@@ -421,37 +421,6 @@ expected_by=$(( now_epoch + DEADLINE_S ))
 [ -n "$EXPECTED_BY_JSON" ] || EXPECTED_BY_JSON="$expected_by"
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# --- undeclared-supersession visibility (#1032) -------------------------------
-# `--supersedes` retired ZERO rows in a week here because nobody passed it, while
-# 25 of 43 mispaired rows were re-dispatch shaped — exactly its case. A usage gap
-# closed by intending to remember is not closed, so the tool says it at the only
-# moment the intent exists.
-#
-# TWO TIERS, and the split is a measurement not a preference. 51% of id'd
-# dispatches go to a bot that already holds an open row, so speaking on that would
-# fire on half of all traffic — the same dead-signal defect #1032 is about. Only
-# the shared-reference case (11%) is said out loud; the count is recorded.
-#
-# Never blocks and never rewrites intent: queueing two tasks on one bot is
-# legitimate, and the tool cannot tell a queue from a replacement. Skipped
-# entirely when the caller already declared, and fail-open at every step — a
-# dispatch must never fail because a hint helper was unavailable.
-OPEN_AT_DISPATCH=0
-if [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
-    _dt_reports="$(fleet_runtime_dir)/report-back.jsonl"
-    _dt_hint=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" \
-        --bot "$WORKER_SESSION" --dispatch-log "$(dispatch_ledger_path)" \
-        --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || true)
-    OPEN_AT_DISPATCH=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" --count-only \
-        --bot "$WORKER_SESSION" --dispatch-log "$(dispatch_ledger_path)" \
-        --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || echo 0)
-    case "$OPEN_AT_DISPATCH" in ''|*[!0-9]*) OPEN_AT_DISPATCH=0 ;; esac
-    # Only the loud tier is printed, and only when the caller has NOT declared.
-    if [ -z "$DISPATCH_SUPERSEDES" ] && [ -n "$_dt_hint" ]; then
-        printf '%s\n' "$_dt_hint" >&2
-    fi
-fi
-
 # Escape backslash + double-quote for valid JSON (no jq dependency).
 safe_task=$(json_escape "$TASK")
 
@@ -527,6 +496,40 @@ _plane_peer_context() {
 }
 [ "$PLANE_ARMED" = "1" ] && { _plane_peer_context "$WORKER_SESSION" || true; }
 
+# --- undeclared-supersession visibility (#1032) -------------------------------
+# `--supersedes` retired ZERO rows in a week here because nobody passed it, while
+# 25 of 43 mispaired rows were re-dispatch shaped — exactly its case. A usage gap
+# closed by intending to remember is not closed, so the tool says it at the only
+# moment the intent exists.
+#
+# TWO TIERS, and the split is a measurement not a preference. 51% of id'd
+# dispatches go to a bot that already holds an open row, so speaking on that would
+# fire on half of all traffic — the same dead-signal defect #1032 is about. Only
+# the shared-reference case (11%) is said out loud; the count is recorded.
+#
+# Never blocks and never rewrites intent: queueing two tasks on one bot is
+# legitimate, and the tool cannot tell a queue from a replacement. Skipped
+# entirely when the caller already declared, and fail-open at every step — a
+# dispatch must never fail because a hint helper was unavailable.
+OPEN_AT_DISPATCH=0
+if [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
+    # ONE run answers both tiers: line 1 is the open-row count (the quiet
+    # tier), the rest the note (the loud tier). Asked AFTER the peer context
+    # and for the WORKER's fleet: the sender's roster does not hold a
+    # cross-fleet worker (44.6% of dispatches), so the hint read 0 open
+    # there and could never speak (the structural lens, F18 R2a).
+    _dt_out=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" \
+        --bot "$WORKER_SESSION" --task "$TASK" --ref "$DISPATCH_REF" \
+        --fleet "${PLANE_PEER_FLEET:-${FLEET_NAME:-}}" 2>/dev/null || true)
+    OPEN_AT_DISPATCH=$(printf '%s\n' "$_dt_out" | head -n 1)
+    case "$OPEN_AT_DISPATCH" in ''|*[!0-9]*) OPEN_AT_DISPATCH=0 ;; esac
+    _dt_hint=$(printf '%s\n' "$_dt_out" | tail -n +2)
+    # Only the loud tier is printed, and only when the caller has NOT declared.
+    if [ -z "$DISPATCH_SUPERSEDES" ] && [ -n "$_dt_hint" ]; then
+        printf '%s\n' "$_dt_hint" >&2
+    fi
+fi
+
 _plane_emit_intent() {
     # Intent BEFORE transport (F9): the communication (and for id'd tasks the
     # work_item + assignment) exists before the first send attempt.
@@ -584,8 +587,12 @@ _plane_emit_intent() {
     src_ref=""
     [ -n "$dispatch_ref" ] && src_ref="\"source_ref\":\"$dispatch_ref\","
     if [ -n "$DISPATCH_SUPERSEDES" ] && [ -n "$PLANE_ASG_ID" ]; then
+        # scoped to THIS worker (#518's rule, which the legacy join carried and
+        # the first plane build dropped): a same-named id held by another bot
+        # is never the one this dispatch retires
         _sup=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
-            --task-id "$DISPATCH_SUPERSEDES" 2>/dev/null || true)
+            --task-id "$DISPATCH_SUPERSEDES" \
+            --assignee "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION" 2>/dev/null || true)
         if [ -n "$_sup" ]; then
             SUP_WI=${_sup%% *}; _sup=${_sup#* }; SUP_ASG=${_sup%% *}; SUP_MSG=${_sup##* }
             [ -n "$SUP_MSG" ] && [ "$SUP_MSG" != "$SUP_ASG" ] && sup_frag="\"supersedes_msg_id\":\"$SUP_MSG\","

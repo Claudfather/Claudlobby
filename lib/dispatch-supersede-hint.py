@@ -42,9 +42,11 @@ one issue may well be parallel work, and the phrasing must never imply otherwise
 accuse them of forgetting.
 
 Openness is decided by ``dispatch-overdue.py::open_dispatches`` — the shipped
-door (#904) — never re-derived here. This module reads the dispatch log directly
-only to recover the TASK TEXT of ids that door already returned, for reference
-comparison and display.
+door (#904) — never re-derived here; the TASK TEXT of the ids it returned comes
+from the plane's work items in the SAME session (F18 R2a). The WORKER's fleet is
+named by the caller (``--fleet``): a cross-fleet dispatch reads the peer's
+roster, never the sender's — the structural lens found the hint counting 0 open
+on the 44.6% of dispatches that cross fleets, so the loud tier could never fire.
 
 Standalone stdlib (``dispatch-overdue.py`` / ``who-reviewed.py`` precedent).
 Wrapped by ``tests/test_dispatch_supersede_hint.py``.
@@ -110,84 +112,41 @@ def ref_from_url(ref: str) -> set[str]:
     return {m.group(1)} if m else set()
 
 
-def task_texts(dispatch_log: str, bot: str) -> dict[str, str]:
-    """``{task_id: task text}`` for one bot, for reference comparison only.
-
-    Never used to decide whether a row is open — that is the shipped door's job.
-    Unreadable log yields ``{}``: this feature must never be why a dispatch fails.
-    """
-    out: dict[str, str] = {}
-    try:
-        with open(dispatch_log, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if str(row.get("bot", "")).lower() != bot.lower():
-                    continue
-                tid = str(row.get("task_id") or "")
-                if tid:
-                    out[tid] = str(row.get("task") or "")
-    except OSError:
-        return {}
-    return out
-
-
-def plane_task_texts(mod, bot: str) -> dict[str, str]:
-    """``{task_id: task text}`` from the PLANE when the open reader resolves to
-    it (cutover C3): after the dispatch write's retirement the log is frozen,
-    so its `task` field would compare a new dispatch against history only.
-    Empty when the reader still serves the JSONL, or on any plane failure —
-    the hint must never be why a dispatch fails (the caller falls back to
-    the log's texts)."""
-    try:
-        p = mod._select("open", "auto", fleet=None, root=None)
-    except Exception:
-        return {}
-    if p is None:
-        return {}
+def plane_task_texts(p, bot: str) -> dict[str, str]:
+    """``{task_id: task text}`` from the PLANE — the only source (F18 R2a):
+    the open reader's session *p*, the work items' titles. Empty on any plane
+    failure — the hint must never be why a dispatch fails (then the loud
+    tier simply cannot fire, and the quiet tier still counts)."""
     try:
         return p.pr.task_texts(p.conn, p.fleet, bot)
     except Exception:
         return {}
-    finally:
-        try:
-            p.close()
-        except Exception:
-            pass
 
 
 def hint(
     bot: str,
-    dispatch_log: str,
-    report_ledger: str,
     new_task: str,
     new_ref: str = "",
     overdue_mod=None,
+    fleet: str | None = None,
 ) -> tuple[int, list[str], str]:
     """``(open_count, matching_ids, note)`` for a dispatch about to be sent.
 
     ``open_count`` is the quiet tier — recorded, never spoken. ``matching_ids``
     is the loud tier: open rows sharing a reference with *new_task*. ``note`` is
-    empty unless there is something worth saying.
+    empty unless there is something worth saying. *fleet* is the WORKER's
+    (None = the matcher's carriers, the sender's).
     """
     mod = overdue_mod or _load_overdue()
     try:
-        # source="auto" (chunk 6b): follows the open reader's flip, so the hint
-        # and open_at_dispatch never read a ledger the retirement froze.
-        rows = mod.open_dispatches(bot, dispatch_log, report_ledger, source="auto")
+        with mod.open_plane(fleet=fleet) as p:     # ONE session for both questions
+            open_ids = [tid for _da, _eb, tid in mod.open_dispatches(bot, plane=p)]
+            if not open_ids:
+                return 0, [], ""
+            mine = refs(new_task) | ref_from_url(new_ref)
+            texts = plane_task_texts(p, bot) if mine else {}
     except Exception:
         return 0, [], ""  # fail open: never break a dispatch over a hint
-    open_ids = [tid for _da, _eb, tid in rows]
-    if not open_ids:
-        return 0, [], ""
-
-    mine = refs(new_task) | ref_from_url(new_ref)
-    texts = plane_task_texts(mod, bot) or task_texts(dispatch_log, bot)
     matching = [tid for tid in open_ids if mine and (mine & refs(texts.get(tid, "")))]
     if not matching:
         return len(open_ids), [], ""
@@ -215,23 +174,16 @@ def hint(
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--bot", required=True)
-    ap.add_argument("--dispatch-log", required=True)
-    ap.add_argument("--report-ledger", required=True)
     ap.add_argument("--task", default="", help="the payload about to be sent")
     ap.add_argument("--ref", default="", help="the envelope --ref URL, if any")
-    ap.add_argument(
-        "--count-only",
-        action="store_true",
-        help="print only the open-row count (the quiet tier)",
-    )
+    ap.add_argument("--fleet", default=None,
+                    help="the WORKER's fleet (a cross-fleet dispatch reads the peer's roster)")
     args = ap.parse_args(argv)
 
-    count, _matching, note = hint(
-        args.bot, args.dispatch_log, args.report_ledger, args.task, args.ref
-    )
-    if args.count_only:
-        print(count)
-        return 0
+    # ONE run answers both tiers: line 1 is the open-row count (the quiet
+    # tier, recorded), the rest is the note (the loud tier), when there is one.
+    count, _matching, note = hint(args.bot, args.task, args.ref, fleet=args.fleet or None)
+    print(count)
     if note:
         print(note)
     return 0

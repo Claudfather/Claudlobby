@@ -3884,40 +3884,12 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
 # stamps it on exactly that unit. Add a row per dormant door.
 FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = {
     "keepalive": ("PLANE_EMIT_ENABLED",),
-    "plane-shadow": ("PLANE_SHADOW_ENABLED",),
-    # fleet-pulse reads TWO plane flags: the chunk-4 divergence bridge
-    # (PLANE_SHADOW_ENABLED — the timer unit sources no .env, so without this
-    # stamp the bridge could never arm from a timer) and the chunk-5 flip of
-    # its overdue reader (PLANE_READ_OVERDUE — per reader, never one
-    # fleet-wide flag). The one genuinely multi-flag job.
-    "fleet-pulse": ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS"),
+    # fleet-pulse reads the flip flags of its readers (PLANE_READ_* — per
+    # reader, never one fleet-wide flag; the timer unit sources no .env, so
+    # without this stamp a flip could never reach it). R3 retires them.
+    "fleet-pulse": ("PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS"),
 }
 
-def _shadow_retired_at(paths, fleet_name: str):
-    """The instant the fleet's legacy writes were retired, read from the plane
-    (read-only), or None when not retired or when the plane cannot say."""
-    try:
-        from .plane import cutover as _cut
-        from .plane.db import open_ro
-        conn, _why = open_ro(paths.root)
-        if conn is None:
-            return None
-        try:
-            ret = _cut.retired(conn, fleet_name)
-        finally:
-            conn.close()
-        return ret[0] if ret else None
-    except Exception:            # a schema the composer cannot read: the tier's answer stands
-        return None
-
-
-# The cutover read flags also need a SESSION carrier: start-bot.sh exports
-# bot.conf (`set -a`) but sources the .env tiers WITHOUT export, so a bare
-# `PLANE_READ_OPEN=1` in the fleet tier never reaches report-back.sh or brief
-# inside a bot session (measured in bash and zsh — spec lens, chunk 5).
-# compose_bot_conf therefore carries the armed read flags, resolved from the
-# same cascade the timers use, memoized per (root, fleet) so a 21-bot generate
-# pays the env-tiers subprocess once.
 _READ_FLAG_MEMO: dict[tuple[str, str], dict[str, str]] = {}
 
 
@@ -4001,9 +3973,7 @@ def compose_fleet_timers(
 
     # Which fleet job reads which arming flag — a TABLE, so the next dormant
     # door adds a row rather than a branch; each flag resolves through the
-    # one cascade read below. The shadow comparison (cutover chunk 3) rides
-    # its OWN carrier: a recorded fact must not start being written because
-    # emission is on.
+    # one cascade read below.
     job_extra_env: dict[str, dict[str, str]] = {}
     job_baseline_env: dict[str, str] = {}
     try:
@@ -4019,7 +3989,7 @@ def compose_fleet_timers(
         # any script that sources lib-common can land a fleet event (the ERR
         # trap alone), and a timer unit sources no .env — measured on the live
         # estate: fleet-pulse, the fleet's main emitter, composed with the
-        # shadow and read flags but not this one, so a whole sweep's events
+        # read flags but not this one, so a whole sweep's events
         # reached only the JSONL (Phase B1's first deploy).
         if _env_tiers.armed(_cascade, "PLANE_EMIT_ENABLED"):
             job_baseline_env = {"PLANE_EMIT_ENABLED": "1"}
@@ -4033,18 +4003,6 @@ def compose_fleet_timers(
         for _flag in _write_flags.values():
             if _env_tiers.resolves_to(_cascade, _flag, "0"):
                 job_baseline_env[_flag] = "0"
-        # The shadow ENDS with the retirement (B3): a fleet whose legacy writes
-        # are retired on the plane has no legacy side left to grade, so its
-        # plane-shadow unit composes DORMANT even though the tier still arms it
-        # — the timer would only run the record mode to be told so every ten
-        # minutes. The fact is read where it lives; an unreachable plane leaves
-        # the tier's answer standing (the launcher's own refusal covers it).
-        if "plane-shadow" in job_extra_env:
-            _ret = _shadow_retired_at(paths, fleet.name)
-            if _ret:
-                job_extra_env.pop("plane-shadow", None)
-                _log.info("plane-shadow: the legacy writes of %s are retired (%s) — the shadow"
-                          " ended; composing the unit dormant", fleet.name, _ret)
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(
             "plane arming unresolved (%s) — timer-run plane doors compose"

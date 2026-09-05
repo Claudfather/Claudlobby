@@ -22,15 +22,20 @@ import sqlite3
 from typing import Optional
 
 from .ids import derive_uid
-from .shadow import BAR_BY_READER, DIRECT_MOVE_REASON, GATE_TRANSITIONS, GATED, UNSHADOWED, Streak
+
+# The five readers the cutover flipped, one flag each. The shadow that once
+# READERS a declaration (a clean run of legacy-vs-plane comparisons) is gone
+# with the legacy readers (F18 closure, R2a): there is no legacy side left to
+# grade, so every declaration is the direct move the operator ruled.
+READERS = ("open", "overdue", "open_task", "unassigned", "events")
+DIRECT_MOVE_REASON = ("operator ruling 2026-09-03: no backward compat, hard flip, fix forward"
+                      " — declared as a direct move (F18 closure: no shadow)")
 
 EVENT_DECLARED = "cutover_declared"
-READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
-# Chunk 6b — the legacy WRITES, per door. Default 1 (keep writing); a fleet
-# retires a door's JSONL append with 0, and retiring a write ENDS the shadow
-# for every reader that read that ledger (there is no legacy side left to
-# grade) — so the retirement is gated on every reader being declared, and
-# recorded as its own epoch.
+READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in READERS}
+# Chunk 6b — the legacy WRITES, per door (the flags go with R3 of the closure;
+# since R1 every door records on the plane alone). The retirement is gated on
+# every reader being declared, and recorded as its own epoch.
 EVENT_RETIRED = "legacy_write_retired"
 WRITE_FLAGS = {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH", "report": "PLANE_LEGACY_WRITE_REPORT",
                "workstreams": "PLANE_LEGACY_WRITE_WORKSTREAMS",
@@ -69,27 +74,19 @@ def fleet_uid(conn: sqlite3.Connection, fleet: str) -> Optional[str]:
     return row[0] if row else None
 
 
-def unmet(streaks: list[Streak]) -> list[Streak]:
-    return [s for s in streaks if not s.gate_ok]
-
-
-def declaration_event(fleet: str, reader: str, streaks: list[Streak], now: str, *,
+def declaration_event(fleet: str, reader: str, now: str, *,
                       forced: Optional[str] = None, subject_uid: Optional[str] = None) -> dict:
     """The system event recording the flip. Id derived from (fleet, reader,
     instant, reason): a re-run at the same instant is one fact, not two, while
     a CORRECTED reason at that instant is a new fact, never dropped as a
-    duplicate. Anchored on the fleet's identity when it has one."""
+    duplicate. Anchored on the fleet's identity when it has one. Every
+    declaration is a DIRECT MOVE (shadowed=false, no gate, the reason
+    recorded): the shadow that once gated a reader went with the legacy side."""
     if reader not in READ_FLAGS:
         raise ValueError(f"unknown reader {reader!r}")
-    # An UNSHADOWED reader (Phase B's direct move) has no gate to meet: the
-    # record says so (shadowed=false, no bar, gate_met null, the ruling as its
-    # reason) rather than claiming an empty streak list met a bar.
-    shadowed = reader not in UNSHADOWED
-    if not shadowed:
-        forced = forced or DIRECT_MOVE_REASON
-    gate = ({"clean_run": (streaks[0].clean_bar if streaks else BAR_BY_READER[reader]),
-             "transitions": GATE_TRANSITIONS}
-            if shadowed else {"clean_run": None, "transitions": None})
+    forced = forced or DIRECT_MOVE_REASON
+    shadowed = False
+    gate = {"clean_run": None, "transitions": None}
     return {
         "event_type": "system",
         "emitter": "plane-cutover",
@@ -106,12 +103,9 @@ def declaration_event(fleet: str, reader: str, streaks: list[Streak], now: str, 
                 "flag": READ_FLAGS[reader],
                 "shadowed": shadowed,
                 "gate": gate,
-                "gate_met": (not unmet(streaks)) if shadowed else None,
+                "gate_met": None,
                 "forced": forced,
-                "streaks": [
-                    {"bot": s.bot, "clean_run": s.clean_run,
-                     "transitions": s.transitions, "gate_ok": s.gate_ok}
-                    for s in streaks],
+                "streaks": [],
             },
         },
     }
@@ -130,7 +124,7 @@ def declared(conn: sqlite3.Connection, fleet: str) -> dict[str, tuple[str, Optio
 
 def undeclared(decl: dict[str, tuple[str, Optional[str]]]) -> list[str]:
     """The readers a write retirement still waits on."""
-    return [r for r in GATED if r not in decl]
+    return [r for r in READERS if r not in decl]
 
 
 def retirement_event(fleet: str, decl: dict[str, tuple[str, Optional[str]]], now: str, *,

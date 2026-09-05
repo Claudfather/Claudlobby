@@ -54,11 +54,9 @@ mkdir -p "$state_dir"
 # outage ran ~360 ticks on a single delivery. Set 0 to disable.
 _RENOTIFY_AFTER_S="${FLEET_PULSE_RENOTIFY_AFTER_S:-21600}"  # 6h
 
-# Dispatch watchdog inputs: the manager-written dispatch ledger and the
-# worker-written report ledger (overlay path first, root fallback — matches
-# report-back.sh). The overdue matcher cross-references them per bot.
-dispatch_log="$(dispatch_ledger_path)"
-report_ledger="$(fleet_runtime_dir "$fleet")/report-back.jsonl"
+# Dispatch watchdog inputs: the plane, through the matcher (F18 R2a) — no
+# ledger files; a matcher that cannot reach the plane refuses, and the
+# refusal is paged rather than read as a quiet fleet.
 
 # --- Helpers: push to a bot's manager, and identify which manager instance ---
 # The manager this bot notifies, as "<socket>|<session>" (empty when none is
@@ -131,7 +129,7 @@ reap_events() {
 }
 
 # --- Pre-sweep: dispatch-overdue scan (once, not per-bot) ---
-# Runs dispatch-overdue.py --all to read both ledger files exactly once.
+# Runs dispatch-overdue.py --all against the plane exactly once.
 # Output is stored in a temp file for per-bot lookup inside the loop.
 # --bots-dir enables respawn detection (#835): a past-deadline row whose worker
 # restarted after it was dispatched is split into the orphan set instead of the
@@ -146,65 +144,19 @@ _orphan_cache=$(safe_mktemp)
 # chat is resolved below.
 _overdue_reader_rc=0
 _overdue_reader_err=$(safe_mktemp)
-# No file-exists gate (F18 R1): the matcher answers from the plane under the
-# flip, and the retired ledgers' paths only fill its positional slots until R2
-# removes them — a gate on the file switched the whole pre-sweep OFF on a host
-# whose files are gone (found by the R1 harness port).
-python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" --fleet "$fleet" \
+# The matcher reads the plane of THIS fleet (F18 R2a): no ledger paths, no
+# file-exists gate — a gate on the retired file once switched the whole
+# pre-sweep OFF on a host whose files were gone (found by the R1 harness port).
+python3 "$LIB_DIR/dispatch-overdue.py" --all --fleet "$fleet" \
     --bots-dir "$BOTS_DIR" 2>"$_overdue_reader_err" > "$_overdue_cache" || _overdue_reader_rc=$?
-python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$dispatch_log" "$report_ledger" \
+python3 "$LIB_DIR/dispatch-overdue.py" --orphans --fleet "$fleet" \
     --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
 
-# --- Cutover shadow bridge (chunk 4, J4): a DIVERGED latest comparison pages ---
-# The shadow timer records legacy-vs-plane comparisons; the plane never alerts
-# through the fleet it observes on its own, so the fleet's own watchdog asks
-# the STDLIB check (lib/plane-shadow-check.py - a sweep on a Pi must not import
-# the package every 300s) and pages through the house debounce
-# (debounce_notify, the same helper every other notice here rides), clearing
-# the marker when the check reads clean so a recurrence pages again. Gated on
-# the shadow's OWN carrier; explained divergences with agreeing heads never
-# page (they record as clean). A check that cannot run is disclosed on stderr,
-# never read as clean.
-_shadow_page() {
-    local _rc=0
-    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
-        "$LIB_DIR/tg-post.sh" "$1" >/dev/null 2>&1 || _rc=$?
-    if [ "$_rc" -ne 0 ]; then
-        # debounce_notify writes its marker on fire regardless of delivery; a
-        # page that never left must not silence the next ten minutes, so the
-        # marker is cleared and the next sweep fires again (the retry the
-        # sibling escalation block promises).
-        printf '%s ALERT-DELIVERY-FAILED escalation shadow_divergence: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$_rc" >&2
-        _SHADOW_PAGE_FAILED=1
-    fi
-}
-_shadow_bridge() {
-    [ "${PLANE_SHADOW_ENABLED:-0}" = "1" ] || return 0
-    [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: shadow bridge armed but no escalation chat - a divergence could not page" >&2; return 0; }
-    local _out _rc=0
-    _out=$(python3 "$LIB_DIR/plane-shadow-check.py" --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" 2>&1) || _rc=$?
-    case "$_rc" in
-        0) debounce_clear "$state_dir" fleet shadow_divergence; return 0 ;;
-        1) ;;
-        *) echo "fleet-pulse: shadow check unavailable (rc $_rc): $(printf '%s' "$_out" | tail -1 | cut -c1-160)" >&2; return 0 ;;
-    esac
-    local _pairs; _pairs=$(printf '%s' "$_out" | awk '{print $1"/"$2}' | tr '\n' ' ')
-    _SHADOW_PAGE_FAILED=0
-    debounce_notify "$state_dir" fleet shadow_divergence _shadow_page \
-        "FLEET ALERT: cutover shadow divergence on ${_pairs% }. The plane and the legacy ledger disagree about a bot's open or overdue set (or the fleet's idle-worker set) - run: claudlobby --fleet $fleet plane shadow --show 5" "" "${FLEET_PULSE_SHADOW_RENOTIFY_S:-3600}"
-    # debounce_notify writes its marker AFTER the pager returns, whatever the
-    # pager did; a page that never left must not silence the next window.
-    # The window is hourly by default (FLEET_PULSE_SHADOW_RENOTIFY_S): under the
-    # operator's hard-flip ruling the shadow is an instrument, not a gate, and
-    # a standing divergence paged every ten minutes was measured as noise.
-    [ "${_SHADOW_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet shadow_divergence
-    return 0
-}
 
 # --- Cutover overdue-reader guard (chunk 5): a REFUSED --all is not "nothing overdue" ---
 # The flipped overdue reader refuses (rc 3) rather than falling back to the
 # JSONL when the plane cannot serve; the sweep above keeps its rc and stderr,
-# and this guard pages -- debounced, the shadow bridge's shape -- so a dark
+# and this guard pages -- debounced, like every other notice here -- so a dark
 # watchdog is a paged watchdog. rc 0 clears the marker; any other rc is
 # disclosed on stderr and never paged (rc 2 is a call-shape bug, not an outage).
 _overdue_page() {
@@ -283,7 +235,7 @@ _ensure_unassigned_scan() {
     # disclosed on stderr (the overdue reader pages; the idle check is quieter
     # by design — it is an advisory notice, not an alert).
     _unassigned_rc=0
-    python3 "$LIB_DIR/dispatch-overdue.py" --unassigned "$dispatch_log" "$report_ledger" --fleet "$fleet" \
+    python3 "$LIB_DIR/dispatch-overdue.py" --unassigned --fleet "$fleet" \
         2>"$_unassigned_cache.err" > "$_unassigned_cache" || _unassigned_rc=$?
     if [ "$_unassigned_rc" -ne 0 ]; then
         echo "fleet-pulse: the idle-worker reader exited ${_unassigned_rc} — worker_unassigned cannot be judged this pass: $(tail -1 "$_unassigned_cache.err" 2>/dev/null | cut -c1-160)" >&2
@@ -714,7 +666,6 @@ _events_reader_guard() {
     return 0
 }
 
-_shadow_bridge || true
 _overdue_reader_guard || true
 
 if [ -n "$_ESCALATION_CHAT_ID" ]; then

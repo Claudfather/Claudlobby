@@ -97,7 +97,6 @@ and never blocks its real action on it.
 | `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; declaration events | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the one place the flag still means something (R3 decides its fate) |
 | `lib/workstream-update.sh`, `lib/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
-| `claudlobby plane shadow --record` (fleet timer) | `shadow_parity_clean` / `_diverged` system events per (bot, reader, instant) | `PLANE_SHADOW_ENABLED` |
 | `claudlobby plane cutover --reader` | `cutover_declared` (the epoch) | the operator's hand |
 | `claudlobby plane import --apply` | the parity gap, `origin=legacy` under an `import_batch` | the operator's hand |
 
@@ -118,17 +117,17 @@ their own flag). The read side (`brief`, `plane view`) needs no flag.
   Composed as the dormant `claudlobby-plane-view` host service; Tailscale Serve
   fronts it.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
-  rungs (schema, provisional actors, tombstone validity, reconciliation, the
-  shadow gate, each cutover flag against its declaration). **These RUN
+  rungs (schema, provisional actors, tombstone validity, reconciliation,
+  each cutover flag against its declaration). **These RUN
   `migrate()` and are therefore not read-only — and so do `plane registry`,
   `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
   (`DowngradeError`, rc 4) and an unmerged package's doctor (or registry read)
   will migrate a live db. Verify a branch on a live host only through the
-  doors that open read-only: `plane shadow`, `plane parity`, `plane import`
+  doors that open read-only: `plane parity`, `plane import`
   (dry-run), `plane cutover` (it refuses before writing), `brief`, `plane view`,
   and the stdlib readers below.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
-  `lib/plane-shadow-check.py`, `lib/who-reviewed.py --source plane`) — the
+  `lib/who-reviewed.py --source plane`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to
   `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the legacy-id join, the
@@ -146,7 +145,7 @@ read instead of them one READER at a time, each reader's flip a recorded state
 machine (steps 1–5; history now — the closure that follows removed the
 writers):
 
-1. **Shadow.** `plane shadow --record` compares, per bot and per reader, the
+1. **Shadow** *(retired with the closure, R2a — there is no legacy side left to grade).* `plane shadow --record` compared, per bot and per reader, the
    legacy answer (the install's own `lib/dispatch-overdue.py`, through
    `brief`'s seam) with the plane's, classifies every divergence (`skew`
    inside the emit grace, `legacy_supersedes_pre_cutover`, `plane_superseded`
@@ -155,60 +154,49 @@ writers):
    does not honour, and a sha-keyed construct the ledger cannot name; the heads
    are compared past every structurally explained row —
    `legacy_malformed_deadline`, `intentional`, else `divergence`) and records
-   the comparison as a system event. The `plane-shadow` fleet timer does this
-   every 10 minutes once armed; `--replay-hours N` front-loads it from history
+   the comparison as a system event. The `plane-shadow` fleet timer did this
+   every 10 minutes while armed; `--replay-hours N` front-loads it from history
    at the top-of-hour marks. Readers: `open` (the deadline-blind list),
    `overdue` (the watchdog's set), and `open_task` (the resolver — a streak
    mode over the open records, which carry the resolver's answers on both
    sides).
-2. **Gate.** `plane shadow --gate`: 20 consecutive clean comparisons with at
+2. **Gate** *(retired with the shadow, R2a).* `plane shadow --gate` wanted 20 consecutive clean comparisons with at
    least one open→closed transition per (bot, reader); the resolver needs 200
    agreeing non-empty answers and a change (a stale head is a false
    completion). An idle fleet cannot meet it: a set that never changed proves
-   nothing. `plane doctor` carries the rung; `lib/plane-shadow-check.py` is
-   the watchdog's question (the fleet-pulse bridge pages a diverged latest
-   comparison).
-3. **Declare.** `plane cutover --reader open|overdue|open_task|unassigned`
-   refuses unless the gate is met on every declared bot (`--force <reason>`
-   records the reason instead) and lands `cutover_declared`, anchored on the
-   fleet's identity. A flip is TWO facts: this declaration AND the flag.
-   `--reader events` is a DIRECT MOVE (Phase B, operator ruling 2026-09-03:
-   no backward compat, fix forward): no shadow exists for it, so it declares
-   without a gate and records the ruling as its reason (`shadowed: false`,
-   `gate_met: null`) rather than an empty streak list read as a met bar.
+   nothing. `plane doctor` carried the rung; `lib/plane-shadow-check.py` was
+   the watchdog's question (the fleet-pulse bridge paged a diverged latest
+   comparison). All of it is deleted.
+3. **Declare.** `plane cutover --reader open|overdue|open_task|unassigned|events`
+   lands `cutover_declared`, anchored on the fleet's identity, as a DIRECT
+   MOVE (operator ruling 2026-09-03: no backward compat, fix forward; the
+   shadow gate went with the closure, R2a — `shadowed: false`,
+   `gate_met: null`, the ruling recorded as the reason). A flip was TWO
+   facts, this declaration AND the flag, for the readers that read one.
 4. **Flip.** `PLANE_READ_OPEN=1` / `PLANE_READ_OVERDUE=1` /
    `PLANE_READ_OPEN_TASK=1` / `PLANE_READ_UNASSIGNED=1` / `PLANE_READ_EVENTS=1`
-   in the fleet `.env` tier; `generate` composes the
-   armed flags into `bot.conf` (the session carrier — `start-bot.sh` exports
-   `bot.conf` and sources the tiers WITHOUT export) and stamps them on the
-   timer units that read the matcher (`FLEET_JOB_ARMING`). The matcher serves
-   the plane only when flag AND declaration hold; a flag alone is disclosed and
-   the JSONL keeps serving. An unreachable plane under a declared flip
-   REFUSES (rc 3, empty stdout) — never a silent fallback — and the watchdog
-   pages a refused reader. Rollback at this stage: the flag back to 0.
-5. **Retire the writes.** `PLANE_LEGACY_WRITE_DISPATCH` / `_REPORT` /
-   `_EVENTS` default `1`; `plane cutover --retire-writes` refuses unless every reader is
-   declared and records `legacy_write_retired` — retiring a write ENDS the
-   shadow for the readers that read that ledger (`plane shadow` compare and
-   record modes refuse afterwards; `--gate`/`--check` still read the
-   records). A door skips its JSONL append only on FOUR facts: the flag
-   says 0, the plane is armed, the retirement is recorded, and THAT
-   emission succeeded (`PLANE_EMIT_LAST_RC`) — every other case writes the
-   ledger and says why, because a dispatch or report must land somewhere.
-   Rollback: the flags back to 1. Every matcher reader (`--open`, `--all`,
-   `--orphans`, `--open-task`, `--unassigned`) follows its flip, and the
-   readers of a RETIRED ledger follow the retirement fact itself (chunk C3,
-   `brief.plane_retired_conn`: `legacy_write_retired` naming the door, read
-   on the plane — no flag, because a frozen ledger is wrong on the day it
-   freezes): `claudlobby report-back`, brief's unacked reports + `--ack`,
-   `who-reviewed.py --source auto` (the plane's rows plus the ledgers of
-   fleets whose write is not retired, deduplicated), the supersede hint's
-   task texts. Chunk A2 closes the last file-backed record: the workstream
-   registry's write retires behind `PLANE_LEGACY_WRITE_WORKSTREAMS` (the
-   door then works on a registry materialized from the plane and its verb
-   events are the writes; `claudlobby workstreams` and brief's section render
-   the registry from the plane). The briefing trigger already rode
-   `emit_fleet_event`, so it retired with the events family.
+   in the fleet `.env` tier; `generate` composes the armed flags into
+   `bot.conf` (the session carrier — `start-bot.sh` exports `bot.conf` and
+   sources the tiers WITHOUT export) and stamps them on the timer units
+   (`FLEET_JOB_ARMING`). **Since R2a the matcher reads no flag and no
+   declaration: it reads the plane alone**, and an unreachable plane REFUSES
+   (rc 3, empty stdout) — never a silent fallback — while the watchdog pages a
+   refused reader. Only the `events` readers (`claudlobby events`, brief's
+   alerts, fleet-pulse's escalation) still serve the plane on flag AND
+   declaration; R2b moves them, and R3 removes the flags and this door.
+5. **Retire the writes.** `plane cutover --retire-writes` refuses unless every
+   reader is declared and records `legacy_write_retired`. Since R1 no door
+   writes a ledger regardless — the plane is the only recorder and
+   `PLANE_EMIT_DISABLED=1` the one silencer — so what the record still
+   governs is the readers of a RETIRED ledger, which follow the retirement
+   fact itself (chunk C3, `brief.plane_retired_conn`: `legacy_write_retired`
+   naming the door, read on the plane — no flag, because a frozen ledger is
+   wrong on the day it freezes): `claudlobby report-back`, brief's unacked
+   reports + `--ack`, `who-reviewed.py --source auto`. Chunk A2 closed the
+   last file-backed record: the workstream registry is materialized from the
+   plane and its verb events are the writes (`claudlobby workstreams` and
+   brief's section render it from the plane). R2b moves these readers to the
+   plane outright.
 6. **The closure (F18 R1, 2026-09-04 — operator ruling: no JSONL, no shims,
    no backwards compat).** With both fleets retired on every door, the legacy
    WRITERS were removed outright: no door writes a ledger, a per-bot event
@@ -274,8 +262,7 @@ own report ledger only, never guessed).
 
 **Arming carriers** — `PLANE_EMIT_ENABLED` (the generate-time registry scan
 only: every runtime door is always on since F18 R1, and `PLANE_EMIT_DISABLED=1`
-is the harness exemption that silences one), `PLANE_SHADOW_ENABLED` (the shadow timer and the
-fleet-pulse bridge), `PLANE_EXPIRE_ENABLED`, `PLANE_PRUNE_ENABLED` (the two
+is the harness exemption that silences one), `PLANE_EXPIRE_ENABLED`, `PLANE_PRUNE_ENABLED` (the two
 host sweeps self-gate), `PLANE_READ_*` (the flips). Put them in the fleet
 `.env` tier: sessions get them through `bot.conf`, timers through the composed
 `Environment=` lines, and `generate` reads the same cascade. `env_tiers.armed`

@@ -179,14 +179,7 @@ val_plane_ready() {
     mkdir -p "$fdir"
     [ -f "$fdir/fleet.yaml" ] || printf 'fleet:\n  name: %s\n  bots: {}\n' "$fleet" > "$fdir/fleet.yaml"
     CLAUDLOBBY_ROOT="$root" CLAUDLOBBY_FLEET="$fleet" emit_fleet_event validate_started harness '{}' "" >/dev/null 2>&1 || true
-    # fleet-pulse.sh still gates its dispatch pre-sweep (--all / --orphans, the
-    # overdue + orphan + unassigned checks) on the dispatch LOG FILE existing —
-    # a file nothing writes any more (R1 door gap, reported with this port). An
-    # EMPTY file passes that gate and holds nothing: under the flip every row
-    # the sweep sees comes from the plane. Remove with the gate.
     mkdir -p "$root/state" "$fdir/runtime"
-    : >> "$root/state/dispatch-log.jsonl"
-    : >> "$fdir/runtime/report-back.jsonl"
     for rd in open overdue open_task unassigned events; do
         "$VAL_CLI" --root "$root" --fleet "$fleet" plane cutover --reader "$rd" \
             --force "validate-bot-change" >/dev/null 2>&1 || true
@@ -352,12 +345,12 @@ harness_check "no legacy event file was written by the sweep (the plane is the o
 # #460: a never-closing dispatch must age out of the overdue set so fleet-pulse
 # stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI
 # fleet-pulse consumes) with a 25h-old, never-reported dispatch and assert nothing.
-# The retired ledgers' paths fill the matcher's two positional slots (R2 of the
-# closure removes them); under the flip the matcher answers from the plane.
+# The retired ledgers' paths survive only as the #1187 shape probe's junk
+# inputs below (a path in the bot slot); the matcher answers from the plane.
 VAL_REPORT_LEDGER="$ROOT/local/$FLEET/runtime/report-back.jsonl"
 VAL_DISPATCH_LOG="$ROOT/state/dispatch-log.jsonl"
 val_seed_dispatch "$ROOT" "$FLEET" "$MGR" valaged t-aged-0000 "$((now - 90000))" "$((now - 89400))" "x"
-aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$VAL_DISPATCH_LOG" "$VAL_REPORT_LEDGER" "$(date +%s)" \
+aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
     --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c "^valaged " || true)
 [ "${aged_out:-1}" -eq 0 ] && r=yes || r=no
 harness_check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
@@ -410,7 +403,7 @@ t835_closed=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a 
 harness_check "#835 report-back without --task lands its task event on the resolved dispatch (the plane's stamped id)" "$r"
 
 # The join is unchanged — so the row closing is proof the id is the RIGHT one.
-t835_left=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$t835_dispatch" "$t835_ledger" "$(date +%s)" \
+t835_left=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
     --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c "^$T835_BOT " || true)
 [ "${t835_left:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#835 the resolved id actually closes the dispatch (watchdog join untouched)" "$r"
@@ -448,7 +441,7 @@ or_overdue=$(val_events "$ROOT" "$FLEET" "$OR_BOT" overdue_dispatch | grep -c 't
 [ "${or_overdue:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#835 respawn orphan emits NO overdue_dispatch from the real pulse" "$r"
 
-or_listed=$(python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$t835_dispatch" "$t835_ledger" "$(date +%s)" \
+or_listed=$(python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$(date +%s)" \
     --bots-dir "$ROOT/local/$FLEET/runtime/bots" --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-835-0002' || true)
 [ "${or_listed:-0}" -ge 1 ] && r=yes || r=no
 harness_check "#835 the orphan is still listable (evidence kept, not reaped away)" "$r"
@@ -509,7 +502,7 @@ harness_check "#1187 mis-ordered --open is REFUSED (rc 2), not a silent empty re
 # grammars differ, so "invalid argument" alone would leave them stuck.
 python3 "$LIB_DIR/dispatch-overdue.py" --open \
     "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" 2>"$ROOT/t1187.err" >/dev/null || true
-grep -q "take the BOT first" "$ROOT/t1187.err" && r=yes || r=no
+grep -q "expects <bot_id> first" "$ROOT/t1187.err" && r=yes || r=no
 harness_check "#1187   ...and names the grammar split, not merely that it refused" "$r"
 
 # Wrong COUNT was already loud before this change. Pinned so the shape gate is
@@ -523,7 +516,7 @@ harness_check "#1187 wrong ARITY was already loud and stays loud (the gate is ab
 
 # STDOUT must stay rows-only. This is the assertion that protects report-back.
 t1187_stdout=$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$T1187_BOT" "$t835_dispatch" "$VAL_REPORT_LEDGER" --fleet "$FLEET" --root "$ROOT" 2>/dev/null || true)
+    "$T1187_BOT" --fleet "$FLEET" --root "$ROOT" 2>/dev/null || true)
 printf '%s' "$t1187_stdout" | grep -q 't-1187-0001' \
     && ! printf '%s' "$t1187_stdout" | grep -q -- '--open:' && r=yes || r=no
 harness_check "#1187 --open STDOUT is rows only (no scope header for awk to eat)" "$r"
@@ -531,7 +524,7 @@ harness_check "#1187 --open STDOUT is rows only (no scope header for awk to eat)
 # ...and the scope reaches a human, on stderr, even with ZERO rows -- the case
 # the shape gate cannot reach (a typo, or another fleet's bot under #526).
 python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "nosuchbot-1187" "$t835_dispatch" "$VAL_REPORT_LEDGER" --fleet "$FLEET" --root "$ROOT" 2>"$ROOT/t1187b.err" >/dev/null || true
+    "nosuchbot-1187" --fleet "$FLEET" --root "$ROOT" 2>"$ROOT/t1187b.err" >/dev/null || true
 grep -q "nosuchbot-1187" "$ROOT/t1187b.err" && grep -q "0 open" "$ROOT/t1187b.err" && r=yes || r=no
 harness_check "#1187 an EMPTY result names the bot it filtered on (cannot read as nothing-exists)" "$r"
 
@@ -563,8 +556,6 @@ harness_check "#1187 report-back with NOTHING open raises no false supplied-id a
 echo ""
 echo "=== validate #1024: reported-but-never-re-dispatched (mirror watchdog) ==="
 
-UA_LEDGER="$VAL_REPORT_LEDGER"
-UA_DISPATCH="$ROOT/state/dispatch-log.jsonl"
 ua_iso() { python3 -c "import datetime,sys;print(datetime.datetime.fromtimestamp(int(sys.argv[1]),datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1"; }
 
 # ua_bot <name> <check:1|0> <manager_tmux> [trailing_comment]

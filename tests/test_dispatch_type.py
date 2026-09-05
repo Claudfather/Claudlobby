@@ -32,8 +32,6 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import _scrubbed_env
-from tests.test_plane_cutover_flip import _declare
-from tests.test_plane_shadow import FLEET_YAML
 from tests.test_task_id_dispatch import FLEET, TASK_ID_RE, _fake_lib, plane_dispatch_row
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -145,14 +143,12 @@ class TestTheDeadlineIsGatedToo:
         out = sp.run(
             [
                 "python3", str(LIB_DIR / "dispatch-overdue.py"), "--all",
-                str(tmp_path / "state" / "dispatch-log.jsonl"),
-                str(tmp_path / "runtime" / "fleet" / "report-back.jsonl"),
                 # an hour later: the task's 600s deadline has passed, and the
                 # dispatch is still inside the matcher's expiry cap
                 # (DISPATCH_OVERDUE_MAX_AGE_S, 24h) — a day later it would be
                 # EXPIRED rather than overdue, and page nothing for that reason
                 str(int(time.time()) + 3600),
-                "--source", "plane", "--fleet", FLEET, "--root", str(tmp_path),
+                "--fleet", FLEET, "--root", str(tmp_path),
             ],
             capture_output=True, text=True, timeout=60,
         )
@@ -271,32 +267,16 @@ def _roundtrip_lib(tmp_path: Path):
     report-back.sh and dispatch-overdue.py are what the resolver needs (both
     in the sibling's DOOR_FILES); without them report-back's lookup fails open
     and every arm reads clean — a harness that cannot see the defect it was
-    written for. The resolver answers from the PLANE: the two readers it
-    consults (open_task, open) are declared on this throwaway plane and
-    flagged in the env, exactly the two facts a flip needs.
-    The retired dispatch log's path fills the matcher's positional slot; no
-    file exists and none is needed (R1: the resolver has no file-exists gate).
+    written for. The resolver answers from the PLANE, the only source (F18
+    R2a): no ledger, no flag, no declaration — the fleet rides the FLEET_NAME
+    the harness env already carries.
     """
     libdir, env = _fake_lib(
         tmp_path, f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n'
     )
     env["MANAGER_TMUX"] = "lead"
-    env["PLANE_READ_OPEN_TASK"] = "1"
-    env["PLANE_READ_OPEN"] = "1"
     (tmp_path / "state").mkdir(exist_ok=True)
-    # The fleet overlay the CLI's cutover door insists on (the declaration is
-    # recorded through the real `plane cutover --reader`).
-    (tmp_path / "local" / FLEET / "runtime").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "local" / FLEET / "fleet.yaml").write_text(FLEET_YAML)
     return libdir, env
-
-
-def _declare_readers(root: Path) -> None:
-    """The resolver's flip, recorded on the throwaway plane (a flag alone is
-    disclosed and serves the — absent — JSONL). Needs the plane db to exist:
-    call after the seed dispatch created it."""
-    _declare(root, "open_task")
-    _declare(root, "open")
 
 
 def _seed_open_task(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> str:
@@ -310,7 +290,6 @@ def _seed_open_task(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") ->
     assert r.returncode == 0, r.stderr
     row = plane_dispatch_row(tmp_path)
     assert row and TASK_ID_RE.match(row["task_id"]), row
-    _declare_readers(tmp_path)
     return row["task_id"]
 
 
@@ -321,9 +300,7 @@ def _still_open(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> set
             str(libdir / "dispatch-overdue.py"),
             "--open",
             bot,
-            str(tmp_path / "state" / "dispatch-log.jsonl"),
-            str(tmp_path / "runtime" / "fleet" / "report-back.jsonl"),
-            "--source", "plane", "--fleet", FLEET, "--root", str(tmp_path),
+            "--fleet", FLEET, "--root", str(tmp_path),
         ],
         capture_output=True,
         text=True,

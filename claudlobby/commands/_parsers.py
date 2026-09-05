@@ -34,7 +34,6 @@ from .plane import (
     cmd_plane_expire,
     cmd_plane_import,
     cmd_plane_parity,
-    cmd_plane_shadow,
     cmd_plane_cutover,
     cmd_plane_prune,
     cmd_plane_registry,
@@ -529,36 +528,6 @@ def register_subparsers(sub) -> None:
     pcut.add_argument("--force", default="",
                       help="Declare despite a short gate; the reason is recorded in the event")
     pcut.set_defaults(func=cmd_plane_cutover)
-    psh = psub.add_parser(
-        "shadow",
-        help="Cutover J4 shadow: the legacy open set vs the plane's, per bot,"
-        " classified; --record writes the comparison as a system event;"
-        " --gate reads the streaks (rc 0 met / 1 not / 3 unreachable)")
-    psh.add_argument("--bot", default=None, help="One bot (default: the fleet roster)")
-    psh.add_argument("--record", action="store_true",
-                     help="Record each comparison (shadow_parity_clean/diverged)")
-    psh.add_argument("--gate", action="store_true",
-                     help="Report the per-(bot, reader) gate from recorded comparisons")
-    psh.add_argument("--check", action="store_true",
-                     help="The fleet-pulse bridge: rc 1 when any (bot, reader)'s LATEST"
-                     " recorded comparison diverged (unexplained, or the heads differ)")
-    psh.add_argument("--reader", choices=("open", "overdue", "unassigned", "open_task", "all"), default="all",
-                     help="Which reader to shadow: the deadline-blind open list, the"
-                     " watchdog's overdue set, or both (default); open_task is --gate/--check"
-                     " only (the resolver's head is graded inside the open records)")
-    psh.add_argument("--replay-hours", type=int, default=0,
-                     help="Also compare at each of the last N hourly instants"
-                     " (front-loads the gate from history)")
-    psh.add_argument("--skew-grace", type=int, default=600,
-                     help="Seconds a row may be newer than the comparison and"
-                     " still class as skew (default 600)")
-    psh.add_argument("--intentional", default="",
-                     help="Comma-separated task ids declared as intentional divergence")
-    psh.add_argument("--show", type=int, default=5,
-                     help="Unexplained divergences to list per bot (default 5)")
-    psh.add_argument("--verbose", action="store_true",
-                     help="Print every replayed instant, not just now")
-    psh.set_defaults(func=cmd_plane_shadow)
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")

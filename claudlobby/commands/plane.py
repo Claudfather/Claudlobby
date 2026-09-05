@@ -314,25 +314,6 @@ def cmd_plane_doctor(args) -> int:
                          " ack, so this is the steady state, not a gap")
                 except sqlite3.Error as exc:
                     rung(False, "reconcile", f"unreadable: {exc}")
-                try:
-                    from ..plane import shadow as _sh
-                    fl = paths.fleet_name
-                    if fl:
-                        roster, _why = _fleet_roster(paths)
-                        sts = _sh.gate_summary(conn, fl, roster or [])
-                        if not any(x.comparisons for x in sts):
-                            rung(True, "shadow parity (cutover J4)",
-                                 "no comparisons recorded yet — `plane shadow --record`"
-                                 " (dormant timer: PLANE_SHADOW_ENABLED=1)")
-                        else:
-                            met = [x for x in sts if x.gate_ok]
-                            div = [x.last_diverged_at for x in sts if x.last_diverged_at]
-                            rung(len(met) == len(sts), "shadow parity (cutover J4)",
-                                 f"{len(met)}/{len(sts)} bots met the gate"
-                                 f" ({_sh.GATE_CLEAN_RUN} clean + a transition)"
-                                 + (f"; last divergence {max(div)}" if div else ""))
-                except Exception as exc:          # a rung must never take the doctor down
-                    rung(False, "shadow parity", f"unreadable: {exc}")
                 # cutover chunk 5 — each reader's flag against its declaration:
                 # a flag nobody declared, or a declaration nobody armed, is a
                 # flip that half-happened.
@@ -846,115 +827,6 @@ def _fleet_roster(paths) -> "tuple[list[str] | None, str | None]":
     return sorted(fleet_cfg.bots), None
 
 
-def _shadow_check(conn, fleet: str, roster: list[str], readers) -> int:
-    """The fleet-pulse bridge's question: does any (bot, reader) have a
-    DIVERGED latest comparison? rc 1 names them; explained-only divergences
-    with agreeing heads never page."""
-    from ..plane import shadow as sh
-    hits = sh.latest_diverged(conn, fleet, roster, readers)
-    for bot, reader, at in hits:
-        print(f"  {bot} [{reader}] diverged at {at}")
-    print(f"shadow[{fleet}] check: {len(hits)} diverged (bot, reader) pair(s)"
-          + (" — " + ", ".join(f"{b}/{r}" for b, r, _ in hits) if hits else ""))
-    return 1 if hits else 0
-
-
-def _shadow_gate(conn, fleet: str, roster: list[str], readers) -> int:
-    from ..plane import shadow as sh
-    streaks = sh.gate_summary(conn, fleet, roster, readers)
-    short = [f"{st.bot}/{st.reader}" for st in streaks if not st.gate_ok]
-    for st in streaks:
-        print(f"  {st.line()}")
-    print(f"shadow[{fleet}] gate: {len(streaks) - len(short)}/{len(streaks)} (bot, reader) pairs met"
-          f" ({sh.GATE_CLEAN_RUN} clean + {sh.GATE_TRANSITIONS} transition)"
-          + (f"; short: {', '.join(short)}" if short else ""))
-    return 1 if short else 0
-
-
-def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: Path,
-                    rlog: Path, args, readers) -> int:
-    from ..plane import shadow as sh
-    now = datetime.now(timezone.utc)
-    # The cap and the grace resolved the way the WATCHDOG resolves them (env
-    # overrides included) - a gate that validated the compiled-in defaults
-    # would read clean on a fleet whose real watchdog runs a different rule.
-    max_age = int(doors._resolve_max_age()) if hasattr(doors, "_resolve_max_age") \
-        else int(getattr(doors, "DEFAULT_OVERDUE_MAX_AGE_S", 86400))
-    grace = int(doors._resolve_progress_grace()) if hasattr(doors, "_resolve_progress_grace") else 0
-    intentional = {t.strip() for t in (args.intentional or "").split(",") if t.strip()}
-    instants = [(at, True) for at in sh.replay_instants(now, args.replay_hours)] \
-        if args.replay_hours else []
-    instants.append((now, False))
-    superseded = sh.superseded_by_bot(doors, dlog)
-    malformed = {bot: sh.malformed_deadlines(doors, bot, str(dlog)) for bot in bots}
-    uids = {bot: sh.actor_uid(conn, f"bot:{fleet}/{bot}") for bot in bots}
-    events: list[dict] = []
-    diverged = 0
-    for at, replay in instants:
-        bound = sh.dt_iso(at) if replay else None
-        with sh.ledgers_at(dlog, rlog, bound) as (dl, rl):
-            # the legacy overdue classification answers for EVERY bot at once
-            legacy_overdue = (sh.legacy_overdue_all(doors, dl, rl, now=at, max_age_s=max_age)
-                              if sh.READER_OVERDUE in readers else {})
-            if sh.READER_UNASSIGNED in readers:
-                # a FLEET-level reader: one comparison per instant, keyed by the fleet's
-                # own alias (the record's bot slot names the fleet)
-                pr = doors._plane_readers()
-                d = sh.diff(fleet, "_fleet", sh.legacy_unassigned(doors, dl, rl, now=at),
-                            sh.plane_unassigned(conn, fleet, pr, now=at, at=bound),
-                            now=at, skew_s=args.skew_grace, reader=sh.READER_UNASSIGNED)
-                if not replay or args.verbose:
-                    print(f"  fleet [{sh.READER_UNASSIGNED}]: legacy={len(d.legacy_ids)} plane={len(d.plane_ids)}"
-                          f" {'clean' if d.clean else 'DIVERGED ' + str(d.classes())}")
-                diverged += 0 if d.clean else 1
-                events.append(sh.shadow_event(d))
-            for bot in bots:
-                # once per (bot, instant): every open row (the overdue reader keeps
-                # the id-less ones) and what the plane closed by supersession
-                plane_rows = sh.plane_open(conn, fleet, bot, at=bound, idless=True)
-                plane_sup = sh.plane_superseded(conn, fleet, bot, at=bound)
-                for reader in readers:
-                    if reader == sh.READER_UNASSIGNED:
-                        continue                                   # fleet-level: compared above, once
-                    if reader == sh.READER_OPEN:
-                        legacy = sh.legacy_open(doors, bot, dl, rl)
-                        # the resolver's answers (chunk 6a): legacy with its id-less
-                        # guard and the #1418 rule at THIS instant; the plane's head
-                        # through the stdlib readers the matcher itself ships
-                        resolver_legacy = doors.open_task_id(bot, dl, rl, now=int(at.timestamp()))
-                        resolver_plane = doors._plane_readers().head(conn, fleet, bot, bound)
-                        plane = [r for r in plane_rows if r.task_id is not None]   # the open LIST is id'd rows only
-                    else:
-                        legacy = legacy_overdue.get(bot.lower(), [])
-                        plane = sh.plane_overdue(conn, fleet, bot, now=at, max_age_s=max_age,
-                                                 progress_grace_s=grace, rows=plane_rows,
-                                                 uid=uids[bot])
-                    d = sh.diff(fleet, bot, legacy, plane, now=at, skew_s=args.skew_grace,
-                                **({"resolver_legacy": resolver_legacy, "resolver_plane": resolver_plane}
-                                   if reader == sh.READER_OPEN else {}),
-                                superseded=superseded.get(bot.lower(), set()),
-                                plane_superseded=plane_sup,
-                                intentional=intentional, reader=reader,
-                                malformed=malformed[bot] if reader == sh.READER_OVERDUE else None)
-                    if not replay or args.verbose:
-                        print(f"  {bot} [{reader}]{' @ ' + sh.ts19(d.at) if replay else ''}:"
-                              f" legacy={len(d.legacy_ids)} plane={len(d.plane_ids)}"
-                              f" head={'agrees' if d.head_agrees else 'DIFFERS'}"
-                              f" {'clean' if d.clean else 'DIVERGED'}"
-                              + (f" {d.classes()}" if d.divergences else ""))
-                        for x in d.unexplained[:args.show]:
-                            print(f"    {x.side} {_one_line(x.ref)} ({x.cls})")
-                    diverged += 0 if d.clean else 1
-                    events.append(sh.shadow_event(d, subject_uid=uids[bot]))
-    print(f"shadow[{fleet}]: {len(bots)} bot(s) x {len(readers)} reader(s) x {len(instants)} instant(s):"
-          f" {len(events) - diverged} clean, {diverged} diverged")
-    if args.record:
-        counts = sh.record(root, events)
-        print(f"shadow[{fleet}] recorded: committed={counts['committed']}"
-              f" duplicate={counts['duplicate']} spooled={counts['spooled']}")
-    return 1 if diverged else 0
-
-
 def _cascade_for(paths):
     """The fleet's env-tier cascade, or None when the resolver door is
     unavailable (disclosed by the caller, never assumed). ONE subprocess per
@@ -988,18 +860,28 @@ def _write_flags(paths, cascade=None) -> dict[str, bool | None]:
     return {door: _env_tiers.resolves_to(cascade, flag, "0") for door, flag in WRITE_FLAGS.items()}
 
 
+def _record(root: Path, events: list[dict]) -> dict[str, int]:
+    """Land the cutover's own facts through the batch door and count the
+    outcomes (committed / duplicate / spooled) — the shadow module used to
+    own this one-liner."""
+    from ..plane.emit_api import emit_batch
+    counts: dict[str, int] = {}
+    for r in emit_batch(root, events):
+        counts[r.status] = counts.get(r.status, 0) + 1
+    return counts
+
+
 def cmd_plane_cutover(args) -> int:
-    """Declare a reader's flip to the plane (cutover chunk 5): refuses unless
-    the J4 gate is met for that reader on every declared bot, records
-    `cutover_declared` (streaks at the instant, or the --force reason) and
-    prints the flag line the operator adds. rc 0 declared / 1 refused (gate
-    not met) / 2 usage / 3 unreachable."""
+    """Declare a reader's flip to the plane (cutover chunk 5 → F18 closure):
+    records `cutover_declared` for the reader as a direct move (the --force
+    reason, else the ruling) and prints the flag line the operator adds;
+    `--retire-writes` records `legacy_write_retired`. rc 0 / 2 usage / 3
+    unreachable. The whole door goes with R3."""
     paths = _resolve_paths(args)
     root = paths.root
 
     def run() -> int:
         from ..plane import cutover as _cut
-        from ..plane import shadow as _sh
         fleet = paths.fleet_name
         if not fleet:
             print("cutover: needs --fleet <name>", file=sys.stderr)
@@ -1009,7 +891,7 @@ def cmd_plane_cutover(args) -> int:
             print(f"cutover: UNREACHABLE — fleet manifest: {why}")
             return 3
         if bool(args.reader) == bool(args.retire_writes):
-            print("cutover: exactly one of --reader <" + "|".join(_sh.GATED) + "> or --retire-writes",
+            print("cutover: exactly one of --reader <" + "|".join(_cut.READERS) + "> or --retire-writes",
                   file=sys.stderr)
             return 2
         conn = _open_plane_ro(root, "cutover", sys.stdout)
@@ -1022,15 +904,12 @@ def cmd_plane_cutover(args) -> int:
                 decl = _cut.declared(conn, fleet)
                 missing = _cut.undeclared(decl)
                 covered = _cut.retired_doors(conn, fleet) if already is not None else set()
-            else:
-                streaks = _sh.gate_summary(conn, fleet, roster, (args.reader,))
         finally:
             conn.close()
         if args.retire_writes:
-            # Chunk 6b: retiring a write ENDS the shadow for every reader that read
-            # that ledger, so every reader must be declared first — or forced,
-            # with the reason recorded.
-            for r in _sh.GATED:
+            # Chunk 6b: the retirement is recorded once every reader is declared
+            # — or forced, with the reason recorded.
+            for r in _cut.READERS:
                 print(("  declared " if r in decl else "  MISSING  ") + r
                       + (f" ({decl[r][0]})" if r in decl else ""))
             if missing and not args.force:
@@ -1050,32 +929,24 @@ def cmd_plane_cutover(args) -> int:
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             ev = _cut.retirement_event(fleet, decl, now, forced=args.force or None,
                                        subject_uid=anchor)
-            counts = _sh.record(root, [ev])
+            counts = _record(root, [ev])
             print(f"cutover: legacy writes retired for {fleet} at {now}"
                   + (f" (FORCED: {args.force})" if args.force else "")
                   + f" [{', '.join(f'{k}={v}' for k, v in counts.items() if v)}]")
             print("  add to the fleet .env tier:  " + "  ".join(f"{f}=0" for f in _cut.WRITE_FLAGS.values()))
             print(f"  then `claudlobby --fleet {fleet} generate` and restart the sessions;"
-                  " the shadow ends here — there is no legacy side left to grade;"
                   " rollback = the flags back to 1")
-            print("  every matcher reader (--open, --all, --orphans, --open-task, --unassigned) follows"
-                  " its flip; the report, events and workstream readers follow this retirement")
+            print("  the matcher reads the plane alone (F18 R2a); the report, events and workstream"
+                  " readers follow this retirement")
             return 0
-        if already is not None:
-            print(f"cutover: note — the legacy writes are retired ({already[0]}); the shadow cannot"
-                  " record new evidence for this reader, so this declaration stands on what was"
-                  " recorded before the retirement")
-        short = _cut.unmet(streaks)
-        for st in streaks:
-            print(("  ok   " if st.gate_ok else "  SHORT ") + st.line())
-        if short and not args.force:
-            print(f"cutover: REFUSED — {len(short)}/{len(streaks)} (bot, {args.reader})"
-                  f" streaks short of the gate; keep shadowing, or --force <reason>")
-            return 1
+        # No gate (F18 closure, R2a): the shadow that once graded a reader's
+        # legacy answer against the plane's has no legacy side left to read,
+        # so every declaration is the direct move the operator ruled — the
+        # reason recorded is --force's, else the ruling itself.
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        ev = _cut.declaration_event(fleet, args.reader, streaks, now, forced=args.force or None,
+        ev = _cut.declaration_event(fleet, args.reader, now, forced=args.force or None,
                                     subject_uid=anchor)
-        counts = _sh.record(root, [ev])
+        counts = _record(root, [ev])
         flag = _cut.READ_FLAGS[args.reader]
         if counts.get("duplicate") and not counts.get("committed"):
             print(f"cutover: {args.reader} already declared at this instant ({now}) — one fact,"
@@ -1090,86 +961,6 @@ def cmd_plane_cutover(args) -> int:
         return 0
 
     return _guarded("cutover", run)
-
-
-def cmd_plane_shadow(args) -> int:
-    """The shadow-diff primitive (cutover chunk 3): per bot, the legacy open
-    set (the install's dispatch-overdue.py, through brief's seam) against
-    the plane's, classified, optionally RECORDED as a system event, and the
-    J4 gate derived from what was recorded. Never writes a ledger, never
-    routes the plane's answer anywhere. Two readers: the deadline-blind
-    open list and the watchdog's overdue set. rc 0 clean (or gate met, or
-    check clean) / 1 a divergence (or gate not met, or check found one) /
-    2 usage / 3 unreachable."""
-    paths = _resolve_paths(args)
-    root = paths.root
-
-    def run() -> int:
-        from ..brief import dispatch_ledger_path, load_dispatch_doors, report_ledger_path
-        from ..plane.parity import read_ledger
-        from ..source_state import SOURCE_OK
-
-        fleet = paths.fleet_name
-        if not fleet:
-            print("shadow: needs --fleet <name> — the plane's open set is per"
-                  " bot:<fleet>/<name>", file=sys.stderr)
-            return 2
-        roster, why = _fleet_roster(paths)
-        if roster is None:
-            print(f"shadow: UNREACHABLE — fleet manifest: {why}")
-            return 3
-        if args.bot and args.bot not in roster:
-            print(f"shadow: {args.bot} is not on the {fleet} roster ({', '.join(roster)})"
-                  " — a comparison for a name nobody dispatches to would read clean by"
-                  " emptiness", file=sys.stderr)
-            return 2
-        doors = load_dispatch_doors(paths)
-        if doors is None:
-            print(f"shadow: UNREACHABLE — lib/dispatch-overdue.py not loadable from {paths.lib}")
-            return 3
-        dlog, rlog = dispatch_ledger_path(paths), report_ledger_path(paths)
-        for label, path in (("dispatch-log", dlog), ("report-back", rlog)):
-            state, detail, _, _ = read_ledger(path)
-            if state not in (SOURCE_OK, "empty"):
-                print(f"shadow: UNREACHABLE — {label}: {detail}")
-                return 3
-        conn = _open_plane_ro(root, "shadow", sys.stdout)
-        if conn is None:
-            return 3
-        if not (args.gate or args.check):
-            from ..plane import cutover as _cut
-            ret = _cut.retired(conn, fleet)
-            if ret is not None:
-                conn.close()
-                # rc 0, not a usage code: the end of the shadow is its DESIGNED state,
-                # and the composed timer kept running the record mode after the flip —
-                # eleven runs at exit 2 on the Mini, a unit reporting failure for
-                # having nothing left to do (B3).
-                print(f"shadow: the legacy writes are retired for {fleet} ({ret[0]}) — there is"
-                      " no legacy side left to grade; the shadow ended with the retirement"
-                      " (--gate / --check still read what was recorded)", file=sys.stderr)
-                return 0
-        from ..plane import shadow as sh
-        readers = (sh.READERS + (sh.READER_UNASSIGNED,)) if args.reader == "all" else (args.reader,)
-        if args.reader == sh.READER_OPEN_TASK and not (args.gate or args.check):
-            print("shadow: open_task is a gate mode — the resolver's head is graded inside"
-                  " the open reader's records; use --gate --reader open_task (or --check)",
-                  file=sys.stderr)
-            return 2
-        try:
-            if args.check:
-                return _shadow_check(conn, fleet, roster, readers)
-            if args.gate:
-                return _shadow_gate(conn, fleet, roster, readers)
-            bots = [args.bot] if args.bot else roster
-            return _shadow_compare(conn, root, fleet, bots, doors, dlog, rlog, args, readers)
-        except sqlite3.Error as exc:
-            print(f"shadow: UNREACHABLE — plane db unreadable: {exc}")
-            return 3
-        finally:
-            conn.close()
-
-    return _guarded("plane shadow", run)
 
 
 def cmd_plane_view(args) -> int:

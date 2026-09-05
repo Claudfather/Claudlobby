@@ -274,9 +274,8 @@ def supersession_events(conn: sqlite3.Connection, fleet: str, rows: list[LegacyR
     the retired id. *planned* maps task ids to the ids THIS run's dispatch
     imports mint, so a retired dispatch imported in the same run is closed
     in the same run (the closure follows its assignment in the batch) rather
-    than on the next one. The shadow (chunk 3) CLASSIFIES the same
-    ``supersedes`` field through the legacy matcher's helper; this is where
-    it CLOSES."""
+    than on the next one. This is where a legacy ``supersedes`` CLOSES on the
+    plane (the shadow that once classified it is gone — F18 R2a)."""
     planned = planned or {}
     events: list[dict] = []
     for row in rows:

@@ -2,6 +2,8 @@
 
 **Status:** RULED (2026-09-02 evening). Each junction got its own evaluative session — go/no-go against the intent (*off JSON as soon as possible; the plane becomes the record*) and its target purpose. **All four: GO-WITH-CHANGES.** The changes are folded below as corrections to this walk, each verified in the code before being written here. Tracking: #1444. The build queue is at the end; chunk 1 is in flight.
 
+**Closure (2026-09-04, #1467):** R1 retired every writer — the plane is the only recorder, `PLANE_EMIT_DISABLED=1` the one silencer; R2a made the matcher plane-only and DELETED the shadow, its gate, its timer and the doctor rung, so the shadow/gate instructions below are history (every declaration is the direct move the 2026-09-03 ruling made it). The remaining readers, the cutover door and the flags go with R2b/R3.
+
 ## Why this is the largest remaining piece
 
 Every new surface — registry, presence, inventory, org, utilization, attention — reads the plane's SQLite db, and it has been recording production data since 2026-08-28. But the fleet's **system of record is still the legacy JSONL**: the doors dual-write (spec F18, "disposable-until-cutover"), and the readers that *act* on fleet state — the brief a manager boots with, the pulse watchdog that pages, the resolver that closes a dispatch when a worker reports — still read files. Until they move, the plane is a mirror, not the record; and the mission ("redo the data model underneath the framework and then use that to power the observability plane") is only half done.

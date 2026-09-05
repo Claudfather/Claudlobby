@@ -6,7 +6,11 @@ source, and the supersede hint's task texts. Each now follows the retirement
 fact itself (`legacy_write_retired` naming the door, read on the plane —
 `brief.plane_retired_conn`), never a new flag: a frozen ledger is wrong on the
 day it freezes. The row shapes are the legacy ones, `ts` in the legacy form,
-so every consumer and every brief cursor keeps working.
+so every consumer and every brief cursor keeps working. (F18 R2a: the
+matcher's legacy side and the shadow are gone; the supersede hint reads the
+plane unconditionally now — test_the_supersede_hint_reads_its_task_texts_from_the_plane_once_flipped
+→ test_the_supersede_hint_reads_its_task_texts_from_the_plane, and its stdlib
+half is test_the_planes_task_texts_carry_the_dispatch_text.)
 """
 from __future__ import annotations
 
@@ -17,20 +21,20 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+import pytest
+
 from claudlobby.brief import _reports_section, plane_retired_conn, read_cursor, write_cursor
-from claudlobby.plane import shadow as sh
+from claudlobby.plane import cutover as cut
 from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import ro as _ro
-from tests.test_plane_cutover_flip import _cli, _declare, _env, _stdlib_readers
-from tests.test_plane_cutover_parity import _live_dispatch, _rrow, _write
-from tests.test_plane_shadow import F, REPO, _report, _scene
+from tests.plane_fixtures import F, REPO, _cli, _declare, _env, _report, _scene, _stdlib_readers, ro as _ro
+from tests.test_plane_cutover_parity import _rrow, _write
 
 LIB = REPO / "lib"
 TERMINAL = {"completed", "failed", "blocked"}
 
 
 def _retire(root):
-    for reader in sh.GATED:
+    for reader in cut.READERS:
         _declare(root, reader)
     assert _cli(root, "cutover", "--retire-writes").returncode == 0
 
@@ -151,6 +155,8 @@ def test_report_back_serves_the_plane_once_the_report_write_is_retired(tmp_path)
 
 def test_report_back_refuses_when_the_plane_cannot_answer_under_a_retirement(tmp_path, monkeypatch):
     root, paths, _, _ = _scene(tmp_path)
+    from claudlobby.brief import report_ledger_path
+    report_ledger_path(paths).write_text("")      # the command still probes the ledger BEFORE the plane (R2b's)
     _retire(root)
     (root / "lib").unlink()                                                          # the readers are not reachable
     (root / "lib").mkdir()
@@ -281,26 +287,37 @@ def test_who_reviewed_auto_joins_the_plane_with_the_unretired_ledgers_and_dedupe
 
 # --- the supersede hint ------------------------------------------------------------------
 
-def test_the_supersede_hint_reads_its_task_texts_from_the_plane_once_flipped(tmp_path, monkeypatch):
-    root, paths, d, r = _scene(tmp_path)
-    from claudlobby.brief import dispatch_ledger_path, report_ledger_path
+def _hint_module():
     spec = importlib.util.spec_from_file_location("hint", LIB / "dispatch-supersede-hint.py")
-    hint = importlib.util.module_from_spec(spec); spec.loader.exec_module(hint)
-    dl, rl = str(dispatch_ledger_path(paths)), str(report_ledger_path(paths))
-    # the plane's work item for t-2 carries the text with the reference; the frozen
-    # log's `task` field does not (the fixture's rows say "do the thing")
-    with _ro(root) as conn:
-        conn.execute("SELECT 1").fetchone()
-    with __import__("claudlobby.plane.db", fromlist=["connect"]).connect(root / "state" / "plane" / "plane.db") as conn:
-        conn.execute("UPDATE work_items SET title = ? WHERE work_item_id = ?", ("fix the flaky test in #480", "wi_" + "2".rjust(32, "0")))
-    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root)); monkeypatch.setenv("CLAUDLOBBY_FLEET", F)
-    monkeypatch.setenv("PLANE_READ_OPEN", "1")
-    n, ids, note = hint.hint("w1", dl, rl, "another pass at #480")                    # flag alone: the log's texts (no #480)
-    assert ids == []
-    _declare(root, "open")
-    n, ids, note = hint.hint("w1", dl, rl, "another pass at #480")                    # flipped: the plane's text
-    assert ids == ["t-2-bbbb"] and "--supersedes t-2-bbbb" in note
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _title_with_ref(root):
+    """The plane's work item for t-2 carries the text with the reference."""
+    from claudlobby.plane.db import connect
+    with connect(root / "state" / "plane" / "plane.db") as conn:
+        conn.execute("UPDATE work_items SET title = ? WHERE work_item_id = ?",
+                     ("fix the flaky test in #480", "wi_" + "2".rjust(32, "0")))
+
+
+def test_the_planes_task_texts_carry_the_dispatch_text(tmp_path):
+    root, paths, _, _ = _scene(tmp_path)
+    _title_with_ref(root)
     pr = _stdlib_readers()
     with _ro(root) as conn:
-        assert pr.task_texts(conn, F, "W1")["t-2-bbbb"] == "fix the flaky test in #480"
+        assert pr.task_texts(conn, F, "W1")["t-2-bbbb"] == "fix the flaky test in #480"   # case-insensitive alias
         assert pr.task_texts(conn, F, "ghost") == {}
+
+
+def test_the_supersede_hint_reads_its_task_texts_from_the_plane(tmp_path, monkeypatch):
+    root, paths, _, _ = _scene(tmp_path)
+    _title_with_ref(root)
+    hint = _hint_module()
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root)); monkeypatch.setenv("CLAUDLOBBY_FLEET", F)
+    monkeypatch.delenv("FLEET_NAME", raising=False)
+    n, ids, note = hint.hint("w1", "another pass at #480")           # the plane's text carries #480
+    assert n == 1 and ids == ["t-2-bbbb"] and "--supersedes t-2-bbbb" in note
+    n, ids, note = hint.hint("w1", "unrelated work")                 # the quiet tier: counted, never spoken
+    assert (n, ids, note) == (1, [], "")

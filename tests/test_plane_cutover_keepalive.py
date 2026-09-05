@@ -14,11 +14,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from claudlobby.plane import shadow as sh
+from claudlobby.plane import cutover as cut
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.uptime import compute_metrics, entries_from_plane, parse_keepalive_log
-from tests.test_plane_cutover_flip import _stdlib_readers
+from tests.plane_fixtures import _stdlib_readers
 from tests.test_plane_keepalive_door import CLI, LIB, _rig, _tick
 
 FLEET = "kfleet"
@@ -40,7 +40,7 @@ def _cli(root: Path, *args, env=None):
 
 
 def _retire(root: Path):
-    for reader in sh.GATED:
+    for reader in cut.READERS:
         r = _cli(root, "plane", "cutover", "--reader", reader, "--force", "ruling")
         assert r.returncode == 0, r.stdout + r.stderr
     r = _cli(root, "plane", "cutover", "--retire-writes")

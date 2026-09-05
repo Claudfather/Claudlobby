@@ -103,19 +103,16 @@ done
 # bug). dispatch-overdue.py owns "which dispatch is open" for both readers, so
 # the id supplied here is one this bot genuinely has open — and the watchdog
 # still verifies it independently. Fail-open at every step: a missing python3, an
-# unreadable ledger, or nothing open all leave TASK_ID empty and the report
+# unreachable plane, or nothing open all leave TASK_ID empty and the report
 # behaves exactly as it did before. A report-back must never fail because a
 # watchdog helper was unavailable.
 case "$STATUS" in
     completed|failed|blocked)
         if [ -z "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
-            # No file-exists gate (F18 R1): the matcher answers from the plane
-            # under the flip, and the retired ledgers' paths only fill its two
-            # positional slots until R2 removes them — a gate on the file made
-            # the resolver dead on a host whose files are gone.
-            _rb_dispatch="$(dispatch_ledger_path)"
-            TASK_ID="$(python3 "$LIB_DIR/dispatch-overdue.py" --open-task \
-                "$BOT" "$_rb_dispatch" "$(fleet_runtime_dir)/report-back.jsonl" 2>/dev/null || true)"
+            # The resolver reads the plane of this fleet (F18 R2a) — no ledger
+            # paths, no file-exists gate (a gate on the retired file once made
+            # the resolver dead on a host whose files were gone).
+            TASK_ID="$(python3 "$LIB_DIR/dispatch-overdue.py" --open-task "$BOT" 2>/dev/null || true)"
         # A SUPPLIED id is checked but NEVER changed (#1032). The resolver above
         # runs only when --task is omitted, so a wrong id was accepted verbatim
         # where an absent one would have been repaired — the auto-resolver was
@@ -129,9 +126,7 @@ case "$STATUS" in
         # closing older rows is #447. A tool that silently picks a row is worse
         # than one that says it cannot tell: the first sends nobody to look.
         elif [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
-            _rb_dispatch="$(dispatch_ledger_path)"
-            _rb_open="$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
-                "$BOT" "$_rb_dispatch" "$(fleet_runtime_dir)/report-back.jsonl" 2>/dev/null \
+            _rb_open="$(python3 "$LIB_DIR/dispatch-overdue.py" --open "$BOT" 2>/dev/null \
                 | awk '{print $3}' || true)"
             # Only a NON-EMPTY open set can contradict the caller. An empty
             # one means the bot has nothing open — the plane unreachable, the
@@ -174,9 +169,6 @@ if plane_armed report-back --require-fleet; then
     PLANE_ARMED=1
 fi
 PLANE_MSG_ID="" PLANE_LINK_WI="" PLANE_LINK_ASG=""
-# (The resolver's two positional ledger slots above still receive the RETIRED
-# ledgers' paths: the matcher answers from the plane under the flip and treats an
-# absent file as absent — R2 of the F18 closure removes the slots.)
 _plane_lookup_dispatch_ids() {
     # The join dispatch-task recorded: the plane assignment carrying this task
     # id (source_ref dispatch-log:<id>) holds the construct ids. Fail-open — an
@@ -268,41 +260,47 @@ _plane_emit_report_intent() {
             events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\"$sess_frag}}"
         fi
     fi
-    # Cutover chunk 6a: an id-less report (no --task) with a TERMINAL status
-    # answers every OPEN id-less dispatch of this bot, as the legacy ledger
-    # closes id-less rows by any later terminal report -- each gets the
-    # terminal task event, so the plane resolver guard releases exactly when
-    # the legacy one does and the overdue reader stops paging it.
-    if [ -z "$TASK_ID" ]; then
-        local _idless_ev="" _pairs _wi _asg
-        case "$STATUS" in
-            completed) _idless_ev="completed" ;;
-            failed)    _idless_ev="failed" ;;
-            blocked)   _idless_ev="returned_blocked" ;;
-        esac
-        if [ -n "$_idless_ev" ]; then
-            _pairs=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
-                --root "${CLAUDLOBBY_ROOT:-}" --open-idless --fleet "${FLEET_NAME:-}" --bot "$BOT" \
-                2>/dev/null || true)
-            while read -r _wi _asg; do
-                [ -n "$_asg" ] || continue
-                events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$_wi\",\"assignment_id\":\"$_asg\",\"event\":\"$_idless_ev\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "$SUMMARY")\"${sess_frag:-}}}"
-            done <<EOF_IDLESS
+    # EVERY terminal report — id-less, id'd, or naming an id the plane could
+    # not link — answers every OPEN id-less dispatch of this bot (cutover 6a,
+    # widened by F18 R2a): the legacy ledger closed an id-less row on the
+    # bot's next terminal report of ANY kind, and the first plane build
+    # closed them only for id-less reports, leaving an id'd report's rows
+    # open (found by the matcher suite's port). Each gets the terminal task
+    # event, so the resolver guard releases and the overdue reader stops
+    # paging it. The worker did something terminal; the id-less rows it was
+    # holding are answered.
+    local _idless_ev="" _pairs _wi _asg
+    case "$STATUS" in
+        completed) _idless_ev="completed" ;;
+        failed)    _idless_ev="failed" ;;
+        blocked)   _idless_ev="returned_blocked" ;;
+    esac
+    if [ -n "$_idless_ev" ]; then
+        _pairs=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
+            --root "${CLAUDLOBBY_ROOT:-}" --open-idless --fleet "${FLEET_NAME:-}" --bot "$BOT" \
+            2>/dev/null || true)
+        while read -r _wi _asg; do
+            [ -n "$_asg" ] || continue
+            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$_wi\",\"assignment_id\":\"$_asg\",\"event\":\"$_idless_ev\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "$SUMMARY")\"${sess_frag:-}}}"
+        done <<EOF_IDLESS
 $_pairs
 EOF_IDLESS
-        fi
     fi
     # A report whose STATUS reached no task event (a terminal note that resolved
-    # nothing, or an id'd report the plane could not link) still has a status
-    # the idle-worker check reads off the legacy row — so it rides the plane as
-    # a `report_status` system event on the bot's actor (alias-resolved at
-    # ingest), under the same report-back:<msg> ref. Never for progress (not
-    # a status the check reads) and never beside a task event (one fact).
+    # nothing, an id'd report the plane could not link, or a PROGRESS report
+    # without a task id) still has a status two readers need — the idle-worker
+    # check (terminal, never progress) and the overdue reader's progress grace
+    # (F18 R2a: the legacy grace deferred on any progress report BY BOT, and a
+    # progress report resolves no id, so without this marker a long task that
+    # reports id-less progress paged as overdue at its deadline) — so it rides
+    # the plane as a `report_status` system event on the bot's actor
+    # (alias-resolved at ingest), under the same report-back:<msg> ref, never
+    # beside a task event (one fact).
     case ",$events," in
         *'"event_type":"task"'*) ;;
         *)
             case "$STATUS" in
-                completed|failed|blocked)
+                completed|failed|blocked|progress)
                     events="$events,{\"event_type\":\"system\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"report_status\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"status\":\"$STATUS\",\"msg_id\":\"$PLANE_MSG_ID\"}}}" ;;
             esac ;;
     esac

@@ -201,8 +201,8 @@ reader, the dispatch resolver — answers from.
 Full reference: [`observable-plane.md`](observable-plane.md) — the ten families and the common
 envelope, identity (aliases vs minted uids), the write spine and its ladder (daemon socket → cold
 CLI → spool), every door and the flag that arms it, the read side (and which doors are NOT
-read-only), the F18 cutover state machine (shadow → gate → declare → flip → retire) with the
-rollback at each stage, migrations and retention.
+read-only), the F18 cutover state machine (declare → flip → retire — the shadow and its gate went with the
+closure, R2a) with the rollback at each stage, migrations and retention.
 
 Two properties matter at this altitude. **Everything is dormant by default**: a fleet that never
 sets `PLANE_EMIT_ENABLED=1` in its `.env` tier pays nothing; the ingest daemon, the view daemon and
