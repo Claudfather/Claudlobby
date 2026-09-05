@@ -11,6 +11,8 @@ captures its page) against a throwaway plane through the real doors.
 """
 from __future__ import annotations
 
+import re
+
 import os
 import shutil
 import subprocess
@@ -110,7 +112,11 @@ def test_an_unreachable_plane_is_unknown_per_bot_and_paged_never_none(tmp_path):
     r = _pulse(root, libdir)
     assert r.returncode == 0, r.stderr[-2000:]
     assert "UNREACHABLE" in r.stderr and "cannot be judged this pass" in r.stderr
-    assert "No such file" not in r.stderr and ".critical-window" not in r.stderr
+    # a MISSING SCRIPT would say "No such file" too — but so does Linux's socket
+    # client for the absent daemon socket ("[Errno 2] No such file or directory"),
+    # which is the expected transport fallback here, not a broken rig
+    assert not re.search(r"(bash|python3?|dispatch-overdue\.py|plane-lookup\.py):.*No such file", r.stderr), r.stderr[-1500:]
+    assert ".critical-window" not in r.stderr
     paged = capture.read_text()
     assert "events reader for f is UNREACHABLE" in paged and PAGE not in paged, paged
     summary = _summary(root)
