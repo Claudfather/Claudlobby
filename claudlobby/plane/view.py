@@ -475,13 +475,23 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
 # identical cards (item 6, #1479). What they share is NOT an id: every send
 # mints its own work item (`dispatch-task.sh`: `plane_mint_id wi` per
 # dispatch), so a work-item join groups nothing a real broadcast produces.
-# What a broadcast does share is the sender, the words, the state the row is
-# in, the arm that put it in the queue, and the instant it went out — so that
-# is the key, clustered on the dispatch instant inside a one-minute window.
+# What a broadcast does share is the sender, the words AS STORED, the state
+# the row is in, the arm that put it in the queue, the instant it went out
+# and one row per recipient — so that is the key, clustered on the dispatch
+# instant inside a one-minute window.
+#
+# The window is MEASURED, not asserted (fold F2). On the production plane,
+# 2026-09-05: 7 multi-recipient dispatch groups, widest spread 28s, and the
+# six-recipient broadcasts spread 5-6s — about a second per recipient, the
+# per-send cost of the tmux fan-out. 60s therefore covers a 21-bot fleet with
+# margin and is a constant rather than a knob: an operator cannot tell which
+# value would be right, and a knob that is never turned is a second copy of
+# this number for the next reader to reconcile.
 _BROADCAST_WINDOW_S = 60.0
 
 
-def _stamp_broadcasts(rows: list[dict]) -> None:
+def _stamp_broadcasts(rows: list[dict],
+                      raw_title: dict[str, str | None]) -> None:
     """Stamp `broadcast_key` on the rows that are ONE broadcast.
 
     Only ATTENTION rows cluster, and that is the semantic the card needs: it
@@ -490,20 +500,42 @@ def _stamp_broadcasts(rows: list[dict]) -> None:
     card shows one status pill — a group that disagreed about it would
     fabricate the pill for some members; the arms are in it because the card
     shows one reason line. A row with no title cannot be shown to be the same
-    NOTE as another, so it never joins a cluster. A cluster of one is left
-    unkeyed, so a single-recipient card renders exactly as it did.
+    NOTE as another, so it never joins a cluster.
+
+    The words are the work item's RAW title, never the rendered one (fold
+    F3): `body_words` strips a trailing `| key:value`, so two reviews of
+    DIFFERENT pull requests render identical words and grouped — one card
+    naming a PR that half its recipients were never sent (reproduced).
+
+    ONE ROW PER RECIPIENT (fold F1). A broadcast has one row per bot, so
+    within a cluster the FIRST row per assignee is the member and a later
+    row for that same assignee is a RE-DISPATCH — the estate's common case,
+    which rendered "→ issey, issey · 2 bots". It is left unkeyed and renders
+    as its own card, which is what a re-dispatch is. A cluster of one
+    DISTINCT recipient is left unkeyed too, so a single-recipient card
+    renders exactly as it did.
 
     The window is anchored to the cluster's FIRST row, never to its previous
     one: chaining would let a slow trickle drift arbitrarily far from the
-    dispatch it claims to be part of. An instant that will not parse (or will
-    not compare — a naive stamp beside an aware one) opens a new cluster:
-    unprovable is not grouped, which is exactly today's rendering.
+    dispatch it claims to be part of. An instant that will not parse opens a
+    new cluster: unprovable is not grouped, which is exactly today's
+    rendering. (It cannot fail to COMPARE — `occurred_at` is an
+    `AwareDatetime` in the envelope contract, so a naive stamp never reaches
+    the db; the guard that caught one was unreachable, fold F8.)
+
+    THE EXIT (fold F7): this whole inference retires the day
+    `lib/dispatch-task.sh` reuses ONE work item across a fan-out — the schema
+    already allows N assignments per work item (`idx_assignments_item` is
+    non-unique) — because then the view groups by `work_item_id`, the door
+    says which rows are one broadcast instead of the view guessing, and the
+    window goes with the guess.
     """
     groups: dict[tuple, list[dict]] = {}
     for r in rows:
-        if not r["attention"] or not r["title"]:
+        title = raw_title.get(r["assignment_id"])
+        if not r["attention"] or not title:
             continue
-        groups.setdefault((r["assigned_by_uid"], r["title"], r["status"],
+        groups.setdefault((r["assigned_by_uid"], title, r["status"],
                            tuple(r["attention_reason"])), []).append(r)
     for members in groups.values():
         if len(members) < 2:
@@ -513,21 +545,21 @@ def _stamp_broadcasts(rows: list[dict]) -> None:
         cluster: list[dict] = []
         lead: datetime | None = None
 
-        def _close() -> None:                 # a cluster of one is not one
-            if len(cluster) > 1:
-                key = "bc:" + cluster[0]["assignment_id"]
-                for m in cluster:
-                    m["broadcast_key"] = key
+        def _close() -> None:      # a cluster of one RECIPIENT is not one
+            first: dict[str, dict] = {}
+            for m in cluster:
+                first.setdefault(m["assignee_uid"], m)
+            if len(first) < 2:
+                return
+            key = "bc:" + cluster[0]["assignment_id"]
+            for m in first.values():
+                m["broadcast_key"] = key
 
         for r in members:
             at = _parse_iso(r["occurred_at"])
-            near = False
-            if lead is not None and at is not None:
-                try:
-                    near = (abs((at - lead).total_seconds())
-                            <= _BROADCAST_WINDOW_S)
-                except TypeError:             # naive beside aware
-                    near = False
+            near = (lead is not None and at is not None
+                    and abs((at - lead).total_seconds())
+                    <= _BROADCAST_WINDOW_S)
             if near:
                 cluster.append(r)
             else:
@@ -582,6 +614,10 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
     arms = {r["assignment_id"]: r for r in conn.execute(
         ATTENTION_ARMS_SQL + f" AND a.assignment_id IN ({ph})",
         (now, now, *ids))}
+    # the RAW titles, before the render form replaces them: the broadcast key
+    # is keyed on what was STORED (fold F3 — `body_words` strips the trailing
+    # `| ref:…` that is the only thing telling two reviews apart)
+    raw_titles = {r["assignment_id"]: r["title"] for r in rows}
     for r in rows:
         r["title"] = body_words(r["title"])
         r["assignee_short"] = (labels.get(r["assignee_alias"])
@@ -604,7 +640,7 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
         r["attention_reason"] = reasons
         r["attention_since"] = since
         r["broadcast_key"] = None
-    _stamp_broadcasts(rows)
+    _stamp_broadcasts(rows, raw_titles)
     return {"assignments": rows,
             "attention_count": sum(1 for r in rows if r["attention"])}
 
@@ -639,6 +675,15 @@ def _fetch_identities(conn: sqlite3.Connection,
         f"{scope} ORDER BY last_seen DESC LIMIT 200", params):
         row = dict(r)
         row["short"] = _short(row["alias"])
+        # WHICH FLEET a rail row belongs to, stamped here (fold F5): a fleet
+        # identity is its own fleet, a bot reads it off its alias through
+        # inventory.fleet_of — the ONE Python spelling of the axis — and a
+        # human is `null`, belonging to every room and no fleet. The page
+        # groups the roster on this; it had a third spelling of the rule
+        # (splitting on the FIRST `/` where fleet_of takes the LAST), which
+        # a fleet name containing a slash would have split differently.
+        row["fleet"] = (row["alias"] if row["kind"] == "fleet"
+                        else fleet_of(row["alias"]))
         # a human actor is legitimately-provisional (never in a roster to
         # confirm) — do NOT badge it as an unconfirmed suspect
         if row["alias"].startswith("human:"):

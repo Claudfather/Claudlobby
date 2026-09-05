@@ -257,23 +257,31 @@ function attentionWhy(r) {
   return `<div class="why">⚠ ${parts.join(" · ")}</div>`;
 }
 
-// A note dispatched to N bots is N rows, and the rail rendered N identical
-// cards (item 6, #1479). WHICH rows are one broadcast is the SERVER's fact
-// (`broadcast_key` — one sender, the same words, the same state, the same
-// arm, one dispatch instant): the page groups what the API keyed and derives
-// no key of its own, so it can never group two rows the API considers
-// unrelated. An unkeyed row is a group of one and renders as it always did.
-// Order is the payload's — a group sits where its first member sat.
-function groupBroadcasts(rows) {
+// ONE group-by, two callers (fold F6): the attention rail groups the rows the
+// API keyed as one broadcast, the roster groups rows by the fleet the API
+// stamped. A null key is its OWN group — an unkeyed row is a group of one —
+// and order is the input's: a group sits where its first member sat.
+function groupBy(rows, keyOf) {
   const out = [], byKey = new Map();
   for (const r of rows) {
-    const seen = r.broadcast_key ? byKey.get(r.broadcast_key) : null;
+    const k = keyOf(r);
+    const seen = k == null ? null : byKey.get(k);
     if (seen) { seen.push(r); continue; }
     const group = [r];
-    if (r.broadcast_key) byKey.set(r.broadcast_key, group);
+    if (k != null) byKey.set(k, group);
     out.push(group);
   }
   return out;
+}
+
+// A note dispatched to N bots is N rows, and the rail rendered N identical
+// cards (item 6, #1479). WHICH rows are one broadcast is the SERVER's fact
+// (`broadcast_key` — one sender, the same stored words, the same state, the
+// same arm, one dispatch instant, one row per recipient): the page groups
+// what the API keyed and derives no key of its own, so it can never group
+// two rows the API considers unrelated.
+function groupBroadcasts(rows) {
+  return groupBy(rows, (r) => r.broadcast_key);
 }
 
 // A card that must be scrolled past has already failed to route attention
@@ -334,18 +342,6 @@ function renderTasks(env) {
     .map((r) => card([r])).join("");
 }
 
-// Which fleet a rail row belongs to, off its own alias (`bot:<fleet>/<name>`
-// — inventory's rule): a fleet identity is its own fleet, a human belongs to
-// none (it is a participant of every room). Nothing here asks which room the
-// page thinks it is in — whether the READ spans fleets is what decides the
-// grouping, and only the `all` read ever does.
-function railFleetOf(a) {
-  if (a.kind === "fleet") return a.alias;
-  const rest = a.alias.slice(a.alias.indexOf(":") + 1);
-  const i = rest.indexOf("/");
-  return i < 0 ? null : rest.slice(0, i);
-}
-
 function railRow(a) {
   const live = a.last_seen && (Date.now() - Date.parse(a.last_seen)) < 36e5;
   return `<div class="actor" title="${esc(a.alias)}">
@@ -364,26 +360,30 @@ function railRow(a) {
 // is its most recent, and the groups sort by that. Names are the server's
 // `short` (fleet-qualified under `all`), and no row is dropped: the header
 // is added, nothing it names is taken away.
+//
+// WHICH fleet a row belongs to is the SERVER's stamp (`fleet`, fold F5 — a
+// fleet identity is its own fleet, a bot's is read off its alias through
+// inventory.fleet_of, a human's is null because it is a participant of every
+// room). The page had a third spelling of that rule and no longer parses an
+// alias at all. Nothing here asks which room the page thinks it is in —
+// whether the READ spans fleets is what decides the grouping, and only the
+// `all` read ever does.
 function renderFleet(env) {
   const el = $("fleet");
   if (renderState(el, env,
                   { idleWhenEmpty: (d) => !d.identities.length })) return;
   const rows = env.data.identities;
-  const fleets = new Set(rows.map(railFleetOf).filter(Boolean));
+  const fleets = new Set(rows.map((a) => a.fleet).filter(Boolean));
   if (fleets.size < 2) { el.innerHTML = rows.map(railRow).join(""); return; }
-  const groups = new Map();
-  for (const a of rows) {
-    const k = railFleetOf(a) || "";
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(a);
-  }
-  el.innerHTML = [...groups.entries()]
-    .sort((x, y) => (y[1][0].last_seen || "").localeCompare(
-      x[1][0].last_seen || ""))
-    .map(([f, members]) => {
+  el.innerHTML = groupBy(rows, (a) => a.fleet || "")
+    .sort((x, y) => (y[0].last_seen || "").localeCompare(
+      x[0].last_seen || ""))
+    .map((members) => {
+      const f = members[0].fleet;
       // the count is BOTS — the fleet's own identity row is not one of them
-      const bots = members.filter((m) => m.kind === "actor").length;
-      const count = f ? `${bots} bot${bots === 1 ? "" : "s"}` : `${bots}`;
+      // — and the un-fleeted group counts HUMANS, which is what it holds
+      const n = members.filter((m) => m.kind === "actor").length;
+      const count = `${n} ${f ? "bot" : "human"}${n === 1 ? "" : "s"}`;
       return `<div class="rail-head"><b>${esc(f || "humans")}</b>`
         + `<small>${esc(count)}</small></div>`
         + members.map(railRow).join("");

@@ -852,28 +852,57 @@ def test_ui_carries_the_overview_strip_and_the_cross_fleet_mark():
 
 # --- chunk L (#1479): what the operator reads ---------------------------------
 
-def _dispatch(root: Path, h: str, *, expected_by: str | None, tx_state: str | None,
-              fleet: str = "f") -> None:
+_UNSET = object()          # `title=None` MEANS wordless — hence a sentinel
+
+
+def _dispatch(root: Path, h: str, *, expected_by: str | None,
+              tx_state: str | None, fleet: str = "f",
+              worker: str | None = None, mgr: str | None = None,
+              at: str | None = None, title=_UNSET) -> str:
     """One dispatched assignment: work item + assignment + task_request, and
-    optionally one transmission row in *tx_state* (None = no transmission)."""
-    mgr, worker = f"bot:{fleet}/erlich", f"bot:{fleet}/ramanujan"
-    asg = {"assignment_id": "asg_" + h * 32, "work_item_id": "wi_" + h * 32,
-           "assignee": worker, "assigned_by": mgr, "dispatch_msg_id": "msg_" + h * 32}
+    optionally one transmission row in *tx_state* (None = no transmission).
+    Returns the assignment id.
+
+    A BROADCAST is several of these: same manager, same words, one instant,
+    N recipients — and, as the real door does it, a FRESH work item for
+    every send. `title=None` emits the assignment with no work item behind
+    it (the row the board renders wordless); `at` stamps the dispatch
+    instant (default: whatever ingest stamps).
+
+    *h* seeds every id, so ids stay distinct per row; `(h * 32)[:32]` keeps
+    a one-character *h* reading `asg_1111…` as it always did and lets a
+    longer tag repeat to the same width."""
+    stem = (h * 32)[:32]
+    mgr = mgr or f"bot:{fleet}/erlich"
+    worker = worker or f"bot:{fleet}/ramanujan"
+    if title is _UNSET:
+        title = f"task {h}"
+    asg = {"assignment_id": "asg_" + stem, "work_item_id": "wi_" + stem,
+           "assignee": worker, "assigned_by": mgr,
+           "dispatch_msg_id": "msg_" + stem}
     if expected_by:
         asg["expected_by"] = expected_by
-    emit_batch(root, [
+    assignment = {"event_type": "assignment", "emitter": "t", "fleet": fleet,
+                  "payload": asg}
+    if at:
+        assignment["occurred_at"] = at
+    emit_batch(root, ([] if title is None else [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
-         "payload": {"work_item_id": "wi_" + h * 32, "title": f"task {h}", "created_by": mgr}},
-        {"event_type": "assignment", "emitter": "t", "fleet": fleet, "payload": asg},
+         "payload": {"work_item_id": "wi_" + stem, "title": title,
+                     "created_by": mgr}}]) + [
+        assignment,
         {"event_type": "communication", "emitter": "t", "fleet": fleet,
-         "payload": {"msg_id": "msg_" + h * 32, "sender": mgr, "recipient": worker,
-                     "message_class": "task_request", "command_type": "task",
-                     "body": f"go {h}"}}])
+         "payload": {"msg_id": "msg_" + stem, "sender": mgr,
+                     "recipient": worker, "message_class": "task_request",
+                     "command_type": "task", "body": title or f"go {h}"}}])
     if tx_state:
         emit_batch(root, [{
             "event_type": "transmission", "emitter": "t", "fleet": fleet,
-            "payload": {"msg_id": "msg_" + h * 32, "attempt_no": 1, "carrier": "tmux",
-                        "destination": "ramanujan", "state": tx_state}}])
+            "payload": {"msg_id": "msg_" + stem, "attempt_no": 1,
+                        "carrier": "tmux",
+                        "destination": worker.rsplit("/", 1)[-1],
+                        "state": tx_state}}])
+    return "asg_" + stem
 
 
 def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_path):
@@ -1057,38 +1086,17 @@ def test_totals_of_a_plane_with_no_fleet_are_zero_fleets_not_four_zeros(tmp_path
 
 # --- item 6 (#1479): one broadcast, one card; the rail groups by fleet ------
 
-def _note(root: Path, tag: str, *, worker: str, at: str,
-          title: str | None = "stand down and report",
-          expected_by: str | None = FUTURE,
-          tx_state: str | None = "carrier_queued",
-          mgr: str = "bot:f/erlich", fleet: str = "f") -> str:
-    """One dispatch of *title* to *worker*, stamped at *at*. A broadcast is
-    several of these: same manager, same words, one instant, N recipients —
-    and, as the real door does it, a FRESH work item for every send.
-    `title=None` emits the assignment with no work item behind it (the row
-    the board renders wordless)."""
-    stem = (tag * 16)[:32]
-    asg, wi, msg = f"asg_{stem}", f"wi_{stem}", f"msg_{stem}"
-    payload = {"assignment_id": asg, "work_item_id": wi, "assignee": worker,
-               "assigned_by": mgr, "dispatch_msg_id": msg}
-    if expected_by:
-        payload["expected_by"] = expected_by
-    emit_batch(root, ([] if title is None else [
-        {"event_type": "work_item", "emitter": "t", "fleet": fleet,
-         "payload": {"work_item_id": wi, "title": title, "created_by": mgr}}]) + [
-        {"event_type": "assignment", "emitter": "t", "fleet": fleet,
-         "occurred_at": at, "payload": payload},
-        {"event_type": "communication", "emitter": "t", "fleet": fleet,
-         "payload": {"msg_id": msg, "sender": mgr, "recipient": worker,
-                     "message_class": "task_request", "command_type": "task",
-                     "body": title}}])
-    if tx_state:
-        emit_batch(root, [{
-            "event_type": "transmission", "emitter": "t", "fleet": fleet,
-            "payload": {"msg_id": msg, "attempt_no": 1, "carrier": "tmux",
-                        "destination": worker.rsplit("/", 1)[-1],
-                        "state": tx_state}}])
-    return asg
+NOTE = "stand down and report"
+
+
+def _note(root: Path, tag: str, worker: str, at: str, **kw) -> str:
+    """One dispatch of the shared note to *worker* at *at* — `_dispatch`
+    with the broadcast defaults (a queued send with a live deadline, so the
+    row is in the attention queue on the `never_activated` arm)."""
+    kw.setdefault("expected_by", FUTURE)
+    kw.setdefault("tx_state", "carrier_queued")
+    kw.setdefault("title", NOTE)
+    return _dispatch(root, tag, worker=f"bot:f/{worker}", at=at, **kw)
 
 
 def test_one_note_to_four_bots_carries_one_broadcast_key(tmp_path):
@@ -1100,18 +1108,17 @@ def test_one_note_to_four_bots_carries_one_broadcast_key(tmp_path):
     two unrelated rows never share one."""
     base = "2026-01-01T00:00:0"
     for i, bot in enumerate(("jian-yang", "issey", "damodaran", "ramanujan")):
-        _note(tmp_path, f"{i+1}a", worker=f"bot:f/{bot}", at=f"{base}{i * 2}+00:00")
-    _note(tmp_path, "5a", worker="bot:f/erlich", at=f"{base}0+00:00",
+        _note(tmp_path, f"{i+1}a", bot, f"{base}{i * 2}+00:00")
+    _note(tmp_path, "5a", "erlich", f"{base}0+00:00",
           title="a different note entirely")
-    _note(tmp_path, "6a", worker="bot:f/gilfoyle", at=f"{base}0+00:00",
-          title="and another")
+    _note(tmp_path, "6a", "gilfoyle", f"{base}0+00:00", title="and another")
     rows = _tasks(tmp_path)
-    note = [r for r in rows.values() if r["title"] == "stand down and report"]
+    note = [r for r in rows.values() if r["title"] == NOTE]
     assert len(note) == 4 and all(r["attention"] for r in note)
     assert len({r["work_item_id"] for r in note}) == 4      # no shared id
     assert len({r["broadcast_key"] for r in note}) == 1
     assert note[0]["broadcast_key"] == "bc:asg_" + "1a" * 16   # earliest member
-    others = [r for r in rows.values() if r["title"] != "stand down and report"]
+    others = [r for r in rows.values() if r["title"] != NOTE]
     assert len(others) == 2 and all(r["attention"] for r in others)
     assert [r["broadcast_key"] for r in others] == [None, None]
 
@@ -1124,21 +1131,19 @@ def test_a_broadcast_never_groups_what_it_cannot_show_is_one(tmp_path):
     shown to be the same NOTE. All five fall out of the cluster rather than
     into it — the unprovable renders exactly as it does today."""
     at = "2026-01-01T00:00:00+00:00"
-    _note(tmp_path, "1b", worker="bot:f/jian-yang", at=at)
-    _note(tmp_path, "2b", worker="bot:f/issey", at=at)
-    late = _note(tmp_path, "3b", worker="bot:f/damodaran",
-                 at="2026-01-01T01:00:00+00:00")
-    arm = _note(tmp_path, "4b", worker="bot:f/ramanujan", at=at,
+    _note(tmp_path, "1b", "jian-yang", at)
+    _note(tmp_path, "2b", "issey", at)
+    late = _note(tmp_path, "3b", "damodaran", "2026-01-01T01:00:00+00:00")
+    arm = _note(tmp_path, "4b", "ramanujan", at,
                 expected_by=PAST, tx_state=None)          # overdue, not queued
-    who = _note(tmp_path, "5b", worker="bot:f/gilfoyle", at=at,
-                mgr="bot:f/dinesh")
+    who = _note(tmp_path, "5b", "gilfoyle", at, mgr="bot:f/dinesh")
     # TWO wordless rows, so the guard is what keeps them apart rather than
     # their being alone: without it they are one key and one card
-    none = _note(tmp_path, "6b", worker="bot:f/bighead", at=at, title=None)
-    none2 = _note(tmp_path, "8b", worker="bot:f/jared", at=at, title=None)
+    none = _note(tmp_path, "6b", "bighead", at, title=None)
+    none2 = _note(tmp_path, "8b", "jared", at, title=None)
     # same words, same manager, same arm — but this one has been accepted, so
     # its card carries a different status pill
-    seen = _note(tmp_path, "7b", worker="bot:f/monica", at=at)
+    seen = _note(tmp_path, "7b", "monica", at)
     emit_batch(tmp_path, [{
         "event_type": "task", "emitter": "t", "fleet": "f",
         "payload": {"event": "accepted", "assignment_id": seen,
@@ -1155,17 +1160,91 @@ def test_a_broadcast_never_groups_what_it_cannot_show_is_one(tmp_path):
     assert rows[seen]["status"] != kept["status"]          # the pill differs
 
 
+def test_the_arm_that_queued_a_row_is_part_of_its_broadcast_key(tmp_path):
+    """Fold F4: the ARMS axis, pinned. Four rows agreeing on sender, words,
+    instant and status, differing only in WHY they need you — two queued
+    with a live deadline (`never_activated`), two queued past one
+    (`never_activated`, `overdue`). The card shows ONE reason line, so those
+    are two broadcasts and two cards. A build that dropped `attention_reason`
+    from the key survived every other pin here."""
+    at = "2026-01-01T00:00:00+00:00"
+    live = [_note(tmp_path, t, b, at) for t, b in
+            (("1e", "jian-yang"), ("2e", "issey"))]
+    past = [_note(tmp_path, t, b, at, expected_by=PAST) for t, b in
+            (("3e", "damodaran"), ("4e", "ramanujan"))]
+    rows = _tasks(tmp_path)
+    assert [rows[a]["attention_reason"] for a in live] == [["never_activated"]] * 2
+    assert [rows[a]["attention_reason"] for a in past] == \
+        [["never_activated", "overdue"]] * 2
+    # everything else the key holds AGREES across the four — only the arm moves
+    assert len({rows[a]["status"] for a in live + past}) == 1
+    assert len({rows[a]["assigned_by_uid"] for a in live + past}) == 1
+    assert len({rows[a]["title"] for a in live + past}) == 1
+    keys = {tuple(sorted(rows[a]["broadcast_key"] for a in pair))
+            for pair in (live, past)}
+    assert all(k[0] == k[1] and k[0] for k in keys)      # each pair is one card
+    assert len(keys) == 2                                # and they are two
+
+
+def test_the_broadcast_key_is_the_stored_title_not_the_rendered_one(tmp_path):
+    """Fold F3: `body_words` strips a trailing `| key:value`, so two reviews
+    of DIFFERENT pull requests RENDER identical words. Keyed on the render,
+    they grouped — one card naming a PR half its recipients were never sent
+    (reproduced). The key is the work item's title as STORED."""
+    at = "2026-01-01T00:00:00+00:00"
+    stem = "review the branch"
+    one = [_note(tmp_path, t, b, at,
+                 title=f"{stem} | ref:https://example.invalid/o/r/pull/1")
+           for t, b in (("1f", "jian-yang"), ("2f", "issey"))]
+    two = [_note(tmp_path, t, b, at,
+                 title=f"{stem} | ref:https://example.invalid/o/r/pull/2")
+           for t, b in (("3f", "damodaran"), ("4f", "ramanujan"))]
+    rows = _tasks(tmp_path)
+    # the RENDER is identical — which is exactly what made this invisible
+    assert {rows[a]["title"] for a in one + two} == {stem}
+    assert rows[one[0]]["broadcast_key"] == rows[one[1]]["broadcast_key"]
+    assert rows[two[0]]["broadcast_key"] == rows[two[1]]["broadcast_key"]
+    assert rows[one[0]]["broadcast_key"] != rows[two[0]]["broadcast_key"]
+    assert rows[one[0]]["broadcast_key"] and rows[two[0]]["broadcast_key"]
+
+
+def test_a_re_dispatch_to_the_same_bot_is_not_a_second_recipient(tmp_path):
+    """Fold F1: a broadcast has ONE row per recipient. Two open dispatches of
+    the same words to the SAME bot inside the window — the estate's common
+    re-dispatch — read "→ issey, issey · 2 bots". The first row per assignee
+    is the member; a later one is a re-dispatch and renders as its own card.
+    A cluster of one DISTINCT recipient is not a broadcast at all, so both of
+    its rows render exactly as they did before item 6."""
+    base = "2026-01-01T00:00:"
+    # ONE bot, twice, 10s apart: two plain cards, no key
+    twice = [_note(tmp_path, "aa", "issey", f"{base}00+00:00"),
+             _note(tmp_path, "ab", "issey", f"{base}10+00:00")]
+    # three bots and a duplicate of the first: a 3-bot card + one plain card
+    crew = [_note(tmp_path, t, b, f"{base}00+00:00", title="all hands")
+            for t, b in (("ac", "jian-yang"), ("ad", "damodaran"),
+                         ("ae", "ramanujan"))]
+    dup = _note(tmp_path, "af", "jian-yang", f"{base}10+00:00",
+                title="all hands")
+    rows = _tasks(tmp_path)
+    assert all(rows[a]["attention"] for a in twice + crew + [dup])
+    assert [rows[a]["broadcast_key"] for a in twice] == [None, None]
+    keyed = {rows[a]["broadcast_key"] for a in crew}
+    assert len(keyed) == 1 and keyed != {None}
+    assert rows[dup]["broadcast_key"] is None      # a re-dispatch, not a member
+    # and the count the card shows is DISTINCT recipients
+    card = [r for r in rows.values() if r["broadcast_key"] in keyed]
+    assert len(card) == 3
+    assert len({r["assignee_uid"] for r in card}) == 3
+
+
 def test_the_broadcast_window_is_anchored_to_the_dispatch_it_names(tmp_path):
     """Three sends 50s apart are not one broadcast. The window is measured
     from the cluster's FIRST row, so 0s and 50s group and 1m40s starts its
     own; chaining to the previous row would let a trickle drift arbitrarily
     far from the dispatch it claims to be part of."""
-    a = _note(tmp_path, "1d", worker="bot:f/jian-yang",
-              at="2026-01-01T00:00:00+00:00")
-    b = _note(tmp_path, "2d", worker="bot:f/issey",
-              at="2026-01-01T00:00:50+00:00")
-    c = _note(tmp_path, "3d", worker="bot:f/damodaran",
-              at="2026-01-01T00:01:40+00:00")
+    a = _note(tmp_path, "1d", "jian-yang", "2026-01-01T00:00:00+00:00")
+    b = _note(tmp_path, "2d", "issey", "2026-01-01T00:00:50+00:00")
+    c = _note(tmp_path, "3d", "damodaran", "2026-01-01T00:01:40+00:00")
     rows = _tasks(tmp_path)
     assert rows[a]["broadcast_key"] == rows[b]["broadcast_key"] == "bc:" + a
     assert rows[c]["broadcast_key"] is None
@@ -1177,8 +1256,7 @@ def test_only_the_rows_that_need_you_join_a_broadcast(tmp_path):
     "4 bots"), and every row carries the field so the page never guesses."""
     at = "2026-01-01T00:00:00+00:00"
     crew = ("jian-yang", "issey", "damodaran", "ramanujan")
-    ids = [_note(tmp_path, f"{i + 1}c", worker=f"bot:f/{b}", at=at)
-           for i, b in enumerate(crew)]
+    ids = [_note(tmp_path, f"{i + 1}c", b, at) for i, b in enumerate(crew)]
     for aid in ids[2:]:
         emit_batch(tmp_path, [{
             "event_type": "task", "emitter": "t", "fleet": "f",
@@ -1193,26 +1271,47 @@ def test_only_the_rows_that_need_you_join_a_broadcast(tmp_path):
                and r["broadcast_key"] is None for r in done)
 
 
+def test_a_rail_row_carries_the_fleet_the_server_says_it_belongs_to(tmp_path):
+    """Fold F5: WHICH fleet a roster row belongs to is stamped by the API
+    (`inventory.fleet_of`, the one Python spelling), never parsed by the
+    page — which had a third spelling that split on the FIRST `/` where
+    `fleet_of` takes the LAST. A fleet identity is its own fleet; a human
+    belongs to none, being a participant of every room."""
+    _seed_twins(tmp_path)
+    rail = {r["alias"]: r for r in TestClient(create_app(tmp_path))
+            .get("/api/identities").json()["data"]["identities"]}
+    assert rail["bot:data/one"]["fleet"] == "data"
+    assert rail["bot:engineering/one"]["fleet"] == "engineering"
+    assert rail["data"]["kind"] == "fleet" and rail["data"]["fleet"] == "data"
+    assert rail["human:chris"]["fleet"] is None
+    room = TestClient(create_app(tmp_path)) \
+        .get("/api/identities?fleet=data").json()["data"]["identities"]
+    assert {r["fleet"] for r in room} == {"data", None}   # the fleet + a human
+
+
 def test_ui_renders_one_card_per_broadcast_and_a_header_per_fleet():
-    """Structural (item 6, #1479): the page groups ONLY what the API keyed,
-    the card names the recipients and their count, the header count stays the
-    number of rows that need you, the roster groups by fleet under `all` and
-    not in a room, and the reason line is free to wrap."""
+    """Structural (item 6, #1479 + its fold): the page groups ONLY what the
+    API keyed and parses no alias of its own, the card names the recipients,
+    the header count stays the number of rows that need you, the roster
+    groups by fleet under `all` and not in a room, ONE group-by serves both,
+    and the reason line is free to wrap."""
     from importlib.resources import files
     ui = files("claudlobby.plane").joinpath("ui")
     js = ui.joinpath("app.js").read_text()
     # the grouping is the server's fact; the page never derives one
     assert "r.broadcast_key" in js and "groupBroadcasts(attn)" in js
     assert "r.title ===" not in js       # never keyed on the words here
-    # the card: recipients + count, and the WORST member dates it (the group
-    # must never under-report the wait it is showing)
-    assert "recipientsLine" in js and "bots" in js
-    assert "(b.attention_since || \"\") < (a.attention_since || \"\")" in js
+    # ONE group-by, two callers (fold F6)
+    assert js.count("function groupBy(") == 1
+    assert js.count("byKey.set(") == 1   # the only grouping loop in the file
+    assert "groupBy(rows, (a) => a.fleet" in js
+    # the fleet is the SERVER's stamp — no alias parsing left on the page
+    assert "railFleetOf" not in js
+    assert "a.alias.indexOf" not in js
     # the badge counts ROWS, so the header and the rail agree
     assert "badge.textContent = attn.length" in js
     # the roster: a header per fleet, only when the read spans more than one
-    assert "railFleetOf" in js and "rail-head" in js
-    assert "fleets.size < 2" in js
+    assert "rail-head" in js and "fleets.size < 2" in js
     css = ui.joinpath("style.css").read_text()
     assert ".rail-head" in css
     # the nit: the reason line wraps rather than clipping at the rail's edge
@@ -1220,3 +1319,65 @@ def test_ui_renders_one_card_per_broadcast_and_a_header_per_fleet():
     why = why[:why.index("}")]
     assert "nowrap" not in why and "ellipsis" not in why
     assert "overflow: hidden" not in why and "overflow-wrap" in why
+
+
+def _js_function(src: str, name: str) -> str:
+    """One `function <name>(…) {…}` lifted VERBATIM from a shipped file.
+    Brace-matched rather than retyped: a pin carrying its own copy of the
+    code pins the copy, and this one has to run what ships."""
+    i = src.index("function %s(" % name)
+    depth, j = 0, src.index("{", i)
+    for k in range(j, len(src)):
+        depth += (src[k] == "{") - (src[k] == "}")
+        if depth == 0:
+            return src[i:k + 1]
+    raise AssertionError("unbalanced braces in " + name)
+
+
+def test_the_page_groups_and_elides_what_the_operator_actually_reads(tmp_path):
+    """BEHAVIORAL (fold F9), run in node: the two pure page functions on real
+    inputs, because every other pin on them is a substring of the source and
+    a substring cannot tell a working grouper from a broken one. Four rows —
+    two sharing a key, two unkeyed — must render three cards in payload
+    order, the keyed one holding its two members; seven recipients must elide
+    at six names while the COUNT stays whole."""
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node is not installed on this host")
+    import re
+    from importlib.resources import files
+    js = files("claudlobby.plane").joinpath("ui/app.js").read_text()
+    shown = re.search(r"^const NAMES_SHOWN = .*$", js, re.M)
+    assert shown, "NAMES_SHOWN is the elision boundary and must be readable"
+    # `esc` is panel-state's and pinned there; this pin is about grouping and
+    # elision, so it runs against a pass-through and never re-tests escaping
+    driver = "\n".join([
+        'const esc = (s) => String(s ?? "");',
+        shown.group(0),
+        _js_function(js, "groupBy"),
+        _js_function(js, "groupBroadcasts"),
+        _js_function(js, "recipientsLine"),
+        """
+const row = (n, key) => ({ assignee_short: n, broadcast_key: key });
+const rows = [row("one", "bc:1"), row("solo", null),
+              row("three", "bc:1"), row("other", null)];
+const groups = groupBroadcasts(rows);
+const many = Array.from({ length: 7 }, (_, i) => row("bot" + i, "bc:2"));
+console.log(JSON.stringify({
+  shape: groups.map((g) => g.map((r) => r.assignee_short)),
+  line: recipientsLine(groups[0]),
+  elided: recipientsLine(many),
+}));
+""",
+    ])
+    pin = tmp_path / "pin.mjs"
+    pin.write_text(driver)
+    out = subprocess.run(["node", str(pin)], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    # three cards, in the payload's order, the keyed one holding both members
+    assert got["shape"] == [["one", "three"], ["solo"], ["other"]]
+    assert got["line"] == "→ one, three · 2 bots"
+    # the names elide, the count never does
+    assert got["elided"] == "→ bot0, bot1, bot2, bot3, bot4, bot5 … · 7 bots"
