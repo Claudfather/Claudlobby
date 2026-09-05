@@ -35,8 +35,9 @@ TASK_ID_RE = re.compile(r"^t-[0-9]+-[0-9a-f]{4}$")
 # harness): the socket rung fails and says so, then the cold-CLI rung records.
 # Every other stderr byte on a clean dispatch is a defect.
 SHIM_STDERR_RE = re.compile(
-    r"^plane-emit: (daemon unavailable \(rc=\d+\) — falling back to cold CLI"
-    r"|socket in wedge cooldown \(\d+s\) — straight to cold CLI)$"
+    r"^(plane-emit: (daemon unavailable \(rc=\d+\) — falling back to cold CLI"
+    r"|socket in wedge cooldown \(\d+s\) — straight to cold CLI)"
+    r"|plane-socket-client: transport failed: .*)$"   # the socket rung's own voice (Linux: ENOENT; macOS: path too long)
 )
 
 # The lib files a door reaches through $LIB_DIR: the plane shim (THE record),

@@ -22,6 +22,9 @@ assert_eq() {
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
+# The receipt's record is the plane (F18 closure R1); the CLI rung is stood in
+# for by tests/plane_capture_cli.sh, which renders each batch as the legacy row.
+CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
 # Stubs: nothing may reach the host's real systemd or any tmux server.
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/systemctl"
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
@@ -42,18 +45,19 @@ spin_down() {
     env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
         SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
+        PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
         bash "$LIB_DIR/spin-down-bot.sh" "$bdir" "$@" 2>&1 || true
 }
 
-# The LAST teardown row in the fleet ledger. Deliberately reads the fleet
-# ledger (not the bot dir) — that is the property under test.
+# The LAST teardown row the plane received. Deliberately NOT anything under
+# the bot dir — the record surviving the bot is the property under test.
 receipt_row() {
-    grep -h '"type":"bot_teardown_started"' "$ROOT/state/events"/fleet-*.jsonl 2>/dev/null | tail -1
+    grep -h '"type":"bot_teardown_started"' "$CAPTURE" 2>/dev/null | tail -1
 }
 # field <row> <key> — a real JSON parse, so key order in the emitted payload is
 # never load-bearing and an escaped quote in free text cannot truncate a read.
 field() { ROW="$1" K="$2" python3 -c 'import json,os;d=json.loads(os.environ["ROW"]);print(d.get(os.environ["K"], d.get("data",{}).get(os.environ["K"],"")))' 2>/dev/null || true; }
-reset() { rm -rf "$ROOT"; }
+reset() { rm -rf "$ROOT"; : > "$CAPTURE"; }
 
 echo "=== spin-down teardown-receipt contract ==="
 
@@ -98,8 +102,10 @@ assert_eq "receipt outlived the purged bot dir" "bot4" "$(field "$row" bot)"
 # ordering, since the receipt and the legs are logged by the same script.
 reset
 out="$(spin_down bot5)"
+# The script's OWN first line (the plane shim discloses its rung fallbacks on
+# stderr ahead of it under 2>&1; those are not legs).
 assert_eq "receipt is logged before any teardown leg" "yes" \
-    "$(printf '%s\n' "$out" | head -1 | grep -q 'receipt:' && echo yes || echo no)"
+    "$(printf '%s\n' "$out" | grep 'spin-down\[' | head -1 | grep -q 'receipt:' && echo yes || echo no)"
 
 # --- a bot with no bot.conf is already reaped: no phantom receipt ------------
 reset
@@ -116,8 +122,8 @@ assert_eq "no receipt for a bot that was never there" "" "$(receipt_row)"
 reset
 SPINDOWN_RECEIPT_ENABLED="" spin_down bot6 --reason "should not be recorded" >/dev/null
 assert_eq "unarmed fleet writes NO receipt" "" "$(receipt_row)"
-assert_eq "unarmed fleet does not even create the ledger dir" "no" \
-    "$([ -d "$ROOT/state/events" ] && echo yes || echo no)"
+assert_eq "unarmed fleet does not even touch the plane" "no" \
+    "$([ -s "$CAPTURE" ] && echo yes || echo no)"
 # Dormant means dormant only for the RECORD -- the teardown itself is unchanged,
 # so a dormant fleet is never left with a bot that failed to reap.
 assert_eq "unarmed teardown still reaps supervision" "yes" \

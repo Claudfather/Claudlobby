@@ -1936,13 +1936,17 @@ BOT_SERVICE=$BP_SVC
 TMUX_SESSION=$BP_BOT
 BPCONF
 
+    # The plane setup (five reader declarations through the CLI: seconds) must
+    # run BEFORE the unit starts — placed after it, it consumed the 4s
+    # ExecStartPre window the first sample exists to observe (CI: "observed
+    # active/running" where activating/start-pre was the point).
+    val_plane_ready "$BP_ROOT" "$BP_FLEET"
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     systemctl --user start --no-block "$BP_SVC" >/dev/null 2>&1 || true
 
     bp_state() { systemctl --user show -p ActiveState -p SubState --value "$BP_SVC" 2>/dev/null | paste -sd/ -; }
     bp_starting() { service_is_starting "$BP_SVC"; }
 
-    val_plane_ready "$BP_ROOT" "$BP_FLEET"
     bp_pulse() {
         CLAUDLOBBY_ROOT="$BP_ROOT" CLAUDLOBBY_FLEET="$BP_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
             "$LIB_DIR/fleet-pulse.sh" "$BP_FLEET" >/dev/null 2>&1 || true
