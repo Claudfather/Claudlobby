@@ -950,29 +950,48 @@ echo "=== validate dead-session RESTART line (#579: keepalive emitter ⇄ uptime
 DBOT="valdead"
 DDIR="$ROOT/local/$FLEET/runtime/bots/$DBOT"
 mkdir -p "$DDIR/data"
+# A COMPOSED bot's shape: FLEET_NAME + BOT_SERVICE (the private tmux socket). Both
+# are load-bearing for what this scenario asserts — with no FLEET_NAME keepalive
+# anchors the restart on the HOST sentinel and records no per-bot fact, and with
+# FLEET_NAME but no BOT_SERVICE the socket resolver refuses before the dead-session
+# branch is reached (both probed on a throwaway rig, F18 R2b). No unit or plist
+# exists for the label, so the restart ladder falls through to the recorder stub.
 cat > "$DDIR/bot.conf" <<CONF
 BOT_NAME="$DBOT"
 BOT_ID="$DBOT"
-BOT_SERVICE=""
+BOT_SERVICE="com.val.$DBOT"
+FLEET_NAME="$FLEET"
 MANAGER_TMUX="$MGR"
 CONF
-# No tmux session for valdead → keepalive takes the dead-session branch. The RESTART
-# log line is echoed before the restart action fires, so it lands regardless of the
-# (stubbed) restart.
+# No tmux session for valdead on its socket → keepalive takes the dead-session
+# branch. The RESTART log line is echoed before the restart action fires, so it
+# lands regardless of the (stubbed) restart.
 CLAUDLOBBY_ROOT="$ROOT" "$HLIB/keepalive.sh" "$DDIR" >/dev/null 2>&1 || true
 grep -qE 'RESTART.*session dead' "$DDIR/keepalive.log" 2>/dev/null && r=yes || r=no
 harness_check "keepalive dead-session path emits a RESTART … session dead log line" "$r"
-# Load-bearing assertion: the REAL uptime parser (parse_keepalive_log, backed by
-# _LOG_LINE_RE) must extract a RESTART from that emitted line — the emitter⇄parser
-# coupling the #577 review flagged as guarded only by a hand-written fixture until now.
-dead_restarts=$(python3 -c "
-import sys; sys.path.insert(0, '$LIB_DIR/..')
-from claudlobby.uptime import parse_keepalive_log
-from pathlib import Path
-print(sum(1 for _, s in parse_keepalive_log(Path('$DDIR/keepalive.log')) if s == 'RESTART'))
-" 2>/dev/null || echo 0)
+# Load-bearing assertion: the READER the fleet consumes must see that restart.
+# F18 closure R2b: the keepalive.log parser is gone with the file; `claudlobby
+# uptime` reads the plane's keepalive entries — the RESTART is the
+# keepalive_restart fleet event the real tick landed. The tick's emission is
+# detached (the cold CLI lands it in the background), so poll, bounded.
+dead_restarts=0
+for _i in $(seq 1 40); do
+    dead_restarts=$(python3 - "$LIB_DIR" "$ROOT" "$FLEET" "$DBOT" <<'PY' 2>/dev/null || echo 0
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pr", sys.argv[1] + "/plane-readers.py")
+pr = importlib.util.module_from_spec(spec); spec.loader.exec_module(pr)
+try:
+    conn = pr.connect(sys.argv[2])
+except Exception:
+    print(0); sys.exit(0)
+print(sum(1 for _, s in pr.keepalive_entries(conn, sys.argv[3], sys.argv[4], None) if s == "RESTART"))
+PY
+)
+    [ "${dead_restarts:-0}" -ge 1 ] && break
+    sleep 0.5
+done
 [ "${dead_restarts:-0}" -ge 1 ] && r=yes || r=no
-harness_check "uptime parser extracts a RESTART from the real emitted keepalive.log (#579)" "$r"
+harness_check "the plane's keepalive entries yield the RESTART the real tick landed (#579, F18 R2b)" "$r"
 
 # Regression guard: send_reload_command must resend Enter ONLY when the TUI
 # swallowed it (command still on the input line), never after a clean submit.

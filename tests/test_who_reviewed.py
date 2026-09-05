@@ -2,19 +2,26 @@
 wrote it, when a shared GitHub PAT makes every review read `chrisrogers37`.
 
 The two rules under test are the ones that came from the manual version failing:
-a bare number must never match, and the ledger row lands seconds after the
-review so an exact-equality join finds nothing.
+a bare number must never match, and the report lands seconds after the review so
+an exact-equality join finds nothing.
+
+F18 closure (R2b): the plane is the module's ONLY source. The join is pure over
+row dicts, so the rule pins below feed it rows directly; the CLI pins land a
+report on a throwaway plane as the report door lands it. Deleted with the
+ledgers: TestLedgerLoading (test_bad_lines_counted_not_silently_dropped,
+test_missing_ledger_reports_unreadable, test_fleet_marker_attached),
+TestDiscovery (test_finds_flat_nested_and_root_layouts,
+test_no_ledgers_is_empty_not_error).
 """
 
 from __future__ import annotations
 
 import json
 
-from tests.conftest import (
-    load_lib_module,
-    report_row as _report,
-    write_jsonl as _write_jsonl,
-)
+import pytest
+
+from tests.conftest import load_lib_module, report_row as _report
+from tests.plane_fixtures import _dispatch, _report as _land_report, plane_root
 
 who = load_lib_module("who-reviewed")
 
@@ -22,11 +29,25 @@ REPO = "Claudfather/Claudlobby"
 URL = f"https://github.com/{REPO}/pull/1046"
 
 
+# One review at the instant of the real #1046 pair (14:22:05Z), as `gh` renders it.
+_PAYLOAD = {
+    "reviews": [
+        {
+            "submittedAt": "2026-08-06T14:22:05Z",
+            "state": "COMMENTED",
+            "author": {"login": "chrisrogers37"},
+            "body": "verdict",
+        }
+    ],
+    "comments": [],
+}
+
+
 def _rows(*rows):
-    """Attach the fleet marker load_ledger would add, without touching disk."""
+    """Attach the fleet marker load_plane_rows adds, without touching a plane."""
     out = []
     for row, fleet in rows:
-        out.append({**row, "_fleet": fleet, "_ledger": f"/fake/{fleet}"})
+        out.append({**row, "_fleet": fleet})
     return out
 
 
@@ -257,49 +278,6 @@ class TestRefusals:
         assert out[0]["verdict"] == "UNKNOWN"
 
 
-class TestLedgerLoading:
-    def test_bad_lines_counted_not_silently_dropped(self, tmp_path):
-        path = tmp_path / "report-back.jsonl"
-        path.write_text(
-            json.dumps(_report("vera", "2026-08-06T14:22:17Z", pr_url=URL))
-            + "\n"
-            + "{not json\n"
-            + "[]\n",
-            encoding="utf-8",
-        )
-        rows, bad = who.load_ledger(str(path), "ai-platform")
-        assert len(rows) == 1
-        assert bad == 2
-
-    def test_missing_ledger_reports_unreadable(self, tmp_path):
-        rows, bad = who.load_ledger(str(tmp_path / "nope.jsonl"), "ghost")
-        assert rows == []
-        assert bad == -1
-
-    def test_fleet_marker_attached(self, tmp_path):
-        path = tmp_path / "report-back.jsonl"
-        _write_jsonl(path, [_report("vera", "2026-08-06T14:22:17Z", pr_url=URL)])
-        rows, _ = who.load_ledger(str(path), "ai-platform")
-        assert rows[0]["_fleet"] == "ai-platform"
-
-
-class TestDiscovery:
-    def test_finds_flat_nested_and_root_layouts(self, tmp_path):
-        flat = tmp_path / "local" / "alpha" / "runtime"
-        nested = tmp_path / "local" / "home" / "ai-platform" / "runtime"
-        rootm = tmp_path / "runtime" / "fleet"
-        for d in (flat, nested, rootm):
-            d.mkdir(parents=True)
-            (d / "report-back.jsonl").write_text("", encoding="utf-8")
-        found = dict((f, p) for f, p in who.discover_ledgers(str(tmp_path)))
-        assert "alpha" in found
-        assert "ai-platform" in found
-        assert "(root)" in found
-
-    def test_no_ledgers_is_empty_not_error(self, tmp_path):
-        assert who.discover_ledgers(str(tmp_path)) == []
-
-
 class TestPayloadNormalization:
     def test_reviews_and_comments_both_become_events(self):
         payload = {
@@ -328,58 +306,65 @@ class TestPayloadNormalization:
 
 
 class TestCli:
-    def test_refuses_without_any_ledger_source(self, capsys, monkeypatch, tmp_path):
+    def test_refuses_without_a_root(self, capsys, monkeypatch, tmp_path):
         """Refusing beats reporting every review as UNKNOWN — a false all-clear
         is exactly the wrong-attribution class this module exists to stop."""
         monkeypatch.delenv("CLAUDLOBBY_ROOT", raising=False)
         payload = tmp_path / "p.json"
-        payload.write_text(
-            json.dumps({"reviews": [], "comments": []}), encoding="utf-8"
-        )
+        payload.write_text(json.dumps({"reviews": [], "comments": []}), encoding="utf-8")
         rc = who.main([REPO, "1046", "--reviews-json", str(payload), "--root", ""])
         assert rc == 4
         assert "refusing" in capsys.readouterr().err
 
-    def test_end_to_end_json(self, capsys, tmp_path):
-        ledger = tmp_path / "local" / "home" / "ai-platform" / "runtime"
-        ledger.mkdir(parents=True)
-        _write_jsonl(
-            ledger / "report-back.jsonl",
-            [_report("vera", "2026-08-06T14:22:17Z", pr_url=URL)],
-        )
+    def test_unreachable_plane_refuses_not_unknown(self, capsys, tmp_path):
+        """A root with no plane db is UNREACHABLE — not a fleet that never
+        reported. rc 4, empty stdout, the reason on stderr."""
+        root = tmp_path / "root"
+        (root / "state" / "plane").mkdir(parents=True)
         payload = tmp_path / "p.json"
-        payload.write_text(
-            json.dumps(
-                {
-                    "reviews": [
-                        {
-                            "submittedAt": "2026-08-06T14:22:05Z",
-                            "state": "COMMENTED",
-                            "author": {"login": "chrisrogers37"},
-                            "body": "verdict",
-                        }
-                    ],
-                    "comments": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        rc = who.main(
-            [
-                REPO,
-                "1046",
-                "--reviews-json",
-                str(payload),
-                "--root",
-                str(tmp_path),
-                "--json",
-            ]
-        )
+        payload.write_text(json.dumps(_PAYLOAD), encoding="utf-8")
+        rc = who.main([REPO, "1046", "--reviews-json", str(payload), "--root", str(root), "--json"])
+        captured = capsys.readouterr()
+        assert rc == 4 and captured.out == "" and "unreachable" in captured.err
+
+    def test_end_to_end_json(self, capsys, tmp_path):
+        """The regression pair, landed as the report door lands it: the review
+        posts at 14:22:05Z, vera's report lands at 14:22:17Z (+12s)."""
+        root = plane_root(tmp_path)
+        wi, asg = _dispatch(root, "1", "t-1-aaaa", "2026-08-06T14:00:00Z", bot="vera")
+        _land_report(root, wi, asg, "2026-08-06T14:22:17Z", bot="vera",
+                     extra={"pr_url": URL, "summary": "Request Changes on #1046"})
+        payload = tmp_path / "p.json"
+        payload.write_text(json.dumps(_PAYLOAD), encoding="utf-8")
+        rc = who.main([REPO, "1046", "--reviews-json", str(payload), "--root", str(root), "--json"])
         assert rc == 0
         result = json.loads(capsys.readouterr().out)
-        assert result["events"][0]["bot"] == "vera"
-        assert result["events"][0]["fleet"] == "ai-platform"
-        assert result["scope"]["rows"] == 1
+        event = result["events"][0]
+        assert event["verdict"] == "MATCH"
+        assert (event["bot"], event["fleet"], event["basis"]["delta_s"]) == ("vera", "f", 12)
+        assert event["basis"]["field"] == "pr_url" and event["basis"]["repo_qualified"] is True
+        assert result["scope"]["rows"] == 1 and result["scope"]["fleets"] == ["f"]
+        assert result["scope"]["source"] == "plane" and result["scope"]["plane"].endswith("plane.db")
+
+    def test_text_scope_names_the_plane_and_the_fleets(self, capsys, tmp_path):
+        root = plane_root(tmp_path)
+        wi, asg = _dispatch(root, "1", "t-1-aaaa", "2026-08-06T14:00:00Z", bot="vera")
+        _land_report(root, wi, asg, "2026-08-06T14:22:17Z", bot="vera",
+                     extra={"pr_url": URL, "summary": "x"})
+        payload = tmp_path / "p.json"
+        payload.write_text(json.dumps(_PAYLOAD), encoding="utf-8")
+        assert who.main([REPO, "1046", "--reviews-json", str(payload), "--root", str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "plane: " in out and "plane.db" in out and "fleets: f" in out
+        assert "→ vera (f)" in out and "report 2026-08-06T14:22:17Z (+12s)" in out
+
+    def test_the_retired_source_seam_is_refused(self, tmp_path):
+        """`--source` and `--ledger` went with the ledgers (F18 R2b); a stale
+        caller must hear it rather than be silently served the plane."""
+        for stale in (["--source", "plane"], ["--ledger", "/x.jsonl"]):
+            with pytest.raises(SystemExit) as exc:
+                who.main([REPO, "1046", *stale, "--root", str(tmp_path)])
+            assert exc.value.code == 2
 
     def test_bad_repo_arg_rejected(self, capsys):
         assert who.main(["notarepo", "1046"]) == 2

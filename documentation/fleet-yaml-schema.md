@@ -274,7 +274,7 @@ fleet:
 
 ### `fleet.workstreams`
 
-Bounds for the per-fleet workstream registry (`workstreams.json`) — the fleet's bounded portfolio of concurrent work across unrelated repos. Optional; the defaults apply when the block is omitted.
+Bounds for the per-fleet workstream registry (materialized from the plane; there is no file) — the fleet's bounded portfolio of concurrent work across unrelated repos. Optional; the defaults apply when the block is omitted.
 
 ```yaml
 fleet:

@@ -143,7 +143,7 @@ def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
     reviews = tmp_path / "reviews.json"
     reviews.write_text(json.dumps({"reviews": [], "comments": []}))
     ok = subprocess.run([sys.executable, str(REPO / "lib" / "who-reviewed.py"), "org/repo", "1046",
-                         "--source", "plane", "--root", str(root), "--reviews-json", str(reviews), "--json"],
+                         "--root", str(root), "--reviews-json", str(reviews), "--json"],
                         capture_output=True, text=True, timeout=60)
     assert ok.returncode == 0, ok.stderr
     assert json.loads(ok.stdout)["scope"]["source"] == "plane"
@@ -151,6 +151,6 @@ def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
     rows, why = wr.load_plane_rows(str(root))
     assert rows == [] and "no plane db" in why                                     # unreachable ≠ empty
     gone = subprocess.run([sys.executable, str(REPO / "lib" / "who-reviewed.py"), "org/repo", "1046",
-                           "--source", "plane", "--root", str(root), "--reviews-json", str(reviews)],
+                           "--root", str(root), "--reviews-json", str(reviews)],
                           capture_output=True, text=True, timeout=60)
     assert gone.returncode == 4 and gone.stdout == "" and "unreachable" in gone.stderr

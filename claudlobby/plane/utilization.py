@@ -46,8 +46,13 @@ def _parse(ts: str) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
-def bot_utilization(conn, *, now: datetime | None = None,
-                    fleet: str | None = None, days: int = 7) -> list[dict]:
+def heartbeat_series(conn, *, now: datetime | None = None,
+                     fleet: str | None = None, days: int = 7) -> dict[str, list[tuple[datetime, str]]]:
+    """``{alias: [(instant, BUSY|IDLE|UNKNOWN), ...]}`` in TIME order — the
+    recorded (instant, verdict) pairs EVERY keepalive-derived read consumes
+    (this surface, ``claudlobby.utilization``, ``claudlobby status``; F18
+    closure R2b: the keepalive.log those once parsed is gone). ONE reader,
+    so no two surfaces can disagree about what was recorded."""
     if now is None:
         now = datetime.now(timezone.utc)
     since = (now - timedelta(days=days)).isoformat()
@@ -64,6 +69,14 @@ def bot_utilization(conn, *, now: datetime | None = None,
         if ts > now + timedelta(seconds=60):
             continue                      # a future stamp is a clock error, not data
         series.setdefault(alias, []).append((ts, state))
+    return series
+
+
+def bot_utilization(conn, *, now: datetime | None = None,
+                    fleet: str | None = None, days: int = 7) -> list[dict]:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    series = heartbeat_series(conn, now=now, fleet=fleet, days=days)
     out = []
     for alias in sorted(series):
         entries = series[alias]

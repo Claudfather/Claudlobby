@@ -1,71 +1,43 @@
-"""Read-only view of the per-fleet workstream registry (workstreams.json).
+"""Read-only view of the per-fleet workstream registry — the PLANE's rendering.
 
-Writes go exclusively through ``lib/workstream-update.sh`` (the single writer)
-and the ``/workstream`` manager skill that wraps it; this module only renders.
-Path resolution mirrors the report-back ledger (overlay vs. root mode).
+Since the F18 closure the registry is materialized from the plane's workstream
+events (``lib/plane-readers.py::workstream_registry``); there is no file. Writes
+go exclusively through ``lib/workstream-update.sh`` (the single writer) and the
+``/workstream`` manager skill that wraps it; this module only renders.
 """
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
 from .paths import Paths
 
 
-def registry_path(paths: Paths) -> Path:
-    """workstreams.json — see ``Paths.fleet_state`` for the overlay-vs-root rule."""
-    return paths.fleet_state / "workstreams.json"
+def lease_days_env() -> int:
+    """The lease window the registry is rendered with (``WORKSTREAM_LEASE_DAYS``,
+    default 14) — one definition for every reader."""
+    try:
+        return int(os.environ.get("WORKSTREAM_LEASE_DAYS") or 14)
+    except ValueError:
+        return 14
 
 
 def plane_workstreams(paths: Paths):
-    """(entries, note) from the PLANE when the fleet's workstreams write is
-    retired (cutover A2 — the registry file is then no record at all), else
-    (None, note or None). The retirement fact is read where it lives
-    (``brief.plane_retired_conn``); an unreachable plane serves the file
-    LABELED."""
-    from .brief import load_lib_module, plane_retired_conn
-    conn, note = plane_retired_conn(paths, "workstreams")
+    """(entries, None) — the ``{id: entry}`` map from the plane — or (None, note)
+    when the plane cannot answer: unreachable, no stdlib readers, no fleet, or a
+    fleet the plane holds no bot of. Never an empty map for a plane that could
+    not be read (the caller omits with the note, or refuses)."""
+    from .brief import plane_conn, resolve_fleet_name
+    conn, pr, note = plane_conn(paths)
     if conn is None:
         return None, note
     try:
-        pr = load_lib_module(paths, "plane-readers.py")
-        if pr is None:
-            return None, f"lib/plane-readers.py is not readable under {paths.lib} — serving the file"
-        try:
-            lease = int(os.environ.get("WORKSTREAM_LEASE_DAYS") or 14)
-        except ValueError:
-            lease = 14
-        reg = pr.workstream_registry(conn, paths.fleet_name, lease_days=lease)
+        reg = pr.workstream_registry(conn, resolve_fleet_name(paths), lease_days=lease_days_env())
     except Exception as exc:
-        return None, f"the workstreams write is retired and the plane cannot answer: {exc}"
+        return None, f"the plane cannot answer: {exc}"
     finally:
         conn.close()
     return reg.get("workstreams", {}), None
-
-
-def load_workstreams(paths: Paths) -> dict:
-    """Return the ``{id: entry}`` map, or empty on missing/corrupt registry.
-    Cutover A2: the plane's registry once the workstreams write is retired
-    (the file is no record then); the note, if any, is the caller's to
-    disclose through ``plane_workstreams``."""
-    entries, _note = plane_workstreams(paths)
-    if entries is not None:
-        return entries
-    p = registry_path(paths)
-    if not p.is_file():
-        return {}
-    try:
-        data = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    # Valid JSON but not the expected object (e.g. a hand-mangled file that is a
-    # list or scalar) → treat as empty rather than raising AttributeError.
-    if not isinstance(data, dict):
-        return {}
-    ws = data.get("workstreams", {})
-    return ws if isinstance(ws, dict) else {}
 
 
 def _day(ts: str | None) -> str:

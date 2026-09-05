@@ -29,13 +29,10 @@ Which gates bite, and how each is DETECTED rather than assumed — a hardcoded
 class of untruth it was added to prevent:
 
   ``#911`` ledger escaping
-      MEASURED. Unescaped writer fields produce invalid JSONL rows that every
-      reader silently ``continue``s past, so any count derived from them can
-      under-report. This module re-scans the two ledgers it consumes and
-      reports how many rows failed to parse. Self-clearing: once the writers
-      escape, the count is 0 and the disclosure disappears on its own. This is
-      NOT #911's fix — the shared readers still drop those rows, and this does
-      not change that. It measures how many they dropped.
+      RETIRED with the ledgers (F18 closure): the plane's rows are typed and
+      validated at ingest, so a malformed row is refused by the contract and
+      recorded as such, never dropped silently by a reader. The re-scan this
+      module carried, and its label, went with the files.
 
   ``#903`` event-type SSOT
       DETECTED, structurally. ``CRITICAL_TYPES`` is a hand-maintained
@@ -73,13 +70,14 @@ with all three fields named in ``degraded[]``: not zero, which is a false
 all-clear, and not everything, which is a wall of finished work presented as
 outstanding.
 
-The same shape applies twice more. An unreadable report ledger would render
-``unacked (0)`` — an all-clear asserting no worker is waiting on a decision,
-which is #949 and #1024 exactly, so that section omits too (that reader moves to
-the plane with R2b). And orphan classification returns a clean empty set when it
-has no bots dir to read ``.spawn`` mtimes from (#1014's family), which is
-indistinguishable from "no work was lost to a restart" — labeled, since open and
-overdue stay sound.
+The reports, alerts and workstreams sections read the plane through the same
+rule (``plane_conn``: no flag, no retirement fact, no file; unreachable is not
+empty) and OMIT with the note when it cannot answer — ``unacked (0)`` from a
+plane that could not be read would be #949 and #1024 exactly, re-created by
+the surface built to close them. Orphan classification still returns a clean
+empty set when it has no bots dir to read ``.spawn`` mtimes from (#1014's
+family), which is indistinguishable from "no work was lost to a restart" —
+labeled, since open and overdue stay sound.
 """
 
 from __future__ import annotations
@@ -98,7 +96,6 @@ from .source_state import (
     probe_dir,
     probe_source,
 )
-from .workstreams import load_workstreams, registry_path
 
 SCHEMA_VERSION = 1
 
@@ -186,7 +183,7 @@ class Degradation:
         }
 
 
-# --- ledger reading -----------------------------------------------------------
+# --- plane reading ------------------------------------------------------------
 
 
 # Re-exported from ``source_state``, which owns the rule now that five other
@@ -194,76 +191,6 @@ class Degradation:
 # two can never drift: these strings are emitted verbatim in the schema-1
 # envelope (``provenance.*.state``) and asserted on by tests, so a second
 # definition would be a wire-format fork waiting to happen.
-LEDGER_OK = SOURCE_OK
-LEDGER_ABSENT = SOURCE_ABSENT
-LEDGER_UNREADABLE = SOURCE_UNREADABLE
-
-
-@dataclass(frozen=True)
-class LedgerRead:
-    """A ledger's readability, its rows, and how many lines failed to parse.
-
-    ``state`` is the load-bearing field, and the line it draws is
-    **present-vs-not**, never empty-vs-not: a ledger that exists and holds zero
-    rows is a legitimate state (a fleet that has not reported yet), and for
-    that fleet "every dispatch is still open" is the TRUE answer. Only absence
-    or an IO failure makes the same answer a fabrication.
-    """
-
-    state: str
-    rows: list[dict]
-    bad_lines: int
-
-
-def _read_ledger(path: Path) -> LedgerRead:
-    """Read a JSONL ledger, distinguishing absent from unreadable from empty.
-
-    Two jobs, and they are separate on purpose.
-
-    **Readability** is the defensive half. The shared matcher swallows
-    ``FileNotFoundError`` and returns no rows, which makes a missing report
-    ledger indistinguishable from one where nothing has been reported —
-    measured on this branch: point it at a path that does not exist and five
-    dispatches that were all closed by terminal reports come back as five
-    overdue rows, rc 0, no warning. A ledger that exists but cannot be *read*
-    fails the other way and raises out of the matcher entirely. Neither is
-    something a read door may pass on, so both are surfaced here as state and
-    the caller omits rather than answers.
-
-    **Parse coverage** is the #911 half, and is deliberately NOT a fix for it:
-    the shared readers still drop malformed rows silently and this changes
-    nothing about that. It re-reads the same file to learn how many they
-    dropped, so the brief can state its bound instead of printing a count that
-    quietly under-reports.
-    """
-    # Classification is delegated so this module and the five CLI readers draw
-    # the same line. The except arms below are KEPT, not vestigial: the probe
-    # opens the file and this reads it, two syscalls with a gap between them, and
-    # a read can fail where an open succeeded. Belt and braces on a read door is
-    # the right trade — the alternative is a traceback out of a read-only command.
-    probe = probe_source(path)
-    if probe.unreachable:
-        return LedgerRead(probe.state, [], 0)
-    try:
-        text = path.read_text()
-    except FileNotFoundError:
-        return LedgerRead(LEDGER_ABSENT, [], 0)
-    except OSError:
-        return LedgerRead(LEDGER_UNREADABLE, [], 0)
-
-    rows: list[dict] = []
-    bad = 0
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            bad += 1
-    return LedgerRead(LEDGER_OK, rows, bad)
-
-
 def _iso(epoch: int | None) -> str | None:
     if epoch is None:
         return None
@@ -301,33 +228,56 @@ def load_dispatch_doors(paths: Paths):
     return load_lib_module(paths, "dispatch-overdue.py")
 
 
-def plane_retired_conn(paths: Paths, door: str):
-    """(conn, note): an OPEN read-only plane connection when the fleet's legacy
-    write for *door* (``dispatch`` / ``report`` / ``events``) is RETIRED on the
-    plane — the ledger is frozen from that instant and a reader that opens it
-    answers from the past — else (None, note or None). The fact is the doors'
-    own second fact (``legacy_write_retired`` naming the door), read where it
-    lives; no reader flag. An unreachable plane returns (None, note): the
-    fact cannot be read, so the ledger serves LABELED, never silently. The
-    caller closes the connection."""
-    fleet = paths.fleet_name
-    if not fleet:
-        return None, None
-    from .plane import cutover as _cut
-    from .plane.db import open_ro
-    conn, why = open_ro(paths.root)
-    if conn is None:
-        return None, (f"the plane is unreachable ({why}), so whether the {door} ledger is frozen"
-                      " cannot be read — serving the ledger, which may be stale")
+def resolve_fleet_name(paths: Paths) -> str | None:
+    """The fleet the plane's rows are keyed by: the overlay's name, else the
+    root manifest's ``fleet.name``, else the carriers every session and timer
+    carries (``CLAUDLOBBY_FLEET`` / ``FLEET_NAME``) — the matcher's own rule,
+    so a root-mode command names the fleet the matcher would (``Paths``
+    knows only the overlay's directory; root mode has none)."""
+    if paths.fleet_name:
+        return paths.fleet_name
     try:
-        covered = _cut.retired_doors(conn, fleet)
-    except Exception as exc:                        # a schema the door cannot read: label, never guess
+        import yaml
+        doc = yaml.safe_load(paths.fleet_yaml.read_text()) or {}
+        name = (doc.get("fleet") or {}).get("name") if isinstance(doc, dict) else None
+        if name:
+            return str(name)
+    except Exception:
+        pass
+    return os.environ.get("CLAUDLOBBY_FLEET") or os.environ.get("FLEET_NAME") or None
+
+
+def plane_conn(paths: Paths):
+    """(conn, readers, note): an OPEN read-only plane connection plus the
+    install's stdlib readers when the plane can answer for this fleet, else
+    (None, None, note). The plane is the ONLY source (F18 closure, R2b): no
+    flag, no retirement fact, no file to fall back on — and unreachable is
+    not empty. No db, no schema, an unreadable lib/, no fleet name, or a
+    plane that holds no bot of the fleet (a wrong root is not "nothing
+    recorded" — the matcher's rule, #1014's class) all return the note, and
+    the section is OMITTED with it. The caller closes the connection."""
+    fleet = resolve_fleet_name(paths)
+    if not fleet:
+        return None, None, ("no fleet name resolved (no overlay, no fleet.yaml naming one, no"
+                            " CLAUDLOBBY_FLEET / FLEET_NAME) — the plane's rows are per fleet")
+    pr = load_lib_module(paths, "plane-readers.py")
+    if pr is None:
+        return None, None, f"lib/plane-readers.py is not readable under {paths.lib}"
+    try:
+        conn = pr.connect(str(paths.root))
+    except Exception as exc:
+        return None, None, (f"the plane is unreachable ({exc}) — restore state/plane/plane.db under"
+                            f" {paths.root} or name the right root")
+    try:
+        roster = pr.roster(conn, fleet)
+    except Exception as exc:                        # a schema the readers cannot read: omit, never guess
         conn.close()
-        return None, f"the plane could not answer whether the {door} ledger is frozen ({exc}) — serving the ledger"
-    if door not in covered:
+        return None, None, f"the plane could not answer for fleet {fleet!r} ({exc})"
+    if not roster:
         conn.close()
-        return None, None
-    return conn, None
+        return None, None, (f"the plane at {paths.root} holds no bot of fleet {fleet!r} — wrong root, or a"
+                            " fleet it has never seen")
+    return conn, pr, None
 
 
 def load_lib_module(paths: Paths, filename: str):
@@ -351,21 +301,6 @@ def load_lib_module(paths: Paths, filename: str):
         return mod
     except (OSError, SyntaxError, ImportError):
         return None
-
-
-def dispatch_ledger_path(paths: Paths) -> Path:
-    """state/dispatch-log.jsonl — host-global, one file per CLAUDLOBBY_ROOT.
-
-    Python twin of ``dispatch_ledger_path`` in lib-common.sh. The writer and
-    both existing readers must agree byte-for-byte on this path; a third reader
-    resolving a different file would report on dispatches nobody else can see.
-    """
-    return paths.root / "state" / "dispatch-log.jsonl"
-
-
-def report_ledger_path(paths: Paths) -> Path:
-    """report-back.jsonl — per-fleet; ``Paths.fleet_state`` owns that rule."""
-    return paths.fleet_state / "report-back.jsonl"
 
 
 # --- the ack cursor (the module's only write) ---------------------------------
@@ -604,47 +539,20 @@ def _workstream_section(
 ) -> dict:
     """Active workstreams with the stall flags the pulse consumer never shipped.
 
-    Read-only: ``load_workstreams`` opens the registry and nothing here writes
-    it back. ``stalled`` means no progress within the lease window; ``lease
+    Read-only: the registry is the plane's rendering (``plane_workstreams``)
+    and nothing here writes it back. ``stalled`` means no progress within the lease window; ``lease
     expired`` means the lease itself has run out. They are independent — a
     renewed workstream keeps its lease while its ``last_progress_ts`` stays put
     (``lib/workstream-update.sh:249`` is explicit that renew does not advance
     progress), which is exactly the state worth surfacing.
     """
     from .workstreams import plane_workstreams
-    served, note = plane_workstreams(paths)          # cutover A2: the plane once the write is retired
-    if note:
-        if "cannot answer" in note:
-            degraded.append(Degradation(field="workstreams", mode="omitted", reason=note, issue="#1444"))
-            return {}
-        degraded.append(Degradation(field="workstreams", mode="labeled", reason=note, issue="#1444"))
-    workstreams = served if served is not None else load_workstreams(paths)
-
-    # An empty result has two very different causes and load_workstreams cannot
-    # distinguish them: a genuinely empty registry, or one whose JSON failed to
-    # parse (it returns {} for both). Reporting "no workstreams" for a corrupt
-    # file is the silent-drop failure this epic exists to close, so the corrupt
-    # case is separated out here — checked only on the empty path, so the normal
-    # path pays nothing.
-    if not workstreams and served is None:
-        reg = registry_path(paths)
-        if reg.is_file():
-            try:
-                json.loads(reg.read_text())
-            except (OSError, json.JSONDecodeError):
-                degraded.append(
-                    Degradation(
-                        field="workstreams",
-                        mode="omitted",
-                        reason=(
-                            f"the registry at {reg} exists but does not parse; "
-                            "'no workstreams' would be indistinguishable from a "
-                            "registry that failed to load"
-                        ),
-                        issue="#911",
-                    )
-                )
-                return {}
+    workstreams, note = plane_workstreams(paths)      # the plane, the only source (F18 R2b)
+    if workstreams is None:
+        # 'no workstreams' from a plane that could not be read is the silent
+        # drop this door exists to refuse: omitted, with the note.
+        degraded.append(Degradation(field="workstreams", mode="omitted", reason=note, issue="#1467"))
+        return {}
 
     lease_s = _lease_days(fleet) * 86400
     active, stalled = [], []
@@ -681,95 +589,41 @@ def _reports_section(
     would answer the wrong one. Every row carries ``bot``, so a consumer that
     does want a narrower view can take it.
     """
-    ledger = report_ledger_path(paths)
-    # Cutover C3: with the report write RETIRED the ledger is frozen — the
-    # unacked list comes from the plane (the same row shape, the same cursor
-    # compare: the readers render `ts` in the legacy form). An unreachable
-    # plane under a retirement omits the section like the alerts section does.
-    conn, note = plane_retired_conn(paths, "report")
-    if conn is not None:
-        try:
-            pr = load_lib_module(paths, "plane-readers.py")
-            if pr is None:
-                raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
-            rows = pr.report_rows(conn, paths.fleet_name)
-        except Exception as exc:
-            degraded.append(Degradation(field="reports", mode="omitted",
-                                        reason=f"the report ledger is retired and the plane cannot answer: {exc}",
-                                        issue="#1444"))
-            return {}
-        finally:
-            conn.close()
-        stripped = sum(1 for r in rows if r.get("_body_stripped") and r.get("_source") != "task_event")
-        if stripped:
-            degraded.append(Degradation(field="reports", mode="labeled",
-                                        reason=f"{stripped} report(s) hold no summary on the plane (the capture"
-                                               " policy kept no body and no task event named one)",
-                                        issue="#1444"))
-        unacked = [
-            {"ts": r["ts"], "bot": r["bot"], "status": r["status"], "task_id": r["task_id"],
-             "summary": r["summary"], "pr_url": r["pr_url"]}
-            for r in rows
-            if r.get("status") in terminal and (cursor is None or r["ts"] > cursor)
-        ]
-        unacked.sort(key=lambda r: r["ts"])
-        return {"cursor": cursor, "unacked": unacked, "source": "plane"}
-    if note:
-        degraded.append(Degradation(field="reports", mode="labeled", reason=note, issue="#1444"))
-    read = _read_ledger(ledger)
-
-    # A ledger that cannot be read would render as "unacked (0)" — an all-clear
-    # asserting that no worker is waiting on a decision. That is #949 and #1024
-    # exactly, re-created by the surface built to close them, so it is omitted
-    # instead. An existing-but-empty ledger is NOT this case and renders 0
-    # honestly.
-    if read.state != LEDGER_OK:
-        degraded.append(
-            Degradation(
-                field="reports",
-                mode="omitted",
-                reason=(
-                    f"the report ledger is {read.state} at {ledger}; "
-                    "'0 unacked' would assert that no worker is waiting on a "
-                    "decision, which is the incident class this section exists "
-                    "to surface"
-                ),
-                issue="#526",
-            )
-        )
+    # The plane, the only source (F18 R2b): the same row shape the ledger had
+    # (the readers render `ts` in the legacy form, so the cursor keeps
+    # comparing). A plane that cannot answer OMITS the section: "unacked (0)"
+    # would assert that no worker is waiting on a decision — #949 and #1024
+    # exactly, re-created by the surface built to close them.
+    conn, pr, note = plane_conn(paths)
+    if conn is None:
+        degraded.append(Degradation(field="reports", mode="omitted",
+                                    reason=f"{note}; '0 unacked' would assert that no worker is waiting"
+                                           " on a decision, which is the incident class this section"
+                                           " exists to surface",
+                                    issue="#1467"))
         return {}
-
-    rows, bad = read.rows, read.bad_lines
-    if bad:
-        degraded.append(
-            Degradation(
-                field="reports",
-                mode="labeled",
-                reason=(
-                    f"{bad} row(s) in {ledger.name} are not valid JSON and were "
-                    "skipped by every reader, including this one — the unacked "
-                    "list can under-report"
-                ),
-                issue="#911",
-            )
-        )
-
+    try:
+        rows = pr.report_rows(conn, resolve_fleet_name(paths))
+    except Exception as exc:
+        degraded.append(Degradation(field="reports", mode="omitted",
+                                    reason=f"the plane cannot answer: {exc}", issue="#1467"))
+        return {}
+    finally:
+        conn.close()
+    stripped = sum(1 for r in rows if r.get("_body_stripped") and r.get("_source") != "task_event")
+    if stripped:
+        degraded.append(Degradation(field="reports", mode="labeled",
+                                    reason=f"{stripped} report(s) hold no summary on the plane (the capture"
+                                           " policy kept no body and no task event named one)",
+                                    issue="#1444"))
     unacked = [
-        {
-            "ts": r.get("ts"),
-            "bot": r.get("bot"),
-            "status": r.get("status"),
-            "task_id": r.get("task_id"),
-            "summary": r.get("summary"),
-            "pr_url": r.get("pr_url"),
-        }
+        {"ts": r["ts"], "bot": r["bot"], "status": r["status"], "task_id": r["task_id"],
+         "summary": r["summary"], "pr_url": r["pr_url"]}
         for r in rows
-        if r.get("status") in terminal
-        and isinstance(r.get("ts"), str)
-        and (cursor is None or r["ts"] > cursor)
+        if r.get("status") in terminal and (cursor is None or r["ts"] > cursor)
     ]
     unacked.sort(key=lambda r: r["ts"])
-    return {"cursor": cursor, "unacked": unacked}
+    return {"cursor": cursor, "unacked": unacked, "source": "plane"}
 
 
 def _alerts_section(
@@ -781,8 +635,6 @@ def _alerts_section(
     The degradation is keyed on the SSOT symbol rather than a hardcoded flag,
     so it retires itself when the registry ships.
     """
-    from .commands.events import collect_events
-
     try:
         from . import known_values
 
@@ -806,73 +658,35 @@ def _alerts_section(
             )
         )
 
-    # Was is_dir(), which let an unlistable dir through to collect_events and
-    # raised PermissionError out of the brief.
-    #
-    # BOTH unreachable states disclose, and that pairing is the point. An
-    # earlier round handled only UNREADABLE, so an ABSENT bots dir returned an
-    # empty alert list with nothing in degraded[] -- a reader saw no alerts and
-    # no statement that the door could not be opened. A false all-clear here is
-    # worse than anywhere else in this module, because "never serves a number it
-    # knows is wrong" is the property the whole door is built on.
-    #
-    # Same shape brief already uses for the orphan list under #1014: an empty
-    # list that is empty BY CONSTRUCTION is named as such rather than served as
-    # a measurement. The wording differs by state because the remedies differ --
-    # absent means wire the instrument, unreadable means fix the permissions.
-    _alert_probe = probe_dir(paths.runtime_bots)
-    if _alert_probe.state != SOURCE_OK:
-        degraded.append(
-            Degradation(
-                field="alerts",
-                mode="omitted",
-                reason=(
-                    (
-                        f"no bots directory at {paths.runtime_bots}"
-                        if _alert_probe.state == SOURCE_ABSENT
-                        else f"the bots directory at {paths.runtime_bots} "
-                        "exists but cannot be listed"
-                    )
-                    + ", so no alert source could be read and an empty list "
-                    "would mean 'could not look', not 'nothing is wrong'"
-                ),
-                issue="#1227",
-            )
-        )
-        return []
-
     cutoff = (
         (datetime.fromtimestamp(now, timezone.utc) - timedelta(hours=ALERT_WINDOW_H))
         .isoformat()
         .replace("+00:00", "Z")
     )
 
+    # The plane, the only source (F18 R2b): no flag, no bots dir, no files. A
+    # plane that cannot answer OMITS — an empty list would mean "could not
+    # look", not "nothing is wrong", and a false all-clear here is worse than
+    # anywhere else in this module.
     from .commands.events import collect_plane_events, plane_events_conn
     try:
         conn, note = plane_events_conn(paths)
     except RuntimeError as exc:
+        conn, note = None, str(exc)
+    if conn is None:
         degraded.append(Degradation(field="alerts", mode="omitted",
-                                    reason=f"PLANE_READ_EVENTS=1 but the plane is unreachable: {exc}"
-                                           " — restore the plane db or flip the flag back to 0",
-                                    issue="#1444"))
+                                    reason=f"the plane cannot answer: {note} — an empty list would mean"
+                                           " 'could not look', not 'nothing is wrong'",
+                                    issue="#1467"))
         return []
-    if conn is not None:
-        try:
-            events = collect_plane_events(conn, paths, bot=bot_id, critical_only=True, since=cutoff)
-        except RuntimeError as exc:
-            degraded.append(Degradation(field="alerts", mode="omitted",
-                                        reason=f"PLANE_READ_EVENTS=1 but the plane cannot answer: {exc}",
-                                        issue="#1444"))
-            return []
-        finally:
-            conn.close()
-    else:
-        events = collect_events(
-            paths.runtime_bots,
-            bot=bot_id,
-            critical_only=True,
-            fleet_events_dir=paths.root / "state" / "events",
-        )
+    try:
+        events = collect_plane_events(conn, paths, bot=bot_id, critical_only=True, since=cutoff)
+    except RuntimeError as exc:
+        degraded.append(Degradation(field="alerts", mode="omitted",
+                                    reason=f"the plane cannot answer: {exc}", issue="#1467"))
+        return []
+    finally:
+        conn.close()
     return [
         {
             "ts": e.get("ts"),
@@ -892,8 +706,8 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
     """Compose the schema-1 envelope for one bot.
 
     ``now`` is injected rather than read here so the whole door is a pure
-    function of (ledgers, registry, clock) and every section is testable
-    without freezing time globally.
+    function of (the plane, clock) and every section is testable without
+    freezing time globally.
     """
     bot = fleet.bots[bot_id]
     degraded: list[Degradation] = []
@@ -902,25 +716,6 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
     terminal = set(
         getattr(doors, "_TERMINAL", None) or {"completed", "failed", "blocked"}
     )
-
-    # The dispatch join reads BOTH ledgers, so a poisoned row in either can
-    # leave a closed dispatch looking open. Measured on the dispatch log here;
-    # the report ledger's own count is taken in _reports_section.
-    dlog = dispatch_ledger_path(paths)
-    bad_dispatch = _read_ledger(dlog).bad_lines
-    if bad_dispatch:
-        degraded.append(
-            Degradation(
-                field="dispatches",
-                mode="labeled",
-                reason=(
-                    f"{bad_dispatch} row(s) in {dlog.name} are not valid JSON and "
-                    "were skipped by the matcher — open/overdue counts can "
-                    "under-report"
-                ),
-                issue="#911",
-            )
-        )
 
     brief = {
         "schema": SCHEMA_VERSION,
@@ -935,29 +730,6 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
         ),
         "alerts": _alerts_section(paths, bot_id, now, degraded),
     }
-
-    # #526, the residence mismatch, as a standing bound whenever the section IS
-    # served: the dispatch log is host-global while report ledgers are per-fleet,
-    # and the join keys on bot name alone. A bot of ANOTHER fleet appears in this
-    # log with its reports in a file this brief never opens, so its rows read as
-    # permanently overdue — observed live at six false overdue rows for one bot.
-    # Rows for THIS bot are sound, which is why the section is labeled rather
-    # than omitted here; the omit path above covers the case where the whole
-    # join has no ledger at all.
-    if paths.fleet_dir is not None and brief["dispatches"]:
-        degraded.append(
-            Degradation(
-                field="dispatches",
-                mode="labeled",
-                reason=(
-                    "the dispatch log is host-global while report ledgers are "
-                    "per-fleet and the join keys on bot name alone, so rows for a "
-                    "bot of another fleet on this host — or a name reused across "
-                    "fleets — cross-resolve against the wrong ledger"
-                ),
-                issue="#526",
-            )
-        )
 
     # Cut from v1 with two independent reasons pointing the same way; recorded
     # so its absence is an answer rather than a gap.
@@ -1107,7 +879,7 @@ def format_brief(brief: dict) -> str:
 
     r = brief.get("reports") or {}
     if not r:
-        # Never render a count here: "unacked (0)" over an unreadable ledger is
+        # Never render a count here: "unacked (0)" over a plane that could not be read is
         # precisely the all-clear this section exists to stop being wrong about.
         out.append(f"REPORTS{mark('reports')}")
         out.append("  (unavailable — see DEGRADED)")
@@ -1193,50 +965,38 @@ def boot_provenance(paths: Paths, now: int) -> dict:
     Interim for #1122: the never-vs-quiet distinction ("no work in flight" vs
     "no recorded fleet history" — different answers, and the gap between them
     is the motivating incident) is not expressible in the schema-1 envelope,
-    so the boot mode computes it here from the same files the door already
-    reads. When #1122 lands these facts move into the envelope and this helper
-    is deleted.
+    so the boot mode computes it here. When #1122 lands these facts move into
+    the envelope and this helper is deleted.
 
-    Same read discipline as the door: presence is distinguished from emptiness,
-    and an absent source reports its state rather than a zero. The registry is
-    read RAW here rather than via ``load_workstreams``, which flattens
-    absent/corrupt/empty to ``{}`` — through it, a corrupt registry would
-    render "0 entries", a false-quiet on exactly the property this helper
-    exists to carry (#1122 owns the envelope-level fix).
+    Both facts come from the PLANE (F18 closure, R2b): the dispatches the
+    dispatch door landed for the fleet's bots — ever, and in a fixed 24h
+    window, a human-scale recency fact deliberately NOT the watchdog's expiry
+    mirror — and the workstream registry's entry count. Same read discipline
+    as the door: a plane that cannot answer reports its state, never a zero.
     """
-
-    def _row_epoch(v) -> int | None:
-        # The raw ledger stores epoch seconds (the matcher's numeric
-        # contract); ISO strings are tolerated so a future writer change
-        # degrades to a parse rather than a silent zero.
-        if isinstance(v, (int, float)):
-            return int(v)
-        return _epoch(v)
-
-    ledger = _read_ledger(dispatch_ledger_path(paths))
-    dl: dict = {"state": ledger.state}
-    if ledger.state == LEDGER_OK:
-        dl["rows_ever"] = len(ledger.rows)
-        # A fixed 24h recency window, deliberately NOT the watchdog's
-        # DISPATCH_OVERDUE_MAX_AGE_S mirror: the line self-describes as
-        # "in 24h", a human-scale recency fact, not an open/overdue semantic.
-        cutoff = now - 24 * 3600
-        dl["rows_24h"] = sum(
-            1
-            for r in ledger.rows
-            if (_row_epoch(r.get("dispatched_at") or r.get("ts")) or 0) >= cutoff
-        )
-
-    rp = registry_path(paths)
-    reg: dict = {"present": rp.is_file()}
-    if reg["present"]:
-        try:
-            raw = json.loads(rp.read_text())
-            ws = raw.get("workstreams", []) if isinstance(raw, dict) else None
-            reg["entries"] = len(ws) if isinstance(ws, list) else None
-        except (OSError, json.JSONDecodeError):
-            reg["entries"] = None
-    return {"dispatch_ledger": dl, "registry": reg}
+    conn, pr, note = plane_conn(paths)
+    if conn is None:
+        return {"dispatches": {"state": "unreachable", "note": note},
+                "registry": {"present": False, "note": note}}
+    from .workstreams import lease_days_env
+    fleet = resolve_fleet_name(paths)
+    try:
+        uids = [u for e in pr.roster(conn, fleet).values() for u in e["uids"]]
+        marks = ",".join("?" * len(uids))
+        since = datetime.fromtimestamp(now - 24 * 3600, timezone.utc).isoformat()
+        ever = conn.execute(f"SELECT COUNT(*) FROM assignments WHERE assignee_uid IN ({marks})",
+                            uids).fetchone()[0]
+        recent = conn.execute(f"SELECT COUNT(*) FROM assignments WHERE assignee_uid IN ({marks})"
+                              " AND occurred_at >= ?", (*uids, since)).fetchone()[0]
+        entries = len(pr.workstream_registry(conn, fleet,
+                                             lease_days=lease_days_env()).get("workstreams", {}))
+    except Exception as exc:
+        return {"dispatches": {"state": "unreachable", "note": str(exc)},
+                "registry": {"present": False, "note": str(exc)}}
+    finally:
+        conn.close()
+    return {"dispatches": {"state": "ok", "rows_ever": ever, "rows_24h": recent},
+            "registry": {"present": True, "entries": entries}}
 
 
 def _boot_detail_lines(d: dict, now: int) -> tuple[list[str], int]:
@@ -1280,9 +1040,9 @@ def format_boot_brief(brief: dict, prov: dict) -> str:
 
     The empty state is the point, not a collapse case (fork R3-F1, #1102): an
     all-quiet boot renders WHY it is quiet, with source provenance — never
-    silence, never a bare zero. "0 open (ledger: N rows ever)" and "no recorded
-    fleet history" are different answers; the motivating incident was the gap
-    between them.
+    silence, never a bare zero. "0 open (plane: N dispatches ever)" and "no
+    recorded fleet history" are different answers; the motivating incident was
+    the gap between them.
     """
     bot = brief["bot"]
     door = f"full state: claudlobby brief --bot {bot} [--json]"
@@ -1320,14 +1080,14 @@ def format_boot_brief(brief: dict, prov: dict) -> str:
                 exempt.append(f"  (+{hidden} more — door)")
         else:
             # The all-quiet line, with provenance. Never a bare zero.
-            dl = prov.get("dispatch_ledger", {})
-            if dl.get("state") == LEDGER_OK:
+            dl = prov.get("dispatches", {})
+            if dl.get("state") == "ok":
                 led = (
-                    f"ledger: {dl.get('rows_ever', 0)} rows ever, "
+                    f"plane: {dl.get('rows_ever', 0)} dispatches ever, "
                     f"{dl.get('rows_24h', 0)} in 24h"
                 )
             else:
-                led = f"ledger: {dl.get('state', 'unknown')}"
+                led = f"plane: {dl.get('state', 'unknown')}"
             reg = prov.get("registry", {})
             if reg.get("present"):
                 entries = reg.get("entries")
@@ -1337,7 +1097,7 @@ def format_boot_brief(brief: dict, prov: dict) -> str:
                     else "registry: present (unreadable)"
                 )
             else:
-                reg_txt = "registry: absent on this fleet"
+                reg_txt = "registry: unreachable"
             exempt.append(
                 f"all quiet for this bot: 0 open dispatches ({led}); {reg_txt}{mark}"
             )

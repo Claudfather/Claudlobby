@@ -39,6 +39,18 @@ _FAMILY_COUNTS = {
 _SPOOL_NAME_RE = re.compile(r"ev_[0-9a-f]{32}\.json")
 
 
+
+def dispatch_ledger_path(paths) -> Path:
+    """state/dispatch-log.jsonl — the archaeology doors' own (`plane parity` /
+    `plane import` over an ARCHIVED ledger; nothing writes one since the F18
+    closure). R3 deletes them together."""
+    return paths.root / "state" / "dispatch-log.jsonl"
+
+
+def report_ledger_path(paths) -> Path:
+    """<fleet_state>/report-back.jsonl — see dispatch_ledger_path."""
+    return paths.fleet_state / "report-back.jsonl"
+
 def _guarded(label: str, fn) -> int:
     """THE exception-to-exit mapping (one copy). DowngradeError is caught for
     every door — plane status and spool retry run migrate() too, and a newer
@@ -689,7 +701,6 @@ def cmd_plane_parity(args) -> int:
     root = paths.root
 
     def run() -> int:
-        from ..brief import dispatch_ledger_path, report_ledger_path
         from ..plane.parity import DISPATCH, REPORT, compare
 
         out = sys.stderr if args.json else sys.stdout
@@ -756,7 +767,6 @@ def cmd_plane_import(args) -> int:
     root = paths.root
 
     def run() -> int:
-        from ..brief import dispatch_ledger_path, report_ledger_path
         from ..plane.legacy_import import apply_import, plan_import
 
         fleet = paths.fleet_name

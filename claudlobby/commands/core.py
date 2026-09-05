@@ -441,7 +441,7 @@ def cmd_status(args) -> int:
 
 
 def cmd_report_back(args) -> int:
-    """Query the report-back ledger — human-readable table of bot work events.
+    """Query the fleet's reports on the plane — a human-readable table of bot work events.
 
     #1216: an unreachable ledger and a ledger with no matching rows must not
     render alike. They did — both were an ``INFO`` line on *stderr* and rc 0 with
@@ -460,33 +460,6 @@ def cmd_report_back(args) -> int:
     is *not* true of ``dispatch-overdue.py`` — see ``source_state``.
     """
     paths = _resolve_paths(args)
-
-    # Resolve ledger path (fleet_state owns the overlay-vs-root rule; the shell
-    # twin is fleet_runtime_dir in lib-common.sh, used by report-back.sh)
-    ledger = paths.fleet_state / "report-back.jsonl"
-
-    probe = probe_source(ledger)
-    if probe.unreachable:
-        # Name the fleet-tier remedy only in root mode, where it is the actual
-        # cause. In overlay mode --fleet was already passed, so suggesting it
-        # would send the reader to re-run the command they just ran.
-        #
-        # And only for ABSENT. The tier remedy answers "the file is not here",
-        # so on UNREADABLE -- where the file WAS reached and the fix is
-        # permissions -- it is advice for a different fault, in the one state
-        # whose entire purpose is being distinguishable (#1227 review).
-        remedy = (
-            ""
-            if getattr(args, "fleet", None) or probe.state != SOURCE_ABSENT
-            else UNREACHABLE_REMEDIES["fleet_tier"]
-        )
-        line = unreachable_line("the report-back ledger", probe, remedy=remedy)
-        # --json makes stdout MACHINE-facing, so the disclosure moves to stderr
-        # there: a prose line emitted into a JSONL stream is the phantom-row
-        # defect this fix exists to prevent, re-created by the fix. rc carries it
-        # in both modes; the placement only decides which reader also sees text.
-        print(line, file=sys.stderr if args.json else sys.stdout)
-        return 1
 
     # Parse --since into a cutoff timestamp
     cutoff = None
@@ -509,60 +482,33 @@ def cmd_report_back(args) -> int:
                 )
                 return 1
 
-    # Cutover C3: with the report write RETIRED the ledger is frozen and the
-    # rows come from the plane — the same row shape, the same filters. The fact
-    # is read where it lives; an unreachable plane serves the ledger LABELED.
-    from ..brief import load_lib_module, plane_retired_conn
-    source = str(ledger)
-    conn, note = plane_retired_conn(paths, "report")
-    if note:
-        print(f"claudlobby report-back: {note}", file=sys.stderr)
-    entries = []
-    total_rows = 0
-    if conn is not None:
-        try:
-            pr = load_lib_module(paths, "plane-readers.py")
-            if pr is None:
-                raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
-            rows = pr.report_rows(conn, paths.fleet_name, since=cutoff.isoformat() if cutoff else None)
-        except Exception as exc:
-            print(f"claudlobby report-back: UNREACHABLE — the report ledger is retired and the plane"
-                  f" cannot answer: {exc}", file=sys.stderr)
-            return 3
-        finally:
-            conn.close()
-        source = "the plane (the report ledger is retired)"
-        total_rows = len(rows)
-        entries = [pr.public(r) for r in rows
-                   if (not args.bot or r.get("bot") == args.bot)
-                   and (not args.status or r.get("status") == args.status)]
-    else:
-        for line in ledger.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = _json.loads(line)
-            except _json.JSONDecodeError:
-                continue
-            total_rows += 1
-            if args.bot and entry.get("bot") != args.bot:
-                continue
-            if args.status and entry.get("status") != args.status:
-                continue
-            if cutoff:
-                try:
-                    ts = datetime.fromisoformat(entry["ts"].replace("Z", "+00:00"))
-                    if ts < cutoff:
-                        continue
-                except (KeyError, ValueError):
-                    continue
-            entries.append(entry)
+    # The plane, the only source (F18 R2b): no ledger probe, no retirement
+    # fact, no file. An unreachable plane REFUSES (rc 3) with the remedy —
+    # never an empty table, which would read as "this worker is fresh"
+    # (#1216's incident, re-created).
+    from ..brief import plane_conn, resolve_fleet_name
+    conn, pr, note = plane_conn(paths)
+    if conn is None:
+        print(f"claudlobby report-back: UNREACHABLE — {note}", file=sys.stderr)
+        return 3
+    fleet_name = resolve_fleet_name(paths)
+    try:
+        rows = pr.report_rows(conn, fleet_name, since=cutoff.isoformat() if cutoff else None)
+    except Exception as exc:
+        print(f"claudlobby report-back: UNREACHABLE — the plane cannot answer: {exc}", file=sys.stderr)
+        return 3
+    finally:
+        conn.close()
+    source = f"the plane (fleet {fleet_name})"
+    total_rows = len(rows)
+    entries = [pr.public(r) for r in rows
+               if (not args.bot or r.get("bot") == args.bot)
+               and (not args.status or r.get("status") == args.status)]
 
     if not entries:
-        # Emptiness is stated POSITIVELY, naming the ledger that was read and how
-        # many rows it holds. "0 matched of 34 rows in <path>" cannot be confused
-        # with "cannot read <path>", which is the whole point: the reader learns
+        # Emptiness is stated POSITIVELY, naming the source that was read and
+        # how many rows it holds. "0 matched of 34 rows" cannot be confused with
+        # "cannot read the plane", which is the whole point: the reader learns
         # the instrument worked and the filter is what excluded everything. Left
         # on stderr under --json so an empty JSONL stream stays empty.
         print(
@@ -595,8 +541,7 @@ def cmd_brief(args) -> int:
     """The fleet's one read door — composed state for one bot.
 
     Read-only apart from a single write: ``--ack`` advances that viewer's
-    report cursor. Every other artifact it touches (dispatch log, report
-    ledger, workstream registry, event files) is opened for reading only.
+    report cursor. Everything else it touches is the plane, opened read-only.
     """
     from ..brief import (
         boot_provenance,
@@ -671,38 +616,19 @@ def cmd_brief(args) -> int:
 def cmd_workstreams(args) -> int:
     """Read-only view of the fleet workstream registry. Writes go exclusively
     through lib/workstream-update.sh and the /workstream manager skill."""
-    from ..workstreams import format_list, format_show, load_workstreams, registry_path
+    from ..workstreams import format_list, format_show
 
     paths = _resolve_paths(args)
 
-    # Same class as #1216: ``load_workstreams`` returns {} for an absent registry
-    # AND for an empty one, so ``format_list`` printed "No workstreams." either
-    # way — a manager reading that cannot tell "this fleet has no open
-    # workstreams" from "this fleet's registry was never created, or I resolved
-    # the wrong tier". Probed here rather than inside load_workstreams because
-    # that function is also imported by brief.py, which has its own remedy
-    # (label the section) and must keep its current contract.
-    # Cutover A2: with the workstreams write RETIRED the registry file is no
-    # record — the plane serves (an absent file is then expected, not a refusal);
-    # the plane unable to answer under a retirement is rc 3; the fact unknown
-    # serves the file LABELED.
+    # The plane, the only source (F18 R2b): an unreachable plane refuses (rc 3)
+    # with the note — never "No workstreams." from a registry that could not be
+    # read (#1216's class).
     from ..workstreams import plane_workstreams
-    entries, note = plane_workstreams(paths)
-    if note:
-        print(f"claudlobby workstreams: {note}", file=sys.stderr)
-        if "cannot answer" in note:
-            return 3
-    if entries is None:
-        registry = registry_path(paths)
-        probe = probe_source(registry)
-        if probe.unreachable:
-            remedy = (
-                "" if getattr(args, "fleet", None) else UNREACHABLE_REMEDIES["fleet_tier"]
-            )
-            print(unreachable_line("the workstream registry", probe, remedy=remedy))
-            return 1
+    workstreams, note = plane_workstreams(paths)
+    if workstreams is None:
+        print(f"claudlobby workstreams: UNREACHABLE — {note}", file=sys.stderr)
+        return 3
 
-    workstreams = entries if entries is not None else load_workstreams(paths)
     if getattr(args, "ws_command", "list") == "show":
         entry = workstreams.get(args.id)
         if not entry:
@@ -715,7 +641,8 @@ def cmd_workstreams(args) -> int:
 
 
 def cmd_uptime(args) -> int:
-    """Per-bot uptime, MTBR, and restart-rate metrics from keepalive logs."""
+    """Per-bot uptime, MTBR, and restart-rate metrics from the plane's
+    heartbeat samples and restart transitions (F18 closure R2b)."""
     from ..uptime import WINDOWS, aggregate_fleet, format_json, format_table
 
     paths = _resolve_paths(args)
@@ -736,35 +663,42 @@ def cmd_uptime(args) -> int:
         return 1
 
     windows = [args.window] if args.window else list(WINDOWS.keys())
-    # Cutover B2: with the events write RETIRED the keepalive log is frozen
-    # and the entries come from the plane (the heartbeat samples and the
-    # restart transitions); the fact is read where it lives, an unreachable
-    # plane with the fact unknown serves the log LABELED.
-    from ..brief import load_lib_module, plane_retired_conn
-    from ..uptime import entries_from_plane
-    conn, note = plane_retired_conn(paths, "events")
-    if note:
-        print(f"claudlobby uptime: {note}", file=sys.stderr)
-    entries_for = None
-    if conn is not None:
-        pr = load_lib_module(paths, "plane-readers.py")
-        if pr is None:
-            conn.close()
-            print("claudlobby uptime: UNREACHABLE — the events write is retired and"
-                  f" lib/plane-readers.py is not readable under {paths.lib}", file=sys.stderr)
-            return 3
-        since = (datetime.now(timezone.utc) - max(WINDOWS.values())).isoformat()
-        fleet_name = paths.fleet_name
+    # F18 closure R2b: the plane is the ONLY source — the heartbeat samples,
+    # the dead-session fact and the restart transitions keepalive lands
+    # there; no keepalive.log, no retirement fact. A plane that cannot
+    # answer REFUSES (rc 3): an empty table would read as a fleet that never
+    # ran. The readers are the install's own stdlib script, like the bash
+    # doors' (never this checkout's copy).
+    import sqlite3
 
-        def entries_for(bot_dir):
-            return entries_from_plane(pr, conn, fleet_name, bot_dir.name, since)
+    from ..brief import load_lib_module
+    from ..uptime import entries_from_plane
+    pr = load_lib_module(paths, "plane-readers.py")
+    if pr is None:
+        print("claudlobby uptime: UNREACHABLE — lib/plane-readers.py is not readable under"
+              f" {paths.lib}", file=sys.stderr)
+        return 3
+    try:
+        conn = pr.connect(str(paths.root))
+    except pr.PlaneUnreachable as exc:
+        print(f"claudlobby uptime: UNREACHABLE — the plane cannot answer ({exc}); restore"
+              f" state/plane/plane.db under {paths.root} or name the right root — no uptime"
+              " is served rather than a wrong one", file=sys.stderr)
+        return 3
+    fleet_name = paths.fleet_name or _load_fleet_or_exit(paths)[0].name
+    since = (datetime.now(timezone.utc) - max(WINDOWS.values())).isoformat()
+
+    def entries_for(bot_dir):
+        return entries_from_plane(pr, conn, fleet_name, bot_dir.name, since)
     try:
         results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
-                                  bot_dirs=bot_dirs,
-                                  **({"entries_for": entries_for} if entries_for is not None else {}))
+                                  bot_dirs=bot_dirs, entries_for=entries_for)
+    except (pr.PlaneUnreachable, sqlite3.Error) as exc:
+        print(f"claudlobby uptime: UNREACHABLE — the plane could not answer ({exc}); no uptime"
+              " is served rather than a wrong one", file=sys.stderr)
+        return 3
     finally:
-        if conn is not None:
-            conn.close()
+        conn.close()
 
     if not results:
         log.info("No bots found in %s", bots_dir)
