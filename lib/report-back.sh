@@ -103,7 +103,7 @@ done
 # bug). dispatch-overdue.py owns "which dispatch is open" for both readers, so
 # the id supplied here is one this bot genuinely has open — and the watchdog
 # still verifies it independently. Fail-open at every step: a missing python3, an
-# unreadable ledger, or nothing open all leave TASK_ID empty and the report
+# unreachable plane, or nothing open all leave TASK_ID empty and the report
 # behaves exactly as it did before. A report-back must never fail because a
 # watchdog helper was unavailable.
 case "$STATUS" in
@@ -260,37 +260,32 @@ _plane_emit_report_intent() {
             events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\"$sess_frag}}"
         fi
     fi
-    # Cutover chunk 6a: an id-less report (no --task) with a TERMINAL status
-    # answers every OPEN id-less dispatch of this bot, as the legacy ledger
-    # closes id-less rows by any later terminal report -- each gets the
-    # terminal task event, so the plane resolver guard releases exactly when
-    # the legacy one does and the overdue reader stops paging it.
-    # ...and for EVERY terminal report, id'd or not (F18 R2a): the legacy
-    # ledger closed an id-less dispatch on the bot's next terminal report of
-    # any kind; the first plane build closed them only for id-less reports,
-    # so an id'd report — or one naming an id the plane could not link — left
-    # the bot's open id-less dispatches open (found by the matcher suite's
-    # port). The worker did something terminal; the id-less rows it was
+    # EVERY terminal report — id-less, id'd, or naming an id the plane could
+    # not link — answers every OPEN id-less dispatch of this bot (cutover 6a,
+    # widened by F18 R2a): the legacy ledger closed an id-less row on the
+    # bot's next terminal report of ANY kind, and the first plane build
+    # closed them only for id-less reports, leaving an id'd report's rows
+    # open (found by the matcher suite's port). Each gets the terminal task
+    # event, so the resolver guard releases and the overdue reader stops
+    # paging it. The worker did something terminal; the id-less rows it was
     # holding are answered.
-    {
-        local _idless_ev="" _pairs _wi _asg
-        case "$STATUS" in
-            completed) _idless_ev="completed" ;;
-            failed)    _idless_ev="failed" ;;
-            blocked)   _idless_ev="returned_blocked" ;;
-        esac
-        if [ -n "$_idless_ev" ]; then
-            _pairs=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
-                --root "${CLAUDLOBBY_ROOT:-}" --open-idless --fleet "${FLEET_NAME:-}" --bot "$BOT" \
-                2>/dev/null || true)
-            while read -r _wi _asg; do
-                [ -n "$_asg" ] || continue
-                events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$_wi\",\"assignment_id\":\"$_asg\",\"event\":\"$_idless_ev\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "$SUMMARY")\"${sess_frag:-}}}"
-            done <<EOF_IDLESS
+    local _idless_ev="" _pairs _wi _asg
+    case "$STATUS" in
+        completed) _idless_ev="completed" ;;
+        failed)    _idless_ev="failed" ;;
+        blocked)   _idless_ev="returned_blocked" ;;
+    esac
+    if [ -n "$_idless_ev" ]; then
+        _pairs=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
+            --root "${CLAUDLOBBY_ROOT:-}" --open-idless --fleet "${FLEET_NAME:-}" --bot "$BOT" \
+            2>/dev/null || true)
+        while read -r _wi _asg; do
+            [ -n "$_asg" ] || continue
+            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$_wi\",\"assignment_id\":\"$_asg\",\"event\":\"$_idless_ev\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "$SUMMARY")\"${sess_frag:-}}}"
+        done <<EOF_IDLESS
 $_pairs
 EOF_IDLESS
-        fi
-    }
+    fi
     # A report whose STATUS reached no task event (a terminal note that resolved
     # nothing, an id'd report the plane could not link, or a PROGRESS report
     # without a task id) still has a status two readers need — the idle-worker

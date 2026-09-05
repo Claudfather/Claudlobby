@@ -154,8 +154,8 @@ writers):
    does not honour, and a sha-keyed construct the ledger cannot name; the heads
    are compared past every structurally explained row —
    `legacy_malformed_deadline`, `intentional`, else `divergence`) and records
-   the comparison as a system event. The `plane-shadow` fleet timer does this
-   every 10 minutes once armed; `--replay-hours N` front-loads it from history
+   the comparison as a system event. The `plane-shadow` fleet timer did this
+   every 10 minutes while armed; `--replay-hours N` front-loads it from history
    at the top-of-hour marks. Readers: `open` (the deadline-blind list),
    `overdue` (the watchdog's set), and `open_task` (the resolver — a streak
    mode over the open records, which carry the resolver's answers on both
@@ -164,50 +164,39 @@ writers):
    least one open→closed transition per (bot, reader); the resolver needs 200
    agreeing non-empty answers and a change (a stale head is a false
    completion). An idle fleet cannot meet it: a set that never changed proves
-   nothing. `plane doctor` carries the rung; `lib/plane-shadow-check.py` is
-   the watchdog's question (the fleet-pulse bridge pages a diverged latest
-   comparison).
-3. **Declare.** `plane cutover --reader open|overdue|open_task|unassigned`
-   refuses unless the gate is met on every declared bot (`--force <reason>`
-   records the reason instead) and lands `cutover_declared`, anchored on the
-   fleet's identity. A flip is TWO facts: this declaration AND the flag.
-   `--reader events` is a DIRECT MOVE (Phase B, operator ruling 2026-09-03:
-   no backward compat, fix forward): no shadow exists for it, so it declares
-   without a gate and records the ruling as its reason (`shadowed: false`,
-   `gate_met: null`) rather than an empty streak list read as a met bar.
+   nothing. `plane doctor` carried the rung; `lib/plane-shadow-check.py` was
+   the watchdog's question (the fleet-pulse bridge paged a diverged latest
+   comparison). All of it is deleted.
+3. **Declare.** `plane cutover --reader open|overdue|open_task|unassigned|events`
+   lands `cutover_declared`, anchored on the fleet's identity, as a DIRECT
+   MOVE (operator ruling 2026-09-03: no backward compat, fix forward; the
+   shadow gate went with the closure, R2a — `shadowed: false`,
+   `gate_met: null`, the ruling recorded as the reason). A flip was TWO
+   facts, this declaration AND the flag, for the readers that read one.
 4. **Flip.** `PLANE_READ_OPEN=1` / `PLANE_READ_OVERDUE=1` /
    `PLANE_READ_OPEN_TASK=1` / `PLANE_READ_UNASSIGNED=1` / `PLANE_READ_EVENTS=1`
-   in the fleet `.env` tier; `generate` composes the
-   armed flags into `bot.conf` (the session carrier — `start-bot.sh` exports
-   `bot.conf` and sources the tiers WITHOUT export) and stamps them on the
-   timer units that read the matcher (`FLEET_JOB_ARMING`). The matcher serves
-   the plane only when flag AND declaration hold; a flag alone is disclosed and
-   the JSONL keeps serving. An unreachable plane under a declared flip
-   REFUSES (rc 3, empty stdout) — never a silent fallback — and the watchdog
-   pages a refused reader. Rollback at this stage: the flag back to 0.
-5. **Retire the writes.** `PLANE_LEGACY_WRITE_DISPATCH` / `_REPORT` /
-   `_EVENTS` default `1`; `plane cutover --retire-writes` refuses unless every reader is
-   declared and records `legacy_write_retired` — retiring a write ENDS the
-   shadow for the readers that read that ledger (`plane shadow` compare and
-   record modes refuse afterwards; `--gate`/`--check` still read the
-   records). A door skips its JSONL append only on FOUR facts: the flag
-   says 0, the plane is armed, the retirement is recorded, and THAT
-   emission succeeded (`PLANE_EMIT_LAST_RC`) — every other case writes the
-   ledger and says why, because a dispatch or report must land somewhere.
-   Rollback: the flags back to 1. Every matcher reader (`--open`, `--all`,
-   `--orphans`, `--open-task`, `--unassigned`) follows its flip, and the
-   readers of a RETIRED ledger follow the retirement fact itself (chunk C3,
-   `brief.plane_retired_conn`: `legacy_write_retired` naming the door, read
-   on the plane — no flag, because a frozen ledger is wrong on the day it
-   freezes): `claudlobby report-back`, brief's unacked reports + `--ack`,
-   `who-reviewed.py --source auto` (the plane's rows plus the ledgers of
-   fleets whose write is not retired, deduplicated), the supersede hint's
-   task texts. Chunk A2 closes the last file-backed record: the workstream
-   registry's write retires behind `PLANE_LEGACY_WRITE_WORKSTREAMS` (the
-   door then works on a registry materialized from the plane and its verb
-   events are the writes; `claudlobby workstreams` and brief's section render
-   the registry from the plane). The briefing trigger already rode
-   `emit_fleet_event`, so it retired with the events family.
+   in the fleet `.env` tier; `generate` composes the armed flags into
+   `bot.conf` (the session carrier — `start-bot.sh` exports `bot.conf` and
+   sources the tiers WITHOUT export) and stamps them on the timer units
+   (`FLEET_JOB_ARMING`). **Since R2a the matcher reads no flag and no
+   declaration: it reads the plane alone**, and an unreachable plane REFUSES
+   (rc 3, empty stdout) — never a silent fallback — while the watchdog pages a
+   refused reader. Only the `events` readers (`claudlobby events`, brief's
+   alerts, fleet-pulse's escalation) still serve the plane on flag AND
+   declaration; R2b moves them, and R3 removes the flags and this door.
+5. **Retire the writes.** `plane cutover --retire-writes` refuses unless every
+   reader is declared and records `legacy_write_retired`. Since R1 no door
+   writes a ledger regardless — the plane is the only recorder and
+   `PLANE_EMIT_DISABLED=1` the one silencer — so what the record still
+   governs is the readers of a RETIRED ledger, which follow the retirement
+   fact itself (chunk C3, `brief.plane_retired_conn`: `legacy_write_retired`
+   naming the door, read on the plane — no flag, because a frozen ledger is
+   wrong on the day it freezes): `claudlobby report-back`, brief's unacked
+   reports + `--ack`, `who-reviewed.py --source auto`. Chunk A2 closed the
+   last file-backed record: the workstream registry is materialized from the
+   plane and its verb events are the writes (`claudlobby workstreams` and
+   brief's section render it from the plane). R2b moves these readers to the
+   plane outright.
 6. **The closure (F18 R1, 2026-09-04 — operator ruling: no JSONL, no shims,
    no backwards compat).** With both fleets retired on every door, the legacy
    WRITERS were removed outright: no door writes a ledger, a per-bot event

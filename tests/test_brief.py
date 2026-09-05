@@ -617,42 +617,91 @@ def test_format_marks_degraded_sections_inline_and_lists_them(paths: Paths):
         assert section in text
 
 
-def test_subfield_degradation_marks_its_parent_section_header(
+def test_a_matcher_predating_the_plane_only_reader_withholds_the_section(
     paths: Paths, monkeypatch
 ):
-    """A degraded `dispatches.open` must not render a clean DISPATCHES header
-    above an `open (0)` that is not a measurement."""
-    _seed_plane(paths)                       # the plane answers; only the open door is missing
+    """The matcher is the INSTALL's; one that predates the plane-only reader
+    (F18 R2a) has ledger-era signatures that would raise out of a read-only
+    command. The WHOLE section is withheld, all three fields named, and the
+    DISPATCHES header carries the issue."""
+    _seed_plane(paths)
     import claudlobby.brief as brief_mod
 
     real = brief_mod.load_dispatch_doors
 
     class _Old:
-        """A matcher from before the open-list door existed."""
-
         def __init__(self, mod):
             self._mod = mod
 
         def __getattr__(self, name):
-            if name == "open_dispatches":
+            if name == "open_plane":
                 raise AttributeError(name)
             return getattr(self._mod, name)
 
     monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Old(real(p)))
-    _write_jsonl(_dlog(paths), [_dispatch("alex", NOW - 100, NOW + 100, task_id="t-1")])
-    _write_jsonl(_rlog(paths), [])
-
     brief = build_brief(_fleet(), paths, "alex", NOW)
-    entry = _find(brief, "dispatches.open", "#904")
-    assert entry and entry[0]["mode"] == "omitted"
-    assert brief["dispatches"]["open"] == []
-    # Overdue/orphaned are unaffected — only the open list degrades.
-    assert "overdue" in brief["dispatches"]
-
+    assert brief["dispatches"] == {}
+    omitted = {x["field"] for x in brief["degraded"] if x["mode"] == "omitted"}
+    assert {"dispatches.open", "dispatches.overdue", "dispatches.orphaned"} <= omitted
+    entry = _find(brief, "dispatches.open", "#1467")
+    assert entry and "predates" in entry[0]["reason"]
     header = next(
         ln for ln in format_brief(brief).splitlines() if ln.startswith("DISPATCHES")
     )
-    assert "#904" in header
+    assert "#1467" in header
+
+
+def test_a_failure_after_the_first_answer_withholds_all_three(paths: Paths, monkeypatch):
+    """Both questions ride ONE plane session; a failure on the second (the
+    open list) withholds the section whole and names all three fields — the
+    structural lens found only `open` named, so overdue was neither present
+    nor listed."""
+    _seed_plane(paths)
+    import claudlobby.brief as brief_mod
+
+    real = brief_mod.load_dispatch_doors
+
+    class _Flaky:
+        def __init__(self, mod):
+            self._mod = mod
+
+        def __getattr__(self, name):
+            return getattr(self._mod, name)
+
+        def open_dispatches(self, *a, **k):
+            raise self._mod.PlaneUnreachable("gone mid-brief")
+
+    monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Flaky(real(p)))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert brief["dispatches"] == {}
+    omitted = {x["field"] for x in brief["degraded"] if x["mode"] == "omitted"}
+    assert {"dispatches.open", "dispatches.overdue", "dispatches.orphaned"} <= omitted
+
+
+def test_the_dispatches_section_opens_the_plane_once(paths: Paths, monkeypatch):
+    """One session for both questions (the simplify lens found two opens —
+    each an importlib exec, a connect and a registry scan)."""
+    _seed_plane(paths)
+    import claudlobby.brief as brief_mod
+
+    real = brief_mod.load_dispatch_doors
+    opened: list[int] = []
+
+    class _Counting:
+        def __init__(self, mod):
+            self._mod = mod
+
+        def __getattr__(self, name):
+            return getattr(self._mod, name)
+
+        def open_plane(self, *a, **k):
+            opened.append(1)
+            return self._mod.open_plane(*a, **k)
+
+    monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Counting(real(p)))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert "open" in brief["dispatches"] and "overdue" in brief["dispatches"]
+    assert len(opened) == 1
 
 
 def test_text_output_caps_long_sections_and_discloses_the_cap(paths: Paths):

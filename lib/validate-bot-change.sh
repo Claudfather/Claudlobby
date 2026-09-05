@@ -179,14 +179,7 @@ val_plane_ready() {
     mkdir -p "$fdir"
     [ -f "$fdir/fleet.yaml" ] || printf 'fleet:\n  name: %s\n  bots: {}\n' "$fleet" > "$fdir/fleet.yaml"
     CLAUDLOBBY_ROOT="$root" CLAUDLOBBY_FLEET="$fleet" emit_fleet_event validate_started harness '{}' "" >/dev/null 2>&1 || true
-    # fleet-pulse.sh still gates its dispatch pre-sweep (--all / --orphans, the
-    # overdue + orphan + unassigned checks) on the dispatch LOG FILE existing —
-    # a file nothing writes any more (R1 door gap, reported with this port). An
-    # EMPTY file passes that gate and holds nothing: under the flip every row
-    # the sweep sees comes from the plane. Remove with the gate.
     mkdir -p "$root/state" "$fdir/runtime"
-    : >> "$root/state/dispatch-log.jsonl"
-    : >> "$fdir/runtime/report-back.jsonl"
     for rd in open overdue open_task unassigned events; do
         "$VAL_CLI" --root "$root" --fleet "$fleet" plane cutover --reader "$rd" \
             --force "validate-bot-change" >/dev/null 2>&1 || true
@@ -352,8 +345,8 @@ harness_check "no legacy event file was written by the sweep (the plane is the o
 # #460: a never-closing dispatch must age out of the overdue set so fleet-pulse
 # stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI
 # fleet-pulse consumes) with a 25h-old, never-reported dispatch and assert nothing.
-# The retired ledgers' paths fill the matcher's two positional slots (R2 of the
-# closure removes them); under the flip the matcher answers from the plane.
+# The retired ledgers' paths survive only as the #1187 shape probe's junk
+# inputs below (a path in the bot slot); the matcher answers from the plane.
 VAL_REPORT_LEDGER="$ROOT/local/$FLEET/runtime/report-back.jsonl"
 VAL_DISPATCH_LOG="$ROOT/state/dispatch-log.jsonl"
 val_seed_dispatch "$ROOT" "$FLEET" "$MGR" valaged t-aged-0000 "$((now - 90000))" "$((now - 89400))" "x"
@@ -563,8 +556,6 @@ harness_check "#1187 report-back with NOTHING open raises no false supplied-id a
 echo ""
 echo "=== validate #1024: reported-but-never-re-dispatched (mirror watchdog) ==="
 
-UA_LEDGER="$VAL_REPORT_LEDGER"
-UA_DISPATCH="$ROOT/state/dispatch-log.jsonl"
 ua_iso() { python3 -c "import datetime,sys;print(datetime.datetime.fromtimestamp(int(sys.argv[1]),datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1"; }
 
 # ua_bot <name> <check:1|0> <manager_tmux> [trailing_comment]

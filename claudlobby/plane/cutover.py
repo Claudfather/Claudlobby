@@ -24,21 +24,18 @@ from typing import Optional
 from .ids import derive_uid
 
 # The five readers the cutover flipped, one flag each. The shadow that once
-# GATED a declaration (a clean run of legacy-vs-plane comparisons) is gone
+# READERS a declaration (a clean run of legacy-vs-plane comparisons) is gone
 # with the legacy readers (F18 closure, R2a): there is no legacy side left to
 # grade, so every declaration is the direct move the operator ruled.
 READERS = ("open", "overdue", "open_task", "unassigned", "events")
-GATED = READERS          # the name the callers and the tests grew up with
 DIRECT_MOVE_REASON = ("operator ruling 2026-09-03: no backward compat, hard flip, fix forward"
                       " — declared as a direct move (F18 closure: no shadow)")
 
 EVENT_DECLARED = "cutover_declared"
-READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
-# Chunk 6b — the legacy WRITES, per door. Default 1 (keep writing); a fleet
-# retires a door's JSONL append with 0, and retiring a write ENDS the shadow
-# for every reader that read that ledger (there is no legacy side left to
-# grade) — so the retirement is gated on every reader being declared, and
-# recorded as its own epoch.
+READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in READERS}
+# Chunk 6b — the legacy WRITES, per door (the flags go with R3 of the closure;
+# since R1 every door records on the plane alone). The retirement is gated on
+# every reader being declared, and recorded as its own epoch.
 EVENT_RETIRED = "legacy_write_retired"
 WRITE_FLAGS = {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH", "report": "PLANE_LEGACY_WRITE_REPORT",
                "workstreams": "PLANE_LEGACY_WRITE_WORKSTREAMS",
@@ -127,7 +124,7 @@ def declared(conn: sqlite3.Connection, fleet: str) -> dict[str, tuple[str, Optio
 
 def undeclared(decl: dict[str, tuple[str, Optional[str]]]) -> list[str]:
     """The readers a write retirement still waits on."""
-    return [r for r in GATED if r not in decl]
+    return [r for r in READERS if r not in decl]
 
 
 def retirement_event(fleet: str, decl: dict[str, tuple[str, Optional[str]]], now: str, *,

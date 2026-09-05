@@ -80,6 +80,7 @@ and callable from fleet-pulse.sh without importing the package.
 from __future__ import annotations
 
 import datetime
+import functools
 import os
 import sqlite3
 import sys
@@ -139,6 +140,7 @@ class PlaneUnreachable(RuntimeError):
     """The plane must serve and cannot — unreachable, not empty (rc 3)."""
 
 
+@functools.lru_cache(maxsize=None)
 def _plane_readers():
     """Import the stdlib plane reader beside this file (never the package)."""
     import importlib.util
@@ -184,11 +186,18 @@ class _Plane:
     def close(self) -> None:
         self.conn.close()
 
+    def __enter__(self) -> "_Plane":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
 
 def open_plane(fleet: str | None = None, root: str | None = None) -> _Plane:
-    """The plane session every provider below reads from. Callers that ask
-    several questions in one breath (brief, fleet-pulse's pre-sweep) open ONE
-    and pass it as ``plane=``; each provider closes what it opened itself."""
+    """The plane session every provider below reads from. A caller that asks
+    several questions in one breath (brief's dispatches section, the
+    supersede hint) opens ONE — ``with open_plane(...) as p:`` — and passes
+    it as ``plane=``; a provider closes only what it opened itself."""
     return _Plane(fleet, root)
 
 
@@ -215,11 +224,24 @@ def _spawn_epoch(bots_dir: str, bot: str) -> int | None:
         return None
 
 
-def _session(plane: _Plane | None, fleet: str | None, root: str | None) -> tuple[_Plane, bool]:
-    """The session to read from and whether THIS call owns (and must close) it."""
-    if plane is not None:
-        return plane, False
-    return open_plane(fleet, root), True
+class _session:
+    """``with _session(plane, fleet, root) as p:`` — the session a provider
+    reads from: the caller's, or one opened here and closed on exit. A sqlite
+    failure inside the body is PlaneUnreachable whoever opened the session."""
+
+    def __init__(self, plane: _Plane | None, fleet: str | None, root: str | None):
+        self._given, self._fleet, self._root = plane, fleet, root
+        self._p: _Plane | None = None
+
+    def __enter__(self) -> _Plane:
+        self._p = self._given if self._given is not None else open_plane(self._fleet, self._root)
+        return self._p
+
+    def __exit__(self, et, ev, tb) -> None:
+        if self._given is None and self._p is not None:
+            self._p.close()
+        if et is not None and issubclass(et, sqlite3.Error):
+            raise PlaneUnreachable(f"plane db unreadable: {ev}") from ev
 
 
 # --- the providers ---------------------------------------------------------------
@@ -248,15 +270,9 @@ def open_dispatches(
     pinned byte-identical in `plane-readers.py`), so this door and the
     resolver can never disagree about what open means.
     """
-    p, own = _session(plane, fleet, root)
-    try:
+    with _session(plane, fleet, root) as p:
         entry = _plane_bot(p, bot, "open")
         return p.pr.open_rows(p.conn, p.fleet, bot, entry=entry) if entry else []
-    except sqlite3.Error as exc:
-        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
-    finally:
-        if own:
-            p.close()
 
 
 def _classify_all(
@@ -281,8 +297,7 @@ def _classify_all(
     """
     grace = _resolve_progress_grace()
     spawn_cache: dict[str, int | None] = {}
-    p, own = _session(plane, fleet, root)
-    try:
+    with _session(plane, fleet, root) as p:
         out: dict[str, list[tuple[int, int, int, str]]] = {}
         orphans: dict[str, list[tuple[int, int, int, str]]] = {}
         for bot, entry in sorted(p.roster.items()):
@@ -301,11 +316,6 @@ def _classify_all(
                         continue
                 out.setdefault(bot, []).append(row)
         return out, orphans
-    except sqlite3.Error as exc:
-        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
-    finally:
-        if own:
-            p.close()
 
 
 def overdue_all(
@@ -388,14 +398,8 @@ def unassigned_all(
     Threshold filtering defaults OFF (0 = report every match with its idle
     time); fleet-pulse applies the threshold and the staleness cap PER BOT.
     """
-    p, own = _session(plane, fleet, root)
-    try:
+    with _session(plane, fleet, root) as p:
         return p.pr.unassigned_rows(p.conn, p.fleet, now=now, idle_threshold=idle_threshold)
-    except sqlite3.Error as exc:
-        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
-    finally:
-        if own:
-            p.close()
 
 
 def open_task_id(
@@ -403,7 +407,6 @@ def open_task_id(
     *,
     fleet: str | None = None,
     root: str | None = None,
-    now: int | None = None,
     plane: _Plane | None = None,
 ) -> str | None:
     """The bot's OLDEST still-open id'd dispatch, or None.
@@ -427,19 +430,11 @@ def open_task_id(
     an open row. The cost is one-directional and deliberate: a report that WAS
     the missing echo leaves its row open until the next report (UNTRACKED,
     the degradation direction #1187 chose; the watchdog still surfaces it).
-    ``now`` is accepted for callers that pass one; the plane reader answers
-    for the present instant.
+    The plane reader answers for the present instant.
     """
-    del now  # the plane reader answers at its own instant; kept for the callers' grammar
-    p, own = _session(plane, fleet, root)
-    try:
+    with _session(plane, fleet, root) as p:
         entry = _plane_bot(p, bot, "to resolve")
         return p.pr.head(p.conn, p.fleet, bot, entry=entry) if entry else None
-    except sqlite3.Error as exc:
-        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
-    finally:
-        if own:
-            p.close()
 
 
 # --- the CLI --------------------------------------------------------------------
@@ -449,6 +444,8 @@ def _take_bots_dir(argv: list[str]) -> tuple[list[str], str | None]:
     a valueless flag anywhere else would survive the strip and then be read
     as a positional."""
     if len(argv) >= 2 and argv[-2] == "--bots-dir":
+        if not argv[-1]:
+            raise SystemExit("dispatch-overdue: --bots-dir needs a value")
         return argv[:-2], argv[-1]
     return argv, None
 
@@ -460,7 +457,10 @@ def _take_plane_opts(argv: list[str]) -> tuple[list[str], str | None, str | None
     i = 0
     while i < len(argv):
         if argv[i] in ("--fleet", "--root"):
-            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+            # An EMPTY value is refused like a missing one: `--fleet ""` used
+            # to fall through to the carrier and answer for ANOTHER fleet at
+            # rc 0 (the adversarial lens, F18 R2a).
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--") or not argv[i + 1]:
                 raise SystemExit(f"dispatch-overdue: {argv[i]} needs a value")
             if argv[i] == "--fleet":
                 fleet = argv[i + 1]
@@ -556,7 +556,10 @@ def _refuse_undeterminable_orphans(bots_dir: str | None) -> bool:
 
 
 _USAGE = __doc__.strip().splitlines()[0]
-_MODES = ("--all", "--orphans", "--open", "--open-task", "--unassigned")
+# The positional grammar, once: mode -> (takes a bot, takes <now_epoch>).
+_GRAMMAR = {"--all": (False, True), "--orphans": (False, True), "--open": (True, False),
+            "--open-task": (True, True), "--unassigned": (False, True)}
+_MODES = tuple(_GRAMMAR)
 
 
 def _now_arg(argv: list[str], i: int) -> int | None:
@@ -574,86 +577,72 @@ def _now_arg(argv: list[str], i: int) -> int | None:
 def main() -> int:
     try:
         argv, fleet_opt, root_opt = _take_plane_opts(sys.argv)
+        argv, bots_dir = _take_bots_dir(argv)
     except SystemExit as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    argv, bots_dir = _take_bots_dir(argv)
-    if len(argv) < 2 or argv[1] not in _MODES:
+    if len(argv) < 2 or argv[1] not in _GRAMMAR:
         print(_USAGE, file=sys.stderr)
         print(f"  modes: {' '.join(_MODES)}", file=sys.stderr)
         return 2
     mode = argv[1]
+    takes_bot, takes_now = _GRAMMAR[mode]
     max_age = _resolve_max_age()
-
-    def _trailing() -> bool:
-        # Trailing arguments a mode does not take are a usage error, never
-        # ignored: a stale caller passing the retired `--source jsonl` or the
-        # two ledger paths must hear it (found by the cutover suites' port).
-        # Asked AFTER the bot-slot shape gate, so a path in the bot slot keeps
-        # its own, more specific refusal (#1187).
-        _max = {"--open": 3, "--open-task": 4, "--all": 3, "--orphans": 3, "--unassigned": 3}[mode]
-        if len(argv) > _max:
-            print(f"dispatch-overdue: {mode} takes no {argv[_max]!r} — usage: {_USAGE}", file=sys.stderr)
-            return True
-        return False
-
-    if mode in ("--open", "--open-task"):
+    bot = ""
+    if takes_bot:
         if len(argv) < 3:
             print(_USAGE, file=sys.stderr)
             return 2
         bot = argv[2]
         if _reject_bot_slot(mode, bot):
             return 2
-        if _trailing():
+    # Trailing arguments a mode does not take are a usage error, never
+    # ignored: a stale caller passing the retired `--source jsonl` or the two
+    # ledger paths must hear it (found by the cutover suites' port). Asked
+    # AFTER the bot-slot shape gate, so a path in the bot slot keeps its own,
+    # more specific refusal (#1187).
+    limit = 2 + int(takes_bot) + int(takes_now)
+    if len(argv) > limit:
+        print(f"dispatch-overdue: {mode} takes no {argv[limit]!r} — usage: {_USAGE}", file=sys.stderr)
+        return 2
+    now = 0
+    if takes_now:
+        parsed = _now_arg(argv, 2 + int(takes_bot))
+        if parsed is None:
             return 2
-        try:
-            if mode == "--open":
-                rows = open_dispatches(bot, fleet=fleet_opt, root=root_opt)
-                for da, exp, tid in rows:
-                    print(f"{da} {exp if exp is not None else '-'} {tid}")
-                # The scope, ALWAYS and on STDERR (#1187): report-back.sh pipes
-                # this stdout through `awk {print $3}`, so a prose line there
-                # becomes a phantom open row. An empty result that names what
-                # it filtered on can never be read as "nothing exists".
-                print(f"--open: bot={bot!r} -> {len(rows)} open id'd dispatch(es) [source=plane]",
-                      file=sys.stderr)
-                return 0
-            now = _now_arg(argv, 3)
-            if now is None:
-                return 2
-            tid = open_task_id(bot, fleet=fleet_opt, root=root_opt, now=now)
+        now = parsed
+    if mode == "--orphans" and _refuse_undeterminable_orphans(bots_dir):
+        return 3
+    try:
+        if mode == "--open":
+            rows = open_dispatches(bot, fleet=fleet_opt, root=root_opt)
+            for da, exp, tid in rows:
+                print(f"{da} {exp if exp is not None else '-'} {tid}")
+            # The scope, ALWAYS and on STDERR (#1187): report-back.sh pipes
+            # this stdout through `awk {print $3}`, so a prose line there
+            # becomes a phantom open row. An empty result that names what
+            # it filtered on can never be read as "nothing exists".
+            print(f"--open: bot={bot!r} -> {len(rows)} open id'd dispatch(es) [source=plane]",
+                  file=sys.stderr)
+        elif mode == "--open-task":
+            tid = open_task_id(bot, fleet=fleet_opt, root=root_opt)
             if tid:
                 print(tid)
             print(f"dispatch-overdue: --open-task: bot={bot!r} -> {tid or '-'} [source=plane]",
                   file=sys.stderr)
-            return 0
-        except PlaneUnreachable as exc:
-            print(f"dispatch-overdue: {mode}: the plane is UNREACHABLE — {exc}", file=sys.stderr)
-            return 3
-
-    if _trailing():
-        return 2
-    now = _now_arg(argv, 2)
-    if now is None:
-        return 2
-    if mode == "--orphans" and _refuse_undeterminable_orphans(bots_dir):
-        return 3
-    try:
-        if mode == "--unassigned":
-            rows = unassigned_all(now, fleet=fleet_opt, root=root_opt)
-            for bot_id, (rts, idle, tid, status) in sorted(rows.items()):
+        elif mode == "--unassigned":
+            for bot_id, (rts, idle, tid, status) in sorted(
+                    unassigned_all(now, fleet=fleet_opt, root=root_opt).items()):
                 print(f"{bot_id} {rts} {idle} {tid} {status}")
-            return 0
-        over, orph = _classify_all(now, max_age, bots_dir, fleet=fleet_opt, root=root_opt)
+        else:
+            over, orph = _classify_all(now, max_age, bots_dir, fleet=fleet_opt, root=root_opt)
+            for bot_id, entries in sorted((over if mode == "--all" else orph).items()):
+                for da, exp, elapsed, tid in entries:
+                    print(f"{bot_id} {da} {exp} {elapsed} {tid}")
     except PlaneUnreachable as exc:
         print(f"dispatch-overdue: {mode}: the plane is UNREACHABLE — {exc}", file=sys.stderr)
         return 3
-    rows = over if mode == "--all" else orph
-    for bot_id, entries in sorted(rows.items()):
-        for da, exp, elapsed, tid in entries:
-            print(f"{bot_id} {da} {exp} {elapsed} {tid}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

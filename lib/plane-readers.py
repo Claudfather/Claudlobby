@@ -113,14 +113,17 @@ ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
 # The bot's last sign of life: a linked `progress` task event OR the
 # `report_status` marker an id-less progress report lands on the actor (the
 # legacy grace deferred on any progress report BY BOT, and a progress report
-# resolves no id — F18 R2a). Params: (actor, at, actor, at).
+# resolves no id — F18 R2a). Both halves span EVERY uid of the bot (`%s` =
+# the marks): a case-variant alias mints a second actor, and a grace bound to
+# the first one paged a live, reporting worker (the adversarial lens).
+# Params: (*uids, at, *uids, at).
 LAST_PROGRESS_SQL = (
     "SELECT MAX(t) FROM ("
     "SELECT e.occurred_at AS t FROM events e WHERE e.kind = 'task' AND e.event = 'progress'"
-    " AND e.actor_uid = ? AND e.occurred_at <= ?"
+    " AND e.actor_uid IN (%s) AND e.occurred_at <= ?"
     " UNION ALL"
     " SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = 'report_status'"
-    " AND e.subject_uid = ? AND json_extract(e.detail, '$.status') = 'progress' AND e.occurred_at <= ?)"
+    " AND e.subject_uid IN (%s) AND json_extract(e.detail, '$.status') = 'progress' AND e.occurred_at <= ?)"
 )
 # Twin of cutover.LATEST_DECLARED_SQL: the fleet is matched on the anchor
 # COLUMN first (survives a truncated detail), the detail's fleet second.
@@ -238,9 +241,10 @@ def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, ma
     at = datetime.fromtimestamp(now, timezone.utc).isoformat()
     rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=False)
     last_progress = None
-    actor = (entry or {}).get("actor")
-    if progress_grace > 0 and actor:
-        row = conn.execute(LAST_PROGRESS_SQL, (actor, at, actor, at)).fetchone()
+    uids = (entry or {}).get("uids", [])
+    if progress_grace > 0 and uids:
+        marks = ",".join("?" * len(uids))
+        row = conn.execute(LAST_PROGRESS_SQL % (marks, marks), (*uids, at, *uids, at)).fetchone()
         last_progress = _epoch(row[0]) if row and row[0] else None
     out: list[tuple[int, int, int, Optional[str]]] = []
     for da, exp, tid in rows:

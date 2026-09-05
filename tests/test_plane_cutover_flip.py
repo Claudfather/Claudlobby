@@ -55,7 +55,6 @@ def test_the_stdlib_open_sql_is_byte_identical_to_the_package():
 
 def test_the_reader_set_and_its_flags_are_one_fact():
     assert cut.READERS == ("open", "overdue", "open_task", "unassigned", "events")
-    assert cut.GATED == cut.READERS                                  # the name the callers grew up with
     assert cut.READ_FLAGS == {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE",
                               "open_task": "PLANE_READ_OPEN_TASK", "unassigned": "PLANE_READ_UNASSIGNED",
                               "events": "PLANE_READ_EVENTS"}

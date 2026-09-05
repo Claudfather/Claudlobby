@@ -72,7 +72,8 @@ def _epoch(iso):
 def _dispatch(root, n, task_id, ts, *, bot="w1", ledger=None):
     """One dispatch as the live door lands it (the importer suite's helper):
     work item + assignment + communication. *ledger* is accepted for the
-    callers that still collect the legacy-shaped rows; nothing writes them."""
+    callers that still collect the legacy-shaped rows (the report and resolver
+    suites write them for the readers R2b moves)."""
     from tests.test_plane_cutover_parity import _drow, _live_dispatch
     row = _drow(ts, task_id, bot=bot)
     row["dispatched_at"] = _epoch(ts)

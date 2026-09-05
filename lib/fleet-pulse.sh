@@ -54,9 +54,9 @@ mkdir -p "$state_dir"
 # outage ran ~360 ticks on a single delivery. Set 0 to disable.
 _RENOTIFY_AFTER_S="${FLEET_PULSE_RENOTIFY_AFTER_S:-21600}"  # 6h
 
-# Dispatch watchdog inputs: the manager-written dispatch ledger and the
-# worker-written report ledger (overlay path first, root fallback — matches
-# report-back.sh). The overdue matcher cross-references them per bot.
+# Dispatch watchdog inputs: the plane, through the matcher (F18 R2a) — no
+# ledger files; a matcher that cannot reach the plane refuses, and the
+# refusal is paged rather than read as a quiet fleet.
 
 # --- Helpers: push to a bot's manager, and identify which manager instance ---
 # The manager this bot notifies, as "<socket>|<session>" (empty when none is
@@ -129,7 +129,7 @@ reap_events() {
 }
 
 # --- Pre-sweep: dispatch-overdue scan (once, not per-bot) ---
-# Runs dispatch-overdue.py --all to read both ledger files exactly once.
+# Runs dispatch-overdue.py --all against the plane exactly once.
 # Output is stored in a temp file for per-bot lookup inside the loop.
 # --bots-dir enables respawn detection (#835): a past-deadline row whose worker
 # restarted after it was dispatched is split into the orphan set instead of the

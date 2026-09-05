@@ -63,9 +63,9 @@ def content_key(raw_line: str) -> str:
 
 def epoch_iso(epoch) -> Optional[str]:
     """The ledgers store instants as epoch seconds (``dispatched_at``,
-    ``expected_by``; null or junk when absent); the contract and the shadow
-    want an aware ISO instant. ONE definition — the importer and the shadow
-    both ride it, and a zero/negative/junk value is ABSENT (None), never
+    ``expected_by``; null or junk when absent); the contract wants an aware
+    ISO instant. ONE definition — the importer and the parity check both
+    ride it, and a zero/negative/junk value is ABSENT (None), never
     1970."""
     try:
         value = float(epoch)

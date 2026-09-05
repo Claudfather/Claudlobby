@@ -50,6 +50,21 @@ def test_an_idless_progress_report_defers_the_overdue_alarm(tmp_path):
     assert dead.returncode == 0 and dead.stdout.startswith("w1 "), (dead.stdout, dead.stderr)
 
 
+def test_a_case_variant_alias_still_defers_the_alarm(tmp_path):
+    """`W1` reporting for a dispatch sent to `w1` mints a second actor; the
+    grace once bound to the FIRST actor uid alone and paged the live worker
+    (the adversarial lens). Every per-bot read spans all of the bot's uids."""
+    libdir, env = _plane_lib(tmp_path)
+    env = {**env, "OBSERVABILITY_DISPATCH_DEADLINE": "1"}
+    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a long task"', env)
+    assert r.returncode == 0, r.stderr
+    r = _bash(f'"{libdir}/report-back.sh" W1 progress "variant case" --progress 10', env)
+    assert r.returncode == 0, r.stderr
+    import time
+    late = _matcher(tmp_path, libdir, env, "--all", str(int(time.time()) + 5))
+    assert late.returncode == 0 and late.stdout == "", (late.stdout, late.stderr)
+
+
 def test_supersedes_retires_this_workers_assignment_not_a_same_id_twin(tmp_path):
     libdir, env = _plane_lib(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"', env)
@@ -84,3 +99,15 @@ def test_a_stale_callers_trailing_arguments_are_a_usage_error(tmp_path):
     assert r.returncode == 2 and "takes no '--source'" in r.stderr, (r.returncode, r.stderr)
     r = _matcher(tmp_path, libdir, env, "--all", "1700000000", "/tmp/dispatch-log.jsonl")
     assert r.returncode == 2, (r.returncode, r.stderr)
+
+
+def test_an_empty_fleet_or_root_value_is_refused_not_carried(tmp_path):
+    """`--fleet ""` fell through to the carrier and answered for ANOTHER fleet
+    at rc 0 (the adversarial lens); an empty value is refused like a missing
+    one, and so is an empty --bots-dir."""
+    libdir, env = _plane_lib(tmp_path)
+    env = {**env, "CLAUDLOBBY_FLEET": F, "CLAUDLOBBY_ROOT": str(tmp_path)}
+    for args in (["--all", "--fleet", ""], ["--all", "--root", ""], ["--orphans", "--bots-dir", ""]):
+        r = subprocess.run([sys.executable, str(libdir / "dispatch-overdue.py"), *args],
+                           capture_output=True, text=True, env=env, timeout=120)
+        assert r.returncode == 2 and "needs a value" in r.stderr, (args, r.returncode, r.stderr)

@@ -3973,9 +3973,7 @@ def compose_fleet_timers(
 
     # Which fleet job reads which arming flag — a TABLE, so the next dormant
     # door adds a row rather than a branch; each flag resolves through the
-    # one cascade read below. The shadow comparison (cutover chunk 3) rides
-    # its OWN carrier: a recorded fact must not start being written because
-    # emission is on.
+    # one cascade read below.
     job_extra_env: dict[str, dict[str, str]] = {}
     job_baseline_env: dict[str, str] = {}
     try:
@@ -3991,7 +3989,7 @@ def compose_fleet_timers(
         # any script that sources lib-common can land a fleet event (the ERR
         # trap alone), and a timer unit sources no .env — measured on the live
         # estate: fleet-pulse, the fleet's main emitter, composed with the
-        # shadow and read flags but not this one, so a whole sweep's events
+        # read flags but not this one, so a whole sweep's events
         # reached only the JSONL (Phase B1's first deploy).
         if _env_tiers.armed(_cascade, "PLANE_EMIT_ENABLED"):
             job_baseline_env = {"PLANE_EMIT_ENABLED": "1"}

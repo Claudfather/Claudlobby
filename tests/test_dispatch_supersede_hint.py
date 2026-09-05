@@ -241,12 +241,37 @@ def test_a_raising_open_door_degrades_to_silence(root):
 
 
 def test_plane_task_texts_survives_a_raising_plane(root):
-    """The texts are a best effort: a plane that answers the open list but not
-    the titles costs the loud tier, never the dispatch."""
-    class HalfBoom:
-        def open_plane(self, *a, **k):
+    """The texts are a best effort: a session that answers the open list but
+    not the titles costs the loud tier, never the dispatch."""
+    class _Readers:
+        def task_texts(self, *a, **k):
             raise RuntimeError("no titles today")
+
+    class HalfBoom:
+        pr, conn, fleet = _Readers(), None, FLEET
     assert hint_mod.plane_task_texts(HalfBoom(), "w1") == {}
+
+
+def test_the_hint_reads_the_workers_fleet_not_the_senders(root, monkeypatch):
+    """A cross-fleet dispatch (44.6% of traffic) used to count 0 open: the
+    hint asked the SENDER's roster for the worker (the structural lens, F18
+    R2a). The caller names the worker's fleet; the carrier is the fallback."""
+    _dispatch(root, "w1", "t-1", "fix #4242 please")
+    monkeypatch.setenv("CLAUDLOBBY_FLEET", "sender-fleet")           # the manager's own fleet
+    assert hint_mod.hint("w1", "also #4242") == (0, [], "")           # the sender's roster: no w1
+    count, matching, note = hint_mod.hint("w1", "also #4242", fleet=FLEET)
+    assert (count, matching) == (1, ["t-1"]) and "--supersedes t-1" in note
+
+
+def test_the_cli_answers_both_tiers_in_one_run(root, capsys):
+    """Line 1 is the open-row count (recorded), the rest the note (spoken) —
+    dispatch-task.sh used to spawn the helper twice for one computation."""
+    _dispatch(root, "w1", "t-1", "fix #4242 please")
+    assert hint_mod.main(["--bot", "w1", "--task", "more on #4242", "--fleet", FLEET]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "1" and "--supersedes t-1" in "\n".join(lines[1:])
+    assert hint_mod.main(["--bot", "w1", "--task", "unrelated", "--fleet", FLEET]) == 0
+    assert capsys.readouterr().out.splitlines() == ["1"]
 
 
 # ------------------------------------------------------ what it must never do

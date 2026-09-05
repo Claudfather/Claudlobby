@@ -907,9 +907,8 @@ def cmd_plane_cutover(args) -> int:
         finally:
             conn.close()
         if args.retire_writes:
-            # Chunk 6b: retiring a write ENDS the shadow for every reader that read
-            # that ledger, so every reader must be declared first — or forced,
-            # with the reason recorded.
+            # Chunk 6b: the retirement is recorded once every reader is declared
+            # — or forced, with the reason recorded.
             for r in _cut.READERS:
                 print(("  declared " if r in decl else "  MISSING  ") + r
                       + (f" ({decl[r][0]})" if r in decl else ""))
@@ -937,8 +936,8 @@ def cmd_plane_cutover(args) -> int:
             print("  add to the fleet .env tier:  " + "  ".join(f"{f}=0" for f in _cut.WRITE_FLAGS.values()))
             print(f"  then `claudlobby --fleet {fleet} generate` and restart the sessions;"
                   " rollback = the flags back to 1")
-            print("  every matcher reader (--open, --all, --orphans, --open-task, --unassigned) follows"
-                  " its flip; the report, events and workstream readers follow this retirement")
+            print("  the matcher reads the plane alone (F18 R2a); the report, events and workstream"
+                  " readers follow this retirement")
             return 0
         # No gate (F18 closure, R2a): the shadow that once graded a reader's
         # legacy answer against the plane's has no legacy side left to read,
