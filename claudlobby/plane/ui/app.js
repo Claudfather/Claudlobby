@@ -171,6 +171,7 @@ function threadArticle(t) {
   el.className = "thread";
   el.dataset.key = t.key;
   el.dataset.seq = String(t.latest_seq);
+  el.dataset.room = currentFleet || "all";   // the room this card's names were rendered for
   el.innerHTML = `
     <div class="t-kicker">${kicker}</div>
     <div class="t-head"><span class="t-title">${esc(threadTitle(t))}</span>
@@ -189,9 +190,15 @@ function renderChannel(env) {
   const existing = new Map(
     [...el.querySelectorAll("article.thread")].map((n) => [n.dataset.key, n]));
   const frag = document.createDocumentFragment();
+  // A card is reused only when its thread is unchanged AND it was rendered
+  // for THIS room: the same thread carries bare names in its room and
+  // fleet-qualified names under `all`, so a card kept across a tab switch
+  // showed the previous room's names (live on the Mini, U follow-up)
+  const room = currentFleet || "all";
   for (const t of env.data.threads) {
     const prev = existing.get(t.key);
     frag.appendChild(prev && prev.dataset.seq === String(t.latest_seq)
+                     && prev.dataset.room === room
       ? prev : threadArticle(t));
   }
   el.replaceChildren(frag);
@@ -318,7 +325,11 @@ function renderOverview(env) {
   const sm = h.samples;
   const facet = (k, label, fmt) => sm && sm[k] ? `${label} ${esc(fmt(sm[k].value))}` : null;
   const facets = sm ? [
-    facet("host.load", "load", (v) => String(v)),
+    // the probe records the load TRIPLET as an object ({one, five, fifteen});
+    // a scalar (an older or a foreign emitter) renders as itself
+    facet("host.load", "load", (v) => v && typeof v === "object"
+      ? [v.one, v.five, v.fifteen].filter((x) => x !== undefined).join(" ")
+      : String(v)),
     facet("host.mem_available_mb", "free RAM", (v) => `${Math.round(v / 1024 * 10) / 10} GB`),
     facet("host.disk_free_gb", "free disk", (v) => `${v} GB`),
     facet("host.undervoltage", "undervoltage", (v) => v ? "YES" : "no"),
