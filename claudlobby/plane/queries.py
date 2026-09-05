@@ -35,6 +35,30 @@ NON_TERMINAL_CLAUSE = (
 # Params: (assignee_uid, at, at, at, at, at, at) — the assignee resolved to a
 # uid by the caller on the small registry (case-insensitively), so the read
 # hits idx_assignments_assignee; `at` None = unbounded (everything landed).
+# --- the fleet axis of an alias, in SQL (U) -----------------------------------
+# `bot:<fleet>/<name>`: an actor's fleet is the segment between `bot:` and the
+# first `/`. As a predicate it is a RANGE over the alias index — case-sensitive
+# like the equality arms the room queries bind (`fleet_uid`, `recipient_fleet`),
+# so one string means one fleet on every arm (a LIKE arm is ASCII-case-
+# insensitive and let `Eng` count `eng`'s bots while the room kept them apart),
+# seekable, and free of LIKE metacharacters (a fleet named `en_` cannot absorb
+# `eng`). Bind the fleet TWICE (`fleet_range_params`). Python-side, the same
+# rule is inventory.fleet_of.
+def fleet_alias_range(col: str = "alias") -> str:
+    return f"({col} >= 'bot:' || ? || '/' AND {col} < 'bot:' || ? || '0')"
+
+
+def fleet_range_params(fleet: str) -> tuple[str, str]:
+    return (fleet, fleet)
+
+
+# `_`-prefixed aliases are scope SENTINELS (the `_host` fleet the host probe
+# emits under — a host job has no real fleet), never participants: the one
+# spelling every rail, roster and fleet-list read applies.
+def not_sentinel_sql(col: str = "alias") -> str:
+    return f"{col} NOT LIKE '\\_%' ESCAPE '\\'"
+
+
 OPEN_ASSIGNMENTS_AT_SQL = (
     "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by"
     " FROM assignments a"

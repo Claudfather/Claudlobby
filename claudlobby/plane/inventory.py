@@ -46,11 +46,44 @@ def _short(alias: str) -> str:
     return alias.rsplit("/", 1)[-1]
 
 
-def _fleet_of(alias: str) -> str | None:
-    # bot:<fleet>/<name> -> fleet
+def fleet_of(alias: str) -> str | None:
+    """`bot:<fleet>/<name>` -> fleet; None for anything else (a human, a
+    bare alias, a library item). THE Python spelling of the fleet axis —
+    queries.fleet_alias_range is the SQL one; nothing else re-parses it."""
     if alias.startswith("bot:") and "/" in alias:
         return alias[4:].rsplit("/", 1)[0]
     return None
+
+
+_fleet_of = fleet_of
+
+
+def qualified(alias: str | None) -> str | None:
+    """`bot:<fleet>/<name>` -> `fleet/name`; anything without a fleet keeps
+    its short form — there is no fleet to qualify it by."""
+    if not alias:
+        return alias
+    fleet = fleet_of(alias)
+    return f"{fleet}/{_short(alias)}" if fleet else _short(alias)
+
+
+def qualified_labels(aliases) -> dict[str, str]:
+    """alias -> presentation label wherever two fleets MEET (U1/U2): when
+    the aliases in a read span more than one fleet, every bot reads
+    ``fleet/name``, so the reader always knows which fleet a card, a task
+    or a message belongs to; a read that holds one fleet only (a room, or
+    a single-fleet host — most installs) keeps the caller's short names,
+    which are unambiguous there. Only aliases WITH a fleet
+    are in the result: a human, a bare alias, a library item keep the
+    caller's short form (a human has no fleet to qualify by, and the view's
+    `_short` strips `human:` where this module's does not). Qualifying
+    everything, not only twins, is the rule: a bare name among qualified
+    ones cannot say whether it is unique or simply un-fleeted, and the #526
+    collision (an `erlich` on each fleet) is covered by construction."""
+    uniq = [a for a in dict.fromkeys(a for a in aliases if a) if fleet_of(a)]
+    if len({fleet_of(a) for a in uniq}) < 2:
+        return {}   # one fleet in the read: bare names are unambiguous
+    return {a: qualified(a) for a in uniq}
 
 
 def _equipment_of(payload: dict) -> dict:
@@ -87,17 +120,15 @@ def fleet_inventory(conn, fleet: str | None = None) -> dict:
                                  fleet=fleet)
 
     bot_rows = [_bot_row(b) for b in bots]
-    # A short name that two fleets both use (an `erlich` on each — the #526
-    # collision class) is qualified as fleet/name in every label, so an
-    # all-fleets read never shows two indistinguishable cards or attributes
-    # one bot's equipment to its twin (gauntlet, probed).
-    seen: dict[str, int] = {}
-    for b in bots:
-        seen[_short(b["entity_alias"])] = seen.get(_short(b["entity_alias"]), 0) + 1
+    # A short name that two fleets both use is qualified as fleet/name in
+    # every label (`qualified_labels`, the one definition), so an all-fleets
+    # read never shows two indistinguishable cards or attributes one bot's
+    # equipment to its twin (gauntlet, probed).
+    # only a read that SPANS fleets qualifies (a room shows bare names)
+    labels = {} if fleet else qualified_labels(b["entity_alias"] for b in bots)
 
     def _label(alias: str) -> str:
-        sh = _short(alias)
-        return f"{_fleet_of(alias)}/{sh}" if seen.get(sh, 0) > 1 else sh
+        return labels.get(alias) or _short(alias)
     for r in bot_rows:
         r["short"] = _label(r["alias"])
     # (category, name) -> [bot labels] — the used_by join

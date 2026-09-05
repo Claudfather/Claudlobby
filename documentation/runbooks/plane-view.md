@@ -56,6 +56,52 @@ Optional `state/plane/channels.json` maps raw carrier addresses to names
 (`{"-100123": "Engineering group"}`) so a Telegram destination never renders
 as a raw chat id.
 
+## Two fleets on one host (U, #1467)
+
+A host that runs more than one fleet gets the **fleet dimension**: a tab strip
+(one tab per fleet the plane records, plus `all`), an overview strip above the
+channel (one card per fleet, one host card), and every board scoped to the tab.
+
+- **Tabs and the default.** `/api/fleets` lists every fleet from the registry's
+  fleet identities (never the roster rail's last-seen window, so a quiet fleet
+  keeps its tab). `default` is the fleet whose *room* moved most recently — a
+  communication sent by the fleet or to it — and is the tab a first visit opens;
+  the viewer's pick is remembered per browser (`localStorage` key `plane.fleet`).
+  `_`-prefixed scope sentinels (the `_host` fleet the host probe emits under) are
+  never fleets or participants.
+- **One axis, every route.** `/api/tasks`, `/api/identities`, `/api/channel`,
+  `/api/search`, `/api/grid`, `/api/presence`, `/api/inventory`, `/api/org` and
+  `/api/utilization` take `?fleet=<name>`. A fleet's bots are the aliases in
+  `bot:<fleet>/…` — one case-sensitive rule on every arm (`queries.fleet_alias_range`
+  in SQL, `inventory.fleet_of` in Python), so a fleet named `en_` cannot absorb
+  `eng`'s bots and `Eng` is not `eng`. `fleet=` (empty) and `fleet=all` are the
+  host-wide read. A fleet the plane holds **no identity for** (while it holds
+  others) answers a typed `unknown` state naming the fleets it does hold — the
+  plane's own rule, never a healthy empty room; a plane holding no fleet yet lets
+  the name through to the route's idle remedy (`generate`). The grid and presence
+  routes also accept a fleet the sampler knows from disk before its first row.
+- **Names.** Inside a room, bare names. Wherever two fleets meet — the `all` room,
+  a cross-fleet thread in either room, an all-fleets inventory — every bot reads
+  `fleet/name` (`inventory.qualified_labels`), so a twin (`erlich` on both fleets)
+  and a unique name are both unambiguous. Each channel message carries
+  `sender_fleet` / `recipient_fleet` read off the parties' own aliases (never the
+  fleet the row was emitted under) and a `cross_fleet` mark.
+- **The overview card.** Per fleet: `bots` (with the `provisional` part disclosed —
+  actors no registry scan has confirmed; a mistyped dispatch target mints one),
+  presence counts scoped to the room, `open` (**the matcher's rule**,
+  `OPEN_ASSIGNMENTS_AT_SQL` per actor — the same count `claudlobby brief --bot`,
+  fleet-pulse and `dispatch-overdue.py` show), `attention` and `overdue` (the
+  attention queue's rows and its deadline arm), `orphaned` (the watchdog's
+  `.spawn` split; `null` with a reason when the view's root holds no bot
+  directories for the fleet), the newest report and the 24-hour report count,
+  `last_activity_at` (ledger time) and the capture policy. The host card: recorder
+  up/down, spool, rows, ingest lag with its state (`none` / `ok` / `warn` past
+  120s, stamped by the API), and the host probe's newest facets (load, RAM, disk,
+  thermal, under-voltage) — `null` until `plane-host-probe` has ever recorded.
+  A figure whose source is absent is `null` with a reason, never `0`.
+- **Not on the card:** unacked reports — the ack cursor is `claudlobby brief`'s
+  per-viewer file, not a plane fact.
+
 ## The grid shows raw terminals — operators only (ruling 2026-08-29)
 
 The thumbnail grid and focus pane render each bot's LIVE terminal verbatim

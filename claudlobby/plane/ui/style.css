@@ -142,6 +142,33 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
   body { overflow: auto; height: auto; }
 }
 
+/* cross-fleet mark (U2): a thread whose two fleets differ says so, and
+   its names render fleet-qualified in every room */
+.tag.xfleet { color: var(--purple); border: 1px solid var(--purple);
+              background: none; font-weight: 600; }
+.t-head .tag.xfleet { margin-left: 4px; }
+
+/* the overview strip (U3): one card per fleet + the host, above the panels */
+.overview { display: flex; gap: 8px; padding: 6px 10px 8px; flex-wrap: wrap;
+            border-bottom: 1px solid var(--edge); flex: none; }
+.overview:empty { display: none; }
+.overview .panel-state { padding: 6px 10px; flex: 1; text-align: left; }
+.ov-card { background: var(--panel); border: 1px solid var(--edge);
+           border-radius: 8px; padding: 6px 10px; font-size: 12px;
+           color: var(--dim); min-width: 200px; flex: 1 1 200px; }
+.ov-card.pick { cursor: pointer; }
+.ov-card.pick:hover { border-color: var(--accent); }
+.ov-card.on { border-color: var(--accent); }
+.ov-card .ov-head { display: flex; gap: 8px; align-items: baseline; }
+.ov-card .ov-head b { color: var(--ink); font-size: 13px; }
+.ov-card .ov-head small { margin-left: auto; }
+.ov-card .ov-line { margin-top: 2px; display: flex; gap: 6px; flex-wrap: wrap;
+                    align-items: baseline; }
+.ov-card .ov-bad { color: var(--bad); font-weight: 600; }
+.ov-card .ov-warn { color: var(--warn); }
+.ov-card .ov-ok { color: var(--ok); }
+.ov-card.ov-host { border-style: dashed; flex: 0 1 220px; }
+
 /* view nav + fleet tabs */
 #view-nav { display: flex; gap: 6px; }
 #view-nav .on { color: var(--accent); border-color: var(--accent); }

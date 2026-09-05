@@ -149,6 +149,12 @@ function threadArticle(t) {
     : "";
   const kicker = t.work_item_id
     ? `work item${t.repo ? ` · ${esc(t.repo)}` : ""}` : "conversation";
+  // U2: a cross-fleet thread carries a visible mark; its names arrive
+  // fleet-qualified from the server (`eng/erlich → data/samir`) in every
+  // room, while intra-fleet names stay short in their own room
+  const xfleet = t.cross_fleet
+    ? `<span class="tag xfleet" title="sender and recipient are on`
+      + ` different fleets">cross-fleet</span>` : "";
   const msgs = t.messages.map((m) => `
     <div class="msg">
       <div class="who"><b>${esc(m.sender_short)}</b>
@@ -168,7 +174,7 @@ function threadArticle(t) {
   el.innerHTML = `
     <div class="t-kicker">${kicker}</div>
     <div class="t-head"><span class="t-title">${esc(threadTitle(t))}</span>
-      <span class="t-meta">${esc(attribution)}</span></div>
+      ${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
     ${ladder(t)}
     ${msgs}`;
   return el;
@@ -253,6 +259,99 @@ function renderSummary(env) {
     ? (fresh ? "recording" : "recorder up, quiet") : "recorder DOWN";
 }
 
+// The two-fleet overview strip (U3): one card per fleet, one host card.
+// Every figure is a server fact through the door that defines it; a
+// figure the server could not source arrives null + a reason and renders
+// as "unknown (reason)", never as a zero (§16). A fleet card is the tab
+// switch when the host has a fleet dimension.
+const OV_PRESENCE_ORDER = ["working", "idle", "stale", "unknown", "sampling",
+                           "down"];
+function ovPresence(p) {
+  const c = p.counts || {};
+  const parts = OV_PRESENCE_ORDER.filter((s) => c[s] > 0)
+    .map((s) => `<span class="pres pres-${s}">${c[s]} ${s}</span>`);
+  if (p.live_poll !== "ok") {
+    parts.push(`<span class="ov-warn">live poll ${esc(p.live_poll)}</span>`);
+  }
+  return parts.length ? parts.join(" ") : `<span>no presence recorded</span>`;
+}
+function ovNum(n, word, bad = true) {
+  if (n === null || n === undefined) return `<span class="ov-warn">${esc(word)} unknown</span>`;
+  return `<span class="${n > 0 && bad ? "ov-bad" : ""}">${n} ${esc(word)}</span>`;
+}
+function renderOverview(env) {
+  const el = $("overview");
+  if (!el) return;
+  if (!env || env.state !== "ok") {
+    el.innerHTML = stateBlock(env ? env.state : "disconnected",
+                              env && env.provenance, env && env.remediation);
+    return;
+  }
+  const d = env.data;
+  const dimension = fleets.length >= 2;
+  const cards = d.fleets.map((f) => `
+    <div class="ov-card ${dimension ? "pick" : ""} ${
+        dimension && f.alias === currentFleet ? "on" : ""}"
+         data-fleet="${esc(f.alias)}" ${dimension ? 'role="button" tabindex="0"' : ""}
+         title="${esc(f.alias)}${dimension ? " — open this room" : ""}">
+      <div class="ov-head"><b>${esc(f.alias)}</b>
+        <span>${f.bots} bot${f.bots === 1 ? "" : "s"}${
+          f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed)</small>` : ""}</span>
+        <small>${esc(f.capture)} capture</small></div>
+      <div class="ov-line">${ovPresence(f.presence)}</div>
+      <div class="ov-line">${ovNum(f.open, "open", false)} ·
+        ${ovNum(f.attention, "need you")} · ${ovNum(f.overdue, "overdue")} ·
+        <span title="${esc(f.orphaned_reason || "")}">${
+          ovNum(f.orphaned, "orphaned")}</span></div>
+      <div class="ov-line">
+        <span>${f.newest_report_at
+          ? `last report ${esc(ago(f.newest_report_at))}` : "no reports"}${
+          f.reports_24h ? ` · ${f.reports_24h} in 24h` : ""}</span> ·
+        <span>active ${esc(ago(f.last_activity_at))}</span></div>
+    </div>`).join("");
+  const h = d.host;
+  // the lag STATE is the API's (ingest_lag_state) — the page only renders it
+  const lag = h.ingest_lag_state === "none"
+    ? `<span class="ov-warn">nothing ingested yet</span>`
+    : `<span class="${h.ingest_lag_state === "warn" ? "ov-warn" : ""}">ingest lag ${
+        h.ingest_lag_s | 0}s</span>`;
+  const sm = h.samples;
+  const facet = (k, label, fmt) => sm && sm[k] ? `${label} ${esc(fmt(sm[k].value))}` : null;
+  const facets = sm ? [
+    facet("host.load", "load", (v) => String(v)),
+    facet("host.mem_available_mb", "free RAM", (v) => `${Math.round(v / 1024 * 10) / 10} GB`),
+    facet("host.disk_free_gb", "free disk", (v) => `${v} GB`),
+    facet("host.undervoltage", "undervoltage", (v) => v ? "YES" : "no"),
+    facet("host.thermal_flags", "thermal", (v) => String(v)),
+  ].filter(Boolean).join(" · ") : `<span class="ov-warn" title="arm the plane-host-probe host timer (PLANE_EMIT_ENABLED=1) to record load, RAM, disk and thermal facets">host probe not armed</span>`;
+  const spool = h.spool_state === "unreadable"
+    ? `<span class="ov-bad">spool unreadable</span>`
+    : ovNum(h.spool_files, "spooled");
+  const host = `
+    <div class="ov-card ov-host" title="the host's recorder — every fleet on this host writes here">
+      <div class="ov-head"><b>host</b>
+        <span class="${h.daemon_serving ? "ov-ok" : "ov-bad"}">${
+          h.daemon_serving ? "recorder up" : "recorder DOWN"}</span>
+        <small>${h.rows} rows</small></div>
+      <div class="ov-line">${spool} · ${lag}</div>
+      <div class="ov-line">${facets}</div>
+      ${d.capture_config === "malformed"
+        ? `<div class="ov-line ov-bad">capture.json malformed — policies shown are defaults</div>` : ""}
+    </div>`;
+  el.innerHTML = cards + host;
+}
+
+// ONE delegated listener for the strip's cards (re-rendered on every refresh;
+// per-card listeners were re-attached each time — simplify lens)
+$("overview").addEventListener("click", (e) => {
+  const c = e.target.closest(".ov-card.pick");
+  if (c) pickFleet(c.dataset.fleet);
+});
+$("overview").addEventListener("keydown", (e) => {
+  const c = e.target.closest(".ov-card.pick");
+  if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); pickFleet(c.dataset.fleet); }
+});
+
 // Debug rail: a ring buffer rendered ONLY while visible (the hidden rail
 // used to receive DOM churn for every ledger row regardless — gauntlet).
 const debugRing = [];
@@ -275,13 +374,26 @@ let generation = 0;
 
 async function refreshBoards() {
   const gen = ++generation;   // stale responses never paint over newer ones
-  const [ch, tk, fl, sm] = await Promise.all([
-    jget(channelUrl()), jget("/api/tasks"),
-    jget("/api/identities"), jget("/api/summary"),
+  if (!fleetsSeen) {
+    // The FIRST paint learns the fleet dimension before it fetches a board:
+    // every per-fleet board below is fetched IN the room, so the room must
+    // be known first — the old flow fetched the firehose, discovered the
+    // fleets from the roster, and refetched (one wasted round trip and one
+    // flash of the wrong room on every load).
+    adoptFleets(await jget("/api/fleets"));
+    if (gen !== generation) return;
+  }
+  const q = fleetQuery();
+  const [ch, tk, fl, sm, ov] = await Promise.all([
+    jget(channelUrl()), jget("/api/tasks" + q),
+    jget("/api/identities" + q), jget("/api/summary"),
+    jget("/api/overview"),
   ]);
   if (gen !== generation) return;
+  adoptFleets(ov);   // the overview carries the fleet list + default: one door
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
-  if (fl && fl.state === "ok") renderFleetTabs(fl.data.identities);
+  renderFleetTabs();
+  renderOverview(ov);   // after the tabs: the strip highlights the pick
   restartSafety();
 }
 
@@ -370,46 +482,78 @@ function ansiToHtml(text) {
 }
 
 let currentView = "channel";
-let currentFleet = null;   // null = auto (single fleet or "all" not yet chosen)
+let currentFleet = null;   // null = auto (single fleet, or no pick yet)
 let gridTimer = null;
 let focusTimer = null;
 
-function channelUrl() {
-  const f = currentFleet && currentFleet !== "all"
-    ? `&fleet=${encodeURIComponent(currentFleet)}` : "";
-  return `/api/channel?limit=120${f}`;
+// The fleet DIMENSION (U1): the host's fleets come from /api/fleets — the
+// registry's fleet identities — never from the roster rail, whose LIMIT-200
+// last-seen window silently dropped a quiet fleet's tab on a two-fleet host.
+let fleets = [];          // [{alias, bots, last_comm_at, ...}], alphabetical
+let fleetsSeen = false;   // the first /api/fleets answer has landed
+const PICK_KEY = "plane.fleet";
+
+function loadPick() {   // per-viewer convenience — may be absent or throw
+  try { return localStorage.getItem(PICK_KEY); } catch { return null; }
+}
+function savePick(f) {
+  try { localStorage.setItem(PICK_KEY, f); } catch { /* not persisted */ }
 }
 
-function renderFleetTabs(identities) {
-  const fleets = identities.filter((i) => i.kind === "fleet")
-    .map((i) => i.alias).sort();
+// Adopt a /api/fleets answer: keep the list, and settle `currentFleet` —
+// the viewer's remembered pick when it still names a fleet (or "all"),
+// else the server's default (the room that moved most recently), else the
+// first fleet. One fleet = no dimension at all (null, no tabs).
+function adoptFleets(env) {
+  if (!env || env.state !== "ok" || !env.data) return;
+  fleetsSeen = true;
+  fleets = env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
+  const names = fleets.map((f) => f.alias);
+  if (names.length < 2) { currentFleet = null; return; }
+  if (currentFleet && (currentFleet === "all" || names.includes(currentFleet))) return;
+  const stored = loadPick();
+  currentFleet = stored && (stored === "all" || names.includes(stored))
+    ? stored : (env.data.default || names[0]);
+}
+
+function fleetQuery(sep = "?") {   // the per-fleet routes' `fleet=` axis
+  return currentFleet && currentFleet !== "all"
+    ? `${sep}fleet=${encodeURIComponent(currentFleet)}` : "";
+}
+
+function channelUrl() {
+  return `/api/channel?limit=120${fleetQuery("&")}`;
+}
+
+function renderFleetTabs() {
   const el = $("fleet-tabs");
-  if (fleets.length < 2) { el.innerHTML = ""; currentFleet = null; return; }
+  if (fleets.length < 2) { el.innerHTML = ""; return; }
   // Per-team rooms are the DEFAULT (operator ruling): a fleet tab is always
-  // selected; the merged firehose is the explicit last resort.
-  if (!currentFleet) {
-    // Rooms are the default: on first paint with >1 fleet the channel was
-    // fetched as the firehose (currentFleet null); adopt the room and
-    // refetch THROUGH the generation guard — the direct fetch was the one
-    // unguarded render path left (gauntlet round 2).
-    currentFleet = fleets[0];
-    refreshBoards();
-  }
-  el.innerHTML = [...fleets, "all"].map((f) =>
-    `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
-    + ` data-fleet="${esc(f)}" type="button">${esc(f)}</button>`).join("");
+  // selected; the merged host view is the explicit last resort.
+  el.innerHTML = [...fleets.map((f) => f.alias), "all"].map((f) => {
+    const meta = fleets.find((x) => x.alias === f);
+    const n = meta ? `<small>${esc(meta.bots)}</small>` : "<small>host</small>";
+    return `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
+      + ` data-fleet="${esc(f)}" type="button">${esc(f)} ${n}</button>`;
+  }).join("");
   el.querySelectorAll("button").forEach((b) =>
-    b.addEventListener("click", () => {
-      currentFleet = b.dataset.fleet;
-      renderFleetTabs(identities);   // instant highlight
-      if (currentView === "fleet") pollFleet();   // the tab follows the pick
-      refreshBoards();               // guarded path (generation stale-guard)
-      if (!$("search-results").hidden) {
-        // active search: re-fire in the NEW room — otherwise the visible
-        // hits stay scoped to the old room under the new tab's highlight
-        $("search").dispatchEvent(new Event("input"));
-      }
-    }));
+    b.addEventListener("click", () => pickFleet(b.dataset.fleet)));
+}
+
+// ONE pick path — the tab row and the overview strip's cards (U3) both
+// land here, so a card click can never drift from a tab click.
+function pickFleet(f) {
+  currentFleet = f;
+  savePick(currentFleet);
+  renderFleetTabs();             // instant highlight (the strip re-renders with the boards)
+  if (currentView === "fleet") pollFleet();   // the tab follows the pick
+  if (currentView === "grid") pollGrid();     // so does the grid
+  refreshBoards();               // guarded path (generation stale-guard)
+  if (!$("search-results").hidden) {
+    // active search: re-fire in the NEW room — otherwise the visible
+    // hits stay scoped to the old room under the new tab's highlight
+    $("search").dispatchEvent(new Event("input"));
+  }
 }
 
 const STATUS_DOT = { up: "live", down: "", sampling: "warn" };
@@ -515,8 +659,9 @@ function renderGrid(env) {
 // the degradable one).
 async function pollGrid() {
   if (currentView !== "grid") return;
+  const q = fleetQuery();   // the tab's panes and verdicts (U4/U1)
   const [gridEnv, presEnv] = await Promise.all([
-    jget("/api/grid"), jget("/api/presence").catch(() => null),
+    jget("/api/grid" + q), jget("/api/presence" + q).catch(() => null),
   ]);
   const byAlias = {};
   if (presEnv && presEnv.data) {
@@ -548,6 +693,12 @@ function renderPresenceStrip(counts, recordedDown) {
   const parts = PRESENCE_ORDER
     .filter((s) => counts[s] > 0)
     .map((s) => `<span class="pres pres-${s}">${counts[s]} ${s}</span>`);
+  if (parts.length) {
+    // whose counts these are: the room's under a tab, the host's under
+    // "all" — the header is otherwise host-level, so say which
+    parts.unshift(`<span>${esc(currentFleet && currentFleet !== "all"
+      ? currentFleet : "host")}</span>`);
+  }
   if (recordedDown) {
     // the activity half is dark — say so, never a badge-less grid with no
     // hint (the disclosure the server sent must reach the operator)
@@ -564,7 +715,7 @@ function setView(view) {
   if (view !== "channel") $("search").value = "";
   $("grid").hidden = view !== "grid";
   $("trust").hidden = view !== "trust";
-  $("fleet").hidden = view !== "fleet";
+  $("fleet-room").hidden = view !== "fleet";
   if (view === "fleet") pollFleet();
   document.querySelectorAll("#view-nav button").forEach((b) =>
     b.classList.toggle("on", b.dataset.view === view));
@@ -822,12 +973,13 @@ const EQUIP_ORDER = ["expertise", "skills", "mcp", "integrations", "guardrails",
 
 async function pollFleet() {
   if (currentView !== "fleet") return;
-  renderState($("fleet"), { state: "loading" });
-  // honor the fleet picker (the same f= the channel/search use); with no
-  // pick, every fleet the host records — cross-fleet twins come back
-  // fleet-qualified from the server (gauntlet)
-  const f = currentFleet && currentFleet !== "all"
-    ? `?fleet=${encodeURIComponent(currentFleet)}` : "";
+  renderState($("fleet-room"), { state: "loading" });
+  // honor the fleet picker (the same fleet= the channel/search use); with
+  // "all", every fleet the host records — cross-fleet twins come back
+  // fleet-qualified from the server (gauntlet). The org tree FOLLOWS the
+  // tab (U4): with a tab picked the server never falls back to its
+  // first-alphabetical default.
+  const f = fleetQuery();
   // org + utilization ride alongside; either failing never blanks the
   // inventory (the same opposite-failure-modes rule as grid + presence)
   const [inv, org, util] = await Promise.all([
@@ -854,7 +1006,7 @@ function countsLine(counts) {
 }
 
 function renderInventory(env, orgEnv) {
-  const el = $("fleet");
+  const el = $("fleet-room");
   if (!env || env.state !== "ok") {
     el.innerHTML = stateBlock(env ? env.state : "disconnected",
                               env && env.provenance, env && env.remediation);

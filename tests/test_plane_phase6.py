@@ -170,7 +170,7 @@ def test_endpoints_and_typed_absence(tmp_path):
     util = c.get("/api/utilization", params={"fleet": F}).json()
     assert util["state"] == "ok" and util["data"][0]["short"] == "erlich"
     miss = c.get("/api/org", params={"fleet": "nope"}).json()
-    assert miss["state"] == "idle"          # never another fleet's tree under this name
+    assert miss["state"] == "unknown"       # never another fleet's tree under this name
     empty = TestClient(create_app(tmp_path / "none")).get("/api/org").json()
     assert empty["state"] == "absent" and "data" not in empty
 
@@ -306,3 +306,51 @@ def test_empty_roster_entry_is_not_a_phantom_root(tmp_path):
         conn.close()
     assert [r["bot"] for r in t["roots"]] == ["erlich"]
     assert t["bots"] == 1
+
+
+def test_org_route_follows_the_requested_fleet_never_the_default(tmp_path):
+    """U4: with a fleet tab picked the org tree is THAT fleet's — the
+    first-alphabetical default is only for a read that names no fleet, and
+    it discloses the choice (`available`)."""
+    fastapi = __import__("pytest").importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+
+    root = _root(tmp_path)
+    emit_batch(root, [_fleet_kf([{"bot": "x", "reports_to": None}]), _done()])
+    g = _fleet_kf([{"bot": "y", "reports_to": None}])
+    g["fleet"] = "g"; g["payload"]["entity_alias"] = "g"; g["payload"]["payload"]["alias"] = "g"
+    d = _done(); d["fleet"] = "g"; d["payload"]["scope"] = "g"
+    emit_batch(root, [g, d])
+    client = TestClient(create_app(root))
+    picked = client.get("/api/org?fleet=g").json()
+    assert picked["state"] == "ok" and picked["data"]["fleet"] == "g"
+    assert [n["bot"] for n in picked["data"]["roots"]] == ["y"]
+    unnamed = client.get("/api/org").json()["data"]
+    assert unnamed["fleet"] == "f" and unnamed["available"] == ["f", "g"]
+    assert client.get("/api/org?fleet=nope").json()["state"] == "unknown"
+
+
+def test_overview_row_for_a_keyframe_only_fleet_is_quiet_not_absent(tmp_path):
+    """U3 under §16: a fleet the registry knows only by its keyframe (no
+    comms, no assignments, no heartbeats) is a row of facts — zero open,
+    no report, its activity instant from the ledger — while the figure
+    with no source (orphan-ness, no bot directory) is None + a reason."""
+    fastapi = __import__("pytest").importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+
+    root = _root(tmp_path)
+    emit_batch(root, [_fleet_kf([{"bot": "x", "reports_to": None}]), _done()])
+    ov = TestClient(create_app(root)).get("/api/overview").json()
+    assert ov["state"] == "ok"
+    (row,) = ov["data"]["fleets"]
+    assert row["alias"] == F
+    assert (row["open"], row["attention"], row["overdue"]) == (0, 0, 0)
+    assert row["newest_report_at"] is None and row["reports_24h"] == 0
+    assert row["last_activity_at"] and row["last_comm_at"] is None
+    assert row["orphaned"] is None and row["orphaned_reason"]
+    assert row["presence"]["counts"] == {"working": 0, "idle": 0, "down": 0,
+                                         "stale": 0, "unknown": 0,
+                                         "sampling": 0}
+    assert row["capture"] == "full"

@@ -75,8 +75,10 @@ def test_search_scopes_to_the_room(tmp_path):
     client = TestClient(create_app(tmp_path))
     eng = client.get("/api/search?q=huntress&fleet=engineering").json()
     assert len(eng["data"]["results"]) == 1
+    # a fleet the plane holds no identity for is a typed refusal naming the
+    # fleets it does hold (U, #1467) — never a healthy empty result list
     ghost = client.get("/api/search?q=huntress&fleet=ghostfleet").json()
-    assert ghost["data"]["results"] == []
+    assert ghost["state"] == "unknown" and "data" not in ghost
 
 
 def test_hostile_query_is_never_a_source_error(tmp_path):

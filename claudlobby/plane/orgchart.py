@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from . import registry_read as _rr
+from .queries import not_sentinel_sql
 
 
 def org_tree(conn, fleet: str | None = None) -> dict | None:
@@ -22,7 +23,7 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
     ``fleet`` is None). None = no fleet keyframe yet (absent ≠ empty)."""
     available = sorted(r[0] for r in conn.execute(
         "SELECT alias FROM identity_registry WHERE kind='fleet'"
-        " AND alias NOT LIKE '\\_%' ESCAPE '\\'"))
+        f" AND {not_sentinel_sql()}"))
     if fleet is None:
         # deterministic: the first fleet by name, with the choice disclosed
         fleet = available[0] if available else None
