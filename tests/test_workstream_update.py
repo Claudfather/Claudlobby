@@ -120,10 +120,18 @@ def _iso(ts: str) -> datetime:
 
 
 def _no_files(tmp_path: Path) -> None:
-    """Nothing but the plane under the root: the door writes no registry, no archive."""
-    stray = [p for p in _root(tmp_path).rglob("*") if p.is_file()
-             and "state/plane" not in str(p) and p.name != "host-uid"]
-    assert stray == [], f"the door wrote files: {stray}"
+    """Nothing but the plane under the root — the door writes no record file.
+    Excluded: the plane's own home, the host uid it mints, and the LOCK
+    artefacts (`workstreams.lock` under flock on Linux, `workstreams.lock.d`
+    under the mkdir spinlock on macOS) — a lock is not a record."""
+    root = tmp_path / "root"
+    files = sorted(
+        p for p in root.rglob("*") if p.is_file()
+        and "state/plane" not in str(p.relative_to(root))
+        and p.name != "host-uid"
+        and not p.name.endswith(".lock") and ".lock.d" not in str(p)
+    )
+    assert files == [], f"the door wrote files: {files}"
 
 
 class TestOpen:
