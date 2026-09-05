@@ -848,3 +848,208 @@ def test_ui_carries_the_overview_strip_and_the_cross_fleet_mark():
     assert "t.cross_fleet" in js and "xfleet" in js
     css = ui.joinpath("style.css").read_text()
     assert ".tag.xfleet" in css and ".ov-card" in css
+
+
+# --- chunk L (#1479): what the operator reads ---------------------------------
+
+def _dispatch(root: Path, h: str, *, expected_by: str | None, tx_state: str | None,
+              fleet: str = "f") -> None:
+    """One dispatched assignment: work item + assignment + task_request, and
+    optionally one transmission row in *tx_state* (None = no transmission)."""
+    mgr, worker = f"bot:{fleet}/erlich", f"bot:{fleet}/ramanujan"
+    asg = {"assignment_id": "asg_" + h * 32, "work_item_id": "wi_" + h * 32,
+           "assignee": worker, "assigned_by": mgr, "dispatch_msg_id": "msg_" + h * 32}
+    if expected_by:
+        asg["expected_by"] = expected_by
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "t", "fleet": fleet,
+         "payload": {"work_item_id": "wi_" + h * 32, "title": f"task {h}", "created_by": mgr}},
+        {"event_type": "assignment", "emitter": "t", "fleet": fleet, "payload": asg},
+        {"event_type": "communication", "emitter": "t", "fleet": fleet,
+         "payload": {"msg_id": "msg_" + h * 32, "sender": mgr, "recipient": worker,
+                     "message_class": "task_request", "command_type": "task",
+                     "body": f"go {h}"}}])
+    if tx_state:
+        emit_batch(root, [{
+            "event_type": "transmission", "emitter": "t", "fleet": fleet,
+            "payload": {"msg_id": "msg_" + h * 32, "attempt_no": 1, "carrier": "tmux",
+                        "destination": "ramanujan", "state": tx_state}}])
+
+
+def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_path):
+    """Chunk L (#1479): a finished task carries `terminal_at` (the first
+    terminal task event — the row TASK_STATUS_SQL names) so the card reads
+    "completed 1m ago" instead of a deadline it no longer has; an attention
+    row carries WHY (`attention_reason`: never_activated / overdue, primary
+    first) and since when; an open, delivered, not-yet-due row carries
+    neither."""
+    _seed_conversation(tmp_path)                                    # asg_{H}: completed
+    _dispatch(tmp_path, "1", expected_by="2020-01-01T00:00:00+00:00",
+              tx_state="carrier_queued")                            # queued, never activated, overdue
+    _dispatch(tmp_path, "2", expected_by="2099-01-01T00:00:00+00:00",
+              tx_state="pane_submitted")                            # delivered, not due
+    _dispatch(tmp_path, "3", expected_by="2020-01-01T00:00:00+00:00",
+              tx_state="pane_submitted")                            # delivered, overdue
+    rows = {r["assignment_id"]: r for r in
+            TestClient(create_app(tmp_path)).get("/api/tasks").json()["data"]["assignments"]}
+    done = rows[f"asg_{H}"]
+    assert done["status"] == "completed" and done["terminal_at"]
+    assert done["attention"] is False and done["attention_reason"] == []
+    assert done["attention_since"] is None
+    queued = rows["asg_" + "1" * 32]
+    assert queued["attention"] is True and queued["terminal_at"] is None
+    assert queued["attention_reason"] == ["never_activated", "overdue"]
+    assert queued["attention_since"] == queued["occurred_at"]    # since the dispatch
+    fine = rows["asg_" + "2" * 32]
+    assert fine["attention"] is False and fine["attention_reason"] == []
+    assert fine["terminal_at"] is None and fine["expected_by"].startswith("2099")
+    late = rows["asg_" + "3" * 32]
+    assert late["attention"] is True and late["attention_reason"] == ["overdue"]
+    assert late["attention_since"] == late["expected_by"]         # since the deadline
+
+
+def test_ui_reads_in_the_operators_language():
+    """Structural (chunk L, #1479 + its fold): the page's RULES, not its
+    identifiers. The header and the machinery rail read the overview envelope
+    and are BLANKED when its source fails (§16); the page keeps no copy of a
+    server vocabulary and re-derives no magnitude of its own; the clamp height
+    is derived from the one constant that decides a body is long."""
+    from importlib.resources import files
+    ui = files("claudlobby.plane").joinpath("ui")
+    html = ui.joinpath("index.html").read_text()
+    assert 'id="fleet-totals"' in html and 'id="host-facts"' in html
+    assert 'id="age"' not in html and 'id="total"' not in html and 'id="spool"' not in html
+    js = ui.joinpath("app.js").read_text()
+    # one door for both: the header's totals and the rail's host line come
+    # from the overview envelope, and both clear on a source failure
+    assert "renderHeader(ov)" in js and "renderHostFacts(ov)" in js
+    assert "renderHeader(null)" in js and "renderHostFacts(null)" in js
+    assert "hostFacts" not in js              # the dead module state is gone
+    # no copied vocabulary, no client-side re-derivation (folds F4 + F7)
+    assert "TERMINAL_STATUSES" not in js      # endedness is `terminal_at`
+    assert "r.terminal_at" in js
+    assert 'dueLabel(r.expected_by).replace' not in js
+    assert "attention_since" in js and "never delivered" in js
+    assert "chase the worker" in js and "send failed" in js
+    # the clamp: ONE number, read by the stylesheet; the toggle finds its
+    # body by structure and remembers what the operator opened
+    assert "--clamp-lines" in js and "openBodies" in js
+    assert "previousElementSibling" not in js
+    css = ui.joinpath("style.css").read_text()
+    assert ".msg .body.clamp" in css and ".card .why" in css
+    assert "var(--clamp-lines)" in css and "11.5em" not in css
+    assert "var(--panel, " not in css         # a fallback that was the wrong color
+
+
+# --- chunk L, the fold: one row, the queue's own arms, totals with caveats --
+
+def _tasks(root: Path) -> dict:
+    return {r["assignment_id"]: r for r in
+            TestClient(create_app(root)).get("/api/tasks")
+            .json()["data"]["assignments"]}
+
+
+def test_status_and_its_instant_come_from_the_same_terminal_row(tmp_path):
+    """Fold F1 (#1479): an assignment with TWO terminal events must not show
+    one event's name over the other's instant. `completed` is ingested FIRST
+    and stamped LATER; `superseded` lands after it carrying an EARLIER
+    occurred_at. Ledger order is authoritative (queries.py:5-8), so the status
+    is `completed` and the instant is completed's — the first build read the
+    instant from a separate MIN(occurred_at) and printed superseded's."""
+    _dispatch(tmp_path, "4", expected_by=None, tx_state="pane_submitted")
+    aid, wid = "asg_" + "4" * 32, "wi_" + "4" * 32
+    later, earlier = "2026-01-02T00:00:00+00:00", "2026-01-01T00:00:00+00:00"
+    for event, ts in (("completed", later), ("superseded", earlier)):
+        emit_batch(tmp_path, [{
+            "event_type": "task", "emitter": "t", "fleet": "f",
+            "occurred_at": ts,
+            "payload": {"event": event, "work_item_id": wid,
+                        "assignment_id": aid}}])
+    row = _tasks(tmp_path)[aid]
+    assert row["status"] == "completed"
+    assert row["terminal_at"] == later      # never the superseded's earlier one
+
+
+def test_every_attention_arm_is_stamped_by_the_query_that_selected_it(tmp_path):
+    """Fold F2 (#1479): the reason a card is in the queue comes from
+    ATTENTION_ARMS_SQL — the query that selected it — one column per arm,
+    never a second derivation beside it. A failed send, a queued-and-never-
+    delivered send and a passed deadline are three different remedies; both
+    send arms date from the dispatch, a bare deadline from the deadline."""
+    _dispatch(tmp_path, "5", expected_by=FUTURE, tx_state="failed")
+    _dispatch(tmp_path, "6", expected_by=FUTURE, tx_state="carrier_queued")
+    _dispatch(tmp_path, "7", expected_by=PAST, tx_state=None)
+    _dispatch(tmp_path, "8", expected_by=PAST, tx_state="failed")
+    rows = _tasks(tmp_path)
+    failed = rows["asg_" + "5" * 32]
+    assert failed["attention_reason"] == ["send_failed"]
+    assert failed["attention_since"] == failed["occurred_at"]
+    queued = rows["asg_" + "6" * 32]
+    assert queued["attention_reason"] == ["never_activated"]
+    assert queued["attention_since"] == queued["occurred_at"]
+    late = rows["asg_" + "7" * 32]
+    assert late["attention_reason"] == ["overdue"]     # no transmission = silence
+    assert late["attention_since"] == late["expected_by"]
+    both = rows["asg_" + "8" * 32]
+    assert both["attention_reason"] == ["send_failed", "overdue"]
+    assert both["attention_since"] == both["occurred_at"]   # the primary arm
+    # the arms EXHAUST attention, which is what makes the card's bare
+    # "needs you" fallback unreachable
+    assert all(r["attention_reason"] for r in rows.values() if r["attention"])
+    assert not any(r["attention_reason"] for r in rows.values()
+                   if not r["attention"])
+
+
+def test_the_arms_query_selects_exactly_the_attention_query(tmp_path):
+    """Both are built from `queries.ATTENTION_ARMS`, so the queue and the
+    reasons cannot disagree about who is in it — a new arm reaches both or
+    neither."""
+    import sqlite3 as _sq
+
+    from claudlobby.plane import view
+    from claudlobby.plane.queries import ATTENTION_ARMS_SQL, ATTENTION_SQL
+
+    _seed_conversation(tmp_path)                       # a closed one
+    _dispatch(tmp_path, "5", expected_by=FUTURE, tx_state="failed")
+    _dispatch(tmp_path, "6", expected_by=FUTURE, tx_state="carrier_queued")
+    _dispatch(tmp_path, "7", expected_by=PAST, tx_state=None)
+    _dispatch(tmp_path, "9", expected_by=FUTURE, tx_state="pane_submitted")
+    conn = _sq.connect(tmp_path / "state" / "plane" / "plane.db")
+    now = view._now_iso()
+    plain = {r[0] for r in conn.execute(ATTENTION_SQL, (now,))}
+    armed = {r[0] for r in conn.execute(ATTENTION_ARMS_SQL, (now, now))}
+    conn.close()
+    assert plain == armed and len(plain) == 3
+
+
+def test_the_header_totals_ship_with_their_disclosures(tmp_path):
+    """Fold F5 (#1479): the totals are the SERVER's, summed once, and carry
+    what the page dropped when it summed the cards itself — the unconfirmed
+    share of the bot count and the worst live-poll state on the host."""
+    _seed_twins_with_deadlines(tmp_path)
+    client = TestClient(create_app(tmp_path, sampler=_TwinSampler()))
+    data = client.get("/api/overview").json()["data"]
+    cards, t = data["fleets"], data["totals"]
+    assert t["fleets"] == 2
+    assert t["bots"] == sum(c["bots"] for c in cards) == 4
+    assert t["provisional"] == sum(c["provisional"] for c in cards) > 0
+    assert t["working"] == 1 and t["attention"] == 1 and t["overdue"] == 1
+    assert t["live_poll"] == "ok"
+
+    class _NoSampler(_TwinSampler):
+        available = False
+
+    degraded = TestClient(create_app(tmp_path, sampler=_NoSampler())) \
+        .get("/api/overview").json()["data"]["totals"]
+    assert degraded["live_poll"] == "unavailable"   # never swallowed by a sum
+
+
+def test_totals_of_a_plane_with_no_fleet_are_zero_fleets_not_four_zeros(tmp_path):
+    """A host that has recorded nothing under a fleet says so — the header
+    reads "no fleet recorded" rather than four confident zeros."""
+    _full_capture(tmp_path)
+    emit_batch(tmp_path, [{"event_type": "system", "emitter": "t",
+                           "payload": {"event": "daemon_started"}}])
+    body = TestClient(create_app(tmp_path)).get("/api/overview").json()
+    assert body["state"] == "ok"
+    assert body["data"]["fleets"] == [] and body["data"]["totals"]["fleets"] == 0

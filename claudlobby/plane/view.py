@@ -71,7 +71,8 @@ from .presence import STALE_AFTER_S, _parse_iso, derive_presence, presence_count
 from .sampler import PaneSampler, discover_bot_dirs
 from .queries import (
     ACTIVATION_TX_EVENTS,
-    ATTENTION_SQL,
+    ATTENTION_ARMS,
+    ATTENTION_ARMS_SQL,
     LATEST_HEARTBEAT_SQL,
     NON_TERMINAL_CLAUSE,
     TASK_STATUS_SQL,
@@ -497,17 +498,45 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
     # the one definition; output verified byte-identical.
     ids = [r["assignment_id"] for r in rows]
     ph = ",".join("?" * len(ids))
-    status = {r["assignment_id"]: r["status"] for r in conn.execute(
-        TASK_STATUS_SQL + f" WHERE a.assignment_id IN ({ph})", ids)}
-    attention = {r[0] for r in conn.execute(
-        ATTENTION_SQL + f" AND a.assignment_id IN ({ph})",
-        (_now_iso(), *ids))}
+    # status AND the instant it ended, from ONE row (chunk L fold, #1479):
+    # `terminal_at` is the occurred_at of the same first-terminal event
+    # TASK_STATUS_SQL names as the status, so a finished card reads
+    # "completed 1m ago" instead of a deadline it no longer has — and can
+    # never read one event's name over another's instant, which a separate
+    # MIN(occurred_at) did.
+    status = {r["assignment_id"]: (r["status"], r["terminal_at"])
+              for r in conn.execute(
+                  TASK_STATUS_SQL + f" WHERE a.assignment_id IN ({ph})", ids)}
+    now = _now_iso()
+    # WHY a row needs attention — the queue's OWN arms, stamped by the query
+    # that selected the row (ATTENTION_ARMS_SQL is ATTENTION_SQL plus one
+    # column per arm, both built from `queries.ATTENTION_ARMS`): the card says
+    # "send failed 12h ago" / "queued 12h ago, never delivered" / "overdue 2h"
+    # instead of a bare flag, and nothing here re-derives an arm in Python.
+    arms = {r["assignment_id"]: r for r in conn.execute(
+        ATTENTION_ARMS_SQL + f" AND a.assignment_id IN ({ph})",
+        (now, now, *ids))}
     for r in rows:
         r["title"] = body_words(r["title"])
         r["assignee_short"] = (labels.get(r["assignee_alias"])
                                or _short(r["assignee_alias"]))
-        r["status"] = status.get(r["assignment_id"], "created_not_sent")
-        r["attention"] = r["assignment_id"] in attention
+        st, terminal_at = status.get(r["assignment_id"],
+                                     ("created_not_sent", None))
+        r["status"] = st
+        r["terminal_at"] = terminal_at
+        arm = arms.get(r["assignment_id"])
+        r["attention"] = arm is not None
+        # the arms in the operator's priority order; the two SEND arms date
+        # from the dispatch, the deadline arm from the deadline
+        reasons = [name for name, _ in ATTENTION_ARMS if arm and arm[name]]
+        # the PRIMARY arm dates the card: only a purely-overdue row is dated
+        # from its deadline (`overdue` is last in the priority order)
+        since = None
+        if reasons:
+            since = (r["expected_by"] if reasons[0] == "overdue"
+                     else r["occurred_at"])
+        r["attention_reason"] = reasons
+        r["attention_since"] = since
     return {"assignments": rows,
             "attention_count": sum(1 for r in rows if r["attention"])}
 
@@ -949,9 +978,10 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
       of one task id when a later one completes). ONE definition of open,
       so the strip can never disagree with the watchdog on the same fleet;
       per actor because the query is indexed on the assignee.
-    * `attention` / `overdue` — `ATTENTION_SQL` with the fleet's assignees
-      APPENDED as a restriction (the tasks door's pattern: queries.py stays
-      the one definition); overdue is the deadline arm of it.
+    * `attention` / `overdue` — `ATTENTION_ARMS_SQL` with the fleet's
+      assignees APPENDED as a restriction (the tasks door's pattern:
+      queries.py stays the one definition); overdue is the deadline ARM,
+      read off the query's own column rather than re-derived here.
     * `orphaned` — the watchdog's split (#835): an id'd overdue dispatch
       older than the bot's `.spawn` was lost to a restart. It needs the
       bot's DIRECTORY, so a fleet with none under the view's root reports
@@ -968,7 +998,9 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
       let one future-stamped row pin a fleet at "0s ago" forever).
     * `capture` — the recorder's policy through `capture_mode`, the ONE
       rule, as /api/trust reads it.
-    The host row is `_fetch_summary` plus the ingest lag."""
+    The host row is `_fetch_summary` plus the ingest lag, and `totals` is
+    those rows summed once for the header — with the disclosures a sum
+    swallows (`_totals`)."""
     from datetime import datetime, timedelta, timezone
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
@@ -999,14 +1031,15 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
         attention = overdue = 0
         if uids:
             ph = ",".join("?" * len(uids))
-            # the queue's rows for this fleet, with their deadlines: ONE read
-            # answers attention AND overdue (its deadline arm)
+            # the queue's rows for this fleet WITH their arms: ONE read
+            # answers attention AND overdue (its deadline arm), through the
+            # same query the task board reads its reasons from — the strip
+            # had a third Python re-derivation of the same arm (fold F2)
             att = conn.execute(
-                "SELECT a2.assignment_id, a2.expected_by FROM assignments a2"
-                f" WHERE a2.assignment_id IN ({ATTENTION_SQL}"
-                f"  AND a.assignee_uid IN ({ph}))", (now, *uids)).fetchall()
+                ATTENTION_ARMS_SQL + f" AND a.assignee_uid IN ({ph})",
+                (now, now, *uids)).fetchall()
             attention = len(att)
-            overdue = sum(1 for r in att if r[1] and r[1] < now)
+            overdue = sum(1 for r in att if r["overdue"])
         orphaned: int | None = 0
         orphaned_reason = None
         fleet_dirs = {b: d for (fl_, b), d in bot_dirs.items() if fl_ == alias}
@@ -1080,7 +1113,35 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
         "samples": _host_samples(conn),
     }
     return {"fleets": rows, "default": fl["default"], "host": host,
-            "capture_config": capture_state}
+            "capture_config": capture_state, "totals": _totals(rows, live_poll)}
+
+
+# worst-first: the header must not report a healthy poll because one fleet's
+# was fine (§16 — a disclosure a total swallows is a total that lies)
+_POLL_RANK = {"ok": 0, "degraded": 1, "unavailable": 2}
+
+
+def _totals(rows: list[dict], live_poll: str) -> dict:
+    """The host-wide totals the header renders, summed HERE with the
+    disclosures the cards carry (chunk L fold, #1479): the page summed
+    `bots`/`working`/`attention`/`overdue` itself and dropped the unconfirmed
+    part and the live-poll state on the way — one definition of a total, and
+    it ships the caveats with the number. `fleets` is the count summed over,
+    so a header can say "no fleet recorded" rather than four zeros."""
+    def _sum(pick) -> int:
+        return sum(int(pick(r) or 0) for r in rows)
+
+    worst = max((r["presence"]["live_poll"] for r in rows),
+                key=lambda s: _POLL_RANK.get(s, 3), default=live_poll)
+    return {
+        "fleets": len(rows),
+        "bots": _sum(lambda r: r["bots"]),
+        "provisional": _sum(lambda r: r["provisional"]),
+        "working": _sum(lambda r: r["presence"]["counts"].get("working")),
+        "attention": _sum(lambda r: r["attention"]),
+        "overdue": _sum(lambda r: r["overdue"]),
+        "live_poll": worst,
+    }
 
 
 def _recorder_state(root: Path) -> dict:
@@ -1112,6 +1173,56 @@ def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Shutdown: the held-stream release (chunk L fold, #1479)
+# --------------------------------------------------------------------------
+
+def begin_shutdown(app) -> None:
+    """Tell every held SSE stream to finish NOW.
+
+    Called from the RUNNER's signal hook, which is the only moment that
+    works: uvicorn sets `should_exit` on the signal, then waits
+    `timeout_graceful_shutdown` for in-flight requests, and sends the
+    lifespan shutdown only AFTER that wait (`uvicorn/server.py::shutdown`).
+    An event set in the lifespan's shutdown branch alone would therefore be
+    set BY the streams' own cancellation, far too late to prevent it —
+    measured with this hook removed and that branch left in place: 5.23s to
+    exit, against 5.18s for no event at all and 0.26s for this.
+
+    Safe from a signal handler: the set is handed to the loop with
+    `call_soon_threadsafe`, which also wakes it. A view with no running
+    lifespan (a bare `create_app` in a test) has no event and no streams to
+    release, so this is a no-op."""
+    state = getattr(app, "state", None)
+    event = getattr(state, "shutting_down", None)
+    if event is None:
+        return
+    loop = getattr(state, "loop", None)
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(event.set)
+    else:   # pragma: no cover - the loop is gone; nothing is streaming
+        event.set()
+
+
+def _stopping(app) -> bool:
+    event = getattr(getattr(app, "state", None), "shutting_down", None)
+    return bool(event is not None and event.is_set())
+
+
+async def _idle_tick(app, seconds: float) -> bool:
+    """The stream's idle wait: `seconds`, or less if the daemon starts to
+    stop. True = stopping (the caller ends the response)."""
+    event = getattr(getattr(app, "state", None), "shutting_down", None)
+    if event is None:
+        await asyncio.sleep(seconds)
+        return False
+    try:
+        await asyncio.wait_for(event.wait(), timeout=seconds)
+    except (asyncio.TimeoutError, TimeoutError):
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------
 # App factory
 # --------------------------------------------------------------------------
 
@@ -1128,10 +1239,19 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
 
     @asynccontextmanager
     async def _lifespan(_app):  # pragma: no cover - exercised live
+        # The held-stream release (chunk L fold, #1479). Created INSIDE the
+        # running loop and published on app.state; `begin_shutdown` sets it
+        # the moment the daemon is asked to stop, and the SSE generators end
+        # their response normally instead of being cancelled at the graceful
+        # ceiling. Also set on the way out, for a runner that reaches the
+        # lifespan's shutdown first (uvicorn does not — see begin_shutdown).
+        _app.state.shutting_down = asyncio.Event()
+        _app.state.loop = asyncio.get_running_loop()
         sampler.start()
         try:
             yield
         finally:
+            _app.state.shutting_down.set()
             await sampler.stop()
 
     app = FastAPI(title="observable plane", docs_url=None, redoc_url=None,
@@ -1363,7 +1483,15 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                      once: int = 0):
         """SSE ledger tail. Cursor resolution: `Last-Event-ID` (browser
         reconnect) > explicit ?cursor= > HEAD. `once=1` emits one batch/ping
-        and closes — the bounded seam tests and curl use."""
+        and closes — the bounded seam tests and curl use.
+
+        The stream ENDS ITSELF when the daemon is stopping (chunk L fold,
+        #1479): the idle tick waits on the shutdown event OR one second, so
+        the response completes normally and the process exits at once. The
+        first build wrapped the tail in `except CancelledError`, which
+        suppressed nothing — the cancellation lands on the ASGI task inside
+        starlette, not on this generator: with the wrapper in place a real
+        SIGTERM still took 5.18s and still printed the traceback."""
         last_event_id = request.headers.get("last-event-id")
 
         async def gen():
@@ -1378,9 +1506,13 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                 last = (head.get("data") or {"ingest_seq": 0})["ingest_seq"] \
                     if head["state"] == SOURCE_OK and head.get("data") else 0
             yield "retry: 3000\n\n"
+            async for frame in _tail(last):
+                yield frame
+
+        async def _tail(last: int):
             last_source_state = SOURCE_OK
             while True:
-                if await request.is_disconnected():
+                if await request.is_disconnected() or _stopping(request.app):
                     return
                 env = _envelope(root, lambda c: [
                     dict(r) for r in c.execute(
@@ -1406,7 +1538,8 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                     yield ": ping\n\n"
                 if once:
                     return
-                await asyncio.sleep(1.0)
+                if await _idle_tick(request.app, 1.0):
+                    return   # the daemon is stopping — end the response
 
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store"})

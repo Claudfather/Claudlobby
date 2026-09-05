@@ -16,9 +16,7 @@
     <button class="pill ghost" data-view="trust" type="button">trust</button>
   </nav>
   <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
-  <span class="pill" title="the host's recorder — every fleet on this host writes here">host ingest <b id="age">—</b></span>
-  <span class="pill" title="host-wide ledger rows">host rows <b id="total">—</b></span>
-  <span class="pill" title="host-wide spool">host spool <b id="spool">—</b></span>
+  <span class="pill" id="fleet-totals" title="every fleet on this host — bots, working now, needing you, overdue (the overview's own figures)"><b>—</b> bots</span>
   <span class="pill presence-strip" id="presence-strip" hidden></span>
   <span class="spacer"></span>
   <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">machinery</button>
@@ -49,6 +47,7 @@
       <div class="scroll" id="tasks"></div>
     </div>
     <div id="rail-debug" aria-label="event machinery" hidden>
+      <div class="host-facts" id="host-facts" title="the host's recorder — every fleet on this host writes here">host ingest — · rows — · spool —</div>
       <h2>event stream <span class="hint">(raw ledger)</span></h2>
       <div class="scroll" id="debug"></div>
     </div>

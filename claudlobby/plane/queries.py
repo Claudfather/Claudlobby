@@ -5,7 +5,9 @@ renewal horizons compare against NOW ("renewed UNTIL" means until: an
 expired renewal protects nothing — round-6 counterexample), while activity
 recency compares against CUTOFF = now − policy_window. Both latest-by-
 ingest_seq: ledger order is authoritative, producer timestamps may arrive
-out of order. ATTENTION_SQL binds (overdue_cutoff,).
+out of order. ATTENTION_SQL binds (overdue_cutoff,); ATTENTION_ARMS_SQL —
+the same rows with one column per arm — binds it TWICE (the overdue column,
+then the same arm inside the filter).
 """
 
 from __future__ import annotations
@@ -128,21 +130,60 @@ ACTIVATION_TX_EVENTS = (
 )
 _TX_ACTIVATION = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
 
+# The ARMS of attention, one definition each (chunk L fold, #1479). Attention
+# = non-terminal AND (evidence of dispatch trouble OR overdue). Trouble is
+# EVIDENCE-BASED: transmission rows exist for the dispatch, yet none reached
+# activation — a send that FAILED or one that sits queued. An assignment with
+# NO transmission rows at all is a producer gap (or a pre-doors import), which
+# is silence, not alarm (§6b #2).
+#
+# The two trouble arms partition that one predicate on whether a `failed`
+# transmission exists, because the operator's remedy differs: a failed send is
+# a carrier fact to re-send, a never-activated one may be a bot that is down.
+# Their union is byte-equivalent to the old single arm (a `failed` row IS a
+# transmission row), so ATTENTION_SQL's population is unchanged.
+_TX_EXISTS = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+              " AND e.msg_id = a.dispatch_msg_id)")
+_TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+                 " AND e.msg_id = a.dispatch_msg_id"
+                 f" AND e.event IN ({_TX_ACTIVATION}))")
+_TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+              " AND e.msg_id = a.dispatch_msg_id AND e.event='failed')")
+
+# (name, predicate) — the ONE list both surfaces below are built from, so a
+# new arm cannot reach the queue without also reaching the column the card
+# renders its reason from (the fold's rule: a new arm forces a new column).
+# ORDER IS THE OPERATOR'S PRIORITY (send_failed, never_activated, overdue) and
+# also the `?` order of ATTENTION_ARMS_SQL's columns.
+ATTENTION_ARMS = (
+    ("send_failed", f"({_TX_FAILED} AND NOT {_TX_ACTIVATED})"),
+    ("never_activated",
+     f"({_TX_EXISTS} AND NOT {_TX_ACTIVATED} AND NOT {_TX_FAILED})"),
+    ("overdue", "(a.expected_by < ?)"),
+)
+_ARM_FILTER = "(" + " OR ".join(sql for _, sql in ATTENTION_ARMS) + ")"
+_NON_TERMINAL_A = (
+    "NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))")
+
 ATTENTION_SQL = (
-    # Attention = non-terminal AND (evidence of dispatch trouble OR overdue).
-    # Trouble is EVIDENCE-BASED: transmission rows exist for the dispatch, yet
-    # none reached activation — a send that failed or sits queued. An
-    # assignment with NO transmission rows at all is a producer gap (or a
-    # pre-doors import), which is silence, not alarm (§6b #2).
     "SELECT a.assignment_id FROM assignments a"
-    " WHERE NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-    f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))"
-    " AND ((EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-    "        AND e.msg_id = a.dispatch_msg_id)"
-    "   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-    "        AND e.msg_id = a.dispatch_msg_id"
-    f"        AND e.event IN ({_TX_ACTIVATION})))"
-    "  OR a.expected_by < ?)"
+    f" WHERE {_NON_TERMINAL_A}"
+    f" AND {_ARM_FILTER}"
+)
+
+# The same rows, each stamped with WHICH arms hold — so the card can say
+# "send failed 12h ago" or "overdue 2h" instead of a bare flag, and no
+# consumer re-derives an arm in Python beside the query that selected it
+# (the fold's F2: `_fetch_tasks` had its own second derivation and
+# `_fetch_overview` a third). Binds (overdue_cutoff, overdue_cutoff): the
+# overdue COLUMN, then the same arm inside the filter.
+ATTENTION_ARMS_SQL = (
+    "SELECT a.assignment_id,"
+    + ",".join(f" {sql} AS {name}" for name, sql in ATTENTION_ARMS)
+    + " FROM assignments a"
+    f" WHERE {_NON_TERMINAL_A}"
+    f" AND {_ARM_FILTER}"
 )
 
 # Attempt-status ladder below the task-event tiers (§8 + §6b #1): activation
@@ -158,11 +199,31 @@ ATTENTION_SQL = (
 _TX_OPEN = _TX_ACTIVATION   # the SAME activation set — never a second copy
 _TX_UNRESOLVED = "'send_attempted','carrier_queued','unknown','duplicate_suppressed'"
 
+# THE first terminal task event of an assignment, as a correlated scalar
+# subquery over one COLUMN of that row (chunk L fold, #1479). Both the status
+# and the instant are read through this ONE fragment, so they can never name
+# different rows: the selection is byte-identical and `ingest_seq` is unique
+# per event (one ledger row per ingested envelope), which makes the ORDER BY a
+# total order. The fold's finding: `terminal_at` was a separate
+# MIN(occurred_at), so an assignment with two terminal events (a `completed`
+# ingested first, a `superseded` with an EARLIER occurred_at ingested second)
+# showed one event's name over the other's instant. SQLite has no LATERAL, so
+# one subquery cannot yield two columns here; a window-function CTE could, at
+# the cost of a whole-table pass over `events` that the per-assignment
+# partial index (migration 0002) exists to avoid — the §14 read gate.
+def _first_terminal(col: str) -> str:
+    return (f"(SELECT {col} FROM events t WHERE t.kind='task'"
+            f"  AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL})"
+            "  ORDER BY t.ingest_seq LIMIT 1)")
+
+
+# Columns: (assignment_id, status, terminal_at). `terminal_at` is NULL for a
+# live assignment and is the instant of the SAME row `status` names when the
+# task has ended — the card reads "completed 1m ago" rather than a deadline it
+# no longer has.
 TASK_STATUS_SQL = (
     "SELECT a.assignment_id, COALESCE("
-    " (SELECT t.event FROM events t WHERE t.kind='task'"
-    f"  AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL})"
-    "  ORDER BY t.ingest_seq LIMIT 1),"
+    f" {_first_terminal('t.event')},"
     # supplied_id_not_open is a JOIN anomaly, not a lifecycle state (#1372
     # review F11) — it must never surface as an assignment's visible status.
     " (SELECT t.event FROM events t WHERE t.kind='task'"
@@ -184,7 +245,9 @@ TASK_STATUS_SQL = (
     "    AND x.msg_id = a.dispatch_msg_id"
     "    AND x.event='failed') THEN 'dispatch_failed'"
     "  ELSE 'created_not_sent'"
-    " END) AS status FROM assignments a"
+    " END) AS status,"
+    f" {_first_terminal('t.occurred_at')} AS terminal_at"
+    " FROM assignments a"
 )
 
 WORKSTREAM_STATUS_SQL = (

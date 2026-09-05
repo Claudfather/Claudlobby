@@ -83,9 +83,30 @@ function deliveryLine(msg) {
   return `<div class="delivery ${cls}">${esc(TX[t.event] || t.event)}</div>`;
 }
 
+// A body past CLAMP_LINES lines is clamped with a "show more" toggle (chunk
+// L, #1479): a thirty-line dispatch made everything below it unscannable.
+// The toggle is delegated on #channel. The number lives HERE and only here —
+// the stylesheet reads it as a custom property, so the clamp height and the
+// decision to clamp can never be two different eights.
+const CLAMP_LINES = 8, CLAMP_CHARS = 900;
+document.documentElement.style.setProperty("--clamp-lines", String(CLAMP_LINES));
+
+// Which bodies the operator opened, by msg_id. A card is rebuilt whenever
+// its thread gains a message, and the open state used to live only on that
+// DOM node — so the reply that arrived while you were reading re-collapsed
+// the message you had expanded (fold F8).
+const openBodies = new Set();
+
 function bodyBlock(m) {
   const words = m.body_words || m.body;
-  if (words) return `<div class="body">${esc(words)}</div>`;
+  if (words) {
+    const long = words.split("\n").length > CLAMP_LINES || words.length > CLAMP_CHARS;
+    const open = long && openBodies.has(m.msg_id);
+    return `<div class="body${long ? " clamp" : ""}${open ? " open" : ""}">`
+      + `${esc(words)}</div>`
+      + (long ? `<button class="more" type="button">`
+                + `${open ? "show less" : "show more"}</button>` : "");
+  }
   return `<div class="body redacted">message captured as metadata only`
        + ` (${m.body_bytes} bytes${m.truncated ? ", truncated" : ""})</div>`;
 }
@@ -156,7 +177,7 @@ function threadArticle(t) {
     ? `<span class="tag xfleet" title="sender and recipient are on`
       + ` different fleets">cross-fleet</span>` : "";
   const msgs = t.messages.map((m) => `
-    <div class="msg">
+    <div class="msg" data-msg-id="${esc(m.msg_id)}">
       <div class="who"><b>${esc(m.sender_short)}</b>
         <span class="to">→ ${esc(m.recipient_short || "—")}</span>
         ${CLASS_TAGS.has(m.message_class)
@@ -204,6 +225,38 @@ function renderChannel(env) {
   el.replaceChildren(frag);
 }
 
+// WHY a card needs you, and what clears it — the queue's own arms as the API
+// stamps them (attention_reason / attention_since, from ATTENTION_ARMS_SQL:
+// the query that SELECTED the row also says which arm holds). Reason and
+// remedy are separated by a real dash; every magnitude is the server's
+// instant through ago(), never re-derived here — reading it off the deadline
+// printed "overdue due in 5m" whenever the two clocks disagreed (fold F7).
+// No fallback line: attention IS the disjunction of these three arms, so an
+// attention row always carries at least one (pinned server-side).
+//
+// Each arm dates itself from the server instant that arm is ABOUT: the two
+// send arms from `attention_since` (the dispatch), the deadline arm from the
+// deadline — which is the same field when overdue is the only arm, and the
+// right one when it rides behind a failed send.
+const WHY = {
+  send_failed: (r) => [`send failed ${ago(r.attention_since)}`,
+                       "re-send with --supersedes"],
+  never_activated: (r) => [`queued ${ago(r.attention_since)}, never delivered`,
+                           "re-send with --supersedes, or check the bot is up"],
+  overdue: (r) => [`overdue ${ago(r.expected_by || r.attention_since)}`,
+                   "chase the worker, or re-dispatch with a new deadline"],
+};
+
+function attentionWhy(r) {
+  if (!r.attention) return "";
+  const parts = (r.attention_reason || []).filter((k) => WHY[k]).map((k) => {
+    const [reason, fix] = WHY[k](r);
+    return `${esc(reason)} — <small>${esc(fix)}</small>`;
+  });
+  if (!parts.length) return "";
+  return `<div class="why">⚠ ${parts.join(" · ")}</div>`;
+}
+
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
   if (renderState(taskEl, env,
@@ -218,13 +271,20 @@ function renderTasks(env) {
   badge.textContent = attn.length;
   const card = (r) => {
     const st = TASK_STATUS[r.status] || { label: r.status, cls: "" };
-    const due = dueLabel(r.expected_by);
+    // A finished task has no deadline any more: it reads "completed 1m ago"
+    // (the terminal instant the API stamps); the deadline is an OPEN task's
+    // fact only (chunk L, #1479 — "completed · overdue 1h" was one card).
+    // ENDEDNESS is `terminal_at` itself — the server stamps status and
+    // instant from one row, so a copy of its terminal vocabulary here could
+    // only ever disagree with it (fold F4).
+    const when = r.terminal_at
+      ? `${st.label} ${ago(r.terminal_at)}` : dueLabel(r.expected_by);
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
       <b>${esc(clip(r.title || "", 160) || r.work_item_id)}</b>
       <div class="sub">${esc(r.assignee_short || r.assignee_uid)}`
-      + `${due ? ` · ${esc(due)}` : ""}`
-      + `${r.attention ? " · ⚠ needs you" : ""}</div></div>`;
+      + `${when ? ` · ${esc(when)}` : ""}</div>`
+      + attentionWhy(r) + `</div>`;
   };
   attEl.innerHTML = attn.length ? attn.map(card).join("")
     : stateBlock("idle", null, null, { label: "nothing needs you" });
@@ -246,19 +306,64 @@ function renderFleet(env) {
   }).join("");
 }
 
+// The header in the operator's language (chunk L, #1479): the host's totals
+// — bots, working now, needing you, overdue — WITH the disclosures the cards
+// carry. The page used to sum the fleet rows itself and dropped both of them
+// on the way (fold F5): the unconfirmed share of the bot count, and a live
+// poll that was degraded or gone. The totals are the server's now, summed in
+// one place; this renders them and adds nothing.
+function renderHeader(env) {
+  const el = $("fleet-totals");
+  if (!el) return;
+  if (!env || env.state !== "ok" || !env.data || !env.data.totals) {
+    el.innerHTML = `<b>—</b> bots`;   // §16: never a zero for an absent source
+    return;
+  }
+  const t = env.data.totals;
+  if (!t.fleets) {
+    el.innerHTML = `<span class="dim">no fleet recorded</span>`;
+    return;
+  }
+  el.innerHTML = `<b>${t.bots}</b> bots`
+    + (t.provisional ? ` <small title="actors no registry scan has confirmed`
+        + ` yet — a mistyped dispatch target mints one">(${t.provisional}`
+        + ` unconfirmed)</small>` : "")
+    + ` · <b>${t.working}</b> working`
+    + ` · <b class="${t.attention ? "warn" : ""}">${t.attention}</b> need you`
+    + ` · <b class="${t.overdue ? "warn" : ""}">${t.overdue}</b> overdue`
+    + (t.live_poll !== "ok"
+       ? ` <small class="warn" title="the pane sampler is not answering — the`
+         + ` working count is the recorded half only">live poll`
+         + ` ${esc(t.live_poll)}</small>` : "");
+}
+
+// The machinery rail's host line — from the OVERVIEW's host block, the same
+// envelope the host card renders (fold F6: the rail read /api/summary and the
+// card /api/overview, so the two could disagree by an instant, and the value
+// also sat in a module variable nothing else read). `null` blanks it, for the
+// stream's source-failure path: a stale number is worse than none (§16).
+function renderHostFacts(env) {
+  const el = $("host-facts");
+  if (!el) return;
+  const h = env && env.state === "ok" && env.data ? env.data.host : null;
+  el.textContent = h
+    ? `host ingest ${h.last_ingest_at ? ago(h.last_ingest_at) : "never"}`
+      + ` · rows ${h.rows} · spool ${h.spool_files}`
+    : "host ingest — · rows — · spool —";
+}
+
 function renderSummary(env) {
   const beat = $("beat"), label = $("beat-label");
   if (!env || env.state !== "ok") {
     beat.className = "dot";
     label.textContent = env ? `source ${env.state}` : "view daemon unreachable";
-    $("age").textContent = "—";
     return;
   }
   const d = env.data, prov = env.provenance;
-  $("total").textContent = d.counts.ingest_ledger;
-  $("spool").textContent = d.spool_files;
-  $("age").textContent = prov.last_ingest_at ? ago(prov.last_ingest_at)
-                                             : "never";
+  // the recorder's numbers moved off the header (chunk L, #1479): the header
+  // answers "how is my fleet", not "how is the recorder" — the host card and
+  // the machinery rail keep the latter (the rail's line is renderHostFacts,
+  // off the same overview envelope as the card)
   const fresh = prov.last_ingest_at
     && (Date.now() - Date.parse(prov.last_ingest_at)) < 12e4;
   beat.className = "dot " + (d.daemon_serving ? (fresh ? "ok" : "warn") : "");
@@ -356,6 +461,23 @@ function renderOverview(env) {
   el.innerHTML = cards + host;
 }
 
+$("channel").addEventListener("click", (e) => {
+  const b = e.target.closest("button.more");
+  if (!b) return;
+  // by STRUCTURE, not by sibling order: anything rendered between a body and
+  // its button (a delivery line, a tag) breaks a walk to the button's
+  // previous sibling, and breaks it SILENTLY — the toggle just stops working
+  const msg = b.closest(".msg");
+  const body = msg && msg.querySelector(".body");
+  if (!body) return;
+  const open = body.classList.toggle("open");
+  b.textContent = open ? "show less" : "show more";
+  if (msg.dataset.msgId) {
+    if (open) openBodies.add(msg.dataset.msgId);
+    else openBodies.delete(msg.dataset.msgId);
+  }
+});
+
 // ONE delegated listener for the strip's cards (re-rendered on every refresh;
 // per-card listeners were re-attached each time — simplify lens)
 $("overview").addEventListener("click", (e) => {
@@ -406,6 +528,7 @@ async function refreshBoards() {
   ]);
   if (gen !== generation) return;
   adoptFleets(ov);   // the overview carries the fleet list + default: one door
+  renderHeader(ov); renderHostFacts(ov);
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
   renderFleetTabs();
   renderOverview(ov);   // after the tabs: the strip highlights the pick
@@ -434,10 +557,14 @@ function openStream() {
   };
   es.addEventListener("source", (ev) => {
     // The RECORDER's source went absent/unreadable mid-stream — typed, not
-    // silence (the first version pushed these frames to no listener).
+    // silence (the first version pushed these frames to no listener). The
+    // header and the host line are CLEARED, not left standing: the numbers
+    // they hold came from a source that has stopped answering (§16).
     try {
       const env = JSON.parse(ev.data);
       renderSummary(env);
+      renderHeader(null);
+      renderHostFacts(null);
       renderState($("channel"), env);
     } catch { /* next refresh corrects */ }
   });

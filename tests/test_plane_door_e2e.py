@@ -146,7 +146,7 @@ def test_dispatch_task_armed_lands_the_construct_triple(tmp_path, armed):
     assert wi["title"] == "fix the widget"
     assert tx["event"] == "pane_submitted" and tx["carrier"] == "tmux"
     # §6b activation: a submitted dispatch is OPEN
-    statuses = dict(_rows(tmp_path, TASK_STATUS_SQL))
+    statuses = {r[0]: r[1] for r in _rows(tmp_path, TASK_STATUS_SQL)}
     assert statuses[row["plane_assignment_id"]] == "open"
 
 
@@ -226,7 +226,7 @@ def test_report_back_links_task_facts_and_closes_the_status(tmp_path, armed):
     # bot_tmux_send-class sends is pinned by the pane_send_verified suite and
     # exercised live by the canary.)
     assert txs == ["pane_submitted", "failed"]
-    statuses = dict(_rows(tmp_path, TASK_STATUS_SQL))
+    statuses = {r[0]: r[1] for r in _rows(tmp_path, TASK_STATUS_SQL)}
     assert statuses[row["plane_assignment_id"]] == "completed"
     assert not list(tmp_path.rglob("report-back.jsonl")), "no report ledger, ever"
 
