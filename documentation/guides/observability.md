@@ -11,7 +11,7 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 |----------|---------------|---------|
 | Is the fleet healthy? | Fleet status dashboard | `claudlobby status` |
 | What happened recently? | The plane (`state/plane/plane.db`) | `claudlobby events --critical --tail 20` |
-| Is a specific bot stuck? | The plane's heartbeat samples | `claudlobby status` / `claudlobby events --bot <bot> --type keepalive` |
+| Is a specific bot stuck? | The plane's heartbeat samples | `claudlobby status` (the newest heartbeat) / `claudlobby uptime --bot <bot>` (the history) / `claudlobby events --bot <bot> --source keepalive` (the transitions) |
 | Why did a bot restart? | Keepalive events + journal | `claudlobby events --bot <bot> --type keepalive` |
 | Did a script fail? | Script error events | `claudlobby events --type script_error` |
 | Is a service down? | systemd journal | `journalctl --user -u <BOT_SERVICE> -n 30` |

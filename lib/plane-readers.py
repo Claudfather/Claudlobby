@@ -497,7 +497,7 @@ def keepalive_entries(conn: sqlite3.Connection, fleet: str, bot: str,
 
 
 # --- the workstream registry from the plane (cutover A2) --------------------------
-# workstreams.json is the last file-backed record: {updated, workstreams: {id:
+# the registry the door once wrote as workstreams.json, materialized from the plane: {updated, workstreams: {id:
 # {id, fleet, title, project, status, owner_bot, next, task_ids, refs,
 # opened_ts, last_progress_ts, lease_expires_ts, renewals[, closed_ts]}}}. The
 # plane holds the construct (title, owner, project, opened instant) and the

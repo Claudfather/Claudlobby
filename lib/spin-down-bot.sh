@@ -71,7 +71,7 @@ sd_log() { printf 'spin-down[%s]: %s\n' "$SLUG" "$*"; }
 # sd_log is stdout-only, so it dies with the invoking terminal: the ledger row is
 # the only durable record of WHO tore a bot down and WHY.
 #
-# It goes to the FLEET ledger, not the bot's own data/events, because --purge
+# It is anchored on the FLEET on the plane, not on the bot, because --purge
 # deletes the bot dir — a record written there would die with the very
 # transaction it documents. An explicitly empty bot_dir arg forces
 # emit_fleet_event's fleet-level branch while keeping bot identity explicit.
