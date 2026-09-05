@@ -127,7 +127,7 @@ their own flag). The read side (`brief`, `plane view`) needs no flag.
   (dry-run), `plane cutover` (it refuses before writing), `brief`, `plane view`,
   and the stdlib readers below.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
-  `lib/who-reviewed.py --source plane`) — the
+  `lib/who-reviewed.py`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to
   `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the legacy-id join, the
@@ -181,22 +181,26 @@ writers):
    (`FLEET_JOB_ARMING`). **Since R2a the matcher reads no flag and no
    declaration: it reads the plane alone**, and an unreachable plane REFUSES
    (rc 3, empty stdout) — never a silent fallback — while the watchdog pages a
-   refused reader. Only the `events` readers (`claudlobby events`, brief's
-   alerts, fleet-pulse's escalation) still serve the plane on flag AND
-   declaration; R2b moves them, and R3 removes the flags and this door.
+   refused reader. **R2b-1: every Python reader reads the plane alone** —
+   `claudlobby report-back` / `events` / `workstreams` / `uptime` / `status`,
+   `who-reviewed.py`, and brief's reports, alerts and workstreams sections
+   (one rule, `brief.plane_conn`: no flag, no declaration, no retirement
+   fact, no file; unreachable is not empty). Only fleet-pulse's escalation
+   still reads `PLANE_READ_EVENTS` + the declaration; R2b-2 moves it, and R3
+   removes the flags and this door.
 5. **Retire the writes.** `plane cutover --retire-writes` refuses unless every
    reader is declared and records `legacy_write_retired`. Since R1 no door
    writes a ledger regardless — the plane is the only recorder and
    `PLANE_EMIT_DISABLED=1` the one silencer — so what the record still
    governs is the readers of a RETIRED ledger, which follow the retirement
-   fact itself (chunk C3, `brief.plane_retired_conn`: `legacy_write_retired`
+   fact itself (chunk C3, `brief.plane_retired_conn` — deleted in R2b-1: `legacy_write_retired`
    naming the door, read on the plane — no flag, because a frozen ledger is
-   wrong on the day it freezes): `claudlobby report-back`, brief's unacked
-   reports + `--ack`, `who-reviewed.py --source auto`. Chunk A2 closed the
+   wrong on the day it freezes) — until R2b-1, which moved `claudlobby
+   report-back`, brief's unacked reports + `--ack`, `who-reviewed.py` and the
+   workstream readers to the plane outright (the retirement fact now governs
+   nothing; `retired_doors` goes with R3). Chunk A2 had already closed the
    last file-backed record: the workstream registry is materialized from the
-   plane and its verb events are the writes (`claudlobby workstreams` and
-   brief's section render it from the plane). R2b moves these readers to the
-   plane outright.
+   plane and its verb events are the writes.
 6. **The closure (F18 R1, 2026-09-04 — operator ruling: no JSONL, no shims,
    no backwards compat).** With both fleets retired on every door, the legacy
    WRITERS were removed outright: no door writes a ledger, a per-bot event

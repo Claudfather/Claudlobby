@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 import os
 import subprocess
@@ -18,7 +20,7 @@ from claudlobby.status import (
     _health_indicator,
     _service_display,
     _heartbeat_display,
-    _parse_keepalive_log,
+    _latest_heartbeats,
     _state_display,
     collect_fleet_status,
     format_bot_detail,
@@ -26,6 +28,8 @@ from claudlobby.status import (
     format_table,
 )
 from claudlobby.utilization import load_fleet_state
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 # -- Fixtures ---------------------------------------------------------------
@@ -39,7 +43,7 @@ def mock_paths(tmp_path):
     root = tmp_path / "claudlobby"
     root.mkdir()
     (root / "library").mkdir()
-    (root / "lib").mkdir()
+    (root / "lib").symlink_to(REPO / "lib")   # the install's lib/: every reader rides the matcher's session
     fleet_dir = root / "local" / "test-fleet"
     fleet_dir.mkdir(parents=True)
     runtime = fleet_dir / "runtime" / "bots"
@@ -122,39 +126,83 @@ class TestLoadFleetState:
 # -- _parse_keepalive_log ----------------------------------------------------
 
 
-class TestParseKeepaliveLog:
-    def test_missing_file(self, tmp_path):
-        ts, pane = _parse_keepalive_log(tmp_path)
-        assert ts is None
-        assert pane == ""
+def _land_heartbeats(root, fleet: str, bot: str, states: list[str]) -> None:
+    """Heartbeat samples on a plane under `root`, oldest first, as keepalive
+    lands them (one a minute, ending a minute ago)."""
+    from claudlobby.plane.emit_api import emit_batch
 
-    def test_valid_log(self, tmp_path):
-        log = tmp_path / "keepalive.log"
-        log.write_text("2026-05-16T23:06:47-04:00 IDLE \u2014 at prompt\n")
-        ts, pane = _parse_keepalive_log(tmp_path)
-        assert ts is not None
-        assert ts.year == 2026
-        assert pane == "IDLE"
+    (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    n = len(states)
+    out = emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": fleet,
+                             "occurred_at": (now - timedelta(minutes=n - i)).isoformat(),
+                             "payload": {"subject_kind": "bot_instance", "subject": f"bot:{fleet}/{bot}",
+                                         "metric": "bot.heartbeat", "value": {"state": st}}}
+                            for i, st in enumerate(states)])
+    assert all(o.status == "committed" for o in out), out
 
-    def test_busy_pane(self, tmp_path):
-        log = tmp_path / "keepalive.log"
-        log.write_text("2026-05-16T23:06:47-04:00 BUSY \u2014 working\n")
-        _, pane = _parse_keepalive_log(tmp_path)
-        assert pane == "BUSY"
 
-    def test_empty_file(self, tmp_path):
-        (tmp_path / "keepalive.log").write_text("")
-        ts, pane = _parse_keepalive_log(tmp_path)
-        assert ts is None
+class TestLatestHeartbeats:
+    """F18 closure R2b: the newest bot.heartbeat sample per bot replaces the
+    keepalive.log tail (TestParseKeepaliveLog went with the file)."""
 
-    def test_reads_last_line(self, tmp_path):
-        log = tmp_path / "keepalive.log"
-        log.write_text(
-            "2026-05-16T23:00:00-04:00 IDLE \u2014 at prompt\n"
-            "2026-05-16T23:01:00-04:00 BUSY \u2014 working\n"
-        )
-        _, pane = _parse_keepalive_log(tmp_path)
-        assert pane == "BUSY"
+    def test_no_plane_rows(self, mock_paths):
+        from tests.plane_fixtures import ro
+
+        _land_heartbeats(mock_paths.root, "other-fleet", "zed", ["IDLE"])
+        with ro(mock_paths.root) as conn:
+            assert _latest_heartbeats(conn, "test-fleet") == {}          # another fleet's bot is not ours
+
+    def test_newest_wins_across_case_variant_aliases(self, mock_paths):
+        """`bot:F/ALEX` after `bot:F/alex` mints a second instance; the loop
+        once let the query's LAST row win, so an older sample overwrote a newer
+        one (the R2b-1 adversarial lens). The query yields the two instances in
+        uid order — a hash, unknowable in advance — so the pin first learns
+        which alias the query yields LAST and then lands the OLDER sample under
+        it: last-row-wins must pick the stale state, newest-by-occurred the
+        live one."""
+        from claudlobby.plane.emit_api import emit_batch
+        from claudlobby.plane.queries import LATEST_HEARTBEAT_SQL
+        from tests.plane_fixtures import ro
+
+        (mock_paths.root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+
+        def _sample(bot, state, minutes_ago):
+            return {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "test-fleet",
+                    "occurred_at": (now - timedelta(minutes=minutes_ago)).isoformat(),
+                    "payload": {"subject_kind": "bot_instance", "subject": f"bot:test-fleet/{bot}",
+                                "metric": "bot.heartbeat", "value": {"state": state}}}
+
+        out = emit_batch(mock_paths.root, [_sample("alex", "UNKNOWN", 30), _sample("ALEX", "UNKNOWN", 30)])
+        assert all(o.status == "committed" for o in out), out
+        with ro(mock_paths.root) as conn:
+            order = [r["alias"].split("/")[-1] for r in conn.execute(LATEST_HEARTBEAT_SQL)
+                     if r["alias"].startswith("bot:test-fleet/")]
+        assert sorted(order) == ["ALEX", "alex"], order
+        first, last = order
+        out = emit_batch(mock_paths.root, [_sample(first, "BUSY", 1), _sample(last, "IDLE", 5)])
+        assert all(o.status == "committed" for o in out), out
+        with ro(mock_paths.root) as conn:
+            got = _latest_heartbeats(conn, "test-fleet")
+        assert set(got) == {"alex"} and got["alex"][1] == "BUSY", (order, got)
+
+    def test_newest_sample_wins(self, mock_paths):
+        from tests.plane_fixtures import ro
+
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["IDLE", "BUSY"])
+        with ro(mock_paths.root) as conn:
+            got = _latest_heartbeats(conn, "test-fleet")
+        assert set(got) == {"alice"}
+        ts, pane = got["alice"]
+        assert pane == "BUSY" and ts.tzinfo is not None and (datetime.now(timezone.utc) - ts).total_seconds() < 120
+
+    def test_case_variant_alias_is_the_same_bot(self, mock_paths):
+        from tests.plane_fixtures import ro
+
+        _land_heartbeats(mock_paths.root, "test-fleet", "ALICE", ["BUSY"])
+        with ro(mock_paths.root) as conn:
+            assert _latest_heartbeats(conn, "test-fleet")["alice"][1] == "BUSY"
 
 
 # -- Health indicator --------------------------------------------------------
@@ -462,6 +510,32 @@ class TestCollectFleetStatus:
         # bob does not
         bob = next(bs for bs in results if bs.name == "bob")
         assert bob.tmux_alive is False
+        # no plane under this root: the recorded half is UNKNOWN on every bot,
+        # said so — never rendered as a healthy blank
+        assert alice.plane_unreachable and "plane" in alice.plane_unreachable
+        assert _health_indicator(alice) == "?" and _heartbeat_display(alice) == "unknown"
+        assert alice.busy_pct_24h is None                      # unknown, not 0%
+        assert json.loads(format_json(results, "f"))["bots"][0]["plane_unreachable"]
+        table = format_table(results, "test-fleet")
+        assert "plane is unreachable" in table and "restore state/plane/plane.db" in table
+        assert "plane unreachable" in format_bot_detail(alice)
+
+    def test_the_plane_serves_heartbeat_pane_state_and_utilization(self, mock_fleet, mock_paths):
+        """With a plane: alice's newest sample is BUSY (heartbeat + pane state),
+        her series rolls up to 100% busy; bob, never recorded, is blank."""
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY", "BUSY", "BUSY"])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        bob = next(bs for bs in results if bs.name == "bob")
+        assert not alice.plane_unreachable and alice.pane_state == "BUSY" and alice.last_heartbeat is not None
+        assert alice.busy_pct_24h == 100.0 and alice.current_task_age_secs is not None
+        assert bob.last_heartbeat is None and bob.pane_state == "" and bob.busy_pct_24h == 0.0
+        assert "plane is unreachable" not in format_table(results, "test-fleet")
 
     def test_systemd_check_queries_bot_service_label(self, mock_fleet, mock_paths):
         """#657: on Linux the SVC check must query the BOT_SERVICE unit

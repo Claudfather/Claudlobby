@@ -152,15 +152,9 @@ class TestUnreachableLine:
 
 
 class TestTheRuleIsSharedNotCopied:
-    def test_brief_reexports_these_literals_rather_than_redefining_them(self):
-        """brief.py emits these strings verbatim in its schema-1 envelope. Two
-        definitions is a wire-format fork waiting to happen, so the aliases are
-        asserted identical rather than merely equal-looking."""
-        from claudlobby import brief
-
-        assert brief.LEDGER_OK is SOURCE_OK
-        assert brief.LEDGER_ABSENT is SOURCE_ABSENT
-        assert brief.LEDGER_UNREADABLE is SOURCE_UNREADABLE
+    # test_brief_reexports_these_literals_rather_than_redefining_them was deleted
+    # with brief's LEDGER_* aliases (F18 R2b): brief reads no ledger, so it has
+    # no source state to re-export.
 
     def test_the_envelope_strings_are_unchanged_by_the_extraction(self):
         """The literals are load-bearing for consumers, so pin the VALUES too —

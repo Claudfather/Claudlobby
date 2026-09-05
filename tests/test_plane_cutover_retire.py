@@ -6,7 +6,7 @@ to skip, so the four-fact `plane_write_retired` predicate is gone with it).
 What remains is the epoch: `plane cutover --retire-writes` records
 `legacy_write_retired` once every reader is declared (or forced, with the
 reason), the readers of the once-retired ledgers follow that fact
-(`brief.plane_retired_conn`), and the doctor reads each PLANE_LEGACY_WRITE_*
+(`brief.plane_retired_conn`, deleted in R2b-1 — every reader reads the plane alone), and the doctor reads each PLANE_LEGACY_WRITE_*
 flag against it. R3 retires the door and the flag surface.
 
 Deleted with the shadow (F18 closure, R2a): test_the_shadow_ends_with_the_retirement,
@@ -143,7 +143,7 @@ def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
     reviews = tmp_path / "reviews.json"
     reviews.write_text(json.dumps({"reviews": [], "comments": []}))
     ok = subprocess.run([sys.executable, str(REPO / "lib" / "who-reviewed.py"), "org/repo", "1046",
-                         "--source", "plane", "--root", str(root), "--reviews-json", str(reviews), "--json"],
+                         "--root", str(root), "--reviews-json", str(reviews), "--json"],
                         capture_output=True, text=True, timeout=60)
     assert ok.returncode == 0, ok.stderr
     assert json.loads(ok.stdout)["scope"]["source"] == "plane"
@@ -151,6 +151,6 @@ def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
     rows, why = wr.load_plane_rows(str(root))
     assert rows == [] and "no plane db" in why                                     # unreachable ≠ empty
     gone = subprocess.run([sys.executable, str(REPO / "lib" / "who-reviewed.py"), "org/repo", "1046",
-                           "--source", "plane", "--root", str(root), "--reviews-json", str(reviews)],
+                           "--root", str(root), "--reviews-json", str(reviews)],
                           capture_output=True, text=True, timeout=60)
     assert gone.returncode == 4 and gone.stdout == "" and "unreachable" in gone.stderr

@@ -7,8 +7,11 @@ App-auth #1270) the single `<slug>[bot]`. Either way the per-bot author is not
 recorded on GitHub's side, so no amount of querying GitHub harder will ever
 recover it: fleet-scope App narrows the identity from a human to a bot but does
 not make it per-bot (that is #252). This join stays load-bearing until then. The
-information exists in exactly one place: the per-fleet report-back ledgers, where
-the bot that posted the verdict wrote a row naming itself.
+information exists in exactly one place: the plane, where the report door lands
+the bot's own report as a task event — the actor alias names the bot AND its
+fleet, and the event's detail carries the PR URL the bot cited. (Until the F18
+closure, R2b, the same rows lived in per-fleet report-back ledgers; those are
+gone, and the plane is the ONLY source — no ledger, no `--source` seam.)
 
 Recovering it is a JOIN, and until now every reader hand-rolled that join. Two
 people did it independently on the same PR the same evening and one of them got
@@ -28,15 +31,15 @@ Two rules, both learned from how the manual version actually worked:
 1. MATCH ON `pull/<N>`, NEVER A BARE NUMBER. A bare `1046` collides with task
    ids (`t-1786320833-e1e9` contains digit runs), epoch timestamps, progress
    percentages and issue numbers, and has misattributed a PR on this estate
-   before. Note the shape of the real data: the SAME ledger row carries
+   before. Note the shape of the real data: the SAME report carries
    `pr_url: ".../pull/1046"` and `summary: "Request Changes on #1046"`. The
    first is a match; the second is exactly the ambiguous form that must never
    count. `#N` is not accepted either — only `pull/N`, bounded so `pull/1046`
    cannot be satisfied by `pull/10461`.
 
-2. TIMESTAMP-MATCH WITH A TOLERANCE. The ledger row is written seconds AFTER the
-   review posts — the bot posts, then reports. The two real pairs on #1046 were
-   +12s and +8s. An exact-equality join finds nothing; an unbounded one finds
+2. TIMESTAMP-MATCH WITH A TOLERANCE. The report lands seconds AFTER the review
+   posts — the bot posts, then reports. The two real pairs on #1046 were +12s
+   and +8s. An exact-equality join finds nothing; an unbounded one finds
    everything.
 
 UNMATCHED IS `UNKNOWN`, AND MULTI-MATCHED IS `AMBIGUOUS`. Neither is ever
@@ -52,10 +55,13 @@ Usage:
   --reviews-json <file>   read the GitHub side from a file instead of calling
                           `gh`; this is the seam that keeps the join unit-testable
                           and lets the module run with no network at all
-  --ledger <path>         explicit ledger (repeatable). Without it, every fleet
-                          on the host is discovered under $CLAUDLOBBY_ROOT
-  --tolerance <seconds>   forward window, ledger row after review (default 120)
+  --root <dir>            the claudlobby root whose plane is read (default
+                          $CLAUDLOBBY_ROOT); every fleet on the host is in it
+  --tolerance <seconds>   forward window, report after review (default 120)
   --backward <seconds>    backward allowance for clock skew (default 10)
+
+An unreachable plane REFUSES (rc 4, empty stdout) — never an empty answer, since
+"every review UNKNOWN" is the false all-clear this module exists to stop.
 
 Standalone stdlib module — `dispatch-overdue.py` precedent — so the join is unit
 testable and any bot can call it without importing the compositor package.
@@ -65,7 +71,6 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import glob
 import json
 import os
 import re
@@ -73,8 +78,8 @@ import subprocess
 import sys
 import time
 
-# The ledger row lands after the review posts. Measured on the real pair that
-# motivated this: review 14:22:05Z, ledger 14:22:17Z (+12s); the second pair on
+# The report lands after the review posts. Measured on the real pair that
+# motivated this: review 14:22:05Z, report 14:22:17Z (+12s); the second pair on
 # the same PR was +8s. 120s is generous against those, and deliberately not
 # generous enough to sweep in an unrelated report on a busy PR — a wider window
 # does not produce a better answer, it produces AMBIGUOUS more often, which is
@@ -83,16 +88,17 @@ DEFAULT_TOLERANCE_S = 120
 
 # Clocks are not perfectly aligned and this host has an RTC-less stale-clock
 # window at boot (see selfstart-snapshot.sh). A small backward allowance keeps a
-# genuine pair from being missed because the ledger stamped a second early.
+# genuine pair from being missed because the report was stamped a second early.
 DEFAULT_BACKWARD_S = 10
 
-# Fields scanned for the PR reference. These are the URL-bearing fields written
-# by report-back.sh. `summary` is included because a bot may legitimately cite a
-# `pull/` URL there, but it can only ever match the SAME bounded `pull/<N>` form
-# — the bare `#1046` that also lives in summary text is never a match. The field
-# that matched is reported, so a reader can weigh a `pr_url` hit differently from
-# a prose hit rather than being handed an undifferentiated "matched".
-LEDGER_TEXT_FIELDS = ("pr_url", "issues", "artifact", "summary")
+# Fields scanned for the PR reference — what a report's task event carries in
+# its detail (report-back.sh lands `pr_url` and `summary`). `summary` is
+# included because a bot may legitimately cite a `pull/` URL there, but it can
+# only ever match the SAME bounded `pull/<N>` form — the bare `#1046` that also
+# lives in summary text is never a match. The field that matched is reported,
+# so a reader can weigh a `pr_url` hit differently from a prose hit rather than
+# being handed an undifferentiated "matched".
+ROW_TEXT_FIELDS = ("pr_url", "summary")
 
 
 # ----------------------------------------------------------------------
@@ -180,7 +186,7 @@ def row_pr_match(row: dict, qualified: re.Pattern, bare: re.Pattern):
     the reported basis names the best evidence rather than the first found.
     """
     best = None
-    for field in LEDGER_TEXT_FIELDS:
+    for field in ROW_TEXT_FIELDS:
         value = row.get(field)
         if not isinstance(value, str) or not value:
             continue
@@ -192,91 +198,29 @@ def row_pr_match(row: dict, qualified: re.Pattern, bare: re.Pattern):
 
 
 # ----------------------------------------------------------------------
-# Ledger discovery and loading
+# The rows: the plane's task events — the ONLY source (F18 closure R2b; the
+# door was cut in cutover chunk 6b beside the ledgers, which are gone). A
+# report's `pr_url` rides the task event's detail (not the communication body,
+# which the capture policy may strip), the actor alias names the bot AND its
+# fleet, and the assignment's source_ref carries the legacy task id.
 # ----------------------------------------------------------------------
 
-
-def discover_ledgers(root: str) -> list[tuple[str, str]]:
-    """[(fleet, path)] for every report-back ledger under a claudlobby root.
-
-    Covers all three layouts the estate actually uses: flat `local/<fleet>/`,
-    the nested system container `local/<system>/<fleet>/` that
-    migrate-fleet-to-system.sh produces (and which every fleet on this host
-    currently uses), and root mode `runtime/fleet/`. Missing a layout would
-    silently shrink the search space and turn a real attribution into UNKNOWN,
-    so all three are globbed rather than assuming one.
-    """
-    seen: dict[str, str] = {}
-    patterns = [
-        os.path.join(root, "local", "*", "runtime", "report-back.jsonl"),
-        os.path.join(root, "local", "*", "*", "runtime", "report-back.jsonl"),
-        os.path.join(root, "runtime", "fleet", "report-back.jsonl"),
-    ]
-    for pattern in patterns:
-        for path in glob.glob(pattern):
-            real = os.path.realpath(path)
-            if real in seen:
-                continue
-            # <fleet>/runtime/report-back.jsonl -> the fleet is two levels up.
-            fleet = os.path.basename(os.path.dirname(os.path.dirname(path)))
-            if fleet == "runtime":  # root mode: runtime/fleet/report-back.jsonl
-                fleet = "(root)"
-            seen[real] = fleet
-    return sorted(
-        ((fleet, path) for path, fleet in seen.items()), key=lambda p: (p[0], p[1])
-    )
-
-
-def load_ledger(path: str, fleet: str) -> tuple[list[dict], int]:
-    """(rows, unreadable_line_count) for one ledger.
-
-    A poisoned line is counted and skipped, never dropped silently — #911 is the
-    standing defect that ledger rows can be unparseable, and a join that quietly
-    ignored them would under-report attribution while looking complete.
-    """
-    rows: list[dict] = []
-    bad = 0
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except (ValueError, TypeError):
-                    bad += 1
-                    continue
-                if not isinstance(row, dict):
-                    bad += 1
-                    continue
-                row["_fleet"] = fleet
-                row["_ledger"] = path
-                rows.append(row)
-    except OSError:
-        return ([], -1)  # -1 distinguishes "unreadable file" from "no bad lines"
-    return (rows, bad)
-
-
-# ----------------------------------------------------------------------
-# The join
-# ----------------------------------------------------------------------
-
-
-# ----------------------------------------------------------------------
-# The plane side (cutover chunk 6b): the same join off the plane's task events
-# instead of the report ledgers, so attribution survives the report ledger's
-# retirement. A report's `pr_url` rides the task event's detail (not the
-# communication body, which the capture policy may strip), the actor alias
-# names the bot AND its fleet, and the assignment's source_ref carries the
-# legacy task id. Rows are shaped like ledger rows so `attribute` is untouched.
-# ----------------------------------------------------------------------
-
+# Two legs, one row shape: a report that resolved a task carries its pr_url on
+# the TASK event (the assignment's source_ref names the task id); a report
+# that resolved nothing carries it on the `report_status` marker the report
+# door lands on the bot (no task id). The second leg is what makes an ad-hoc
+# review — work never dispatched with an id — attributable at all (the R2b-1
+# adversarial lens found every such review UNKNOWN once the ledger was gone).
 PLANE_ROWS_SQL = (
     "SELECT e.occurred_at, i.alias, e.event, e.detail, a.source_ref"
     " FROM events e JOIN identity_registry i ON i.uid = e.actor_uid"
     " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
     " WHERE e.kind = 'task' AND e.detail_truncated = 0"
+    " AND json_extract(e.detail, '$.pr_url') IS NOT NULL"
+    " UNION ALL"
+    " SELECT e.occurred_at, i.alias, json_extract(e.detail, '$.status'), e.detail, NULL"
+    " FROM events e JOIN identity_registry i ON i.uid = e.subject_uid"
+    " WHERE e.kind = 'system' AND e.event = 'report_status' AND e.detail_truncated = 0"
     " AND json_extract(e.detail, '$.pr_url') IS NOT NULL"
 )
 
@@ -293,9 +237,9 @@ def _readers():
 
 
 def load_plane_rows(root: str) -> tuple[list[dict], str | None]:
-    """(rows, reason) — rows shaped like ledger rows from the plane's task
-    events that carry a pr_url; reason is set (and rows empty) when the plane
-    is unreachable, which is NOT an empty answer. The `detail_truncated = 0`
+    """(rows, reason) — one row per task event that carries a pr_url; reason
+    is set (and rows empty) when the plane is unreachable, which is NOT an
+    empty answer. The `detail_truncated = 0`
     filter is defensive only: a task event's summary is capped at 4096 bytes
     by the contract, so its detail never reaches the diagnostic cap and no
     row is ever dropped for truncation."""
@@ -325,41 +269,13 @@ def load_plane_rows(root: str) -> tuple[list[dict], str | None]:
             tid = source_ref[len("dispatch-log:"):]
         rows.append({"ts": ts, "bot": bot or "(unnamed)", "status": event, "task_id": tid,
                      "pr_url": data.get("pr_url") or "", "summary": data.get("summary") or "",
-                     "_fleet": fleet, "_ledger": "plane"})
+                     "_fleet": fleet})
     return rows, None
 
 
-def report_write_retired(root: str, fleet: str) -> bool:
-    """Is the fleet's report write retired on the plane (the ledger frozen)?
-    False when the plane cannot say — then the ledger is read and the scope
-    discloses the plane's state."""
-    pr = _readers()
-    try:
-        conn = pr.connect(root)
-    except pr.PlaneUnreachable:
-        return False
-    try:
-        return pr.retired(conn, fleet, "report") is not None
-    except Exception:
-        return False
-    finally:
-        conn.close()
-
-
-def dedupe_rows(rows: list[dict]) -> list[dict]:
-    """One row per (fleet, bot, second): a report the plane and a ledger both
-    hold is one candidate, never two — two identical candidates would read as
-    AMBIGUOUS under the join's own rule. The plane's row wins the tie."""
-    seen: set = set()
-    out: list[dict] = []
-    ordered = sorted(rows, key=lambda r: 0 if r.get("_ledger") == "plane" else 1)
-    for r in ordered:
-        key = (r.get("_fleet"), r.get("bot"), (r.get("ts") or "")[:19])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(r)
-    return out
+# ----------------------------------------------------------------------
+# The join
+# ----------------------------------------------------------------------
 
 
 def attribute_event(
@@ -401,7 +317,7 @@ def attribute_event(
             {
                 "bot": row.get("bot") or "(unnamed)",
                 "fleet": row.get("_fleet"),
-                "ledger_ts": row.get("ts"),
+                "report_ts": row.get("ts"),
                 "delta_s": delta,
                 "field": field,
                 "repo_qualified": is_qualified,
@@ -414,7 +330,7 @@ def attribute_event(
         return {
             **event,
             "verdict": "UNKNOWN",
-            "reason": f"no ledger row cites pull/{event.get('_number')} within "
+            "reason": f"no report cites pull/{event.get('_number')} within "
             f"-{backward}s/+{tolerance}s",
             "candidates": [],
         }
@@ -526,10 +442,8 @@ def _render_text(result: dict) -> str:
     lines = [
         f"who-reviewed {scope['repo']}#{scope['number']}",
         f"  window: -{scope['backward']}s / +{scope['tolerance']}s around each event",
-        f"  ledgers: {scope['ledgers_read']} read, {scope['rows']} rows"
-        + (f", {scope['unreadable']} unreadable" if scope["unreadable"] else "")
-        + (f", {scope['bad_lines']} unparseable rows" if scope["bad_lines"] else ""),
-        f"  fleets: {', '.join(scope['fleets']) or '(none found)'}",
+        f"  plane: {scope['plane']}, {scope['rows']} report(s) citing a PR",
+        f"  fleets: {', '.join(scope['fleets']) or '(none with a report citing a PR)'}",
         "",
     ]
     if not result["events"]:
@@ -543,7 +457,7 @@ def _render_text(result: dict) -> str:
             qual = "repo-qualified" if basis["repo_qualified"] else "pull/N only"
             lines.append(f"{head} → {event['bot']} ({event['fleet']})")
             lines.append(
-                f"      basis: {basis['field']} {qual}, ledger {basis['ledger_ts']} "
+                f"      basis: {basis['field']} {qual}, report {basis['report_ts']} "
                 f"({basis['delta_s']:+d}s)"
             )
         elif event["verdict"] == "AMBIGUOUS":
@@ -551,7 +465,7 @@ def _render_text(result: dict) -> str:
             for cand in event["candidates"]:
                 lines.append(
                     f"      candidate: {cand['bot']} ({cand['fleet']}) "
-                    f"{cand['ledger_ts']} ({cand['delta_s']:+d}s, {cand['field']})"
+                    f"{cand['report_ts']} ({cand['delta_s']:+d}s, {cand['field']})"
                 )
         else:
             lines.append(f"{head} → UNKNOWN — {event['reason']}")
@@ -573,20 +487,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--reviews-json", help="read the GitHub side from a file")
     parser.add_argument(
-        "--ledger",
-        action="append",
-        default=[],
-        help="explicit ledger path (repeatable)",
-    )
-    parser.add_argument(
         "--root",
         default=os.environ.get("CLAUDLOBBY_ROOT", ""),
-        help="claudlobby root for ledger discovery",
+        help="claudlobby root whose plane is read (every fleet on the host)",
     )
-    parser.add_argument("--source", choices=("auto", "ledger", "plane"), default="auto",
-                        help="auto (default, cutover C3): the plane's rows plus the ledgers of fleets"
-                        " whose report write is NOT retired, deduplicated; ledger: the report"
-                        " ledgers only; plane: the plane's task events only (chunk 6b)")
     parser.add_argument("--tolerance", type=int, default=DEFAULT_TOLERANCE_S)
     parser.add_argument("--backward", type=int, default=DEFAULT_BACKWARD_S)
     args = parser.parse_args(argv)
@@ -606,85 +510,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"could not read the review side: {exc}", file=sys.stderr)
         return 3
 
-    # Ledger side
-    rows: list[dict] = []
-    unreadable = 0
-    bad_lines = 0
-    fleets: list = []
-    ledgers: list = []
-    plane_note = None
-    if args.source == "plane":
-        if not args.root:
-            print("--source plane needs --root (or CLAUDLOBBY_ROOT); refusing rather than"
-                  " reporting every review as UNKNOWN", file=sys.stderr)
-            return 4
-        rows, why = load_plane_rows(args.root)
-        if why is not None:
-            print(f"the plane is unreachable ({why}) — not an empty answer; refusing", file=sys.stderr)
-            return 4
-        fleets = sorted({r["_fleet"] for r in rows})
-    elif args.source == "auto":
-        # Cutover C3: the plane holds every report an ARMED fleet made and is the
-        # only record once a fleet's report write is retired; an unarmed fleet's
-        # reports live in its ledger alone. So: the plane's rows, plus the ledgers
-        # of fleets whose write is NOT retired, deduplicated by (fleet, bot,
-        # second) before the AMBIGUOUS rule — the same report seen twice must not
-        # read as two candidates. An unreachable plane is DISCLOSED in the scope
-        # and the ledgers still serve (right for an unflipped fleet, stale for a
-        # flipped one — said so, never silent).
-        if args.root:
-            rows, plane_note = load_plane_rows(args.root)
-            ledgers = [(fleet, path) for fleet, path in
-                       ([(os.path.basename(os.path.dirname(os.path.dirname(p))) or "(explicit)", p) for p in args.ledger]
-                        if args.ledger else discover_ledgers(args.root))
-                       if plane_note is not None or not report_write_retired(args.root, fleet)]
-        elif args.ledger:
-            ledgers = [(os.path.basename(os.path.dirname(os.path.dirname(p))) or "(explicit)", p) for p in args.ledger]
-        else:
-            print("no --ledger given and CLAUDLOBBY_ROOT is unset, so neither the plane nor a"
-                  " ledger could be located; refusing rather than reporting every review as UNKNOWN",
-                  file=sys.stderr)
-            return 4
-    elif args.ledger:
-        ledgers = [
-            (os.path.basename(os.path.dirname(os.path.dirname(p))) or "(explicit)", p)
-            for p in args.ledger
-        ]
-    elif args.root:
-        ledgers = discover_ledgers(args.root)
-    else:
-        print(
-            "no --ledger given and CLAUDLOBBY_ROOT is unset, so no ledger could "
-            "be located; refusing rather than reporting every review as UNKNOWN",
-            file=sys.stderr,
-        )
+    # The plane side — the only source. No root means no plane can be located:
+    # refuse, rather than report every review as UNKNOWN.
+    if not args.root:
+        print("no --root given and CLAUDLOBBY_ROOT is unset, so the plane cannot be located;"
+              " refusing rather than reporting every review as UNKNOWN", file=sys.stderr)
         return 4
-
-    for fleet, path in ledgers:
-        loaded, bad = load_ledger(path, fleet)
-        if bad < 0:
-            unreadable += 1
-            continue
-        bad_lines += bad
-        rows.extend(loaded)
-        fleets.append(fleet)
-    ledgers_read = len(fleets)                      # the FILES read; the plane is not one of them
-    if args.source == "auto":
-        fleets = sorted(set(fleets) | {r["_fleet"] for r in rows if r.get("_ledger") == "plane"})
-        rows = dedupe_rows(rows)
+    rows, why = load_plane_rows(args.root)
+    if why is not None:
+        print(f"the plane is unreachable ({why}) — not an empty answer; refusing", file=sys.stderr)
+        return 4
+    fleets = sorted({r["_fleet"] for r in rows})
 
     result = {
         "scope": {
-            **({"plane": f"unreachable: {plane_note}"} if plane_note else {}),
+            "plane": os.path.join(args.root, "state", "plane", "plane.db"),
             "repo": args.repo,
             "number": args.number,
             "tolerance": args.tolerance,
             "backward": args.backward,
-            "ledgers_read": ledgers_read,
-            "ledgers_found": len(ledgers),
-            "unreadable": unreadable,
-            "bad_lines": bad_lines,
-            "source": args.source,
+            "source": "plane",
             "rows": len(rows),
             "fleets": fleets,
         },

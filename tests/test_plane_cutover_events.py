@@ -5,14 +5,14 @@ hard flip, fix forward), and with R1 the file is GONE: `emit_fleet_event`
 lands every fleet event as a system event anchored on the bot's actor (or the
 fleet) whose detail carries {source, legacy_ts, data}, so the plane re-renders
 the legacy row byte for byte, and writes nothing else — waited on, bounded,
-a failed or reaped emission disclosed as not recorded. The readers —
-`claudlobby events`, brief's alerts, fleet-pulse's escalation + summary —
-follow the flip until R2b: PLANE_READ_EVENTS=1 AND a recorded
-`cutover_declared` for `events`; a flag alone is disclosed; an unreachable
-plane refuses, never reads as quiet. (R2a removed the matcher's legacy side
-and the shadow; the events reader's own flip is untouched here, so its pins
-stay. test_the_events_reader_declares_as_a_direct_move_without_a_gate no
-longer contrasts a shadowed reader: every declaration is a direct move now.)
+a failed or reaped emission disclosed as not recorded. R2b: `claudlobby
+events` and brief's alerts read the plane and NOTHING else — no flag, no
+declaration, no file; an unreachable plane refuses (rc 3 / the section
+omitted), never reads as quiet. fleet-pulse's escalation + summary still ride
+PLANE_READ_EVENTS + the declaration until R2b-2 moves them. (R2a removed the
+matcher's legacy side and the shadow;
+test_the_events_reader_declares_as_a_direct_move_without_a_gate no longer
+contrasts a shadowed reader: every declaration is a direct move now.)
 """
 from __future__ import annotations
 
@@ -270,42 +270,43 @@ def _drop_plane(root):
         p.unlink()
 
 
-def test_claudlobby_events_serves_the_plane_on_flag_and_declaration(tmp_path):
+def test_claudlobby_events_serves_the_plane_and_nothing_else(tmp_path):
+    """No flag, no declaration (F18 closure, R2b): the plane is the only
+    source, whatever PLANE_READ_EVENTS says and whether or not the reader was
+    ever declared; the files' bots-dir gate is gone with the files; an
+    unreachable plane refuses at rc 3 with nothing on stdout."""
     root, paths, _, _ = _scene(tmp_path)
-    paths.runtime_bots.mkdir(parents=True)                         # the command's first gate
+    assert not paths.runtime_bots.exists()                         # the files' first gate: no longer one
     _land(root, "w1", "session_missing", "2026-09-03T10:00:00Z", {"session": "w1"})
     _land(root, "w2", "keepalive", "2026-09-03T10:01:00Z", {"state": "IDLE"}, source="keepalive")
     _land(root, "fleet", "fleet_rescue", "2026-09-03T10:02:00Z", {"rescued": 1})
     _land(root, "w1", "report_status", "2026-09-03T10:03:00Z", {"status": "completed"},
           source="report-back", provenance=False)                  # a report door's marker: NOT a fleet event
-    off = _events_cmd(root, "--json")                              # no flag: the files (none readable -> rc 1)
-    assert off.returncode == 1 and off.stdout == "" and "no event source was readable" in off.stderr
-    flag_only = _events_cmd(root, "--json", PLANE_READ_EVENTS="1")
-    assert flag_only.returncode == 1 and flag_only.stdout == ""    # a flag alone changes nothing
-    assert "no cutover_declared" in flag_only.stderr
-    _declare(root, "events")
-    for off_value in ("0", "true", "yes"):                          # a declaration alone changes nothing either
-        r = _events_cmd(root, "--json", PLANE_READ_EVENTS=off_value)
-        assert r.returncode == 1 and r.stdout == "" and "no cutover_declared" not in r.stderr, off_value
-    assert _events_cmd(root, "--json").returncode == 1
-    rows = _rows(_events_cmd(root, "--json", PLANE_READ_EVENTS="1"))
+    rows = _rows(_events_cmd(root, "--json"))                      # nothing set: the plane
     assert [(r["bot"], r["type"], r["source"]) for r in rows] == [
         ("w1", "session_missing", "pulse"), ("w2", "keepalive", "keepalive"), ("fleet", "fleet_rescue", "pulse")]
     assert rows[0]["ts"] == "2026-09-03T10:00:00Z" and rows[0]["data"] == {"session": "w1"}
     assert {"cutover_declared", "report_status"}.isdisjoint({r["type"] for r in rows})   # provenance, not a name list
-    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--critical", PLANE_READ_EVENTS="1"))] == ["w1"]
-    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--bot", "W2", PLANE_READ_EVENTS="1"))] == ["w2"]
-    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--type", "fleet_rescue", PLANE_READ_EVENTS="1"))] == ["fleet"]
-    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--source", "keepalive", PLANE_READ_EVENTS="1"))] == ["w2"]
-    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--bot", "fleet", PLANE_READ_EVENTS="1"))] == ["fleet"]
-    table = _events_cmd(root, PLANE_READ_EVENTS="1")
+    for flag in ("0", "1", "true", "yes"):                          # the retired flag changes nothing
+        assert _rows(_events_cmd(root, "--json", PLANE_READ_EVENTS=flag)) == rows, flag
+    _declare(root, "events")                                        # nor does a declaration
+    assert _rows(_events_cmd(root, "--json")) == rows
+    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--critical"))] == ["w1"]
+    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--bot", "W2"))] == ["w2"]
+    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--type", "fleet_rescue"))] == ["fleet"]
+    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--source", "keepalive"))] == ["w2"]
+    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--bot", "fleet"))] == ["fleet"]
+    table = _events_cmd(root)
     assert table.returncode == 0 and "session_missing" in table.stdout
     _drop_plane(root)
-    gone = _events_cmd(root, "--json", PLANE_READ_EVENTS="1")
+    gone = _events_cmd(root, "--json")
     assert gone.returncode == 3 and "UNREACHABLE" in gone.stderr and gone.stdout == ""
 
 
-def test_brief_alerts_follow_the_flip_and_omit_when_the_plane_is_unreachable(tmp_path, monkeypatch):
+def test_brief_alerts_read_the_plane_and_omit_when_it_is_unreachable(tmp_path, monkeypatch):
+    """brief's alerts section rides `plane_events_conn`: the plane whatever
+    the retired flag says, and OMITTED with the reason when it cannot be
+    reached — never the files (they hold nothing), never a quiet list."""
     root, paths, _, _ = _scene(tmp_path)
     paths.runtime_bots.mkdir(parents=True)
     now = datetime.now(timezone.utc)
@@ -313,23 +314,20 @@ def test_brief_alerts_follow_the_flip_and_omit_when_the_plane_is_unreachable(tmp
     _land(root, "w1", "session_missing", fresh, {"session": "w1"})
     _land(root, "w1", "keepalive", fresh, {"state": "IDLE"}, source="keepalive")   # a notice is never an alert
     _land(root, "w2", "service_down", fresh, {"unit": "x"})                         # another bot's
-    monkeypatch.setenv("PLANE_READ_EVENTS", "1")
-    degraded = []
-    assert _alerts_section(paths, "w1", int(now.timestamp()), degraded) == []      # flag alone: the files
-    _declare(root, "events")
-    monkeypatch.setenv("PLANE_READ_EVENTS", "0")
-    degraded = []
-    assert _alerts_section(paths, "w1", int(now.timestamp()), degraded) == []      # declaration alone: the files
-    assert not any(d.field == "alerts" and d.mode == "omitted" for d in degraded)
-    monkeypatch.setenv("PLANE_READ_EVENTS", "1")
-    degraded = []
-    alerts = _alerts_section(paths, "w1", int(now.timestamp()), degraded)
-    assert [(a["type"], a["data"]) for a in alerts] == [("session_missing", {"session": "w1"})]
-    assert not any(d.field == "alerts" and d.mode == "omitted" for d in degraded)
+    for flag in (None, "0", "1"):
+        if flag is None:
+            monkeypatch.delenv("PLANE_READ_EVENTS", raising=False)
+        else:
+            monkeypatch.setenv("PLANE_READ_EVENTS", flag)
+        degraded = []
+        alerts = _alerts_section(paths, "w1", int(now.timestamp()), degraded)
+        assert [(a["type"], a["data"]) for a in alerts] == [("session_missing", {"session": "w1"})], flag
+        assert not any(d.field == "alerts" and d.mode == "omitted" for d in degraded), flag
     _drop_plane(root)
     degraded = []
     assert _alerts_section(paths, "w1", int(now.timestamp()), degraded) == []
-    assert any(d.field == "alerts" and d.mode == "omitted" and "unreachable" in d.reason for d in degraded)
+    assert any(d.field == "alerts" and d.mode == "omitted"
+               and ("unreachable" in d.reason.lower() or "no plane db" in d.reason) for d in degraded), degraded
 
 
 def test_plane_lookup_answers_the_events_and_escalation_questions(tmp_path):

@@ -5,7 +5,11 @@ Aggregates live state from four sources:
 1. **fleet-state.json** — canonical bot status (idle/working/blocked/offline)
 2. **tmux** — session presence (alive or not)
 3. **systemd / launchd** — service supervision state
-4. **keepalive.log** — last heartbeat timestamp and pane state (BUSY/IDLE)
+4. **the plane** — the newest ``bot.heartbeat`` sample per bot (last heartbeat
+   + pane state, BUSY/IDLE) and the heartbeat series behind the utilization
+   columns (F18 closure R2b; keepalive.log is gone). A plane that cannot answer
+   renders those columns ``unknown``, flags health ``?`` and says why under the
+   table — never blank-as-healthy.
 
 Output is a one-screen table for the operator's morning check.
 """
@@ -92,9 +96,12 @@ class BotStatus:
     # on a host that is not Linux and has no service label, and "we never asked"
     # must not render as "we asked and it is down".
     service_sub: str = _SVC_UNDETERMINED  # e.g. "running", "exited", "dead"
-    # keepalive
+    # the plane's newest heartbeat sample
     last_heartbeat: datetime | None = None
     pane_state: str = ""  # BUSY/IDLE/UNKNOWN
+    # why the plane could not answer — heartbeat, pane state and utilization
+    # are then UNKNOWN, not absent; "" when it answered
+    plane_unreachable: str = ""
     # utilization (populated by collect_fleet_status)
     busy_pct_24h: float | None = None
     idle_since: datetime | None = None
@@ -194,37 +201,44 @@ def _check_launchd_service(bot_id: str, service_label: str) -> tuple[bool, str]:
         return False, _SVC_UNDETERMINED
 
 
-def _parse_keepalive_log(bot_dir: Path) -> tuple[datetime | None, str]:
-    """Read last line of keepalive.log. Returns (timestamp, pane_state)."""
-    log_path = bot_dir / "keepalive.log"
-    if not log_path.is_file():
-        return None, ""
-    try:
-        # Read last 4KB — enough for the last few lines
-        with open(log_path, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 4096))
-            tail = f.read().decode("utf-8", errors="replace")
-        lines = [l for l in tail.splitlines() if l.strip()]
-        if not lines:
-            return None, ""
-        last = lines[-1]
-        # Format: "2026-05-16T23:06:47-04:00 IDLE — at prompt"
-        #      or "2026-05-16T23:06:47-04:00 BUSY — working"
-        parts = last.split(None, 2)
-        if len(parts) < 2:
-            return None, ""
+def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]:
+    """``{bot name (lower-cased): (instant, BUSY|IDLE|UNKNOWN)}`` — the plane's
+    NEWEST ``bot.heartbeat`` sample per bot, through the presence derivation's
+    own query (``LATEST_HEARTBEAT_SQL``: the newest row per INSTANCE by ledger
+    order). A bot may hold several instances — a case-variant alias mints a
+    second — and across them the sample with the newest ``occurred_at`` (its
+    own instant) wins, falling back to ``ingested_at`` for a row without one;
+    "last row wins" once rendered a live BUSY bot IDLE (the R2b-1 adversarial
+    lens). Presence keeps the ingest clock for freshness; this is the pick."""
+    from .plane.queries import LATEST_HEARTBEAT_SQL
+    import sqlite3
+    prefix = f"bot:{fleet_name}/".lower()
+    out: dict[str, tuple[datetime, str]] = {}
+    cur = conn.cursor()
+    cur.row_factory = sqlite3.Row          # the shared session's connection yields tuples
+    for row in cur.execute(LATEST_HEARTBEAT_SQL):
+        alias = str(row["alias"] or "")
+        if not alias.lower().startswith(prefix):
+            continue
+        stamp = row["occurred_at"] or row["ingested_at"]
         try:
-            ts = datetime.fromisoformat(parts[0])
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+            ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         except ValueError:
-            return None, ""
-        pane = parts[1].rstrip(" —\u2014")
-        return ts, pane
-    except OSError:
-        return None, ""
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        raw = row["value"]
+        try:
+            state = (json.loads(raw) if isinstance(raw, str) else raw or {}).get("state")
+        except (ValueError, AttributeError):
+            state = None
+        key = alias[len(prefix):].lower()
+        # NEWEST wins across a bot's case-variant aliases (a `bot:F/ALEX`
+        # sample after `bot:F/alex` mints a second instance; "last row wins"
+        # rendered a live BUSY bot IDLE — the R2b-1 adversarial lens)
+        if key not in out or ts > out[key][0]:
+            out[key] = (ts, state if isinstance(state, str) else "UNKNOWN")
+    return out
 
 
 def _read_service_label(bot_dir: Path) -> str:
@@ -246,13 +260,30 @@ def collect_fleet_status(
     paths: Paths,
 ) -> list[BotStatus]:
     """Collect status for all bots in the fleet."""
-    from .utilization import compute_bot_utilization, load_fleet_state
+    from .utilization import compute_bot_utilization, fleet_heartbeat_series, load_fleet_state
 
     state_data = load_fleet_state(paths)
     bots_state = state_data.get("bots", {})
     tmux_sessions = _check_tmux_sessions(fleet, paths)
     is_linux = platform.system() == "Linux"
     now = datetime.now(timezone.utc)
+
+    # The plane, opened ONCE: the newest heartbeat per bot (heartbeat + pane
+    # state) and the heartbeat series (utilization). Unreachable is not
+    # empty — every bot then carries the reason and its columns say unknown.
+    heartbeats: dict[str, tuple[datetime, str]] = {}
+    series: dict[str, list[tuple[datetime, str]]] = {}
+    from .brief import plane_session
+    plane, plane_unreachable = plane_session(paths)      # the overlay's fleet, else the manifest's
+    if plane is not None:
+        try:
+            heartbeats = _latest_heartbeats(plane.conn, plane.fleet)
+            series = fleet_heartbeat_series(plane.conn, plane.fleet, now)
+        except Exception as exc:                 # a schema the reader cannot use: say so, never blank
+            plane_unreachable = f"the plane could not answer: {exc}"
+        finally:
+            plane.close()
+    plane_unreachable = plane_unreachable or ""
 
     results: list[BotStatus] = []
 
@@ -278,13 +309,12 @@ def collect_fleet_status(
         elif label:
             bs.service_active, bs.service_sub = _check_launchd_service(bot_id, label)
 
-        # keepalive heartbeat
-        bs.last_heartbeat, bs.pane_state = _parse_keepalive_log(bot_dir)
-
-        # utilization (from keepalive logs)
-        if bot_dir.is_dir():
+        # the plane: heartbeat + pane state, then utilization over the series
+        bs.plane_unreachable = plane_unreachable
+        if not plane_unreachable:
+            bs.last_heartbeat, bs.pane_state = heartbeats.get(bot_id.lower(), (None, ""))
             util = compute_bot_utilization(
-                bot_id, bot_dir, bots_state.get(bot_id, {}), now=now
+                bot_id, series.get(bot_id.lower(), []), bots_state.get(bot_id, {}), now=now
             )
             bs.busy_pct_24h = util.busy_pct_24h
             bs.current_task_age_secs = util.current_task_age_secs
@@ -307,6 +337,11 @@ def _health_indicator(bs: BotStatus) -> str:
         # never undetermined, so the sentinel is only consulted once we know
         # the unit was not reported active.
         return _yellow("?") if bs.service_undetermined else _red("x")
+    if bs.plane_unreachable:
+        # up by tmux and the service, but the recorded half is unreadable:
+        # NOT known healthy (a plane outage read as an all-green fleet is the
+        # founding gap of #1361)
+        return _yellow("?")
     if bs.last_heartbeat:
         age = (
             datetime.now(timezone.utc) - bs.last_heartbeat.astimezone(timezone.utc)
@@ -334,6 +369,8 @@ def _state_display(bs: BotStatus) -> str:
 
 def _heartbeat_display(bs: BotStatus) -> str:
     """Relative heartbeat age."""
+    if bs.plane_unreachable:
+        return _yellow("unknown")
     if bs.last_heartbeat is None:
         return _dim("--")
     age = (
@@ -364,6 +401,8 @@ def _service_display(bs: BotStatus) -> str:
 
 def _tmux_display(bs: BotStatus) -> str:
     if bs.tmux_alive:
+        if bs.plane_unreachable:
+            return "up?"        # alive, pane verdict unknown (the plane is unreachable)
         if bs.pane_state == "BUSY":
             return _green("busy")
         if bs.pane_state == "IDLE":
@@ -396,6 +435,8 @@ def _pad(s: str, width: int) -> str:
 
 def _busy_pct_display(bs: BotStatus) -> str:
     """Busy % today."""
+    if bs.plane_unreachable:
+        return _yellow("?")
     if bs.busy_pct_24h is None:
         return _dim("--")
     pct = f"{bs.busy_pct_24h:.0f}%"
@@ -408,6 +449,8 @@ def _busy_pct_display(bs: BotStatus) -> str:
 
 def _idle_since_display(bs: BotStatus, now: datetime) -> str:
     """Relative idle duration."""
+    if bs.plane_unreachable:
+        return _yellow("?")
     if bs.idle_since is None:
         return _dim("--")
     age = (now - bs.idle_since.astimezone(timezone.utc)).total_seconds()
@@ -418,6 +461,8 @@ def _idle_since_display(bs: BotStatus, now: datetime) -> str:
 
 def _task_age_display(bs: BotStatus) -> str:
     """Current task age."""
+    if bs.plane_unreachable:
+        return _yellow("?")
     if bs.current_task_age_secs is None:
         return _dim("--")
     s = _fmt_duration(bs.current_task_age_secs)
@@ -492,6 +537,12 @@ def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
     undetermined = sum(1 for bs in statuses if bs.service_undetermined)
 
     lines.append("")
+    why = next((bs.plane_unreachable for bs in statuses if bs.plane_unreachable), "")
+    if why:
+        lines.append(_yellow(f"  heartbeat, pane state and utilization: unknown — the plane is"
+                             f" unreachable ({why}); restore state/plane/plane.db or name the"
+                             " right root"))
+        lines.append("")
     summary_parts = [f"{up_count}/{total} up"]
     if undetermined:
         # Without this the shortfall in "N/M up" reads as N-M bots being DOWN.
@@ -513,7 +564,8 @@ def format_bot_detail(bs: BotStatus) -> str:
     lines.append(f"  State:      {_state_display(bs)}")
     lines.append(f"  Service:    {_service_display(bs)} ({bs.service_sub})")
     lines.append(f"  Tmux:       {_tmux_display(bs)}")
-    lines.append(f"  Heartbeat:  {_heartbeat_display(bs)}")
+    lines.append(f"  Heartbeat:  {_heartbeat_display(bs)}"
+                 + (f" (plane unreachable: {bs.plane_unreachable})" if bs.plane_unreachable else ""))
 
     lines.append(f"  Busy 24h:   {_busy_pct_display(bs)}")
     now = datetime.now(timezone.utc)
@@ -546,6 +598,8 @@ def format_json(statuses: list[BotStatus], fleet_name: str) -> str:
                     bs.last_heartbeat.isoformat() if bs.last_heartbeat else None
                 ),
                 "pane_state": bs.pane_state or None,
+                # the reason heartbeat/pane/utilization are unknown, else null
+                "plane_unreachable": bs.plane_unreachable or None,
                 "busy_pct_24h": bs.busy_pct_24h,
                 "idle_since": (bs.idle_since.isoformat() if bs.idle_since else None),
                 "current_task_age_secs": bs.current_task_age_secs,

@@ -294,6 +294,12 @@ EOF_IDLESS
     # progress report resolves no id, so without this marker a long task that
     # reports id-less progress paged as overdue at its deadline) — so it rides
     # the plane as a `report_status` system event on the bot's actor
+    # ...carrying the report's pr_url when it has one: a review posted for work
+    # never dispatched with an id resolves no task, and who-reviewed reads the
+    # marker leg for it (the R2b-1 adversarial lens found every ad-hoc review
+    # unattributable once the ledger was gone).
+    _pr_frag=""
+    [ -n "$pr_url" ] && _pr_frag=",\"pr_url\":\"$(json_escape "$pr_url")\""
     # (alias-resolved at ingest), under the same report-back:<msg> ref, never
     # beside a task event (one fact).
     case ",$events," in
@@ -301,7 +307,7 @@ EOF_IDLESS
         *)
             case "$STATUS" in
                 completed|failed|blocked|progress)
-                    events="$events,{\"event_type\":\"system\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"report_status\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"status\":\"$STATUS\",\"msg_id\":\"$PLANE_MSG_ID\"}}}" ;;
+                    events="$events,{\"event_type\":\"system\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"report_status\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"status\":\"$STATUS\",\"msg_id\":\"$PLANE_MSG_ID\"${_pr_frag:-}}}}" ;;
             esac ;;
     esac
     local _batch

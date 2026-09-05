@@ -4,7 +4,8 @@ there behind a fourth door; the F18 closure's R1 made it the ONLY home).
 same jq programs, one lock), the verb's plane event IS the write, no file is
 ever written, and every reader (`claudlobby workstreams`, brief's section)
 renders the registry from the plane — `plane-readers.workstream_registry`. No
-flag gates this door any more: a plane that cannot serve the registry, or an
+flag gates this door any more, and since R2b no reader consults the
+retirement fact or a file: a plane that cannot serve the registry, or an
 emission the shim could not record, is a REFUSAL (rc 3 / rc 4), never a file.
 """
 from __future__ import annotations
@@ -18,9 +19,7 @@ from pathlib import Path
 
 from claudlobby.brief import _workstream_section
 from claudlobby.config import load_fleet
-from claudlobby.plane import cutover as cut
-from claudlobby.workstreams import registry_path
-from tests.plane_fixtures import F, REPO, _cli, _declare, _env, _scene, _stdlib_readers, ro as _ro
+from tests.plane_fixtures import F, REPO, _env, _scene, _stdlib_readers, ro as _ro
 
 LIB = REPO / "lib"
 CLI = Path(sys.executable).parent / "claudlobby"
@@ -41,10 +40,9 @@ def _ws(root, *args, **extra):
     return r
 
 
-def _retire(root):
-    for reader in cut.READERS:
-        _declare(root, reader)
-    assert _cli(root, "cutover", "--retire-writes").returncode == 0
+def _reg(paths):
+    """Where the registry FILE used to live — asserted absent: nothing writes one."""
+    return paths.fleet_state / "workstreams.json"
 
 
 def _await(root, sql, want, *, timeout=30):
@@ -71,7 +69,7 @@ def test_the_plane_renders_every_verb_the_door_wrote(tmp_path):
     """The whole verb table through the real door, read back through the
     renderer the door itself materializes from — and no file anywhere."""
     root, paths, _, _ = _scene(tmp_path)
-    reg = registry_path(paths)
+    reg = _reg(paths)
     a = _ws(root, "open", "Ship the widget", "--owner", "w1", "--project", "alpha", "--next", "first cut")
     assert a.returncode == 0, a.stderr
     ws_a = a.stdout.strip()
@@ -104,21 +102,20 @@ def test_the_plane_renders_every_verb_the_door_wrote(tmp_path):
     assert plane_reg["updated"] >= e["last_progress_ts"]
 
 
-def test_under_the_retirement_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path):
+def test_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    reg = registry_path(paths)
-    _retire(root)
-    a = _ws(root, "open", "Retired-era work", "--owner", "w2", "--next", "plan it", PLANE_LEGACY_WRITE_WORKSTREAMS="0")
+    reg = _reg(paths)
+    a = _ws(root, "open", "Retired-era work", "--owner", "w2", "--next", "plan it")
     assert a.returncode == 0, a.stderr
     ws_a = a.stdout.strip()
     assert not reg.exists()                                                     # the plane event IS the write
     assert _await(root, "SELECT COUNT(*) FROM workstreams", 1) == 1
-    listing = _ws_cli(root, PLANE_READ_OPEN="1")                                # no flag needed: the retirement is the fact
+    listing = _ws_cli(root)                                                     # no flag, no fact: the plane
     assert listing.returncode == 0 and ws_a in listing.stdout and "w2" in listing.stdout, listing.stdout + listing.stderr
     shown = _ws_cli(root, "show", ws_a)
     assert shown.returncode == 0 and "Retired-era work" in shown.stdout and "plan it" in shown.stdout
-    assert _ws(root, "progress", ws_a, "--next", "build it", PLANE_LEGACY_WRITE_WORKSTREAMS="0").returncode == 0
-    assert _ws(root, "block", ws_a, "--note", "blocked on x", PLANE_LEGACY_WRITE_WORKSTREAMS="0").returncode == 0
+    assert _ws(root, "progress", ws_a, "--next", "build it").returncode == 0
+    assert _ws(root, "block", ws_a, "--note", "blocked on x").returncode == 0
     assert _await(root, "SELECT COUNT(*) FROM events WHERE kind = 'workstream'", 2) == 2
     assert not reg.exists()
     deg = []
@@ -126,18 +123,18 @@ def test_under_the_retirement_the_door_works_with_no_file_and_the_readers_serve_
     section = _workstream_section(fleet, paths, int(time.time()), deg)
     assert section == {"active": [], "stalled": []}                             # blocked: not active — served, not omitted
     assert not any(d.field == "workstreams" for d in deg)
-    assert _ws(root, "close", ws_a, "--status", "done", PLANE_LEGACY_WRITE_WORKSTREAMS="0").returncode == 0
-    pruned = _ws(root, "prune", PLANE_LEGACY_WRITE_WORKSTREAMS="0")
+    assert _ws(root, "close", ws_a, "--status", "done").returncode == 0
+    pruned = _ws(root, "prune")
     assert pruned.returncode == 0 and "Pruned 1" in pruned.stdout
     assert not (root / "local" / F / "runtime" / "workstreams-archive.jsonl").exists()   # the archived event is the archive
     assert _await(root, "SELECT COUNT(*) FROM events WHERE kind = 'workstream' AND event = 'archived'", 1) == 1
     after = _ws_cli(root)
     assert after.returncode == 0 and "No workstreams." in after.stdout
-    # the fact unknown (the plane gone): the file serves, LABELED — and an absent file is then a refusal as before
+    # the plane gone: the reader REFUSES (rc 3) — unreachable is not "No workstreams." (F18 R2b)
     for p in (root / "state" / "plane").glob("plane.db*"):
         p.unlink()
     unknown = _ws_cli(root)
-    assert unknown.returncode == 1 and "may be stale" in unknown.stderr
+    assert unknown.returncode == 3 and unknown.stdout == "" and "UNREACHABLE" in unknown.stderr
 
 
 def test_an_unrecorded_verb_refuses_and_changes_nothing(tmp_path):
@@ -145,7 +142,7 @@ def test_an_unrecorded_verb_refuses_and_changes_nothing(tmp_path):
     not happen, the plane is unchanged, and no file appears — there is
     nothing to land it in any more."""
     root, paths, _, _ = _scene(tmp_path)
-    reg = registry_path(paths)
+    reg = _reg(paths)
     a = _ws(root, "open", "Lost in the post", PLANE_EMIT_CLI="/usr/bin/false")
     assert a.returncode == 4, a.stdout + a.stderr
     assert "did not record this verb" in a.stderr and "nothing changed" in a.stderr

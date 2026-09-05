@@ -1,16 +1,34 @@
-"""claudlobby events — tail/filter JSONL events across all bots."""
+"""claudlobby events — the fleet's events, from the plane and nothing else.
+
+Every fleet event lands on the plane as a system event anchored on the bot's
+actor (or the fleet, or the host) with a ``fleet-events:`` provenance and a
+detail carrying ``{source, legacy_ts, data}`` (F18 R1: the plane is the only
+recorder). The stdlib readers the bash doors ship (``lib/plane-readers.py``)
+render each one back as the row the retired ledgers used to hold, so the
+table and the ``--json`` rows are the shapes they were — ONE rendering,
+shared with ``plane-lookup.py --events`` and fleet-pulse. ``--critical`` is
+the severity the registry stamped at ingest (``SYSTEM_EVENT_SEVERITY``), one
+definition; ``CRITICAL_TYPES`` below is the file-era vocabulary, kept so the
+registry is pinned to agree with it.
+
+There is no file to read (F18 closure, R2b): R1 removed every writer, and a
+reader that could still open one would read nothing at best and the archive
+at worst. There is no flag and no declaration either — the plane is the only
+source. An unreachable plane REFUSES (rc 3, the remedy on stderr): "No events
+found." from an instrument that could not be reached is a claim about the
+estate drawn from nothing, the #1216 class. A reachable plane holding no
+event for the fleet prints that line honestly, at rc 0.
+"""
 
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
-from pathlib import Path
 
-from ..source_state import SOURCE_ABSENT, SOURCE_UNREADABLE, probe_dir, scan_dir
-
-# Critical event types — fleet health problems that need attention.
+# Critical event types — fleet health problems that need attention. The
+# file-era hand list; the plane path filters on the registry's severity, and
+# tests pin that every name here is registered critical.
 CRITICAL_TYPES = {
     "session_missing",
     "service_down",
@@ -25,157 +43,37 @@ CRITICAL_TYPES = {
 
 
 def plane_events_conn(paths):
-    """(conn, note): an OPEN read-only plane connection when the events reader
-    is flipped — PLANE_READ_EVENTS=1 AND a recorded `cutover_declared` for
-    `events`, the two facts every flipped reader needs — else (None, a note
-    or None). ONE open: the declaration check and the read share it (the
-    dispatch matcher's measured fold). Raises RuntimeError when the flag is
-    set and the plane cannot be reached: refused, never read as quiet (Phase
-    B — after the retirement the files hold nothing). The caller closes."""
-    if os.environ.get("PLANE_READ_EVENTS", "0") != "1":
-        return None, None
-    from ..plane import cutover as _cut
-    from ..plane.db import open_ro
-    fleet = paths.fleet_name
-    if not fleet:
-        return None, "PLANE_READ_EVENTS=1 but no fleet is named — serving the ledgers"
-    conn, why = open_ro(paths.root)
-    if conn is None:
-        raise RuntimeError(f"PLANE_READ_EVENTS=1 but the plane is unreachable: {why}")
-    if "events" not in _cut.declared(conn, fleet):
-        conn.close()
-        return None, (f"PLANE_READ_EVENTS=1 but no cutover_declared for {fleet}/events — the flip is"
-                      f" not declared; serving the ledgers (`claudlobby --fleet {fleet} plane cutover --reader events`)")
-    return conn, None
+    """(conn, note): an OPEN read-only plane connection, or ``(None, why)``
+    when the plane cannot answer — ``brief.plane_session``'s rule (no fleet
+    named, no db, an unopenable or schema-less db, a fleet the plane holds no
+    bot of; no flag, no declaration — F18 closure, R2b). The caller closes."""
+    from ..brief import plane_session
+    plane, note = plane_session(paths)
+    if plane is None:
+        return None, note
+    return plane.conn, None
 
 
-def collect_plane_events(conn, paths, *, bot=None, event_type=None, source=None,
-                         critical_only=False, since=None) -> list[dict]:
+def collect_plane_events(conn, paths, *, fleet=None, pr=None, bot=None, event_type=None,
+                         source=None, critical_only=False, since=None) -> list[dict]:
     """The fleet's events from the plane as legacy rows — the same filters and
-    row shape as `collect_events`, through the stdlib readers the bash doors
-    ship (one row rendering; critical = the severity the registry stamped at
-    ingest, one definition). A plane that cannot answer (no identity for the
-    fleet, a db error) raises RuntimeError — the caller's refusal."""
-    from ..brief import load_lib_module
-    pr = load_lib_module(paths, "plane-readers.py")
+    row shape the retired files had, through the stdlib readers the bash
+    doors ship (one row rendering; critical = the severity the registry
+    stamped at ingest, one definition). A plane that cannot answer (no
+    identity for the fleet, a db error) raises RuntimeError — the caller's
+    refusal."""
+    from ..brief import load_lib_module, resolve_fleet_name
+    pr = pr or load_lib_module(paths, "plane-readers.py")
     if pr is None:
         raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
     try:
-        rows = pr.fleet_events(conn, paths.fleet_name, since=since, bot=bot, event_type=event_type)
-    except (pr.PlaneUnreachable, sqlite3.Error) as exc:
+        rows = pr.fleet_events(conn, fleet or resolve_fleet_name(paths), since=since, bot=bot,
+                               event_type=event_type)
+    except (pr.PlaneUnreachable, sqlite3.Error, ValueError) as exc:
         raise RuntimeError(str(exc)) from exc
     return [pr.public(r) for r in rows
             if (not source or r.get("source") == source)
             and (not critical_only or r.get("_severity") == "critical")]
-
-
-def collect_events(
-    bots_dir: Path | str,
-    *,
-    bot: str | None = None,
-    event_type: str | None = None,
-    source: str | None = None,
-    critical_only: bool = False,
-    fleet_events_dir: Path | str | None = None,
-    coverage: dict | None = None,
-) -> list[dict]:
-    """Read JSONL events from all bots and the fleet-level ledger, filtered.
-
-    ``coverage``, when a dict is passed in, is filled with what this read could
-    and could not reach: ``sources_total`` / ``sources_read`` and the ``absent``
-    and ``unreadable`` paths. An out-param rather than a changed return type
-    because ``brief.py`` and eleven tests already consume the list — the caller
-    that wants the bound asks for it, and nothing else has to change.
-
-    The reason it is worth asking for: a bot with no ``data/events`` directory and
-    a bot whose events were all filtered out contribute the same nothing, so
-    ``No events found.`` can mean "the fleet is quiet" or "no instrument has ever
-    written here". Same class as #1216, and here it is a COVERAGE question rather
-    than a refusal — partial data is still worth having, so the read continues and
-    states its floor instead of failing.
-    """
-    bots_dir = Path(bots_dir)
-    events: list[dict] = []
-    absent: list[str] = []
-    unreadable: list[str] = []
-    sources_total = 0
-    sources_read = 0
-
-    # (dir, bot-to-match): per-bot rows are selected by which directory they
-    # came from, so they need no field match. The fleet ledger holds every bot's
-    # rows in one file — plus events that outlive, or never had, a bot dir
-    # (host-job alerts, script_error breadcrumbs, a teardown receipt whose whole
-    # purpose is surviving the dir it documents) — so --bot must key on the row.
-    if bot:
-        bot_dirs = [bots_dir / bot]
-    else:
-        # is_dir() passes for a dir with no execute bit, and iterdir() then
-        # raises — a read door that crashed would trade a false all-clear for
-        # an outage, which source_state exists to refuse.
-        # scan_dir, and its list IS the enumeration — a probe followed by
-        # iterdir() re-opened the directory, and a mid-iteration OSError
-        # after one benign entry dropped bots silently (external round 4).
-        _bots, _entries = scan_dir(bots_dir)
-        if _bots.state == SOURCE_UNREADABLE:
-            unreadable.append(str(bots_dir))
-            bot_dirs = []
-        elif _bots.state == SOURCE_ABSENT:
-            absent.append(str(bots_dir))
-            bot_dirs = []
-        else:
-            bot_dirs = sorted(_entries)
-    ledgers = [(bd / "data" / "events", None) for bd in bot_dirs]
-    if fleet_events_dir is not None:
-        ledgers.append((Path(fleet_events_dir), bot))
-
-    for events_path, want_bot in ledgers:
-        sources_total += 1
-        # Path.glob SWALLOWS the OSError from an unlistable dir and yields
-        # nothing, so is_dir() here counted a dropped source as READ and left
-        # coverage silent. Permissions are the cheap repro; the class is any
-        # OSError on listing.
-        _probe, _files = scan_dir(events_path)
-        if _probe.state == SOURCE_ABSENT:
-            absent.append(str(events_path))
-            continue
-        if _probe.state == SOURCE_UNREADABLE:
-            unreadable.append(str(events_path))
-            continue
-        sources_read += 1
-        for f in sorted(e for e in _files if e.name.endswith(".jsonl")):
-            try:
-                for line in f.read_text().splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        ev = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if want_bot and ev.get("bot") != want_bot:
-                        continue
-                    if event_type and ev.get("type") != event_type:
-                        continue
-                    if source and ev.get("source") != source:
-                        continue
-                    if critical_only and ev.get("type") not in CRITICAL_TYPES:
-                        continue
-                    events.append(ev)
-            except OSError:
-                unreadable.append(str(f))
-                continue
-
-    events.sort(key=lambda e: e.get("ts", ""))
-    if coverage is not None:
-        coverage.update(
-            {
-                "sources_total": sources_total,
-                "sources_read": sources_read,
-                "absent": absent,
-                "unreadable": unreadable,
-            }
-        )
-    return events
 
 
 def format_event_table(events: list[dict]) -> str:
@@ -223,83 +121,29 @@ def format_event_table(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def coverage_line(coverage: dict) -> str:
-    """One line stating what the read could not reach — or "" when it reached all.
-
-    Silent on full coverage on purpose. A bound printed on every healthy run is
-    wallpaper within a week, and a disclosure people have learned to skip is worse
-    than none: it is the same false assurance with an alibi. So this speaks only
-    when the count really is a floor.
-
-    An absent events dir is normal for a bot that has not emitted yet, which is
-    why absence is COUNTED but not itemised, while an unreadable file is named —
-    that one is a fault someone can fix.
-    """
-    total = coverage.get("sources_total", 0)
-    read = coverage.get("sources_read", 0)
-    unreadable = coverage.get("unreadable", [])
-    if not total or (read == total and not unreadable):
-        return ""
-    bits = [f"coverage: read {read} of {total} event source(s)"]
-    # len(absent), NOT total - read. The derivation was exact only while an
-    # unlistable dir was (wrongly) counted as read; once it stopped being, the
-    # arithmetic started describing unreadable sources as absent — the very
-    # conflation this module exists to prevent, inside its own disclosure.
-    n_absent = len(coverage.get("absent", []))
-    if n_absent:
-        bits.append(f"{n_absent} had no events directory")
-    if unreadable:
-        shown = ", ".join(unreadable[:3])
-        more = f" (+{len(unreadable) - 3} more)" if len(unreadable) > 3 else ""
-        bits.append(f"unreadable: {shown}{more}")
-    return " — ".join(bits)
-
-
 def cmd_events(args) -> int:
     """CLI entry point for ``claudlobby events``."""
     from ._helpers import _resolve_paths
 
     paths = _resolve_paths(args)
-    bots_dir = paths.runtime_bots
-
-    _bots_probe = probe_dir(bots_dir)
-    if _bots_probe.state == SOURCE_ABSENT:
-        print(f"No bots directory at {bots_dir}")
-        return 1
-    if _bots_probe.state == SOURCE_UNREADABLE:
-        print(
-            f"Cannot read the bots directory at {bots_dir} — it exists but "
-            "cannot be listed, so 'no events' would be a fabrication."
-        )
-        return 1
-
-    coverage: dict = {}
+    conn, note = plane_events_conn(paths)
+    if conn is None:
+        # rc 3, the unreachable-is-not-empty code every plane reader uses:
+        # nothing is printed on stdout, so a caller cannot read the refusal
+        # as a quiet fleet.
+        print(f"claudlobby events: UNREACHABLE — {note}; restore the plane db"
+              f" (state/plane/plane.db) under {paths.root} or name the right root — no"
+              " event is served rather than a wrong count", file=sys.stderr)
+        return 3
     try:
-        conn, note = plane_events_conn(paths)
+        events = collect_plane_events(conn, paths, bot=args.bot, event_type=args.type,
+                                      source=args.source, critical_only=args.critical,
+                                      since=getattr(args, "since", None))
     except RuntimeError as exc:
         print(f"claudlobby events: UNREACHABLE — {exc}", file=sys.stderr)
         return 3
-    if note:
-        print(f"claudlobby events: {note}", file=sys.stderr)
-    if conn is not None:
-        try:
-            events = collect_plane_events(conn, paths, bot=args.bot, event_type=args.type,
-                                          source=args.source, critical_only=args.critical)
-        except RuntimeError as exc:
-            print(f"claudlobby events: UNREACHABLE — {exc}", file=sys.stderr)
-            return 3
-        finally:
-            conn.close()
-    else:
-        events = collect_events(
-            bots_dir,
-            bot=args.bot,
-            event_type=args.type,
-            source=args.source,
-            critical_only=args.critical,
-            fleet_events_dir=paths.root / "state" / "events",
-            coverage=coverage,
-        )
+    finally:
+        conn.close()
 
     if args.json:
         for ev in events:
@@ -308,20 +152,4 @@ def cmd_events(args) -> int:
         if args.tail:
             events = events[-args.tail :]
         print(format_event_table(events))
-        line = coverage_line(coverage)
-        if line:
-            print(line)
-
-    # Nothing readable at all is a refusal, not a quiet fleet: "No events found."
-    # over zero reachable sources is a claim about the estate drawn from an
-    # instrument that was never wired. Distinct from SOME sources missing, which
-    # is a coverage note above and keeps rc 0 because partial data is still data.
-    if coverage.get("sources_total") and not coverage.get("sources_read"):
-        print(
-            "no event source was readable — the count above is not evidence "
-            "the fleet is quiet",
-            file=sys.stderr if args.json else sys.stdout,
-        )
-        return 1
-
     return 0

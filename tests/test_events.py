@@ -1,132 +1,107 @@
-"""Tests for the claudlobby events subcommand."""
+"""Tests for the claudlobby events subcommand — the plane, and nothing else
+(F18 closure, R2b).
 
-import json
-import os
-from datetime import datetime, timezone
+Every fixture lands its events on a plane under a throwaway root the way the
+door does (`_land`: a system event with the `fleet-events:` provenance and a
+{source, legacy_ts, data} detail); the reader renders them back as the rows
+the retired files held, so the assertions are the old suite's.
+
+Deleted with the files (their subject no longer exists):
+TestCollectEvents.test_skips_malformed_json (ingest validates the detail; a
+truncated one is disclosed — the renderer's pin lives in
+test_plane_cutover_events), TestFleetLedger.test_absent_ledger_is_harmless,
+TestEventCoverageIsStatedNotAssumed (five tests: a coverage floor over file
+sources), TestUnlistableDirectorySources (three) and
+test_late_enumeration_failure_lands_in_unreadable_coverage. The one
+unreachable state left is the plane's, and it REFUSES (rc 3) rather than
+stating a floor: partial data was worth having when the sources were files;
+the plane is one source, reachable or not.
+"""
+
+from __future__ import annotations
+
+import sqlite3
 
 import pytest
 
 from claudlobby.commands.events import (
     CRITICAL_TYPES,
-    collect_events,
+    collect_plane_events,
     format_event_table,
+    plane_events_conn,
 )
+from claudlobby.paths import Paths
+from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
+from tests.plane_fixtures import F, _scene
+from tests.test_plane_cutover_events import _drop_plane, _events_cmd, _land, _rows
 
 
 @pytest.fixture
-def events_dir(tmp_path):
-    """Create a mock bots directory with event files."""
-    bot_dir = tmp_path / "alpha"
-    events = bot_dir / "data" / "events"
-    events.mkdir(parents=True)
-
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    events_file = events / f"fleet-{today}.jsonl"
-
-    lines = [
-        json.dumps(
-            {
-                "ts": "2026-06-10T10:00:00-04:00",
-                "bot": "alpha",
-                "type": "session_missing",
-                "source": "pulse",
-                "data": {"session": "alpha"},
-            }
-        ),
-        json.dumps(
-            {
-                "ts": "2026-06-10T10:05:00-04:00",
-                "bot": "alpha",
-                "type": "service_down",
-                "source": "pulse",
-                "data": {"unit": "com.test.eng.alpha", "state": "failed"},
-            }
-        ),
-        json.dumps(
-            {
-                "ts": "2026-06-10T10:10:00-04:00",
-                "bot": "alpha",
-                "type": "tool_call",
-                "source": "vitals",
-                "data": {"tool": "Read", "event": "PreToolUse"},
-            }
-        ),
-        json.dumps(
-            {
-                "ts": "2026-06-10T10:15:00-04:00",
-                "bot": "alpha",
-                "type": "keepalive",
-                "source": "keepalive",
-                "data": {"state": "IDLE"},
-            }
-        ),
-    ]
-    events_file.write_text("\n".join(lines) + "\n")
-
-    return tmp_path
+def scene(tmp_path):
+    """The old fixture's four rows for `alpha`, on the plane."""
+    root, paths, _, _ = _scene(tmp_path)
+    _land(root, "alpha", "session_missing", "2026-06-10T10:00:00-04:00", {"session": "alpha"})
+    _land(root, "alpha", "service_down", "2026-06-10T10:05:00-04:00",
+          {"unit": "com.test.eng.alpha", "state": "failed"})
+    _land(root, "alpha", "tool_call", "2026-06-10T10:10:00-04:00",
+          {"tool": "Read", "event": "PreToolUse"}, source="vitals")
+    _land(root, "alpha", "keepalive", "2026-06-10T10:15:00-04:00", {"state": "IDLE"}, source="keepalive")
+    return root, paths
 
 
-class TestCollectEvents:
-    def test_collects_all_events(self, events_dir):
-        events = collect_events(events_dir)
-        assert len(events) == 4
+def _collect(paths, **kw):
+    conn, note = plane_events_conn(paths)
+    assert conn is not None, note
+    try:
+        return collect_plane_events(conn, paths, **kw)
+    finally:
+        conn.close()
 
-    def test_filter_by_type(self, events_dir):
-        events = collect_events(events_dir, event_type="service_down")
+
+class TestCollectPlaneEvents:
+    def test_collects_all_events(self, scene):
+        _root, paths = scene
+        assert len(_collect(paths)) == 4
+
+    def test_filter_by_type(self, scene):
+        _root, paths = scene
+        events = _collect(paths, event_type="service_down")
         assert len(events) == 1
         assert events[0]["type"] == "service_down"
 
-    def test_filter_by_bot(self, events_dir):
-        events = collect_events(events_dir, bot="alpha")
-        assert len(events) == 4
+    def test_filter_by_bot(self, scene):
+        _root, paths = scene
+        assert len(_collect(paths, bot="alpha")) == 4
+        assert len(_collect(paths, bot="ALPHA")) == 4          # the alias compare is case-insensitive
 
-    def test_filter_by_bot_no_match(self, events_dir):
-        events = collect_events(events_dir, bot="nonexistent")
-        assert len(events) == 0
+    def test_filter_by_bot_no_match(self, scene):
+        _root, paths = scene
+        assert _collect(paths, bot="nonexistent") == []
 
-    def test_filter_by_source(self, events_dir):
-        events = collect_events(events_dir, source="pulse")
-        assert len(events) == 2
+    def test_filter_by_source(self, scene):
+        _root, paths = scene
+        assert len(_collect(paths, source="pulse")) == 2
 
-    def test_filter_critical_only(self, events_dir):
-        events = collect_events(events_dir, critical_only=True)
-        types = {e["type"] for e in events}
+    def test_filter_critical_only(self, scene):
+        _root, paths = scene
+        types = {e["type"] for e in _collect(paths, critical_only=True)}
         assert "tool_call" not in types
         assert "keepalive" not in types
         assert "session_missing" in types
         assert "service_down" in types
 
-    def test_filter_critical_only_includes_bridge_and_lifecycle_failures(
-        self, tmp_path
-    ):
+    def test_filter_critical_only_includes_bridge_and_lifecycle_failures(self, tmp_path):
         """bridge_down/reload_failed/restart_failed are emit_failure_alert events —
-        operator-actionable, so they must surface under --critical like service_down."""
-        bot_dir = tmp_path / "alpha"
-        events = bot_dir / "data" / "events"
-        events.mkdir(parents=True)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        events_file = events / f"fleet-{today}.jsonl"
-        lines = [
-            json.dumps(
-                {
-                    "ts": "2026-07-06T10:00:00-04:00",
-                    "bot": "alpha",
-                    "type": t,
-                    "source": "s",
-                    "data": {},
-                }
-            )
-            for t in ("bridge_down", "reload_failed", "restart_failed", "send_miss")
-        ]
-        events_file.write_text("\n".join(lines) + "\n")
-
-        result = collect_events(tmp_path, critical_only=True)
-        types = {e["type"] for e in result}
-        assert "bridge_down" in types
-        assert "reload_failed" in types
-        assert "restart_failed" in types
+        operator-actionable, so they must surface under --critical like
+        service_down. On the plane that is the registry's severity, stamped at
+        ingest — one definition for the CLI, brief and fleet-pulse."""
+        root, paths, _, _ = _scene(tmp_path)
+        for i, t in enumerate(("bridge_down", "reload_failed", "restart_failed", "send_miss")):
+            _land(root, "alpha", t, f"2026-07-06T10:0{i}:00-04:00", {}, source="s")
+        types = {e["type"] for e in _collect(paths, critical_only=True)}
+        assert types == {"bridge_down", "reload_failed", "restart_failed"}
         # send_miss is informational (emit_fleet_notice), not operator-actionable
-        assert "send_miss" not in types
+        assert SYSTEM_EVENT_SEVERITY["send_miss"] != "critical"
 
     def test_critical_types_set_contents(self):
         assert {
@@ -137,89 +112,50 @@ class TestCollectEvents:
         } <= CRITICAL_TYPES
         assert "send_miss" not in CRITICAL_TYPES
 
-    def test_events_sorted_by_timestamp(self, events_dir):
-        events = collect_events(events_dir)
-        timestamps = [e["ts"] for e in events]
+    def test_events_sorted_by_timestamp(self, scene):
+        _root, paths = scene
+        timestamps = [e["ts"] for e in _collect(paths)]
         assert timestamps == sorted(timestamps)
 
-    def test_skips_malformed_json(self, events_dir):
-        bad_file = events_dir / "alpha" / "data" / "events" / "bad.jsonl"
-        bad_file.write_text('{"ts":"ok"}\nnot json\n{"ts":"also ok"}\n')
-        events = collect_events(events_dir, bot="alpha")
-        # 4 from fixture + 2 valid from bad file
-        assert len(events) == 6
+    def test_the_rows_are_the_legacy_shape_and_nothing_private_leaks(self, scene):
+        _root, paths = scene
+        row = _collect(paths, event_type="session_missing")[0]
+        assert row == {"ts": "2026-06-10T10:00:00-04:00", "bot": "alpha", "type": "session_missing",
+                       "source": "pulse", "data": {"session": "alpha"}}
 
-    def test_empty_dir_returns_empty(self, tmp_path):
-        bots = tmp_path / "bots"
-        bots.mkdir()
-        assert collect_events(bots) == []
-
-
-@pytest.fixture
-def fleet_ledger(tmp_path):
-    """A fleet-level ledger at <root>/state/events, alongside the bots dir."""
-    ledger = tmp_path / "state" / "events"
-    ledger.mkdir(parents=True)
-    (ledger / "fleet-2026-06-10.jsonl").write_text(
-        "\n".join(
-            json.dumps(ev)
-            for ev in (
-                {
-                    "ts": "2026-06-10T09:00:00-04:00",
-                    "bot": "alpha",
-                    "type": "bot_teardown_started",
-                    "source": "spin-down",
-                    "data": {"action": "spin-down --purge", "actor": "clog"},
-                },
-                {
-                    "ts": "2026-06-10T09:30:00-04:00",
-                    "bot": "fleet",
-                    "type": "reload_failed",
-                    "source": "reload",
-                    "data": {},
-                },
-            )
-        )
-        + "\n"
-    )
-    return ledger
+    def test_a_fleet_with_no_events_yet_is_an_honest_empty(self, tmp_path):
+        """A reachable plane that holds no fleet event for the fleet: nothing
+        — rc 0 and "No events found." — because the instrument was reached
+        and found nothing, the one case that line is true for."""
+        root, paths, _, _ = _scene(tmp_path)               # dispatches and reports, no fleet event
+        assert _collect(paths) == []
+        r = _events_cmd(root)
+        assert r.returncode == 0 and "No events found." in r.stdout
 
 
-class TestFleetLedger:
-    """Events that outlive — or never had — a bot dir live in the fleet ledger.
+class TestFleetLevelRows:
+    """Events that outlive — or never had — a bot dir: a spin-down receipt
+    exists precisely to survive the directory it documents. On the plane they
+    anchor on the FLEET and render as bot `fleet`; --bot keys on the row."""
 
-    Reading only per-bot dirs makes them write-only in practice: a spin-down
-    receipt exists precisely to survive the directory it documents, so a reader
-    blind to that ledger cannot show the one record it was written for.
-    """
-
-    def test_fleet_events_are_collected(self, events_dir, fleet_ledger):
-        events = collect_events(events_dir, fleet_events_dir=fleet_ledger)
-        assert len(events) == 6  # 4 per-bot + 2 fleet-level
-
-    def test_fleet_events_honour_type_filter(self, events_dir, fleet_ledger):
-        events = collect_events(
-            events_dir, event_type="reload_failed", fleet_events_dir=fleet_ledger
-        )
-        assert len(events) == 1
-        assert events[0]["type"] == "reload_failed"
-
-    def test_bot_filter_applies_to_the_shared_ledger(self, events_dir, fleet_ledger):
-        # Per-bot rows are filtered by directory; fleet rows share one file, so
-        # --bot has to key on the field or it would leak other bots' events.
-        events = collect_events(events_dir, bot="alpha", fleet_events_dir=fleet_ledger)
-        assert {e["bot"] for e in events} == {"alpha"}
-        assert any(e["type"] == "bot_teardown_started" for e in events)
-
-    def test_absent_ledger_is_harmless(self, events_dir, tmp_path):
-        events = collect_events(events_dir, fleet_events_dir=tmp_path / "nope")
-        assert len(events) == 4
+    def test_fleet_rows_are_collected_and_filtered(self, scene):
+        root, paths = scene
+        _land(root, "alpha", "bot_teardown_started", "2026-06-10T09:00:00-04:00",
+              {"action": "spin-down --purge", "actor": "clog"}, source="spin-down")
+        _land(root, "fleet", "reload_failed", "2026-06-10T09:30:00-04:00", {}, source="reload")
+        assert len(_collect(paths)) == 6                            # 4 + the receipt + the fleet row
+        only = _collect(paths, event_type="reload_failed")
+        assert len(only) == 1 and only[0]["bot"] == "fleet"
+        mine = _collect(paths, bot="alpha")
+        assert {e["bot"] for e in mine} == {"alpha"}
+        assert any(e["type"] == "bot_teardown_started" for e in mine)
+        assert [e["type"] for e in _collect(paths, bot="fleet")] == ["reload_failed"]
 
 
 class TestFormatEventTable:
-    def test_table_output(self, events_dir):
-        events = collect_events(events_dir)
-        output = format_event_table(events)
+    def test_table_output(self, scene):
+        _root, paths = scene
+        output = format_event_table(_collect(paths))
         assert "alpha" in output
         assert "session_missing" in output
         assert "TIME" in output
@@ -239,236 +175,79 @@ class TestFormatEventTable:
         assert "..." in output
 
 
-class TestEventCoverageIsStatedNotAssumed:
-    """The events half of the class. ``No events found.`` was the same output
-    whether the fleet was quiet or no instrument had ever written — but unlike
-    #1216 this one is a COVERAGE question, not a refusal: partial data is still
-    worth having, so the read continues and states its floor.
-    """
+class TestPlaneEventsConn:
+    """The one contract brief consumes: (conn, None) when the plane can
+    answer, (None, why) when it cannot — and NEVER a flag or a declaration
+    in between (F18 closure, R2b)."""
 
-    def test_full_coverage_says_nothing(self, tmp_path):
-        """Silence on a healthy run is deliberate. A bound printed every time is
-        wallpaper within a week, and a disclosure people have learned to skip is
-        worse than none — it is the same false assurance with an alibi."""
-        from claudlobby.commands.events import collect_events, coverage_line
+    def test_a_reachable_plane_opens_without_any_flag(self, scene, monkeypatch):
+        _root, paths = scene
+        for value in ("0", "1", "true"):
+            monkeypatch.setenv("PLANE_READ_EVENTS", value)             # the retired flag: inert
+            conn, note = plane_events_conn(paths)
+            assert conn is not None and note is None
+            assert conn.execute("PRAGMA query_only").fetchone()[0] == 1   # read-only, structurally
+            conn.close()
+        monkeypatch.delenv("PLANE_READ_EVENTS", raising=False)
+        conn, note = plane_events_conn(paths)
+        assert conn is not None and note is None
+        conn.close()
 
-        ev = tmp_path / "b1" / "data" / "events"
-        ev.mkdir(parents=True)
-        (ev / "fleet-2026-01-01.jsonl").write_text(
-            json.dumps({"ts": "2026-01-01T00:00:00Z", "bot": "b1", "type": "x"}) + "\n"
-        )
-        cov: dict = {}
-        collect_events(tmp_path, coverage=cov)
-        assert cov["sources_read"] == cov["sources_total"]
-        assert coverage_line(cov) == ""
+    def test_no_fleet_named_is_refused(self, scene):
+        root, _paths = scene
+        conn, note = plane_events_conn(Paths(root=root, fleet_dir=None))
+        assert conn is None and "no fleet is named" in note
 
-    def test_a_bot_with_no_events_dir_is_counted_as_unread(self, tmp_path):
-        from claudlobby.commands.events import collect_events, coverage_line
+    def test_no_db_is_refused(self, tmp_path):
+        root = tmp_path / "root"
+        (root / "local" / F).mkdir(parents=True)
+        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / F))
+        assert conn is None and "no plane db" in note
 
-        (tmp_path / "b1" / "data" / "events").mkdir(parents=True)
-        (tmp_path / "b2").mkdir()  # never emitted — no data/events
-        cov: dict = {}
-        collect_events(tmp_path, coverage=cov)
-        assert cov["sources_total"] == 2
-        assert cov["sources_read"] == 1
-        line = coverage_line(cov)
-        assert "read 1 of 2" in line
-        assert "no events directory" in line
+    def test_a_schema_less_db_is_refused(self, tmp_path):
+        root = tmp_path / "root"
+        (root / "local" / F).mkdir(parents=True)
+        (root / "state" / "plane").mkdir(parents=True)
+        with sqlite3.connect(root / "state" / "plane" / "plane.db") as c:
+            c.execute("CREATE TABLE x (a)")
+        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / F))
+        assert conn is None and note
 
-    def test_zero_readable_sources_is_a_refusal_not_a_quiet_fleet(self, tmp_path):
-        """The one case that must be loud: "No events found." over ZERO reachable
-        sources is a claim about the estate drawn from an instrument that was
-        never wired."""
-        from claudlobby.__main__ import main
+    def test_a_fleet_the_plane_never_saw_is_refused_not_quiet(self, scene):
+        root, _paths = scene
+        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / "ghost"))
+        assert conn is None and "no bot of fleet 'ghost'" in note
 
-        fleet = tmp_path / "local" / "f1"
-        (fleet / "runtime" / "bots" / "b1").mkdir(parents=True)
-        (fleet / "fleet.yaml").write_text("fleet:\n  name: f1\n  bots: {}\n")
-        (tmp_path / "library").mkdir()
-        (tmp_path / "lib").mkdir()
-
-        rc = main(["--root", str(tmp_path), "--fleet", "f1", "events"])
-        assert rc == 1
-
-    def test_partial_coverage_keeps_rc_zero(self, tmp_path):
-        """Partial is not a failure — the rows that WERE read are real, and
-        refusing would throw away good data to protest missing data."""
-        from claudlobby.__main__ import main
-
-        fleet = tmp_path / "local" / "f1"
-        bots = fleet / "runtime" / "bots"
-        ev = bots / "b1" / "data" / "events"
-        ev.mkdir(parents=True)
-        (ev / "fleet-2026-01-01.jsonl").write_text(
-            json.dumps({"ts": "2026-01-01T00:00:00Z", "bot": "b1", "type": "x"}) + "\n"
-        )
-        (bots / "b2").mkdir()
-        (fleet / "fleet.yaml").write_text("fleet:\n  name: f1\n  bots: {}\n")
-        (tmp_path / "library").mkdir()
-        (tmp_path / "lib").mkdir()
-
-        rc = main(["--root", str(tmp_path), "--fleet", "f1", "events"])
-        assert rc == 0
-
-    def test_an_unreadable_file_is_named_rather_than_merely_counted(self, tmp_path):
-        """An absent events dir is normal for a bot that has not emitted yet, so
-        it is counted. An unreadable FILE is a fault someone can fix, so it is
-        named."""
-        from claudlobby.commands.events import collect_events, coverage_line
-
-        if os.geteuid() == 0:
-            pytest.skip("root ignores the mode bits")
-        ev = tmp_path / "b1" / "data" / "events"
-        ev.mkdir(parents=True)
-        bad = ev / "fleet-2026-01-01.jsonl"
-        bad.write_text("{}\n")
-        bad.chmod(0o000)
-        try:
-            cov: dict = {}
-            collect_events(tmp_path, coverage=cov)
-            assert cov["unreadable"] == [str(bad)]
-            assert "unreadable:" in coverage_line(cov)
-            assert str(bad) in coverage_line(cov)
-        finally:
-            bad.chmod(0o644)
-
-    def test_coverage_is_opt_in_so_existing_callers_are_untouched(self, tmp_path):
-        """brief.py and eleven tests consume the list return. The bound is an
-        out-param precisely so nothing else had to change."""
-        from claudlobby.commands.events import collect_events
-
-        (tmp_path / "b1" / "data" / "events").mkdir(parents=True)
-        assert collect_events(tmp_path) == []
+    def test_an_empty_plane_root_refuses_rather_than_creating_a_db(self, tmp_path):
+        """A read door on a typo'd root must not open an empty plane and
+        report everything missing (the J1 exists-before-connect finding)."""
+        root, _paths, _, _ = _scene(tmp_path)                         # a real plane, then the wrong root
+        wrong = tmp_path / "elsewhere"
+        (wrong / "local" / F).mkdir(parents=True)
+        conn, note = plane_events_conn(Paths(root=wrong, fleet_dir=wrong / "local" / F))
+        assert conn is None and "no plane db" in note
+        assert not (wrong / "state" / "plane" / "plane.db").exists()
+        assert (root / "state" / "plane" / "plane.db").exists()
 
 
-class TestUnlistableDirectorySources:
-    """A directory that stats fine and raises on iteration (#1227 review).
+class TestTheCommandRefuses:
+    def test_an_unreachable_plane_is_rc_3_with_nothing_on_stdout(self, scene):
+        """"No events found." over an instrument that could not be reached
+        is a claim about the estate drawn from nothing — the #1216 class."""
+        root, _paths = scene
+        assert _rows(_events_cmd(root, "--json"))                          # reachable: rows
+        _drop_plane(root)
+        gone = _events_cmd(root, "--json")
+        assert gone.returncode == 3 and gone.stdout == ""
+        assert "UNREACHABLE" in gone.stderr and "no plane db" in gone.stderr
+        table = _events_cmd(root)
+        assert table.returncode == 3 and table.stdout == ""                # the table mode refuses the same way
 
-    ``is_dir()`` passes for a dir with no execute bit, and ``Path.glob``
-    SWALLOWS the resulting OSError and yields nothing — so the source is
-    counted as read, holding zero rows. Permissions are the cheap repro; the
-    class is any OSError on listing (a bad chmod -R, a partial restore, EIO
-    from failing storage — this host runs on SD).
-    """
-
-    def test_an_unlistable_events_dir_is_named_rather_than_counted_as_read(
-        self, tmp_path
-    ):
-        from claudlobby.commands.events import collect_events, coverage_line
-
-        if os.geteuid() == 0:
-            pytest.skip("root ignores the mode bits")
-        for b in ("a", "b"):
-            d = tmp_path / b / "data" / "events"
-            d.mkdir(parents=True)
-            (d / "fleet-2026-01-01.jsonl").write_text(
-                json.dumps(
-                    {"ts": "2026-01-01T00:00:00Z", "bot": b, "type": "fleet_alert"}
-                )
-                + "\n"
-            )
-        bad = tmp_path / "b" / "data" / "events"
-        bad.chmod(0o000)
-        try:
-            with pytest.raises(OSError):  # the mutation really did apply
-                list(bad.iterdir())
-            cov: dict = {}
-            collect_events(tmp_path, coverage=cov)
-            assert cov["unreadable"] == [str(bad)]
-            assert cov["sources_read"] == 1, "an unlistable dir must not count as read"
-            assert str(bad) in coverage_line(cov)
-        finally:
-            bad.chmod(0o755)
-
-    def test_an_unlistable_bots_dir_refuses_rather_than_raising(self, tmp_path):
-        """source_state's own rule: a read door that crashed would trade a false
-        all-clear for an outage."""
-        from claudlobby.commands.events import collect_events
-
-        if os.geteuid() == 0:
-            pytest.skip("root ignores the mode bits")
-        (tmp_path / "a" / "data" / "events").mkdir(parents=True)
-        tmp_path.chmod(0o000)
-        try:
-            cov: dict = {}
-            events = collect_events(tmp_path, coverage=cov)
-            assert events == []
-            assert cov["unreadable"] == [str(tmp_path)]
-        finally:
-            tmp_path.chmod(0o755)
-
-
-    def test_an_unlistable_dir_is_not_described_as_having_no_events_directory(
-        self, tmp_path
-    ):
-        """The absent count was derived as total-read, which was exact only
-        while unreadable dirs were (wrongly) counted as read. Fixing that made
-        the derivation over-count, so the line called an unreadable source
-        absent — this PR's own conflation, inside its own disclosure."""
-        from claudlobby.commands.events import collect_events, coverage_line
-
-        if os.geteuid() == 0:
-            pytest.skip("root ignores the mode bits")
-        for b in ("a", "b"):
-            (tmp_path / b / "data" / "events").mkdir(parents=True)
-        bad = tmp_path / "b" / "data" / "events"
-        bad.chmod(0o000)
-        try:
-            cov: dict = {}
-            collect_events(tmp_path, coverage=cov)
-            line = coverage_line(cov)
-            assert "unreadable:" in line
-            assert "had no events directory" not in line, (
-                f"an unreadable dir was reported as absent: {line}"
-            )
-        finally:
-            bad.chmod(0o755)
-
-
-def test_late_enumeration_failure_lands_in_unreadable_coverage(
-    tmp_path, monkeypatch
-):
-    """External round 4: probe-then-glob let a mid-iteration OSError drop an
-    events ledger silently AFTER sources_read counted it clean. scan_dir's
-    list is now the enumeration — a late failure lands the bots dir in
-    unreadable coverage, never a falsely clean sweep."""
-    import errno
-    import types
-
-    from claudlobby import source_state
-    from claudlobby.commands.events import collect_events
-
-    bots = tmp_path / "bots"
-    live = bots / "live" / "data" / "events"
-    live.mkdir(parents=True)
-    (live / "events.jsonl").write_text('{"event": "x"}\n')
-    (bots / "benign").mkdir()
-
-    real = source_state.os.scandir
-
-    class _It:
-        def __init__(self):
-            self._sent = False
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            if not self._sent:
-                self._sent = True
-                return types.SimpleNamespace(path=str(bots / "benign"))
-            raise OSError(errno.EIO, "later readdir failed")
-
-    monkeypatch.setattr(
-        source_state.os, "scandir",
-        lambda p: _It() if str(p) == str(bots) else real(p))
-    coverage: dict = {}
-    rows = collect_events(bots, coverage=coverage)
-    assert str(bots) in coverage["unreadable"]
-    assert rows == []
+    def test_a_missing_bots_dir_is_not_a_gate_any_more(self, tmp_path):
+        """The files' first gate ("No bots directory", rc 1) guarded a walk
+        that no longer happens; the plane's identity probe is the gate."""
+        root, paths, _, _ = _scene(tmp_path)
+        assert not paths.runtime_bots.exists()
+        _land(root, "w1", "session_missing", "2026-09-03T10:00:00Z", {"session": "w1"})
+        rows = _rows(_events_cmd(root, "--json"))
+        assert [(r["bot"], r["type"]) for r in rows] == [("w1", "session_missing")]

@@ -116,7 +116,7 @@ def test_a_re_import_of_a_live_idless_row_adds_nothing(tmp_path):
     attributable through the report ledger and are skipped, disclosed)."""
     from datetime import datetime, timezone
     from pathlib import Path
-    from claudlobby.brief import dispatch_ledger_path, report_ledger_path
+    from claudlobby.commands.plane import dispatch_ledger_path, report_ledger_path
     from claudlobby.plane.legacy_import import apply_import, plan_import
     root, paths, d, r = _scene(tmp_path)
     ts = "2026-09-02T11:00:00Z"

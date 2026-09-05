@@ -1,16 +1,21 @@
-"""Cutover chunk C3 — the readers of the RETIRED ledgers move to the plane.
-With the dispatch, report and events writes retired (Phase C), four readers
-still opened a frozen file and answered from the past: `claudlobby
-report-back`, brief's unacked reports + `--ack`, `who-reviewed.py`'s default
-source, and the supersede hint's task texts. Each now follows the retirement
-fact itself (`legacy_write_retired` naming the door, read on the plane —
-`brief.plane_retired_conn`), never a new flag: a frozen ledger is wrong on the
-day it freezes. The row shapes are the legacy ones, `ts` in the legacy form,
-so every consumer and every brief cursor keeps working. (F18 R2a: the
-matcher's legacy side and the shadow are gone; the supersede hint reads the
-plane unconditionally now — test_the_supersede_hint_reads_its_task_texts_from_the_plane_once_flipped
-→ test_the_supersede_hint_reads_its_task_texts_from_the_plane, and its stdlib
+"""The readers of the report rows serve the PLANE — the only source since
+the F18 closure (R2b): `claudlobby report-back` and brief's unacked reports
++ `--ack` read `plane-readers.report_rows` with no ledger probe, no
+retirement fact and no file; an unreachable plane REFUSES (rc 3) or OMITS
+the section, never an empty answer. The row shapes are the legacy ones, `ts`
+in the legacy form, so every consumer and every brief cursor keeps working.
+(Cutover C3 introduced these readers behind the retirement fact; R2b removed
+the fact. F18 R2a: the supersede hint reads the plane unconditionally —
+test_the_supersede_hint_reads_its_task_texts_from_the_plane, and its stdlib
 half is test_the_planes_task_texts_carry_the_dispatch_text.)
+
+Deleted with the ledgers (R2b): test_plane_retired_conn_is_the_one_door_fact
+(the door is gone — `brief.plane_conn` replaces it, pinned in test_brief),
+test_who_reviewed_auto_joins_the_plane_with_the_unretired_ledgers_and_dedupes
+(`--source auto` and the ledger sources went with who-reviewed's plane-only
+rewrite), and the "not retired: the ledger" halves of the report-back / brief
+tests (→ test_report_back_serves_the_plane,
+test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing).
 """
 from __future__ import annotations
 
@@ -23,20 +28,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from claudlobby.brief import _reports_section, plane_retired_conn, read_cursor, write_cursor
-from claudlobby.plane import cutover as cut
+from claudlobby.brief import _reports_section, read_cursor, write_cursor
 from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import F, REPO, _cli, _declare, _env, _report, _scene, _stdlib_readers, ro as _ro
-from tests.test_plane_cutover_parity import _rrow, _write
+from tests.plane_fixtures import F, REPO, _env, _report, _scene, _stdlib_readers, ro as _ro
 
 LIB = REPO / "lib"
 TERMINAL = {"completed", "failed", "blocked"}
-
-
-def _retire(root):
-    for reader in cut.READERS:
-        _declare(root, reader)
-    assert _cli(root, "cutover", "--retire-writes").returncode == 0
 
 
 def _drop_plane(root):
@@ -123,166 +120,73 @@ def test_a_stripped_body_is_disclosed_never_invented(tmp_path):
 
 # --- claudlobby report-back --------------------------------------------------------
 
-def test_report_back_serves_the_plane_once_the_report_write_is_retired(tmp_path):
+def test_report_back_serves_the_plane(tmp_path):
     root, paths, d, r = _scene(tmp_path)
     wi2, asg2 = "wi_" + "2".rjust(32, "0"), "asg_" + "2".rjust(32, "0")
     msg = _report(root, wi2, asg2, "2026-09-02T12:00:00Z", event="completed",
                   extra={"summary": "shipped it", "pr_url": "https://github.com/o/r/pull/7"})
-    r.append(_rrow("2026-09-02T12:00:00Z", "t-2-bbbb", "completed", summary="shipped it",
-                   pr_url="https://github.com/o/r/pull/7", plane_msg_id=msg))
-    from claudlobby.brief import report_ledger_path
-    _write(report_ledger_path(paths), r)
-    before = _rows_of(_report_back(root, "--json"))                                 # not retired: the ledger
-    assert [x["task_id"] for x in before] == ["t-1-aaaa", "t-2-bbbb"]
-    _retire(root)
-    after = _rows_of(_report_back(root, "--json"))                                  # retired: the plane
-    assert [x["task_id"] for x in after] == ["t-1-aaaa", "t-2-bbbb"]
-    same = {"ts", "bot", "task_id", "status", "summary", "pr_url", "plane_msg_id"}
-    assert {k: before[1][k] for k in same} == {k: after[1][k] for k in same}         # the same row, either source
-    assert set(after[1]) == set(before[1])                                           # the same keys
+    rows = _rows_of(_report_back(root, "--json"))
+    assert [x["task_id"] for x in rows] == ["t-1-aaaa", "t-2-bbbb"]
+    assert set(rows[1]) == set(_stdlib_readers().REPORT_FIELDS)                     # the legacy row, private keys stripped
+    assert (rows[1]["summary"], rows[1]["pr_url"], rows[1]["plane_msg_id"]) == \
+        ("shipped it", "https://github.com/o/r/pull/7", msg)
     assert [x["task_id"] for x in _rows_of(_report_back(root, "--json", "--bot", "w1", "--status", "completed"))] == ["t-1-aaaa", "t-2-bbbb"]
-    assert _rows_of(_report_back(root, "--json", "--since", "2026-09-02T11:30:00Z")) and \
-        [x["task_id"] for x in _rows_of(_report_back(root, "--json", "--since", "2026-09-02T11:30:00Z"))] == ["t-2-bbbb"]
+    assert [x["task_id"] for x in _rows_of(_report_back(root, "--json", "--since", "2026-09-02T11:30:00Z"))] == ["t-2-bbbb"]
     table = _report_back(root)
     assert table.returncode == 0 and "shipped it" in table.stdout and "2 event(s)" in table.stdout
     none = _report_back(root, "--bot", "nobody")
-    assert none.returncode == 0 and "0 event(s) matched" in none.stdout and "the plane (the report ledger is retired)" in none.stdout
+    assert none.returncode == 0 and "0 event(s) matched" in none.stdout and f"the plane (fleet {F})" in none.stdout
     _drop_plane(root)
     gone = _report_back(root, "--json")
-    assert gone.returncode == 0 and gone.stdout != ""                              # the fact cannot be read: the ledger, LABELED
-    assert "may be stale" in gone.stderr
+    assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr    # unreachable is not empty
 
 
-def test_report_back_refuses_when_the_plane_cannot_answer_under_a_retirement(tmp_path, monkeypatch):
+def test_report_back_refuses_when_the_matcher_is_unreachable(tmp_path):
+    """Every reader rides the install's matcher session (R2b-1 fold): a lib/
+    without it cannot answer, and the command REFUSES — never an empty table."""
     root, paths, _, _ = _scene(tmp_path)
-    from claudlobby.brief import report_ledger_path
-    report_ledger_path(paths).write_text("")      # the command still probes the ledger BEFORE the plane (R2b's)
-    _retire(root)
-    (root / "lib").unlink()                                                          # the readers are not reachable
+    (root / "lib").unlink()
     (root / "lib").mkdir()
-    (root / "lib" / "dispatch-overdue.py").symlink_to(REPO / "lib" / "dispatch-overdue.py")
+    (root / "lib" / "plane-readers.py").symlink_to(REPO / "lib" / "plane-readers.py")
     gone = _report_back(root, "--json")
     assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr
 
 
 # --- brief: unacked reports + --ack ---------------------------------------------------
 
-def test_brief_unacked_follows_the_retirement_and_the_cursor_keeps_comparing(tmp_path):
+def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path):
     root, paths, d, r = _scene(tmp_path)
-    from claudlobby.brief import report_ledger_path
     wi2, asg2 = "wi_" + "2".rjust(32, "0"), "asg_" + "2".rjust(32, "0")
-    m1 = _report(root, wi2, asg2, "2026-09-02T12:00:00Z", event="completed", extra={"summary": "one"})
-    r.append(_rrow("2026-09-02T12:00:00Z", "t-2-bbbb", "completed", summary="one", plane_msg_id=m1))
-    _write(report_ledger_path(paths), r)
+    _report(root, wi2, asg2, "2026-09-02T12:00:00Z", event="completed", extra={"summary": "one"})
     deg = []
-    before = _reports_section(paths, None, TERMINAL, deg)                          # the ledger
-    assert [x["summary"] for x in before["unacked"]] == ["done", "one"] and "source" not in before
+    before = _reports_section(paths, None, TERMINAL, deg)
+    assert before["source"] == "plane"
+    assert [(x["task_id"], x["summary"]) for x in before["unacked"]] == [("t-1-aaaa", ""), ("t-2-bbbb", "one")]
     write_cursor(paths, "mgr", before["unacked"][-1]["ts"])                          # the legacy-form cursor
-    _retire(root)
     deg = []
-    after = _reports_section(paths, read_cursor(paths, "mgr"), TERMINAL, deg)       # the plane
-    assert after["source"] == "plane" and after["unacked"] == []                     # everything acked, on both sides
-    m2 = _report(root, wi2, asg2, "2026-09-02T12:00:01Z", event="failed", extra={"summary": "two"})
+    after = _reports_section(paths, read_cursor(paths, "mgr"), TERMINAL, deg)
+    assert after["unacked"] == []                                                    # everything acked
+    _report(root, wi2, asg2, "2026-09-02T12:00:01Z", event="failed", extra={"summary": "two"})
     deg = []
     later = _reports_section(paths, read_cursor(paths, "mgr"), TERMINAL, deg)
     assert [(x["summary"], x["status"], x["ts"]) for x in later["unacked"]] == [("two", "failed", "2026-09-02T12:00:01Z")]
     assert not any(x.field == "reports" and x.mode == "omitted" for x in deg)
     _drop_plane(root)
     deg = []
-    unknown = _reports_section(paths, read_cursor(paths, "mgr"), TERMINAL, deg)      # the fact cannot be read: ledger, LABELED
-    assert "source" not in unknown and any(x.field == "reports" and x.mode == "labeled" and "may be stale" in x.reason for x in deg)
+    assert _reports_section(paths, read_cursor(paths, "mgr"), TERMINAL, deg) == {}    # unreachable: omitted, never 0
+    assert any(x.field == "reports" and x.mode == "omitted" and x.issue == "#1467" for x in deg)
 
 
-def test_brief_omits_the_section_when_the_plane_cannot_answer_under_a_retirement(tmp_path):
+def test_brief_omits_the_section_when_the_matcher_is_unreachable(tmp_path):
+    """Every plane read rides the install's matcher session (R2b-1 fold): an
+    install whose lib/ lacks it cannot answer, and the section is OMITTED —
+    never '0 unacked'."""
     root, paths, _, _ = _scene(tmp_path)
-    _retire(root)
     (root / "lib").unlink(); (root / "lib").mkdir()
-    (root / "lib" / "dispatch-overdue.py").symlink_to(REPO / "lib" / "dispatch-overdue.py")
+    (root / "lib" / "plane-readers.py").symlink_to(REPO / "lib" / "plane-readers.py")
     deg = []
     assert _reports_section(paths, None, TERMINAL, deg) == {}
     assert any(x.field == "reports" and x.mode == "omitted" for x in deg)
-
-
-def test_plane_retired_conn_is_the_one_door_fact(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    conn, note = plane_retired_conn(paths, "report")
-    assert conn is None and note is None                                             # not retired: the ledger, quietly
-    _retire(root)
-    conn, note = plane_retired_conn(paths, "report")
-    assert conn is not None and note is None
-    conn.close()
-    conn, note = plane_retired_conn(paths, "dispatch")
-    assert conn is not None; conn.close()
-    _drop_plane(root)
-    conn, note = plane_retired_conn(paths, "report")
-    assert conn is None and "may be stale" in note
-
-
-# --- who-reviewed --source auto --------------------------------------------------------
-
-def _who():
-    spec = importlib.util.spec_from_file_location("who_reviewed", LIB / "who-reviewed.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _payload(path, ts):
-    path.write_text(json.dumps({"reviews": [{"submittedAt": ts, "state": "APPROVED",
-                                             "author": {"login": "someone"}, "body": "lgtm"}], "comments": []}))
-    return path
-
-
-def test_who_reviewed_auto_joins_the_plane_with_the_unretired_ledgers_and_dedupes(tmp_path, capsys):
-    """Fleet f is retired (its reports are the plane's); fleet g is not (its
-    report lives in its ledger alone). A report both sides hold is ONE
-    candidate, so a review it matches attributes rather than reading AMBIGUOUS."""
-    root, paths, d, r = _scene(tmp_path)
-    from claudlobby.brief import report_ledger_path
-    wi2, asg2 = "wi_" + "2".rjust(32, "0"), "asg_" + "2".rjust(32, "0")
-    m = _report(root, wi2, asg2, "2026-09-02T12:00:00Z", event="completed",
-                extra={"summary": "Approved #46", "pr_url": "https://github.com/o/r/pull/46"})
-    r.append(_rrow("2026-09-02T12:00:00Z", "t-2-bbbb", "completed", summary="Approved #46",
-                   pr_url="https://github.com/o/r/pull/46", plane_msg_id=m))           # the same report, in f's ledger too
-    _write(report_ledger_path(paths), r)
-    gdir = root / "local" / "g" / "runtime"; gdir.mkdir(parents=True)
-    (root / "local" / "g" / "fleet.yaml").write_text("fleet:\n  name: g\n  bots:\n    v1:\n")
-    (gdir / "report-back.jsonl").write_text(json.dumps(_rrow("2026-09-03T09:00:00Z", "t-9-gggg", "completed",
-                                                             bot="v1", summary="Approved #47",
-                                                             pr_url="https://github.com/o/r/pull/47")) + "\n")
-    _retire(root)
-    who = _who()
-    p46 = _payload(tmp_path / "p46.json", "2026-09-02T12:00:05Z")
-    rc = who.main(["o/r", "46", "--reviews-json", str(p46), "--root", str(root), "--json"])
-    out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out["events"][0]["verdict"] == "MATCH" and out["events"][0]["bot"] == "w1", out["events"][0]
-    # the same report from the plane AND f's own ledger is ONE candidate: the
-    # ambiguity rule already collapses same-bot duplicates, but a doubled
-    # candidate list still misleads whoever reads the basis (and the row count)
-    assert len(out["events"][0]["candidates"]) == 1 and out["scope"]["rows"] == 2, out["events"][0]["candidates"]   # w1's pr row once + g's; the scene's pr-less completion is not a plane row
-    assert out["scope"]["source"] == "auto" and "f" in out["scope"]["fleets"] and "g" in out["scope"]["fleets"]
-    assert out["scope"]["ledgers_read"] == 1 and out["scope"]["ledgers_found"] == 1    # g's file; the plane is not a ledger (live: read 2 of found 1)
-    assert "plane" not in out["scope"]                                               # reachable: no disclosure
-    p47 = _payload(tmp_path / "p47.json", "2026-09-03T09:00:03Z")
-    who.main(["o/r", "47", "--reviews-json", str(p47), "--root", str(root), "--json"])
-    out = json.loads(capsys.readouterr().out)
-    assert out["events"][0]["verdict"] == "MATCH" and out["events"][0]["bot"] == "v1"   # the unretired ledger still joins
-    # the dedupe itself: an explicit --ledger names f's file even though f is
-    # retired, so the same report reaches the join from BOTH sides — one
-    # candidate, never two (the unit, pinned beside the door)
-    who.main(["o/r", "46", "--reviews-json", str(p46), "--root", str(root), "--json",
-              "--ledger", str(report_ledger_path(paths))])
-    out = json.loads(capsys.readouterr().out)
-    assert out["events"][0]["verdict"] == "MATCH" and len(out["events"][0]["candidates"]) == 1
-    both = [{"_fleet": "f", "bot": "w1", "ts": "2026-09-02T12:00:00Z", "_ledger": "/x"},
-            {"_fleet": "f", "bot": "w1", "ts": "2026-09-02T12:00:00.4+00:00", "_ledger": "plane"},
-            {"_fleet": "f", "bot": "w1", "ts": "2026-09-02T12:00:01Z", "_ledger": "/x"}]
-    kept = who.dedupe_rows(both)
-    assert [(k["ts"], k["_ledger"]) for k in kept] == [("2026-09-02T12:00:00.4+00:00", "plane"), ("2026-09-02T12:00:01Z", "/x")]
-    _drop_plane(root)
-    who.main(["o/r", "46", "--reviews-json", str(p46), "--root", str(root), "--json"])
-    out = json.loads(capsys.readouterr().out)
-    assert out["scope"]["plane"].startswith("unreachable") and out["events"][0]["bot"] == "w1"   # the ledgers serve, disclosed
 
 
 # --- the supersede hint ------------------------------------------------------------------

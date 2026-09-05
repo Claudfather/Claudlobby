@@ -1,4 +1,10 @@
-"""Tests for claudlobby.uptime — keepalive log aggregation metrics."""
+"""Tests for claudlobby.uptime — uptime metrics from the plane.
+
+F18 closure R2b: the keepalive.log parser is gone, so TestParseKeepaliveLog and
+TestCollectBotLogs went with it; `aggregate_fleet` takes the plane's entries
+through its required `entries_for` seam, and `claudlobby uptime` refuses when
+the plane cannot answer.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +12,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from claudlobby.uptime import (
-    parse_keepalive_log,
-    collect_bot_logs,
     compute_metrics,
     aggregate_fleet,
     format_table,
@@ -28,71 +32,6 @@ def _ts(hour: int, minute: int = 0) -> str:
 
 def _write_log(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n")
-
-
-# -- parse_keepalive_log ---------------------------------------------------
-
-
-class TestParseKeepaliveLog:
-    def test_parses_all_states(self, tmp_path: Path):
-        log = tmp_path / "keepalive.log"
-        _write_log(
-            log,
-            [
-                f"{_ts(10, 0)} BUSY \u2014 active processing",
-                f"{_ts(10, 5)} IDLE \u2014 at prompt",
-                f"{_ts(10, 10)} RESTART \u2014 session dead, systemctl --user restart bot",
-                f"{_ts(10, 15)} UNKNOWN \u2014 pane state did not match (1 consecutive)",
-                f"{_ts(10, 20)} SKIP \u2014 session reappeared",
-            ],
-        )
-        entries = parse_keepalive_log(log)
-        assert len(entries) == 5
-        assert [s for _, s in entries] == ["BUSY", "IDLE", "RESTART", "UNKNOWN", "SKIP"]
-
-    def test_skips_non_matching_lines(self, tmp_path: Path):
-        log = tmp_path / "keepalive.log"
-        _write_log(
-            log,
-            [
-                f"{_ts(10)} BUSY \u2014 active processing",
-                "some random noise",
-                "",
-                f"{_ts(10, 5)} IDLE \u2014 at prompt",
-            ],
-        )
-        entries = parse_keepalive_log(log)
-        assert len(entries) == 2
-
-    def test_missing_file(self, tmp_path: Path):
-        assert parse_keepalive_log(tmp_path / "nope.log") == []
-
-
-# -- collect_bot_logs ------------------------------------------------------
-
-
-class TestCollectBotLogs:
-    def test_combines_rotated_and_current(self, tmp_path: Path):
-        _write_log(
-            tmp_path / "keepalive.log.1",
-            [
-                f"{_ts(8)} IDLE \u2014 at prompt",
-            ],
-        )
-        _write_log(
-            tmp_path / "keepalive.log",
-            [
-                f"{_ts(12)} BUSY \u2014 active processing",
-            ],
-        )
-        entries = collect_bot_logs(tmp_path)
-        assert len(entries) == 2
-        assert entries[0][0] < entries[1][0]
-        assert entries[0][1] == "IDLE"
-        assert entries[1][1] == "BUSY"
-
-
-# -- compute_metrics -------------------------------------------------------
 
 
 class TestComputeMetrics:
@@ -197,22 +136,15 @@ class TestAggregateFleet:
         (bot1 / "bot.conf").write_text("BOT_NAME=alpha\n")
         # Relative timestamp so the entry always lands inside the now-relative
         # 24h window, regardless of the calendar date the suite runs on.
-        # microsecond=0 to match _LOG_LINE_RE's second-precision timestamp format.
-        recent = (
-            (datetime.now(TZ) - timedelta(hours=1)).replace(microsecond=0).isoformat()
-        )
-        _write_log(
-            bot1 / "keepalive.log",
-            [
-                f"{recent} IDLE \u2014 at prompt",
-            ],
-        )
+        recent = (datetime.now(TZ) - timedelta(hours=1)).replace(microsecond=0)
+        entries = {"alpha": [(recent, "IDLE")]}
 
         bot2 = tmp_path / "beta"
         bot2.mkdir()
         (bot2 / "bot.conf").write_text("BOT_NAME=beta\n")
 
-        results = aggregate_fleet(tmp_path, windows=["24h"])
+        results = aggregate_fleet(tmp_path, windows=["24h"],
+                                  entries_for=lambda d: entries.get(d.name, []))
         assert "alpha" in results
         assert "beta" in results
         assert results["alpha"]["24h"]["entries_in_window"] == 1
@@ -224,7 +156,8 @@ class TestAggregateFleet:
             d.mkdir()
             (d / "bot.conf").write_text(f"BOT_NAME={name}\n")
 
-        results = aggregate_fleet(tmp_path, windows=["24h"], bot_filter="alpha")
+        results = aggregate_fleet(tmp_path, windows=["24h"], bot_filter="alpha",
+                                  entries_for=lambda d: [])
         assert "alpha" in results
         assert "beta" not in results
 
@@ -378,10 +311,10 @@ class TestUptimeLateEnumerationFailure:
         # an EMPTY materialized listing must yield no rows even though a
         # real bot sits in bots_dir — proof nothing re-globs the dir (the
         # mutation that ignores bot_dirs finds realbot here and goes red)
-        assert aggregate_fleet(bots, windows=["24h"], bot_dirs=[]) == {}
+        assert aggregate_fleet(bots, windows=["24h"], bot_dirs=[], entries_for=lambda d: []) == {}
 
         # ...and the listing IS what gets consumed
-        got = aggregate_fleet(bots, windows=["24h"], bot_dirs=[real_bot])
+        got = aggregate_fleet(bots, windows=["24h"], bot_dirs=[real_bot], entries_for=lambda d: [])
         assert "realbot" in got
 
     def test_cmd_uptime_hands_its_scan_to_aggregate(self, tmp_path, monkeypatch):
@@ -393,9 +326,10 @@ class TestUptimeLateEnumerationFailure:
         bots = tmp_path / "runtime" / "bots"
         (bots / "somebot").mkdir(parents=True)
         (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
+        _root_mode_plane(tmp_path)
 
         seen = {}
-        def _recorder(bots_dir, windows=None, bot_filter=None, bot_dirs=None):
+        def _recorder(bots_dir, windows=None, bot_filter=None, bot_dirs=None, *, entries_for):
             seen["bot_dirs"] = bot_dirs
             return {}
 
@@ -405,3 +339,87 @@ class TestUptimeLateEnumerationFailure:
             json=False))
         assert seen["bot_dirs"] is not None, "cmd_uptime must pass its scan"
         assert bots / "somebot" in seen["bot_dirs"]
+
+
+# -- the plane is the only source ------------------------------------------
+
+
+def _root_mode_plane(root: Path) -> None:
+    """A root-mode install with a manifest, the repo's lib/ (the readers the
+    command loads) and a plane holding one heartbeat for `somebot`."""
+    from claudlobby.plane.emit_api import emit_batch
+    from tests.plane_fixtures import REPO
+
+    (root / "fleet.yaml").write_text(
+        "fleet:\n  name: rootfleet\n  service_prefix: com.test\n  bots:\n"
+        "    somebot:\n      expertise: [software-engineering]\n")
+    if not (root / "lib").exists():
+        (root / "lib").symlink_to(REPO / "lib")
+    (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    out = emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": "rootfleet",
+                             "occurred_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+                             "payload": {"subject_kind": "bot_instance", "subject": "bot:rootfleet/somebot",
+                                         "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}])
+    assert all(o.status == "committed" for o in out), out
+
+
+class TestUptimeReadsThePlaneAlone:
+    def _args(self, root, **kw):
+        import types
+        return types.SimpleNamespace(root=str(root), fleet=None, bot=None, window="24h", json=True, **kw)
+
+    def test_cmd_uptime_serves_the_planes_entries(self, tmp_path, capsys):
+        import json as _json
+
+        from claudlobby.commands.core import cmd_uptime
+
+        bots = tmp_path / "runtime" / "bots"
+        (bots / "somebot").mkdir(parents=True)
+        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
+        _root_mode_plane(tmp_path)
+        assert cmd_uptime(self._args(tmp_path)) == 0
+        out = _json.loads(capsys.readouterr().out)
+        assert out["somebot"]["24h"]["entries_in_window"] == 1
+
+    def test_cmd_uptime_refuses_a_plane_that_never_saw_the_fleet(self, tmp_path, capsys):
+        """A plane holding only another fleet is a wrong root, not bots that
+        never beat: the command once rendered a table of dashes at rc 0 here,
+        byte-identical to a known fleet with zero heartbeats (the R2b-1
+        adversarial lens). It rides the matcher's session and refuses."""
+        from datetime import datetime, timedelta, timezone
+
+        from claudlobby.commands.core import cmd_uptime
+        from claudlobby.plane.emit_api import emit_batch
+        from tests.plane_fixtures import REPO
+
+        _root_mode_plane(tmp_path)                                   # rootfleet's manifest + lib
+        bots = tmp_path / "runtime" / "bots"
+        (bots / "somebot").mkdir(parents=True)
+        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
+        # the plane's only identity belongs to ANOTHER fleet
+        import sqlite3
+        with sqlite3.connect(tmp_path / "state" / "plane" / "plane.db") as c:
+            c.execute("DELETE FROM identity_registry WHERE alias LIKE 'bot:rootfleet/%'")
+            c.execute("DELETE FROM metric_samples")
+        out = emit_batch(tmp_path, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": "elsewhere",
+                                     "occurred_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+                                     "payload": {"subject_kind": "bot_instance", "subject": "bot:elsewhere/x",
+                                                 "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}])
+        assert all(o.status == "committed" for o in out), out
+        assert cmd_uptime(self._args(tmp_path)) == 3
+        captured = capsys.readouterr()
+        assert captured.out == "" and "no bot of fleet 'rootfleet'" in captured.err
+
+    def test_cmd_uptime_refuses_without_a_plane(self, tmp_path, capsys):
+        """No plane db: rc 3 and the remedy on stderr, NOTHING on stdout — an
+        empty table would read as a fleet that never ran."""
+        from claudlobby.commands.core import cmd_uptime
+        from tests.plane_fixtures import REPO
+
+        bots = tmp_path / "runtime" / "bots"
+        (bots / "somebot").mkdir(parents=True)
+        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
+        (tmp_path / "lib").symlink_to(REPO / "lib")
+        assert cmd_uptime(self._args(tmp_path)) == 3
+        captured = capsys.readouterr()
+        assert captured.out == "" and "UNREACHABLE" in captured.err and "plane.db" in captured.err
