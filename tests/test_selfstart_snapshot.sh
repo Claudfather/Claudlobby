@@ -50,6 +50,39 @@ assert_absent() {
 T="$(mktemp -d "${TMPDIR:-/tmp}/selfstart-test.XXXXXX")" || exit 1
 trap 'rm -rf "$T"' EXIT
 ROOT="$T/root"; CFG="$T/cfg"
+# The receipts live on the PLANE (F18 closure R2b-2), so every scratch root
+# carries one, seeded with each declared fleet's identity (a fleet the plane
+# never saw is a REFUSAL, by the rule every reader follows). Landed through
+# the package's emit_batch under the python that can import it — the pytest
+# wrapper passes its own interpreter; standalone runs need one on PATH.
+PY="${SELFSTART_TEST_PYTHON:-python3}"
+SEQ=0
+# The program rides -c and the events ride STDIN: `python3 -` takes its program
+# from stdin, so a piped payload under a heredoc is silently dead (the
+# plane-telegram-in.sh lesson, met again here — every receipt landed as []).
+PLANE_LAND_PROG='
+import json, sys, pathlib
+from claudlobby.plane.emit_api import emit_batch
+root = pathlib.Path(sys.argv[1]); (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+events = [json.loads(line) for line in sys.stdin if line.strip()]
+assert events, "plane_land: no events on stdin"
+out = emit_batch(root, events)
+bad = [(o.status, getattr(o, "reason", "")) for o in out if o.status != "committed"]
+assert not bad, bad
+'
+plane_land() {  # plane_land <root>   (stdin: one emit_batch event per line)
+    "$PY" -c "$PLANE_LAND_PROG" "$1"
+}
+seed_plane_fleet() {  # seed_plane_fleet <fleet> — the fleet's identity on the current root's plane
+    SEQ=$((SEQ + 1))
+    printf '{"event_type":"system","emitter":"manual","fleet":"%s","occurred_at":"2026-08-01T00:00:00Z","source_ref":"fleet-events:sha:%032x","payload":{"event":"keepalive_skip","subject_kind":"fleet","subject":"%s","data":{"source":"manual","legacy_ts":"2026-08-01T00:00:00Z","data":{}}}}\n' \
+        "$1" "$SEQ" "$1" | plane_land "$ROOT"
+    grep -qx "$1" "$ROOT/.fleets" 2>/dev/null || printf '%s\n' "$1" >> "$ROOT/.fleets"
+}
+reset_plane() {  # the plane is append-only: a fresh one, re-seeded with the root's fleets
+    rm -rf "$ROOT/state/plane"
+    while IFS= read -r _f; do [ -n "$_f" ] && seed_plane_fleet "$_f"; done < "$ROOT/.fleets"
+}
 
 # Boot instant the fixtures are built around.
 BOOT=1786020000              # 2026-08-06T12:40:00Z
@@ -75,6 +108,7 @@ declare_fleet() {  # declare_fleet <fleet> <bot>...
         echo "  plugins:"
         echo "    additional: []"
     } > "$d/fleet.yaml"
+    seed_plane_fleet "$fleet"
 }
 
 bot_dir()   { printf '%s/local/home/%s/runtime/bots/%s\n' "$ROOT" "$1" "$2"; }
@@ -495,9 +529,30 @@ add_rec  rescue toolfirst    s "$PRE_B"  "$CHANNEL";  add_asst rescue toolfirst 
 # Assistant records but no post-boot user record at all.
 add_asst rescue nopayload    s "$PRE_B"  5
 
-mk_receipt() {  # mk_receipt <file-date> <row-json>
-    mkdir -p "$ROOT/state/events"
-    printf '%s\n' "$2" >> "$ROOT/state/events/fleet-$1.jsonl"
+land_receipt() {  # land_receipt <row-json> — the legacy receipt row, landed on the plane
+    # as emit_fleet_event lands it: a system event on the FLEET's identity whose
+    # detail carries {source, legacy_ts, data}. occurred_at is NOW: the parsers
+    # read the boundary and the names out of data, never the row's ts, and the
+    # reader's window (the day before the boot) must admit the receipt whatever
+    # synthetic boot instant the case runs against. Any key the fixture placed
+    # at the top level rides along inside data (as `_toplevel`), so the text
+    # readers still see it — 8h-8k drive exactly those shapes.
+    SEQ=$((SEQ + 1))
+    "$PY" - "$ROOT" "$(head -1 "$ROOT/.fleets")" "$1" "$SEQ" <<'PYRCPT' | plane_land "$ROOT"
+import json, sys, datetime
+root, fleet, raw, seq = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+row = json.loads(raw)
+extra = {k: v for k, v in row.items() if k not in ("ts", "bot", "type", "source", "data")}
+data = dict(row.get("data") or {})
+if extra:
+    data["_toplevel"] = extra
+now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+print(json.dumps({"event_type": "system", "emitter": row.get("source", "manual"), "fleet": fleet,
+                  "occurred_at": now, "source_ref": f"fleet-events:sha:{seq:032x}",
+                  "payload": {"event": row["type"], "subject_kind": "fleet", "subject": fleet,
+                              "data": {"source": row.get("source", "manual"), "legacy_ts": row["ts"],
+                                       "data": data}}}))
+PYRCPT
 }
 RECEIPT_BASE='"ts":"2026-08-06T08:50:00-04:00","bot":"fleet","type":"fleet_rescue","source":"manual"'
 
@@ -524,7 +579,7 @@ assert_eq "headline counts only genuine self-starts" \
     "3" "$(printf '%s\n' "$OUT10" | sed -n 's/.*SNAPSHOT:  \([0-9]*\) of 6.*/\1/p')"
 
 # ---- 8b: a usable receipt splits payload into self-start vs carried ---------
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\",\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\",\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
 OUT11="$(run_snapshot "$BOOT")"; RC11=$?
 
 assert_eq "a contaminated page refuses with its own exit code" "6" "$RC11"
@@ -553,8 +608,8 @@ assert_absent "no honest-limit note when a receipt IS present" \
 # `recorded` is the receipt disclosing that its stamp was TYPED, not read. The
 # comparison is suppressed entirely; the name list survives, because a list of
 # who was touched is not reconstructed by being written down late.
-rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"recorded\":\"after the fact, not at repair time\",\"bots_rescued\":[\"rescuedbot\",\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"recorded\":\"after the fact, not at repair time\",\"bots_rescued\":[\"rescuedbot\",\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
 OUT12="$(run_snapshot "$BOOT")"; RC12=$?
 
 assert_eq "a retroactive receipt still refuses" "6" "$RC12"
@@ -579,15 +634,15 @@ assert_contains "and the refusal says why nothing can certify it" \
 # ---- 8d: a correction row is not a receipt ---------------------------------
 # The closing quote in the type match is load-bearing: a prefix match reads
 # fleet_rescue_correction as a receipt with no boundary and refuses the page.
-rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
-mk_receipt 2026-08-06 '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet","type":"fleet_rescue_correction","source":"manual","data":{"corrects":"a prior row"}}'
+reset_plane
+land_receipt '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet","type":"fleet_rescue_correction","source":"manual","data":{"corrects":"a prior row"}}'
 OUT13="$(run_snapshot "$BOOT")"; RC13=$?
 assert_eq "a correction row alone does not contaminate" "0" "$RC13"
 assert_absent "and raises no contamination banner" "CONTAMINATED" "$OUT13"
 
 # ---- 8e: a receipt for an EARLIER boot must not bleed forward ---------------
-rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06T11:00:00Z\"}}"
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06T11:00:00Z\"}}"
 OUT14="$(run_snapshot "$BOOT")"; RC14=$?
 assert_eq "a boundary predating this boot belongs to an earlier one" "0" "$RC14"
 assert_eq "so its named bot is not marked rescued" \
@@ -597,11 +652,11 @@ assert_eq "so its named bot is not marked rescued" \
 # A fractionless boundary compared against a fractional record: without padding,
 # "12:50:00.500Z" sorts BEFORE "12:50:00Z" because "." is below "Z", and a bot
 # half a second the wrong side silently flips class.
-rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+reset_plane
 rm -rf "$(proj_dir rescue rescuedbot)"
 add_rec  rescue rescuedbot s "2026-08-06T12:50:00.500Z" "$PAYLOAD"
 add_asst rescue rescuedbot s "2026-08-06T12:50:00.500Z" 2
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
 OUT15="$(run_snapshot "$BOOT")"
 assert_eq "half a second past a fractionless boundary is still RESCUED" \
     "RESCUED" "$(section_of "$OUT15" rescuedbot)"
@@ -610,8 +665,8 @@ assert_eq "half a second past a fractionless boundary is still RESCUED" \
 # Contaminated outranks too-early: re-running fixes early and can never
 # un-contaminate a boot. Incomplete outranks both.
 BOOT=$(( $(date +%s) - 20 ))
-rm -f "$ROOT"/state/events/*.jsonl
-mk_receipt "$(date -u +%Y-%m-%d)" "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"$(date -u +%Y-%m-%dT%H:%M:%S)Z\"}}"
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"$(date -u +%Y-%m-%dT%H:%M:%S)Z\"}}"
 mk_unit rescue selfstarter 60
 OUT16="$(run_snapshot "$BOOT")"; RC16=$?
 assert_eq "contaminated outranks too-early in the exit code" "6" "$RC16"
@@ -656,8 +711,8 @@ BOOT=1786020000
 # WOULD FAIL IF: row_field stopped distinguishing absent from present-and-empty
 # (an empty value falls through to 8j's message instead), the rc=1 arm were
 # dropped, or absence stopped suppressing the boundary at all.
-rm -f "$ROOT"/state/events/*.jsonl
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"]}}"
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"]}}"
 OUT20="$(run_snapshot "$BOOT")"; RC20=$?
 
 assert_eq "a receipt with no boundary field still refuses the page" "6" "$RC20"
@@ -679,8 +734,8 @@ assert_eq "and an unnamed bot is refused rather than promoted" \
 #
 # WOULD FAIL IF: the distinct-count arm were dropped (state goes USABLE and the
 # ambiguity line never prints), or rc=2 were folded into rc=1's message.
-rm -f "$ROOT"/state/events/*.jsonl
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"selfstart_measurement_valid_before\":\"2026-08-06T13:30:00Z\",\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"selfstart_measurement_valid_before\":\"2026-08-06T13:30:00Z\",\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
 OUT21="$(run_snapshot "$BOOT")"; RC21=$?
 
 assert_eq "an ambiguous boundary refuses the page" "6" "$RC21"
@@ -704,8 +759,8 @@ assert_eq "the name list survives the ambiguity" \
 # WOULD FAIL IF: iso_utc_shaped stopped requiring the trailing Z (the offset
 # stamp is adopted) or stopped requiring the T hh:mm:ss middle (the bare date
 # is adopted). Either weakening flips the state to USABLE.
-rm -f "$ROOT"/state/events/*.jsonl
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06T08:50:00-04:00\"}}"
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06T08:50:00-04:00\"}}"
 OUT22="$(run_snapshot "$BOOT")"; RC22=$?
 
 assert_eq "a local-offset boundary refuses the page" "6" "$RC22"
@@ -716,8 +771,8 @@ assert_absent "a present stamp is not reported as absent" \
 assert_contains "and the uncomparable stamp is never adopted" \
     "Rescue boundary   : UNUSABLE" "$OUT22"
 
-rm -f "$ROOT"/state/events/*.jsonl
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06\"}}"
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06\"}}"
 OUT23="$(run_snapshot "$BOOT")"; RC23=$?
 
 assert_eq "a date with no time is equally uncomparable" "6" "$RC23"
@@ -736,8 +791,8 @@ assert_contains "and is refused as a non-instant" \
 #
 # WOULD FAIL IF: -u were dropped from row_field's sort, or the count moved from
 # distinct values to raw match count. Either turns this row into 8i.
-rm -f "$ROOT"/state/events/*.jsonl
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"selfstart_measurement_valid_before\":\"$BOUNDARY\",\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"selfstart_measurement_valid_before\":\"$BOUNDARY\",\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
 OUT24="$(run_snapshot "$BOOT")"; RC24=$?
 
 assert_eq "a repeated but consistent boundary still refuses — a rescue covers the boot" "6" "$RC24"
@@ -962,9 +1017,9 @@ assert_eq "widening the allowance widens the bound" \
 # boundary, so the receipt did not cover it and it fell through to SELF-STARTED.
 # A receipt that DOES cover a late payload must still win: "a human carried it"
 # is a recorded fact, where late-unexplained is only the absence of one.
-# mk_receipt reads $ROOT at call time, so the definition from case 8 writes into
-# this case's scratch root without redefinition.
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"2026-08-06T12:56:40Z\"}}"
+# land_receipt reads $ROOT at call time, so the definition from case 8 lands on
+# this case's scratch plane without redefinition.
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"2026-08-06T12:56:40Z\"}}"
 OUT28="$(run_snapshot "$SANE_JOURNAL")"; RC28=$?
 assert_eq "a receipt covering this boot still refuses the page" "6" "$RC28"
 assert_eq "a late payload AFTER the rescue boundary is RESCUED, not late" \
@@ -976,7 +1031,7 @@ assert_eq "a late payload the receipt does NOT cover is still late" \
     "LATE-UNEXPLAINED" "$(section_of "$OUT28" pastbound)"
 assert_contains "and the contaminated headline reports late separately" \
     "late-unexplained" "$OUT28"
-rm -f "$ROOT"/state/events/*.jsonl
+reset_plane
 
 # ---- 10g: no readable ladder — SUPPRESSED and disclosed -------------------
 # MAX_RUNG=0 would ASSERT a zero-length ladder rather than measure one, putting
@@ -1023,7 +1078,7 @@ cat > "$T/bin3/date" <<'STUB'
 for a in "$@"; do
     case "$a" in "@1786020120"|"1786020120") exit 1 ;; esac
 done
-exec /usr/bin/date "$@"
+for _d in /usr/bin/date /bin/date; do [ -x "$_d" ] && exec "$_d" "$@"; done; exit 127
 STUB
 chmod +x "$T/bin3/date"
 OUT31="$(run_snapshot "$SANE_JOURNAL" "PATH=$T/bin3:$PATH")"; RC31=$?
@@ -1054,95 +1109,12 @@ assert_contains "and names the clock as the reason" "the boot clock is STALE" "$
 assert_eq "so no bot is called late on an untrusted clock" \
     "0" "$(printf '%s\n' "$OUT30" | sed -n 's/^LATE, UNEXPLAINED.*(\([0-9]*\))$/\1/p')"
 
-# ---- 11: a receipt written with json.dumps SPACING is still read -----------
-# The #1202 class in a READER. `lib/selfstart-snapshot.sh` matched receipts with
-# a compact-only pattern, while a rescuer writing via python `json.dumps` emits
-# `"type": "fleet_rescue"` with a space. Measured live on the 2026-08-24 boot:
-# two rescuers, one spaced and one compact, and the reader saw ONE of them —
-# dropping a 17-name receipt whose boundary was also the EARLIER of the two. The
-# page then printed 7 bots as LATE-UNEXPLAINED ("something woke these bots and
-# nothing recorded what") about bots a receipt named explicitly.
-#
-# Three patterns had to move together, and this is the load-bearing part: the
-# reader alone is NOT a fix. With only the reader widened, the row is admitted
-# and then `row_field` / `row_rescued_names` — both compact-only — fail to parse
-# it, so the boundary flips to UNUSABLE for EVERY receipt including the
-# well-formed compact one. Verified on the live ledger: reader-only took
-# SELF-STARTED from 3 to 0 and ADJUDICATE from 7 to 11. A partial fix here is
-# worse than none, which is why all three are pinned in one test.
-rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
-# CONTROL FIRST — with no receipt, `arishape` is LATE-UNEXPLAINED. Without this
-# the arm below could pass by the fixture simply not being late, which is the
-# way a spacing test most easily certifies nothing.
-LATE_BEFORE="$(printf '%s\n' "$(run_snapshot "$BOOT")" | sed -n 's/^LATE, UNEXPLAINED.*(\([0-9]*\))$/\1/p')"
-assert_eq "control: with no receipt the exemplar is an unexplained gap" \
-    "LATE-UNEXPLAINED" "$(section_of "$(run_snapshot "$BOOT")" arishape)"
-
-SPACED_BASE='"ts": "2026-08-06T08:50:00-04:00", "bot": "fleet", "type": "fleet_rescue", "source": "manual"'
-mk_receipt 2026-08-06 "{$SPACED_BASE, \"data\": {\"actor\": \"tester\", \"bots_rescued\": [\"arishape\"], \"selfstart_measurement_valid_before\": \"$BOUNDARY\"}}"
-OUT40="$(run_snapshot "$BOOT")"; RC40=$?
-
-assert_eq "a spaced receipt is READ, so the page still refuses" "6" "$RC40"
-assert_contains "and its boundary is usable, not UNUSABLE" "Rescue boundary   : $BOUNDARY" "$OUT40"
-assert_contains "and its name list is parsed, not silently empty" \
-    "Named as rescued  : 1 bot(s)" "$OUT40"
-# The whole point of the bug, reproduced: a bot a receipt names EXPLICITLY was
-# printed as "something woke these bots and nothing recorded what".
-assert_eq "a receipt-named bot is RESCUED, not an unexplained gap" \
-    "RESCUED" "$(section_of "$OUT40" arishape)"
-assert_eq "so the unexplained-gap count drops by exactly that bot" \
-    "$((LATE_BEFORE - 1))" "$(printf '%s\n' "$OUT40" | sed -n 's/^LATE, UNEXPLAINED.*(\([0-9]*\))$/\1/p')"
-
-# ---- 11b: POSITIVE CONTROL — the correction exclusion survives both spacings
-# The closing quote is what keeps `fleet_rescue_correction` rows out, and it is
-# load-bearing: a correction carries none of a receipt's fields, so admitting
-# one would refuse the whole page. Widening for an optional space must not
-# widen into a prefix match. Both spellings are checked, because fixing the
-# spacing is exactly the edit that could reintroduce this.
-rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
-mk_receipt 2026-08-06 '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet","type":"fleet_rescue_correction","source":"manual","data":{"note":"compact correction"}}'
-mk_receipt 2026-08-06 '{"ts": "2026-08-06T08:50:00-04:00", "bot": "fleet", "type": "fleet_rescue_correction", "source": "manual", "data": {"note": "spaced correction"}}'
-OUT41="$(run_snapshot "$BOOT")"; RC41=$?
-assert_eq "corrections alone are not receipts, so the page is a result again" "0" "$RC41"
-assert_contains "and contamination is reported as unruled-out, not as covered" \
-    "contamination CANNOT be ruled out" "$OUT41"
-
-# The exclusion has to hold for EVERY form the matcher now admits, not just the
-# two it originally hardened against — otherwise widening for whitespace could
-# turn this into a prefix match in exactly the forms nothing tests. vera caught
-# that the control covered 2 of 5 while the code was safe in all 5: safe and
-# PINNED are different, and only the second survives the next edit.
-rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
-mkdir -p "$ROOT/state/events"
-for _cf in '"type":"fleet_rescue_correction"' '"type": "fleet_rescue_correction"' \
-           '"type":  "fleet_rescue_correction"' '"type" : "fleet_rescue_correction"' \
-           '"type":\t"fleet_rescue_correction"'; do
-    printf '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet",%b,"source":"manual","data":{"note":"c"}}\n' \
-        "$_cf" >> "$ROOT/state/events/fleet-2026-08-06.jsonl"
-done
-OUT41b="$(run_snapshot "$BOOT")"; RC41b=$?
-assert_eq "corrections in ALL FIVE whitespace forms are still excluded" "0" "$RC41b"
-assert_contains "and none of the five is mistaken for a receipt" \
-    "contamination CANNOT be ruled out" "$OUT41b"
-
-# ---- 11b2: THREE MORE writer conventions, because there is no canonical writer
-# Every one of these receipts is hand-typed at rescue time — there is no shared
-# writer function anywhere in the tree — so a third spacing convention is the
-# same failure class recurring, not a hypothetical. `": ?"` hardened against the
-# two conventions we had OBSERVED and would have silently dropped these three.
-# Closing the class (`[[:space:]]*` on both sides of the colon) rather than the
-# instances is the point. Credit: rajan, reviewing #1347.
-for _sp in 'two-spaces:"type":  "fleet_rescue"' 'pre-colon:"type" : "fleet_rescue"' 'tab:"type":\t"fleet_rescue"'; do
-    _label="${_sp%%:*}"; _form="${_sp#*:}"
-    rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
-    mkdir -p "$ROOT/state/events"
-    printf '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet",%b,"source":"manual","data":{"actor":"t","bots_rescued":["arishape"],"selfstart_measurement_valid_before":"%s"}}\n' \
-        "$_form" "$BOUNDARY" > "$ROOT/state/events/fleet-2026-08-06.jsonl"
-    _out="$(run_snapshot "$BOOT")"
-    assert_eq "writer convention '$_label' is read, not silently dropped" \
-        "RESCUED" "$(section_of "$_out" arishape)"
-done
-
+# ---- 11: (deleted with the files, F18 closure R2b-2) — the json.dumps SPACING
+# cases (11, 11b, 11b2) pinned the FILE parser's tolerance of a hand-typed
+# receipt's whitespace; the plane renders every receipt through one reader and
+# a correction row is its own event type, never admitted by `--type
+# fleet_rescue`. 11c survives: two rescuers per boot is the normal case.
+reset_plane
 # ---- 11c: two rescuers, mixed spacing — EARLIEST boundary wins -------------
 # Multiple rescuers per boot is the normal case, not the exception: the
 # 2026-08-24 boot had two within 35 seconds. The loop already handles it
@@ -1150,15 +1122,47 @@ done
 # already covers) and that behaviour is pinned here so the spacing fix is not
 # mistaken for a one-rescuer assumption. `row_field`'s rc=2 ambiguity is a
 # WITHIN-ROW check — two rows with two boundaries is not ambiguous.
-rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+reset_plane
 EARLIER="2026-08-06T12:45:00.000Z"
-mk_receipt 2026-08-06 "{$SPACED_BASE, \"data\": {\"actor\": \"early\", \"bots_rescued\": [\"rescuedbot\"], \"selfstart_measurement_valid_before\": \"$EARLIER\"}}"
-mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"late\",\"bots_rescued\":[\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"early\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"$EARLIER\"}}"
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"late\",\"bots_rescued\":[\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
 OUT42="$(run_snapshot "$BOOT")"
 assert_contains "with two rescuers the EARLIEST boundary is adopted" \
     "Rescue boundary   : $EARLIER" "$OUT42"
 assert_contains "and both name lists are unioned, not replaced" \
     "Named as rescued  : 2 bot(s)" "$OUT42"
+
+# ---- 12: the receipt SOURCE could not be read — refused, never "no receipt" --
+# The file version failed OPEN when the ledger was missing (the docstring said
+# that was the one direction the gate must never fail in, and it did). On the
+# plane an unreadable source is its own refusal: exit 7, stamped RESCUE
+# UNKNOWN, the reason named, the boot not spoiled.
+rm -rf "$ROOT/state/plane"
+OUT50="$(run_snapshot "$BOOT")"; RC50=$?
+assert_eq "an unreadable receipt source refuses with its own exit code" "7" "$RC50"
+assert_contains "and stamps the page RESCUE UNKNOWN" "RESCUE UNKNOWN" "$OUT50"
+assert_contains "and says the result is not valid for that reason" \
+    "result valid  : NO — the rescue receipts could not be read" "$OUT50"
+assert_contains "and the headline stops claiming a result" \
+    "NOT A RESULT — whether a rescue covers this boot is UNKNOWN" "$OUT50"
+assert_absent "an unreadable source is never read as absence of a receipt" \
+    "contamination CANNOT be ruled out" "$OUT50"
+# A plane that exists but holds no identity for a declared fleet is the same
+# refusal (a wrong root is not "nothing recorded"), naming the fleet.
+reset_plane
+declare_fleet ghostfleet ghostbot
+rm -rf "$ROOT/state/plane"; seed_plane_fleet bound             # only ONE of the two fleets known
+mk_dir ghostfleet ghostbot
+OUT51="$(run_snapshot "$BOOT")"; RC51=$?
+assert_eq "a fleet the plane never saw refuses the page" "7" "$RC51"
+assert_contains "and names that fleet as the unreadable one" "fleet ghostfleet" "$OUT51"
+# A covering receipt beside an unreadable fleet: the bots it names are still
+# classified, and the page still refuses as UNKNOWN (7 outranks 6).
+land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"arishape\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT52="$(run_snapshot "$BOOT")"; RC52=$?
+assert_eq "unknown outranks contaminated" "7" "$RC52"
+assert_eq "a receipt that WAS read still classifies its bots" \
+    "RESCUED" "$(section_of "$OUT52" arishape)"
 
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"

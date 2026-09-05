@@ -307,14 +307,29 @@ stop_load_burners() {
     return 0
 }
 
-# count_send_retries <bot_dir> — send_retry rows across the bot's event ledgers.
+# count_send_retries <bot_dir> — the probe bot's send_retry events on the PLANE
+# (F18 closure R2b-2: start-bot.sh lands them through emit_fleet_event; the
+# per-bot event files are gone). The root is the probe root the bot dir sits in
+# and the fleet is the composed bot.conf FLEET_NAME. Prints the count. Prints
+# NOTHING and returns 1 when the plane cannot answer, with the reason on stderr:
+# an outage must never read as "no retry fired" — the caller records the boot's
+# retry as UNKNOWN (null in the row) rather than 0, and the summarizer says so.
 count_send_retries() {
-    local files=("$1"/data/events/*.jsonl)
-    if [ -f "${files[0]}" ]; then
-        awk '/"type":"send_retry"/ { n++ } END { print n + 0 }' "${files[@]}"
-    else
-        printf '0'
+    local bot_dir="$1" root fleet rows _rc=0
+    root="${bot_dir%/runtime/bots/*}"
+    fleet="$(sed -n 's/^FLEET_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$bot_dir/bot.conf" 2>/dev/null | head -1)"
+    fleet="${fleet:-${PROBE_FLEET:-boot-sampler}}"
+    rows="$(mktemp "${TMPDIR:-/tmp}/bss-retries.XXXXXX")" || return 1
+    python3 -S -E "$root/lib/plane-lookup.py" --root "$root" --events --fleet "$fleet" \
+        --bot "$(basename "$bot_dir")" --type send_retry > "$rows" 2>"$rows.err" || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        printf 'count_send_retries: the plane could not answer (rc=%s): %s -- retry count UNKNOWN for this boot\n' \
+            "$_rc" "$(tail -1 "$rows.err" 2>/dev/null | cut -c1-160)" >&2
+        rm -f "$rows" "$rows.err"
+        return 1
     fi
+    wc -l < "$rows" | tr -d ' '
+    rm -f "$rows" "$rows.err"
     return 0
 }
 
@@ -731,6 +746,7 @@ main() {
     CONFIG_DIR="$ROOT/config"
     BOT="bsprobe"
     BOT_DIR="$ROOT/runtime/bots/$BOT"
+    PROBE_FLEET="boot-sampler"
     VAULT="$ROOT/vault"
     ART="$ROOT/artifacts"
     ROWS="$ART/rows.jsonl"
@@ -798,7 +814,7 @@ main() {
 
     cat > "$ROOT/fleet.yaml" <<YAML
 fleet:
-  name: boot-sampler
+  name: $PROBE_FLEET
   service_prefix: bsampler
   accounts:
     default: ~/.claude
@@ -932,7 +948,11 @@ YAML
         outcome=""; t_submit=""; pane=""; pids=""; glyph_at_inject=""; t_glyph=""
         # Carry the ledger count forward — boot i's "before" is boot i-1's
         # "after"; only the first boot scans cold.
-        events_before="${events_after:-"$(count_send_retries "$BOT_DIR")"}"
+        if [ -n "${events_after:-}" ]; then
+            events_before="$events_after"
+        else
+            events_before="$(count_send_retries "$BOT_DIR")" || events_before=""
+        fi
         touch "$ROOT/.boot-marker"
         sleep 1  # -nt needs the marker strictly older than new transcripts
         # Sampled at the boot that experienced it, not once for the run: the
@@ -1033,8 +1053,14 @@ YAML
         # Per-boot evidence beyond the verdict: did the #837 retry fire, and
         # the live process tree (parity). startup.log detail lives in the tail
         # artifact rather than a row field.
-        events_after="$(count_send_retries "$BOT_DIR")"
-        retry_fired=$(( ${events_after:-0} - ${events_before:-0} ))
+        events_after="$(count_send_retries "$BOT_DIR")" || events_after=""
+        # UNKNOWN (empty -> null in the row) when either count could not be read:
+        # a plane outage is not "the retry did not fire".
+        if [ -n "$events_after" ] && [ -n "$events_before" ]; then
+            retry_fired=$(( events_after - events_before ))
+        else
+            retry_fired=""
+        fi
         parity="$(awk '{ $1 = ""; sub(/^ /, ""); print }' "$boot_art/procs.txt" 2>/dev/null | sort | uniq -c | awk '{ c = $1; $1 = ""; sub(/^ /, ""); printf "%s:%s ", $0, c }')" || true
         tail -40 "$BOT_DIR/logs/startup.log" > "$boot_art/startup.log.tail" 2>/dev/null || true
 
@@ -1053,7 +1079,7 @@ YAML
             '{i: ($i|tonumber), kind: $kind, outcome: $outcome,
               t_startbot_s: ($t_startbot|tonumber),
               t_submit_s: (if $t_submit == "" then null else ($t_submit|tonumber) end),
-              retry_fired: ($retry|tonumber), parity_procs: $parity,
+              retry_fired: (if $retry == "" then null else ($retry|tonumber) end), parity_procs: $parity,
               glyph_at_inject: (if $glyph == "" then null else ($glyph|tonumber) end),
               t_glyph_s: (if $t_glyph == "" then null else ($t_glyph|tonumber) end),
               load_burners: ($burners|tonumber),
@@ -1076,7 +1102,7 @@ YAML
             "${blk:+ block $blk pos $pos $ARM_AXIS=$arm}" "$outcome" \
             "${t_submit:+ submit=${t_submit}s}" \
             "${boot_la:+ la=${boot_la}}" \
-            "$([ "$retry_fired" -gt 0 ] && printf ' [send_retry fired]' || true)"
+            "$({ [ -n "$retry_fired" ] && [ "$retry_fired" -gt 0 ] && printf ' [send_retry fired]'; } || { [ -z "$retry_fired" ] && printf ' [send_retry UNKNOWN: plane unreachable]'; } || true)"
 
         # Teardown: kill-server takes the pane's tree; one liveness-gated KILL
         # pass sweeps recorded survivors (MCP servers can outlive the pane).

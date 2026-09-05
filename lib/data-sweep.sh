@@ -52,11 +52,10 @@ TS=$(ts_iso)
 # The only file classes purge may remove — protect by default. A pattern
 # belongs here only when the class is regenerable or append-only history
 # nothing reads back after the retention window:
-#   events/*.jsonl    framework event stream. Primary ager: fleet-pulse
-#                     reap_events (fleet-*.jsonl) and keepalive.sh
-#                     (keepalive-*.jsonl) at OBSERVABILITY_REAP_DAYS
-#                     (default 7); this purge is the backstop for
-#                     pulse-off fleets and orphaned bot dirs.
+#   (events/*.jsonl   were the framework event stream until the F18 closure;
+#                     nothing writes them and nothing reads them -- the plane
+#                     holds the events, plane prune ages its samples. Any file
+#                     left is the operator's archive, not this sweep's.)
 #   vetted log names  the known text logs, same name set log-rotate-fleet.sh
 #                     rotates under data/ (keep in lockstep). A bare *.log
 #                     glob would also match binary LevelDB / browser-profile
@@ -67,8 +66,7 @@ TS=$(ts_iso)
 # never swept, wherever they sit under data/.
 find_stale_ephemeral() {
     find "$1" -type f \
-        \( -path '*/events/*.jsonl' \
-           -o -name 'cron.log' -o -name 'git-pull.log' \
+        \( -name 'cron.log' -o -name 'git-pull.log' \
            -o -name 'briefing*.log' -o -name 'home-assistant.log' \
            -o -name '*.bak' \
            -o -name '.plane-rc-relay-*' \) \

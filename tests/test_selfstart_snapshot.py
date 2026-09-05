@@ -30,13 +30,18 @@ HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 # two #1045-review regressions, the #1043 contamination/typing cases, the #1106
 # refusal-branch cases (8h-8k) and the #1203 lateness bound (case 10). Raise
 # this when cases are added; never lower it to make a red wrapper green.
-MIN_ASSERTIONS = 183
+MIN_ASSERTIONS = 194   # 2026-09-05: section 11's file-parser spacing cases went with the files (F18 closure R2b-2); the plane cases (12) came in
 
 
 @pytest.fixture(scope="module")
 def run() -> subprocess.CompletedProcess:
+    import os
+    import sys
+    # The receipts live on the plane (F18 closure R2b-2): the harness lands
+    # its fixtures through the package, under THIS interpreter.
+    env = {**os.environ, "SELFSTART_TEST_PYTHON": sys.executable}
     return subprocess.run(
-        ["bash", str(HARNESS)], capture_output=True, text=True, timeout=300
+        ["bash", str(HARNESS)], capture_output=True, text=True, timeout=600, env=env
     )
 
 
@@ -395,3 +400,17 @@ def test_the_run_proves_it_covered_every_declared_bot(run):
     assert "PASS: an incomplete run exits non-zero" in run.stdout
     assert "PASS: incomplete headline is stamped, not just the banner" in run.stdout
     assert "PASS: healthy run carries no INCOMPLETE stamp" in run.stdout
+
+
+def test_an_unreadable_receipt_source_refuses_rather_than_failing_open(run):
+    """F18 closure R2b-2: the fleet_rescue receipts live on the plane, and the
+    plane being unreadable — no db, or a declared fleet it holds no identity
+    for — is a REFUSAL with its own exit code (7) and stamp, never read as "no
+    receipt". The file version failed open on a missing ledger, the one
+    direction the gate must never fail in."""
+    assert "PASS: an unreadable receipt source refuses with its own exit code" in run.stdout
+    assert "PASS: and stamps the page RESCUE UNKNOWN" in run.stdout
+    assert "PASS: an unreadable source is never read as absence of a receipt" in run.stdout
+    assert "PASS: a fleet the plane never saw refuses the page" in run.stdout
+    assert "PASS: unknown outranks contaminated" in run.stdout
+    assert "PASS: a receipt that WAS read still classifies its bots" in run.stdout

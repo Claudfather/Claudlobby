@@ -45,6 +45,16 @@ BOT_DIR="$FLEET_DIR/runtime/bots/$BOT"
 TIMERS_DIR="$FLEET_DIR/runtime/fleet/timers"
 WORK="$(mktemp -d)"
 
+# briefing_event_landed <root> <fleet> <bot> — the trigger rides emit_fleet_event, so
+# its briefing_dispatched / briefing_deferred lands on the PLANE under the
+# checkout's root (F18 closure R2b-2: no per-bot event file). True iff the plane
+# holds a briefing-sourced event for the bot; an unreachable plane is a FAILED
+# check, never a skipped one.
+briefing_event_landed() {
+    python3 -S -E "$1/lib/plane-lookup.py" --root "$1" --events --fleet "$2" --bot "$3" 2>/dev/null \
+        | grep -qE '"source": ?"briefing"'
+}
+
 pass=0
 fail=0
 check() {
@@ -113,7 +123,6 @@ if [ "$(uname -s)" = "Linux" ] && systemctl --user show-environment >/dev/null 2
 fi
 
 echo "=== rehearse-briefing-timer: composed timer chain (#627 P6 gate 2) ==="
-mkdir -p "$BOT_DIR/data/events"
 
 # --- 1. compose the equipped (bot,slot) unit + assert the full unit set -------
 log "composing briefing timers for $FLEET/$BOT/$SLOT"
@@ -161,8 +170,7 @@ UNIT_TIMER
         sleep 10
     done
     check "composed briefing timer FIRES: journal records $UNIT.service activation" "$r"
-    ev=$(ls "$BOT_DIR"/data/events/fleet-*.jsonl 2>/dev/null | head -1 || true)
-    { [ -n "$ev" ] && grep -q '"source":"briefing"' "$ev"; } && r=yes || r=no
+    briefing_event_landed "$CLAUDLOBBY_ROOT" "$FLEET" "$BOT" && r=yes || r=no
     check "timer fire runs the trigger end-to-end: briefing-trigger.sh emitted a briefing event" "$r"
 else
     log "SKIP live-fire assertions — no user systemd (systemctl --user unavailable on this host)"

@@ -1363,3 +1363,77 @@ class TestPublishedValuesDoNotMove:
     def test_strand_rate_values_unchanged(self, k, n, want):
         lo, hi = summary.cp_interval(k, n, 0.95)
         assert f"{lo:.3f}, {hi:.3f}" == want
+
+
+class TestCountSendRetriesReadsThePlane:
+    """F18 closure R2b-2: the probe's send_retry events live on the plane
+    (start-bot.sh lands them through emit_fleet_event); the per-bot event
+    files are gone. An outage is UNKNOWN (no output, rc 1), never 0."""
+
+    @staticmethod
+    def _probe(root: Path, fleet: str = "boot-sampler", bot: str = "bsprobe") -> Path:
+        bot_dir = root / "runtime" / "bots" / bot
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "bot.conf").write_text(f'BOT_ID="{bot}"\nFLEET_NAME="{fleet}"\n')
+        if not (root / "lib").exists():
+            (root / "lib").symlink_to(REPO_ROOT / "lib")
+        return bot_dir
+
+    @staticmethod
+    def _land(root: Path, fleet: str, bot: str, etype: str, n: int) -> None:
+        from claudlobby.plane.emit_api import emit_batch
+
+        (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+        events = [{"event_type": "system", "emitter": "start-bot", "fleet": fleet,
+                   "occurred_at": f"2026-08-06T12:4{i}:00Z",
+                   "source_ref": f"fleet-events:sha:{i:032x}",
+                   "payload": {"event": etype, "subject_kind": "actor", "subject": f"bot:{fleet}/{bot}",
+                               "data": {"source": "start-bot", "legacy_ts": f"2026-08-06T12:4{i}:00Z",
+                                        "data": {"attempt": i}}}} for i in range(n)]
+        out = emit_batch(root, events)
+        assert all(o.status == "committed" for o in out), out
+
+    @staticmethod
+    def _count(bot_dir: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", "-c", f'. "{SAMPLER}"; count_send_retries "$1"', "_", str(bot_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def test_counts_the_probes_send_retry_events(self, tmp_path):
+        bot_dir = self._probe(tmp_path)
+        self._land(tmp_path, "boot-sampler", "bsprobe", "send_retry", 3)
+        self._land(tmp_path, "boot-sampler", "other", "send_retry", 2)          # another bot's, not counted
+        r = self._count(bot_dir)
+        assert r.returncode == 0 and r.stdout.strip() == "3", (r.stdout, r.stderr)
+
+    def test_a_probe_with_no_retries_is_a_real_zero(self, tmp_path):
+        bot_dir = self._probe(tmp_path)
+        self._land(tmp_path, "boot-sampler", "bsprobe", "keepalive_skip", 1)     # the fleet is known, no retry
+        r = self._count(bot_dir)
+        assert r.returncode == 0 and r.stdout.strip() == "0", (r.stdout, r.stderr)
+
+    def test_an_unreachable_plane_is_unknown_never_zero(self, tmp_path):
+        bot_dir = self._probe(tmp_path)                                         # no plane db at all
+        r = self._count(bot_dir)
+        assert r.returncode == 1 and r.stdout == "" and "UNKNOWN" in r.stderr, (r.stdout, r.stderr)
+
+
+class TestSummaryDisclosesUnknownRetries:
+    """A null retry_fired (the plane unreadable at count time) is disclosed
+    and kept out of both retry strata — never pooled as 'did not fire'."""
+
+    def test_unknown_retries_are_named_and_excluded(self):
+        rows = TestSummarize._rows("clean", "strand", "clean")
+        rows[1]["retry_fired"] = None
+        rows[3]["retry_fired"] = 2
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("bss_summary", REPO_ROOT / "lib" / "boot-strand-summary.py")
+        summary_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(summary_mod)
+        lines, _machine, _k, _valid = summary_mod.arm_block(rows, None)
+        text = "\n".join(lines)
+        assert "send_retry UNKNOWN on 1 boot(s)" in text
+        assert "clean via #837 send_retry: 1 boot(s)" in text
+        assert "retry_fired == 0: 0/1" in text or "retry_fired == 0: " in text
