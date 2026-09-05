@@ -148,7 +148,7 @@ export CLAUDLOBBY_FLEET="$FLEET"
 # events rendered as the legacy JSONL rows, oldest first, from the plane — so
 # every grep this harness ever made on a fleet-<day>.jsonl works unchanged on
 # the output. A bot's own events by name; the fleet-level receipts (the old
-# state/events/ file) as "fleet"; empty = nothing recorded, unreachable = empty
+# fleet-anchored plane row) as "fleet"; empty = nothing recorded, unreachable = empty
 # too (the assertion that expected a row then fails, which is the honest
 # reading of an instrument that cannot answer).
 val_events() {
@@ -1775,7 +1775,7 @@ BRIEF="valbrief"; BRIEFBUSY="valbriefbusy"; SINK="valsink"
 BRIEF_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEF"
 BRIEFBUSY_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEFBUSY"
 # data/ holds the busy bot's .last-tool-call marker and is where the trigger
-# emits events; briefing-trigger.sh + emit_fleet_event create logs/ + data/events
+# emits events; briefing-trigger.sh + emit_fleet_event land on the plane (logs/ still)
 # on demand. SINK is a pure classifier sink (pane-only) — no dir needed; its
 # socket resolves by the basename fallback.
 mkdir -p "$BRIEF_DIR/data" "$BRIEFBUSY_DIR/data"

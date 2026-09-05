@@ -122,9 +122,9 @@ claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
 claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
 claudlobby status [--bot <name>] # fleet health dashboard
 claudlobby doctor                # pre-flight fleet health diagnostic
-claudlobby report-back           # query bot work event ledger (--since, --bot)
+claudlobby report-back           # worker reports from the plane (--since, --bot)
 claudlobby uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
-claudlobby events                # tail/filter JSONL events across all bots
+claudlobby events                # fleet events from the plane (--bot, --type, --critical)
 claudlobby new-bot               # interactive bot scaffolding
 claudlobby new-skill             # scaffold a new skill directory
 claudlobby new-guardrail         # scaffold a new guardrail file

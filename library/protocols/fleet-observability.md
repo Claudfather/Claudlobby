@@ -13,9 +13,9 @@ Pull-based observability for fleet managers. Two writers produce events; manager
 |--------|--------|-----------|--------------|
 | Bot vitals | `lib/bot-vitals.sh` | Every tool call (Claude Code hook) | `vitals` |
 | Fleet pulse | `lib/fleet-pulse.sh` | Cron (every 5 min) | `pulse` |
-| Keepalive idle marker | `lib/keepalive.sh` | Every keepalive run (60s timer) | Marker file (`data/.idle`), not JSONL |
+| Keepalive | `lib/keepalive.sh` | Every keepalive run (60s timer) | `keepalive` — `bot.heartbeat` / `bot.session_up` samples and `keepalive_*` and `bridge_heal` events on the plane, plus the `data/.idle` marker |
 
-Both write the same JSONL schema to the same bot-local directory. Managers read one path per bot regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
+Every writer lands on the plane through `emit_fleet_event`; managers read one door, `claudlobby events`, regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
 
 ## Where to Read
 

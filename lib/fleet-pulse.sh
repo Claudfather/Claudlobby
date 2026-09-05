@@ -27,7 +27,7 @@ if [ ! -d "$BOTS_DIR" ]; then
     exit 1
 fi
 # Fleet overlay dir (flat local/<fleet> byte-identically, or nested
-# local/<system>/<fleet>) — the home for fleet.yaml + the report ledger below.
+# local/<system>/<fleet>) — the home for fleet.yaml and the fleet state below.
 fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
 
 # fleet.yaml is authoritative for which bots this fleet owns. Filter the
@@ -144,8 +144,8 @@ python3 "$LIB_DIR/dispatch-overdue.py" --orphans --fleet "$fleet" \
 
 
 # --- Cutover overdue-reader guard (chunk 5): a REFUSED --all is not "nothing overdue" ---
-# The flipped overdue reader refuses (rc 3) rather than falling back to the
-# JSONL when the plane cannot serve; the sweep above keeps its rc and stderr,
+# The overdue reader refuses (rc 3) when the plane cannot serve — there is
+# nothing to fall back to; the sweep above keeps its rc and stderr,
 # and this guard pages -- debounced, like every other notice here -- so a dark
 # watchdog is a paged watchdog. rc 0 clears the marker; any other rc is
 # disclosed on stderr and never paged (rc 2 is a call-shape bug, not an outage).

@@ -96,10 +96,9 @@ host:
     # VOLATILE facets (load, available RAM, free disk, Pi thermal/undervolt,
     # boot time) — which F12 keeps OUT of the registry keyframe — and emits
     # them as host.* metric_samples for the Host card. Per-minute cadence
-    # (30k-row envelope, guarded by the plane-prune retention lane). DORMANT
-    # by default; self-gates on PLANE_EMIT_ENABLED (the standard emission
-    # flag, stamped by the host-timer arming carrier) — a read-only emitter,
-    # so it shares the plane flag rather than earning its own.
+    # (30k-row envelope, guarded by the plane-prune retention lane). Always on
+    # (PLANE_EMIT_DISABLED=1 is the one silencer): a read-only emitter with no
+    # gate of its own.
     plane-host-probe:
       enroll: false
       script: "$CLAUDLOBBY_ROOT/lib/plane-host-probe.sh"
@@ -229,8 +228,8 @@ defaults:
       # The OUTBOUND Telegram carrier (#1402): the plugin's MCP reply path
       # was the plane's blind spot -- a bot answering the operator left no
       # record while tg-post notices did. Matcher-scoped to the reply tool;
-      # composed dormant (PLANE_EMIT_ENABLED=1, the transcript-digest
-      # pattern), exit 0 on every path.
+      # always on (PLANE_EMIT_DISABLED=1 is the one silencer), exit 0
+      # on every path.
       - command: "$CLAUDLOBBY_ROOT/lib/plane-telegram-out.sh"
         matcher: "mcp__plugin_telegram_telegram__reply"
         timeout: 15
@@ -252,10 +251,9 @@ defaults:
         timeout: 150
     # Observable-plane session identity (PR-B T7, spec §19.6/F12): derives the
     # transcript-stable session_uid + a fresh per-process process_uid and
-    # publishes them to $BOT_DIR/data/.plane-session for the doors. Same
-    # dormancy pattern as transcript-digest: composed everywhere harmlessly,
-    # self-gated on PLANE_EMIT_ENABLED=1 in the fleet env, exit 0 on every
-    # path (a hook must never break a boot).
+    # publishes them to $BOT_DIR/data/.plane-session for the doors. Composed
+    # everywhere, always on (PLANE_EMIT_DISABLED=1 is the one silencer), exit
+    # 0 on every path (a hook must never break a boot).
     SessionStart:
       - command: "$CLAUDLOBBY_ROOT/lib/plane-session-start.sh"
         timeout: 15
@@ -272,7 +270,7 @@ defaults:
     # when a bot answers a Telegram-initiated turn with plain final text
     # (no reply tool call) the bridge's RC auto-relay delivers it and no
     # PostToolUse fires — this Stop hook records that final answer, carrier
-    # state `unknown` (delivery unobserved), dormant on PLANE_EMIT_ENABLED.
+    # state `unknown` (delivery unobserved); always on, exit 0 on every path.
     Stop:
       - command: "$CLAUDLOBBY_ROOT/lib/plane-rc-relay-out.sh"
         timeout: 15
@@ -354,9 +352,8 @@ defaults:
       script: "$CLAUDLOBBY_ROOT/lib/weekly-worker-restart.sh"
       schedule: "Sun *-*-* 05:00:00"
       type: oneshot
-    # Weekly per-bot data/ hygiene (event-JSONL bloat), analogous to
-    # log-rotation. Purges only known-ephemeral files (events/*.jsonl, vetted
-    # text-log names, *.bak) older than 30 days — durable files never age out.
+    # Weekly per-bot data/ hygiene, analogous to log-rotation. Purges only
+    # known-ephemeral files (vetted text-log names, *.bak) older than 30 days — durable files never age out.
     # A fleet changes retention by overriding this job's script line
     # (e.g. "... --purge --days 60").
     data-sweep:

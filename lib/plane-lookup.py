@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""plane-lookup.py — the plane answered by LEGACY TASK ID (cutover chunk 1).
+"""plane-lookup.py — the plane answered by TASK ID.
 
 Every dispatch stamps ``source_ref = "dispatch-log:<task_id>"`` on the
-plane work_item and assignment it emits, so the plane can answer a legacy
-task id today — and two doors need exactly that instead of grepping
-``dispatch-log.jsonl``: ``report-back.sh`` recovers the work_item /
-assignment ids for its own emission (the cutover's hard precondition —
-retire the dispatch log's write and every report row would unlink), and
-``dispatch-task.sh --supersedes`` needs the superseded dispatch's plane
-ids to set ``supersedes_msg_id`` and emit a terminal ``superseded`` event.
+plane work_item and assignment it emits — a stable ref shape, the only
+thing the name still means — and two doors resolve through it:
+``report-back.sh`` recovers the work_item / assignment ids for its own
+emission, and ``dispatch-task.sh --supersedes`` needs the superseded
+dispatch's plane ids to set ``supersedes_msg_id`` and emit a terminal
+``superseded`` event.
 
 Stdlib-only, like ``dispatch-overdue.py`` — a bash door must not pay the
 package import on every call. Read-only (``mode=ro`` + ``query_only``).

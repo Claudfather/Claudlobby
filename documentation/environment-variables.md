@@ -130,7 +130,7 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 ## Opt-in Feature Flags
 
 A handful of shared `lib/` hooks and scripts compose into **every** bot on **every** fleet
-(via `system.yaml` `defaults.hooks` or a shared `lib/` script), but ship **dormant by default** —
+(via `system.yaml` `defaults.hooks` or a shared `lib/` script), but ship **dormant by default** (the plane hooks are the exception since F18 R1: always on, `PLANE_EMIT_DISABLED=1` the one silencer) —
 each is a no-op until the specific var below is set to `"1"` under the relevant bot's
 `bots.<name>.env` (which lands in that bot's `bot.conf` and is inherited by hooks/scripts running
 in its session). This is the equippable-dormant pattern: a shared install cannot be staged
@@ -140,9 +140,9 @@ per-bot, so rollout is gated per-fleet (or per-bot) instead of going live estate
 | Variable | Consumer | Description |
 |----------|----------|--------------|
 | `SESSION_DIGEST_ENABLED` | `lib/transcript-digest.sh` (SessionEnd hook) | `"1"` arms per-session Haiku transcript digesting for this bot. Default `0` (dormant) |
-| `PLANE_EMIT_ENABLED` | `lib/plane-session-start.sh` (SessionStart hook) | `"1"` arms observable-plane session-identity emission (`session_uid`/`process_uid`) for this bot. Default `0` (dormant) |
-| `PLANE_EMIT_DISABLED` | `lib/plane-emit.sh`, `lib/plane-session-start.sh` | `"1"` forces a no-op regardless of `PLANE_EMIT_ENABLED` — the harness/test exemption. Opposite polarity from the other flags on this list |
-| `SPINDOWN_RECEIPT_ENABLED` | `lib/spin-down-bot.sh` | `"1"` arms the `bot_teardown_started` fleet-ledger receipt on teardown for this bot's fleet. Default `0` (dormant) |
+| `PLANE_EMIT_ENABLED` | `claudlobby generate` (`registry_emit.py`) | `"1"` in the fleet-tier `.env` arms the generate-time registry keyframe scan. Not a runtime door gate — every door is always on since F18 R1 |
+| `PLANE_EMIT_DISABLED` | `lib/plane-emit.sh`, every hook | `"1"` silences every plane door — the harness/test exemption, the one silencer. Opposite polarity from the other flags on this list |
+| `SPINDOWN_RECEIPT_ENABLED` | `lib/spin-down-bot.sh` | `"1"` arms the `bot_teardown_started` receipt on teardown (on the plane, anchored on this bot's fleet). Default `0` (dormant) |
 
 ## Plugins
 

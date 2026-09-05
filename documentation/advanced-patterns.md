@@ -36,7 +36,7 @@ The example fleet already wires this on its `lead` bot. The phase-by-phase decis
 
 ### How it dispatches
 
-Lifecycle hands work to the engineer and reviewer through the same socket-aware path every fleet dispatch uses — `lib/dispatch.sh` (or `lib/dispatch-task.sh`, which additionally records the task to the dispatch ledger with a deadline so an overdue task surfaces as `overdue_dispatch`). Workers signal progress and completion with `lib/report-back.sh`, which the manager reads in its own pane. See Section 5 for both.
+Lifecycle hands work to the engineer and reviewer through the same socket-aware path every fleet dispatch uses — `lib/dispatch.sh` (or `lib/dispatch-task.sh`, which additionally records the task on the plane as an assignment with a deadline so an overdue task surfaces as `overdue_dispatch`). Workers signal progress and completion with `lib/report-back.sh`, which the manager reads in its own pane. See Section 5 for both.
 
 ### Gotchas
 
@@ -147,7 +147,7 @@ $CLAUDLOBBY_ROOT/lib/dispatch.sh <worker-session> "Implement X in org/repo. Bran
 
 `dispatch.sh` reverse-resolves the worker's private socket from its session name, confirms the session exists on that socket, and sends the text and Enter as two steps (so a rendering TUI can't swallow the keystroke). If the peer can't be reached it logs a `send_miss` event and exits non-zero instead of silently dropping the message.
 
-`lib/dispatch-task.sh` wraps `dispatch.sh` with accountability: it appends the task to `state/dispatch-log.jsonl` with a deadline (`expected_by`) before sending, so the fleet-pulse watchdog can flag the task `overdue_dispatch` if no terminal report arrives in time. Any envelope flag (`--botcommand`, `--repo`, `--priority`, `--ref`, `--workstream`) wraps the task in a `[BOTCOMMAND]` envelope **and mints a `task:<id>`** the worker echoes back (`report-back.sh --task <id>`), so the watchdog joins on identity — prefer `--botcommand` at minimum for anything individually tracked.
+`lib/dispatch-task.sh` wraps `dispatch.sh` with accountability: it records the dispatch on the plane (a work item + an assignment) with a deadline (`expected_by`) before sending, so the fleet-pulse watchdog can flag the task `overdue_dispatch` if no terminal report arrives in time. Any envelope flag (`--botcommand`, `--repo`, `--priority`, `--ref`, `--workstream`) wraps the task in a `[BOTCOMMAND]` envelope **and mints a `task:<id>`** the worker echoes back (`report-back.sh --task <id>`), so the watchdog joins on identity — prefer `--botcommand` at minimum for anything individually tracked.
 
 ### Report-back: worker → manager
 
@@ -176,7 +176,7 @@ $CLAUDLOBBY_ROOT/lib/report-back.sh eng-1 blocked "Need DB migration permissions
 $CLAUDLOBBY_ROOT/lib/report-back.sh eng-1 progress "Refactoring auth" --progress 40
 ```
 
-Beyond the pane message, `report-back.sh` appends a structured JSONL event to the fleet report-back ledger and mirrors the bot's state (idle/working/blocked) to `fleet-state`, so completion is queryable via `claudlobby report-back` even if the manager missed the pane message.
+Beyond the pane message, `report-back.sh` lands the report on the plane (a communication + the task event) and mirrors the bot's state (idle/working/blocked) to `fleet-state`, so completion is queryable via `claudlobby report-back` even if the manager missed the pane message.
 
 ### Where the manager address comes from — you don't set it by hand
 
@@ -188,7 +188,7 @@ Beyond the pane message, `report-back.sh` appends a structured JSONL event to th
 
 - The `|` delimiter means summaries must not contain pipes. Keep summaries to one sentence.
 - `send-keys` has a practical length limit — keep the whole message well under ~500 characters. For detail, include a PR/issue URL and let the manager read it via GitHub MCP.
-- A dropped cross-socket send is no longer silent: it emits a `send_miss` event to the sender's `data/events/` stream, so you can see when a report failed to land (e.g. the manager's session was down).
+- A dropped cross-socket send is no longer silent: it emits a `send_miss` event to the plane (`claudlobby events --type send_miss`), so you can see when a report failed to land (e.g. the manager's session was down).
 
 ---
 

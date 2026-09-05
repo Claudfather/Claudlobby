@@ -29,7 +29,7 @@
 # is installed, not a path list. See that helper for why.
 #
 # Quiet-failure discipline: an offline host or a non-git root logs + exits 0,
-# leaving a script_error breadcrumb in state/events — a missed nudge is
+# leaving a script_error breadcrumb on the plane — a missed nudge is
 # low-urgency and must never become alert noise. One repo's failure never
 # aborts the sweep.
 #
