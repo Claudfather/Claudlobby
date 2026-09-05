@@ -327,7 +327,8 @@ LEGACY_STATUS = {"completed": "completed", "failed": "failed", "returned_blocked
 # summary | progress:N | pr:URL` under full capture. `ts` renders in the legacy
 # form (UTC, seconds, `Z`) so every brief cursor keeps comparing correctly.
 REPORT_COMMS_SQL = (
-    "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref"
+    "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref,"
+    " c.ingest_seq"
     " FROM communications c"
     " WHERE c.message_class = 'report' AND c.fleet_uid = ? AND c.source_ref LIKE 'report-back:%'"
     " AND (? IS NULL OR c.occurred_at >= ?)"
@@ -394,7 +395,7 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
     since = since_form(since)
     prefix = f"bot:{fleet}/"
     out: list[dict] = []
-    for occurred_at, msg_id, sender_uid, sender_alias, body, ref in conn.execute(
+    for occurred_at, msg_id, sender_uid, sender_alias, body, ref, seq in conn.execute(
             REPORT_COMMS_SQL, (uid, since, since)):
         name = (sender_alias or "").removeprefix(prefix)
         if bot and name.lower() != bot.lower():
@@ -406,7 +407,9 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
                     "progress": parsed.get("progress", ""), "artifact": parsed.get("artifact", ""),
                     "issues": parsed.get("issues", ""), "skill": parsed.get("skill", ""),
                     "status": parsed.get("status", ""), "_source": "body" if parsed else "none",
-                    "_body_stripped": not body})
+                    "_body_stripped": not body,
+                    # the plane's ordering authority (§4) — what an ack points at
+                    "_seq": seq})
         ev = conn.execute(_REPORT_STATUS_EVENT_SQL, (ref, sender_uid)).fetchone()
         if ev is not None:
             event, detail, dispatch_ref = ev
@@ -432,6 +435,52 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
             continue
         out.append(row)
     return out
+
+
+# The viewer's newest ack (chunk K, #1467): `brief --ack` records ONE
+# `reports_acked` system event on the viewer's own actor, its detail the
+# `ingest_seq` the ack reaches. Both anchors are matched (subject and actor),
+# spanning EVERY uid the bot's alias variants minted (the R2a rule: a
+# case-variant alias is a second actor, and an ack bound to one uid would read
+# as "never acked" from the other).
+NEWEST_ACK_SQL = (
+    "SELECT e.ingest_seq, e.occurred_at, e.detail, e.subject_alias FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'reports_acked'"
+    " AND (e.subject_uid IN (%s) OR e.actor_uid IN (%s))"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+
+
+def ack_from_row(row) -> Optional[dict]:
+    """A `reports_acked` events row -> {seq, ts, count, acked_at, by}; None when
+    its detail carries no readable cursor — which reads as "never acked" and
+    fails toward showing too much (#949/#1024's direction, kept from the
+    file era: a broken cursor must never hide a report)."""
+    if row is None:
+        return None
+    seq_landed, occurred_at, detail, subject_alias = row
+    try:
+        data = json.loads(detail) if detail else {}
+    except ValueError:
+        return None
+    seq = data.get("acked_through_seq") if isinstance(data, dict) else None
+    if not isinstance(seq, int):
+        return None
+    return {"seq": seq, "ts": data.get("acked_through_ts") or legacy_ts(occurred_at),
+            "count": data.get("count"), "acked_at": occurred_at, "by": subject_alias,
+            "landed_seq": seq_landed}
+
+
+def newest_ack(conn: sqlite3.Connection, fleet: str, bot: str, *,
+               entry: Optional[dict] = None) -> Optional[dict]:
+    """The viewer's newest ack from the plane, or None when it has acked nothing
+    (or its newest ack is unreadable — see ack_from_row)."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    uids = (entry or {}).get("uids", [])
+    if not uids:
+        return None
+    marks = ",".join("?" * len(uids))
+    return ack_from_row(conn.execute(NEWEST_ACK_SQL % (marks, marks), (*uids, *uids)).fetchone())
 
 
 TASK_TEXTS_SQL = (

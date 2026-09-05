@@ -4,6 +4,7 @@ the unknown-fleet refusal, the sender's own fleet, the matcher's open rule,
 the host card's recorded facts, one bot-dir walk."""
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -237,3 +238,40 @@ def test_discover_bot_dirs_is_the_walk_the_grid_gates(tmp_path):
     assert [(f, b) for f, b, _ in walked] == [("f", "nosock"), ("f", "sock")]
     panes = _sampler.discover_panes(tmp_path)
     assert [p["bot"] for p in panes] == ["sock"] or panes == []   # gate: socket or nothing
+
+
+# --- the strip's unacked figure: the fleet's newest ack (chunk K) --------------
+
+def test_overview_unacked_is_past_the_fleets_newest_ack(tmp_path):
+    """`brief --ack` records a `reports_acked` event on the acking bot; the card
+    counts report-class communications on the room axis past the fleet's newest
+    ack by ANY of its actors; a fleet that never acked reads null + reason —
+    never a count of everything ever — and another fleet's ack is not its own."""
+    _seed(tmp_path)
+    emit_batch(tmp_path, [
+        _comm("engineering", "1", "bot:engineering/one", "bot:engineering/mgr", cls="report"),
+        _comm("engineering", "2", "bot:engineering/one", "bot:engineering/mgr", cls="report")])
+    c = TestClient(create_app(tmp_path))
+    rows = lambda: {r["alias"]: r for r in c.get("/api/overview").json()["data"]["fleets"]}
+    eng = rows()["engineering"]
+    assert eng["unacked"] is None and "never run" in eng["unacked_reason"]
+    assert (eng["acked_by"], eng["acked_at"]) == (None, None)
+
+    conn = sqlite3.connect(tmp_path / "state" / "plane" / "plane.db")
+    first_seq = conn.execute("SELECT ingest_seq FROM communications WHERE msg_id = ?",
+                             ("msg_" + "1" * 32,)).fetchone()[0]
+    conn.close()
+
+    def ack(data):
+        return emit_batch(tmp_path, [{
+            "event_type": "system", "emitter": "brief", "fleet": "engineering",
+            "payload": {"event": "reports_acked", "subject_kind": "actor",
+                        "subject": "bot:engineering/mgr", "data": data}}])[0].status
+    assert ack({"acked_through_seq": first_seq, "acked_through_ts": "2026-09-05T00:00:00Z",
+                "count": 1}) == "committed"
+    eng = rows()["engineering"]
+    assert eng["unacked"] == 1 and eng["acked_by"] == "mgr" and eng["acked_at"]
+    assert rows()["data"]["unacked"] is None            # data's manager has not acked
+    # a newer ack whose detail carries no cursor is no read position (never a 0)
+    assert ack({"note": "nothing readable"}) == "committed"
+    assert rows()["engineering"]["unacked"] is None

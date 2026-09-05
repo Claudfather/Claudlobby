@@ -99,8 +99,14 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
   120s, stamped by the API), and the host probe's newest facets (load, RAM, disk,
   thermal, under-voltage) — `null` until `plane-host-probe` has ever recorded.
   A figure whose source is absent is `null` with a reason, never `0`.
-- **Not on the card:** unacked reports — the ack cursor is `claudlobby brief`'s
-  per-viewer file, not a plane fact.
+- **Unacked reports (chunk K).** `claudlobby brief --ack` records the viewer's read
+  position as a plane fact — one `reports_acked` system event on the manager's actor,
+  its detail the `ingest_seq` the ack reaches. The fleet card counts report-class
+  communications on the room axis past the fleet's newest ack by any of its actors
+  ("N unacked · acked by <bot> 2h ago"); a fleet that has never acked reads
+  `no ack recorded` (`null` + reason), never a count of everything ever. No cursor
+  file exists any more: a failed emit is a failed ack (rc 1, said on stderr), a spooled
+  one is disclosed and takes effect when the spool drains.
 
 ## The grid shows raw terminals — operators only (ruling 2026-08-29)
 

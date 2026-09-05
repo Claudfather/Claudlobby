@@ -45,11 +45,9 @@ from claudlobby.brief import (
     boot_provenance,
     build_brief,
     format_boot_brief,
-    cursor_path,
     format_brief,
+    record_ack,
     load_dispatch_doors,
-    read_cursor,
-    write_cursor,
 )
 from claudlobby.config import BotConfig, FleetConfig, ProjectConfig, ScopeConfig
 from claudlobby.paths import Paths
@@ -387,7 +385,27 @@ def test_missing_matcher_omits_every_plane_section_rather_than_reporting_zero(pa
 # --- unacked reports + the ack cursor -----------------------------------------
 
 
-def test_brief_ack_cursor_roundtrip(paths: Paths):
+def _acked_events(paths: Paths) -> list[tuple]:
+    import sqlite3
+    conn = sqlite3.connect(paths.root / "state" / "plane" / "plane.db")
+    try:
+        return conn.execute(
+            "SELECT subject_alias, severity, detail FROM events WHERE kind='system'"
+            " AND event='reports_acked' ORDER BY ingest_seq").fetchall()
+    finally:
+        conn.close()
+
+
+def _ack(paths: Paths, bot: str, unacked: list[dict]):
+    newest = max(unacked, key=lambda r: r["seq"] or 0)
+    return record_ack(paths, FLEET, bot, acked_through_seq=newest["seq"],
+                      acked_through_ts=newest["ts"], count=len(unacked))
+
+
+def test_brief_ack_is_a_plane_fact_and_the_unacked_list_shrinks(paths: Paths):
+    """Chunk K (#1467): `--ack` records ONE `reports_acked` system event on the
+    viewer's own actor; the unacked list is what lies past it on the plane's
+    own ordering (`ingest_seq`), and no cursor file exists anywhere."""
     _seed_plane(paths)
     for row in (
         _report("vera", "2026-08-08T10:00:00Z", status="completed"),
@@ -401,32 +419,121 @@ def test_brief_ack_cursor_roundtrip(paths: Paths):
     unacked = brief["reports"]["unacked"]
     # progress is not terminal — it closes nothing and acks nothing.
     assert [r["status"] for r in unacked] == ["completed", "blocked"]
+    assert all(isinstance(r["seq"], int) for r in unacked)
     assert brief["reports"]["cursor"] is None
 
-    write_cursor(paths, "alex", unacked[-1]["ts"])
+    out = _ack(paths, "alex", unacked)
+    assert out.recorded and out.rung == "cold", out
     again = build_brief(fleet, paths, "alex", NOW)
     assert again["reports"]["unacked"] == []
-    assert again["reports"]["cursor"] == "2026-08-08T11:00:00Z"
-    assert read_cursor(paths, "alex") == "2026-08-08T11:00:00Z"
+    assert again["reports"]["cursor"] == "2026-08-08T11:00:00Z"   # the legacy-form ts, for the render
+
+    (alias, severity, detail), = _acked_events(paths)
+    assert alias == f"bot:{FLEET}/alex" and severity == "notice"
+    data = json.loads(detail)
+    assert set(data) == {"acked_through_seq", "acked_through_ts", "count"}
+    assert data["acked_through_seq"] == max(r["seq"] for r in unacked) and data["count"] == 2
+
+    # a report landing after the ack reads unacked again
+    _land_report(paths, _report("vera", "2026-08-08T12:00:00Z", status="completed"))
+    assert [r["ts"] for r in build_brief(fleet, paths, "alex", NOW)["reports"]["unacked"]] == [
+        "2026-08-08T12:00:00Z"]
+    assert not list(paths.root.rglob("brief-cursor-*"))        # no JSON state, anywhere
 
 
-def test_cursor_is_per_bot(paths: Paths):
-    """Two managers acking the same reports must not clobber each other."""
+def test_ack_is_per_viewer_on_the_plane(paths: Paths):
+    """Two managers acking the same reports must not clobber each other: the
+    fact is anchored on the acking bot's own actor."""
     _seed_plane(paths)
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
-    write_cursor(paths, "alex", "2026-08-08T23:00:00Z")
+    alex = build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"]
+    assert _ack(paths, "alex", alex).recorded
 
     assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
     assert len(build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"]) == 1
-    assert cursor_path(paths, "alex") != cursor_path(paths, "ari")
 
 
-def test_corrupt_cursor_fails_toward_showing_too_much(paths: Paths):
+def test_unreadable_ack_fails_toward_showing_too_much(paths: Paths):
+    """The file era's rule, kept: a read position that cannot be read is no
+    read position — the report shows, never hides (#949/#1024)."""
+    from claudlobby.plane.emit_api import emit_batch
+
     _seed_plane(paths)
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
-    cursor_path(paths, "alex").write_text("{not json")
+    out = emit_batch(paths.root, [{
+        "event_type": "system", "emitter": "brief", "fleet": FLEET,
+        "payload": {"event": "reports_acked", "subject_kind": "actor",
+                    "subject": f"bot:{FLEET}/alex", "data": {"note": "no cursor here"}}}])
+    assert out[0].status == "committed"
 
-    assert len(build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"]) == 1
+    reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    assert len(reports["unacked"]) == 1 and reports["cursor"] is None
+
+
+def test_ack_ladder_daemon_rung_classifies_the_reply(paths: Paths, monkeypatch, tmp_path):
+    """The socket is the live rung: a verdict the daemon returns is a failed ack,
+    a refused transport falls to the cold door with the SAME finalized request."""
+    import claudlobby.plane.daemon as daemon
+
+    _seed_plane(paths)
+    sock = tmp_path / "ingest.sock"; sock.write_text("")
+    monkeypatch.setattr(daemon, "socket_path", lambda root: sock)
+    sent: list[list[dict]] = []
+
+    monkeypatch.setattr(daemon, "send_batch", lambda p, events, **kw: (
+        sent.append(events) or {"ok": True, "results": [{"event_id": events[0]["event_id"],
+                                                          "status": "committed"}]}))
+    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
+    assert (out.status, out.rung) == ("recorded", "daemon")
+    assert sent[0][0]["event_id"] and sent[0][0]["payload"]["event"] == "reports_acked"
+
+    monkeypatch.setattr(daemon, "send_batch", lambda p, events, **kw: {
+        "ok": False, "code": "contract_violation", "error": "bad"})
+    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
+    assert (out.status, out.rung) == ("failed", "daemon") and "contract_violation" in out.detail
+    assert _acked_events(paths) == []                       # nothing recorded by a refusal
+
+    def refused(p, events, **kw):
+        raise OSError("connection refused")
+    monkeypatch.setattr(daemon, "send_batch", refused)
+    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
+    assert (out.status, out.rung) == ("recorded", "cold")
+    assert len(_acked_events(paths)) == 1
+
+
+def test_failed_emit_is_a_failed_ack(paths: Paths, monkeypatch, caplog):
+    """A failed emit marks nothing seen: rc 1, said by name, no fact recorded,
+    the reports read unacked again — there is no file to fall back on."""
+    import argparse
+    import logging
+
+    import claudlobby.plane.emit_api as emit_api
+    from claudlobby.commands.core import cmd_brief
+
+    fleet_dir = paths.root / "local" / "f1"
+    (fleet_dir / "runtime").mkdir(parents=True)
+    _write_fleet_yaml(fleet_dir, "f1", ["alex"])
+    _seed_plane_for(paths, "f1")
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"), fleet="f1")
+
+    def boom(root, reqs):
+        raise RuntimeError("disk on fire")
+    monkeypatch.setattr(emit_api, "emit_batch", boom)
+    args = argparse.Namespace(fleet="f1", root=str(paths.root), seed=False, bot="alex",
+                              json=False, ack=True, boot=False)
+    with caplog.at_level(logging.ERROR, logger="claudlobby"):
+        assert cmd_brief(args) == 1
+    assert "did NOT record the ack" in caplog.text and "disk on fire" in caplog.text
+    assert _acked_events(paths) == []
+
+
+def test_no_cursor_file_is_written_or_read_anywhere():
+    """The deletion, pinned: no door under claudlobby/ or lib/ names the file."""
+    import subprocess
+    out = subprocess.run(["grep", "-rn", "-E", "brief-cursor|read_cursor|write_cursor|cursor_path",
+                          str(REPO_ROOT / "claudlobby"), str(REPO_ROOT / "lib")],
+                         capture_output=True, text=True)
+    assert out.returncode == 1 and out.stdout == "", out.stdout
 
 
 def test_reports_are_fleet_wide_not_self_scoped(paths: Paths):
@@ -842,7 +949,7 @@ def test_ack_refuses_when_the_report_section_was_not_served(paths: Paths, caplog
         assert cmd_brief(args) == 1
     assert "refusing to ack" in caplog.text
     assert "not found" not in caplog.text
-    assert not cursor_path(Paths(root=paths.root, fleet_dir=fleet_dir), "alex").exists()
+    assert not (paths.root / "state" / "plane" / "plane.db").exists()   # a refusal records nothing
 
 
 def test_ack_succeeds_when_the_plane_answers(paths: Paths):
@@ -862,7 +969,8 @@ def test_ack_succeeds_when_the_plane_answers(paths: Paths):
         fleet="f1", root=str(paths.root), seed=False, bot="alex", json=False, ack=True
     )
     assert cmd_brief(args) == 0
-    assert cursor_path(Paths(root=paths.root, fleet_dir=fleet_dir), "alex").exists()
+    (alias, severity, detail), = _acked_events(paths)
+    assert alias == "bot:f1/alex" and json.loads(detail)["count"] == 1
 
 
 # --- the omit suppresses true positives too, and must say how many ------------

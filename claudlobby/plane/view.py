@@ -867,6 +867,22 @@ _REPORTS_SINCE_SQL = (
     " UNION"
     " SELECT msg_id FROM communications WHERE recipient_fleet = ?"
     "  AND message_class = 'report' AND occurred_at >= ?)")
+# The fleet's newest ack by ANY of its actors (chunk K, #1467): the manager is
+# whoever acks; the card is a glance, so the newest read position wins.
+_FLEET_NEWEST_ACK_SQL = (
+    "SELECT e.ingest_seq, e.occurred_at, e.detail, e.subject_alias FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'reports_acked'"
+    " AND (e.subject_uid IN ({ph}) OR e.actor_uid IN ({ph}))"
+    " ORDER BY e.ingest_seq DESC LIMIT 1")
+# reports on the room axis the ack has not reached — the `_REPORTS_SINCE_SQL`
+# shape, bounded by the plane's ordering authority rather than a clock
+_UNACKED_REPORTS_SQL = (
+    "SELECT COUNT(*) FROM ("
+    " SELECT msg_id FROM communications WHERE fleet_uid = ?"
+    "  AND message_class = 'report' AND ingest_seq > ?"
+    " UNION"
+    " SELECT msg_id FROM communications WHERE recipient_fleet = ?"
+    "  AND message_class = 'report' AND ingest_seq > ?)")
 _HOST_SAMPLES_SQL = (
     # the host probe's newest value per facet (subject_kind=host — the
     # `_host` sentinel's samples, keyed by hostname): the ONE recorded place
@@ -883,6 +899,24 @@ _HOST_SAMPLES_SQL = (
 # The page's ingest-lag warning threshold, stamped by the API so a JSON
 # consumer gets the state and not only the number (structural lens)
 _INGEST_LAG_WARN_S = 120
+
+
+def _ack_from_row(row) -> dict | None:
+    """A `reports_acked` events row -> {seq, by, acked_at}; None when its detail
+    carries no readable cursor (reads as never acked — fails toward showing
+    the reports, the file era's rule kept). Mirrors `plane-readers.ack_from_row`
+    (a stdlib script every consumer shells; not importable here)."""
+    if row is None:
+        return None
+    _seq_landed, occurred_at, detail, subject_alias = row
+    try:
+        data = json.loads(detail) if detail else {}
+    except ValueError:
+        return None
+    seq = data.get("acked_through_seq") if isinstance(data, dict) else None
+    if not isinstance(seq, int):
+        return None
+    return {"seq": seq, "by": subject_alias, "acked_at": occurred_at}
 
 
 def _host_samples(conn: sqlite3.Connection) -> dict | None:
@@ -943,6 +977,11 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
       None + a reason (UNKNOWN is not zero — #1014's rule).
     * `newest_report_at` / `reports_24h` — `report`-class communications
       on the room axis (sent by the fleet OR to it).
+    * `unacked` — the same axis past the fleet's newest ack (chunk K:
+      `brief --ack` records a `reports_acked` event; the manager is whoever
+      acks, the newest ack of any actor wins); None + a reason when the
+      fleet has never acked — no read position is a different fact from a
+      backlog, and "everything ever" would be a number nobody asked for.
     * `last_activity_at` — the fleet identity's `last_seen`: LEDGER time,
       advanced by every emission under the fleet (a producer clock would
       let one future-stamped row pin a fleet at "0s ago" forever).
@@ -1012,6 +1051,20 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
         newest = conn.execute(_NEWEST_REPORT_SQL, (f["uid"], alias)).fetchone()
         reports_24h = conn.execute(
             _REPORTS_SINCE_SQL, (f["uid"], day_ago, alias, day_ago)).fetchone()[0]
+        unacked, unacked_reason, acked_by, acked_at = None, None, None, None
+        if uids:
+            ph = ",".join("?" * len(uids))
+            ack = _ack_from_row(conn.execute(
+                _FLEET_NEWEST_ACK_SQL.format(ph=ph), (*uids, *uids)).fetchone())
+            if ack is None:
+                unacked_reason = ("no ack recorded — `claudlobby brief --ack` has never"
+                                  " run for this fleet, so it has no read position")
+            else:
+                unacked = conn.execute(
+                    _UNACKED_REPORTS_SQL, (f["uid"], ack["seq"], alias, ack["seq"])).fetchone()[0]
+                acked_by, acked_at = _short(ack["by"]), ack["acked_at"]
+        else:
+            unacked_reason = "no actor of this fleet on the plane — nobody could have acked"
         rows.append({
             "alias": alias, "bots": f["bots"], "provisional": f["provisional"],
             "presence": {"counts": presence_counts(verdicts),
@@ -1020,6 +1073,8 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
             "orphaned": orphaned, "orphaned_reason": orphaned_reason,
             "newest_report_at": newest[0] if newest else None,
             "reports_24h": reports_24h,
+            "unacked": unacked, "unacked_reason": unacked_reason,
+            "acked_by": acked_by, "acked_at": acked_at,
             "last_activity_at": f["last_seen"],
             "last_comm_at": f["last_comm_at"],
             "capture": capture_mode(capture, alias),

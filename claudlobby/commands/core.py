@@ -538,15 +538,16 @@ def cmd_report_back(args) -> int:
 def cmd_brief(args) -> int:
     """The fleet's one read door — composed state for one bot.
 
-    Read-only apart from a single write: ``--ack`` advances that viewer's
-    report cursor. Everything else it touches is the plane, opened read-only.
+    Read-only apart from a single emission: ``--ack`` records that viewer's
+    read position on the plane (a `reports_acked` system event, chunk K).
+    Everything else it touches is the plane, opened read-only.
     """
     from ..brief import (
         boot_provenance,
         build_brief,
         format_boot_brief,
         format_brief,
-        write_cursor,
+        record_ack,
     )
 
     paths = _resolve_paths(args)
@@ -595,17 +596,34 @@ def cmd_brief(args) -> int:
                 bot_id,
             )
             return 1
-        # Advance to the newest row the caller was just shown, so the ack covers
-        # exactly what was rendered — never a row that arrived mid-run.
+        # Ack exactly what was rendered — the newest row the caller was just
+        # shown, by the plane's own ordering — never a row that arrived mid-run.
         unacked = reports.get("unacked", [])
         if unacked:
-            write_cursor(paths, bot_id, unacked[-1]["ts"])
-            log.info(
-                "acked %d report(s) for %s — cursor at %s",
-                len(unacked),
-                bot_id,
-                unacked[-1]["ts"],
-            )
+            newest = max(unacked, key=lambda r: r.get("seq") or 0)
+            outcome = record_ack(paths, fleet.name, bot_id,
+                                 acked_through_seq=newest.get("seq") or 0,
+                                 acked_through_ts=newest["ts"], count=len(unacked))
+            if outcome.status == "failed":
+                # A failed emit is a failed ack: the plane is the only record,
+                # so nothing was marked seen — the reports read unacked again.
+                log.error(
+                    "did NOT record the ack for %s (%s rung: %s) — %d report(s) still"
+                    " read unacked; there is no other record",
+                    bot_id, outcome.rung, outcome.detail, len(unacked),
+                )
+                return 1
+            if outcome.status == "spooled":
+                log.warning(
+                    "ack for %s spooled (%s) — the plane holds it after `claudlobby plane"
+                    " spool retry`; until then the %d report(s) still read unacked",
+                    bot_id, outcome.detail, len(unacked),
+                )
+            else:
+                log.info(
+                    "acked %d report(s) for %s — recorded on the plane (%s) through seq %s",
+                    len(unacked), bot_id, outcome.rung, newest.get("seq"),
+                )
         else:
             log.info("nothing to ack for %s", bot_id)
     return 0
