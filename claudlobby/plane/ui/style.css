@@ -60,6 +60,16 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .actor .dot.live { background: var(--ok); }
 .actor small { color: var(--dim); margin-left: auto; font-size: 11px; }
 .actor .prov-badge { color: var(--warn); font-size: 11px; }
+/* item 6 (#1479): under `all` the roster groups by fleet — a small header
+   per group instead of every fleet interleaved by last-seen. Sticky so the
+   fleet a row belongs to is still readable once the rail is scrolled. */
+.rail-head { display: flex; align-items: baseline; gap: 8px;
+             position: sticky; top: 0; z-index: 1; background: var(--bg);
+             padding: 8px 8px 3px; margin-top: 4px;
+             border-bottom: 1px solid var(--edge); }
+.rail-head b { font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+               color: var(--dim); }
+.rail-head small { color: var(--dim); font-size: 11px; margin-left: auto; }
 
 /* channel — threads */
 .thread {
@@ -319,7 +329,16 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .msg .body.clamp.open::after { display: none; }
 .msg button.more { font-size: 11px; color: var(--accent); background: none; border: 0;
   padding: 2px 0; cursor: pointer; }
-.card .why { color: var(--bad); font-size: 11.5px; margin-top: 3px; }
+/* item 6 (#1479), seen live: the remedy was cut at the rail's right edge on
+   a narrow window ("— re-s" then the rest on the next line). The whole line
+   must read, so it wraps and clips nothing of its own — and `--supersedes`,
+   the longest token the rail carries, may break inside itself rather than
+   run past the edge. What clips it there is `body { overflow: hidden }` (the
+   app fills the viewport), NOT the `.scroll` container: `overflow-y: auto`
+   makes the OTHER axis `auto` too, which scrolls rather than clips (fold
+   F8 — the earlier comment named the wrong mechanism). */
+.card .why { color: var(--bad); font-size: 11.5px; margin-top: 3px;
+             white-space: normal; overflow-wrap: anywhere; clear: right; }
 .card .why small { color: var(--dim); }
 #fleet-totals b.warn { color: var(--bad); }
 #fleet-totals small { color: var(--dim); }
