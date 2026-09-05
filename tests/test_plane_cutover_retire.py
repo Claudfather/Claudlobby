@@ -47,7 +47,7 @@ def test_retire_writes_refuses_until_every_reader_is_declared_then_records(tmp_p
     done = _cli(root, "cutover", "--retire-writes")
     assert done.returncode == 0, done.stdout + done.stderr
     assert "PLANE_LEGACY_WRITE_DISPATCH=0" in done.stdout and "PLANE_LEGACY_WRITE_REPORT=0" in done.stdout
-    assert "--unassigned" in done.stdout and "frozen" not in done.stdout.lower()   # every reader follows its flip
+    assert "reads the plane alone" in done.stdout and "frozen" not in done.stdout.lower()   # R2a: no reader follows a flip
     with _ro(root) as conn:
         at, forced = cut.retired(conn, F)
         assert at and forced is None

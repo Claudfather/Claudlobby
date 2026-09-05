@@ -120,7 +120,7 @@ def test_retire_writes_no_longer_names_a_frozen_reader(tmp_path):
     for reader in cut.READERS:
         _declare(root, reader)
     done = _cli(root, "cutover", "--retire-writes")
-    assert done.returncode == 0 and "frozen" not in done.stdout.lower() and "--unassigned" in done.stdout
+    assert done.returncode == 0 and "frozen" not in done.stdout.lower() and "reads the plane alone" in done.stdout
 
 
 def test_a_progress_report_is_not_terminal_and_a_blocked_one_keeps_the_legacy_word(tmp_path):

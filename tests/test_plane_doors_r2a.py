@@ -34,13 +34,14 @@ def test_an_idless_progress_report_defers_the_overdue_alarm(tmp_path):
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a long task"', env)
     assert r.returncode == 0, r.stderr
     assert _plane_row(tmp_path)["task_id"].startswith("t-")
+    import time
+    time.sleep(1.1)          # the grace wants a report AFTER the dispatch: same-second == not after (CI)
     # a progress report WITHOUT --task: no task event can link, the marker lands
     r = _bash(f'"{libdir}/report-back.sh" w1 progress "halfway" --progress 50', env)
     assert r.returncode == 0, r.stderr
     marker = _rows(tmp_path, "SELECT json_extract(detail, '$.status') FROM events"
                              " WHERE kind='system' AND event='report_status'")
     assert [m[0] for m in marker] == ["progress"]
-    import time
     now = int(time.time()) + 5                                  # past the 1s deadline
     late = _matcher(tmp_path, libdir, env, "--all", str(now))
     assert late.returncode == 0, late.stderr
@@ -58,6 +59,8 @@ def test_a_case_variant_alias_still_defers_the_alarm(tmp_path):
     env = {**env, "OBSERVABILITY_DISPATCH_DEADLINE": "1"}
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a long task"', env)
     assert r.returncode == 0, r.stderr
+    import time
+    time.sleep(1.1)          # a report AFTER the dispatch, never the same second (CI)
     r = _bash(f'"{libdir}/report-back.sh" W1 progress "variant case" --progress 10', env)
     assert r.returncode == 0, r.stderr
     import time
