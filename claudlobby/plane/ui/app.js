@@ -313,7 +313,11 @@ function renderOverview(env) {
       <div class="ov-line">
         <span>${f.newest_report_at
           ? `last report ${esc(ago(f.newest_report_at))}` : "no reports"}${
-          f.reports_24h ? ` · ${f.reports_24h} in 24h` : ""}</span> ·
+          f.reports_24h ? ` · ${f.reports_24h} in 24h` : ""}${
+          f.unacked === null || f.unacked === undefined
+            ? ` · <span class="ov-warn" title="${esc(f.unacked_reason || "")}">no ack recorded</span>`
+            : ` · ${ovNum(f.unacked, "unacked")} <small title="${esc(f.acked_at || "")}">acked by ${
+                esc(f.acked_by)} ${esc(ago(f.acked_at))}</small>`}</span> ·
         <span>active ${esc(ago(f.last_activity_at))}</span></div>
     </div>`).join("");
   const h = d.host;

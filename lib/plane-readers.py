@@ -326,11 +326,14 @@ LEGACY_STATUS = {"completed": "completed", "failed": "failed", "returned_blocked
 # terminal note carries, else the body's own `[BOTREPORT] bot | status |
 # summary | progress:N | pr:URL` under full capture. `ts` renders in the legacy
 # form (UTC, seconds, `Z`) so every brief cursor keeps comparing correctly.
-REPORT_COMMS_SQL = (
-    "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref"
+# THE definition of a fleet's reports — byte-identical to queries.FLEET_REPORTS_SQL
+# (pinned): the room axis, sent by the fleet or addressed to it.
+FLEET_REPORTS_SQL = (
+    "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref,"
+    " c.ingest_seq"
     " FROM communications c"
-    " WHERE c.message_class = 'report' AND c.fleet_uid = ? AND c.source_ref LIKE 'report-back:%'"
-    " AND (? IS NULL OR c.occurred_at >= ?)"
+    " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
+    " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
     " ORDER BY c.occurred_at, c.ingest_seq"
 )
 _REPORT_STATUS_EVENT_SQL = (
@@ -384,7 +387,8 @@ def parse_report_body(body: Optional[str]) -> dict:
 
 
 def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = None,
-                bot: Optional[str] = None, status: Optional[str] = None) -> list[dict]:
+                bot: Optional[str] = None, status: Optional[str] = None,
+                since_seq: Optional[int] = None) -> list[dict]:
     """The fleet's reports as legacy rows, oldest first. Private keys: `_source`
     (`task_event` / `marker` / `body` — which leg named the status) and
     `_body_stripped` (the capture policy kept no body, so a report the plane
@@ -394,9 +398,11 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
     since = since_form(since)
     prefix = f"bot:{fleet}/"
     out: list[dict] = []
-    for occurred_at, msg_id, sender_uid, sender_alias, body, ref in conn.execute(
-            REPORT_COMMS_SQL, (uid, since, since)):
-        name = (sender_alias or "").removeprefix(prefix)
+    for occurred_at, msg_id, sender_uid, sender_alias, body, ref, seq in conn.execute(
+            FLEET_REPORTS_SQL, (uid, fleet, since, since, since_seq, since_seq)):
+        alias = sender_alias or ""
+        # a sender on another fleet reads fleet/name — the fleet axis's rule
+        name = alias.removeprefix(prefix) if alias.startswith(prefix) else alias.removeprefix("bot:")
         if bot and name.lower() != bot.lower():
             continue
         parsed = parse_report_body(body)
@@ -406,7 +412,9 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
                     "progress": parsed.get("progress", ""), "artifact": parsed.get("artifact", ""),
                     "issues": parsed.get("issues", ""), "skill": parsed.get("skill", ""),
                     "status": parsed.get("status", ""), "_source": "body" if parsed else "none",
-                    "_body_stripped": not body})
+                    "_body_stripped": not body,
+                    # the plane's ordering authority (§4) — what an ack points at
+                    "_seq": seq})
         ev = conn.execute(_REPORT_STATUS_EVENT_SQL, (ref, sender_uid)).fetchone()
         if ev is not None:
             event, detail, dispatch_ref = ev
@@ -432,6 +440,63 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
             continue
         out.append(row)
     return out
+
+
+# The viewer's newest ack (chunk K, #1467): `brief --ack` records ONE
+# `reports_acked` system event on the viewer's own actor, its detail the
+# `ingest_seq` the ack reaches. Both anchors are matched (subject and actor),
+# spanning EVERY uid the bot's alias variants minted (the R2a rule: a
+# case-variant alias is a second actor, and an ack bound to one uid would read
+# as "never acked" from the other).
+NEWEST_ACK_SQL = (
+    "SELECT json_extract(e.detail, '$.acked_through_seq') AS seq,"
+    " json_extract(e.detail, '$.acked_through_ts') AS ts,"
+    " json_extract(e.detail, '$.count') AS count,"
+    " e.occurred_at AS acked_at, e.subject_alias AS acked_by, e.ingest_seq AS landed_seq"
+    " FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'reports_acked'"
+    " AND (e.subject_uid IN ({ph}) OR e.actor_uid IN ({ph}))"
+    " AND json_type(e.detail, '$.acked_through_seq') = 'integer'"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+
+
+def ack_from_row(row) -> Optional[dict]:
+    """A NEWEST_ACK_SQL row -> {seq, ts, count, acked_at, by, landed_seq}; the
+    SQL already skipped rows with no readable cursor, so this only unpacks."""
+    if row is None:
+        return None
+    seq, ts, count, acked_at, by, landed_seq = row
+    return {"seq": int(seq), "ts": ts or legacy_ts(acked_at), "count": count,
+            "acked_at": acked_at, "by": by, "landed_seq": landed_seq}
+
+
+def newest_ack(conn: sqlite3.Connection, uids: list) -> Optional[dict]:
+    """The newest readable ack among *uids* (a viewer's, or every actor of a
+    fleet — the card's glance), or None when none of them ever acked."""
+    if not uids:
+        return None
+    marks = ",".join("?" * len(uids))
+    return ack_from_row(conn.execute(NEWEST_ACK_SQL.format(ph=marks), (*uids, *uids)).fetchone())
+
+
+# The legacy report statuses that END a task (the matcher's `_TERMINAL` in
+# ledger terms): what an unacked list and the card count as needing a read.
+TERMINAL_STATUSES = frozenset({"completed", "failed", "blocked"})
+
+
+def unacked_rows(rows: list, acked_seq: Optional[int], terminal=TERMINAL_STATUSES) -> list[dict]:
+    """The reports a read position has not reached: newer than the ack by
+    `ingest_seq` (the ordering authority) and either terminal or of NO known
+    status — a report the plane holds with no task fact still needs reading
+    (fail toward showing more); a `progress` note is never unacked. THE one
+    rule brief's list and the overview card share, so what the manager sees
+    is exactly what the card counts and an ack clears both."""
+    keep = [r for r in rows
+            if (r.get("status") in terminal or not r.get("status"))
+            and (acked_seq is None or (r.get("_seq") or 0) > acked_seq)]
+    keep.sort(key=lambda r: (r.get("ts") or "", r.get("_seq") or 0))
+    return keep
 
 
 TASK_TEXTS_SQL = (

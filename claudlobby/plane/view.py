@@ -885,6 +885,21 @@ _HOST_SAMPLES_SQL = (
 _INGEST_LAG_WARN_S = 120
 
 
+def _plane_readers(root: Path):
+    """The install's stdlib `lib/plane-readers.py` — the reader brief and
+    `claudlobby report-back` answer through — so the card counts EXACTLY the
+    rows the manager's brief lists (`report_rows` + `unacked_rows`, one rule);
+    None when the install carries no readable copy (disclosed on the card)."""
+    from types import SimpleNamespace
+    from ..brief import load_lib_module
+    # the plane root's own lib/ (the install on a host), else the package's
+    # checkout (an editable install serving a plane under another root)
+    for lib in (Path(root) / "lib", Path(__file__).resolve().parents[2] / "lib"):
+        if (lib / "plane-readers.py").is_file():
+            return load_lib_module(SimpleNamespace(lib=lib), "plane-readers.py")
+    return None
+
+
 def _host_samples(conn: sqlite3.Connection) -> dict | None:
     """metric -> {value, occurred_at} for the host probe's newest facets;
     None when the probe has never recorded (dormant, or armed on another
@@ -943,6 +958,11 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
       None + a reason (UNKNOWN is not zero — #1014's rule).
     * `newest_report_at` / `reports_24h` — `report`-class communications
       on the room axis (sent by the fleet OR to it).
+    * `unacked` — the same axis past the fleet's newest ack (chunk K:
+      `brief --ack` records a `reports_acked` event; the manager is whoever
+      acks, the newest ack of any actor wins); None + a reason when the
+      fleet has never acked — no read position is a different fact from a
+      backlog, and "everything ever" would be a number nobody asked for.
     * `last_activity_at` — the fleet identity's `last_seen`: LEDGER time,
       advanced by every emission under the fleet (a producer clock would
       let one future-stamped row pin a fleet at "0s ago" forever).
@@ -962,6 +982,7 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
     stale_after = _stale_after_s()
     bot_dirs = {(fl, b): d for fl, b, d in discover_bot_dirs(root)}
     actors = _fleet_actors(conn)
+    pr = _plane_readers(root)
     fl = _fetch_fleets(conn, actors)
     rows = []
     for f in fl["fleets"]:
@@ -1012,6 +1033,24 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
         newest = conn.execute(_NEWEST_REPORT_SQL, (f["uid"], alias)).fetchone()
         reports_24h = conn.execute(
             _REPORTS_SINCE_SQL, (f["uid"], day_ago, alias, day_ago)).fetchone()[0]
+        unacked, unacked_reason, acked_by, acked_at = None, None, None, None
+        if pr is None:
+            unacked_reason = ("the install's lib/plane-readers.py is unreadable — the card"
+                              " cannot count what the brief lists")
+        elif not uids:
+            unacked_reason = "no actor of this fleet on the plane — nobody could have acked"
+        else:
+            # the fleet's newest readable ack by ANY of its actors (the manager
+            # is whoever acks; the card is a glance), then the rows past it
+            # through the SAME rule brief's list applies (unacked_rows)
+            ack = pr.newest_ack(conn, uids)
+            if ack is None:
+                unacked_reason = ("no ack recorded — `claudlobby brief --ack` has never"
+                                  " run for this fleet")
+            else:
+                past = pr.report_rows(conn, alias, since_seq=ack["seq"])
+                unacked = len(pr.unacked_rows(past, ack["seq"], pr.TERMINAL_STATUSES))
+                acked_by, acked_at = _short(ack["by"]), ack["acked_at"]
         rows.append({
             "alias": alias, "bots": f["bots"], "provisional": f["provisional"],
             "presence": {"counts": presence_counts(verdicts),
@@ -1020,6 +1059,8 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
             "orphaned": orphaned, "orphaned_reason": orphaned_reason,
             "newest_report_at": newest[0] if newest else None,
             "reports_24h": reports_24h,
+            "unacked": unacked, "unacked_reason": unacked_reason,
+            "acked_by": acked_by, "acked_at": acked_at,
             "last_activity_at": f["last_seen"],
             "last_comm_at": f["last_comm_at"],
             "capture": capture_mode(capture, alias),

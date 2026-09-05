@@ -6,8 +6,9 @@ mission pointers, dispatches, workstreams, unacked reports, and recent critical
 events. Skills consume THIS, never the plane db by hand — that is the coupling
 the door exists to kill.
 
-Read-only by construction. The whole module performs exactly one write: the
-``--ack`` cursor (``brief-cursor-<bot>.json``), single-purpose and atomic. No
+Read-only by construction. The whole module performs exactly one EMISSION:
+``--ack`` records a ``reports_acked`` system event on the plane (chunk K,
+#1467) — the viewer's read position is a plane fact, not a cursor file. No
 ledger, registry, or event file is written by any path here.
 
 THE TRUST RULE (epic #1102 phase R0)
@@ -320,42 +321,62 @@ def load_lib_module(paths: Paths, filename: str):
     return mod
 
 
-# --- the ack cursor (the module's only write) ---------------------------------
+# --- the ack (the module's only emission) --------------------------------------
 
 
-def cursor_path(paths: Paths, bot: str) -> Path:
-    """Where a viewer's ack cursor lives. Per-bot: two managers acking the same
-    ledger must not clobber each other's read position."""
-    return paths.fleet_state / f"brief-cursor-{bot}.json"
+@dataclass
+class AckOutcome:
+    """What became of an ack: `recorded` (the plane holds it — committed, or a
+    duplicate of an earlier attempt), `spooled` (the plane could not take it now
+    and the spool holds it until `plane spool retry`; the reports read unacked
+    until then), or `failed` (nothing holds it — a failed emit is a failed ack)."""
+
+    status: str
+    detail: str = ""
+
+    @property
+    def recorded(self) -> bool:
+        return self.status == "recorded"
 
 
-def read_cursor(paths: Paths, bot: str) -> str | None:
-    """Last acked timestamp, or None when the viewer has never acked.
+def ack_request(fleet: str, bot: str, *, acked_through_seq: int, acked_through_ts: str,
+                count: int) -> dict:
+    """The ONE event `--ack` records: `reports_acked` on the viewer's own actor
+    (the manager acks from its own session), its detail the plane's ordering
+    authority — the `ingest_seq` the ack reaches (§4) — with the legacy-form
+    ts riding for the render and the count for the story."""
+    return {
+        "event_type": "system", "emitter": "brief", "fleet": fleet,
+        "payload": {"event": "reports_acked", "subject_kind": "actor",
+                    "subject": f"bot:{fleet}/{bot}",
+                    "data": {"acked_through_seq": int(acked_through_seq),
+                             "acked_through_ts": acked_through_ts, "count": int(count)}},
+    }
 
-    A corrupt or unreadable cursor reads as None — i.e. "you have acked
-    nothing", which over-reports unacked work. That direction is deliberate:
-    the failure this door closes (#1024, #949) is a report going *unseen*, so
-    a broken cursor must fail toward showing too much, never too little.
-    """
-    p = cursor_path(paths, bot)
+
+def record_ack(paths: Paths, fleet: str, bot: str, *, acked_through_seq: int,
+               acked_through_ts: str, count: int) -> AckOutcome:
+    """Record the ack through the package's cold emit door — `emit_batch`
+    (validate, one transaction, the spool as its own floor), the door the
+    registry lane, the expiry sweep and `claudlobby emit-batch` use; the daemon
+    runs the same door, so a second writer on the WAL is the designed case. A
+    silenced plane (`PLANE_EMIT_DISABLED=1`, the harness exemption) is a FAILED
+    ack: the plane is the only record, so an ack it will not hold marks
+    nothing. Every verdict or failure is likewise a failed ack, said by name."""
+    if os.environ.get("PLANE_EMIT_DISABLED") == "1":
+        return AckOutcome("failed", "PLANE_EMIT_DISABLED=1 — the plane is silenced, nothing records an ack")
+    from .plane.emit_api import emit_batch
+
     try:
-        data = json.loads(p.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    ts = data.get("last_seen_ts")
-    return ts if isinstance(ts, str) else None
-
-
-def write_cursor(paths: Paths, bot: str, last_seen_ts: str) -> Path:
-    """Advance the viewer's cursor. Atomic tmp+rename, the module's ONE write."""
-    p = cursor_path(paths, bot)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"last_seen_ts": last_seen_ts}) + "\n")
-    tmp.replace(p)
-    return p
+        out = emit_batch(paths.root, [ack_request(
+            fleet, bot, acked_through_seq=acked_through_seq,
+            acked_through_ts=acked_through_ts, count=count)])
+    except Exception as exc:  # noqa: BLE001 — every verdict is a failed ack, said by name
+        return AckOutcome("failed", f"{type(exc).__name__}: {exc}")
+    status = out[0].status if out else ""
+    return AckOutcome("recorded" if status in ("committed", "duplicate") else
+                      "spooled" if status == "spooled" else "failed",
+                      out[0].detail if out and out[0].detail else status)
 
 
 # --- sections -----------------------------------------------------------------
@@ -598,10 +619,10 @@ def _workstream_section(
 
 
 def _reports_section(
-    paths: Paths, cursor: str | None, terminal: set[str], degraded: list[Degradation],
+    paths: Paths, bot_id: str, terminal: set[str], degraded: list[Degradation],
     plane=None,
 ) -> dict:
-    """Terminal reports newer than the viewer's cursor — fleet-wide, on purpose.
+    """Terminal reports newer than the viewer's newest ack — fleet-wide, on purpose.
 
     Note the deliberate asymmetry with the sections above: dispatches and
     mission are *about* ``--bot X``, while this one is *for* ``--bot X to act
@@ -610,11 +631,13 @@ def _reports_section(
     would answer the wrong one. Every row carries ``bot``, so a consumer that
     does want a narrower view can take it.
     """
-    # The plane, the only source (F18 R2b): the same row shape the ledger had
-    # (the readers render `ts` in the legacy form, so the cursor keeps
-    # comparing). A plane that cannot answer OMITS the section: "unacked (0)"
-    # would assert that no worker is waiting on a decision — #949 and #1024
-    # exactly, re-created by the surface built to close them.
+    # The plane, the only source (F18 R2b) — for the reports AND for the
+    # viewer's read position (chunk K: the newest `reports_acked` event on the
+    # viewer's actor, compared on `ingest_seq`, the ordering authority; the
+    # legacy-form `ts` rides for the render). A plane that cannot answer OMITS
+    # the section: "unacked (0)" would assert that no worker is waiting on a
+    # decision — #949 and #1024 exactly, re-created by the surface built to
+    # close them.
     session, note = (plane, None) if plane is not None else plane_session(paths)
     if session is None:
         degraded.append(Degradation(field="reports", mode="omitted",
@@ -624,7 +647,12 @@ def _reports_section(
                                     issue="#1467"))
         return {}
     try:
-        rows = session.pr.report_rows(session.conn, session.fleet)
+        # the viewer's read position first (its uids from the session's roster,
+        # spanning every alias variant), then only the rows past it
+        entry = session.roster.get(bot_id.lower()) or {}
+        ack = session.pr.newest_ack(session.conn, entry.get("uids", []))
+        rows = session.pr.report_rows(session.conn, session.fleet,
+                                      since_seq=ack["seq"] if ack else None)
     except Exception as exc:
         degraded.append(Degradation(field="reports", mode="omitted",
                                     reason=f"the plane cannot answer: {exc}", issue="#1467"))
@@ -638,14 +666,18 @@ def _reports_section(
                                     reason=f"{stripped} report(s) hold no summary on the plane (the capture"
                                            " policy kept no body and no task event named one)",
                                     issue="#1444"))
+    # ONE rule with the overview card (plane-readers.unacked_rows): terminal or
+    # status-less reports past the ack — what the manager sees is what the card
+    # counts, and this ack clears both
     unacked = [
-        {"ts": r["ts"], "bot": r["bot"], "status": r["status"], "task_id": r["task_id"],
-         "summary": r["summary"], "pr_url": r["pr_url"]}
-        for r in rows
-        if r.get("status") in terminal and (cursor is None or r["ts"] > cursor)
+        {"ts": r["ts"], "seq": r.get("_seq"), "bot": r["bot"], "status": r["status"],
+         "task_id": r["task_id"], "summary": r["summary"], "pr_url": r["pr_url"]}
+        for r in session.pr.unacked_rows(rows, ack["seq"] if ack else None, terminal)
     ]
-    unacked.sort(key=lambda r: r["ts"])
-    return {"cursor": cursor, "unacked": unacked, "source": "plane"}
+    # schema-1 keeps its three keys (`cursor` = the ack's legacy-form ts);
+    # the card, not the brief, carries when and by whom. Keys INSIDE a row may
+    # be added (additive; `seq` is one); the top-level key set is the contract.
+    return {"cursor": ack["ts"] if ack else None, "unacked": unacked, "source": "plane"}
 
 
 def _alerts_section(
@@ -755,8 +787,7 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
                 "dispatches": _dispatch_section(doors, paths, bot_id, now, degraded,
                                                 fleet_name=fleet.name, plane=plane),
                 "workstreams": _workstream_section(fleet, paths, now, degraded, plane=plane),
-                "reports": _reports_section(paths, read_cursor(paths, bot_id), terminal, degraded,
-                                            plane=plane),
+                "reports": _reports_section(paths, bot_id, terminal, degraded, plane=plane),
                 "alerts": _alerts_section(paths, bot_id, now, degraded, plane=plane),
             }
     brief = {
