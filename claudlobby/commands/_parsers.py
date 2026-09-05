@@ -32,9 +32,6 @@ from .plane import (
     cmd_emit_batch,
     cmd_plane_doctor,
     cmd_plane_expire,
-    cmd_plane_import,
-    cmd_plane_parity,
-    cmd_plane_cutover,
     cmd_plane_prune,
     cmd_plane_registry,
     cmd_plane_schema,
@@ -493,41 +490,6 @@ def register_subparsers(sub) -> None:
     pex.add_argument("--dry-run", action="store_true",
                      help="Report the count without emitting")
     pex.set_defaults(func=cmd_plane_expire)
-    ppa = psub.add_parser(
-        "parity",
-        help="Are the legacy ledgers fully in the plane? (dispatch-log +"
-        " this fleet's report-back; rc 0 clean, 1 gaps, 3 unreachable)")
-    ppa.add_argument("--since", default=None,
-                     help="ISO instant; older ledger rows are outside the window")
-    ppa.add_argument("--show", type=int, default=10,
-                     help="Missing/duplicate rows to list per ledger (default 10)")
-    ppa.add_argument("--json", action="store_true",
-                     help="Schema-1 envelope on stdout (text moves to stderr)")
-    ppa.set_defaults(func=cmd_plane_parity)
-    pim = psub.add_parser(
-        "import",
-        help="Land the legacy rows the plane is missing for THIS fleet"
-        " (origin=legacy, content-hashed ids, idempotent). Dry-run by default")
-    pim.add_argument("--since", default=None,
-                     help="ISO instant; older ledger rows are outside the window")
-    pim.add_argument("--apply", action="store_true",
-                     help="Write the batch (default: plan and report only)")
-    pim.set_defaults(func=cmd_plane_import)
-    pcut = psub.add_parser(
-        "cutover",
-        help="Cutover chunk 5: declare a reader's flip to the plane — refuses"
-        " unless the J4 gate is met on every bot, records cutover_declared,"
-        " prints the PLANE_READ_* flag line (rc 0 declared / 1 refused / 3 unreachable)")
-    pcut.add_argument("--retire-writes", action="store_true",
-                      help="Chunk 6b: declare the legacy JSONL writes retired (dispatch-log +"
-                      " report-back) — refuses unless every reader is declared; records"
-                      " legacy_write_retired; prints the PLANE_LEGACY_WRITE_*=0 lines")
-    pcut.add_argument("--reader", choices=("open", "overdue", "open_task", "unassigned", "events"), default=None,
-                      help="Which reader flips (events = a direct move, no gate): the open list, the watchdog's overdue set, or the"
-                      " resolver (--open-task; its bar is 200 agreeing heads + a head change)")
-    pcut.add_argument("--force", default="",
-                      help="Declare despite a short gate; the reason is recorded in the event")
-    pcut.set_defaults(func=cmd_plane_cutover)
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")

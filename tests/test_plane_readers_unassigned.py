@@ -12,13 +12,16 @@ test_the_flag_and_declaration_flip_the_idle_check_and_the_shadow_grades_it
 test_a_plane_only_completion_makes_the_flipped_check_answer_from_the_plane
 (asymmetric by design; its plane half is the first test),
 test_a_terminal_note_that_resolved_nothing_is_idle_on_both_sides (→ ..._is_idle).
+
+
+F18 closure R3 — gone with the cutover machinery: test_the_fleet_pulse_unit_carries_the_unassigned_flag_and_names_its_fleet,
+test_every_fleet_job_unit_carries_the_retirement_flags_when_the_tier_says_0, test_retire_writes_no_longer_names_a_frozen_reader.
 """
 
 from __future__ import annotations
 
-from claudlobby.plane import cutover as cut
-from tests.plane_fixtures import F, NOW_EPOCH, REPO, _cli, _declare, _epoch, _matcher, _report, _scene
-from tests.test_plane_cutover_parity import _live_dispatch
+from tests.plane_fixtures import F, NOW_EPOCH, REPO, _cli, _epoch, _matcher, _report, _scene
+from tests.plane_fixtures import _live_dispatch
 
 WI2, ASG2 = f"wi_{'2':0>32}", f"asg_{'2':0>32}"
 WI3, ASG3 = f"wi_{'3':0>32}", f"asg_{'3':0>32}"
@@ -63,25 +66,12 @@ def test_the_idle_check_refuses_an_unreachable_plane(tmp_path):
     assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr
 
 
-def test_the_fleet_pulse_unit_carries_the_unassigned_flag_and_names_its_fleet(tmp_path, monkeypatch):
-    from claudlobby.composer import FLEET_JOB_ARMING
-    from tests.test_plane_cutover_flip import _composed
-    assert FLEET_JOB_ARMING["fleet-pulse"] == ("PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS")
-    timers, _ = _composed(tmp_path, monkeypatch, {"PLANE_READ_UNASSIGNED": "1"})
-    pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
-    assert "Environment=PLANE_READ_UNASSIGNED=1" in pulse
-    src = (REPO / "lib" / "fleet-pulse.sh").read_text()
-    line = next(l for l in src.splitlines() if 'dispatch-overdue.py" --unassigned' in l)
-    assert '--fleet "$fleet"' in line
-    assert "|| _unassigned_rc=$?" in src and "cannot be judged this pass" in src   # a refusal is disclosed, never an empty answer
-
-
 def test_every_fleet_job_unit_carries_the_emission_flag_when_the_tier_arms_it(tmp_path, monkeypatch):
     """A timer unit sources no .env, and any script that sources lib-common can
     land a fleet event (the ERR trap alone) — measured on the live estate: the
     fleet-pulse unit composed with the read flags but not the emission flag,
     so a whole sweep's fleet events went unrecorded."""
-    from tests.test_plane_cutover_flip import _composed
+    from tests.test_plane_readers_matcher import _composed
     armed, unarmed = tmp_path / "armed", tmp_path / "unarmed"
     armed.mkdir(); unarmed.mkdir()
     timers, _ = _composed(armed, monkeypatch, {"PLANE_EMIT_ENABLED": "1"})
@@ -92,35 +82,6 @@ def test_every_fleet_job_unit_carries_the_emission_flag_when_the_tier_arms_it(tm
     timers, _ = _composed(unarmed, monkeypatch, {"PLANE_EMIT_ENABLED": "0"})
     for svc in (p for p in timers.iterdir() if p.suffix == ".service"):
         assert "PLANE_EMIT_ENABLED" not in svc.read_text(), svc.name        # unarmed composes unarmed
-
-
-def test_every_fleet_job_unit_carries_the_retirement_flags_when_the_tier_says_0(tmp_path, monkeypatch):
-    """Phase C, found live: the sessions retired their events write but the
-    fleet-pulse TIMER kept dual-writing — its unit was stamped with the read
-    and emit flags, never the write flags. Every fleet job unit now carries
-    each PLANE_LEGACY_WRITE_* that resolves to 0; at 1 nothing is stamped."""
-    from tests.test_plane_cutover_flip import _composed
-    on, off = tmp_path / "on", tmp_path / "off"
-    on.mkdir(); off.mkdir()
-    timers, _ = _composed(on, monkeypatch, {"PLANE_EMIT_ENABLED": "1", "PLANE_LEGACY_WRITE_EVENTS": "0",
-                                            "PLANE_LEGACY_WRITE_DISPATCH": "0"})
-    services = [p for p in timers.iterdir() if p.suffix == ".service"]
-    assert services
-    for svc in services:
-        text = svc.read_text()
-        assert "Environment=PLANE_LEGACY_WRITE_EVENTS=0" in text and "Environment=PLANE_LEGACY_WRITE_DISPATCH=0" in text, svc.name
-        assert "PLANE_LEGACY_WRITE_REPORT" not in text                       # unset in the tier: nothing stamped
-    timers, _ = _composed(off, monkeypatch, {"PLANE_EMIT_ENABLED": "1", "PLANE_LEGACY_WRITE_EVENTS": "1"})
-    for svc in (p for p in timers.iterdir() if p.suffix == ".service"):
-        assert "PLANE_LEGACY_WRITE" not in svc.read_text(), svc.name
-
-
-def test_retire_writes_no_longer_names_a_frozen_reader(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    for reader in cut.READERS:
-        _declare(root, reader)
-    done = _cli(root, "cutover", "--retire-writes")
-    assert done.returncode == 0 and "frozen" not in done.stdout.lower() and "reads the plane alone" in done.stdout
 
 
 def test_a_progress_report_is_not_terminal_and_a_blocked_one_keeps_the_legacy_word(tmp_path):

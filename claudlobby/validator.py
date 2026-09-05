@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 from . import dotenv, tool_resolve
 from .claudron_compat import CLAUDRON_INTEGRATION_URL
 from .config import (
+    _RETIRED_OBSERVABILITY_KEYS,
     _PROJECT_VALIDATION_KEYS,
     GITHUB_APP_ENV_VARS,
     FleetConfig,
@@ -980,15 +981,13 @@ def _validate_bots(
                 report.warnings.append(
                     f"bot '{bot_name}': observability.pulse_interval > 3600s (1h) is unusually long — got {obs.pulse_interval}"
                 )
-        if obs.reap_days is not None:
-            if obs.reap_days <= 0:
-                report.warnings.append(
-                    f"bot '{bot_name}': observability.reap_days must be > 0 (got {obs.reap_days})"
-                )
-            elif obs.reap_days > 365:
-                report.warnings.append(
-                    f"bot '{bot_name}': observability.reap_days > 365 is unusually long — got {obs.reap_days}"
-                )
+        for retired_key in obs.retired:
+            # A key nothing reads is a lie in the config surface: said, never
+            # silently ignored (and never refused — an old manifest must load).
+            report.warnings.append(
+                f"bot '{bot_name}': observability.{retired_key} has no reader since the F18 closure"
+                f" — remove it ({_RETIRED_OBSERVABILITY_KEYS.get(retired_key, 'retired')})"
+            )
         if obs.bridge_heal_max_attempts is not None and not (
             1 <= obs.bridge_heal_max_attempts <= 10
         ):
@@ -1668,6 +1667,14 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_placeholders(fleet, report)
 
     fleet_env = dotenv.read(paths.env_file)
+    # The F18 closure's transition flags have no reader (R3 deleted the last):
+    # a fleet tier still carrying one is a lie in the config surface, said —
+    # never silently ignored, never refused (an old tier must still load).
+    for key in sorted(k for k in fleet_env if k.startswith(("PLANE_READ_", "PLANE_LEGACY_WRITE_"))):
+        report.warnings.append(
+            f"{paths.env_file}: {key} is a retired cutover flag with no reader since the F18 closure"
+            " — remove the line (the plane is the only source; nothing flips)"
+        )
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)

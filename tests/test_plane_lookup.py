@@ -233,3 +233,12 @@ def test_supersedes_reaches_the_plane_through_the_real_dispatch_door(tmp_path):
     assert sup == [{"work_item_id": wi_old, "assignment_id": asg_old,
                     "event": "superseded", "successor_id": asg_new}]
     assert asg_new != asg_old
+
+
+def test_the_cutover_modes_are_gone(tmp_path):
+    """F18 closure R3: `--declared` / `--retired` / `--door` are not grammar any
+    more — a stale caller hears a usage error, never an empty instant."""
+    r = _run(tmp_path, "--declared", "events", "--fleet", "f")
+    assert r.returncode == 2 and "unrecognized arguments" in r.stderr, (r.returncode, r.stderr)
+    r = _run(tmp_path, "--retired", "--fleet", "f")
+    assert r.returncode == 2, (r.returncode, r.stderr)

@@ -527,12 +527,11 @@ Deny wins over allow at the same layer. The validator warns if denied tools conf
 
 ### `bots.<name>.observability`
 
-Controls fleet observability thresholds for heartbeat pulses, event retention, and stuck-detection. Emitted as env vars in `bot.conf` for consumption by `lib/fleet-pulse.sh`, `lib/bot-vitals.sh`, and the dispatch watchdog.
+Controls fleet observability thresholds for heartbeat pulses and stuck-detection. Emitted as env vars in `bot.conf` for consumption by `lib/fleet-pulse.sh`, `lib/bot-vitals.sh`, and the dispatch watchdog.
 
 ```yaml
 observability:
   pulse_interval: 300           # seconds between heartbeat pulses (default: 300)
-  reap_days: 7                  # days to retain event files before reaping (default: 7)
   activity_stuck_threshold: 1800  # seconds of no tool-call activity before flagged (default: 1800)
   dispatch_deadline: 1800       # seconds after manager dispatch before flagged overdue (default: 1800)
   bridge_heal: true             # enable the keepalive Telegram-bridge auto-heal ladder (default: off)
@@ -542,7 +541,9 @@ observability:
   unassigned_max_age: 86400     # stop reporting a strand past this age (default: 86400; <= 0 never stops)
 ```
 
-The four threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
+`observability.reap_days` is retired (F18 closure, #1467): the event files it aged are gone and the plane's `plane prune` retention replaced them — a manifest that still sets it loads, and `claudlobby validate` warns, naming the key.
+
+The three threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 
 **`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`lib/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
 
@@ -554,7 +555,7 @@ It is **off by default** because it is the only pulse check whose subject is the
 
 **These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries a fixed set of `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`, plus any `fleet_pulse:` knobs — see below) and `lib/fleet-pulse.sh` sources no `.env` file, so a fleet-tier `.env` setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
 
-Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`, `OBSERVABILITY_UNASSIGNED_CHECK`, `OBSERVABILITY_UNASSIGNED_THRESHOLD`, `OBSERVABILITY_UNASSIGNED_MAX_AGE`.
+Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`, `OBSERVABILITY_UNASSIGNED_CHECK`, `OBSERVABILITY_UNASSIGNED_THRESHOLD`, `OBSERVABILITY_UNASSIGNED_MAX_AGE`.
 
 ### Fleet-pulse escalation (environment overrides)
 

@@ -8,10 +8,10 @@
 # Subject is the host, keyed by hostname → the SAME uid the registry
 # keyframes the host under, so a facet sample joins the Host card with no
 # glue. Runs from the composed `plane-host-probe` host timer, NOT the
-# ingest-only daemon (scope tripwire). DORMANT behind PLANE_EMIT_ENABLED
-# (the standard plane emission flag, stamped onto the unit by the
-# host-timer arming carrier) and NON-BLOCKING: every path exits 0, a
-# health monitor is elsewhere — this only RECORDS.
+# ingest-only daemon (scope tripwire). Always on since the F18 closure
+# (`plane_armed`: PLANE_EMIT_DISABLED=1 is the one silencer) and
+# NON-BLOCKING: every path exits 0, a health monitor is elsewhere — this
+# only RECORDS.
 #
 # Facet readers are the estate's proven cross-platform patterns
 # (avail_ram_mb from lib-common; a -P-wrapped df for portable free-GB; the

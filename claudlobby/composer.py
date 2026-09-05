@@ -960,14 +960,13 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             if val:
                 lines.append(f"export MODEL_STRATEGY_{key.upper()}={_shq(val)}")
 
-    # Observability — pulse interval and event retention.
+    # Observability — pulse interval and the watchdog thresholds.
     # Values may be None when system defaults are disabled via system_defaults: false.
     obs = bot.observability
     if any(
         v is not None
         for v in [
             obs.pulse_interval,
-            obs.reap_days,
             obs.activity_stuck_threshold,
             obs.dispatch_deadline,
             obs.bridge_heal,
@@ -983,8 +982,6 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             lines.append(
                 f"export OBSERVABILITY_PULSE_INTERVAL={_shq(obs.pulse_interval)}"
             )
-        if obs.reap_days is not None:
-            lines.append(f"export OBSERVABILITY_REAP_DAYS={_shq(obs.reap_days)}")
         if obs.activity_stuck_threshold is not None:
             lines.append(
                 f"export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD={_shq(obs.activity_stuck_threshold)}"
@@ -1212,17 +1209,6 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             'STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."'
         )
 
-    read_flags = _read_flag_env(paths, fleet.name)
-    if read_flags:
-        lines.append("")
-        lines.append("# Cutover flags (chunks 5-6b): the SESSION carrier for PLANE_READ_* (1 = flip)")
-        lines.append("# and PLANE_LEGACY_WRITE_* (0 = retired) — resolved from the fleet .env tier at")
-        lines.append("# compose time, because start-bot.sh exports bot.conf and sources the tiers")
-        lines.append("# without export. A flag here is half the fact: the matcher serves the plane only")
-        lines.append("# once `plane cutover` declared it, and a retired write is recorded the same way.")
-        for k, v in sorted(read_flags.items()):
-            lines.append(f"export {k}={_shq(v)}")
-        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -3884,30 +3870,7 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
 # stamps it on exactly that unit. Add a row per dormant door.
 FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = {
     "keepalive": ("PLANE_EMIT_ENABLED",),
-    # fleet-pulse reads the flip flags of its readers (PLANE_READ_* — per
-    # reader, never one fleet-wide flag; the timer unit sources no .env, so
-    # without this stamp a flip could never reach it). R3 retires them.
-    "fleet-pulse": ("PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS"),
 }
-
-_READ_FLAG_MEMO: dict[tuple[str, str], dict[str, str]] = {}
-
-
-def _read_flag_env(paths: Paths, fleet_name: str | None) -> dict[str, str]:
-    key = (str(paths.root), fleet_name or "")
-    if key not in _READ_FLAG_MEMO:
-        from . import env_tiers as _env_tiers
-        from .plane.cutover import READ_FLAGS, WRITE_FLAGS
-        env: dict[str, str] = {}
-        try:
-            cascade = _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=fleet_name))
-            env = {f: "1" for f in READ_FLAGS.values() if _env_tiers.armed(cascade, f)}
-            # chunk 6b: a RETIRED legacy write (the tier says 0) rides the same carrier
-            env.update({f: "0" for f in WRITE_FLAGS.values() if _env_tiers.resolves_to(cascade, f, "0")})
-        except _env_tiers.ResolverUnavailable as exc:
-            _log.warning("cutover read flags unresolved (%s) — bot.conf composes them UNSET", exc)
-        _READ_FLAG_MEMO[key] = env
-    return _READ_FLAG_MEMO[key]
 
 
 def compose_fleet_timers(
@@ -3980,7 +3943,7 @@ def compose_fleet_timers(
         _cascade = _env_tiers.cascade(
             _env_tiers.read_tiers(paths, fleet_name=fleet.name)
         )
-        for _job, _flags in FLEET_JOB_ARMING.items():
+        for _job, _flags in FLEET_JOB_ARMING.items():       # one row since F18 R3: keepalive's emission arming
             _armed = {f: "1" for f in _flags if _env_tiers.armed(_cascade, f)}
             if _armed:
                 job_extra_env[_job] = _armed
@@ -3993,16 +3956,6 @@ def compose_fleet_timers(
         # reached only the JSONL (Phase B1's first deploy).
         if _env_tiers.armed(_cascade, "PLANE_EMIT_ENABLED"):
             job_baseline_env = {"PLANE_EMIT_ENABLED": "1"}
-        # ... and the RETIREMENT flags when the tier says 0 (Phase C, found
-        # live): a retired write is skipped only where the door can read the
-        # flag, and a timer-run door (fleet-pulse's session_missing and its
-        # kin) read the unit's env — stamped with the read and emit flags,
-        # never the write flags, so the fleet kept dual-writing its events
-        # JSONL from the timer after the sessions had retired theirs.
-        from .plane.cutover import WRITE_FLAGS as _write_flags
-        for _flag in _write_flags.values():
-            if _env_tiers.resolves_to(_cascade, _flag, "0"):
-                job_baseline_env[_flag] = "0"
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(
             "plane arming unresolved (%s) — timer-run plane doors compose"

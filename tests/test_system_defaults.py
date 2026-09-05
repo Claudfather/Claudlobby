@@ -107,11 +107,11 @@ class TestMergeSystemIntoDefaults:
         assert result["hooks"]["PreToolUse"][0]["command"] == "sys.sh"
 
     def test_fleet_overrides_observability(self):
-        system = {"observability": {"pulse_interval": 300, "reap_days": 7}}
+        system = {"observability": {"pulse_interval": 300, "activity_stuck_threshold": 1800}}
         defaults = {"observability": {"pulse_interval": 600}}
         result = _merge_system_into_defaults(system, defaults)
         assert result["observability"]["pulse_interval"] == 600
-        assert result["observability"]["reap_days"] == 7
+        assert result["observability"]["activity_stuck_threshold"] == 1800
 
     def test_fleet_non_hook_keys_win(self):
         system = {"model": "sonnet"}
@@ -220,7 +220,6 @@ class TestLoadFleetSystemDefaults:
         fleet, merged = load_fleet(fleet_path)
         bot = fleet.bots["worker"]
         assert bot.observability.pulse_interval == 300
-        assert bot.observability.reap_days == 7
         assert bot.observability.activity_stuck_threshold == 1800
         assert bot.observability.dispatch_deadline == 1800
 
@@ -312,7 +311,7 @@ class TestLoadFleetSystemDefaults:
         # Fleet override wins
         assert merged["observability"]["pulse_interval"] == 600
         # System default fills in missing
-        assert merged["observability"]["reap_days"] == 7
+        assert merged["observability"]["activity_stuck_threshold"] == 1800
 
     def test_fleet_config_has_system_defaults(self, tmp_path):
         root = tmp_path / "claudlobby"

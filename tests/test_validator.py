@@ -482,23 +482,36 @@ class TestObservabilityValidation:
             "pulse_interval > 3600" in w and "worker-1" in w for w in report.warnings
         )
 
-    def test_reap_days_zero_warns(self, fleet_dir, monkeypatch):
+    def test_a_retired_cutover_flag_in_the_fleet_tier_is_disclosed_not_ignored(self, fleet_dir, monkeypatch):
+        """A fleet `.env` tier that still carries `PLANE_READ_*` / `PLANE_LEGACY_WRITE_*`
+        (the estate's state on the R3 deploy day) loads and composes clean — and
+        validate SAYS the line is dead, the shape `reap_days` gets (F18 closure, R3)."""
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        fleet.bots["lead"].observability.reap_days = 0
+        paths = _make_paths(fleet_dir)
+        paths.env_file.write_text("PLANE_READ_OPEN=1\nPLANE_LEGACY_WRITE_REPORT=0\nGITHUB_PAT=ghp_x\n")
+        report = validate(fleet, paths)
+        flagged = [w for w in report.warnings if "retired cutover flag" in w]
+        assert any("PLANE_READ_OPEN" in w for w in flagged) and any("PLANE_LEGACY_WRITE_REPORT" in w for w in flagged)
+        assert not any("GITHUB_PAT" in w for w in flagged)
+        assert not report.errors
+
+    def test_a_retired_observability_key_is_disclosed_not_ignored(self, fleet_dir, monkeypatch):
+        """`observability.reap_days` has no reader since the F18 closure
+        (#1467): a manifest that still sets it loads, and validate SAYS so,
+        naming the key — a config field nothing reads must not be swallowed
+        (test_reap_days_zero_warns / test_reap_days_over_365_warns went with the
+        knob: there is no range to check on a key nothing reads)."""
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].observability.retired = ("reap_days",)
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any(
-            "reap_days must be > 0" in w and "lead" in w for w in report.warnings
+            "observability.reap_days has no reader since the F18 closure" in w and "lead" in w
+            for w in report.warnings
         )
-
-    def test_reap_days_over_365_warns(self, fleet_dir, monkeypatch):
-        self._env_patch(monkeypatch)
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        fleet.bots["worker-1"].observability.reap_days = 500
-        paths = _make_paths(fleet_dir)
-        report = validate(fleet, paths)
-        assert any("reap_days > 365" in w and "worker-1" in w for w in report.warnings)
+        assert not any("reap_days" in w and "worker-1" in w for w in report.warnings)
 
     def test_bridge_heal_max_attempts_out_of_range_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)

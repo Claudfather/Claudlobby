@@ -33,7 +33,7 @@ from claudlobby.commands.events import (
 from claudlobby.paths import Paths
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.plane_fixtures import F, _scene
-from tests.test_plane_cutover_events import _drop_plane, _events_cmd, _land, _rows
+from tests.test_plane_events_door import _drop_plane, _events_cmd, _land, _rows
 
 
 @pytest.fixture
@@ -182,15 +182,9 @@ class TestPlaneEventsConn:
 
     def test_a_reachable_plane_opens_without_any_flag(self, scene, monkeypatch):
         _root, paths = scene
-        for value in ("0", "1", "true"):
-            monkeypatch.setenv("PLANE_READ_EVENTS", value)             # the retired flag: inert
-            conn, note = plane_events_conn(paths)
-            assert conn is not None and note is None
-            assert conn.execute("PRAGMA query_only").fetchone()[0] == 1   # read-only, structurally
-            conn.close()
-        monkeypatch.delenv("PLANE_READ_EVENTS", raising=False)
         conn, note = plane_events_conn(paths)
         assert conn is not None and note is None
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1   # read-only, structurally
         conn.close()
 
     def test_no_fleet_named_is_refused(self, scene):

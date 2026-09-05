@@ -196,7 +196,6 @@ class TestTmuxEnvCompleteness:
             telegram=TelegramConfig(handle="w_bot", token_env="TG_TOKEN"),
             observability=ObservabilityConfig(
                 pulse_interval=300,
-                reap_days=7,
                 activity_stuck_threshold=1800,
                 dispatch_deadline=1800,
             ),
@@ -215,7 +214,6 @@ class TestTmuxEnvCompleteness:
 
         for var in (
             "OBSERVABILITY_PULSE_INTERVAL",
-            "OBSERVABILITY_REAP_DAYS",
             "OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD",
             "OBSERVABILITY_DISPATCH_DEADLINE",
         ):

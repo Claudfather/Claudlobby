@@ -9,10 +9,14 @@ a failed or reaped emission disclosed as not recorded. R2b: `claudlobby
 events` and brief's alerts read the plane and NOTHING else — no flag, no
 declaration, no file; an unreachable plane refuses (rc 3 / the section
 omitted), never reads as quiet. fleet-pulse's escalation + summary still ride
-PLANE_READ_EVENTS + the declaration until R2b-2 moves them. (R2a removed the
+the flag and the declaration that once gated them are gone (R2b-2 / R3). (R2a removed the
 matcher's legacy side and the shadow;
 test_the_events_reader_declares_as_a_direct_move_without_a_gate no longer
 contrasts a shadowed reader: every declaration is a direct move now.)
+
+Deleted with the cutover machinery (F18 closure, R3):
+test_the_events_reader_declares_as_a_direct_move_without_a_gate (no declaration
+exists to record); the `--declared` lookups and the flag loops went with it.
 """
 from __future__ import annotations
 
@@ -29,10 +33,9 @@ import pytest
 
 from claudlobby.brief import _alerts_section
 from claudlobby.commands.events import CRITICAL_TYPES
-from claudlobby.plane import cutover as cut
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
-from tests.plane_fixtures import F, REPO, _cli, _declare, _env, _scene, _stdlib_readers, ro as _ro
+from tests.plane_fixtures import F, REPO, _cli, _env, _scene, _stdlib_readers, ro as _ro
 from tests.test_plane_lookup import _run as _lookup
 
 LIB = REPO / "lib"
@@ -272,7 +275,7 @@ def _drop_plane(root):
 
 def test_claudlobby_events_serves_the_plane_and_nothing_else(tmp_path):
     """No flag, no declaration (F18 closure, R2b): the plane is the only
-    source, whatever PLANE_READ_EVENTS says and whether or not the reader was
+    source, with no flag and no declaration to consult (the reader was once
     ever declared; the files' bots-dir gate is gone with the files; an
     unreachable plane refuses at rc 3 with nothing on stdout."""
     root, paths, _, _ = _scene(tmp_path)
@@ -287,10 +290,6 @@ def test_claudlobby_events_serves_the_plane_and_nothing_else(tmp_path):
         ("w1", "session_missing", "pulse"), ("w2", "keepalive", "keepalive"), ("fleet", "fleet_rescue", "pulse")]
     assert rows[0]["ts"] == "2026-09-03T10:00:00Z" and rows[0]["data"] == {"session": "w1"}
     assert {"cutover_declared", "report_status"}.isdisjoint({r["type"] for r in rows})   # provenance, not a name list
-    for flag in ("0", "1", "true", "yes"):                          # the retired flag changes nothing
-        assert _rows(_events_cmd(root, "--json", PLANE_READ_EVENTS=flag)) == rows, flag
-    _declare(root, "events")                                        # nor does a declaration
-    assert _rows(_events_cmd(root, "--json")) == rows
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--critical"))] == ["w1"]
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--bot", "W2"))] == ["w2"]
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--type", "fleet_rescue"))] == ["fleet"]
@@ -314,15 +313,10 @@ def test_brief_alerts_read_the_plane_and_omit_when_it_is_unreachable(tmp_path, m
     _land(root, "w1", "session_missing", fresh, {"session": "w1"})
     _land(root, "w1", "keepalive", fresh, {"state": "IDLE"}, source="keepalive")   # a notice is never an alert
     _land(root, "w2", "service_down", fresh, {"unit": "x"})                         # another bot's
-    for flag in (None, "0", "1"):
-        if flag is None:
-            monkeypatch.delenv("PLANE_READ_EVENTS", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_READ_EVENTS", flag)
-        degraded = []
-        alerts = _alerts_section(paths, "w1", int(now.timestamp()), degraded)
-        assert [(a["type"], a["data"]) for a in alerts] == [("session_missing", {"session": "w1"})], flag
-        assert not any(d.field == "alerts" and d.mode == "omitted" for d in degraded), flag
+    degraded = []
+    alerts = _alerts_section(paths, "w1", int(now.timestamp()), degraded)
+    assert [(a["type"], a["data"]) for a in alerts] == [("session_missing", {"session": "w1"})]
+    assert not any(d.field == "alerts" and d.mode == "omitted" for d in degraded)
     _drop_plane(root)
     degraded = []
     assert _alerts_section(paths, "w1", int(now.timestamp()), degraded) == []
@@ -369,10 +363,6 @@ def test_plane_lookup_answers_the_events_and_escalation_questions(tmp_path):
     assert _lookup(root, "--events").returncode == 2                                # needs --fleet
     never = _lookup(root, "--events", "--fleet", "ghost")
     assert never.returncode == 3 and never.stdout == "" and "no identity for fleet" in never.stderr
-    assert _lookup(root, "--declared", "events", "--fleet", F).stdout == ""        # not declared: nothing
-    _declare(root, "events")
-    at = _lookup(root, "--declared", "events", "--fleet", F)
-    assert at.returncode == 0 and at.stdout.strip().startswith("20") and _lookup(root, "--declared", "open", "--fleet", F).stdout == ""
     _drop_plane(root)
     gone = _lookup(root, "--events", "--fleet", F)
     assert gone.returncode == 3 and gone.stdout == "" and "unreachable, not empty" in gone.stderr
@@ -394,33 +384,6 @@ def test_the_row_renderer_discloses_a_truncated_detail_and_never_strips_another_
     assert pr.since_form(None) is None and pr.since_form("") is None
     with pytest.raises(ValueError):
         pr.since_form("not-an-instant")
-
-
-# --- the declaration: a direct move -------------------------------------------
-
-def test_the_events_reader_declares_as_a_direct_move_without_a_gate(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    r = _cli(root, "cutover", "--reader", "events")                 # no --force: the ruling is the reason
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "direct move" in r.stdout and "PLANE_READ_EVENTS=1" in r.stdout
-    with _ro(root) as conn:
-        decl = cut.declared(conn, F)
-        data = json.loads(conn.execute(
-            "SELECT detail FROM events WHERE event = 'cutover_declared'").fetchone()[0])
-    assert "events" in decl and "direct move" in (decl["events"][1] or "")
-    assert data["shadowed"] is False and data["gate"] == {"clean_run": None, "transitions": None}
-    assert data["gate_met"] is None and data["streaks"] == []
-    with _ro(root) as conn:                                          # anchored on the fleet's identity
-        anchored = conn.execute(
-            "SELECT e.subject_alias, e.subject_uid = i.uid FROM events e JOIN identity_registry i"
-            " ON i.kind = 'fleet' AND i.alias = ? WHERE e.event = 'cutover_declared'", (F,)).fetchone()
-    assert tuple(anchored) == (F, 1)
-    _declare(root, "open")                                          # every reader declares the same way now: no shadow, no gate
-    with _ro(root) as conn:
-        also = json.loads(conn.execute(
-            "SELECT detail FROM events WHERE event = 'cutover_declared' AND json_extract(detail, '$.reader') = 'open'"
-        ).fetchone()[0])
-    assert also["shadowed"] is False and also["gate_met"] is None and also["forced"] == "test"
 
 
 # --- fleet-pulse: the escalation and the summary read the plane ---------------
@@ -461,15 +424,11 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     libdir = _pulse_lib(tmp_path, capture)
     page = "FLEET ALERT: session_missing on 2 bots (w1 w2)."
 
-    for reader in cut.READERS:                                       # the hard flip: declare + retire
-        _declare(root, reader, "operator ruling 2026-09-03: hard flip, fix forward")
-    assert _cli(root, "cutover", "--retire-writes").returncode == 0
-
-    after = _pulse(root, libdir, PLANE_READ_EVENTS="1")
+    after = _pulse(root, libdir)                                     # no flag, no declaration: the plane
     assert after.returncode == 0, after.stderr[-2000:]
     assert page in capture.read_text(), capture.read_text() + after.stderr[-2000:]
     assert not list(paths.runtime_bots.glob("*/data/events/fleet-*.jsonl"))       # no file, ever (R1)
-    assert "UNREACHABLE" not in after.stderr and "no cutover_declared" not in after.stderr
+    assert "UNREACHABLE" not in after.stderr
     n = _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 2)
     assert n >= 2, n                                                 # one sweep, two bots, on the plane
     summary = (root / "state" / "pulse" / "pulse-summary.txt").read_text()
@@ -485,7 +444,7 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     capture.write_text("")
     _drop_plane(root)
     (root / "state" / "plane" / "plane.db").mkdir()
-    dark = _pulse(root, libdir, PLANE_READ_EVENTS="1")
+    dark = _pulse(root, libdir)
     assert dark.returncode == 0, dark.stderr[-2000:]
     assert "UNREACHABLE" in dark.stderr and "cannot be judged this pass" in dark.stderr
     # the escalation loop never reaches for a cache no read produced (a read

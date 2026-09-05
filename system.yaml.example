@@ -279,7 +279,6 @@ defaults:
 
   observability:
     pulse_interval: 300
-    reap_days: 7
     activity_stuck_threshold: 1800
     # DO NOT RAISE THIS TO QUIET overdue_dispatch NOISE. A run of false alerts
     # makes that the obvious move, and it is a one-line edit that reaches every

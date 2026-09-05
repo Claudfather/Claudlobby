@@ -201,16 +201,15 @@ reader, the dispatch resolver — answers from.
 Full reference: [`observable-plane.md`](observable-plane.md) — the ten families and the common
 envelope, identity (aliases vs minted uids), the write spine and its ladder (daemon socket → cold
 CLI → spool), every door and the flag that arms it, the read side (and which doors are NOT
-read-only), the F18 cutover state machine (declare → flip → retire — the shadow and its gate went with the
-closure, R2a) with the rollback at each stage, migrations and retention.
+read-only), the F18 cutover as history (the closure deleted its machinery), migrations and retention.
 
 Two properties matter at this altitude. **Everything is dormant by default**: a fleet that never
 sets `PLANE_EMIT_ENABLED=1` in its `.env` tier pays nothing; the ingest daemon, the view daemon and
 the sweeps are separately armed host jobs (`system.yaml`, see
 [`system-yaml-schema.md`](../system-yaml-schema.md#unit-service--resident-host-services)). And
 **nothing in `fleet.yaml` or `runtime/bots/` changes shape because of it** — the plane records what
-the doors already do; the legacy JSONL ledgers keep being written until the cutover retires them,
-one reader at a time, with the parity of the two answers measured and recorded before any flip.
+the doors already do. The legacy JSONL ledgers are gone: the F18 closure (#1467) removed every
+writer, moved every reader onto the plane, and deleted the transition machinery.
 
 ## Validation
 
