@@ -55,8 +55,8 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # cutover chunk 7a — a report whose status reached no task event (a terminal
     # note that resolved nothing): the status the idle-worker check reads.
     "report_status": "notice",
-    # cutover Phase B — the bot-events ledger (data/events/fleet-*.jsonl) on the
-    # plane: every `emit_fleet_event` type the estate emits, registered with the
+    # cutover Phase B — the fleet events (once the per-bot data/events files,
+    # gone since F18 R1) on the plane: every `emit_fleet_event` type the estate emits, registered with the
     # severity `claudlobby events`' CRITICAL_TYPES implies (critical pages the
     # operator through fleet-pulse's escalation; notice is the record). An
     # unregistered type still ingests with NULL severity (F19).

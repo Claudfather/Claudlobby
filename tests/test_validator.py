@@ -482,6 +482,20 @@ class TestObservabilityValidation:
             "pulse_interval > 3600" in w and "worker-1" in w for w in report.warnings
         )
 
+    def test_a_retired_cutover_flag_in_the_fleet_tier_is_disclosed_not_ignored(self, fleet_dir, monkeypatch):
+        """A fleet `.env` tier that still carries `PLANE_READ_*` / `PLANE_LEGACY_WRITE_*`
+        (the estate's state on the R3 deploy day) loads and composes clean — and
+        validate SAYS the line is dead, the shape `reap_days` gets (F18 closure, R3)."""
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        paths.env_file.write_text("PLANE_READ_OPEN=1\nPLANE_LEGACY_WRITE_REPORT=0\nGITHUB_PAT=ghp_x\n")
+        report = validate(fleet, paths)
+        flagged = [w for w in report.warnings if "retired cutover flag" in w]
+        assert any("PLANE_READ_OPEN" in w for w in flagged) and any("PLANE_LEGACY_WRITE_REPORT" in w for w in flagged)
+        assert not any("GITHUB_PAT" in w for w in flagged)
+        assert not report.errors
+
     def test_a_retired_observability_key_is_disclosed_not_ignored(self, fleet_dir, monkeypatch):
         """`observability.reap_days` has no reader since the F18 closure
         (#1467): a manifest that still sets it loads, and validate SAYS so,

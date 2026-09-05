@@ -48,3 +48,11 @@ def test_the_recorded_epochs_still_classify_and_the_doctor_carries_no_rung_for_t
     assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"
     d = _cli(root, "doctor")
     assert "cutover" not in d.stdout.lower() and "legacy write" not in d.stdout.lower(), d.stdout
+
+
+def test_the_retirement_token_is_still_registered():
+    """The machinery is gone (R3) but the estate recorded these epochs; the
+    names stay registered so those rows keep their severity."""
+    from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
+    assert SYSTEM_EVENT_SEVERITY["legacy_write_retired"] == "notice"
+    assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"

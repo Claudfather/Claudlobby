@@ -16,9 +16,9 @@ package import on every call. Read-only (``mode=ro`` + ``query_only``).
 Output: ``<work_item_id> <assignment_id> <dispatch_msg_id>`` for the LATEST
 matching assignment (by ingest order), or nothing. Exit codes follow the
 unreachable ≠ empty rule (source_state): 0 found · 0 not-found (empty
-stdout, a note on stderr — a stamped id is NOT proof the row exists, so
-the caller keeps its legacy fallback until cutover) · 3 unreachable (no
-db, or unopenable) · 2 usage.
+stdout, a note on stderr — a stamped id is NOT proof the row exists; the
+caller says so and carries on) · 3 unreachable (no db, or unopenable) ·
+2 usage.
 """
 
 from __future__ import annotations
@@ -29,9 +29,9 @@ import json
 import sqlite3
 import sys
 
-# The package twin of this read went with the importer (F18 R3); this stdlib read (the
-# importer's report link and supersession closure ride it); a bash door cannot
-# import the package, so the SQL lives twice - keep the two in step.
+# The package twin of this read went with the importer (F18 R3); the dispatch
+# door's supersession closure and the report door's link ride this stdlib read
+# (a bash door cannot import the package).
 SQL = (
     "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, i.alias"
     " FROM assignments a"

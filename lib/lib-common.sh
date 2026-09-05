@@ -2690,20 +2690,6 @@ env_tier_present_files() {
     env_tier_rows "$@" | awk -F'\t' '$3 == "present" { print $2 }'
 }
 
-# dispatch_ledger_path
-# The manager-written dispatch ledger, on stdout. Host-global (one file per
-# CLAUDLOBBY_ROOT), unlike the per-fleet report ledger fleet_runtime_dir locates.
-# One home because the writer (dispatch-task.sh) and both readers (fleet-pulse's
-# watchdog, report-back's open-dispatch resolver) must agree byte-for-byte: a
-# resolver reading a different file than the watchdog would re-resolve rows the
-# watchdog still considers open. Self-locating fallback so a caller with no
-# CLAUDLOBBY_ROOT exported still resolves the install it was invoked from.
-dispatch_ledger_path() {
-    local root="${CLAUDLOBBY_ROOT:-}"
-    [ -n "$root" ] || root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    printf '%s' "$root/state/dispatch-log.jsonl"
-}
-
 # host_bots_dirs
 # Emit every bots dir on this host (one per line): root-mode runtime/bots when
 # present, plus each local/<fleet>/runtime/bots. The named enumerator for
@@ -4001,8 +3987,9 @@ seed_claude_auth_and_trust() {
 # --- Fleet event-ledger retention -------------------------------------------
 
 # sha256_hex32 <string> -- the first 32 hex chars of sha256 over the exact bytes
-# (no trailing newline): the importer content key (plane.ids.derive_hex), so a
-# live door and a later import of the same ledger line agree on one ref.
+# (no trailing newline): the dispatch door's `dispatch-log:sha:` content key
+# (plane.ids.derive_hex) for an id-less dispatch, derived from the row it would
+# once have written, so the ref is deterministic from the dispatch itself.
 sha256_hex32() {
     if command -v shasum >/dev/null 2>&1; then
         printf '%s' "$1" | shasum -a 256 | cut -c1-32

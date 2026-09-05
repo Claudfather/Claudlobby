@@ -33,7 +33,7 @@ from claudlobby.commands.events import (
 from claudlobby.paths import Paths
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.plane_fixtures import F, _scene
-from tests.test_plane_cutover_events import _drop_plane, _events_cmd, _land, _rows
+from tests.test_plane_events_door import _drop_plane, _events_cmd, _land, _rows
 
 
 @pytest.fixture

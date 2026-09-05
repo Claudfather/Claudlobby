@@ -1,14 +1,11 @@
-"""Cutover chunk 5 → F18 closure R2a: the matcher's list readers (`--open`,
-`--all`) answer from the PLANE and from nothing else.
+"""The matcher's list readers (`--open`, `--all`, `--orphans`) answer from the
+PLANE and from nothing else — the plane-reader pins that survived the F18
+closure's cutover-era suite (chunk 5 → R2a → R3).
 
-The flip used to be two facts — a per-reader PLANE_READ_* flag AND a recorded
-`cutover_declared` — with `--source jsonl` naming the legacy side the shadow
-graded. R2a removed the legacy side and the shadow with it: the matcher opens
-the plane under `--fleet`/`--root` (else the CLAUDLOBBY_FLEET → FLEET_NAME and
-CLAUDLOBBY_ROOT carriers), refuses at rc 3 when it cannot (UNREACHABLE is not
-empty), and `plane cutover --reader` records a DIRECT MOVE with no gate. The
-flags still compose (bot.conf, the fleet-pulse unit) and the doctor still
-reads them against the declaration; R3 retires that surface.
+The matcher opens the plane under `--fleet`/`--root` (else the CLAUDLOBBY_FLEET
+→ FLEET_NAME and CLAUDLOBBY_ROOT carriers) and refuses at rc 3 when it cannot
+(UNREACHABLE is not empty). No flag, no declaration, no gate: R3 deleted the
+cutover machinery, and the composer stamps no transition flag (pinned below).
 
 Deleted with the shadow and the legacy side (F18 closure, R2a):
 test_open_and_all_answer_the_same_from_the_plane_and_the_jsonl (its plane half
@@ -335,3 +332,23 @@ def test_the_stdlib_readers_hold_no_cutover_twin():
     """`declared` / `retired` and their SQL went with the cutover facts (R3)."""
     pr = _stdlib_readers()
     assert not any(hasattr(pr, n) for n in ("declared", "retired", "DECLARED_SQL", "RETIRED_SQL"))
+
+
+def test_the_orphan_list_is_the_planes_own_split(tmp_path):
+    """Every dispatch the plane holds for a bot older than its .spawn is the
+    orphan list's — the one landed by the live door and the scene's alike;
+    a bot that never respawned contributes nothing."""
+    import os
+    root, paths, _, _ = _scene(tmp_path)
+    _live_dispatch(root, "8", "t-8-only-plane", ts="2026-09-02T09:00:00Z", expected_by="2026-09-02T10:00:00+00:00")
+    bots = root / "bots"
+    (bots / "w1" / "data").mkdir(parents=True)
+    spawn = bots / "w1" / "data" / ".spawn"
+    spawn.write_text("")
+    os.utime(spawn, (NOW_EPOCH - 60, NOW_EPOCH - 60))                  # w1 respawned after both dispatches
+    orphans = _matcher(root, "--orphans", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
+    assert orphans.returncode == 0, orphans.stderr
+    assert "t-8-only-plane" in orphans.stdout and "t-2-bbbb" in orphans.stdout
+    assert "w2" not in orphans.stdout and "t-3-cccc" not in orphans.stdout
+    over = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
+    assert "t-8-only-plane" not in over.stdout and "t-3-cccc" in over.stdout      # split, never paged twice

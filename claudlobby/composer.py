@@ -3943,7 +3943,7 @@ def compose_fleet_timers(
         _cascade = _env_tiers.cascade(
             _env_tiers.read_tiers(paths, fleet_name=fleet.name)
         )
-        for _job, _flags in FLEET_JOB_ARMING.items():
+        for _job, _flags in FLEET_JOB_ARMING.items():       # one row since F18 R3: keepalive's emission arming
             _armed = {f: "1" for f in _flags if _env_tiers.armed(_cascade, f)}
             if _armed:
                 job_extra_env[_job] = _armed

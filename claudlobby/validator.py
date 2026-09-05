@@ -1667,6 +1667,14 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_placeholders(fleet, report)
 
     fleet_env = dotenv.read(paths.env_file)
+    # The F18 closure's transition flags have no reader (R3 deleted the last):
+    # a fleet tier still carrying one is a lie in the config surface, said —
+    # never silently ignored, never refused (an old tier must still load).
+    for key in sorted(k for k in fleet_env if k.startswith(("PLANE_READ_", "PLANE_LEGACY_WRITE_"))):
+        report.warnings.append(
+            f"{paths.env_file}: {key} is a retired cutover flag with no reader since the F18 closure"
+            " — remove the line (the plane is the only source; nothing flips)"
+        )
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)

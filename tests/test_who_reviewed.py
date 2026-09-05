@@ -16,6 +16,10 @@ test_no_ledgers_is_empty_not_error).
 
 from __future__ import annotations
 
+import sys
+
+import subprocess
+
 import json
 
 import pytest
@@ -368,3 +372,45 @@ class TestCli:
 
     def test_bad_repo_arg_rejected(self, capsys):
         assert who.main(["notarepo", "1046"]) == 2
+
+
+# --- the plane join, moved from tests/test_plane_cutover_retire.py (dissolved in R3) ---
+from claudlobby.plane.emit_api import emit_batch
+from tests.plane_fixtures import F as PLANE_FLEET, REPO as REPO_ROOT, _rrow, _scene
+
+
+def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
+    wr = who
+    root, paths, _, r = _scene(tmp_path)
+    ts = "2026-09-02T14:00:00Z"
+    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": PLANE_FLEET,
+                       "source_ref": f"report-back:msg_{'5':0>32}", "occurred_at": ts,
+                       "payload": {"work_item_id": f"wi_{'2':0>32}", "assignment_id": f"asg_{'2':0>32}",
+                                   "event": "completed", "actor": f"bot:{PLANE_FLEET}/w1",
+                                   "pr_url": "https://github.com/org/repo/pull/1046", "summary": "Request Changes on #1046"}}])
+    ledger_rows = [{**_rrow(ts, "t-2-bbbb", "completed", pr_url="https://github.com/org/repo/pull/1046",
+                            summary="Request Changes on #1046"), "_fleet": PLANE_FLEET, "_ledger": "ledger"}]
+    plane_rows, why = wr.load_plane_rows(str(root))
+    assert why is None and len(plane_rows) == 1
+    assert {k: plane_rows[0][k] for k in ("bot", "pr_url", "task_id", "status", "_fleet")} == \
+        {"bot": "w1", "pr_url": "https://github.com/org/repo/pull/1046", "task_id": "t-2-bbbb",
+         "status": "completed", "_fleet": PLANE_FLEET}
+    events = [{"ts": "2026-09-02T13:59:52Z", "state": "CHANGES_REQUESTED", "kind": "review"}]
+    from_ledger = wr.attribute(events, ledger_rows, "org/repo", 1046)
+    from_plane = wr.attribute(events, plane_rows, "org/repo", 1046)
+    assert from_ledger[0]["verdict"] == from_plane[0]["verdict"] == "MATCH"
+    assert from_plane[0]["candidates"][0]["bot"] == "w1"
+    reviews = tmp_path / "reviews.json"
+    reviews.write_text(json.dumps({"reviews": [], "comments": []}))
+    ok = subprocess.run([sys.executable, str(REPO_ROOT / "lib" / "who-reviewed.py"), "org/repo", "1046",
+                         "--root", str(root), "--reviews-json", str(reviews), "--json"],
+                        capture_output=True, text=True, timeout=60)
+    assert ok.returncode == 0, ok.stderr
+    assert json.loads(ok.stdout)["scope"]["source"] == "plane"
+    (root / "state" / "plane" / "plane.db").unlink()
+    rows, why = wr.load_plane_rows(str(root))
+    assert rows == [] and "no plane db" in why                                     # unreachable ≠ empty
+    gone = subprocess.run([sys.executable, str(REPO_ROOT / "lib" / "who-reviewed.py"), "org/repo", "1046",
+                           "--root", str(root), "--reviews-json", str(reviews)],
+                          capture_output=True, text=True, timeout=60)
+    assert gone.returncode == 4 and gone.stdout == "" and "unreachable" in gone.stderr

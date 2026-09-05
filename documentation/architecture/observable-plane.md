@@ -157,7 +157,7 @@ the walk in `documentation/plans/2026-09-02-plane-cutover-f18-design-walk.md`.
 **Arming carriers** — `PLANE_EMIT_ENABLED` (the generate-time registry scan
 only: every runtime door is always on since F18 R1, and `PLANE_EMIT_DISABLED=1`
 is the harness exemption that silences one), `PLANE_EXPIRE_ENABLED`, `PLANE_PRUNE_ENABLED` (the two
-host sweeps self-gate), `PLANE_READ_*` (the flips). Put them in the fleet
+host sweeps self-gate). Put them in the fleet
 `.env` tier: sessions get them through `bot.conf`, timers through the composed
 `Environment=` lines, and `generate` reads the same cascade. `env_tiers.armed`
 is the one definition of "resolves to 1".

@@ -49,18 +49,6 @@ OPEN_ASSIGNMENTS_AT_SQL = (
     " ORDER BY a.occurred_at, a.ingest_seq"
 )
 
-# The plane answered by a LEGACY source_ref for ONE assignee (cutover chunks
-# 1-3b): the assignments that carry `source_ref` (a dispatch-log task id)
-# whose assignee alias matches case-insensitively, the legacy matcher's own
-# bot key. Params: (source_ref, alias). `lib/plane-lookup.py` is the stdlib
-# TWIN of the latest-by-ref read (a bash door cannot import the package) —
-# keep the two in step; the importer's report link and its supersession
-# closure both ride these rather than private copies.
-_BY_REF_JOIN = (
-    " FROM assignments a JOIN identity_registry i ON i.uid = a.assignee_uid"
-    " WHERE a.source_ref = ? AND lower(i.alias) = lower(?)"
-)
-
 # §6b #1/#2 (PR-B): activation derives from CARRIER-APPROPRIATE evidence —
 # submission-class rows (pane_submitted / carrier_accepted) occupy the
 # activation rung, because submission is the strongest fact the tmux carrier
