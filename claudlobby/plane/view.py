@@ -66,6 +66,7 @@ from .emit_api import CaptureConfigError, capture_mode, load_capture_config
 from .ingest import CONSTRUCT_TABLES
 from .spool import oldest_spooled_at, scan_spool
 from .ingest import now_iso as _now_iso
+from .inventory import qualified_labels
 from .sampler import PaneSampler
 from .queries import (
     ACTIVATION_TX_EVENTS,
@@ -105,6 +106,51 @@ def _short(alias: str | None) -> str | None:
     if alias.startswith("human:"):
         return alias[len("human:"):] or alias
     return alias
+
+
+def _fleet_like(fleet: str) -> str:
+    """The `bot:<fleet>/%` LIKE prefix with the fleet's own LIKE metas
+    escaped (a fleet named `en_` must not absorb `eng`'s bots — the same
+    escape utilization.py applies; bound with ``ESCAPE '\\'``)."""
+    esc = fleet.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"bot:{esc}/%"
+
+
+_FLEET_ROWS_SQL = (
+    "SELECT uid, alias, first_seen, last_seen FROM identity_registry"
+    " WHERE kind = 'fleet' AND alias NOT LIKE '\\_%' ESCAPE '\\'"
+    " ORDER BY alias")
+
+
+def _fetch_fleets(conn: sqlite3.Connection) -> dict:
+    """The host's fleets, from the registry's fleet identities — NEVER
+    from the roster rail's last-seen window (U1): that read is LIMIT 200
+    newest-first over every participant, so on a host whose bots and
+    humans out-chatter a quiet fleet the fleet drops out of the window and
+    its tab with it. `_`-prefixed scope sentinels (the `_host` fleet the
+    host probe emits under) are not fleets. `default` is the fleet whose
+    room moved most recently — the room axis, sent BY the fleet or TO it —
+    ties and silence broken alphabetically; it is the tab a first visit
+    opens when the viewer has never picked one."""
+    fleets = []
+    for uid, alias, first_seen, last_seen in conn.execute(_FLEET_ROWS_SQL):
+        bots = conn.execute(
+            "SELECT COUNT(*) FROM identity_registry WHERE kind = 'actor'"
+            " AND alias LIKE ? ESCAPE '\\'", (_fleet_like(alias),)).fetchone()[0]
+        arms = conn.execute(
+            "SELECT occurred_at FROM communications WHERE fleet_uid = ?"
+            " ORDER BY ingest_seq DESC LIMIT 1", (uid,)).fetchall()
+        arms += conn.execute(
+            "SELECT occurred_at FROM communications WHERE recipient_fleet = ?"
+            " ORDER BY ingest_seq DESC LIMIT 1", (alias,)).fetchall()
+        fleets.append({
+            "alias": alias, "uid": uid, "first_seen": first_seen,
+            "last_seen": last_seen, "bots": bots,
+            "last_comm_at": max((r[0] for r in arms if r[0]), default=None)})
+    # reverse=True keeps the alphabetical order among equal instants
+    ranked = sorted(fleets, key=lambda f: f["last_comm_at"] or "", reverse=True)
+    return {"fleets": fleets,
+            "default": ranked[0]["alias"] if ranked else None}
 
 
 def _plane_state_dir(root: Path) -> Path:
@@ -335,7 +381,15 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
     return {"threads": out}
 
 
-def _fetch_tasks(conn: sqlite3.Connection) -> dict:
+def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
+    # `fleet` scopes the board to that fleet's ASSIGNEES (U1 — the same axis
+    # every per-fleet route filters on); with no fleet the host-wide board
+    # labels a twin-named assignee `fleet/name` (inventory's one rule).
+    where, params = "", []
+    if fleet:
+        where = (" WHERE a.assignee_uid IN (SELECT uid FROM identity_registry"
+                 "  WHERE alias LIKE ? ESCAPE '\\')")
+        params = [_fleet_like(fleet)]
     rows = [dict(r) for r in conn.execute(
         "SELECT a.assignment_id, a.work_item_id, a.assignee_uid,"
         " a.expected_by, a.occurred_at, w.title,"
@@ -343,9 +397,11 @@ def _fetch_tasks(conn: sqlite3.Connection) -> dict:
         "   WHERE i.uid = a.assignee_uid) AS assignee_alias"
         " FROM assignments a LEFT JOIN work_items w"
         "   ON w.work_item_id = a.work_item_id"
-        " ORDER BY a.ingest_seq DESC LIMIT 200")]
+        f"{where} ORDER BY a.ingest_seq DESC LIMIT 200", params)]
     if not rows:
         return {"assignments": [], "attention_count": 0}
+    labels = ({} if fleet
+              else qualified_labels(r["assignee_alias"] for r in rows))
     # Derive status/attention for the DISPLAYED ids only (gauntlet,
     # measured 20x): the unrestricted derivations walked every assignment
     # ever to render 200. The restriction is APPENDED so queries.py stays
@@ -359,7 +415,8 @@ def _fetch_tasks(conn: sqlite3.Connection) -> dict:
         (_now_iso(), *ids))}
     for r in rows:
         r["title"] = body_words(r["title"])
-        r["assignee_short"] = _short(r["assignee_alias"])
+        r["assignee_short"] = (labels.get(r["assignee_alias"])
+                               or _short(r["assignee_alias"]))
         r["status"] = status.get(r["assignment_id"], "created_not_sent")
         r["attention"] = r["assignment_id"] in attention
     return {"assignments": rows,
@@ -375,8 +432,18 @@ def _fetch_tasks(conn: sqlite3.Connection) -> dict:
 _RAIL_KINDS = ("fleet", "actor")   # humans resolve as actors
 
 
-def _fetch_identities(conn: sqlite3.Connection) -> dict:
+def _fetch_identities(conn: sqlite3.Connection,
+                      fleet: str | None = None) -> dict:
     ph = ",".join("?" * len(_RAIL_KINDS))
+    scope, params = "", list(_RAIL_KINDS)
+    if fleet:
+        # the room's participants (U1): the fleet itself, its bots, and every
+        # human — a human is a participant of every room (the operator talks
+        # to both fleets and belongs to neither)
+        scope = (" AND ((kind = 'fleet' AND alias = ?)"
+                 "  OR (kind = 'actor' AND (alias LIKE ? ESCAPE '\\'"
+                 "   OR alias LIKE 'human:%')))")
+        params += [fleet, _fleet_like(fleet)]
     rows = []
     for r in conn.execute(
         "SELECT uid, kind, alias, provisional, first_seen, last_seen"
@@ -385,7 +452,7 @@ def _fetch_identities(conn: sqlite3.Connection) -> dict:
         # fleet the host probe emits under — a host job has no real fleet,
         # so its sentinel is not a participant the rail should show)
         " AND alias NOT LIKE '\\_%' ESCAPE '\\'"
-        " ORDER BY last_seen DESC LIMIT 200", _RAIL_KINDS):
+        f"{scope} ORDER BY last_seen DESC LIMIT 200", params):
         row = dict(r)
         row["short"] = _short(row["alias"])
         # a human actor is legitimately-provisional (never in a roster to
@@ -393,6 +460,11 @@ def _fetch_identities(conn: sqlite3.Connection) -> dict:
         if row["alias"].startswith("human:"):
             row["provisional"] = 0
         rows.append(row)
+    if not fleet:
+        # the host-wide rail: twins across fleets read `fleet/name`
+        labels = qualified_labels(r["alias"] for r in rows if r["kind"] == "actor")
+        for row in rows:
+            row["short"] = labels.get(row["alias"]) or row["short"]
     return {"identities": rows}
 
 
@@ -697,12 +769,20 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                       lambda c: _fetch_channel(c, names, limit, fleet)))
 
     @app.get("/api/tasks")
-    def tasks():
-        return JSONResponse(_envelope(root, _fetch_tasks))
+    def tasks(fleet: str | None = None):
+        return JSONResponse(_envelope(root, lambda c: _fetch_tasks(c, fleet)))
 
     @app.get("/api/identities")
-    def identities():
-        return JSONResponse(_envelope(root, _fetch_identities))
+    def identities(fleet: str | None = None):
+        return JSONResponse(
+            _envelope(root, lambda c: _fetch_identities(c, fleet)))
+
+    @app.get("/api/fleets")
+    def fleets():
+        """The fleet dimension (U1): every fleet the host records, with the
+        tab a first visit should open. Read from the registry's fleet
+        identities, never the rail's bounded window."""
+        return JSONResponse(_envelope(root, _fetch_fleets))
 
     @app.get("/api/grid")
     def grid(focus: str | None = None, fleet: str | None = None):
@@ -722,6 +802,12 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
         if focus:
             sampler.focus(focus, fleet)
         snap = sampler.snapshot()
+        if fleet and not focus:
+            # the tab's grid (U4): one fleet's panes; a twin-named bot on the
+            # other fleet keeps its own slot rather than colliding into this
+            # one (panes are keyed (fleet, bot) by the sampler already)
+            snap = {**snap, "panes": [p for p in snap["panes"]
+                                      if p.get("fleet") == fleet]}
         if focus:
             # The focus overlay renders ONE pane — ship one, not all 18
             # (measured 6.3x payload waste). Filter on the flag the sampler
@@ -738,7 +824,7 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
         })
 
     @app.get("/api/presence")
-    def presence():
+    def presence(fleet: str | None = None):
         """The Lane C presence derivation (chunk 2): the latest recorded
         heartbeat per bot joined with the sampler's live liveness poll into
         one working/idle/down/stale/unknown/sampling verdict + header
@@ -777,6 +863,13 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
             dict(zip(("alias", "value", "ingested_at"), row))
             for row in c.execute(LATEST_HEARTBEAT_SQL)])
         recorded = env["data"] if env["state"] == SOURCE_OK else []
+        if fleet:
+            # the tab's verdicts and counts (U1) — both halves scoped to
+            # the fleet, so the header strip is the room's, not the host's
+            prefix = f"bot:{fleet}/"
+            live = [p for p in live if p.get("fleet") == fleet]
+            recorded = [r for r in recorded
+                        if str(r.get("alias") or "").startswith(prefix)]
         rows = derive_presence(recorded, live, now=now,
                                stale_after_s=stale_after)
         body = {"data": {"bots": [r.__dict__ for r in rows],

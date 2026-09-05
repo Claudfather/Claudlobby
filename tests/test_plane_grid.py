@@ -449,3 +449,89 @@ def test_wedged_capture_reap_does_not_block_on_grandchild_pipe(tmp_path):
     elapsed = asyncio.run(run())
     assert elapsed < 7.0, f"reap blocked {elapsed:.1f}s on the orphan pipe"
     assert s.snapshot()["panes"][0]["status"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# The fleet dimension on the grid + presence (U4/U1, #1467)
+# ---------------------------------------------------------------------------
+
+def test_grid_fleet_filter_keeps_twin_named_bots_apart(tmp_path):
+    """`?fleet=` FILTERS the snapshot: a tab's grid shows that fleet's panes
+    only, and a same-named bot on the other fleet keeps its own slot —
+    never merged into the tab's card, never shown under the wrong tab."""
+    _bot(tmp_path, "flat", "engineering", "one")
+    _bot(tmp_path, "flat", "data", "one")
+    tmux = _fake_tmux(tmp_path, 'printf "pane content\\n"')
+    s = PaneSampler(tmp_path, tmux=str(tmux))
+    s._panes = discover_panes(tmp_path)
+
+    async def run():
+        for p in s._panes:
+            await s._capture(p, 14)
+    asyncio.run(run())
+    client = TestClient(create_app(tmp_path, sampler=s))
+    both = client.get("/api/grid").json()["data"]["panes"]
+    assert sorted((p["fleet"], p["bot"]) for p in both) == [
+        ("data", "one"), ("engineering", "one")]
+    eng = client.get("/api/grid?fleet=engineering").json()["data"]["panes"]
+    assert [(p["fleet"], p["bot"]) for p in eng] == [("engineering", "one")]
+    assert client.get("/api/grid?fleet=nope").json()["data"]["panes"] == []
+    # focus still resolves the twin by (fleet, bot) and ships ONE pane
+    foc = client.get("/api/grid?focus=one&fleet=data").json()["data"]["panes"]
+    assert [(p["fleet"], p["bot"], p["focused"]) for p in foc] == [
+        ("data", "one", True)]
+
+
+def test_presence_fleet_filter_scopes_both_halves(tmp_path):
+    """The header strip under a tab is the ROOM's counts: the recorded half
+    (heartbeat samples) and the live half (panes) are both scoped."""
+    d = tmp_path / "state" / "plane"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "capture.json").write_text('{"*": "full"}')
+    rows = []
+    for fleet in ("engineering", "data"):
+        alias = f"bot:{fleet}/one"
+        rows += [
+            {"event_type": "registry_snapshot", "emitter": "t", "fleet": fleet,
+             "payload": {"entity_type": "bot", "entity_alias": alias,
+                         "cause": "generate", "scan_id": "s1",
+                         "payload": {"alias": alias, "account": "a",
+                                     "service": "s", "model": "opus",
+                                     "posture": {"permissions_mode": "plan"},
+                                     "composed_hashes": {},
+                                     "declared_hash": "d",
+                                     "schema_version": "1"}}},
+            {"event_type": "metric_sample", "emitter": "keepalive",
+             "fleet": fleet,
+             "payload": {"subject_kind": "bot_instance", "subject": alias,
+                         "metric": "bot.heartbeat",
+                         "value": {"state": "BUSY", "marker_age_s": 3}}}]
+    emit_batch(tmp_path, rows)
+
+    class _Sampler:
+        available = True
+
+        def snapshot(self):
+            return {"panes": [{"fleet": "engineering", "bot": "one",
+                               "status": "up"},
+                              {"fleet": "data", "bot": "one", "status": "up"},
+                              {"fleet": "data", "bot": "two",
+                               "status": "down"}],
+                    "sampler_running": True}
+
+        def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    client = TestClient(create_app(tmp_path, sampler=_Sampler()))
+    host = client.get("/api/presence").json()["data"]
+    assert host["counts"]["working"] == 2 and host["counts"]["down"] == 1
+    data = client.get("/api/presence?fleet=data").json()["data"]
+    assert {b["alias"] for b in data["bots"]} == {"bot:data/one",
+                                                  "bot:data/two"}
+    assert data["counts"]["working"] == 1 and data["counts"]["down"] == 1
+    eng = client.get("/api/presence?fleet=engineering").json()["data"]
+    assert [b["alias"] for b in eng["bots"]] == ["bot:engineering/one"]
+    assert eng["counts"]["down"] == 0

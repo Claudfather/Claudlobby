@@ -16,9 +16,9 @@
     <button class="pill ghost" data-view="trust" type="button">trust</button>
   </nav>
   <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
-  <span class="pill">ingest <b id="age">—</b></span>
-  <span class="pill">rows <b id="total">—</b></span>
-  <span class="pill">spool <b id="spool">—</b></span>
+  <span class="pill" title="the host's recorder — every fleet on this host writes here">host ingest <b id="age">—</b></span>
+  <span class="pill" title="host-wide ledger rows">host rows <b id="total">—</b></span>
+  <span class="pill" title="host-wide spool">host spool <b id="spool">—</b></span>
   <span class="pill presence-strip" id="presence-strip" hidden></span>
   <span class="spacer"></span>
   <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">machinery</button>
@@ -35,7 +35,7 @@
     <div class="scroll" id="search-results" hidden></div>
     <div class="scroll" id="channel"></div>
     <div class="scroll" id="grid" hidden></div>
-    <div class="scroll" id="fleet" hidden></div>
+    <div class="scroll" id="fleet-room" hidden></div>
     <div class="scroll" id="trust" hidden></div>
   </section>
   <section id="rail-right">

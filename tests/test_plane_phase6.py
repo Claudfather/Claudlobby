@@ -306,3 +306,26 @@ def test_empty_roster_entry_is_not_a_phantom_root(tmp_path):
         conn.close()
     assert [r["bot"] for r in t["roots"]] == ["erlich"]
     assert t["bots"] == 1
+
+
+def test_org_route_follows_the_requested_fleet_never_the_default(tmp_path):
+    """U4: with a fleet tab picked the org tree is THAT fleet's — the
+    first-alphabetical default is only for a read that names no fleet, and
+    it discloses the choice (`available`)."""
+    fastapi = __import__("pytest").importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+
+    root = _root(tmp_path)
+    emit_batch(root, [_fleet_kf([{"bot": "x", "reports_to": None}]), _done()])
+    g = _fleet_kf([{"bot": "y", "reports_to": None}])
+    g["fleet"] = "g"; g["payload"]["entity_alias"] = "g"; g["payload"]["payload"]["alias"] = "g"
+    d = _done(); d["fleet"] = "g"; d["payload"]["scope"] = "g"
+    emit_batch(root, [g, d])
+    client = TestClient(create_app(root))
+    picked = client.get("/api/org?fleet=g").json()
+    assert picked["state"] == "ok" and picked["data"]["fleet"] == "g"
+    assert [n["bot"] for n in picked["data"]["roots"]] == ["y"]
+    unnamed = client.get("/api/org").json()["data"]
+    assert unnamed["fleet"] == "f" and unnamed["available"] == ["f", "g"]
+    assert client.get("/api/org?fleet=nope").json()["state"] == "idle"

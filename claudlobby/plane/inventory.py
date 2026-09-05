@@ -53,6 +53,26 @@ def _fleet_of(alias: str) -> str | None:
     return None
 
 
+def qualified_labels(aliases) -> dict[str, str]:
+    """alias -> presentation label, THE one definition of the twin rule
+    (U1): a short name two fleets both use (an `erlich` on each — the #526
+    collision class) is qualified as ``fleet/name``; an unambiguous one
+    stays bare. Every all-fleets surface of the view (inventory cards,
+    task assignees, the roster rail) labels through here, so a host running
+    two fleets never shows two indistinguishable names or attributes one
+    bot's work to its twin. Only the aliases it QUALIFIES are in the result:
+    an unambiguous bot, a human, a library item keep the caller's own
+    short-name rule (a human has no fleet to qualify by, and the view's
+    `_short` strips `human:` where this module's does not)."""
+    uniq = list(dict.fromkeys(a for a in aliases if a))
+    seen: dict[str, int] = {}
+    for a in uniq:
+        if _fleet_of(a) is not None:
+            seen[_short(a)] = seen.get(_short(a), 0) + 1
+    return {a: f"{_fleet_of(a)}/{_short(a)}" for a in uniq
+            if _fleet_of(a) is not None and seen.get(_short(a), 0) > 1}
+
+
 def _equipment_of(payload: dict) -> dict:
     eq = payload.get("equipment") or {}
     return eq if isinstance(eq, dict) else {}
@@ -87,17 +107,14 @@ def fleet_inventory(conn, fleet: str | None = None) -> dict:
                                  fleet=fleet)
 
     bot_rows = [_bot_row(b) for b in bots]
-    # A short name that two fleets both use (an `erlich` on each — the #526
-    # collision class) is qualified as fleet/name in every label, so an
-    # all-fleets read never shows two indistinguishable cards or attributes
-    # one bot's equipment to its twin (gauntlet, probed).
-    seen: dict[str, int] = {}
-    for b in bots:
-        seen[_short(b["entity_alias"])] = seen.get(_short(b["entity_alias"]), 0) + 1
+    # A short name that two fleets both use is qualified as fleet/name in
+    # every label (`qualified_labels`, the one definition), so an all-fleets
+    # read never shows two indistinguishable cards or attributes one bot's
+    # equipment to its twin (gauntlet, probed).
+    labels = qualified_labels(b["entity_alias"] for b in bots)
 
     def _label(alias: str) -> str:
-        sh = _short(alias)
-        return f"{_fleet_of(alias)}/{sh}" if seen.get(sh, 0) > 1 else sh
+        return labels.get(alias) or _short(alias)
     for r in bot_rows:
         r["short"] = _label(r["alias"])
     # (category, name) -> [bot labels] — the used_by join

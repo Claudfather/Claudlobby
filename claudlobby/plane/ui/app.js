@@ -275,13 +275,25 @@ let generation = 0;
 
 async function refreshBoards() {
   const gen = ++generation;   // stale responses never paint over newer ones
-  const [ch, tk, fl, sm] = await Promise.all([
-    jget(channelUrl()), jget("/api/tasks"),
-    jget("/api/identities"), jget("/api/summary"),
+  if (!fleetsSeen) {
+    // The FIRST paint learns the fleet dimension before it fetches a board:
+    // every per-fleet board below is fetched IN the room, so the room must
+    // be known first — the old flow fetched the firehose, discovered the
+    // fleets from the roster, and refetched (one wasted round trip and one
+    // flash of the wrong room on every load).
+    adoptFleets(await jget("/api/fleets"));
+    if (gen !== generation) return;
+  }
+  const q = fleetQuery();
+  const [ch, tk, fl, sm, fe] = await Promise.all([
+    jget(channelUrl()), jget("/api/tasks" + q),
+    jget("/api/identities" + q), jget("/api/summary"),
+    jget("/api/fleets"),
   ]);
   if (gen !== generation) return;
+  adoptFleets(fe);
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
-  if (fl && fl.state === "ok") renderFleetTabs(fl.data.identities);
+  renderFleetTabs();
   restartSafety();
 }
 
@@ -370,39 +382,67 @@ function ansiToHtml(text) {
 }
 
 let currentView = "channel";
-let currentFleet = null;   // null = auto (single fleet or "all" not yet chosen)
+let currentFleet = null;   // null = auto (single fleet, or no pick yet)
 let gridTimer = null;
 let focusTimer = null;
 
-function channelUrl() {
-  const f = currentFleet && currentFleet !== "all"
-    ? `&fleet=${encodeURIComponent(currentFleet)}` : "";
-  return `/api/channel?limit=120${f}`;
+// The fleet DIMENSION (U1): the host's fleets come from /api/fleets — the
+// registry's fleet identities — never from the roster rail, whose LIMIT-200
+// last-seen window silently dropped a quiet fleet's tab on a two-fleet host.
+let fleets = [];          // [{alias, bots, last_comm_at, ...}], alphabetical
+let fleetsSeen = false;   // the first /api/fleets answer has landed
+const PICK_KEY = "plane.fleet";
+
+function loadPick() {   // per-viewer convenience — may be absent or throw
+  try { return localStorage.getItem(PICK_KEY); } catch { return null; }
+}
+function savePick(f) {
+  try { localStorage.setItem(PICK_KEY, f); } catch { /* not persisted */ }
 }
 
-function renderFleetTabs(identities) {
-  const fleets = identities.filter((i) => i.kind === "fleet")
-    .map((i) => i.alias).sort();
+// Adopt a /api/fleets answer: keep the list, and settle `currentFleet` —
+// the viewer's remembered pick when it still names a fleet (or "all"),
+// else the server's default (the room that moved most recently), else the
+// first fleet. One fleet = no dimension at all (null, no tabs).
+function adoptFleets(env) {
+  if (!env || env.state !== "ok" || !env.data) return;
+  fleetsSeen = true;
+  fleets = [...env.data.fleets].sort((a, b) => a.alias < b.alias ? -1 : 1);
+  const names = fleets.map((f) => f.alias);
+  if (names.length < 2) { currentFleet = null; return; }
+  if (currentFleet && (currentFleet === "all" || names.includes(currentFleet))) return;
+  const stored = loadPick();
+  currentFleet = stored && (stored === "all" || names.includes(stored))
+    ? stored : (env.data.default || names[0]);
+}
+
+function fleetQuery(sep = "?") {   // the per-fleet routes' `fleet=` axis
+  return currentFleet && currentFleet !== "all"
+    ? `${sep}fleet=${encodeURIComponent(currentFleet)}` : "";
+}
+
+function channelUrl() {
+  return `/api/channel?limit=120${fleetQuery("&")}`;
+}
+
+function renderFleetTabs() {
   const el = $("fleet-tabs");
-  if (fleets.length < 2) { el.innerHTML = ""; currentFleet = null; return; }
+  if (fleets.length < 2) { el.innerHTML = ""; return; }
   // Per-team rooms are the DEFAULT (operator ruling): a fleet tab is always
-  // selected; the merged firehose is the explicit last resort.
-  if (!currentFleet) {
-    // Rooms are the default: on first paint with >1 fleet the channel was
-    // fetched as the firehose (currentFleet null); adopt the room and
-    // refetch THROUGH the generation guard — the direct fetch was the one
-    // unguarded render path left (gauntlet round 2).
-    currentFleet = fleets[0];
-    refreshBoards();
-  }
-  el.innerHTML = [...fleets, "all"].map((f) =>
-    `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
-    + ` data-fleet="${esc(f)}" type="button">${esc(f)}</button>`).join("");
+  // selected; the merged host view is the explicit last resort.
+  el.innerHTML = [...fleets.map((f) => f.alias), "all"].map((f) => {
+    const meta = fleets.find((x) => x.alias === f);
+    const n = meta ? `<small>${esc(meta.bots)}</small>` : "<small>host</small>";
+    return `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
+      + ` data-fleet="${esc(f)}" type="button">${esc(f)} ${n}</button>`;
+  }).join("");
   el.querySelectorAll("button").forEach((b) =>
     b.addEventListener("click", () => {
       currentFleet = b.dataset.fleet;
-      renderFleetTabs(identities);   // instant highlight
+      savePick(currentFleet);
+      renderFleetTabs();             // instant highlight
       if (currentView === "fleet") pollFleet();   // the tab follows the pick
+      if (currentView === "grid") pollGrid();     // so does the grid
       refreshBoards();               // guarded path (generation stale-guard)
       if (!$("search-results").hidden) {
         // active search: re-fire in the NEW room — otherwise the visible
@@ -515,8 +555,9 @@ function renderGrid(env) {
 // the degradable one).
 async function pollGrid() {
   if (currentView !== "grid") return;
+  const q = fleetQuery();   // the tab's panes and verdicts (U4/U1)
   const [gridEnv, presEnv] = await Promise.all([
-    jget("/api/grid"), jget("/api/presence").catch(() => null),
+    jget("/api/grid" + q), jget("/api/presence" + q).catch(() => null),
   ]);
   const byAlias = {};
   if (presEnv && presEnv.data) {
@@ -548,6 +589,12 @@ function renderPresenceStrip(counts, recordedDown) {
   const parts = PRESENCE_ORDER
     .filter((s) => counts[s] > 0)
     .map((s) => `<span class="pres pres-${s}">${counts[s]} ${s}</span>`);
+  if (parts.length) {
+    // whose counts these are: the room's under a tab, the host's under
+    // "all" — the header is otherwise host-level, so say which
+    parts.unshift(`<span>${esc(currentFleet && currentFleet !== "all"
+      ? currentFleet : "host")}</span>`);
+  }
   if (recordedDown) {
     // the activity half is dark — say so, never a badge-less grid with no
     // hint (the disclosure the server sent must reach the operator)
@@ -564,7 +611,7 @@ function setView(view) {
   if (view !== "channel") $("search").value = "";
   $("grid").hidden = view !== "grid";
   $("trust").hidden = view !== "trust";
-  $("fleet").hidden = view !== "fleet";
+  $("fleet-room").hidden = view !== "fleet";
   if (view === "fleet") pollFleet();
   document.querySelectorAll("#view-nav button").forEach((b) =>
     b.classList.toggle("on", b.dataset.view === view));
@@ -822,12 +869,13 @@ const EQUIP_ORDER = ["expertise", "skills", "mcp", "integrations", "guardrails",
 
 async function pollFleet() {
   if (currentView !== "fleet") return;
-  renderState($("fleet"), { state: "loading" });
-  // honor the fleet picker (the same f= the channel/search use); with no
-  // pick, every fleet the host records — cross-fleet twins come back
-  // fleet-qualified from the server (gauntlet)
-  const f = currentFleet && currentFleet !== "all"
-    ? `?fleet=${encodeURIComponent(currentFleet)}` : "";
+  renderState($("fleet-room"), { state: "loading" });
+  // honor the fleet picker (the same fleet= the channel/search use); with
+  // "all", every fleet the host records — cross-fleet twins come back
+  // fleet-qualified from the server (gauntlet). The org tree FOLLOWS the
+  // tab (U4): with a tab picked the server never falls back to its
+  // first-alphabetical default.
+  const f = fleetQuery();
   // org + utilization ride alongside; either failing never blanks the
   // inventory (the same opposite-failure-modes rule as grid + presence)
   const [inv, org, util] = await Promise.all([
@@ -854,7 +902,7 @@ function countsLine(counts) {
 }
 
 function renderInventory(env, orgEnv) {
-  const el = $("fleet");
+  const el = $("fleet-room");
   if (!env || env.state !== "ok") {
     el.innerHTML = stateBlock(env ? env.state : "disconnected",
                               env && env.provenance, env && env.remediation);

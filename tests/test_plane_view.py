@@ -445,3 +445,132 @@ def test_plane_open_matches_its_own_port(monkeypatch, capsys, tmp_path):
     assert cmd_plane_open(args) == 0
     out = capsys.readouterr().out.strip()
     assert out == "https://mini.tail.ts.net"
+
+
+# ---------------------------------------------------------------------------
+# The fleet DIMENSION (U1/U4, #1467): two fleets on one host.
+# ---------------------------------------------------------------------------
+
+def _seed_twins(root: Path) -> None:
+    """Two fleets, each with a manager and a worker BOTH named `one`/`mgr`
+    (the #526 collision class), one assignment each, one human notice."""
+    _full_capture(root)
+    for fleet, h in (("engineering", "a"), ("data", "b")):
+        mgr, worker = f"bot:{fleet}/mgr", f"bot:{fleet}/one"
+        emit_batch(root, [
+            {"event_type": "work_item", "emitter": "t", "fleet": fleet,
+             "payload": {"work_item_id": "wi_" + h * 32,
+                         "title": f"work for {fleet}", "created_by": mgr}},
+            {"event_type": "assignment", "emitter": "t", "fleet": fleet,
+             "payload": {"assignment_id": "asg_" + h * 32,
+                         "work_item_id": "wi_" + h * 32,
+                         "assignee": worker, "assigned_by": mgr,
+                         "dispatch_msg_id": "msg_" + h * 32}},
+            {"event_type": "communication", "emitter": "t", "fleet": fleet,
+             "payload": {"msg_id": "msg_" + h * 32, "sender": mgr,
+                         "recipient": worker, "message_class": "task_request",
+                         "command_type": "task", "body": f"go {fleet}"}},
+        ])
+    emit_batch(root, [{
+        "event_type": "communication", "emitter": "t", "fleet": "data",
+        "payload": {"msg_id": "msg_" + "c" * 32, "sender": "human:chris",
+                    "recipient": "bot:data/mgr", "message_class": "chat",
+                    "body": "hi data"}}])
+
+
+def test_fleets_door_lists_registry_fleets_beyond_the_rail_window(tmp_path):
+    """U1: the fleet list comes from the registry's fleet identities, NOT
+    the roster rail's LIMIT-200 last-seen window — 300 newer identities
+    push the quiet fleet out of the rail, and its tab must survive."""
+    _seed_twins(tmp_path)
+    emit_batch(tmp_path, [{
+        "event_type": "communication", "emitter": "t", "fleet": "engineering",
+        "payload": {"msg_id": "msg_" + f"{i:032x}",
+                    "sender": f"bot:engineering/x{i}",
+                    "recipient": "bot:engineering/mgr",
+                    "message_class": "chat", "body": "noise"}}
+        for i in range(300)])
+    # a host-job sentinel is not a fleet
+    emit_batch(tmp_path, [{
+        "event_type": "metric_sample", "emitter": "probe", "fleet": "_host",
+        "payload": {"subject_kind": "host", "subject": "h1",
+                    "metric": "host.job_ran", "value": 1}}])
+    client = TestClient(create_app(tmp_path))
+    rail = client.get("/api/identities").json()["data"]["identities"]
+    rail_fleets = {r["alias"] for r in rail if r["kind"] == "fleet"}
+    assert "data" not in rail_fleets           # the window dropped it (premise)
+    fl = client.get("/api/fleets").json()
+    assert fl["state"] == "ok"
+    assert [f["alias"] for f in fl["data"]["fleets"]] == ["data", "engineering"]
+    by = {f["alias"]: f for f in fl["data"]["fleets"]}
+    assert by["data"]["bots"] == 2 and by["engineering"]["bots"] == 302
+    assert fl["data"]["default"] == "engineering"   # its room moved last
+
+
+def test_fleets_default_is_the_room_that_moved_last(tmp_path):
+    """The first-visit tab: the fleet whose room (sent BY it or TO it)
+    carries the newest message — data's human notice landed last."""
+    _seed_twins(tmp_path)
+    fl = TestClient(create_app(tmp_path)).get("/api/fleets").json()["data"]
+    assert fl["default"] == "data"
+    # silence everywhere: alphabetical, and an empty plane has no default
+    empty = tmp_path / "empty"
+    _full_capture(empty)
+    emit_batch(empty, [{"event_type": "metric_sample", "emitter": "p",
+                        "fleet": "zeta", "payload": {
+                            "subject_kind": "host", "subject": "h",
+                            "metric": "host.job_ran", "value": 1}},
+                       {"event_type": "metric_sample", "emitter": "p",
+                        "fleet": "alpha", "payload": {
+                            "subject_kind": "host", "subject": "h",
+                            "metric": "host.job_ran", "value": 1}}])
+    fl = TestClient(create_app(empty)).get("/api/fleets").json()["data"]
+    assert fl["default"] == "alpha"
+    assert all(f["last_comm_at"] is None for f in fl["fleets"])
+
+
+def test_tasks_and_identities_follow_the_fleet_and_qualify_twins(tmp_path):
+    """Every per-fleet board filters on the same axis (the assignee's /
+    participant's fleet), and the host-wide read labels twins fleet/name
+    through inventory's ONE rule."""
+    _seed_twins(tmp_path)
+    client = TestClient(create_app(tmp_path))
+    eng = client.get("/api/tasks?fleet=engineering").json()["data"]
+    assert [a["title"] for a in eng["assignments"]] == ["work for engineering"]
+    assert eng["assignments"][0]["assignee_short"] == "one"   # bare in its room
+    host = client.get("/api/tasks").json()["data"]["assignments"]
+    assert sorted(a["assignee_short"] for a in host) == ["data/one",
+                                                          "engineering/one"]
+    none = client.get("/api/tasks?fleet=nonexistent").json()
+    assert none["state"] == "ok" and none["data"]["assignments"] == []
+    # a fleet named with LIKE metas cannot absorb another's bots
+    assert client.get("/api/tasks?fleet=e_gineering").json()["data"][
+        "assignments"] == []
+
+    data = client.get("/api/identities?fleet=data").json()["data"]["identities"]
+    aliases = {r["alias"] for r in data}
+    assert aliases == {"data", "bot:data/mgr", "bot:data/one", "human:chris"}
+    assert all(r["short"] in ("data", "mgr", "one", "chris") for r in data)
+    rail = client.get("/api/identities").json()["data"]["identities"]
+    shorts = {r["alias"]: r["short"] for r in rail}
+    assert shorts["bot:data/one"] == "data/one"
+    assert shorts["bot:engineering/one"] == "engineering/one"
+    assert shorts["human:chris"] == "chris"       # never fleet-qualified
+
+
+def test_index_ids_are_unique_and_the_room_panel_owns_its_id(tmp_path):
+    """U4: the fleet room shared id="fleet" with the roster rail, so
+    getElementById always returned the rail and the room never rendered
+    into its own panel. Ids are unique; app.js targets the room's id."""
+    import re
+    from importlib.resources import files
+    ui = files("claudlobby.plane").joinpath("ui")
+    html = ui.joinpath("index.html").read_text()
+    ids = re.findall(r'\bid="([^"]+)"', html)
+    assert len(ids) == len(set(ids)), sorted(
+        i for i in ids if ids.count(i) > 1)
+    assert "fleet-room" in ids and "fleet" in ids
+    js = ui.joinpath("app.js").read_text()
+    assert '$("fleet-room")' in js
+    assert 'jget("/api/fleets")' in js          # the dimension's source
+    assert "localStorage" in js and "try {" in js   # the remembered pick
