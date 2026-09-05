@@ -51,8 +51,14 @@ WORK="$(mktemp -d)"
 # holds a briefing-sourced event for the bot; an unreachable plane is a FAILED
 # check, never a skipped one.
 briefing_event_landed() {
-    python3 -S -E "$1/lib/plane-lookup.py" --root "$1" --events --fleet "$2" --bot "$3" 2>/dev/null \
-        | grep -qE '"source": ?"briefing"'
+    local _err
+    _err="$(mktemp "${TMPDIR:-/tmp}/rbt-events.XXXXXX")" || return 1
+    if python3 -S -E "$1/lib/plane-lookup.py" --root "$1" --events --fleet "$2" --bot "$3" \
+            --type briefing_dispatched 2>"$_err" | grep -qE '"source": ?"briefing"'; then
+        rm -f "$_err"; return 0
+    fi
+    [ -s "$_err" ] && log "briefing_event_landed: $(tail -1 "$_err" | cut -c1-160)"
+    rm -f "$_err"; return 1
 }
 
 pass=0

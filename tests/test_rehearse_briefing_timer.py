@@ -45,11 +45,18 @@ def test_the_rehearsal_asks_the_plane_not_a_file():
 
 
 def test_a_briefing_event_on_the_plane_satisfies_the_fire_assertion(tmp_path):
-    _land(tmp_path, "briefing-rehearsal", "rbot", "briefing_deferred", "briefing")
+    _land(tmp_path, "briefing-rehearsal", "rbot", "briefing_dispatched", "briefing")
     assert _landed(tmp_path, "briefing-rehearsal", "rbot")
 
 
 def test_no_briefing_event_and_no_plane_both_fail_the_assertion(tmp_path):
     assert not _landed(tmp_path, "briefing-rehearsal", "rbot")                 # no plane at all
     _land(tmp_path, "briefing-rehearsal", "rbot", "keepalive_skip", "keepalive")   # the fleet is known, no briefing
+    assert not _landed(tmp_path, "briefing-rehearsal", "rbot")
+
+
+def test_a_deferred_briefing_does_not_satisfy_the_fire_assertion(tmp_path):
+    """The assertion names the DISPATCHED event (the R2b-2 spec lens): a timer
+    that fired but deferred the briefing did not run the trigger end-to-end."""
+    _land(tmp_path, "briefing-rehearsal", "rbot", "briefing_deferred", "briefing")
     assert not _landed(tmp_path, "briefing-rehearsal", "rbot")

@@ -4000,16 +4000,6 @@ seed_claude_auth_and_trust() {
 
 # --- Fleet event-ledger retention -------------------------------------------
 
-# reap_event_files <events_dir> <name_glob> <reap_days> — delete JSONL event
-# files older than <reap_days>. The caller resolves <reap_days> in its own
-# context (process env, bot.conf, or a script-specific override) and passes it
-# in; only the find shape lives here. No-op when <events_dir> is absent.
-reap_event_files() {
-    local events_dir="$1" name_glob="$2" reap_days="$3"
-    [ -d "$events_dir" ] || return 0
-    find "$events_dir" -name "$name_glob" -type f -mtime +"$reap_days" -delete 2>/dev/null || true
-}
-
 # sha256_hex32 <string> -- the first 32 hex chars of sha256 over the exact bytes
 # (no trailing newline): the importer content key (plane.ids.derive_hex), so a
 # live door and a later import of the same ledger line agree on one ref.

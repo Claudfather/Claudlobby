@@ -317,8 +317,7 @@ stop_load_burners() {
 count_send_retries() {
     local bot_dir="$1" root fleet rows _rc=0
     root="${bot_dir%/runtime/bots/*}"
-    fleet="$(sed -n 's/^FLEET_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$bot_dir/bot.conf" 2>/dev/null | head -1)"
-    fleet="${fleet:-${PROBE_FLEET:-boot-sampler}}"
+    fleet="${PROBE_FLEET:-boot-sampler}"      # the probe's manifest is composed from PROBE_FLEET
     rows="$(mktemp "${TMPDIR:-/tmp}/bss-retries.XXXXXX")" || return 1
     python3 -S -E "$root/lib/plane-lookup.py" --root "$root" --events --fleet "$fleet" \
         --bot "$(basename "$bot_dir")" --type send_retry > "$rows" 2>"$rows.err" || _rc=$?
@@ -841,7 +840,11 @@ fleet:
 YAML
 
     printf 'composing probe bot with %s ...\n' "$CLAUDLOBBY_SRC"
-    CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$CLAUDLOBBY_SRC" python3 -m claudlobby generate >> "$LOG" 2>&1
+    # PLANE_EMIT_ENABLED arms the generate-time registry scan, which creates the
+    # plane db under the probe root BEFORE boot 1 — without it the first boot's
+    # send_retry count read no plane and was UNKNOWN on every run (the R2b-2
+    # structural lens).
+    CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$CLAUDLOBBY_SRC" PLANE_EMIT_ENABLED=1 python3 -m claudlobby generate >> "$LOG" 2>&1
 
     pass=0
     fail=0

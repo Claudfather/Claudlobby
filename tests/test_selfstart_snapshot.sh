@@ -1147,20 +1147,26 @@ assert_contains "and the headline stops claiming a result" \
     "NOT A RESULT — whether a rescue covers this boot is UNKNOWN" "$OUT50"
 assert_absent "an unreadable source is never read as absence of a receipt" \
     "contamination CANNOT be ruled out" "$OUT50"
-# A plane that exists but holds no identity for a declared fleet is the same
-# refusal (a wrong root is not "nothing recorded"), naming the fleet.
+# A plane that exists but holds no identity for a declared fleet is NOT the
+# same refusal: a fleet_rescue receipt is an ingest that mints the fleet's
+# identity, so a fleet with none cannot hold one — a certain no-receipt, listed
+# by name, never a page darkened forever by a dormant manifest (the R2b-2
+# structural lens flipped this case).
 reset_plane
 declare_fleet ghostfleet ghostbot
 rm -rf "$ROOT/state/plane"; seed_plane_fleet bound             # only ONE of the two fleets known
 mk_dir ghostfleet ghostbot
 OUT51="$(run_snapshot "$BOOT")"; RC51=$?
-assert_eq "a fleet the plane never saw refuses the page" "7" "$RC51"
-assert_contains "and names that fleet as the unreadable one" "fleet ghostfleet" "$OUT51"
-# A covering receipt beside an unreadable fleet: the bots it names are still
-# classified, and the page still refuses as UNKNOWN (7 outranks 6).
+[ "$RC51" != "7" ] && r=yes || r=no; assert_eq "a fleet the plane never saw is a certain no-receipt, not a refusal" "yes" "$r"
+assert_contains "and is listed by name as never on the plane" "never on the plane: ghostfleet" "$OUT51"
+# A covering receipt beside a never-seen fleet: the receipt is read, the bots
+# it names are classified, and the page is CONTAMINATED (6) — the never-seen
+# fleet cannot hold a receipt and does not refuse the page. (The 7-outranks-6
+# precedence is asserted in the ladder itself: an unreadable SOURCE is one db,
+# so a receipt read beside an unreadable fleet is not a reachable state.)
 land_receipt "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"arishape\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
 OUT52="$(run_snapshot "$BOOT")"; RC52=$?
-assert_eq "unknown outranks contaminated" "7" "$RC52"
+assert_eq "a receipt beside a never-seen fleet is contaminated, not unknown" "6" "$RC52"
 assert_eq "a receipt that WAS read still classifies its bots" \
     "RESCUED" "$(section_of "$OUT52" arishape)"
 

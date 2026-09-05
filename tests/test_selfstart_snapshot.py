@@ -411,6 +411,6 @@ def test_an_unreadable_receipt_source_refuses_rather_than_failing_open(run):
     assert "PASS: an unreadable receipt source refuses with its own exit code" in run.stdout
     assert "PASS: and stamps the page RESCUE UNKNOWN" in run.stdout
     assert "PASS: an unreadable source is never read as absence of a receipt" in run.stdout
-    assert "PASS: a fleet the plane never saw refuses the page" in run.stdout
-    assert "PASS: unknown outranks contaminated" in run.stdout
+    assert "PASS: a fleet the plane never saw is a certain no-receipt, not a refusal" in run.stdout
+    assert "PASS: a receipt beside a never-seen fleet is contaminated, not unknown" in run.stdout
     assert "PASS: a receipt that WAS read still classifies its bots" in run.stdout

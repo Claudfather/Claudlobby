@@ -5,8 +5,8 @@
 # and checks: tmux session alive, systemd service state, pane freshness,
 # uncommitted git WIP.
 #
-# Writes events to each bot's data/events/fleet-YYYY-MM-DD.jsonl with
-# source: "pulse". Same schema as bot-vitals.sh.
+# Every check lands on the plane through emit_fleet_event (source: "pulse");
+# the escalation and the summary read the plane's critical set back.
 #
 # Usage: lib/fleet-pulse.sh <fleet-name>
 
@@ -159,6 +159,12 @@ _overdue_page() {
     fi
 }
 
+# A brand-new fleet pages this guard ONCE: its first pulse's pre-sweep runs before
+# the sweep's own emissions mint the fleet's identity, so the matcher refuses
+# ("holds no bot of fleet") and the next pass clears it. Kept rather than
+# special-cased (the R2b-2 adversarial lens): that refusal is also the ONLY
+# signal a timer with a wrong CLAUDLOBBY_ROOT ever gives, since the sweep's own
+# emissions would mint the identity in the wrong plane and silence it next pass.
 _overdue_reader_guard() {
     case "${_overdue_reader_rc:-0}" in
         0) debounce_clear "$state_dir" fleet overdue_reader_unreachable; return 0 ;;
@@ -525,23 +531,22 @@ for bot_dir in "$BOTS_DIR"/*/; do
 done
 
 # --- Events read-back: the plane, the only source (F18 closure, R2b-2) ---
-# The escalation and the summary once read each bot's dated event FILES, with a
-# two-day span for a sweep straddling midnight and a flag + declaration gating
-# the plane behind them. No door writes a file since R1, so the files branch
-# read nothing at best and the archive at worst; the plane is read by INSTANT
-# (the escalation inside its window, the summary inside the read-back span),
-# and a plane that cannot answer is a THIRD state — never a quiet fleet: the
-# per-bot ALERTS column says unknown and _events_reader_guard pages it.
+# The plane is read by INSTANT (the escalation inside its window, the summary
+# inside the read-back span), and a plane that cannot answer is a THIRD state,
+# never a quiet fleet: the per-bot ALERTS column says unknown and
+# _events_reader_guard pages it. (The dated event files this once read went
+# with R1; the flag + declaration that gated the plane behind them with R2b-2.)
 _EVENTS_SOURCE=plane       # plane | unreachable — flipped to unreachable by a failed read, for the rest of the sweep
 _events_why=""
-_events_from_plane() {
+_events_readable() {
     [ "$_EVENTS_SOURCE" = plane ]
 }
 # The plane's CRITICAL set inside a window, read ONCE per window per sweep into
-# a cache file (`<bot> <type> <latest>` per row) — the escalation loop asks
-# inside its own window, the summary inside the read-back span; a sweep used
-# to spawn the lookup once per bot per type. Not a subshell call: a failed read
-# flips the source to unreachable for the rest of the sweep.
+# a cache file (`<bot> <type> <latest>` per row); the two windows are two reads
+# on purpose — the door normalises `--since` to the stored form, and a bash
+# lexical compare across instant forms is the boundary bug it exists to avoid.
+# Not a subshell call: a failed read flips the source to unreachable for the
+# rest of the sweep.
 _plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = cache path
     local _rc=0
     python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalation \
@@ -627,7 +632,7 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
         # fix (mirror bridge_down's startup+pulse legs) is the deferred follow-up.
         _esc_cache="$state_dir/.critical-window"
         _esc_ok=0
-        if _events_from_plane; then
+        if _events_readable; then
             _plane_critical "$_window_start" "$_esc_cache" && _esc_ok=1
         fi
         for _crit_type in $_CRITICAL_ESCALATION_TYPES; do
@@ -722,7 +727,7 @@ _summary_tmp=$(safe_mktemp)
         fi
 
         _s_alerts=""
-        if _events_from_plane; then
+        if _events_readable; then
             # ONE read for the whole summary (the read-back span), on the first bot
             if [ -z "${_rb_read:-}" ]; then
                 _rb_read=1; _rb_ok=0

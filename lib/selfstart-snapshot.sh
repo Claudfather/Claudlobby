@@ -443,21 +443,34 @@ receipts_from_plane() {  # receipts_from_plane <since-date YYYY-MM-DD>
     local since="$1" fname man n_before n_after _rc
     while IFS="$(printf '\t')" read -r fname man; do
         [ -n "$fname" ] || continue
-        n_before="$(wc -l < "$TMP/receipt_rows" | tr -d ' ')"
         _rc=0
         # The window bounds the scan, nothing more: a since the clock could not
         # format (every date call failing) is dropped rather than sent as a
         # non-instant — the boundary compare below still decides applicability,
         # and an unbounded read of one fleet's receipts is cheap.
         python3 -S -E "$SCRIPT_DIR/plane-lookup.py" --root "$ROOT" --events --fleet "$fname" \
-            --type fleet_rescue ${since:+--since "${since}T00:00:00Z"} >> "$TMP/receipt_rows" 2>"$TMP/receipt_err" || _rc=$?
+            --type fleet_rescue ${since:+--since "${since}T00:00:00Z"} > "$TMP/receipt_rows.$fname" 2>"$TMP/receipt_err" || _rc=$?
         if [ "$_rc" -ne 0 ]; then
+            # A fleet the plane holds NO IDENTITY for is a CERTAIN no-receipt,
+            # not an unknown: a fleet_rescue receipt is an ingest that mints the
+            # fleet's identity, so a fleet with none cannot hold one. A dormant
+            # or never-booted manifest on the host must not darken the page
+            # forever (the R2b-2 structural lens); it is listed, never refused.
+            if grep -q "no identity for fleet" "$TMP/receipt_err" 2>/dev/null; then
+                printf '%s\n' "$fname" >> "$TMP/receipt_never_seen"
+                rm -f "$TMP/receipt_rows.$fname"
+                continue
+            fi
             RECEIPTS_UNREACHABLE=1
             RECEIPTS_WHY="${RECEIPTS_WHY:+$RECEIPTS_WHY; }fleet $fname (rc $_rc): $(tail -1 "$TMP/receipt_err" 2>/dev/null | cut -c1-140)"
+            rm -f "$TMP/receipt_rows.$fname"
             continue
         fi
-        n_after="$(wc -l < "$TMP/receipt_rows" | tr -d ' ')"
-        [ "$n_after" -gt "$n_before" ] && printf '%s\n' "$fname" >> "$TMP/receipt_fleets"
+        if [ -s "$TMP/receipt_rows.$fname" ]; then
+            cat "$TMP/receipt_rows.$fname" >> "$TMP/receipt_rows"
+            printf '%s\n' "$fname" >> "$TMP/receipt_fleets"
+        fi
+        rm -f "$TMP/receipt_rows.$fname"
     done < "$TMP/fleet_pairs"
     return 0
 }
@@ -501,7 +514,7 @@ SCAN_SINCE="${SCAN_SINCE%%T*}"
 [ -n "$SCAN_SINCE" ] || SCAN_SINCE="${BOOT_ISO%%T*}"
 
 : > "$TMP/receipt_rows"
-: > "$TMP/receipt_fleets"
+: > "$TMP/receipt_fleets"; : > "$TMP/receipt_never_seen"
 receipts_from_plane "$SCAN_SINCE"
 
 while IFS= read -r row; do
@@ -1169,7 +1182,7 @@ case "$RESCUE_STATE" in
         if [ "$RECEIPTS_UNREACHABLE" -eq 1 ]; then
             echo "  rescue receipt: UNREADABLE — $RECEIPTS_WHY"
         else
-            echo "  rescue receipt: none covers this boot — contamination CANNOT be ruled out"
+            echo "  rescue receipt: none covers this boot — contamination CANNOT be ruled out$([ -s "$TMP/receipt_never_seen" ] && printf ' (never on the plane: %s)' "$(tr '\n' ' ' < "$TMP/receipt_never_seen" | sed 's/ $//')")"
         fi ;;
     USABLE)
         echo "  rescue receipt: boundary $RESCUE_STAMP, $N_RESCUE_NAMED bot(s) named (fleet(s): $(tr '\n' ' ' < "$TMP/receipt_fleets"))" ;;
