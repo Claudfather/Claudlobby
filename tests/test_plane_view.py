@@ -848,3 +848,80 @@ def test_ui_carries_the_overview_strip_and_the_cross_fleet_mark():
     assert "t.cross_fleet" in js and "xfleet" in js
     css = ui.joinpath("style.css").read_text()
     assert ".tag.xfleet" in css and ".ov-card" in css
+
+
+# --- chunk L (#1479): what the operator reads ---------------------------------
+
+def _dispatch(root: Path, h: str, *, expected_by: str | None, tx_state: str | None,
+              fleet: str = "f") -> None:
+    """One dispatched assignment: work item + assignment + task_request, and
+    optionally one transmission row in *tx_state* (None = no transmission)."""
+    mgr, worker = f"bot:{fleet}/erlich", f"bot:{fleet}/ramanujan"
+    asg = {"assignment_id": "asg_" + h * 32, "work_item_id": "wi_" + h * 32,
+           "assignee": worker, "assigned_by": mgr, "dispatch_msg_id": "msg_" + h * 32}
+    if expected_by:
+        asg["expected_by"] = expected_by
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "t", "fleet": fleet,
+         "payload": {"work_item_id": "wi_" + h * 32, "title": f"task {h}", "created_by": mgr}},
+        {"event_type": "assignment", "emitter": "t", "fleet": fleet, "payload": asg},
+        {"event_type": "communication", "emitter": "t", "fleet": fleet,
+         "payload": {"msg_id": "msg_" + h * 32, "sender": mgr, "recipient": worker,
+                     "message_class": "task_request", "command_type": "task",
+                     "body": f"go {h}"}}])
+    if tx_state:
+        emit_batch(root, [{
+            "event_type": "transmission", "emitter": "t", "fleet": fleet,
+            "payload": {"msg_id": "msg_" + h * 32, "attempt_no": 1, "carrier": "tmux",
+                        "destination": "ramanujan", "state": tx_state}}])
+
+
+def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_path):
+    """Chunk L (#1479): a finished task carries `terminal_at` (the first
+    terminal task event — the row TASK_STATUS_SQL names) so the card reads
+    "completed 1m ago" instead of a deadline it no longer has; an attention
+    row carries WHY (`attention_reason`: never_activated / overdue, primary
+    first) and since when; an open, delivered, not-yet-due row carries
+    neither."""
+    _seed_conversation(tmp_path)                                    # asg_{H}: completed
+    _dispatch(tmp_path, "1", expected_by="2020-01-01T00:00:00+00:00",
+              tx_state="carrier_queued")                            # queued, never activated, overdue
+    _dispatch(tmp_path, "2", expected_by="2099-01-01T00:00:00+00:00",
+              tx_state="pane_submitted")                            # delivered, not due
+    _dispatch(tmp_path, "3", expected_by="2020-01-01T00:00:00+00:00",
+              tx_state="pane_submitted")                            # delivered, overdue
+    rows = {r["assignment_id"]: r for r in
+            TestClient(create_app(tmp_path)).get("/api/tasks").json()["data"]["assignments"]}
+    done = rows[f"asg_{H}"]
+    assert done["status"] == "completed" and done["terminal_at"]
+    assert done["attention"] is False and done["attention_reason"] == []
+    assert done["attention_since"] is None
+    queued = rows["asg_" + "1" * 32]
+    assert queued["attention"] is True and queued["terminal_at"] is None
+    assert queued["attention_reason"] == ["never_activated", "overdue"]
+    assert queued["attention_since"] == queued["occurred_at"]    # since the dispatch
+    fine = rows["asg_" + "2" * 32]
+    assert fine["attention"] is False and fine["attention_reason"] == []
+    assert fine["terminal_at"] is None and fine["expected_by"].startswith("2099")
+    late = rows["asg_" + "3" * 32]
+    assert late["attention"] is True and late["attention_reason"] == ["overdue"]
+    assert late["attention_since"] == late["expected_by"]         # since the deadline
+
+
+def test_ui_reads_in_the_operators_language():
+    """Structural (chunk L, #1479): the header carries the fleet totals and no
+    recorder pill (those live in the machinery rail + the host card); the
+    task card renders the terminal instant and the attention reason; long
+    bodies clamp behind a toggle."""
+    from importlib.resources import files
+    ui = files("claudlobby.plane").joinpath("ui")
+    html = ui.joinpath("index.html").read_text()
+    assert 'id="fleet-totals"' in html and 'id="host-facts"' in html
+    assert 'id="age"' not in html and 'id="total"' not in html and 'id="spool"' not in html
+    js = ui.joinpath("app.js").read_text()
+    assert "function renderHeader" in js and "renderHeader(ov)" in js
+    assert "function attentionWhy" in js and "never delivered" in js
+    assert "TERMINAL_STATUSES.has(r.status)" in js and "r.terminal_at" in js
+    assert 'button.more' in js and "CLAMP_LINES" in js
+    css = ui.joinpath("style.css").read_text()
+    assert ".msg .body.clamp" in css and ".card .why" in css

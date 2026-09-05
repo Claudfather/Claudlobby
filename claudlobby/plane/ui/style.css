@@ -304,3 +304,17 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .org-tree li::before { content: "└ "; color: var(--dim); }
 .org-tree li.cycle { color: var(--warn); }
 .bot-card .bc-util { font-size: 11px; color: var(--dim); }
+
+/* chunk L (#1479): long bodies clamp with a toggle; the card says why it needs you;
+   the header's totals warn */
+.msg .body.clamp { max-height: 11.5em; overflow: hidden; position: relative; }
+.msg .body.clamp::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0;
+  height: 2.5em; background: linear-gradient(to bottom, transparent, var(--panel, #0d1117)); }
+.msg .body.clamp.open { max-height: none; }
+.msg .body.clamp.open::after { display: none; }
+.msg button.more { font-size: 11px; color: var(--accent); background: none; border: 0;
+  padding: 2px 0; cursor: pointer; }
+.card .why { color: var(--bad); font-size: 11.5px; margin-top: 3px; }
+.card .why small { color: var(--dim); }
+#fleet-totals b.warn { color: var(--bad); }
+.host-facts { color: var(--dim); font-size: 11px; padding: 4px 8px; }

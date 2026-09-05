@@ -83,9 +83,18 @@ function deliveryLine(msg) {
   return `<div class="delivery ${cls}">${esc(TX[t.event] || t.event)}</div>`;
 }
 
+// A body past ~8 lines is clamped with a "show more" toggle (chunk L,
+// #1479): a thirty-line dispatch made everything below it unscannable. The
+// toggle is delegated on #channel; open state lives on the card, which the
+// channel keeps across refreshes while the thread is unchanged.
+const CLAMP_LINES = 8, CLAMP_CHARS = 900;
 function bodyBlock(m) {
   const words = m.body_words || m.body;
-  if (words) return `<div class="body">${esc(words)}</div>`;
+  if (words) {
+    const long = words.split("\n").length > CLAMP_LINES || words.length > CLAMP_CHARS;
+    return `<div class="body${long ? " clamp" : ""}">${esc(words)}</div>`
+      + (long ? `<button class="more" type="button">show more</button>` : "");
+  }
   return `<div class="body redacted">message captured as metadata only`
        + ` (${m.body_bytes} bytes${m.truncated ? ", truncated" : ""})</div>`;
 }
@@ -204,6 +213,29 @@ function renderChannel(env) {
   el.replaceChildren(frag);
 }
 
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled",
+  "returned_blocked", "superseded", "reassigned", "expired"]);
+
+// WHY a card needs you — the queue's two arms as the API stamps them
+// (attention_reason, attention_since): "queued 12h ago, never delivered" says
+// the dispatch never reached the bot and what clears it; "overdue 2h" says
+// the deadline passed. A bare "needs you" was the flag without the reason.
+function attentionWhy(r) {
+  if (!r.attention) return "";
+  const reasons = r.attention_reason || [];
+  const since = r.attention_since ? ago(r.attention_since) : "";
+  const parts = [];
+  if (reasons.includes("never_activated")) {
+    parts.push(`queued ${esc(since)}, never delivered`
+      + ` <small>re-send with --supersedes, or check the bot is up</small>`);
+  }
+  if (reasons.includes("overdue")) {
+    parts.push(`overdue ${esc(dueLabel(r.expected_by).replace("overdue ", ""))}`);
+  }
+  if (!parts.length) parts.push("needs you");
+  return `<div class="why">⚠ ${parts.join(" · ")}</div>`;
+}
+
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
   if (renderState(taskEl, env,
@@ -218,13 +250,18 @@ function renderTasks(env) {
   badge.textContent = attn.length;
   const card = (r) => {
     const st = TASK_STATUS[r.status] || { label: r.status, cls: "" };
-    const due = dueLabel(r.expected_by);
+    // A finished task has no deadline any more: it reads "completed 1m ago"
+    // (the terminal instant the API stamps); the deadline is an OPEN task's
+    // fact only (chunk L, #1479 — "completed · overdue 1h" was one card).
+    const when = TERMINAL_STATUSES.has(r.status)
+      ? (r.terminal_at ? `${st.label} ${ago(r.terminal_at)}` : st.label)
+      : dueLabel(r.expected_by);
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
       <b>${esc(clip(r.title || "", 160) || r.work_item_id)}</b>
       <div class="sub">${esc(r.assignee_short || r.assignee_uid)}`
-      + `${due ? ` · ${esc(due)}` : ""}`
-      + `${r.attention ? " · ⚠ needs you" : ""}</div></div>`;
+      + `${when ? ` · ${esc(when)}` : ""}</div>`
+      + attentionWhy(r) + `</div>`;
   };
   attEl.innerHTML = attn.length ? attn.map(card).join("")
     : stateBlock("idle", null, null, { label: "nothing needs you" });
@@ -246,19 +283,43 @@ function renderFleet(env) {
   }).join("");
 }
 
+let hostFacts = "";
+
+// The header in the operator's language (chunk L, #1479): the fleet totals
+// the overview already carries — bots, working now, needing you, overdue —
+// summed over every fleet on the host; "—" while the overview cannot answer
+// (never a zero from a source that is absent, §16).
+function renderHeader(env) {
+  const el = $("fleet-totals");
+  if (!el) return;
+  if (!env || env.state !== "ok" || !env.data) {
+    el.innerHTML = `<b>—</b> bots`;
+    return;
+  }
+  const f = env.data.fleets;
+  const sum = (pick) => f.reduce((n, x) => n + (pick(x) || 0), 0);
+  const bots = sum((x) => x.bots), working = sum((x) => x.presence.counts.working),
+    attn = sum((x) => x.attention), overdue = sum((x) => x.overdue);
+  el.innerHTML = `<b>${bots}</b> bots · <b>${working}</b> working`
+    + ` · <b class="${attn ? "warn" : ""}">${attn}</b> need you`
+    + ` · <b class="${overdue ? "warn" : ""}">${overdue}</b> overdue`;
+}
+
 function renderSummary(env) {
   const beat = $("beat"), label = $("beat-label");
   if (!env || env.state !== "ok") {
     beat.className = "dot";
     label.textContent = env ? `source ${env.state}` : "view daemon unreachable";
-    $("age").textContent = "—";
     return;
   }
   const d = env.data, prov = env.provenance;
-  $("total").textContent = d.counts.ingest_ledger;
-  $("spool").textContent = d.spool_files;
-  $("age").textContent = prov.last_ingest_at ? ago(prov.last_ingest_at)
-                                             : "never";
+  // the recorder's numbers moved off the header into the machinery rail
+  // (chunk L, #1479): the header answers "how is my fleet", not "how is the
+  // recorder" — the host card and the rail keep the latter
+  hostFacts = `host ingest ${prov.last_ingest_at ? ago(prov.last_ingest_at) : "never"}`
+    + ` · rows ${d.counts.ingest_ledger} · spool ${d.spool_files}`;
+  const hf = $("host-facts");
+  if (hf) hf.textContent = hostFacts;
   const fresh = prov.last_ingest_at
     && (Date.now() - Date.parse(prov.last_ingest_at)) < 12e4;
   beat.className = "dot " + (d.daemon_serving ? (fresh ? "ok" : "warn") : "");
@@ -356,6 +417,14 @@ function renderOverview(env) {
   el.innerHTML = cards + host;
 }
 
+$("channel").addEventListener("click", (e) => {
+  const b = e.target.closest("button.more");
+  if (!b) return;
+  const body = b.previousElementSibling;
+  const open = body.classList.toggle("open");
+  b.textContent = open ? "show less" : "show more";
+});
+
 // ONE delegated listener for the strip's cards (re-rendered on every refresh;
 // per-card listeners were re-attached each time — simplify lens)
 $("overview").addEventListener("click", (e) => {
@@ -406,6 +475,7 @@ async function refreshBoards() {
   ]);
   if (gen !== generation) return;
   adoptFleets(ov);   // the overview carries the fleet list + default: one door
+  renderHeader(ov);
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
   renderFleetTabs();
   renderOverview(ov);   // after the tabs: the strip highlights the pick

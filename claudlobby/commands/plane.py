@@ -647,7 +647,14 @@ def cmd_plane_view(args) -> int:
             f" ({exc})", file=sys.stderr)
         return 1
     app = create_app(root)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    # A held SSE connection kept the daemon alive through SIGTERM until a
+    # SIGKILL (chunk L, #1479 — measured: still running 20s after the signal
+    # with one /api/stream client attached; uvicorn waits on in-flight
+    # requests with no bound by default). A read-only viewer owes its clients
+    # nothing on shutdown: bound the wait, then the streams are cancelled and
+    # the lifespan closes the sampler.
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning",
+                timeout_graceful_shutdown=5)
     return 0
 
 

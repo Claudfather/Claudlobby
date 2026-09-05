@@ -7,6 +7,7 @@ description: Serving the Phase-4 read-only operator plane and fronting it with T
 
 The Phase-4 v1 UI (design walk 2026-08-28): a strictly read-only window over
 the plane db — the story-first channel, attention queue, tasks, fleet roster,
+header totals (bots · working · need you · overdue, from the overview),
 and an SSE live stream. It can observe everything and touch nothing: no
 non-GET route exists (pinned by `tests/test_plane_view.py`), and every db
 connection opens `mode=ro` with `PRAGMA query_only`.

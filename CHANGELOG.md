@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — chunk L: what the operator reads (#1479)
+
+- A finished task no longer shows a deadline: the tasks payload stamps `terminal_at` (the first terminal task event, the row `TASK_STATUS_SQL` names) and the card reads "completed 1m ago"; the deadline is an open task's fact only. The first build rendered "completed · overdue 1h" on one card.
+- An attention card says WHY: the payload stamps `attention_reason` (`never_activated` — transmission rows exist for the dispatch and none reached activation; `overdue` — the deadline passed; both may hold, the first is primary) and `attention_since`; the card reads "queued 12h ago, never delivered — re-send with --supersedes, or check the bot is up" or "overdue 2h" instead of a bare "needs you".
+- The header speaks the operator's language: `<N> bots · <W> working · <A> need you · <O> overdue`, summed from the overview the page already fetches ("—" while it cannot answer); the recorder's `host ingest · rows · spool` moved to the machinery rail and the host card.
+- Long message bodies clamp at ~8 lines with a "show more / show less" toggle (delegated on the channel; open state rides the card across refreshes while its thread is unchanged).
+- `plane view` stops on SIGTERM: with one `/api/stream` client attached the daemon stayed up 20s+ until a SIGKILL (uvicorn waits on in-flight requests with no bound by default); `uvicorn.run(..., timeout_graceful_shutdown=5)` bounds the wait and the stream ends cleanly on cancellation — measured 5.2s from SIGTERM to exit with a client attached, pinned by a real-process test. Uvicorn logs one "timeout graceful shutdown exceeded" line per held stream at that moment; expected.
+
 ### Changed — chunk K: the ack is a plane fact (#1467)
 
 - `claudlobby brief --ack` records the viewer's read position on the plane: ONE `reports_acked` system event on the manager's own actor (`subject bot:<fleet>/<bot>`, detail `{acked_through_seq, acked_through_ts, count}` — the `ingest_seq` of the newest report the render served, the plane's ordering authority), through the package's cold emit door (`emit_batch`, the door the registry lane, the expiry sweep and `claudlobby emit-batch` use; its spool is the floor). A failed or refused emit is a FAILED ack — rc 1, said by name, nothing marked seen; a spooled one is disclosed and takes effect when the spool drains; `PLANE_EMIT_DISABLED=1` (the harness exemption) is a failed ack, never a quiet success. The per-viewer cursor file (`brief-cursor-<bot>.json`) is gone. `brief --ack` is therefore no longer a read-only door: the cold door runs `migrate()`.

@@ -499,15 +499,48 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
     ph = ",".join("?" * len(ids))
     status = {r["assignment_id"]: r["status"] for r in conn.execute(
         TASK_STATUS_SQL + f" WHERE a.assignment_id IN ({ph})", ids)}
+    now = _now_iso()
     attention = {r[0] for r in conn.execute(
-        ATTENTION_SQL + f" AND a.assignment_id IN ({ph})",
-        (_now_iso(), *ids))}
+        ATTENTION_SQL + f" AND a.assignment_id IN ({ph})", (now, *ids))}
+    # The instant a task ENDED (chunk L, #1479): the FIRST terminal task
+    # event, the same row TASK_STATUS_SQL names as the status — so a finished
+    # card reads "completed 1m ago" instead of a deadline it no longer has.
+    terminal_at = {r[0]: r[1] for r in conn.execute(
+        "SELECT t.assignment_id, MIN(t.occurred_at) FROM events t"
+        f" WHERE t.kind = 'task' AND t.event IN ({_TERMINAL_EVENTS})"
+        f" AND t.assignment_id IN ({ph}) GROUP BY t.assignment_id", ids)}
+    # WHY a row needs attention — the queue's two arms (ATTENTION_SQL), stamped
+    # from the row's own facts so the card can say "queued 12h ago, never
+    # delivered" or "overdue 2h" instead of a bare flag: `never_activated` =
+    # transmission rows exist for the dispatch and none reached activation;
+    # `overdue` = the deadline passed. Both may hold; the first is primary.
+    tx_state = {r[0]: (bool(r[1]), bool(r[2])) for r in conn.execute(
+        "SELECT a.assignment_id,"
+        " EXISTS (SELECT 1 FROM events e WHERE e.kind = 'transmission'"
+        "         AND e.msg_id = a.dispatch_msg_id) AS has_tx,"
+        " EXISTS (SELECT 1 FROM events e WHERE e.kind = 'transmission'"
+        "         AND e.msg_id = a.dispatch_msg_id"
+        f"        AND e.event IN ({_ACTIVATION_EVENTS})) AS activated"
+        f" FROM assignments a WHERE a.assignment_id IN ({ph})", ids)} if attention else {}
     for r in rows:
         r["title"] = body_words(r["title"])
         r["assignee_short"] = (labels.get(r["assignee_alias"])
                                or _short(r["assignee_alias"]))
         r["status"] = status.get(r["assignment_id"], "created_not_sent")
         r["attention"] = r["assignment_id"] in attention
+        r["terminal_at"] = terminal_at.get(r["assignment_id"])
+        reasons: list[str] = []
+        since = None
+        if r["attention"]:
+            has_tx, activated = tx_state.get(r["assignment_id"], (False, False))
+            if has_tx and not activated:
+                reasons.append("never_activated")
+                since = r["occurred_at"]
+            if r["expected_by"] and r["expected_by"] < now:
+                reasons.append("overdue")
+                since = since or r["expected_by"]
+        r["attention_reason"] = reasons
+        r["attention_since"] = since
     return {"assignments": rows,
             "attention_count": sum(1 for r in rows if r["attention"])}
 
@@ -519,6 +552,10 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
 # only have bots!"). Entity identities belong to the registry surfaces
 # (chunk B), not the roster.
 _RAIL_KINDS = ("fleet", "actor")   # humans resolve as actors
+# the task-event and transmission vocabularies as SQL lists — queries.py's own
+# (`_TERMINAL` / `_TX_ACTIVATION` there are private; the tuples are exported)
+_TERMINAL_EVENTS = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
+_ACTIVATION_EVENTS = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
 
 
 def _fetch_identities(conn: sqlite3.Connection,
@@ -1379,6 +1416,17 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                     if head["state"] == SOURCE_OK and head.get("data") else 0
             yield "retry: 3000\n\n"
             last_source_state = SOURCE_OK
+            try:
+                async for frame in _tail(last, last_source_state):
+                    yield frame
+            except asyncio.CancelledError:
+                # the daemon is shutting down (uvicorn's bounded graceful
+                # shutdown cancels held streams — chunk L, #1479): end the
+                # stream cleanly; the browser's EventSource reconnects by
+                # itself when the daemon is back
+                return
+
+        async def _tail(last: int, last_source_state: str):
             while True:
                 if await request.is_disconnected():
                     return
