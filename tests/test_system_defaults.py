@@ -718,7 +718,6 @@ _ALL_JOB_NAMES = {
     "reload-fleet",
     "weekly-worker-restart",
     "data-sweep",
-    "plane-shadow",          # cutover chunk 3: dormant, its own arming carrier
 }
 
 
@@ -1091,7 +1090,7 @@ class TestDormantManifest:
         entries = [
             line for line in manifest.splitlines() if line and not line.startswith("#")
         ]
-        assert entries == ["com.test.plane-shadow", "com.test.weekly-worker-restart"]
+        assert entries == ["com.test.weekly-worker-restart"]
         # Composed-but-dormant: the units are still emitted (F4 lock).
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()
         assert (timers_dir / "com.test.weekly-worker-restart.service").is_file()
@@ -1109,6 +1108,6 @@ class TestDormantManifest:
         entries = [
             line for line in manifest.splitlines() if line and not line.startswith("#")
         ]
-        assert entries == ["com.test.plane-shadow"]   # the other dormant job stays listed
+        assert entries == []                          # the one dormant job enrolled: nothing left to list
         # Still composed, of course.
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()

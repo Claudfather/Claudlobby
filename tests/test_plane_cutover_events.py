@@ -7,9 +7,12 @@ fleet) whose detail carries {source, legacy_ts, data}, so the plane re-renders
 the legacy row byte for byte, and writes nothing else — waited on, bounded,
 a failed or reaped emission disclosed as not recorded. The readers —
 `claudlobby events`, brief's alerts, fleet-pulse's escalation + summary —
-follow the flip until R2: PLANE_READ_EVENTS=1 AND a recorded
+follow the flip until R2b: PLANE_READ_EVENTS=1 AND a recorded
 `cutover_declared` for `events`; a flag alone is disclosed; an unreachable
-plane refuses, never reads as quiet.
+plane refuses, never reads as quiet. (R2a removed the matcher's legacy side
+and the shadow; the events reader's own flip is untouched here, so its pins
+stay. test_the_events_reader_declares_as_a_direct_move_without_a_gate no
+longer contrasts a shadowed reader: every declaration is a direct move now.)
 """
 from __future__ import annotations
 
@@ -26,13 +29,11 @@ import pytest
 
 from claudlobby.brief import _alerts_section
 from claudlobby.commands.events import CRITICAL_TYPES
-from claudlobby.plane import cutover as cut, shadow as sh
+from claudlobby.plane import cutover as cut
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
-from tests.plane_fixtures import ro as _ro
-from tests.test_plane_cutover_flip import _cli, _declare, _env, _stdlib_readers
+from tests.plane_fixtures import F, REPO, _cli, _declare, _env, _scene, _stdlib_readers, ro as _ro
 from tests.test_plane_lookup import _run as _lookup
-from tests.test_plane_shadow import F, REPO, _scene
 
 LIB = REPO / "lib"
 CLI = Path(sys.executable).parent / "claudlobby"
@@ -408,7 +409,6 @@ def test_the_events_reader_declares_as_a_direct_move_without_a_gate(tmp_path):
         decl = cut.declared(conn, F)
         data = json.loads(conn.execute(
             "SELECT detail FROM events WHERE event = 'cutover_declared'").fetchone()[0])
-        readers = {s.reader for s in sh.gate_summary(conn, F, ["w1", "w2"], sh.GATED)}
     assert "events" in decl and "direct move" in (decl["events"][1] or "")
     assert data["shadowed"] is False and data["gate"] == {"clean_run": None, "transitions": None}
     assert data["gate_met"] is None and data["streaks"] == []
@@ -417,14 +417,12 @@ def test_the_events_reader_declares_as_a_direct_move_without_a_gate(tmp_path):
             "SELECT e.subject_alias, e.subject_uid = i.uid FROM events e JOIN identity_registry i"
             " ON i.kind = 'fleet' AND i.alias = ? WHERE e.event = 'cutover_declared'", (F,)).fetchone()
     assert tuple(anchored) == (F, 1)
-    assert "events" not in readers and readers == {"open", "overdue", "open_task", "unassigned"}
-    _declare(root, "open")                                          # a shadowed reader keeps its real gate block
+    _declare(root, "open")                                          # every reader declares the same way now: no shadow, no gate
     with _ro(root) as conn:
-        shadowed = json.loads(conn.execute(
+        also = json.loads(conn.execute(
             "SELECT detail FROM events WHERE event = 'cutover_declared' AND json_extract(detail, '$.reader') = 'open'"
         ).fetchone()[0])
-    assert shadowed["shadowed"] is True and shadowed["gate"]["clean_run"] == sh.GATE_CLEAN_RUN
-    assert shadowed["gate_met"] is False
+    assert also["shadowed"] is False and also["gate_met"] is None and also["forced"] == "test"
 
 
 # --- fleet-pulse: the escalation and the summary read the plane ---------------
@@ -465,7 +463,7 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     libdir = _pulse_lib(tmp_path, capture)
     page = "FLEET ALERT: session_missing on 2 bots (w1 w2)."
 
-    for reader in sh.GATED:                                          # the hard flip: declare + retire
+    for reader in cut.READERS:                                       # the hard flip: declare + retire
         _declare(root, reader, "operator ruling 2026-09-03: hard flip, fix forward")
     assert _cli(root, "cutover", "--retire-writes").returncode == 0
 

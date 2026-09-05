@@ -23,7 +23,7 @@ from pathlib import Path
 
 from tests.conftest import _scrubbed_env
 from tests.plane_fixtures import ro as _ro
-from tests.test_plane_shadow import F as FLEET
+from tests.plane_fixtures import F as FLEET
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_DIR = REPO_ROOT / "lib"

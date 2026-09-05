@@ -18,11 +18,9 @@ from pathlib import Path
 
 from claudlobby.brief import _workstream_section
 from claudlobby.config import load_fleet
-from claudlobby.plane import shadow as sh
+from claudlobby.plane import cutover as cut
 from claudlobby.workstreams import registry_path
-from tests.plane_fixtures import ro as _ro
-from tests.test_plane_cutover_flip import _cli, _declare, _env, _stdlib_readers
-from tests.test_plane_shadow import F, REPO, _scene
+from tests.plane_fixtures import F, REPO, _cli, _declare, _env, _scene, _stdlib_readers, ro as _ro
 
 LIB = REPO / "lib"
 CLI = Path(sys.executable).parent / "claudlobby"
@@ -44,7 +42,7 @@ def _ws(root, *args, **extra):
 
 
 def _retire(root):
-    for reader in sh.GATED:
+    for reader in cut.READERS:
         _declare(root, reader)
     assert _cli(root, "cutover", "--retire-writes").returncode == 0
 

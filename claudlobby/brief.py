@@ -474,7 +474,8 @@ def _mission_section(fleet, bot, paths: Paths) -> dict:
 
 
 def _dispatch_section(
-    doors, paths: Paths, bot_id: str, now: int, degraded: list[Degradation]
+    doors, paths: Paths, bot_id: str, now: int, degraded: list[Degradation],
+    fleet_name: str | None = None,
 ) -> dict:
     """open / overdue / orphaned, all three from the #835 doors.
 
@@ -487,90 +488,12 @@ def _dispatch_section(
     cap, and the orphan split. The rendered ``past_due`` flag means literally
     ``now > expected_by`` and is not a claim that the watchdog is alarming.
     """
-    dlog, rlog = dispatch_ledger_path(paths), report_ledger_path(paths)
-
-    # THE DEFENSIVE GATE. The #835 doors fail OPEN on a missing report ledger:
-    # with nothing to join against, no dispatch can be closed, so every
-    # past-deadline row in history comes back overdue at rc 0 with no warning.
-    # That is not a degraded number, it is a wall of finished work presented as
-    # outstanding — the exact defect this epic exists to end, arriving through
-    # the door meant to fix it. So the section is OMITTED: not zero (a false
-    # all-clear), not everything (a false alarm), and never silently either.
-    #
-    # The realistic way to hit it is #526, not a typo: the dispatch log is
-    # host-global at state/dispatch-log.jsonl while report ledgers are per-fleet
-    # at local/<fleet>/runtime/report-back.jsonl, so pairing the host-wide log
-    # with one fleet's ledger makes every OTHER fleet's bots read as permanently
-    # overdue. Reproduced live against this fleet.
-    #
-    # Existence, not emptiness, is the test — see LedgerRead. Checked here
-    # rather than fixed in the matcher on purpose: the doors are shared with the
-    # watchdog and are not this issue's to change.
-    dispatch_read = _read_ledger(dlog)
-    report_read = _read_ledger(rlog)
-
-    for what, path, read, issue, consequence in (
-        (
-            "report ledger",
-            rlog,
-            report_read,
-            "#526",
-            "with no reports to join against, every past-deadline dispatch "
-            "would read as overdue and every id'd dispatch as open",
-        ),
-        (
-            "dispatch log",
-            dlog,
-            dispatch_read,
-            "#1014",
-            "with no dispatches to read, all three lists would be empty — a "
-            "manufactured all-clear",
-        ),
-    ):
-        if read.state == LEDGER_OK:
-            continue
-
-        # AN OMISSION SUPPRESSES TRUE ROWS TOO, and that is not optional: with
-        # no ledger, a genuinely overdue dispatch and a finished one are the
-        # same bytes, so nothing here can tell them apart. What IS avoidable is
-        # letting the real one go unmentioned. Under-reporting is the worse
-        # failure — a noisy watchdog gets audited, a silent one does not — so
-        # the rows that could not be adjudicated are COUNTED even though they
-        # cannot be classified. "12 dispatches past deadline, status
-        # undeterminable" is actionable; a bare "unavailable" is not.
-        #
-        # The count deliberately claims nothing about overdue-ness. It is
-        # None — stated, never rendered as 0 — when the dispatch log is the
-        # unreadable side, because then even the denominator is unknown.
-        unadjudicated = None
-        if dispatch_read.state == LEDGER_OK:
-            unadjudicated = sum(
-                1
-                for d in dispatch_read.rows
-                if str(d.get("bot", "")).lower() == bot_id.lower()
-                and isinstance(d.get("expected_by"), int)
-                and now > d["expected_by"]
-            )
-        tail = (
-            f"; {unadjudicated} dispatch row(s) for this bot are past deadline "
-            "and could not be adjudicated either way"
-            if unadjudicated
-            else ""
-        )
-        degraded.append(
-            Degradation(
-                field="dispatches",
-                mode="omitted",
-                reason=(
-                    f"the {what} is {read.state} at {path}; {consequence}, "
-                    f"so no dispatch state is served rather than a wrong one{tail}"
-                ),
-                issue=issue,
-                count=unadjudicated,
-            )
-        )
-        return {}
-
+    # THE PLANE IS THE ONLY SOURCE (F18 R2a). The two ledgers this section once
+    # probed — omitting itself when either was absent, because the matcher
+    # failed OPEN on a missing report ledger and served a wall of finished
+    # work as outstanding — no longer exist. The matcher now refuses when the
+    # plane cannot answer (PlaneUnreachable), and this section OMITS on that,
+    # with the remedy named: never zero (a false all-clear), never a guess.
     if doors is None:
         degraded.append(
             Degradation(
@@ -623,28 +546,35 @@ def _dispatch_section(
     # named, because a silent fallback would let a flipped fleet read legacy
     # again without anyone knowing. An install whose matcher predates the
     # sources is called the old way and serves the JSONL.
-    has_sources = hasattr(doors, "resolve_source")
-    plane_ctx = {"source": "auto", "fleet": paths.fleet_name, "root": str(paths.root)}
+    # The fleet the matcher reads: the overlay's, else the manifest's (root
+    # mode names its fleet in fleet.yaml alone), else the carriers inside the
+    # matcher itself.
+    plane_ctx = {"fleet": paths.fleet_name or fleet_name, "root": str(paths.root)}
     plane_err = getattr(doors, "PlaneUnreachable", ())
 
-    def _omit(field: str, exc: BaseException) -> None:
-        degraded.append(Degradation(
-            field=field, mode="omitted",
-            reason=f"the flip is declared for this reader but the plane source is unreachable:"
-                   f" {exc} — restore the plane db or flip the flag back to 0",
-            issue="#1444"))
+    def _omit(exc: BaseException, *fields: str) -> None:
+        # Each list the plane could not serve is named, and the WHOLE section
+        # is withheld: three empty lists would render as "0 open", a false
+        # all-clear — the shape the renderer reads as "unavailable" is the
+        # empty dict.
+        for field in fields:
+            degraded.append(Degradation(
+                field=field, mode="omitted",
+                reason=f"the plane cannot answer: {exc} — restore the plane db (state/plane/plane.db)"
+                       f" under {paths.root} or name the right root, so no dispatch state is served"
+                       " rather than a wrong one",
+                issue="#1467"))
 
     classify = getattr(doors, "_classify_all", None)
-    if classify is not None:
-        try:
-            over, orph = (classify(str(dlog), str(rlog), now, max_age, bots_dir, **plane_ctx)
-                          if has_sources else classify(str(dlog), str(rlog), now, max_age, bots_dir))
-        except plane_err as exc:
-            _omit("dispatches.overdue", exc)
-            over, orph = {}, classify(str(dlog), str(rlog), now, max_age, bots_dir)[1]
-    else:
-        over = doors.overdue_all(str(dlog), str(rlog), now, max_age, bots_dir)
-        orph = doors.orphaned_all(str(dlog), str(rlog), now, max_age, bots_dir)
+    try:
+        if classify is not None:
+            over, orph = classify(now, max_age, bots_dir, **plane_ctx)
+        else:
+            over = doors.overdue_all(now, max_age, bots_dir, **plane_ctx)
+            orph = doors.orphaned_all(now, max_age, bots_dir, **plane_ctx)
+    except plane_err as exc:
+        _omit(exc, "dispatches.overdue", "dispatches.orphaned", "dispatches.open")
+        return {}
     overdue_rows = over.get(bot_id.lower(), [])
     orphan_rows = orph.get(bot_id.lower(), [])
 
@@ -695,11 +625,10 @@ def _dispatch_section(
         open_rows = []
     else:
         try:
-            open_rows = (open_door(bot_id, str(dlog), str(rlog), **plane_ctx)
-                         if has_sources else open_door(bot_id, str(dlog), str(rlog)))
+            open_rows = open_door(bot_id, **plane_ctx)
         except plane_err as exc:
-            _omit("dispatches.open", exc)
-            open_rows = []
+            _omit(exc, "dispatches.open")
+            return {}
 
     return {
         "open": [
@@ -905,47 +834,6 @@ def _reports_section(
     return {"cursor": cursor, "unacked": unacked}
 
 
-def _shadow_section(paths: Paths, bot_id: str, degraded: list[Degradation]) -> dict:
-    """The cutover shadow's streaks for this bot, per reader, from the
-    RECORDED comparisons in the plane (chunk 4) — read-only, never
-    re-derived here. Absent plane db, or no comparison recorded for the bot,
-    is a labeled degradation rather than a clean-looking zero: the flip gate
-    must never read "met" from silence."""
-    import sqlite3
-    from .plane.db import open_ro
-    from .plane import shadow as sh
-
-    fleet_name = paths.fleet_name or ""
-    conn, reason = open_ro(paths.root)          # the probe every plane read door shares
-    if conn is None:
-        degraded.append(Degradation(
-            field="shadow", mode="omitted",
-            reason=f"{reason} — no shadow comparison can be read", issue="#1444"))
-        return {}
-    try:
-        streaks = [sh.streak(conn, fleet_name, bot_id, r) for r in sh.READERS]
-    except sqlite3.Error as exc:                 # opened but unreadable (a pre-migration db)
-        degraded.append(Degradation(
-            field="shadow", mode="omitted",
-            reason=f"plane db unreadable: {exc}", issue="#1444"))
-        return {}
-    finally:
-        conn.close()
-    out = {
-        st.reader: {
-            "comparisons": st.comparisons, "clean_run": st.clean_run,
-            "transitions": st.transitions, "gate_ok": st.gate_ok,
-            "last_diverged_at": st.last_diverged_at, "last_at": st.last_at,
-        } for st in streaks}
-    if not any(st.comparisons for st in streaks):
-        degraded.append(Degradation(
-            field="shadow", mode="labeled",
-            reason="no shadow comparison recorded for this bot yet — the gate cannot"
-                   " be met from silence (`plane shadow --record`, or arm PLANE_SHADOW_ENABLED)",
-            issue="#1444"))
-    return out
-
-
 def _alerts_section(
     paths: Paths, bot_id: str, now: int, degraded: list[Degradation]
 ) -> list[dict]:
@@ -1102,13 +990,12 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
         "fleet": fleet.name,
         "generated_at": _iso(now),
         "mission": _mission_section(fleet, bot, paths),
-        "dispatches": _dispatch_section(doors, paths, bot_id, now, degraded),
+        "dispatches": _dispatch_section(doors, paths, bot_id, now, degraded, fleet_name=fleet.name),
         "workstreams": _workstream_section(fleet, paths, now, degraded),
         "reports": _reports_section(
             paths, read_cursor(paths, bot_id), terminal, degraded
         ),
         "alerts": _alerts_section(paths, bot_id, now, degraded),
-        "shadow": _shadow_section(paths, bot_id, degraded),
     }
 
     # #526, the residence mismatch, as a standing bound whenever the section IS
@@ -1311,18 +1198,6 @@ def format_brief(brief: dict) -> str:
         out.append(f"  {_short(a['ts'])}  {a['type']:<20} {a.get('source') or ''}")
     out.extend(more)
     out.append("")
-    from .plane import shadow as sh
-    shadow = brief.get("shadow") or {}
-    out.append(f"SHADOW — cutover comparisons, per reader{mark('shadow')}")
-    if not shadow:
-        out.append("  (none — see degraded)")
-    for reader, st in shadow.items():
-        state = "gate met" if st["gate_ok"] else "gate NOT met"
-        out.append(f"  {reader}: clean_run {st['clean_run']}/{sh.GATE_CLEAN_RUN}"
-                   f" transitions {st['transitions']} comparisons {st['comparisons']}"
-                   f" last_diverged {st['last_diverged_at'] or '-'} — {state}")
-    out.append("")
-
     if deg:
         out.append("DEGRADED — fields this door will not serve as plain truth")
         for e in deg:

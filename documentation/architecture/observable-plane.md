@@ -97,7 +97,6 @@ and never blocks its real action on it.
 | `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; declaration events | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the one place the flag still means something (R3 decides its fate) |
 | `lib/workstream-update.sh`, `lib/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
-| `claudlobby plane shadow --record` (fleet timer) | `shadow_parity_clean` / `_diverged` system events per (bot, reader, instant) | `PLANE_SHADOW_ENABLED` |
 | `claudlobby plane cutover --reader` | `cutover_declared` (the epoch) | the operator's hand |
 | `claudlobby plane import --apply` | the parity gap, `origin=legacy` under an `import_batch` | the operator's hand |
 
@@ -118,17 +117,17 @@ their own flag). The read side (`brief`, `plane view`) needs no flag.
   Composed as the dormant `claudlobby-plane-view` host service; Tailscale Serve
   fronts it.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
-  rungs (schema, provisional actors, tombstone validity, reconciliation, the
-  shadow gate, each cutover flag against its declaration). **These RUN
+  rungs (schema, provisional actors, tombstone validity, reconciliation,
+  each cutover flag against its declaration). **These RUN
   `migrate()` and are therefore not read-only — and so do `plane registry`,
   `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
   (`DowngradeError`, rc 4) and an unmerged package's doctor (or registry read)
   will migrate a live db. Verify a branch on a live host only through the
-  doors that open read-only: `plane shadow`, `plane parity`, `plane import`
+  doors that open read-only: `plane parity`, `plane import`
   (dry-run), `plane cutover` (it refuses before writing), `brief`, `plane view`,
   and the stdlib readers below.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
-  `lib/plane-shadow-check.py`, `lib/who-reviewed.py --source plane`) — the
+  `lib/who-reviewed.py --source plane`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to
   `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the legacy-id join, the
@@ -146,7 +145,7 @@ read instead of them one READER at a time, each reader's flip a recorded state
 machine (steps 1–5; history now — the closure that follows removed the
 writers):
 
-1. **Shadow.** `plane shadow --record` compares, per bot and per reader, the
+1. **Shadow** *(retired with the closure, R2a — there is no legacy side left to grade).* `plane shadow --record` compared, per bot and per reader, the
    legacy answer (the install's own `lib/dispatch-overdue.py`, through
    `brief`'s seam) with the plane's, classifies every divergence (`skew`
    inside the emit grace, `legacy_supersedes_pre_cutover`, `plane_superseded`
@@ -161,7 +160,7 @@ writers):
    `overdue` (the watchdog's set), and `open_task` (the resolver — a streak
    mode over the open records, which carry the resolver's answers on both
    sides).
-2. **Gate.** `plane shadow --gate`: 20 consecutive clean comparisons with at
+2. **Gate** *(retired with the shadow, R2a).* `plane shadow --gate` wanted 20 consecutive clean comparisons with at
    least one open→closed transition per (bot, reader); the resolver needs 200
    agreeing non-empty answers and a change (a stale head is a false
    completion). An idle fleet cannot meet it: a set that never changed proves
@@ -274,8 +273,7 @@ own report ledger only, never guessed).
 
 **Arming carriers** — `PLANE_EMIT_ENABLED` (the generate-time registry scan
 only: every runtime door is always on since F18 R1, and `PLANE_EMIT_DISABLED=1`
-is the harness exemption that silences one), `PLANE_SHADOW_ENABLED` (the shadow timer and the
-fleet-pulse bridge), `PLANE_EXPIRE_ENABLED`, `PLANE_PRUNE_ENABLED` (the two
+is the harness exemption that silences one), `PLANE_EXPIRE_ENABLED`, `PLANE_PRUNE_ENABLED` (the two
 host sweeps self-gate), `PLANE_READ_*` (the flips). Put them in the fleet
 `.env` tier: sessions get them through `bot.conf`, timers through the composed
 `Environment=` lines, and `generate` reads the same cascade. `env_tiers.armed`

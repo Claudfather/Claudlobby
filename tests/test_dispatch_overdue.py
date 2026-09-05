@@ -1,81 +1,275 @@
 """Unit tests for lib/dispatch-overdue.py — the dispatch watchdog matcher,
-including the P4 task-id join matrix (semantics: overdue_all docstring)."""
+including the P4 task-id join matrix (semantics: overdue_all docstring).
+
+THE PLANE IS THE ONLY SOURCE (F18 closure, R2a). Every fixture below is still
+written in the legacy ledger shape (`dispatch_row` / `report_row`, the rows
+the doors once appended to `dispatch-log.jsonl` and `report-back.jsonl`) and
+is LANDED on a throwaway plane exactly as the live doors would have landed
+it — a dispatch as its work item + assignment + communication (keyed
+`dispatch-log:<task_id>`, or `dispatch-log:sha:<key>` for an id-less send),
+a report as its `report` communication plus the task event the report door
+lands when it can link the report (an id'd terminal report on its own
+assignment; an id-less terminal report on EVERY open id-less assignment of
+the bot, the door's `--open-idless` closer; a linked progress report as a
+`progress` task event), else the `report_status` marker; a `--supersedes`
+declaration as a terminal `superseded` task event on the retired assignment.
+The matcher then answers from that plane. The join semantics pinned here are
+the matcher's contract; only the source of the rows changed.
+
+Retired with the legacy readers, and why:
+  * TestMissingIdCounter — `missing_id_count` counted terminal report rows
+    carrying no task id off the report ledger; there is no ledger.
+  * TestReportLedgerRefusal — the absent / unopenable / directory-shaped
+    report ledger and the #1418 stale-head rule were refusals about a FILE;
+    the plane's equivalent (unreachable is not empty, rc 3, nothing on
+    stdout) is pinned in TestUnreachableIsNotEmpty.
+  * the `--source` refusals and the ledger-slot ordering probes — there is
+    no source to choose and no ledger slots to mis-order. The bot-slot SHAPE
+    gate (#1187) stays: a path, a `.jsonl` name or an empty string in the bot
+    slot is still rc 2, and single-bot mode (which shared the hazard) is gone.
+  * single-bot mode — the plane readers answer per fleet; one bot is
+    `--open` / `--open-task`, every bot is `--all` / `--orphans` /
+    `--unassigned`.
+Two semantics moved from the matcher to the DISPATCH and REPORT DOORS, where
+the plane records them at emission time, and are no longer this module's to
+enforce (see the notes on the tests that pinned them): a terminal report that
+names an id the plane cannot link closes nothing — not even an id-less
+dispatch (the legacy ledger's blanket "any later terminal report" rule went
+with it), and a `--supersedes` retires whatever assignment carries the named
+id when the door records it.
+"""
 
 from __future__ import annotations
 
-import time
-
 import datetime as _dt
+import hashlib
 import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
+from claudlobby.plane.emit_api import emit_batch
 from tests.conftest import (
     dispatch_row as _dispatch,
     load_lib_module,
     report_row as _report,
-    write_jsonl as _write_jsonl,
 )
+from tests.plane_fixtures import F, MATCHER, plane_root
 
 dispatch_overdue = load_lib_module("dispatch-overdue")
+
+_TERMINAL = {"completed": "completed", "failed": "failed", "blocked": "returned_blocked"}
+
+
+# --- the rig: legacy-shaped rows, landed as the doors land them ----------------
+
+def _iso(epoch: int) -> str:
+    return datetime.fromtimestamp(int(epoch), timezone.utc).isoformat()
+
+
+def _epoch(ts: str) -> int:
+    return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+
+
+class _Plane:
+    """One throwaway plane per test. `land(dispatches, reports)` applies rows in
+    ledger order and tracks what the doors would have known at each instant
+    (which assignments exist, which are still open), so the report door's
+    id-less closer and the dispatch door's supersession land on the same rows
+    the live doors would have chosen."""
+
+    def __init__(self, tmp_path: Path):
+        self.root = plane_root(tmp_path)
+        self.n = 0
+        self.by_id: dict[tuple[str, str], tuple[str, str, int]] = {}   # (bot, task_id) -> (wi, asg, at)
+        self.idless: list[tuple[str, str, str, int]] = []              # (bot, wi, asg, at)
+        self.closed: set[str] = set()                                  # assignment ids closed (any terminal)
+
+    def _mint(self, prefix: str) -> str:
+        self.n += 1
+        return f"{prefix}_{self.n:0>32x}"
+
+    def _emit(self, events: list[dict]) -> None:
+        out = emit_batch(self.root, events)
+        bad = [o for o in out if o.status not in ("committed", "duplicate")]
+        assert not bad, bad
+
+    def dispatch(self, row: dict) -> None:
+        bot = str(row.get("bot", ""))
+        key = bot.lower()
+        da = row.get("dispatched_at")
+        if not isinstance(da, int):
+            return                                  # the legacy first gate: no instant, no row
+        tid = row.get("task_id")
+        wi, asg, msg = self._mint("wi"), self._mint("asg"), self._mint("msg")
+        if tid:
+            ref = f"dispatch-log:{tid}"
+        else:
+            ref = "dispatch-log:sha:" + hashlib.sha256(f"{bot}:{da}:{self.n}".encode()).hexdigest()[:32]
+        at = _iso(da)
+        exp = row.get("expected_by")
+        payload_asg = {"assignment_id": asg, "work_item_id": wi, "assignee": f"bot:{F}/{bot}",
+                       "assigned_by": f"bot:{F}/lead", "dispatch_msg_id": msg}
+        if isinstance(exp, int):
+            payload_asg["expected_by"] = _iso(exp)
+        events = [
+            {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F, "source_ref": ref,
+             "occurred_at": at, "payload": {"work_item_id": wi, "title": str(row.get("task") or "t"),
+                                            "created_by": f"bot:{F}/lead"}},
+            {"event_type": "assignment", "emitter": "dispatch-task", "fleet": F, "source_ref": ref,
+             "occurred_at": at, "payload": payload_asg},
+            {"event_type": "communication", "emitter": "dispatch-task", "fleet": F, "source_ref": ref,
+             "occurred_at": at, "payload": {"msg_id": msg, "sender": f"bot:{F}/lead",
+                                            "recipient": f"bot:{F}/{bot}", "message_class": "task_request",
+                                            "command_type": "task", "work_item_id": wi,
+                                            "assignment_id": asg, "body": "t"}},
+        ]
+        # --supersedes: the door records a terminal `superseded` on the retired
+        # assignment when the plane holds the named id (scoped to the bot here,
+        # the rule this suite pins; the door's own lookup is by id alone).
+        sup = row.get("supersedes")
+        if sup and (key, str(sup)) in self.by_id:
+            _wi, old_asg, _at = self.by_id[(key, str(sup))]
+            events.append({"event_type": "task", "emitter": "dispatch-task", "fleet": F, "source_ref": ref,
+                           "occurred_at": at, "payload": {"work_item_id": _wi, "assignment_id": old_asg,
+                                                          "event": "superseded", "successor_id": asg}})
+            self.closed.add(old_asg)
+        self._emit(events)
+        if tid:
+            self.by_id[(key, str(tid))] = (wi, asg, da)
+        else:
+            self.idless.append((key, wi, asg, da))
+
+    def report(self, row: dict) -> None:
+        bot = str(row.get("bot", ""))
+        key = bot.lower()
+        ts = str(row.get("ts", ""))
+        at_epoch = _epoch(ts)
+        at = _iso(at_epoch)
+        status = str(row.get("status", ""))
+        tid = row.get("task_id")
+        msg = self._mint("msg")
+        ref = f"report-back:{msg}"
+        actor = f"bot:{F}/{bot}"
+        link = self.by_id.get((key, str(tid))) if tid else None
+        comm_payload = {"msg_id": msg, "sender": actor, "recipient": f"bot:{F}/lead",
+                        "recipient_raw": "lead", "message_class": "report", "body": "r"}
+        if link:
+            comm_payload.update({"work_item_id": link[0], "assignment_id": link[1]})
+        events = [{"event_type": "communication", "emitter": "report-back", "fleet": F, "source_ref": ref,
+                   "occurred_at": at, "payload": comm_payload}]
+        ev = _TERMINAL.get(status) or ("progress" if status == "progress" else None)
+        if link and ev:
+            events.append({"event_type": "task", "emitter": "report-back", "fleet": F, "source_ref": ref,
+                           "occurred_at": at, "payload": {"work_item_id": link[0], "assignment_id": link[1],
+                                                          "event": ev, "actor": actor}})
+            if ev != "progress":
+                self.closed.add(link[1])
+        elif not tid and status in _TERMINAL:
+            # the id-less closer: every OPEN id-less assignment of the bot, as of now
+            landed = 0
+            for b, wi, asg, da in self.idless:
+                if b == key and asg not in self.closed and da <= at_epoch:
+                    events.append({"event_type": "task", "emitter": "report-back", "fleet": F,
+                                   "source_ref": ref, "occurred_at": at,
+                                   "payload": {"work_item_id": wi, "assignment_id": asg,
+                                               "event": _TERMINAL[status], "actor": actor}})
+                    self.closed.add(asg)
+                    landed += 1
+            if not landed:
+                events.append(self._marker(ref, actor, status, msg, at))
+        elif status in _TERMINAL:
+            # an id'd terminal report the plane cannot link: the marker only
+            events.append(self._marker(ref, actor, status, msg, at))
+        self._emit(events)
+
+    @staticmethod
+    def _marker(ref, actor, status, msg, at):
+        return {"event_type": "system", "emitter": "report-back", "fleet": F, "source_ref": ref,
+                "occurred_at": at, "payload": {"event": "report_status", "subject_kind": "actor",
+                                               "subject": actor, "data": {"status": status, "msg_id": msg}}}
+
+    def land(self, dispatches=(), reports=()) -> "_Plane":
+        for d in dispatches:
+            self.dispatch(d)
+        for r in reports:
+            self.report(r)
+        return self
+
+
+def _land(tmp_path, dispatches=(), reports=()) -> _Plane:
+    return _Plane(tmp_path).land(dispatches, reports)
+
+
+def _overdue(plane: _Plane, bot: str, now: int, max_age=None) -> list:
+    """The retired single-bot mode, as a filter over the fleet's overdue set."""
+    kw = {"fleet": F, "root": str(plane.root)}
+    if max_age is not None:
+        return dispatch_overdue.overdue_all(now, max_age, **kw).get(bot.lower(), [])
+    return dispatch_overdue.overdue_all(now, **kw).get(bot.lower(), [])
+
+
+def _open(plane: _Plane, bot: str) -> list:
+    return dispatch_overdue.open_dispatches(bot, fleet=F, root=str(plane.root))
+
+
+def _head(plane: _Plane, bot: str):
+    return dispatch_overdue.open_task_id(bot, fleet=F, root=str(plane.root))
+
+
+def _argv(plane: _Plane, *args) -> list[str]:
+    return ["dispatch-overdue.py", *args, "--fleet", F, "--root", str(plane.root)]
+
+
+# --- overdue ---------------------------------------------------------------------
 
 
 class TestOverdue:
     def test_not_yet_due(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [])
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)])
         # now (1500) < expected_by (2000) → not overdue
-        assert dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 1500) == []
+        assert _overdue(p, "eng-1", 1500) == []
 
     def test_overdue_no_report(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [])
-        res = dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 2600)
-        assert res == [(1000, 2000, 600, "-")]
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)])
+        assert _overdue(p, "eng-1", 2600) == [(1000, 2000, 600, "-")]
 
     def test_closed_by_terminal_report(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
         # report at 2026-05-27T10:30:00Z is after dispatch → closes it
-        _write_jsonl(rlog, [_report("eng-1", "2026-05-27T10:30:00Z", "completed")])
-        assert dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 9999999999) == []
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)],
+                  [_report("eng-1", "2026-05-27T10:30:00Z", "completed")])
+        assert _overdue(p, "eng-1", 9999999999) == []
 
     def test_stale_report_before_dispatch_does_not_close(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
         # dispatched_at corresponds to a time AFTER this old report
-        _write_jsonl(dlog, [_dispatch("eng-1", 1800000000, 1800000600)])
-        _write_jsonl(rlog, [_report("eng-1", "2020-01-01T00:00:00Z", "completed")])
-        res = dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 1800001000)
-        assert len(res) == 1
+        p = _land(tmp_path, [_dispatch("eng-1", 1800000000, 1800000600)],
+                  [_report("eng-1", "2020-01-01T00:00:00Z", "completed")])
+        assert len(_overdue(p, "eng-1", 1800001000)) == 1
 
     def test_progress_report_does_not_close(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [_report("eng-1", "2026-05-27T10:30:00Z", "progress")])
-        assert len(dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 2600)) == 1
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)],
+                  [_report("eng-1", "2026-05-27T10:30:00Z", "progress")])
+        assert len(_overdue(p, "eng-1", 2600)) == 1
 
     def test_other_bot_ignored(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-2", 1000, 2000)])
-        _write_jsonl(rlog, [])
-        assert dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 2600) == []
+        p = _land(tmp_path, [_dispatch("eng-2", 1000, 2000)])
+        assert _overdue(p, "eng-1", 2600) == []
 
     def test_case_insensitive_bot_match(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("Eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [_report("eng-1", "2026-05-27T10:30:00Z", "completed")])
         # report (lowercase) should close dispatch (mixed case)
-        assert dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 9999999999) == []
+        p = _land(tmp_path, [_dispatch("Eng-1", 1000, 2000)],
+                  [_report("eng-1", "2026-05-27T10:30:00Z", "completed")])
+        assert _overdue(p, "eng-1", 9999999999) == []
 
-    def test_missing_files(self, tmp_path):
-        assert (
-            dispatch_overdue.overdue(
-                "eng-1", str(tmp_path / "no"), str(tmp_path / "no2"), 99
-            )
-            == []
-        )
+    def test_no_plane_is_unreachable_not_empty(self, tmp_path):
+        """The retired `test_missing_files` inverted: two missing ledgers used
+        to read as an empty fleet; a missing plane REFUSES."""
+        with pytest.raises(dispatch_overdue.PlaneUnreachable):
+            dispatch_overdue.overdue_all(99, fleet=F, root=str(tmp_path / "no-plane"))
 
 
 class TestExpiryCap:
@@ -83,89 +277,52 @@ class TestExpiryCap:
     so fleet-pulse stops re-emitting overdue_dispatch every cycle forever."""
 
     def test_stale_open_dispatch_expires(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [])
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)])
         # Past deadline, never reported, but age (100000s) > cap (3600s) → expired.
-        assert (
-            dispatch_overdue.overdue(
-                "eng-1", str(dlog), str(rlog), 101000, max_age=3600
-            )
-            == []
-        )
+        assert _overdue(p, "eng-1", 101000, max_age=3600) == []
 
     def test_within_max_age_still_overdue(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [])
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)])
         # age (3000s) < cap (3600s), past deadline → still overdue.
-        assert dispatch_overdue.overdue(
-            "eng-1", str(dlog), str(rlog), 4000, max_age=3600
-        ) == [(1000, 2000, 2000, "-")]
+        assert _overdue(p, "eng-1", 4000, max_age=3600) == [(1000, 2000, 2000, "-")]
 
     def test_default_cap_is_24h(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("mason", 1000, 2000)])
-        _write_jsonl(rlog, [])
+        p = _land(tmp_path, [_dispatch("mason", 1000, 2000)])
         # Just under 24h → overdue; just over → expired — under the DEFAULT (no max_age passed).
-        assert (
-            len(dispatch_overdue.overdue("mason", str(dlog), str(rlog), 1000 + 86399))
-            == 1
-        )
-        assert (
-            dispatch_overdue.overdue("mason", str(dlog), str(rlog), 1000 + 86401) == []
-        )
+        assert len(_overdue(p, "mason", 1000 + 86399)) == 1
+        assert _overdue(p, "mason", 1000 + 86401) == []
 
     def test_cap_disabled_with_zero(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [])
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)])
         # max_age=0 disables the cap → an ancient open dispatch still counts as overdue.
-        assert (
-            len(
-                dispatch_overdue.overdue(
-                    "eng-1", str(dlog), str(rlog), 10_000_000, max_age=0
-                )
-            )
-            == 1
-        )
+        assert len(_overdue(p, "eng-1", 10_000_000, max_age=0)) == 1
 
     def test_never_closing_dispatch_stops_being_flagged(self, tmp_path):
         """#460 anchor: a never-reported dispatch drops out of the overdue set past the
         cap, so fleet-pulse (which emits only what the matcher returns) stops re-emitting
         overdue_dispatch. The matcher is stateless, so one past-cap empty result is the
         guarantee for this cycle and every later one."""
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [])
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)])
         # Far past the default 24h cap, never reported → nothing to emit.
-        assert (
-            dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 1000 + 500000) == []
-        )
+        assert _overdue(p, "eng-1", 1000 + 500000) == []
 
     def test_closed_report_recognized_even_when_aged(self, tmp_path):
         """A dispatch closed by a terminal report is closed, not merely expired —
-        the report path still short-circuits before the age cap."""
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
-        _write_jsonl(rlog, [_report("eng-1", "2026-05-27T10:30:00Z", "completed")])
-        # Aged well past the cap AND closed → still [] (closed wins, order preserved).
-        assert (
-            dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 1000 + 999999) == []
-        )
+        the closure still short-circuits before the age cap."""
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2000)],
+                  [_report("eng-1", "2026-05-27T10:30:00Z", "completed")])
+        assert _overdue(p, "eng-1", 1000 + 999999) == []
 
 
-# --- join matrix (dispatch-overdue.py) --------------------------------------------
+# --- join matrix ------------------------------------------------------------------
 
 
 class TestJoinMatrix:
     NOW = 2000
 
     def _run(self, tmp_path, dispatches, reports):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, dispatches)
-        _write_jsonl(rlog, reports)
-        return dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW)
+        p = _land(tmp_path, dispatches, reports)
+        return dispatch_overdue.overdue_all(self.NOW, fleet=F, root=str(p.root))
 
     def test_id_report_closes_exactly_its_own_dispatch(self, tmp_path):
         out = self._run(
@@ -190,7 +347,8 @@ class TestJoinMatrix:
         assert out.get("w1"), "id'd dispatch must remain overdue"
 
     def test_idless_terminal_closes_idless_dispatch(self, tmp_path):
-        # Legacy rows keep the pre-migration (bot, ts) semantics — no flag-day.
+        # An id-less dispatch closes on the bot's next terminal report — the
+        # report door lands the terminal event on every open id-less assignment.
         out = self._run(
             tmp_path,
             [_dispatch("w1", 100, 1000)],
@@ -198,15 +356,19 @@ class TestJoinMatrix:
         )
         assert not out.get("w1")
 
-    def test_id_report_closes_idless_dispatch_too(self, tmp_path):
-        # An id-carrying terminal report still satisfies a legacy dispatch
-        # (it is strictly more informative than the old contract required).
+    def test_an_unlinkable_id_report_closes_nothing_not_even_an_idless_dispatch(self, tmp_path):
+        """MOVED SEMANTIC (F18 R2a). The legacy ledger's blanket rule — ANY
+        later terminal report, id'd or not, closed an id-less dispatch — is
+        gone with the ledger: the report door closes id-less assignments only
+        from an id-LESS terminal report (`--open-idless`), and an id'd report
+        whose id the plane cannot link lands its status marker and nothing
+        else. The old assertion (`not out.get("w1")`) inverts here."""
         out = self._run(
             tmp_path,
             [_dispatch("w1", 100, 1000)],
             [_report("w1", "1970-01-01T00:05:00Z", task_id="t-999-ffff")],
         )
-        assert not out.get("w1")
+        assert out.get("w1"), "an unlinkable id'd report closed an id-less dispatch"
 
     def test_report_from_wrong_bot_does_not_close(self, tmp_path):
         # Review finding (#518): the id join must be scoped by (bot, id) —
@@ -234,44 +396,16 @@ class TestJoinMatrix:
         that silenced the row permanently — which is closing by another name, and the
         thing this test originally existed to forbid.
         """
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")])
-        _write_jsonl(
-            rlog,
-            [
-                _report(
-                    "w1",
-                    "1970-01-01T00:05:00Z",
-                    status="progress",
-                    task_id="t-100-aaaa",
-                )
-            ],
-        )
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+                  [_report("w1", "1970-01-01T00:05:00Z", status="progress", task_id="t-100-aaaa")])
+        kw = {"fleet": F, "root": str(p.root)}
         # progress at epoch 300; at NOW=2000 it is 1700s old, inside the grace
-        assert not dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW).get(
-            "w1"
-        )
+        assert not dispatch_overdue.overdue_all(self.NOW, **kw).get("w1")
         # once the grace lapses the row is overdue again — deferred, never closed
         later = 300 + dispatch_overdue.DEFAULT_PROGRESS_GRACE_S + 1
-        assert dispatch_overdue.overdue_all(str(dlog), str(rlog), later).get("w1"), (
+        assert dispatch_overdue.overdue_all(later, **kw).get("w1"), (
             "a progress report must never permanently close a dispatch"
         )
-
-
-class TestMissingIdCounter:
-    def test_counts_idless_terminal_reports(self, tmp_path):
-        rlog = tmp_path / "r.jsonl"
-        _write_jsonl(
-            rlog,
-            [
-                _report("w1", "1970-01-01T00:05:00Z"),
-                _report("w1", "1970-01-01T00:06:00Z", task_id="t-1-aaaa"),
-                _report("w2", "1970-01-01T00:07:00Z", status="progress"),
-                _report("w2", "1970-01-01T00:08:00Z", status="failed"),
-            ],
-        )
-        # terminal + id-less: w1's first report and w2's failed report
-        assert dispatch_overdue.missing_id_count(str(rlog)) == 2
 
 
 class TestOrphanSplit:
@@ -292,151 +426,126 @@ class TestOrphanSplit:
         os.utime(marker, (spawn_epoch, spawn_epoch))
         return str(tmp_path / "bots")
 
-    def _logs(self, tmp_path, dispatches, reports):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, dispatches)
-        _write_jsonl(rlog, reports)
-        return str(dlog), str(rlog)
+    def _sets(self, p, bots=None):
+        kw = {"fleet": F, "root": str(p.root)}
+        return (dispatch_overdue.overdue_all(self.NOW, bots_dir=bots, **kw),
+                dispatch_overdue.orphaned_all(self.NOW, bots_dir=bots, **kw))
 
     def test_respawn_after_dispatch_moves_row_out_of_overdue(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
-        )
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")])
         bots = self._bots_dir(tmp_path, "w1", 500)  # respawned AFTER dispatch
-        assert dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
-        orphans = dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots)
+        over, orphans = self._sets(p, bots)
+        assert over == {}
         assert [d[3] for d in orphans["w1"]] == ["t-100-aaaa"], (
             "the orphan must stay listable — reaping it silently deletes the "
             "evidence that a task was lost to a restart"
         )
 
     def test_same_incarnation_still_reports_overdue(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
-        )
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")])
         bots = self._bots_dir(tmp_path, "w1", 50)  # spawned BEFORE dispatch
-        assert "w1" in dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots)
-        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
+        over, orphans = self._sets(p, bots)
+        assert "w1" in over and orphans == {}
 
     def test_without_bots_dir_nothing_is_orphaned(self, tmp_path):
         """No marker access => keep alarming. Never retire a row on a guess."""
-        dlog, rlog = self._logs(
-            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
-        )
-        assert "w1" in dispatch_overdue.overdue_all(dlog, rlog, self.NOW)
-        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW) == {}
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")])
+        over, orphans = self._sets(p)
+        assert "w1" in over and orphans == {}
 
     def test_missing_spawn_marker_keeps_row_overdue(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
-        )
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")])
         (tmp_path / "bots").mkdir()
-        bots = str(tmp_path / "bots")
-        assert "w1" in dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots)
+        over, _ = self._sets(p, str(tmp_path / "bots"))
+        assert "w1" in over
 
     def test_idless_dispatch_never_orphans(self, tmp_path):
-        """An id-less row closes on ANY later terminal report, so a respawned
-        worker's next report still retires it — nothing to remember, nothing to
-        orphan."""
-        dlog, rlog = self._logs(tmp_path, [_dispatch("w1", 100, 1000)], [])
+        """An id-less row closes on the bot's next terminal report, so a
+        respawned worker's next report still retires it — nothing to remember,
+        nothing to orphan."""
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000)])
         bots = self._bots_dir(tmp_path, "w1", 500)
-        assert "w1" in dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots)
-        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
+        over, orphans = self._sets(p, bots)
+        assert "w1" in over and orphans == {}
 
     def test_a_closed_row_is_neither_overdue_nor_orphan(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path,
-            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
-            [_report("w1", "1970-01-01T00:05:00Z", task_id="t-100-aaaa")],
-        )
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+                  [_report("w1", "1970-01-01T00:05:00Z", task_id="t-100-aaaa")])
         bots = self._bots_dir(tmp_path, "w1", 500)
-        assert dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
-        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
+        assert self._sets(p, bots) == ({}, {})
 
 
 class TestOpenTaskResolution:
     """#835 — the id report-back.sh supplies when the worker omits --task."""
 
-    def _logs(self, tmp_path, dispatches, reports):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, dispatches)
-        _write_jsonl(rlog, reports)
-        return str(dlog), str(rlog)
-
     def test_resolves_the_oldest_open_dispatch(self, tmp_path):
         """Oldest, not newest: the oldest is the row past its deadline and
         alarming, and it is what a serial FIFO worker just finished. Rows are
-        written out of dispatch order to pin that this is time-ordered, not
-        file-ordered."""
-        dlog, rlog = self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
-                _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
-                _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
-            ],
-            [],
-        )
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-100-aaaa"
+        landed out of dispatch order to pin that this is time-ordered, not
+        ingest-ordered."""
+        p = _land(tmp_path, [
+            _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
+            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+            _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
+        ])
+        assert _head(p, "w1") == "t-100-aaaa"
 
     def test_concurrent_dispatches_retire_in_dispatch_order(self, tmp_path):
         """The normal case, not an edge one — most active bots carry 2-3 open.
         Each report closes exactly one row, oldest first, so a sequence of
         reports drains the queue in the order it was sent."""
-        dispatches = [
+        p = _land(tmp_path, [
             _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
             _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
             _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
-        ]
-        reports: list = []
+        ])
         drained = []
         for _ in range(3):
-            dlog, rlog = self._logs(tmp_path, dispatches, reports)
-            tid = dispatch_overdue.open_task_id("w1", dlog, rlog)
+            tid = _head(p, "w1")
             drained.append(tid)
-            reports.append(_report("w1", "1970-01-01T00:20:00Z", task_id=tid))
+            p.report(_report("w1", "1970-01-01T00:20:00Z", task_id=tid))
         assert drained == ["t-100-aaaa", "t-200-bbbb", "t-300-cccc"]
-        dlog, rlog = self._logs(tmp_path, dispatches, reports)
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) is None
+        assert _head(p, "w1") is None
 
     def test_skips_already_closed_dispatches(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
-                _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
-            ],
-            [_report("w1", "1970-01-01T00:10:00Z", task_id="t-300-cccc")],
-        )
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-100-aaaa"
+        p = _land(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+            _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
+        ], [_report("w1", "1970-01-01T00:10:00Z", task_id="t-300-cccc")])
+        assert _head(p, "w1") == "t-100-aaaa"
 
     def test_none_when_nothing_open(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path,
-            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
-            [_report("w1", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")],
-        )
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) is None
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+                  [_report("w1", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")])
+        assert _head(p, "w1") is None
 
     def test_scoped_to_the_bot(self, tmp_path):
         """A peer's open dispatch must never be handed to this bot — that is
         the cross-bot leak the watchdog join is deliberately scoped against."""
-        dlog, rlog = self._logs(
-            tmp_path, [_dispatch("w2", 300, 1000, task_id="t-300-cccc")], []
-        )
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) is None
+        p = _land(tmp_path, [_dispatch("w2", 300, 1000, task_id="t-300-cccc")])
+        assert _head(p, "w1") is None
 
     def test_idless_dispatches_are_not_resolvable(self, tmp_path):
-        dlog, rlog = self._logs(tmp_path, [_dispatch("w1", 100, 1000)], [])
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) is None
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000)])
+        assert _head(p, "w1") is None
+
+    def test_an_unanswered_idless_dispatch_suppresses_the_resolver(self, tmp_path):
+        """#1190: while the bot's NEWEST assignment is id-less and unanswered, a
+        terminal report most plausibly answers THAT, so resolving an older
+        id'd row would be a false completion — the resolver returns nothing
+        until the bot's next terminal report discharges the id-less row."""
+        p = _land(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+            _dispatch("w1", 200, 1000),                       # a peer note, id-less, newest
+        ])
+        assert _head(p, "w1") is None
+        p.report(_report("w1", "1970-01-01T00:10:00Z"))     # id-less terminal: discharges it
+        assert _head(p, "w1") == "t-100-aaaa"
 
     def test_a_peers_report_does_not_close_this_bots_dispatch(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path,
-            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
-            [_report("w2", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")],
-        )
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-100-aaaa"
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+                  [_report("w2", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")])
+        assert _head(p, "w1") == "t-100-aaaa"
 
 
 class TestProgressLiveness:
@@ -450,27 +559,32 @@ class TestProgressLiveness:
 
     The two halves are inseparable. Silencing a busy worker is only safe if a dead one
     still alarms; a test for either alone passes against a change that breaks the other.
+
+    ON THE PLANE the liveness signal is a `progress` task event by the bot's
+    actor, which the report door lands only for a progress report it can
+    LINK (one carrying the task id); the fixtures here carry it. An id-less
+    progress report lands a communication and no event — see the R2a
+    findings on #1467.
     """
 
     GRACE = 2700  # DEFAULT_PROGRESS_GRACE_S; asserted equal below so it cannot drift
+    TID = "t-1000-aaaa"
 
     def _overdue(self, tmp_path, reports, now):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
         # dispatched at 1000, due at 2800 — the real 30-minute budget
-        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2800, task_id="t-1000-aaaa")])
-        _write_jsonl(rlog, reports)
-        return dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), now)
+        p = _land(tmp_path, [_dispatch("eng-1", 1000, 2800, task_id=self.TID)], reports)
+        return _overdue(p, "eng-1", now)
+
+    def _progress(self, ts):
+        return _report("eng-1", ts, status="progress", task_id=self.TID)
 
     def test_grace_matches_the_measured_default(self):
         assert dispatch_overdue.DEFAULT_PROGRESS_GRACE_S == self.GRACE
 
     def test_a_busy_worker_is_silenced(self, tmp_path):
         """Past deadline, but reported progress 10 minutes ago → working, not stuck."""
-        res = self._overdue(
-            tmp_path,
-            [_report("eng-1", "1970-01-01T01:00:00Z", status="progress")],  # epoch 3600
-            now=3600 + 600,
-        )
+        res = self._overdue(tmp_path, [self._progress("1970-01-01T01:00:00Z")],   # epoch 3600
+                            now=3600 + 600)
         assert res == [], "a worker reporting progress 10min ago was paged as overdue"
 
     def test_a_dead_worker_still_alarms(self, tmp_path):
@@ -479,11 +593,8 @@ class TestProgressLiveness:
         This is the half that makes the other half safe. Deferral is bounded by the
         worker's own reporting: stop, and the alarm returns.
         """
-        res = self._overdue(
-            tmp_path,
-            [_report("eng-1", "1970-01-01T01:00:00Z", status="progress")],  # epoch 3600
-            now=3600 + self.GRACE + 1,
-        )
+        res = self._overdue(tmp_path, [self._progress("1970-01-01T01:00:00Z")],   # epoch 3600
+                            now=3600 + self.GRACE + 1)
         assert res, "a worker silent for longer than the grace must still alarm"
 
     def test_progress_before_the_dispatch_does_not_defer(self, tmp_path):
@@ -498,36 +609,23 @@ class TestProgressLiveness:
         # it. An earlier draft used epoch 30, which the grace bound rejected on age
         # alone: the test passed while saying nothing about the bound it names, and the
         # mutation run caught it.
-        res = self._overdue(
-            tmp_path,
-            [_report("eng-1", "1970-01-01T00:15:00Z", status="progress")],
-            now=3000,
-        )
+        res = self._overdue(tmp_path, [self._progress("1970-01-01T00:15:00Z")], now=3000)
         assert res, "a progress report predating the dispatch deferred the alarm"
 
     def test_a_future_dated_progress_report_cannot_mute_the_alarm(self, tmp_path):
-        """Clock skew or a hand-edited ledger must not buy silence.
+        """Clock skew or a hand-edited record must not buy silence.
 
         A report dated ahead of `now` yields a negative age, which satisfies any grace
         bound and would suppress the row forever — a permanent silent mute, the one
-        outcome this change must never produce. Found by an existing test failing
-        against the first draft, not by inspection.
+        outcome this change must never produce.
         """
-        res = self._overdue(
-            tmp_path,
-            [_report("eng-1", "2099-01-01T00:00:00Z", status="progress")],
-            now=3000,
-        )
+        res = self._overdue(tmp_path, [self._progress("2099-01-01T00:00:00Z")], now=3000)
         assert res, "a future-dated progress report muted the alarm"
 
     def test_grace_of_zero_disables_deferral(self, tmp_path, monkeypatch):
         """The escape hatch, mirroring DISPATCH_OVERDUE_MAX_AGE_S's `<= 0 disables`."""
         monkeypatch.setenv("DISPATCH_PROGRESS_GRACE_S", "0")
-        res = self._overdue(
-            tmp_path,
-            [_report("eng-1", "1970-01-01T01:00:00Z", status="progress")],
-            now=3600 + 600,
-        )
+        res = self._overdue(tmp_path, [self._progress("1970-01-01T01:00:00Z")], now=3600 + 600)
         assert res, "grace=0 must restore the pre-change behaviour exactly"
 
     def test_terminal_report_still_closes_regardless_of_progress(self, tmp_path):
@@ -535,15 +633,8 @@ class TestProgressLiveness:
         deferred, so the row never reappears when the grace lapses."""
         res = self._overdue(
             tmp_path,
-            [
-                _report("eng-1", "1970-01-01T01:00:00Z", status="progress"),
-                _report(
-                    "eng-1",
-                    "1970-01-01T01:05:00Z",
-                    status="completed",
-                    task_id="t-1000-aaaa",
-                ),
-            ],
+            [self._progress("1970-01-01T01:00:00Z"),
+             _report("eng-1", "1970-01-01T01:05:00Z", status="completed", task_id=self.TID)],
             now=3600 + self.GRACE + 5000,
         )
         assert res == [], "a completed dispatch reappeared after the grace lapsed"
@@ -552,220 +643,153 @@ class TestProgressLiveness:
 class TestOpenList:
     """#904 — the read door's list form. Same join as the resolver, wider set."""
 
-    def _logs(self, tmp_path, dispatches, reports):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, dispatches)
-        _write_jsonl(rlog, reports)
-        return str(dlog), str(rlog)
-
     def test_lists_every_open_row_oldest_first(self, tmp_path):
-        """Written out of dispatch order, to pin that this is time-ordered."""
-        dlog, rlog = self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
-                _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
-                _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
-            ],
-            [],
-        )
-        rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
-        assert [t for _, _, t in rows] == ["t-100-aaaa", "t-200-bbbb", "t-300-cccc"]
+        """Landed out of dispatch order, to pin that this is time-ordered."""
+        p = _land(tmp_path, [
+            _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
+            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+            _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
+        ])
+        assert [t for _, _, t in _open(p, "w1")] == ["t-100-aaaa", "t-200-bbbb", "t-300-cccc"]
 
     def test_open_task_id_is_this_lists_head(self, tmp_path):
         """One loop, not two: a resolver that could hand back an id this list
         does not contain is the desync class the module exists to prevent."""
-        dlog, rlog = self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 300, 1000, task_id="t-c"),
-                _dispatch("w1", 100, 1000, task_id="t-a"),
-            ],
-            [],
-        )
-        rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2]
+        p = _land(tmp_path, [
+            _dispatch("w1", 300, 1000, task_id="t-c"),
+            _dispatch("w1", 100, 1000, task_id="t-a"),
+        ])
+        rows = _open(p, "w1")
+        assert _head(p, "w1") == rows[0][2]
 
     def test_is_deadline_blind(self, tmp_path):
         """A row inside its deadline is OPEN but not overdue — the distinction
         the door was added to make readable."""
-        dlog, rlog = self._logs(
-            tmp_path, [_dispatch("w1", 100, 9_999_999, task_id="t-early")], []
-        )
-        assert [
-            t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)
-        ] == ["t-early"]
-        assert dispatch_overdue.overdue("w1", dlog, rlog, 1000) == []
+        p = _land(tmp_path, [_dispatch("w1", 100, 9_999_999, task_id="t-early")])
+        assert [t for _, _, t in _open(p, "w1")] == ["t-early"]
+        assert _overdue(p, "w1", 1000) == []
 
     def test_is_a_superset_of_overdue(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-late"),
-                _dispatch("w1", 200, 9_999_999, task_id="t-early"),
-            ],
-            [],
-        )
-        open_ids = {t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)}
-        overdue_ids = {t for *_, t in dispatch_overdue.overdue("w1", dlog, rlog, 5000)}
+        p = _land(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-late"),
+            _dispatch("w1", 200, 9_999_999, task_id="t-early"),
+        ])
+        open_ids = {t for _, _, t in _open(p, "w1")}
+        overdue_ids = {t for *_, t in _overdue(p, "w1", 5000)}
         assert overdue_ids == {"t-late"}
         assert overdue_ids <= open_ids
 
     def test_terminal_report_removes_the_row(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path,
-            [_dispatch("w1", 100, 1000, task_id="t-a")],
-            [_report("w1", "2026-05-27T10:05:00Z", task_id="t-a")],
-        )
-        assert dispatch_overdue.open_dispatches("w1", dlog, rlog) == []
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")],
+                  [_report("w1", "2026-05-27T10:05:00Z", task_id="t-a")])
+        assert _open(p, "w1") == []
 
     def test_a_peers_report_does_not_close_this_bots_row(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path,
-            [_dispatch("w1", 100, 1000, task_id="t-a")],
-            [_report("w2", "2026-05-27T10:05:00Z", task_id="t-a")],
-        )
-        assert [
-            t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)
-        ] == ["t-a"]
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")],
+                  [_report("w2", "2026-05-27T10:05:00Z", task_id="t-a")])
+        assert [t for _, _, t in _open(p, "w1")] == ["t-a"]
 
     def test_idless_rows_are_not_listed(self, tmp_path):
         """Same gate as the resolver: only id'd rows are addressable."""
-        dlog, rlog = self._logs(tmp_path, [_dispatch("w1", 100, 1000)], [])
-        assert dispatch_overdue.open_dispatches("w1", dlog, rlog) == []
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000)])
+        assert _open(p, "w1") == []
 
     def test_missing_expected_by_is_None_not_a_filter(self, tmp_path):
         """A row the resolver would still hand back must remain listable, or
         the door hides work that can still be closed."""
         row = _dispatch("w1", 100, 1000, task_id="t-a")
         del row["expected_by"]
-        dlog, rlog = self._logs(tmp_path, [row], [])
-        assert dispatch_overdue.open_dispatches("w1", dlog, rlog) == [
-            (100, None, "t-a")
-        ]
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-a"
+        p = _land(tmp_path, [row])
+        assert _open(p, "w1") == [(100, None, "t-a")]
+        assert _head(p, "w1") == "t-a"
 
     def test_scoped_to_the_bot(self, tmp_path):
-        dlog, rlog = self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-mine"),
-                _dispatch("w2", 100, 1000, task_id="t-theirs"),
-            ],
-            [],
-        )
-        assert [
-            t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)
-        ] == ["t-mine"]
+        p = _land(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-mine"),
+            _dispatch("w2", 100, 1000, task_id="t-theirs"),
+        ])
+        assert [t for _, _, t in _open(p, "w1")] == ["t-mine"]
 
     def test_cli_open_mode_prints_rows(self, tmp_path, monkeypatch, capsys):
         row = _dispatch("w1", 100, 1000, task_id="t-a")
-        idless = _dispatch("w1", 150, 1000, task_id="t-b")
-        del idless["expected_by"]
-        dlog, rlog = self._logs(tmp_path, [row, idless], [])
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
-        )
+        no_deadline = _dispatch("w1", 150, 1000, task_id="t-b")
+        del no_deadline["expected_by"]
+        p = _land(tmp_path, [row, no_deadline])
+        monkeypatch.setattr("sys.argv", _argv(p, "--open", "w1"))
         assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == "100 1000 t-a\n150 - t-b\n"
 
-    def test_cli_open_mode_is_silent_when_nothing_is_open(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        dlog, rlog = self._logs(tmp_path, [], [])
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
-        )
+    def test_cli_open_mode_is_silent_when_nothing_is_open(self, tmp_path, monkeypatch, capsys):
+        p = _land(tmp_path, [_dispatch("w9", 100, 1000, task_id="t-z")])   # the fleet exists; w1 holds nothing
+        monkeypatch.setattr("sys.argv", _argv(p, "--open", "w1"))
         assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == ""
 
-    def test_ties_keep_ledger_order_matching_the_old_strict_min(self, tmp_path):
+    def test_ties_keep_ingest_order_matching_the_old_strict_min(self, tmp_path):
         """The tie-break was asserted from reading the sort's stability; this
         pins it. `open_task_id` USED to scan with a strict `<`, which keeps the
-        FIRST row seen on a tie. `list.sort` is stable, so it must agree — if it
-        ever did not, the resolver would close a different dispatch than the one
-        the list shows first, silently."""
-        dlog, rlog = self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-ccc"),
-                _dispatch("w1", 100, 1000, task_id="t-bbb"),
-                _dispatch("w1", 100, 1000, task_id="t-aaa"),
-            ],
-            [],
-        )
-        rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        FIRST row seen on a tie; the plane orders by instant then ingest
+        order, so it must agree — if it ever did not, the resolver would close
+        a different dispatch than the one the list shows first, silently."""
+        p = _land(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-ccc"),
+            _dispatch("w1", 100, 1000, task_id="t-bbb"),
+            _dispatch("w1", 100, 1000, task_id="t-aaa"),
+        ])
+        rows = _open(p, "w1")
         assert [t for _, _, t in rows] == ["t-ccc", "t-bbb", "t-aaa"]
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-ccc"
+        assert _head(p, "w1") == "t-ccc"
 
     def test_a_tie_at_the_head_still_resolves_to_the_head(self, tmp_path):
-        """Tie at the oldest timestamp, with a younger row written first — so
-        file order and time order disagree and only the sort can be right."""
-        dlog, rlog = self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 500, 1000, task_id="t-young"),
-                _dispatch("w1", 100, 1000, task_id="t-old-z"),
-                _dispatch("w1", 100, 1000, task_id="t-old-a"),
-            ],
-            [],
-        )
-        rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        """Tie at the oldest timestamp, with a younger row landed first — so
+        ingest order and time order disagree and only the sort can be right."""
+        p = _land(tmp_path, [
+            _dispatch("w1", 500, 1000, task_id="t-young"),
+            _dispatch("w1", 100, 1000, task_id="t-old-z"),
+            _dispatch("w1", 100, 1000, task_id="t-old-a"),
+        ])
+        rows = _open(p, "w1")
         assert [t for _, _, t in rows] == ["t-old-z", "t-old-a", "t-young"]
-        assert (
-            dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2] == "t-old-z"
-        )
+        assert _head(p, "w1") == rows[0][2] == "t-old-z"
 
     # --- #1124: the identical-dispatched_at tie-break -------------------------
     #
     # open_task_id resolves the dispatch an id-less report-back closes, which is
-    # MOST reports (report-back.sh omits --task in the common path, #847). #904
-    # replaced its inline `da < best[0]` scan — strict less-than, so the first
-    # row in ledger order wins a tie — with `rows[0]` off open_dispatches()'s
-    # stable-sorted list. The two agree, and open_dispatches' docstring states
-    # the guarantee, but nothing enforced it: it held by measurement, not by
-    # mechanism, and one refactor away from silently inverting.
-    #
+    # MOST reports (report-back.sh omits --task in the common path, #847). The
+    # resolver is `rows[0]` off open_dispatches()'s instant-then-ingest order.
     # Live harm class, not hypothetical (#878): on 2026-08-08 three ai-platform
     # reports resolved to task ids dispatched 2026-08-04 — a 4.6-day gap. A
     # tie-break regression adds one more way for an id-less report to close the
-    # wrong dispatch: the finished task never shows done, the wrong one is
-    # marked closed, and the watchdog alarms on work that actually completed.
+    # wrong dispatch.
     #
-    # THE IDS ARE CHOSEN SO FILE ORDER AND ALPHABETICAL ORDER DISAGREE. An
+    # THE IDS ARE CHOSEN SO INGEST ORDER AND ALPHABETICAL ORDER DISAGREE. An
     # implementation that broke ties by sorting on task_id would satisfy a
-    # same-order-only test by coincidence; with t-bbb written first, ledger
+    # same-order-only test by coincidence; with t-bbb landed first, ingest
     # order says t-bbb and alphabetical says t-aaa, so the two are separable.
 
     def _tied(self, tmp_path, first, second):
-        """Two dispatches to one bot with IDENTICAL dispatched_at, in file order."""
-        return self._logs(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id=first),
-                _dispatch("w1", 100, 1000, task_id=second),
-            ],
-            [],
-        )
+        """Two dispatches to one bot with IDENTICAL dispatched_at, in ingest order."""
+        return _land(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id=first),
+            _dispatch("w1", 100, 1000, task_id=second),
+        ])
 
-    def test_tie_resolves_to_the_row_written_first(self, tmp_path):
-        dlog, rlog = self._tied(tmp_path, "t-bbb", "t-aaa")
-        # Ledger order, NOT the alphabetically-smaller id.
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-bbb"
+    def test_tie_resolves_to_the_row_landed_first(self, tmp_path):
+        p = self._tied(tmp_path, "t-bbb", "t-aaa")
+        # Ingest order, NOT the alphabetically-smaller id.
+        assert _head(p, "w1") == "t-bbb"
 
-    def test_tie_reversed_file_order_resolves_to_the_other_row(self, tmp_path):
-        """Step 3, and the whole point: same two rows, order swapped, other
-        answer. Without this a constant-by-coincidence implementation passes."""
-        dlog, rlog = self._tied(tmp_path, "t-aaa", "t-bbb")
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-aaa"
+    def test_tie_reversed_order_resolves_to_the_other_row(self, tmp_path):
+        """Same two rows, order swapped, other answer. Without this a
+        constant-by-coincidence implementation passes."""
+        p = self._tied(tmp_path, "t-aaa", "t-bbb")
+        assert _head(p, "w1") == "t-aaa"
 
     def test_tie_answer_is_order_dependent_not_a_fixed_value(self, tmp_path):
         """States the property directly: the two orders must disagree. A single
         assertion no implementation can satisfy by returning a constant."""
-        a, _ = self._tied(tmp_path, "t-bbb", "t-aaa")
-        first = dispatch_overdue.open_task_id("w1", a, str(tmp_path / "r.jsonl"))
-        b, _ = self._tied(tmp_path, "t-aaa", "t-bbb")
-        second = dispatch_overdue.open_task_id("w1", b, str(tmp_path / "r.jsonl"))
+        first = _head(self._tied(tmp_path / "a", "t-bbb", "t-aaa"), "w1")
+        second = _head(self._tied(tmp_path / "b", "t-aaa", "t-bbb"), "w1")
         assert first != second, "tie-break is not order-dependent"
         assert {first, second} == {"t-aaa", "t-bbb"}
 
@@ -773,58 +797,43 @@ class TestOpenList:
         """The resolver is the list's head — the invariant #904 created and the
         reason a tie-break regression would desync them rather than just
         reorder a display."""
-        for first, second in (("t-bbb", "t-aaa"), ("t-aaa", "t-bbb")):
-            dlog, rlog = self._tied(tmp_path, first, second)
-            rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        for i, (first, second) in enumerate((("t-bbb", "t-aaa"), ("t-aaa", "t-bbb"))):
+            p = self._tied(tmp_path / str(i), first, second)
+            rows = _open(p, "w1")
             assert [t for _, _, t in rows] == [first, second]
-            assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2]
+            assert _head(p, "w1") == rows[0][2]
 
 
 class TestBotSlotShapeGate:
     """#1187 — right count, wrong order was silent; wrong count never was.
 
-    --open, --open-task and SINGLE-BOT MODE each name one bot and take it
-    first; --all/--orphans/--unassigned name none. Calling a bot-slot mode with
-    the every-bot grammar keeps the arity valid, so a path lands in the bot
-    slot, nothing matches, and the door prints nothing at rc 0 — the same
-    output as a genuinely empty result. That is how a manager checking whether
-    its closures had worked read a full backlog as all-clear.
-
-    Only the two flagged doors are gated here; single-bot mode is the
-    documented remaining gap and is pinned below.
+    --open and --open-task each name one bot and take it first; --all,
+    --orphans and --unassigned name none. Calling a bot-slot mode with a path
+    in the bot slot used to keep the arity valid, match nothing, and print
+    nothing at rc 0 — the same output as a genuinely empty result. That is how
+    a manager checking whether its closures had worked read a full backlog as
+    all-clear. The ledger slots are gone (R2a) but the class is not: a path in
+    the bot slot is still refused, loudly.
     """
 
-    def _logs(self, tmp_path, dispatches, reports):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, dispatches)
-        _write_jsonl(rlog, reports)
-        return str(dlog), str(rlog)
-
     def _rows(self, tmp_path):
-        return self._logs(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")], [])
-
-    # -- the filed defect: right count, wrong order --------------------------
+        return _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")])
 
     @pytest.mark.parametrize("mode", ["--open", "--open-task"])
-    def test_wrong_order_is_refused_loudly_not_silently(
+    def test_a_path_in_the_bot_slot_is_refused_loudly_not_silently(
         self, tmp_path, monkeypatch, capsys, mode
     ):
         """THE regression this gate exists for. Both doors share the grammar,
         so both share the hazard; a fix on one only would leave the other."""
-        dlog, rlog = self._rows(tmp_path)
-        # --all's grammar (logs first), which is exactly 3 positionals — the
-        # arity check passes and main() reaches the join with a path as `bot`.
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", mode, dlog, rlog, "1786700000"]
-        )
+        p = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", _argv(p, mode, str(tmp_path / "state" / "dispatch-log.jsonl"), "1786700000"))
         assert dispatch_overdue.main() == 2
         out = capsys.readouterr()
         assert out.out == ""  # never a partial result alongside a refusal
         assert "expects <bot_id> first" in out.err
         # The refusal must name the remedy, not merely reject: the operator's
         # actual error is not knowing the two grammars differ.
-        assert "take the LOGS first" in out.err
-        assert "take the BOT first" in out.err
+        assert "name no bot at all" in out.err
 
     @pytest.mark.parametrize(
         "bad,label",
@@ -840,10 +849,8 @@ class TestBotSlotShapeGate:
     ):
         """A bare filename carries no separator, so the '/' test alone would
         miss the commonest form — invoking from the ledger's own directory."""
-        dlog, rlog = self._rows(tmp_path)
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open", bad, dlog, rlog]
-        )
+        p = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", _argv(p, "--open", bad))
         assert dispatch_overdue.main() == 2
         assert label in capsys.readouterr().err
 
@@ -855,193 +862,109 @@ class TestBotSlotShapeGate:
         above. `a.b` guards the suffix test against becoming a bare dot test."""
         assert dispatch_overdue._not_a_bot_id(bot) is None
 
-    def test_gate_is_inert_for_the_report_back_call_shape(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """report-back.sh:99 passes its own $BOT first. Same rc, same stdout as
+    def test_gate_is_inert_for_the_report_back_call_shape(self, tmp_path, monkeypatch, capsys):
+        """report-back.sh passes its own $BOT first. Same rc, same stdout as
         before the gate — its fail-open contract is untouched."""
-        dlog, rlog = self._rows(tmp_path)
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open-task", "w1", dlog, rlog]
-        )
+        p = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", _argv(p, "--open-task", "w1"))
         assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == "t-a\n"
 
-    # -- dara's narrowing, pinned: arity was never the hole ------------------
-
     @pytest.mark.parametrize("mode", ["--open", "--open-task"])
-    def test_wrong_arity_was_already_loud_and_stays_loud(
-        self, tmp_path, monkeypatch, capsys, mode
-    ):
-        """Two positionals already returned rc 2 before this change. Pinned so
-        the shape gate is never mistaken for the thing that made misuse loud —
-        a reviewer measuring THIS shape reads the defect as unreproducible."""
-        dlog, rlog = self._rows(tmp_path)
-        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", mode, dlog, rlog])
+    def test_a_missing_bot_is_a_usage_error(self, tmp_path, monkeypatch, capsys, mode):
+        """No bot at all was already rc 2 before the gate and stays so. Pinned so
+        the shape gate is never mistaken for the thing that made misuse loud."""
+        p = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", _argv(p, mode))
         assert dispatch_overdue.main() == 2
-        assert capsys.readouterr().out == ""
-
-    # -- which modes have a bot slot, pinned in code rather than prose --------
-
-    def test_single_bot_mode_is_BOT_first_like_the_gated_doors(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """Executable because the prose got this backwards once (#1188 review):
-        the docstring filed single-bot mode under "logs first", which would send
-        the next reader hunting a dlog/rlog-swap detector instead of reusing
-        _reject_bot_slot. argv[1] is the BOT — assert it, do not describe it."""
-        # now=2000: past expected_by (1000) but inside the 24h age cap, or the
-        # row expires and the mode looks bot-blind for an unrelated reason.
-        dlog, rlog = self._rows(tmp_path)
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "w1", dlog, rlog, "2000"]
-        )
-        assert dispatch_overdue.main() == 0
-        assert "t-a" in capsys.readouterr().out  # argv[1] selected the bot
-
-        # Control: a DIFFERENT name in the same slot returns nothing, so the
-        # assertion above is about argv[1] and not about the row merely existing.
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "other", dlog, rlog, "2000"]
-        )
-        assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == ""
 
     @pytest.mark.parametrize("mode", ["--all", "--orphans", "--unassigned"])
     def test_every_bot_modes_have_no_bot_slot_and_fail_LOUDLY(
-        self, tmp_path, monkeypatch, mode
+        self, tmp_path, monkeypatch, capsys, mode
     ):
-        """The other half of the same correction. These name no bot, so there is
-        nothing for the gate to check — and mis-ordering them is already loud: a
-        ledger path reaches the `now` slot and int() raises. Pins WHY they are
-        excluded, so "ungated" is never re-read as "silently broken like #1187".
-        """
-        dlog, rlog = self._rows(tmp_path)
-        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", mode, "w1", dlog, rlog])
-        with pytest.raises(ValueError):
-            dispatch_overdue.main()
+        """These name no bot, so there is nothing for the gate to check — and
+        handing them one is already loud: the name lands in the `now` slot
+        and is refused as not an instant, rc 2. Pins WHY they are excluded, so
+        "ungated" is never re-read as "silently broken like #1187"."""
+        p = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", _argv(p, mode, "w1"))
+        assert dispatch_overdue.main() == 2
+        out = capsys.readouterr()
+        assert out.out == "" and "<now_epoch> must be an integer" in out.err
 
-    def test_forgotten_flag_falling_into_single_bot_mode_now_refuses(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """Flipped, not deleted, per this test's own standing instruction (#1232).
-
-        It asserted rc 0 + silence for `<dlog> <rlog> <now>` — the forgotten-flag
-        route into single-bot mode. That is now rc 3, because the #1232 report
-        ledger guard reaches it: `now` lands in the rlog slot and a timestamp is
-        not a readable file. Closed by a DIFFERENT route than the one the old
-        docstring predicted (_reject_bot_slot on the bot slot), which is why the
-        assertion flips here rather than the test being retired.
-        """
-        dlog, rlog = self._rows(tmp_path)
-        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", dlog, rlog, "100000"])
-        assert dispatch_overdue.main() == 3
-        assert capsys.readouterr().out == ""
-
-    def test_single_bot_mode_bot_slot_is_STILL_ungated_with_a_real_ledger(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """The half #1232 does NOT close, kept as a live tripwire.
-
-        The guard above fires on the *ledger* slot, so it catches the forgotten
-        flag and nothing else. A path in the BOT slot beside a genuinely
-        readable ledger still parses, matches nothing, and returns rc 0 with no
-        output — byte-identical to a real empty result. Closing that is still
-        the one-line _reject_bot_slot call.
-
-        Asserts today's WRONG behaviour deliberately. When someone wires the
-        shape gate in, this FAILS — flip it then, do not delete it.
-        """
-        dlog, rlog = self._rows(tmp_path)
-        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", dlog, rlog, rlog])
-        assert dispatch_overdue.main() == 0
-        assert capsys.readouterr().out == ""
+    def test_an_unknown_mode_is_a_usage_error_that_names_the_modes(self, tmp_path, monkeypatch, capsys):
+        """The retired single-bot grammar (`<bot> <dlog> <rlog>`) must not fall
+        through to anything: a first positional that is not a mode is rc 2."""
+        p = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", _argv(p, "w1", "2000"))
+        assert dispatch_overdue.main() == 2
+        out = capsys.readouterr()
+        assert out.out == "" and "--open-task" in out.err
 
 
 class TestOpenScopeDisclosure:
     """#1187 — an empty result that names its own scope cannot be misread.
 
     The shape gate above kills the instance; this kills the class. A plausible
-    but WRONG bot — a typo, or a live name belonging to another fleet under the
-    #526 host-global/per-fleet join — passes every shape test and still returns
-    zero rows at rc 0. Coverage honesty applied to a read door: state the bound.
+    but WRONG bot — a typo, or a live name of another fleet — passes every
+    shape test and still returns zero rows at rc 0. Coverage honesty applied
+    to a read door: state the bound.
     """
 
-    def _logs(self, tmp_path, dispatches, reports):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, dispatches)
-        _write_jsonl(rlog, reports)
-        return str(dlog), str(rlog)
-
-    def test_empty_result_names_the_bot_it_filtered_on(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        dlog, rlog = self._logs(
-            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")], []
-        )
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open", "typo-bot", dlog, rlog]
-        )
+    def test_empty_result_names_the_bot_it_filtered_on(self, tmp_path, monkeypatch, capsys):
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")])
+        monkeypatch.setattr("sys.argv", _argv(p, "--open", "typo-bot"))
         assert dispatch_overdue.main() == 0
         out = capsys.readouterr()
         assert out.out == ""
         assert "typo-bot" in out.err and "0 open" in out.err
 
-    def test_scope_is_stated_on_a_NON_empty_result_too(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """Always, not only when empty. Under #526 a reader can be looking at
-        another fleet's rows; 'which bot' is part of reading the answer, and a
-        line that appears only on zero makes its own presence the signal."""
-        dlog, rlog = self._logs(
-            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")], []
-        )
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
-        )
+    def test_scope_is_stated_on_a_NON_empty_result_too(self, tmp_path, monkeypatch, capsys):
+        """Always, not only when empty. 'which bot' is part of reading the
+        answer, and a line that appears only on zero makes its own presence
+        the signal."""
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")])
+        monkeypatch.setattr("sys.argv", _argv(p, "--open", "w1"))
         assert dispatch_overdue.main() == 0
         out = capsys.readouterr()
         assert out.out == "100 1000 t-a\n"
         assert "w1" in out.err and "1 open" in out.err
 
     def test_scope_line_NEVER_reaches_stdout(self, tmp_path, monkeypatch, capsys):
-        """Load-bearing, not stylistic. report-back.sh:117 pipes this stdout
+        """Load-bearing, not stylistic. report-back.sh pipes this stdout
         through `awk {print $3}` to decide whether a supplied --task id is open,
         and only a NON-EMPTY open set may contradict the caller (#1146). On
         stdout the scope line becomes a phantom row whose field 3 is "->".
 
-        NOTE THE SHAPE: the empty log here is not incidental. A bot that holds
-        an open row still matches its own id — the phantom adds an entry rather
-        than displacing the real one — so that case stays clean and would read
-        as proof the placement is free. It bites with NOTHING open, where a
-        valid id meets an open set of exactly ["->"] and a correct report is
-        flagged `supplied-id-not-open`. Verified against the real report-back.sh
-        with the scope line moved to stdout.
+        NOTE THE SHAPE: the bot holding NOTHING open is not incidental. A bot
+        that holds an open row still matches its own id — the phantom adds an
+        entry rather than displacing the real one — so that case stays clean
+        and would read as proof the placement is free. It bites with nothing
+        open, where a valid id meets an open set of exactly ["->"] and a
+        correct report is flagged `supplied-id-not-open`.
 
         Assert the whole stream, so no header can slip in beside the rows.
         """
-        dlog, rlog = self._logs(tmp_path, [], [])
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
-        )
+        p = _land(tmp_path, [_dispatch("w9", 100, 1000, task_id="t-z")])   # the fleet exists; w1 holds nothing
+        monkeypatch.setattr("sys.argv", _argv(p, "--open", "w1"))
         assert dispatch_overdue.main() == 0
         out = capsys.readouterr()
         assert out.out == ""
         assert out.err != ""  # the disclosure went somewhere — just not stdout
 
-    def test_open_task_stays_silent_on_stdout_and_stderr(
+    def test_open_task_prints_one_id_or_nothing_and_discloses_on_stderr(
         self, tmp_path, monkeypatch, capsys
     ):
-        """The resolver is machine-consumed and prints one id or nothing. It
-        gets the shape gate but NOT the scope line: narration on every terminal
-        report-back fleet-wide would be noise with no reader."""
-        dlog, rlog = self._logs(tmp_path, [], [])
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open-task", "w1", dlog, rlog]
-        )
+        """The resolver is machine-consumed: one id or nothing on stdout. Its
+        answer is disclosed on stderr — `[source=plane]` — because the report
+        door discards stderr and a reader auditing by hand must be able to
+        see which side answered (the plane, now the only one)."""
+        p = _land(tmp_path, [_dispatch("w9", 100, 1000, task_id="t-z")])
+        monkeypatch.setattr("sys.argv", _argv(p, "--open-task", "w1"))
         assert dispatch_overdue.main() == 0
         out = capsys.readouterr()
-        assert out.out == "" and out.err == ""
+        assert out.out == "" and "[source=plane]" in out.err and "'w1'" in out.err
 
 
 class TestSupersession:
@@ -1058,41 +981,38 @@ class TestSupersession:
     dispatcher, never on a pattern inferred afterwards. Inference was measured against
     the real ledger and rejected: of 189 closed rows, 14 had a later row close first and
     were still answered after, 3 unambiguously genuine (work answered 6-7h late).
+
+    ON THE PLANE the declaration is a terminal `superseded` task event the
+    dispatch door lands on the retired assignment at re-dispatch; the matcher
+    reads it as any other terminal event. `_superseded_ids`' per-bot scoping
+    (#518) was the legacy matcher's; on the plane the scoping is the dispatch
+    door's lookup — see the R2a findings on #1467 — so the two "scoped by
+    bot" pins are retired from THIS suite rather than certified by a rig that
+    would be enforcing the rule itself.
     """
 
     NOW = 5000
 
     def _overdue(self, tmp_path, dispatches):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, dispatches)
-        _write_jsonl(rlog, [])
-        return dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW)
+        p = _land(tmp_path, dispatches)
+        return dispatch_overdue.overdue_all(self.NOW, fleet=F, root=str(p.root))
 
     def _both_open_doors(self, tmp_path, dispatches, bot="w1", reports=None):
         """(open list ids, resolver id) — the PRODUCT the class never asserted.
 
-        Every case above routes through `_overdue`, so supersession was pinned on
-        the deadline-bound path only. A helper returning one door would let the
-        same hole reopen shifted by one; this returns both because the defect was
-        the DISAGREEMENT between them, not either door's own behaviour.
+        A helper returning one door would let a hole reopen shifted by one;
+        this returns both because the #1357 defect was the DISAGREEMENT
+        between them, not either door's own behaviour.
         """
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, dispatches)
-        _write_jsonl(rlog, reports or [])
-        return (
-            [r[2] for r in dispatch_overdue.open_dispatches(bot, str(dlog), str(rlog))],
-            dispatch_overdue.open_task_id(bot, str(dlog), str(rlog)),
-        )
+        p = _land(tmp_path, dispatches, reports or [])
+        return [r[2] for r in _open(p, bot)], _head(p, bot)
 
     def test_an_explicitly_superseded_row_is_retired(self, tmp_path):
         """The stranded row goes quiet; the replacement stays accountable."""
-        out = self._overdue(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-100-old"),
-                _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
-            ],
-        )
+        out = self._overdue(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-100-old"),
+            _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+        ])
         ids = [row[3] for row in out.get("w1", [])]
         assert "t-100-old" not in ids, "the superseded row still pages"
         assert "t-200-new" in ids, (
@@ -1108,13 +1028,10 @@ class TestSupersession:
         This is what the oldest-first resolver exists to serve, and it is exactly the
         case timing-based inference got wrong.
         """
-        out = self._overdue(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-100-a"),
-                _dispatch("w1", 200, 1100, task_id="t-200-b"),
-            ],
-        )
+        out = self._overdue(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-100-a"),
+            _dispatch("w1", 200, 1100, task_id="t-200-b"),
+        ])
         ids = sorted(row[3] for row in out.get("w1", []))
         assert ids == ["t-100-a", "t-200-b"], (
             f"a queued dispatch was retired without any declaration: {ids}"
@@ -1125,42 +1042,15 @@ class TestSupersession:
         dropped task. Rows with no `supersedes` key at all must behave as before."""
         rows = [_dispatch("w1", 100, 1000, task_id="t-100-a")]
         assert "supersedes" not in rows[0]
-        assert [r[3] for r in self._overdue(tmp_path, rows).get("w1", [])] == [
-            "t-100-a"
-        ]
-
-    def test_supersedes_is_scoped_by_bot(self, tmp_path):
-        """One bot's dispatch must not retire another's row, however the id was typed —
-        the same scoping `_terminal_reported_ids` carries for the same reason (#518)."""
-        out = self._overdue(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-100-old"),
-                _dispatch("w2", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
-            ],
-        )
-        assert [r[3] for r in out.get("w1", [])] == ["t-100-old"], (
-            "w2's declaration silenced w1's dispatch"
-        )
+        assert [r[3] for r in self._overdue(tmp_path, rows).get("w1", [])] == ["t-100-a"]
 
     def test_an_empty_supersedes_retires_nothing(self, tmp_path):
         """The dispatcher always emits the key, so the common row carries
-        `supersedes: ""`. Empty must be falsy, not a wildcard.
-
-        HONEST LABEL: this documents an invariant it cannot currently violate. An empty
-        value can only match a row whose `task_id` is also empty, and such a row takes
-        the id-LESS branch above, so the pathological case is unreachable. Removing the
-        falsy guard leaves all 48 tests green — the mutation run proved that. The guard
-        stays as defence against a future caller that emits a placeholder rather than an
-        empty string; the test is a statement of intent, not a detector.
-        """
-        out = self._overdue(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-100-a", supersedes=""),
-                _dispatch("w1", 200, 1100, task_id="t-200-b", supersedes=""),
-            ],
-        )
+        `supersedes: ""`. Empty must be falsy, not a wildcard."""
+        out = self._overdue(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-100-a", supersedes=""),
+            _dispatch("w1", 200, 1100, task_id="t-200-b", supersedes=""),
+        ])
         assert sorted(r[3] for r in out.get("w1", [])) == ["t-100-a", "t-200-b"]
 
     def test_a_chain_of_re_dispatches_retires_every_link_but_the_last(self, tmp_path):
@@ -1169,59 +1059,28 @@ class TestSupersession:
         Each link names its immediate predecessor, so the chain collapses to the row
         that is actually live.
         """
-        out = self._overdue(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 200, task_id="t-1"),
-                _dispatch("w1", 300, 400, task_id="t-2", supersedes="t-1"),
-                _dispatch("w1", 500, 600, task_id="t-3", supersedes="t-2"),
-                _dispatch("w1", 700, 800, task_id="t-4", supersedes="t-3"),
-                _dispatch("w1", 900, 1000, task_id="t-5", supersedes="t-4"),
-            ],
-        )
+        out = self._overdue(tmp_path, [
+            _dispatch("w1", 100, 200, task_id="t-1"),
+            _dispatch("w1", 300, 400, task_id="t-2", supersedes="t-1"),
+            _dispatch("w1", 500, 600, task_id="t-3", supersedes="t-2"),
+            _dispatch("w1", 700, 800, task_id="t-4", supersedes="t-3"),
+            _dispatch("w1", 900, 1000, task_id="t-5", supersedes="t-4"),
+        ])
         assert [r[3] for r in out.get("w1", [])] == ["t-5"]
 
     # ------------------------------------------------------------------
     # #1357 — the open doors honour the same retirement the overdue path does.
-    #
-    # These are the cases whose ABSENCE let a live defect sit under a green
-    # suite. Supersession was tested (every case above) and `open_dispatches`
-    # was tested (TestOpenDispatches, ~90 lines) — never together, so the
-    # product went unasserted and the two doors disagreed about OPEN.
-    #
-    # A fix that merely wires `_superseded_ids` into `open_dispatches` passes
-    # the suite that also passed BEFORE the fix, so these were run against
-    # UNFIXED main (git archive of origin/main, this file grafted on) to check
-    # they are not the same certificate. Result — 3 failed, 8 passed:
-    #
-    #   FAILS on main   test_a_retired_row_is_gone_from_BOTH_open_doors
-    #                   test_the_two_doors_agree_on_what_retirement_means
-    #                   test_a_chain_leaves_no_phantom_at_the_head
-    #   PASSES on main  test_an_undeclared_queue_is_NOT_retired_from_the_open_doors
-    #                   test_supersedes_is_scoped_by_bot_on_the_open_doors_too
-    #
-    # Those last two are CONTROLS, not detectors, and passing in both arms is
-    # what makes them controls: they pin the boundary the fix must not cross
-    # (retire only on an explicit same-bot declaration). A control that failed
-    # on main would be testing the change instead of bounding it.
+    # Supersession and the open list were each tested, never together, so the
+    # two doors disagreed about OPEN under a green suite: a retired row was
+    # invisible to alerting and simultaneously the preferred close target.
     # ------------------------------------------------------------------
 
     def test_a_retired_row_is_gone_from_BOTH_open_doors(self, tmp_path):
-        """The core regression, stated as the product rather than as one door.
-
-        A retired row was simultaneously invisible to alerting (filtered by
-        `_classify_all`) and the PREFERRED close target (head of this list, which
-        is what `report-back.sh` resolves an id-less report to). So the next
-        id-less terminal report closed the row declared dead while the live
-        successor stranded — measured on four supersede pairs across three fleets.
-        """
-        ids, head = self._both_open_doors(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-100-old"),
-                _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
-            ],
-        )
+        """The core regression, stated as the product rather than as one door."""
+        ids, head = self._both_open_doors(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-100-old"),
+            _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+        ])
         assert ids == ["t-200-new"], f"the retired row is still listed open: {ids}"
         assert head == "t-200-new", (
             f"the resolver hands back the RETIRED row ({head}) — an id-less report "
@@ -1229,27 +1088,18 @@ class TestSupersession:
         )
 
     def test_the_two_doors_agree_on_what_retirement_means(self, tmp_path):
-        """The desync assertion — neither door alone can express this.
-
-        `dispatch-overdue.py` argues `--open-task` was made literally the head of
-        `--open`'s list because a resolver that could hand back an id the list
-        does not contain is a desync class. This is that class one level out:
-        OVERDUE and OPEN disagreeing about retirement, with the resolver
-        inheriting the wrong answer. Assert the agreement, not either side.
-        """
+        """The desync assertion — neither door alone can express this."""
         dispatches = [
             _dispatch("w1", 100, 1000, task_id="t-100-old"),
             _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
         ]
-        overdue_ids = {r[3] for r in self._overdue(tmp_path, dispatches).get("w1", [])}
-        open_ids, head = self._both_open_doors(tmp_path, dispatches)
+        overdue_ids = {r[3] for r in self._overdue(tmp_path / "o", dispatches).get("w1", [])}
+        open_ids, head = self._both_open_doors(tmp_path / "d", dispatches)
         assert "t-100-old" not in overdue_ids, (
             "positive control failed: the overdue path stopped retiring the row, "
             "so a green agreement assertion below would prove nothing"
         )
-        assert "t-100-old" not in set(open_ids), (
-            "OVERDUE retired the row and OPEN did not — the doors disagree"
-        )
+        assert "t-100-old" not in set(open_ids), "OVERDUE retired the row and OPEN did not — the doors disagree"
         assert head != "t-100-old", "the resolver inherited the wrong answer"
         assert set(overdue_ids) <= set(open_ids), (
             "open must stay a strict superset of overdue while sharing its "
@@ -1257,46 +1107,24 @@ class TestSupersession:
         )
 
     def test_an_undeclared_queue_is_NOT_retired_from_the_open_doors(self, tmp_path):
-        """The boundary, restated for the door that just gained the gate.
-
-        Retiring too eagerly turns a false-page bug into a dropped-task bug, and
-        on THIS door it would be worse than on the overdue one: the resolver
-        writes its answer into the ledger, so an over-broad gate silently marks
-        live work `completed`. Two dispatches, no declaration — both stay open,
-        oldest still first.
-        """
-        ids, head = self._both_open_doors(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-100-a"),
-                _dispatch("w1", 200, 1100, task_id="t-200-b"),
-            ],
-        )
+        """The boundary, restated for the door that carries the resolver: an
+        over-broad gate would silently mark live work `completed`. Two
+        dispatches, no declaration — both stay open, oldest still first."""
+        ids, head = self._both_open_doors(tmp_path, [
+            _dispatch("w1", 100, 1000, task_id="t-100-a"),
+            _dispatch("w1", 200, 1100, task_id="t-200-b"),
+        ])
         assert ids == ["t-100-a", "t-200-b"], f"a queued dispatch was retired: {ids}"
         assert head == "t-100-a", "FIFO resolution broke"
-
-    def test_supersedes_is_scoped_by_bot_on_the_open_doors_too(self, tmp_path):
-        """One bot's declaration must not retire another's row — the #518 scoping,
-        which is carried by `_superseded_ids` itself and so must survive being
-        consumed from a second call site."""
-        ids, head = self._both_open_doors(
-            tmp_path,
-            [
-                _dispatch("w1", 100, 1000, task_id="t-100-old"),
-                _dispatch("w2", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
-            ],
-        )
-        assert ids == ["t-100-old"], f"w2's declaration silenced w1's row: {ids}"
-        assert head == "t-100-old"
 
     def test_a_chain_leaves_no_phantom_at_the_head(self, tmp_path):
         """The sharpest live reproduction: nothing went wrong operationally.
 
         The manager superseded correctly at every hop and the worker reported
         both live rows with explicit ids, so both closed. The first row was
-        retired two hops back, will never be reported against, and was still the
-        head of the open list — so the bot's next id-less report closed a row
-        from three hours earlier. A longer chain left a longer phantom tail.
+        retired two hops back, will never be reported against, and was still
+        the head of the open list — so the bot's next id-less report closed a
+        row from three hours earlier.
         """
         ids, head = self._both_open_doors(
             tmp_path,
@@ -1328,11 +1156,13 @@ class TestUnassigned:
     T10 = "2026-05-27T10:00:00Z"
     E10 = int(_dt.datetime.fromisoformat(T10.replace("Z", "+00:00")).timestamp())
 
+    def _unassigned(self, p, now, threshold=0):
+        return dispatch_overdue.unassigned_all(now, threshold, fleet=F, root=str(p.root))
+
     def test_reported_and_never_retasked_is_flagged(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
-        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed")])
-        res = dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300)
+        p = _land(tmp_path, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)],
+                  [_report("eng-1", self.T10, "completed")])
+        res = self._unassigned(p, self.E10 + 7300)
         assert "eng-1" in res
         reported_at, idle, _tid, status = res["eng-1"]
         assert reported_at == self.E10
@@ -1342,110 +1172,67 @@ class TestUnassigned:
     def test_retasked_after_reporting_is_not_flagged(self, tmp_path):
         """The positive control. Without it, a check that fired on every
         terminal report would satisfy every other test in this class."""
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(
-            dlog,
-            [
-                _dispatch("eng-1", self.E10 - 3600, self.E10 - 3000),
-                _dispatch("eng-1", self.E10 + 60, self.E10 + 660),
-            ],
-        )
-        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed")])
-        assert (
-            dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300) == {}
-        )
+        p = _land(tmp_path, [
+            _dispatch("eng-1", self.E10 - 3600, self.E10 - 3000),
+            _dispatch("eng-1", self.E10 + 60, self.E10 + 660),
+        ], [_report("eng-1", self.T10, "completed")])
+        assert self._unassigned(p, self.E10 + 7300) == {}
 
     def test_five_stale_open_dispatches_do_not_mask_the_strand(self, tmp_path):
         """THE case the design exists for, and it is a real one.
 
         Six dispatches to one worker inside 2143s for a single evolving task;
         the worker answers only the last id, so five rows stay open afterwards.
-        Replayed against the real ledgers at successive cutoffs, this function
-        is silent through the busy stretch, raises at the 4797s gap that
-        follows, and goes silent again when the next dispatch lands — with all
-        five stale ids open throughout (vera, review of #1121).
-
         A predicate keyed on "has an open dispatch" reads those five as
         still-busy and never fires — the #1024 incident recurring inside its own
         watchdog. The fixture below is that shape, reduced.
         """
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(
-            dlog,
-            [
-                _dispatch(
-                    "eng-1",
-                    self.E10 - 2100 + i * 300,
-                    self.E10 - 1500 + i * 300,
-                    task_id=f"t-{i}",
-                )
-                for i in range(6)
-            ],
-        )
-        # Terminal report against the LAST id only; t-0..t-4 remain open.
-        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed", task_id="t-5")])
-        res = dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300)
-        assert "eng-1" in res, "five stale open rows masked a genuine strand"
+        p = _land(tmp_path, [
+            _dispatch("eng-1", self.E10 - 2100 + i * 300, self.E10 - 1500 + i * 300, task_id=f"t-{i}")
+            for i in range(6)
+        ], [_report("eng-1", self.T10, "completed", task_id="t-5")])   # t-0..t-4 remain open
+        assert "eng-1" in self._unassigned(p, self.E10 + 7300), "five stale open rows masked a genuine strand"
 
     def test_progress_as_newest_report_is_not_flagged(self, tmp_path):
         """Still working, or stalled mid-task — the stall is overdue's to report."""
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
-        _write_jsonl(
-            rlog,
-            [
-                _report("eng-1", "2026-05-27T09:00:00Z", "completed"),
-                _report("eng-1", self.T10, "progress"),
-            ],
-        )
-        assert (
-            dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300) == {}
-        )
+        p = _land(tmp_path, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)],
+                  [_report("eng-1", "2026-05-27T09:00:00Z", "completed"),
+                   _report("eng-1", self.T10, "progress")])
+        assert self._unassigned(p, self.E10 + 7300) == {}
 
     def test_a_bot_that_never_reported_is_not_flagged(self, tmp_path):
         """No terminal report means nothing came back, so there is nothing to be
         unassigned FROM. That case belongs to overdue_all, not here."""
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
-        _write_jsonl(rlog, [])
-        assert (
-            dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300) == {}
-        )
+        p = _land(tmp_path, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
+        assert self._unassigned(p, self.E10 + 7300) == {}
 
     def test_threshold_filters_when_asked(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
-        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed")])
+        p = _land(tmp_path, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)],
+                  [_report("eng-1", self.T10, "completed")])
         now = self.E10 + 100
-        assert dispatch_overdue.unassigned_all(str(dlog), str(rlog), now, 7200) == {}
+        assert self._unassigned(p, now, 7200) == {}
         # ...and defaults to reporting everything, because fleet-pulse applies
         # the threshold per bot and one scan must serve differently-tuned bots.
-        assert "eng-1" in dispatch_overdue.unassigned_all(str(dlog), str(rlog), now)
+        assert "eng-1" in self._unassigned(p, now)
 
     def test_never_dispatched_bot_that_reported_is_flagged(self, tmp_path):
-        """No dispatch row at all is still an unassigned worker, not an error."""
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [])
-        _write_jsonl(rlog, [_report("eng-1", self.T10, "blocked")])
-        res = dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300)
+        """No dispatch at all is still an unassigned worker, not an error."""
+        p = _land(tmp_path, [], [_report("eng-1", self.T10, "blocked")])
+        res = self._unassigned(p, self.E10 + 7300)
         assert res["eng-1"][3] == "blocked"
 
     def test_bot_scoping(self, tmp_path):
         """One bot's dispatch must not clear another's strand."""
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("eng-2", self.E10 + 60, self.E10 + 660)])
-        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed")])
-        assert "eng-1" in dispatch_overdue.unassigned_all(
-            str(dlog), str(rlog), self.E10 + 7300
-        )
+        p = _land(tmp_path, [_dispatch("eng-2", self.E10 + 60, self.E10 + 660)],
+                  [_report("eng-1", self.T10, "completed")])
+        assert "eng-1" in self._unassigned(p, self.E10 + 7300)
 
-    def test_missing_ledgers_are_empty_not_fatal(self, tmp_path):
-        assert (
-            dispatch_overdue.unassigned_all(
-                str(tmp_path / "nope.jsonl"), str(tmp_path / "nada.jsonl"), self.E10
-            )
-            == {}
-        )
+    def test_no_plane_is_unreachable_not_empty(self, tmp_path):
+        """The retired `test_missing_ledgers_are_empty_not_fatal` inverted:
+        two missing ledgers used to read as an idle-free fleet; a missing
+        plane REFUSES — an empty answer here would read as 'no idle workers'."""
+        with pytest.raises(dispatch_overdue.PlaneUnreachable):
+            dispatch_overdue.unassigned_all(self.E10, fleet=F, root=str(tmp_path / "no-plane"))
 
 
 class TestOrphansRefusesWhenItCannotLook:
@@ -1463,19 +1250,16 @@ class TestOrphansRefusesWhenItCannotLook:
 
     NOW = 3000
 
-    def _logs(self, tmp_path):
-        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
-        _write_jsonl(dlog, [_dispatch("w1", 100, 1000, task_id="t-1")])
-        _write_jsonl(rlog, [])
-        return str(dlog), str(rlog)
+    def _plane(self, tmp_path):
+        return _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-1")])
 
-    def _main(self, argv, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py"] + argv)
+    def _main(self, p, argv, monkeypatch):
+        monkeypatch.setattr("sys.argv", _argv(p, *argv))
         return dispatch_overdue.main()
 
     def test_no_bots_dir_refuses_at_rc_three(self, tmp_path, monkeypatch, capsys):
-        dlog, rlog = self._logs(tmp_path)
-        rc = self._main(["--orphans", dlog, rlog, str(self.NOW)], monkeypatch)
+        p = self._plane(tmp_path)
+        rc = self._main(p, ["--orphans", str(self.NOW)], monkeypatch)
         assert rc == 3
         assert "cannot determine orphans without --bots-dir" in capsys.readouterr().err
 
@@ -1483,18 +1267,8 @@ class TestOrphansRefusesWhenItCannotLook:
         """The second silent state, and the one a real caller reaches: a
         --bots-dir that resolves to nothing (a moved fleet, a wrong root) looked
         identical to a healthy fleet with no orphans."""
-        dlog, rlog = self._logs(tmp_path)
-        rc = self._main(
-            [
-                "--orphans",
-                dlog,
-                rlog,
-                str(self.NOW),
-                "--bots-dir",
-                str(tmp_path / "no-such-dir"),
-            ],
-            monkeypatch,
-        )
+        p = self._plane(tmp_path)
+        rc = self._main(p, ["--orphans", str(self.NOW), "--bots-dir", str(tmp_path / "no-such-dir")], monkeypatch)
         assert rc == 3
         assert "cannot read the bots dir" in capsys.readouterr().err
 
@@ -1505,20 +1279,9 @@ class TestOrphansRefusesWhenItCannotLook:
         emptiness, is the line — a fleet that genuinely lost nothing must still
         get the true answer, or the fix has traded a false all-clear for a
         refusal that fires on healthy fleets."""
-        dlog, rlog = self._logs(tmp_path)
-        bots = tmp_path / "bots" / "w1" / "data"
-        bots.mkdir(parents=True)
-        rc = self._main(
-            [
-                "--orphans",
-                dlog,
-                rlog,
-                str(self.NOW),
-                "--bots-dir",
-                str(tmp_path / "bots"),
-            ],
-            monkeypatch,
-        )
+        p = self._plane(tmp_path)
+        (tmp_path / "bots" / "w1" / "data").mkdir(parents=True)
+        rc = self._main(p, ["--orphans", str(self.NOW), "--bots-dir", str(tmp_path / "bots")], monkeypatch)
         cap = capsys.readouterr()
         assert rc == 0
         assert cap.out == ""
@@ -1527,45 +1290,33 @@ class TestOrphansRefusesWhenItCannotLook:
         """The positive control on the other side: the mode must still find what
         it exists to find. Without this, every assertion above would hold on a
         command that had stopped classifying anything at all."""
-        dlog, rlog = self._logs(tmp_path)
+        p = self._plane(tmp_path)
         data = tmp_path / "bots" / "w1" / "data"
         data.mkdir(parents=True)
         spawn = data / ".spawn"
         spawn.write_text("")
         os.utime(spawn, (500, 500))  # respawned AFTER the dispatch at 100
-        rc = self._main(
-            [
-                "--orphans",
-                dlog,
-                rlog,
-                str(self.NOW),
-                "--bots-dir",
-                str(tmp_path / "bots"),
-            ],
-            monkeypatch,
-        )
+        rc = self._main(p, ["--orphans", str(self.NOW), "--bots-dir", str(tmp_path / "bots")], monkeypatch)
         cap = capsys.readouterr()
         assert rc == 0
         assert "t-1" in cap.out
 
-    def test_rc_three_is_distinct_from_the_usage_code(self, tmp_path, monkeypatch):
+    def test_rc_three_is_distinct_from_the_usage_code(self, tmp_path, monkeypatch, capsys):
         """rc 2 means "you called me wrong"; rc 3 means "I cannot answer that".
         Collapsing them would re-create this very bug one level up — a caller
         could no longer tell a typo from an unreachable instrument."""
-        dlog, rlog = self._logs(tmp_path)
-        cannot_answer = self._main(["--orphans", dlog, rlog], monkeypatch)
-        malformed = self._main(["--orphans", dlog], monkeypatch)
+        p = self._plane(tmp_path)
+        cannot_answer = self._main(p, ["--orphans", str(self.NOW)], monkeypatch)
+        malformed = self._main(p, ["--orphans", "not-an-instant"], monkeypatch)
+        capsys.readouterr()
         assert cannot_answer == 3
         assert malformed == 2
 
-    def test_all_mode_is_untouched_by_the_orphan_refusal(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """--all takes the same positional grammar and legitimately runs without
-        a bots dir (it just cannot split orphans out). Gating it would break the
-        watchdog's primary call."""
-        dlog, rlog = self._logs(tmp_path)
-        rc = self._main(["--all", dlog, rlog, str(self.NOW)], monkeypatch)
+    def test_all_mode_is_untouched_by_the_orphan_refusal(self, tmp_path, monkeypatch, capsys):
+        """--all legitimately runs without a bots dir (it just cannot split
+        orphans out). Gating it would break the watchdog's primary call."""
+        p = self._plane(tmp_path)
+        rc = self._main(p, ["--all", str(self.NOW)], monkeypatch)
         cap = capsys.readouterr()
         assert rc == 0
         assert "t-1" in cap.out
@@ -1574,9 +1325,10 @@ class TestOrphansRefusesWhenItCannotLook:
         """The refusal lives in the CLI mode, NOT the join. brief.py imports
         orphaned_all directly and labels this gap its own way, so changing the
         function would have broken a caller that already had it right."""
-        dlog, rlog = self._logs(tmp_path)
-        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW) == {}
-        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=None) == {}
+        p = self._plane(tmp_path)
+        kw = {"fleet": F, "root": str(p.root)}
+        assert dispatch_overdue.orphaned_all(self.NOW, **kw) == {}
+        assert dispatch_overdue.orphaned_all(self.NOW, bots_dir=None, **kw) == {}
 
 
 def test_orphans_refuses_on_an_unlistable_bots_dir(tmp_path):
@@ -1586,49 +1338,18 @@ def test_orphans_refuses_on_an_unlistable_bots_dir(tmp_path):
     zero stdout, empty stderr. orphan-ness is decided by reaching
     <bots_dir>/<bot>/data/.spawn, which silently fails for every bot.
     """
-    import json as _json
-    import os as _os
-    import subprocess
-    import sys
-
-    if _os.geteuid() == 0:
+    if os.geteuid() == 0:
         pytest.skip("root ignores the mode bits")
+    p = _land(tmp_path, [_dispatch("a", 1786000000, 1786000600, task_id="t-1")])
     bots = tmp_path / "bots"
     (bots / "a" / "data").mkdir(parents=True)
     (bots / "a" / "data" / ".spawn").write_text("")
-    dlog = tmp_path / "d.jsonl"
-    rlog = tmp_path / "r.jsonl"
-    dlog.write_text(
-        _json.dumps(
-            {
-                "ts": "2026-08-10T00:00:00Z",
-                "bot": "a",
-                "task_id": "t-1",
-                "dispatched_at": 1786000000,
-                "expected_by": 1786000600,
-            }
-        )
-        + "\n"
-    )
-    rlog.write_text("")
-    from pathlib import Path as _P
-
-    script = _P(__file__).resolve().parent.parent / "lib" / "dispatch-overdue.py"
     bots.chmod(0o000)
     try:
         proc = subprocess.run(
-            [
-                sys.executable,
-                str(script),
-                "--orphans",
-                str(dlog),
-                str(rlog),
-                "1787000000",
-                "--bots-dir",
-                str(bots),
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, str(MATCHER), "--orphans", "1787000000", "--bots-dir", str(bots),
+             "--fleet", F, "--root", str(p.root)],
+            capture_output=True, text=True,
         )
     finally:
         bots.chmod(0o755)
@@ -1637,179 +1358,47 @@ def test_orphans_refuses_on_an_unlistable_bots_dir(tmp_path):
     assert "unlistable" in proc.stderr.lower() or "cannot" in proc.stderr.lower()
 
 
-class TestReportLedgerRefusal:
-    """#1232 — a reader that cannot reach its report ledger must not answer.
-
-    The join closes a dispatch by finding its terminal report. With no readable
-    ledger there is nothing to join against, so EVERY id'd row comes back open
-    — indistinguishable from a fleet that closed nothing. Three managers read
-    inflated counts for six hours; on one fleet the inflated number EQUALLED
-    the true one, so no amount of inspection could have caught it there.
-
-    Exactly the class :830 already guarded for --orphans, pointed at the input
-    people actually pass by hand.
+class TestUnreachableIsNotEmpty:
+    """The plane's twin of the retired report-ledger refusals (#1232's class):
+    a reader that cannot reach its source must not answer as if it had found
+    nothing. rc 3, nothing on stdout — stdout is parsed (fleet-pulse's caches,
+    report-back's `awk`), so the refusal rides stderr and the rc.
     """
 
-    def _rows(self, tmp_path):
-        dlog = tmp_path / "d.jsonl"
-        rlog = tmp_path / "r.jsonl"
-        dlog.write_text(
-            '{"ts":"2026-09-01T00:00:00Z","bot":"w1","task_id":"t-1",'
-            '"dispatched_at":1000,"expected_by":2000}\n'
-        )
-        rlog.write_text("")
-        return str(dlog), str(rlog)
-
-    @pytest.mark.parametrize(
-        "argv_tail",
-        [
-            ["--open", "w1", "DLOG", "MISSING"],
-            ["w1", "DLOG", "MISSING"],  # single-bot mode
-        ],
-        ids=["open", "single-bot"],
-    )
-    def test_absent_ledger_refuses_at_rc3_with_nothing_on_stdout(
-        self, tmp_path, monkeypatch, capsys, argv_tail
-    ):
-        """rc carries the refusal; the TEXT must never touch stdout.
-
-        Placement is measured, not stylistic: report-back.sh:117 pipes --open
-        through `awk {print $3}` and fleet-pulse.sh reads this stdout into a
-        cache. A line printed there becomes a phantom row.
-        """
-        dlog, _ = self._rows(tmp_path)
-        argv = [a.replace("DLOG", dlog).replace("MISSING", str(tmp_path / "nope.jsonl"))
-                for a in argv_tail]
-        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", *argv])
+    @pytest.mark.parametrize("argv", [["--open", "w1"], ["--open-task", "w1"], ["--all", "5000"],
+                                      ["--unassigned", "5000"]], ids=["open", "open-task", "all", "unassigned"])
+    def test_no_plane_db_refuses_at_rc3_with_nothing_on_stdout(self, tmp_path, monkeypatch, capsys, argv):
+        root = plane_root(tmp_path)                                   # the home exists; no db was ever created
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", *argv, "--fleet", F, "--root", str(root)])
         assert dispatch_overdue.main() == 3
         cap = capsys.readouterr()
         assert cap.out == "", "refusal text on stdout becomes a phantom row"
-        assert "cannot read the report ledger" in cap.err
+        assert "UNREACHABLE" in cap.err
 
-    def test_open_task_PROCEEDS_on_an_absent_ledger(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """The #835 resolver must survive the never-reported fleet.
-
-        A fleet that has never reported has no ledger file, and the FIRST
-        report is exactly the call that must work. Absence makes this door's
-        answer MORE certain, not less: nothing has been closed, so the head of
-        the open list is correct by construction.
-
-        Refusing here is what broke three validate-bot-change.sh assertions.
-        """
-        now = int(time.time())                       # a YOUNG head: the first report of a new fleet
-        dlog = tmp_path / "young-dispatch.jsonl"
-        _write_jsonl(dlog, [_dispatch("w1", now - 60, now + 1000, task_id="t-1")])
-        dlog = str(dlog)
-        monkeypatch.setattr(
-            "sys.argv",
-            ["dispatch-overdue.py", "--open-task", "w1", dlog,
-             str(tmp_path / "never-reported.jsonl")],
-        )
-        assert dispatch_overdue.main() == 0
-        assert capsys.readouterr().out.strip() == "t-1"
-
-    def test_open_task_resolves_NOTHING_on_an_absent_ledger_beside_a_stale_head(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """#1418 (cutover chunk 6a): an ABSENT ledger beside an id'd dispatch
-        OLDER than the expiry cap is a wrong path, not a first report a day
-        late — the head would be a long-closed id handed back as the one to
-        close (measured: seven-day-old finished work on three of seven bots).
-        Nothing, disclosed on stderr, rc 0 — the caller degrades to an id-less
-        report exactly as its fail-open contract says."""
-        dlog, _ = self._rows(tmp_path)                 # dispatched_at=100: ancient
-        monkeypatch.setattr(
-            "sys.argv",
-            ["dispatch-overdue.py", "--open-task", "w1", dlog,
-             str(tmp_path / "never-reported.jsonl")],
-        )
-        assert dispatch_overdue.main() == 0
-        out = capsys.readouterr()
-        assert out.out.strip() == "" and "#1418" in out.err and "stale head" in out.err
-
-    def test_a_disabled_cap_disables_the_stale_head_rule_too(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """DISPATCH_OVERDUE_MAX_AGE_S <= 0 means NO expiry cap everywhere in
-        this file; the #1418 rule honours it (a fleet that disabled the cap
-        keeps its first-report resolution)."""
-        dlog, _ = self._rows(tmp_path)
-        monkeypatch.setenv("DISPATCH_OVERDUE_MAX_AGE_S", "0")
-        monkeypatch.setattr(
-            "sys.argv",
-            ["dispatch-overdue.py", "--open-task", "w1", dlog,
-             str(tmp_path / "never-reported.jsonl")],
-        )
-        assert dispatch_overdue.main() == 0
-        assert capsys.readouterr().out.strip() == "t-1"
-
-    def test_open_task_STILL_refuses_when_the_ledger_is_unopenable(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """The other absence. Rows exist that cannot be read, so some are
-        certainly closed and the head may be an already-CLOSED row — resolving
-        would stamp a false closure. Degrading to an id-less report is strictly
-        better, so this one DOES refuse."""
-        dlog, rlog = self._rows(tmp_path)
-        os.chmod(rlog, 0o000)
-        try:
-            if os.access(rlog, os.R_OK):
-                pytest.skip("cannot make a file unreadable as this user")
-            monkeypatch.setattr(
-                "sys.argv", ["dispatch-overdue.py", "--open-task", "w1", dlog, rlog]
-            )
-            assert dispatch_overdue.main() == 3
-            assert capsys.readouterr().out == ""
-        finally:
-            os.chmod(rlog, 0o644)
-
-    def test_an_EXISTING_but_empty_ledger_still_answers(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """The line is PRESENCE, not emptiness.
-
-        A ledger holding zero rows is a fleet that has not reported yet, and
-        "every dispatch is still open" is TRUE for it. Refusing here would
-        trade a false all-clear for a false outage.
-        """
-        dlog, rlog = self._rows(tmp_path)
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
-        )
-        assert dispatch_overdue.main() == 0
-        assert capsys.readouterr().out.strip() != ""
-
-    def test_present_but_unopenable_refuses(self, tmp_path, monkeypatch, capsys):
-        """Openability, not is_file(): a path that stats fine and then raises is
-        the mode that takes out a read door, and a stat-only probe certifies it."""
-        dlog, rlog = self._rows(tmp_path)
-        os.chmod(rlog, 0o000)
-        try:
-            if os.access(rlog, os.R_OK):  # running as root — probe cannot fire
-                pytest.skip("cannot make a file unreadable as this user")
-            monkeypatch.setattr(
-                "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
-            )
-            assert dispatch_overdue.main() == 3
-            assert "cannot be opened" in capsys.readouterr().err
-        finally:
-            os.chmod(rlog, 0o644)
-
-    def test_a_directory_reports_NOT_A_FILE_not_a_permission_problem(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """is_file() stays the FIRST gate. IsADirectoryError is an OSError, so
-        probing first would report a directory as unreadable and send someone
-        to run chmod on a path that is simply not a file."""
-        dlog, _ = self._rows(tmp_path)
-        d = tmp_path / "isadir.jsonl"
-        d.mkdir()
-        monkeypatch.setattr(
-            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, str(d)]
-        )
+    def test_a_fleet_the_plane_never_saw_refuses_too(self, tmp_path, monkeypatch, capsys):
+        """A schema-valid plane that holds no bot of the named fleet is a wrong
+        root or a fleet it never saw — 'nothing open' from it would be absence
+        read as clean (#1014's class)."""
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")])
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", "--open", "w1", "--fleet", "ghost", "--root", str(p.root)])
         assert dispatch_overdue.main() == 3
-        err = capsys.readouterr().err
-        assert "is not a file" in err and "cannot be opened" not in err
+        cap = capsys.readouterr()
+        assert cap.out == "" and "holds no bot of fleet 'ghost'" in cap.err
 
+    def test_no_fleet_and_no_root_is_a_refusal_not_an_empty_answer(self, tmp_path, monkeypatch, capsys):
+        for k in ("CLAUDLOBBY_FLEET", "FLEET_NAME", "CLAUDLOBBY_ROOT"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", "--all", "5000"])
+        assert dispatch_overdue.main() == 3
+        cap = capsys.readouterr()
+        assert cap.out == "" and "needs a fleet" in cap.err
+
+    def test_the_carriers_name_the_plane_when_the_flags_are_absent(self, tmp_path, monkeypatch, capsys):
+        """The timer units stamp CLAUDLOBBY_FLEET and CLAUDLOBBY_ROOT; a session
+        carries FLEET_NAME — the matcher reads them exactly as a bare call does."""
+        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")])
+        monkeypatch.setenv("CLAUDLOBBY_FLEET", F)
+        monkeypatch.setenv("CLAUDLOBBY_ROOT", str(p.root))
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", "--open", "w1"])
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out == "100 1000 t-a\n"

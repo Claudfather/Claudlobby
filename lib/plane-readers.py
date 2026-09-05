@@ -4,14 +4,14 @@
 
 The matcher (``dispatch-overdue.py``) is a stdlib script every consumer shells,
 so its plane source cannot import the package (the ``plane-lookup.py`` /
-``plane-shadow-check.py`` precedent — both now import THIS module's ``connect``
+the retired shadow check's precedent — every stdlib door imports THIS module's ``connect``
 so the read-only open, its schema probe and its transient retry live once).
 This module is the stdlib twin of the package definitions — keep them in step
 (the open SQL is pinned byte-identical):
 
 - ``open_rows``     ↔ ``claudlobby.plane.queries.OPEN_ASSIGNMENTS_AT_SQL`` +
-                      ``claudlobby.plane.shadow.plane_open``
-- ``overdue_rows``  ↔ ``claudlobby.plane.shadow.plane_overdue`` (deadline
+                      the plane's own open set (`queries.OPEN_ASSIGNMENTS_AT_SQL`)
+- ``overdue_rows``  ↔ the watchdog's overdue rules (deadline
                       passed, the expiry cap, the bot's own ``progress`` inside
                       the grace — the watchdog's rules, mirrored; id-less rows
                       are KEPT, as that reader keeps them)
@@ -110,9 +110,17 @@ OPEN_SQL = (
     '.occurred_at <= ?))))) ORDER BY a.occurred_at, a.ingest_seq'
 )
 ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
+# The bot's last sign of life: a linked `progress` task event OR the
+# `report_status` marker an id-less progress report lands on the actor (the
+# legacy grace deferred on any progress report BY BOT, and a progress report
+# resolves no id — F18 R2a). Params: (actor, at, actor, at).
 LAST_PROGRESS_SQL = (
-    "SELECT MAX(e.occurred_at) FROM events e WHERE e.kind = 'task' AND e.event = 'progress'"
+    "SELECT MAX(t) FROM ("
+    "SELECT e.occurred_at AS t FROM events e WHERE e.kind = 'task' AND e.event = 'progress'"
     " AND e.actor_uid = ? AND e.occurred_at <= ?"
+    " UNION ALL"
+    " SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = 'report_status'"
+    " AND e.subject_uid = ? AND json_extract(e.detail, '$.status') = 'progress' AND e.occurred_at <= ?)"
 )
 # Twin of cutover.LATEST_DECLARED_SQL: the fleet is matched on the anchor
 # COLUMN first (survives a truncated detail), the detail's fleet second.
@@ -232,7 +240,7 @@ def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, ma
     last_progress = None
     actor = (entry or {}).get("actor")
     if progress_grace > 0 and actor:
-        row = conn.execute(LAST_PROGRESS_SQL, (actor, at)).fetchone()
+        row = conn.execute(LAST_PROGRESS_SQL, (actor, at, actor, at)).fetchone()
         last_progress = _epoch(row[0]) if row and row[0] else None
     out: list[tuple[int, int, int, Optional[str]]] = []
     for da, exp, tid in rows:

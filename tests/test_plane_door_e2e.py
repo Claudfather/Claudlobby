@@ -375,16 +375,12 @@ def test_an_idless_report_answers_open_idless_dispatches_through_the_real_doors(
     task_id = _plane_row(tmp_path)["task_id"]
     r = _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "what is the retry logic"', env)
     assert r.returncode == 0, r.stderr
-    # the matcher's two positional ledger slots: the retired ledgers' paths,
-    # absent (R2 of the closure removes the slots)
-    dlog = tmp_path / "state" / "dispatch-log.jsonl"
-    rlog = tmp_path / "runtime" / "fleet" / "report-back.jsonl"
     r = _bash(f'"{libdir}/report-back.sh" w1 progress "looking"', env)     # a non-terminal report first
     assert r.returncode == 0, r.stderr
-    assert not dlog.exists() and not rlog.exists()
-    matcher = [sys.executable, str(libdir / "dispatch-overdue.py"), "--open-task", "w1", str(dlog), str(rlog)]
-    mx = {**env, "PLANE_READ_OPEN_TASK": "0"}
-    before_p = _sp.run(matcher + ["--source", "plane", "--fleet", "e2e-fleet"], capture_output=True, text=True, env=mx)
+    matcher = [sys.executable, str(libdir / "dispatch-overdue.py"), "--open-task", "w1",
+               "--fleet", "e2e-fleet", "--root", str(tmp_path)]
+    mx = dict(env)
+    before_p = _sp.run(matcher, capture_output=True, text=True, env=mx)
     assert before_p.stdout == "", before_p.stderr                       # the id-less guard
     r = _bash(f'"{libdir}/report-back.sh" w1 completed "done with the query"', env)      # no --task: id-less
     assert r.returncode == 0, r.stderr
@@ -394,7 +390,7 @@ def test_an_idless_report_answers_open_idless_dispatches_through_the_real_doors(
         " WHERE t.kind='task' AND t.event='completed'").fetchall()
     conn.close()
     assert [(x["event"], x["source_ref"][:len("dispatch-log:sha:")]) for x in closed] == [("completed", "dispatch-log:sha:")]
-    after_p = _sp.run(matcher + ["--source", "plane", "--fleet", "e2e-fleet"], capture_output=True, text=True, env=mx)
+    after_p = _sp.run(matcher, capture_output=True, text=True, env=mx)
     assert after_p.stdout.strip() == task_id, after_p.stderr
     assert "[source=plane]" in after_p.stderr
 
@@ -416,8 +412,15 @@ def test_a_terminal_bare_note_lands_its_status_marker_through_the_real_door(tmp_
     conn.close()
     assert n_task == 0 and comm is not None
     assert tuple(marker) == ("actor", comm["sender_alias"], f"report-back:{comm['msg_id']}", "completed")
-    r2 = _bash(f'"{libdir}/report-back.sh" w1 progress "still looking"', env)     # progress: no marker
+    # F18 R2a: an id-less PROGRESS report lands a marker too — the overdue
+    # reader's progress grace reads it (the legacy grace deferred on any
+    # progress report by bot, and a progress report resolves no id). The
+    # idle-worker check reads only the terminal ones.
+    r2 = _bash(f'"{libdir}/report-back.sh" w1 progress "still looking"', env)
     assert r2.returncode == 0
     conn = connect(db_path(tmp_path))
-    assert conn.execute("SELECT COUNT(*) FROM events WHERE kind='system' AND event='report_status'").fetchone()[0] == 1
+    statuses = [row[0] for row in conn.execute(
+        "SELECT json_extract(detail,'$.status') FROM events WHERE kind='system' AND event='report_status'"
+        " ORDER BY occurred_at").fetchall()]
     conn.close()
+    assert statuses == ["completed", "progress"]

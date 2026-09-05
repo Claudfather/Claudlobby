@@ -12,16 +12,30 @@ must not claim to. It is **does it stay quiet enough to be worth reading**, and
     picks a row. Oldest-open-first would have produced the SAME wrong pairing in
     the filed instance, so "helpfully resolve it" is measurably no better here,
     and blanket-closing older rows is #447.
+
+F18 closure (R2a): the hint reads the PLANE and nothing else — the open rows
+through the matcher (`dispatch-overdue.py::open_dispatches`, the plane's own
+open set) and the task texts through the stdlib reader's `task_texts` (the
+work item's title, which IS the dispatch text). Every fixture below lands its
+dispatches on a plane under a throwaway root; the fleet and the root reach the
+door through the carriers every session and timer carries (CLAUDLOBBY_FLEET /
+CLAUDLOBBY_ROOT). There is no file to read and no file-based pin left.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from claudlobby.plane.emit_api import emit_batch
+from tests.plane_fixtures import plane_root
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
+FLEET = "f"
 
 
 def _load(name: str, mod_name: str):
@@ -35,28 +49,57 @@ def _load(name: str, mod_name: str):
 hint_mod = _load("dispatch-supersede-hint.py", "dispatch_supersede_hint")
 
 
-def _write(path: Path, rows: list[dict]) -> str:
-    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    return str(path)
+def _iso(epoch: int) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
 
 
-def _dispatch(bot, tid, task, da=1000, eb=99999):
-    return {
-        "ts": "2026-08-12T10:00:00Z",
-        "manager": "m",
-        "bot": bot,
-        "task_id": tid,
-        "task": task,
-        "dispatched_at": da,
-        "expected_by": eb,
-    }
+_SEQ = [0]
 
 
-def _fixture(tmp_path, dispatches, reports=()):
-    return (
-        _write(tmp_path / "d.jsonl", dispatches),
-        _write(tmp_path / "r.jsonl", list(reports)),
-    )
+def _dispatch(root: Path, bot: str, tid: str, task: str, da: int = 1_800_000_000, eb: int = 1_900_000_000):
+    """One dispatch as the live door lands it — work item (its title IS the
+    task text), assignment (keyed `dispatch-log:<tid>`), communication."""
+    _SEQ[0] += 1
+    n = f"{_SEQ[0]:x}"
+    wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
+    ref = f"dispatch-log:{tid}"
+    ts = _iso(da)
+    out = emit_batch(root, [
+        {"event_type": "work_item", "emitter": "dispatch-task", "fleet": FLEET,
+         "source_ref": ref, "occurred_at": ts,
+         "payload": {"work_item_id": wi, "title": task, "created_by": f"bot:{FLEET}/m"}},
+        {"event_type": "assignment", "emitter": "dispatch-task", "fleet": FLEET,
+         "source_ref": ref, "occurred_at": ts,
+         "payload": {"assignment_id": asg, "work_item_id": wi, "assignee": f"bot:{FLEET}/{bot}",
+                     "assigned_by": f"bot:{FLEET}/m", "dispatch_msg_id": msg, "expected_by": _iso(eb)}},
+        {"event_type": "communication", "emitter": "dispatch-task", "fleet": FLEET,
+         "source_ref": ref, "occurred_at": ts,
+         "payload": {"msg_id": msg, "sender": f"bot:{FLEET}/m", "recipient": f"bot:{FLEET}/{bot}",
+                     "message_class": "task_request", "command_type": "task",
+                     "work_item_id": wi, "assignment_id": asg, "body": task}}])
+    assert all(o.status == "committed" for o in out), out
+    return wi, asg
+
+
+def _close(root: Path, bot: str, wi: str, asg: str, ts: str = "2026-08-12T10:30:00Z"):
+    """The terminal report the real report door lands for the assignment."""
+    _SEQ[0] += 1
+    msg = f"msg_{'e' * 24}{_SEQ[0]:0>8x}"
+    out = emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": FLEET,
+                             "source_ref": f"report-back:{msg}", "occurred_at": ts,
+                             "payload": {"work_item_id": wi, "assignment_id": asg, "event": "completed",
+                                         "actor": f"bot:{FLEET}/{bot}"}}])
+    assert out[0].status == "committed", out
+
+
+@pytest.fixture
+def root(tmp_path: Path, monkeypatch) -> Path:
+    """A plane root, named to the door through the carriers a session carries."""
+    r = plane_root(tmp_path)
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(r))
+    monkeypatch.setenv("CLAUDLOBBY_FLEET", FLEET)
+    monkeypatch.delenv("FLEET_NAME", raising=False)
+    return r
 
 
 # ------------------------------------------------------------------ references
@@ -90,10 +133,10 @@ def test_ref_from_url_takes_the_trailing_number():
 
 
 def test_the_url_form_is_only_applied_to_the_incoming_dispatch():
-    """The stored `task` field never contains the envelope's `ref:` URL.
+    """The stored task text never contains the envelope's `ref:` URL.
 
     `dispatch-task.sh` assembles the envelope separately from the payload it
-    stores, so a `ref:https?://…` pattern matched **0 of 463** real rows. It was
+    records, so a `ref:https?://…` pattern matched **0 of 463** real rows. It was
     dead code in the first cut of the helper and only running it against the real
     ledger showed that. `refs()` is therefore hash-only, and the URL form is a
     separate function applied to the NEW dispatch, where the value does exist.
@@ -105,16 +148,11 @@ def test_the_url_form_is_only_applied_to_the_incoming_dispatch():
 # ------------------------------------------------------------------- the tiers
 
 
-def test_quiet_tier_counts_open_rows_and_says_nothing(tmp_path):
+def test_quiet_tier_counts_open_rows_and_says_nothing(root):
     """The 51% case: open rows exist, nothing references anything. Recorded only."""
-    d, r = _fixture(
-        tmp_path,
-        [
-            _dispatch("w1", "t-1", "do the first thing"),
-            _dispatch("w1", "t-2", "do the second thing", da=1100),
-        ],
-    )
-    count, matching, note = hint_mod.hint("w1", d, r, "a third unrelated thing")
+    _dispatch(root, "w1", "t-1", "do the first thing")
+    _dispatch(root, "w1", "t-2", "do the second thing", da=1_800_000_100)
+    count, matching, note = hint_mod.hint("w1", "a third unrelated thing")
     assert count == 2
     assert matching == []
     assert note == "", (
@@ -122,73 +160,60 @@ def test_quiet_tier_counts_open_rows_and_says_nothing(tmp_path):
     )
 
 
-def test_loud_tier_fires_on_a_shared_reference(tmp_path):
-    d, r = _fixture(tmp_path, [_dispatch("w1", "t-1", "investigate #4242 please")])
-    count, matching, note = hint_mod.hint("w1", d, r, "another look at #4242")
+def test_loud_tier_fires_on_a_shared_reference(root):
+    _dispatch(root, "w1", "t-1", "investigate #4242 please")
+    count, matching, note = hint_mod.hint("w1", "another look at #4242")
     assert count == 1
     assert matching == ["t-1"]
     assert "t-1" in note and "--supersedes t-1" in note
 
 
-def test_loud_tier_fires_via_the_envelope_ref_url(tmp_path):
+def test_loud_tier_fires_via_the_envelope_ref_url(root):
     """A new `ref:…/issues/4242` matches an open row whose prose says `#4242`."""
-    d, r = _fixture(tmp_path, [_dispatch("w1", "t-1", "investigate #4242 please")])
+    _dispatch(root, "w1", "t-1", "investigate #4242 please")
     _c, matching, note = hint_mod.hint(
-        "w1", d, r, "another look", new_ref="https://github.com/o/r/issues/4242"
+        "w1", "another look", new_ref="https://github.com/o/r/issues/4242"
     )
     assert matching == ["t-1"] and note
 
 
-def test_the_note_names_the_choice_and_never_asserts_supersession(tmp_path):
+def test_the_note_names_the_choice_and_never_asserts_supersession(root):
     """Phrasing is a property, not a detail.
 
     Two dispatches naming one issue may be parallel work. The note must put the
     id within copy-paste reach without claiming the caller forgot something.
     """
-    d, r = _fixture(tmp_path, [_dispatch("w1", "t-1", "#4242 work")])
-    _c, _m, note = hint_mod.hint("w1", d, r, "more on #4242")
+    _dispatch(root, "w1", "t-1", "#4242 work")
+    _c, _m, note = hint_mod.hint("w1", "more on #4242")
     assert "if this REPLACES it" in note
     assert "if it is additional work, nothing to do" in note
     for accusation in ("forgot", "should have", "error", "missing --supersedes"):
         assert accusation not in note.lower()
 
 
-def test_no_open_rows_means_silence_and_zero(tmp_path):
-    d, r = _fixture(tmp_path, [])
-    assert hint_mod.hint("w1", d, r, "anything about #4242") == (0, [], "")
+def test_no_open_rows_means_silence_and_zero(root):
+    _dispatch(root, "w2", "t-9", "someone else's work")       # the plane knows the fleet; w1 holds nothing
+    assert hint_mod.hint("w1", "anything about #4242") == (0, [], "")
 
 
-def test_another_bots_open_row_never_matches(tmp_path):
+def test_another_bots_open_row_never_matches(root):
     """Openness is per-bot; one bot's row must not surface on another's dispatch."""
-    d, r = _fixture(tmp_path, [_dispatch("w2", "t-1", "investigate #4242")])
-    assert hint_mod.hint("w1", d, r, "more on #4242") == (0, [], "")
+    _dispatch(root, "w2", "t-1", "investigate #4242")
+    assert hint_mod.hint("w1", "more on #4242") == (0, [], "")
 
 
-def test_a_closed_row_does_not_match(tmp_path):
+def test_a_closed_row_does_not_match(root):
     """Openness comes from the shipped door, so a terminal report retires the row."""
-    d, r = _fixture(
-        tmp_path,
-        [_dispatch("w1", "t-1", "investigate #4242")],
-        [
-            {
-                "ts": "2026-08-12T10:30:00Z",
-                "bot": "w1",
-                "task_id": "t-1",
-                "status": "completed",
-                "summary": "done",
-            }
-        ],
-    )
-    assert hint_mod.hint("w1", d, r, "more on #4242") == (0, [], "")
+    wi, asg = _dispatch(root, "w1", "t-1", "investigate #4242")
+    _close(root, "w1", wi, asg)
+    assert hint_mod.hint("w1", "more on #4242") == (0, [], "")
 
 
-def test_many_matches_are_capped_and_the_cap_is_disclosed(tmp_path):
+def test_many_matches_are_capped_and_the_cap_is_disclosed(root):
     """A note that must be scrolled past has already failed to route attention."""
-    d, r = _fixture(
-        tmp_path,
-        [_dispatch("w1", f"t-{i}", "on #4242", da=1000 + i) for i in range(5)],
-    )
-    _c, matching, note = hint_mod.hint("w1", d, r, "more #4242")
+    for i in range(5):
+        _dispatch(root, "w1", f"t-{i}", "on #4242", da=1_800_000_000 + i)
+    _c, matching, note = hint_mod.hint("w1", "more #4242")
     assert len(matching) == 5
     assert "+2 more" in note, "silently showing 3 of 5 is the coverage-honesty defect"
 
@@ -196,43 +221,46 @@ def test_many_matches_are_capped_and_the_cap_is_disclosed(tmp_path):
 # ------------------------------------------------------------------- fail-open
 
 
-def test_an_unreadable_dispatch_log_never_breaks_a_dispatch(tmp_path):
-    """A dispatch must never fail because a hint helper could not read a file."""
-    r = _write(tmp_path / "r.jsonl", [])
-    assert hint_mod.hint("w1", str(tmp_path / "missing.jsonl"), r, "#4242") == (
-        0,
-        [],
-        "",
-    )
+def test_an_unreachable_plane_never_breaks_a_dispatch(tmp_path, monkeypatch):
+    """A dispatch must never fail because a hint helper could not reach the
+    plane: no db under the root is the matcher's refusal, and the hint turns
+    it into silence and a zero count."""
+    r = plane_root(tmp_path)
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(r))
+    monkeypatch.setenv("CLAUDLOBBY_FLEET", FLEET)
+    assert hint_mod.hint("w1", "#4242") == (0, [], "")
 
 
-def test_a_raising_open_door_degrades_to_silence(tmp_path):
+def test_a_raising_open_door_degrades_to_silence(root):
     class Boom:
         def open_dispatches(self, *a, **k):
             raise RuntimeError("door exploded")
 
-    d, r = _fixture(tmp_path, [_dispatch("w1", "t-1", "#4242")])
-    assert hint_mod.hint("w1", d, r, "#4242", overdue_mod=Boom()) == (0, [], "")
+    _dispatch(root, "w1", "t-1", "#4242")
+    assert hint_mod.hint("w1", "#4242", overdue_mod=Boom()) == (0, [], "")
 
 
-def test_task_texts_survives_a_corrupt_line(tmp_path):
-    p = tmp_path / "d.jsonl"
-    p.write_text('{"bot":"w1","task_id":"t-1","task":"ok"}\nNOT JSON\n')
-    assert hint_mod.task_texts(str(p), "w1") == {"t-1": "ok"}
+def test_plane_task_texts_survives_a_raising_plane(root):
+    """The texts are a best effort: a plane that answers the open list but not
+    the titles costs the loud tier, never the dispatch."""
+    class HalfBoom:
+        def open_plane(self, *a, **k):
+            raise RuntimeError("no titles today")
+    assert hint_mod.plane_task_texts(HalfBoom(), "w1") == {}
 
 
 # ------------------------------------------------------ what it must never do
 
 
-def test_it_returns_no_decision_only_facts(tmp_path):
+def test_it_returns_no_decision_only_facts(root):
     """The contract is (count, candidates, note) — never a chosen supersedes id.
 
     #1027's thesis is that the ledger records what was SENT, never what was
     MEANT. This helper cannot see intent either, so its output must remain
     something a human acts on rather than something a script applies.
     """
-    d, r = _fixture(tmp_path, [_dispatch("w1", "t-1", "#4242")])
-    result = hint_mod.hint("w1", d, r, "#4242")
+    _dispatch(root, "w1", "t-1", "#4242")
+    result = hint_mod.hint("w1", "#4242")
     assert isinstance(result, tuple) and len(result) == 3
     count, matching, note = result
     assert (
@@ -242,7 +270,7 @@ def test_it_returns_no_decision_only_facts(tmp_path):
     assert matching == ["t-1"]
 
 
-def test_a_new_reference_does_NOT_match_an_unrelated_open_row(tmp_path):
+def test_a_new_reference_does_NOT_match_an_unrelated_open_row(root):
     """The false-positive case, and the one the first test pass missed entirely.
 
     A mutation replacing the reference comparison with `True` survived, because
@@ -251,24 +279,22 @@ def test_a_new_reference_does_NOT_match_an_unrelated_open_row(tmp_path):
     open row about something else — which is exactly the 51%-noise failure the
     loud tier exists to avoid.
     """
-    d, r = _fixture(tmp_path, [_dispatch("w1", "t-1", "an unrelated task, no refs")])
-    count, matching, note = hint_mod.hint("w1", d, r, "please look at #4242")
+    _dispatch(root, "w1", "t-1", "an unrelated task, no refs")
+    count, matching, note = hint_mod.hint("w1", "please look at #4242")
     assert count == 1, "the row is still open and still counted"
     assert matching == [] and note == "", "spoke about a row sharing no reference"
 
 
-def test_a_different_reference_does_not_match(tmp_path):
-    d, r = _fixture(tmp_path, [_dispatch("w1", "t-1", "work on #1111")])
-    assert hint_mod.hint("w1", d, r, "work on #2222")[1:] == ([], "")
+def test_a_different_reference_does_not_match(root):
+    _dispatch(root, "w1", "t-1", "work on #1111")
+    assert hint_mod.hint("w1", "work on #2222")[1:] == ([], "")
 
 
-def test_the_overflow_count_matches_the_ids_actually_listed(tmp_path):
+def test_the_overflow_count_matches_the_ids_actually_listed(root):
     """Pins the disclosure to what is shown, not to a second copy of the cap."""
-    d, r = _fixture(
-        tmp_path,
-        [_dispatch("w1", f"t-{i}", "on #4242", da=1000 + i) for i in range(7)],
-    )
-    _c, matching, note = hint_mod.hint("w1", d, r, "more #4242")
+    for i in range(7):
+        _dispatch(root, "w1", f"t-{i}", "on #4242", da=1_800_000_000 + i)
+    _c, matching, note = hint_mod.hint("w1", "more #4242")
     listed = [t for t in matching if t in note]
     assert len(matching) == 7
     assert f"+{len(matching) - len(listed)} more" in note, (

@@ -357,7 +357,7 @@ harness_check "no legacy event file was written by the sweep (the plane is the o
 VAL_REPORT_LEDGER="$ROOT/local/$FLEET/runtime/report-back.jsonl"
 VAL_DISPATCH_LOG="$ROOT/state/dispatch-log.jsonl"
 val_seed_dispatch "$ROOT" "$FLEET" "$MGR" valaged t-aged-0000 "$((now - 90000))" "$((now - 89400))" "x"
-aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$VAL_DISPATCH_LOG" "$VAL_REPORT_LEDGER" "$(date +%s)" \
+aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
     --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c "^valaged " || true)
 [ "${aged_out:-1}" -eq 0 ] && r=yes || r=no
 harness_check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
@@ -410,7 +410,7 @@ t835_closed=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a 
 harness_check "#835 report-back without --task lands its task event on the resolved dispatch (the plane's stamped id)" "$r"
 
 # The join is unchanged — so the row closing is proof the id is the RIGHT one.
-t835_left=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$t835_dispatch" "$t835_ledger" "$(date +%s)" \
+t835_left=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
     --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c "^$T835_BOT " || true)
 [ "${t835_left:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#835 the resolved id actually closes the dispatch (watchdog join untouched)" "$r"
@@ -448,7 +448,7 @@ or_overdue=$(val_events "$ROOT" "$FLEET" "$OR_BOT" overdue_dispatch | grep -c 't
 [ "${or_overdue:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#835 respawn orphan emits NO overdue_dispatch from the real pulse" "$r"
 
-or_listed=$(python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$t835_dispatch" "$t835_ledger" "$(date +%s)" \
+or_listed=$(python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$(date +%s)" \
     --bots-dir "$ROOT/local/$FLEET/runtime/bots" --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-835-0002' || true)
 [ "${or_listed:-0}" -ge 1 ] && r=yes || r=no
 harness_check "#835 the orphan is still listable (evidence kept, not reaped away)" "$r"
@@ -509,7 +509,7 @@ harness_check "#1187 mis-ordered --open is REFUSED (rc 2), not a silent empty re
 # grammars differ, so "invalid argument" alone would leave them stuck.
 python3 "$LIB_DIR/dispatch-overdue.py" --open \
     "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" 2>"$ROOT/t1187.err" >/dev/null || true
-grep -q "take the BOT first" "$ROOT/t1187.err" && r=yes || r=no
+grep -q "expects <bot_id> first" "$ROOT/t1187.err" && r=yes || r=no
 harness_check "#1187   ...and names the grammar split, not merely that it refused" "$r"
 
 # Wrong COUNT was already loud before this change. Pinned so the shape gate is
@@ -523,7 +523,7 @@ harness_check "#1187 wrong ARITY was already loud and stays loud (the gate is ab
 
 # STDOUT must stay rows-only. This is the assertion that protects report-back.
 t1187_stdout=$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$T1187_BOT" "$t835_dispatch" "$VAL_REPORT_LEDGER" --fleet "$FLEET" --root "$ROOT" 2>/dev/null || true)
+    "$T1187_BOT" --fleet "$FLEET" --root "$ROOT" 2>/dev/null || true)
 printf '%s' "$t1187_stdout" | grep -q 't-1187-0001' \
     && ! printf '%s' "$t1187_stdout" | grep -q -- '--open:' && r=yes || r=no
 harness_check "#1187 --open STDOUT is rows only (no scope header for awk to eat)" "$r"
@@ -531,7 +531,7 @@ harness_check "#1187 --open STDOUT is rows only (no scope header for awk to eat)
 # ...and the scope reaches a human, on stderr, even with ZERO rows -- the case
 # the shape gate cannot reach (a typo, or another fleet's bot under #526).
 python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "nosuchbot-1187" "$t835_dispatch" "$VAL_REPORT_LEDGER" --fleet "$FLEET" --root "$ROOT" 2>"$ROOT/t1187b.err" >/dev/null || true
+    "nosuchbot-1187" --fleet "$FLEET" --root "$ROOT" 2>"$ROOT/t1187b.err" >/dev/null || true
 grep -q "nosuchbot-1187" "$ROOT/t1187b.err" && grep -q "0 open" "$ROOT/t1187b.err" && r=yes || r=no
 harness_check "#1187 an EMPTY result names the bot it filtered on (cannot read as nothing-exists)" "$r"
 

@@ -438,13 +438,10 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # dispatch must never fail because a hint helper was unavailable.
 OPEN_AT_DISPATCH=0
 if [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
-    _dt_reports="$(fleet_runtime_dir)/report-back.jsonl"
     _dt_hint=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" \
-        --bot "$WORKER_SESSION" --dispatch-log "$(dispatch_ledger_path)" \
-        --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || true)
+        --bot "$WORKER_SESSION" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || true)
     OPEN_AT_DISPATCH=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" --count-only \
-        --bot "$WORKER_SESSION" --dispatch-log "$(dispatch_ledger_path)" \
-        --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || echo 0)
+        --bot "$WORKER_SESSION" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || echo 0)
     case "$OPEN_AT_DISPATCH" in ''|*[!0-9]*) OPEN_AT_DISPATCH=0 ;; esac
     # Only the loud tier is printed, and only when the caller has NOT declared.
     if [ -z "$DISPATCH_SUPERSEDES" ] && [ -n "$_dt_hint" ]; then
@@ -584,8 +581,12 @@ _plane_emit_intent() {
     src_ref=""
     [ -n "$dispatch_ref" ] && src_ref="\"source_ref\":\"$dispatch_ref\","
     if [ -n "$DISPATCH_SUPERSEDES" ] && [ -n "$PLANE_ASG_ID" ]; then
+        # scoped to THIS worker (#518's rule, which the legacy join carried and
+        # the first plane build dropped): a same-named id held by another bot
+        # is never the one this dispatch retires
         _sup=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
-            --task-id "$DISPATCH_SUPERSEDES" 2>/dev/null || true)
+            --task-id "$DISPATCH_SUPERSEDES" \
+            --assignee "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION" 2>/dev/null || true)
         if [ -n "$_sup" ]; then
             SUP_WI=${_sup%% *}; _sup=${_sup#* }; SUP_ASG=${_sup%% *}; SUP_MSG=${_sup##* }
             [ -n "$SUP_MSG" ] && [ "$SUP_MSG" != "$SUP_ASG" ] && sup_frag="\"supersedes_msg_id\":\"$SUP_MSG\","

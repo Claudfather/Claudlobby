@@ -1,11 +1,20 @@
-"""Cutover chunk 6b — the legacy WRITES retired, per door, as the end of shadowing;
-who-reviewed's plane join.
+"""Cutover chunk 6b → F18 closure: the legacy WRITES' retirement as a RECORDED
+fact, and who-reviewed's plane join.
 
-A door skips its JSONL append only on FOUR facts (`plane_write_retired` in
-lib-common): the flag says 0, the plane is armed, the retirement is RECORDED
-(`plane cutover --retire-writes`, read through `plane-lookup.py --retired`),
-and THIS emission succeeded (`PLANE_EMIT_LAST_RC`). Every other case writes
-the ledger and says why — a dispatch or report must land somewhere.
+The doors themselves write nothing since R1 (there is no ledger append left
+to skip, so the four-fact `plane_write_retired` predicate is gone with it).
+What remains is the epoch: `plane cutover --retire-writes` records
+`legacy_write_retired` once every reader is declared (or forced, with the
+reason), the readers of the once-retired ledgers follow that fact
+(`brief.plane_retired_conn`), and the doctor reads each PLANE_LEGACY_WRITE_*
+flag against it. R3 retires the door and the flag surface.
+
+Deleted with the shadow (F18 closure, R2a): test_the_shadow_ends_with_the_retirement,
+test_the_shadow_unit_composes_dormant_once_the_writes_are_retired,
+test_the_orphan_list_follows_the_overdue_flip (the plane's orphan split is
+test_plane_cutover_flip.test_the_orphan_split_holds_on_the_plane).
+Re-pointed: test_the_plane_orphan_list_is_the_planes_own_not_the_ledgers →
+test_the_orphan_list_is_the_planes_own_split.
 """
 
 from __future__ import annotations
@@ -13,30 +22,13 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
 
 from claudlobby.plane import cutover as cut
-from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from tests.conftest import load_lib_module
-from tests.plane_fixtures import ro as _ro
-from tests.test_plane_cutover_flip import F, _cli, _composed, _declare, _ledgers, _matcher, _scene
-from tests.test_plane_cutover_parity import _rrow
-from tests.test_plane_door_e2e import _bash, _plane_row, _plane_lib
-from tests.test_plane_shadow import REPO
-
-E2E_FLEET = "e2e-fleet"
-RETIRED = {"PLANE_LEGACY_WRITE_DISPATCH": "0", "PLANE_LEGACY_WRITE_REPORT": "0"}
-
-
-def _lines(path):
-    return len(path.read_text().splitlines()) if path.exists() else 0
-
-
-def _record_retirement(root, fleet=E2E_FLEET):
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    decl = {r: (now, None) for r in cut.GATED}
-    emit_batch(root, [cut.retirement_event(fleet, decl, now)])
+from tests.plane_fixtures import F, NOW_EPOCH, REPO, _cli, _declare, _matcher, _scene, ro as _ro
+from tests.test_plane_cutover_flip import _composed
+from tests.test_plane_cutover_parity import _live_dispatch, _rrow
 
 
 def test_retire_writes_refuses_until_every_reader_is_declared_then_records(tmp_path):
@@ -68,44 +60,28 @@ def test_retire_writes_refuses_until_every_reader_is_declared_then_records(tmp_p
     assert again.returncode == 0 and "already retired" in again.stdout             # nothing new recorded
     with _ro(root) as conn:
         assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'legacy_write_retired'").fetchone()[0] == 1
-    later = _cli(root, "cutover", "--reader", "open", "--force", "after")
-    assert later.returncode == 0 and "stands on what was recorded" in later.stdout
+    later = _cli(root, "cutover", "--reader", "open", "--force", "after")          # a declaration after the retirement still records
+    assert later.returncode == 0, later.stdout + later.stderr
 
 
-def test_the_shadow_ends_with_the_retirement(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    assert _cli(root, "shadow").returncode == 0
-    forced = _cli(root, "cutover", "--retire-writes", "--force", "operator")
-    assert forced.returncode == 0 and "FORCED" in forced.stdout
-    for args in ((), ("--record",), ("--replay-hours", "3")):
-        ended = _cli(root, "shadow", *args)
-        # rc 0: the designed end state, not a usage error (the composed timer ran
-        # the record mode after the flip and reported failure every ten minutes)
-        assert ended.returncode == 0 and "no legacy side left" in ended.stderr, args
-        assert ended.stdout == ""
-    assert _cli(root, "shadow", "--gate").returncode == 1                        # what was recorded still reads
-    assert _cli(root, "shadow", "--check").returncode == 0
-
-
-def test_the_orphan_list_follows_the_overdue_flip(tmp_path):
-    """--orphans is the overdue reader's own split, so it flips with it and never
-    reads a ledger the retirement froze."""
+def test_the_orphan_list_is_the_planes_own_split(tmp_path):
+    """Every dispatch the plane holds for a bot older than its .spawn is the
+    orphan list's — the one landed by the live door and the scene's alike;
+    a bot that never respawned contributes nothing."""
     import os
-    from tests.test_plane_cutover_flip import NOW_EPOCH
     root, paths, _, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
+    _live_dispatch(root, "8", "t-8-only-plane", ts="2026-09-02T09:00:00Z", expected_by="2026-09-02T10:00:00+00:00")
     bots = root / "bots"
     (bots / "w1" / "data").mkdir(parents=True)
     spawn = bots / "w1" / "data" / ".spawn"
     spawn.write_text("")
-    os.utime(spawn, (NOW_EPOCH - 60, NOW_EPOCH - 60))
-    jsonl = _matcher(root, "--orphans", dl, rl, str(NOW_EPOCH), "--source", "jsonl", "--bots-dir", str(bots))
-    plane = _matcher(root, "--orphans", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F, "--bots-dir", str(bots))
-    assert jsonl.returncode == 0 == plane.returncode and jsonl.stdout == plane.stdout and "t-2-bbbb" in plane.stdout
-    _declare(root, "overdue")
-    auto = _matcher(root, "--orphans", dl, rl, str(NOW_EPOCH), "--bots-dir", str(bots),
-                    PLANE_READ_OVERDUE="1", CLAUDLOBBY_FLEET=F)
-    assert auto.stdout == plane.stdout
+    os.utime(spawn, (NOW_EPOCH - 60, NOW_EPOCH - 60))                  # w1 respawned after both dispatches
+    orphans = _matcher(root, "--orphans", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
+    assert orphans.returncode == 0, orphans.stderr
+    assert "t-8-only-plane" in orphans.stdout and "t-2-bbbb" in orphans.stdout
+    assert "w2" not in orphans.stdout and "t-3-cccc" not in orphans.stdout
+    over = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
+    assert "t-8-only-plane" not in over.stdout and "t-3-cccc" in over.stdout      # split, never paged twice
 
 
 def test_the_doctor_reads_the_write_flags_against_the_retirement(tmp_path):
@@ -178,67 +154,3 @@ def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
                            "--source", "plane", "--root", str(root), "--reviews-json", str(reviews)],
                           capture_output=True, text=True, timeout=60)
     assert gone.returncode == 4 and gone.stdout == "" and "unreachable" in gone.stderr
-
-
-def test_the_plane_orphan_list_is_the_planes_own_not_the_ledgers(tmp_path):
-    """A dispatch the plane holds and the ledger does not (the ledger frozen by
-    a retirement) is orphaned by the plane's own split — the mutant that kept
-    reading the ledger for orphans survived the parity pin, so this one is
-    asymmetric on purpose."""
-    import os
-    from tests.test_plane_cutover_flip import NOW_EPOCH
-    from tests.test_plane_cutover_parity import _live_dispatch
-    root, paths, _, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
-    _live_dispatch(root, "8", "t-8-only-plane", ts="2026-09-02T09:00:00Z", expected_by="2026-09-02T10:00:00+00:00")
-    bots = root / "bots"
-    (bots / "w1" / "data").mkdir(parents=True)
-    spawn = bots / "w1" / "data" / ".spawn"
-    spawn.write_text("")
-    os.utime(spawn, (NOW_EPOCH - 60, NOW_EPOCH - 60))                  # w1 respawned after both dispatches
-    plane = _matcher(root, "--orphans", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F, "--bots-dir", str(bots))
-    jsonl = _matcher(root, "--orphans", dl, rl, str(NOW_EPOCH), "--source", "jsonl", "--bots-dir", str(bots))
-    assert plane.returncode == 0 and "t-8-only-plane" in plane.stdout and "t-2-bbbb" in plane.stdout
-    assert "t-8-only-plane" not in jsonl.stdout
-
-
-
-def test_the_shadow_unit_composes_dormant_once_the_writes_are_retired(tmp_path, monkeypatch):
-    """The tier still arms PLANE_SHADOW_ENABLED, but a fleet whose legacy
-    writes are retired has nothing left to grade: its plane-shadow unit
-    composes without the stamp (the launcher's dormant path, exit 0), while a
-    sibling job (fleet-pulse) keeps the same flag for its bridge."""
-    from textwrap import dedent
-    import claudlobby.composer as composer_mod
-    import claudlobby.env_tiers as env_tiers_mod
-    from claudlobby.composer import compose_fleet_timers
-    from claudlobby.config import load_fleet
-    from claudlobby.env_tiers import Resolution
-    from claudlobby.paths import Paths
-    from claudlobby.plane.emit_api import emit_batch
-    from tests.test_composer_briefing_arming import _FLEET
-    fl = dedent(_FLEET).replace("system_defaults: false", "system_defaults: true")
-
-    def compose(root, *, retired):
-        root.mkdir(parents=True)
-        (root / "fleet.yaml").write_text(fl)
-        fleet, md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root)
-        if retired:
-            (root / "state" / "plane").mkdir(parents=True)
-            out = emit_batch(root, [cut.retirement_event(fleet.name, {}, "2026-09-04T16:24:49+00:00")])
-            assert out[0].status == "committed"
-        res = {k: Resolution(name=k, value="1", tier="fleet", path=None) for k in ("PLANE_SHADOW_ENABLED", "PLANE_EMIT_ENABLED")}
-        monkeypatch.setattr(env_tiers_mod, "read_tiers", lambda paths, fleet_name=None, bot_name=None: [])
-        monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: res)
-        composer_mod._READ_FLAG_MEMO.clear()
-        timers = compose_fleet_timers(fleet, paths, md)
-        shadow = next(p for p in timers.iterdir() if "plane-shadow" in p.name and p.suffix == ".service").read_text()
-        pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
-        return shadow, pulse
-
-    shadow, pulse = compose(tmp_path / "live", retired=False)
-    assert "Environment=PLANE_SHADOW_ENABLED=1" in shadow and "Environment=PLANE_SHADOW_ENABLED=1" in pulse
-    shadow, pulse = compose(tmp_path / "ended", retired=True)
-    assert "PLANE_SHADOW_ENABLED" not in shadow                                   # ended: dormant
-    assert "Environment=PLANE_SHADOW_ENABLED=1" in pulse                          # the bridge still reads what was recorded

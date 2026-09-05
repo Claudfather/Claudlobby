@@ -1,71 +1,50 @@
-"""Cutover chunk 5 — the FLIP of the two list readers, and the epoch recorded.
+"""Cutover chunk 5 → F18 closure R2a: the matcher's list readers (`--open`,
+`--all`) answer from the PLANE and from nothing else.
 
-A flip is TWO facts: the reader's flag (PLANE_READ_OPEN / PLANE_READ_OVERDUE —
-the fleet .env tier, composed into bot.conf and stamped on the fleet-pulse
-unit) AND a `cutover_declared` record. The matcher's providers serve the plane
-only when both hold (`source="auto"`); `--source jsonl` stays callable by name
-(the shadow's legacy side); `--source plane` serves the plane regardless (the
-operator's probe). An unreachable plane under a set flag REFUSES rather than
-falling back. `plane cutover --reader` refuses until the J4 gate is met (or
---force with a reason) and records the declaration anchored on the fleet.
+The flip used to be two facts — a per-reader PLANE_READ_* flag AND a recorded
+`cutover_declared` — with `--source jsonl` naming the legacy side the shadow
+graded. R2a removed the legacy side and the shadow with it: the matcher opens
+the plane under `--fleet`/`--root` (else the CLAUDLOBBY_FLEET → FLEET_NAME and
+CLAUDLOBBY_ROOT carriers), refuses at rc 3 when it cannot (UNREACHABLE is not
+empty), and `plane cutover --reader` records a DIRECT MOVE with no gate. The
+flags still compose (bot.conf, the fleet-pulse unit) and the doctor still
+reads them against the declaration; R3 retires that surface.
+
+Deleted with the shadow and the legacy side (F18 closure, R2a):
+test_open_and_all_answer_the_same_from_the_plane_and_the_jsonl (its plane half
+is test_open_and_all_answer_from_the_plane),
+test_the_expiry_cap_and_the_progress_grace_hold_on_both_sources (→ ..._hold_on_the_plane),
+test_the_orphan_split_holds_on_both_sources (→ ..._holds_on_the_plane),
+test_a_flag_alone_is_not_a_flip_and_a_declaration_makes_it_one,
+test_the_shadow_keeps_grading_the_jsonl_after_the_flip,
+test_cutover_refuses_short_of_the_gate_records_when_met_and_force_records_the_reason
+(→ test_cutover_declares_a_direct_move_and_records_the_reason).
+Re-pointed and renamed: test_the_flag_map_is_one_fact_across_the_boundary →
+test_the_reader_set_and_its_flags_are_one_fact (the matcher publishes no
+PLANE_READ_FLAGS), test_an_unreachable_plane_under_a_set_flag_refuses_and_never_falls_back
+→ test_an_unreachable_plane_refuses_and_never_answers_empty,
+test_brief_follows_the_flip_and_omits_loudly_on_an_unreachable_plane →
+test_brief_serves_the_plane_and_omits_loudly_when_it_is_unreachable,
+test_the_grammar_refuses_a_dropped_value_and_a_plane_source_off_its_modes →
+test_the_grammar_refuses_a_dropped_value_and_a_path_in_the_bot_slot.
 """
 
 from __future__ import annotations
 
-import importlib.util
+import json
 import os
-import subprocess
-import sys
+import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from claudlobby.brief import dispatch_ledger_path, load_dispatch_doors, report_ledger_path
-from claudlobby.plane import cutover as cut
-from claudlobby.plane import queries, shadow as sh
+import pytest
+
+from claudlobby.plane import cutover as cut, queries
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
-from tests.plane_fixtures import plane_root, ro as _ro
-from tests.test_plane_cutover_parity import _live_dispatch, _rrow, _write
-from tests.test_plane_shadow import F, NOW, REPO, _record, _scene
-
-MATCHER = REPO / "lib" / "dispatch-overdue.py"
-NOW_EPOCH = int(datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc).timestamp())
-
-
-def _env(root, **extra):
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PLANE_READ_") and k not in ("CLAUDLOBBY_FLEET", "FLEET_NAME")}
-    env.update({"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home")})
-    env.update(extra)
-    return env
-
-
-def _matcher(root, *args, **extra):
-    return subprocess.run([sys.executable, str(MATCHER), *args], capture_output=True,
-                          text=True, timeout=120, env=_env(root, **extra))
-
-
-def _cli(root, *args, **extra):
-    return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root),
-                           "--fleet", F, "plane", *args], capture_output=True, text=True,
-                          timeout=180, env=_env(root, **extra))
-
-
-def _declare(root, reader, reason="test"):
-    r = _cli(root, "cutover", "--reader", reader, "--force", reason)
-    assert r.returncode == 0, r.stdout + r.stderr
-    return r
-
-
-def _ledgers(paths):
-    return str(dispatch_ledger_path(paths)), str(report_ledger_path(paths))
-
-
-def _stdlib_readers():
-    spec = importlib.util.spec_from_file_location("pr", REPO / "lib" / "plane-readers.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _cli, _declare, _matcher, _scene,
+                                  _stdlib_readers, plane_root, ro as _ro)
+from tests.test_plane_cutover_parity import _live_dispatch
 
 
 # --- the twins cannot drift --------------------------------------------------------
@@ -74,236 +53,186 @@ def test_the_stdlib_open_sql_is_byte_identical_to_the_package():
     assert _stdlib_readers().OPEN_SQL == queries.OPEN_ASSIGNMENTS_AT_SQL
 
 
-def test_the_flag_map_is_one_fact_across_the_boundary(tmp_path):
-    from claudlobby.paths import Paths
-    root, paths, _, _ = _scene(tmp_path)
-    doors = load_dispatch_doors(paths)
+def test_the_reader_set_and_its_flags_are_one_fact():
+    assert cut.READERS == ("open", "overdue", "open_task", "unassigned", "events")
+    assert cut.GATED == cut.READERS                                  # the name the callers grew up with
     assert cut.READ_FLAGS == {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE",
                               "open_task": "PLANE_READ_OPEN_TASK", "unassigned": "PLANE_READ_UNASSIGNED",
                               "events": "PLANE_READ_EVENTS"}
-    assert doors.PLANE_READ_FLAGS == {k: v for k, v in cut.READ_FLAGS.items() if k != "events"}   # the matcher's readers
     assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"
 
 
-# --- the two sources answer identically ------------------------------------------
+# --- the plane answers -------------------------------------------------------------
 
-def test_open_and_all_answer_the_same_from_the_plane_and_the_jsonl(tmp_path):
+def test_open_and_all_answer_from_the_plane(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
     for bot, want in (("w1", "t-2-bbbb"), ("w2", "t-3-cccc")):
-        jsonl = _matcher(root, "--open", bot, dl, rl, "--source", "jsonl")
-        plane = _matcher(root, "--open", bot, dl, rl, "--source", "plane", "--fleet", F)
-        assert jsonl.returncode == 0 and plane.returncode == 0, (jsonl.stderr, plane.stderr)
-        assert jsonl.stdout == plane.stdout and want in plane.stdout
-        assert "[source=plane]" in plane.stderr and "[source=jsonl]" in jsonl.stderr
-    jsonl = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
-    plane = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
-    assert jsonl.returncode == 0 == plane.returncode and jsonl.stdout == plane.stdout
-    assert [l.split()[0] for l in plane.stdout.splitlines()] == ["w1", "w2"]   # both past due
+        r = _matcher(root, "--open", bot, "--fleet", F)
+        assert r.returncode == 0, r.stderr
+        assert [l.split()[-1] for l in r.stdout.splitlines()] == [want]
+        # the scope, ALWAYS and on stderr (#1187): stdout is parsed by report-back
+        assert f"--open: bot={bot!r} -> 1 open id'd dispatch(es) [source=plane]" in r.stderr
+    over = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
+    assert over.returncode == 0, over.stderr
+    assert [(l.split()[0], l.split()[-1]) for l in over.stdout.splitlines()] == \
+        [("w1", "t-2-bbbb"), ("w2", "t-3-cccc")]                     # both past due
+    # the carriers: a session's FLEET_NAME, a timer unit's CLAUDLOBBY_FLEET (which
+    # wins over a session's), an explicit --root over CLAUDLOBBY_ROOT
+    named = _matcher(root, "--open", "w1", "--fleet", F)
+    session = _matcher(root, "--open", "w1", FLEET_NAME=F)
+    unit = _matcher(root, "--open", "w1", CLAUDLOBBY_FLEET=F, FLEET_NAME="other")
+    rooted = _matcher(root, "--open", "w1", "--fleet", F, "--root", str(root),
+                      CLAUDLOBBY_ROOT=str(tmp_path / "nowhere"))
+    assert named.stdout and session.stdout == unit.stdout == rooted.stdout == named.stdout
+    assert session.returncode == unit.returncode == rooted.returncode == 0
 
 
-def test_the_expiry_cap_and_the_progress_grace_hold_on_both_sources(tmp_path):
-    root, paths, _, r = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
-    later = NOW_EPOCH + 30 * 86400                      # the cap drops the ancient rows on both
-    jsonl = _matcher(root, "--all", dl, rl, str(later), "--source", "jsonl")
-    plane = _matcher(root, "--all", dl, rl, str(later), "--source", "plane", "--fleet", F)
-    assert jsonl.returncode == 0 == plane.returncode and jsonl.stdout == plane.stdout == ""
-    prog_at = datetime.fromtimestamp(NOW_EPOCH - 300, timezone.utc)   # w1 reported progress 5 min ago
-    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
-                       "source_ref": f"report-back:msg_{'8':0>32}", "occurred_at": sh.dt_iso(prog_at),
+def test_the_expiry_cap_and_the_progress_grace_hold_on_the_plane(tmp_path):
+    root, paths, _, _ = _scene(tmp_path)
+    later = NOW_EPOCH + 30 * 86400                       # the cap drops the ancient rows
+    capped = _matcher(root, "--all", str(later), "--fleet", F)
+    assert capped.returncode == 0 and capped.stdout == "", capped.stderr
+    prog_at = datetime.fromtimestamp(NOW_EPOCH - 300, timezone.utc).isoformat(timespec="seconds")
+    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,     # w1 reported progress 5 min ago
+                       "source_ref": f"report-back:msg_{'8':0>32}", "occurred_at": prog_at,
                        "payload": {"work_item_id": f"wi_{'2':0>32}", "assignment_id": f"asg_{'2':0>32}",
                                    "event": "progress", "actor": f"bot:{F}/w1", "progress": 10}}])
-    r.append({**_rrow(sh.dt_iso(prog_at), "t-2-bbbb", "progress", progress="10"),
-              "ts": sh.dt_iso(prog_at).replace("+00:00", "Z")})
-    _write(report_ledger_path(paths), r)
-    jsonl = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
-    plane = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
-    assert jsonl.stdout == plane.stdout and "t-2-bbbb" not in plane.stdout and "t-3-cccc" in plane.stdout
+    graced = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
+    assert graced.returncode == 0 and "t-2-bbbb" not in graced.stdout and "t-3-cccc" in graced.stdout
+    opened = _matcher(root, "--open", "w1", "--fleet", F)             # open is deadline-blind and grace-blind
+    assert [l.split()[-1] for l in opened.stdout.splitlines()] == ["t-2-bbbb"]
 
 
-def test_the_orphan_split_holds_on_both_sources(tmp_path):
-    """A dispatch older than the bot's .spawn is the orphan list's row on the
-    plane side too — never paged as overdue twice (#835)."""
+def test_the_orphan_split_holds_on_the_plane(tmp_path):
+    """A dispatch older than the bot's .spawn is the orphan list's row — never
+    paged as overdue twice (#835); with no bots dir there is no split, and the
+    orphan mode refuses rather than answering 'none' (#1014)."""
     root, paths, _, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
     bots = root / "bots"
     (bots / "w1" / "data").mkdir(parents=True)
     spawn = bots / "w1" / "data" / ".spawn"
     spawn.write_text("")
     os.utime(spawn, (NOW_EPOCH - 60, NOW_EPOCH - 60))      # w1 respawned after t-2 was dispatched
-    jsonl = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "jsonl", "--bots-dir", str(bots))
-    plane = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F,
-                     "--bots-dir", str(bots))
-    assert jsonl.returncode == 0 == plane.returncode and jsonl.stdout == plane.stdout
-    assert "t-2-bbbb" not in plane.stdout and "t-3-cccc" in plane.stdout
-    orphans = _matcher(root, "--orphans", dl, rl, str(NOW_EPOCH), "--bots-dir", str(bots))
-    assert "t-2-bbbb" in orphans.stdout
-    unsplit = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
-    assert "t-2-bbbb" in unsplit.stdout                    # no bots dir: no split, like legacy
+    split = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
+    assert split.returncode == 0, split.stderr
+    assert "t-2-bbbb" not in split.stdout and "t-3-cccc" in split.stdout
+    orphans = _matcher(root, "--orphans", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
+    assert orphans.returncode == 0, orphans.stderr
+    assert "t-2-bbbb" in orphans.stdout and "t-3-cccc" not in orphans.stdout
+    unsplit = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
+    assert "t-2-bbbb" in unsplit.stdout                    # no bots dir: no split
+    blind = _matcher(root, "--orphans", str(NOW_EPOCH), "--fleet", F)
+    assert blind.returncode == 3 and blind.stdout == "" and "cannot determine orphans" in blind.stderr
 
 
 def test_another_fleets_bot_never_leaks_into_the_overdue_set(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
     _live_dispatch(root, "9", "t-9-zzzz", ts="2026-09-02T09:00:00Z", bot="w9", fleet="g",
                    expected_by="2026-09-02T10:00:00+00:00")
-    ours = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
-    theirs = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", "g")
+    ours = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
+    theirs = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", "g")
     assert ours.returncode == 0 and "w9" not in ours.stdout and "t-9-zzzz" not in ours.stdout
     assert [l.split()[0] for l in ours.stdout.splitlines()] == ["w1", "w2"]
     assert theirs.stdout.startswith("w9 ") and "t-9-zzzz" in theirs.stdout and "w1" not in theirs.stdout
 
 
 def test_an_id_less_row_is_the_overdue_readers_but_never_the_open_lists(tmp_path):
-    """A `sha:` assignment (an id-less legacy row the importer keyed by content)
-    prints as `-` in --all, like the legacy reader, and is absent from --open."""
-    root, paths, d, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
-    from tests.test_plane_cutover_parity import _drow
-    from tests.test_plane_shadow import _epoch
-    ts = "2026-09-02T11:00:00Z"                          # after t-2: ledger order is time order
+    """A `sha:` assignment (an id-less dispatch keyed by content) prints as `-`
+    in --all, as the legacy reader printed it, and is absent from --open."""
+    root, paths, _, _ = _scene(tmp_path)
+    ts = "2026-09-02T11:00:00Z"
     deadline = datetime.fromtimestamp(1788000000, timezone.utc).isoformat()
     _live_dispatch(root, "7", "sha:" + "ab" * 8, ts=ts, expected_by=deadline)
-    row = _drow(ts, "", expected_by=1788000000)         # the id-less legacy row, the same deadline
-    row["dispatched_at"] = _epoch(ts)
-    d.append(row)
-    _write(dispatch_ledger_path(paths), d)
-    for args in (("--open", "w1", dl, rl), ("--all", dl, rl, str(NOW_EPOCH))):
-        jsonl = _matcher(root, *args, "--source", "jsonl")
-        plane = _matcher(root, *args, "--source", "plane", "--fleet", F)
-        assert jsonl.stdout == plane.stdout, (args, jsonl.stdout, plane.stdout)
-    assert " - " not in _matcher(root, "--open", "w1", dl, rl, "--source", "plane", "--fleet", F).stdout
-    assert any(l.split()[-1] == "-" for l in
-               _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F).stdout.splitlines())
+    opened = _matcher(root, "--open", "w1", "--fleet", F)
+    assert opened.returncode == 0 and [l.split()[-1] for l in opened.stdout.splitlines()] == ["t-2-bbbb"]
+    over = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
+    assert over.returncode == 0, over.stderr
+    rows = [l.split() for l in over.stdout.splitlines()]
+    assert {r[-1] for r in rows if r[0] == "w1"} == {"t-2-bbbb", "-"}
 
 
-# --- the flip is flag AND declaration ---------------------------------------------
+# --- unreachable is not empty --------------------------------------------------------
 
-def test_a_flag_alone_is_not_a_flip_and_a_declaration_makes_it_one(tmp_path):
+def test_an_unreachable_plane_refuses_and_never_answers_empty(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
-    half = _matcher(root, "--open", "w1", dl, rl, PLANE_READ_OPEN="1", CLAUDLOBBY_FLEET=F)
-    assert half.returncode == 0 and "[source=jsonl]" in half.stderr and "t-2-bbbb" in half.stdout
-    assert "no cutover_declared" in half.stderr and "plane cutover --reader open" in half.stderr
-    _declare(root, "open")
-    on = _matcher(root, "--open", "w1", dl, rl, PLANE_READ_OPEN="1", CLAUDLOBBY_FLEET=F)
-    assert on.returncode == 0 and "[source=plane]" in on.stderr and on.stdout == half.stdout
-    off = _matcher(root, "--open", "w1", dl, rl, PLANE_READ_OPEN="0", CLAUDLOBBY_FLEET=F)
-    assert "[source=jsonl]" in off.stderr and off.stdout == on.stdout      # rollback = the flag
-    named = _matcher(root, "--open", "w1", dl, rl, "--source", "jsonl", PLANE_READ_OPEN="1", CLAUDLOBBY_FLEET=F)
-    assert "[source=jsonl]" in named.stderr                                 # the shadow's legacy side
-    over_half = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), PLANE_READ_OVERDUE="1", FLEET_NAME=F)
-    assert over_half.returncode == 0 and "no cutover_declared" in over_half.stderr and "t-3-cccc" in over_half.stdout
-    _declare(root, "overdue")
-    over = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), PLANE_READ_OVERDUE="1", FLEET_NAME=F)
-    assert over.returncode == 0 and "no cutover_declared" not in over.stderr and over.stdout == over_half.stdout
-
-
-def test_an_unreachable_plane_under_a_set_flag_refuses_and_never_falls_back(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
-    _declare(root, "open"); _declare(root, "overdue")
-    nofleet = _matcher(root, "--open", "w1", dl, rl, PLANE_READ_OPEN="1")
+    nofleet = _matcher(root, "--open", "w1")                        # no --fleet, no carrier
     assert nofleet.returncode == 3 and nofleet.stdout == "" and "UNREACHABLE" in nofleet.stderr
+    assert "needs a fleet" in nofleet.stderr
+    noroot = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F, CLAUDLOBBY_ROOT="")
+    assert noroot.returncode == 3 and noroot.stdout == "" and "UNREACHABLE" in noroot.stderr
     # a schema-valid plane that holds no bot of this fleet (a wrong root) is refused, not "nothing open"
     other = plane_root(tmp_path / "elsewhere")
     _live_dispatch(other, "1", "t-1-aaaa", ts="2026-09-02T09:00:00Z", fleet="zz")
-    wrong = _matcher(root, "--open", "w1", dl, rl, "--source", "plane", "--fleet", F, "--root", str(other))
+    wrong = _matcher(root, "--open", "w1", "--fleet", F, "--root", str(other))
     assert wrong.returncode == 3 and wrong.stdout == "" and "holds no bot of fleet" in wrong.stderr
     (root / "state" / "plane" / "plane.db").unlink()
-    nodb = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), PLANE_READ_OVERDUE="1", CLAUDLOBBY_FLEET=F)
-    assert nodb.returncode == 3 and nodb.stdout == "" and "UNREACHABLE" in nodb.stderr
-    legacy = _matcher(root, "--all", dl, rl, str(NOW_EPOCH))            # unflipped: still answers
-    assert legacy.returncode == 0 and "t-2-bbbb" in legacy.stdout
+    for args in (("--open", "w1"), ("--open-task", "w1"), ("--all", str(NOW_EPOCH)),
+                 ("--unassigned", str(NOW_EPOCH)), ("--orphans", str(NOW_EPOCH), "--bots-dir", str(root))):
+        gone = _matcher(root, *args, "--fleet", F)
+        assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr, (args, gone.stderr)
 
 
-def test_the_shadow_keeps_grading_the_jsonl_after_the_flip(tmp_path):
-    from tests.test_plane_shadow import _cli as shadow_cli
-    root, paths, _, _ = _scene(tmp_path)
-    before = shadow_cli(root)
-    _declare(root, "open"); _declare(root, "overdue")
-    flipped = subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root), "--fleet", F,
-                              "plane", "shadow"], capture_output=True, text=True, timeout=180,
-                             env=_env(root, PLANE_READ_OPEN="1", PLANE_READ_OVERDUE="1", CLAUDLOBBY_FLEET=F))
-    assert flipped.returncode == 0 and flipped.stdout == before.stdout and "18 clean" not in flipped.stdout
-    assert "no cutover_declared" not in flipped.stderr and "clean" in flipped.stdout
-
-
-def test_brief_follows_the_flip_and_omits_loudly_on_an_unreachable_plane(tmp_path, monkeypatch):
+def test_brief_serves_the_plane_and_omits_loudly_when_it_is_unreachable(tmp_path):
     from claudlobby.brief import build_brief
     from claudlobby.config import load_fleet
     root, paths, _, _ = _scene(tmp_path)
     fleet, _ = load_fleet(paths.fleet_yaml)
-    monkeypatch.setenv("PLANE_READ_OPEN", "1")
-    monkeypatch.setenv("PLANE_READ_OVERDUE", "1")
-    half = build_brief(fleet, paths, "w1", NOW_EPOCH)            # flag without declaration: legacy, sound
-    assert [x["task_id"] for x in half["dispatches"]["open"]] == ["t-2-bbbb"]
-    assert not {x["field"] for x in half["degraded"]} & {"dispatches.open", "dispatches.overdue"}
-    _declare(root, "open"); _declare(root, "overdue")
     b = build_brief(fleet, paths, "w1", NOW_EPOCH)
     assert [x["task_id"] for x in b["dispatches"]["open"]] == ["t-2-bbbb"]
     assert [x["task_id"] for x in b["dispatches"]["overdue"]] == ["t-2-bbbb"]
     assert not {x["field"] for x in b["degraded"]} & {"dispatches.open", "dispatches.overdue"}
+    assert "shadow" not in b                                         # the envelope carries no shadow section
     (root / "state" / "plane" / "plane.db").unlink()
     b2 = build_brief(fleet, paths, "w1", NOW_EPOCH)
-    assert b2["dispatches"]["open"] == [] and b2["dispatches"]["overdue"] == []
-    modes = {x["field"]: x["mode"] for x in b2["degraded"]}
-    assert modes["dispatches.open"] == "omitted" and modes["dispatches.overdue"] == "omitted"
-    assert any("flip the flag back" in x["reason"] for x in b2["degraded"])
+    assert b2["dispatches"] == {}                                   # the WHOLE section withheld: never "0 open"
+    modes = {(x["field"], x["mode"]) for x in b2["degraded"]}
+    assert {("dispatches.open", "omitted"), ("dispatches.overdue", "omitted"),
+            ("dispatches.orphaned", "omitted")} <= modes
+    assert any("the plane cannot answer" in x["reason"] for x in b2["degraded"])
 
 
-# --- the epoch: refused until the gate, recorded when declared -------------------
+# --- the epoch: a direct move, recorded when declared ----------------------------------
 
-def test_cutover_refuses_short_of_the_gate_records_when_met_and_force_records_the_reason(tmp_path):
+def test_cutover_declares_a_direct_move_and_records_the_reason(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    short = _cli(root, "cutover", "--reader", "open")
-    assert short.returncode == 1 and "REFUSED" in short.stdout and "SHORT" in short.stdout
-    with _ro(root) as conn:
-        assert cut.declared(conn, F) == {}
-    forced = _cli(root, "cutover", "--reader", "overdue", "--force", "bootstrap")
-    assert forced.returncode == 0 and "PLANE_READ_OVERDUE=1" in forced.stdout, forced.stderr
+    plain = _cli(root, "cutover", "--reader", "open")               # no gate, no --force needed
+    assert plain.returncode == 0, plain.stdout + plain.stderr
+    assert "PLANE_READ_OPEN=1" in plain.stdout and "committed=1" in plain.stdout
+    assert "direct move" in plain.stdout and "REFUSED" not in plain.stdout
     with _ro(root) as conn:
         decl = cut.declared(conn, F)
-        assert set(decl) == {"overdue"} and decl["overdue"][1] == "bootstrap"
+        assert set(decl) == {"open"} and decl["open"][1] == cut.DIRECT_MOVE_REASON
         anchor = cut.fleet_uid(conn, F)
         row = conn.execute("SELECT subject_kind, subject_uid, subject_alias FROM events"
                            " WHERE event = 'cutover_declared'").fetchone()
         assert tuple(row) == (("fleet", anchor, F) if anchor else (None, None, None))   # the bare alias the registry mints
-    t0 = NOW - timedelta(hours=40)
-    for bot, ids in (("w1", ["t-2-bbbb"]), ("w2", ["t-3-cccc"])):
-        for k in range(sh.GATE_CLEAN_RUN):
-            _record(root, bot, t0 + timedelta(hours=k), ids)
-        _record(root, bot, t0 + timedelta(hours=21), [])           # the transition
-    met = _cli(root, "cutover", "--reader", "open")
-    assert met.returncode == 0 and "PLANE_READ_OPEN=1" in met.stdout and "FORCED" not in met.stdout
+        data = json.loads(conn.execute("SELECT detail FROM events WHERE event = 'cutover_declared'").fetchone()[0])
+    assert data["shadowed"] is False and data["gate"] == {"clean_run": None, "transitions": None}
+    assert data["gate_met"] is None and data["streaks"] == [] and data["flag"] == "PLANE_READ_OPEN"
+    forced = _cli(root, "cutover", "--reader", "overdue", "--force", "bootstrap")
+    assert forced.returncode == 0 and "PLANE_READ_OVERDUE=1" in forced.stdout, forced.stderr
+    assert "FORCED: bootstrap" in forced.stdout
     with _ro(root) as conn:
         decl = cut.declared(conn, F)
-        assert set(decl) == {"open", "overdue"} and decl["open"][1] is None
-        gate_met = [tuple(r) for r in conn.execute(
-            "SELECT json_extract(detail, '$.gate_met'), json_extract(detail, '$.reader')"
-            " FROM events WHERE event = 'cutover_declared' ORDER BY occurred_at")]
-        assert (1, "open") in gate_met and (0, "overdue") in gate_met
+    assert set(decl) == {"open", "overdue"} and decl["overdue"][1] == "bootstrap"
 
 
 def test_the_declaration_id_is_derived_so_a_re_run_at_one_instant_is_one_fact():
-    st = sh.Streak(F, "w1", sh.READER_OPEN)
-    a = cut.declaration_event(F, "open", [st], "2026-09-03T05:00:00+00:00")
-    a2 = cut.declaration_event(F, "open", [], "2026-09-03T05:00:00+00:00")
-    b = cut.declaration_event(F, "open", [st], "2026-09-03T05:00:00+00:00", forced="x")
-    c = cut.declaration_event(F, "open", [st], "2026-09-03T05:00:01+00:00")
+    a = cut.declaration_event(F, "open", "2026-09-03T05:00:00+00:00")
+    a2 = cut.declaration_event(F, "open", "2026-09-03T05:00:00+00:00")
+    b = cut.declaration_event(F, "open", "2026-09-03T05:00:00+00:00", forced="x")
+    c = cut.declaration_event(F, "open", "2026-09-03T05:00:01+00:00")
     assert a["event_id"] == a2["event_id"]                              # a re-run: one fact
     assert len({a["event_id"], b["event_id"], c["event_id"]}) == 3      # a reason or a later instant: new facts
-    assert a["payload"]["event"] == "cutover_declared" and a["payload"]["data"]["gate_met"] is False
+    data = a["payload"]["data"]
+    assert a["payload"]["event"] == "cutover_declared" and data["gate_met"] is None
+    assert data["shadowed"] is False and data["streaks"] == [] and data["forced"] == cut.DIRECT_MOVE_REASON
+    assert data["gate"] == {"clean_run": None, "transitions": None}
     assert "subject_kind" not in a["payload"]
-    anchored = cut.declaration_event(F, "open", [st], "2026-09-03T05:00:00+00:00", subject_uid="flt_x")
+    anchored = cut.declaration_event(F, "open", "2026-09-03T05:00:00+00:00", subject_uid="flt_x")
     assert anchored["payload"]["subject_kind"] == "fleet" and anchored["payload"]["subject_alias"] == F
-    try:
-        cut.declaration_event(F, "orphans", [], "2026-09-03T05:00:00+00:00")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("an unknown reader must not declare")
+    with pytest.raises(ValueError):
+        cut.declaration_event(F, "orphans", "2026-09-03T05:00:00+00:00")   # an unknown reader must not declare
 
 
 def test_the_latest_declaration_wins_and_a_same_instant_re_run_is_disclosed(tmp_path):
@@ -367,7 +296,6 @@ def _composed(tmp_path, monkeypatch, armed: dict[str, str]):
 
 def test_bot_conf_carries_the_read_flags_the_fleet_tier_arms(tmp_path, monkeypatch):
     _, conf = _composed(tmp_path, monkeypatch, {"PLANE_READ_OPEN": "1"})
-    import re
     assert re.search(r"^export PLANE_READ_OPEN='?1'?$", conf, re.M) and "PLANE_READ_OVERDUE" not in conf
     _, bare = _composed(tmp_path / "b", monkeypatch, {"PLANE_READ_OPEN": "0", "PLANE_EMIT_ENABLED": "1"})
     assert "PLANE_READ_" not in bare
@@ -375,20 +303,24 @@ def test_bot_conf_carries_the_read_flags_the_fleet_tier_arms(tmp_path, monkeypat
 
 def test_the_fleet_pulse_unit_is_the_multi_flag_job(tmp_path, monkeypatch):
     from claudlobby.composer import FLEET_JOB_ARMING
-    assert FLEET_JOB_ARMING["fleet-pulse"] == ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS")
-    timers, _ = _composed(tmp_path, monkeypatch, {"PLANE_SHADOW_ENABLED": "1", "PLANE_READ_OVERDUE": "1"})
+    assert FLEET_JOB_ARMING["fleet-pulse"] == ("PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS")
+    assert not any("SHADOW" in f for flags in FLEET_JOB_ARMING.values() for f in flags)
+    timers, _ = _composed(tmp_path, monkeypatch, {"PLANE_READ_OVERDUE": "1", "PLANE_READ_EVENTS": "1"})
     pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
-    assert "Environment=PLANE_SHADOW_ENABLED=1" in pulse and "Environment=PLANE_READ_OVERDUE=1" in pulse
-    assert "PLANE_READ_OVERDUE" not in (timers / "com.test.plane-shadow.service").read_text()
+    assert "Environment=PLANE_READ_OVERDUE=1" in pulse and "Environment=PLANE_READ_EVENTS=1" in pulse
+    assert not [p.name for p in timers.iterdir() if "plane-shadow" in p.name]   # no shadow unit composes any more
+    assert "PLANE_READ_OVERDUE" not in (timers / "com.test.keepalive.service").read_text()
     timers2, _ = _composed(tmp_path / "b", monkeypatch, {"PLANE_READ_OVERDUE": "1"})
     pulse2 = next(p for p in timers2.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
-    assert "PLANE_READ_OVERDUE=1" in pulse2 and "PLANE_SHADOW_ENABLED" not in pulse2
+    assert "PLANE_READ_OVERDUE=1" in pulse2 and "PLANE_READ_EVENTS" not in pulse2
 
 
-def test_the_watchdog_names_its_fleet_on_the_overdue_call():
+def test_the_watchdog_names_its_fleet_on_every_matcher_call():
     src = (REPO / "lib" / "fleet-pulse.sh").read_text()
-    line = next(l for l in src.splitlines() if 'dispatch-overdue.py" --all' in l)
-    assert '--fleet "$fleet"' in line
+    for mode in ("--all", "--orphans", "--unassigned"):
+        line = next(l for l in src.splitlines() if f'dispatch-overdue.py" {mode}' in l)
+        assert '--fleet "$fleet"' in line, mode
+    assert "--source" not in src and "dispatch-log.jsonl" not in src
 
 
 def test_env_tiers_armed_is_exact():
@@ -400,31 +332,31 @@ def test_env_tiers_armed_is_exact():
 
 # --- the grammar -------------------------------------------------------------------
 
-def test_the_grammar_refuses_a_dropped_value_and_a_plane_source_off_its_modes(tmp_path):
+def test_the_grammar_refuses_a_dropped_value_and_a_path_in_the_bot_slot(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    dl, rl = _ledgers(paths)
-    for args in (("--open", "w1", dl, rl, "--fleet"),
-                 ("--open", "w1", dl, rl, "--fleet", "--source", "plane"),
-                 ("--all", dl, rl, "--source"),
-                 ("--all", dl, rl, "--root")):
+    for args in (("--open", "w1", "--fleet"),
+                 ("--open", "w1", "--root", "--fleet", F),
+                 ("--all", "--root"),
+                 ("--all", str(NOW_EPOCH), "--fleet")):
         r = _matcher(root, *args, CLAUDLOBBY_FLEET="other")
         assert r.returncode == 2 and r.stdout == "" and "needs a value" in r.stderr, args
-    accepted = _matcher(root, "--open-task", "w1", dl, rl, "--source", "plane", "--fleet", F)
-    assert accepted.returncode == 0 and "no meaning" not in accepted.stderr   # the resolver flips too (6a)
-    orphans = _matcher(root, "--orphans", dl, rl, "--bots-dir", str(root), "--source", "plane", "--fleet", F)
-    assert orphans.returncode == 0 and "no meaning" not in orphans.stderr     # the orphan list follows the overdue flip (6b)
-    unassigned = _matcher(root, "--unassigned", dl, rl, "--source", "plane", "--fleet", F)
-    assert unassigned.returncode == 0 and "no meaning" not in unassigned.stderr   # the idle check flips too (7a)
-    for args in (("w1", dl, rl),):
-        r = _matcher(root, *args, "--source", "plane", "--fleet", F)
-        assert r.returncode == 2 and r.stdout == "" and "no meaning" in r.stderr, args
-        auto = _matcher(root, *args, PLANE_READ_OPEN="1", PLANE_READ_OVERDUE="1", CLAUDLOBBY_FLEET=F)
-        assert auto.returncode in (0, 3) and "no meaning" not in auto.stderr, args   # flags apply where defined
-    # --bots-dir need not be last any more: the source flags are stripped first
-    bots = root / "bots"; (bots / "w1" / "data").mkdir(parents=True)
-    a = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--bots-dir", str(bots), "--source", "jsonl")
-    b = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "jsonl", "--bots-dir", str(bots))
-    assert a.returncode == 0 == b.returncode and a.stdout == b.stdout
+    for mode in ("--open", "--open-task"):                          # the #1187 shape gate
+        for bad in ("/a/path", "x.jsonl", " "):
+            r = _matcher(root, mode, bad, "--fleet", F)
+            assert r.returncode == 2 and r.stdout == "" and "expects <bot_id> first" in r.stderr, (mode, bad)
+    for args in (("--open-task", "w1"), ("--orphans", "--bots-dir", str(root)), ("--unassigned",)):
+        r = _matcher(root, *args, "--fleet", F)
+        assert r.returncode == 0, (args, r.stderr)
+    assert _matcher(root).returncode == 2 and _matcher(root, "--source", "plane").returncode == 2   # no such mode
+    for args in (("--all", "later"), ("--open-task", "w1", "soon")):
+        r = _matcher(root, *args, "--fleet", F)
+        assert r.returncode == 2 and "must be an integer" in r.stderr, args
+    # --bots-dir need not be last in what the caller assembles: --fleet/--root are stripped first
+    bots = root / "bots"
+    (bots / "w1" / "data").mkdir(parents=True)
+    a = _matcher(root, "--all", str(NOW_EPOCH), "--bots-dir", str(bots), "--fleet", F)
+    b = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
+    assert a.returncode == 0 == b.returncode and a.stdout == b.stdout and a.stdout
 
 
 def test_the_stdlib_open_falls_back_to_a_query_only_connection_on_cantopen(tmp_path, monkeypatch):
