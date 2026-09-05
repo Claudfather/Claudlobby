@@ -251,7 +251,8 @@ def test_carrier_accepted_reads_open_at_derivation(tmp_path):
     conn = connect(db_path(tmp_path))
     status = {r[0]: r[1] for r in conn.execute(queries.TASK_STATUS_SQL)}
     attention = [r[0] for r in conn.execute(
-        queries.ATTENTION_SQL, ("1970-01-01T00:00:00+00:00",)).fetchall()]
+        queries.ATTENTION_SQL,
+        queries.attention_params("1970-01-01T00:00:00+00:00")).fetchall()]
     conn.close()
     assert status[f"asg_{H}"] == "open"
     assert attention == []

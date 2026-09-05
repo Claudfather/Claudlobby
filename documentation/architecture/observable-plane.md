@@ -43,7 +43,7 @@ unknown token is a `ContractViolation`, never a silently stored string.
 | `work_items` | a unit of work | created by a dispatch, linked from its assignment and communication |
 | `assignments` | work assigned to a bot with a deadline | `expected_by`; `source_ref = dispatch-log:<task_id>` (or `dispatch-log:sha:<content key>` for an id-less dispatch) is the legacy join key |
 | `workstreams` | the per-fleet workstream registry's plane twin | `workstream-update.sh` emits its construct + verb events |
-| `events` | everything that happens TO a construct | `kind` = task (progress, completed, failed, returned_blocked, cancelled, superseded, reassigned, expired …), transmission (send_attempted, pane_submitted, carrier_queued, carrier_accepted, recipient_acknowledged, failed, duplicate_suppressed, unknown — `ATTEMPT_STATES`), workstream, system (registry-stamped severity; a DIAGNOSTIC cap of 16 KB on `detail`, `detail_truncated` when it hit) |
+| `events` | everything that happens TO a construct | `kind` = task (22 tokens, `TASK_EVENTS`: progress, completed, failed, returned_blocked, cancelled, superseded, reassigned, expired …, plus the task loop's two HUMAN acts — `escalated` (a manager raises the task for human guidance; NON-terminal, so the task stays open while the human decides) and `nudged` (the operator asks the manager to act) — each carrying its text in the detail (`question` / `reason`, CONTENT-capped) and the person in `by`), transmission (send_attempted, pane_submitted, carrier_queued, carrier_accepted, recipient_acknowledged, failed, duplicate_suppressed, unknown — `ATTEMPT_STATES`), workstream, system (registry-stamped severity; a DIAGNOSTIC cap of 16 KB on `detail`, `detail_truncated` when it hit) |
 | `identity_registry` | aliases → uids | kinds host, vault, fleet, actor, bot_instance, session; provisional actors until a registry keyframe confirms them |
 | `registry_snapshots` | entity keyframes × observed change | the SCD partition is (host, entity type, entity uid); `payload_hash` gates the write; a tombstone is the one stored operation |
 | `metric_samples` | numeric time series | names from the `METRIC_NAMES` registry (`bot.heartbeat`, `host.load`, …); retention 30 days (`plane prune`) |
@@ -97,6 +97,8 @@ and never blocks its real action on it.
 | `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; the `scan_completed` declaration that validates its tombstones | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the flag's only meaning since the closure |
 | `lib/workstream-update.sh`, `lib/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
+| `lib/task-act.sh` | a manager's act on ONE open task: a terminal `cancelled` (`withdraw`) or a non-terminal `escalated` (`escalate`) on the assignment its task id resolves to (`plane-lookup.py --task-id … --all-open`, which REFUSES an id matching two open rows) | `PLANE_EMIT_DISABLED=1` — and unlike the dispatch door it then REFUSES (rc 3): the act IS the record, so there is nothing left to have done |
+| `claudlobby task nudge` | the operator's non-terminal `nudged` on one assignment (actor `human:<who>`), then an id-less re-check to the task's manager (`assigned_by`) through `lib/dispatch.sh` — the record first, so a failed send never leaves a delivered nudge untraced | `PLANE_EMIT_DISABLED=1` — refuses (rc 3) and sends nothing |
 
 Dormancy is a compose-time fact where the composer can make it one (an unarmed
 `unit: service` job composes NO units) and a self-gate where it cannot (host
@@ -177,7 +179,7 @@ is the one definition of "resolves to 1".
 `plane doctor` / `plane registry` / `plane prune` / `plane expire` / `spool retry`. 0001 kernel · 0002 task-status index · 0003/0004
 the fleet room · 0005 FTS · 0006 the registry lane · 0007 `assignments(source_ref)`
 (the legacy join) · 0008 `events(actor_uid, occurred_at)` (progress grace, the
-resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window). A newer db refuses older code (rc 4), never downgrades.
+resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window) · 0010 the task vocabulary widened for `escalated` and `nudged` (chunk M-A). A newer db refuses older code (rc 4), never downgrades. **0010 is the estate's first table REBUILD** — SQLite cannot ALTER a CHECK, so widening the task-event list means the documented 12-step copy of `events`, paid once by whichever door opens the plane first after the upgrade (it needs the table's size again in free space while it runs). The O(1) alternative, a `PRAGMA writable_schema` edit of `sqlite_master`, corrupts the schema outright when the SQL is wrong, which is a worse failure than a slow start on the one database the estate keeps its history in.
 
 **Retention** — `plane prune` ages `metric_samples` past 30 days by
 `ingested_at` (the incident-join window); nothing else is ever deleted; no

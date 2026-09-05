@@ -173,9 +173,10 @@ def test_derivation_fixtures(tmp_path: Path):
         tx(m2, "pane_submitted"), tx(m2, "recipient_acknowledged"),
     ])
     conn = connect(db_path(tmp_path))
-    from claudlobby.plane.queries import ATTENTION_SQL
+    from claudlobby.plane.queries import ATTENTION_SQL, attention_params
 
-    attention = [r[0] for r in conn.execute(ATTENTION_SQL, ("2026-06-01",))]
+    attention = [r[0] for r in conn.execute(ATTENTION_SQL,
+                                            attention_params("2026-06-01"))]
     assert attention == [a2], f"attention must surface ONLY the successor: {attention}"
     # terminal dominance: complete a2, then a late progress must not reopen
     emit_batch(tmp_path, [

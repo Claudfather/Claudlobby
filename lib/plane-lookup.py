@@ -7,7 +7,8 @@ thing the name still means — and two doors resolve through it:
 ``report-back.sh`` recovers the work_item / assignment ids for its own
 emission, and ``dispatch-task.sh --supersedes`` needs the superseded
 dispatch's plane ids to set ``supersedes_msg_id`` and emit a terminal
-``superseded`` event.
+``superseded`` event, and ``task-act.sh`` resolves the row a manager is
+withdrawing or escalating (``--all-open``, which refuses to pick for it).
 
 Stdlib-only, like ``dispatch-overdue.py`` — a bash door must not pay the
 package import on every call. Read-only (``mode=ro`` + ``query_only``).
@@ -90,12 +91,50 @@ def _open_idless(a) -> int:
     return _with_plane(a.root, fn)
 
 
+def _all_open(a) -> int:
+    """`--task-id <id> --all-open`: `<work_item_id> <assignment_id>
+    <dispatch_msg_id|-> <assignee_alias|-> <fleet_alias|->` for EVERY open
+    assignment carrying the id, newest first (chunk M-A, #1481).
+
+    The plain `--task-id` mode answers the LATEST match and stops, which is
+    right for the two doors that already know the assignee. `task-act.sh`
+    does not — a manager holds task ids, not the roster — so it needs the
+    whole open set to refuse an ambiguous id by NAMING the rows instead of
+    silently acting on the newest. Empty = nothing open under that id, which
+    is not the same fact as no such id; the caller says which."""
+    def fn(pr, conn):
+        for wi, asg, msg, who, fleet in pr.open_assignments_for_task(conn, a.task_id):
+            print(f"{wi} {asg} {msg or '-'} {who or '-'} {fleet or '-'}")
+        return 0
+    return _with_plane(a.root, fn)
+
+
+def _escalated(a) -> int:
+    """`--escalated --fleet F`: `<assignment_id> <task_id> <by> <occurred_at>
+    <question>` per OPEN escalation, oldest first, TAB-separated so a question
+    containing spaces survives the read; newlines are stripped for the same
+    reason. Empty = nothing escalated (rc 0); unreachable = rc 3."""
+    def fn(pr, conn):
+        for row in pr.escalated_rows(conn, a.fleet):
+            question = " ".join((row["question"] or "").split())
+            print("\t".join((row["assignment_id"], row["task_id"], row["by"],
+                             row["occurred_at"], question)))
+        return 0
+    return _with_plane(a.root, fn)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--root", required=True)
     ap.add_argument("--task-id", default=None)
     ap.add_argument("--assignee", default=None,
                     help="bot:<fleet>/<name>; name part compared case-insensitively")
+    ap.add_argument("--all-open", action="store_true",
+                    help="--task-id: print EVERY open assignment carrying the id, not just the"
+                    " latest (the task-loop acts refuse an ambiguous id rather than guessing)")
+    ap.add_argument("--escalated", action="store_true",
+                    help="print the fleet's OPEN escalations, tab-separated (needs --fleet) —"
+                    " fleet-pulse's read for the `escalated` task event")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
     ap.add_argument("--events", action="store_true",
@@ -122,6 +161,10 @@ def main(argv=None) -> int:
         print("plane-lookup: --root is empty (CLAUDLOBBY_ROOT unset?) — unreachable",
               file=sys.stderr)
         return 3
+    if a.escalated:
+        if not a.fleet:
+            ap.error("--escalated needs --fleet")
+        return _escalated(a)
     if a.open_idless:
         if not (a.fleet and a.bot):
             ap.error("--open-idless needs --fleet and --bot")
@@ -162,7 +205,9 @@ def main(argv=None) -> int:
             return 0
         return _with_plane(a.root, fn)
     if not a.task_id:
-        ap.error("--task-id is required (or --open-idless)")
+        ap.error("--task-id is required (or --open-idless / --escalated)")
+    if a.all_open:
+        return _all_open(a)
     want = None
     if a.assignee:
         fl, _, name = a.assignee.rpartition("/")

@@ -142,10 +142,12 @@ def test_work_item_body_cap_is_bytes():
 
 
 def test_receiver_acknowledged_is_gone():
-    # 20 = the F9-v2.1 nineteen + supplied_id_not_open (§6b #6, PR-B).
+    # 22 = the F9-v2.1 nineteen + supplied_id_not_open (§6b #6, PR-B)
+    # + escalated and nudged (the task loop's human acts, chunk M-A #1481).
     from claudlobby.plane.contracts import TASK_EVENTS
-    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 20
+    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 22
     assert "supplied_id_not_open" in TASK_EVENTS
+    assert {"escalated", "nudged"} <= set(TASK_EVENTS)
 
 
 def test_task_event_vocabulary_enforced():

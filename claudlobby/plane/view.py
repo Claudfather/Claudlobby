@@ -74,12 +74,13 @@ from .queries import (
     ACTIVATION_TX_EVENTS,
     ATTENTION_ARMS,
     ATTENTION_ARMS_SQL,
+    EVENT_DATED_ARMS,
     LATEST_HEARTBEAT_SQL,
     NON_TERMINAL_CLAUSE,
     TASK_STATUS_SQL,
     TERMINAL_TASK_EVENTS,
-    OPEN_ASSIGNMENTS_AT_SQL, fleet_alias_range, fleet_range_params,
-    not_sentinel_sql,
+    OPEN_ASSIGNMENTS_AT_SQL, attention_arms_params, fleet_alias_range,
+    fleet_range_params, not_sentinel_sql,
 )
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -613,7 +614,7 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
     # instead of a bare flag, and nothing here re-derives an arm in Python.
     arms = {r["assignment_id"]: r for r in conn.execute(
         ATTENTION_ARMS_SQL + f" AND a.assignment_id IN ({ph})",
-        (now, now, *ids))}
+        (*attention_arms_params(now), *ids))}
     # the RAW titles, before the render form replaces them: the broadcast key
     # is keyed on what was STORED (fold F3 — `body_words` strips the trailing
     # `| ref:…` that is the only thing telling two reviews apart)
@@ -629,16 +630,29 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
         arm = arms.get(r["assignment_id"])
         r["attention"] = arm is not None
         # the arms in the operator's priority order; the two SEND arms date
-        # from the dispatch, the deadline arm from the deadline
+        # from the dispatch, the deadline arm from the deadline, and the two
+        # HUMAN arms (chunk M-A) from the event the human landed
         reasons = [name for name, _ in ATTENTION_ARMS if arm and arm[name]]
-        # the PRIMARY arm dates the card: only a purely-overdue row is dated
-        # from its deadline (`overdue` is last in the priority order)
+        # the PRIMARY arm dates the card: a purely-overdue row from its
+        # deadline (`overdue` is last in the priority order), an escalation or
+        # a nudge from its own instant — the query's `arm_at`, never
+        # re-derived here.
         since = None
         if reasons:
-            since = (r["expected_by"] if reasons[0] == "overdue"
-                     else r["occurred_at"])
+            if reasons[0] in EVENT_DATED_ARMS:
+                since = arm["arm_at"]
+            elif reasons[0] == "overdue":
+                since = r["expected_by"]
+            else:
+                since = r["occurred_at"]
         r["attention_reason"] = reasons
         r["attention_since"] = since
+        # WHAT the human said and WHO said it, straight off the arm's own
+        # event: the escalation's question is the whole point of the card
+        # ("needs you: <question>"), and a nudge names the person so the
+        # manager knows who is waiting. Both None for every other arm.
+        r["attention_question"] = arm["arm_question"] if arm else None
+        r["attention_by"] = arm["arm_by"] if arm else None
         r["broadcast_key"] = None
     _stamp_broadcasts(rows, raw_titles)
     return {"assignments": rows,
@@ -1150,7 +1164,7 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
             # had a third Python re-derivation of the same arm (fold F2)
             att = conn.execute(
                 ATTENTION_ARMS_SQL + f" AND a.assignee_uid IN ({ph})",
-                (now, now, *uids)).fetchall()
+                (*attention_arms_params(now), *uids)).fetchall()
             attention = len(att)
             overdue = sum(1 for r in att if r["overdue"])
         orphaned: int | None = 0

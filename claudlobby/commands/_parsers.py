@@ -42,6 +42,7 @@ from .plane import (
     cmd_plane_status,
 )
 from .scaffolding import cmd_new_bot, cmd_new_guardrail, cmd_new_skill
+from .task import cmd_task_nudge
 
 
 def register_subparsers(sub) -> None:
@@ -178,6 +179,22 @@ def register_subparsers(sub) -> None:
     ws_sub.add_parser("list", help="List all workstreams (default)")
     pws_show = ws_sub.add_parser("show", help="Show one workstream by id")
     pws_show.add_argument("id", help="Workstream id (e.g. ws-ship-the-widget)")
+
+    # The task loop's operator door (chunk M-A, #1481). A subcommand group from
+    # the start, because M's other verbs land beside `nudge` rather than as
+    # top-level commands of their own.
+    pt = sub.add_parser("task", help="Acts on ONE task (the plane's assignments)")
+    t_sub = pt.add_subparsers(dest="task_action", required=True)
+    ptn = t_sub.add_parser(
+        "nudge",
+        help="Record a nudge on an open task and ask its manager to act",
+    )
+    ptn.add_argument("task_id", help="The dispatch's task id (e.g. t-1757000000-ab12)")
+    ptn.add_argument("why", nargs="?", default="",
+                     help="Why you are nudging — carried to the manager and recorded")
+    ptn.add_argument("--as", dest="as_who", default=None,
+                     help="Who is nudging (default: $USER) — the actor is human:<who>")
+    ptn.set_defaults(func=cmd_task_nudge)
 
     pu = sub.add_parser(
         "uptime",

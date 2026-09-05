@@ -43,6 +43,10 @@ const TASK_STATUS = {
   accepted: { label: "accepted", cls: "s-open" },
   blocked_waiting: { label: "blocked (waiting)", cls: "s-pend" },
   resumed: { label: "resumed", cls: "s-open" },
+  // the task loop's human acts (chunk M-A, #1481) — both NON-terminal, so
+  // both read as live work rather than as an ending
+  escalated: { label: "needs a human", cls: "s-pend" },
+  nudged: { label: "nudged", cls: "s-open" },
 };
 
 const CLASS_TAGS = new Set(["task_request", "report", "question", "answer",
@@ -231,18 +235,30 @@ function renderChannel(env) {
 // remedy are separated by a real dash; every magnitude is the server's
 // instant through ago(), never re-derived here — reading it off the deadline
 // printed "overdue due in 5m" whenever the two clocks disagreed (fold F7).
-// No fallback line: attention IS the disjunction of these three arms, so an
+// No fallback line: attention IS the disjunction of these arms, so an
 // attention row always carries at least one (pinned server-side).
 //
 // Each arm dates itself from the server instant that arm is ABOUT: the two
 // send arms from `attention_since` (the dispatch), the deadline arm from the
 // deadline — which is the same field when overdue is the only arm, and the
-// right one when it rides behind a failed send.
+// right one when it rides behind a failed send — and the two HUMAN arms
+// (chunk M-A, #1481) from the instant the human acted, which the server
+// already put in `attention_since` for them.
 const WHY = {
+  escalated: (r) => [
+    r.attention_question
+      ? `needs you: ${r.attention_question}`
+      : "needs you — the question was not recorded",
+    `asked by ${r.attention_by || "the manager"} ${ago(r.attention_since)}`],
   send_failed: (r) => [`send failed ${ago(r.attention_since)}`,
-                       "re-send with --supersedes"],
+                       "re-send with --supersedes, or withdraw it"
+                       + " (task-act.sh withdraw <id>)"],
   never_activated: (r) => [`queued ${ago(r.attention_since)}, never delivered`,
-                           "re-send with --supersedes, or check the bot is up"],
+                           "re-send with --supersedes, check the bot is up, or"
+                           + " withdraw it (task-act.sh withdraw <id>)"],
+  nudged: (r) => [`nudged ${ago(r.attention_since)} by`
+                  + ` ${r.attention_by || "the operator"}, no act yet`,
+                  "the manager owes a chase, supersede, withdraw or escalate"],
   overdue: (r) => [`overdue ${ago(r.expected_by || r.attention_since)}`,
                    "chase the worker, or re-dispatch with a new deadline"],
 };

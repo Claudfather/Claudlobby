@@ -2970,9 +2970,30 @@ class TestComposeBotConfObservability:
         conf = self._compose(tmp_path, observability=obs)
         assert "# Observability" in conf
 
-    def test_observability_section_skipped_when_all_none(self, tmp_path):
-        conf = self._compose(tmp_path)
-        assert "# Observability" not in conf
+    def test_a_deadline_is_composed_even_when_the_fleet_declares_none(self, tmp_path):
+        """M1 (#1481): an unset `dispatch_deadline` used to compose NOTHING —
+        with the system-defaults tier off, the one fact the overdue watchdog
+        reads depended on a bash literal nobody could see from fleet.yaml. The
+        ruled default is 24h, and it is composed in SECONDS: 1440 is 24h in
+        MINUTES, and composing that number would make every dispatch overdue
+        in 24 minutes fleet-wide."""
+        from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S
+
+        conf = self._compose(tmp_path)                 # no observability at all
+        assert DEFAULT_DISPATCH_DEADLINE_S == 86_400   # 24h, the ruling, in seconds
+        assert "# Observability" in conf
+        assert "export OBSERVABILITY_DISPATCH_DEADLINE=86400" in conf
+        # ...and nothing else is invented for a fleet that declared nothing
+        assert "OBSERVABILITY_PULSE_INTERVAL" not in conf
+        assert "OBSERVABILITY_BRIDGE_HEAL" not in conf
+
+    def test_a_zero_deadline_composes_as_zero_and_disables_the_clock(self, tmp_path):
+        """`0` is the open-ended dispatch, not "now": it must reach bot.conf
+        as 0 so the door withholds `expected_by` entirely."""
+        from claudlobby.config import ObservabilityConfig
+
+        conf = self._compose(tmp_path, observability=ObservabilityConfig(dispatch_deadline=0))
+        assert "export OBSERVABILITY_DISPATCH_DEADLINE=0" in conf
 
     def test_bridge_heal_emits_shell_1_not_python_true(self, tmp_path):
         """keepalive.sh:130 gates on the string '1'; a bool True rendered via the

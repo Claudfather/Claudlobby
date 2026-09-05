@@ -119,7 +119,7 @@ Event behavior is controlled via `fleet.yaml` `observability:` block, which land
 |---------|---------|---------|
 | `OBSERVABILITY_PULSE_INTERVAL` | 300 | Seconds between fleet-pulse runs |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | 1800 | Seconds before flagging activity_stuck |
-| `OBSERVABILITY_DISPATCH_DEADLINE` | 1800 | Seconds before flagging overdue_dispatch |
+| `OBSERVABILITY_DISPATCH_DEADLINE` | 86400 composed (`system.yaml`'s tier still supplies 1800) | Seconds before flagging overdue_dispatch; `0` = open-ended, no deadline minted |
 | `OBSERVABILITY_BRIDGE_DOWN_GRACE` | 300 | Seconds of post-(re)start grace before an actionable `bridge_down` fires (avoids flagging a poller still coming up after a restart) |
 | `OBSERVABILITY_BRIDGE_HEAL` | 0 (off) | Tier-2 Telegram-bridge self-heal gate. When `1`, `keepalive.sh` bounces a bot whose poller is verified-dark on an **idle** tick — the only respawn, since the `bun server.ts` poller is an MCP stdio child of `claude` — reusing the same restart ladder as the dead-session watchdog. The `.spawn` grace spaces retries; `BRIDGE_HEAL_MAX_ATTEMPTS` caps them, then it escalates once and stops. `no_token`/`unknown`/`no_handle` never bounce. **Ships OFF**: enabling the bounce fleet-wide is gated on the production bounce→recovery telemetry (issue #453 Fork F6b). Enable via a bot/fleet `env:` entry once the gate clears |
 | `BRIDGE_HEAL_MAX_ATTEMPTS` | 3 | Max bridge-heal bounces before `keepalive.sh` stops and escalates once (F3 escalate-only); the bot still serves tmux dispatch throughout. Only consulted when `OBSERVABILITY_BRIDGE_HEAL=1` |

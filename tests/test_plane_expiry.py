@@ -17,7 +17,7 @@ from pathlib import Path
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.expiry import expirable, expired_events
-from claudlobby.plane.queries import ATTENTION_SQL, TASK_STATUS_SQL
+from claudlobby.plane.queries import ATTENTION_SQL, TASK_STATUS_SQL, attention_params
 from tests.plane_fixtures import plane_root
 
 REPO = Path(__file__).resolve().parent.parent
@@ -76,8 +76,8 @@ def test_expired_event_clears_attention_and_sets_status_idempotently(tmp_path):
     stale, fresh, done = _seed(root)
     conn = connect(db_path(root))
     try:
-        before = [r[0] for r in conn.execute(ATTENTION_SQL,
-                                             (NOW.isoformat(),))]
+        before = [r[0] for r in conn.execute(
+            ATTENTION_SQL, attention_params(NOW.isoformat()))]
         assert stale[1] in before and fresh[1] in before   # both overdue
         plan = expirable(conn, now=NOW, after_days=7)
     finally:
@@ -85,7 +85,8 @@ def test_expired_event_clears_attention_and_sets_status_idempotently(tmp_path):
     emit_batch(root, expired_events(plan, now=NOW, after_days=7))
     conn = connect(db_path(root))
     try:
-        after = [r[0] for r in conn.execute(ATTENTION_SQL, (NOW.isoformat(),))]
+        after = [r[0] for r in conn.execute(
+            ATTENTION_SQL, attention_params(NOW.isoformat()))]
         assert stale[1] not in after                # the card is gone
         assert fresh[1] in after                    # the fresh one stays
         assert {r[0]: r[1] for r in conn.execute(TASK_STATUS_SQL)}[stale[1]] == "expired"

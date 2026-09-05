@@ -5,12 +5,18 @@ renewal horizons compare against NOW ("renewed UNTIL" means until: an
 expired renewal protects nothing — round-6 counterexample), while activity
 recency compares against CUTOFF = now − policy_window. Both latest-by-
 ingest_seq: ledger order is authoritative, producer timestamps may arrive
-out of order. ATTENTION_SQL binds (overdue_cutoff,); ATTENTION_ARMS_SQL —
-the same rows with one column per arm — binds it TWICE (the overdue column,
-then the same arm inside the filter).
+out of order. ATTENTION_SQL and ATTENTION_ARMS_SQL bind ONE value per
+`?`-bearing arm, in ARM ORDER, through `attention_params` /
+`attention_arms_params` (chunk M-A, #1481) — the arms-with-columns form binds
+the same tuple TWICE, the columns then the filter. Positional binds were
+hand-written at five call sites while there was exactly one `?`; a second
+arm made a mis-ordered pair a silently WRONG answer rather than an error, so
+the tuple is derived from one `now` in one place.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timedelta
 
 TERMINAL_TASK_EVENTS = (
     "completed", "failed", "cancelled", "returned_blocked",
@@ -150,18 +156,90 @@ _TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
 _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
               " AND e.msg_id = a.dispatch_msg_id AND e.event='failed')")
 
+# --- the HUMAN arms (chunk M-A, #1481) ----------------------------------------
+# Two acts a person takes on ONE task, both already just task events: a
+# manager's `escalated` (it asks the human a question, and is NON-terminal —
+# the task stays open while the human decides) and the operator's `nudged`
+# (it asks the manager to act). Each holds only while it is the assignment's
+# NEWEST task event, so a later `progress`, a re-dispatch's `superseded`, a
+# withdrawal's `cancelled` or any terminal event clears it with no second
+# door and no state to reconcile. "Newest" is TASK_STATUS_SQL's own rule —
+# latest by ingest_seq, `supplied_id_not_open` excluded because it is a JOIN
+# anomaly rather than a lifecycle state (#1372 review F11).
+def _newest_task(col: str) -> str:
+    return (f"(SELECT {col} FROM events n WHERE n.kind='task'"
+            "  AND n.assignment_id = a.assignment_id"
+            "  AND n.event <> 'supplied_id_not_open'"
+            "  ORDER BY n.ingest_seq DESC LIMIT 1)")
+
+
+_NEWEST_EVENT = _newest_task("n.event")
+_NEWEST_AT = _newest_task("n.occurred_at")
+
+# A nudge is an ASK, and a manager is owed a moment to act on it, so a nudge
+# is not attention until it has gone unanswered past this. Named because the
+# card's own wording quotes it ("nudged 40m ago by chris, no act yet"), and
+# because a bare literal inside the SQL string is unquotable there.
+NUDGE_GRACE_S = 30 * 60
+
 # (name, predicate) — the ONE list both surfaces below are built from, so a
 # new arm cannot reach the queue without also reaching the column the card
 # renders its reason from (the fold's rule: a new arm forces a new column).
-# ORDER IS THE OPERATOR'S PRIORITY (send_failed, never_activated, overdue) and
-# also the `?` order of ATTENTION_ARMS_SQL's columns.
+# ORDER IS THE OPERATOR'S PRIORITY (a human waiting on an answer outranks a
+# carrier fault, which outranks a clock) and also the `?` order of
+# ATTENTION_ARMS_SQL's columns — bind through `attention_params`, never by
+# hand.
 ATTENTION_ARMS = (
+    ("escalated", f"({_NEWEST_EVENT} = 'escalated')"),
     ("send_failed", f"({_TX_FAILED} AND NOT {_TX_ACTIVATED})"),
     ("never_activated",
      f"({_TX_EXISTS} AND NOT {_TX_ACTIVATED} AND NOT {_TX_FAILED})"),
+    ("nudged", f"({_NEWEST_EVENT} = 'nudged' AND {_NEWEST_AT} < ?)"),
     ("overdue", "(a.expected_by < ?)"),
 )
+
+# The arms a card dates from THEIR OWN event (`arm_at`) rather than from the
+# dispatch or the deadline: a human act is about when the human acted, and
+# reading an escalation off the dispatch instant printed "needs you 3d ago"
+# for a question asked a minute earlier.
+EVENT_DATED_ARMS = ("escalated", "nudged")
+
+# The arm's own FACTS, stamped beside the arms so no consumer re-derives them
+# (the fold's F2): WHEN the human acted, WHAT an escalation asks, and WHO. All
+# three off the same newest task event the arms select on. None carries a `?`,
+# so the bind contract stays the arms'; each is NULL where the row's newest
+# event has no such detail — including where a metadata-mode capture dropped
+# the prose, which the card renders as "not recorded" rather than inventing
+# one. Exactly the three the card reads: an unread column is a correlated
+# subquery per row paid for nothing.
+ATTENTION_ARM_FACTS = (
+    ("arm_at", _NEWEST_AT),
+    ("arm_question", _newest_task("json_extract(n.detail, '$.question')")),
+    ("arm_by", _newest_task("json_extract(n.detail, '$.by')")),
+)
 _ARM_FILTER = "(" + " OR ".join(sql for _, sql in ATTENTION_ARMS) + ")"
+
+
+def nudge_cutoff(now: str) -> str:
+    """The instant a nudge must PREDATE to be an unanswered one — `now` less
+    the grace, in the string form the ledger stores `occurred_at` in."""
+    return (datetime.fromisoformat(now.replace("Z", "+00:00"))
+            - timedelta(seconds=NUDGE_GRACE_S)).isoformat()
+
+
+def attention_params(now: str) -> tuple:
+    """ATTENTION_SQL's binds: ONE value per `?`-bearing arm, in ARM ORDER.
+    Both derive from a single `now`, so the queue can never read the nudge
+    grace off one clock and the deadline off another."""
+    return (nudge_cutoff(now), now)
+
+
+def attention_arms_params(now: str) -> tuple:
+    """ATTENTION_ARMS_SQL's binds: the arm COLUMNS, then the same arms again
+    inside the filter."""
+    return attention_params(now) * 2
+
+
 _NON_TERMINAL_A = (
     "NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
     f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))")
@@ -172,15 +250,17 @@ ATTENTION_SQL = (
     f" AND {_ARM_FILTER}"
 )
 
-# The same rows, each stamped with WHICH arms hold — so the card can say
-# "send failed 12h ago" or "overdue 2h" instead of a bare flag, and no
-# consumer re-derives an arm in Python beside the query that selected it
-# (the fold's F2: `_fetch_tasks` had its own second derivation and
-# `_fetch_overview` a third). Binds (overdue_cutoff, overdue_cutoff): the
-# overdue COLUMN, then the same arm inside the filter.
+# The same rows, each stamped with WHICH arms hold and the facts those arms
+# are about — so the card can say "send failed 12h ago", "overdue 2h" or
+# "needs you: <question>" instead of a bare flag, and no consumer re-derives
+# an arm in Python beside the query that selected it (the fold's F2:
+# `_fetch_tasks` had its own second derivation and `_fetch_overview` a
+# third). Binds `attention_arms_params(now)`: the arm COLUMNS, then the same
+# arms inside the filter.
 ATTENTION_ARMS_SQL = (
     "SELECT a.assignment_id,"
-    + ",".join(f" {sql} AS {name}" for name, sql in ATTENTION_ARMS)
+    + ",".join(f" {sql} AS {name}"
+               for name, sql in (*ATTENTION_ARMS, *ATTENTION_ARM_FACTS))
     + " FROM assignments a"
     f" WHERE {_NON_TERMINAL_A}"
     f" AND {_ARM_FILTER}"

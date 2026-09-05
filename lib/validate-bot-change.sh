@@ -450,6 +450,106 @@ or_ev2=$(val_events "$ROOT" "$FLEET" "$OR_BOT" dispatch_orphaned | grep -c 't-83
 harness_check "#835 a second sweep does NOT re-record the same orphan (latch holds)" "$r"
 
 # ===========================================================================
+# #1481 chunk M-A — the manager's two acts on ONE open task.
+#
+# Unit tests pin the resolution and the vocabulary. What only running the real
+# doors proves is the pair of facts the acts exist for and that no unit test
+# reaches: a WITHDRAWN row actually leaves the matcher's open set (the
+# watchdog stops crying wolf over a send that never landed), and an ESCALATED
+# one actually does NOT -- `escalated` is non-terminal by ruling, so the work
+# survives the human deciding, and the only thing that can see it is the
+# dedicated read fleet-pulse will page from.
+#
+# The reason and the question are CONTENT, so this rig -- which carries no
+# capture.json, i.e. metadata mode -- deliberately asserts the ARM and the
+# person rather than the prose. The text round-trip is pinned under full
+# capture in tests/test_task_loop_doors.py; a harness that flipped the
+# capture policy mid-run would be testing the policy, not the door.
+# ===========================================================================
+echo ""
+echo "=== validate #1481: withdraw closes a row, escalate keeps it open ==="
+
+# NO bot directory for the worker, deliberately. Every door under test here
+# reads the PLANE (the acts, the matcher, the escalated read) and none needs
+# one -- while a directory under the fleet's bots dir is what makes
+# fleet-pulse health-check a bot, so creating one would add a session_missing
+# push to the shared manager pane on every later sweep and scroll the line a
+# LATER scenario captures out of view. Measured: with the directory, the
+# #1024 pane assertion failed on both runs and passed on the baseline.
+TA_BOT="valact1481"
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0001 "$((now - 600))" "$((now + 3600))" "the undelivered one"
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0002 "$((now - 600))" "$((now + 3600))" "the twin id"
+
+# --- withdraw: run as the MANAGER, the way a manager session would ---
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
+    "$LIB_DIR/task-act.sh" withdraw t-1481-0001 --reason "the broadcast never landed" \
+    > "$ROOT/ta-withdraw.out" 2> "$ROOT/ta-withdraw.err" || true
+
+ta_cancel=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'cancelled' AND a.source_ref = 'dispatch-log:t-1481-0001'")
+[ "${ta_cancel:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 task-act.sh withdraw lands ONE cancelled task event on the resolved assignment" "$r"
+
+ta_by=$(val_sql "$ROOT" "SELECT json_extract(e.detail, '\$.by') FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'cancelled' AND a.source_ref = 'dispatch-log:t-1481-0001'")
+[ "$ta_by" = "$MGR" ] && r=yes || r=no
+harness_check "#1481   ...stamped with WHO withdrew it (the manager, by name)" "$r"
+
+ta_open=$(python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
+    --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-1481-0001' || true)
+[ "${ta_open:-1}" -eq 0 ] && r=yes || r=no
+harness_check "#1481 the withdrawn row leaves the matcher OPEN set (the watchdog stops chasing it)" "$r"
+
+# The refusal that keeps a manager from cancelling the wrong worker: a second
+# OPEN assignment under the same id, on another bot.
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$T835_BOT" t-1481-0002 "$((now - 500))" "$((now + 3600))" "a twin id on another bot"
+ta_amb_rc=0
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
+    "$LIB_DIR/task-act.sh" withdraw t-1481-0002 --reason "which one?" \
+    >/dev/null 2> "$ROOT/ta-amb.err" || ta_amb_rc=$?
+ta_amb_events=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND a.source_ref = 'dispatch-log:t-1481-0002'")
+{ [ "$ta_amb_rc" -eq 2 ] && grep -q "matches 2 open assignments" "$ROOT/ta-amb.err" \
+    && [ "${ta_amb_events:-1}" -eq 0 ]; } && r=yes || r=no
+harness_check "#1481 an id matching TWO open assignments is REFUSED, naming them, with nothing acted" "$r"
+
+# --- escalate: a fresh id, so the ambiguity above cannot reach it ---
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0003 "$((now - 400))" "$((now + 3600))" "the one with a question"
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
+    "$LIB_DIR/task-act.sh" escalate t-1481-0003 "do we ship without the migration" \
+    > "$ROOT/ta-esc.out" 2> "$ROOT/ta-esc.err" || true
+
+ta_esc_open=$(python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
+    --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-1481-0003' || true)
+[ "${ta_esc_open:-0}" -ge 1 ] && r=yes || r=no
+harness_check "#1481 an escalated task stays OPEN (non-terminal by ruling: the work survives the human)" "$r"
+
+ta_esc=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
+    --fleet "$FLEET" 2>/dev/null | grep -c 't-1481-0003' || true)
+[ "${ta_esc:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 plane-lookup --escalated lists it (the only read that can see a non-terminal raise)" "$r"
+
+ta_esc_by=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
+    --fleet "$FLEET" 2>/dev/null | grep 't-1481-0003' | cut -f3 || true)
+[ "$ta_esc_by" = "$MGR" ] && r=yes || r=no
+harness_check "#1481   ...naming who asked, which no capture mode strips" "$r"
+
+# A later report is an ACT: the arm holds only while `escalated` is the
+# assignment newest task event, so nothing has to remember to un-escalate.
+#
+# Deliberately addressed to a manager session that does not exist. The plane
+# record is emitted BEFORE the send (report-back.sh, F9 intent-before-transport),
+# so the fact under test lands either way -- and pointing this at the shared
+# $MGR pane pushed two [BOTREPORT] lines into it, which scrolled the line a
+# LATER scenario captures out of the visible pane and failed a #1024 push
+# assertion that had nothing to do with this change. A harness scenario must
+# not perturb its neighbours to make its own point.
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="valnomgr1481" \
+    "$LIB_DIR/report-back.sh" "$TA_BOT" progress "on it" --progress 30 \
+    --task t-1481-0003 >/dev/null 2>&1 || true
+ta_esc_after=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
+    --fleet "$FLEET" 2>/dev/null | grep -c 't-1481-0003' || true)
+[ "${ta_esc_after:-1}" -eq 0 ] && r=yes || r=no
+harness_check "#1481 a later report CLEARS the escalation (no second door, nothing to reconcile)" "$r"
+
+# ===========================================================================
 # #1187 — a read door whose misuse was indistinguishable from "nothing open".
 #
 # --open, --open-task and single-bot mode each name ONE bot and take it first;
