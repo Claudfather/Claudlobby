@@ -255,6 +255,12 @@ Exit codes:
      the page is a reconstruction rather than the measurement. Printed and
      stamped CONTAMINATED. Outranks 5 (re-running never un-contaminates a boot)
      and is outranked by 4.
+  7  the rescue receipts could not be READ — the plane (where a fleet_rescue
+     receipt lands) was unreachable for at least one declared fleet, so whether
+     a rescue covers this boot is UNKNOWN. Printed and stamped RESCUE UNKNOWN.
+     A receipt gate that fails OPEN is the one failure this measurement must
+     never have, so an unreadable source refuses like a covering receipt would.
+     Outranks 6 and 5, outranked by 4.
 EOF
 }
 
@@ -418,22 +424,55 @@ iso_utc_shaped() {
     esac
 }
 
-# Ledger files that could hold a receipt for THIS boot: dated at or after the
-# day BEFORE the boot date. The filename carries a LOCAL date while the boot
-# instant here is UTC, so a boot either side of midnight would otherwise skip
-# the very file holding its own rescue — and missing a receipt fails OPEN, the
-# one direction this gate must never fail in.
-ledger_files_for_boot() {
-    local since="$1" f b d
-    for f in "$ROOT"/state/events/fleet-*.jsonl; do
-        [ -f "$f" ] || continue
-        b="$(basename "$f")"; d="${b#fleet-}"; d="${d%.jsonl}"
-        case "$d" in
-            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
-            *) continue ;;
-        esac
-        [ "$d" \< "$since" ] || printf '%s\n' "$f"
-    done
+# Receipts live on the PLANE (F18 closure R2b-2): a `fleet_rescue` receipt is a
+# system event on the rescued FLEET's identity, landed by emit_fleet_event, so
+# the plane is asked per declared fleet — every fleet.yaml on the host — from
+# the day BEFORE the boot date (the same window the dated files once drew: a
+# boot either side of midnight must not miss its own rescue). Rows print as the
+# legacy JSON lines, `"type": "fleet_rescue"` only (a correction row is its own
+# type and never admitted), into $TMP/receipt_rows for the parsers below.
+#
+# THE LOAD-BEARING RULE: a fleet the plane cannot answer for — no db, a schema
+# the reader cannot use, a fleet it holds no identity for — is RECORDED as
+# unreadable and the page refuses (exit 7), never read as "no receipt". Missing
+# a receipt fails OPEN, the one direction this gate must never fail in, and an
+# instrument that cannot be reached is not evidence of absence.
+RECEIPTS_UNREACHABLE=0
+RECEIPTS_WHY=""
+receipts_from_plane() {  # receipts_from_plane <since-date YYYY-MM-DD>
+    local since="$1" fname man n_before n_after _rc
+    while IFS="$(printf '\t')" read -r fname man; do
+        [ -n "$fname" ] || continue
+        _rc=0
+        # The window bounds the scan, nothing more: a since the clock could not
+        # format (every date call failing) is dropped rather than sent as a
+        # non-instant — the boundary compare below still decides applicability,
+        # and an unbounded read of one fleet's receipts is cheap.
+        python3 -S -E "$SCRIPT_DIR/plane-lookup.py" --root "$ROOT" --events --fleet "$fname" \
+            --type fleet_rescue ${since:+--since "${since}T00:00:00Z"} > "$TMP/receipt_rows.$fname" 2>"$TMP/receipt_err" || _rc=$?
+        if [ "$_rc" -ne 0 ]; then
+            # A fleet the plane holds NO IDENTITY for is a CERTAIN no-receipt,
+            # not an unknown: a fleet_rescue receipt is an ingest that mints the
+            # fleet's identity, so a fleet with none cannot hold one. A dormant
+            # or never-booted manifest on the host must not darken the page
+            # forever (the R2b-2 structural lens); it is listed, never refused.
+            if grep -q "no identity for fleet" "$TMP/receipt_err" 2>/dev/null; then
+                printf '%s\n' "$fname" >> "$TMP/receipt_never_seen"
+                rm -f "$TMP/receipt_rows.$fname"
+                continue
+            fi
+            RECEIPTS_UNREACHABLE=1
+            RECEIPTS_WHY="${RECEIPTS_WHY:+$RECEIPTS_WHY; }fleet $fname (rc $_rc): $(tail -1 "$TMP/receipt_err" 2>/dev/null | cut -c1-140)"
+            rm -f "$TMP/receipt_rows.$fname"
+            continue
+        fi
+        if [ -s "$TMP/receipt_rows.$fname" ]; then
+            cat "$TMP/receipt_rows.$fname" >> "$TMP/receipt_rows"
+            printf '%s\n' "$fname" >> "$TMP/receipt_fleets"
+        fi
+        rm -f "$TMP/receipt_rows.$fname"
+    done < "$TMP/fleet_pairs"
+    return 0
 }
 
 # One JSON string field, and EMPTY when the row carries more than one distinct
@@ -460,48 +499,23 @@ row_rescued_names() {
         | grep -v '^bots_rescued$'
 }
 
+# Every fleet.yaml on the host, enumerated HERE because the receipt read below
+# asks the plane per declared fleet (the roster itself is built further down
+# from the same list).
+discover_fleet_manifests | sort -u > "$TMP/fleet_pairs"
+cut -f2 < "$TMP/fleet_pairs" | sort -u > "$TMP/manifests"
+if [ ! -s "$TMP/manifests" ]; then
+    die_loud "No fleet.yaml found under $ROOT/local/" \
+             "Looked at local/*/fleet.yaml and local/*/*/fleet.yaml"
+fi
+
 SCAN_SINCE="$(epoch_to_iso_utc "$(( BOOT_EPOCH - 86400 ))")"
 SCAN_SINCE="${SCAN_SINCE%%T*}"
 [ -n "$SCAN_SINCE" ] || SCAN_SINCE="${BOOT_ISO%%T*}"
 
 : > "$TMP/receipt_rows"
-: > "$TMP/receipt_files"
-while IFS= read -r lf; do
-    [ -n "$lf" ] || continue
-    # The closing quote is load-bearing: without it this also swallows
-    # fleet_rescue_correction rows, which are metadata ABOUT a receipt and carry
-    # none of its fields. A prefix match here would read a correction as a
-    # receipt with no stamp and refuse the whole page for it.
-    #
-    # The optional space is load-bearing too, and for the opposite reason (#1202
-    # in a READER rather than a writer). A rescuer writing via python
-    # `json.dumps` emits `"type": "fleet_rescue"`; one writing with printf emits
-    # it compact. Both are valid JSON and both occur — measured on the
-    # 2026-08-24 boot, where two rescuers wrote one of each and a compact-only
-    # match read ONE of them, dropping a 17-name receipt whose boundary was also
-    # the EARLIER of the two. Seven bots the dropped receipt named explicitly
-    # printed as LATE-UNEXPLAINED: "something woke these bots and nothing
-    # recorded what."
-    #
-    # THIS PATTERN CANNOT BE WIDENED ALONE. `row_field` and `row_rescued_names`
-    # parse the admitted row and were compact-only for the same reason, so
-    # widening only here admits a row that then fails to parse — which flips the
-    # boundary to UNUSABLE for EVERY receipt, including well-formed compact
-    # ones. Verified on the live ledger: reader-only took SELF-STARTED 3 -> 0 and
-    # ADJUDICATE 7 -> 11 — worse than the bug IN THAT LEDGER SHAPE, where an
-    # already-parseable receipt sits alongside the newly-admitted unparseable one.
-    # NOT a general law: against a ledger holding ONE spaced receipt and no
-    # compact sibling, reader-only is a strict IMPROVEMENT (unpatched never sees
-    # the receipt, returns rc 0 / "result valid: yes" and reports a rescued bot as
-    # a clean self-start; reader-only returns rc 6 CONTAMINATED, which is honest).
-    # You cannot know which shape you will meet at rescue time, so all three move
-    # together or none do; tests/test_selfstart_snapshot.sh section 11 pins that.
-    if grep -E '"type"[[:space:]]*:[[:space:]]*"fleet_rescue"' "$lf" >> "$TMP/receipt_rows" 2>/dev/null; then
-        basename "$lf" >> "$TMP/receipt_files"
-    fi
-done <<EOF
-$(ledger_files_for_boot "$SCAN_SINCE")
-EOF
+: > "$TMP/receipt_fleets"; : > "$TMP/receipt_never_seen"
+receipts_from_plane "$SCAN_SINCE"
 
 while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -593,11 +607,8 @@ N_RESCUE_NAMED="$(sort -u "$TMP/rescued_names" | grep -c . || true)"
 # The roster comes from declared_bots_strict, the LOUD door — never
 # parse_fleet_bots. See that function for why there are two doors and why
 # swapping this one for the soft sibling silently reinstates the bug above.
-discover_fleet_manifests | cut -f2 | sort -u > "$TMP/manifests"
-if [ ! -s "$TMP/manifests" ]; then
-    die_loud "No fleet.yaml found under $ROOT/local/" \
-             "Looked at local/*/fleet.yaml and local/*/*/fleet.yaml"
-fi
+# (the manifests were enumerated above, ahead of the receipt read — the plane
+# is asked per declared fleet)
 
 : > "$TMP/declared"
 : > "$TMP/badman"
@@ -1010,9 +1021,19 @@ EXIT_CODE=0
 # outranks contaminated because a short denominator invalidates the whole page
 # including its contamination reading.
 CONTAMINATED=0
+RECEIPTS_UNKNOWN=0
 if [ "$RESCUE_STATE" != "NONE" ]; then
     CONTAMINATED=1
     EXIT_CODE=6
+fi
+# The receipt SOURCE could not be read for at least one fleet: whether a rescue
+# covers this boot is unknown, which is not a result either. Precedence 4 > 7 >
+# 6 > 5: a receipt that WAS read still classifies its bots, but the page cannot
+# claim the receipts were all seen, so it refuses as unknown rather than as
+# covered (the instrument, not the boot, is what needs fixing).
+if [ "$RECEIPTS_UNREACHABLE" -eq 1 ]; then
+    RECEIPTS_UNKNOWN=1
+    EXIT_CODE=7
 fi
 
 # ── Completeness assertion ──────────────────────────────────────────────────
@@ -1076,6 +1097,23 @@ if [ "$TOO_EARLY" -eq 1 ]; then
     echo
 fi
 
+if [ "$RECEIPTS_UNKNOWN" -eq 1 ]; then
+    echo
+    echo "############################################################"
+    echo "##  RESCUE UNKNOWN — THE RECEIPTS COULD NOT BE READ        ##"
+    echo "############################################################"
+    echo "##"
+    echo "##  The plane holds the fleet_rescue receipts, and it could not"
+    echo "##  answer for at least one declared fleet:"
+    echo "##    $RECEIPTS_WHY"
+    echo "##  So whether a rescue covers this boot is UNKNOWN, and a receipt"
+    echo "##  gate that fails open is the one failure this measurement must"
+    echo "##  never have. Restore the plane (state/plane/plane.db under"
+    echo "##  $ROOT) and re-run; the boot is not spoiled by this refusal."
+    echo "############################################################"
+    echo
+fi
+
 if [ "$CONTAMINATED" -eq 1 ]; then
     echo
     echo "############################################################"
@@ -1106,7 +1144,10 @@ if [ "$CONTAMINATED" -eq 1 ]; then
 fi
 
 echo "==============================================================="
-if [ "$CONTAMINATED" -eq 1 ]; then
+if [ "$RECEIPTS_UNKNOWN" -eq 1 ]; then
+    echo "  SELF-START SNAPSHOT:  NOT A RESULT — whether a rescue covers this boot is UNKNOWN"
+    echo "                        (provisional: $n_self of $TOTAL, $n_rescued carried, $n_inbound woken by inbound, $n_late late-unexplained)"
+elif [ "$CONTAMINATED" -eq 1 ]; then
     echo "  SELF-START SNAPSHOT:  NOT A RESULT — a rescue covers this boot"
     echo "                        (provisional: $n_self of $TOTAL, $n_rescued carried, $n_inbound woken by inbound, $n_late late-unexplained)"
 elif [ "$TOO_EARLY" -eq 1 ]; then
@@ -1138,9 +1179,13 @@ fi
 echo "  clock at boot : $CLOCK_VERDICT — $CLOCK_DETAIL"
 case "$RESCUE_STATE" in
     NONE)
-        echo "  rescue receipt: none covers this boot — contamination CANNOT be ruled out" ;;
+        if [ "$RECEIPTS_UNREACHABLE" -eq 1 ]; then
+            echo "  rescue receipt: UNREADABLE — $RECEIPTS_WHY"
+        else
+            echo "  rescue receipt: none covers this boot — contamination CANNOT be ruled out$([ -s "$TMP/receipt_never_seen" ] && printf ' (never on the plane: %s)' "$(tr '\n' ' ' < "$TMP/receipt_never_seen" | sed 's/ $//')")"
+        fi ;;
     USABLE)
-        echo "  rescue receipt: boundary $RESCUE_STAMP, $N_RESCUE_NAMED bot(s) named ($(tr '\n' ' ' < "$TMP/receipt_files"))" ;;
+        echo "  rescue receipt: boundary $RESCUE_STAMP, $N_RESCUE_NAMED bot(s) named (fleet(s): $(tr '\n' ' ' < "$TMP/receipt_fleets"))" ;;
     *)
         echo "  rescue receipt: boundary UNUSABLE — $RESCUE_WHY"
         echo "                  $N_RESCUE_NAMED bot(s) named; the name list still applies" ;;
@@ -1155,7 +1200,9 @@ else
 fi
 echo "  boot instant  : ${BOOT_ISO}Z (epoch $BOOT_EPOCH)"
 echo "  snapshot at   : ${NOW_ISO}Z (${ELAPSED}s after boot)"
-if [ "$CONTAMINATED" -eq 1 ]; then
+if [ "$RECEIPTS_UNKNOWN" -eq 1 ]; then
+    echo "  result valid  : NO — the rescue receipts could not be read, see the RESCUE UNKNOWN banner"
+elif [ "$CONTAMINATED" -eq 1 ]; then
     echo "  result valid  : NO — a rescue covers this boot, see the CONTAMINATED banner"
 elif [ "$TOO_EARLY" -eq 1 ]; then
     echo "  result valid  : NOT YET — re-run at $(epoch_to_iso_utc "$VALID_AT")Z (ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s)"

@@ -1,19 +1,20 @@
-"""Regression: fleet-pulse.sh must survive a bot with no events file (#610).
+"""Regression: fleet-pulse.sh must survive a bot with no events (#610).
 
-``_readback_efiles`` ended with ``[ -f ] && printf | sort -u``: when the last
-date in the read-back span has no ledger, the failed ``[ -f ]`` becomes the
-pipeline's exit status under ``pipefail``, and the ``_efiles=$(...)``
-assignment call sites abort the whole pulse (exit 1) via ``set -e`` + the ERR
-trap — killing fleet-wide escalation and the summary.
+The 2026-06 bug: ``_readback_efiles`` ended with ``[ -f ] && printf | sort -u``
+and a bot with a live session and zero events all day left today's ledger
+absent, so the failed ``[ -f ]`` became the pipeline's exit status under
+``pipefail`` and the whole pulse aborted through ``set -e`` + the ERR trap.
 
-The trigger is an idle-but-HEALTHY bot: a dead-session bot gets today's ledger
-created by the main loop's own ``session_missing`` emission, so only a bot with
-a live tmux session and zero events all day leaves the ledger absent. One such
-bot killed the pulse for the entire fleet, every tick.
+F18 closure R2b-2: the events read-back reads the PLANE and nothing else —
+``_readback_efiles`` and the dated files are gone, so the helper-contract
+tests ``test_readback_efiles_no_files_is_success`` and
+``test_readback_efiles_lists_existing_files`` went with them. The end-to-end
+pin keeps its subject: a healthy, idle bot with zero events on the plane must
+not abort the sweep at either read-back site.
 
 CI runs pytest only, so the bash is exercised via subprocess. The end-to-end
 test needs a real tmux server for the healthy-idle bot and skips where tmux is
-unavailable; the helper-contract tests always run.
+unavailable.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -30,59 +30,6 @@ from tests.conftest import _scrubbed_env, read_fleet_events
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FLEET_PULSE = REPO_ROOT / "lib" / "fleet-pulse.sh"
-
-TODAY = date.today().isoformat()
-YESTERDAY = (date.today() - timedelta(days=1)).isoformat()
-
-
-# --- helper contract: _readback_efiles ---------------------------------------
-
-
-def _readback_efiles(bot_dir: Path, today: str, rb_today: str) -> tuple[str, int]:
-    """Extract ``_readback_efiles`` from fleet-pulse.sh and invoke it directly,
-    under pipefail like the caller — without it the pipe into ``sort -u`` masks
-    the failed ``[ -f ]`` and the bug is invisible."""
-    script = (
-        "set -o pipefail; "
-        f'fn=$(sed -n "/^_readback_efiles() {{/,/^}}/p" "{FLEET_PULSE}"); '
-        f'eval "$fn"; today="{today}"; _rb_today="{rb_today}"; '
-        '_readback_efiles "$1"'
-    )
-    proc = subprocess.run(
-        ["bash", "-c", script, "_", str(bot_dir)],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
-    return proc.stdout, proc.returncode
-
-
-def test_readback_efiles_no_files_is_success(tmp_path):
-    """No ledger for the span is a normal state: empty output, exit 0."""
-    bot = tmp_path / "bots" / "idle"
-    (bot / "data" / "events").mkdir(parents=True)
-    out, rc = _readback_efiles(bot, TODAY, TODAY)
-    assert rc == 0, "empty read-back span must not be an error"
-    assert out == ""
-
-
-def test_readback_efiles_lists_existing_files(tmp_path):
-    """Listing must also exit 0 on the half-present straddle span (yesterday's
-    file exists, today's not yet) — a second latent trigger."""
-    bot = tmp_path / "bots" / "busy"
-    events = bot / "data" / "events"
-    events.mkdir(parents=True)
-    yesterday_file = events / f"fleet-{YESTERDAY}.jsonl"
-    yesterday_file.write_text('{"type":"tool_call"}\n')
-    out, rc = _readback_efiles(bot, YESTERDAY, TODAY)
-    assert rc == 0
-    assert out.splitlines() == [str(yesterday_file)]
-
-    # Identical span dates (the no-midnight-crossing case) dedup via sort -u.
-    out, rc = _readback_efiles(bot, YESTERDAY, YESTERDAY)
-    assert rc == 0
-    assert out.splitlines() == [str(yesterday_file)]
-
 
 # --- end-to-end: the pulse survives a no-events bot ---------------------------
 
@@ -105,7 +52,8 @@ def pulse_fleet(tmp_path):
 
     - ``aaa-idle`` — live tmux session (own socket), zero events: the trigger.
       Globs first, so the sweep hits its empty read-back before the other bot.
-    - ``zzz-logged`` — pre-seeded today ledger (the has-events control).
+    - ``zzz-logged`` — no session, so the sweep itself lands its
+      session_missing on the plane (the has-events control).
     """
     root = tmp_path / "root"
     fleet = "pulsefleet"
@@ -116,9 +64,8 @@ def pulse_fleet(tmp_path):
     (idle / "bot.conf").write_text(f"TMUX_SOCKET={SOCKET}\n")
 
     logged = bots / "zzz-logged"
-    events = logged / "data" / "events"
-    events.mkdir(parents=True)
-    (events / f"fleet-{TODAY}.jsonl").write_text('{"type":"tool_call"}\n')
+    (logged / "data").mkdir(parents=True)
+    (logged / "bot.conf").write_text("TMUX_SOCKET=pulse610-none\n")
 
     # Only the 2-space `bots:` block and 4-space bot keys are read
     # (parse_fleet_bots).
@@ -183,11 +130,12 @@ def _script_errors(root: Path) -> str:
 )
 def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
     """The pulse exits 0 with a full summary and no script_error, through both
-    ``_readback_efiles`` call sites. With a chat id resolved, the escalation
-    loop's site runs — the live abort of #610 ("non-zero exit at line 332").
-    Without one, only the summary's site runs; it survives today purely because
-    its ``{ ... } && mv`` shape suppresses ``set -e``, and this pin keeps it
-    surviving if that shape ever changes.
+    read-back sites (the plane's one read for the escalation window and for
+    the summary span). With a chat id resolved, the escalation loop's site runs
+    — the live abort of #610 ("non-zero exit at line 332"). Without one, only
+    the summary's site runs; it survives purely because its ``{ ... } && mv``
+    shape suppresses ``set -e``, and this pin keeps it surviving if that shape
+    ever changes.
     """
     root, fleet = pulse_fleet
     proc = _run_pulse(root, fleet, extra_env)

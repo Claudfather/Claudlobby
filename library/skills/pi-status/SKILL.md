@@ -64,9 +64,9 @@ echo "Total MCP processes: $(ps aux | grep -E 'uvx|npx|workspace-mcp|notion|gith
 Check last keepalive log entries:
 ```bash
 echo "=== Assistant keepalive ==="
-tail -3 <ASSISTANT_TOOLS_DIR>/keepalive.log
+claudlobby uptime --bot <bot-a>      # heartbeat history, from the plane
 echo "=== Business bot keepalive ==="
-tail -3 ~/<bot-b>/keepalive.log
+claudlobby uptime --bot <bot-b>
 ```
 
 ### 5. Network

@@ -5,8 +5,8 @@
 # and checks: tmux session alive, systemd service state, pane freshness,
 # uncommitted git WIP.
 #
-# Writes events to each bot's data/events/fleet-YYYY-MM-DD.jsonl with
-# source: "pulse". Same schema as bot-vitals.sh.
+# Every check lands on the plane through emit_fleet_event (source: "pulse");
+# the escalation and the summary read the plane's critical set back.
 #
 # Usage: lib/fleet-pulse.sh <fleet-name>
 
@@ -40,7 +40,6 @@ declared_bots=$(parse_fleet_bots "$fleet_dir/fleet.yaml")
 
 install_error_trap ""
 
-today=$(date +%Y-%m-%d)
 ts=$(ts_iso)
 
 # State directory for pane hashes (persistent across runs)
@@ -119,15 +118,6 @@ _notify_current_bot() {
     notify_manager "$_current_bot_dir" "$1"
 }
 
-# --- Helper: reap old event files for a bot (honors OBSERVABILITY_REAP_DAYS) ---
-reap_events() {
-    local bot_dir="$1"
-    local events_dir="$bot_dir/data/events"
-    local reap_days
-    reap_days=$(bot_conf_get "$bot_dir" OBSERVABILITY_REAP_DAYS 7)
-    reap_event_files "$events_dir" "fleet-*.jsonl" "$reap_days"
-}
-
 # --- Pre-sweep: dispatch-overdue scan (once, not per-bot) ---
 # Runs dispatch-overdue.py --all against the plane exactly once.
 # Output is stored in a temp file for per-bot lookup inside the loop.
@@ -169,6 +159,12 @@ _overdue_page() {
     fi
 }
 
+# A brand-new fleet pages this guard ONCE: its first pulse's pre-sweep runs before
+# the sweep's own emissions mint the fleet's identity, so the matcher refuses
+# ("holds no bot of fleet") and the next pass clears it. Kept rather than
+# special-cased (the R2b-2 adversarial lens): that refusal is also the ONLY
+# signal a timer with a wrong CLAUDLOBBY_ROOT ever gives, since the sweep's own
+# emissions would mint the identity in the wrong plane and silence it next pass.
 _overdue_reader_guard() {
     case "${_overdue_reader_rc:-0}" in
         0) debounce_clear "$state_dir" fleet overdue_reader_unreachable; return 0 ;;
@@ -180,7 +176,7 @@ _overdue_reader_guard() {
     [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: overdue reader UNREACHABLE and no escalation chat - the watchdog is dark for overdue dispatches: ${_why}" >&2; return 0; }
     _OVERDUE_PAGE_FAILED=0
     debounce_notify "$state_dir" fleet overdue_reader_unreachable _overdue_page \
-        "FLEET ALERT: the overdue reader for ${fleet} is UNREACHABLE - the watchdog cannot see overdue dispatches until the plane is restored, or PLANE_READ_OVERDUE is flipped back to 0. (${_why})" \
+        "FLEET ALERT: the overdue reader for ${fleet} is UNREACHABLE - the watchdog cannot see overdue dispatches until the plane is restored. (${_why})" \
         "" 600 || true
     [ "${_OVERDUE_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet overdue_reader_unreachable
     return 0
@@ -532,66 +528,25 @@ for bot_dir in "$BOTS_DIR"/*/; do
             fi
         fi
     fi
-
-    # Reap old event files for this bot
-    reap_events "$bot_dir"
 done
 
-# Read-back date span for the escalation + summary below. emit_fleet_event
-# stamps each event with a per-call date, so a sweep that straddles midnight
-# lands late events in the NEXT day's ledger — past the single script-start
-# $today this read-back would otherwise scan. Covering the script-start day plus
-# the read-back day (identical unless the sweep crossed midnight; a sub-24h
-# sweep spans at most these two) closes that gap. The span tracks the sweep's
-# own run, not the escalation window: the summary below has no time filter and
-# leans on this span alone for "recent", while the escalation ADDITIONALLY
-# filters by _window_start — so a narrower span there can only under-count
-# (miss), never over-escalate.
-_rb_today=$(date +%Y-%m-%d)
-# Echo a bot's existing ledger file(s) across that span, oldest first so a
-# downstream `tail -1` still yields the chronologically latest event. An empty
-# result (bot emitted nothing in the span) is a normal state, not an error:
-# without the explicit return, a missing file on the span's last date makes the
-# failed `[ -f ]` the pipeline's exit status under pipefail, and the `$(...)`
-# assignment call sites abort the whole pulse via set -e (#610). The `|| true`
-# states that same tolerance to the ERR trap, which `return 0` cannot: the return
-# masks the status for errexit, but the trap has already fired by then, so under
-# errtrace (#844) a normal empty span logged a script_error every pulse — on the
-# per-minute path. Suppressing at the statement is what marks a benign non-zero
-# as intended; masking it afterwards only hides it from one of the two readers.
-# Phase B: the events readers follow the flip — flag AND a recorded declaration
-# for the `events` reader, asked ONCE per sweep; a flag alone is disclosed and
-# the files keep serving. An UNREACHABLE plane under the flag is a THIRD state,
-# never the files: after the retirement they hold nothing, so a fallback would
-# read an outage as a quiet fleet (the watchdog gone dark in silence).
-_EVENTS_SOURCE=""          # files | plane | unreachable, decided once per sweep
+# --- Events read-back: the plane, the only source (F18 closure, R2b-2) ---
+# The plane is read by INSTANT (the escalation inside its window, the summary
+# inside the read-back span), and a plane that cannot answer is a THIRD state,
+# never a quiet fleet: the per-bot ALERTS column says unknown and
+# _events_reader_guard pages it. (The dated event files this once read went
+# with R1; the flag + declaration that gated the plane behind them with R2b-2.)
+_EVENTS_SOURCE=plane       # plane | unreachable — flipped to unreachable by a failed read, for the rest of the sweep
 _events_why=""
-_events_from_plane() {
-    if [ -z "$_EVENTS_SOURCE" ]; then
-        _EVENTS_SOURCE=files
-        if [ "${PLANE_READ_EVENTS:-0}" = "1" ]; then
-            local _decl _rc=0
-            _decl=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --declared events \
-                --fleet "$fleet" 2>"$state_dir/.events-err") || _rc=$?
-            if [ "$_rc" -ne 0 ]; then
-                _EVENTS_SOURCE=unreachable
-                _events_why=$(tail -1 "$state_dir/.events-err" 2>/dev/null | cut -c1-200)
-                echo "fleet-pulse: PLANE_READ_EVENTS=1 but the plane is UNREACHABLE (rc=$_rc): ${_events_why} - critical events cannot be judged this pass" >&2
-            elif [ -n "$_decl" ]; then
-                _EVENTS_SOURCE=plane
-            else
-                echo "fleet-pulse: PLANE_READ_EVENTS=1 but no cutover_declared for $fleet/events - the events readers keep the files (plane cutover --reader events)" >&2
-            fi
-            rm -f "$state_dir/.events-err"
-        fi
-    fi
+_events_readable() {
     [ "$_EVENTS_SOURCE" = plane ]
 }
 # The plane's CRITICAL set inside a window, read ONCE per window per sweep into
-# a cache file (`<bot> <type> <latest>` per row) — the escalation loop asks
-# inside its own window, the summary inside the read-back span; a sweep used
-# to spawn the lookup once per bot per type. Not a subshell call: a failed read
-# flips the source to unreachable for the rest of the sweep.
+# a cache file (`<bot> <type> <latest>` per row); the two windows are two reads
+# on purpose — the door normalises `--since` to the stored form, and a bash
+# lexical compare across instant forms is the boundary bug it exists to avoid.
+# Not a subshell call: a failed read flips the source to unreachable for the
+# rest of the sweep.
 _plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = cache path
     local _rc=0
     python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalation \
@@ -599,7 +554,7 @@ _plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = 
     if [ "$_rc" -ne 0 ]; then
         _EVENTS_SOURCE=unreachable
         _events_why=$(tail -1 "$state_dir/.events-err" 2>/dev/null | cut -c1-200)
-        echo "fleet-pulse: critical-events reader UNREACHABLE (rc=$_rc): ${_events_why} - not judged this pass" >&2
+        echo "fleet-pulse: critical-events reader UNREACHABLE (rc=$_rc): ${_events_why} - critical events cannot be judged this pass" >&2
         rm -f "$state_dir/.events-err" "$2"; return 1
     fi
     rm -f "$state_dir/.events-err"
@@ -608,15 +563,6 @@ _plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = 
 _CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout"
 _CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck rc_timeout"
 _rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")
-
-_readback_efiles() {
-    local _bd="$1" _d _f
-    for _d in "$today" "$_rb_today"; do
-        _f="$_bd/data/events/fleet-${_d}.jsonl"
-        [ -f "$_f" ] && printf '%s\n' "$_f"
-    done | sort -u || true
-    return 0
-}
 
 # --- Fleet-wide escalation: persistent critical events → Telegram -----------
 _ESCALATION_THRESHOLD="${FLEET_PULSE_ESCALATION_THRESHOLD:-2}"
@@ -660,7 +606,7 @@ _events_reader_guard() {
     [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: events reader UNREACHABLE and no escalation chat - the watchdog is dark for critical fleet events: ${_events_why}" >&2; return 0; }
     _EVENTS_PAGE_FAILED=0
     debounce_notify "$state_dir" fleet events_reader_unreachable _events_page \
-        "FLEET ALERT: the events reader for ${fleet} is UNREACHABLE - critical fleet events cannot be judged until the plane is restored, or PLANE_READ_EVENTS is flipped back to 0. (${_events_why})" \
+        "FLEET ALERT: the events reader for ${fleet} is UNREACHABLE - critical fleet events cannot be judged until the plane is restored. (${_events_why})" \
         "" 600 || true
     [ "${_EVENTS_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet events_reader_unreachable
     return 0
@@ -686,34 +632,15 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
         # fix (mirror bridge_down's startup+pulse legs) is the deferred follow-up.
         _esc_cache="$state_dir/.critical-window"
         _esc_ok=0
-        if _events_from_plane; then
+        if _events_readable; then
             _plane_critical "$_window_start" "$_esc_cache" && _esc_ok=1
         fi
         for _crit_type in $_CRITICAL_ESCALATION_TYPES; do
             _affected_bots=""
             _affected_count=0
-            if [ "$_EVENTS_SOURCE" = files ]; then
-                for bot_dir in "$BOTS_DIR"/*/; do
-                    [ -d "$bot_dir" ] || continue
-                    _bid=$(basename "$bot_dir")
-                    bot_in_fleet "$_bid" "$declared_bots" || continue
-                    _efiles=$(_readback_efiles "$bot_dir")
-                    [ -n "$_efiles" ] || continue
-                    # Check if this bot has this critical event type within the window
-                    # shellcheck disable=SC2086  # _efiles: newline list of ledger paths, intentional split
-                    if grep -q "\"type\":\"$_crit_type\"" $_efiles 2>/dev/null; then
-                        # shellcheck disable=SC2086
-                        _latest_ts=$(grep -h "\"type\":\"$_crit_type\"" $_efiles | tail -1 | \
-                            python3 -c "import sys,json; print(json.loads(sys.stdin.readline())['ts'])" 2>/dev/null || echo "")
-                        if [ -n "$_latest_ts" ] && [[ "$_latest_ts" > "$_window_start" ]]; then
-                            _affected_bots="$_affected_bots $_bid"
-                            _affected_count=$((_affected_count + 1))
-                        fi
-                    fi
-                done
-            elif [ "$_esc_ok" -eq 1 ]; then
-                # Phase B: the same question from the plane's one read — which
-                # declared bots carry this critical type inside the window
+            if [ "$_esc_ok" -eq 1 ]; then
+                # the plane's one read: which declared bots carry this critical
+                # type inside the window
                 while read -r _bid _btype _latest_ts; do
                     [ "$_btype" = "$_crit_type" ] || continue
                     bot_in_fleet "$_bid" "$declared_bots" || continue
@@ -721,7 +648,7 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                     _affected_count=$((_affected_count + 1))
                 done < "$_esc_cache"
             else
-                continue                  # unreachable under the flag: not judged this pass (disclosed once, paged below)
+                continue                  # unreachable: not judged this pass (disclosed once, paged below)
             fi
             if [ "$_affected_count" -ge "$_ESCALATION_THRESHOLD" ]; then
                 _esc_marker="$state_dir/escalation_${_crit_type}"
@@ -800,7 +727,7 @@ _summary_tmp=$(safe_mktemp)
         fi
 
         _s_alerts=""
-        if _events_from_plane; then
+        if _events_readable; then
             # ONE read for the whole summary (the read-back span), on the first bot
             if [ -z "${_rb_read:-}" ]; then
                 _rb_read=1; _rb_ok=0
@@ -812,16 +739,15 @@ _summary_tmp=$(safe_mktemp)
                 done
             fi
         fi
-        if [ "$_EVENTS_SOURCE" = files ]; then
-            _s_efiles=$(_readback_efiles "$_s_bot_dir")
-            if [ -n "$_s_efiles" ]; then
-                for _s_ct in $_CRITICAL_SUMMARY_TYPES; do
-                    # shellcheck disable=SC2086  # _s_efiles: newline list of ledger paths, intentional split
-                    grep -q "\"type\":\"$_s_ct\"" $_s_efiles 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
-                done
-            fi
-        elif [ "$_EVENTS_SOURCE" = unreachable ]; then
+        if [ "$_EVENTS_SOURCE" = unreachable ]; then
             _s_alerts=" unknown (events reader unreachable)"    # never "none": an outage is not a quiet bot
+        fi
+        # A refused overdue reader (rc 3, the plane unreachable or holding no
+        # bot of this fleet) is the same third state for the overdue half of
+        # the column: the events reader said unknown here since Phase B while
+        # a refused overdue reader still printed none (filed on #1467).
+        if [ "${_overdue_reader_rc:-0}" -eq 3 ]; then
+            _s_alerts="$_s_alerts unknown (overdue reader unreachable)"
         fi
         _s_alerts="${_s_alerts:- none}"
         printf "%-12s %-8s %-18s %s\n" "$_s_bid" "$_s_session_status" "$_s_svc_status" "$_s_alerts"
