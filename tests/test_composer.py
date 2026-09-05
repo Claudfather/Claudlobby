@@ -2941,13 +2941,12 @@ class TestComposeBotConfObservability:
 
         obs = ObservabilityConfig(
             pulse_interval=300,
-            reap_days=7,
             activity_stuck_threshold=1800,
             dispatch_deadline=1800,
         )
         conf = self._compose(tmp_path, observability=obs)
         assert "export OBSERVABILITY_PULSE_INTERVAL=300" in conf
-        assert "export OBSERVABILITY_REAP_DAYS=7" in conf
+        assert "OBSERVABILITY_REAP_DAYS" not in conf          # the knob is retired (F18 closure): never composed
         assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1800" in conf
         assert "export OBSERVABILITY_DISPATCH_DEADLINE=1800" in conf
 
@@ -2956,13 +2955,11 @@ class TestComposeBotConfObservability:
 
         obs = ObservabilityConfig(
             pulse_interval=60,
-            reap_days=14,
             activity_stuck_threshold=600,
             dispatch_deadline=900,
         )
         conf = self._compose(tmp_path, observability=obs)
         assert "export OBSERVABILITY_PULSE_INTERVAL=60" in conf
-        assert "export OBSERVABILITY_REAP_DAYS=14" in conf
         assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=600" in conf
         assert "export OBSERVABILITY_DISPATCH_DEADLINE=900" in conf
 

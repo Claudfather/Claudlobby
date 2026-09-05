@@ -29,7 +29,7 @@ import json
 import sqlite3
 import sys
 
-# The package twin of this read is queries.LATEST_ASSIGNMENT_BY_REF_SQL (the
+# The package twin of this read went with the importer (F18 R3); this stdlib read (the
 # importer's report link and supersession closure ride it); a bash door cannot
 # import the package, so the SQL lives twice - keep the two in step.
 SQL = (
@@ -99,12 +99,6 @@ def main(argv=None) -> int:
                     help="bot:<fleet>/<name>; name part compared case-insensitively")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
-    ap.add_argument("--declared", default=None, metavar="READER",
-                    help="print the instant READER was declared cut over to the plane for --fleet"
-                    " (cutover_declared), or nothing — the bash readers' half of a flip's two facts")
-    ap.add_argument("--retired", action="store_true",
-                    help="print the instant the fleet's legacy writes were retired, or nothing"
-                    " (needs --fleet; chunk 6b — the doors' second fact)")
     ap.add_argument("--events", action="store_true",
                     help="print the fleet's events as legacy JSONL rows, oldest first (needs --fleet;"
                     " --since <iso> bounds; --bot / --type filter) — Phase B, the bot-events ledger from the plane")
@@ -114,8 +108,6 @@ def main(argv=None) -> int:
     ap.add_argument("--since", default=None,
                     help="an ISO instant; a naive one is the host's local clock (fleet-pulse's window)")
     ap.add_argument("--type", default=None)
-    ap.add_argument("--door", default=None, choices=("dispatch", "report", "events", "workstreams"),
-                    help="with --retired: the retirement must name this door's flag")
     ap.add_argument("--workstreams", action="store_true",
                     help="print the fleet's workstream registry JSON from the plane (needs --fleet;"
                     " --lease-days for a never-renewed lease) — cutover A2, the door's read side")
@@ -168,17 +160,6 @@ def main(argv=None) -> int:
             else:
                 for row in pr.fleet_events(conn, a.fleet, since=a.since, bot=a.bot, event_type=a.type):
                     print(json.dumps(pr.public(row), separators=(",", ":")))
-            return 0
-        return _with_plane(a.root, fn)
-    if a.retired or a.declared:
-        if not a.fleet:
-            ap.error("--retired / --declared need --fleet")
-
-        def fn(pr, conn):
-            at = (pr.retired(conn, a.fleet, a.door) if a.retired
-                  else pr.declared(conn, a.fleet, a.declared))
-            if at:
-                print(at)
             return 0
         return _with_plane(a.root, fn)
     if not a.task_id:

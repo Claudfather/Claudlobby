@@ -105,15 +105,12 @@ Bot activity
 | Path | Content | Retention |
 |------|---------|-----------|
 | `runtime/bots/<bot>/keepalive.log` | Plaintext keepalive state log | Rotated by log-rotate.sh (500 lines) |
-| `runtime/bots/<bot>/data/events/fleet-*.jsonl` | Structured events from pulse + vitals | 7 days (configurable via `OBSERVABILITY_REAP_DAYS`) |
-| `runtime/bots/<bot>/data/events/keepalive-*.jsonl` | Keepalive JSONL events | 7 days (configurable) |
+| `state/plane/plane.db` | The plane: every event, dispatch, report and heartbeat sample (F18 closure — the per-bot and fleet-root event files are gone); read with `claudlobby events` / `report-back` / `uptime` / `brief` | Append-only; metric samples aged by `plane prune` (30d) |
 | `runtime/bots/<bot>/data/.idle` | Idle marker — touched by keepalive.sh on IDLE, cleared on BUSY. Fleet-pulse reads mtime. | Transient (current state only) |
 | `runtime/bots/<bot>/data/.last-tool-call` | Tool-call marker — touched by bot-vitals.sh on every hook. Stale mtime + no `.idle` = activity_stuck candidate. | Transient (current state only) |
 | `state/fleet-state.json` | Per-bot current status + task | Persistent |
 | `state/pulse/pulse-summary.txt` | Last fleet-pulse human-readable output | Overwritten each run |
 | `state/pulse/<bot>.pane_hash` | Pane change detection markers | Persistent |
-| `state/dispatch-log.jsonl` | Dispatch history for overdue tracking | Persistent |
-| `state/events/fleet-*.jsonl` | Fleet-root events not tied to one bot, or that must outlive one — `reload_failed`, `restart_failed`, `bridge_down` at bring-up (via `emit_failure_alert`/`emit_fleet_notice`), `bot_teardown_started` (survives `spin-down --purge` deleting the bot dir), plus `script_error`/`send_miss` emitted outside a bot context (host jobs). Read by `claudlobby events` alongside the per-bot ledgers | Not currently reaped — no `OBSERVABILITY_REAP_DAYS` sweep touches this path. Deliberate for teardown receipts, whose audit value is long-lived |
 
 ## Configuration
 
@@ -122,7 +119,6 @@ Event behavior is controlled via `fleet.yaml` `observability:` block, which land
 | Env var | Default | Meaning |
 |---------|---------|---------|
 | `OBSERVABILITY_PULSE_INTERVAL` | 300 | Seconds between fleet-pulse runs |
-| `OBSERVABILITY_REAP_DAYS` | 7 | Days to retain event JSONL files |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | 1800 | Seconds before flagging activity_stuck |
 | `OBSERVABILITY_DISPATCH_DEADLINE` | 1800 | Seconds before flagging overdue_dispatch |
 | `OBSERVABILITY_BRIDGE_DOWN_GRACE` | 300 | Seconds of post-(re)start grace before an actionable `bridge_down` fires (avoids flagging a poller still coming up after a restart) |

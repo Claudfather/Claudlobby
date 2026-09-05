@@ -92,7 +92,6 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `OBSERVABILITY_PULSE_INTERVAL` | `bots.<name>.observability.pulse_interval` | Seconds between heartbeat pulses (default: 300) |
-| `OBSERVABILITY_REAP_DAYS` | `bots.<name>.observability.reap_days` | Days to retain event files (default: 7) |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | `bots.<name>.observability.activity_stuck_threshold` | Seconds of inactivity before flagged stuck (default: 1800) |
 | `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue (default: 1800) |
 | `RC_READY_TIMEOUT_S` | env override (`start-bot.sh`) | Seconds to wait for the `remote-control is active` readiness string before logging TIMEOUT and emitting the `rc_timeout` event (default: 90). Not composed from fleet.yaml — a raw override for slow hosts and the test harness |

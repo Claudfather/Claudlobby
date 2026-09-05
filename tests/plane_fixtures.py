@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from claudlobby.plane.db import connect_ro, db_file
+from claudlobby.plane.emit_api import emit_batch
 
 
 def plane_root(tmp_path: Path, *, capture: str = '{"*": "full"}') -> Path:
@@ -38,6 +39,7 @@ def ro(root: Path):
 # deleted shadow suite and the flip suite, F18 closure R2a) --------------------
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -74,7 +76,6 @@ def _dispatch(root, n, task_id, ts, *, bot="w1", ledger=None):
     work item + assignment + communication. *ledger* is accepted for the
     callers that still collect the legacy-shaped rows (the report and resolver
     suites write them for the readers R2b moves)."""
-    from tests.test_plane_cutover_parity import _drow, _live_dispatch
     row = _drow(ts, task_id, bot=bot)
     row["dispatched_at"] = _epoch(ts)
     deadline = datetime.fromtimestamp(row["expected_by"], timezone.utc).isoformat()
@@ -116,7 +117,6 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
 
 
 def _complete(root, wi, asg, ts, task_id, reports=None, *, bot="w1"):
-    from tests.test_plane_cutover_parity import _rrow
     _report(root, wi, asg, ts, bot=bot)
     if reports is not None:
         reports.append(_rrow(ts, task_id, "completed", bot=bot))
@@ -138,8 +138,7 @@ def _scene(tmp_path):
 
 
 def _env(root, **extra):
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PLANE_READ_") and k not in ("CLAUDLOBBY_FLEET", "FLEET_NAME")}
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDLOBBY_FLEET", "FLEET_NAME")}
     env.update({"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home")})
     env.update(extra)
     return env
@@ -156,14 +155,67 @@ def _cli(root, *args, **extra):
                           timeout=180, env=_env(root, **extra))
 
 
-def _declare(root, reader, reason="test"):
-    r = _cli(root, "cutover", "--reader", reader, "--force", reason)
-    assert r.returncode == 0, r.stdout + r.stderr
-    return r
-
-
 def _stdlib_readers():
     spec = importlib.util.spec_from_file_location("pr", REPO / "lib" / "plane-readers.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+# --- the legacy-shaped rows and the live dispatch (from the deleted parity suite) ---
+# tests/test_plane_cutover_parity.py (25 tests: the parity door and the importer)
+# went with `plane parity` / `plane import` in the F18 closure, R3 — there is
+# no ledger left to compare or import. These four helpers were its exports;
+# the suites that land a dispatch the way the live door does still ride them.
+
+def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=None, ref=None):
+    """A dispatch the LIVE door landed: three events, emitter dispatch-task.
+    *expected_by* (ISO) mirrors the ledger row's deadline when a test needs
+    the watchdog's question answered on both sides; *ref* overrides the
+    source_ref (an id-less construct's ``dispatch-log:sha:<key>``)."""
+    fl = fleet or F
+    wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
+    ref = ref or f"dispatch-log:{task_id}"
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "dispatch-task", "fleet": fl,
+         "source_ref": ref, "occurred_at": ts,
+         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{fl}/mgr"}},
+        {"event_type": "assignment", "emitter": "dispatch-task", "fleet": fl,
+         "source_ref": ref, "occurred_at": ts,
+         "payload": {"assignment_id": asg, "work_item_id": wi,
+                     "assignee": f"bot:{fl}/{bot}", "assigned_by": f"bot:{fl}/mgr",
+                     "dispatch_msg_id": msg,
+                     **({"expected_by": expected_by} if expected_by else {})}},
+        {"event_type": "communication", "emitter": "dispatch-task", "fleet": fl,
+         "source_ref": ref, "occurred_at": ts,
+         "payload": {"msg_id": msg, "sender": f"bot:{fl}/mgr", "recipient": f"bot:{fl}/{bot}",
+                     "message_class": "task_request", "command_type": "task",
+                     "work_item_id": wi, "assignment_id": asg, "body": "t"}}])
+    return wi, asg, msg
+
+
+def _drow(ts, task_id, *, manager="mgr", bot="w1", task="do the thing\nmore",
+          expected_by=1788000000, plane=("", "", "")):
+    """A dispatch row in the retired ledger's shape (the readers that still
+    collect legacy-shaped rows compare against it)."""
+    msg, wi, asg = plane
+    return {"ts": ts, "manager": manager, "bot": bot, "task_id": task_id,
+            "workstream": "", "task": task, "dispatched_at": 1787900000,
+            "expected_by": expected_by, "claudron_hits": 0, "supersedes": "",
+            "open_at_dispatch": 0, "plane_msg_id": msg, "plane_work_item_id": wi,
+            "plane_assignment_id": asg}
+
+
+def _rrow(ts, task_id, status, *, bot="w1", summary="done", pr_url="",
+          progress="", anomaly="", plane_msg_id=""):
+    """A report row in the retired ledger's shape."""
+    return {"ts": ts, "bot": bot, "task_id": task_id, "status": status,
+            "summary": summary, "pr_url": pr_url, "issues": "", "skill": "",
+            "progress": progress, "artifact": "", "task_anomaly": anomaly,
+            "plane_msg_id": plane_msg_id}
+
+
+def _write(path: Path, rows, *, extra_lines=()):
+    """JSON lines to *path* — for the suites that still pin a legacy row shape."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows) + "".join(extra_lines))

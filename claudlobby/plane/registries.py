@@ -46,12 +46,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # still classify.
     "shadow_parity_clean": "notice",
     "shadow_parity_diverged": "critical",
-    # cutover chunk 5 — the epoch, recorded when it happens: a reader flipped
-    # to the plane (with the gate evidence, or a --force reason) is a fact the
-    # ledger must carry; the flag alone is invisible history.
+    # cutover chunks 5 / 6b — the epochs the transition recorded (a reader
+    # declared, the legacy writes retired). The machinery is gone (F18 R3:
+    # the plane is the only source); the names stay REGISTERED so the rows
+    # the estate recorded still classify.
     "cutover_declared": "notice",
-    # cutover chunk 6b — the legacy writes retired: the END of shadowing for
-    # the ledgers those writes fed, a fact the ledger must carry.
     "legacy_write_retired": "notice",
     # cutover chunk 7a — a report whose status reached no task event (a terminal
     # note that resolved nothing): the status the idle-worker check reads.

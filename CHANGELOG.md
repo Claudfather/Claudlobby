@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed — F18 closure R3: the cutover machinery goes (#1467)
+
+- The cutover machinery is gone: `claudlobby/plane/cutover.py`, `parity.py` and `legacy_import.py`, the `plane cutover` / `plane parity` / `plane import` doors, the doctor's cutover and legacy-write rungs and the two ledger-path helpers are deleted — no flag or declaration is read anywhere, so no rollback lever is lost — while `cutover_declared` and `legacy_write_retired` stay registered so the epochs the estate recorded keep their severity (`lib/plane-parity.py`, the generic instrument, stays for an archived ledger).
+- The composer stamps no transition flag any more (`FLEET_JOB_ARMING` keeps only keepalive's `PLANE_EMIT_ENABLED`; `bot.conf` and the fleet-pulse unit carry no `PLANE_READ_*` / `PLANE_LEGACY_WRITE_*` whatever the tier says), `lib/plane-lookup.py --declared` / `--retired` / `--door` and the stdlib `declared` / `retired` twins are gone, and the runtime harness neither exports the read flags nor declares a reader — every reader reads the plane alone.
+- Docs: the architecture doc's cutover section is a history paragraph; the CLAUDE.md rows (keepalive, fleet-pulse, plane-lookup, plane-readers, plane-parity, the `plane/` tree row), overview.md and the design walk's closure line follow.
+
+- `observability.reap_days` / `OBSERVABILITY_REAP_DAYS` is retired — nothing has read it since the closure removed the event files and their reapers (the plane's `plane prune` retention took over), so the field, its range warnings, its composed export, the package default and the docs go; a manifest that still sets it loads and `claudlobby validate` warns, naming the key, never a silent ignore.
 ### Removed — F18 closure R2b-2: the shell readers read the plane alone, and the prose stops naming files (#1467)
 
 - `lib/fleet-pulse.sh`'s events read-back reads the plane and nothing else (F18 closure R2b-2) — no `PLANE_READ_EVENTS`, no declaration lookup, no dated event files, no reaper of files nothing writes; a plane that cannot answer is disclosed once, rendered `unknown (events reader unreachable)` per bot and paged, and a REFUSED overdue reader is rendered ` unknown (overdue reader unreachable)` per bot in the summary where it once printed `none`.

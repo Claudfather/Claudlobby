@@ -2,7 +2,7 @@
 
 **Status:** RULED (2026-09-02 evening). Each junction got its own evaluative session — go/no-go against the intent (*off JSON as soon as possible; the plane becomes the record*) and its target purpose. **All four: GO-WITH-CHANGES.** The changes are folded below as corrections to this walk, each verified in the code before being written here. Tracking: #1444. The build queue is at the end; chunk 1 is in flight.
 
-**Closure (2026-09-04, #1467):** R1 retired every writer — the plane is the only recorder, `PLANE_EMIT_DISABLED=1` the one silencer; R2a made the matcher plane-only and DELETED the shadow, its gate, its timer and the doctor rung, so the shadow/gate instructions below are history (every declaration is the direct move the 2026-09-03 ruling made it). The remaining readers, the cutover door and the flags go with R2b/R3.
+**Closure (2026-09-04, #1467):** R1 retired every writer — the plane is the only recorder, `PLANE_EMIT_DISABLED=1` the one silencer; R2a made the matcher plane-only and DELETED the shadow, its gate, its timer and the doctor rung, so the shadow/gate instructions below are history (every declaration is the direct move the 2026-09-03 ruling made it). R2b-1/R2b-2 moved every remaining reader (Python, then shell and prose) onto the plane; R3 deleted the cutover door, the parity/import doors, the `PLANE_READ_*` / `PLANE_LEGACY_WRITE_*` flags and their composed stamps, and the stdlib twins of the declaration/retirement facts. The walk below is history.
 
 ## Why this is the largest remaining piece
 

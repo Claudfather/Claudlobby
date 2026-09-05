@@ -15,7 +15,6 @@ This module is the stdlib twin of the package definitions — keep them in step
                       passed, the expiry cap, the bot's own ``progress`` inside
                       the grace — the watchdog's rules, mirrored; id-less rows
                       are KEPT, as that reader keeps them)
-- ``declared``      ↔ ``claudlobby.plane.cutover.declared``
 - ``answering_idless`` / ``head`` ↔ ``dispatch-overdue._answering_an_idless_dispatch``
                       + ``open_task_id`` (the resolver, chunk 6a: while the bot's
                       NEWEST assignment is an id-less dispatch nothing has
@@ -124,14 +123,6 @@ LAST_PROGRESS_SQL = (
     " UNION ALL"
     " SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = 'report_status'"
     " AND e.subject_uid IN (%s) AND json_extract(e.detail, '$.status') = 'progress' AND e.occurred_at <= ?)"
-)
-# Twin of cutover.LATEST_DECLARED_SQL: the fleet is matched on the anchor
-# COLUMN first (survives a truncated detail), the detail's fleet second.
-DECLARED_SQL = (
-    "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = ?"
-    " AND e.detail_truncated = 0 AND json_extract(e.detail, '$.reader') = ?"
-    " AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"
-    " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
 )
 DISPATCH = "dispatch-log:"
 IDLESS = DISPATCH + "sha:"
@@ -766,31 +757,3 @@ def escalation(conn: sqlite3.Connection, fleet: str, window_start: Optional[str]
                 ESCALATION_SQL, (uid, FLEET_EVENTS_PREFIX + "%", since_form(window_start) or "",
                                  event_type, event_type))
             if alias and alias.startswith(prefix)}
-
-# Twin of cutover.LATEST_RETIRED_SQL, with the door: a retirement COVERS a
-# door when its recorded flags name it — a record from before a door existed
-# retires nothing it never named. The fleet is matched on the anchor column
-# (the registry mints the fleet identity under its BARE name) first, the
-# detail's fleet second.
-RETIRED_SQL = (
-    "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = ?"
-    " AND e.detail_truncated = 0 AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"
-    " AND (? IS NULL OR json_extract(e.detail, '$.flags.' || ?) IS NOT NULL)"
-    " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
-)
-
-
-def retired(conn: sqlite3.Connection, fleet: str, door: Optional[str] = None) -> Optional[str]:
-    """The instant the fleet's legacy writes were retired (``legacy_write_retired``)
-    — the LATEST record naming *door* (dispatch / report / events) when one is
-    given — or None: the doors skip their ledger append only when this is
-    recorded."""
-    row = conn.execute(RETIRED_SQL, ("legacy_write_retired", fleet, fleet, door, door)).fetchone()
-    return row[0] if row else None
-
-
-def declared(conn: sqlite3.Connection, fleet: str, reader: str) -> Optional[str]:
-    """The instant of the LATEST ``cutover_declared`` for (fleet, reader), or
-    None: a flag nobody declared is not a flip."""
-    row = conn.execute(DECLARED_SQL, ("cutover_declared", reader, fleet, fleet)).fetchone()
-    return row[0] if row else None

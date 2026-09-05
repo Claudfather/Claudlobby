@@ -143,10 +143,6 @@ export CLAUDLOBBY_ROOT="$ROOT"
 # The harness plays the unit: CLAUDLOBBY_FLEET, never FLEET_NAME (the
 # socket-fallback contract above needs FLEET_NAME unset).
 export CLAUDLOBBY_FLEET="$FLEET"
-# Every reader answers from the plane: the flag (composed into bot.conf and
-# stamped on the timer units in production) AND a recorded declaration per
-# fleet (val_plane_ready below records it for each fleet a scenario pulses).
-export PLANE_READ_OPEN=1 PLANE_READ_OVERDUE=1 PLANE_READ_OPEN_TASK=1 PLANE_READ_UNASSIGNED=1 PLANE_READ_EVENTS=1
 
 # val_events <root> <fleet> [bot|fleet|""] [type] [since-iso]: the fleet's
 # events rendered as the legacy JSONL rows, oldest first, from the plane — so
@@ -168,22 +164,18 @@ val_sql() { sqlite3 "$1/state/plane/plane.db" "$2" 2>/dev/null || true; }
 # val_iso <epoch>: the instant as the doors stamp it.
 val_iso() { epoch_to_iso_utc "$1"; }
 # val_plane_ready <root> <fleet>: the plane db exists (a first fleet-level
-# receipt through the real door creates it — the declarations open it) and
-# every reader is declared cut over for the fleet. A fleet with no manifest
-# gets an EMPTY one (the cutover CLI loads it; parse_fleet_bots reads an empty
-# bots map exactly like a missing file — every dir is scanned, as before).
+# receipt through the real door creates it). A fleet with no manifest gets an
+# EMPTY one (parse_fleet_bots reads an empty bots map exactly like a missing
+# file — every dir is scanned, as before). Nothing is declared: since the F18
+# closure (R3) every reader reads the plane alone, no flag, no declaration.
 val_plane_ready() {
-    local root="$1" fleet="$2" rd fdir
+    local root="$1" fleet="$2" fdir
     fdir="$(CLAUDLOBBY_ROOT="$root" resolve_fleet_dir "$fleet" 2>/dev/null || true)"
     [ -n "$fdir" ] || fdir="$root/local/$fleet"
     mkdir -p "$fdir"
     [ -f "$fdir/fleet.yaml" ] || printf 'fleet:\n  name: %s\n  bots: {}\n' "$fleet" > "$fdir/fleet.yaml"
     CLAUDLOBBY_ROOT="$root" CLAUDLOBBY_FLEET="$fleet" emit_fleet_event validate_started harness '{}' "" >/dev/null 2>&1 || true
     mkdir -p "$root/state" "$fdir/runtime"
-    for rd in open overdue open_task unassigned events; do
-        "$VAL_CLI" --root "$root" --fleet "$fleet" plane cutover --reader "$rd" \
-            --force "validate-bot-change" >/dev/null 2>&1 || true
-    done
 }
 # val_link_plane_shim <libdir>: a stub lib dir that carries a symlinked or
 # copied lib-common.sh reaches the shim by ITS OWN path, so the shim and the
@@ -301,7 +293,6 @@ BOT_ID="$BOT"
 BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1
-OBSERVABILITY_REAP_DAYS=7
 TELEGRAM_BOT_HANDLE="$BOT"
 OBSERVABILITY_BRIDGE_DOWN_GRACE=0
 CONF

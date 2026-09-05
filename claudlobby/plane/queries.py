@@ -60,14 +60,6 @@ _BY_REF_JOIN = (
     " FROM assignments a JOIN identity_registry i ON i.uid = a.assignee_uid"
     " WHERE a.source_ref = ? AND lower(i.alias) = lower(?)"
 )
-LATEST_ASSIGNMENT_BY_REF_SQL = (
-    "SELECT a.assignment_id, a.work_item_id" + _BY_REF_JOIN
-    + " ORDER BY a.ingest_seq DESC LIMIT 1"
-)
-OPEN_ASSIGNMENTS_BY_REF_SQL = (
-    "SELECT a.assignment_id, a.work_item_id" + _BY_REF_JOIN
-    + " AND" + NON_TERMINAL_CLAUSE + " ORDER BY a.ingest_seq"
-)
 
 # §6b #1/#2 (PR-B): activation derives from CARRIER-APPROPRIATE evidence —
 # submission-class rows (pane_submitted / carrier_accepted) occupy the

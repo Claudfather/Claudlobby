@@ -12,9 +12,14 @@ flag against it. R3 retires the door and the flag surface.
 Deleted with the shadow (F18 closure, R2a): test_the_shadow_ends_with_the_retirement,
 test_the_shadow_unit_composes_dormant_once_the_writes_are_retired,
 test_the_orphan_list_follows_the_overdue_flip (the plane's orphan split is
-test_plane_cutover_flip.test_the_orphan_split_holds_on_the_plane).
+test_plane_readers_matcher.test_the_orphan_split_holds_on_the_plane).
 Re-pointed: test_the_plane_orphan_list_is_the_planes_own_not_the_ledgers →
 test_the_orphan_list_is_the_planes_own_split.
+Deleted with the cutover machinery (F18 closure, R3 — no flag, declaration or
+retirement left to read): test_retire_writes_refuses_until_every_reader_is_declared_then_records,
+test_the_doctor_reads_the_write_flags_against_the_retirement,
+test_write_flag_vs_retirement_names_the_missing_half,
+test_bot_conf_carries_a_retired_write_flag.
 """
 
 from __future__ import annotations
@@ -23,45 +28,9 @@ import json
 import subprocess
 import sys
 
-from claudlobby.plane import cutover as cut
 from claudlobby.plane.emit_api import emit_batch
 from tests.conftest import load_lib_module
-from tests.plane_fixtures import F, NOW_EPOCH, REPO, _cli, _declare, _matcher, _scene, ro as _ro
-from tests.test_plane_cutover_flip import _composed
-from tests.test_plane_cutover_parity import _live_dispatch, _rrow
-
-
-def test_retire_writes_refuses_until_every_reader_is_declared_then_records(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    assert _cli(root, "cutover", "--retire-writes", "--reader", "open").returncode == 2
-    assert _cli(root, "cutover").returncode == 2
-    short = _cli(root, "cutover", "--retire-writes")
-    assert short.returncode == 1 and "REFUSED" in short.stdout and "MISSING" in short.stdout
-    with _ro(root) as conn:
-        assert cut.retired(conn, F) is None
-    for reader in ("open", "overdue"):
-        _declare(root, reader)
-    still = _cli(root, "cutover", "--retire-writes")
-    assert still.returncode == 1 and "open_task" in still.stdout and "unassigned" in still.stdout
-    _declare(root, "open_task"); _declare(root, "unassigned"); _declare(root, "events")
-    done = _cli(root, "cutover", "--retire-writes")
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert "PLANE_LEGACY_WRITE_DISPATCH=0" in done.stdout and "PLANE_LEGACY_WRITE_REPORT=0" in done.stdout
-    assert "reads the plane alone" in done.stdout and "frozen" not in done.stdout.lower()   # R2a: no reader follows a flip
-    with _ro(root) as conn:
-        at, forced = cut.retired(conn, F)
-        assert at and forced is None
-        data = json.loads(conn.execute("SELECT detail FROM events WHERE event = 'legacy_write_retired'").fetchone()[0])
-    assert data["undeclared"] == [] and set(data["declared"]) == {"open", "overdue", "open_task", "unassigned", "events"}
-    assert data["flags"] == {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH=0", "report": "PLANE_LEGACY_WRITE_REPORT=0",
-                             "events": "PLANE_LEGACY_WRITE_EVENTS=0", "workstreams": "PLANE_LEGACY_WRITE_WORKSTREAMS=0"}
-    assert "PLANE_LEGACY_WRITE_WORKSTREAMS=0" in done.stdout                       # the fourth door (cutover A2)
-    again = _cli(root, "cutover", "--retire-writes")
-    assert again.returncode == 0 and "already retired" in again.stdout             # nothing new recorded
-    with _ro(root) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'legacy_write_retired'").fetchone()[0] == 1
-    later = _cli(root, "cutover", "--reader", "open", "--force", "after")          # a declaration after the retirement still records
-    assert later.returncode == 0, later.stdout + later.stderr
+from tests.plane_fixtures import F, NOW_EPOCH, REPO, _cli, _live_dispatch, _matcher, _rrow, _scene, ro as _ro
 
 
 def test_the_orphan_list_is_the_planes_own_split(tmp_path):
@@ -84,39 +53,12 @@ def test_the_orphan_list_is_the_planes_own_split(tmp_path):
     assert "t-8-only-plane" not in over.stdout and "t-3-cccc" in over.stdout      # split, never paged twice
 
 
-def test_the_doctor_reads_the_write_flags_against_the_retirement(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    (root / "home").mkdir()
-    (root / "local" / F / ".env").write_text("PLANE_LEGACY_WRITE_DISPATCH=0\n")
-    d = _cli(root, "doctor")
-    assert "legacy write dispatch" in d.stdout and "NO retirement recorded" in d.stdout, d.stdout
-    assert "legacy write report" in d.stdout and "writing (not retired)" in d.stdout
-    _cli(root, "cutover", "--retire-writes", "--force", "operator")
-    d2 = _cli(root, "doctor")
-    assert "retired (recorded" in d2.stdout and "the flag still writes" in d2.stdout   # report not yet flipped
-
-
-def test_the_retirement_token_is_registered():
+def test_the_retirement_token_is_still_registered():
+    """The machinery is gone (R3) but the estate recorded these epochs; the
+    names stay registered so those rows keep their severity."""
     from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
     assert SYSTEM_EVENT_SEVERITY["legacy_write_retired"] == "notice"
-    assert cut.EVENT_RETIRED == "legacy_write_retired" and set(cut.WRITE_FLAGS) == {'dispatch', 'report', 'events', 'workstreams'}
-
-
-def test_write_flag_vs_retirement_names_the_missing_half():
-    assert cut.write_flag_vs_retirement(True, None)[0] is False
-    assert cut.write_flag_vs_retirement(False, "2026-09-03T09:00:00+00:00")[0] is False
-    assert cut.write_flag_vs_retirement(True, "2026-09-03T09:00:00+00:00") == (True, "retired (recorded 2026-09-03T09:00:00+00:00)")
-    assert cut.write_flag_vs_retirement(False, None) == (True, "writing (not retired)")
-    assert cut.undeclared({}) == ["open", "overdue", "open_task", "unassigned", "events"]
-    assert cut.undeclared({"open": ("t", None)}) == ["overdue", "open_task", "unassigned", "events"]
-
-
-def test_bot_conf_carries_a_retired_write_flag(tmp_path, monkeypatch):
-    _, conf = _composed(tmp_path, monkeypatch, {"PLANE_LEGACY_WRITE_DISPATCH": "0", "PLANE_READ_OPEN": "1"})
-    assert "export PLANE_LEGACY_WRITE_DISPATCH=0" in conf and "PLANE_LEGACY_WRITE_REPORT" not in conf
-    assert "PLANE_READ_OPEN" in conf
-    _, bare = _composed(tmp_path / "b", monkeypatch, {"PLANE_LEGACY_WRITE_DISPATCH": "1"})
-    assert "PLANE_LEGACY_WRITE" not in bare
+    assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"
 
 
 def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):

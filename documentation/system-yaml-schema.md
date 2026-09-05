@@ -46,9 +46,8 @@ defaults:                      # per-fleet defaults -- mirrors fleet.yaml's `def
         matcher: <tool-pattern>                    # omit for all tools
         timeout: <seconds>                         # optional
 
-  observability:               # same 4 fields as fleet.yaml bots.<name>.observability
+  observability:               # the same fields as fleet.yaml bots.<name>.observability
     pulse_interval: <seconds>
-    reap_days: <days>
     activity_stuck_threshold: <seconds>
     dispatch_deadline: <seconds>
 
@@ -244,7 +243,7 @@ for the emitted env vars and per-field validation. This file supplies the
 platform floor; a fleet's own `defaults.observability` (or a bot's own
 `observability:`) overrides per-field via a shallow merge — declaring one
 field doesn't reset the others. Current floor values: `pulse_interval: 300`,
-`reap_days: 7`, `activity_stuck_threshold: 1800`, `dispatch_deadline: 1800`.
+`activity_stuck_threshold: 1800`, `dispatch_deadline: 1800`.
 
 **`dispatch_deadline` in particular carries a long, load-bearing comment in
 the source** recording a specific measured trade (a bimodal completion-time

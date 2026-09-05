@@ -151,7 +151,7 @@ def test_no_event_file_is_read_or_reaped(tmp_path):
     root, paths = _two_dead_bots(tmp_path)
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
-    (paths.runtime_bots / "w1" / "bot.conf").write_text("TMUX_SOCKET=r2b2-none-w1\nOBSERVABILITY_REAP_DAYS=0\n")
+    (paths.runtime_bots / "w1" / "bot.conf").write_text("TMUX_SOCKET=r2b2-none-w1\n")
     stale = paths.runtime_bots / "w1" / "data" / "events" / "fleet-2020-01-01.jsonl"
     stale.parent.mkdir(parents=True, exist_ok=True)
     body = '{"ts":"2020-01-01T00:00:00Z","type":"service_down","source":"pulse","bot":"w1","data":{}}\n'

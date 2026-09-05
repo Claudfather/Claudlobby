@@ -132,7 +132,7 @@ def _land(paths: Paths, row: dict, *, fleet: str = FLEET) -> tuple[str, str]:
     """Land one legacy-shaped dispatch row on the plane under ``paths.root``
     as the live door lands it (work item + assignment + communication) —
     the importer suite's helper, with the fleet the brief's carrier names."""
-    from tests.test_plane_cutover_parity import _live_dispatch
+    from tests.plane_fixtures import _live_dispatch
     _SEQ[0] += 1
     tid = row.get("task_id") or f"t-{_SEQ[0]}-0000"
     n = f"{_SEQ[0]:x}"

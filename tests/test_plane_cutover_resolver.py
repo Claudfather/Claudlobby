@@ -17,15 +17,18 @@ test_cutover_open_task_declares_a_direct_move_and_the_doctor_reads_it),
 test_the_flag_and_declaration_flip_the_resolver (its unreachable half →
 test_the_resolver_refuses_an_unreachable_plane),
 test_shadow_open_task_is_a_gate_mode_only.
+
+Deleted with the cutover machinery (F18 closure, R3):
+test_cutover_open_task_declares_a_direct_move_and_the_doctor_reads_it,
+test_a_re_import_of_a_live_idless_row_adds_nothing (the importer is gone).
 """
 
 from __future__ import annotations
 
-from claudlobby.plane import cutover as cut
 from claudlobby.plane.emit_api import emit_batch
 from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _cli, _epoch, _matcher, _scene,
                                   _stdlib_readers, open_assignment_ids, ro as _ro)
-from tests.test_plane_cutover_parity import _drow, _live_dispatch, _write
+from tests.plane_fixtures import _drow, _live_dispatch, _write
 
 
 def _terminal(root, n, bot, at):
@@ -71,20 +74,6 @@ def test_an_unanswered_idless_dispatch_makes_the_resolver_answer_nothing(tmp_pat
     assert freed.returncode == 0 and freed.stdout.strip() == "t-2-bbbb"
 
 
-def test_cutover_open_task_declares_a_direct_move_and_the_doctor_reads_it(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    r = _cli(root, "cutover", "--reader", "open_task")               # no gate, no --force needed
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "PLANE_READ_OPEN_TASK=1" in r.stdout and "REFUSED" not in r.stdout
-    with _ro(root) as conn:
-        decl = cut.declared(conn, F)
-    assert set(decl) == {"open_task"} and decl["open_task"][1] == cut.DIRECT_MOVE_REASON
-    (root / "home").mkdir()
-    (root / "local" / F / ".env").write_text("PLANE_READ_OPEN_TASK=1\n")
-    d = _cli(root, "doctor")
-    assert "cutover open_task — flipped to the plane" in d.stdout, d.stdout
-
-
 def test_the_resolver_refuses_an_unreachable_plane(tmp_path):
     """report-back consumes this door with `2>/dev/null || true`: a refusal is
     an EMPTY stdout at rc 3 (the report degrades to id-less), never a stale id."""
@@ -109,36 +98,12 @@ def test_a_peers_terminal_report_does_not_discharge_this_bots_idless_dispatch(tm
     assert _matcher(root, "--open-task", "w2", "--fleet", F).stdout == ""     # and w2 has nothing open now
 
 
-def test_a_re_import_of_a_live_idless_row_adds_nothing(tmp_path):
-    """The rationale, pinned: a ledger holding a live-emitted id-less row
-    imports as NOTHING new — the row's stamped plane ids already match (the
-    importer never keys dispatch rows by content; id-less rows are not
-    attributable through the report ledger and are skipped, disclosed)."""
-    from datetime import datetime, timezone
-    from pathlib import Path
-    from claudlobby.commands.plane import dispatch_ledger_path, report_ledger_path
-    from claudlobby.plane.legacy_import import apply_import, plan_import
-    root, paths, d, r = _scene(tmp_path)
-    ts = "2026-09-02T11:00:00Z"
-    _live_dispatch(root, "7", "sha:" + "ab" * 8, ts=ts, expected_by="2026-09-02T12:00:00+00:00")
-    row = _drow(ts, "", expected_by=1788000000, plane=(f"msg_{'7':0>32}", f"wi_{'7':0>32}", f"asg_{'7':0>32}"))
-    row["dispatched_at"] = _epoch(ts)
-    d.append(row)
-    _write(dispatch_ledger_path(paths), d)
-    before = len(open_assignment_ids(root))
-    with _ro(root) as conn:
-        plan = plan_import(conn, fleet=F, dispatch_path=Path(dispatch_ledger_path(paths)),
-                           report_path=Path(report_ledger_path(paths)), now=datetime.now(timezone.utc))
-    assert plan.dispatches == 0                                      # the id-less row imports nothing
-    assert not [e for e in plan.events if e["event_type"] in ("assignment", "work_item")]
-    apply_import(root, plan)                                         # (unstamped REPORT rows may import: not this row)
-    assert len(open_assignment_ids(root)) == before
-
-
-def test_sha256_hex32_is_the_importers_content_key_and_fails_loudly_without_a_tool(tmp_path):
-    """The bash key must equal `parity.content_key` byte for byte, and with no
-    sha tool on PATH it must FAIL (empty + nonzero) rather than mint junk —
-    the door then discloses and emits the communication only."""
+def test_sha256_hex32_is_the_content_key_and_fails_loudly_without_a_tool(tmp_path):
+    """The bash key an id-less dispatch's `dispatch-log:sha:<key>` ref derives
+    from must be the first 32 hex of the row's sha256 (the importer that once
+    shared this definition is gone, R3 — the bash side is the one definition
+    now), and with no sha tool on PATH it must FAIL (empty + nonzero) rather
+    than mint junk — the door then discloses and emits the communication only."""
     import hashlib
     import subprocess
     lib = REPO / "lib" / "lib-common.sh"

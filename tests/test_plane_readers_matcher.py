@@ -27,38 +27,36 @@ test_brief_follows_the_flip_and_omits_loudly_on_an_unreachable_plane →
 test_brief_serves_the_plane_and_omits_loudly_when_it_is_unreachable,
 test_the_grammar_refuses_a_dropped_value_and_a_plane_source_off_its_modes →
 test_the_grammar_refuses_a_dropped_value_and_a_path_in_the_bot_slot.
+
+
+F18 closure R3 — the cutover machinery is gone (no flags, no declarations, no
+doctor rungs), so these went with it: test_the_reader_set_and_its_flags_are_one_fact,
+test_cutover_declares_a_direct_move_and_records_the_reason,
+test_the_declaration_id_is_derived_so_a_re_run_at_one_instant_is_one_fact,
+test_the_latest_declaration_wins_and_a_same_instant_re_run_is_disclosed,
+test_flag_vs_declaration_names_the_missing_half, test_the_doctor_reads_the_flag_against_the_declaration,
+test_bot_conf_carries_the_read_flags_the_fleet_tier_arms, test_the_fleet_pulse_unit_is_the_multi_flag_job.
+What remains is the plane-reader suite (the file is renamed to say so).
 """
 
 from __future__ import annotations
 
-import json
 import os
-import re
-import time
 from datetime import datetime, timezone
 
 import pytest
 
-from claudlobby.plane import cutover as cut, queries
+from claudlobby.plane import queries
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
-from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _cli, _declare, _matcher, _scene,
+from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _cli, _matcher, _scene,
                                   _stdlib_readers, plane_root, ro as _ro)
-from tests.test_plane_cutover_parity import _live_dispatch
+from tests.plane_fixtures import _live_dispatch
 
 
 # --- the twins cannot drift --------------------------------------------------------
 
 def test_the_stdlib_open_sql_is_byte_identical_to_the_package():
     assert _stdlib_readers().OPEN_SQL == queries.OPEN_ASSIGNMENTS_AT_SQL
-
-
-def test_the_reader_set_and_its_flags_are_one_fact():
-    assert cut.READERS == ("open", "overdue", "open_task", "unassigned", "events")
-    assert cut.READ_FLAGS == {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE",
-                              "open_task": "PLANE_READ_OPEN_TASK", "unassigned": "PLANE_READ_UNASSIGNED",
-                              "events": "PLANE_READ_EVENTS"}
-    assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"
 
 
 # --- the plane answers -------------------------------------------------------------
@@ -192,81 +190,6 @@ def test_brief_serves_the_plane_and_omits_loudly_when_it_is_unreachable(tmp_path
 
 # --- the epoch: a direct move, recorded when declared ----------------------------------
 
-def test_cutover_declares_a_direct_move_and_records_the_reason(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    plain = _cli(root, "cutover", "--reader", "open")               # no gate, no --force needed
-    assert plain.returncode == 0, plain.stdout + plain.stderr
-    assert "PLANE_READ_OPEN=1" in plain.stdout and "committed=1" in plain.stdout
-    assert "direct move" in plain.stdout and "REFUSED" not in plain.stdout
-    with _ro(root) as conn:
-        decl = cut.declared(conn, F)
-        assert set(decl) == {"open"} and decl["open"][1] == cut.DIRECT_MOVE_REASON
-        anchor = cut.fleet_uid(conn, F)
-        row = conn.execute("SELECT subject_kind, subject_uid, subject_alias FROM events"
-                           " WHERE event = 'cutover_declared'").fetchone()
-        assert tuple(row) == (("fleet", anchor, F) if anchor else (None, None, None))   # the bare alias the registry mints
-        data = json.loads(conn.execute("SELECT detail FROM events WHERE event = 'cutover_declared'").fetchone()[0])
-    assert data["shadowed"] is False and data["gate"] == {"clean_run": None, "transitions": None}
-    assert data["gate_met"] is None and data["streaks"] == [] and data["flag"] == "PLANE_READ_OPEN"
-    forced = _cli(root, "cutover", "--reader", "overdue", "--force", "bootstrap")
-    assert forced.returncode == 0 and "PLANE_READ_OVERDUE=1" in forced.stdout, forced.stderr
-    assert "FORCED: bootstrap" in forced.stdout
-    with _ro(root) as conn:
-        decl = cut.declared(conn, F)
-    assert set(decl) == {"open", "overdue"} and decl["overdue"][1] == "bootstrap"
-
-
-def test_the_declaration_id_is_derived_so_a_re_run_at_one_instant_is_one_fact():
-    a = cut.declaration_event(F, "open", "2026-09-03T05:00:00+00:00")
-    a2 = cut.declaration_event(F, "open", "2026-09-03T05:00:00+00:00")
-    b = cut.declaration_event(F, "open", "2026-09-03T05:00:00+00:00", forced="x")
-    c = cut.declaration_event(F, "open", "2026-09-03T05:00:01+00:00")
-    assert a["event_id"] == a2["event_id"]                              # a re-run: one fact
-    assert len({a["event_id"], b["event_id"], c["event_id"]}) == 3      # a reason or a later instant: new facts
-    data = a["payload"]["data"]
-    assert a["payload"]["event"] == "cutover_declared" and data["gate_met"] is None
-    assert data["shadowed"] is False and data["streaks"] == [] and data["forced"] == cut.DIRECT_MOVE_REASON
-    assert data["gate"] == {"clean_run": None, "transitions": None}
-    assert "subject_kind" not in a["payload"]
-    anchored = cut.declaration_event(F, "open", "2026-09-03T05:00:00+00:00", subject_uid="flt_x")
-    assert anchored["payload"]["subject_kind"] == "fleet" and anchored["payload"]["subject_alias"] == F
-    with pytest.raises(ValueError):
-        cut.declaration_event(F, "orphans", "2026-09-03T05:00:00+00:00")   # an unknown reader must not declare
-
-
-def test_the_latest_declaration_wins_and_a_same_instant_re_run_is_disclosed(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    first = _cli(root, "cutover", "--reader", "overdue", "--force", "first")
-    assert first.returncode == 0 and "committed=1" in first.stdout
-    again = _cli(root, "cutover", "--reader", "overdue", "--force", "first")   # same reason, same second?
-    if "duplicate=1" in again.stdout:
-        assert "already declared at this instant" in again.stdout
-    time.sleep(1.1)
-    _declare(root, "overdue", "second")
-    with _ro(root) as conn:
-        assert cut.declared(conn, F)["overdue"][1] == "second"
-
-
-def test_flag_vs_declaration_names_the_missing_half():
-    assert cut.flag_vs_declaration(True, None)[0] is False
-    assert "NO declaration" in cut.flag_vs_declaration(True, None)[1]
-    assert cut.flag_vs_declaration(False, "2026-09-03T05:00:00+00:00")[0] is False
-    assert cut.flag_vs_declaration(True, "2026-09-03T05:00:00+00:00")[0] is True
-    assert cut.flag_vs_declaration(False, None) == (True, "legacy (not declared, not flipped)")
-
-
-def test_the_doctor_reads_the_flag_against_the_declaration(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    (root / "home").mkdir()
-    (root / "local" / F / ".env").write_text("PLANE_READ_OPEN=1\n")
-    d = _cli(root, "doctor")
-    assert "cutover open" in d.stdout and "NO declaration" in d.stdout, d.stdout + d.stderr
-    assert "cutover overdue" in d.stdout and "legacy" in d.stdout
-    _declare(root, "open", "operator")
-    d2 = _cli(root, "doctor")
-    assert "flipped to the plane" in d2.stdout and "NO declaration" not in d2.stdout
-
-
 # --- the carriers ------------------------------------------------------------------
 
 def _composed(tmp_path, monkeypatch, armed: dict[str, str]):
@@ -287,31 +210,9 @@ def _composed(tmp_path, monkeypatch, armed: dict[str, str]):
     res = {k: Resolution(name=k, value=v, tier="fleet", path=None) for k, v in armed.items()}
     monkeypatch.setattr(env_tiers_mod, "read_tiers", lambda paths, fleet_name=None, bot_name=None: [])
     monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: res)
-    composer_mod._READ_FLAG_MEMO.clear()
     timers = compose_fleet_timers(fleet, paths, md)
     conf = compose_bot_conf(next(iter(fleet.bots.values())), fleet, paths)
     return timers, conf
-
-
-def test_bot_conf_carries_the_read_flags_the_fleet_tier_arms(tmp_path, monkeypatch):
-    _, conf = _composed(tmp_path, monkeypatch, {"PLANE_READ_OPEN": "1"})
-    assert re.search(r"^export PLANE_READ_OPEN='?1'?$", conf, re.M) and "PLANE_READ_OVERDUE" not in conf
-    _, bare = _composed(tmp_path / "b", monkeypatch, {"PLANE_READ_OPEN": "0", "PLANE_EMIT_ENABLED": "1"})
-    assert "PLANE_READ_" not in bare
-
-
-def test_the_fleet_pulse_unit_is_the_multi_flag_job(tmp_path, monkeypatch):
-    from claudlobby.composer import FLEET_JOB_ARMING
-    assert FLEET_JOB_ARMING["fleet-pulse"] == ("PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS")
-    assert not any("SHADOW" in f for flags in FLEET_JOB_ARMING.values() for f in flags)
-    timers, _ = _composed(tmp_path, monkeypatch, {"PLANE_READ_OVERDUE": "1", "PLANE_READ_EVENTS": "1"})
-    pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
-    assert "Environment=PLANE_READ_OVERDUE=1" in pulse and "Environment=PLANE_READ_EVENTS=1" in pulse
-    assert not [p.name for p in timers.iterdir() if "plane-shadow" in p.name]   # no shadow unit composes any more
-    assert "PLANE_READ_OVERDUE" not in (timers / "com.test.keepalive.service").read_text()
-    timers2, _ = _composed(tmp_path / "b", monkeypatch, {"PLANE_READ_OVERDUE": "1"})
-    pulse2 = next(p for p in timers2.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
-    assert "PLANE_READ_OVERDUE=1" in pulse2 and "PLANE_READ_EVENTS" not in pulse2
 
 
 def test_the_watchdog_names_its_fleet_on_every_matcher_call():
@@ -414,3 +315,23 @@ def test_the_stdlib_open_retries_a_transient_cantopen_once_then_refuses(tmp_path
         assert "unable to open" in str(exc)
     else:
         raise AssertionError("a persistent CANTOPEN must refuse")
+
+
+def test_the_composer_stamps_no_transition_flag_whatever_the_tier_says(tmp_path, monkeypatch):
+    """F18 closure R3: the cutover carriers are gone. A tier that still says
+    PLANE_READ_OPEN=1 or PLANE_LEGACY_WRITE_DISPATCH=0 composes NOTHING of it
+    into bot.conf or the fleet-pulse unit; the emission arming still rides."""
+    from claudlobby.composer import FLEET_JOB_ARMING
+    timers, conf = _composed(tmp_path, monkeypatch, {"PLANE_READ_OPEN": "1", "PLANE_READ_OVERDUE": "1",
+                                                     "PLANE_LEGACY_WRITE_DISPATCH": "0", "PLANE_EMIT_ENABLED": "1"})
+    assert "PLANE_READ_" not in conf and "PLANE_LEGACY_WRITE_" not in conf
+    pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
+    assert "PLANE_READ_" not in pulse and "PLANE_LEGACY_WRITE_" not in pulse
+    assert "Environment=PLANE_EMIT_ENABLED=1" in pulse
+    assert "fleet-pulse" not in FLEET_JOB_ARMING and FLEET_JOB_ARMING["keepalive"] == ("PLANE_EMIT_ENABLED",)
+
+
+def test_the_stdlib_readers_hold_no_cutover_twin():
+    """`declared` / `retired` and their SQL went with the cutover facts (R3)."""
+    pr = _stdlib_readers()
+    assert not any(hasattr(pr, n) for n in ("declared", "retired", "DECLARED_SQL", "RETIRED_SQL"))
