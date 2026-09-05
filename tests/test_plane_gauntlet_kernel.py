@@ -249,7 +249,7 @@ def test_carrier_accepted_reads_open_at_derivation(tmp_path):
                     "state": "carrier_accepted"},
     }])
     conn = connect(db_path(tmp_path))
-    status = dict(conn.execute(queries.TASK_STATUS_SQL).fetchall())
+    status = {r[0]: r[1] for r in conn.execute(queries.TASK_STATUS_SQL)}
     attention = [r[0] for r in conn.execute(
         queries.ATTENTION_SQL, ("1970-01-01T00:00:00+00:00",)).fetchall()]
     conn.close()

@@ -323,9 +323,12 @@ def _seed_assignment(root: Path, *, dispatch_msg, tx_events=()) -> str:
 
 
 def _statuses(root: Path) -> dict:
+    # TASK_STATUS_SQL is (assignment_id, status, terminal_at) since the chunk
+    # L fold (#1479) — the instant now rides the same row as the status; this
+    # ladder asks only about the status.
     from claudlobby.plane.queries import TASK_STATUS_SQL
     conn = connect(db_path(root))
-    out = dict(conn.execute(TASK_STATUS_SQL).fetchall())
+    out = {r[0]: r[1] for r in conn.execute(TASK_STATUS_SQL).fetchall()}
     conn.close()
     return out
 

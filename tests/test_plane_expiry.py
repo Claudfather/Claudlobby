@@ -88,7 +88,7 @@ def test_expired_event_clears_attention_and_sets_status_idempotently(tmp_path):
         after = [r[0] for r in conn.execute(ATTENTION_SQL, (NOW.isoformat(),))]
         assert stale[1] not in after                # the card is gone
         assert fresh[1] in after                    # the fresh one stays
-        assert dict(conn.execute(TASK_STATUS_SQL))[stale[1]] == "expired"
+        assert {r[0]: r[1] for r in conn.execute(TASK_STATUS_SQL)}[stale[1]] == "expired"
         again = expirable(conn, now=NOW, after_days=7)
     finally:
         conn.close()

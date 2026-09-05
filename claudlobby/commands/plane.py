@@ -638,7 +638,7 @@ def cmd_plane_view(args) -> int:
     --host is the raw-bind dev fallback."""
     root = _resolve_paths(args).root
     try:
-        from ..plane.view import create_app
+        from ..plane.view import begin_shutdown, create_app
         import uvicorn
     except (ImportError, RuntimeError) as exc:
         print(
@@ -647,14 +647,32 @@ def cmd_plane_view(args) -> int:
             f" ({exc})", file=sys.stderr)
         return 1
     app = create_app(root)
-    # A held SSE connection kept the daemon alive through SIGTERM until a
-    # SIGKILL (chunk L, #1479 — measured: still running 20s after the signal
-    # with one /api/stream client attached; uvicorn waits on in-flight
-    # requests with no bound by default). A read-only viewer owes its clients
-    # nothing on shutdown: bound the wait, then the streams are cancelled and
-    # the lifespan closes the sampler.
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning",
-                timeout_graceful_shutdown=5)
+
+    class _ViewServer(uvicorn.Server):
+        """Stops when asked. A held SSE connection kept the daemon alive
+        through SIGTERM until a SIGKILL (chunk L, #1479 — measured: still
+        running 20s after the signal with one `/api/stream` client attached;
+        uvicorn waits on in-flight requests with no bound by default).
+
+        The signal is where the streams have to hear it: uvicorn sends the
+        lifespan shutdown only AFTER its graceful wait, so nothing inside the
+        app can release the very requests that wait is waiting on. This hook
+        runs first, the streams end their own responses, and the process
+        exits without cancelling anything (measured: 5.18s and one
+        CancelledError traceback before, 0.26s and none after)."""
+
+        def handle_exit(self, sig, frame):   # pragma: no cover - signal path
+            begin_shutdown(app)
+            super().handle_exit(sig, frame)
+
+    # The ceiling stays as the backstop for a stream that does NOT end itself
+    # (a wedged read). Keep it under launchd's 20s default stop timeout —
+    # systemd's is 90s — or the supervisor's SIGKILL is what stops the daemon.
+    config = uvicorn.Config(app, host=args.host, port=args.port,
+                            log_level="warning", timeout_graceful_shutdown=5)
+    _ViewServer(config).run()
+    # Unreachable under SIGTERM: uvicorn re-raises the captured signal on the
+    # way out, so the process dies with rc -15 rather than returning here.
     return 0
 
 

@@ -188,7 +188,7 @@ def test_derivation_fixtures(tmp_path: Path):
     ])
     from claudlobby.plane.queries import RECONCILIATION_SQL, TASK_STATUS_SQL
 
-    statuses = dict(conn.execute(TASK_STATUS_SQL).fetchall())
+    statuses = {r[0]: r[1] for r in conn.execute(TASK_STATUS_SQL)}
     assert statuses[a2] == "completed", (
         f"terminal must dominate late progress: {statuses[a2]}")
     assert statuses[a1] == "reassigned"

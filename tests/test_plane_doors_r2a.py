@@ -76,7 +76,8 @@ def test_supersedes_retires_this_workers_assignment_not_a_same_id_twin(tmp_path)
     twin = _seed_assignment(tmp_path, task_id=mine["task_id"], bot="w2", tag="7")   # newer, same id, another bot
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand --supersedes {mine["task_id"]} w1 "second"', env)
     assert r.returncode == 0, r.stderr
-    statuses = dict(_rows(tmp_path, TASK_STATUS_SQL))
+    # (assignment_id, status, terminal_at) since the chunk L fold (#1479)
+    statuses = {r[0]: r[1] for r in _rows(tmp_path, TASK_STATUS_SQL)}
     assert statuses[mine["plane_assignment_id"]] == "superseded", statuses
     assert statuses[twin[2]] != "superseded", "another bot's same-id assignment was retired"
 
@@ -90,7 +91,8 @@ def test_every_terminal_report_closes_the_bots_open_idless_dispatches(tmp_path):
     # an id'd terminal report naming an id the plane cannot link
     r = _bash(f'"{libdir}/report-back.sh" w1 completed "done" --task t-999999-beef', env)
     assert r.returncode == 0, r.stderr
-    statuses = dict(_rows(tmp_path, TASK_STATUS_SQL))
+    # (assignment_id, status, terminal_at) since the chunk L fold (#1479)
+    statuses = {r[0]: r[1] for r in _rows(tmp_path, TASK_STATUS_SQL)}
     assert statuses[idless["plane_assignment_id"]] == "completed", statuses
 
 
