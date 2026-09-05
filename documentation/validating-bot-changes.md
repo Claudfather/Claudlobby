@@ -69,4 +69,4 @@ Cite the observation in the PR body — claimed evidence is not evidence. See `l
 
 ## Boundary: this is not Claudosseum
 
-This loop is **pre-merge change validation** — does *this* change work. It's a claudlobby dev/operator discipline. **Longitudinal scoring** of which behaviors actually perform across hundreds of real runs ("trials and combat") is Claudosseum's job; claudlobby only *emits* the structured telemetry (the same `data/events` / `report-back.jsonl` stream) for it to consume. See `PROJECT_MISSION.md` sibling boundaries.
+This loop is **pre-merge change validation** — does *this* change work. It's a claudlobby dev/operator discipline. **Longitudinal scoring** of which behaviors actually perform across hundreds of real runs ("trials and combat") is Claudosseum's job; claudlobby only *emits* the structured telemetry (the plane's rows, the same the fleet's own doors read) for it to consume. See `PROJECT_MISSION.md` sibling boundaries.

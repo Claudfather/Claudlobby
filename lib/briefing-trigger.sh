@@ -62,9 +62,9 @@ if bot_is_busy "$SOCKET" "$BOT"; then
     defer bot_busy "bot busy"
 fi
 
-# --- observable-plane dual-write (PR-B T6; the inventory's judgment row: a
+# --- observable-plane record (PR-B T6; the inventory's judgment row: a
 # briefing-class communication carried as a raw slash injection — the door
-# mints it a communication). Dormant behind PLANE_EMIT_ENABLED=1; disclosed,
+# mints it a communication). Always on (PLANE_EMIT_DISABLED=1 is the one silencer); disclosed,
 # never blocking. Intent before the send (F9); the busy defer above means a
 # sent briefing lands in an idle pane, so a clean send is pane_submitted.
 PLANE_ARMED=0

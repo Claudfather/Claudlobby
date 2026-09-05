@@ -59,9 +59,9 @@ printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" > "$URL_C
 # a false success on an alert that never went out. Parse `.ok` and exit NON-ZERO
 # on failure so the caller can escalate a genuinely undelivered alert instead of
 # trusting a silent drop.
-# --- observable-plane dual-write (PR-B T6; dormant, disclosed, non-blocking) --
-# Armed only when the fleet set PLANE_EMIT_ENABLED=1 AND this caller has a bot
-# identity (host timers have no FLEET_NAME/BOT_NAME and skip naturally).
+# --- observable-plane record (PR-B T6; disclosed, non-blocking) -----------
+# Always on (PLANE_EMIT_DISABLED=1 is the one silencer) when this caller has a
+# bot identity (host timers have no FLEET_NAME/BOT_NAME and skip naturally).
 # Intent BEFORE the send (F9); outcome-typed transmission after — telegram
 # carrier semantics per §7: API ok=true is carrier_accepted (acceptance, not
 # delivery), a rejected/empty response is failed.

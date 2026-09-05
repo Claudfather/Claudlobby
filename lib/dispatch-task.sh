@@ -10,7 +10,7 @@
 #   --workstream ID    Workstream this task advances (envelope + plane work item)
 #   --supersedes ID    This dispatch REPLACES an earlier one; the named task id is
 #                      retired rather than left to age out and page. Opt-in, and
-#                      inert when omitted — see the ledger-write comment below.
+#                      inert when omitted — see the record comment below.
 #                      When omitted and the bot already has an open row that
 #                      references the same issue, a note names the id to pass
 #                      (#1032). It never blocks and never guesses.
@@ -23,7 +23,7 @@
 #                      (default task). Implies --botcommand. ONLY `task` mints.
 #
 # `task` envelope sends MINT a task id (mint_task_id, lib-common), record it in
-# the ledger row AND transmit it as `task:<id>` — join semantics live in
+# the dispatch row AND transmit it as `task:<id>` — join semantics live in
 # dispatch-overdue.py (overdue_all docstring). Raw-text sends (no flags) stay
 # id-less: an id recorded but never transmitted would guarantee a
 # false-positive overdue, since the worker cannot echo what it never saw.
@@ -62,7 +62,7 @@
 # When enabled and the claudron CLI + CLAUDRON_VAULT_PATH resolve, the task
 # text gains a single-line "[fleet memory: <title> (<abs path>); ...]" prefix
 # of lookup pointers (titles + paths only, never note bodies — the worker
-# reads the files itself). claudron_hits in the ledger row records how many
+# reads the files itself). claudron_hits in the dispatch row records how many
 # pointers were injected ("" = preflight did not run, "0" = ran, no hits).
 set -euo pipefail
 
@@ -152,7 +152,7 @@ fi
 
 # --- Claudron query-before preflight (plan P1e, fork F7) --------------------
 # Prepends compact fleet-memory pointers to the task before the envelope is
-# built, so both enveloped and raw-text dispatches carry them and the ledger
+# built, so both enveloped and raw-text dispatches carry them and the dispatch row
 # records the enriched task. The wedge must never block a dispatch: any
 # missing prerequisite, lookup failure, or unparseable output degrades to a
 # plain send. CLAUDRON_VAULT_PATH is the canonical vault address and the CLI
@@ -305,9 +305,9 @@ _claudron_query_before() {
     # sanitized to printable-by-construction before use: pipes become "/"
     # (the [BOTCOMMAND] envelope is pipe-delimited) and runs of whitespace OR
     # control bytes collapse to single spaces — an embedded newline would
-    # split the single-line ledger row into invalid JSON that line-oriented
+    # split the single-line dispatch row into invalid JSON that line-oriented
     # rotation then truncates, and a non-whitespace control (a YAML "\e" in a
-    # note title reaches here as a raw ESC) would ledger bytes the worker
+    # note title reaches here as a raw ESC) would record bytes the worker
     # never receives once the tmux-side sanitizer strips them.
     # Any unexpected JSON shape exits 1 into the return-0 net.
     parsed=$(printf '%s' "$raw" | python3 -c '
@@ -567,7 +567,7 @@ _plane_emit_intent() {
     # test inside a command substitution returns rc 1 into the assignment and
     # errexit kills the door.
     # The dispatch ref: the legacy task id, or the importer content key of the
-    # ledger line for an id-less dispatch (cutover chunk 6a) -- one ref for the
+    # dispatch row for an id-less dispatch (cutover chunk 6a) -- one ref for the
     # live door and any later import, so they classify as one fact.
     local dispatch_ref
     if [ -n "$TASK_ID" ]; then
@@ -610,11 +610,11 @@ _plane_emit_intent() {
     local comm wi_ev asg_ev
     comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
     if [ -n "$dispatch_ref" ]; then
-        # The plane's deadline MIRRORS the ledger's: a control dispatch (query /
+        # The plane's deadline MIRRORS the dispatch row's: a control dispatch (query /
         # cancel / compact / restart) withholds it on both sides, for the reason
         # written above the null — an id-less row with a deadline goes overdue
         # and names nothing. The first 6a build stamped it on the plane only, so
-        # the plane read "overdue" on queries the ledger deliberately kept silent
+        # the plane read "overdue" on queries the row deliberately kept silent
         # and the shadow paged on every one of them.
         if [ "$EXPECTED_BY_JSON" != "null" ]; then
             iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
@@ -628,7 +628,7 @@ _plane_emit_intent() {
         asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
         local _batch
         printf -v _batch '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}"
-        plane_emit_events dispatch-task <<<"$_batch"       # same shell: PLANE_EMIT_LAST_RC reaches the ledger decision
+        plane_emit_events dispatch-task <<<"$_batch"       # same shell: PLANE_EMIT_LAST_RC reaches the record decision
     else
         local _batch
         printf -v _batch '{"events":[%s]}' "$comm"

@@ -379,7 +379,7 @@ auth_curl_cfg() {
 # sed. Values containing ANY control character take the python3 path — JSON
 # forbids raw chars below 0x20 in strings, sed is line-oriented and cannot
 # escape the newline it never sees, and a raw newline splits a single-line
-# JSONL ledger row, which the line-oriented rotation then truncates into
+# JSON row (the dispatch row the door composes), which line-oriented rotation truncates into
 # permanently invalid JSON (#530). json.dumps produces exact JSON string
 # escaping for every control character; [[:cntrl:]] (POSIX class, bash 3.2
 # case-glob safe) routes them all, not just the common \n\r\t.
@@ -1360,7 +1360,7 @@ emit_fleet_event() {
 }
 
 # _tmux_send_miss <session> <socket> <reason>
-# Emit a send_miss event to the caller bot's JSONL ledger (best-effort) plus a
+# Emit a send_miss event to the plane, attributed to the caller bot (best-effort), plus a
 # stderr breadcrumb, so a dropped cross-socket send becomes observable instead
 # of silently swallowed. Internal to bot_tmux_send. The sending bot is the
 # event's top-level "bot", resolved by emit_fleet_event from BOT_DIR / BOT_ID.
@@ -2601,7 +2601,7 @@ resolve_bots_dir() {
 }
 
 # fleet_runtime_dir
-# Directory for fleet-scoped runtime state (report-back.jsonl, workstreams.json):
+# Directory for fleet-scoped runtime state (the brief cursors, the workstreams lock):
 # overlay local/<fleet>/runtime, else root runtime/fleet. The bash twin of
 # Paths.fleet_state — the one home for this overlay-vs-root rule.
 # Usage: DIR=$(fleet_runtime_dir [fleet-name])
@@ -3538,9 +3538,9 @@ extract_bot_conf_var() {
 # --- Script error events ------------------------------------------------------
 
 # emit_script_error <bot_dir> <script_name> <exit_code> <message>
-# Write a script_error event to the bot's JSONL event log.
+# Land a script_error event on the plane, attributed to the bot.
 # For scripts that run outside a bot context, pass "" for bot_dir and
-# the event is written to $CLAUDLOBBY_ROOT/state/events/.
+# the event is attributed to the fleet (or the host sentinel).
 emit_script_error() {
     local bot_dir="$1" script_name="$2" exit_code="$3" message="$4"
     local data
@@ -3557,7 +3557,7 @@ emit_script_error() {
 # _emit_fleet_signal <bots_dir> <event_type> <reason> <ev_source> <WORD>
 # Shared body for emit_failure_alert / emit_fleet_notice. It
 #   1. emits a fleet-observability event {type:<event_type>, source:<ev_source>,
-#      data.reason} to $CLAUDLOBBY_ROOT/state/events/fleet-<date>.jsonl, and
+#      data.reason} on the plane, anchored on the fleet, and
 #   2. signals the fleet manager via a tmux nudge AND the Telegram channel
 #      (chat id resolved like fleet-pulse: env override, else the first bot that
 #      declares TELEGRAM_GROUP_CHAT_ID — falling back across every fleet on the

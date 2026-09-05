@@ -229,7 +229,7 @@ preserved. Currently ships:
 | `PreToolUse` | `lib/gh-mention-guard.sh` | always active — rewrites `@handle` out of GitHub-bound tool calls (#1019) |
 | `PostToolUse` | `lib/bot-vitals.sh` | always active |
 | `SessionEnd` | `lib/transcript-digest.sh` | composed on every bot; **self-gated** on `SESSION_DIGEST_ENABLED=1` in the fleet's own `env:` — see [Two dormancy patterns](#two-dormancy-patterns-composed-vs-enrolled) below |
-| `SessionStart` | `lib/plane-session-start.sh` | composed on every bot; **self-gated** on `PLANE_EMIT_ENABLED=1` |
+| `SessionStart` | `lib/plane-session-start.sh` | composed on every bot; always on (`PLANE_EMIT_DISABLED=1` is the one silencer); exits 0 on every path |
 
 A fleet disables the whole category with `system_defaults: { hooks: false }`
 in its own `fleet.yaml`, or overrides/extends individual events by declaring
@@ -366,13 +366,14 @@ used throughout the codebase, and it's worth keeping them distinct:
 
 1. **Env-var self-gate inside an always-composed artifact.** A hook script
    is composed onto *every* bot unconditionally (cheap, harmless on its own)
-   but checks an env var at runtime and no-ops unless armed. Both dormant
-   hooks in `defaults.hooks` above (`transcript-digest.sh` /
-   `plane-session-start.sh`) work this way — `SESSION_DIGEST_ENABLED=1` and
-   `PLANE_EMIT_ENABLED=1` are armed **in a fleet's own `fleet.yaml` `env:`
-   block**, not anywhere in `system.yaml`. This file's only role is
-   composing the always-present hook entry; the arming lever lives entirely
-   downstream, per fleet.
+   but checks an env var at runtime and no-ops unless armed. The dormant
+   hook in `defaults.hooks` above (`transcript-digest.sh`) works this way —
+   `SESSION_DIGEST_ENABLED=1` is armed
+   **in a fleet's own `fleet.yaml` `env:` block**, not anywhere in
+   `system.yaml`. (The plane hooks are always on; `PLANE_EMIT_ENABLED=1` lives
+   in the fleet `.env` tier and arms only the generate-time registry scan.)
+   This file's only role is composing the always-present hook entry; the
+   arming lever lives entirely downstream, per fleet.
 2. **`enroll:` gates whether the scheduling artifact exists or gets enrolled
    at all** — a property of the job/service entry itself, not runtime
    behavior inside an always-present script. This is the mechanism the

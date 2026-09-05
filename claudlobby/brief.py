@@ -1,10 +1,10 @@
 """claudlobby brief — one read door over the state the fleet already writes.
 
-``claudlobby brief --bot X [--json] [--ack]`` composes five sections that today
-live in five unrelated files and are read (where they are read at all) by
-hand-rolled jq against stale schemas: mission pointers, dispatches, workstreams,
-unacked reports, and recent critical events. Skills consume THIS, never the raw
-files — that is the coupling the door exists to kill.
+``claudlobby brief --bot X [--json] [--ack]`` composes five sections off the
+plane (once five unrelated files, read by hand-rolled jq against stale schemas):
+mission pointers, dispatches, workstreams, unacked reports, and recent critical
+events. Skills consume THIS, never the plane db by hand — that is the coupling
+the door exists to kill.
 
 Read-only by construction. The whole module performs exactly one write: the
 ``--ack`` cursor (``brief-cursor-<bot>.json``), single-purpose and atomic. No
@@ -104,7 +104,7 @@ SCHEMA_VERSION = 1
 # the only available proxy for "still unresolved" — which is why the rendered
 # header says "last 24h" and not "unresolved". Naming the proxy accurately is
 # the honest move; a section titled "unresolved" would be asserting a fact no
-# row in the ledger records.
+# row on the plane records.
 ALERT_WINDOW_H = 24
 
 # Rows any ONE text section will print before truncating. The JSON envelope is

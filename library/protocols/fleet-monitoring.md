@@ -9,7 +9,7 @@ How a monitor bot reasons about fleet health on a schedule, over digests that
 already exist.
 
 **This protocol extends `fleet-observability`; it does not restate it.** That
-protocol owns the event stream — sources, JSONL schema, decision table, retention,
+protocol owns the event stream — sources, the plane's row shape, decision table, `plane prune` retention,
 and the read-at-decision-points cadence a *manager* uses. This one covers what is
 different about a monitor: it runs on a **schedule** rather than at decision
 points, it reasons over **pre-aggregated digests** rather than raw events, and its
@@ -96,7 +96,7 @@ The monitor reads **only** pre-aggregated sources:
 | Source | Path | Shape |
 |---|---|---|
 | Transcript digests | `$CLAUDLOBBY_ROOT/state/transcript-digests/transcript-digest-YYYY-MM-DD.jsonl` | one row per finished session |
-| Bot events | `claudlobby events` (never the raw `<bot-dir>/data/events/...` path directly — see `fleet-observability`, whose composed recipe this used to duplicate and now defers to) | see `fleet-observability` |
+| Bot events | `claudlobby events` (the plane's one reader — never open `state/plane/plane.db` by hand; see `fleet-observability`, whose composed recipe this used to duplicate and now defers to) | see `fleet-observability` |
 | Rollups | `claudlobby uptime` · `utilization` · `report-back` | fleet-level aggregates |
 
 ### Digest row contract

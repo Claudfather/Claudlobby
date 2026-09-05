@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — F18 closure R4: the prose stops describing the file era (#1467)
+
+- The operator-facing docs stop naming files as sources (F18 closure R4): the README's command lines, the observability guide's question table and its dormant-plane blockquote, advanced-patterns' dispatch/report/send-miss mechanics, the schema and reference pages' `PLANE_EMIT_ENABLED` / SessionStart rows, the validation guide and CLAUDE.md's observe step all say the plane — every door lands on it, `events` / `report-back` / `uptime` / `status` / `brief` read it, `plane prune` ages its samples, and the only flag left arms the generate-time registry scan.
+- The library protocols, skills and expertise that still told a bot to read a file or reach a per-fleet ledger now say the plane (`claudlobby events` / `report-back`, `--fleet` scoping a query, a refusal never an empty result); the system.yaml comments for the host probe, the Telegram and RC-relay hooks and the SessionStart hook say "always on, `PLANE_EMIT_DISABLED=1` the one silencer" instead of dormant-on-`PLANE_EMIT_ENABLED`; the data-sweep comment and the shipped example lose `events/*.jsonl` and `reap_days`; and the lib docstrings and comments (`plane-emit.sh`, `plane-parity.py`, `lib-common.sh`, `fleet-pulse.sh`, `briefing-trigger.sh`, `tg-post.sh`, `brief.py`, `plane-lookup.py`, `dispatch-task.sh`) stop narrating dual-write, dormancy or a ledger as live.
+- Inventoried first: every sentence a reader would follow today was classified STALE-LIVE (must change), HISTORY (left) or ROW-CONTEXT (a lead that still told the file era though a later sentence said the plane), so the sweep is complete rather than incidental; prose only, no code path changed.
+
 ### Removed — F18 closure R3: the cutover machinery goes (#1467)
 
 - The cutover machinery is gone: `claudlobby/plane/cutover.py`, `parity.py` and `legacy_import.py`, the `plane cutover` / `plane parity` / `plane import` doors, the doctor's cutover and legacy-write rungs and the two ledger-path helpers are deleted — no flag or declaration is read anywhere, so no rollback lever is lost — while `cutover_declared` and `legacy_write_retired` stay registered so the epochs the estate recorded keep their severity (`lib/plane-parity.py`, the generic instrument, stays for an archived ledger).

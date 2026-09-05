@@ -19,7 +19,6 @@
 # THE SHIM NEVER BLOCKS A DOOR'S REAL ACTION. Doors call it as
 #   plane_emit <<<"$batch" || log "plane record failed rc=$? (acted, unrecorded)"
 # — the send/report/restart itself must already have happened or still happen.
-# During dual-write the legacy JSONL row is the load-bearing record.
 #
 # Env:
 #   CLAUDLOBBY_ROOT      install root (default: this script's parent)
