@@ -55,7 +55,14 @@ ROOT="$T/root"; CFG="$T/cfg"
 # never saw is a REFUSAL, by the rule every reader follows). Landed through
 # the package's emit_batch under the python that can import it — the pytest
 # wrapper passes its own interpreter; standalone runs need one on PATH.
-PY="${SELFSTART_TEST_PYTHON:-python3}"
+# The interpreter that can import the package: the wrapper passes its own;
+# the hermetic bash runner passes none, and the PATH python3 there is the
+# system one (no claudlobby) — so the repo's venv comes before it.
+PY="${SELFSTART_TEST_PYTHON:-}"
+if [ -z "$PY" ]; then
+    if [ -x "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv/bin/python" ]; then PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv/bin/python"; else PY=python3; fi
+fi
+"$PY" -c "import claudlobby" 2>/dev/null || { echo "test_selfstart_snapshot: no python that imports claudlobby ($PY) -- the plane cases cannot be seeded" >&2; exit 1; }
 SEQ=0
 # The program rides -c and the events ride STDIN: `python3 -` takes its program
 # from stdin, so a piped payload under a heredoc is silently dead (the
