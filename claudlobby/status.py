@@ -203,10 +203,13 @@ def _check_launchd_service(bot_id: str, service_label: str) -> tuple[bool, str]:
 
 def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]:
     """``{bot name (lower-cased): (instant, BUSY|IDLE|UNKNOWN)}`` — the plane's
-    NEWEST ``bot.heartbeat`` sample per instance of *fleet_name*, through the
-    presence derivation's own query (``LATEST_HEARTBEAT_SQL``: newest by
-    ledger order, stamped with its ``ingested_at`` — the freshness clock
-    presence reads, robust to a producer's skewed clock)."""
+    NEWEST ``bot.heartbeat`` sample per bot, through the presence derivation's
+    own query (``LATEST_HEARTBEAT_SQL``: the newest row per INSTANCE by ledger
+    order). A bot may hold several instances — a case-variant alias mints a
+    second — and across them the sample with the newest ``occurred_at`` (its
+    own instant) wins, falling back to ``ingested_at`` for a row without one;
+    "last row wins" once rendered a live BUSY bot IDLE (the R2b-1 adversarial
+    lens). Presence keeps the ingest clock for freshness; this is the pick."""
     from .plane.queries import LATEST_HEARTBEAT_SQL
     import sqlite3
     prefix = f"bot:{fleet_name}/".lower()
@@ -217,8 +220,9 @@ def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]
         alias = str(row["alias"] or "")
         if not alias.lower().startswith(prefix):
             continue
+        stamp = row["occurred_at"] or row["ingested_at"]
         try:
-            ts = datetime.fromisoformat(str(row["ingested_at"]).replace("Z", "+00:00"))
+            ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         except ValueError:
             continue
         if ts.tzinfo is None:

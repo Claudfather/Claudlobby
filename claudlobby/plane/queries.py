@@ -299,11 +299,12 @@ REG_INVALID_TOMBSTONES_SQL = (
 # input.
 LATEST_HEARTBEAT_SQL = (
     "WITH latest AS ("
-    " SELECT subject_uid, value, ingest_seq,"
+    " SELECT subject_uid, value, ingest_seq, occurred_at,"
     "  ROW_NUMBER() OVER (PARTITION BY subject_uid"
     "    ORDER BY ingest_seq DESC) AS rn"
     " FROM metric_samples WHERE metric='bot.heartbeat')"
-    " SELECT i.alias AS alias, l.value AS value, g.ingested_at AS ingested_at"
+    " SELECT i.alias AS alias, l.value AS value, g.ingested_at AS ingested_at,"
+    "  l.occurred_at AS occurred_at"
     " FROM latest l"
     " JOIN identity_registry i ON i.uid = l.subject_uid"
     " JOIN ingest_ledger g ON g.ingest_seq = l.ingest_seq"

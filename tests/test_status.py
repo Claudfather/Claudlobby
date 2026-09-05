@@ -155,16 +155,37 @@ class TestLatestHeartbeats:
 
     def test_newest_wins_across_case_variant_aliases(self, mock_paths):
         """`bot:F/ALEX` after `bot:F/alex` mints a second instance; the loop
-        once let the query's LAST row win, so an older IDLE overwrote a newer
-        BUSY (the R2b-1 adversarial lens). The newest sample wins, whichever
-        variant the query yields last."""
+        once let the query's LAST row win, so an older sample overwrote a newer
+        one (the R2b-1 adversarial lens). The query yields the two instances in
+        uid order — a hash, unknowable in advance — so the pin first learns
+        which alias the query yields LAST and then lands the OLDER sample under
+        it: last-row-wins must pick the stale state, newest-by-occurred the
+        live one."""
+        from claudlobby.plane.emit_api import emit_batch
+        from claudlobby.plane.queries import LATEST_HEARTBEAT_SQL
         from tests.plane_fixtures import ro
 
-        _land_heartbeats(mock_paths.root, "test-fleet", "alex", ["IDLE"])
-        _land_heartbeats(mock_paths.root, "test-fleet", "ALEX", ["BUSY"])
+        (mock_paths.root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+
+        def _sample(bot, state, minutes_ago):
+            return {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "test-fleet",
+                    "occurred_at": (now - timedelta(minutes=minutes_ago)).isoformat(),
+                    "payload": {"subject_kind": "bot_instance", "subject": f"bot:test-fleet/{bot}",
+                                "metric": "bot.heartbeat", "value": {"state": state}}}
+
+        out = emit_batch(mock_paths.root, [_sample("alex", "UNKNOWN", 30), _sample("ALEX", "UNKNOWN", 30)])
+        assert all(o.status == "committed" for o in out), out
+        with ro(mock_paths.root) as conn:
+            order = [r["alias"].split("/")[-1] for r in conn.execute(LATEST_HEARTBEAT_SQL)
+                     if r["alias"].startswith("bot:test-fleet/")]
+        assert sorted(order) == ["ALEX", "alex"], order
+        first, last = order
+        out = emit_batch(mock_paths.root, [_sample(first, "BUSY", 1), _sample(last, "IDLE", 5)])
+        assert all(o.status == "committed" for o in out), out
         with ro(mock_paths.root) as conn:
             got = _latest_heartbeats(conn, "test-fleet")
-        assert set(got) == {"alex"} and got["alex"][1] == "BUSY"
+        assert set(got) == {"alex"} and got["alex"][1] == "BUSY", (order, got)
 
     def test_newest_sample_wins(self, mock_paths):
         from tests.plane_fixtures import ro
