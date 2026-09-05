@@ -42,6 +42,7 @@ import os
 import re
 import secrets
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 try:  # §14: optional UI features degrade without disabling the core ledger
@@ -470,6 +471,71 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
     return {"threads": out}
 
 
+# One note dispatched to N bots is N rows, and the attention rail rendered N
+# identical cards (item 6, #1479). What they share is NOT an id: every send
+# mints its own work item (`dispatch-task.sh`: `plane_mint_id wi` per
+# dispatch), so a work-item join groups nothing a real broadcast produces.
+# What a broadcast does share is the sender, the words, the state the row is
+# in, the arm that put it in the queue, and the instant it went out — so that
+# is the key, clustered on the dispatch instant inside a one-minute window.
+_BROADCAST_WINDOW_S = 60.0
+
+
+def _stamp_broadcasts(rows: list[dict]) -> None:
+    """Stamp `broadcast_key` on the rows that are ONE broadcast.
+
+    Only ATTENTION rows cluster, and that is the semantic the card needs: it
+    lists the recipients that need you, never everyone the note reached (2 of
+    4 still queued must not read "4 bots"). `status` is in the key because the
+    card shows one status pill — a group that disagreed about it would
+    fabricate the pill for some members; the arms are in it because the card
+    shows one reason line. A row with no title cannot be shown to be the same
+    NOTE as another, so it never joins a cluster. A cluster of one is left
+    unkeyed, so a single-recipient card renders exactly as it did.
+
+    The window is anchored to the cluster's FIRST row, never to its previous
+    one: chaining would let a slow trickle drift arbitrarily far from the
+    dispatch it claims to be part of. An instant that will not parse (or will
+    not compare — a naive stamp beside an aware one) opens a new cluster:
+    unprovable is not grouped, which is exactly today's rendering.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for r in rows:
+        if not r["attention"] or not r["title"]:
+            continue
+        groups.setdefault((r["assigned_by_uid"], r["title"], r["status"],
+                           tuple(r["attention_reason"])), []).append(r)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda r: (r["occurred_at"] or "",
+                                    r["assignment_id"]))
+        cluster: list[dict] = []
+        lead: datetime | None = None
+
+        def _close() -> None:                 # a cluster of one is not one
+            if len(cluster) > 1:
+                key = "bc:" + cluster[0]["assignment_id"]
+                for m in cluster:
+                    m["broadcast_key"] = key
+
+        for r in members:
+            at = _parse_iso(r["occurred_at"])
+            near = False
+            if lead is not None and at is not None:
+                try:
+                    near = (abs((at - lead).total_seconds())
+                            <= _BROADCAST_WINDOW_S)
+                except TypeError:             # naive beside aware
+                    near = False
+            if near:
+                cluster.append(r)
+            else:
+                _close()
+                cluster, lead = [r], at
+        _close()
+
+
 def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
     # `fleet` scopes the board to that fleet's ASSIGNEES (U1 — the same axis
     # every per-fleet route filters on); with no fleet the host-wide board
@@ -482,7 +548,7 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
         params = list(fleet_range_params(fleet))
     rows = [dict(r) for r in conn.execute(
         "SELECT a.assignment_id, a.work_item_id, a.assignee_uid,"
-        " a.expected_by, a.occurred_at, w.title,"
+        " a.assigned_by_uid, a.expected_by, a.occurred_at, w.title,"
         " (SELECT alias FROM identity_registry i"
         "   WHERE i.uid = a.assignee_uid) AS assignee_alias"
         " FROM assignments a LEFT JOIN work_items w"
@@ -537,6 +603,8 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
                      else r["occurred_at"])
         r["attention_reason"] = reasons
         r["attention_since"] = since
+        r["broadcast_key"] = None
+    _stamp_broadcasts(rows)
     return {"assignments": rows,
             "attention_count": sum(1 for r in rows if r["attention"])}
 

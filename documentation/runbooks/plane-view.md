@@ -85,6 +85,12 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
   plane's own rule, never a healthy empty room; a plane holding no fleet yet lets
   the name through to the route's idle remedy (`generate`). The grid and presence
   routes also accept a fleet the sampler knows from disk before its first row.
+- **The roster rail.** Inside a room, a flat list ordered by last-seen. Under
+  `all` — the only read that spans fleets — the rail groups by fleet under a
+  small header (the fleet's alias, its bot count) so the fleets do not
+  interleave; recency still orders the rows inside a group and the groups
+  themselves. Humans belong to every room and no fleet, so they get their own
+  group. No row is dropped by the grouping.
 - **Names.** Inside a room, bare names. Wherever two fleets meet — the `all` room,
   a cross-fleet thread in either room, an all-fleets inventory — every bot reads
   `fleet/name` (`inventory.qualified_labels`), so a twin (`erlich` on both fleets)
@@ -118,6 +124,21 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
   exists any more: a failed emit is a failed ack (rc 1, said on stderr), a spooled one
   is disclosed and takes effect when the spool drains, and `PLANE_EMIT_DISABLED=1`
   refuses to ack.
+
+## The attention rail
+
+A card says WHY it needs you and what clears it — the arm that put it in the
+queue (`send_failed` / `never_activated` / `overdue`), dated by the server's
+own instant. **One note dispatched to N bots is one card**: the rows share no
+id (every send mints its own work item), so `/api/tasks` keys a broadcast by
+what it really shares — sender, words, status, arm, and a dispatch instant
+inside a minute — and the card reads `→ jian-yang, issey, damodaran,
+ramanujan · 4 bots` above the one reason line, dated by its worst member.
+Only rows that still need you join a card, so the recipients listed are the
+ones to chase, not everyone the note reached; the `attention` badge counts
+ROWS, so it agrees with the header's "N need you". Anything the API cannot
+show is one broadcast — a different sender, arm, status or instant, or a
+row with no words — stays its own card.
 
 ## The grid shows raw terminals — operators only (ruling 2026-08-29)
 

@@ -1053,3 +1053,170 @@ def test_totals_of_a_plane_with_no_fleet_are_zero_fleets_not_four_zeros(tmp_path
     body = TestClient(create_app(tmp_path)).get("/api/overview").json()
     assert body["state"] == "ok"
     assert body["data"]["fleets"] == [] and body["data"]["totals"]["fleets"] == 0
+
+
+# --- item 6 (#1479): one broadcast, one card; the rail groups by fleet ------
+
+def _note(root: Path, tag: str, *, worker: str, at: str,
+          title: str | None = "stand down and report",
+          expected_by: str | None = FUTURE,
+          tx_state: str | None = "carrier_queued",
+          mgr: str = "bot:f/erlich", fleet: str = "f") -> str:
+    """One dispatch of *title* to *worker*, stamped at *at*. A broadcast is
+    several of these: same manager, same words, one instant, N recipients —
+    and, as the real door does it, a FRESH work item for every send.
+    `title=None` emits the assignment with no work item behind it (the row
+    the board renders wordless)."""
+    stem = (tag * 16)[:32]
+    asg, wi, msg = f"asg_{stem}", f"wi_{stem}", f"msg_{stem}"
+    payload = {"assignment_id": asg, "work_item_id": wi, "assignee": worker,
+               "assigned_by": mgr, "dispatch_msg_id": msg}
+    if expected_by:
+        payload["expected_by"] = expected_by
+    emit_batch(root, ([] if title is None else [
+        {"event_type": "work_item", "emitter": "t", "fleet": fleet,
+         "payload": {"work_item_id": wi, "title": title, "created_by": mgr}}]) + [
+        {"event_type": "assignment", "emitter": "t", "fleet": fleet,
+         "occurred_at": at, "payload": payload},
+        {"event_type": "communication", "emitter": "t", "fleet": fleet,
+         "payload": {"msg_id": msg, "sender": mgr, "recipient": worker,
+                     "message_class": "task_request", "command_type": "task",
+                     "body": title}}])
+    if tx_state:
+        emit_batch(root, [{
+            "event_type": "transmission", "emitter": "t", "fleet": fleet,
+            "payload": {"msg_id": msg, "attempt_no": 1, "carrier": "tmux",
+                        "destination": worker.rsplit("/", 1)[-1],
+                        "state": tx_state}}])
+    return asg
+
+
+def test_one_note_to_four_bots_carries_one_broadcast_key(tmp_path):
+    """Item 6 (#1479): a note dispatched to four bots rendered four identical
+    attention cards. The rows share no id — every send mints its own work item
+    — so the API keys them by what a broadcast actually shares: the sender,
+    the words, the state, the arm, and a dispatch instant inside a minute. The
+    key names the cluster's earliest member, so it is stable across refreshes;
+    two unrelated rows never share one."""
+    base = "2026-01-01T00:00:0"
+    for i, bot in enumerate(("jian-yang", "issey", "damodaran", "ramanujan")):
+        _note(tmp_path, f"{i+1}a", worker=f"bot:f/{bot}", at=f"{base}{i * 2}+00:00")
+    _note(tmp_path, "5a", worker="bot:f/erlich", at=f"{base}0+00:00",
+          title="a different note entirely")
+    _note(tmp_path, "6a", worker="bot:f/gilfoyle", at=f"{base}0+00:00",
+          title="and another")
+    rows = _tasks(tmp_path)
+    note = [r for r in rows.values() if r["title"] == "stand down and report"]
+    assert len(note) == 4 and all(r["attention"] for r in note)
+    assert len({r["work_item_id"] for r in note}) == 4      # no shared id
+    assert len({r["broadcast_key"] for r in note}) == 1
+    assert note[0]["broadcast_key"] == "bc:asg_" + "1a" * 16   # earliest member
+    others = [r for r in rows.values() if r["title"] != "stand down and report"]
+    assert len(others) == 2 and all(r["attention"] for r in others)
+    assert [r["broadcast_key"] for r in others] == [None, None]
+
+
+def test_a_broadcast_never_groups_what_it_cannot_show_is_one(tmp_path):
+    """The key's bounds, each its own remedy on the card: a send an hour later
+    is its own dispatch; a different reason is a different remedy; a different
+    STATE is a different status pill, which one card cannot show twice; a
+    different sender is a different broadcast; a row with no words cannot be
+    shown to be the same NOTE. All five fall out of the cluster rather than
+    into it — the unprovable renders exactly as it does today."""
+    at = "2026-01-01T00:00:00+00:00"
+    _note(tmp_path, "1b", worker="bot:f/jian-yang", at=at)
+    _note(tmp_path, "2b", worker="bot:f/issey", at=at)
+    late = _note(tmp_path, "3b", worker="bot:f/damodaran",
+                 at="2026-01-01T01:00:00+00:00")
+    arm = _note(tmp_path, "4b", worker="bot:f/ramanujan", at=at,
+                expected_by=PAST, tx_state=None)          # overdue, not queued
+    who = _note(tmp_path, "5b", worker="bot:f/gilfoyle", at=at,
+                mgr="bot:f/dinesh")
+    # TWO wordless rows, so the guard is what keeps them apart rather than
+    # their being alone: without it they are one key and one card
+    none = _note(tmp_path, "6b", worker="bot:f/bighead", at=at, title=None)
+    none2 = _note(tmp_path, "8b", worker="bot:f/jared", at=at, title=None)
+    # same words, same manager, same arm — but this one has been accepted, so
+    # its card carries a different status pill
+    seen = _note(tmp_path, "7b", worker="bot:f/monica", at=at)
+    emit_batch(tmp_path, [{
+        "event_type": "task", "emitter": "t", "fleet": "f",
+        "payload": {"event": "accepted", "assignment_id": seen,
+                    "work_item_id": "wi_" + seen[len("asg_"):]}}])
+    rows = _tasks(tmp_path)
+    pair = {rows["asg_" + "1b" * 16]["broadcast_key"],
+            rows["asg_" + "2b" * 16]["broadcast_key"]}
+    assert pair == {"bc:asg_" + "1b" * 16}
+    for aid in (late, arm, who, none, none2, seen):
+        assert rows[aid]["attention"] is True
+        assert rows[aid]["broadcast_key"] is None, aid
+    kept = rows["asg_" + "1b" * 16]
+    assert rows[seen]["attention_reason"] == kept["attention_reason"]
+    assert rows[seen]["status"] != kept["status"]          # the pill differs
+
+
+def test_the_broadcast_window_is_anchored_to_the_dispatch_it_names(tmp_path):
+    """Three sends 50s apart are not one broadcast. The window is measured
+    from the cluster's FIRST row, so 0s and 50s group and 1m40s starts its
+    own; chaining to the previous row would let a trickle drift arbitrarily
+    far from the dispatch it claims to be part of."""
+    a = _note(tmp_path, "1d", worker="bot:f/jian-yang",
+              at="2026-01-01T00:00:00+00:00")
+    b = _note(tmp_path, "2d", worker="bot:f/issey",
+              at="2026-01-01T00:00:50+00:00")
+    c = _note(tmp_path, "3d", worker="bot:f/damodaran",
+              at="2026-01-01T00:01:40+00:00")
+    rows = _tasks(tmp_path)
+    assert rows[a]["broadcast_key"] == rows[b]["broadcast_key"] == "bc:" + a
+    assert rows[c]["broadcast_key"] is None
+
+
+def test_only_the_rows_that_need_you_join_a_broadcast(tmp_path):
+    """The card lists the recipients that NEED you: a member that has since
+    been answered leaves the cluster (2 of 4 still queued must never read
+    "4 bots"), and every row carries the field so the page never guesses."""
+    at = "2026-01-01T00:00:00+00:00"
+    crew = ("jian-yang", "issey", "damodaran", "ramanujan")
+    ids = [_note(tmp_path, f"{i + 1}c", worker=f"bot:f/{b}", at=at)
+           for i, b in enumerate(crew)]
+    for aid in ids[2:]:
+        emit_batch(tmp_path, [{
+            "event_type": "task", "emitter": "t", "fleet": "f",
+            "payload": {"event": "completed", "assignment_id": aid,
+                        "work_item_id": "wi_" + aid[len("asg_"):]}}])
+    rows = _tasks(tmp_path)
+    keyed = [r for r in rows.values() if r["broadcast_key"]]
+    assert {r["assignment_id"] for r in keyed} == set(ids[:2])
+    assert all(r["attention"] for r in keyed)
+    done = [rows[aid] for aid in ids[2:]]
+    assert all(r["status"] == "completed" and r["attention"] is False
+               and r["broadcast_key"] is None for r in done)
+
+
+def test_ui_renders_one_card_per_broadcast_and_a_header_per_fleet():
+    """Structural (item 6, #1479): the page groups ONLY what the API keyed,
+    the card names the recipients and their count, the header count stays the
+    number of rows that need you, the roster groups by fleet under `all` and
+    not in a room, and the reason line is free to wrap."""
+    from importlib.resources import files
+    ui = files("claudlobby.plane").joinpath("ui")
+    js = ui.joinpath("app.js").read_text()
+    # the grouping is the server's fact; the page never derives one
+    assert "r.broadcast_key" in js and "groupBroadcasts(attn)" in js
+    assert "r.title ===" not in js       # never keyed on the words here
+    # the card: recipients + count, and the WORST member dates it (the group
+    # must never under-report the wait it is showing)
+    assert "recipientsLine" in js and "bots" in js
+    assert "(b.attention_since || \"\") < (a.attention_since || \"\")" in js
+    # the badge counts ROWS, so the header and the rail agree
+    assert "badge.textContent = attn.length" in js
+    # the roster: a header per fleet, only when the read spans more than one
+    assert "railFleetOf" in js and "rail-head" in js
+    assert "fleets.size < 2" in js
+    css = ui.joinpath("style.css").read_text()
+    assert ".rail-head" in css
+    # the nit: the reason line wraps rather than clipping at the rail's edge
+    why = css[css.index(".card .why"):]
+    why = why[:why.index("}")]
+    assert "nowrap" not in why and "ellipsis" not in why
+    assert "overflow: hidden" not in why and "overflow-wrap" in why
