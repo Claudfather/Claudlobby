@@ -216,7 +216,7 @@ class TestPlaneEventsConn:
     def test_a_fleet_the_plane_never_saw_is_refused_not_quiet(self, scene):
         root, _paths = scene
         conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / "ghost"))
-        assert conn is None and "no identity for fleet 'ghost'" in note
+        assert conn is None and "no bot of fleet 'ghost'" in note
 
     def test_an_empty_plane_root_refuses_rather_than_creating_a_db(self, tmp_path):
         """A read door on a typo'd root must not open an empty plane and

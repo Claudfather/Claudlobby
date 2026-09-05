@@ -218,22 +218,16 @@ def compute_fleet_utilization(
     zeros."""
     if now is None:
         now = datetime.now(timezone.utc)
-    from .brief import resolve_fleet_name
-    fleet_name = fleet or resolve_fleet_name(paths)     # root mode names its fleet in fleet.yaml alone
-    if not fleet_name:
-        raise PlaneUnreachable("the plane's rows are per fleet and none was named"
-                               " (run with --fleet, or pass fleet=)")
-    from .plane.db import open_ro
-    conn, why = open_ro(paths.root)
-    if conn is None:
-        raise PlaneUnreachable(f"{why} — restore state/plane/plane.db under {paths.root}"
-                               " or name the right root")
+    from .brief import plane_session
+    plane, note = plane_session(paths, fleet=fleet)     # the ONE plane door (root mode resolves its fleet)
+    if plane is None:
+        raise PlaneUnreachable(note)
     try:
-        series = fleet_heartbeat_series(conn, fleet_name, now)
+        series = fleet_heartbeat_series(plane.conn, plane.fleet, now)
     except Exception as exc:                          # a schema the reader cannot use: refuse
         raise PlaneUnreachable(f"the plane could not answer: {exc}") from exc
     finally:
-        conn.close()
+        plane.close()
 
     fleet_state = load_fleet_state(paths)
     bots_state = fleet_state.get("bots", {})

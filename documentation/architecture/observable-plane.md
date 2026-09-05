@@ -127,7 +127,7 @@ their own flag). The read side (`brief`, `plane view`) needs no flag.
   (dry-run), `plane cutover` (it refuses before writing), `brief`, `plane view`,
   and the stdlib readers below.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
-  `lib/who-reviewed.py --source plane`) — the
+  `lib/who-reviewed.py`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to
   `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the legacy-id join, the
@@ -193,7 +193,7 @@ writers):
    writes a ledger regardless — the plane is the only recorder and
    `PLANE_EMIT_DISABLED=1` the one silencer — so what the record still
    governs is the readers of a RETIRED ledger, which follow the retirement
-   fact itself (chunk C3, `brief.plane_retired_conn`: `legacy_write_retired`
+   fact itself (chunk C3, `brief.plane_retired_conn` — deleted in R2b-1: `legacy_write_retired`
    naming the door, read on the plane — no flag, because a frozen ledger is
    wrong on the day it freezes) — until R2b-1, which moved `claudlobby
    report-back`, brief's unacked reports + `--ack`, `who-reviewed.py` and the

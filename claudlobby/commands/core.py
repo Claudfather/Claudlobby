@@ -21,6 +21,7 @@ from ..source_state import (
 )
 from ..validator import validate
 from ._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
+from ._helpers import refuse_unreachable
 
 log = logging.getLogger("claudlobby")
 
@@ -486,22 +487,19 @@ def cmd_report_back(args) -> int:
     # fact, no file. An unreachable plane REFUSES (rc 3) with the remedy —
     # never an empty table, which would read as "this worker is fresh"
     # (#1216's incident, re-created).
-    from ..brief import plane_conn, resolve_fleet_name
-    conn, pr, note = plane_conn(paths)
-    if conn is None:
-        print(f"claudlobby report-back: UNREACHABLE — {note}", file=sys.stderr)
-        return 3
-    fleet_name = resolve_fleet_name(paths)
+    from ..brief import plane_session
+    plane, note = plane_session(paths)
+    if plane is None:
+        return refuse_unreachable("report-back", note)
     try:
-        rows = pr.report_rows(conn, fleet_name, since=cutoff.isoformat() if cutoff else None)
+        rows = plane.pr.report_rows(plane.conn, plane.fleet, since=cutoff.isoformat() if cutoff else None)
     except Exception as exc:
-        print(f"claudlobby report-back: UNREACHABLE — the plane cannot answer: {exc}", file=sys.stderr)
-        return 3
+        return refuse_unreachable("report-back", f"the plane cannot answer: {exc}")
     finally:
-        conn.close()
-    source = f"the plane (fleet {fleet_name})"
+        plane.close()
+    source = f"the plane (fleet {plane.fleet})"
     total_rows = len(rows)
-    entries = [pr.public(r) for r in rows
+    entries = [plane.pr.public(r) for r in rows
                if (not args.bot or r.get("bot") == args.bot)
                and (not args.status or r.get("status") == args.status)]
 
@@ -626,8 +624,7 @@ def cmd_workstreams(args) -> int:
     from ..workstreams import plane_workstreams
     workstreams, note = plane_workstreams(paths)
     if workstreams is None:
-        print(f"claudlobby workstreams: UNREACHABLE — {note}", file=sys.stderr)
-        return 3
+        return refuse_unreachable("workstreams", note)
 
     if getattr(args, "ws_command", "list") == "show":
         entry = workstreams.get(args.id)
@@ -671,34 +668,22 @@ def cmd_uptime(args) -> int:
     # doors' (never this checkout's copy).
     import sqlite3
 
-    from ..brief import load_lib_module
+    from ..brief import plane_session
     from ..uptime import entries_from_plane
-    pr = load_lib_module(paths, "plane-readers.py")
-    if pr is None:
-        print("claudlobby uptime: UNREACHABLE — lib/plane-readers.py is not readable under"
-              f" {paths.lib}", file=sys.stderr)
-        return 3
-    try:
-        conn = pr.connect(str(paths.root))
-    except pr.PlaneUnreachable as exc:
-        print(f"claudlobby uptime: UNREACHABLE — the plane cannot answer ({exc}); restore"
-              f" state/plane/plane.db under {paths.root} or name the right root — no uptime"
-              " is served rather than a wrong one", file=sys.stderr)
-        return 3
-    fleet_name = paths.fleet_name or _load_fleet_or_exit(paths)[0].name
+    plane, note = plane_session(paths)
+    if plane is None:
+        return refuse_unreachable("uptime", note)
     since = (datetime.now(timezone.utc) - max(WINDOWS.values())).isoformat()
 
     def entries_for(bot_dir):
-        return entries_from_plane(pr, conn, fleet_name, bot_dir.name, since)
+        return entries_from_plane(plane.pr, plane.conn, plane.fleet, bot_dir.name, since)
     try:
         results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
                                   bot_dirs=bot_dirs, entries_for=entries_for)
-    except (pr.PlaneUnreachable, sqlite3.Error) as exc:
-        print(f"claudlobby uptime: UNREACHABLE — the plane could not answer ({exc}); no uptime"
-              " is served rather than a wrong one", file=sys.stderr)
-        return 3
+    except (plane.pr.PlaneUnreachable, sqlite3.Error) as exc:
+        return refuse_unreachable("uptime", f"the plane could not answer ({exc})")
     finally:
-        conn.close()
+        plane.close()
 
     if not results:
         log.info("No bots found in %s", bots_dir)

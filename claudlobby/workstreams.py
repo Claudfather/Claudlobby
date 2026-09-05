@@ -22,21 +22,23 @@ def lease_days_env() -> int:
         return 14
 
 
-def plane_workstreams(paths: Paths):
+def plane_workstreams(paths: Paths, plane=None):
     """(entries, None) — the ``{id: entry}`` map from the plane — or (None, note)
     when the plane cannot answer: unreachable, no stdlib readers, no fleet, or a
     fleet the plane holds no bot of. Never an empty map for a plane that could
-    not be read (the caller omits with the note, or refuses)."""
-    from .brief import plane_conn, resolve_fleet_name
-    conn, pr, note = plane_conn(paths)
-    if conn is None:
+    not be read (the caller omits with the note, or refuses). *plane* is a
+    caller's open session (``brief.plane_session``); else one is opened here."""
+    from .brief import plane_session
+    session, note = (plane, None) if plane is not None else plane_session(paths)
+    if session is None:
         return None, note
     try:
-        reg = pr.workstream_registry(conn, resolve_fleet_name(paths), lease_days=lease_days_env())
+        reg = session.pr.workstream_registry(session.conn, session.fleet, lease_days=lease_days_env())
     except Exception as exc:
         return None, f"the plane cannot answer: {exc}"
     finally:
-        conn.close()
+        if plane is None:
+            session.close()
     return reg.get("workstreams", {}), None
 
 

@@ -82,6 +82,7 @@ labeled, since open and overdue stay sound.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from dataclasses import dataclass
@@ -247,60 +248,76 @@ def resolve_fleet_name(paths: Paths) -> str | None:
     return os.environ.get("CLAUDLOBBY_FLEET") or os.environ.get("FLEET_NAME") or None
 
 
-def plane_conn(paths: Paths):
-    """(conn, readers, note): an OPEN read-only plane connection plus the
-    install's stdlib readers when the plane can answer for this fleet, else
-    (None, None, note). The plane is the ONLY source (F18 closure, R2b): no
-    flag, no retirement fact, no file to fall back on — and unreachable is
-    not empty. No db, no schema, an unreadable lib/, no fleet name, or a
-    plane that holds no bot of the fleet (a wrong root is not "nothing
-    recorded" — the matcher's rule, #1014's class) all return the note, and
-    the section is OMITTED with it. The caller closes the connection."""
-    fleet = resolve_fleet_name(paths)
+def plane_session(paths: Paths, fleet: str | None = None):
+    """(plane, note): the matcher's plane session (`lib/dispatch-overdue.py`'s
+    `open_plane` — connection, the stdlib readers, the resolved fleet and its
+    roster, a context manager) when the plane can answer for this fleet, else
+    (None, note). ONE door for every plane read in the package (F18 closure,
+    R2b-1): no flag, no retirement fact, no file to fall back on — and
+    unreachable is not empty. No db, no schema, an unreadable lib/, no fleet
+    name, a matcher that predates the plane-only reader, or a plane that holds
+    no bot of the fleet (a wrong root is not "nothing recorded" — the
+    matcher's rule, #1014's class) all return the note, and the caller omits
+    or refuses with it. The caller closes (or uses ``with``)."""
+    # The order of the refusals is the order of the remedies' usefulness: a
+    # missing db is named before a missing fleet (a root-mode call with no
+    # plane and no manifest wants "no plane db", not "no fleet"), and a root
+    # with neither an install nor a db is said to be a wrong root.
+    db = paths.root / "state" / "plane" / "plane.db"
+    doors = load_dispatch_doors(paths)
+    if doors is None or not hasattr(doors, "open_plane"):
+        if not db.is_file():
+            return None, (f"no plane db at {db} and no lib/dispatch-overdue.py under {paths.root} —"
+                          " a wrong root (restore state/plane/plane.db, or name the right root)")
+        return None, (f"the matcher installed at {paths.lib / 'dispatch-overdue.py'} is unreadable or"
+                      " predates the plane-only reader — pull the install and re-run")
+    if not db.is_file():
+        return None, f"no plane db at {db} — restore state/plane/plane.db under {paths.root} or name the right root"
+    fleet = fleet or resolve_fleet_name(paths)
     if not fleet:
-        return None, None, ("no fleet name resolved (no overlay, no fleet.yaml naming one, no"
-                            " CLAUDLOBBY_FLEET / FLEET_NAME) — the plane's rows are per fleet")
-    pr = load_lib_module(paths, "plane-readers.py")
-    if pr is None:
-        return None, None, f"lib/plane-readers.py is not readable under {paths.lib}"
+        return None, ("no fleet is named (--fleet <name>, or a fleet.yaml naming one) — the plane's"
+                      " rows are per fleet")
     try:
-        conn = pr.connect(str(paths.root))
-    except Exception as exc:
-        return None, None, (f"the plane is unreachable ({exc}) — restore state/plane/plane.db under"
-                            f" {paths.root} or name the right root")
-    try:
-        roster = pr.roster(conn, fleet)
-    except Exception as exc:                        # a schema the readers cannot read: omit, never guess
-        conn.close()
-        return None, None, f"the plane could not answer for fleet {fleet!r} ({exc})"
-    if not roster:
-        conn.close()
-        return None, None, (f"the plane at {paths.root} holds no bot of fleet {fleet!r} — wrong root, or a"
-                            " fleet it has never seen")
-    return conn, pr, None
+        return doors.open_plane(fleet=fleet, root=str(paths.root)), None
+    except doors.PlaneUnreachable as exc:
+        return None, (f"{exc} — restore state/plane/plane.db under {paths.root} or name the"
+                      " right root")
+
+
+def plane_conn(paths: Paths, fleet: str | None = None):
+    """(conn, readers, note) — ``plane_session`` for a caller that wants the
+    bare connection and readers and closes the connection itself."""
+    plane, note = plane_session(paths, fleet)
+    if plane is None:
+        return None, None, note
+    return plane.conn, plane.pr, None
+
+
+_LIB_MODULES: dict[tuple[str, float], object] = {}
 
 
 def load_lib_module(paths: Paths, filename: str):
     """Import one of the INSTALL's stdlib ``lib/*.py`` scripts as a module,
-    or None when unreadable — ``load_dispatch_doors``'s seam, generalised
-    (Phase B: the plane readers ride it too). Always the install's ``lib/``,
-    never the importing checkout's copy: the install's scripts are what the
-    bash doors run, and a checkout fallback changes which install answers."""
+    or None when unreadable — ``load_dispatch_doors``'s seam, generalised.
+    Memoized on (path, mtime): a brief once exec'd `plane-readers.py` six
+    times per call (the R2b-1 simplify lens); a re-installed lib/ changes the
+    mtime and is re-read."""
     import importlib.util
-
     src = paths.lib / filename
-    if not src.is_file():
-        return None
     try:
-        spec = importlib.util.spec_from_file_location(
-            filename.replace("-", "_").removesuffix(".py"), src)
-        if spec is None or spec.loader is None:
-            return None
+        key = (str(src), src.stat().st_mtime)
+    except OSError:
+        return None
+    if key in _LIB_MODULES:
+        return _LIB_MODULES[key]
+    try:
+        spec = importlib.util.spec_from_file_location(f"_claudlobby_lib_{src.stem.replace('-', '_')}", src)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod
     except (OSError, SyntaxError, ImportError):
         return None
+    _LIB_MODULES[key] = mod
+    return mod
 
 
 # --- the ack cursor (the module's only write) ---------------------------------
@@ -383,7 +400,7 @@ def _mission_section(fleet, bot, paths: Paths) -> dict:
 
 def _dispatch_section(
     doors, paths: Paths, bot_id: str, now: int, degraded: list[Degradation],
-    fleet_name: str | None = None,
+    fleet_name: str | None = None, plane=None,
 ) -> dict:
     """open / overdue / orphaned, all three from the #835 doors.
 
@@ -469,9 +486,12 @@ def _dispatch_section(
             f" plane-only reader (no {', '.join(missing)}) — pull the install and re-run,"
             " so no dispatch state is served rather than a wrong one", "#1467")
     try:
-        with doors.open_plane(**plane_ctx) as plane:
-            over, orph = doors._classify_all(now, max_age, bots_dir, plane=plane)
-            open_rows = doors.open_dispatches(bot_id, plane=plane)
+        # the caller's session when it holds one (build_brief opens ONE plane
+        # for every section), else this section's own
+        with (contextlib.nullcontext(plane) if plane is not None
+              else doors.open_plane(**plane_ctx)) as session:
+            over, orph = doors._classify_all(now, max_age, bots_dir, plane=session)
+            open_rows = doors.open_dispatches(bot_id, plane=session)
     except doors.PlaneUnreachable as exc:
         return _withhold(
             f"the plane cannot answer: {exc} — restore the plane db (state/plane/plane.db)"
@@ -535,7 +555,7 @@ def _dispatch_section(
 
 
 def _workstream_section(
-    fleet, paths: Paths, now: int, degraded: list[Degradation]
+    fleet, paths: Paths, now: int, degraded: list[Degradation], plane=None
 ) -> dict:
     """Active workstreams with the stall flags the pulse consumer never shipped.
 
@@ -547,7 +567,7 @@ def _workstream_section(
     progress), which is exactly the state worth surfacing.
     """
     from .workstreams import plane_workstreams
-    workstreams, note = plane_workstreams(paths)      # the plane, the only source (F18 R2b)
+    workstreams, note = plane_workstreams(paths, plane=plane)   # the plane, the only source (F18 R2b)
     if workstreams is None:
         # 'no workstreams' from a plane that could not be read is the silent
         # drop this door exists to refuse: omitted, with the note.
@@ -578,7 +598,8 @@ def _workstream_section(
 
 
 def _reports_section(
-    paths: Paths, cursor: str | None, terminal: set[str], degraded: list[Degradation]
+    paths: Paths, cursor: str | None, terminal: set[str], degraded: list[Degradation],
+    plane=None,
 ) -> dict:
     """Terminal reports newer than the viewer's cursor — fleet-wide, on purpose.
 
@@ -594,8 +615,8 @@ def _reports_section(
     # comparing). A plane that cannot answer OMITS the section: "unacked (0)"
     # would assert that no worker is waiting on a decision — #949 and #1024
     # exactly, re-created by the surface built to close them.
-    conn, pr, note = plane_conn(paths)
-    if conn is None:
+    session, note = (plane, None) if plane is not None else plane_session(paths)
+    if session is None:
         degraded.append(Degradation(field="reports", mode="omitted",
                                     reason=f"{note}; '0 unacked' would assert that no worker is waiting"
                                            " on a decision, which is the incident class this section"
@@ -603,13 +624,14 @@ def _reports_section(
                                     issue="#1467"))
         return {}
     try:
-        rows = pr.report_rows(conn, resolve_fleet_name(paths))
+        rows = session.pr.report_rows(session.conn, session.fleet)
     except Exception as exc:
         degraded.append(Degradation(field="reports", mode="omitted",
                                     reason=f"the plane cannot answer: {exc}", issue="#1467"))
         return {}
     finally:
-        conn.close()
+        if plane is None:
+            session.close()
     stripped = sum(1 for r in rows if r.get("_body_stripped") and r.get("_source") != "task_event")
     if stripped:
         degraded.append(Degradation(field="reports", mode="labeled",
@@ -627,7 +649,7 @@ def _reports_section(
 
 
 def _alerts_section(
-    paths: Paths, bot_id: str, now: int, degraded: list[Degradation]
+    paths: Paths, bot_id: str, now: int, degraded: list[Degradation], plane=None
 ) -> list[dict]:
     """Critical events for the bot within the lookback window.
 
@@ -668,25 +690,24 @@ def _alerts_section(
     # plane that cannot answer OMITS — an empty list would mean "could not
     # look", not "nothing is wrong", and a false all-clear here is worse than
     # anywhere else in this module.
-    from .commands.events import collect_plane_events, plane_events_conn
-    try:
-        conn, note = plane_events_conn(paths)
-    except RuntimeError as exc:
-        conn, note = None, str(exc)
-    if conn is None:
+    from .commands.events import collect_plane_events
+    session, note = (plane, None) if plane is not None else plane_session(paths)
+    if session is None:
         degraded.append(Degradation(field="alerts", mode="omitted",
                                     reason=f"the plane cannot answer: {note} — an empty list would mean"
                                            " 'could not look', not 'nothing is wrong'",
                                     issue="#1467"))
         return []
     try:
-        events = collect_plane_events(conn, paths, bot=bot_id, critical_only=True, since=cutoff)
+        events = collect_plane_events(session.conn, paths, fleet=session.fleet, pr=session.pr,
+                                      bot=bot_id, critical_only=True, since=cutoff)
     except RuntimeError as exc:
         degraded.append(Degradation(field="alerts", mode="omitted",
                                     reason=f"the plane cannot answer: {exc}", issue="#1467"))
         return []
     finally:
-        conn.close()
+        if plane is None:
+            session.close()
     return [
         {
             "ts": e.get("ts"),
@@ -717,18 +738,34 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
         getattr(doors, "_TERMINAL", None) or {"completed", "failed", "blocked"}
     )
 
+    # ONE plane session for every section (a brief once opened the plane five
+    # times and exec'd the readers six — the R2b-1 simplify lens); a plane that
+    # cannot answer omits every plane-served section, each field named.
+    plane, note = plane_session(paths)      # the overlay's fleet, else the manifest's (resolve_fleet_name)
+    if plane is None:
+        for field in ("dispatches.overdue", "dispatches.orphaned", "dispatches.open",
+                      "workstreams", "reports", "alerts"):
+            degraded.append(Degradation(field=field, mode="omitted", issue="#1467",
+                                        reason=f"the plane cannot answer: {note} — no state is"
+                                               " served rather than a wrong one"))
+        sections = {"dispatches": {}, "workstreams": {}, "reports": {}, "alerts": []}
+    else:
+        with plane:
+            sections = {
+                "dispatches": _dispatch_section(doors, paths, bot_id, now, degraded,
+                                                fleet_name=fleet.name, plane=plane),
+                "workstreams": _workstream_section(fleet, paths, now, degraded, plane=plane),
+                "reports": _reports_section(paths, read_cursor(paths, bot_id), terminal, degraded,
+                                            plane=plane),
+                "alerts": _alerts_section(paths, bot_id, now, degraded, plane=plane),
+            }
     brief = {
         "schema": SCHEMA_VERSION,
         "bot": bot_id,
         "fleet": fleet.name,
         "generated_at": _iso(now),
         "mission": _mission_section(fleet, bot, paths),
-        "dispatches": _dispatch_section(doors, paths, bot_id, now, degraded, fleet_name=fleet.name),
-        "workstreams": _workstream_section(fleet, paths, now, degraded),
-        "reports": _reports_section(
-            paths, read_cursor(paths, bot_id), terminal, degraded
-        ),
-        "alerts": _alerts_section(paths, bot_id, now, degraded),
+        **sections,
     }
 
     # Cut from v1 with two independent reasons pointing the same way; recorded
@@ -974,14 +1011,14 @@ def boot_provenance(paths: Paths, now: int) -> dict:
     mirror — and the workstream registry's entry count. Same read discipline
     as the door: a plane that cannot answer reports its state, never a zero.
     """
-    conn, pr, note = plane_conn(paths)
-    if conn is None:
+    plane, note = plane_session(paths)
+    if plane is None:
         return {"dispatches": {"state": "unreachable", "note": note},
                 "registry": {"present": False, "note": note}}
     from .workstreams import lease_days_env
-    fleet = resolve_fleet_name(paths)
+    conn, pr, fleet = plane.conn, plane.pr, plane.fleet
     try:
-        uids = [u for e in pr.roster(conn, fleet).values() for u in e["uids"]]
+        uids = [u for e in plane.roster.values() for u in e["uids"]]
         marks = ",".join("?" * len(uids))
         since = datetime.fromtimestamp(now - 24 * 3600, timezone.utc).isoformat()
         ever = conn.execute(f"SELECT COUNT(*) FROM assignments WHERE assignee_uid IN ({marks})",

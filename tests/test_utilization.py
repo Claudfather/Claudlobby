@@ -24,6 +24,8 @@ from claudlobby.utilization import (
     write_utilization_json,
 )
 
+REPO = Path(__file__).resolve().parent.parent
+
 
 def _make_entries(
     states: list[str],
@@ -217,7 +219,7 @@ class TestComputeBotUtilization:
 class TestComputeFleetUtilization:
     def _paths(self, tmp_path):
         (tmp_path / "library").mkdir(exist_ok=True)
-        (tmp_path / "lib").mkdir(exist_ok=True)
+        (tmp_path / "lib").exists() or (tmp_path / "lib").symlink_to(REPO / "lib")
         from claudlobby.paths import Paths
         return Paths(root=tmp_path)
 
@@ -285,7 +287,7 @@ class TestWriteUtilizationJson:
     def test_writes_valid_json(self, tmp_path):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         (tmp_path / "library").mkdir()
-        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib").symlink_to(REPO / "lib")
         from claudlobby.paths import Paths
 
         paths = Paths(root=tmp_path)
@@ -311,7 +313,7 @@ class TestWriteUtilizationJson:
     def test_creates_state_dir(self, tmp_path):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         (tmp_path / "library").mkdir()
-        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib").symlink_to(REPO / "lib")
         from claudlobby.paths import Paths
 
         paths = Paths(root=tmp_path)

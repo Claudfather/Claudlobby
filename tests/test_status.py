@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 import os
 import subprocess
@@ -27,6 +29,8 @@ from claudlobby.status import (
 )
 from claudlobby.utilization import load_fleet_state
 
+REPO = Path(__file__).resolve().parent.parent
+
 
 # -- Fixtures ---------------------------------------------------------------
 
@@ -39,7 +43,7 @@ def mock_paths(tmp_path):
     root = tmp_path / "claudlobby"
     root.mkdir()
     (root / "library").mkdir()
-    (root / "lib").mkdir()
+    (root / "lib").symlink_to(REPO / "lib")   # the install's lib/: every reader rides the matcher's session
     fleet_dir = root / "local" / "test-fleet"
     fleet_dir.mkdir(parents=True)
     runtime = fleet_dir / "runtime" / "bots"
@@ -148,6 +152,19 @@ class TestLatestHeartbeats:
         _land_heartbeats(mock_paths.root, "other-fleet", "zed", ["IDLE"])
         with ro(mock_paths.root) as conn:
             assert _latest_heartbeats(conn, "test-fleet") == {}          # another fleet's bot is not ours
+
+    def test_newest_wins_across_case_variant_aliases(self, mock_paths):
+        """`bot:F/ALEX` after `bot:F/alex` mints a second instance; the loop
+        once let the query's LAST row win, so an older IDLE overwrote a newer
+        BUSY (the R2b-1 adversarial lens). The newest sample wins, whichever
+        variant the query yields last."""
+        from tests.plane_fixtures import ro
+
+        _land_heartbeats(mock_paths.root, "test-fleet", "alex", ["IDLE"])
+        _land_heartbeats(mock_paths.root, "test-fleet", "ALEX", ["BUSY"])
+        with ro(mock_paths.root) as conn:
+            got = _latest_heartbeats(conn, "test-fleet")
+        assert set(got) == {"alex"} and got["alex"][1] == "BUSY"
 
     def test_newest_sample_wins(self, mock_paths):
         from tests.plane_fixtures import ro

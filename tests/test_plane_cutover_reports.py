@@ -141,11 +141,13 @@ def test_report_back_serves_the_plane(tmp_path):
     assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr    # unreachable is not empty
 
 
-def test_report_back_refuses_when_the_readers_are_unreachable(tmp_path):
+def test_report_back_refuses_when_the_matcher_is_unreachable(tmp_path):
+    """Every reader rides the install's matcher session (R2b-1 fold): a lib/
+    without it cannot answer, and the command REFUSES — never an empty table."""
     root, paths, _, _ = _scene(tmp_path)
-    (root / "lib").unlink()                                                          # the readers are not reachable
+    (root / "lib").unlink()
     (root / "lib").mkdir()
-    (root / "lib" / "dispatch-overdue.py").symlink_to(REPO / "lib" / "dispatch-overdue.py")
+    (root / "lib" / "plane-readers.py").symlink_to(REPO / "lib" / "plane-readers.py")
     gone = _report_back(root, "--json")
     assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr
 
@@ -175,10 +177,13 @@ def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path):
     assert any(x.field == "reports" and x.mode == "omitted" and x.issue == "#1467" for x in deg)
 
 
-def test_brief_omits_the_section_when_the_readers_are_unreachable(tmp_path):
+def test_brief_omits_the_section_when_the_matcher_is_unreachable(tmp_path):
+    """Every plane read rides the install's matcher session (R2b-1 fold): an
+    install whose lib/ lacks it cannot answer, and the section is OMITTED —
+    never '0 unacked'."""
     root, paths, _, _ = _scene(tmp_path)
     (root / "lib").unlink(); (root / "lib").mkdir()
-    (root / "lib" / "dispatch-overdue.py").symlink_to(REPO / "lib" / "dispatch-overdue.py")
+    (root / "lib" / "plane-readers.py").symlink_to(REPO / "lib" / "plane-readers.py")
     deg = []
     assert _reports_section(paths, None, TERMINAL, deg) == {}
     assert any(x.field == "reports" and x.mode == "omitted" for x in deg)

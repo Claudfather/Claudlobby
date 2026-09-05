@@ -208,9 +208,12 @@ def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]
     ledger order, stamped with its ``ingested_at`` — the freshness clock
     presence reads, robust to a producer's skewed clock)."""
     from .plane.queries import LATEST_HEARTBEAT_SQL
+    import sqlite3
     prefix = f"bot:{fleet_name}/".lower()
     out: dict[str, tuple[datetime, str]] = {}
-    for row in conn.execute(LATEST_HEARTBEAT_SQL):
+    cur = conn.cursor()
+    cur.row_factory = sqlite3.Row          # the shared session's connection yields tuples
+    for row in cur.execute(LATEST_HEARTBEAT_SQL):
         alias = str(row["alias"] or "")
         if not alias.lower().startswith(prefix):
             continue
@@ -225,7 +228,12 @@ def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]
             state = (json.loads(raw) if isinstance(raw, str) else raw or {}).get("state")
         except (ValueError, AttributeError):
             state = None
-        out[alias[len(prefix):].lower()] = (ts, state if isinstance(state, str) else "UNKNOWN")
+        key = alias[len(prefix):].lower()
+        # NEWEST wins across a bot's case-variant aliases (a `bot:F/ALEX`
+        # sample after `bot:F/alex` mints a second instance; "last row wins"
+        # rendered a live BUSY bot IDLE — the R2b-1 adversarial lens)
+        if key not in out or ts > out[key][0]:
+            out[key] = (ts, state if isinstance(state, str) else "UNKNOWN")
     return out
 
 
@@ -248,7 +256,6 @@ def collect_fleet_status(
     paths: Paths,
 ) -> list[BotStatus]:
     """Collect status for all bots in the fleet."""
-    from .plane.db import open_ro
     from .utilization import compute_bot_utilization, fleet_heartbeat_series, load_fleet_state
 
     state_data = load_fleet_state(paths)
@@ -262,15 +269,16 @@ def collect_fleet_status(
     # empty — every bot then carries the reason and its columns say unknown.
     heartbeats: dict[str, tuple[datetime, str]] = {}
     series: dict[str, list[tuple[datetime, str]]] = {}
-    conn, plane_unreachable = open_ro(paths.root)
-    if conn is not None:
+    from .brief import plane_session
+    plane, plane_unreachable = plane_session(paths)      # the overlay's fleet, else the manifest's
+    if plane is not None:
         try:
-            heartbeats = _latest_heartbeats(conn, fleet.name)
-            series = fleet_heartbeat_series(conn, fleet.name, now)
+            heartbeats = _latest_heartbeats(plane.conn, plane.fleet)
+            series = fleet_heartbeat_series(plane.conn, plane.fleet, now)
         except Exception as exc:                 # a schema the reader cannot use: say so, never blank
             plane_unreachable = f"the plane could not answer: {exc}"
         finally:
-            conn.close()
+            plane.close()
     plane_unreachable = plane_unreachable or ""
 
     results: list[BotStatus] = []

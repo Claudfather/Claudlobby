@@ -42,54 +42,33 @@ CRITICAL_TYPES = {
 }
 
 
-def _readers(paths):
-    """The stdlib readers, loaded from the INSTALL's lib/ (the door and the
-    bash readers must render one row the same way), or None."""
-    from ..brief import load_lib_module
-    return load_lib_module(paths, "plane-readers.py")
-
-
 def plane_events_conn(paths):
     """(conn, note): an OPEN read-only plane connection, or ``(None, why)``
-    when the plane cannot answer — no fleet named, no db, an unopenable or
-    schema-less db, or a fleet the plane holds no identity for (a wrong root
-    is not "nothing recorded"). No flag, no declaration (F18 closure, R2b):
-    the plane is the only source. The caller closes."""
-    from ..brief import resolve_fleet_name
-    from ..plane.db import open_ro
-    fleet = resolve_fleet_name(paths)          # root mode names its fleet in fleet.yaml alone
-    if not fleet:
-        return None, ("no fleet is named (--fleet <name>, or a fleet.yaml naming one) — the"
-                      " plane's events are per fleet")
-    conn, why = open_ro(paths.root)
-    if conn is None:
-        return None, why
-    pr = _readers(paths)
-    if pr is None:
-        conn.close()
-        return None, f"lib/plane-readers.py is not readable under {paths.lib}"
-    try:
-        pr.fleet_uid(conn, fleet)          # the identity probe: schema AND fleet, one read
-    except (pr.PlaneUnreachable, sqlite3.Error) as exc:
-        conn.close()
-        return None, str(exc)
-    return conn, None
+    when the plane cannot answer — ``brief.plane_session``'s rule (no fleet
+    named, no db, an unopenable or schema-less db, a fleet the plane holds no
+    bot of; no flag, no declaration — F18 closure, R2b). The caller closes."""
+    from ..brief import plane_session
+    plane, note = plane_session(paths)
+    if plane is None:
+        return None, note
+    return plane.conn, None
 
 
-def collect_plane_events(conn, paths, *, bot=None, event_type=None, source=None,
-                         critical_only=False, since=None) -> list[dict]:
+def collect_plane_events(conn, paths, *, fleet=None, pr=None, bot=None, event_type=None,
+                         source=None, critical_only=False, since=None) -> list[dict]:
     """The fleet's events from the plane as legacy rows — the same filters and
     row shape the retired files had, through the stdlib readers the bash
     doors ship (one row rendering; critical = the severity the registry
     stamped at ingest, one definition). A plane that cannot answer (no
     identity for the fleet, a db error) raises RuntimeError — the caller's
     refusal."""
-    from ..brief import resolve_fleet_name
-    pr = _readers(paths)
+    from ..brief import load_lib_module, resolve_fleet_name
+    pr = pr or load_lib_module(paths, "plane-readers.py")
     if pr is None:
         raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
     try:
-        rows = pr.fleet_events(conn, resolve_fleet_name(paths), since=since, bot=bot, event_type=event_type)
+        rows = pr.fleet_events(conn, fleet or resolve_fleet_name(paths), since=since, bot=bot,
+                               event_type=event_type)
     except (pr.PlaneUnreachable, sqlite3.Error, ValueError) as exc:
         raise RuntimeError(str(exc)) from exc
     return [pr.public(r) for r in rows

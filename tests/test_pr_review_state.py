@@ -636,3 +636,34 @@ def test_a_multi_hex_verdict_that_names_its_anchor_is_still_anchored():
     """
     body, want = TestShaAnchorRegex.MULTI_HEX_ANCHORED
     assert prs.parse_anchor(body) == want
+
+
+class TestAttributionReadsThePlane:
+    """`--attribute` joins who-reviewed's PLANE rows (F18 closure R2b-1): the
+    first plane-only who-reviewed left this caller reaching for its deleted
+    ledger loaders, so attribution failed soft on every PR (the spec lens)."""
+
+    def test_a_plane_backed_attribution_resolves(self):
+        class _Stub:
+            @staticmethod
+            def load_plane_rows(root):
+                return [{"ts": "2026-06-01T10:00:00Z", "bot": "vera", "status": "completed",
+                         "task_id": "t-1", "pr_url": "https://github.com/o/r/pull/1", "summary": "",
+                         "_fleet": "f"}], None
+
+            @staticmethod
+            def fetch_events(repo, number):
+                return [{"ts": "2026-06-01T10:00:12Z"}]
+
+            @staticmethod
+            def attribute(events, rows, repo, number):
+                return [{"ts": e["ts"], "bot": "vera"} for e in events]
+
+        mapping, err = prs.ledger_identity_for("o/r", 1, "/nonexistent", module=_Stub())
+        assert err is None and mapping == {"2026-06-01T10:00:12Z": "vera"}
+
+    def test_an_unreachable_plane_is_soft_but_never_silent(self, tmp_path):
+        """The real module against a root with no plane: a reason, not {} read
+        as 'no attribution available' — `source_state`'s rule."""
+        mapping, err = prs.ledger_identity_for("o/r", 1, str(tmp_path / "nowhere"))
+        assert mapping == {} and err and "unreachable" in err

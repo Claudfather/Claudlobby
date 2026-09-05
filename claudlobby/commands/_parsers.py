@@ -415,14 +415,14 @@ def register_subparsers(sub) -> None:
 
     pev = sub.add_parser(
         "events",
-        help="Tail/filter JSONL events across all bots",
+        help="Tail/filter the fleet's events on the plane",
     )
     pev.add_argument("--bot", help="Filter by bot name")
     pev.add_argument(
         "--type", help="Filter by event type (e.g. service_down, tool_call)"
     )
     pev.add_argument(
-        "--source", help="Filter by source (vitals, pulse, keepalive, lib)"
+        "--source", help="Filter by the emitting script (vitals, pulse, keepalive, lib)"
     )
     pev.add_argument(
         "--critical",

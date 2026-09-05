@@ -205,11 +205,22 @@ def row_pr_match(row: dict, qualified: re.Pattern, bare: re.Pattern):
 # fleet, and the assignment's source_ref carries the legacy task id.
 # ----------------------------------------------------------------------
 
+# Two legs, one row shape: a report that resolved a task carries its pr_url on
+# the TASK event (the assignment's source_ref names the task id); a report
+# that resolved nothing carries it on the `report_status` marker the report
+# door lands on the bot (no task id). The second leg is what makes an ad-hoc
+# review — work never dispatched with an id — attributable at all (the R2b-1
+# adversarial lens found every such review UNKNOWN once the ledger was gone).
 PLANE_ROWS_SQL = (
     "SELECT e.occurred_at, i.alias, e.event, e.detail, a.source_ref"
     " FROM events e JOIN identity_registry i ON i.uid = e.actor_uid"
     " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
     " WHERE e.kind = 'task' AND e.detail_truncated = 0"
+    " AND json_extract(e.detail, '$.pr_url') IS NOT NULL"
+    " UNION ALL"
+    " SELECT e.occurred_at, i.alias, json_extract(e.detail, '$.status'), e.detail, NULL"
+    " FROM events e JOIN identity_registry i ON i.uid = e.subject_uid"
+    " WHERE e.kind = 'system' AND e.event = 'report_status' AND e.detail_truncated = 0"
     " AND json_extract(e.detail, '$.pr_url') IS NOT NULL"
 )
 

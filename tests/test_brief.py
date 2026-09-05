@@ -366,15 +366,21 @@ def test_terminal_report_closes_an_open_dispatch(paths: Paths):
     assert d["overdue"] == []
 
 
-def test_missing_matcher_omits_dispatches_rather_than_reporting_zero(paths: Paths):
-    """An unloadable door must not render as 'nothing open'."""
+def test_missing_matcher_omits_every_plane_section_rather_than_reporting_zero(paths: Paths):
+    """An unloadable matcher must not render as 'nothing open' — and since
+    every plane read rides its session (R2b-1 fold), the reports, alerts and
+    workstreams sections are withheld with it, each field named."""
     (paths.lib / "dispatch-overdue.py").unlink()
     _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-1"))
 
     brief = build_brief(_fleet(), paths, "alex", NOW)
-    assert brief["dispatches"] == {}
-    entry = _find(brief, "dispatches", "#835")
-    assert entry and entry[0]["mode"] == "omitted"
+    assert brief["dispatches"] == {} and brief["reports"] == {} and brief["workstreams"] == {}
+    assert brief["alerts"] == []
+    omitted = {x["field"] for x in brief["degraded"] if x["mode"] == "omitted" and x["issue"] == "#1467"}
+    assert {"dispatches.open", "dispatches.overdue", "dispatches.orphaned", "reports", "alerts",
+            "workstreams"} <= omitted
+    entry = _find(brief, "dispatches.open", "#1467")
+    assert entry and "matcher" in entry[0]["reason"]
     assert "unavailable" in format_brief(brief)
 
 
@@ -1107,3 +1113,30 @@ class TestAlertsReadThePlane:
         assert not [d for d in degraded if d.field == "alerts" and d.mode == "omitted"], (
             f"a plane that holds the fleet was wrongly omitted: {[d.reason for d in degraded]}"
         )
+
+
+def test_build_brief_opens_the_plane_once_for_every_section(paths: Paths, monkeypatch):
+    """One session for the dispatches, workstreams, reports and alerts sections
+    (a brief once opened the plane five times and exec'd the readers six — the
+    R2b-1 simplify lens)."""
+    _seed_plane(paths)
+    import claudlobby.brief as brief_mod
+
+    real = brief_mod.load_dispatch_doors
+    opened: list[int] = []
+
+    class _Counting:
+        def __init__(self, mod):
+            self._mod = mod
+
+        def __getattr__(self, name):
+            return getattr(self._mod, name)
+
+        def open_plane(self, *a, **k):
+            opened.append(1)
+            return self._mod.open_plane(*a, **k)
+
+    monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Counting(real(p)))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert "open" in brief["dispatches"] and "unacked" in brief["reports"] and "active" in brief["workstreams"]
+    assert len(opened) == 1, opened

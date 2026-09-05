@@ -6,7 +6,7 @@ to skip, so the four-fact `plane_write_retired` predicate is gone with it).
 What remains is the epoch: `plane cutover --retire-writes` records
 `legacy_write_retired` once every reader is declared (or forced, with the
 reason), the readers of the once-retired ledgers follow that fact
-(`brief.plane_retired_conn`), and the doctor reads each PLANE_LEGACY_WRITE_*
+(`brief.plane_retired_conn`, deleted in R2b-1 — every reader reads the plane alone), and the doctor reads each PLANE_LEGACY_WRITE_*
 flag against it. R3 retires the door and the flag surface.
 
 Deleted with the shadow (F18 closure, R2a): test_the_shadow_ends_with_the_retirement,

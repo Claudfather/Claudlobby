@@ -35,7 +35,23 @@ done
 
 MODE=write
 $SUMMARY && MODE=summary
-python3 - "$CLAUDLOBBY_ROOT" "$FLEET" "$MODE" <<'PY'
+# The package, under the interpreter that can import it (the plane-daemon.sh
+# ladder): the venv first, else a python3 that imports claudlobby. The system
+# python3 the bash doors run is 3.9 and the package requires 3.10 — running
+# `python3 -` from PATH with a sys.path insert was a refusal on every host
+# without a venv on PATH (the R2b-1 structural lens).
+PY_BIN=""
+if [ -x "$CLAUDLOBBY_ROOT/.venv/bin/python" ]; then
+    PY_BIN="$CLAUDLOBBY_ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1 \
+    && (cd "$CLAUDLOBBY_ROOT" && python3 -c "import claudlobby" >/dev/null 2>&1); then
+    PY_BIN="python3"
+fi
+if [ -z "$PY_BIN" ]; then
+    printf 'fleet-utilization.sh: no python that imports claudlobby resolvable from %s\n' "$CLAUDLOBBY_ROOT" >&2
+    exit 127
+fi
+"$PY_BIN" - "$CLAUDLOBBY_ROOT" "$FLEET" "$MODE" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 from claudlobby.paths import Paths

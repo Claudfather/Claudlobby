@@ -381,6 +381,35 @@ class TestUptimeReadsThePlaneAlone:
         out = _json.loads(capsys.readouterr().out)
         assert out["somebot"]["24h"]["entries_in_window"] == 1
 
+    def test_cmd_uptime_refuses_a_plane_that_never_saw_the_fleet(self, tmp_path, capsys):
+        """A plane holding only another fleet is a wrong root, not bots that
+        never beat: the command once rendered a table of dashes at rc 0 here,
+        byte-identical to a known fleet with zero heartbeats (the R2b-1
+        adversarial lens). It rides the matcher's session and refuses."""
+        from datetime import datetime, timedelta, timezone
+
+        from claudlobby.commands.core import cmd_uptime
+        from claudlobby.plane.emit_api import emit_batch
+        from tests.plane_fixtures import REPO
+
+        _root_mode_plane(tmp_path)                                   # rootfleet's manifest + lib
+        bots = tmp_path / "runtime" / "bots"
+        (bots / "somebot").mkdir(parents=True)
+        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
+        # the plane's only identity belongs to ANOTHER fleet
+        import sqlite3
+        with sqlite3.connect(tmp_path / "state" / "plane" / "plane.db") as c:
+            c.execute("DELETE FROM identity_registry WHERE alias LIKE 'bot:rootfleet/%'")
+            c.execute("DELETE FROM metric_samples")
+        out = emit_batch(tmp_path, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": "elsewhere",
+                                     "occurred_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+                                     "payload": {"subject_kind": "bot_instance", "subject": "bot:elsewhere/x",
+                                                 "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}])
+        assert all(o.status == "committed" for o in out), out
+        assert cmd_uptime(self._args(tmp_path)) == 3
+        captured = capsys.readouterr()
+        assert captured.out == "" and "no bot of fleet 'rootfleet'" in captured.err
+
     def test_cmd_uptime_refuses_without_a_plane(self, tmp_path, capsys):
         """No plane db: rc 3 and the remedy on stderr, NOTHING on stdout — an
         empty table would read as a fleet that never ran."""
