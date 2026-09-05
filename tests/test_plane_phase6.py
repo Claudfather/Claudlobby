@@ -329,3 +329,28 @@ def test_org_route_follows_the_requested_fleet_never_the_default(tmp_path):
     unnamed = client.get("/api/org").json()["data"]
     assert unnamed["fleet"] == "f" and unnamed["available"] == ["f", "g"]
     assert client.get("/api/org?fleet=nope").json()["state"] == "idle"
+
+
+def test_overview_row_for_a_keyframe_only_fleet_is_quiet_not_absent(tmp_path):
+    """U3 under §16: a fleet the registry knows only by its keyframe (no
+    comms, no assignments, no heartbeats) is a row of facts — zero open,
+    no report, its activity instant from the ledger — while the figure
+    with no source (orphan-ness, no bot directory) is None + a reason."""
+    fastapi = __import__("pytest").importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+
+    root = _root(tmp_path)
+    emit_batch(root, [_fleet_kf([{"bot": "x", "reports_to": None}]), _done()])
+    ov = TestClient(create_app(root)).get("/api/overview").json()
+    assert ov["state"] == "ok"
+    (row,) = ov["data"]["fleets"]
+    assert row["alias"] == F
+    assert (row["open"], row["attention"], row["overdue"]) == (0, 0, 0)
+    assert row["newest_report_at"] is None and row["reports_24h"] == 0
+    assert row["last_activity_at"] and row["last_comm_at"] is None
+    assert row["orphaned"] is None and row["orphaned_reason"]
+    assert row["presence"]["counts"] == {"working": 0, "idle": 0, "down": 0,
+                                         "stale": 0, "unknown": 0,
+                                         "sampling": 0}
+    assert row["capture"] == "full"

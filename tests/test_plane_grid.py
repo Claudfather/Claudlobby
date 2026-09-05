@@ -535,3 +535,51 @@ def test_presence_fleet_filter_scopes_both_halves(tmp_path):
     eng = client.get("/api/presence?fleet=engineering").json()["data"]
     assert [b["alias"] for b in eng["bots"]] == ["bot:engineering/one"]
     assert eng["counts"]["down"] == 0
+
+
+def test_overview_presence_is_each_rooms_not_the_hosts(tmp_path):
+    """U3 over U1's scoping: the strip's per-fleet presence is the SAME
+    derivation the presence panel serves under that fleet's tab — a
+    twin-named bot on the other fleet never joins this fleet's count, and
+    a dead pane on data never darkens engineering's card."""
+    d = tmp_path / "state" / "plane"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "capture.json").write_text('{"*": "full"}')
+    rows = []
+    for fleet, state in (("engineering", "BUSY"), ("data", "IDLE")):
+        alias = f"bot:{fleet}/one"
+        rows.append(
+            {"event_type": "metric_sample", "emitter": "keepalive",
+             "fleet": fleet,
+             "payload": {"subject_kind": "bot_instance", "subject": alias,
+                         "metric": "bot.heartbeat",
+                         "value": {"state": state, "marker_age_s": 3}}})
+    emit_batch(tmp_path, rows)
+
+    class _Sampler:
+        available = True
+
+        def snapshot(self):
+            return {"panes": [{"fleet": "engineering", "bot": "one",
+                               "status": "up"},
+                              {"fleet": "data", "bot": "one", "status": "up"},
+                              {"fleet": "data", "bot": "two",
+                               "status": "down"}],
+                    "sampler_running": True}
+
+        def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    client = TestClient(create_app(tmp_path, sampler=_Sampler()))
+    strip = {r["alias"]: r["presence"]["counts"]
+             for r in client.get("/api/overview").json()["data"]["fleets"]}
+    for fleet in ("engineering", "data"):
+        panel = client.get(f"/api/presence?fleet={fleet}").json()["data"]
+        assert strip[fleet] == panel["counts"], fleet
+    assert strip["engineering"] == {"working": 1, "idle": 0, "down": 0,
+                                    "stale": 0, "unknown": 0, "sampling": 0}
+    assert strip["data"] == {"working": 0, "idle": 1, "down": 1,
+                             "stale": 0, "unknown": 0, "sampling": 0}

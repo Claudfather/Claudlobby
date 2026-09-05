@@ -149,6 +149,12 @@ function threadArticle(t) {
     : "";
   const kicker = t.work_item_id
     ? `work item${t.repo ? ` · ${esc(t.repo)}` : ""}` : "conversation";
+  // U2: a cross-fleet thread carries a visible mark; its names arrive
+  // fleet-qualified from the server (`eng/erlich → data/samir`) in every
+  // room, while intra-fleet names stay short in their own room
+  const xfleet = t.cross_fleet
+    ? `<span class="tag xfleet" title="sender and recipient are on`
+      + ` different fleets">cross-fleet</span>` : "";
   const msgs = t.messages.map((m) => `
     <div class="msg">
       <div class="who"><b>${esc(m.sender_short)}</b>
@@ -168,7 +174,7 @@ function threadArticle(t) {
   el.innerHTML = `
     <div class="t-kicker">${kicker}</div>
     <div class="t-head"><span class="t-title">${esc(threadTitle(t))}</span>
-      <span class="t-meta">${esc(attribution)}</span></div>
+      ${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
     ${ladder(t)}
     ${msgs}`;
   return el;
@@ -253,6 +259,85 @@ function renderSummary(env) {
     ? (fresh ? "recording" : "recorder up, quiet") : "recorder DOWN";
 }
 
+// The two-fleet overview strip (U3): one card per fleet, one host card.
+// Every figure is a server fact through the door that defines it; a
+// figure the server could not source arrives null + a reason and renders
+// as "unknown (reason)", never as a zero (§16). A fleet card is the tab
+// switch when the host has a fleet dimension.
+const OV_PRESENCE_ORDER = ["working", "idle", "stale", "unknown", "sampling",
+                           "down"];
+function ovPresence(p) {
+  const c = p.counts || {};
+  const parts = OV_PRESENCE_ORDER.filter((s) => c[s] > 0)
+    .map((s) => `<span class="pres pres-${s}">${c[s]} ${s}</span>`);
+  if (p.live_poll !== "ok") {
+    parts.push(`<span class="ov-warn">live poll ${esc(p.live_poll)}</span>`);
+  }
+  return parts.length ? parts.join(" ") : `<span>no presence recorded</span>`;
+}
+function ovNum(n, word, bad = true) {
+  if (n === null || n === undefined) return `<span class="ov-warn">${esc(word)} unknown</span>`;
+  return `<span class="${n > 0 && bad ? "ov-bad" : ""}">${n} ${esc(word)}</span>`;
+}
+function renderOverview(env) {
+  const el = $("overview");
+  if (!el) return;
+  if (!env || env.state !== "ok") {
+    el.innerHTML = stateBlock(env ? env.state : "disconnected",
+                              env && env.provenance, env && env.remediation);
+    return;
+  }
+  const d = env.data;
+  const dimension = fleets.length >= 2;
+  const cards = d.fleets.map((f) => `
+    <div class="ov-card ${dimension ? "pick" : ""} ${
+        dimension && f.alias === currentFleet ? "on" : ""}"
+         data-fleet="${esc(f.alias)}" ${dimension ? 'role="button" tabindex="0"' : ""}
+         title="${esc(f.alias)}${dimension ? " — open this room" : ""}">
+      <div class="ov-head"><b>${esc(f.alias)}</b>
+        <span>${f.bots} bot${f.bots === 1 ? "" : "s"}</span>
+        <small>${esc(f.capture)} capture</small></div>
+      <div class="ov-line">${ovPresence(f.presence)}</div>
+      <div class="ov-line">${ovNum(f.open, "open", false)} ·
+        ${ovNum(f.attention, "need you")} · ${ovNum(f.overdue, "overdue")} ·
+        <span title="${esc(f.orphaned_reason || "")}">${
+          ovNum(f.orphaned, "orphaned")}</span></div>
+      <div class="ov-line">
+        <span>${f.newest_report_at
+          ? `last report ${esc(ago(f.newest_report_at))}` : "no reports"}${
+          f.reports_24h ? ` · ${f.reports_24h} today` : ""}</span> ·
+        <span>active ${esc(ago(f.last_activity_at))}</span></div>
+    </div>`).join("");
+  const h = d.host;
+  const lag = h.ingest_lag_s === null || h.ingest_lag_s === undefined
+    ? `<span class="ov-warn">nothing ingested yet</span>`
+    : `<span class="${h.ingest_lag_s > 120 ? "ov-warn" : ""}">ingest lag ${
+        h.ingest_lag_s | 0}s</span>`;
+  const spool = h.spool_state === "unreadable"
+    ? `<span class="ov-bad">spool unreadable</span>`
+    : ovNum(h.spool_files, "spooled");
+  const host = `
+    <div class="ov-card ov-host" title="the host's recorder — every fleet on this host writes here">
+      <div class="ov-head"><b>host</b>
+        <span class="${h.daemon_serving ? "ov-ok" : "ov-bad"}">${
+          h.daemon_serving ? "recorder up" : "recorder DOWN"}</span>
+        <small>${h.rows} rows</small></div>
+      <div class="ov-line">${spool} · ${lag}</div>
+      ${d.capture_config === "malformed"
+        ? `<div class="ov-line ov-bad">capture.json malformed — policies shown are defaults</div>` : ""}
+    </div>`;
+  el.innerHTML = cards + host;
+  if (dimension) {
+    el.querySelectorAll(".ov-card.pick").forEach((c) => {
+      const go = () => pickFleet(c.dataset.fleet);
+      c.addEventListener("click", go);
+      c.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
+      });
+    });
+  }
+}
+
 // Debug rail: a ring buffer rendered ONLY while visible (the hidden rail
 // used to receive DOM churn for every ledger row regardless — gauntlet).
 const debugRing = [];
@@ -285,15 +370,16 @@ async function refreshBoards() {
     if (gen !== generation) return;
   }
   const q = fleetQuery();
-  const [ch, tk, fl, sm, fe] = await Promise.all([
+  const [ch, tk, fl, sm, fe, ov] = await Promise.all([
     jget(channelUrl()), jget("/api/tasks" + q),
     jget("/api/identities" + q), jget("/api/summary"),
-    jget("/api/fleets"),
+    jget("/api/fleets"), jget("/api/overview"),
   ]);
   if (gen !== generation) return;
   adoptFleets(fe);
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
   renderFleetTabs();
+  renderOverview(ov);   // after the tabs: the strip highlights the pick
   restartSafety();
 }
 
@@ -437,19 +523,25 @@ function renderFleetTabs() {
       + ` data-fleet="${esc(f)}" type="button">${esc(f)} ${n}</button>`;
   }).join("");
   el.querySelectorAll("button").forEach((b) =>
-    b.addEventListener("click", () => {
-      currentFleet = b.dataset.fleet;
-      savePick(currentFleet);
-      renderFleetTabs();             // instant highlight
-      if (currentView === "fleet") pollFleet();   // the tab follows the pick
-      if (currentView === "grid") pollGrid();     // so does the grid
-      refreshBoards();               // guarded path (generation stale-guard)
-      if (!$("search-results").hidden) {
-        // active search: re-fire in the NEW room — otherwise the visible
-        // hits stay scoped to the old room under the new tab's highlight
-        $("search").dispatchEvent(new Event("input"));
-      }
-    }));
+    b.addEventListener("click", () => pickFleet(b.dataset.fleet)));
+}
+
+// ONE pick path — the tab row and the overview strip's cards (U3) both
+// land here, so a card click can never drift from a tab click.
+function pickFleet(f) {
+  currentFleet = f;
+  savePick(currentFleet);
+  renderFleetTabs();             // instant highlight
+  $("overview").querySelectorAll(".ov-card.pick").forEach((c) =>
+    c.classList.toggle("on", c.dataset.fleet === f));
+  if (currentView === "fleet") pollFleet();   // the tab follows the pick
+  if (currentView === "grid") pollGrid();     // so does the grid
+  refreshBoards();               // guarded path (generation stale-guard)
+  if (!$("search-results").hidden) {
+    // active search: re-fire in the NEW room — otherwise the visible
+    // hits stay scoped to the old room under the new tab's highlight
+    $("search").dispatchEvent(new Event("input"));
+  }
 }
 
 const STATUS_DOT = { up: "live", down: "", sampling: "warn" };

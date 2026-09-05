@@ -54,6 +54,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via CLI refusal
 else:
     _IMPORT_ERROR = None
 
+from ..paths import _iter_fleet_dirs
 from ..source_state import (
     SOURCE_ABSENT,
     SOURCE_OK,
@@ -67,10 +68,13 @@ from .ingest import CONSTRUCT_TABLES
 from .spool import oldest_spooled_at, scan_spool
 from .ingest import now_iso as _now_iso
 from .inventory import qualified_labels
+from .presence import STALE_AFTER_S, derive_presence, presence_counts
 from .sampler import PaneSampler
 from .queries import (
     ACTIVATION_TX_EVENTS,
     ATTENTION_SQL,
+    LATEST_HEARTBEAT_SQL,
+    NON_TERMINAL_CLAUSE,
     TASK_STATUS_SQL,
     TERMINAL_TASK_EVENTS,
 )
@@ -106,6 +110,16 @@ def _short(alias: str | None) -> str | None:
     if alias.startswith("human:"):
         return alias[len("human:"):] or alias
     return alias
+
+
+def _qualified(alias: str | None) -> str | None:
+    """`bot:<fleet>/<name>` -> `fleet/name` — the SAME string inventory's
+    `qualified_labels` mints for a twin, so a cross-fleet name and a
+    twin name read alike. Anything without a fleet (a human, a bare
+    alias) keeps `_short`: there is no fleet to qualify it by (U2)."""
+    if alias and alias.startswith("bot:") and "/" in alias:
+        return alias[len("bot:"):]
+    return _short(alias)
 
 
 def _fleet_like(fleet: str) -> str:
@@ -264,7 +278,8 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
     cols = ("ingest_seq, msg_id, occurred_at, sender_alias,"
             " recipient_alias, recipient_raw, message_class, command_type,"
             " privacy, body, body_bytes, truncated, work_item_id,"
-            " assignment_id, reply_to_msg_id, emitter")
+            " assignment_id, reply_to_msg_id, emitter, fleet_uid,"
+            " recipient_fleet")
     if fleet:
         # Per-team channels are the DEFAULT view (operator ruling 2026-08-29:
         # rooms, not a firehose). A room shows every message that TOUCHES the
@@ -306,6 +321,19 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
         t["activated"] = t["event"] in _ACTIVATION_SET
         tx_by_msg.setdefault(t["msg_id"], []).append(t)
 
+    # Identity keeps its fleet where it matters (U2): the sender's fleet is
+    # the room query's sender arm (`fleet_uid` <-> the registry's fleet
+    # row), the recipient's is 0004's virtual column — the two facts the
+    # room predicate already matches on, never a second parse of the
+    # alias. A message whose two fleets differ is CROSS-FLEET, and both of
+    # its names render fleet-qualified in EVERY room (`eng/erlich ->
+    # data/samir`), because inside the data room a bare `erlich` reads as
+    # one of data's own. Intra-fleet names stay short in their room; the
+    # host-wide read ("all") qualifies twins through inventory's ONE rule.
+    fleet_alias = {r["uid"]: r["alias"] for r in conn.execute(
+        "SELECT uid, alias FROM identity_registry WHERE kind = 'fleet'")}
+    labels = ({} if fleet else qualified_labels(
+        a for c in comms for a in (c["sender_alias"], c["recipient_alias"])))
     reply_to = {c["msg_id"]: c["reply_to_msg_id"] for c in comms}
 
     def chain_root(mid: str) -> str:
@@ -332,8 +360,18 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
         key = wi or f"chain:{r}"
         t = threads.setdefault(key, {"key": key, "work_item_id": wi,
                                      "messages": []})
-        c["sender_short"] = _short(c["sender_alias"])
-        c["recipient_short"] = _short(c["recipient_alias"])
+        c["sender_fleet"] = fleet_alias.get(c.pop("fleet_uid"))
+        c["cross_fleet"] = bool(
+            c["sender_fleet"] and c["recipient_fleet"]
+            and c["sender_fleet"] != c["recipient_fleet"])
+        if c["cross_fleet"]:
+            c["sender_short"] = _qualified(c["sender_alias"])
+            c["recipient_short"] = _qualified(c["recipient_alias"])
+        else:
+            c["sender_short"] = (labels.get(c["sender_alias"])
+                                 or _short(c["sender_alias"]))
+            c["recipient_short"] = (labels.get(c["recipient_alias"])
+                                    or _short(c["recipient_alias"]))
         if not c["recipient_alias"] and c["recipient_raw"]:
             c["recipient_short"] = names.get(c["recipient_raw"], "Telegram")
         # §11: the raw carrier address is SENSITIVE and the name is resolved
@@ -373,6 +411,9 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
              if e["event"] in _TERMINAL_SET), None)
         t["delivered"] = any(
             x["activated"] for m in t["messages"] for x in m["tx"])
+        # a thread with one cross-fleet message IS a cross-fleet thread —
+        # the mark rides the thread, the names ride each message
+        t["cross_fleet"] = any(m["cross_fleet"] for m in t["messages"])
         t["latest_seq"] = max(
             [m["ingest_seq"] for m in t["messages"]]
             + [e["ingest_seq"] for e in t["task_events"]])
@@ -556,12 +597,15 @@ def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
     # rows — gauntlet). Pinned by an EXPLAIN test.
     sql += " ORDER BY comms_fts.rowid DESC LIMIT ?"
     params.append(limit)
-    rows = []
-    for r in conn.execute(sql, params):
-        row = dict(r)
-        row["sender_short"] = _short(row.pop("sender_alias"))
-        row["recipient_short"] = _short(row.pop("recipient_alias"))
-        rows.append(row)
+    rows = [dict(r) for r in conn.execute(sql, params)]
+    # the host-wide read qualifies twins (U2b) — a hit attributed to `one`
+    # on a two-fleet host names nobody
+    labels = ({} if fleet else qualified_labels(
+        a for r in rows for a in (r["sender_alias"], r["recipient_alias"])))
+    for row in rows:
+        sa, ra = row.pop("sender_alias"), row.pop("recipient_alias")
+        row["sender_short"] = labels.get(sa) or _short(sa)
+        row["recipient_short"] = labels.get(ra) or _short(ra)
     return {**out, "results": rows,
             "marker_open": mopen, "marker_close": mclose}
 
@@ -705,6 +749,243 @@ def _spool_pending(root: Path) -> tuple[int, str | None, str]:
     return len(sc.pending), oldest_spooled_at(sc.pending), "ok"
 
 
+# --------------------------------------------------------------------------
+# Presence inputs — shared by /api/presence and /api/overview (U3), so the
+# strip's per-fleet verdicts are the SAME derivation the presence panel
+# shows, never a second copy of its scoping.
+# --------------------------------------------------------------------------
+
+def _stale_after_s() -> float:
+    # the staleness horizon is keepalive's active window (a separate
+    # process, so an env knob is the only carrier) — coupled, not a twin
+    # literal; default matches the keepalive default
+    try:
+        return float(os.environ.get("KEEPALIVE_ACTIVE_WINDOW_S",
+                                    STALE_AFTER_S))
+    except ValueError:
+        return STALE_AFTER_S
+
+
+def _live_panes(sampler) -> tuple[list, bool]:
+    """The sampler's live half: (panes, degraded). It must fail
+    INDEPENDENTLY of the recorded half: snapshot() is a pure cache read,
+    but a raise or a shape without "panes" must not 500 a panel and take
+    the recorded half down with it (probed) — degrade to no live poll,
+    disclosed, exactly as the db side does."""
+    if not sampler.available:
+        return [], False
+    try:
+        return list(sampler.snapshot().get("panes", [])), False
+    except Exception:  # noqa: BLE001 — a read door must not crash
+        return [], True
+
+
+def _heartbeat_rows(conn: sqlite3.Connection) -> list[dict]:
+    return [dict(zip(("alias", "value", "ingested_at"), row))
+            for row in conn.execute(LATEST_HEARTBEAT_SQL)]
+
+
+def _scope_presence(recorded: list, live: list, fleet: str) -> tuple[list, list]:
+    """Both halves scoped to ONE fleet (U1): a tab's verdicts and counts
+    are the room's, not the host's — and a twin-named bot on the other
+    fleet never joins this room's count."""
+    prefix = f"bot:{fleet}/"
+    return ([r for r in recorded
+             if str(r.get("alias") or "").startswith(prefix)],
+            [p for p in live if p.get("fleet") == fleet])
+
+
+# --------------------------------------------------------------------------
+# The two-fleet overview strip (U3): one row per fleet, one host row
+# --------------------------------------------------------------------------
+
+_FLEET_ACTORS_SQL = ("SELECT uid, alias FROM identity_registry"
+                     " WHERE kind = 'actor' AND alias LIKE ? ESCAPE '\\'")
+# the room's newest report: the channel's UNION-of-equality-arms form
+# (0003 sender arm / 0004 recipient arm — never an OR, 0004's lesson)
+_NEWEST_REPORT_SQL = (
+    "SELECT occurred_at FROM ("
+    " SELECT * FROM (SELECT occurred_at, ingest_seq FROM communications"
+    "  WHERE fleet_uid = ? AND message_class = 'report'"
+    "  ORDER BY ingest_seq DESC LIMIT 1)"
+    " UNION"
+    " SELECT * FROM (SELECT occurred_at, ingest_seq FROM communications"
+    "  WHERE recipient_fleet = ? AND message_class = 'report'"
+    "  ORDER BY ingest_seq DESC LIMIT 1))"
+    " ORDER BY ingest_seq DESC LIMIT 1")
+_REPORTS_SINCE_SQL = (
+    "SELECT COUNT(*) FROM ("
+    " SELECT msg_id FROM communications WHERE fleet_uid = ?"
+    "  AND message_class = 'report' AND occurred_at >= ?"
+    " UNION"
+    " SELECT msg_id FROM communications WHERE recipient_fleet = ?"
+    "  AND message_class = 'report' AND occurred_at >= ?)")
+_OVERDUE_ROWS_SQL = (
+    "SELECT a.assignment_id, a.occurred_at, a.source_ref, i.alias"
+    " FROM assignments a JOIN identity_registry i ON i.uid = a.assignee_uid"
+    " WHERE a.assignment_id IN ({ph})")
+
+
+def _bot_dirs(root: Path) -> dict[tuple[str, str], Path]:
+    """(fleet, bot) -> bot dir for every bot dir the host's tree holds: the
+    sampler's discovery walk (`paths._iter_fleet_dirs`, the ONE nested-
+    aware fleet walk) WITHOUT its socket gate — orphan-ness reads
+    `data/.spawn`, which a socket-less bot dir still carries."""
+    out: dict[tuple[str, str], Path] = {}
+    fleet_dirs = list(_iter_fleet_dirs(root / "local"))
+    if (root / "runtime" / "bots").is_dir():
+        fleet_dirs.append(root)   # root/CLI mode: the fleet label is root.name
+    for fleet_dir in fleet_dirs:
+        bots = fleet_dir / "runtime" / "bots"
+        try:
+            entries = sorted(bots.iterdir()) if bots.is_dir() else []
+        except OSError:
+            continue
+        for bot_dir in entries:
+            if (bot_dir / "bot.conf").is_file():
+                out[(fleet_dir.name, bot_dir.name)] = bot_dir
+    return out
+
+
+def _spawn_epoch(bot_dir: Path) -> int | None:
+    """Mtime of `<bot_dir>/data/.spawn` — start-bot.sh touches it on EVERY
+    start, so it dates the current incarnation of the session (the
+    matcher's `_spawn_epoch`, same file, same reading); None = unreadable,
+    and the matcher's rule for that is "not an orphan" (the row stays
+    overdue), never a guess."""
+    try:
+        return int((bot_dir / "data" / ".spawn").stat().st_mtime)
+    except OSError:
+        return None
+
+
+def _epoch(iso: str | None) -> float | None:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
+                    live_poll: str) -> dict:
+    """The strip's rows. Every figure is a PLANE fact through the doors
+    that already define it — never a bare zero where a source is absent:
+
+    * `bots` — `_fetch_fleets`'s registry count.
+    * `presence` — `derive_presence` over the SAME scoped halves the
+      presence panel uses; `live_poll` says whether the sampler answered.
+    * `open` — `NON_TERMINAL_CLAUSE` over the fleet's assignees: the ONE
+      per-assignment open rule ATTENTION_SQL and the expiry sweep share,
+      so the strip agrees with the queue it sits above. Deliberately NOT
+      `OPEN_ASSIGNMENTS_AT_SQL`: that is the shadow's per-(bot, task id)
+      closure for grading the legacy matcher, and its sibling-closure OR
+      defeats the task-event index — measured 4.3s per request at 4000
+      assignments, on a door the page refetches on every ledger push.
+    * `attention` / `overdue` — `ATTENTION_SQL` with the fleet's assignees
+      APPENDED as a restriction (the tasks door's pattern: queries.py stays
+      the one definition); overdue is the deadline arm of it.
+    * `orphaned` — the watchdog's split (#835): an id'd overdue dispatch
+      older than the bot's `.spawn` was lost to a restart. It needs the
+      bot's DIRECTORY, so a fleet with none under the view's root reports
+      None + a reason (UNKNOWN is not zero — #1014's rule).
+    * `newest_report_at` / `reports_24h` — `report`-class communications
+      on the room axis (sent by the fleet OR to it).
+    * `last_activity_at` — the fleet identity's `last_seen`: LEDGER time,
+      advanced by every emission under the fleet (a producer clock would
+      let one future-stamped row pin a fleet at "0s ago" forever).
+    * `capture` — the recorder's policy through `capture_mode`, the ONE
+      rule, as /api/trust reads it.
+    The host row is `_fetch_summary` plus the ingest lag."""
+    from datetime import datetime, timedelta, timezone
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    day_ago = (now_dt - timedelta(hours=24)).isoformat()
+    try:
+        capture = load_capture_config(root)
+        capture_state = "ok"
+    except CaptureConfigError:
+        capture, capture_state = {}, "malformed"
+    recorded = _heartbeat_rows(conn)
+    stale_after = _stale_after_s()
+    bot_dirs = _bot_dirs(root)
+    rows = []
+    for f in _fetch_fleets(conn)["fleets"]:
+        alias = f["alias"]
+        actors = conn.execute(_FLEET_ACTORS_SQL, (_fleet_like(alias),)).fetchall()
+        uids = [r["uid"] for r in actors]
+        rec, lv = _scope_presence(recorded, live, alias)
+        verdicts = derive_presence(rec, lv, now=now_dt, stale_after_s=stale_after)
+        open_n = attention = overdue = 0
+        overdue_ids: list[str] = []
+        if uids:
+            ph = ",".join("?" * len(uids))
+            open_n = conn.execute(
+                f"SELECT COUNT(*) FROM assignments a"
+                f" WHERE a.assignee_uid IN ({ph}) AND{NON_TERMINAL_CLAUSE}",
+                uids).fetchone()[0]
+            attention = conn.execute(
+                f"SELECT COUNT(*) FROM ({ATTENTION_SQL}"
+                f" AND a.assignee_uid IN ({ph}))", (now, *uids)).fetchone()[0]
+            overdue_ids = [r[0] for r in conn.execute(
+                ATTENTION_SQL + f" AND a.expected_by < ? AND a.assignee_uid IN ({ph})",
+                (now, now, *uids))]
+            overdue = len(overdue_ids)
+        orphaned: int | None = 0
+        orphaned_reason = None
+        fleet_dirs = {b: d for (fl, b), d in bot_dirs.items() if fl == alias}
+        if not fleet_dirs:
+            orphaned, orphaned_reason = None, (
+                "no bot directories for this fleet under the view's root —"
+                " orphan-ness compares a dispatch against the bot's .spawn")
+        elif overdue_ids:
+            ph = ",".join("?" * len(overdue_ids))
+            for asg, occurred, ref, bot_alias in conn.execute(
+                    _OVERDUE_ROWS_SQL.format(ph=ph), overdue_ids):
+                # only an id'd dispatch can orphan (the matcher's rule: an
+                # id-less one closes on ANY later terminal report)
+                idd = bool(ref) and ref.startswith("dispatch-log:") \
+                    and not ref.startswith("dispatch-log:sha:")
+                bot_dir = fleet_dirs.get(_short(bot_alias) or "")
+                spawn = _spawn_epoch(bot_dir) if bot_dir else None
+                da = _epoch(occurred)
+                # whole seconds on both sides, the matcher's comparison: a
+                # restart in the dispatch's own second is not an orphan
+                if idd and spawn is not None and da is not None \
+                        and spawn > int(da):
+                    orphaned += 1
+        newest = conn.execute(_NEWEST_REPORT_SQL, (f["uid"], alias)).fetchone()
+        reports_24h = conn.execute(
+            _REPORTS_SINCE_SQL, (f["uid"], day_ago, alias, day_ago)).fetchone()[0]
+        rows.append({
+            "alias": alias, "bots": f["bots"],
+            "presence": {"counts": presence_counts(verdicts),
+                         "live_poll": live_poll},
+            "open": open_n, "attention": attention, "overdue": overdue,
+            "orphaned": orphaned, "orphaned_reason": orphaned_reason,
+            "newest_report_at": newest[0] if newest else None,
+            "reports_24h": reports_24h,
+            "last_activity_at": f["last_seen"],
+            "last_comm_at": f["last_comm_at"],
+            "capture": capture_mode(capture, alias),
+        })
+    summary = _fetch_summary(conn, root)
+    prov = _provenance(root, conn)
+    last_in = _epoch(prov.get("last_ingest_at"))
+    host = {
+        "daemon_serving": summary["daemon_serving"],
+        "spool_files": summary["spool_files"],
+        "spool_state": summary["spool_state"],
+        "spool_oldest_at": summary["spool_oldest_at"],
+        "rows": summary["counts"]["ingest_ledger"],
+        "last_ingest_at": prov.get("last_ingest_at"),
+        # lag from LEDGER time; None (never a zero) when nothing was ingested
+        "ingest_lag_s": (round(max(0.0, now_dt.timestamp() - last_in), 1)
+                         if last_in is not None else None),
+    }
+    return {"fleets": rows, "host": host, "capture_config": capture_state}
+
+
 def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
     counts = {}
     for t in ("communications", "work_items", "assignments", "workstreams",
@@ -834,44 +1115,20 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
         just leaves every live status ``sampling`` (the recorded half
         still types staleness). Never a table; computed per request."""
         from datetime import datetime, timezone
-        from .presence import (
-            STALE_AFTER_S, derive_presence, presence_counts)
-        from .queries import LATEST_HEARTBEAT_SQL
 
-        # the staleness horizon is keepalive's active window (a separate
-        # process, so an env knob is the only carrier) — coupled, not a
-        # twin literal; default matches the keepalive default
-        try:
-            stale_after = float(os.environ.get(
-                "KEEPALIVE_ACTIVE_WINDOW_S", STALE_AFTER_S))
-        except ValueError:
-            stale_after = STALE_AFTER_S
         now = datetime.now(timezone.utc)
-        # the live half must fail INDEPENDENTLY of the recorded half (the
-        # endpoint's own law): snapshot() is a pure cache read, but a raise
-        # or a shape without "panes" must not 500 the panel and take the
-        # recorded half down with it (probed) — degrade to no live poll,
-        # disclosed, exactly as the db side does
-        sampler_degraded = False
-        live = []
-        if sampler.available:
-            try:
-                live = sampler.snapshot().get("panes", [])
-            except Exception:  # noqa: BLE001 — a read door must not crash
-                sampler_degraded = True
-        env = _envelope(root, lambda c: [
-            dict(zip(("alias", "value", "ingested_at"), row))
-            for row in c.execute(LATEST_HEARTBEAT_SQL)])
+        # the live half fails INDEPENDENTLY of the recorded half (the
+        # endpoint's own law) — `_live_panes` owns that rule for this
+        # panel and the overview strip alike
+        live, sampler_degraded = _live_panes(sampler)
+        env = _envelope(root, _heartbeat_rows)
         recorded = env["data"] if env["state"] == SOURCE_OK else []
         if fleet:
             # the tab's verdicts and counts (U1) — both halves scoped to
             # the fleet, so the header strip is the room's, not the host's
-            prefix = f"bot:{fleet}/"
-            live = [p for p in live if p.get("fleet") == fleet]
-            recorded = [r for r in recorded
-                        if str(r.get("alias") or "").startswith(prefix)]
+            recorded, live = _scope_presence(recorded, live, fleet)
         rows = derive_presence(recorded, live, now=now,
-                               stale_after_s=stale_after)
+                               stale_after_s=_stale_after_s())
         body = {"data": {"bots": [r.__dict__ for r in rows],
                          "counts": presence_counts(rows),
                          "sampler_available": (sampler.available
@@ -890,6 +1147,20 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                 "source": "heartbeat samples + live sampler",
                 "checked_at": _now_iso()}
         return JSONResponse(body)
+
+    @app.get("/api/overview")
+    def overview():
+        """The two-fleet overview strip (U3): one row per fleet the host
+        records — bots, presence, open/attention/overdue/orphaned, report
+        freshness, activity, capture policy — and one host row (recorder,
+        spool, ingest lag). Every figure through the door that already
+        defines it; a figure whose source is absent is None + a reason,
+        never a zero (§16). GET, read-only like every route."""
+        live, degraded = _live_panes(sampler)
+        live_poll = ("unavailable" if not sampler.available
+                     else "degraded" if degraded else "ok")
+        return JSONResponse(_envelope(
+            root, lambda c: _fetch_overview(c, root, live, live_poll)))
 
     @app.get("/api/inventory")
     def inventory(fleet: str | None = None):
