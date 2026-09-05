@@ -101,12 +101,18 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
   A figure whose source is absent is `null` with a reason, never `0`.
 - **Unacked reports (chunk K).** `claudlobby brief --ack` records the viewer's read
   position as a plane fact — one `reports_acked` system event on the manager's actor,
-  its detail the `ingest_seq` the ack reaches. The fleet card counts report-class
-  communications on the room axis past the fleet's newest ack by any of its actors
-  ("N unacked · acked by <bot> 2h ago"); a fleet that has never acked reads
-  `no ack recorded` (`null` + reason), never a count of everything ever. No cursor
-  file exists any more: a failed emit is a failed ack (rc 1, said on stderr), a spooled
-  one is disclosed and takes effect when the spool drains.
+  its detail the `ingest_seq` the ack reaches — through the cold emit door (so `--ack`
+  is the one brief door that writes, and it runs `migrate()`). A fleet's reports are ONE
+  definition (`queries.FLEET_REPORTS_SQL`): report-class communications on its room
+  axis, sent by the fleet or addressed to it. The card counts, through the same rule
+  the brief lists (`plane-readers.unacked_rows`: terminal or status-less reports past
+  the fleet's newest readable ack by any of its actors; a `progress` note never),
+  "N unacked · acked by <bot> 2h ago"; a fleet that has never acked reads
+  `no ack recorded` (`null` + reason), never a count of everything ever; a
+  `reports_acked` row with no readable cursor is skipped, not a reset. No cursor file
+  exists any more: a failed emit is a failed ack (rc 1, said on stderr), a spooled one
+  is disclosed and takes effect when the spool drains, and `PLANE_EMIT_DISABLED=1`
+  refuses to ack.
 
 ## The grid shows raw terminals — operators only (ruling 2026-08-29)
 

@@ -600,7 +600,7 @@ def cmd_brief(args) -> int:
         # shown, by the plane's own ordering — never a row that arrived mid-run.
         unacked = reports.get("unacked", [])
         if unacked:
-            newest = max(unacked, key=lambda r: r.get("seq") or 0)
+            newest = unacked[-1]   # sorted by (ts, seq): the last is the newest
             outcome = record_ack(paths, fleet.name, bot_id,
                                  acked_through_seq=newest.get("seq") or 0,
                                  acked_through_ts=newest["ts"], count=len(unacked))
@@ -608,9 +608,9 @@ def cmd_brief(args) -> int:
                 # A failed emit is a failed ack: the plane is the only record,
                 # so nothing was marked seen — the reports read unacked again.
                 log.error(
-                    "did NOT record the ack for %s (%s rung: %s) — %d report(s) still"
+                    "did NOT record the ack for %s (%s) — %d report(s) still"
                     " read unacked; there is no other record",
-                    bot_id, outcome.rung, outcome.detail, len(unacked),
+                    bot_id, outcome.detail, len(unacked),
                 )
                 return 1
             if outcome.status == "spooled":
@@ -622,7 +622,7 @@ def cmd_brief(args) -> int:
             else:
                 log.info(
                     "acked %d report(s) for %s — recorded on the plane (%s) through seq %s",
-                    len(unacked), bot_id, outcome.rung, newest.get("seq"),
+                    len(unacked), bot_id, outcome.detail, newest.get("seq"),
                 )
         else:
             log.info("nothing to ack for %s", bot_id)

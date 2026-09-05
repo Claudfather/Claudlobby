@@ -59,6 +59,42 @@ def not_sentinel_sql(col: str = "alias") -> str:
     return f"{col} NOT LIKE '\\_%' ESCAPE '\\'"
 
 
+# --- a fleet's reports, and its read position (chunk K, #1467) -----------------
+# THE definition of "a fleet's reports": report-class communications on the
+# fleet's ROOM AXIS — sent by the fleet (fleet_uid) or addressed to it
+# (recipient_fleet: a worker on another fleet reporting to this fleet's manager
+# is this fleet's report). brief's unacked list, `claudlobby report-back` and
+# the overview card all read this text (lib/plane-readers.py carries the
+# byte-identical copy, pinned): a second population let the card count a report
+# the manager's brief never showed, which no ack could clear. Binds
+# (fleet_uid, fleet_alias, since, since, since_seq, since_seq).
+FLEET_REPORTS_SQL = (
+    "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref,"
+    " c.ingest_seq"
+    " FROM communications c"
+    " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
+    " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
+    " ORDER BY c.occurred_at, c.ingest_seq"
+)
+
+# The newest READABLE `reports_acked` event among a set of uids (subject OR
+# actor — an ack lands on the viewer's own actor; the uids span every alias
+# variant the bot minted, the R2a rule). Decoded by SQLite: a row whose detail
+# carries no integer cursor is not an ack and is skipped — never a reset to
+# "never acked" that erases an older valid one (adversarial lens). Format with
+# ph = the uid placeholders, bind the uids twice.
+NEWEST_ACK_SQL = (
+    "SELECT json_extract(e.detail, '$.acked_through_seq') AS seq,"
+    " json_extract(e.detail, '$.acked_through_ts') AS ts,"
+    " json_extract(e.detail, '$.count') AS count,"
+    " e.occurred_at AS acked_at, e.subject_alias AS acked_by, e.ingest_seq AS landed_seq"
+    " FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'reports_acked'"
+    " AND (e.subject_uid IN ({ph}) OR e.actor_uid IN ({ph}))"
+    " AND json_type(e.detail, '$.acked_through_seq') = 'integer'"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+
 OPEN_ASSIGNMENTS_AT_SQL = (
     "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by"
     " FROM assignments a"

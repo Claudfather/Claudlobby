@@ -272,6 +272,22 @@ def test_overview_unacked_is_past_the_fleets_newest_ack(tmp_path):
     eng = rows()["engineering"]
     assert eng["unacked"] == 1 and eng["acked_by"] == "mgr" and eng["acked_at"]
     assert rows()["data"]["unacked"] is None            # data's manager has not acked
-    # a newer ack whose detail carries no cursor is no read position (never a 0)
+    # a newer ack whose detail carries no cursor is not an ack: the older
+    # readable one holds (never a reset to "never acked", never a 0)
     assert ack({"note": "nothing readable"}) == "committed"
-    assert rows()["engineering"]["unacked"] is None
+    eng = rows()["engineering"]
+    assert eng["unacked"] == 1 and eng["acked_by"] == "mgr"
+    # the card counts what the manager's brief lists — ONE rule: a worker on
+    # the data fleet reporting to engineering's manager is engineering's report
+    # (the room axis); a `progress` note is never unacked
+    (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    emit_batch(tmp_path, [
+        {"event_type": "communication", "emitter": "report-back", "fleet": "data",
+         "payload": {"msg_id": "msg_" + "3" * 32, "sender": "bot:data/one",
+                     "recipient": "bot:engineering/mgr", "message_class": "report",
+                     "body": "[BOTREPORT] one | completed | for engineering"}},
+        {"event_type": "communication", "emitter": "report-back", "fleet": "engineering",
+         "payload": {"msg_id": "msg_" + "4" * 32, "sender": "bot:engineering/one",
+                     "recipient": "bot:engineering/mgr", "message_class": "report",
+                     "body": "[BOTREPORT] one | progress | halfway"}}])
+    assert rows()["engineering"]["unacked"] == 2

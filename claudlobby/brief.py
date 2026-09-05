@@ -332,7 +332,6 @@ class AckOutcome:
     until then), or `failed` (nothing holds it — a failed emit is a failed ack)."""
 
     status: str
-    rung: str
     detail: str = ""
 
     @property
@@ -357,39 +356,26 @@ def ack_request(fleet: str, bot: str, *, acked_through_seq: int, acked_through_t
 
 def record_ack(paths: Paths, fleet: str, bot: str, *, acked_through_seq: int,
                acked_through_ts: str, count: int) -> AckOutcome:
-    """Record the ack through the shim's ladder, in process: the ingest daemon's
-    socket first (the live rung — no migration, no second writer on the WAL),
-    the cold in-process door when the socket is absent or refused, the spool as
-    that door's own floor. The request is FINALIZED once before the first
-    attempt (event_id minted here), so a commit whose ack was lost classifies
-    as a duplicate on the fallback, never a second row. A verdict the plane
-    returns (contract, downgrade, total failure) is a FAILED ack: there is no
-    file to fall back on any more, so the caller says so and moves nothing."""
-    from .plane.daemon import send_batch, socket_path
-    from .plane.emit_api import _finalize, emit_batch
+    """Record the ack through the package's cold emit door — `emit_batch`
+    (validate, one transaction, the spool as its own floor), the door the
+    registry lane, the expiry sweep and `claudlobby emit-batch` use; the daemon
+    runs the same door, so a second writer on the WAL is the designed case. A
+    silenced plane (`PLANE_EMIT_DISABLED=1`, the harness exemption) is a FAILED
+    ack: the plane is the only record, so an ack it will not hold marks
+    nothing. Every verdict or failure is likewise a failed ack, said by name."""
+    if os.environ.get("PLANE_EMIT_DISABLED") == "1":
+        return AckOutcome("failed", "PLANE_EMIT_DISABLED=1 — the plane is silenced, nothing records an ack")
+    from .plane.emit_api import emit_batch
 
-    req = _finalize(ack_request(fleet, bot, acked_through_seq=acked_through_seq,
-                                acked_through_ts=acked_through_ts, count=count))
-    sock = socket_path(paths.root)
-    if sock.exists():
-        try:
-            reply = send_batch(sock, [req])
-        except (OSError, ValueError):
-            reply = None       # transport unavailable — the cold rung answers
-        if reply is not None:
-            if not reply.get("ok"):
-                return AckOutcome("failed", "daemon",
-                                  f"{reply.get('code', 'refused')}: {reply.get('error', '')}")
-            status = (reply.get("results") or [{}])[0].get("status", "")
-            return AckOutcome("recorded" if status in ("committed", "duplicate") else
-                              "spooled" if status == "spooled" else "failed", "daemon", status)
     try:
-        out = emit_batch(paths.root, [req])
+        out = emit_batch(paths.root, [ack_request(
+            fleet, bot, acked_through_seq=acked_through_seq,
+            acked_through_ts=acked_through_ts, count=count)])
     except Exception as exc:  # noqa: BLE001 — every verdict is a failed ack, said by name
-        return AckOutcome("failed", "cold", f"{type(exc).__name__}: {exc}")
+        return AckOutcome("failed", f"{type(exc).__name__}: {exc}")
     status = out[0].status if out else ""
     return AckOutcome("recorded" if status in ("committed", "duplicate") else
-                      "spooled" if status == "spooled" else "failed", "cold",
+                      "spooled" if status == "spooled" else "failed",
                       out[0].detail if out and out[0].detail else status)
 
 
@@ -661,8 +647,12 @@ def _reports_section(
                                     issue="#1467"))
         return {}
     try:
-        rows = session.pr.report_rows(session.conn, session.fleet)
-        ack = session.pr.newest_ack(session.conn, session.fleet, bot_id)
+        # the viewer's read position first (its uids from the session's roster,
+        # spanning every alias variant), then only the rows past it
+        entry = session.roster.get(bot_id.lower()) or {}
+        ack = session.pr.newest_ack(session.conn, entry.get("uids", []))
+        rows = session.pr.report_rows(session.conn, session.fleet,
+                                      since_seq=ack["seq"] if ack else None)
     except Exception as exc:
         degraded.append(Degradation(field="reports", mode="omitted",
                                     reason=f"the plane cannot answer: {exc}", issue="#1467"))
@@ -676,17 +666,17 @@ def _reports_section(
                                     reason=f"{stripped} report(s) hold no summary on the plane (the capture"
                                            " policy kept no body and no task event named one)",
                                     issue="#1444"))
-    acked_seq = ack["seq"] if ack else None
+    # ONE rule with the overview card (plane-readers.unacked_rows): terminal or
+    # status-less reports past the ack — what the manager sees is what the card
+    # counts, and this ack clears both
     unacked = [
         {"ts": r["ts"], "seq": r.get("_seq"), "bot": r["bot"], "status": r["status"],
          "task_id": r["task_id"], "summary": r["summary"], "pr_url": r["pr_url"]}
-        for r in rows
-        if r.get("status") in terminal
-        and (acked_seq is None or (r.get("_seq") or 0) > acked_seq)
+        for r in session.pr.unacked_rows(rows, ack["seq"] if ack else None, terminal)
     ]
-    unacked.sort(key=lambda r: (r["ts"], r["seq"] or 0))
     # schema-1 keeps its three keys (`cursor` = the ack's legacy-form ts);
-    # the card, not the brief, carries when and by whom
+    # the card, not the brief, carries when and by whom. Keys INSIDE a row may
+    # be added (additive; `seq` is one); the top-level key set is the contract.
     return {"cursor": ack["ts"] if ack else None, "unacked": unacked, "source": "plane"}
 
 

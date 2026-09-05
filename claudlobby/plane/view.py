@@ -867,22 +867,6 @@ _REPORTS_SINCE_SQL = (
     " UNION"
     " SELECT msg_id FROM communications WHERE recipient_fleet = ?"
     "  AND message_class = 'report' AND occurred_at >= ?)")
-# The fleet's newest ack by ANY of its actors (chunk K, #1467): the manager is
-# whoever acks; the card is a glance, so the newest read position wins.
-_FLEET_NEWEST_ACK_SQL = (
-    "SELECT e.ingest_seq, e.occurred_at, e.detail, e.subject_alias FROM events e"
-    " WHERE e.kind = 'system' AND e.event = 'reports_acked'"
-    " AND (e.subject_uid IN ({ph}) OR e.actor_uid IN ({ph}))"
-    " ORDER BY e.ingest_seq DESC LIMIT 1")
-# reports on the room axis the ack has not reached — the `_REPORTS_SINCE_SQL`
-# shape, bounded by the plane's ordering authority rather than a clock
-_UNACKED_REPORTS_SQL = (
-    "SELECT COUNT(*) FROM ("
-    " SELECT msg_id FROM communications WHERE fleet_uid = ?"
-    "  AND message_class = 'report' AND ingest_seq > ?"
-    " UNION"
-    " SELECT msg_id FROM communications WHERE recipient_fleet = ?"
-    "  AND message_class = 'report' AND ingest_seq > ?)")
 _HOST_SAMPLES_SQL = (
     # the host probe's newest value per facet (subject_kind=host — the
     # `_host` sentinel's samples, keyed by hostname): the ONE recorded place
@@ -901,22 +885,19 @@ _HOST_SAMPLES_SQL = (
 _INGEST_LAG_WARN_S = 120
 
 
-def _ack_from_row(row) -> dict | None:
-    """A `reports_acked` events row -> {seq, by, acked_at}; None when its detail
-    carries no readable cursor (reads as never acked — fails toward showing
-    the reports, the file era's rule kept). Mirrors `plane-readers.ack_from_row`
-    (a stdlib script every consumer shells; not importable here)."""
-    if row is None:
-        return None
-    _seq_landed, occurred_at, detail, subject_alias = row
-    try:
-        data = json.loads(detail) if detail else {}
-    except ValueError:
-        return None
-    seq = data.get("acked_through_seq") if isinstance(data, dict) else None
-    if not isinstance(seq, int):
-        return None
-    return {"seq": seq, "by": subject_alias, "acked_at": occurred_at}
+def _plane_readers(root: Path):
+    """The install's stdlib `lib/plane-readers.py` — the reader brief and
+    `claudlobby report-back` answer through — so the card counts EXACTLY the
+    rows the manager's brief lists (`report_rows` + `unacked_rows`, one rule);
+    None when the install carries no readable copy (disclosed on the card)."""
+    from types import SimpleNamespace
+    from ..brief import load_lib_module
+    # the plane root's own lib/ (the install on a host), else the package's
+    # checkout (an editable install serving a plane under another root)
+    for lib in (Path(root) / "lib", Path(__file__).resolve().parents[2] / "lib"):
+        if (lib / "plane-readers.py").is_file():
+            return load_lib_module(SimpleNamespace(lib=lib), "plane-readers.py")
+    return None
 
 
 def _host_samples(conn: sqlite3.Connection) -> dict | None:
@@ -1001,6 +982,7 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
     stale_after = _stale_after_s()
     bot_dirs = {(fl, b): d for fl, b, d in discover_bot_dirs(root)}
     actors = _fleet_actors(conn)
+    pr = _plane_readers(root)
     fl = _fetch_fleets(conn, actors)
     rows = []
     for f in fl["fleets"]:
@@ -1052,19 +1034,23 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
         reports_24h = conn.execute(
             _REPORTS_SINCE_SQL, (f["uid"], day_ago, alias, day_ago)).fetchone()[0]
         unacked, unacked_reason, acked_by, acked_at = None, None, None, None
-        if uids:
-            ph = ",".join("?" * len(uids))
-            ack = _ack_from_row(conn.execute(
-                _FLEET_NEWEST_ACK_SQL.format(ph=ph), (*uids, *uids)).fetchone())
+        if pr is None:
+            unacked_reason = ("the install's lib/plane-readers.py is unreadable — the card"
+                              " cannot count what the brief lists")
+        elif not uids:
+            unacked_reason = "no actor of this fleet on the plane — nobody could have acked"
+        else:
+            # the fleet's newest readable ack by ANY of its actors (the manager
+            # is whoever acks; the card is a glance), then the rows past it
+            # through the SAME rule brief's list applies (unacked_rows)
+            ack = pr.newest_ack(conn, uids)
             if ack is None:
                 unacked_reason = ("no ack recorded — `claudlobby brief --ack` has never"
-                                  " run for this fleet, so it has no read position")
+                                  " run for this fleet")
             else:
-                unacked = conn.execute(
-                    _UNACKED_REPORTS_SQL, (f["uid"], ack["seq"], alias, ack["seq"])).fetchone()[0]
+                past = pr.report_rows(conn, alias, since_seq=ack["seq"])
+                unacked = len(pr.unacked_rows(past, ack["seq"], pr.TERMINAL_STATUSES))
                 acked_by, acked_at = _short(ack["by"]), ack["acked_at"]
-        else:
-            unacked_reason = "no actor of this fleet on the plane — nobody could have acked"
         rows.append({
             "alias": alias, "bots": f["bots"], "provisional": f["provisional"],
             "presence": {"counts": presence_counts(verdicts),

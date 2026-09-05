@@ -423,7 +423,7 @@ def test_brief_ack_is_a_plane_fact_and_the_unacked_list_shrinks(paths: Paths):
     assert brief["reports"]["cursor"] is None
 
     out = _ack(paths, "alex", unacked)
-    assert out.recorded and out.rung == "cold", out
+    assert out.recorded, out
     again = build_brief(fleet, paths, "alex", NOW)
     assert again["reports"]["unacked"] == []
     assert again["reports"]["cursor"] == "2026-08-08T11:00:00Z"   # the legacy-form ts, for the render
@@ -453,52 +453,69 @@ def test_ack_is_per_viewer_on_the_plane(paths: Paths):
     assert len(build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"]) == 1
 
 
-def test_unreadable_ack_fails_toward_showing_too_much(paths: Paths):
-    """The file era's rule, kept: a read position that cannot be read is no
-    read position — the report shows, never hides (#949/#1024)."""
+def test_a_malformed_ack_is_no_read_position_and_erases_none(paths: Paths):
+    """A `reports_acked` row whose detail carries no integer cursor is not an
+    ack: alone, the report shows (never hides — #949/#1024); landing AFTER a
+    valid ack it does not reset the viewer to "never acked" — the newest
+    READABLE ack holds (adversarial lens: one bad row erased a valid cursor)."""
+    from claudlobby.plane.emit_api import emit_batch
+
+    def malformed():
+        return emit_batch(paths.root, [{
+            "event_type": "system", "emitter": "brief", "fleet": FLEET,
+            "payload": {"event": "reports_acked", "subject_kind": "actor",
+                        "subject": f"bot:{FLEET}/alex", "data": {"note": "no cursor here"}}}])[0].status
+
+    _seed_plane(paths)
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
+    assert malformed() == "committed"
+    reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    assert len(reports["unacked"]) == 1 and reports["cursor"] is None
+
+    assert _ack(paths, "alex", reports["unacked"]).recorded
+    assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
+    assert malformed() == "committed"
+    again = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    assert again["unacked"] == [] and again["cursor"] == "2026-08-08T10:00:00Z"
+
+
+def test_a_silenced_plane_is_a_failed_ack(paths: Paths, monkeypatch):
+    """`PLANE_EMIT_DISABLED=1` is the one silencer (the harness exemption): a
+    plane that will not hold the ack marks nothing — failed, said by name,
+    no fact recorded — never a quiet rc 0 that reads as acked."""
+    from claudlobby.brief import record_ack
+
+    _seed_plane(paths)
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
+    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
+    assert out.status == "failed" and "PLANE_EMIT_DISABLED" in out.detail
+    assert _acked_events(paths) == []
+
+
+def test_a_fleets_reports_are_the_room_axis_and_progress_is_never_unacked(paths: Paths):
+    """ONE definition of a fleet's reports (queries.FLEET_REPORTS_SQL): a worker on
+    ANOTHER fleet reporting to this fleet's manager is this fleet's report — it
+    reaches the manager's brief (the card counts it, so the brief must list it,
+    or no ack could ever clear it); a `progress` note is never unacked; a
+    report the plane holds with no status at all still needs reading."""
     from claudlobby.plane.emit_api import emit_batch
 
     _seed_plane(paths)
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
-    out = emit_batch(paths.root, [{
-        "event_type": "system", "emitter": "brief", "fleet": FLEET,
-        "payload": {"event": "reports_acked", "subject_kind": "actor",
-                    "subject": f"bot:{FLEET}/alex", "data": {"note": "no cursor here"}}}])
-    assert out[0].status == "committed"
-
+    _land_report(paths, {"bot": "vera", "ts": "2026-08-08T10:30:00Z", "status": "progress",
+                         "summary": "halfway"})
+    emit_batch(paths.root, [{
+        "event_type": "communication", "emitter": "report-back", "fleet": "other",
+        "source_ref": "report-back:msg_" + "9" * 32, "occurred_at": "2026-08-08T11:00:00Z",
+        "payload": {"msg_id": "msg_" + "9" * 32, "sender": "bot:other/zed",
+                    "recipient": f"bot:{FLEET}/alex", "recipient_raw": "alex",
+                    "message_class": "report",
+                    "body": "[BOTREPORT] zed | completed | cross-fleet done"}}])
     reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
-    assert len(reports["unacked"]) == 1 and reports["cursor"] is None
-
-
-def test_ack_ladder_daemon_rung_classifies_the_reply(paths: Paths, monkeypatch, tmp_path):
-    """The socket is the live rung: a verdict the daemon returns is a failed ack,
-    a refused transport falls to the cold door with the SAME finalized request."""
-    import claudlobby.plane.daemon as daemon
-
-    _seed_plane(paths)
-    sock = tmp_path / "ingest.sock"; sock.write_text("")
-    monkeypatch.setattr(daemon, "socket_path", lambda root: sock)
-    sent: list[list[dict]] = []
-
-    monkeypatch.setattr(daemon, "send_batch", lambda p, events, **kw: (
-        sent.append(events) or {"ok": True, "results": [{"event_id": events[0]["event_id"],
-                                                          "status": "committed"}]}))
-    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
-    assert (out.status, out.rung) == ("recorded", "daemon")
-    assert sent[0][0]["event_id"] and sent[0][0]["payload"]["event"] == "reports_acked"
-
-    monkeypatch.setattr(daemon, "send_batch", lambda p, events, **kw: {
-        "ok": False, "code": "contract_violation", "error": "bad"})
-    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
-    assert (out.status, out.rung) == ("failed", "daemon") and "contract_violation" in out.detail
-    assert _acked_events(paths) == []                       # nothing recorded by a refusal
-
-    def refused(p, events, **kw):
-        raise OSError("connection refused")
-    monkeypatch.setattr(daemon, "send_batch", refused)
-    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
-    assert (out.status, out.rung) == ("recorded", "cold")
-    assert len(_acked_events(paths)) == 1
+    assert [(r["bot"], r["status"]) for r in reports["unacked"]] == [
+        ("vera", "completed"), ("other/zed", "completed")]
+    assert _ack(paths, "alex", reports["unacked"]).recorded
+    assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
 
 
 def test_failed_emit_is_a_failed_ack(paths: Paths, monkeypatch, caplog):
