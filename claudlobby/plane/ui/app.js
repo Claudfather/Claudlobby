@@ -318,7 +318,11 @@ function renderOverview(env) {
   const sm = h.samples;
   const facet = (k, label, fmt) => sm && sm[k] ? `${label} ${esc(fmt(sm[k].value))}` : null;
   const facets = sm ? [
-    facet("host.load", "load", (v) => String(v)),
+    // the probe records the load TRIPLET as an object ({one, five, fifteen});
+    // a scalar (an older or a foreign emitter) renders as itself
+    facet("host.load", "load", (v) => v && typeof v === "object"
+      ? [v.one, v.five, v.fifteen].filter((x) => x !== undefined).join(" ")
+      : String(v)),
     facet("host.mem_available_mb", "free RAM", (v) => `${Math.round(v / 1024 * 10) / 10} GB`),
     facet("host.disk_free_gb", "free disk", (v) => `${v} GB`),
     facet("host.undervoltage", "undervoltage", (v) => v ? "YES" : "no"),
