@@ -295,7 +295,8 @@ function renderOverview(env) {
          data-fleet="${esc(f.alias)}" ${dimension ? 'role="button" tabindex="0"' : ""}
          title="${esc(f.alias)}${dimension ? " — open this room" : ""}">
       <div class="ov-head"><b>${esc(f.alias)}</b>
-        <span>${f.bots} bot${f.bots === 1 ? "" : "s"}</span>
+        <span>${f.bots} bot${f.bots === 1 ? "" : "s"}${
+          f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed)</small>` : ""}</span>
         <small>${esc(f.capture)} capture</small></div>
       <div class="ov-line">${ovPresence(f.presence)}</div>
       <div class="ov-line">${ovNum(f.open, "open", false)} ·
@@ -305,14 +306,24 @@ function renderOverview(env) {
       <div class="ov-line">
         <span>${f.newest_report_at
           ? `last report ${esc(ago(f.newest_report_at))}` : "no reports"}${
-          f.reports_24h ? ` · ${f.reports_24h} today` : ""}</span> ·
+          f.reports_24h ? ` · ${f.reports_24h} in 24h` : ""}</span> ·
         <span>active ${esc(ago(f.last_activity_at))}</span></div>
     </div>`).join("");
   const h = d.host;
-  const lag = h.ingest_lag_s === null || h.ingest_lag_s === undefined
+  // the lag STATE is the API's (ingest_lag_state) — the page only renders it
+  const lag = h.ingest_lag_state === "none"
     ? `<span class="ov-warn">nothing ingested yet</span>`
-    : `<span class="${h.ingest_lag_s > 120 ? "ov-warn" : ""}">ingest lag ${
+    : `<span class="${h.ingest_lag_state === "warn" ? "ov-warn" : ""}">ingest lag ${
         h.ingest_lag_s | 0}s</span>`;
+  const sm = h.samples;
+  const facet = (k, label, fmt) => sm && sm[k] ? `${label} ${esc(fmt(sm[k].value))}` : null;
+  const facets = sm ? [
+    facet("host.load", "load", (v) => String(v)),
+    facet("host.mem_available_mb", "free RAM", (v) => `${Math.round(v / 1024 * 10) / 10} GB`),
+    facet("host.disk_free_gb", "free disk", (v) => `${v} GB`),
+    facet("host.undervoltage", "undervoltage", (v) => v ? "YES" : "no"),
+    facet("host.thermal_flags", "thermal", (v) => String(v)),
+  ].filter(Boolean).join(" · ") : `<span class="ov-warn" title="arm the plane-host-probe host timer (PLANE_EMIT_ENABLED=1) to record load, RAM, disk and thermal facets">host probe not armed</span>`;
   const spool = h.spool_state === "unreadable"
     ? `<span class="ov-bad">spool unreadable</span>`
     : ovNum(h.spool_files, "spooled");
@@ -323,20 +334,23 @@ function renderOverview(env) {
           h.daemon_serving ? "recorder up" : "recorder DOWN"}</span>
         <small>${h.rows} rows</small></div>
       <div class="ov-line">${spool} · ${lag}</div>
+      <div class="ov-line">${facets}</div>
       ${d.capture_config === "malformed"
         ? `<div class="ov-line ov-bad">capture.json malformed — policies shown are defaults</div>` : ""}
     </div>`;
   el.innerHTML = cards + host;
-  if (dimension) {
-    el.querySelectorAll(".ov-card.pick").forEach((c) => {
-      const go = () => pickFleet(c.dataset.fleet);
-      c.addEventListener("click", go);
-      c.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
-      });
-    });
-  }
 }
+
+// ONE delegated listener for the strip's cards (re-rendered on every refresh;
+// per-card listeners were re-attached each time — simplify lens)
+$("overview").addEventListener("click", (e) => {
+  const c = e.target.closest(".ov-card.pick");
+  if (c) pickFleet(c.dataset.fleet);
+});
+$("overview").addEventListener("keydown", (e) => {
+  const c = e.target.closest(".ov-card.pick");
+  if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); pickFleet(c.dataset.fleet); }
+});
 
 // Debug rail: a ring buffer rendered ONLY while visible (the hidden rail
 // used to receive DOM churn for every ledger row regardless — gauntlet).
@@ -370,13 +384,13 @@ async function refreshBoards() {
     if (gen !== generation) return;
   }
   const q = fleetQuery();
-  const [ch, tk, fl, sm, fe, ov] = await Promise.all([
+  const [ch, tk, fl, sm, ov] = await Promise.all([
     jget(channelUrl()), jget("/api/tasks" + q),
     jget("/api/identities" + q), jget("/api/summary"),
-    jget("/api/fleets"), jget("/api/overview"),
+    jget("/api/overview"),
   ]);
   if (gen !== generation) return;
-  adoptFleets(fe);
+  adoptFleets(ov);   // the overview carries the fleet list + default: one door
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
   renderFleetTabs();
   renderOverview(ov);   // after the tabs: the strip highlights the pick
@@ -493,7 +507,7 @@ function savePick(f) {
 function adoptFleets(env) {
   if (!env || env.state !== "ok" || !env.data) return;
   fleetsSeen = true;
-  fleets = [...env.data.fleets].sort((a, b) => a.alias < b.alias ? -1 : 1);
+  fleets = env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
   const names = fleets.map((f) => f.alias);
   if (names.length < 2) { currentFleet = null; return; }
   if (currentFleet && (currentFleet === "all" || names.includes(currentFleet))) return;
@@ -531,9 +545,7 @@ function renderFleetTabs() {
 function pickFleet(f) {
   currentFleet = f;
   savePick(currentFleet);
-  renderFleetTabs();             // instant highlight
-  $("overview").querySelectorAll(".ov-card.pick").forEach((c) =>
-    c.classList.toggle("on", c.dataset.fleet === f));
+  renderFleetTabs();             // instant highlight (the strip re-renders with the boards)
   if (currentView === "fleet") pollFleet();   // the tab follows the pick
   if (currentView === "grid") pollGrid();     // so does the grid
   refreshBoards();               // guarded path (generation stale-guard)

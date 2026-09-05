@@ -161,12 +161,15 @@ def test_channel_fleet_filter_scopes_the_room(tmp_path):
     assert len(both["data"]["threads"]) == 2  # no filter = the firehose
 
 
-def test_channel_unknown_fleet_is_ok_empty_not_error(tmp_path):
+def test_channel_unknown_fleet_is_a_typed_refusal(tmp_path):
     _seed_two_fleets(tmp_path)
     body = TestClient(create_app(tmp_path)).get(
         "/api/channel?fleet=nonexistent").json()
-    assert body["state"] == "ok"
-    assert body["data"]["threads"] == []  # legitimately idle — UI's word
+    # a fleet the plane does not hold is a typed refusal (U, #1467) — the
+    # room it would have shown is empty by construction, and saying so as
+    # "ok" read as a healthy empty room
+    assert body["state"] == "unknown" and "data" not in body
+    assert "nonexistent" in body["remediation"]
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +375,10 @@ def test_room_is_immune_to_like_metacharacters(tmp_path):
     client = TestClient(create_app(tmp_path))
     for evil in ("en_", "%", "engineerin_"):
         body = client.get(f"/api/channel?fleet={evil}").json()
-        assert body["state"] == "ok"
-        assert body["data"]["threads"] == [], f"{evil!r} leaked a room"
+        # not a fleet the plane holds: refused by name, never a room —
+        # so a metacharacter can neither absorb nor leak one
+        assert body["state"] == "unknown", f"{evil!r} passed as a fleet"
+        assert "data" not in body, f"{evil!r} leaked a room"
 
 
 def test_index_html_alias_is_rewritten_too(tmp_path):

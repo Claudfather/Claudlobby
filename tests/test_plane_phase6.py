@@ -170,7 +170,7 @@ def test_endpoints_and_typed_absence(tmp_path):
     util = c.get("/api/utilization", params={"fleet": F}).json()
     assert util["state"] == "ok" and util["data"][0]["short"] == "erlich"
     miss = c.get("/api/org", params={"fleet": "nope"}).json()
-    assert miss["state"] == "idle"          # never another fleet's tree under this name
+    assert miss["state"] == "unknown"       # never another fleet's tree under this name
     empty = TestClient(create_app(tmp_path / "none")).get("/api/org").json()
     assert empty["state"] == "absent" and "data" not in empty
 
@@ -328,7 +328,7 @@ def test_org_route_follows_the_requested_fleet_never_the_default(tmp_path):
     assert [n["bot"] for n in picked["data"]["roots"]] == ["y"]
     unnamed = client.get("/api/org").json()["data"]
     assert unnamed["fleet"] == "f" and unnamed["available"] == ["f", "g"]
-    assert client.get("/api/org?fleet=nope").json()["state"] == "idle"
+    assert client.get("/api/org?fleet=nope").json()["state"] == "unknown"
 
 
 def test_overview_row_for_a_keyframe_only_fleet_is_quiet_not_absent(tmp_path):

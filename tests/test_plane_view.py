@@ -542,11 +542,16 @@ def test_tasks_and_identities_follow_the_fleet_and_qualify_twins(tmp_path):
     host = client.get("/api/tasks").json()["data"]["assignments"]
     assert sorted(a["assignee_short"] for a in host) == ["data/one",
                                                           "engineering/one"]
+    # a fleet the plane holds no identity for is a typed refusal naming the
+    # fleets it does hold — never a healthy empty room (plane-lookup's rule)
     none = client.get("/api/tasks?fleet=nonexistent").json()
-    assert none["state"] == "ok" and none["data"]["assignments"] == []
-    # a fleet named with LIKE metas cannot absorb another's bots
-    assert client.get("/api/tasks?fleet=e_gineering").json()["data"][
-        "assignments"] == []
+    assert none["state"] == "unknown" and "data" not in none
+    assert "data, engineering" in none["remediation"]
+    # a name built from LIKE metacharacters is simply not a fleet — it can
+    # neither absorb another's bots nor pass as one
+    assert client.get("/api/tasks?fleet=e_gineering").json()["state"] == "unknown"
+    # an empty axis is the host-wide read on every route, not a refusal
+    assert len(client.get("/api/tasks?fleet=").json()["data"]["assignments"]) == 2
 
     data = client.get("/api/identities?fleet=data").json()["data"]["identities"]
     aliases = {r["alias"] for r in data}
@@ -645,9 +650,12 @@ def test_channel_stamps_fleets_and_marks_cross_fleet_threads(tmp_path):
     assert (m["sender_fleet"], m["recipient_fleet"]) == ("engineering",
                                                           "engineering")
     assert (m["sender_short"], m["recipient_short"]) == ("lead", "solo")
-    # the host-wide read keeps an unambiguous intra-fleet name bare too
+    # the host-wide read on a two-fleet host qualifies EVERY bot, the
+    # intra-fleet pair included: a bare name among qualified ones could
+    # not say whether it is unique or simply un-fleeted (U, #1467)
     m = _threads(client)["chain:msg_" + "d" * 32]["messages"][0]
-    assert (m["sender_short"], m["recipient_short"]) == ("lead", "solo")
+    assert (m["sender_short"], m["recipient_short"]) == ("engineering/lead",
+                                                          "engineering/solo")
     # the data room's cross-fleet thread must not show only its own half
     assert len(_threads(client, "data")["wi_" + "e" * 32]["messages"]) == 2
 
@@ -725,7 +733,7 @@ def test_all_tab_never_collapses_twins_in_channel_attention_or_search(tmp_path):
     room = client.get("/api/search?q=go&fleet=data").json()["data"]["results"]
     assert [h["sender_short"] for h in room] == ["mgr"]
     none = client.get("/api/channel?fleet=nonexistent").json()
-    assert none["state"] == "ok" and none["data"]["threads"] == []
+    assert none["state"] == "unknown" and "nonexistent" in none["remediation"]
 
 
 class _TwinSampler:

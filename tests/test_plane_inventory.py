@@ -280,10 +280,11 @@ def test_overlay_shadowed_shared_item_is_not_in_use(tmp_path):
 
 
 def test_cross_fleet_short_name_collision_is_qualified(tmp_path):
-    """Gauntlet SEV-5 fold: two fleets both naming `erlich` (the #526
-    class) are labelled fleet/erlich in an all-fleets read, so cards stay
-    distinguishable and used_by never attributes one twin's equipment to
-    the other."""
+    """Gauntlet SEV-5 fold, widened by U (#1467): an all-fleets read labels
+    EVERY bot fleet/name — twins (the #526 class, an `erlich` on each fleet)
+    by construction, and a unique `dinesh` too, so a bare name never has to
+    be read as "unique or un-fleeted?". A single-fleet read keeps bare
+    names (pinned above)."""
     root = _root(tmp_path)
     _seed(root)
     twin = _bot("bot:g/erlich", skills=("dispatch",), scan="t1")
@@ -295,6 +296,6 @@ def test_cross_fleet_short_name_collision_is_qualified(tmp_path):
     finally:
         conn.close()
     shorts = sorted(b["short"] for b in inv["bots"])
-    assert shorts == ["dinesh", "f/erlich", "g/erlich"]
+    assert shorts == ["f/dinesh", "f/erlich", "g/erlich"]
     lib = {(r["category"], r["name"]): r["used_by"] for r in inv["library"]}
     assert lib[("skills", "dispatch")] == ["f/erlich", "g/erlich"]

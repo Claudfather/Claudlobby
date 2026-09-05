@@ -105,6 +105,16 @@ their own flag). The read side (`brief`, `plane view`) needs no flag.
 
 ## The read side
 
+**Two fleets on one host (U, #1467).** The operator plane reads the fleet
+dimension from the plane itself: `/api/fleets` from the registry's fleet
+identities, every per-fleet route scoped through one fleet-axis predicate
+(`queries.fleet_alias_range` in SQL, `inventory.fleet_of` in Python —
+case-sensitive like the room's equality arms), a typed `unknown` state for a
+fleet the plane does not hold, names qualified `fleet/name` wherever two fleets
+meet, and an overview whose `open` is the matcher's own rule
+(`OPEN_ASSIGNMENTS_AT_SQL`), so the strip and `claudlobby brief` can never
+disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
+
 - **`brief`** (`claudlobby/brief.py`) — the fleet's one read door; its
   `degraded[]` envelope says which sections were LABELED or OMITTED and why
   (an unreachable source is never an empty answer — `source_state.py`).
