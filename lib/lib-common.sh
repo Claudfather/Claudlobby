@@ -219,10 +219,13 @@ with_lock() {
         ( "$_FLOCK_BIN" -x 200; "$@" ) 200>"$lockfile"
         return $?
     fi
-    local lockdir="${lockfile}.d" i=0
+    # 30s budget (WITH_LOCK_WAIT_S), not 5: a critical section that reaches
+    # the plane through the cold-CLI rung runs 1-2s, and a waiter that gives up
+    # runs UNLOCKED — measured by the R1 gauntlet with six concurrent opens.
+    local lockdir="${lockfile}.d" i=0 _max=$(( ${WITH_LOCK_WAIT_S:-30} * 20 ))
     while ! mkdir "$lockdir" 2>/dev/null; do
         i=$((i + 1))
-        [ "$i" -ge 100 ] && break
+        [ "$i" -ge "$_max" ] && break
         sleep 0.05
     done
     local rc=0
@@ -487,25 +490,29 @@ mint_task_id() {
 # spawn; every DOOR already sources lib-common before its plane block.
 
 # plane_armed <door> [--require-fleet] [--require-bot] -> rc 0 armed, 1 not.
-# THE arming predicate: PLANE_EMIT_ENABLED=1 arms, PLANE_EMIT_DISABLED=1
-# (harness override) wins. Identity preconditions are DISCLOSED skips — the
-# silent variants were drift, not decisions: fleet-scoped rows cannot exist
-# without the identity, and a one-line stderr disclosure is how an operator
-# learns why an armed fleet shows no rows from one door.
+# THE arming predicate (F18 closure, R1): the plane is the ONLY recorder and
+# it is always on — PLANE_EMIT_DISABLED=1 (the harness exemption) is the one
+# thing that silences a door. PLANE_EMIT_ENABLED is no longer read: an
+# env-gated arming loses records the day the legacy line is gone (measured:
+# a pre-stop hook run with no flag in its environment wrote its
+# handoff_skipped into a legacy file the retirement had frozen). Identity
+# preconditions are DISCLOSED skips — the silent variants were drift, not
+# decisions: fleet-scoped rows cannot exist without the identity, and a
+# one-line stderr disclosure is how an operator learns why a fleet shows no
+# rows from one door.
 plane_armed() {
     local door="$1"; shift || true
-    [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || return 1
     [ "${PLANE_EMIT_DISABLED:-0}" != "1" ] || return 1
     while [ $# -gt 0 ]; do
         case "$1" in
             --require-fleet)
                 if [ -z "${FLEET_NAME:-}" ]; then
-                    echo "$door: PLANE_EMIT_ENABLED but FLEET_NAME is empty — plane rows are fleet-scoped, skipping plane record (door action unaffected)" >&2
+                    echo "$door: FLEET_NAME is empty — plane rows are fleet-scoped, skipping plane record (door action unaffected)" >&2
                     return 1
                 fi ;;
             --require-bot)
                 if [ -z "${BOT_NAME:-}" ]; then
-                    echo "$door: PLANE_EMIT_ENABLED but BOT_NAME is empty — skipping plane record (door action unaffected)" >&2
+                    echo "$door: BOT_NAME is empty — skipping plane record (door action unaffected)" >&2
                     return 1
                 fi ;;
         esac
@@ -526,11 +533,10 @@ plane_mint_id() {
 # plane_emit_events <door> — stdin {"events":[...]} routed through THE shim
 # (plane-emit.sh: socket -> cold CLI -> spool). stdout discarded; stderr
 # passes through (the fallback disclosure is the contract); rc never
-# propagates — dual-write, the legacy record is load-bearing.
-# The wrapper never blocks the door, but it SURFACES the result: PLANE_EMIT_LAST_RC
-# is 0 after a recorded emission and the shim rc after a failed one (chunk 6b),
-# so a door that has retired its legacy write can still write the ledger when
-# the plane did not record — a dispatch or report must land SOMEWHERE.
+# propagates — a door's real action is never blocked by its record.
+# The wrapper SURFACES the result: PLANE_EMIT_LAST_RC is 0 after a recorded
+# emission and the shim rc after a failed one, so a door can say LOUDLY that
+# its action was not recorded — since the F18 closure there is no other record.
 # Feed it through a here-string (`plane_emit_events door <<<"$batch"`), never a
 # pipeline, wherever the caller needs PLANE_EMIT_LAST_RC afterwards: a pipeline
 # runs the function in a subshell and the result never comes back.
@@ -545,28 +551,6 @@ plane_emit_events() {
     return 0
 }
 
-# plane_fleet_tier_value <fleet> <KEY> <default> -- one key from the fleet .env
-# tier (the file the composer resolves at generate time), for a door running
-# with NO carrier: the restricted parser (parse_env_file) reads it, nothing is
-# sourced, and the last assignment wins as the cascade would have it.
-plane_fleet_tier_value() {
-    local _fleet="$1" _key="$2" _default="${3:-}" _dir _val=""
-    # `|| true` INSIDE the substitution (the #1460 rule): resolve_fleet_dir ends
-    # in `return 1` for a fleet with no directory, and on bash 3.2 that fires
-    # the inherited ERR trap inside the subshell even though the outer `||`
-    # guards the assignment — measured as three phantom script_errors per
-    # keepalive tick in the door harness.
-    _dir=$(resolve_fleet_dir "$_fleet" 2>/dev/null || true)
-    [ -n "$_dir" ] || _dir="${CLAUDLOBBY_ROOT:-}/local/$_fleet"
-    if [ -f "$_dir/.env" ]; then
-        # parse_env_file EXPORTS into the calling shell; inside this
-        # substitution the exports die with the subshell and only the one
-        # value comes back (the fleet tier alone: the flip writes it there).
-        _val=$( unset "$_key"; parse_env_file "$_dir/.env" >/dev/null 2>&1 || true; eval "printf '%s' \"\${$_key-}\"" )
-    fi
-    printf '%s' "${_val:-$_default}"
-}
-
 # plane_kill_tree <pid> -- kill a process and everything under it (recursive
 # pgrep -P: portable where macOS bash 3.2 has no pkill -g / setsid). The
 # keepalive tick carries the same form inside its reaper subshell; a bare kill
@@ -578,45 +562,13 @@ plane_kill_tree() {
     kill -9 "$_p" 2>/dev/null || true
 }
 
-# plane_emit_detached <door> <seconds> <batch> -- the batch through the shim in
-# the BACKGROUND, reaped (whole tree) at the bound, never waited on: the shape
-# for a door on a hot path whose legacy record is written regardless (a fleet
-# event under dual-write). The presence emit in keepalive.sh is the precedent
-# and the reason -- under a permanently wedged rung (the documented D-state SD
-# stall) an unbounded emit made pileup a RATE, not a ceiling. Its stderr is
-# lost with it (a detached failure is visible only as the row's absence; the
-# ledger holds the record).
-plane_emit_detached() {
-    local door="$1" bound="$2" batch="$3"
-    (
-        # Close every inherited descriptor above stderr FIRST: bash parks the
-        # fds a `>/dev/null 2>&1` displaces on 10+, and a backgrounded subshell
-        # inherits those copies — a door called inside a command substitution
-        # (the keepalive tick's ERR trap fires from one) then keeps the
-        # substitution's pipe open for the whole bound, and the caller blocks
-        # on it. Measured: the tick took exactly the detach bound; lsof showed
-        # this reaper holding the tick's pipe on fd 10.
-        local _fd
-        for _fd in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-            eval "exec ${_fd}>&-" 2>/dev/null || true
-        done
-        "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null 2>&1 &
-        _w=$!; _i=0
-        while kill -0 "$_w" 2>/dev/null && [ "$_i" -lt "$bound" ]; do
-            sleep 1; _i=$((_i + 1))
-        done
-        plane_kill_tree "$_w"
-    ) >/dev/null 2>&1 &
-}
-
 # plane_emit_bounded <door> <seconds> <batch> -- the batch through the shim,
 # WAITED on for at most the bound, then reaped (whole tree): the shape for a
-# door that must know its fourth fact (a retired write skips its ledger append
-# only on a recorded emission) but must not hold a watchdog tick behind a
-# wedged rung. PLANE_EMIT_LAST_RC = the shim's rc, 143 when reaped -- "not
-# recorded", so the ledger is written; the plane may still hold the row (a
-# kill after the commit), which under dual-write is a benign duplicate line
-# and never a lost record.
+# door that must know whether its record landed but must not hold a watchdog
+# tick behind a wedged rung. PLANE_EMIT_LAST_RC = the shim's rc, 143 when
+# reaped -- "not recorded", disclosed; the plane may still hold the row (a
+# kill after the commit), and a retry is never a second row because ingest
+# dedupes on the pre-minted event id.
 plane_emit_bounded() {
     local door="$1" bound="$2" batch="$3" _pid _i=0 _rc=0
     "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
@@ -635,84 +587,6 @@ plane_emit_bounded() {
     if [ "$_rc" -ne 0 ] && [ "$_rc" -ne 143 ]; then
         echo "$door: plane record failed rc=$_rc (door action unaffected)" >&2
     fi
-    return 0
-}
-
-# plane_door_key <FLAG_NAME> -- the door the flag names (dispatch / report /
-# events / workstreams): the flag's own suffix, no fork for the known ones.
-plane_door_key() {
-    case "${1#PLANE_LEGACY_WRITE_}" in
-        DISPATCH)    printf dispatch ;;
-        REPORT)      printf report ;;
-        EVENTS)      printf events ;;
-        WORKSTREAMS) printf workstreams ;;
-        *) printf '%s' "${1#PLANE_LEGACY_WRITE_}" | tr '[:upper:]' '[:lower:]' ;;
-    esac
-}
-
-# plane_retirement_covers <door> <FLAG_NAME> -- returns 0 when the flag says 0
-# (the env, else the fleet tier) AND the plane is armed AND a recorded
-# retirement NAMES this door: the READ-side question a door asks at startup
-# (cutover A2: is the file still the record?) -- the emission fact is
-# plane_write_retired's, asked per write.
-plane_retirement_covers() {
-    local door="$1" flag_name="$2" flag_val _fleet_name="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}" _door_key _retired
-    if [ -n "$(eval "printf '%s' \"\${$flag_name+x}\"")" ]; then
-        eval "flag_val=\${$flag_name:-1}"
-    else
-        flag_val=$(plane_fleet_tier_value "$_fleet_name" "$flag_name" 1)
-    fi
-    [ "$flag_val" = "0" ] || return 1
-    [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || return 1
-    _door_key=$(plane_door_key "$flag_name")
-    _retired=$(python3 -S -E "${BASH_SOURCE[0]%/*}/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
-        --retired --door "$_door_key" --fleet "$_fleet_name" 2>/dev/null || true)
-    [ -n "$_retired" ]
-}
-
-# plane_write_retired <door> <FLAG_NAME> -- returns 0 when the legacy JSONL append
-# may be SKIPPED, 1 when the door must write it. Skipping needs FOUR facts, and
-# the missing one is disclosed: the flag says 0; the plane is armed; the
-# retirement is RECORDED (plane cutover --retire-writes, read through the
-# stdlib lookup so a copy-pasted .env cannot retire a write nobody declared);
-# and THIS emission succeeded (PLANE_EMIT_LAST_RC). Default 1: keep writing.
-plane_write_retired() {
-    local door="$1" flag_name="$2" flag_val
-    eval "flag_val=\${$flag_name:-1}"
-    [ "$flag_val" = "0" ] || return 1
-    if [ "${PLANE_ARMED:-0}" != "1" ]; then
-        echo "$door: $flag_name=0 but the plane is unarmed -- writing the ledger anyway" >&2
-        return 1
-    fi
-    if [ "${PLANE_EMIT_LAST_RC:-1}" -ne 0 ]; then
-        echo "$door: $flag_name=0 but the plane did not record this one (rc=$PLANE_EMIT_LAST_RC) -- writing the ledger" >&2
-        return 1
-    fi
-    # The retirement must COVER this door: a record from before a door existed
-    # (chunk 6b's named dispatch and report) retires nothing it never named, or
-    # a copy-pasted flag silences a write nobody declared retired. The door key
-    # is the flag's own suffix (no fork for the three known ones).
-    # The fleet: a session's FLEET_NAME, else the timer units' CLAUDLOBBY_FLEET
-    # — the pair every fleet-scoped door reads. The first build asked for
-    # FLEET_NAME alone, so from a timer unit the lookup was refused (an empty
-    # --fleet) and the door wrote its ledger "just in case" on every sweep:
-    # measured after the flip — the stamp in place, six legacy lines per sweep.
-    local _door_key _retired _fleet_name="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}"
-    _door_key=$(plane_door_key "$flag_name")
-    # Memoised per process on a POSITIVE answer only: a retirement is monotone
-    # (rollback is the flag, which short-circuits above), so one lookup per
-    # (process, door) is the whole cost — a sweep emits dozens of fleet events.
-    eval "_retired=\${_PLANE_RETIRED_AT_${_door_key}:-}"
-    if [ -z "$_retired" ]; then
-        _retired=$(python3 -S -E "${BASH_SOURCE[0]%/*}/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
-            --retired --door "$_door_key" --fleet "$_fleet_name" 2>/dev/null || true)
-        [ -n "$_retired" ] && eval "_PLANE_RETIRED_AT_${_door_key}=\$_retired"
-    fi
-    if [ -z "$_retired" ]; then
-        echo "$door: $flag_name=0 but no legacy_write_retired is recorded for ${_fleet_name:-?} that covers '$_door_key' -- writing the ledger (plane cutover --retire-writes first)" >&2
-        return 1
-    fi
-    echo "$door: legacy write retired ($_retired) -- the plane recorded it" >&2
     return 0
 }
 
@@ -757,24 +631,6 @@ epoch_to_iso_utc() {
         return 0  # BSD/macOS
     fi
     date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ  # GNU/Linux
-}
-
-# rotate_jsonl_by_ts <ledger>
-# Shared self-rotation for ts-keyed JSONL ledgers (dispatch-log.jsonl,
-# report-back.jsonl): keep entries newer than OBSERVABILITY_REAP_DAYS
-# (default 7). Call inside the caller's with_lock critical section.
-# CONSTRAINT: keep DISPATCH_OVERDUE_MAX_AGE_S (default 24h) BELOW this
-# window — a max_age raised past it would let rotation silently prune a
-# still-alerting dispatch row.
-rotate_jsonl_by_ts() {
-    local ledger="$1"
-    local reap_days="${OBSERVABILITY_REAP_DAYS:-7}"
-    local cutoff
-    cutoff=$(date_relative "-${reap_days} days" "%Y-%m-%dT%H:%M:%SZ") || return 0
-    local tmp
-    tmp=$(safe_mktemp)
-    awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\"") ; if (a[1] >= cutoff) print }' "$ledger" > "$tmp" \
-        && mv "$tmp" "$ledger"
 }
 
 # --- tmux helpers ------------------------------------------------------------
@@ -1419,117 +1275,88 @@ bot_tmux() {
     "$_TMUX_BIN" -L "$socket" "$@"
 }
 
-# Append one event to a bot's JSONL ledger (data/events/fleet-YYYY-MM-DD.jsonl)
-# — the SAME ledger fleet-pulse reads and escalates. Best-effort: never fails
-# the caller, because startup/observability paths must not abort on a log write.
-# Identity: explicit bot_dir/bot_id win, else ambient $BOT_DIR/$BOT_ID. An
-# explicitly EMPTY bot_dir ("") forces the fleet-level ledger (state/events,
-# bot:"fleet") and ignores ambient identity — used by _emit_fleet_signal and by
-# emit_script_error's host-context (no bot dir) path. data_json must be a valid
-# JSON value (default {}).
-# Usage: emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
-# The shared per-source event write behind fleet-pulse / code-audit-sweep's
-# checks and _tmux_send_miss below; each passes its own <source> and emits here.
+# emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
+# Record one fleet event on the plane — the ONE door behind fleet-pulse /
+# code-audit-sweep's checks, the keepalive tick's transitions, the vitals hook,
+# _tmux_send_miss below and every other lib/ breadcrumb. Best-effort: never
+# fails the caller, because startup/observability paths must not abort on a
+# record. Identity: explicit bot_dir/bot_id win, else ambient $BOT_DIR/$BOT_ID.
+# An explicitly EMPTY bot_dir ("") forces the FLEET-level anchor (bot "fleet")
+# and ignores ambient identity — used by _emit_fleet_signal and by
+# emit_script_error's host-context (no bot dir) path; with no fleet anywhere
+# the anchor is the HOST (fleet "_host", subject_kind host, the hostname — the
+# probe's convention), never silence. data_json must be a valid JSON value
+# (default {}).
+# The event is a SYSTEM event anchored on the bot's actor (by alias, resolved
+# at ingest) or, for a fleet-level receipt, on the fleet; stamped UTC so every
+# fleet event compares lexically on the stored column; its source_ref is the
+# content key of the row exactly as the retired ledgers wrote it
+# (fleet-events:sha:<key>) — the readers select fleet events by that prefix,
+# never by an event-name list, so the plane's own machinery can never read as
+# a fleet event, and the key stayed stable across the F18 closure. The
+# emission is WAITED on, bounded (FLEET_EVENT_EMIT_TIMEOUT_S, default 10):
+# this door runs inside every lib/ hot path (the keepalive tick's ERR trap
+# included) and a wedged rung must never hold a tick for a minute; a reaped
+# or failed emission is disclosed as "not recorded" — the shim's spool is the
+# durability below that, there is no file. The caller's own PLANE_EMIT_LAST_RC
+# is RESTORED afterwards (a report door that emits a send_miss between its
+# emit and its own verdict must judge its own emission, never this one).
 emit_fleet_event() {
     local event_type="${1:?emit_fleet_event: <type> required}"
     local event_source="${2:-unknown}"
     local data_json="${3:-}"
     # No-colon ${4-…}: an explicitly EMPTY bot_dir stays empty (forcing the
-    # fleet-level branch) instead of falling back to ambient $BOT_DIR.
+    # fleet-level anchor) instead of falling back to ambient $BOT_DIR.
     local bot_dir="${4-${BOT_DIR:-}}"
     local bot_id="${5-}"
     [ -n "$data_json" ] || data_json='{}'
-    local events_dir
     if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
-        events_dir="$bot_dir/data/events"
         [ -n "$bot_id" ] || bot_id="${BOT_ID:-$(basename "$bot_dir")}"
     else
-        # Fleet-level ledger: identity is the explicit bot_id or "fleet" — never
+        # Fleet-level anchor: identity is the explicit bot_id or "fleet" — never
         # ambient $BOT_ID, so a host job's alert is not misattributed to a bot.
-        events_dir="${CLAUDLOBBY_ROOT:-}/state/events"
         [ -n "$bot_id" ] || bot_id="fleet"
     fi
-    local ts today _line
-    ts=$(ts_iso); today=$(date +%Y-%m-%d)
-    # The legacy row, composed ONCE (printf -v, no fork): the append below writes
-    # this exact line, and its content key is the plane row's PROVENANCE
-    # (source_ref fleet-events:sha:<key>, the id-less dispatch's derivation) —
-    # the readers select fleet events by that prefix, never by an event-name
-    # list, so the plane's own machinery can never read as a fleet event.
+    # The fleet: a session's FLEET_NAME, else the timer units' CLAUDLOBBY_FLEET
+    # (the composer stamps that one; resolve_bots_dir reads the same pair),
+    # else — for a bot-anchored call — the bot's OWN bot.conf (plane_peer_fleet's
+    # rule: a hand-run pre-stop hook carries the bot dir and nothing else).
+    local _fleet="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}" _kind _subj
+    if [ -z "$_fleet" ] && [ -n "$bot_dir" ] && [ -d "$bot_dir" ] && [ "$bot_id" != "fleet" ]; then
+        _fleet="$(bot_conf_get "$bot_dir" FLEET_NAME "" 2>/dev/null || true)"
+    fi
+    plane_armed emit_fleet_event || return 0
+    local ts _line _batch _detail _src _key _utc _outer_rc="${PLANE_EMIT_LAST_RC:-0}"
+    ts=$(ts_iso)
+    if [ -n "$_fleet" ] && [ "$bot_id" != "fleet" ]; then
+        _kind=actor; _subj="bot:$_fleet/$bot_id"
+    elif [ -n "$_fleet" ]; then
+        _kind=fleet; _subj="$_fleet"                # the plane's fleet alias is the bare name
+    else
+        # No fleet anywhere (a host job: disk-monitor, host-health-check, a
+        # sibling pull): the HOST is the anchor — the probe's own convention
+        # (fleet "_host", subject_kind host, the hostname) — never silence.
+        # The old state/events/ file took these lines; the plane takes them now.
+        _fleet="_host"; _kind=host; bot_id="host"
+        _subj="$(hostname 2>/dev/null || printf unknown-host)"
+    fi
+    # The row as the retired ledgers wrote it, composed ONCE (printf -v, no
+    # fork) for its CONTENT KEY alone — the plane row's provenance.
     printf -v _line '{"ts":"%s","bot":"%s","type":"%s","source":"%s","data":%s}' \
         "$ts" "$bot_id" "$event_type" "$event_source" "$data_json"
-    # Cutover Phase B: the event is a SYSTEM event on the plane first — anchored
-    # on the bot's actor (by alias, resolved at ingest) or, for a fleet-level
-    # receipt, on the fleet — and the JSONL append retires behind
-    # PLANE_LEGACY_WRITE_EVENTS=0 on the same four facts as the other doors
-    # (plane_write_retired: flag, arming, the recorded retirement covering
-    # THIS door, THIS emission recorded). Best-effort like the append: never
-    # fails the caller. occurred_at is stamped UTC so every fleet event compares
-    # lexically on the stored column (the legacy ts keeps its local offset
-    # inside the detail, for the byte-identical re-render).
-    # The fleet: a session's FLEET_NAME, else the timer units' CLAUDLOBBY_FLEET
-    # (the composer stamps that one; resolve_bots_dir reads the same pair).
-    local _fleet="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}"
-    if [ -n "$_fleet" ] && plane_armed emit_fleet_event; then
-        # plane_write_retired reads the script-level PLANE_ARMED the dispatch and
-        # report doors set at their top; this door is a library function every
-        # script calls, so it carries the verdict itself (dynamic scope: the
-        # check below sees it, the caller never does) — and it RESTORES the
-        # caller's own emission verdict afterwards: a report door that emits a
-        # send_miss between its emit and its retired check must judge its own
-        # fourth fact, never this door's (measured: a failed report emission
-        # read as recorded after a nested fleet event succeeded).
-        local PLANE_ARMED=1 _outer_rc="${PLANE_EMIT_LAST_RC:-0}"
-        local _subj _kind _batch _detail _src _key _utc _skip=1
-        if [ "$bot_id" = "fleet" ]; then
-            _kind=fleet; _subj="$_fleet"                # the plane's fleet alias is the bare name
-        else
-            _kind=actor; _subj="bot:$_fleet/$bot_id"
-        fi
-        # event_source is the one caller-shaped string; type, fleet and bot are
-        # identifiers by construction (a malformed one is refused at ingest,
-        # disclosed, and the legacy line is written regardless).
-        _src=$(json_escape "$event_source")
-        _key=$(sha256_hex32 "$_line" 2>/dev/null || true)
-        _utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        printf -v _detail '{"source":"%s","legacy_ts":"%s","data":%s}' "$_src" "$ts" "$data_json"
-        printf -v _batch '{"events":[{"event_type":"system","emitter":"%s","source_ref":"fleet-events:sha:%s","fleet":"%s","occurred_at":"%s","payload":{"event":"%s","subject_kind":"%s","subject":"%s","data":%s}}]}' \
-            "$_src" "$_key" "$_fleet" "$_utc" "$event_type" "$_kind" "$_subj" "$_detail"
-        # This door runs inside every lib/ hot path -- the keepalive tick's ERR
-        # trap and its send verifier included -- so it never waits on a record
-        # it does not need: under dual-write (the flag at 1) the ledger line
-        # below IS the record and the plane emission is DETACHED, reaped at the
-        # tick's own bound (the same knob as the presence emit, so one setting
-        # governs every emission a tick makes); under the retirement (the flag
-        # at 0) the fourth fact is needed, so the emission is WAITED on -- but
-        # bounded (FLEET_EVENT_EMIT_TIMEOUT_S, default 10), a reaped one being
-        # "not recorded" and the ledger written. Measured: with the emission
-        # synchronous, a wedged rung held the keepalive tick 60s per fleet event.
-        # The write flag: the env (a session's bot.conf, a job unit's stamp),
-        # else the FLEET TIER itself — a hand-run script (rolling-restart's
-        # pre-stop-handoff, an operator's spin-down) carries no flags and
-        # kept dual-writing after the flip (measured: eight lines per bot in
-        # the restart window). Read only when unset, through the restricted
-        # parser, never sourced.
-        local _flag
-        if [ -n "${PLANE_LEGACY_WRITE_EVENTS+x}" ]; then
-            _flag="${PLANE_LEGACY_WRITE_EVENTS:-1}"
-        else
-            _flag=$(plane_fleet_tier_value "$_fleet" PLANE_LEGACY_WRITE_EVENTS 1)
-            [ "$_flag" = "0" ] && PLANE_LEGACY_WRITE_EVENTS=0   # plane_write_retired reads the env
-        fi
-        if [ "$_flag" = "0" ]; then
-            plane_emit_bounded emit_fleet_event "${FLEET_EVENT_EMIT_TIMEOUT_S:-10}" "$_batch"
-            # stderr passes through: the missing fact is DISCLOSED, that is the contract
-            plane_write_retired emit_fleet_event PLANE_LEGACY_WRITE_EVENTS && _skip=0
-        else
-            plane_emit_detached emit_fleet_event "${FLEET_EVENT_DETACH_S:-${KEEPALIVE_EMIT_TIMEOUT_S:-110}}" "$_batch"
-        fi
-        PLANE_EMIT_LAST_RC="$_outer_rc"
-        [ "$_skip" -eq 0 ] && return 0
-    fi
-    mkdir -p "$events_dir" 2>/dev/null || return 0
-    printf '%s\n' "$_line" >> "$events_dir/fleet-${today}.jsonl" 2>/dev/null || true
+    # event_source is the one caller-shaped string; type, fleet and bot are
+    # identifiers by construction (a malformed one is refused at ingest and
+    # disclosed).
+    _src=$(json_escape "$event_source")
+    _key=$(sha256_hex32 "$_line" 2>/dev/null || true)
+    _utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf -v _detail '{"source":"%s","legacy_ts":"%s","data":%s}' "$_src" "$ts" "$data_json"
+    printf -v _batch '{"events":[{"event_type":"system","emitter":"%s","source_ref":"fleet-events:sha:%s","fleet":"%s","occurred_at":"%s","payload":{"event":"%s","subject_kind":"%s","subject":"%s","data":%s}}]}' \
+        "$_src" "$_key" "$_fleet" "$_utc" "$event_type" "$_kind" "$(json_escape "$_subj")" "$_detail"
+    # stderr passes through: a failed or reaped emission is DISCLOSED, that is the contract
+    plane_emit_bounded emit_fleet_event "${FLEET_EVENT_EMIT_TIMEOUT_S:-10}" "$_batch"
+    PLANE_EMIT_LAST_RC="$_outer_rc"
+    return 0
 }
 
 # _tmux_send_miss <session> <socket> <reason>

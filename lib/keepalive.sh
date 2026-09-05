@@ -33,23 +33,13 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
 
 LOG="$BOT_DIR/keepalive.log"
 
-# JSONL retention — delete keepalive event files older than this many days.
-# Honors the one fleet-wide retention window (observability.reap_days, composed as
-# OBSERVABILITY_REAP_DAYS into bot.conf, loaded above) so every event writer
-# (keepalive, fleet-pulse, bot-vitals) reaps on the same horizon. An explicit
-# KEEPALIVE_REAP_DAYS still overrides; both fall back to 7.
-KEEPALIVE_REAP_DAYS="${KEEPALIVE_REAP_DAYS:-${OBSERVABILITY_REAP_DAYS:-7}}"
-
-# Emit a keepalive event. Cutover B2: a TRANSITION (RESTART, BRIDGE_HEAL, SKIP,
-# RELOAD) is a FLEET EVENT on the plane through the one door (emit_fleet_event:
-# provenance, alias-anchored, retired with the family), so `claudlobby events`
-# and `uptime` see it; the per-tick verdicts BUSY / IDLE / UNKNOWN ride the
-# heartbeat sample the same tick emits (plane_presence_samples) and are not
-# fleet events. The keepalive-<day>.jsonl file has NO reader in the estate
-# (measured: 867 rows/bot/day, only the validate harness ever opened it): it
-# keeps being written under dual-write and stops the day the events write is
-# retired — the flag alone gates it, because the four facts protect a RECORD
-# and a file nothing reads is not one.
+# Emit a keepalive event: a TRANSITION (RESTART, BRIDGE_HEAL, SKIP, RELOAD) is
+# a FLEET EVENT on the plane through the one door (emit_fleet_event:
+# provenance, alias-anchored), so `claudlobby events` and `uptime` see it; the
+# per-tick verdicts BUSY / IDLE / UNKNOWN ride the heartbeat sample the same
+# tick emits (plane_presence_samples) and are not fleet events. (The
+# keepalive-<day>.jsonl file this once wrote had no reader in the estate —
+# measured, 867 rows/bot/day — and went with the F18 closure.)
 emit_keepalive_event() {
     local ev_state="$1"
     local ev_detail="${2:-}"
@@ -59,27 +49,6 @@ emit_keepalive_event() {
         SKIP)        emit_fleet_event keepalive_skip keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
         RELOAD)      emit_fleet_event keepalive_reload keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
     esac
-    local _wflag
-    if [ -n "${PLANE_LEGACY_WRITE_EVENTS+x}" ]; then
-        _wflag="${PLANE_LEGACY_WRITE_EVENTS:-1}"
-    else
-        _wflag=$(plane_fleet_tier_value "${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}" PLANE_LEGACY_WRITE_EVENTS 1)
-    fi
-    [ "$_wflag" = "0" ] && return 0
-    local events_dir="$BOT_DIR/data/events"
-    mkdir -p "$events_dir"
-    local events_file="$events_dir/keepalive-$(date +%Y-%m-%d).jsonl"
-    local ts
-    ts=$(ts_iso)
-    local detail_json=""
-    if [ -n "$ev_detail" ]; then
-        detail_json=',"detail":"'"$(json_escape "$ev_detail")"'"'
-    fi
-    printf '{"ts":"%s","bot":"%s","type":"keepalive","source":"keepalive","data":{"state":"%s"%s}}\n' \
-        "$ts" "$BOT_NAME" "$ev_state" "$detail_json" >> "$events_file"
-
-    # Reap old keepalive JSONL files beyond retention window.
-    reap_event_files "$events_dir" 'keepalive-*.jsonl' "$KEEPALIVE_REAP_DAYS"
 }
 
 # ---- plane door: presence's RECORDED half (#1361, harvest item 1) ----------
@@ -429,14 +398,12 @@ UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 case "$state" in
     BUSY)
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
-        emit_keepalive_event "BUSY" "active processing"
         rm -f "$UNKNOWN_COUNTER"
         # Clear idle marker — bot is actively working
         rm -f "$BOT_DIR/data/.idle"
         ;;
     IDLE)
         echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
-        emit_keepalive_event "IDLE" "at prompt"
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"

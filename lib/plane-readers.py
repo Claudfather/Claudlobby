@@ -525,9 +525,24 @@ def _plus_days(iso: str, days: int) -> str:
     return (dt + timedelta(days=days)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int = 14) -> dict:
-    """The registry the door would have written, from the plane."""
-    uid = fleet_uid(conn, fleet)
+EMPTY_REGISTRY = {"updated": "1970-01-01T00:00:00Z", "workstreams": {}}
+
+
+def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int = 14,
+                        or_empty: bool = False) -> dict:
+    """The registry the door would have written, from the plane. A fleet the
+    plane holds no identity for REFUSES (a wrong root is not 'nothing
+    recorded') — except for the WRITER: the first open of a fresh fleet is
+    exactly the call that must work, and the plane cannot hold the fleet's
+    identity before its first row lands, so the door asks with or_empty and
+    starts from the empty registry (F18 closure R1: there is no file to start
+    from any more)."""
+    try:
+        uid = fleet_uid(conn, fleet)
+    except PlaneUnreachable:
+        if or_empty:
+            return {**json.loads(json.dumps(EMPTY_REGISTRY)), "archived": []}
+        raise
     prefix = f"bot:{fleet}/"
     entries: dict = {}
     for wid, title, project, opened, owner_alias, goal in conn.execute(WS_CONSTRUCTS_SQL, (uid,)):
@@ -574,7 +589,14 @@ def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int
             archived.add(wid)
     for wid in archived:
         entries.pop(wid, None)
-    return {"updated": newest, "workstreams": entries}
+    out = {"updated": newest, "workstreams": entries}
+    if or_empty:
+        # the WRITER's view carries the archived ids too: a construct id is
+        # unique per fleet on the plane, so the slug dedup must see what was
+        # pruned (found by the R1 gauntlet: a re-opened title re-minted the
+        # archived id and ingest refused it)
+        out["archived"] = sorted(archived)
+    return out
 
 
 def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_threshold: int = 0,
@@ -687,7 +709,12 @@ def legacy_event_row(occurred_at, event, severity, subject_kind, subject_alias,
         except ValueError:
             data = {}
     prefix = f"bot:{fleet}/"
-    bot = "fleet" if subject_kind == "fleet" else (subject_alias or "?").removeprefix(prefix)
+    if subject_kind == "fleet":
+        bot = "fleet"
+    elif subject_kind == "host":
+        bot = "host"          # a host job's receipt (fleet "_host"): the retired file said "fleet"; the plane says host
+    else:
+        bot = (subject_alias or "?").removeprefix(prefix)
     return {"ts": (data.get("legacy_ts") or (occurred_at or "").replace("+00:00", "Z")),
             "bot": bot, "type": event, "source": data.get("source") or "plane",
             "data": data.get("data") if isinstance(data.get("data"), dict) else {},

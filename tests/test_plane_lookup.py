@@ -163,20 +163,24 @@ def test_report_back_links_through_the_plane_with_the_dispatch_log_absent(tmp_pa
                                tmp_path / "absent" / "dispatch-log.jsonl") == [wi, asg]
 
 
-def test_report_back_falls_back_to_the_ledger_when_the_plane_is_absent(tmp_path):
+def test_report_back_links_nothing_when_the_plane_is_absent_there_is_no_ledger_fallback(tmp_path):
+    """F18 R1: the join is the plane lookup ALONE. A ledger row that would have
+    answered the old grep fallback answers nothing — an unlinked report is
+    disclosed by its own row, never joined from a file."""
     dlog = tmp_path / "dispatch-log.jsonl"
     dlog.write_text('{"ts":"2026-09-01T00:00:00Z","manager":"m","bot":"w1",'
                     '"task_id":"t-1-aaaa","plane_msg_id":"msg_1",'
                     '"plane_work_item_id":"wi_legacy","plane_assignment_id":"asg_legacy"}\n')
-    assert _report_back_lookup(tmp_path / "noplane", "t-1-aaaa", "w1", dlog) == [
-        "wi_legacy", "asg_legacy"]
+    got = _report_back_lookup(tmp_path / "noplane", "t-1-aaaa", "w1", dlog)
+    assert not any(got), got
 
 
-def test_the_two_doors_call_the_lookup_before_the_ledger():
+def test_the_two_doors_call_the_lookup_and_no_door_greps_a_ledger():
     rb = (REPO / "lib" / "report-back.sh").read_text()
     dt = (REPO / "lib" / "dispatch-task.sh").read_text()
-    assert "plane-lookup.py" in rb and rb.index("plane-lookup.py") < rb.index('grep -F "\\"task_id\\"')
-    assert "plane-lookup.py" in dt and '"superseded"' in dt and "supersedes_msg_id" in dt
+    assert "plane-lookup.py" in rb and 'grep -F "\\"task_id\\"' not in rb      # R1: no ledger grep anywhere
+    assert "plane-lookup.py" in dt and 'superseded' in dt and "supersedes_msg_id" in dt
+    assert "_append_ledger" not in dt and "REPORT_LEDGER" not in rb
     for f in ("report-back.sh", "dispatch-task.sh"):
         assert subprocess.run(["bash", "-n", str(REPO / "lib" / f)]).returncode == 0
 

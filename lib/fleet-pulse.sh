@@ -17,6 +17,9 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 fleet="${1:?Usage: fleet-pulse.sh <fleet-name>}"
+# The fleet is this sweep's carrier for every door it runs (emit_fleet_event
+# anchors on it): the timer unit stamps CLAUDLOBBY_FLEET, a hand run does not.
+export CLAUDLOBBY_FLEET="${CLAUDLOBBY_FLEET:-$fleet}"
 
 BOTS_DIR=$(resolve_bots_dir "$fleet")
 if [ ! -d "$BOTS_DIR" ]; then
@@ -143,12 +146,14 @@ _orphan_cache=$(safe_mktemp)
 # chat is resolved below.
 _overdue_reader_rc=0
 _overdue_reader_err=$(safe_mktemp)
-if [ -f "$dispatch_log" ]; then
-    python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" --fleet "$fleet" \
-        --bots-dir "$BOTS_DIR" 2>"$_overdue_reader_err" > "$_overdue_cache" || _overdue_reader_rc=$?
-    python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$dispatch_log" "$report_ledger" \
-        --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
-fi
+# No file-exists gate (F18 R1): the matcher answers from the plane under the
+# flip, and the retired ledgers' paths only fill its positional slots until R2
+# removes them — a gate on the file switched the whole pre-sweep OFF on a host
+# whose files are gone (found by the R1 harness port).
+python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" --fleet "$fleet" \
+    --bots-dir "$BOTS_DIR" 2>"$_overdue_reader_err" > "$_overdue_cache" || _overdue_reader_rc=$?
+python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$dispatch_log" "$report_ledger" \
+    --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
 
 # --- Cutover shadow bridge (chunk 4, J4): a DIVERGED latest comparison pages ---
 # The shadow timer records legacy-vs-plane comparisons; the plane never alerts
@@ -272,7 +277,6 @@ _unassigned_scanned=0
 _ensure_unassigned_scan() {
     [ "$_unassigned_scanned" -eq 0 ] || return 0
     _unassigned_scanned=1
-    [ -f "$dispatch_log" ] || return 0
     _unassigned_cache=$(safe_mktemp)
     # rc kept (chunk 7a): a flipped reader REFUSES (rc 3) when the plane cannot
     # serve, and an empty cache would read as "no idle workers"; the refusal is

@@ -4,8 +4,11 @@ Every pin drives the REAL scripts with hook-shaped stdin against a real
 emit root (the cold CLI path end-to-end). The load-bearing laws: the
 inbound hook's STDOUT IS EMPTY on every path (UserPromptSubmit stdout is
 added to the model's context — leakage would reshape turns fleet-wide);
-both hooks are dormant without arming; every path exits 0; an ordinary
-prompt or foreign tool call writes nothing.
+both hooks RECORD without any flag in their environment (the plane is the
+only recorder and it is always on — F18 closure R1; PLANE_EMIT_ENABLED has
+no meaning any more) and PLANE_EMIT_DISABLED=1, the harness exemption, is
+the one thing that silences them; every path exits 0; an ordinary prompt or
+foreign tool call writes nothing.
 """
 
 from __future__ import annotations
@@ -116,11 +119,19 @@ def test_outbound_ignores_foreign_tools(tmp_path):
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
-def test_outbound_dormant_without_arming(tmp_path):
+def test_outbound_records_without_any_flag_and_ignores_enabled_zero(tmp_path):
+    """The always-on contract: no plane flag at all → the reply is recorded;
+    PLANE_EMIT_ENABLED=0 → still recorded, the flag is not read."""
     root = _root(tmp_path)
     r = _run(OUT, _out_payload(), _env(root, PLANE_EMIT_ENABLED=None))
     assert r.returncode == 0
-    assert not (root / "state" / "plane" / "plane.db").exists()
+    assert len(_rows(root, "SELECT 1 FROM communications")) == 1
+    root2 = tmp_path / "second"
+    (root2 / "state" / "plane").mkdir(parents=True)
+    (root2 / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    r = _run(OUT, _out_payload(), _env(root2, PLANE_EMIT_ENABLED="0"))
+    assert r.returncode == 0
+    assert len(_rows(root2, "SELECT 1 FROM communications")) == 1
 
 
 def test_outbound_disabled_exemption_wins(tmp_path):
@@ -196,10 +207,21 @@ def test_inbound_handles_attr_order_multiline_and_missing_user(tmp_path):
     assert "line one\nline two" in bodies[0]
 
 
-def test_inbound_dormant_and_broken_stdin(tmp_path):
+def test_inbound_records_without_any_flag_and_disabled_silences_it(tmp_path):
     root = _root(tmp_path)
     r = _run(IN, _channel_prompt(), _env(root, PLANE_EMIT_ENABLED=None))
     assert r.returncode == 0 and r.stdout == ""
+    assert len(_rows(root, "SELECT 1 FROM communications")) == 1
+    root2 = tmp_path / "second"
+    (root2 / "state" / "plane").mkdir(parents=True)
+    (root2 / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    r = _run(IN, _channel_prompt(), _env(root2, PLANE_EMIT_DISABLED="1"))
+    assert r.returncode == 0 and r.stdout == ""
+    assert not (root2 / "state" / "plane" / "plane.db").exists()
+
+
+def test_inbound_broken_stdin_is_silent(tmp_path):
+    root = _root(tmp_path)
     for garbage in ("", "not json"):
         r = _run(IN, garbage, _env(root))
         assert r.returncode == 0 and r.stdout == ""

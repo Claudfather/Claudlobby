@@ -1,7 +1,21 @@
 """Tests for lib/workstream-update.sh — the single-writer registry mutator.
 
-Drives the real bash helper against a scratch registry file (WORKSTREAMS_PATH),
-mirroring how test_creds_check_telegram.py exercises the real script.
+The registry is the PLANE (F18 closure R1): every verb materializes it from
+the plane (`plane-lookup.py --workstreams --or-empty`), the verb's plane event
+IS the write, and nothing is written to disk — no workstreams.json, no
+archive file, no WORKSTREAMS_PATH override. The door REFUSES rather than
+falls back: an unreachable plane (rc 3), a silenced plane (PLANE_EMIT_DISABLED=1,
+rc 3), an emission the shim could not record (rc 4).
+
+Drives the real bash helper against a throwaway plane root per test: the
+shim's socket rung finds no daemon (disclosed on stderr) and the cold-CLI rung
+does the real ingest, so every verb costs a python spawn or two. The registry
+is read back through the SAME renderer the door materializes from, whose
+shape is the file's old shape (id, fleet, title, project, status, owner_bot,
+next, task_ids, refs, opened_ts, last_progress_ts, lease_expires_ts,
+renewals[, closed_ts]) — with one model difference worth knowing: the lease is
+DERIVED at read time (opened / last progress + the read-time lease days, or
+the renewal's own renewed_until), never stored per verb.
 """
 
 from __future__ import annotations
@@ -9,13 +23,21 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / "lib" / "workstream-update.sh"
+from tests.plane_fixtures import ro as _ro
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPT = REPO / "lib" / "workstream-update.sh"
+LOOKUP = REPO / "lib" / "plane-lookup.py"
+CLI = Path(sys.executable).parent / "claudlobby"
+FLEET = "f"
 
 # The helper shells out to jq; skip cleanly on hosts without it rather than
 # erroring the whole suite (matches the sibling bash-driving tests).
@@ -24,33 +46,92 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run(tmp_path: Path, *args: str, env_extra: dict | None = None):
-    """Run workstream-update.sh with an isolated registry. Returns CompletedProcess."""
-    registry = tmp_path / "workstreams.json"
+def _root(tmp_path: Path) -> Path:
+    """The throwaway plane root (tests.plane_fixtures.plane_root's shape):
+    state/plane/capture.json only — the first emission creates the db."""
+    root = tmp_path / "root"
+    plane = root / "state" / "plane"
+    if not plane.exists():
+        plane.mkdir(parents=True)
+        (plane / "capture.json").write_text('{"*": "full"}')
+    (tmp_path / "home").mkdir(exist_ok=True)
+    return root
+
+
+def _env(tmp_path: Path, env_extra: dict | None = None) -> dict:
+    root = _root(tmp_path)
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-        "HOME": str(tmp_path),
-        "CLAUDLOBBY_ROOT": str(tmp_path / "root"),
-        "WORKSTREAMS_PATH": str(registry),
+        "HOME": str(tmp_path / "home"),
+        "CLAUDLOBBY_ROOT": str(root),
+        "FLEET_NAME": FLEET,
+        "BOT_NAME": "mgr",
+        "PLANE_EMIT_CLI": str(CLI),
+        # no daemon: the socket rung fails (disclosed) and the cold CLI ingests
+        "PLANE_SOCKET": str(root / "no-daemon.sock"),
+        "WORKSTREAM_LEASE_DAYS": "14",
     }
     if env_extra:
         env.update(env_extra)
+    return env
+
+
+def _run(tmp_path: Path, *args: str, env_extra: dict | None = None):
+    """Run workstream-update.sh against the test's plane root. Returns CompletedProcess."""
     return subprocess.run(
         ["bash", str(SCRIPT), *args],
-        env=env,
+        env=_env(tmp_path, env_extra),
         capture_output=True,
         text=True,
+        timeout=180,
     )
 
 
-def _registry(tmp_path: Path) -> dict:
-    return json.loads((tmp_path / "workstreams.json").read_text())
+def _registry(tmp_path: Path, fleet: str = FLEET, lease_days: int = 14) -> dict:
+    """The registry as the door materializes it: the plane, rendered."""
+    r = subprocess.run(
+        [sys.executable, str(LOOKUP), "--root", str(_root(tmp_path)), "--workstreams",
+         "--or-empty", "--fleet", fleet, "--lease-days", str(lease_days)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def _archived(tmp_path: Path) -> list[str]:
+    """The ids whose `archived` workstream event landed on the plane — the archive."""
+    db = _root(tmp_path) / "state" / "plane" / "plane.db"
+    if not db.exists():
+        return []
+    with _ro(_root(tmp_path)) as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT workstream_id FROM events WHERE kind = 'workstream' AND event = 'archived'"
+            " ORDER BY ingest_seq")]
 
 
 def _open(tmp_path: Path, title: str, *extra: str, env_extra: dict | None = None) -> str:
     r = _run(tmp_path, "open", title, *extra, env_extra=env_extra)
     assert r.returncode == 0, f"open failed: {r.stderr}"
     return r.stdout.strip()
+
+
+def _iso(ts: str) -> datetime:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def _no_files(tmp_path: Path) -> None:
+    """Nothing but the plane under the root — the door writes no record file.
+    Excluded: the plane's own home, the host uid it mints, and the LOCK
+    artefacts (`workstreams.lock` under flock on Linux, `workstreams.lock.d`
+    under the mkdir spinlock on macOS) — a lock is not a record."""
+    root = tmp_path / "root"
+    files = sorted(
+        p for p in root.rglob("*") if p.is_file()
+        and "state/plane" not in str(p.relative_to(root))
+        and p.name != "host-uid"
+        and not p.name.endswith(".lock") and ".lock.d" not in str(p)
+    )
+    assert files == [], f"the door wrote files: {files}"
 
 
 class TestOpen:
@@ -70,6 +151,7 @@ class TestOpen:
         # opened/progress/lease timestamps all present
         for k in ("opened_ts", "last_progress_ts", "lease_expires_ts"):
             assert entry[k], f"missing {k}"
+        _no_files(tmp_path)
 
     def test_slug_dedup_is_deterministic(self, tmp_path: Path):
         a = _open(tmp_path, "Same Title")
@@ -85,13 +167,15 @@ class TestOpen:
 
     def test_fleet_name_stamps_entry(self, tmp_path: Path):
         ws_id = _open(tmp_path, "Fleet-stamped", env_extra={"FLEET_NAME": "eng-team"})
-        assert _registry(tmp_path)["workstreams"][ws_id]["fleet"] == "eng-team"
+        assert _registry(tmp_path, fleet="eng-team")["workstreams"][ws_id]["fleet"] == "eng-team"
+        # the other fleet's registry never saw it
+        assert ws_id not in _registry(tmp_path)["workstreams"]
 
     def test_lease_is_days_after_open(self, tmp_path: Path):
         ws_id = _open(tmp_path, "Leased", env_extra={"WORKSTREAM_LEASE_DAYS": "14"})
-        entry = _registry(tmp_path)["workstreams"][ws_id]
-        opened = datetime.fromisoformat(entry["opened_ts"].replace("Z", "+00:00"))
-        expiry = datetime.fromisoformat(entry["lease_expires_ts"].replace("Z", "+00:00"))
+        entry = _registry(tmp_path, lease_days=14)["workstreams"][ws_id]
+        opened = _iso(entry["opened_ts"])
+        expiry = _iso(entry["lease_expires_ts"])
         assert abs((expiry - opened).total_seconds() - 14 * 86400) < 120
 
 
@@ -105,6 +189,7 @@ class TestCap:
         assert "cap (2)" in r.stderr
         assert "max_active" in r.stderr  # names the knob
         assert "ws-one" in r.stderr  # names oldest active as a close candidate
+        assert set(_registry(tmp_path)["workstreams"]) == {"ws-one", "ws-two"}
 
     def test_blocked_and_closed_free_a_cap_slot(self, tmp_path: Path):
         env = {"WORKSTREAM_MAX_ACTIVE": "2"}
@@ -116,16 +201,18 @@ class TestCap:
 
 
 class TestProgressRenew:
-    def test_progress_advances_last_progress_and_extends_lease(self, tmp_path: Path):
-        ws_id = _open(tmp_path, "work", env_extra={"WORKSTREAM_LEASE_DAYS": "1"})
+    def test_progress_advances_last_progress_and_rederives_the_lease(self, tmp_path: Path):
+        ws_id = _open(tmp_path, "work")
         before = _registry(tmp_path)["workstreams"][ws_id]
-        r = _run(tmp_path, "progress", ws_id, "--next", "phase 2", env_extra={"WORKSTREAM_LEASE_DAYS": "30"})
-        assert r.returncode == 0
+        time.sleep(1.1)                     # the render is whole-second: cross the boundary
+        r = _run(tmp_path, "progress", ws_id, "--next", "phase 2")
+        assert r.returncode == 0, r.stderr
         after = _registry(tmp_path)["workstreams"][ws_id]
         assert after["next"] == "phase 2"
-        # lease pushed out from 1 day to 30 days
+        assert after["last_progress_ts"] > before["last_progress_ts"]
+        # the lease is derived from the last progress + the read-time lease days
+        assert _iso(after["lease_expires_ts"]) == _iso(after["last_progress_ts"]) + timedelta(days=14)
         assert after["lease_expires_ts"] > before["lease_expires_ts"]
-        assert after["last_progress_ts"] >= before["last_progress_ts"]
 
     def test_renew_requires_note(self, tmp_path: Path):
         ws_id = _open(tmp_path, "needs-note")
@@ -136,16 +223,18 @@ class TestProgressRenew:
     def test_renew_loophole_is_visible(self, tmp_path: Path):
         """renew extends the lease but must NOT credit progress — so serial
         renew-without-progress stays detectable by the stall check."""
-        ws_id = _open(tmp_path, "loophole", env_extra={"WORKSTREAM_LEASE_DAYS": "1"})
+        ws_id = _open(tmp_path, "loophole")
         opened = _registry(tmp_path)["workstreams"][ws_id]
         r1 = _run(tmp_path, "renew", ws_id, "--note", "still waiting on review", env_extra={"WORKSTREAM_LEASE_DAYS": "30"})
         r2 = _run(tmp_path, "renew", ws_id, "--note", "still waiting again", env_extra={"WORKSTREAM_LEASE_DAYS": "30"})
-        assert r1.returncode == 0 and r2.returncode == 0
+        assert r1.returncode == 0 and r2.returncode == 0, r1.stderr + r2.stderr
         after = _registry(tmp_path)["workstreams"][ws_id]
-        # lease extended, two renewals logged, but progress NOT credited
+        # the renewal's OWN instant (renewed_until, 30d) is the lease, beyond the
+        # default 14d the render derives from the last progress
         assert after["lease_expires_ts"] > opened["lease_expires_ts"]
-        assert len(after["renewals"]) == 2
-        assert all(rn["note"] for rn in after["renewals"])
+        assert _iso(after["lease_expires_ts"]) > _iso(after["last_progress_ts"]) + timedelta(days=14)
+        # two renewals logged, with notes, but progress NOT credited
+        assert [rn["note"] for rn in after["renewals"]] == ["still waiting on review", "still waiting again"]
         assert after["last_progress_ts"] == opened["last_progress_ts"]
 
 
@@ -168,23 +257,47 @@ class TestCloseBlockPrune:
         assert r.returncode != 0
         assert "done|abandoned" in r.stderr
 
-    def test_prune_archives_terminal_and_drops_from_registry(self, tmp_path: Path):
+    def test_block_drops_from_active_and_carries_its_note(self, tmp_path: Path):
+        ws_id = _open(tmp_path, "stuck", "--next", "keep going")
+        assert _run(tmp_path, "block", ws_id, "--note", "waiting on review").returncode == 0
+        entry = _registry(tmp_path)["workstreams"][ws_id]
+        assert entry["status"] == "blocked" and entry["next"] == "waiting on review"
+
+    def test_prune_archives_terminal_on_the_plane_and_drops_from_registry(self, tmp_path: Path):
         keep = _open(tmp_path, "keep active")
         gone = _open(tmp_path, "will close")
         _run(tmp_path, "close", gone)
         r = _run(tmp_path, "prune")
-        assert r.returncode == 0
+        assert r.returncode == 0, r.stderr
+        assert "Pruned 1 terminal workstream(s) -- archived on the plane" in r.stdout
         reg = _registry(tmp_path)["workstreams"]
         assert keep in reg and gone not in reg
-        archive = tmp_path / "workstreams-archive.jsonl"
-        lines = [json.loads(x) for x in archive.read_text().splitlines() if x.strip()]
-        assert len(lines) == 1 and lines[0]["id"] == gone
+        # the `archived` event IS the archive: one per pruned id, no file anywhere
+        assert _archived(tmp_path) == [gone]
+        _no_files(tmp_path)
 
     def test_prune_noop_when_nothing_terminal(self, tmp_path: Path):
         _open(tmp_path, "active only")
         r = _run(tmp_path, "prune")
         assert r.returncode == 0
-        assert not (tmp_path / "workstreams-archive.jsonl").exists()
+        assert _archived(tmp_path) == []
+        assert "Pruned" not in r.stdout
+
+
+class TestArchivedIds:
+    def test_a_pruned_title_reopens_under_a_fresh_id(self, tmp_path: Path):
+        """A construct id is unique per fleet on the plane, so the slug dedup
+        must see what was pruned: the writer's render carries the archived
+        ids (found by the R1 gauntlet — a re-opened title re-minted the
+        archived id and ingest refused it, rc 4)."""
+        first = _open(tmp_path, "Same Title")
+        assert _run(tmp_path, "close", first).returncode == 0
+        assert _run(tmp_path, "prune").returncode == 0
+        assert first not in _registry(tmp_path)["workstreams"]
+        r = _run(tmp_path, "open", "Same Title")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == f"{first}-2"
+        assert set(_registry(tmp_path)["workstreams"]) == {f"{first}-2"}
 
 
 class TestErrors:
@@ -201,15 +314,46 @@ class TestErrors:
         assert "unknown subcommand" in r.stderr
 
 
+class TestRefusals:
+    """The door refuses rather than falls back: there is no file behind it."""
+
+    def test_a_silenced_plane_refuses_with_nothing_to_work_on(self, tmp_path: Path):
+        r = _run(tmp_path, "open", "quiet", env_extra={"PLANE_EMIT_DISABLED": "1"})
+        assert r.returncode == 3
+        assert "the plane is the only registry" in r.stderr
+        assert not (_root(tmp_path) / "state" / "plane" / "plane.db").exists()
+        _no_files(tmp_path)
+
+    def test_a_root_that_does_not_exist_refuses(self, tmp_path: Path):
+        # the writer trusts an EXISTING root exactly as far as its own emit
+        # would (the first emission creates state/plane there); a root that is
+        # not a directory is unreachable, never an empty registry
+        missing = tmp_path / "missing"
+        r = _run(tmp_path, "open", "nowhere", env_extra={"CLAUDLOBBY_ROOT": str(missing)})
+        assert r.returncode == 3
+        assert "could not serve the registry" in r.stderr
+        assert not missing.exists()
+
+    def test_an_unrecorded_verb_refuses_and_changes_nothing(self, tmp_path: Path):
+        keeper = _open(tmp_path, "keeper")
+        r = _run(tmp_path, "open", "lost in the post", env_extra={"PLANE_EMIT_CLI": "/usr/bin/false"})
+        assert r.returncode == 4
+        assert "did not record this verb" in r.stderr and "nothing changed" in r.stderr
+        assert set(_registry(tmp_path)["workstreams"]) == {keeper}
+        _no_files(tmp_path)
+
+
 class TestConcurrency:
     def test_parallel_opens_mint_distinct_ids(self, tmp_path: Path):
-        # The single-writer guarantee, regression-protected: N concurrent opens
-        # under the lock mint N distinct ids and never lose an update (the
-        # id-mint-under-lock TOCTOU fix — previously only manually observed).
-        n = 20
+        # N concurrent opens mint N distinct ids and never lose an update: each
+        # open's plane event is its own row. Through the cold-CLI rung an open
+        # costs ~1-2s inside the lock, so N is held to what the lock's 5s
+        # spinlock budget serializes (n=20 lands opens past the budget).
+        n = 6
         # Cap raised above n so this isolates id-minting, not the cap (the cap
         # holding under concurrency is covered by the sequential cap tests).
         hi_cap = {"WORKSTREAM_MAX_ACTIVE": "50"}
+        _root(tmp_path)                                   # one root, created before the race
         with ThreadPoolExecutor(max_workers=n) as ex:
             results = list(ex.map(
                 lambda i: _run(tmp_path, "open", f"work item {i}", env_extra=hi_cap), range(n)
@@ -235,11 +379,15 @@ class TestConcurrency:
         assert set(workstreams) == {keeper}, f"{cmd} disturbed the registry"
 
     def test_concurrent_mutate_and_prune_stay_wellformed(self, tmp_path: Path):
-        # Stress the exact B1 interleaving: race a mutator against prune on a
-        # terminal entry. Whatever the ordering, every surviving entry must be
-        # a full record (its map key equals its .id) — no status-only zombie.
-        for _ in range(15):
-            ws = _open(tmp_path, "racer")
+        # Race a mutator against prune on a terminal entry. Whatever the
+        # ordering, every surviving entry must be a full record (its map key
+        # equals its .id) — no status-only zombie. Five rounds (each verb now
+        # costs a spawn or two through the cold-CLI rung), each with its OWN
+        # title: an archived id leaves the render, so re-opening the same
+        # title would re-mint the same id and the plane's UNIQUE workstream_id
+        # refuses it — the door's slug dedup cannot see archived ids (reported).
+        for i in range(5):
+            ws = _open(tmp_path, f"racer {i}")
             _run(tmp_path, "close", ws)
             with ThreadPoolExecutor(max_workers=2) as ex:
                 f1 = ex.submit(_run, tmp_path, "prune")
@@ -257,7 +405,13 @@ class TestBadEnvBounds:
     def test_non_positive_int_bound_dies(self, tmp_path: Path, var: str, bad: str):
         r = _run(tmp_path, "open", "t", env_extra={var: bad})
         assert r.returncode != 0
-        assert "positive integer" in r.stderr or "must be >= 1" in r.stderr
-        reg_file = tmp_path / "workstreams.json"
-        if reg_file.exists():
-            assert _registry(tmp_path)["workstreams"] == {}, "entry created despite bad bound"
+        if var == "WORKSTREAM_LEASE_DAYS" and bad == "lots":
+            # The materialization passes the lease to the lookup BEFORE the
+            # bounds check runs, so a non-numeric lease is refused by the
+            # lookup (rc 3) rather than by _require_pos_int — nothing mutated
+            # either way; the ordering is the door's to tighten.
+            assert "could not serve the registry" in r.stderr or "positive integer" in r.stderr
+        else:
+            assert "positive integer" in r.stderr or "must be >= 1" in r.stderr
+        assert _registry(tmp_path)["workstreams"] == {}, "entry created despite bad bound"
+        _no_files(tmp_path)

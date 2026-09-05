@@ -89,10 +89,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# The ledger this report is appended to, and that the watchdog joins against —
-# resolved once, through the shared helpers, so the resolver below and the writer
-# further down can never read and write different files.
-REPORT_LEDGER="$(fleet_runtime_dir)/report-back.jsonl"
 
 # Resolve the dispatch this report closes when the caller omitted --task (#835).
 # An id'd dispatch closes ONLY on a terminal report echoing the same id, and
@@ -113,11 +109,13 @@ REPORT_LEDGER="$(fleet_runtime_dir)/report-back.jsonl"
 case "$STATUS" in
     completed|failed|blocked)
         if [ -z "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
+            # No file-exists gate (F18 R1): the matcher answers from the plane
+            # under the flip, and the retired ledgers' paths only fill its two
+            # positional slots until R2 removes them — a gate on the file made
+            # the resolver dead on a host whose files are gone.
             _rb_dispatch="$(dispatch_ledger_path)"
-            if [ -f "$_rb_dispatch" ]; then
-                TASK_ID="$(python3 "$LIB_DIR/dispatch-overdue.py" --open-task \
-                    "$BOT" "$_rb_dispatch" "$REPORT_LEDGER" 2>/dev/null || true)"
-            fi
+            TASK_ID="$(python3 "$LIB_DIR/dispatch-overdue.py" --open-task \
+                "$BOT" "$_rb_dispatch" "$(fleet_runtime_dir)/report-back.jsonl" 2>/dev/null || true)"
         # A SUPPLIED id is checked but NEVER changed (#1032). The resolver above
         # runs only when --task is omitted, so a wrong id was accepted verbatim
         # where an absent one would have been repaired — the auto-resolver was
@@ -132,23 +130,21 @@ case "$STATUS" in
         # than one that says it cannot tell: the first sends nobody to look.
         elif [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
             _rb_dispatch="$(dispatch_ledger_path)"
-            if [ -f "$_rb_dispatch" ]; then
-                _rb_open="$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
-                    "$BOT" "$_rb_dispatch" "$REPORT_LEDGER" 2>/dev/null \
-                    | awk '{print $3}' || true)"
-                # Only a NON-EMPTY open set can contradict the caller. An empty
-                # one means the bot has nothing open — the ledger is missing, the
-                # row already closed, or this is an unsolicited report — none of
-                # which is evidence the id is wrong. Fail open: absence of
-                # evidence must not become evidence of absence (#1146).
-                if [ -n "$_rb_open" ] && ! printf '%s\n' "$_rb_open" \
-                        | grep -qxF "$TASK_ID"; then
-                    TASK_ANOMALY="supplied-id-not-open"
-                    printf 'report-back: --task %s is not open for %s; reporting it unchanged.\n' \
-                        "$TASK_ID" "$BOT" >&2
-                    printf 'report-back: open now: %s\n' \
-                        "$(printf '%s' "$_rb_open" | tr '\n' ' ')" >&2
-                fi
+            _rb_open="$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
+                "$BOT" "$_rb_dispatch" "$(fleet_runtime_dir)/report-back.jsonl" 2>/dev/null \
+                | awk '{print $3}' || true)"
+            # Only a NON-EMPTY open set can contradict the caller. An empty
+            # one means the bot has nothing open — the plane unreachable, the
+            # row already closed, or this is an unsolicited report — none of
+            # which is evidence the id is wrong. Fail open: absence of
+            # evidence must not become evidence of absence (#1146).
+            if [ -n "$_rb_open" ] && ! printf '%s\n' "$_rb_open" \
+                    | grep -qxF "$TASK_ID"; then
+                TASK_ANOMALY="supplied-id-not-open"
+                printf 'report-back: --task %s is not open for %s; reporting it unchanged.\n' \
+                    "$TASK_ID" "$BOT" >&2
+                printf 'report-back: open now: %s\n' \
+                    "$(printf '%s' "$_rb_open" | tr '\n' ' ')" >&2
             fi
         fi
         ;;
@@ -166,30 +162,25 @@ done
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
-# --- observable-plane dual-write (PR-B T5; phase-2 plan §3/§6b) ----------------
-# Same arming contract as dispatch-task: dormant unless the fleet sets
-# PLANE_EMIT_ENABLED=1; PLANE_EMIT_DISABLED=1 wins; every failure disclosed,
-# never blocking — the legacy JSONL row below stays the load-bearing record in
-# its EXISTING position. The plane record is intent-FIRST (F9): the report
+# --- the plane record (PR-B T5; phase-2 plan §3/§6b; F18 closure R1) ----------
+# Same arming contract as dispatch-task: the plane is the ONLY record;
+# PLANE_EMIT_DISABLED=1 (the harness exemption) silences it; every failure
+# disclosed, never blocking — and an unrecorded report is said LOUDLY, there
+# being no other record. The plane record is intent-FIRST (F9): the report
 # communication (+ its task facts, one atomic batch) exists before the send —
-# the deliberate crash-exposure flip the phase-2 plan names as the canary
-# sharp edge: a crash between intent and send now leaves a visible
-# intent-without-transmission instead of a sent-report-without-ledger-row.
+# a crash between intent and send leaves a visible intent-without-transmission.
 PLANE_ARMED=0
 if plane_armed report-back --require-fleet; then
     PLANE_ARMED=1
 fi
 PLANE_MSG_ID="" PLANE_LINK_WI="" PLANE_LINK_ASG=""
+# (The resolver's two positional ledger slots above still receive the RETIRED
+# ledgers' paths: the matcher answers from the plane under the flip and treats an
+# absent file as absent — R2 of the F18 closure removes the slots.)
 _plane_lookup_dispatch_ids() {
-    # The join dispatch-task wrote for us: the newest ledger row carrying this
-    # task id holds the plane construct ids. Fail-open — an unarmed-era or
-    # pre-PR-B row has empty fields and the task facts are simply not linked.
-    local dlog row
-    dlog="$(dispatch_ledger_path)"
-    # NOTE: the ledger-exists gate sits on the GREP FALLBACK below, not here.
-    # The first version of the plane-first block was placed under it, so an
-    # absent dispatch log returned before the plane was ever asked - the exact
-    # state the cutover retires the dispatch log INTO (spec lens, #1446).
+    # The join dispatch-task recorded: the plane assignment carrying this task
+    # id (source_ref dispatch-log:<id>) holds the construct ids. Fail-open — an
+    # unlinked report simply carries no task facts, disclosed by its own row.
     # Join hardening (#1372 re-verify blocking residual on F3, tightened in
     # the gauntlet round). Grammar gates BEFORE any grep, because grep -F
     # treats a NEWLINE in the pattern as pattern-OR — a task id carrying
@@ -209,25 +200,13 @@ _plane_lookup_dispatch_ids() {
     local _task_pat='^t-[0-9]+-[0-9a-f]{4}$' _bot_pat='^[A-Za-z0-9._-]+$'
     [[ "$TASK_ID" =~ $_task_pat ]] || return 0
     [[ "$BOT" =~ $_bot_pat ]] || return 0
-    # PLANE FIRST (cutover chunk 1): the dispatch stamped source_ref
-    # dispatch-log:<task_id> on its plane rows, so ask the plane for the ids
-    # before grepping the legacy ledger. A not-found answer keeps the grep
-    # as the fallback until cutover — a stamped id is not proof the plane
-    # row exists (the ledger is stamped BEFORE the emit).
     local _ids
     _ids=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
         --root "${CLAUDLOBBY_ROOT:-}" --task-id "$TASK_ID" \
         --assignee "bot:${FLEET_NAME:-}/$BOT" 2>/dev/null || true)
     if [ -n "$_ids" ]; then
         PLANE_LINK_WI=${_ids%% *}; _ids=${_ids#* }; PLANE_LINK_ASG=${_ids%% *}
-        return 0
     fi
-    [ -f "$dlog" ] || return 0
-    row=$(grep -F "\"task_id\":\"$TASK_ID\"" "$dlog" 2>/dev/null \
-        | grep -iF "\"bot\":\"$BOT\"" | tail -1 || true)
-    [ -n "$row" ] || return 0
-    PLANE_LINK_WI=$(printf '%s' "$row" | sed -n 's/.*"plane_work_item_id":"\([a-z0-9_]*\)".*/\1/p')
-    PLANE_LINK_ASG=$(printf '%s' "$row" | sed -n 's/.*"plane_assignment_id":"\([a-z0-9_]*\)".*/\1/p')
     return 0
 }
 _plane_session_uid() {
@@ -333,6 +312,9 @@ EOF_IDLESS
 }
 if [ "$PLANE_ARMED" = "1" ]; then
     _plane_emit_report_intent || true
+    if [ "${PLANE_EMIT_LAST_RC:-0}" -ne 0 ]; then
+        echo "report-back: the plane did NOT record this report (rc=$PLANE_EMIT_LAST_RC) -- sending anyway; there is no other record" >&2
+    fi
 fi
 
 # Cross-socket send via the one safe primitive: prechecks the manager session on
@@ -347,47 +329,6 @@ if [ "$PLANE_ARMED" = "1" ]; then
         "$(plane_tx_event report-back "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$MANAGER_SESSION" "$_plane_state")" \
         | plane_emit_events report-back || true
 fi
-
-# Append structured JSONL event to the fleet-level report-back ledger.
-# Path follows overlay convention: local/<fleet>/runtime/ or root runtime/fleet/
-# (fleet_runtime_dir owns that rule; Python twin: Paths.fleet_state).
-_emit_ledger_event() {
-    local ledger="$REPORT_LEDGER"
-    mkdir -p "$(dirname "$ledger")"
-    local ts
-    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-    # Extract optional fields from extras
-    local pr_url="" issues="" skill=""
-    for _ex in "$@"; do
-        case "$_ex" in
-            pr:*)     pr_url="${_ex#pr:}" ;;
-            issues:*) issues="${_ex#issues:}" ;;
-            skill:*)  skill="${_ex#skill:}" ;;
-        esac
-    done
-
-    # Build JSON with printf — no jq dependency for the hot path.
-    local safe_summary
-    safe_summary=$(json_escape "$SUMMARY")
-
-    _write_and_rotate() {
-        # plane_msg_id (PR-B T5): the plane communication this report minted —
-        # the parity join for the report lane (source_ref report-back:<id>).
-        # Always emitted, empty when unarmed (schema-uniform convention).
-        printf '{"ts":"%s","bot":"%s","task_id":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s","progress":"%s","artifact":"%s","task_anomaly":"%s","plane_msg_id":"%s"}\n' \
-            "$ts" "$BOT" "$(json_escape "$TASK_ID")" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" "$TASK_ANOMALY" "$PLANE_MSG_ID" >> "$ledger"
-        rotate_jsonl_by_ts "$ledger"
-    }
-    # Cutover chunk 6b: the legacy append retires behind PLANE_LEGACY_WRITE_REPORT=0;
-    # plane_write_retired (lib-common) skips it only when the flag says 0 AND the
-    # plane is armed AND the retirement is recorded AND this report was recorded.
-    if plane_write_retired report-back PLANE_LEGACY_WRITE_REPORT; then
-        return 0
-    fi
-    with_lock "$ledger.lock" _write_and_rotate
-}
-_emit_ledger_event "${POSITIONAL_EXTRAS[@]+"${POSITIONAL_EXTRAS[@]}"}" || true
 
 # Mirror to fleet-state if helper is present
 _FS=$(dirname "$0")/fleet-state-update.sh

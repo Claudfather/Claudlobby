@@ -89,11 +89,25 @@ def test_empty_platform_id_rejected_with_disclosure(tmp_path):
         assert not (Path(env["BOT_DIR"]) / "data" / ".plane-session").exists()
 
 
-def test_unarmed_hook_is_a_silent_noop(tmp_path):
-    env = {**_armed_env(tmp_path), "PLANE_EMIT_ENABLED": "0"}
-    r = _run(json.dumps({"session_id": "x"}), env)
+def test_no_flag_and_enabled_zero_both_publish_and_disabled_silences(tmp_path):
+    """The always-on contract (F18 closure R1): with NO plane flag in the
+    environment the hook publishes the session identity; PLANE_EMIT_ENABLED=0
+    is IGNORED (the flag is not read any more); PLANE_EMIT_DISABLED=1, the
+    harness exemption, is the one silent no-op."""
+    base = _armed_env(tmp_path)
+    f = Path(base["BOT_DIR"]) / "data" / ".plane-session"
+    no_flag = {k: v for k, v in base.items() if k != "PLANE_EMIT_ENABLED"}
+    r = _run(json.dumps({"session_id": "x"}), no_flag)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(f.read_text())["session_uid"] == derive_session_uid("x")
+    f.unlink()
+    r = _run(json.dumps({"session_id": "y"}), {**base, "PLANE_EMIT_ENABLED": "0"})
+    assert r.returncode == 0, r.stderr
+    assert json.loads(f.read_text())["session_uid"] == derive_session_uid("y")
+    f.unlink()
+    r = _run(json.dumps({"session_id": "z"}), {**base, "PLANE_EMIT_DISABLED": "1"})
     assert r.returncode == 0 and r.stderr == ""
-    assert not (Path(env["BOT_DIR"]) / "data" / ".plane-session").exists()
+    assert not f.exists()
 
 
 def test_file_mode_is_0600(tmp_path):

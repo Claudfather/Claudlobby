@@ -23,11 +23,15 @@ HARNESS = REPO_ROOT / "lib" / "validate-bot-change.sh"
     shutil.which("tmux") is None, reason="tmux required for the observe step"
 )
 def test_validate_bot_change_harness():
+    # F18 R1: every door in the harness records through the plane shim (the
+    # cold-CLI rung, ~0.5-1s per emission, ~150 emissions a run), so the
+    # harness takes minutes rather than seconds; the timeout is the measured
+    # wall time with headroom, not a budget.
     result = subprocess.run(
         ["bash", str(HARNESS)],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=1800,
     )
     # Surface the harness output on failure so the failing behavior is visible.
     assert result.returncode == 0, f"harness failed:\n{result.stdout}\n{result.stderr}"

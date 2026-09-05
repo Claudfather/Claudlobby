@@ -14,7 +14,7 @@
 # the vocabulary's MCP-bridge token; carrier_ref = tg:<message_id> when the
 # tool response carries one).
 #
-# DORMANT (PLANE_EMIT_ENABLED=1, the transcript-digest pattern) and
+# SILENT only under PLANE_EMIT_DISABLED=1 (the harness exemption) and
 # NON-BLOCKING: every path exits 0 — a hook must never break a turn.
 # edit_message is deliberately NOT recorded in v1: an edit mutates a prior
 # send, and a fresh communication row per edit would double-count the
@@ -22,7 +22,7 @@
 
 set -u
 
-[ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || exit 0
+[ "${PLANE_EMIT_DISABLED:-0}" != "1" ] || exit 0
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
 if [ -z "${FLEET_NAME:-}" ] || [ -z "${BOT_ID:-}" ]; then
   echo "plane-telegram-out: armed but FLEET_NAME/BOT_ID unset — not recording" >&2

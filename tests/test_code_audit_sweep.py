@@ -302,10 +302,13 @@ class TestSweepSelector:
         gh.chmod(0o755)
         tmux.chmod(0o755)
 
+        from tests.conftest import plane_emit_env, read_fleet_events
         env = dict(os.environ)
         env["CLAUDLOBBY_ROOT"] = str(root)
+        env["CLAUDLOBBY_FLEET"] = "tf"          # the fleet job's carrier: the sweep's events anchor on bot:tf/owner
         env["PATH"] = f"{bindir}:{env['PATH']}"
         env["TMUX_BIN"] = str(tmux)
+        env.update(plane_emit_env())
         proc = subprocess.run(
             ["bash", str(selector), "tf"],
             env=env,
@@ -313,14 +316,17 @@ class TestSweepSelector:
             text=True,
             timeout=120,
         )
-        events = sorted((owner / "data" / "events").glob("fleet-*.jsonl"))
-        return proc, (events[0] if events else None)
+        # F18 R1: the sweep's events land on the plane, never in a per-bot file;
+        # rendered back as the legacy rows (or None when nothing was recorded)
+        assert not list((owner / "data" / "events").glob("fleet-*.jsonl"))
+        events = read_fleet_events(root)
+        return proc, (events or None)
 
     def test_selects_stalest_and_dispatches(self, tmp_path):
-        proc, events_file = self._run(tmp_path)
+        proc, log = self._run(tmp_path)
         assert proc.returncode == 0, proc.stderr
-        assert events_file is not None, "no events file written"
-        log = events_file.read_text()
+        assert log is not None, f"no event recorded on the plane: {proc.stderr}"
+        assert '"bot":"owner"' in log                    # anchored on the owner bot
         # acme/beta is the oldest audit -> stalest -> selected
         assert '"type":"audit_selected"' in log
         assert '"repo":"acme/beta"' in log

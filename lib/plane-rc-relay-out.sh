@@ -24,7 +24,7 @@
 #      it records that a relayable final answer was produced, no more;
 #   5. dedupe on the assistant entry's uuid (a marker under $BOT_DIR/data),
 #      so a re-fired Stop never double-records; stdout EMPTY every path;
-#      dormant on PLANE_EMIT_ENABLED; exit 0 every path.
+#      silent only under PLANE_EMIT_DISABLED=1; exit 0 every path.
 #
 # The PROGRAM rides argv (-c) and the hook payload rides stdin (the #1402
 # lesson: `python3 -` eats a piped payload); the transcript is read by
@@ -36,7 +36,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 set +e
 
-[ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || exit 0
+[ "${PLANE_EMIT_DISABLED:-0}" != "1" ] || exit 0
 if [ -z "${FLEET_NAME:-}" ] || [ -z "${BOT_ID:-}" ]; then
     echo "plane-rc-relay-out: armed but FLEET_NAME/BOT_ID unset — not recording" >&2
     exit 0

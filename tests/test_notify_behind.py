@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 
-from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
+from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, plane_emit_env, read_fleet_events
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "lib", "notify-behind.sh")
@@ -92,7 +92,8 @@ class Harness:
             )
 
     def env(self):
-        return _scrubbed_env(CLAUDLOBBY_ROOT=self.root, TG_CAPTURE=self.capture)
+        # a host job: no fleet, so its receipts land on the plane under _host
+        return _scrubbed_env(CLAUDLOBBY_ROOT=self.root, TG_CAPTURE=self.capture, **plane_emit_env())
 
     def run(self, script=SCRIPT):
         return subprocess.run(
@@ -160,7 +161,9 @@ class TestNotifyBehind:
         events = h.events()
         assert '"type":"source_behind"' in events
         assert '"source":"notice"' in events
-        assert '"bot":"fleet"' in events
+        # a host job's receipt is anchored on the HOST (the retired file said
+        # "fleet"): never misattributed to a bot
+        assert '"bot":"host"' in events
 
     def test_fetch_failure_is_quiet_but_evidenced(self, tmp_path):
         # Offline host: no nudge, no alert spam, exit 0 — but a durable

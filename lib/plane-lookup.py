@@ -120,6 +120,9 @@ def main(argv=None) -> int:
                     help="print the fleet's workstream registry JSON from the plane (needs --fleet;"
                     " --lease-days for a never-renewed lease) — cutover A2, the door's read side")
     ap.add_argument("--lease-days", type=int, default=14)
+    ap.add_argument("--or-empty", action="store_true",
+                    help="--workstreams: a fleet the plane holds no identity for renders the EMPTY"
+                         " registry instead of refusing (the writer's first open of a fresh fleet)")
     ap.add_argument("--fleet", default=None)
     ap.add_argument("--bot", default=None)
     a = ap.parse_args(argv)
@@ -135,9 +138,19 @@ def main(argv=None) -> int:
     if a.workstreams:
         if not a.fleet:
             ap.error("--workstreams needs --fleet")
+        if a.or_empty and not os.path.exists(os.path.join(a.root, "state", "plane", "plane.db")):
+            # The WRITER's first verb on a host whose plane has not been created
+            # yet — the first emission creates it, under this same root, so the
+            # writer trusts the root exactly as far as its own emit will: an
+            # existing directory renders the empty registry, anything else refuses.
+            if os.path.isdir(a.root):
+                print(json.dumps(_readers().EMPTY_REGISTRY, separators=(",", ":"), sort_keys=True))
+                return 0
+            print(f"plane-lookup: {a.root} is not a directory — unreachable, not empty", file=sys.stderr)
+            return 3
 
         def fn(pr, conn):
-            print(json.dumps(pr.workstream_registry(conn, a.fleet, lease_days=a.lease_days),
+            print(json.dumps(pr.workstream_registry(conn, a.fleet, lease_days=a.lease_days, or_empty=a.or_empty),
                              separators=(",", ":"), sort_keys=True))
             return 0
         return _with_plane(a.root, fn)

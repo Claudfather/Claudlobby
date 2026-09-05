@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # bot-vitals.sh — Claude Code hook script for fleet observability.
 #
-# Reads the hook JSON payload from stdin and writes a JSONL event to
-# the bot's data/events/fleet-YYYY-MM-DD.jsonl. Works as both
-# PreToolUse and PostToolUse hook.
+# Reads the hook JSON payload from stdin and records each event on the plane
+# through the fleet-event door (emit_fleet_event). Works as both PreToolUse and
+# PostToolUse hook.
 #
 # Captures: tool_call, session events.
 # NOTE: context_warning and rate_limit are NOT available via the Claude Code
 # hook payload (PreToolUse/PostToolUse). Managers must use live checks for those.
-# Reaps event files older than 7 days on each invocation.
 #
 # Usage in fleet.yaml:
 #   hooks:
@@ -17,8 +16,7 @@
 #     PostToolUse:
 #       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
 #
-# Event schema (one JSON object per line):
-#   {"ts":"...","bot":"...","type":"...","source":"vitals","data":{...}}
+# Each event: <type>\t<data-json>, handed to emit_fleet_event (source "vitals").
 
 # Non-blocking hook: trap ALL errors and always exit 0.
 # A vitals failure must never block tool execution.
@@ -33,14 +31,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- Read hook payload from stdin (Claude Code sends JSON) ---
 payload="$(cat)"
 
-# --- Resolve output directory ---
-events_dir="${BOT_DIR:-${PWD}}/data/events"
-mkdir -p "$events_dir"
-
-ts=$(ts_iso)
 bot="${BOT_ID:-unknown}"
-today=$(date +%Y-%m-%d)
-outfile="$events_dir/fleet-${today}.jsonl"
 
 # --- Parse payload and emit event(s) ---
 # Single python3 call: parse payload, classify event type, print one
@@ -100,9 +91,6 @@ done
 # has made no tool call for a long time (the case pane_stuck can't see). Cheaper
 # and more portable than parsing the last tool_call timestamp out of the JSONL.
 touch "${BOT_DIR:-${PWD}}/data/.last-tool-call" 2>/dev/null || true
-
-# --- Reap old event files ---
-reap_event_files "$events_dir" "fleet-*.jsonl" "${OBSERVABILITY_REAP_DAYS:-7}"
 
 # Non-blocking hook — always exit 0
 exit 0

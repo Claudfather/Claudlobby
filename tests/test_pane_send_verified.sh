@@ -53,6 +53,24 @@ SYNTH_ID="synthetic.paneprobe"
 export BOT_DIR="$TMPD/synth-bot" BOT_ID="$SYNTH_ID"
 export CLAUDLOBBY_ROOT="$TMPD/synth-root"
 mkdir -p "$BOT_DIR/data"
+# F18 closure R1: emit_fleet_event writes no per-bot event file any more — every
+# fleet event goes through lib/plane-emit.sh to the plane. The suite stays
+# hermetic (no plane, no daemon) by pointing the shim at a CAPTURING cold rung:
+# the socket rung fails on a path nothing listens on, the stub below receives
+# the finalized batch file as the shim's LAST argument and appends its contents
+# to CAPTURE, and the assertions grep that file exactly as they grepped the
+# ledger. FLEET_NAME anchors the rows on the synthetic bot (a door records
+# nothing without a fleet).
+export FLEET_NAME="synthetic-fleet"
+export PLANE_SOCKET="$TMPD/no-daemon.sock"
+CAPTURE="$TMPD/plane-capture.jsonl"
+: > "$CAPTURE"
+PLANE_EMIT_CLI="$TMPD/capture-cli"
+export PLANE_EMIT_CLI
+printf '%s\n' '#!/bin/bash' 'f="${@: -1}"' 'cat "$f" >> "'"$CAPTURE"'"' 'echo >> "'"$CAPTURE"'"' > "$PLANE_EMIT_CLI"
+chmod +x "$PLANE_EMIT_CLI"
+# The finalized batch is re-serialized by the shim (json.dumps: a space after
+# each colon), so every reason/event match below tolerates either spacing.
 
 # Stub the single tmux chokepoint. send-keys appends its payload to SENT_LOG;
 # capture-pane pops the next fixture from PANE_SCRIPT (repeating the last one),
@@ -190,12 +208,12 @@ assert_eq "already-drawn pane: still exactly two sends" "2" "$r"
 
 # The gate is best-effort, never a block: a pane that never draws must still get
 # the payload rather than hanging start-bot or silently dropping it.
-# Zero the ledger first — earlier glyph-less cases in this file exhaust the same
+# Zero the capture first — earlier glyph-less cases in this file exhaust the same
 # budget and emit too, and this assertion counts an exact total.
-rm -rf "$BOT_DIR/data/events"
+: > "$CAPTURE"
 r=$(run_send 'NEVERDRAWN860' "$FIXTURES/predraw-empty.txt")
 assert_eq "box never drawn: payload is still sent (best-effort, not dropped)" "2" "$r"
-r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"input-box-never-drawn"' || true)
+r=$(grep -cE '"reason": ?"input-box-never-drawn"' "$CAPTURE" || true)
 assert_eq "box never drawn: emits evidence rather than failing silently" "1" "$r"
 
 # The wait is OPT-IN, which splits the contract in two and both halves need
@@ -279,12 +297,12 @@ assert_eq "drawn box then glyph-less verify -> submitted, no resend" "2" "$r"
 # typed at a TUI that did not exist and are gone. Resending Enter repairs nothing
 # (there is no text in the box to submit), so the PAYLOAD goes again.
 # Pre-fix this returned success on tick 1 and the prompt was lost silently.
-rm -rf "$BOT_DIR/data/events"
+: > "$CAPTURE"
 r=$(run_send 'LOSTPAYLOAD860' \
     $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt")
 assert_eq "never-drawn then a box appears empty -> full payload resent" "4" "$r"
-r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"resent-after-box-drew"' || true)
-assert_eq "the recovery is on the ledger (an invisible repair is how this hid)" "1" "$r"
+r=$(grep -cE '"reason": ?"resent-after-box-drew"' "$CAPTURE" || true)
+assert_eq "the recovery is on the plane (an invisible repair is how this hid)" "1" "$r"
 
 # The resend must be the payload, not a bare Enter: a lost send has nothing in the
 # box for an Enter to submit. Distinguishes this repair from #837's.
@@ -320,12 +338,12 @@ assert_eq "the collapsed payload is sent exactly once (no double-delivery)" "1" 
 # post-budget Enter must NOT fire — it would spend a send on a pane that cannot
 # receive it and file a send_retry, misattributing a pre-draw loss as a post-draw
 # swallow. fleet-pulse reads those rows; the two must not blur.
-rm -rf "$BOT_DIR/data/events"
+: > "$CAPTURE"
 r=$(run_send 'NEVERAPPEARS860' "$FIXTURES/predraw-empty.txt")
 assert_eq "box never appears -> no phantom Enter retry" "2" "$r"
-r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"enter-swallowed"' || true)
+r=$(grep -cE '"reason": ?"enter-swallowed"' "$CAPTURE" || true)
 assert_eq "box never appears -> no send_retry misattribution" "0" "$r"
-r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"input-box-never-drawn"' || true)
+r=$(grep -cE '"reason": ?"input-box-never-drawn"' "$CAPTURE" || true)
 assert_eq "box never appears -> the loss IS recorded as send_blind" "1" "$r"
 
 echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
@@ -348,22 +366,24 @@ export PANE_SEND_VERIFY_TICKS=1
 
 echo "=== the retry is observable (a silent retry is how the old one hid) ==="
 
-# emit_fleet_event writes to $BOT_DIR/data/events when BOT_DIR resolves. Count
-# without an unmatched glob or a zero-match grep aborting the suite under
-# pipefail — a missing event must report FAIL, not kill the run.
-count_events() { cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c "$1" || true; }
-# Zero the ledger: earlier run_send calls already emitted retries into it and
-# the counts below assert exact totals. emit_fleet_event re-mkdirs on write.
-rm -rf "$BOT_DIR/data/events"
+# emit_fleet_event lands every event on the plane through the shim, whose cold
+# rung is the capturing stub above. Count without a zero-match grep aborting the
+# suite under pipefail — a missing event must report FAIL, not kill the run.
+# The batch carries the event name as payload.event and the caller's data
+# verbatim inside payload.data.data, spacing per the re-serialization.
+count_events() { grep -cE "$1" "$CAPTURE" || true; }
+# Zero the capture: earlier run_send calls already emitted retries into it and
+# the counts below assert exact totals.
+: > "$CAPTURE"
 run_send '/claudna:session resume --auto' "$FIXTURES/input-stuck-literal.txt" >/dev/null
-r=$(count_events '"type":"send_retry"')
+r=$(count_events '"event": ?"send_retry"')
 assert_eq "a fired retry emits a send_retry event" "1" "$r"
-r=$(count_events '"reason":"enter-swallowed"')
+r=$(count_events '"reason": ?"enter-swallowed"')
 assert_eq "the event names the reason" "1" "$r"
 
-# A clean submit must stay silent — otherwise the ledger fills with non-events.
+# A clean submit must stay silent — otherwise the plane fills with non-events.
 run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt" >/dev/null
-r=$(count_events '"type":"send_retry"')
+r=$(count_events '"event": ?"send_retry"')
 assert_eq "a clean submit emits NO send_retry event" "1" "$r"
 
 echo "=== wrapped payloads are detected regardless of WHERE the box breaks (#1082) ==="

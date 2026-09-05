@@ -9,7 +9,8 @@ plugin:telegram:telegram}`; the final answer is an assistant entry with
 `error` and `stop_reason: stop_sequence`. Laws: record only a genuine
 final answer (end_turn, text, not an API error, no reply-tool send in the
 turn); carrier state `unknown` (honest); dedupe on the entry uuid; stdout
-empty; dormant; exit 0 every path.
+empty; always on (only PLANE_EMIT_DISABLED=1 silences it); exit 0 every
+path.
 """
 
 from __future__ import annotations
@@ -34,13 +35,17 @@ def _root(tmp_path):
     return root
 
 
-def _env(tmp_path, root, *, armed=True):
+def _env(tmp_path, root, *, armed=True, disabled=False):
+    # `armed` keeps the legacy PLANE_EMIT_ENABLED=1 in the environment of most
+    # pins — it is IGNORED now (F18 closure R1); `disabled` is the one switch.
     env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(tmp_path),
            "PLANE_EMIT_CLI": str(CLI), "PLANE_SOCKET": str(tmp_path / "no.sock"),
            "FLEET_NAME": "f", "BOT_ID": "erlich", "BOT_DIR": str(tmp_path / "bot"),
            "PATH": "/usr/bin:/bin"}
     if armed:
         env["PLANE_EMIT_ENABLED"] = "1"
+    if disabled:
+        env["PLANE_EMIT_DISABLED"] = "1"
     return env
 
 
@@ -74,13 +79,13 @@ def _transcript(tmp_path, entries):
     return p
 
 
-def _run(tmp_path, root, entries, *, armed=True, payload=None):
+def _run(tmp_path, root, entries, *, armed=True, disabled=False, payload=None):
     tp = _transcript(tmp_path, entries)
     stdin = json.dumps(payload if payload is not None else
                        {"session_id": "s1", "transcript_path": str(tp),
                         "hook_event_name": "Stop", "stop_hook_active": False})
     return subprocess.run(["bash", str(HOOK)], input=stdin, capture_output=True,
-                          text=True, env=_env(tmp_path, root, armed=armed),
+                          text=True, env=_env(tmp_path, root, armed=armed, disabled=disabled),
                           timeout=120)
 
 
@@ -152,11 +157,23 @@ def test_non_channel_turn_is_ignored(tmp_path):
     assert _rows(root, "SELECT 1 FROM communications") == []
 
 
-def test_dormant_and_missing_transcript_are_silent_exit_zero(tmp_path):
+def test_records_without_any_flag_and_disabled_silences_it(tmp_path):
+    """The always-on contract (F18 closure R1): no plane flag at all → the
+    answer is recorded; PLANE_EMIT_DISABLED=1 → nothing, exit 0."""
     root = _root(tmp_path)
     r = _run(tmp_path, root, [_channel_user(), _assistant("hi")], armed=False)
     assert r.returncode == 0 and r.stdout == ""
-    assert not (root / "state" / "plane" / "plane.db").is_file()
+    assert len(_rows(root, "SELECT 1 FROM communications")) == 1
+    root2 = tmp_path / "root2"
+    (root2 / "state" / "plane").mkdir(parents=True)
+    (root2 / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    r = _run(tmp_path, root2, [_channel_user(), _assistant("hi")], disabled=True)
+    assert r.returncode == 0 and r.stdout == ""
+    assert not (root2 / "state" / "plane" / "plane.db").is_file()
+
+
+def test_missing_transcript_is_silent_exit_zero(tmp_path):
+    root = _root(tmp_path)
     r2 = _run(tmp_path, root, [_channel_user(), _assistant("hi")],
               payload={"session_id": "s1", "hook_event_name": "Stop"})   # no path
     assert r2.returncode == 0 and r2.stdout == ""

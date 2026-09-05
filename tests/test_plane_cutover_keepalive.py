@@ -1,7 +1,7 @@
-"""Cutover chunk B2 — the per-bot event files that never went through
-`emit_fleet_event`: the keepalive tick's transitions and the vitals hook go
-through the one fleet-event door (provenance, alias-anchored, retired with the
-family), the reader-less keepalive-<day>.jsonl stops with the retirement, and
+"""Cutover chunk B2 → F18 closure R1 — the keepalive tick's transitions and
+the vitals hook go through the one fleet-event door (provenance,
+alias-anchored), no per-bot event file is written any more (the reader-less
+keepalive-<day>.jsonl and the fleet-<day>.jsonl both went with R1), and
 `claudlobby uptime` reads the plane's heartbeat samples + restart transitions
 once the events write is retired — the same arithmetic over the same pairs.
 """
@@ -69,33 +69,20 @@ def _await(root: Path, sql: str, want, *, timeout=30):
 
 # --- the keepalive tick ------------------------------------------------------------
 
-def test_a_dead_session_restart_lands_as_a_fleet_event_and_the_reader_less_file_follows_the_flag(tmp_path):
+def test_a_dead_session_restart_lands_as_a_fleet_event_and_no_file_is_written(tmp_path):
     """The tick under a dead session restarts the bot (the start-bot stub) and
     the RESTART transition is a `keepalive_restart` fleet event on the plane
-    with provenance; under dual-write the legacy keepalive-<day>.jsonl and the
-    fleet-<day>.jsonl lines are still written, under the flag at 0 the
-    reader-less keepalive file is not (the fleet line keeps the four facts)."""
+    with provenance; no keepalive-<day>.jsonl, no fleet-<day>.jsonl (R1)."""
     libdir, bot, env = _rig(tmp_path, has_session=False)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     assert (bot / "start-stub.log").exists()                                       # restarted through the stub
-    kfile = bot / "data" / "events" / f"keepalive-{TODAY}.jsonl"
-    assert kfile.exists() and '"state":"RESTART"' in kfile.read_text()             # dual-write: the old file
-    ffile = bot / "data" / "events" / f"fleet-{TODAY}.jsonl"
-    assert ffile.exists() and '"type":"keepalive_restart"' in ffile.read_text()    # the fleet line (four facts: written)
+    assert not list((bot / "data").glob("events/*.jsonl"))                         # no file, ever
     assert _await(tmp_path, "SELECT COUNT(*) FROM events WHERE event = 'keepalive_restart'", 1) == 1
     with connect(db_path(tmp_path)) as conn:
         ref, alias, sev = conn.execute(
             "SELECT source_ref, subject_alias, severity FROM events WHERE event = 'keepalive_restart'").fetchone()
     assert ref.startswith("fleet-events:sha:") and alias == f"bot:{FLEET}/b1" and sev == "notice"
-    # the flag at 0: the keepalive file is NOT written; nothing retired the fleet line, so it still is
-    (tmp_path / "second").mkdir()
-    libdir2, bot2, env2 = _rig(tmp_path / "second", has_session=False)
-    env2["PLANE_LEGACY_WRITE_EVENTS"] = "0"
-    r = _tick(libdir2, bot2, env2)
-    assert r.returncode == 0, r.stderr
-    assert not (bot2 / "data" / "events" / f"keepalive-{TODAY}.jsonl").exists()
-    assert (bot2 / "data" / "events" / f"fleet-{TODAY}.jsonl").exists()
 
 
 def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp_path):
@@ -105,8 +92,7 @@ def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp
     assert _await(tmp_path, "SELECT COUNT(*) FROM metric_samples WHERE metric = 'bot.heartbeat'", 1) == 1
     with connect(db_path(tmp_path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM events WHERE source_ref LIKE 'fleet-events:%'").fetchone()[0] == 0
-    assert not (bot / "data" / "events" / f"fleet-{TODAY}.jsonl").exists()
-    assert '"state":"IDLE"' in (bot / "data" / "events" / f"keepalive-{TODAY}.jsonl").read_text()   # dual-write keeps the old file
+    assert not list((bot / "data").glob("events/*.jsonl"))                         # no file, ever (R1)
 
 
 # --- the vitals hook ---------------------------------------------------------------
@@ -120,15 +106,14 @@ def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path):
                        timeout=180, env=env)
     assert r.returncode == 0, r.stderr
     assert (bot / "data" / ".last-tool-call").exists()                                # the activity marker
-    line = (bot / "data" / "events" / f"fleet-{TODAY}.jsonl").read_text().strip()   # dual-write: the legacy row
-    row = json.loads(line)
-    assert (row["bot"], row["type"], row["source"], row["data"]) == \
-        ("b1", "tool_call", "vitals", {"tool": "Read", "event": "PostToolUse", "session": "s-1"})
+    assert not list((bot / "data").glob("events/*.jsonl"))                             # no file, ever (R1)
     assert _await(tmp_path, "SELECT COUNT(*) FROM events WHERE event = 'tool_call'", 1) == 1
     pr = _stdlib_readers()
     with connect(db_path(tmp_path)) as conn:
         rows = pr.fleet_events(conn, FLEET)
-    assert [pr.public(x) for x in rows] == [row]                                    # byte for byte the legacy row
+    row = pr.public(rows[0])                                                            # the row as the ledger wrote it
+    assert (row["bot"], row["type"], row["source"], row["data"]) == \
+        ("b1", "tool_call", "vitals", {"tool": "Read", "event": "PostToolUse", "session": "s-1"})
 
 
 # --- uptime ------------------------------------------------------------------------

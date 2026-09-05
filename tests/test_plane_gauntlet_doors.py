@@ -33,7 +33,7 @@ DOOR_FILES = (
     "dispatch-task.sh", "report-back.sh", "workstream-update.sh",
     "tg-post.sh", "briefing-trigger.sh", "plane-session-start.sh",
     "lib-common.sh", "plane-emit.sh", "plane-socket-client.py",
-    "dispatch-overdue.py",
+    "dispatch-overdue.py", "plane-readers.py", "plane-lookup.py",   # the doors' plane joins (R1: no ledger fallback)
 )
 
 
@@ -261,16 +261,14 @@ def test_session_hook_writer_and_report_back_reader_agree(tmp_path, armed):
     expected = "sess_" + hashlib.sha256(b"abc-123").hexdigest()[:32]
     assert expected in (botdir / "data" / ".plane-session").read_text()
 
-    state = tmp_path / "state"
-    state.mkdir(parents=True, exist_ok=True)
-    (state / "dispatch-log.jsonl").write_text(
-        '{"ts":"2026-08-27T00:00:00Z","bot":"w1","task_id":"t-9-ffff",'
-        '"plane_msg_id":"msg_' + "b" * 32 + '",'
-        '"plane_work_item_id":"wi_' + "b" * 32 + '",'
-        '"plane_assignment_id":"asg_' + "b" * 32 + '"}\n'
-    )
+    # the dispatch this report closes, through the real door (the plane is the
+    # only record — no ledger row to seed)
+    d = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "sess probe"', env)
+    assert d.returncode == 0, d.stderr
+    task_id = _rows(tmp_path, "SELECT source_ref FROM assignments ORDER BY ingest_seq DESC LIMIT 1")[0]["source_ref"]
+    task_id = task_id[len("dispatch-log:"):]
     r = _bash(
-        f'"{libdir}/report-back.sh" w1 completed "done" --task t-9-ffff',
+        f'"{libdir}/report-back.sh" w1 completed "done" --task {task_id}',
         dict(env, BOT_DIR=str(botdir)),
     )
     assert r.returncode == 0, r.stderr
@@ -278,7 +276,7 @@ def test_session_hook_writer_and_report_back_reader_agree(tmp_path, armed):
         tmp_path,
         "SELECT session_uid FROM events WHERE kind='task' AND event='completed'",
     )
-    assert len(ev) == 1
+    assert len(ev) == 1, r.stderr
     assert ev[0]["session_uid"] == expected
 
 
@@ -287,20 +285,11 @@ def test_session_hook_writer_and_report_back_reader_agree(tmp_path, armed):
 # ---------------------------------------------------------------------------
 def test_link_join_is_casefold_newest_wins(tmp_path, armed):
     libdir, env = armed
-    state = tmp_path / "state"
-    state.mkdir(parents=True, exist_ok=True)
-    old_ids = ("msg_" + "c" * 32, "wi_" + "c" * 32, "asg_" + "c" * 32)
-    new_ids = ("msg_" + "d" * 32, "wi_" + "d" * 32, "asg_" + "d" * 32)
-    rows = []
-    for bot, ids in (("W1", old_ids), ("w1", new_ids)):
-        # Compact separators — the real ledger writer printfs compact JSON,
-        # and the join greps the compact form.
-        rows.append(json.dumps({
-            "ts": "2026-08-27T00:00:00Z", "bot": bot, "task_id": "t-9-ffff",
-            "plane_msg_id": ids[0], "plane_work_item_id": ids[1],
-            "plane_assignment_id": ids[2],
-        }, separators=(",", ":")))
-    (state / "dispatch-log.jsonl").write_text("\n".join(rows) + "\n")
+    from tests.test_plane_door_e2e import _seed_assignment
+    # two assignments carrying the same task id, W1 first then w1 — on the
+    # plane, the only record (the ledger rows this once seeded are gone)
+    old_ids = _seed_assignment(tmp_path, task_id="t-9-ffff", bot="W1", tag="c")
+    new_ids = _seed_assignment(tmp_path, task_id="t-9-ffff", bot="w1", tag="d")
     r = _bash(
         f'"{libdir}/report-back.sh" W1 completed "done" --task t-9-ffff', env
     )
@@ -310,8 +299,8 @@ def test_link_join_is_casefold_newest_wins(tmp_path, armed):
         "SELECT assignment_id FROM events WHERE kind='task' AND event='completed'",
     )
     # dispatch-overdue.py's join is case-insensitive and newest-row-wins;
-    # the bash mirror must agree: the LAST matching row's ids link.
-    assert ev and ev[0]["assignment_id"] == new_ids[2]
+    # the plane lookup must agree: the LATEST matching assignment's ids link.
+    assert ev and ev[0]["assignment_id"] == new_ids[2], r.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -471,20 +460,27 @@ class TestPlaneHelpers:
     BASE = {"PATH": "/usr/bin:/bin", "HOME": "/tmp"}
 
     def test_plane_armed_matrix(self):
+        """The always-on contract (F18 closure R1): armed with NO flag;
+        PLANE_EMIT_ENABLED is not read (0 changes nothing); the identity
+        preconditions are disclosed skips worded without the old flag;
+        PLANE_EMIT_DISABLED=1 is the one thing that disarms, and it wins."""
         e = dict(self.BASE)
         r = self._run("plane_armed d; echo rc=$?", e)
-        assert "rc=1" in r.stdout  # not enabled
-        e["PLANE_EMIT_ENABLED"] = "1"
-        r = self._run("plane_armed d; echo rc=$?", e)
-        assert "rc=0" in r.stdout
+        assert "rc=0" in r.stdout  # no flag at all: armed
+        r = self._run("plane_armed d; echo rc=$?", {**e, "PLANE_EMIT_ENABLED": "0"})
+        assert "rc=0" in r.stdout  # the old flag has no meaning
         r = self._run("plane_armed d --require-fleet; echo rc=$?", e)
         assert "rc=1" in r.stdout and "FLEET_NAME is empty" in r.stderr
+        assert "PLANE_EMIT_ENABLED" not in r.stderr
+        r = self._run("plane_armed d --require-bot; echo rc=$?", e)
+        assert "rc=1" in r.stdout and "BOT_NAME is empty" in r.stderr
         e["FLEET_NAME"] = "f"
-        r = self._run("plane_armed d --require-fleet; echo rc=$?", e)
+        e["BOT_NAME"] = "b"
+        r = self._run("plane_armed d --require-fleet --require-bot; echo rc=$?", e)
         assert "rc=0" in r.stdout
         e["PLANE_EMIT_DISABLED"] = "1"
-        r = self._run("plane_armed d; echo rc=$?", e)
-        assert "rc=1" in r.stdout  # DISABLED wins
+        r = self._run("plane_armed d; echo rc=$?", {**e, "PLANE_EMIT_ENABLED": "1"})
+        assert "rc=1" in r.stdout  # DISABLED wins, even beside the old flag
 
     def test_plane_mint_id_grammar(self):
         import re
