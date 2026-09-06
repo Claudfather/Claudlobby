@@ -303,3 +303,37 @@ def test_an_unusable_as_name_is_refused_before_anything_is_minted(tmp_path, sent
         return
     assert task_cmd.cmd_task_nudge(args) == 2
     assert sent == [] and _task_events(tmp_path) == []
+
+
+def test_the_send_carries_the_rows_fleet_in_the_environment(tmp_path, monkeypatch):
+    """The re-check is sent through `lib/dispatch.sh` from the HOST, where no
+    `FLEET_NAME` is set: without the fleet in the environment the resolver
+    guesses the first live manager of that short name (the #526 class). The
+    fold's F4 rides the row's fleet as `CLAUDLOBBY_FLEET` (the timer-unit
+    anchor — `FLEET_NAME` would flip the tmux helpers into per-bot strict
+    mode) and drops any inherited `BOT_DIR`. A mutant that dropped the fleet
+    survived every other pin, so this one exercises the REAL door with the
+    subprocess captured."""
+    import subprocess
+
+    from claudlobby.paths import Paths
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "dispatch.sh").write_text("#!/bin/bash\nexit 0\n")
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"], seen["env"] = argv, kw.get("env") or {}
+
+        class R:
+            returncode, stderr = 0, ""
+        return R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("BOT_DIR", "/nowhere")
+    paths = Paths(tmp_path)
+    rc, _ = task_cmd.send_to_bot(paths, "lead", "NUDGE …", fleet="engineering")
+    assert rc == 0 and seen["argv"][-2:] == ["lead", "NUDGE …"]
+    assert seen["env"]["CLAUDLOBBY_FLEET"] == "engineering"
+    assert seen["env"]["CLAUDLOBBY_ROOT"] == str(tmp_path)
+    assert "BOT_DIR" not in seen["env"] and "FLEET_NAME" not in seen["env"]
