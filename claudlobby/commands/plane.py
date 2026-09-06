@@ -718,13 +718,15 @@ def cmd_plane_open(args) -> int:
 
 def cmd_plane_serve(args) -> int:
     """Run the ingest daemon in the foreground (supervision owns backgrounding
-    — systemd Restart=always / launchd KeepAlive, never a self-fork)."""
+    — systemd Restart=always / launchd KeepAlive, never a self-fork). Exits 4
+    when the db is newer than this code, so that same supervision relaunches
+    it on the install's current modules (#1485)."""
     root = _resolve_paths(args).root
 
     def run() -> int:
         from ..plane.daemon import (
-            DaemonAlreadyRunning, PlaneDaemon, SocketOverrideInvalid,
-            SocketPathTooLong,
+            DOWNGRADE_EXIT_CODE, DaemonAlreadyRunning, PlaneDaemon,
+            PlaneDowngradeExit, SocketOverrideInvalid, SocketPathTooLong,
         )
 
         try:
@@ -733,6 +735,12 @@ def cmd_plane_serve(args) -> int:
                 socket_override=Path(args.socket) if args.socket else None,
                 drain_interval=float(args.drain_interval),
             ).serve()
+        except PlaneDowngradeExit:
+            # #1485: the daemon already printed the ONE line naming the
+            # condition and why it is exiting. Caught by name — ahead of
+            # _guarded's generic DowngradeError REFUSED line — so a
+            # supervisor's journal shows one line per relaunch, not two.
+            return DOWNGRADE_EXIT_CODE
         except (DaemonAlreadyRunning, SocketOverrideInvalid,
                 SocketPathTooLong) as exc:
             print(f"plane serve: REFUSED — {exc}", file=sys.stderr)

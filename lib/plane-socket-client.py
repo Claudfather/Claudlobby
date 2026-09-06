@@ -14,9 +14,10 @@ stdout: one event_id per line on success (mirrors `claudlobby emit-batch`)
 exit:   0 ok (committed/duplicate/spooled)
         2 contract violation / bad request   (verdicts — the shim must NOT
         3 total failure                       fall back on these: the CLI
-        4 downgrade refused                   would only repeat them)
+                                              would only repeat them)
         5 transport unavailable/unclassified (the shim's fallback trigger —
-          safe to replay by pre-minted-id idempotency)
+          safe to replay by pre-minted-id idempotency) — AND the daemon's
+          `downgrade` refusal, see VERDICT_EXITS
 """
 
 from __future__ import annotations
@@ -32,8 +33,24 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+TRANSPORT_UNAVAILABLE = 5
+
+# A verdict is a refusal the COLD RUNG WOULD REPEAT — that is the whole test,
+# and it is a claim about the batch, not about the daemon. A contract
+# violation is malformed input; a total failure is a plane that cannot be
+# written; the CLI runs the same validator and the same db, so replaying
+# either costs a spawn and buys nothing.
+#
+# `downgrade` fails that test and is therefore NOT here (#1485). It says the
+# db is newer than the DAEMON'S LOADED CODE — and the daemon is a long-lived
+# process on an editable install, so after a pull-plus-migration its modules
+# are the only stale thing on the host. The cold rung is a fresh interpreter
+# on the install's CURRENT code: it commits. Treating it as a verdict is what
+# lost 261 heartbeat samples across 18 bots in ~15 minutes on the Mini
+# (2026-09-06) — every emit refused, nothing retried, nothing spooled. So it
+# maps to the transport-unavailable exit and the shim falls to rung 2.
 VERDICT_EXITS = {"contract_violation": 2, "bad_request": 2,
-                 "total_failure": 3, "downgrade": 4}
+                 "total_failure": 3}
 
 
 def _parse_argv(argv: list):
@@ -177,9 +194,20 @@ def main() -> int:
     code = resp.get("code", "")
     print(f"plane-socket-client: daemon refused [{code}]: {resp.get('error')}",
           file=sys.stderr)
+    if code == "downgrade":
+        # Said in its own words because the generic "daemon unavailable" line
+        # the shim prints next would misname the condition an operator has to
+        # act on: the DAEMON is stale, not the socket. (The daemon now exits
+        # on this so its supervisor relaunches it on the current install; this
+        # rung must hold regardless, since a daemon too old to know that is
+        # exactly the one an operator meets.)
+        print("plane-socket-client: the daemon is running older code than the"
+              " db it opened — replaying through the cold rung, which runs"
+              " the install's current code", file=sys.stderr)
+        return TRANSPORT_UNAVAILABLE
     # Verdicts pass through; anything else (forbidden/internal/unknown) is
     # transport-ish — replaying through the CLI is safe by idempotency.
-    return VERDICT_EXITS.get(code, 5)
+    return VERDICT_EXITS.get(code, TRANSPORT_UNAVAILABLE)
 
 
 if __name__ == "__main__":

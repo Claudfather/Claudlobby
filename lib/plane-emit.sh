@@ -13,8 +13,16 @@
 # finalized file BEFORE the first attempt; rung 2 replays that exact file, so
 # a commit whose ack was lost classifies as duplicate, never a second row.
 #
-# Verdicts do not fall back: exits 2 (contract), 3 (total failure), 4
-# (downgrade) pass through — the CLI would only repeat them.
+# Verdicts do not fall back: exits 2 (contract) and 3 (total failure) pass
+# through — the CLI would only repeat them. THAT is the whole test, and
+# `downgrade` fails it (#1485): a downgrade refusal says the db is newer than
+# the DAEMON'S LOADED code, and the daemon is a long-lived process on an
+# editable install, so a pull that carries a migration leaves its modules the
+# only stale thing on the host. The cold rung is a fresh interpreter on the
+# install's CURRENT code and commits, so plane-socket-client.py maps that
+# refusal to 5 and it lands here, in the fallback. Exit 4 stays in the
+# passthrough arm for the case that DOES deserve it — the cold rung's own
+# downgrade, where the INSTALL is behind the db and no rung can help.
 #
 # THE SHIM NEVER BLOCKS A DOOR'S REAL ACTION. Doors call it as
 #   plane_emit <<<"$batch" || log "plane record failed rc=$? (acted, unrecorded)"
@@ -99,7 +107,9 @@ else
 fi
 case "$rc" in
     0) exit 0 ;;
-    2|3|4) exit "$rc" ;;   # verdicts: the CLI would only repeat them
+    2|3|4) exit "$rc" ;;   # verdicts: the CLI would only repeat them.
+                           # 4 no longer reaches here from a stale daemon
+                           # (#1485) - the client maps that to 5.
 esac
 
 printf 'plane-emit: daemon unavailable (rc=%s) — falling back to cold CLI\n' "$rc" >&2

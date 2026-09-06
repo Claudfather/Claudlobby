@@ -20,6 +20,22 @@ Protocol (one request per connection, newline-delimited JSON):
   codes mirror the CLI exits: bad_request/contract_violation -> 2,
   total_failure -> 3, downgrade -> 4, internal -> 1.
 
+A `downgrade` — the db is newer than the code THIS PROCESS loaded — is the one
+condition the daemon cannot serve its way out of, and it answers by EXITING
+(#1485). The daemon is long-lived on an editable install: a `git pull` swaps
+the files and the running process keeps its old modules, so the moment a
+migrating door stamps a newer `user_version` the daemon is stale by
+definition and every subsequent emit is refused — 261 heartbeat samples
+across 18 bots lost in ~15 minutes on the Mini, 2026-09-06, before a hand
+restart. Exiting hands the problem to the supervisor that can actually solve
+it (systemd `Restart=always` + `RestartSec=5`; launchd `KeepAlive` true, which
+relaunches on ANY exit and throttles to ~10s). BOUNDED LOOP, deliberately: if
+the install was NOT updated, the relaunched daemon reads the same newer db and
+exits again, and the supervisor's throttle sets the cadence — a cheap
+interpreter spawn every few seconds while the shim's cold rung records
+everything. `claudlobby plane doctor`'s schema rung names the remedy
+("user_version N (code supports M)").
+
 Ack semantics are SYNCHRONOUS AND HONEST (plan §1): the reply is written only
 after commit (or spool). An ack that precedes validation is a receipt that
 isn't — the F9/F6 hazard class this program exists to close.
@@ -49,7 +65,7 @@ from .contracts import ContractViolation
 from .db import connect, db_path
 from .emit_api import emit_batch
 from .ids import ensure_host_uid
-from .migrations import DowngradeError, migrate
+from .migrations import SCHEMA_USER_VERSION, DowngradeError, migrate
 from .spool import SpoolWriteError, drain
 
 # One line carries one batch; communications bodies cap at 16KiB each, so
@@ -59,6 +75,24 @@ MAX_REQUEST_BYTES = 4 * 1024 * 1024
 # letting bind() truncate or fail obscurely.
 MAX_SOCKET_PATH_BYTES = 100
 DEFAULT_DRAIN_INTERVAL = 600.0
+
+# Process exit code for the stale-daemon exit (#1485). 4 rather than a fresh
+# number: `downgrade -> 4` is already the taxonomy's, on the CLI's exits and
+# in the wire protocol above, so the daemon's own exit says the same thing in
+# the same word. Neither supervisor reads it — systemd `Restart=always` and
+# launchd `KeepAlive` true relaunch on ANY exit — so its whole job is to be
+# legible in a journal, and legible means matching the taxonomy it belongs to.
+DOWNGRADE_EXIT_CODE = 4
+
+
+class PlaneDowngradeExit(DowngradeError):
+    """Raised out of serve() to END the process on a stale daemon (#1485).
+
+    A DowngradeError subclass so it can never be laundered into exit 1: the
+    CLI's `_guarded` already maps DowngradeError to 4, so even a path that
+    forgets to catch this specifically still exits in the taxonomy.
+    `cmd_plane_serve` catches it by name only to keep the disclosure to the
+    ONE line the daemon already printed."""
 
 
 class DaemonAlreadyRunning(RuntimeError):
@@ -198,6 +232,46 @@ class PlaneDaemon:
         self._own_uid = os.geteuid()
         self._lock_fd: Optional[int] = None
         self._sock_stat: Optional[tuple[int, int]] = None
+        self._downgrading = False
+
+    # -- the stale-daemon exit (#1485) ---------------------------------------
+    def _downgrade_exit(self, exc: BaseException) -> "PlaneDowngradeExit":
+        """ONE line, then unwind. Never sys.exit() here: the serve loop's
+        finally still has to unlink the socket and drop the lifetime lock, and
+        a SystemExit raised from inside a request handler would skip a `plane
+        serve` caller's own cleanup. The exception carries the exit out."""
+        self._downgrading = True
+        print(
+            f"plane-daemon: {exc} — exiting so the supervisor relaunches me"
+            f" on the current install (this code supports"
+            f" user_version <={SCHEMA_USER_VERSION})",
+            file=sys.stderr,
+        )
+        return PlaneDowngradeExit(str(exc))
+
+    def _assert_supported_schema(self) -> None:
+        """The startup half of the check, run BEFORE bind so a stale daemon
+        never owns the socket at all — the shim then meets a plain ENOENT
+        (exit 5) and goes cold, rather than a live listener that refuses.
+
+        Uses migrate() rather than a bare PRAGMA read because the daemon
+        already migrates at startup (the startup spool drain does), so this
+        adds an ordering, not a new write. An unreachable/broken db is NOT a
+        downgrade: it is disclosed and the daemon serves anyway, spooling —
+        which is the posture that existed before this check."""
+        try:
+            conn = connect(db_path(self.root))
+        except sqlite3.Error as exc:
+            print(f"plane-daemon: schema check skipped ({exc})", file=sys.stderr)
+            return
+        try:
+            migrate(conn)
+        except DowngradeError as exc:
+            raise self._downgrade_exit(exc) from None
+        except Exception as exc:  # noqa: BLE001 — disclosed, never fatal
+            print(f"plane-daemon: schema check skipped ({exc})", file=sys.stderr)
+        finally:
+            conn.close()
 
     # -- lifecycle events (best-effort: the recorder's own heartbeat must
     #    never kill the recorder) ------------------------------------------
@@ -245,6 +319,11 @@ class PlaneDaemon:
                 report = drain(self.root, conn, host)
             finally:
                 conn.close()
+        except DowngradeError as exc:
+            # The drain is the detector on a QUIET daemon: with no traffic,
+            # _handle never runs, and a daemon that went stale hours ago would
+            # otherwise sit there answering nothing until the next emit.
+            raise self._downgrade_exit(exc) from None
         except Exception as exc:  # noqa: BLE001 — a broken drain is disclosed,
             # the serve loop survives; poison entries quarantine INSIDE drain.
             print(f"plane-daemon: spool drain failed ({reason}): {exc}",
@@ -295,8 +374,14 @@ class PlaneDaemon:
             self._reply(conn, {"ok": False, "code": "total_failure", "error": str(exc)})
             return
         except DowngradeError as exc:
+            # ANSWER FIRST, then die. The client needs the typed `downgrade`
+            # code to disclose the real condition — dying mid-request would
+            # give it a bare transport failure, which falls to the cold rung
+            # too but names the socket instead of the stale daemon. sendall()
+            # has handed the bytes to the kernel by the time we unwind, and a
+            # unix socket delivers what was written before close.
             self._reply(conn, {"ok": False, "code": "downgrade", "error": str(exc)})
-            return
+            raise self._downgrade_exit(exc) from None
         except Exception as exc:  # noqa: BLE001 — mirror the CLI's loud exit 1:
             # the CALLER gets a typed refusal; the traceback goes to our stderr.
             import traceback
@@ -424,7 +509,12 @@ class PlaneDaemon:
     def serve(self, *, install_signals: bool = True) -> None:
         """Serial accept loop (plan §2): SQLite is a single writer, so the
         per-connection batch is the concurrency unit and the kernel's listen
-        backlog is the queue."""
+        backlog is the queue.
+
+        Raises PlaneDowngradeExit (exit 4) when the db is newer than this
+        code — at startup, on the first request that hits it, or at an
+        interval drain, whichever comes first (#1485)."""
+        self._assert_supported_schema()
         self._listener = self._bind()
         if install_signals:
             signal.signal(signal.SIGTERM, self.stop)
@@ -466,7 +556,11 @@ class PlaneDaemon:
                     except OSError:
                         pass
         finally:
-            self._emit_system("daemon_stopping")
+            if not self._downgrading:
+                # A stopping receipt cannot commit against a db this process
+                # refuses — attempting it only prints a second, confusing
+                # "lifecycle emit failed" line under the one that matters.
+                self._emit_system("daemon_stopping")
             try:
                 self._listener.close()
             except OSError:

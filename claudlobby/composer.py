@@ -3409,6 +3409,18 @@ def _write_service_units(
     deferred systemd-only enhancement — launchd's needs launch_activate_socket
     via ctypes, and a platform-asymmetric v1 buys complexity first).
 
+    RELAUNCH-ON-NONZERO-EXIT IS LOAD-BEARING, NOT INCIDENTAL (#1485). The
+    ingest daemon now EXITS 4 when the db is newer than its loaded code, so
+    that a pull carrying a migration is repaired by the supervisor instead of
+    by an operator noticing. Both forms below already cover it and are pinned
+    by test: systemd `Restart=always` restarts on any exit (`RestartSec=5`
+    keeps a permanent-condition loop under systemd's default start limit of
+    5 starts / 10s, so a genuinely un-updated install throttles rather than
+    latching `failed`); launchd `KeepAlive` <true/> likewise relaunches on any
+    exit, throttled to ~10s — which is strictly stronger than the
+    `SuccessfulExit false` dictionary form, and the reason we do not swap to
+    it. Anything that narrows either one re-arms the incident.
+
     Emitted ONLY for armed jobs — see the compose_host_timers branch for why
     dormancy must be compose-time for services."""
     from .path_audit import SourceFinding, denied_source_paths, source_findings_error

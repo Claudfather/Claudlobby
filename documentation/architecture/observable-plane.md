@@ -83,6 +83,39 @@ host service) owns INGEST AND NOTHING ELSE. `PLANE_EMIT_DISABLED=1` is the
 harness exemption (a byte-identical no-op); every door calls the shim `|| log`
 and never blocks its real action on it.
 
+**What does NOT fall down the ladder** is decided by one question — *would the
+cold rung repeat this refusal?* A contract violation would (same validator); a
+total failure would (same db). A **downgrade would not**, and treating it as a
+verdict is what cost the estate 261 heartbeat samples across 18 bots in ~15
+minutes on 2026-09-06 (#1485). A downgrade says the db is newer than the code
+**the answering process loaded**, and the daemon is a long-lived process on an
+editable install: a `git pull` swaps the files, the daemon keeps its old
+modules, and the first migrating door (that day, `plane doctor` applying 0010)
+leaves the daemon the only stale thing on the host. The cold rung is a fresh
+interpreter on the install's *current* code and commits. So
+`plane-socket-client.py` maps a `downgrade` reply to exit 5 — the shim's
+fallback trigger — and the daemon itself **exits 4** on the condition, at
+startup (before bind, so doors meet a plain ENOENT rather than a live listener
+that refuses everything), on the first request that hits it, or at an interval
+drain. Its supervisor relaunches it on the current install; if the install was
+never updated it exits again and the supervisor's throttle sets the cadence
+(systemd `RestartSec=5`, launchd ~10s), while the cold rung keeps recording.
+Exit 4 still passes through un-retried from the **cold** rung, where it means
+the install itself is behind the db and no rung can help.
+
+**Deploying a migration.** A pull that carries one leaves every resident
+process on the old modules. Since #1485 the ingest daemon repairs itself, but
+bouncing it explicitly is still the fast path and is the only remedy for a
+daemon predating that fix:
+
+```
+launchctl kickstart -k gui/$UID/claudlobby-plane-daemon    # macOS
+systemctl --user restart claudlobby-plane-daemon           # Linux
+```
+
+`claudlobby plane doctor`'s schema rung is the diagnosis — `user_version N
+(code supports M)`.
+
 ## The doors — who writes what
 
 | Door | Records | Silenced by |
@@ -181,7 +214,7 @@ is the one definition of "resolves to 1".
 writer). 0001 kernel · 0002 task-status index · 0003/0004
 the fleet room · 0005 FTS · 0006 the registry lane · 0007 `assignments(source_ref)`
 (the legacy join) · 0008 `events(actor_uid, occurred_at)` (progress grace, the
-resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window) · 0010 the task vocabulary widened for `escalated` and `nudged` (chunk M-A). A newer db refuses older code (rc 4), never downgrades. **0010 is the estate's first table REBUILD** — SQLite cannot ALTER a CHECK, so widening the task-event list means the documented 12-step copy of `events`, paid once by whichever door opens the plane first after the upgrade (it needs the table's size again in free space while it runs — and on a WAL database that means the WAL's copy TOO: an 80 MB plane whose `events` is 67 MB needs ~67 MB of WAL on top of the new table's ~67 MB, so a host at 90% full passes the naive check and fails the real one). It also holds the write lock for SECONDS rather than the milliseconds every earlier migration took, which is long enough for a second migrator's `BEGIN IMMEDIATE` to exceed `busy_timeout` and raise on a benign race — `migrate()` therefore re-reads `user_version` after WAITING for the write lock, so the loser no-ops on the winner's result. The O(1) alternative, a `PRAGMA writable_schema` edit of `sqlite_master`, corrupts the schema outright when the SQL is wrong, which is a worse failure than a slow start on the one database the estate keeps its history in.
+resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window) · 0010 the task vocabulary widened for `escalated` and `nudged` (chunk M-A). A newer db refuses older code (rc 4), never downgrades — and a refusing *daemon* exits so its supervisor relaunches it on the current install (#1485, the write-spine section above). **0010 is the estate's first table REBUILD** — SQLite cannot ALTER a CHECK, so widening the task-event list means the documented 12-step copy of `events`, paid once by whichever door opens the plane first after the upgrade (it needs the table's size again in free space while it runs — and on a WAL database that means the WAL's copy TOO: an 80 MB plane whose `events` is 67 MB needs ~67 MB of WAL on top of the new table's ~67 MB, so a host at 90% full passes the naive check and fails the real one). It also holds the write lock for SECONDS rather than the milliseconds every earlier migration took, which is long enough for a second migrator's `BEGIN IMMEDIATE` to exceed `busy_timeout` and raise on a benign race — `migrate()` therefore re-reads `user_version` after WAITING for the write lock, so the loser no-ops on the winner's result. The O(1) alternative, a `PRAGMA writable_schema` edit of `sqlite_master`, corrupts the schema outright when the SQL is wrong, which is a worse failure than a slow start on the one database the estate keeps its history in.
 
 **Retention** — `plane prune` ages `metric_samples` past 30 days by
 `ingested_at` (the incident-join window); nothing else is ever deleted; no

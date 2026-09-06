@@ -278,6 +278,12 @@ cleanup() {
     if [ -n "${PL_DPID:-}" ]; then
         kill "$PL_DPID" 2>/dev/null || true
     fi
+    # Same rule for the #1485 fake stale daemon: a plain background python
+    # holding a unix socket, leaked until reboot if an abort lands between
+    # its start and its inline kill.
+    if [ -n "${PL_STALE_PID:-}" ]; then
+        kill "$PL_STALE_PID" 2>/dev/null || true
+    fi
     [ -n "${PL_ROOT:-}" ] && rm -rf "$PL_ROOT" 2>/dev/null
     [ -n "${PL_SOCKDIR:-}" ] && rm -rf "$PL_SOCKDIR" 2>/dev/null
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "$TMUX_TMPDIR"
@@ -2738,6 +2744,54 @@ else
     ls "$PL_ROOT/state"/dispatch-log*.jsonl >/dev/null 2>&1 && r=no || r=yes
     harness_check "  ...and no dispatch ledger exists under the root after three dispatches (no legacy write, F18 R1)" "$r"
 
+    # -- #1485: a STALE daemon must not swallow the record ------------------
+    # The Mini shape, reproduced with the two halves real and the one half
+    # that cannot be real faked: a fake daemon answers every request with the
+    # downgrade refusal (there is no second install here to run older code
+    # from), while the door, the shim and the db are production. The refusal
+    # used to pass through as a verdict, so nothing fell to the cold rung and
+    # nothing spooled - 261 heartbeat samples lost in ~15 minutes.
+    cat > "$PL_ROOT/stale-daemon.py" <<'PLPY'
+import socket, sys
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sys.argv[1]); srv.listen(8)
+open(sys.argv[1] + ".ready", "w").close()
+resp = (b'{"ok": false, "code": "downgrade", "error": "plane.db user_version'
+        b'=999 is newer than this code (supports <=10)"}\n')
+while True:
+    c, _ = srv.accept()
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.sendall(resp); c.close()
+PLPY
+    rm -f "$PL_SOCK" "$PL_SOCK.ready" "$PL_ROOT/state/plane/.socket-wedged"
+    python3 "$PL_ROOT/stale-daemon.py" "$PL_SOCK" >/dev/null 2>&1 &
+    PL_STALE_PID=$!
+    _pl_i=0
+    while [ "$_pl_i" -lt 100 ] && [ ! -e "$PL_SOCK.ready" ]; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
+    _pl_before=$(_pl_count)
+    # PLANE_WEDGE_COOLDOWN_S=0 because the DOOR emits twice (intent, then the
+    # transmission) and the first emission rc 5 arms the shim wedge marker,
+    # so without it the second emission skips the socket entirely and the leg
+    # would measure the COOLDOWN path while claiming to measure the downgrade
+    # one. The previous leg (daemon dead) arms the same marker. Orthogonal
+    # machinery neutralised so the assertion measures what it names.
+    _pl_dispatch "PLANE_WEDGE_COOLDOWN_S=0" "leg four: a stale daemon refuses" >/dev/null && r=yes || r=no
+    harness_check "#1485 a dispatch succeeds against a daemon that refuses [downgrade]" "$r"
+    [ "$(_pl_count)" = "$((_pl_before + 1))" ] && r=yes || r=no
+    harness_check "  ...and the row LANDED through the cold rung (the install current code commits)" "$r"
+    grep -q "falling back to cold CLI" "$PL_ROOT/err" && r=yes || r=no
+    harness_check "  ...with the fallback DISCLOSED, not silent" "$r"
+    grep -q "older code than the db it opened" "$PL_ROOT/err" && r=yes || r=no
+    harness_check "  ...naming the stale daemon rather than a dead socket" "$r"
+    kill "$PL_STALE_PID" 2>/dev/null || true; wait "$PL_STALE_PID" 2>/dev/null || true
+    PL_STALE_PID=""
+    rm -f "$PL_SOCK" "$PL_SOCK.ready" "$PL_ROOT/state/plane/.socket-wedged"
+
     # -- keepalive presence door (chunk: keepalive-as-a-door) ---------------
     # An ARMED keepalive tick against a stubbed-idle pane must record the
     # verdict as metric_samples (bot.heartbeat + bot.session_up) through the
@@ -2777,6 +2831,26 @@ else
     harness_check "doctor flags ATTENTION: daemon started historically, not serving" "$r"
     grep -q "not serving" "$PL_ROOT/doctor.txt" && r=yes || r=no
     harness_check "  ...naming the condition and the corrective command" "$r"
+
+    # -- #1485: the REAL daemon exits for its supervisor to relaunch --------
+    # Last in the leg: it leaves the db stamped at a version nothing supports,
+    # so nothing after it could open the plane anyway.
+    sqlite3 "$PL_ROOT/state/plane/plane.db" "PRAGMA user_version = 999" 2>/dev/null || true
+    "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
+        > "$PL_ROOT/stale.log" 2>&1 &
+    PL_DPID=$!
+    _pl_i=0
+    while [ "$_pl_i" -lt 300 ] && kill -0 "$PL_DPID" 2>/dev/null; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
+    # `set -e` is armed here: a bare `wait` on a daemon that exits 4 aborts
+    # the whole harness (it did, at rc 4, with no summary line).
+    _pl_rc=0; wait "$PL_DPID" 2>/dev/null || _pl_rc=$?
+    PL_DPID=""
+    [ "$_pl_rc" -ne 0 ] && r=yes || r=no
+    harness_check "#1485 a daemon started against a db NEWER than its code exits nonzero" "$r"
+    grep -q "exiting so the supervisor relaunches me" "$PL_ROOT/stale.log" && r=yes || r=no
+    harness_check "  ...saying why, so a journal reader is not left guessing" "$r"
+    [ -S "$PL_SOCK" ] && r=no || r=yes
+    harness_check "  ...and never bound the socket, so every door meets ENOENT and goes cold" "$r"
 
     rm -rf "$PL_ROOT" "$PL_SOCKDIR"
 fi

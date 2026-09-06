@@ -542,3 +542,131 @@ def test_send_batch_raises_oserror_when_no_daemon(tmp_path: Path):
             send_batch(sdir / "absent", [_comm("9")])
     finally:
         shutil.rmtree(sdir, ignore_errors=True)
+
+
+# =============================================================================
+# #1485 — the stale-daemon exit. REAL PROCESSES, deliberately: the whole
+# defect is a long-lived process holding modules the install has since
+# replaced, and an in-thread daemon shares this interpreter's modules, so it
+# can model the refusal but never the RELAUNCH the fix depends on.
+# =============================================================================
+
+def _serve_proc(root: Path, sock: Path):
+    import subprocess
+    import sys as _sys
+
+    return subprocess.Popen(
+        [_sys.executable, "-m", "claudlobby", "--root", str(root),
+         "plane", "serve", "--socket", str(sock), "--drain-interval", "9999"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+def _bump_user_version(root: Path, version: int) -> None:
+    """The live shape: a NEWER package migrated this db in place (on the Mini
+    it was `plane doctor` running migration 0010), and the daemon's loaded
+    code supports less than what it now finds."""
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(str(db_path(root)))
+    try:
+        conn.execute(f"PRAGMA user_version = {version}")
+    finally:
+        conn.close()
+
+
+NEWER = 999   # unreachable by any real migration; never needs bumping
+
+
+def test_daemon_exits_when_the_db_outruns_it_mid_life(tmp_path: Path):
+    """The Mini's exact sequence: daemon up and healthy, a migration lands
+    under it, the next emit finds the db newer than the loaded code. The
+    daemon must ANSWER the refusal (so the shim can name the condition) and
+    then EXIT, so its supervisor relaunches it on the current install."""
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    proc = _serve_proc(tmp_path, sock)
+    try:
+        for _ in range(400):
+            if sock.exists() or proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        assert sock.exists(), f"daemon never bound: {proc.communicate()}"
+
+        _bump_user_version(tmp_path, NEWER)
+
+        reply = send_batch(sock, [_comm("a", body="after the migration")])
+        assert reply.get("ok") is False
+        assert reply.get("code") == "downgrade", reply
+
+        rc = proc.wait(timeout=30)
+        out, err = proc.communicate()
+        assert rc != 0, "a stale daemon that exits 0 reads as a clean stop"
+        assert rc == 4, f"exit {rc}: the taxonomy's downgrade code is 4"
+        assert "exiting so the supervisor relaunches me" in err, err
+        assert f"user_version={NEWER}" in err, err
+        # ONE line about it — a relaunch loop must not spam the journal.
+        said = [ln for ln in err.splitlines() if "relaunches me" in ln]
+        assert len(said) == 1, said
+        # ...and no doomed stopping receipt underneath it.
+        assert "lifecycle emit failed (daemon_stopping)" not in err, err
+        assert not sock.exists(), "the exiting daemon left its socket behind"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+def test_daemon_refuses_to_bind_at_all_when_it_starts_up_stale(tmp_path: Path):
+    """The relaunch's own next lap, and the un-updated-install case. Exiting
+    BEFORE bind is what makes the loop harmless: no socket exists, so every
+    door meets a plain ENOENT and goes cold, instead of finding a live
+    listener that refuses everything (the incident's actual shape)."""
+    conn = connect(db_path(tmp_path))
+    migrate(conn)
+    conn.close()
+    _bump_user_version(tmp_path, NEWER)
+
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    started = time.monotonic()
+    proc = _serve_proc(tmp_path, sock)
+    try:
+        rc = proc.wait(timeout=30)
+        elapsed = time.monotonic() - started
+        out, err = proc.communicate()
+        assert rc == 4, f"exit {rc}: {err}"
+        assert "exiting so the supervisor relaunches me" in err, err
+        assert not sock.exists(), "a stale daemon bound the socket anyway"
+        # The bound is generous on purpose (a cold `python -m claudlobby`
+        # import dominates it); what it pins is that the check runs at
+        # STARTUP rather than waiting for traffic that may never come.
+        assert elapsed < 30
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+def test_a_supported_db_still_serves(tmp_path: Path):
+    """The positive control the two negatives need: the startup check must
+    not be a daemon that refuses to start. Same rig, unbumped db."""
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    proc = _serve_proc(tmp_path, sock)
+    try:
+        for _ in range(400):
+            if sock.exists() or proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        assert sock.exists(), f"daemon never bound: {proc.communicate()}"
+        reply = send_batch(sock, [_comm("b", body="healthy")])
+        assert reply.get("ok") is True, reply
+        assert proc.poll() is None, "the daemon exited on a supported db"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+        shutil.rmtree(sdir, ignore_errors=True)

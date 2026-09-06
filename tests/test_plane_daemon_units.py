@@ -52,6 +52,36 @@ def test_armed_service_composes_service_and_plist_no_timer(tmp_path, monkeypatch
     assert "<key>RunAtLoad</key>" in pbody
 
 
+def test_service_relaunches_on_a_NONZERO_exit(tmp_path, monkeypatch):
+    """#1485. The ingest daemon exits 4 when the db outruns its loaded code,
+    so the composed units are what turns that exit into a repair. Both forms
+    already relaunch on ANY exit; this pins them against a narrowing.
+
+    launchd: `KeepAlive` must be the bare <true/>, not the dictionary form.
+    `<key>KeepAlive</key><dict><key>SuccessfulExit</key><true/></dict>` would
+    relaunch ONLY on a clean exit and strand the daemon on exactly the exit
+    this fix introduces — and it is one word away from the correct dictionary
+    form, which is reason enough to pin the shape rather than the key."""
+    out = _compose(tmp_path, monkeypatch,
+                   {"plane-daemon": {**SERVICE_JOB, "enroll": True}})
+    body = (out / "claudlobby-plane-daemon.service").read_text()
+    assert "Restart=always" in body, "on-success/no would strand the exit"
+    # RestartSec keeps a permanent-condition loop under systemd's default
+    # start limit (5 starts / 10s); without it the unit latches `failed` and
+    # stops relaunching, which is the incident again with extra steps.
+    rsec = [ln for ln in body.splitlines() if ln.startswith("RestartSec=")]
+    assert len(rsec) == 1, rsec
+    assert int(rsec[0].split("=", 1)[1]) >= 2, rsec
+
+    pbody = (out / "claudlobby-plane-daemon.plist").read_text()
+    squashed = "".join(pbody.split())
+    assert "<key>KeepAlive</key><true/>" in squashed, (
+        "KeepAlive must be unconditional — a SuccessfulExit dict would skip"
+        f" the downgrade exit: {pbody}"
+    )
+    assert "SuccessfulExit" not in pbody
+
+
 def test_unarmed_service_composes_nothing(tmp_path, monkeypatch):
     out = _compose(tmp_path, monkeypatch,
                    {"plane-daemon": {**SERVICE_JOB, "enroll": False}})
