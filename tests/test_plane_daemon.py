@@ -8,10 +8,13 @@ root stays on tmp_path (no length limit there).
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,15 +24,17 @@ import pytest
 
 from claudlobby.plane import PLANE_SCHEMA_VERSION
 from claudlobby.plane.daemon import (
+    DAEMON_LOG_NAME,
     DaemonAlreadyRunning,
     MAX_REQUEST_BYTES,
     MAX_SOCKET_PATH_BYTES,
     PlaneDaemon,
+    SocketOverrideInvalid,
     SocketPathTooLong,
     _check_sun_path,
     send_batch,
 )
-from claudlobby.plane.db import connect, db_path
+from claudlobby.plane.db import connect, db_file, db_path
 from claudlobby.plane.ids import ensure_host_uid, mint_event_id
 from claudlobby.plane.migrations import migrate
 from claudlobby.plane.spool import spool_dir, spool_write
@@ -545,21 +550,70 @@ def test_send_batch_raises_oserror_when_no_daemon(tmp_path: Path):
 
 
 # =============================================================================
-# #1485 — the stale-daemon exit. REAL PROCESSES, deliberately: the whole
-# defect is a long-lived process holding modules the install has since
-# replaced, and an in-thread daemon shares this interpreter's modules, so it
-# can model the refusal but never the RELAUNCH the fix depends on.
+# #1485 — the stale-daemon exit. REAL PROCESSES for the exit itself,
+# deliberately: the whole defect is a long-lived process holding modules the
+# install has since replaced, and an in-thread daemon shares this
+# interpreter's modules, so it can model the refusal but never the RELAUNCH
+# the fix depends on.
+#
+# Every real-process pin here must FAIL FAST rather than hang. `wait()` on a
+# PIPEd child can deadlock on a full pipe buffer, and `communicate()` with no
+# timeout against a daemon that is alive-but-unbound blocks the suite
+# forever — a pin that cannot fail is not a pin. Hence _reap/_await_bind/
+# _wait_exit below: bounded, and they print the daemon's stderr when they
+# give up.
 # =============================================================================
 
 def _serve_proc(root: Path, sock: Path):
-    import subprocess
-    import sys as _sys
-
     return subprocess.Popen(
-        [_sys.executable, "-m", "claudlobby", "--root", str(root),
+        [sys.executable, "-m", "claudlobby", "--root", str(root),
          "plane", "serve", "--socket", str(sock), "--drain-interval", "9999"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+
+
+def _reap(proc, timeout: float = 20.0) -> tuple[str, str]:
+    """Stop the daemon and drain its pipes — always bounded, and callable
+    twice (a helper may reap on the way to pytest.fail, and the test's own
+    finally reaps again; a second communicate() on closed pipes raises)."""
+    cached = getattr(proc, "_reaped", None)
+    if cached is not None:
+        return cached
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc._reaped = proc.communicate(timeout=timeout)
+            return proc._reaped
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    try:
+        proc._reaped = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:  # pragma: no cover — kill() was ignored
+        proc.kill()
+        proc._reaped = ("", "")
+    return proc._reaped
+
+
+def _await_bind(proc, sock: Path, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if sock.exists() or proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    if not sock.exists():
+        _out, err = _reap(proc)
+        pytest.fail(f"daemon never bound (rc={proc.returncode}) within"
+                    f" {timeout}s:\n{err}")
+
+
+def _wait_exit(proc, timeout: float = 30.0) -> tuple[int, str, str]:
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _out, err = _reap(proc)
+        pytest.fail(f"daemon still running after {timeout}s:\n{err}")
+    proc._reaped = (out, err)   # so the caller's finally-_reap is a no-op
+    return proc.returncode, out, err
 
 
 def _bump_user_version(root: Path, version: int) -> None:
@@ -571,6 +625,16 @@ def _bump_user_version(root: Path, version: int) -> None:
     conn = _sqlite3.connect(str(db_path(root)))
     try:
         conn.execute(f"PRAGMA user_version = {version}")
+    finally:
+        conn.close()
+
+
+def _read_user_version(root: Path) -> int:
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(str(db_file(root)))
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
         conn.close()
 
@@ -587,11 +651,7 @@ def test_daemon_exits_when_the_db_outruns_it_mid_life(tmp_path: Path):
     sock = sdir / "s"
     proc = _serve_proc(tmp_path, sock)
     try:
-        for _ in range(400):
-            if sock.exists() or proc.poll() is not None:
-                break
-            time.sleep(0.05)
-        assert sock.exists(), f"daemon never bound: {proc.communicate()}"
+        _await_bind(proc, sock)
 
         _bump_user_version(tmp_path, NEWER)
 
@@ -599,29 +659,38 @@ def test_daemon_exits_when_the_db_outruns_it_mid_life(tmp_path: Path):
         assert reply.get("ok") is False
         assert reply.get("code") == "downgrade", reply
 
-        rc = proc.wait(timeout=30)
-        out, err = proc.communicate()
+        rc, _out, err = _wait_exit(proc)
         assert rc != 0, "a stale daemon that exits 0 reads as a clean stop"
         assert rc == 4, f"exit {rc}: the taxonomy's downgrade code is 4"
         assert "exiting so the supervisor relaunches me" in err, err
         assert f"user_version={NEWER}" in err, err
-        # ONE line about it — a relaunch loop must not spam the journal.
+        # ONE line about it — a relaunch loop must not spam the journal — and
+        # it says "supports <=N" ONCE (the fold: the wrapper used to append a
+        # clause the DowngradeError message already carried).
         said = [ln for ln in err.splitlines() if "relaunches me" in ln]
         assert len(said) == 1, said
+        assert said[0].count("supports <=") == 1, said[0]
+        # It names where the loop is visible, because nothing else records it:
+        # a process refusing the db cannot write a row about refusing the db.
+        assert DAEMON_LOG_NAME in said[0], said[0]
         # ...and no doomed stopping receipt underneath it.
         assert "lifecycle emit failed (daemon_stopping)" not in err, err
         assert not sock.exists(), "the exiting daemon left its socket behind"
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        _reap(proc)
         shutil.rmtree(sdir, ignore_errors=True)
 
 
-def test_daemon_refuses_to_bind_at_all_when_it_starts_up_stale(tmp_path: Path):
-    """The relaunch's own next lap, and the un-updated-install case. Exiting
-    BEFORE bind is what makes the loop harmless: no socket exists, so every
-    door meets a plain ENOENT and goes cold, instead of finding a live
-    listener that refuses everything (the incident's actual shape)."""
+def test_daemon_starting_up_stale_exits_and_leaves_no_socket(tmp_path: Path):
+    """The relaunch's own next lap, and the un-updated-install case.
+
+    The check runs immediately AFTER bind rather than before it (the fold:
+    before bind it ran migrate() on paths that never serve, which is how a
+    refused serve migrated the live plane). So the socket exists for the
+    bind-to-check window and is unlinked on the way out — what a door must
+    never meet is a daemon SITTING there refusing everything, and that is
+    what is pinned: past the exit there is no socket, so every door gets a
+    plain ENOENT and goes cold."""
     conn = connect(db_path(tmp_path))
     migrate(conn)
     conn.close()
@@ -632,19 +701,17 @@ def test_daemon_refuses_to_bind_at_all_when_it_starts_up_stale(tmp_path: Path):
     started = time.monotonic()
     proc = _serve_proc(tmp_path, sock)
     try:
-        rc = proc.wait(timeout=30)
+        rc, _out, err = _wait_exit(proc)
         elapsed = time.monotonic() - started
-        out, err = proc.communicate()
         assert rc == 4, f"exit {rc}: {err}"
         assert "exiting so the supervisor relaunches me" in err, err
-        assert not sock.exists(), "a stale daemon bound the socket anyway"
+        assert not sock.exists(), "the exiting daemon left its socket behind"
         # The bound is generous on purpose (a cold `python -m claudlobby`
         # import dominates it); what it pins is that the check runs at
         # STARTUP rather than waiting for traffic that may never come.
         assert elapsed < 30
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        _reap(proc)
         shutil.rmtree(sdir, ignore_errors=True)
 
 
@@ -655,18 +722,106 @@ def test_a_supported_db_still_serves(tmp_path: Path):
     sock = sdir / "s"
     proc = _serve_proc(tmp_path, sock)
     try:
-        for _ in range(400):
-            if sock.exists() or proc.poll() is not None:
-                break
-            time.sleep(0.05)
-        assert sock.exists(), f"daemon never bound: {proc.communicate()}"
+        _await_bind(proc, sock)
         reply = send_batch(sock, [_comm("b", body="healthy")])
         assert reply.get("ok") is True, reply
         assert proc.poll() is None, "the daemon exited on a supported db"
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=15)
-        except Exception:  # noqa: BLE001
-            proc.kill()
+        _reap(proc)
         shutil.rmtree(sdir, ignore_errors=True)
+
+
+# -- the fold: a REFUSED serve must never create or migrate the db -----------
+# In-process on purpose (no subprocess): the claim is about what the startup
+# check TOUCHES, and every refusal below happens inside _bind().
+
+def test_a_serve_refused_for_its_socket_parent_never_creates_the_db(tmp_path: Path):
+    """The startup check used to run migrate() BEFORE _bind(), so a serve
+    refused for a bad --socket parent still created and MIGRATED the plane on
+    its way out (reproduced). That is #1485's own trigger: a serve invoked
+    from a newer checkout against the live root is exactly how the running
+    daemon becomes the stale one — and 0010 holds a seconds-long write lock
+    while doing it, outside the daemon lock."""
+    sdir = _short_sock_dir()          # sun_path is checked before the parent
+    try:
+        d = PlaneDaemon(tmp_path, socket_override=sdir / "nope" / "s")
+        with pytest.raises(SocketOverrideInvalid):
+            d.serve(install_signals=False)
+        assert not db_file(tmp_path).exists(), "a refused serve created the plane"
+        assert not (tmp_path / "state").exists(), (
+            "a refused serve provisioned state/ — db_file is a pure join and"
+            " the check must leave nothing behind"
+        )
+    finally:
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+def test_a_serve_refused_by_the_lock_leaves_the_db_version_alone(tmp_path: Path):
+    """The refusal shape that bites a LIVE host: a second serve against a root
+    whose daemon is already up. It must not migrate the db the running daemon
+    is serving — doing so is precisely what makes the running daemon stale."""
+    # An UNMIGRATED db, deliberately: version 0 is the one stamp migrate()
+    # would certainly move, so "still 0" is unambiguous evidence that the
+    # refused serve never wrote. (A hand-stamped older version is not: the
+    # migration would fail on the already-present tables and leave the number
+    # alone for a reason that has nothing to do with this fix.)
+    connect(db_path(tmp_path)).close()
+    assert _read_user_version(tmp_path) == 0
+
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    # Hold the lifetime lock the way a live daemon does. flock is per open
+    # file description, so a second open in THIS process conflicts too.
+    fd = os.open(sock.with_name(sock.name + ".lock"),
+                 os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        d = PlaneDaemon(tmp_path, socket_override=sock)
+        with pytest.raises(DaemonAlreadyRunning):
+            d.serve(install_signals=False)
+        assert _read_user_version(tmp_path) == 0, (
+            "a serve refused by the lock migrated the live db anyway"
+        )
+    finally:
+        os.close(fd)
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+def test_a_root_whose_state_is_a_regular_file_still_serves(tmp_path: Path):
+    """The other half of the fold. db_path() mkdirs, so a root whose state/ is
+    a regular file raises NotADirectoryError — an OSError, which the first
+    version of the startup check did not catch: the daemon died at startup
+    with a traceback where the old code disclosed and served. Under launchd
+    KeepAlive that is a permanent crash loop on a host whose plane is merely
+    broken.
+
+    "Serves" is the honest, narrow claim: the socket ANSWERS, with a typed
+    refusal it can name, and the process lives. Measured, the answer on this
+    root is `contract_violation` — the capture policy under state/ is
+    unreadable before the db is even reached; a corrupt db answers `internal`.
+    Neither is spooled: the spool covers a RETRYABLE OperationalError, which
+    a root with no state dir is not. What is pinned is the shape (an answer,
+    not a downgrade, not a death), because the exact code is a property of
+    which read fails first."""
+    (tmp_path / "state").write_text("this is a regular file, not a directory\n")
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    proc = _serve_proc(tmp_path, sock)
+    try:
+        _await_bind(proc, sock)
+        reply = send_batch(sock, [_comm("c", body="broken root")])
+        assert reply.get("ok") is False, reply
+        assert reply.get("code") in {"contract_violation", "internal"}, reply
+        assert reply.get("code") != "downgrade", "a broken plane is not a downgrade"
+        assert proc.poll() is None, "the daemon died on a broken root"
+    finally:
+        _out, err = _reap(proc)
+        shutil.rmtree(sdir, ignore_errors=True)
+    # Every fault DISCLOSED and none of them fatal — the pre-check posture,
+    # restored. `_optimize` is named because it is the one that actually
+    # killed the daemon here once the check itself stopped calling db_path():
+    # its catch was sqlite3.Error only, one line after the drain had disclosed
+    # the identical OSError and carried on.
+    assert "spool drain failed (startup)" in err, err
+    assert "optimize skipped" in err, err
+    assert "Traceback" not in err, err

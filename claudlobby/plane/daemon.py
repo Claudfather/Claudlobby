@@ -18,7 +18,10 @@ Protocol (one request per connection, newline-delimited JSON):
   daemon replies:{"ok": true,  "results": [{"event_id","status","detail"?}...]}\n
              or  {"ok": false, "code": "<taxonomy>", "error": "..."}\n
   codes mirror the CLI exits: bad_request/contract_violation -> 2,
-  total_failure -> 3, downgrade -> 4, internal -> 1.
+  total_failure -> 3, downgrade -> 4, internal -> 1. One deliberate
+  exception: lib/plane-socket-client.py maps a DAEMON's `downgrade` to its
+  transport-unavailable exit 5, because that refusal is about the answering
+  process rather than the batch and the cold rung commits it (#1485).
 
 A `downgrade` — the db is newer than the code THIS PROCESS loaded — is the one
 condition the daemon cannot serve its way out of, and it answers by EXITING
@@ -33,8 +36,19 @@ relaunches on ANY exit and throttles to ~10s). BOUNDED LOOP, deliberately: if
 the install was NOT updated, the relaunched daemon reads the same newer db and
 exits again, and the supervisor's throttle sets the cadence — a cheap
 interpreter spawn every few seconds while the shim's cold rung records
-everything. `claudlobby plane doctor`'s schema rung names the remedy
-("user_version N (code supports M)").
+everything.
+
+WHERE THE LOOP IS VISIBLE is this file's own exit line and nothing else. A
+process that refuses the db cannot write to it, so no plane row records the
+exit; the composed host service keeps this stderr at
+`<root>/state/plane-daemon.log` (launchd, appended) or in the journal
+(systemd). `plane doctor` is NOT the diagnosis — a newer db makes it REFUSE
+at 4 through `_guarded` before a single rung prints, so its schema rung
+("user_version N (code supports M)") is unreachable in exactly this
+condition; what an operator gets from a door is the `REFUSED — plane.db
+user_version=N is newer than this code (supports <=M)` line that any
+migrating door (`plane status`, `plane doctor`) prints, which names both
+numbers.
 
 Ack semantics are SYNCHRONOUS AND HONEST (plan §1): the reply is written only
 after commit (or spool). An ack that precedes validation is a receipt that
@@ -62,7 +76,7 @@ from pathlib import Path
 from typing import Optional
 
 from .contracts import ContractViolation
-from .db import connect, db_path
+from .db import connect, connect_ro, db_file, db_path
 from .emit_api import emit_batch
 from .ids import ensure_host_uid
 from .migrations import SCHEMA_USER_VERSION, DowngradeError, migrate
@@ -83,6 +97,12 @@ DEFAULT_DRAIN_INTERVAL = 600.0
 # launchd `KeepAlive` true relaunch on ANY exit — so its whole job is to be
 # legible in a journal, and legible means matching the taxonomy it belongs to.
 DOWNGRADE_EXIT_CODE = 4
+
+# Where the composed launchd service parks this process's stdio, relative to
+# <root>/state (composer._write_service_units writes it; a unit test pins the
+# two against each other). Named HERE because the exit line has to tell an
+# operator where to look, and the exit line is the only record there is.
+DAEMON_LOG_NAME = "plane-daemon.log"
 
 
 class PlaneDowngradeExit(DowngradeError):
@@ -241,37 +261,95 @@ class PlaneDaemon:
         a SystemExit raised from inside a request handler would skip a `plane
         serve` caller's own cleanup. The exception carries the exit out."""
         self._downgrading = True
+        # ONE "supports <=N": every DowngradeError that reaches here already
+        # carries it — migrate()'s does, and the startup check below words its
+        # own identically on purpose — so appending a second clause printed
+        # the same fact twice in the line an operator reads under pressure.
         print(
-            f"plane-daemon: {exc} — exiting so the supervisor relaunches me"
-            f" on the current install (this code supports"
-            f" user_version <={SCHEMA_USER_VERSION})",
+            f"plane-daemon: {exc} — exiting so the supervisor relaunches me on"
+            f" the current install. This line is the whole record: a process"
+            f" that refuses the db cannot write to it, so nothing lands on the"
+            f" plane; the composed host service keeps my stderr at"
+            f" {self.root}/state/{DAEMON_LOG_NAME} (launchd) or in the journal"
+            f" (systemd), where a relaunch loop shows as this line repeating.",
             file=sys.stderr,
         )
         return PlaneDowngradeExit(str(exc))
 
-    def _assert_supported_schema(self) -> None:
-        """The startup half of the check, run BEFORE bind so a stale daemon
-        never owns the socket at all — the shim then meets a plain ENOENT
-        (exit 5) and goes cold, rather than a live listener that refuses.
+    def _read_user_version(self) -> Optional[int]:
+        """``PRAGMA user_version`` through a READ connection — the startup
+        check's whole mechanism, and deliberately NOT ``migrate()``.
 
-        Uses migrate() rather than a bare PRAGMA read because the daemon
-        already migrates at startup (the startup spool drain does), so this
-        adds an ordering, not a new write. An unreachable/broken db is NOT a
-        downgrade: it is disclosed and the daemon serves anyway, spooling —
-        which is the posture that existed before this check."""
+        migrate() CREATES the db (db_path mkdirs, connect creates the file)
+        and then WRITES it, holding 0010's seconds-long write lock. Run from
+        the startup check it did that on paths that never serve at all: a
+        `plane serve` REFUSED for a bad --socket parent, or because another
+        daemon already holds the lock, still created and migrated the live
+        plane on its way out (reproduced). That is #1485's own trigger — a
+        serve invoked from a newer checkout against the live root is exactly
+        how the RUNNING daemon becomes the stale one.
+
+        A db that does not exist has no version to be stale about, so there is
+        nothing to check and nothing is created: ``db_file`` is a pure join,
+        so asking leaves no directory behind either."""
+        path = db_file(self.root)
+        if not path.is_file():
+            return None
         try:
-            conn = connect(db_path(self.root))
-        except sqlite3.Error as exc:
-            print(f"plane-daemon: schema check skipped ({exc})", file=sys.stderr)
-            return
+            conn = connect_ro(path)
+        except sqlite3.Error:
+            # The mode=ro URI cannot create the -shm a WAL db needs once its
+            # writer has closed (plane-readers.connect documents the same
+            # fallback, measured on the estate's 3.9): a plain connection held
+            # read-only by query_only. The file exists, so this creates
+            # nothing either.
+            conn = sqlite3.connect(str(path), timeout=5.0)
+            conn.execute("PRAGMA query_only = 1")
         try:
-            migrate(conn)
-        except DowngradeError as exc:
-            raise self._downgrade_exit(exc) from None
-        except Exception as exc:  # noqa: BLE001 — disclosed, never fatal
-            print(f"plane-daemon: schema check skipped ({exc})", file=sys.stderr)
+            return conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
+
+    def _assert_supported_schema(self) -> None:
+        """The startup half of the check (#1485). Runs AFTER _bind(), as the
+        first statement inside the serve loop's try/finally: the downgrade
+        exit must still unlink the socket and drop the lifetime lock, and
+        every refusal that precedes bind has to reach its refusal without this
+        check having touched the db at all. The socket therefore exists for
+        the bind-to-check window; a door that hits it inside that window gets
+        the typed `downgrade` reply, which plane-socket-client.py maps to the
+        shim's cold rung — the same landing as the ENOENT it meets afterwards.
+
+        A db this process cannot READ is NOT a downgrade: it is disclosed and
+        the daemon serves. What "serves" means there is narrow and honest —
+        the socket ANSWERS, with a typed refusal, and the process lives. It is
+        NOT "serves anyway, spooling": the spool covers a retryable
+        OperationalError (busy/locked/IO/full) and nothing else, so a corrupt
+        db answers `internal` and a root whose state/ is a regular file
+        answers `contract_violation` (measured — the capture policy under
+        state/ is unreadable before the db is reached). That is the posture
+        that existed before this check, kept."""
+        try:
+            current = self._read_user_version()
+        except (sqlite3.Error, OSError) as exc:
+            # OSError as well as sqlite3.Error. The first version caught only
+            # the latter, so a root whose state/ is a regular file (db_path's
+            # mkdir raising NotADirectoryError) killed the daemon at startup
+            # with a traceback — under launchd KeepAlive a permanent crash
+            # loop, where before the check the daemon disclosed and served.
+            # Reading through db_file removes THAT mkdir from this path, so
+            # here the catch is defensive; the live OSError moved to
+            # _optimize, whose catch is widened for the same reason.
+            print(f"plane-daemon: schema check skipped ({exc})", file=sys.stderr)
+            return
+        if current is None or current <= SCHEMA_USER_VERSION:
+            return
+        # Worded byte-identically to migrate()'s refusal so the exit line
+        # reads the same whichever of the three detectors fired.
+        raise self._downgrade_exit(DowngradeError(
+            f"plane.db user_version={current} is newer than this code"
+            f" (supports <={SCHEMA_USER_VERSION}) — refusing downgrade"
+        ))
 
     # -- lifecycle events (best-effort: the recorder's own heartbeat must
     #    never kill the recorder) ------------------------------------------
@@ -303,7 +381,11 @@ class PlaneDaemon:
                 conn.execute("PRAGMA optimize")
             finally:
                 conn.close()
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
+            # OSError too (#1485 fold): db_path() mkdirs, so a root whose
+            # state/ is a regular file raises NotADirectoryError here — an
+            # uncaught one killed the daemon at startup one line after the
+            # drain had disclosed the very same fault and carried on.
             print(f"plane-daemon: optimize skipped: {exc}", file=sys.stderr)
 
     def _drain_spool(self, *, reason: str) -> None:
@@ -514,16 +596,24 @@ class PlaneDaemon:
         Raises PlaneDowngradeExit (exit 4) when the db is newer than this
         code — at startup, on the first request that hits it, or at an
         interval drain, whichever comes first (#1485)."""
-        self._assert_supported_schema()
         self._listener = self._bind()
         if install_signals:
             signal.signal(signal.SIGTERM, self.stop)
             signal.signal(signal.SIGINT, self.stop)
         print(f"plane-daemon: serving on {self.sock_path}", file=sys.stderr)
-        self._emit_system("daemon_started")
-        self._drain_spool(reason="startup")
-        self._optimize()
         try:
+            # Ordering is load-bearing (#1485 fold). The schema check is the
+            # FIRST statement inside the try, so (a) the downgrade exit still
+            # unlinks the socket and drops the lifetime lock on its way out,
+            # and (b) nothing that WRITES the db — the lifecycle receipt, the
+            # startup drain, which migrates — runs against a db this process
+            # refuses. Everything before this point is bind, and bind's own
+            # refusals must never migrate anything: that is what put the live
+            # plane a version ahead of the daemon serving it.
+            self._assert_supported_schema()
+            self._emit_system("daemon_started")
+            self._drain_spool(reason="startup")
+            self._optimize()
             while not self._stop:
                 if time.monotonic() - self._last_drain >= self.drain_interval:
                     self._drain_spool(reason="interval")

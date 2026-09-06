@@ -95,13 +95,31 @@ leaves the daemon the only stale thing on the host. The cold rung is a fresh
 interpreter on the install's *current* code and commits. So
 `plane-socket-client.py` maps a `downgrade` reply to exit 5 — the shim's
 fallback trigger — and the daemon itself **exits 4** on the condition, at
-startup (before bind, so doors meet a plain ENOENT rather than a live listener
-that refuses everything), on the first request that hits it, or at an interval
-drain. Its supervisor relaunches it on the current install; if the install was
-never updated it exits again and the supervisor's throttle sets the cadence
-(systemd `RestartSec=5`, launchd ~10s), while the cold rung keeps recording.
-Exit 4 still passes through un-retried from the **cold** rung, where it means
-the install itself is behind the db and no rung can help.
+startup (immediately after bind, as the first statement inside the serve
+loop's own try/finally, so the exit unlinks the socket and drops the lifetime
+lock on its way out and nothing that WRITES the db runs first), on the first
+request that hits it, or at an interval drain. Its supervisor relaunches it on
+the current install; if the install was never updated it exits again and the
+supervisor's throttle sets the cadence (systemd `RestartSec=5`, launchd ~10s),
+while the cold rung keeps recording.
+
+Two consequences worth stating plainly. The rc 5 also **arms the shim's wedge
+marker**, so for the next `PLANE_WEDGE_COOLDOWN_S` (60s default) every
+emission — every door's, not just this one's — skips the socket and goes
+straight to the cold rung, then the socket is retried: slower, disclosed,
+nothing dropped. And the client returns only 0/2/3/5, so the shim's
+passthrough arm carries **2 and 3 only**; a `4` there was dead code. A
+**cold-rung** downgrade still exits 4, at the tail where the shim returns the
+CLI's rc verbatim — there the install itself is behind the db and no rung can
+help.
+
+The startup check READS `PRAGMA user_version` and never calls `migrate()`,
+which is not a micro-optimization: `migrate()` creates the db and writes it,
+so running it before `_bind()` meant a `plane serve` REFUSED for a bad
+`--socket` parent, or because another daemon already held the lock, still
+created and migrated the live plane on its way out — the very act that makes
+a running daemon stale, with 0010's seconds-long write lock taken outside the
+daemon lock.
 
 **Deploying a migration.** A pull that carries one leaves every resident
 process on the old modules. Since #1485 the ingest daemon repairs itself, but
@@ -113,8 +131,21 @@ launchctl kickstart -k gui/$UID/claudlobby-plane-daemon    # macOS
 systemctl --user restart claudlobby-plane-daemon           # Linux
 ```
 
-`claudlobby plane doctor`'s schema rung is the diagnosis — `user_version N
-(code supports M)`.
+**Where the loop shows.** Not `plane doctor`: a newer db makes every
+migrating door REFUSE at 4 through `_guarded` *before* a single rung prints,
+so its schema rung is unreachable in exactly this condition. What an operator
+gets is (a) the `REFUSED — plane.db user_version=N is newer than this code
+(supports <=M)` line any migrating door prints (`plane status`, `plane
+doctor`), which names both numbers, and (b) the daemon's own exit line, once
+per relaunch, in `<root>/state/plane-daemon.log` (launchd, appended by the
+composed plist) or the journal (systemd, `journalctl --user -u
+claudlobby-plane-daemon`). Nothing records it on the plane — a process that
+refuses the db cannot write a row about refusing it — and that log grows for
+as long as the loop runs, which is until the install is updated.
+
+There is deliberately **no doctor rung counting the loop**: it would render
+only where the condition is absent, which is the dead-signal shape this
+program keeps refusing.
 
 ## The doors — who writes what
 

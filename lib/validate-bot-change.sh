@@ -2835,22 +2835,44 @@ PLPY
     # -- #1485: the REAL daemon exits for its supervisor to relaunch --------
     # Last in the leg: it leaves the db stamped at a version nothing supports,
     # so nothing after it could open the plane anyway.
-    sqlite3 "$PL_ROOT/state/plane/plane.db" "PRAGMA user_version = 999" 2>/dev/null || true
-    "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
-        > "$PL_ROOT/stale.log" 2>&1 &
-    PL_DPID=$!
-    _pl_i=0
-    while [ "$_pl_i" -lt 300 ] && kill -0 "$PL_DPID" 2>/dev/null; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
-    # `set -e` is armed here: a bare `wait` on a daemon that exits 4 aborts
-    # the whole harness (it did, at rc 4, with no summary line).
-    _pl_rc=0; wait "$PL_DPID" 2>/dev/null || _pl_rc=$?
-    PL_DPID=""
-    [ "$_pl_rc" -ne 0 ] && r=yes || r=no
-    harness_check "#1485 a daemon started against a db NEWER than its code exits nonzero" "$r"
-    grep -q "exiting so the supervisor relaunches me" "$PL_ROOT/stale.log" && r=yes || r=no
-    harness_check "  ...saying why, so a journal reader is not left guessing" "$r"
-    [ -S "$PL_SOCK" ] && r=no || r=yes
-    harness_check "  ...and never bound the socket, so every door meets ENOENT and goes cold" "$r"
+    # The precondition is ASSERTED, never assumed (#1485 fold). Without
+    # sqlite3, or against a locked db, the PRAGMA is a silent no-op: the
+    # daemon then starts HEALTHY and the old bare `wait` blocked forever. A
+    # hang is the worst shape a harness leg has - a check that cannot fail is
+    # not a check, and nothing downstream ever prints the summary line.
+    sqlite3 "$PL_ROOT/state/plane/plane.db" "PRAGMA user_version = 999" >/dev/null 2>&1 || true
+    _pl_uv=$(sqlite3 "$PL_ROOT/state/plane/plane.db" "PRAGMA user_version" 2>/dev/null || echo "")
+    [ "$_pl_uv" = "999" ] && r=yes || r=no
+    harness_check "#1485 the stale-db precondition landed (user_version=999)" "$r"
+    if [ "$_pl_uv" = "999" ]; then
+        "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
+            > "$PL_ROOT/stale.log" 2>&1 &
+        PL_DPID=$!
+        _pl_i=0
+        while [ "$_pl_i" -lt 300 ] && kill -0 "$PL_DPID" 2>/dev/null; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
+        # Past the bound it did NOT exit: kill it and record the miss, rather
+        # than waiting on a live process. `set -e` is armed here, so `wait`
+        # keeps its own rc capture too (a bare wait on a daemon that exits 4
+        # aborted the whole harness once, with no summary line).
+        _pl_alive=no
+        if kill -0 "$PL_DPID" 2>/dev/null; then
+            _pl_alive=yes
+            kill "$PL_DPID" 2>/dev/null || true
+        fi
+        _pl_rc=0; wait "$PL_DPID" 2>/dev/null || _pl_rc=$?
+        PL_DPID=""
+        { [ "$_pl_alive" = "no" ] && [ "$_pl_rc" -ne 0 ]; } && r=yes || r=no
+        harness_check "#1485 a daemon started against a db NEWER than its code exits nonzero" "$r"
+        grep -q "exiting so the supervisor relaunches me" "$PL_ROOT/stale.log" && r=yes || r=no
+        harness_check "  ...saying why, so a journal reader is not left guessing" "$r"
+        # It binds, then refuses, then UNLINKS on the way out (the fold moved
+        # the check after bind so a refused serve cannot migrate the db). What
+        # matters to a door is that nothing is left sitting there refusing:
+        # past the exit the path is gone, so every emit meets ENOENT and the
+        # shim goes cold.
+        [ -S "$PL_SOCK" ] && r=no || r=yes
+        harness_check "  ...and left no socket behind, so every door meets ENOENT and goes cold" "$r"
+    fi
 
     rm -rf "$PL_ROOT" "$PL_SOCKDIR"
 fi

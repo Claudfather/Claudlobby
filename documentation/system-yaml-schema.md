@@ -134,7 +134,11 @@ scheduling fields (`schedule`, `interval`, `interval_from`, `type`,
 `persistent`, `randomized_delay`) are not read by the service emitter
 (`_write_service_units`). Composed as systemd `Type=simple` +
 `Restart=always` + `RestartSec=5` with **no `.timer` unit at all**; launchd
-gets `RunAtLoad` + `KeepAlive`. On Linux it is enrolled through a dedicated
+gets `RunAtLoad` + `KeepAlive`, plus `StandardOutPath`/`StandardErrorPath` at
+`<root>/state/<job>.log` — launchd sends an unredirected service's stdio to
+`/dev/null`, and the ingest daemon's stale-exit line (#1485) is the only
+record that exit leaves, so on macOS a relaunch loop was otherwise invisible;
+systemd needs no equivalent because the journal already has it. On Linux it is enrolled through a dedicated
 installer, `lib/install-host-service-systemd.sh`, distinct from the generic
 timer enroller — `setup-system` tells the two apart by whether a `.timer`
 sibling exists next to the `.service` file. On macOS there is no separate
