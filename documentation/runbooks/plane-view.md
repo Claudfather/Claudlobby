@@ -131,8 +131,23 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
 ## The attention rail
 
 A card says WHY it needs you and what clears it — the arm that put it in the
-queue (`send_failed` / `never_activated` / `overdue`), dated by the server's
-own instant. **One note dispatched to N bots is one card**: the rows share no
+queue (`escalated` / `send_failed` / `never_activated` / `nudged` / `overdue`,
+in the operator's priority order), dated by the server's own instant.
+
+Two of those arms are HUMAN acts rather than machine faults (chunk M-A,
+#1481). `escalated` is a manager asking you a question — the card reads
+`needs you: <question> — asked by <manager> 5m ago`, and the task stays OPEN
+while you decide, so nothing is lost by taking your time; answer on Telegram
+and the manager's next act (a re-dispatch, a withdrawal, or the worker's next
+report) clears the card by itself. `nudged` is your own nudge gone
+unanswered for half an hour: `nudged 40m ago by chris, no act yet`. Both hold
+only while they are the assignment's newest task event, so there is no
+"un-escalate" button to remember and none to forget. The doors are
+`lib/task-act.sh` (a manager's `withdraw` / `escalate`), `claudlobby task
+nudge <task-id>` and Telegram; **the page stays read-only** until the
+exposure walk lands a write path with a principal on every request. A card
+whose question reads "not recorded" is a fleet on metadata capture, which
+drops authored prose at the door — the arm and the person still stand. **One note dispatched to N bots is one card**: the rows share no
 id (every send mints its own work item), so `/api/tasks` keys a broadcast by
 what it really shares — sender, the words AS STORED, status, arm, and a
 dispatch instant inside a minute — and the card reads `→ jian-yang, issey,

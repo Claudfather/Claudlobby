@@ -212,6 +212,11 @@ def _family_values(payload, party, entity=None) -> tuple[str, dict]:
                 "progress": payload.progress,
                 "summary": payload.summary,
                 "pr_url": payload.pr_url,
+                # the task loop's human acts (chunk M-A, #1481) — the card
+                # reads `question` / `reason` / `by` straight off this detail
+                "reason": payload.reason,
+                "question": payload.question,
+                "by": payload.by,
             }.items() if v is not None
         }
         return "events", {

@@ -86,7 +86,12 @@ import sqlite3
 import sys
 import time
 
-_TERMINAL = {"completed", "failed", "blocked"}
+# The legacy report statuses that END a task. `cancelled` joined them with the
+# withdraw door (chunk M-A, #1481): the plane's terminal task events have
+# carried it since Phase 1, so the open set already dropped a withdrawn row
+# while this set — which brief reads through `getattr(doors, "_TERMINAL")` —
+# still called it live. `lib/plane-readers.py::TERMINAL_STATUSES` is the twin.
+_TERMINAL = {"completed", "failed", "blocked", "cancelled"}
 
 # A never-closing dispatch stops counting as overdue past this age (seconds from
 # dispatched_at), bounding the watchdog's re-emission. 24h default; override with

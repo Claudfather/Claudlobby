@@ -40,10 +40,23 @@ EQUIPMENT_KEYS = (
 )
 
 
-def _short(alias: str) -> str:
-    # bot:<fleet>/<name> -> name ; shared/<cat>/<name> -> name ; a bare
-    # alias has no "/" and rsplit returns it whole (one branch, gauntlet)
-    return alias.rsplit("/", 1)[-1]
+def short_alias(alias: str | None) -> str | None:
+    """THE alias-first presentation (§11), one definition (M-A fold, F14 —
+    there were four): `bot:<fleet>/<name>` -> name, `shared/<cat>/<name>` ->
+    name, `human:chris` -> chris (#1402: the operator renders by name, the
+    same grammar as every bot). A bare alias has no `/` and no `human:` and
+    comes back whole; a falsy alias comes back as it arrived, so a caller can
+    still tell None from "". The full alias stays in the payload."""
+    if not alias:
+        return alias
+    if "/" in alias:
+        return alias.rsplit("/", 1)[-1]
+    if alias.startswith("human:"):
+        return alias[len("human:"):] or alias
+    return alias
+
+
+_short = short_alias
 
 
 def fleet_of(alias: str) -> str | None:

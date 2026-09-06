@@ -455,6 +455,14 @@ _TELEGRAM_HANDLE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
 # drift here would silently spawn a second server for the same socket name.
 _TMUX_TMPDIR = "/tmp"
 
+# THE composed dispatch deadline when a fleet declares none (chunk M-A, #1481;
+# ruled: 24h). SECONDS — the unit `OBSERVABILITY_DISPATCH_DEADLINE` has always
+# carried and `dispatch-task.sh` adds to `now`; 24h is 1440 MINUTES, and
+# composing that number here would make every dispatch overdue in 24 minutes.
+# A fleet's own `dispatch_deadline` overrides; `0` disables (the door mints no
+# `expected_by`, so the row is open-ended and never pages).
+DEFAULT_DISPATCH_DEADLINE_S = 86_400
+
 
 def _shq(v: object) -> str:
     """Shell-quote a value for safe embedding in sourced bash scripts.
@@ -962,60 +970,58 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
 
     # Observability — pulse interval and the watchdog thresholds.
     # Values may be None when system defaults are disabled via system_defaults: false.
+    # The block is UNCONDITIONAL since chunk M-A (#1481): the dispatch
+    # deadline is composed for every bot, so there is no longer a shape of
+    # fleet.yaml that yields no observability section.
     obs = bot.observability
-    if any(
-        v is not None
-        for v in [
-            obs.pulse_interval,
-            obs.activity_stuck_threshold,
-            obs.dispatch_deadline,
-            obs.bridge_heal,
-            obs.bridge_heal_max_attempts,
-            obs.unassigned_check,
-            obs.unassigned_threshold,
-            obs.unassigned_max_age,
-        ]
-    ):
-        lines.append("")
-        lines.append("# Observability")
-        if obs.pulse_interval is not None:
-            lines.append(
-                f"export OBSERVABILITY_PULSE_INTERVAL={_shq(obs.pulse_interval)}"
-            )
-        if obs.activity_stuck_threshold is not None:
-            lines.append(
-                f"export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD={_shq(obs.activity_stuck_threshold)}"
-            )
-        if obs.dispatch_deadline is not None:
-            lines.append(
-                f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(obs.dispatch_deadline)}"
-            )
-        if obs.bridge_heal is not None:
-            # keepalive.sh gates on the string "1"; emit a shell boolean (1/0),
-            # NOT _shq(bool) which renders "True"/"False" and would leave the
-            # gate closed.
-            lines.append(
-                f"export OBSERVABILITY_BRIDGE_HEAL={'1' if obs.bridge_heal else '0'}"
-            )
-        if obs.bridge_heal_max_attempts is not None:
-            lines.append(
-                f"export BRIDGE_HEAL_MAX_ATTEMPTS={_shq(obs.bridge_heal_max_attempts)}"
-            )
-        if obs.unassigned_check is not None:
-            # Same shell-boolean rule as bridge_heal above: fleet-pulse gates on
-            # the string "1", so _shq(bool) would render "True" and leave the
-            # check silently off.
-            lines.append(
-                f"export OBSERVABILITY_UNASSIGNED_CHECK={'1' if obs.unassigned_check else '0'}"
-            )
-        if obs.unassigned_threshold is not None:
-            lines.append(
-                f"export OBSERVABILITY_UNASSIGNED_THRESHOLD={_shq(obs.unassigned_threshold)}"
-            )
-        if obs.unassigned_max_age is not None:
-            lines.append(
-                f"export OBSERVABILITY_UNASSIGNED_MAX_AGE={_shq(obs.unassigned_max_age)}"
-            )
+    lines.append("")
+    lines.append("# Observability")
+    if obs.pulse_interval is not None:
+        lines.append(
+            f"export OBSERVABILITY_PULSE_INTERVAL={_shq(obs.pulse_interval)}"
+        )
+    if obs.activity_stuck_threshold is not None:
+        lines.append(
+            f"export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD={_shq(obs.activity_stuck_threshold)}"
+        )
+    # A DEADLINE BY DEFAULT (chunk M-A, #1481). An unset value used to
+    # write no line at all, leaving the door on its own literal — so the
+    # one fact the overdue watchdog reads depended on whether the system
+    # defaults tier happened to be on. It is composed either way now:
+    # 24h, the ruled default, in the SECONDS this variable has always
+    # carried (1440 MINUTES — writing 1440 here would be 24 minutes and
+    # would page the whole fleet). A fleet's own `dispatch_deadline`
+    # still wins, and `0` composes as `0`, which the door reads as an
+    # open-ended dispatch.
+    deadline = (DEFAULT_DISPATCH_DEADLINE_S if obs.dispatch_deadline is None
+                else obs.dispatch_deadline)
+    lines.append(f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(deadline)}")
+    if obs.bridge_heal is not None:
+        # keepalive.sh gates on the string "1"; emit a shell boolean (1/0),
+        # NOT _shq(bool) which renders "True"/"False" and would leave the
+        # gate closed.
+        lines.append(
+            f"export OBSERVABILITY_BRIDGE_HEAL={'1' if obs.bridge_heal else '0'}"
+        )
+    if obs.bridge_heal_max_attempts is not None:
+        lines.append(
+            f"export BRIDGE_HEAL_MAX_ATTEMPTS={_shq(obs.bridge_heal_max_attempts)}"
+        )
+    if obs.unassigned_check is not None:
+        # Same shell-boolean rule as bridge_heal above: fleet-pulse gates on
+        # the string "1", so _shq(bool) would render "True" and leave the
+        # check silently off.
+        lines.append(
+            f"export OBSERVABILITY_UNASSIGNED_CHECK={'1' if obs.unassigned_check else '0'}"
+        )
+    if obs.unassigned_threshold is not None:
+        lines.append(
+            f"export OBSERVABILITY_UNASSIGNED_THRESHOLD={_shq(obs.unassigned_threshold)}"
+        )
+    if obs.unassigned_max_age is not None:
+        lines.append(
+            f"export OBSERVABILITY_UNASSIGNED_MAX_AGE={_shq(obs.unassigned_max_age)}"
+        )
 
     # Project validation tiers (projects.yaml) — the repo -> closure-bar map,
     # emitted into EVERY bot's conf: any sprint/runner bot must resolve a

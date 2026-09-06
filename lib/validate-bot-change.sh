@@ -254,7 +254,7 @@ val_seed_report() {
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -448,6 +448,166 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || tr
 or_ev2=$(val_events "$ROOT" "$FLEET" "$OR_BOT" dispatch_orphaned | grep -c 't-835-0002' || true)
 [ "${or_ev2:-0}" -eq 1 ] && r=yes || r=no
 harness_check "#835 a second sweep does NOT re-record the same orphan (latch holds)" "$r"
+
+# ===========================================================================
+# #1481 chunk M-A — the manager's two acts on ONE open task.
+#
+# Unit tests pin the resolution and the vocabulary. What only running the real
+# doors proves is the pair of facts the acts exist for and that no unit test
+# reaches: a WITHDRAWN row actually leaves the matcher's open set (the
+# watchdog stops crying wolf over a send that never landed), and an ESCALATED
+# one actually does NOT -- `escalated` is non-terminal by ruling, so the work
+# survives the human deciding, and the only thing that can see it is the
+# dedicated read fleet-pulse will page from.
+#
+# The reason and the question are CONTENT, so this rig -- which carries no
+# capture.json, i.e. metadata mode -- deliberately asserts the ARM and the
+# person rather than the prose. The text round-trip is pinned under full
+# capture in tests/test_task_loop_doors.py; a harness that flipped the
+# capture policy mid-run would be testing the policy, not the door.
+# ===========================================================================
+echo ""
+echo "=== validate #1481: withdraw closes a row, escalate keeps it open ==="
+
+# NO bot directory for the worker, deliberately. Every door under test here
+# reads the PLANE (the acts, the matcher, the escalated read) and none needs
+# one -- while a directory under the fleet's bots dir is what makes
+# fleet-pulse health-check a bot, so creating one would add a session_missing
+# push to the shared manager pane on every later sweep and scroll the line a
+# LATER scenario captures out of view. Measured: with the directory, the
+# #1024 pane assertion failed on both runs and passed on the baseline.
+TA_BOT="valact1481"
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0001 "$((now - 600))" "$((now + 3600))" "the undelivered one"
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0002 "$((now - 600))" "$((now + 3600))" "the twin id"
+
+# --- withdraw: run as the MANAGER, the way a manager session would ---
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
+    "$LIB_DIR/task-act.sh" withdraw t-1481-0001 --reason "the broadcast never landed" \
+    > "$ROOT/ta-withdraw.out" 2> "$ROOT/ta-withdraw.err" || true
+
+ta_cancel=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'cancelled' AND a.source_ref = 'dispatch-log:t-1481-0001'")
+[ "${ta_cancel:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 task-act.sh withdraw lands ONE cancelled task event on the resolved assignment" "$r"
+
+ta_by=$(val_sql "$ROOT" "SELECT json_extract(e.detail, '\$.by') FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'cancelled' AND a.source_ref = 'dispatch-log:t-1481-0001'")
+[ "$ta_by" = "$MGR" ] && r=yes || r=no
+harness_check "#1481   ...stamped with WHO withdrew it (the manager, by name)" "$r"
+
+ta_open=$(python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
+    --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-1481-0001' || true)
+[ "${ta_open:-1}" -eq 0 ] && r=yes || r=no
+harness_check "#1481 the withdrawn row leaves the matcher OPEN set (the watchdog stops chasing it)" "$r"
+
+# The refusal that keeps a manager from cancelling the wrong worker: a second
+# OPEN assignment under the same id, on another bot.
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$T835_BOT" t-1481-0002 "$((now - 500))" "$((now + 3600))" "a twin id on another bot"
+ta_amb_rc=0
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
+    "$LIB_DIR/task-act.sh" withdraw t-1481-0002 --reason "which one?" \
+    >/dev/null 2> "$ROOT/ta-amb.err" || ta_amb_rc=$?
+ta_amb_events=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND a.source_ref = 'dispatch-log:t-1481-0002'")
+{ [ "$ta_amb_rc" -eq 2 ] && grep -q "matches 2 open assignments" "$ROOT/ta-amb.err" \
+    && [ "${ta_amb_events:-1}" -eq 0 ]; } && r=yes || r=no
+harness_check "#1481 an id matching TWO open assignments is REFUSED, naming them, with nothing acted" "$r"
+
+# --- escalate: a fresh id, so the ambiguity above cannot reach it ---
+val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0003 "$((now - 400))" "$((now + 3600))" "the one with a question"
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
+    "$LIB_DIR/task-act.sh" escalate t-1481-0003 "do we ship without the migration" \
+    > "$ROOT/ta-esc.out" 2> "$ROOT/ta-esc.err" || true
+
+ta_esc_open=$(python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
+    --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-1481-0003' || true)
+[ "${ta_esc_open:-0}" -ge 1 ] && r=yes || r=no
+harness_check "#1481 an escalated task stays OPEN (non-terminal by ruling: the work survives the human)" "$r"
+
+ta_esc=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
+    --fleet "$FLEET" 2>/dev/null | grep -c 't-1481-0003' || true)
+[ "${ta_esc:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 plane-lookup --escalated lists it (the only read that can see a non-terminal raise)" "$r"
+
+ta_esc_by=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
+    --fleet "$FLEET" 2>/dev/null | grep 't-1481-0003' | cut -f3 || true)
+[ "$ta_esc_by" = "$MGR" ] && r=yes || r=no
+harness_check "#1481   ...naming who asked, which no capture mode strips" "$r"
+
+# A later report is an ACT: the arm holds only while `escalated` is the
+# assignment newest task event, so nothing has to remember to un-escalate.
+#
+# Deliberately addressed to a manager session that does not exist. The plane
+# record is emitted BEFORE the send (report-back.sh, F9 intent-before-transport),
+# so the fact under test lands either way -- and pointing this at the shared
+# $MGR pane pushed two [BOTREPORT] lines into it, which scrolled the line a
+# LATER scenario captures out of the visible pane and failed a #1024 push
+# assertion that had nothing to do with this change. A harness scenario must
+# not perturb its neighbours to make its own point.
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="valnomgr1481" \
+    "$LIB_DIR/report-back.sh" "$TA_BOT" progress "on it" --progress 30 \
+    --task t-1481-0003 >/dev/null 2>&1 || true
+ta_esc_after=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
+    --fleet "$FLEET" 2>/dev/null | grep -c 't-1481-0003' || true)
+[ "${ta_esc_after:-1}" -eq 0 ] && r=yes || r=no
+harness_check "#1481 a later report CLEARS the escalation (no second door, nothing to reconcile)" "$r"
+
+# --- nudge: the OPERATOR act, and the half no unit test reaches ---
+#
+# The fold F14. Unit tests pin the record and the refusals with the send
+# monkeypatched away; what only running the real door proves is the reaction:
+# `claudlobby task nudge` resolves the row, records the ask, hands it to
+# `lib/dispatch.sh`, and the MANAGER PANE receives the four-verb menu. That
+# chain crosses three processes and a tmux server, and the fold found it
+# recording nothing at all -- the ask reached the pane and left no trace, so a
+# manager that never answered looked exactly like one nobody asked.
+#
+# ITS OWN MANAGER SESSION, not the shared $MGR. Measured on the first run of
+# this block: the re-check is ~300 characters and landing it in the shared
+# pane scrolled the [FLEET-PULSE] line a LATER scenario captures out of view,
+# failing a #1024 assertion that has nothing to do with this change -- the
+# same neighbour-perturbation the withdraw scenario above already avoids by
+# creating no bot directory. The task is therefore DISPATCHED BY this manager
+# too (`assigned_by` is what the nudge reads), which is also the honest
+# shape: the re-check goes to the row's own manager.
+TA_MGR="valmgr1481"
+tmux new-session -d -s "$TA_MGR" "sleep 600"
+sleep 1
+val_seed_dispatch "$ROOT" "$FLEET" "$TA_MGR" "$TA_BOT" t-1481-0004 "$((now - 300))" "$((now + 3600))" "the nudged one"
+# The CLI reaches the send door at <root>/lib/dispatch.sh -- a production root
+# has one and this throwaway does not, so a bare run would report "the install
+# has no dispatch door" and prove nothing about the pane. Linked for THIS
+# scenario and removed after it, because the harness rule is that a scenario
+# must not leave the shared root in a shape its neighbours did not expect.
+ln -sfn "$LIB_DIR" "$ROOT/lib"
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$FLEET" USER=valop \
+    "$VAL_CLI" --root "$ROOT" task nudge t-1481-0004 "any movement" --as valop \
+    > "$ROOT/ta-nudge.out" 2> "$ROOT/ta-nudge.err" || true
+rm -f "$ROOT/lib"
+
+tn_event=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'nudged' AND a.source_ref = 'dispatch-log:t-1481-0004'")
+[ "${tn_event:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 claudlobby task nudge lands ONE nudged task event on the resolved assignment" "$r"
+
+tn_actor=$(val_sql "$ROOT" "SELECT i.alias FROM events e JOIN identity_registry i ON i.uid = e.actor_uid WHERE e.kind = 'task' AND e.event = 'nudged'")
+[ "$tn_actor" = "human:valop" ] && r=yes || r=no
+harness_check "#1481   ...under a FIRST-CLASS human actor, not the bot that carried it" "$r"
+
+tn_ask=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE message_class = 'task_request' AND command_type = 'query' AND sender_alias = 'human:valop' AND recipient_alias = 'bot:$FLEET/$TA_MGR'")
+[ "${tn_ask:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 the re-check ASK is recorded as a communication to the task manager" "$r"
+
+tn_tx=$(val_sql "$ROOT" "SELECT e.event FROM events e JOIN communications c ON c.msg_id = e.msg_id WHERE e.kind = 'transmission' AND c.sender_alias = 'human:valop'")
+[ "$tn_tx" = "pane_submitted" ] && r=yes || r=no
+harness_check "#1481   ...with an HONEST carrier fact (the send returned 0, so pane_submitted)" "$r"
+
+# -J joins the wrapped lines: the re-check is ~300 characters and an 80-column
+# pane splits `task-act.sh withdraw <id>` across two rows, so a plain capture
+# would fail the assertion for a message that arrived intact.
+tn_pane=$(tmux capture-pane -t "$TA_MGR" -p -J 2>/dev/null || true)
+printf '%s' "$tn_pane" | grep -q 'NUDGE from valop' && r=yes || r=no
+harness_check "#1481 the manager PANE received the nudge (the reaction, not just the record)" "$r"
+# ...and the SHARED manager pane is untouched by this scenario (the neighbour rule)
+command tmux -L "$(vsock "$TA_MGR")" kill-server 2>/dev/null || true
+printf '%s' "$tn_pane" | grep -q 'task-act.sh withdraw t-1481-0004' && r=yes || r=no
+harness_check "#1481   ...carrying the four verbs the manager may answer with" "$r"
 
 # ===========================================================================
 # #1187 — a read door whose misuse was indistinguishable from "nothing open".

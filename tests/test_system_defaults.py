@@ -221,7 +221,9 @@ class TestLoadFleetSystemDefaults:
         bot = fleet.bots["worker"]
         assert bot.observability.pulse_interval == 300
         assert bot.observability.activity_stuck_threshold == 1800
-        assert bot.observability.dispatch_deadline == 1800
+        # the tier's default is a DAY since chunk M-A (#1481: a deadline by default
+        # so the watchdog and the re-check have a clock); 1800 was the pre-M value
+        assert bot.observability.dispatch_deadline == 86400
 
     def test_fleet_hooks_dedup_with_system(self, tmp_path):
         root = tmp_path / "claudlobby"

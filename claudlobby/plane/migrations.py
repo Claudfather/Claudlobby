@@ -10,7 +10,7 @@ import re
 import sqlite3
 from importlib import resources
 
-SCHEMA_USER_VERSION = 9
+SCHEMA_USER_VERSION = 10
 
 _MIGRATION_RE = re.compile(r"^(\d{4})_.+\.sql$")
 
@@ -31,6 +31,31 @@ class DowngradeError(RuntimeError):
 
 def _user_version(conn: sqlite3.Connection) -> int:
     return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _version_after_writer(conn: sqlite3.Connection) -> int:
+    """``user_version`` re-read AFTER the write lock is free (M-A fold, F13).
+
+    The raced-migrator branch below reads the version the instant the script
+    failed, which is right when the other migrator has COMMITTED and wrong
+    when it is still running: a `BEGIN IMMEDIATE` that exceeds `busy_timeout`
+    fails while the winner still holds the lock, so the version has not moved
+    yet and a benign race raised. Migration 0010 makes that reachable rather
+    than theoretical — it rebuilds `events`, which on a real plane is seconds,
+    not the milliseconds every earlier migration took.
+
+    Taking the lock ourselves BLOCKS for up to `busy_timeout` and, once
+    granted, proves the winner committed. It is best-effort by construction:
+    if it cannot be taken either (a genuinely stuck writer) the caller re-
+    raises on the version it already had, which is the old behaviour."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.Error:
+        return _user_version(conn)
+    try:
+        return _user_version(conn)
+    finally:
+        conn.execute("ROLLBACK")
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -58,6 +83,12 @@ def migrate(conn: sqlite3.Connection) -> int:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
             raced = _user_version(conn)
+            if raced < number:
+                # ...or the winner is STILL HOLDING the write lock, which is
+                # what a busy_timeout expiry means. Wait for it, then look
+                # again (F13) — otherwise a benign race raises purely because
+                # the loser asked too early.
+                raced = _version_after_writer(conn)
             if raced > SCHEMA_USER_VERSION:
                 # The concurrent migrator was a NEWER binary — accepting its
                 # result here would bypass the downgrade guard that only ran

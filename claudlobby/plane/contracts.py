@@ -38,19 +38,26 @@ ATTEMPT_STATES = (
     "failed", "unknown", "recipient_acknowledged", "duplicate_suppressed",
 )
 TASK_EVENTS = (
-    # 20 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
+    # 22 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
     # pre-deletion tuple was 20, mis-stated as 19 — the count error predated the
     # deletion): the transmission ack row is
     # the single acknowledgement fact; activation derives through the join.
     # supplied_id_not_open ADDED (§6b #6, PR-B): the worker reported with a
     # task id that was not in the open set at report time — a fact about the
     # JOIN, not the work (4 real ledger rows; report-back already names it).
+    # escalated + nudged ADDED (chunk M-A, #1481) — the task loop's two HUMAN
+    # acts, both NON-terminal: `escalated` raises the task for human guidance
+    # and the task stays open while the human decides (ruled), `nudged` is the
+    # operator asking the manager to act on one row. Each carries its text in
+    # the detail (question / reason) and the person in `by`; each is an
+    # attention arm only while it is the assignment's newest task event, so a
+    # later act clears it with nothing to reconcile.
     "dispatch_intended", "transmission_failed", "dispatch_submitted",
     "accepted", "rejected", "progress",
     "blocked_waiting", "returned_blocked", "resumed", "completed", "failed",
     "cancelled", "deadline_changed", "superseded", "reassigned",
     "retry_created", "orphaned_by_session_loss", "recovered_after_restart",
-    "expired", "supplied_id_not_open",
+    "expired", "supplied_id_not_open", "escalated", "nudged",
 )
 DECLARATION_EVENTS = ("revision_seen", "scan_completed")
 SYSTEM_SUBJECT_KINDS = ("host", "vault", "fleet", "actor", "bot_instance", "session")
@@ -289,6 +296,24 @@ class TaskEvent(_Strict):
     @classmethod
     def _summary_byte_cap(cls, v):
         return _reject_over_cap("task", "summary", v)
+    # The task loop's human acts (chunk M-A, #1481): `reason` is why a manager
+    # withdrew or an operator nudged, `question` is what an escalation asks,
+    # `by` is who did it as the door knew them. Their OWN fields rather than
+    # `summary` because the attention card reads the question back by name and
+    # a door may want both a summary and a reason on one event; CONTENT-capped
+    # like every authored text, so a restrictive capture mode strips them
+    # together with it rather than leaking prose past the policy.
+    reason: Optional[str] = None
+    question: Optional[str] = None
+    by: Optional[str] = None
+
+    # `by` is METADATA (it survives a metadata capture, or a card would say
+    # "needs you" with no asker) but it is still authored input, so it is
+    # capped from the same registry — small, because it is a NAME.
+    @field_validator("reason", "question", "by")
+    @classmethod
+    def _act_text_byte_cap(cls, v, info):
+        return _reject_over_cap("task", info.field_name, v)
     pr_url: Optional[str] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id

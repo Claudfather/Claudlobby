@@ -340,6 +340,11 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .card .why { color: var(--bad); font-size: 11.5px; margin-top: 3px;
              white-space: normal; overflow-wrap: anywhere; clear: right; }
 .card .why small { color: var(--dim); }
+/* An outstanding nudge INSIDE its grace (#1481 fold F11): information, not an
+   alarm — same geometry as `.why`, the dim voice rather than the bad one, so
+   the card does not read as a second warning. */
+.card .note { color: var(--dim); font-size: 11.5px; margin-top: 3px;
+              white-space: normal; overflow-wrap: anywhere; clear: right; }
 #fleet-totals b.warn { color: var(--bad); }
 #fleet-totals small { color: var(--dim); }
 #fleet-totals small.warn { color: var(--warn); }

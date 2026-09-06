@@ -3,7 +3,8 @@
 # Usage: dispatch-task.sh [flags] <worker-session> <task...>
 #
 # Flags:
-#   --deadline-min N   Override default deadline (minutes)
+#   --deadline-min N   Override default deadline (minutes). 0 = open-ended:
+#                      no expected_by is minted, so the row never goes overdue.
 #   --repo NAME        Target repo (adds repo:<NAME> to envelope)
 #   --priority LEVEL   Priority level (adds priority:<LEVEL> to envelope)
 #   --ref URL          Reference URL (adds ref:<URL> to envelope)
@@ -52,8 +53,10 @@
 # reads to flag `overdue_dispatch` if no terminal [BOTREPORT]
 # (completed|failed|blocked) arrives by expected_by.
 # Manager identity is this bot's $BOT_ID; the deadline defaults to
-# $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can be
-# overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
+# $OBSERVABILITY_DISPATCH_DEADLINE (composed into EVERY bot.conf since chunk
+# M-A, #1481 -- 86400s / 24h when the fleet declares no `dispatch_deadline`)
+# and can be overridden with --deadline-min. Either door takes 0 to mean
+# open-ended. Sending itself reuses lib/dispatch.sh.
 #
 # Claudron query-before preflight (plan P1e, fork F7) — env-knobbed, off by
 # default:
@@ -404,10 +407,43 @@ else
     DISPATCH_MSG="$TASK"
 fi
 
+# The deadline, in SECONDS (--deadline-min is the one door in minutes). The
+# composer writes OBSERVABILITY_DISPATCH_DEADLINE into every bot.conf since
+# chunk M-A (#1481) -- 86400 when the fleet declares none -- so this literal
+# is only ever reached by a bot.conf composed before that, or by a hand run
+# with no bot.conf. It matches the composed default rather than the old 1800
+# so the two can never disagree about the same fact.
+#
+# ZERO DISABLES, on either door: an open-ended dispatch mints no expected_by
+# at all, the same `null` a control dispatch carries. Not "now + 0", which
+# would be overdue in the second it was sent -- the loudest possible reading
+# of "no deadline please".
+#
+# A NON-INTEGER IS REFUSED HERE, LOUDLY (the M-A fold, F8). The guard used to
+# leave one alone "so the arithmetic below discloses it" -- and the arithmetic
+# does not: `$(( abc * 60 ))` under `set -u` is an unbound-variable fault
+# inside the ERR trap, which exited 0 having sent nothing and recorded
+# nothing. A typo on either door (`--deadline-min abc`, or a bot.conf carrying
+# `OBSERVABILITY_DISPATCH_DEADLINE=abc`) silently dropped the whole dispatch.
+# The glob is `*[!0-9]*` and NOT `*[!0-9-]*`: allowing `-` let `12-34` through
+# the class test and into `[ "$X" -le 0 ]`, which is itself an error, and a
+# NEGATIVE deadline is not a thing anyway -- `0` is the door for open-ended.
+_reject_non_integer() {
+    case "$2" in
+        ''|*[!0-9]*)
+            echo "dispatch-task: $1 must be a non-negative integer, got '$2' (0 = open-ended)" >&2
+            exit 1 ;;
+    esac
+}
 if [ -n "$DEADLINE_MIN" ]; then
+    _reject_non_integer --deadline-min "$DEADLINE_MIN"
     DEADLINE_S=$(( DEADLINE_MIN * 60 ))
 else
-    DEADLINE_S="${OBSERVABILITY_DISPATCH_DEADLINE:-1800}"
+    DEADLINE_S="${OBSERVABILITY_DISPATCH_DEADLINE:-86400}"
+    _reject_non_integer OBSERVABILITY_DISPATCH_DEADLINE "$DEADLINE_S"
+fi
+if [ "$DEADLINE_S" -le 0 ]; then
+    EXPECTED_BY_JSON="null"
 fi
 
 MANAGER="${BOT_ID:-${BOT_NAME:-unknown}}"

@@ -278,38 +278,30 @@ defaults:
   observability:
     pulse_interval: 300
     activity_stuck_threshold: 1800
-    # DO NOT RAISE THIS TO QUIET overdue_dispatch NOISE. A run of false alerts
-    # makes that the obvious move, and it is a one-line edit that reaches every
-    # fleet at the next generate -- so the trade is recorded here, at the
-    # number, rather than in the issue thread that settled it.
+    # A DEADLINE BY DEFAULT, SO THE WATCHDOG AND THE RE-CHECK HAVE A CLOCK
+    # (chunk M-A, #1481; ruled 24h). SECONDS. 24h is 1440 MINUTES, and putting
+    # that number here would give the estate a 24-minute deadline; `0` is an
+    # open-ended dispatch, which mints no `expected_by` at all.
     #
-    # The completion distribution is BIMODAL, not shifted: across 90 tracked
-    # dispatches, 63 closed comfortably inside 30 minutes while the 26 that
-    # alerted ran to a median of 218, and 81 of the 90 carried this default
-    # untouched -- so those alerts measure the default rather than anyone's
-    # estimate. Those counts are RELAYED: measured in one manager-evening and
-    # recorded in #946, not independently re-derived here. What follows from
-    # them is not relayed, and is deliberately stated without hedge.
+    # This value is ONE of three spellings of a single fact and they are
+    # pinned together (tests/test_composer.py): this tier, the composer's
+    # `DEFAULT_DISPATCH_DEADLINE_S`, and `dispatch-task.sh`'s own literal for
+    # a bot.conf composed before M-A. It sat at 1800 while the other two moved
+    # to 86400, which meant every fleet using this tier -- i.e. nearly all of
+    # them -- kept composing the old 30-minute clock and the ruling reached
+    # nobody (measured on a bare fleet.yaml).
     #
-    # No single value serves both populations. Raising this to 14400 removes
-    # AT LEAST HALF of those ~26 false alerts AND leaves a genuinely wedged bot
-    # unnoticed for four hours instead of thirty minutes. At least half, not
-    # most: a median says how many ran long and nothing about how much longer,
-    # and completion tails typically skew right, so an unknown share of the 26
-    # sits past 240 minutes and keeps alerting. The first effect is visible in
-    # the alert log; the second is COUNTERFACTUAL and appears in no log at all,
-    # which is exactly why the edit looks free.
-    #
-    # The intended fix is suppress-while-provably-working -- never alarm while
-    # the bot is demonstrably active AND the alerted id is its oldest open row
-    # -- tracked in #946, and deliberately not a threshold change: it buys
-    # silence on a working bot without buying blindness on a stalled one, and
-    # keys on the liveness predicate #935 is building rather than adding a
-    # second one. For work known to run long there is already a per-dispatch
+    # The 30-minute threshold's own history -- the bimodal completion
+    # distribution behind it, and why raising a threshold is not the fix for
+    # false alerts -- is #946 and the CHANGELOG. What survives of it here is
+    # the standing rule: DO NOT MOVE THIS NUMBER TO QUIET NOISE. A run of
+    # false alerts makes that the obvious edit and it reaches every fleet at
+    # the next generate; the intended fix is suppress-while-provably-working
+    # (#946), and for work known to run long there is already a per-dispatch
     # door, `dispatch-task.sh --deadline-min <n>`, which widens the window for
     # the one task that needs it and trades away no stall detection anywhere
     # else.
-    dispatch_deadline: 1800
+    dispatch_deadline: 86400
 
   jobs:
     fleet-pulse:

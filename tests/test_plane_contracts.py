@@ -142,10 +142,12 @@ def test_work_item_body_cap_is_bytes():
 
 
 def test_receiver_acknowledged_is_gone():
-    # 20 = the F9-v2.1 nineteen + supplied_id_not_open (§6b #6, PR-B).
+    # 22 = the F9-v2.1 nineteen + supplied_id_not_open (§6b #6, PR-B)
+    # + escalated and nudged (the task loop's human acts, chunk M-A #1481).
     from claudlobby.plane.contracts import TASK_EVENTS
-    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 20
+    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 22
     assert "supplied_id_not_open" in TASK_EVENTS
+    assert {"escalated", "nudged"} <= set(TASK_EVENTS)
 
 
 def test_task_event_vocabulary_enforced():
@@ -176,3 +178,34 @@ def test_schemas_export():
     schemas = export_schemas()
     assert "envelope" in schemas and "communication" in schemas
     assert schemas["communication"]["title"] == "Communication"
+
+
+def test_the_acts_authored_text_is_capped_and_by_survives_a_metadata_capture():
+    """FOLD F11. `reason` / `question` are CONTENT (a metadata capture strips
+    them with every other authored text). `by` must SURVIVE that capture — a
+    card reading "needs you" with no asker is a question nobody can route —
+    but it is authored input all the same, and it shipped as the one field in
+    the family with NO cap at all, so a 4 KB "name" would ride into every
+    attention card. METADATA, and capped like a name."""
+    import pytest as _pytest
+
+    from claudlobby.plane.contracts import ContractViolation, validate_request
+    from claudlobby.plane.registries import CONTENT_FIELDS, FIELD_POLICY
+
+    assert FIELD_POLICY[("task", "by")]["class"] == "METADATA"
+    assert FIELD_POLICY[("task", "by")]["cap"] == 128
+    assert "by" not in CONTENT_FIELDS["task"]          # survives a metadata capture
+    assert {"reason", "question"} <= set(CONTENT_FIELDS["task"])   # and these do not
+
+    def _req(**payload):
+        return {"event_type": "task", "emitter": "t", "fleet": "f",
+                "payload": {"work_item_id": "wi_" + "0" * 32,
+                            "event": "nudged", **payload}}
+
+    validate_request(_req(by="c" * 128))
+    with _pytest.raises(ContractViolation):
+        validate_request(_req(by="c" * 129))
+    with _pytest.raises(ContractViolation):
+        validate_request(_req(reason="r" * 4097))
+    with _pytest.raises(ContractViolation):
+        validate_request(_req(question="q" * 4097))

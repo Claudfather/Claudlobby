@@ -222,6 +222,55 @@ def open_idless_assignments(conn: sqlite3.Connection, fleet: str, bot: str,
     return out
 
 
+# --- the task loop's two acts, resolved by TASK ID (chunk M-A, #1481) ---------
+# `task-act.sh withdraw|escalate <task-id>` is run by a MANAGER that does not
+# know the assignee — a manager holds task ids, not the roster — so unlike
+# `--supersedes` it cannot scope the lookup by assignee. It resolves against
+# every OPEN assignment carrying the id instead and REFUSES when more than one
+# matches: a task id is unique per dispatch but NOT across bots (#526 lets two
+# fleets hold the same name, and a re-dispatch under the same id is legal), and
+# guessing which row a manager meant is how the wrong worker's task gets
+# cancelled. Open closes per ASSIGNMENT — attention and expiry's question,
+# not the list reader's per-(bot, task id) one — because an act names one row.
+#
+# The fold's F6: this question was written out three times (here, in
+# `commands/task.py`, and implicitly in both refusal ladders). It is defined
+# ONCE in `queries.OPEN_BY_TASK_REF_SQL`, of which this is the BYTE-IDENTICAL
+# stdlib twin, pinned by test the way `OPEN_SQL` is — a bash door cannot
+# import the package, and two spellings of "open" is how one door refuses an
+# id another door acts on. `--assignment` NARROWS this result in the caller
+# rather than adding a second query: a lookup by assignment alone would act
+# on a row belonging to another task while stamping the named task's
+# `source_ref` as the act's provenance.
+_NT_A = (
+    " NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    "   AND t.assignment_id = a.assignment_id AND t.event IN " + _TERMINAL + ")"
+)
+_OPEN_ROW_SELECT = (
+    "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.occurred_at,"
+    " w.title, i.alias AS assignee, m.alias AS assigned_by, f.alias AS fleet"
+    " FROM assignments a"
+    " LEFT JOIN work_items w ON w.work_item_id = a.work_item_id"
+    " LEFT JOIN identity_registry i ON i.uid = a.assignee_uid"
+    " LEFT JOIN identity_registry m ON m.uid = a.assigned_by_uid"
+    " LEFT JOIN identity_registry f ON f.uid = a.fleet_uid"
+)
+TASK_OPEN_SQL = (
+    _OPEN_ROW_SELECT + " WHERE a.source_ref = ? AND" + _NT_A
+    + " ORDER BY a.ingest_seq DESC")
+_OPEN_ROW_COLS = ("work_item_id", "assignment_id", "dispatch_msg_id",
+                  "occurred_at", "title", "assignee", "assigned_by", "fleet")
+
+
+def open_assignments_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    """One dict per OPEN assignment stamped ``dispatch-log:<task_id>``, newest
+    first — the `_OPEN_ROW_COLS` keys. Empty = nothing open under that id
+    (which is NOT the same as no such id: a closed one answers empty too, and
+    the caller says so)."""
+    return [dict(zip(_OPEN_ROW_COLS, r))
+            for r in conn.execute(TASK_OPEN_SQL, (DISPATCH + task_id,))]
+
+
 def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, max_age: int,
                  progress_grace: int, entry: Optional[dict] = None
                  ) -> list[tuple[int, int, int, Optional[str]]]:
@@ -314,7 +363,13 @@ NEWEST_ASSIGNMENT_SQL = (
     "SELECT a.occurred_at FROM assignments a WHERE a.assignee_uid IN (%s)"
     " AND (? IS NULL OR a.occurred_at <= ?) ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
 )
-LEGACY_STATUS = {"completed": "completed", "failed": "failed", "returned_blocked": "blocked"}
+# The task events that render as a legacy report STATUS. `cancelled` joined
+# them with the withdraw door (chunk M-A, #1481): it was already terminal for
+# the open set, so a withdrawn row left `--open` correctly while every status
+# render showed the raw event name — the two vocabularies said different
+# things about the same fact.
+LEGACY_STATUS = {"completed": "completed", "failed": "failed",
+                 "returned_blocked": "blocked", "cancelled": "cancelled"}
 
 
 # --- the report ledger from the plane (cutover chunk C3) -------------------------
@@ -482,7 +537,11 @@ def newest_ack(conn: sqlite3.Connection, uids: list) -> Optional[dict]:
 
 # The legacy report statuses that END a task (the matcher's `_TERMINAL` in
 # ledger terms): what an unacked list and the card count as needing a read.
-TERMINAL_STATUSES = frozenset({"completed", "failed", "blocked"})
+# `cancelled` rides with the withdraw door (chunk M-A, #1481) so this set and
+# `dispatch-overdue.py::_TERMINAL` keep naming the same statuses; no report
+# carries it today (the door emits the task event, not a report), which is
+# why adding it changes no live count.
+TERMINAL_STATUSES = frozenset({"completed", "failed", "blocked", "cancelled"})
 
 
 def unacked_rows(rows: list, acked_seq: Optional[int], terminal=TERMINAL_STATUSES) -> list[dict]:
@@ -822,3 +881,54 @@ def escalation(conn: sqlite3.Connection, fleet: str, window_start: Optional[str]
                 ESCALATION_SQL, (uid, FLEET_EVENTS_PREFIX + "%", since_form(window_start) or "",
                                  event_type, event_type))
             if alias and alias.startswith(prefix)}
+
+
+# --- the OPEN escalations of a fleet (chunk M-A, #1481) -----------------------
+# `escalated` is NON-TERMINAL by ruling — the task stays open while the human
+# decides — so nothing in the open set or the status ladder distinguishes it,
+# and fleet-pulse needs its own read to page the operator. An escalation holds
+# only while it is the assignment's NEWEST task event, the same rule
+# `queries.ATTENTION_ARMS` applies: a manager who re-dispatches, withdraws or
+# whose worker reports progress has answered it, and the card and the page
+# must go quiet together rather than on two different rules.
+#
+# Scoped by the EVENT's fleet, not the assignment's assignee: the escalation is
+# the MANAGER's act, and it is that fleet's operator who owes the answer, even
+# where the work sits on another fleet's bot (44.6% of dispatch traffic is
+# cross-fleet).
+#
+# `ESCALATION_IGNORED` is the fold's F1 and the byte-identical twin of
+# `queries.ESCALATION_IGNORED` (pinned): a NUDGE is an ask, not an answer, so
+# it must not displace a raise. Left in the window, escalate → nudge deleted
+# the escalation from this read and from the card at once, permanently,
+# because nothing re-raises it.
+ESCALATION_IGNORED = ("supplied_id_not_open", "nudged")
+_ESC_SKIP = ",".join(f"'{e}'" for e in ESCALATION_IGNORED)
+ESCALATED_SQL = (
+    "SELECT e.assignment_id, a.source_ref,"
+    " json_extract(e.detail, '$.by'), e.occurred_at,"
+    " json_extract(e.detail, '$.question')"
+    " FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.event = 'escalated' AND e.fleet_uid = ?"
+    " AND e.ingest_seq = (SELECT n.ingest_seq FROM events n WHERE n.kind = 'task'"
+    "   AND n.assignment_id = e.assignment_id AND n.event NOT IN (" + _ESC_SKIP + ")"
+    "   ORDER BY n.ingest_seq DESC LIMIT 1)"
+    " AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind = 'task'"
+    "   AND t.event IN " + _TERMINAL + " AND t.assignment_id = e.assignment_id)"
+    " ORDER BY e.occurred_at, e.ingest_seq"
+)
+
+
+def escalated_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
+    """The fleet's OPEN escalations, oldest first — one dict per assignment
+    whose newest task event is `escalated`: {assignment_id, task_id, by,
+    occurred_at, question}. `task_id` is `-` for an id-less dispatch (nothing
+    to name it by), and a missing `by` / `question` renders empty rather than
+    fabricated — a capture mode may legitimately have stripped the text."""
+    uid = fleet_uid(conn, fleet)
+    out = []
+    for asg, ref, by, at, question in conn.execute(ESCALATED_SQL, (uid,)):
+        out.append({"assignment_id": asg, "task_id": _task_id(ref) or "-",
+                    "by": by or "-", "occurred_at": at or "",
+                    "question": question or ""})
+    return out

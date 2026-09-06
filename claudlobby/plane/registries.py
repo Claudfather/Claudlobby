@@ -15,6 +15,20 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     ("communication", "recipient_raw"): {"class": "SENSITIVE"},
     ("work_item", "body"): {"class": "CONTENT", "cap": 16_384},
     ("task", "summary"): {"class": "CONTENT", "cap": 4_096},
+    # chunk M-A (#1481) — the task loop's authored text: why a task was
+    # withdrawn or nudged, and what an escalation asks. Same class and cap as
+    # `summary`; a metadata-mode capture strips all three together.
+    ("task", "reason"): {"class": "CONTENT", "cap": 4_096},
+    ("task", "question"): {"class": "CONTENT", "cap": 4_096},
+    # `by` is METADATA, deliberately: the card must still name WHO acted after
+    # a metadata-mode capture strips the prose beside it ("needs you" with no
+    # asker is a question nobody can route). But it is AUTHORED INPUT all the
+    # same -- `--as <who>` and a bot name -- so it is capped like everything a
+    # human types (the M-A fold, F11): unregistered, it was the one authored
+    # field in the family with no cap at all, and a 4 KB "name" would ride into
+    # every attention card. Small, because it is a NAME: the doors already
+    # clamp an alias to 64 characters.
+    ("task", "by"): {"class": "METADATA", "cap": 128},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
     ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail

@@ -59,7 +59,7 @@ Round-robin across the idle workers (no worker gets a second lens until every id
 
 ### 3. Collect results
 
-Monitor for `[BOTREPORT]` messages (see `report-back`). On `completed` with `skill:ironclad-lens`, read that lens's `result.md`. On `failed`/`blocked`, queue the lens for retry. Time out a lens at `$OBSERVABILITY_DISPATCH_DEADLINE` (default 1800s).
+Monitor for `[BOTREPORT]` messages (see `report-back`). On `completed` with `skill:ironclad-lens`, read that lens's `result.md`. On `failed`/`blocked`, queue the lens for retry. Time out a lens at `$OBSERVABILITY_DISPATCH_DEADLINE` (default 86400s = 24h; a lens that needs a tighter clock passes `--deadline-min`).
 
 ### 4. Retry
 
