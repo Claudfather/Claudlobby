@@ -527,7 +527,11 @@ def test_a_non_integer_deadline_is_refused_loudly_on_both_doors(tmp_path, bad):
         return
     assert composed.returncode == 1, (composed.returncode, composed.stderr)
     assert "OBSERVABILITY_DISPATCH_DEADLINE must be a non-negative integer" in composed.stderr
-    assert not _rows(tmp_path, "SELECT 1 FROM assignments")   # nothing sent, nothing recorded
+    # nothing sent, nothing recorded: the refusal fires BEFORE the door ever
+    # touches the plane, so on a fresh root there is no db at all (the Linux
+    # runner's shape) — absent is "nothing recorded", not an error
+    db = tmp_path / "state" / "plane" / "plane.db"
+    assert not db.exists() or not _rows(tmp_path, "SELECT 1 FROM assignments")
 
 
 def test_a_migrator_that_lost_the_race_waits_instead_of_raising(tmp_path):
