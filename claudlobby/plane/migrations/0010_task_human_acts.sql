@@ -14,6 +14,29 @@
 -- string is wrong -- a worse failure than a slow start, on the one database
 -- the estate keeps its history in.
 --
+-- TWO COSTS MEASURED, both of which the bare sentence above understates:
+--
+--  1. FREE SPACE is the table's size AGAIN plus the WAL's. The copy runs
+--     inside one transaction on a WAL database, so every page written lands
+--     in `plane.db-wal` before it lands in `plane.db`: an 80 MB plane whose
+--     `events` is 67 MB needs ~67 MB of WAL on top of the ~67 MB the new
+--     table occupies, not the ~67 MB a non-WAL rebuild would. A host at 90%
+--     full passes the naive check and fails the real one. There is
+--     deliberately no VACUUM afterwards (it would take the same lock again,
+--     and SQLite reuses the freed pages) -- `plane.db` stays large until it
+--     grows into the space.
+--
+--  2. A CONCURRENT MIGRATOR can lose the race LOUDLY. Every earlier
+--     migration is milliseconds, so the loser's `BEGIN IMMEDIATE` always
+--     found the lock free or waited out a blink; this one holds it for
+--     seconds on a real plane, long enough to exceed `busy_timeout` (5s) and
+--     RAISE rather than take the benign already-applied path. `migrate()`
+--     now re-reads `user_version` after waiting for the write lock
+--     (`_version_after_writer`), so the loser no-ops on the winner's result
+--     instead of erroring -- which matters here because the doors that
+--     migrate (`plane status`/`doctor`/`spool retry`, `claudlobby task
+--     nudge`, every cold `emit`) can easily be two at once on a timer host.
+--
 -- foreign_keys is toggled OUTSIDE the transaction (it is a no-op inside one),
 -- per the same procedure: `events` is a CHILD of ingest_ledger and has no
 -- children of its own, so nothing cascades either way, but DROP TABLE under

@@ -533,7 +533,7 @@ Controls fleet observability thresholds for heartbeat pulses and stuck-detection
 observability:
   pulse_interval: 300           # seconds between heartbeat pulses (default: 300)
   activity_stuck_threshold: 1800  # seconds of no tool-call activity before flagged (default: 1800)
-  dispatch_deadline: 1800       # seconds after manager dispatch before flagged overdue (default: 86400 = 24h; 0 = open-ended)
+  dispatch_deadline: 86400      # seconds after manager dispatch before flagged overdue (default: 86400 = 24h; 0 = open-ended)
   bridge_heal: true             # enable the keepalive Telegram-bridge auto-heal ladder (default: off)
   bridge_heal_max_attempts: 3   # heal bounce cap before escalation (keepalive default: 3)
   unassigned_check: true        # enable the reported-but-never-re-dispatched watchdog (default: off)
@@ -543,7 +543,7 @@ observability:
 
 `observability.reap_days` is retired (F18 closure, #1467): the event files it aged are gone and the plane's `plane prune` retention replaced them — a manifest that still sets it loads, and `claudlobby validate` warns, naming the key.
 
-**`dispatch_deadline` is composed for EVERY bot** (chunk M-A, #1481). It used to be written only when a manifest or the system-defaults tier declared one, so a fleet with `system_defaults: false` and no `observability:` block composed no line at all and the door fell back to a bash literal nobody could see from `fleet.yaml` — while the deadline is the one fact the overdue watchdog reads. The composed default when a fleet declares none is **86400 seconds (24 hours)**; a fleet's own value still wins, and the estate's `system.yaml` tier keeps supplying `1800` for fleets that use it.
+**`dispatch_deadline` is composed for EVERY bot** (chunk M-A, #1481). It used to be written only when a manifest or the system-defaults tier declared one, so a fleet with `system_defaults: false` and no `observability:` block composed no line at all and the door fell back to a bash literal nobody could see from `fleet.yaml` — while the deadline is the one fact the overdue watchdog reads. The composed default when a fleet declares none is **86400 seconds (24 hours)**; a fleet's own value still wins, and `claudlobby/system.yaml`'s own `observability` tier — the one a normal fleet takes — supplies the SAME 86400, so the ruled default reaches the fleets that declare nothing (it sat at 1800 when M-A first shipped, which meant nearly every fleet kept composing the old 30-minute clock; the tier, the composer constant and `dispatch-task.sh`'s fallback are now pinned together).
 
 The unit is **seconds**, and the trap is worth naming: 24h is 1440 *minutes*, so composing `1440` here would give every dispatch a 24-minute deadline and page the whole fleet. `--deadline-min N` on `dispatch-task.sh` is the one door that speaks minutes.
 

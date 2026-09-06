@@ -307,7 +307,10 @@ class TaskEvent(_Strict):
     question: Optional[str] = None
     by: Optional[str] = None
 
-    @field_validator("reason", "question")
+    # `by` is METADATA (it survives a metadata capture, or a card would say
+    # "needs you" with no asker) but it is still authored input, so it is
+    # capped from the same registry — small, because it is a NAME.
+    @field_validator("reason", "question", "by")
     @classmethod
     def _act_text_byte_cap(cls, v, info):
         return _reject_over_cap("task", info.field_name, v)

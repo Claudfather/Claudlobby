@@ -2987,6 +2987,59 @@ class TestComposeBotConfObservability:
         assert "OBSERVABILITY_PULSE_INTERVAL" not in conf
         assert "OBSERVABILITY_BRIDGE_HEAL" not in conf
 
+    def test_a_bare_fleet_yaml_composes_the_ruled_default(self, tmp_path):
+        """FOLD F2, and the case the M-A pin missed: it covered the fleet with
+        the system-defaults tier OFF, which is the RARE shape. A normal
+        fleet.yaml takes `claudlobby/system.yaml`'s `observability` tier, and
+        that tier still said 1800 — so the ruled 24h reached nobody, measured
+        on exactly this shape. The tier is the value the estate actually
+        composes; the composer constant is only the fallback beneath it."""
+        from textwrap import dedent as _dedent
+
+        from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S, compose_bot_conf
+        from claudlobby.config import load_fleet
+        from claudlobby.paths import Paths
+
+        root = tmp_path / "claudlobby"
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+        (root / "fleet.yaml").write_text(_dedent("""\
+            fleet:
+              name: test-fleet
+              service_prefix: com.test
+              bots:
+                worker:
+                  expertise: [eng]
+        """))
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        conf = compose_bot_conf(fleet.bots["worker"], fleet,
+                                Paths(root=root, fleet_dir=root))
+        assert "export OBSERVABILITY_DISPATCH_DEADLINE=86400" in conf
+        assert fleet.bots["worker"].observability.dispatch_deadline == \
+            DEFAULT_DISPATCH_DEADLINE_S
+
+    def test_one_number_three_places_and_they_are_pinned_together(self):
+        """FOLD F2. The default deadline is spelled in THREE files — the
+        system-defaults tier, the composer's constant, and `dispatch-task.sh`'s
+        own literal for a bot.conf composed before M-A. Two of them moved to
+        86400 and the third did not, which is how the ruling shipped and
+        changed nothing. Pinned together so the next move has to visit all
+        three."""
+        import re
+        from pathlib import Path as _P
+
+        from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S
+
+        repo = _P(__file__).resolve().parent.parent
+        tier = re.search(r"^    dispatch_deadline: (\d+)$",
+                         (repo / "claudlobby" / "system.yaml").read_text(), re.M)
+        door = re.search(r'DEADLINE_S="\$\{OBSERVABILITY_DISPATCH_DEADLINE:-(\d+)\}"',
+                         (repo / "lib" / "dispatch-task.sh").read_text())
+        assert tier and door
+        assert int(tier.group(1)) == int(door.group(1)) == DEFAULT_DISPATCH_DEADLINE_S
+        assert DEFAULT_DISPATCH_DEADLINE_S == 86_400      # 24h in SECONDS, the ruling
+
     def test_a_zero_deadline_composes_as_zero_and_disables_the_clock(self, tmp_path):
         """`0` is the open-ended dispatch, not "now": it must reach bot.conf
         as 0 so the door withholds `expected_by` entirely."""

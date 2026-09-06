@@ -78,6 +78,17 @@ def _with_plane(root: str, fn) -> int:
         conn.close()
 
 
+def _assignee_key(alias):
+    """The (fleet, name) an `--assignee` value and a registry alias compare
+    by — lowercased, the legacy grep's own case-insensitivity. None for an
+    absent value; an alias the registry could not name is NOT a match (fail
+    CLOSED), which the caller gets by comparing None against a real key."""
+    if not alias:
+        return None
+    fl, _, name = alias.rpartition("/")
+    return (fl.lower(), name.lower())
+
+
 def _open_idless(a) -> int:
     """`--open-idless --fleet F --bot B`: `<work_item_id> <assignment_id>` per
     OPEN id-less dispatch of the bot (cutover chunk 6a) — what report-back.sh
@@ -101,10 +112,24 @@ def _all_open(a) -> int:
     does not — a manager holds task ids, not the roster — so it needs the
     whole open set to refuse an ambiguous id by NAMING the rows instead of
     silently acting on the newest. Empty = nothing open under that id, which
-    is not the same fact as no such id; the caller says which."""
+    is not the same fact as no such id; the caller says which.
+
+    `--assignee` NARROWS it, the same fail-closed rule the plain mode applies
+    (an assignee the registry cannot name is not a match) — the fold's F5:
+    the flag was accepted and silently ignored here, so a caller that thought
+    it had disambiguated got the whole ambiguous set back. The acts' own
+    `--assignment <asg_id>` narrows THIS list in the caller rather than
+    querying by assignment, so the row acted on provably carries the task id
+    the caller named."""
     def fn(pr, conn):
-        for wi, asg, msg, who, fleet in pr.open_assignments_for_task(conn, a.task_id):
-            print(f"{wi} {asg} {msg or '-'} {who or '-'} {fleet or '-'}")
+        rows = pr.open_assignments_for_task(conn, a.task_id)
+        want = _assignee_key(a.assignee)
+        for r in rows:
+            if want and _assignee_key(r["assignee"]) != want:
+                continue
+            print(f"{r['work_item_id']} {r['assignment_id']}"
+                  f" {r['dispatch_msg_id'] or '-'} {r['assignee'] or '-'}"
+                  f" {r['fleet'] or '-'}")
         return 0
     return _with_plane(a.root, fn)
 
@@ -131,10 +156,12 @@ def main(argv=None) -> int:
                     help="bot:<fleet>/<name>; name part compared case-insensitively")
     ap.add_argument("--all-open", action="store_true",
                     help="--task-id: print EVERY open assignment carrying the id, not just the"
-                    " latest (the task-loop acts refuse an ambiguous id rather than guessing)")
+                    " latest (the task-loop acts refuse an ambiguous id rather than guessing);"
+                    " --assignee narrows it")
     ap.add_argument("--escalated", action="store_true",
                     help="print the fleet's OPEN escalations, tab-separated (needs --fleet) —"
-                    " fleet-pulse's read for the `escalated` task event")
+                    " M-B's fleet-pulse read for the `escalated` task event; NO consumer yet,"
+                    " the paging half lands with M-B")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
     ap.add_argument("--events", action="store_true",
@@ -208,20 +235,14 @@ def main(argv=None) -> int:
         ap.error("--task-id is required (or --open-idless / --escalated)")
     if a.all_open:
         return _all_open(a)
-    want = None
-    if a.assignee:
-        fl, _, name = a.assignee.rpartition("/")
-        want = (fl.lower(), name.lower())
+    want = _assignee_key(a.assignee)
 
     def fn(pr, conn):
         rows = conn.execute(SQL, (f"dispatch-log:{a.task_id}",)).fetchall()
         for wi, asg, msg, alias in rows:
             if want:
                 # Fail CLOSED: an assignee the registry cannot name is not a match.
-                if not alias:
-                    continue
-                fl, _, name = alias.rpartition("/")
-                if (fl.lower(), name.lower()) != want:
+                if _assignee_key(alias) != want:
                     continue
             print(f"{wi} {asg} {msg or ''}".rstrip())
             return 0

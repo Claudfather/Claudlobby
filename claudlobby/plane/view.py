@@ -68,15 +68,17 @@ from .ingest import CONSTRUCT_TABLES
 from .spool import oldest_spooled_at, scan_spool
 from .ingest import now_iso as _now_iso
 from .inventory import fleet_of, qualified, qualified_labels
+from .inventory import short_alias as _short
 from .presence import STALE_AFTER_S, _parse_iso, derive_presence, presence_counts
 from .sampler import PaneSampler, discover_bot_dirs
 from .queries import (
     ACTIVATION_TX_EVENTS,
     ATTENTION_ARMS,
     ATTENTION_ARMS_SQL,
-    EVENT_DATED_ARMS,
+    HUMAN_ARMS,
     LATEST_HEARTBEAT_SQL,
     NON_TERMINAL_CLAUSE,
+    NUDGE_STATE_SQL,
     TASK_STATUS_SQL,
     TERMINAL_TASK_EVENTS,
     OPEN_ASSIGNMENTS_AT_SQL, attention_arms_params, fleet_alias_range,
@@ -101,19 +103,6 @@ def body_words(text: str | None) -> str | None:
     out = _FRAME_RE.sub("", text)
     out = _TAIL_RE.sub("", out)
     return out.strip() or text
-
-
-def _short(alias: str | None) -> str | None:
-    """Alias-first presentation (§11): `bot:fleet/name` -> `name` and
-    `human:chris` -> `chris` (#1402 — the operator renders by name, same
-    grammar as every bot). The full alias stays in the payload."""
-    if not alias:
-        return alias
-    if "/" in alias:
-        return alias.rsplit("/", 1)[-1]
-    if alias.startswith("human:"):
-        return alias[len("human:"):] or alias
-    return alias
 
 
 def _qualified(alias: str | None) -> str | None:
@@ -615,6 +604,13 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
     arms = {r["assignment_id"]: r for r in conn.execute(
         ATTENTION_ARMS_SQL + f" AND a.assignment_id IN ({ph})",
         (*attention_arms_params(now), *ids))}
+    # ...and the row's OUTSTANDING NUDGE, grace or no grace (fold F11). The
+    # arm above fires only once the grace has passed; a nudge made two minutes
+    # ago is the single most useful thing the card can say about the row in
+    # those thirty minutes, and it is not an alarm — so it rides its own
+    # columns and the card renders it as information.
+    nudges = {r["assignment_id"]: r for r in conn.execute(
+        NUDGE_STATE_SQL + f" AND a.assignment_id IN ({ph})", ids)}
     # the RAW titles, before the render form replaces them: the broadcast key
     # is keyed on what was STORED (fold F3 — `body_words` strips the trailing
     # `| ref:…` that is the only thing telling two reviews apart)
@@ -629,30 +625,31 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
         r["terminal_at"] = terminal_at
         arm = arms.get(r["assignment_id"])
         r["attention"] = arm is not None
-        # the arms in the operator's priority order; the two SEND arms date
-        # from the dispatch, the deadline arm from the deadline, and the two
-        # HUMAN arms (chunk M-A) from the event the human landed
-        reasons = [name for name, _ in ATTENTION_ARMS if arm and arm[name]]
-        # the PRIMARY arm dates the card: a purely-overdue row from its
-        # deadline (`overdue` is last in the priority order), an escalation or
-        # a nudge from its own instant — the query's `arm_at`, never
-        # re-derived here.
-        since = None
-        if reasons:
-            if reasons[0] in EVENT_DATED_ARMS:
-                since = arm["arm_at"]
-            elif reasons[0] == "overdue":
-                since = r["expected_by"]
-            else:
-                since = r["occurred_at"]
+        # the arms in the operator's priority order
+        reasons = [name for name, _s, _a, _w in ATTENTION_ARMS if arm and arm[name]]
+        # the PRIMARY arm dates the card, and EVERY arm carries its own date
+        # (fold F12): the send arms the dispatch, the deadline arm the
+        # deadline, the human arms the instant the human acted. One lookup,
+        # because a ladder here is a place a new arm can arrive undated.
+        since = arm[reasons[0] + "_at"] if reasons else None
         r["attention_reason"] = reasons
         r["attention_since"] = since
-        # WHAT the human said and WHO said it, straight off the arm's own
-        # event: the escalation's question is the whole point of the card
-        # ("needs you: <question>"), and a nudge names the person so the
-        # manager knows who is waiting. Both None for every other arm.
-        r["attention_question"] = arm["arm_question"] if arm else None
-        r["attention_by"] = arm["arm_by"] if arm else None
+        # WHAT the human said, WHO said it and WHY — off the LEADING arm's own
+        # columns (fold F10), which is both a scope and a source fix. One
+        # shared `arm_*` set read the row's newest task event whatever arm
+        # won, so an overdue row carrying an in-grace nudge reported
+        # `attention_by` beside a reason line naming no person, and an
+        # escalation followed by a nudge quoted the NUDGE's words as the
+        # question. Each human arm now carries its own, read in its own
+        # window. Nothing is lost by the narrowing: a nudge that is not the
+        # leading arm rides `nudged_by` below, where it is true.
+        lead = reasons[0] if reasons and reasons[0] in HUMAN_ARMS else None
+        r["attention_question"] = arm[f"{lead}_question"] if lead else None
+        r["attention_by"] = arm[f"{lead}_by"] if lead else None
+        r["attention_act_reason"] = arm[f"{lead}_reason"] if lead else None
+        nudge = nudges.get(r["assignment_id"])
+        r["nudged_at"] = nudge["nudged_at"] if nudge else None
+        r["nudged_by"] = nudge["nudged_by"] if nudge else None
         r["broadcast_key"] = None
     _stamp_broadcasts(rows, raw_titles)
     return {"assignments": rows,

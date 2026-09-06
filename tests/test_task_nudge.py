@@ -5,6 +5,10 @@ and a failed send never unwrites it (a nudge nobody delivered is still a nudge
 the operator made, and the card carries it), while a nudge the plane refused
 sends nothing at all — a delivered nudge with no trace is the one shape the
 plane must never produce.
+
+Everything here drives `cmd_task_nudge`, the real door, and reads the plane
+back (the fold's F14): the earlier version asserted a private SQL constant,
+which is the one thing that stays green while the door itself is wrong.
 """
 
 from __future__ import annotations
@@ -23,9 +27,10 @@ ASG, WI, MSG = "asg_" + STEM, "wi_" + STEM, "msg_" + STEM
 
 
 class _Args:
-    def __init__(self, root, task_id, why="", as_who=None):
+    def __init__(self, root, task_id, why="", as_who=None, assignment=None):
         self.root, self.fleet, self.seed = str(root), None, False
         self.task_id, self.why, self.as_who = task_id, why, as_who
+        self.assignment = assignment
 
 
 def _full_capture(root) -> None:
@@ -58,14 +63,35 @@ def _task_events(root):
     return rows
 
 
+def _comms(root):
+    conn = connect(db_path(root))
+    rows = [dict(r) for r in conn.execute(
+        "SELECT c.msg_id, c.sender_alias, c.recipient_alias, c.message_class,"
+        " c.command_type, c.body, c.work_item_id, f.alias AS fleet"
+        " FROM communications c"
+        " LEFT JOIN identity_registry f ON f.uid = c.fleet_uid"
+        " ORDER BY c.ingest_seq")]
+    conn.close()
+    return rows
+
+
+def _transmissions(root):
+    conn = connect(db_path(root))
+    rows = [dict(r) for r in conn.execute(
+        "SELECT msg_id, event, carrier, detail FROM events"
+        " WHERE kind='transmission' ORDER BY ingest_seq")]
+    conn.close()
+    return rows
+
+
 @pytest.fixture()
 def sent(monkeypatch):
     """The manager send, captured rather than made: the CLI runs on the HOST,
     so its only send door is `lib/dispatch.sh` against a live tmux server."""
     calls = []
 
-    def fake(paths, bot, message):
-        calls.append((bot, message))
+    def fake(paths, bot, message, fleet=None):
+        calls.append((bot, message, fleet))
         return 0, ""
 
     monkeypatch.setattr(task_cmd, "send_to_bot", fake)
@@ -96,8 +122,9 @@ def test_a_nudge_records_the_fact_and_asks_the_tasks_manager(tmp_path, sent, mon
     # ...and the re-check goes to the task's OWN manager (the plane's
     # assigned_by), carrying the four verbs and the row's facts
     assert len(sent) == 1
-    bot, message = sent[0]
+    bot, message, fleet = sent[0]
     assert bot == "erlich"
+    assert fleet == F                     # F4: the ROW's fleet, never a guess
     assert message.startswith("NUDGE from chris: task " + tid)
     assert "port the parser" in message and "assignee ramanujan" in message
     for verb in ("chase", "supersede", "withdraw", "escalate"):
@@ -106,17 +133,52 @@ def test_a_nudge_records_the_fact_and_asks_the_tasks_manager(tmp_path, sent, mon
     assert f"dispatch-task.sh --supersedes {tid}" in message
 
 
-def test_a_failed_send_keeps_the_record_and_says_so(tmp_path, monkeypatch, capsys):
+def test_the_ask_is_recorded_as_a_communication_and_a_submitted_transmission(tmp_path, sent, monkeypatch):
+    """FOLD F3. The re-check reached the manager's pane and landed NOWHERE:
+    the plane held a nudge with no trace of anyone being asked to act on it,
+    so a manager who never answered was indistinguishable from one who was
+    never asked. The ask is a communication (id-less — a task_request that
+    opens no row) threaded under the work item, and the carrier fact follows
+    the send."""
+    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    _full_capture(tmp_path)
+    tid = _seed(tmp_path)
+    assert task_cmd.cmd_task_nudge(
+        _Args(tmp_path, tid, why="any movement?", as_who="chris")) == 0
+
+    asks = [c for c in _comms(tmp_path) if c["message_class"] == "task_request"]
+    assert len(asks) == 1
+    ask = asks[0]
+    assert ask["sender_alias"] == "human:chris"          # the telegram-in precedent
+    assert ask["recipient_alias"] == f"bot:{F}/erlich"
+    assert ask["command_type"] == "query"
+    assert ask["work_item_id"] == WI                     # threads under the task
+    assert ask["fleet"] == F
+    assert "NUDGE from chris" in ask["body"]
+
+    tx = _transmissions(tmp_path)
+    assert [(t["event"], t["carrier"]) for t in tx] == [("pane_submitted", "tmux")]
+    assert tx[0]["msg_id"] == ask["msg_id"]
+
+
+def test_a_failed_send_records_the_failure_rather_than_claiming_delivery(tmp_path, monkeypatch, capsys):
     """The fact is written FIRST and a send failure never unwrites it: the
     nudge stands, shows on the card, and M4's timer will carry it. Loud (rc 1),
-    not silent, and not a rollback."""
+    not silent, and not a rollback — and the carrier fact is HONEST (F3): a
+    `pane_submitted` on a send that returned 1 is exactly the fabrication that
+    makes recording the ask worthless."""
     monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
     monkeypatch.setattr(task_cmd, "send_to_bot",
-                        lambda paths, bot, message: (1, "session not found"))
+                        lambda paths, bot, message, fleet=None: (1, "session not found"))
     tid = _seed(tmp_path)
     rc = task_cmd.cmd_task_nudge(_Args(tmp_path, tid, as_who="chris"))
     assert rc == 1
     assert [e for e, _, _ in _task_events(tmp_path)] == ["nudged"]
+    tx = _transmissions(tmp_path)
+    assert [t["event"] for t in tx] == ["failed"]
+    assert "session not found" in (tx[0]["detail"] or "")
+    # the ask itself is still recorded — the question was asked, not delivered
+    assert [c["message_class"] for c in _comms(tmp_path)] == ["task_request"]
     err = capsys.readouterr().err
     assert "did NOT reach erlich" in err and "stands on the plane" in err
 
@@ -133,7 +195,8 @@ def test_a_silenced_plane_refuses_and_sends_nothing(tmp_path, sent, monkeypatch,
 
 def test_an_id_matching_two_open_assignments_is_refused_by_name(tmp_path, sent, monkeypatch, capsys):
     """A wrong nudge sends a manager to chase the wrong worker, so the door
-    refuses and names the candidates — `task-act.sh`'s rule, one door over."""
+    refuses and names the candidates — `task-act.sh`'s rule, one door over —
+    and (fold F5) names a REMEDY the caller can actually run."""
     monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
     tid = _seed(tmp_path)
     _seed(tmp_path, task_id=tid, stem="c" * 32, bot="knuth", mgr="gilfoyle")
@@ -142,6 +205,25 @@ def test_an_id_matching_two_open_assignments_is_refused_by_name(tmp_path, sent, 
     err = capsys.readouterr().err
     assert "matches 2 open assignments" in err
     assert ASG in err and "asg_" + "c" * 32 in err
+    assert "--assignment <asg_id>" in err
+
+
+def test_naming_the_assignment_resolves_the_ambiguity(tmp_path, sent, monkeypatch):
+    """FOLD F5, the other half. `--assignment` NARROWS the task id's own open
+    set rather than querying by assignment, so the row acted on provably
+    carries the id the caller named."""
+    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    tid = _seed(tmp_path)
+    twin = "asg_" + "c" * 32
+    _seed(tmp_path, task_id=tid, stem="c" * 32, bot="knuth", mgr="gilfoyle")
+    assert task_cmd.cmd_task_nudge(
+        _Args(tmp_path, tid, as_who="chris", assignment=twin)) == 0
+    assert [(e, a) for e, _, a in _task_events(tmp_path)] == [("nudged", twin)]
+    assert sent[0][0] == "gilfoyle"          # THAT row's manager
+
+    # ...and an assignment that is not one of this task's rows is not a match
+    assert task_cmd.cmd_task_nudge(
+        _Args(tmp_path, tid, as_who="chris", assignment="asg_" + "d" * 32)) == 2
 
 
 def test_a_closed_row_and_an_unreachable_plane_are_different_answers(tmp_path, sent, monkeypatch):
@@ -186,3 +268,38 @@ def test_an_unparseable_instant_reads_age_unknown_never_zero(tmp_path):
     fabricated-number class. Absence is said as absence."""
     assert task_cmd._age(None) == "age unknown"
     assert task_cmd._age("not-an-instant") == "age unknown"
+
+
+def test_operator_text_is_collapsed_before_it_reaches_a_pane(tmp_path, sent, monkeypatch):
+    """FOLD F9. `lib/dispatch.sh` sends through tmux `send-keys`, where a
+    NEWLINE in the payload is a RETURN: a `why` containing one submitted
+    everything before it and left the rest — here `/exit` — sitting at the
+    manager's prompt (reproduced). Collapsed at the door, so no caller has to
+    remember."""
+    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    _full_capture(tmp_path)
+    tid = _seed(tmp_path, title="port the\nparser")
+    assert task_cmd.cmd_task_nudge(
+        _Args(tmp_path, tid, why="stalled?\n/exit", as_who="chris")) == 0
+    _bot, message, _fleet = sent[0]
+    assert "\n" not in message and "\t" not in message
+    assert "stalled? /exit" in message
+    assert json.loads(_task_events(tmp_path)[0][1])["reason"] == "stalled? /exit"
+
+
+@pytest.mark.parametrize("who", ["chris\nrm -rf /", "bot:eng/erlich", "a" * 65, "", "  "])
+def test_an_unusable_as_name_is_refused_before_anything_is_minted(tmp_path, sent, monkeypatch, who):
+    """FOLD F9. `--as` mints `human:<who>` as a plane identity the registry
+    keeps forever, so an arbitrary string is not free text: a newline, a
+    forged `bot:` namespace or a whole sentence would each become an actor
+    nobody can name again."""
+    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    tid = _seed(tmp_path)
+    args = _Args(tmp_path, tid, as_who=who)
+    if who.strip() == "":
+        # empty/blank falls back to $USER — a real name, not a refusal
+        monkeypatch.setenv("USER", "chris")
+        assert task_cmd.cmd_task_nudge(args) == 0
+        return
+    assert task_cmd.cmd_task_nudge(args) == 2
+    assert sent == [] and _task_events(tmp_path) == []

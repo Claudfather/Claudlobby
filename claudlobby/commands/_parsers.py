@@ -193,7 +193,11 @@ def register_subparsers(sub) -> None:
     ptn.add_argument("why", nargs="?", default="",
                      help="Why you are nudging — carried to the manager and recorded")
     ptn.add_argument("--as", dest="as_who", default=None,
-                     help="Who is nudging (default: $USER) — the actor is human:<who>")
+                     help="Who is nudging (default: $USER) — the actor is human:<who>;"
+                     " letters, digits, '.', '-', '_' (it mints a plane identity)")
+    ptn.add_argument("--assignment", default=None,
+                     help="Act on THIS assignment (asg_...) when the task id matches"
+                     " more than one open row — the remedy the refusal names")
     ptn.set_defaults(func=cmd_task_nudge)
 
     pu = sub.add_parser(

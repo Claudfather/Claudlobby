@@ -254,7 +254,7 @@ val_seed_report() {
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -548,6 +548,66 @@ ta_esc_after=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalat
     --fleet "$FLEET" 2>/dev/null | grep -c 't-1481-0003' || true)
 [ "${ta_esc_after:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#1481 a later report CLEARS the escalation (no second door, nothing to reconcile)" "$r"
+
+# --- nudge: the OPERATOR act, and the half no unit test reaches ---
+#
+# The fold F14. Unit tests pin the record and the refusals with the send
+# monkeypatched away; what only running the real door proves is the reaction:
+# `claudlobby task nudge` resolves the row, records the ask, hands it to
+# `lib/dispatch.sh`, and the MANAGER PANE receives the four-verb menu. That
+# chain crosses three processes and a tmux server, and the fold found it
+# recording nothing at all -- the ask reached the pane and left no trace, so a
+# manager that never answered looked exactly like one nobody asked.
+#
+# ITS OWN MANAGER SESSION, not the shared $MGR. Measured on the first run of
+# this block: the re-check is ~300 characters and landing it in the shared
+# pane scrolled the [FLEET-PULSE] line a LATER scenario captures out of view,
+# failing a #1024 assertion that has nothing to do with this change -- the
+# same neighbour-perturbation the withdraw scenario above already avoids by
+# creating no bot directory. The task is therefore DISPATCHED BY this manager
+# too (`assigned_by` is what the nudge reads), which is also the honest
+# shape: the re-check goes to the row's own manager.
+TA_MGR="valmgr1481"
+tmux new-session -d -s "$TA_MGR" "sleep 600"
+sleep 1
+val_seed_dispatch "$ROOT" "$FLEET" "$TA_MGR" "$TA_BOT" t-1481-0004 "$((now - 300))" "$((now + 3600))" "the nudged one"
+# The CLI reaches the send door at <root>/lib/dispatch.sh -- a production root
+# has one and this throwaway does not, so a bare run would report "the install
+# has no dispatch door" and prove nothing about the pane. Linked for THIS
+# scenario and removed after it, because the harness rule is that a scenario
+# must not leave the shared root in a shape its neighbours did not expect.
+ln -sfn "$LIB_DIR" "$ROOT/lib"
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$FLEET" USER=valop \
+    "$VAL_CLI" --root "$ROOT" task nudge t-1481-0004 "any movement" --as valop \
+    > "$ROOT/ta-nudge.out" 2> "$ROOT/ta-nudge.err" || true
+rm -f "$ROOT/lib"
+
+tn_event=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'nudged' AND a.source_ref = 'dispatch-log:t-1481-0004'")
+[ "${tn_event:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 claudlobby task nudge lands ONE nudged task event on the resolved assignment" "$r"
+
+tn_actor=$(val_sql "$ROOT" "SELECT i.alias FROM events e JOIN identity_registry i ON i.uid = e.actor_uid WHERE e.kind = 'task' AND e.event = 'nudged'")
+[ "$tn_actor" = "human:valop" ] && r=yes || r=no
+harness_check "#1481   ...under a FIRST-CLASS human actor, not the bot that carried it" "$r"
+
+tn_ask=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE message_class = 'task_request' AND command_type = 'query' AND sender_alias = 'human:valop' AND recipient_alias = 'bot:$FLEET/$TA_MGR'")
+[ "${tn_ask:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 the re-check ASK is recorded as a communication to the task manager" "$r"
+
+tn_tx=$(val_sql "$ROOT" "SELECT e.event FROM events e JOIN communications c ON c.msg_id = e.msg_id WHERE e.kind = 'transmission' AND c.sender_alias = 'human:valop'")
+[ "$tn_tx" = "pane_submitted" ] && r=yes || r=no
+harness_check "#1481   ...with an HONEST carrier fact (the send returned 0, so pane_submitted)" "$r"
+
+# -J joins the wrapped lines: the re-check is ~300 characters and an 80-column
+# pane splits `task-act.sh withdraw <id>` across two rows, so a plain capture
+# would fail the assertion for a message that arrived intact.
+tn_pane=$(tmux capture-pane -t "$TA_MGR" -p -J 2>/dev/null || true)
+printf '%s' "$tn_pane" | grep -q 'NUDGE from valop' && r=yes || r=no
+harness_check "#1481 the manager PANE received the nudge (the reaction, not just the record)" "$r"
+# ...and the SHARED manager pane is untouched by this scenario (the neighbour rule)
+command tmux -L "$(vsock "$TA_MGR")" kill-server 2>/dev/null || true
+printf '%s' "$tn_pane" | grep -q 'task-act.sh withdraw t-1481-0004' && r=yes || r=no
+harness_check "#1481   ...carrying the four verbs the manager may answer with" "$r"
 
 # ===========================================================================
 # #1187 — a read door whose misuse was indistinguishable from "nothing open".

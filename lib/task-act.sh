@@ -2,8 +2,8 @@
 # task-act.sh — a MANAGER's two acts on one open task (chunk M-A, #1481).
 #
 # Usage:
-#   task-act.sh withdraw <task-id> --reason "why"
-#   task-act.sh escalate <task-id> "the question for the human"
+#   task-act.sh withdraw <task-id> --reason "why" [--assignment <asg_id>]
+#   task-act.sh escalate <task-id> "the question" [--assignment <asg_id>]
 #
 # WITHDRAW retires a dispatch the manager no longer wants answered -- the
 # undelivered broadcast, the task overtaken by events -- as a terminal
@@ -33,8 +33,17 @@
 # re-dispatch under one id is legal), and cancelling the wrong worker's task
 # is worse than making the caller name the row.
 #
-# Identity is this bot's $BOT_ID / $FLEET_NAME, the dispatch door's rule --
-# both come from the composed bot.conf a session sources.
+# THE REFUSAL NAMES A DOOR THAT EXISTS. It used to say "name the assignment
+# on the plane, or close the duplicates first" while no door took an
+# assignment -- a remedy the caller could not carry out, which leaves closing
+# the OTHER manager's row as the only way out of an ambiguity. `--assignment
+# <asg_id>` is that door, and the refusal prints the ids to paste into it.
+#
+# WHO acts is this bot ($BOT_ID / $FLEET_NAME, the dispatch door's rule, both
+# from the composed bot.conf a session sources). WHICH FLEET the act belongs
+# to is the ROW's own, never the actor's -- 44.6% of dispatch traffic is
+# cross-fleet, and stamping a cross-fleet withdrawal with the manager's fleet
+# files the act where nobody reading that task will look for it.
 #
 # Exit codes: 0 acted - 1 usage - 2 nothing open under that id (or ambiguous)
 # - 3 the plane could not record it (nothing happened).
@@ -67,6 +76,17 @@ shift || true
 
 REASON=""
 QUESTION=""
+ASSIGNMENT=""
+# --assignment is shared by both acts (it disambiguates a row, which has
+# nothing to do with which act is being taken), so it is parsed before the
+# per-act arguments and stripped from what escalate reads as its question.
+_take_assignment() {
+    if [ -z "${1:-}" ]; then
+        echo "task-act: --assignment needs an assignment id (asg_...)" >&2
+        exit 1
+    fi
+    ASSIGNMENT="$1"
+}
 if [ "$ACT" = "withdraw" ]; then
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -76,6 +96,7 @@ if [ "$ACT" = "withdraw" ]; then
                     exit 1
                 fi
                 REASON="$2"; shift 2 ;;
+            --assignment) _take_assignment "${2:-}"; shift 2 ;;
             -*) echo "task-act: unknown flag '$1'" >&2; exit 1 ;;
             *)  break ;;
         esac
@@ -85,7 +106,14 @@ if [ "$ACT" = "withdraw" ]; then
     # defaulted.
     [ -n "$REASON" ] || { echo "task-act: withdraw needs --reason \"why\"" >&2; exit 1; }
 else
-    QUESTION="$*"
+    QUESTION_PARTS=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --assignment) _take_assignment "${2:-}"; shift 2 ;;
+            *) QUESTION_PARTS+=("$1"); shift ;;
+        esac
+    done
+    QUESTION="${QUESTION_PARTS[*]:-}"
     [ -n "$QUESTION" ] || { echo "task-act: escalate needs the question" >&2; exit 1; }
 fi
 
@@ -103,28 +131,54 @@ if ! plane_armed task-act --require-fleet; then
 fi
 
 # --- resolve the row, or refuse naming the candidates ------------------------
+# --task-id= joined with `=`: a task id a human typed may start with `-`, and
+# as a separate word that is parsed as a flag rather than as a value (the fold
+# F10). rc is SPLIT: 2 is a malformed call, 3 is a plane that could not be
+# read -- reporting every nonzero as unreachable sends the caller to check the
+# db for what is a typo in the call.
+LOOKUP_RC=0
 ROWS=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" \
-    --task-id "$TASK_ID" --all-open) || {
-    echo "task-act: the plane could not be read -- unreachable, not empty" >&2
+    "--task-id=$TASK_ID" --all-open) || LOOKUP_RC=$?
+if [ "$LOOKUP_RC" -eq 2 ]; then
+    echo "task-act: the lookup call was refused (rc 2) -- a malformed call, not an unreadable plane" >&2
+    exit 1
+elif [ "$LOOKUP_RC" -ne 0 ]; then
+    echo "task-act: the plane could not be read (rc $LOOKUP_RC) -- unreachable, not empty" >&2
     exit 3
-}
+fi
+NAMED="$TASK_ID"
+if [ -n "$ASSIGNMENT" ]; then
+    # --assignment NARROWS the task id result rather than replacing the
+    # lookup, so the row acted on provably carries the id the caller named:
+    # resolving by assignment alone would act on another task's row while
+    # stamping this task's source_ref as the act's provenance.
+    NAMED="$TASK_ID / $ASSIGNMENT"
+    ROWS=$(printf '%s\n' "$ROWS" | awk -v a="$ASSIGNMENT" '$2 == a')
+fi
 if [ -z "$ROWS" ]; then
-    echo "task-act: no OPEN assignment carries $TASK_ID (a closed one answers empty too -- check 'claudlobby brief')" >&2
+    echo "task-act: no OPEN assignment carries $NAMED (a closed one answers empty too -- check 'claudlobby brief')" >&2
     exit 2
 fi
 MATCHES=$(printf '%s\n' "$ROWS" | grep -c . || true)
 if [ "$MATCHES" -gt 1 ]; then
-    echo "task-act: $TASK_ID matches $MATCHES open assignments -- refusing to pick one:" >&2
+    echo "task-act: $NAMED matches $MATCHES open assignments -- refusing to pick one:" >&2
     printf '%s\n' "$ROWS" | while read -r _wi _asg _msg who fleet; do
         echo "  $_asg  assignee $who  fleet $fleet" >&2
     done
-    echo "task-act: name the assignment on the plane, or close the duplicates first" >&2
+    echo "task-act: re-run with --assignment <asg_id> naming the row you mean" >&2
     exit 2
 fi
-read -r WI ASG _MSG _WHO _FLEET <<<"$ROWS"
+read -r WI ASG _MSG _WHO ROW_FLEET <<<"$ROWS"
+if [ -z "$ROW_FLEET" ] || [ "$ROW_FLEET" = "-" ]; then
+    # ingest requires a fleet, so this is a registry that cannot name one --
+    # disclosed rather than filed under the actor's fleet, which would be a
+    # fabricated attribution (the expiry sweep's rule).
+    echo "task-act: $NAMED has no fleet attribution on the plane -- refusing to record an act under a fabricated fleet" >&2
+    exit 2
+fi
 
 # --- the one event -----------------------------------------------------------
-safe_fleet=$(json_escape "$FLEET_NAME")
+safe_fleet=$(json_escape "$ROW_FLEET")
 actor_alias="bot:$FLEET_NAME/$ACTOR"
 safe_actor=$(json_escape "$actor_alias")
 # The prose rides its OWN field and the summary stays short. Both are capped

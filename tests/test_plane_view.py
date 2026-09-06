@@ -1446,6 +1446,7 @@ def test_a_nudge_is_quiet_inside_its_grace_and_attention_past_it(tmp_path):
 
     from claudlobby.plane.queries import NUDGE_GRACE_S
 
+    _full_capture(tmp_path)          # the nudge's reason is CONTENT, like the question
     now = datetime.now(timezone.utc)
     fresh = (now - timedelta(seconds=NUDGE_GRACE_S // 2)).isoformat()
     stale = (now - timedelta(seconds=NUDGE_GRACE_S * 2)).isoformat()
@@ -1459,6 +1460,7 @@ def test_a_nudge_is_quiet_inside_its_grace_and_attention_past_it(tmp_path):
     assert row["attention_reason"] == ["nudged"]
     assert row["attention_since"] == stale
     assert row["attention_by"] == "chris"
+    assert row["attention_act_reason"] == "any movement?"   # the fold's F10
 
     # the manager acting clears it even though the nudge is long past the grace
     _task_event(tmp_path, "d", "progress", at=now.isoformat())
@@ -1503,3 +1505,136 @@ def test_a_metadata_capture_drops_the_question_but_never_the_arm(tmp_path):
     assert row["attention_reason"] == ["escalated"]
     assert row["attention_by"] == "erlich"
     assert row["attention_question"] is None
+
+
+# --- the M-A fold's pins (#1481) ---------------------------------------------
+
+def test_a_nudge_cannot_erase_an_escalation(tmp_path):
+    """FOLD F1, the highest-severity finding of the round. Both the escalated
+    arm and `plane-lookup --escalated` hold only while `escalated` is the
+    assignment's NEWEST task event — and a nudge IS a task event, so
+    escalate → nudge extinguished the escalation on every surface at once,
+    permanently, since nothing ever re-raises one. A nudge is an ASK, not an
+    ANSWER: the ruling enumerates what clears an escalation (progress, a
+    terminal report, a withdrawal, a supersede) and a nudge is not on it."""
+    _full_capture(tmp_path)
+    _dispatch(tmp_path, "0", expected_by=FUTURE, tx_state="pane_submitted")
+    _task_event(tmp_path, "0", "escalated", at="2026-01-01T00:00:00+00:00",
+                question="ship without the migration?", by="erlich")
+    _task_event(tmp_path, "0", "nudged", at="2026-01-01T00:10:00+00:00",
+                reason="any movement?", by="chris")
+    row = _tasks(tmp_path)["asg_" + ("0" * 32)]
+    assert row["attention"] is True
+    assert row["attention_reason"][0] == "escalated"
+    # ...dated and quoted from the ESCALATION, not from the nudge that followed
+    assert row["attention_since"] == "2026-01-01T00:00:00+00:00"
+    assert row["attention_question"] == "ship without the migration?"
+    assert row["attention_by"] == "erlich"
+    # ...and the nudge is not lost: it rides its own columns
+    assert row["nudged_at"] == "2026-01-01T00:10:00+00:00"
+    assert row["nudged_by"] == "chris"
+    # a REAL act still clears it
+    _task_event(tmp_path, "0", "progress", at="2026-01-01T02:00:00+00:00")
+    assert _tasks(tmp_path)["asg_" + ("0" * 32)]["attention"] is False
+
+
+def test_the_nudge_grace_compares_instants_not_strings(tmp_path):
+    """FOLD F7. `occurred_at` is stored as the emitter's own isoformat, offset
+    and all, so a lexical `<` compares wall-clock DIGITS: a nudge stamped ten
+    minutes ago at `-04:00` sorts before a `+00:00` cutoff hours older and
+    read as long past the grace. Reproduced; the fix compares epochs."""
+    from datetime import datetime, timedelta, timezone
+
+    from claudlobby.plane.queries import NUDGE_GRACE_S
+
+    # ten minutes ago, stamped in a -04:00 offset — well inside the grace
+    at = (datetime.now(timezone(timedelta(hours=-4)))
+          - timedelta(seconds=NUDGE_GRACE_S // 3)).isoformat()
+    assert at.endswith("-04:00")
+    _dispatch(tmp_path, "1", expected_by=FUTURE, tx_state="pane_submitted")
+    _task_event(tmp_path, "1", "nudged", at=at, reason="?", by="chris")
+    row = _tasks(tmp_path)["asg_" + ("1" * 32)]
+    assert row["attention"] is False, "an in-grace nudge paged because of its offset"
+    assert row["nudged_at"] == at and row["nudged_by"] == "chris"
+
+
+def test_an_in_grace_nudge_is_shown_but_never_credited_to_another_arm(tmp_path):
+    """FOLD F10 + F11. The row is OVERDUE and separately carries a nudge that
+    is still inside its grace. Two facts, and they must not be merged: the
+    reason line is the deadline's (which names no person), while the nudge
+    rides `nudged_at`/`nudged_by` so the card can still say "nudged 3m ago by
+    chris" — attention only once the grace has passed."""
+    from datetime import datetime, timedelta, timezone
+
+    from claudlobby.plane.queries import NUDGE_GRACE_S
+
+    fresh = (datetime.now(timezone.utc)
+             - timedelta(seconds=NUDGE_GRACE_S // 2)).isoformat()
+    _dispatch(tmp_path, "2", expected_by=PAST, tx_state="pane_submitted")
+    _task_event(tmp_path, "2", "nudged", at=fresh, reason="any movement?", by="chris")
+    row = _tasks(tmp_path)["asg_" + ("2" * 32)]
+    assert row["attention_reason"] == ["overdue"]
+    assert row["attention_since"] == PAST          # the deadline, not the nudge
+    assert row["attention_by"] is None and row["attention_question"] is None
+    assert row["nudged_at"] == fresh and row["nudged_by"] == "chris"
+
+
+def test_every_arm_carries_its_own_date_column(tmp_path):
+    """FOLD F12: the date used to live in a second list (`EVENT_DATED_ARMS`)
+    plus an if/elif ladder in the view — the shape that lets a new arm ship
+    undated. Every arm now emits `<name>_at` and `since` is a lookup."""
+    import sqlite3
+
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.queries import (ATTENTION_ARMS, ATTENTION_ARMS_SQL,
+                                          attention_arms_params)
+    from claudlobby.plane import view
+
+    _dispatch(tmp_path, "3", expected_by=PAST, tx_state="failed")
+    conn: sqlite3.Connection = connect(db_path(tmp_path))
+    row = conn.execute(ATTENTION_ARMS_SQL,
+                       attention_arms_params(view._now_iso())).fetchone()
+    conn.close()
+    cols = row.keys()
+    for name, _sql, _at, _window in ATTENTION_ARMS:
+        assert name in cols and f"{name}_at" in cols
+    # send_failed leads here, so the card dates from the DISPATCH
+    got = _tasks(tmp_path)["asg_" + ("3" * 32)]
+    assert got["attention_reason"][0] == "send_failed"
+    assert got["attention_since"] == got["occurred_at"]
+
+
+def test_the_page_speaks_exactly_the_arms_and_the_task_vocabulary():
+    """FOLD F13: `app.js` hand-writes an arm→wording map and a status→label
+    map. Neither is generated, so a new arm renders as nothing and a new task
+    event renders as its raw token — both silent. Pinned against the two
+    SSOTs (the suite already reads app.js text elsewhere)."""
+    import re
+    from pathlib import Path as _P
+
+    from claudlobby.plane.contracts import TASK_EVENTS
+    from claudlobby.plane.queries import ATTENTION_ARMS
+
+    src = (_P(__file__).resolve().parent.parent / "claudlobby" / "plane" / "ui"
+           / "app.js").read_text()
+    why = src.split("const WHY = {", 1)[1].split("\n};", 1)[0]
+    assert set(re.findall(r"^  (\w+):", why, re.M)) == \
+        {name for name, _s, _a, _w in ATTENTION_ARMS}
+    status = src.split("const TASK_STATUS = {", 1)[1].split("\n};", 1)[0]
+    labelled = set(re.findall(r"^  (\w+):", status, re.M))
+    # nothing dead: every label is a real task event or one of the ladder's
+    # own derived statuses (`TASK_STATUS_SQL` returns the newest task event
+    # verbatim otherwise), so a typo'd or retired token cannot linger
+    derived = {"open", "pending_unacknowledged", "dispatch_failed",
+               "created_not_sent"}
+    assert labelled <= set(TASK_EVENTS) | derived
+    # ...and nothing NEW goes unlabelled: this is the set the page renders as
+    # a raw token today (a pre-existing gap, out of M-A's scope). It is
+    # FROZEN, so the next task event added has to be labelled or listed here
+    # deliberately — which is the drift the pin exists to catch.
+    assert set(TASK_EVENTS) - labelled == {
+        "deadline_changed", "dispatch_intended", "dispatch_submitted",
+        "orphaned_by_session_loss", "recovered_after_restart", "rejected",
+        "retry_created", "supplied_id_not_open", "transmission_failed",
+    }
+    assert {"escalated", "nudged"} <= labelled     # the M-A pair IS labelled

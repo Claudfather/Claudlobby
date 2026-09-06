@@ -418,22 +418,33 @@ fi
 # at all, the same `null` a control dispatch carries. Not "now + 0", which
 # would be overdue in the second it was sent -- the loudest possible reading
 # of "no deadline please".
+#
+# A NON-INTEGER IS REFUSED HERE, LOUDLY (the M-A fold, F8). The guard used to
+# leave one alone "so the arithmetic below discloses it" -- and the arithmetic
+# does not: `$(( abc * 60 ))` under `set -u` is an unbound-variable fault
+# inside the ERR trap, which exited 0 having sent nothing and recorded
+# nothing. A typo on either door (`--deadline-min abc`, or a bot.conf carrying
+# `OBSERVABILITY_DISPATCH_DEADLINE=abc`) silently dropped the whole dispatch.
+# The glob is `*[!0-9]*` and NOT `*[!0-9-]*`: allowing `-` let `12-34` through
+# the class test and into `[ "$X" -le 0 ]`, which is itself an error, and a
+# NEGATIVE deadline is not a thing anyway -- `0` is the door for open-ended.
+_reject_non_integer() {
+    case "$2" in
+        ''|*[!0-9]*)
+            echo "dispatch-task: $1 must be a non-negative integer, got '$2' (0 = open-ended)" >&2
+            exit 1 ;;
+    esac
+}
 if [ -n "$DEADLINE_MIN" ]; then
+    _reject_non_integer --deadline-min "$DEADLINE_MIN"
     DEADLINE_S=$(( DEADLINE_MIN * 60 ))
 else
     DEADLINE_S="${OBSERVABILITY_DISPATCH_DEADLINE:-86400}"
+    _reject_non_integer OBSERVABILITY_DISPATCH_DEADLINE "$DEADLINE_S"
 fi
-case "$DEADLINE_S" in
-    ''|*[!0-9-]*)
-        # not a plain integer: left alone, so the arithmetic below is what
-        # discloses it rather than this guard swallowing a typo as "no deadline"
-        ;;
-    *)
-        if [ "$DEADLINE_S" -le 0 ]; then
-            EXPECTED_BY_JSON="null"
-        fi
-        ;;
-esac
+if [ "$DEADLINE_S" -le 0 ]; then
+    EXPECTED_BY_JSON="null"
+fi
 
 MANAGER="${BOT_ID:-${BOT_NAME:-unknown}}"
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
