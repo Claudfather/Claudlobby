@@ -42,7 +42,8 @@ from .plane import (
     cmd_plane_status,
 )
 from .scaffolding import cmd_new_bot, cmd_new_guardrail, cmd_new_skill
-from .task import cmd_task_nudge
+from .task import (DEFAULT_MAX_AGE_H, DEFAULT_REPEAT_H, cmd_task_nudge,
+                   cmd_task_recheck)
 
 
 def register_subparsers(sub) -> None:
@@ -199,6 +200,34 @@ def register_subparsers(sub) -> None:
                      help="Act on THIS assignment (asg_...) when the task id matches"
                      " more than one open row — the remedy the refusal names")
     ptn.set_defaults(func=cmd_task_nudge)
+
+    # M4 (chunk M-B): the re-check the dormant `task-recheck` fleet timer runs,
+    # and the same door by hand. `--fleet` here names the PLANE's fleet (an
+    # alias in a per-root db), which is a different question from the global
+    # `--fleet`'s overlay — the matcher's own `--fleet F --root R` shape. It
+    # carries its own dest for a mechanical reason too: an argparse subparser
+    # copies its whole namespace over the parent's, so a second `--fleet` on
+    # `dest="fleet"` would erase a global one given before the subcommand.
+    ptr = t_sub.add_parser(
+        "recheck",
+        help="Ask each manager to act on their stale rows (chase, supersede, "
+        "withdraw, escalate) — the task-recheck timer's door",
+    )
+    ptr.add_argument("--fleet", dest="recheck_fleet", default=None,
+                     help="Fleet whose managers to re-check, as the PLANE names it (default: "
+                     "the overlay's / fleet.yaml's own name)")
+    ptr.add_argument("--max-age-h", dest="max_age_h", type=float,
+                     default=DEFAULT_MAX_AGE_H,
+                     help="Also re-check a row open longer than this, deadline "
+                     "or not (default: 48)")
+    ptr.add_argument("--repeat-h", dest="repeat_h", type=float,
+                     default=DEFAULT_REPEAT_H,
+                     help="Skip a row a re-check already named inside this "
+                     "window — read from the plane, not a state file (default: 24)")
+    ptr.add_argument("--dry-run", dest="dry_run", action="store_true",
+                     help="Print what each manager would be sent; record and "
+                     "send nothing")
+    ptr.set_defaults(func=cmd_task_recheck)
 
     pu = sub.add_parser(
         "uptime",

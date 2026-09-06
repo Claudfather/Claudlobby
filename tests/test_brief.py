@@ -1265,3 +1265,104 @@ def test_build_brief_opens_the_plane_once_for_every_section(paths: Paths, monkey
     brief = build_brief(_fleet(), paths, "alex", NOW)
     assert "open" in brief["dispatches"] and "unacked" in brief["reports"] and "active" in brief["workstreams"]
     assert len(opened) == 1, opened
+
+
+# --- M5: the task-loop menu on the dispatch rows (chunk M-B, #1481) ----------
+
+
+def _land_act(paths: Paths, asg: str, wi: str, event: str, ts: int, **detail) -> None:
+    """One task event on a row, as `task-act.sh` / `task nudge` land theirs."""
+    from claudlobby.plane.emit_api import emit_batch
+    out = emit_batch(paths.root, [{
+        "event_type": "task", "emitter": "test", "fleet": FLEET,
+        "occurred_at": _iso(ts),
+        "payload": {"work_item_id": wi, "assignment_id": asg, "event": event,
+                    "actor": f"bot:{FLEET}/lead", **detail},
+    }])
+    assert all(o.status == "committed" for o in out), out
+
+
+def test_open_and_overdue_rows_carry_the_menu_facts(paths: Paths):
+    """A manager running /brief by hand must see what the re-check timer would
+    have sent it: how old the row is, whether it has moved, and whether anyone
+    is waiting on a human."""
+    wi, asg = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"))
+    _land_act(paths, asg, wi, "progress", NOW - 4000)
+    _land_act(paths, asg, wi, "escalated", NOW - 1000, by="lead",
+              question="do we ship without the migration")
+
+    d = build_brief(_fleet(), paths, "alex", NOW)["dispatches"]
+    row = {r["task_id"]: r for r in d["open"]}["t-late"]
+    assert row["age_s"] == 9000
+    assert row["expected_by"].startswith(_iso(NOW - 3000)[:19])   # the deadline
+    assert row["last_progress_at"].startswith(_iso(NOW - 4000)[:19])
+    assert row["escalated"]["question"] == "do we ship without the migration"
+    assert row["escalated"]["by"] == "lead"
+    assert row["nudged"] is None
+    # the same facts on the overdue row — one reader, both lists
+    over = {r["task_id"]: r for r in d["overdue"]}["t-late"]
+    assert over["escalated"] == row["escalated"] and over["age_s"] == 9000
+
+
+def test_a_nudge_shows_and_does_not_extinguish_an_escalation(paths: Paths):
+    """M-A's F1 on this surface: a nudge is an ASK, not an ANSWER."""
+    wi, asg = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-both"))
+    _land_act(paths, asg, wi, "escalated", NOW - 2000, by="lead", question="which repo")
+    _land_act(paths, asg, wi, "nudged", NOW - 100, by="chris", reason="any movement")
+
+    row = {r["task_id"]: r for r in
+           build_brief(_fleet(), paths, "alex", NOW)["dispatches"]["open"]}["t-both"]
+    assert row["escalated"]["question"] == "which repo"
+    assert row["nudged"]["by"] == "chris"
+
+
+def test_a_row_with_no_acts_reports_none_rather_than_omitting_the_keys(paths: Paths):
+    """`None` is "the plane holds no such fact"; a missing KEY would mean the
+    install's readers predate the menu, which is a different claim and is said
+    in degraded[]."""
+    _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-quiet"))
+    row = {r["task_id"]: r for r in
+           build_brief(_fleet(), paths, "alex", NOW)["dispatches"]["open"]}["t-quiet"]
+    assert row["last_progress_at"] is None
+    assert row["escalated"] is None and row["nudged"] is None
+
+
+def test_the_text_render_prints_the_four_verbs_once(paths: Paths):
+    _land_all(paths, [
+        _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"),
+        _dispatch("alex", NOW - 8000, NOW - 3000, task_id="t-late2"),
+    ])
+    text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
+    menu = [ln for ln in text.splitlines() if ln.startswith("  act on a row:")]
+    assert len(menu) == 1, "the menu belongs under the section, not on every row"
+    for verb in ("chase", "supersede", "withdraw", "escalate"):
+        assert verb in menu[0]
+    assert "task-act.sh withdraw <task-id> --reason" in menu[0]
+    assert "dispatch-task.sh --supersedes <task-id>" in menu[0]
+
+
+def test_the_render_names_an_escalation_on_the_row(paths: Paths):
+    wi, asg = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-esc"))
+    _land_act(paths, asg, wi, "escalated", NOW - 1000, by="lead", question="which repo")
+    text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
+    line = [ln for ln in text.splitlines() if "t-esc" in ln][0]
+    assert "ESCALATED by lead: which repo" in line
+
+
+def test_the_menu_is_one_definition_with_the_re_check(paths: Paths):
+    """The timer's message and the brief's line must never offer a manager
+    different options for the same situation (M-A said so where it wrote the
+    nudge's copy; this is the pin)."""
+    from claudlobby.brief import _verb_menu_line
+    from claudlobby.commands.task import verb_commands
+
+    assert _verb_menu_line() == verb_commands("<task-id>", "<assignee>")
+
+
+def test_json_keeps_its_schema_1_top_level_keys(paths: Paths):
+    """The menu keys are additive INSIDE a row; the envelope's own key set is
+    pinned, and a new top-level key is a schema change."""
+    _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert set(brief["dispatches"]) == {"open", "overdue", "orphaned"}
+    assert brief["schema"] == SCHEMA_VERSION

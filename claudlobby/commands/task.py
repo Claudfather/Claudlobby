@@ -83,24 +83,15 @@ def _one_line(text: str) -> str:
 
 def _age(occurred_at: str | None, now: datetime | None = None) -> str:
     """A coarse age, the page's own granularity. An unparseable instant reads
-    `age unknown` — never `0s`, which would say the task was just dispatched."""
-    if not occurred_at:
-        return "age unknown"
-    try:
-        at = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
-    except ValueError:
+    `age unknown` — never `0s`, which would say the task was just dispatched.
+    The formatter itself is `_span` (chunk M-B), shared with the deadline and
+    the last-progress phrases so one message cannot describe two of its own
+    clocks in two grammars."""
+    at = _instant(occurred_at)
+    if at is None:
         return "age unknown"
     now = now or datetime.now(timezone.utc)
-    if at.tzinfo is None:
-        at = at.replace(tzinfo=timezone.utc)
-    s = (now - at).total_seconds()
-    if s < 60:
-        return f"{max(0, int(s))}s old"
-    if s < 3600:
-        return f"{int(s // 60)}m old"
-    if s < 86400:
-        return f"{int(s // 3600)}h old"
-    return f"{int(s // 86400)}d old"
+    return f"{_span((now - at).total_seconds())} old"
 
 
 def nudge_request(row, *, task_id: str, who: str, why: str) -> dict:
@@ -174,6 +165,31 @@ def transmission_request(row, *, msg_id: str, destination: str, ok: bool,
     }
 
 
+# THE MENU, ONCE (chunk M-B). The nudge speaks it, the re-check timer speaks
+# it, and `claudlobby brief` prints it — three surfaces that must never offer a
+# manager different options for the same situation, which is why M-A wrote the
+# nudge's copy here and said so. Each verb carries its EXACT command, because
+# "supersede it" is advice and `dispatch-task.sh --supersedes <id> …` is a
+# thing a manager can run without going to look anything up.
+TASK_VERBS = ("chase", "supersede", "withdraw", "escalate")
+
+
+def verb_commands(task_id: str, assignee: str = "<bot>") -> str:
+    """The four verbs and their commands for ONE row, on one line.
+
+    `assignee` names the worker the chase would go to — known from the row, so
+    the command is copy-pasteable rather than a template. An id-less row has no
+    task id to name: the caller passes the assignment id, which `--assignment`
+    takes on both acts."""
+    bot = assignee or "<bot>"
+    return (
+        f'chase (dispatch-task.sh --type query {bot} "…"),'
+        f' supersede (dispatch-task.sh --supersedes {task_id} {bot} "…"),'
+        f' withdraw (task-act.sh withdraw {task_id} --reason "…")'
+        f' or escalate (task-act.sh escalate {task_id} "…")'
+    )
+
+
 def recheck_message(row, *, task_id: str, who: str, why: str,
                     now: datetime | None = None) -> str:
     """The id-less re-check the manager receives: what happened, and the four
@@ -181,13 +197,12 @@ def recheck_message(row, *, task_id: str, who: str, why: str,
     row — written here so the nudge and the timer cannot drift into offering
     a manager different options for the same situation."""
     title = _one_line(row["title"] or "") or "untitled"
+    assignee = _short(row["assignee"]) or "unknown"
     return (
         f"NUDGE from {who}: task {task_id} ({title}, {_age(row['occurred_at'], now)},"
-        f" assignee {_short(row['assignee']) or 'unknown'})"
+        f" assignee {assignee})"
         f" — {why or 'no reason given'}."
-        " Act: chase (query the worker), supersede (dispatch-task.sh"
-        f" --supersedes {task_id}), withdraw (task-act.sh withdraw {task_id}),"
-        f' or escalate (task-act.sh escalate {task_id} "…");'
+        f" Act: {verb_commands(task_id, assignee)};"
         " report what you did."
     )
 
@@ -350,3 +365,297 @@ def cmd_task_nudge(args) -> int:
         return 1
     print(f"asked {manager} to act")
     return 0
+
+
+# --- M4: the re-check, ONE message per manager (chunk M-B, #1481) -------------
+# The first REACTION the estate has that nobody asked for by hand. A nudge is
+# event-driven and needs an operator; this is the clock's own turn: every N
+# hours, each manager is handed the rows of theirs that stopped moving and the
+# four verbs, and is asked to say what it did with each.
+#
+# THE MESSAGE IS ID-LESS, deliberately and for the chunk's own reason: an id'd
+# re-check would open a row nobody closes, which is the defect the task loop
+# exists to remove. It is a COMMUNICATION, and the plane records one per ROW
+# rather than one per message — a re-check is N asks delivered in one payload
+# (a manager should read one message, not five), and only a per-row record can
+# answer "have I already asked about this row?" without re-parsing prose. That
+# question IS the debounce: `source_ref = task-recheck:<assignment_id>` is the
+# ONE stamp, and `plane-readers.rechecked_at` is the only reader of it, so the
+# repeat window is a plane read with no timer state file to lose or to lie.
+#
+# THE SENDER IS `system:task-recheck` — `briefing-trigger.sh`'s precedent for a
+# machine-originated communication. Not a human (nobody asked), not the manager
+# (it is the recipient), not the fleet (an actor alias is minted from this, and
+# a fleet is not an actor).
+
+# The stdlib twin of `plane-readers.RECHECK_REF_PREFIX` (pinned equal by test):
+# the reader is bash-facing and cannot import this package, so the write side
+# spells the stamp here and the pin keeps the two from forking. A fork does not
+# crash — it silently disables the debounce and re-asks a manager every run.
+RECHECK_REF_PREFIX = "task-recheck:"
+RECHECK_SENDER = "system:task-recheck"
+DEFAULT_MAX_AGE_H = 48.0
+DEFAULT_REPEAT_H = 24.0
+# How many rows ONE message names. A manager holding 22 stale rows would
+# otherwise get a 3000-character pane send, which is a wall nobody reads and a
+# payload the send path has never been measured on. The rest are NOT stamped —
+# only a row the manager was actually told about counts as re-checked — so they
+# lead the next run instead of being silently skipped for a day.
+RECHECK_MAX_ROWS = 8
+
+
+def _instant(iso: str | None) -> datetime | None:
+    if not iso:
+        return None
+    try:
+        at = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def _span(seconds: float) -> str:
+    """A coarse span, the page's granularity — `_age`'s formatter, shared so a
+    deadline and an age can never be phrased on two different clocks."""
+    s = max(0.0, seconds)
+    if s < 60:
+        return f"{int(s)}s"
+    if s < 3600:
+        return f"{int(s // 60)}m"
+    if s < 86400:
+        return f"{int(s // 3600)}h"
+    return f"{int(s // 86400)}d"
+
+
+def _deadline_phrase(expected_by: str | None, now: datetime) -> str:
+    at = _instant(expected_by)
+    if at is None:
+        return "no deadline" if not expected_by else "deadline unreadable"
+    if at <= now:
+        return f"deadline passed {_span((now - at).total_seconds())} ago"
+    return f"deadline in {_span((at - now).total_seconds())}"
+
+
+def row_is_due(row, *, now: datetime, max_age_s: float) -> bool:
+    """A row the re-check names: its deadline has passed, or it has been open
+    longer than the max age. The two are OR'd because they catch different
+    failures — a deadline that passed is a promise broken, and an ageing row
+    with no deadline (every id-less dispatch, and every row dispatched before
+    M-A) has no promise to break and would otherwise never be re-checked at
+    all. A row whose dispatch instant is unreadable is NOT due: the plane
+    cannot date it, so no clock claim about it would be true."""
+    at = _instant(row.get("occurred_at"))
+    if at is None:
+        return False
+    exp = _instant(row.get("expected_by"))
+    if exp is not None and exp <= now:
+        return True
+    return (now - at).total_seconds() > max_age_s
+
+
+def recheck_row_line(row, *, index: int, now: datetime) -> str:
+    """What the manager is told about ONE row — and, byte for byte, what the
+    plane records as the ask about it."""
+    tid = row.get("task_id") or row.get("assignment_id") or "?"
+    title = _one_line(row.get("title") or "") or "untitled"
+    assignee = _short(row.get("assignee") or "") or "unknown"
+    bits = [f"assignee {assignee}", _age(row.get("occurred_at"), now),
+            _deadline_phrase(row.get("expected_by"), now)]
+    prog = _instant(row.get("last_progress_at"))
+    bits.append(f"last progress {_span((now - prog).total_seconds())} ago"
+                if prog else "no progress on this row")
+    esc = row.get("escalated") or None
+    if esc:
+        q = _one_line(esc.get("question") or "") or "question not recorded"
+        bits.append(f"ESCALATED by {_short(esc.get('by') or '') or 'unknown'}"
+                    f" ({q}) — the human owes an answer")
+    nud = row.get("nudged") or None
+    if nud:
+        bits.append(f"nudged by {_short(nud.get('by') or '') or 'someone'}"
+                    f" {_age(nud.get('at'), now)}")
+    return f"[{index}] task {tid} ({title}) — " + ", ".join(bits)
+
+
+def recheck_digest(lines: list[str], *, fleet: str, max_age_h: float,
+                   extra: int = 0, manager: str = "") -> str:
+    """The whole message, ONE line (tmux `send-keys` reads a newline as a
+    RETURN — `_one_line`'s lesson, applied to the assembly rather than after
+    it). The verbs are stated once, as a template the row lines fill: naming
+    the four commands per row is the same sentence eight times over, and the
+    row lines already carry the id and the assignee it needs."""
+    head = (f"TASK RE-CHECK ({fleet}): {len(lines)} open row(s) of yours are past"
+            f" deadline or older than {max_age_h:g}h.")
+    tail = (f" For EACH: {verb_commands('<task-id>', '<assignee>')}."
+            " Then report what you did per row — a row you leave untouched comes"
+            " back next sweep.")
+    more = (f" (+{extra} more of yours are stale; `claudlobby brief --bot"
+            f" {manager}` lists them all.)") if extra > 0 else ""
+    return _one_line(head + " " + " ".join(lines) + more + tail)
+
+
+def recheck_ask_request(row, *, msg_id: str, manager: str, body: str) -> dict:
+    """The ask about ONE row, as the plane's own record: a communication from
+    the machinery to the manager, carrying the row's ids so it threads under
+    the task, and stamped with the debounce key. It mints no assignment — a
+    re-check must never become a task."""
+    return {
+        "event_type": "communication", "emitter": "task-recheck",
+        "fleet": row["fleet"],
+        "source_ref": RECHECK_REF_PREFIX + row["assignment_id"],
+        "payload": {
+            "msg_id": msg_id,
+            "sender": RECHECK_SENDER,
+            "recipient": manager,
+            "recipient_raw": _short(manager) or manager,
+            "message_class": "task_request",
+            "command_type": "query",
+            "work_item_id": row["work_item_id"],
+            "assignment_id": row["assignment_id"],
+            "body": body,
+        },
+    }
+
+
+def _group_by_manager(rows: list[dict]) -> tuple[dict, list[dict]]:
+    """(manager → its rows, oldest first; the rows no manager can be named
+    for). The second list is DISCLOSED rather than dropped or reassigned to a
+    fleet default: `assigned_by` is the plane's own fact about who owns a row,
+    and inventing an owner sends a re-check to someone who never dispatched
+    it."""
+    by: dict[str, list[dict]] = {}
+    orphans: list[dict] = []
+    for row in rows:
+        mgr = manager_of(row)
+        if not mgr:
+            orphans.append(row)
+            continue
+        by.setdefault(mgr, []).append(row)
+    return by, orphans
+
+
+def _collect_due(plane, *, now: datetime, max_age_s: float, repeat_s: float
+                 ) -> tuple[list[dict], list[dict]]:
+    """(rows to re-check, rows a re-check already named inside the repeat
+    window) — ONE plane session, the stdlib readers' own answers."""
+    rows = plane.pr.fleet_open_rows(plane.conn, plane.fleet)
+    due = [r for r in rows if row_is_due(r, now=now, max_age_s=max_age_s)]
+    stamps = plane.pr.rechecked_at(plane.conn, [r["assignment_id"] for r in due])
+    fresh, held = [], []
+    for row in due:
+        at = _instant(stamps.get(row["assignment_id"]))
+        if at is not None and (now - at).total_seconds() < repeat_s:
+            held.append(row)
+        else:
+            fresh.append(row)
+    return fresh, held
+
+
+def cmd_task_recheck(args) -> int:
+    """`claudlobby task recheck --fleet <F>` — the dormant `task-recheck`
+    timer's door, and a hand-runnable one.
+
+    Exit ladder, the acts' own: 0 = asked (or nothing was due), 1 = something
+    was NOT asked or NOT delivered (a manager down, a row nobody owns), 2 = the
+    call cannot be answered (no fleet named), 3 = the plane cannot serve —
+    unreachable is not empty, so it refuses rather than reporting a quiet
+    fleet."""
+    # `--fleet` here names the PLANE's fleet — an alias in a per-ROOT db — and
+    # deliberately does NOT anchor the overlay the way the global `--fleet`
+    # does. The two are different questions and conflating them made the door
+    # refuse to answer for a fleet whose rows the plane holds but whose
+    # `local/<fleet>/` this root does not (root mode, a moved overlay, a
+    # timer run from an install that composes elsewhere). The matcher's own
+    # contract, `--fleet F --root R`, is exactly this shape.
+    fleet_arg = _one_line(getattr(args, "recheck_fleet", "") or "")
+    paths = _resolve_paths(args)
+    max_age_s = float(getattr(args, "max_age_h", DEFAULT_MAX_AGE_H)) * 3600
+    repeat_s = float(getattr(args, "repeat_h", DEFAULT_REPEAT_H)) * 3600
+    dry = bool(getattr(args, "dry_run", False))
+
+    if os.environ.get("PLANE_EMIT_DISABLED") == "1":
+        print("recheck: PLANE_EMIT_DISABLED=1 — the plane is silenced, so no ask"
+              " could be recorded and every run would re-ask the same rows"
+              " forever; nothing was sent", file=sys.stderr)
+        return 3
+
+    from ..brief import plane_session, resolve_fleet_name
+
+    fleet = fleet_arg or resolve_fleet_name(paths)
+    if not fleet:
+        print("recheck: no fleet is named (--fleet <name>, or a fleet.yaml naming"
+              " one) — the plane's rows are per fleet", file=sys.stderr)
+        return 2
+    plane, note = plane_session(paths, fleet)
+    if plane is None:
+        print(f"recheck: {note} — unreachable, not empty; nothing was sent",
+              file=sys.stderr)
+        return 3
+    now = datetime.now(timezone.utc)
+    try:
+        if not hasattr(plane.pr, "fleet_open_rows"):
+            print(f"recheck: the readers installed at {paths.lib /'plane-readers.py'}"
+                  " predate the task-loop menu — pull the install and re-run",
+                  file=sys.stderr)
+            return 3
+        fresh, held = _collect_due(plane, now=now, max_age_s=max_age_s,
+                                   repeat_s=repeat_s)
+    finally:
+        plane.close()
+
+    by_manager, orphans = _group_by_manager(fresh)
+    for row in orphans:
+        print(f"recheck: {row.get('task_id') or row['assignment_id']} has no"
+              " manager on the plane (no assigned_by the registry can name) —"
+              " nobody was asked", file=sys.stderr)
+    if not by_manager:
+        if orphans:
+            return 1
+        print(f"recheck: nothing in {fleet} is past deadline or older than"
+              f" {max_age_s / 3600:g}h"
+              + (f" ({len(held)} row(s) re-checked inside the last"
+                 f" {repeat_s / 3600:g}h)" if held else "")
+              + " — nothing sent")
+        return 0
+
+    rc = 1 if orphans else 0
+    for manager, rows in sorted(by_manager.items()):
+        named = rows[:RECHECK_MAX_ROWS]
+        lines = [recheck_row_line(r, index=i, now=now)
+                 for i, r in enumerate(named, 1)]
+        message = recheck_digest(lines, fleet=fleet, max_age_h=max_age_s / 3600,
+                                 extra=len(rows) - len(named), manager=manager)
+        if dry:
+            print(f"[dry-run] {manager}: {len(named)} row(s)")
+            print(f"[dry-run] {message}")
+            continue
+        alias = f"bot:{fleet}/{manager}"
+        ids = [mint_msg_id() for _ in named]
+        # INTENT BEFORE TRANSPORT (report-back.sh's rule): the asks are recorded
+        # before the send, so a send that dies mid-flight still leaves the
+        # question on the plane. An UNRECORDED ask is said loudly and sent
+        # anyway — the mission is the ask, and the only cost of the missing
+        # stamp is that the next sweep asks again, which is the safe direction.
+        asked, verdict = _emit(paths.root, [
+            recheck_ask_request(r, msg_id=m, manager=alias, body=line)
+            for r, m, line in zip(named, ids, lines)])
+        if not asked:
+            print(f"recheck: the plane did NOT record the ask to {manager}"
+                  f" ({verdict or 'no outcome'}) — sending anyway; these rows"
+                  " will be re-checked again next sweep", file=sys.stderr)
+        send_rc, err = send_to_bot(paths, manager, message, fleet=fleet)
+        if asked:
+            _emit(paths.root, [
+                transmission_request(r, msg_id=m, destination=manager,
+                                     ok=(send_rc == 0), detail=err)
+                for r, m in zip(named, ids)])
+        if send_rc != 0:
+            print(f"recheck: the re-check did NOT reach {manager}"
+                  f" (rc={send_rc}{': ' + err if err else ''}) —"
+                  f" {len(named)} row(s) stay on the plane unanswered",
+                  file=sys.stderr)
+            rc = 1
+            continue
+        print(f"asked {manager} about {len(named)} row(s)"
+              + (f" (+{len(rows) - len(named)} held over)"
+                 if len(rows) > len(named) else ""))
+    return rc

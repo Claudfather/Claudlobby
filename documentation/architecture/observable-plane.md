@@ -166,6 +166,7 @@ program keeps refusing.
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
 | `lib/task-act.sh` | a manager's act on ONE open task: a terminal `cancelled` (`withdraw`) or a non-terminal `escalated` (`escalate`) on the assignment its task id resolves to (`plane-lookup.py --task-id … --all-open`, which REFUSES an id matching two open rows) | `PLANE_EMIT_DISABLED=1` — and unlike the dispatch door it then REFUSES (rc 3): the act IS the record, so there is nothing left to have done |
 | `claudlobby task nudge` | the operator's non-terminal `nudged` on one assignment (actor `human:<who>`), then an id-less re-check to the task's manager (`assigned_by`) through `lib/dispatch.sh` — the record first, so a failed send never leaves a delivered nudge untraced | `PLANE_EMIT_DISABLED=1` — refuses (rc 3) and sends nothing |
+| `claudlobby task recheck` (fleet timer, `lib/task-recheck.sh`) | one id-less re-check per MANAGER covering their stale rows, recorded as one `task_request` communication PER ROW (sender `system:task-recheck`, `source_ref = task-recheck:<assignment_id>`) plus its transmission | `TASK_RECHECK_ENABLED` (and `enroll: true`); `PLANE_EMIT_DISABLED=1` refuses (rc 3) |
 
 Dormancy is a compose-time fact where the composer can make it one (an unarmed
 `unit: service` job composes NO units) and a self-gate where it cannot (host
@@ -212,6 +213,48 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   query_only` — under the system `python3` the doors run, a read-only URI
   cannot open a WAL database whose writer has closed (it cannot create the
   shared-memory file), which is what a daemon restart looks like.
+
+## The task loop (#1481) — in the operator's words
+
+A dispatch used to be a one-way street: you sent it, and either a report came
+back or the row sat there. The loop closes it, and every step is a plane fact
+already described above — nothing new is stored, and there is no second
+bookkeeping surface to reconcile.
+
+1. **Every id'd dispatch gets a deadline** (24h by default, per fleet), so the
+   watchdog and the re-check have a clock.
+2. **The manager can end a row without a report.** `task-act.sh withdraw <id>
+   --reason …` closes it (`cancelled`, terminal for every reader); a
+   re-dispatch with `--supersedes` retires it and opens the replacement.
+3. **The manager can ask you a question about a row** — `task-act.sh escalate
+   <id> "…"` — and the row STAYS OPEN while you decide. Each escalation is
+   paged to the fleet's Telegram chat exactly ONCE, by fleet-pulse, as
+   `NEEDS YOU (<fleet>): task <id> escalated by <manager>: <question>`. The
+   page is keyed by the row, not by a clock: it goes quiet when any act clears
+   the raise (progress, a report, a withdrawal, a supersede) and speaks again
+   if the manager raises the row afresh. A nudge does not clear it.
+4. **You can poke a row** — `claudlobby task nudge <id> "why"` records who
+   asked and sends that task's own manager a one-row re-check. From Telegram,
+   ask the manager to run it for you ("nudge <task-id> …").
+5. **The clock pokes for you.** Where a fleet arms `task-recheck`, every 6h
+   each manager gets ONE message listing their rows past deadline or older
+   than 48h — id, title, assignee, age, deadline, last progress, and whether
+   anyone escalated or nudged it — with the four verbs and their exact
+   commands, and is asked to report what it did per row. A row already named
+   inside the repeat window (24h) is skipped, and that skip is a PLANE READ:
+   the ask itself is recorded per row, stamped
+   `source_ref = task-recheck:<assignment_id>`, so there is no timer state
+   file to lose, to stale, or to lie. A row nobody asked about — because a
+   send failed or the plane refused the record — comes back next sweep, which
+   is the safe direction.
+6. **The same list by hand.** `claudlobby brief --bot <manager>` renders the
+   open and overdue rows with those facts and prints the same four verbs once
+   under the section, so a manager reading a brief sees exactly what the timer
+   would have sent.
+
+The re-check is deliberately a COMMUNICATION and never a task: an id'd
+re-check would open a row nobody closes, which is the defect the loop exists
+to remove.
 
 ## The cutover (F18) — history
 

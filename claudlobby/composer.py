@@ -3909,6 +3909,11 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
 # stamps it on exactly that unit. Add a row per dormant door.
 FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = {
     "keepalive": ("PLANE_EMIT_ENABLED",),
+    # The task loop's re-check (chunk M-B, #1481) self-gates on this flag, and a
+    # timer unit sources no .env — so without the Environment= line the door is
+    # UNREACHABLE however loudly a fleet arms it in its .env (#1383's class,
+    # measured twice already: briefing, then keepalive).
+    "task-recheck": ("TASK_RECHECK_ENABLED",),
 }
 
 

@@ -254,7 +254,7 @@ val_seed_report() {
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -614,6 +614,135 @@ harness_check "#1481 the manager PANE received the nudge (the reaction, not just
 command tmux -L "$(vsock "$TA_MGR")" kill-server 2>/dev/null || true
 printf '%s' "$tn_pane" | grep -q 'task-act.sh withdraw t-1481-0004' && r=yes || r=no
 harness_check "#1481   ...carrying the four verbs the manager may answer with" "$r"
+
+# ===========================================================================
+# #1481 chunk M-B — the REACTIONS: the re-check timer, and each escalation
+# paged once.
+#
+# Unit tests pin the rows, the stamp and the refusals with the send replaced.
+# What only running the real doors proves is the reaction itself, which
+# crosses three processes and a tmux server in one case and a whole sweep in
+# the other: a manager PANE receiving the menu it is supposed to act on, and
+# an operator being paged about a question exactly once.
+#
+# The re-check scenario gets its OWN manager session and creates no worker
+# directory, both for the reasons the M-A block documents above: a ~400
+# character message in the shared pane scrolls a LATER scenario capture out
+# of view, and a directory under the fleet bots dir makes fleet-pulse
+# health-check a bot that does not exist.
+# ===========================================================================
+echo ""
+echo "=== validate #1481: the re-check reaches a manager, once per window ==="
+
+TR_MGR="valrc1481"
+TR_BOT="valrcbot1481"
+# ITS OWN SANDBOX FLEET, not the shared one. The row this scenario needs is
+# OVERDUE by construction, and an overdue row seeded into the shared fleet
+# perturbs every later scenario that sweeps it -- measured on the first run of
+# this block: the #1024 pane assertion, which greps a fixed capture of the
+# SHARED manager pane, flipped to FAIL for a change that has nothing to do
+# with it. The neighbour rule, structurally rather than hopefully.
+TR_FLEET="valrcf"
+val_plane_ready "$ROOT" "$TR_FLEET"
+tmux new-session -d -s "$TR_MGR" "sleep 600"
+sleep 1
+val_seed_dispatch "$ROOT" "$TR_FLEET" "$TR_MGR" "$TR_BOT" t-1481-0010 "$((now - 7200))" "$((now - 3600))" "the row that stopped moving"
+# The CLI reaches its send door at <root>/lib/dispatch.sh -- linked for THIS
+# scenario and removed after it, the neighbour rule the nudge scenario keeps.
+ln -sfn "$LIB_DIR" "$ROOT/lib"
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$TR_FLEET" \
+    "$VAL_CLI" --root "$ROOT" task recheck --fleet "$TR_FLEET" \
+    > "$ROOT/tr-recheck.out" 2> "$ROOT/tr-recheck.err" || true
+
+tr_pane=$(tmux capture-pane -t "$TR_MGR" -p -J 2>/dev/null || true)
+printf '%s' "$tr_pane" | grep -q 'TASK RE-CHECK' && r=yes || r=no
+harness_check "#1481 the manager PANE received the re-check (the timer reaction, end to end)" "$r"
+
+printf '%s' "$tr_pane" | grep -q 't-1481-0010' && r=yes || r=no
+harness_check "#1481   ...naming the stale row, with the four verbs" "$r"
+
+tr_asg=$(val_sql "$ROOT" "SELECT assignment_id FROM assignments WHERE source_ref = 'dispatch-log:t-1481-0010'")
+tr_ask=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE source_ref = 'task-recheck:$tr_asg'")
+[ "${tr_ask:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 the ask is recorded PER ROW, stamped task-recheck:<assignment_id>" "$r"
+
+tr_sender=$(val_sql "$ROOT" "SELECT sender_alias FROM communications WHERE source_ref = 'task-recheck:$tr_asg'")
+[ "$tr_sender" = "system:task-recheck" ] && r=yes || r=no
+harness_check "#1481   ...from the machinery, to the row own manager" "$r"
+
+tr_tx=$(val_sql "$ROOT" "SELECT e.event FROM events e JOIN communications c ON c.msg_id = e.msg_id WHERE e.kind = 'transmission' AND c.source_ref = 'task-recheck:$tr_asg'")
+[ "$tr_tx" = "pane_submitted" ] && r=yes || r=no
+harness_check "#1481   ...with an HONEST carrier fact (the send returned 0)" "$r"
+
+# The debounce is a PLANE READ: a second run inside the repeat window must add
+# nothing, with no state file anywhere to have remembered it.
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$TR_FLEET" \
+    "$VAL_CLI" --root "$ROOT" task recheck --fleet "$TR_FLEET" \
+    > "$ROOT/tr-recheck2.out" 2> "$ROOT/tr-recheck2.err" || true
+rm -f "$ROOT/lib"
+tr_ask2=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE source_ref = 'task-recheck:$tr_asg'")
+{ [ "${tr_ask2:-0}" -eq 1 ] && grep -q 'nothing sent' "$ROOT/tr-recheck2.out"; } && r=yes || r=no
+harness_check "#1481 a second run inside the repeat window asks NOTHING (the stamp is the debounce)" "$r"
+command tmux -L "$(vsock "$TR_MGR")" kill-server 2>/dev/null || true
+
+echo ""
+echo "=== validate #1481: fleet-pulse pages each escalation ONCE ==="
+# The real sweep, from a stub lib dir whose tg-post.sh RECORDS the page instead
+# of sending it (scenario 2c pattern) -- so the assertion is the alert an
+# operator would actually have received. Its own sandbox fleet, because the
+# marker set is per fleet state dir and the shared fleet is swept by ten other
+# scenarios.
+_tesc_fleet="valtesc"
+_tesc_lib="$ROOT/tesclib"
+mkdir -p "$_tesc_lib"
+ln -s "$LIB_DIR/fleet-pulse.sh" "$_tesc_lib/fleet-pulse.sh"
+ln -s "$LIB_DIR/lib-common.sh"  "$_tesc_lib/lib-common.sh"
+val_link_plane_shim "$_tesc_lib"
+_tesc_pages="$ROOT/tesc-pages.log"
+: > "$_tesc_pages"
+cat > "$_tesc_lib/tg-post.sh" <<STUB
+#!/bin/bash
+printf '%s\n' "\$1" >> "$_tesc_pages"
+STUB
+chmod +x "$_tesc_lib/tg-post.sh"
+val_plane_ready "$ROOT" "$_tesc_fleet"
+mkdir -p "$ROOT/local/$_tesc_fleet/runtime/bots/valtescbot"
+printf 'BOT_SERVICE=\n' > "$ROOT/local/$_tesc_fleet/runtime/bots/valtescbot/bot.conf"
+val_seed_dispatch "$ROOT" "$_tesc_fleet" valtescmgr valtescbot t-1481-0020 "$((now - 7200))" "$((now + 3600))" "the one with a question"
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$_tesc_fleet" BOT_ID=valtescmgr BOT_NAME=valtescmgr \
+    "$LIB_DIR/task-act.sh" escalate t-1481-0020 "do we ship without the migration" \
+    > "$ROOT/tesc-act.out" 2> "$ROOT/tesc-act.err" || true
+
+_tesc_run() {
+    CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$_tesc_fleet" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        "$_tesc_lib/fleet-pulse.sh" "$_tesc_fleet" >/dev/null 2>&1 || true
+}
+_tesc_run
+tesc_paged=$(grep -c 'escalated by valtescmgr' "$_tesc_pages" 2>/dev/null || true)
+[ "${tesc_paged:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 an open escalation PAGES the operator (the only read that can see a raise)" "$r"
+
+grep -q 'task t-1481-0020 escalated by valtescmgr' "$_tesc_pages" && r=yes || r=no
+harness_check "#1481   ...naming the task and who raised it" "$r"
+
+_tesc_run
+tesc_paged2=$(grep -c 'escalated by valtescmgr' "$_tesc_pages" 2>/dev/null || true)
+[ "${tesc_paged2:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1481 a second sweep does NOT re-page the same question (once per escalation)" "$r"
+
+# An act clears the arm, so the marker is forgotten and the row goes quiet.
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$_tesc_fleet" MANAGER_TMUX="valnomgr1481" \
+    "$LIB_DIR/report-back.sh" valtescbot progress "on it" --progress 30 \
+    --task t-1481-0020 >/dev/null 2>&1 || true
+_tesc_run
+tesc_marker=$(ls "$ROOT/state/pulse/escalated" 2>/dev/null | wc -l | tr -d ' ')
+[ "${tesc_marker:-1}" = "0" ] && r=yes || r=no
+harness_check "#1481 an answered escalation is FORGOTTEN (so a re-raise pages again)" "$r"
+
+if [ "${tesc_paged:-0}" -ne 1 ] || [ "${tesc_paged2:-0}" -ne 1 ]; then
+    echo "  --- DIAGNOSTIC: escalation pages recorded ---"
+    sed 's/^/    /' "$_tesc_pages" 2>/dev/null || echo "    (none)"
+fi
 
 # ===========================================================================
 # #1187 — a read door whose misuse was indistinguishable from "nothing open".

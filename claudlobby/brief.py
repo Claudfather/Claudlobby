@@ -506,6 +506,8 @@ def _dispatch_section(
             f"the matcher installed at {paths.lib / 'dispatch-overdue.py'} predates the"
             f" plane-only reader (no {', '.join(missing)}) — pull the install and re-run,"
             " so no dispatch state is served rather than a wrong one", "#1467")
+    menu: dict = {}
+    menu_ready = True
     try:
         # the caller's session when it holds one (build_brief opens ONE plane
         # for every section), else this section's own
@@ -513,6 +515,20 @@ def _dispatch_section(
               else doors.open_plane(**plane_ctx)) as session:
             over, orph = doors._classify_all(now, max_age, bots_dir, plane=session)
             open_rows = doors.open_dispatches(bot_id, plane=session)
+            # M5 (chunk M-B, #1481): the MENU facts, from the same session and
+            # the same readers — a manager running `/brief` by hand must see
+            # what the re-check timer would send it, and neither may re-derive
+            # "open" or "escalated" beside the other. Keyed by (dispatched_at,
+            # task_id), the pair the tuples above are keyed by: a task id may
+            # legitimately repeat across a re-dispatch, and picking the newest
+            # would attach one row's escalation to another's line.
+            menu_ready = hasattr(session.pr, "open_assignment_ids")
+            if menu_ready:
+                entry = session.roster.get(bot_id.lower())
+                index = session.pr.open_assignment_ids(
+                    session.conn, session.fleet, bot_id, entry=entry)
+                facts = session.pr.menu_facts(session.conn, list(index.values()))
+                menu = {k: facts.get(asg, {}) for k, asg in index.items()}
     except doors.PlaneUnreachable as exc:
         return _withhold(
             f"the plane cannot answer: {exc} — restore the plane db (state/plane/plane.db)"
@@ -544,6 +560,35 @@ def _dispatch_section(
             )
         )
 
+    if not menu_ready:
+        # The keys are ADDITIVE, so their absence is invisible unless it is
+        # said: a field neither present nor listed does not exist (the module's
+        # own rule). The rows themselves are sound, so this is `labeled`, not a
+        # withheld section.
+        degraded.append(
+            Degradation(
+                field="dispatches",
+                mode="labeled",
+                reason=(
+                    f"the readers installed at {paths.lib / 'plane-readers.py'} predate "
+                    "the task-loop menu, so the rows carry no last_progress_at, "
+                    "escalated or nudged fact — pull the install and re-run"
+                ),
+                issue="#1481",
+            )
+        )
+
+    def _menu(da: int, tid: str | None) -> dict:
+        """The row's own menu facts, or nothing. `-` is the id-less marker the
+        matcher prints; the index keys those rows under None."""
+        f = menu.get((da, tid if tid and tid != "-" else None), {})
+        return {
+            "age_s": max(0, now - da),
+            "last_progress_at": f.get("last_progress_at"),
+            "escalated": f.get("escalated"),
+            "nudged": f.get("nudged"),
+        } if menu_ready else {"age_s": max(0, now - da)}
+
     return {
         "open": [
             {
@@ -551,6 +596,7 @@ def _dispatch_section(
                 "dispatched_at": _iso(da),
                 "expected_by": _iso(exp),
                 "past_due": exp is not None and now > exp,
+                **_menu(da, tid),
             }
             for da, exp, tid in open_rows
         ],
@@ -560,6 +606,7 @@ def _dispatch_section(
                 "dispatched_at": _iso(da),
                 "expected_by": _iso(exp),
                 "overdue_by_s": elapsed,
+                **_menu(da, tid),
             }
             for da, exp, elapsed, tid in overdue_rows
         ],
@@ -826,6 +873,40 @@ def _short(ts: str | None) -> str:
     return (ts or "—")[:19].replace("T", " ")
 
 
+def _verb_menu_line() -> str:
+    """The four verbs and their commands, from the ONE definition (M5, #1481).
+
+    Imported here rather than at module scope: `commands/task.py` reaches back
+    into this module for the plane session, and a top-level import in both
+    directions is a cycle waiting for the first person who imports them in the
+    unlucky order."""
+    from .commands.task import verb_commands
+
+    return verb_commands("<task-id>", "<assignee>")
+
+
+def _menu_suffix(row: dict) -> str:
+    """What a dispatch row says about itself beyond its clock: whether anyone
+    is waiting on the human, whether anyone has poked it, and whether it has
+    moved at all. Rendered only when the fact exists — an absent key means the
+    install's readers predate the menu (said in `degraded[]`), and a `None`
+    means the plane holds no such fact, which is not the same as `no`."""
+    bits = []
+    esc = row.get("escalated") or None
+    if esc:
+        q = " ".join((esc.get("question") or "").split()) or "question not recorded"
+        bits.append(f"ESCALATED by {esc.get('by') or 'unknown'}: {q}")
+    nud = row.get("nudged") or None
+    if nud:
+        bits.append(f"nudged by {nud.get('by') or 'someone'} {_short(nud.get('at'))}")
+    if "last_progress_at" in row:
+        bits.append(
+            f"last progress {_short(row['last_progress_at'])}"
+            if row.get("last_progress_at") else "no progress on this row"
+        )
+    return ("  | " + " | ".join(bits)) if bits else ""
+
+
 def format_brief(brief: dict) -> str:
     """Sectioned plain text. Degraded fields are marked at the section header
     AND listed in full at the end — the inline marker is where the reader's eye
@@ -909,7 +990,7 @@ def format_brief(brief: dict) -> str:
             flag = "  PAST DUE" if r["past_due"] else ""
             out.append(
                 f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
-                f"  due {_short(r['expected_by'])}{flag}"
+                f"  due {_short(r['expected_by'])}{flag}{_menu_suffix(r)}"
             )
         out.extend(more)
         for label in ("overdue", "orphaned"):
@@ -918,9 +999,16 @@ def format_brief(brief: dict) -> str:
             for r in shown:
                 out.append(
                     f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
-                    f"  +{r['overdue_by_s'] // 60}m past deadline"
+                    f"  +{r['overdue_by_s'] // 60}m past deadline{_menu_suffix(r)}"
                 )
             out.extend(more)
+        # THE MENU, ONCE (M5, #1481) — the same four verbs and the same
+        # commands the re-check timer sends, from the one definition in
+        # `commands/task.py`, so a manager reading `/brief` by hand sees
+        # exactly what the timer would have said. Under the section rather
+        # than per row: repeating four commands per row is the wall of text
+        # the brief's own capping rule exists to prevent.
+        out.append(f"  act on a row: {_verb_menu_line()}")
     out.append("")
 
     w = brief.get("workstreams") or {}
