@@ -19,13 +19,16 @@ did not name them. Scope membership is derivable from alias conventions
 (``bot:<fleet>/…``, ``<fleet>/<key>``, ``shared/…``) and the scan_completed
 declaration names its scope string.
 
-Dormancy (estate rule): armed per fleet through the runtime's .env tier
-cascade (``PLANE_EMIT_ENABLED=1`` in the fleet-tier ``.env`` — the SAME
-resolution the composer uses for briefing-timer arming). NOTE the carrier
-split: ``fleet.yaml env:`` reaches composed ``bot.conf`` (runtime doors and
-hooks read it) but does NOT arm generate-time scans — the .env tier arms
-BOTH, so it is the recommended single carrier. A root pull must never
-switch on new emission; the generate hook is NON-BLOCKING (a scan failure
+Default ON since the defaults flip (chunk N): a keyframe of what the fleet IS
+is what every metric sample joins to, and a plane whose registry lane never
+ran renders an estate of unnamed uids. The knob is an opt-OUT —
+``PLANE_EMIT_ENABLED=0`` in the ``.env`` tier suppresses the scan, resolved
+through the runtime's own tier cascade (the SAME resolution the composer uses
+for timer arming). NOTE the carrier split: ``fleet.yaml env:`` reaches composed
+``bot.conf`` (runtime doors and hooks read it) but does NOT reach generate-time
+scans — the .env tier reaches BOTH, so it is the single carrier worth using.
+``PLANE_EMIT_DISABLED=1`` is the ruled harness exemption and still silences
+this like every other door. The generate hook is NON-BLOCKING (a scan failure
 logs and never breaks generate).
 
 F11 boundary: this emitter enforces the PREVENTION half — incomplete
@@ -572,15 +575,24 @@ def assemble_entities(paths, fleet, vault_rev):
 
 def run_generate_scan(paths, fleet) -> dict | None:
     """Emit one generate-cause registry scan for *fleet*. Returns the summary
-    dict, or None when the fleet is UNARMED (dormancy rule). Raises only
-    upward through the non-blocking hook in cmd_generate."""
-    # Arming resolves through the runtime's OWN .env tier cascade —
-    # env_tiers, exactly as the composer resolves the SAME variable for
-    # briefing timers. The shipped check read fleet.defaults["env"], a tier
-    # the estate does not use: measured armed-the-documented-way -> None —
-    # dead in production while every test passed (gauntlet r1). A resolver
-    # failure means UNARMED (dormancy fails closed); PLANE_EMIT_DISABLED=1
-    # is the ruled harness exemption, honored here like every door.
+    dict, or None when a tier has turned the scan OFF. Raises only upward
+    through the non-blocking hook in cmd_generate."""
+    # The flag resolves through the runtime's OWN .env tier cascade —
+    # env_tiers, exactly as the composer resolves the SAME variable for timer
+    # stamps. (The shipped check once read fleet.defaults["env"], a tier the
+    # estate does not use: measured armed-the-documented-way -> None — dead in
+    # production while every test passed, gauntlet r1.)
+    #
+    # Since the defaults flip this is an opt-OUT: only an exact "0" suppresses
+    # the scan. A RESOLVER FAILURE now runs the scan rather than skipping it,
+    # and the direction is deliberate — under the old dormancy rule failing
+    # closed meant "record nothing", which is the answer nobody audits; under
+    # an on-by-default rule the same instinct would silently drop the keyframes
+    # every later reader joins against. A scan that should not have run costs
+    # one keyframe batch; a scan that silently did not run costs an estate of
+    # unnamed uids. The failure is disclosed either way.
+    # PLANE_EMIT_DISABLED=1 is the ruled harness exemption, honored here like
+    # every other door.
     if os.environ.get("PLANE_EMIT_DISABLED") == "1":
         return None
     from .. import env_tiers as _env_tiers
@@ -588,9 +600,29 @@ def run_generate_scan(paths, fleet) -> dict | None:
         _res = _env_tiers.resolve(
             paths, fleet_name=fleet.name).get("PLANE_EMIT_ENABLED")
     except _env_tiers.ResolverUnavailable as exc:
-        log.warning("registry scan: arming unresolved (%s) — UNARMED", exc)
-        return None
-    if _res is None or _res.value != "1":
+        # ...but an EXPLICIT opt-out beats a fail-open scan (F3). The CLI
+        # already loaded the fleet's .env into os.environ (_load_env), so an
+        # operator who wrote PLANE_EMIT_ENABLED=0 is visible here even when
+        # the tier resolver — a subprocess, and the thing that just failed —
+        # cannot say which tier it came from. Scanning over a `0` we can read
+        # is not failing open, it is ignoring an instruction we have in hand.
+        # ONLY an exact 0 does this: an unset value still scans, which is the
+        # direction the on-by-default rule wants a failure to fall in.
+        _explicit = os.environ.get("PLANE_EMIT_ENABLED")
+        if _explicit == "0":
+            log.info("registry scan: env resolver unreachable (%s), but"
+                     " PLANE_EMIT_ENABLED=0 is set in this process's"
+                     " environment — NOT scanning (an explicit opt-out is"
+                     " honored without the resolver)", exc)
+            return None
+        log.warning("registry scan: env resolver unreachable (%s) — scanning"
+                    " anyway (on by default; PLANE_EMIT_ENABLED=0 opts out)",
+                    exc)
+        _res = None
+    if _res is not None and _res.value == "0":
+        log.info("registry scan: OFF for this fleet (PLANE_EMIT_ENABLED=0 at"
+                 " the %s tier) — no keyframes recorded for this generate",
+                 _res.tier)
         return None
 
     from .emit_api import emit_batch

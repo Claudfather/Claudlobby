@@ -4990,15 +4990,21 @@ class TestComposeBotConfTelegramStateDirExported:
 
 
 class TestTaskRecheckTimer:
-    """The task loop's re-check job composes DORMANT and armed by the tier
-    cascade (chunk M-B, #1481).
+    """The task loop's re-check job composes ENROLLED (chunk N) and carries
+    whatever its tier says about TASK_RECHECK_ENABLED.
 
-    Two gates, deliberately: the DORMANT manifest keeps setup-fleet from
-    enrolling the unit, and the script's own TASK_RECHECK_ENABLED keeps a
-    hand-enrolled or inherited unit inert. This is the first fleet job that
-    DISPATCHES INTO A LIVE MANAGER SESSION, so neither gate alone is the
-    posture: a manifest cannot stop an operator's `systemctl enable`, and a
-    flag cannot stop the backbone from enrolling what it composes.
+    It shipped dormant behind two gates in chunk M-B; the defaults flip turns
+    both around. What it sends is a message to the fleet's OWN manager about
+    the fleet's OWN stale rows — none of the four categories the rule reserves
+    for opt-in — and it is the reaction the whole target workflow exists to
+    produce, so shipping it off meant shipping a loop that ran nowhere.
+
+    The GATE SHAPE is deliberately kept, inverted: a fleet writes
+    TASK_RECHECK_ENABLED=0 and the launcher no-ops loudly. Which makes the
+    stamp below load-bearing in the opposite direction from #1383 — a timer
+    unit sources no .env, so if the composer only ever carried a "1" then the
+    off switch would be unreachable and the job would keep firing with nothing
+    to explain why.
     """
 
     _FLEET = """\
@@ -5035,12 +5041,17 @@ class TestTaskRecheckTimer:
 
         import claudlobby.env_tiers as env_tiers_mod
 
-        res = Resolution(name="TASK_RECHECK_ENABLED", value=armed, tier="fleet",
-                         path=None)
+        # armed=None models a tier that assigns the key NOWHERE — distinct
+        # from one that assigns "0", and the distinction is the point: silence
+        # leaves the launcher's own default in charge.
+        cas: dict = {}
+        if armed is not None:
+            cas["TASK_RECHECK_ENABLED"] = Resolution(
+                name="TASK_RECHECK_ENABLED", value=armed, tier="fleet",
+                path=None)
         monkeypatch.setattr(env_tiers_mod, "read_tiers",
                             lambda paths, fleet_name=None, bot_name=None: [])
-        monkeypatch.setattr(env_tiers_mod, "cascade",
-                            lambda tiers: {"TASK_RECHECK_ENABLED": res})
+        monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: cas)
         return compose_fleet_timers(fleet, paths, md)
 
     def test_the_unit_composes_and_runs_the_launcher_with_the_fleet(
@@ -5051,37 +5062,57 @@ class TestTaskRecheckTimer:
         assert (timers / "com.test.task-recheck.timer").is_file()
         assert "lib/task-recheck.sh rc-fleet" in service
 
-    def test_it_is_dormant_by_default(self, tmp_path, monkeypatch):
+    def test_it_is_ENROLLED_by_default(self, tmp_path, monkeypatch):
+        """The flip: a fresh fleet that declares nothing gets the re-check."""
         timers = self._compose(tmp_path, monkeypatch)
         dormant = [
             ln for ln in (timers / "DORMANT").read_text().splitlines()
             if ln and not ln.startswith("#")
         ]
-        assert "com.test.task-recheck" in dormant
-
-    def test_a_fleet_that_enrolls_it_leaves_the_dormant_list(
-        self, tmp_path, monkeypatch
-    ):
-        timers = self._compose(tmp_path, monkeypatch, enroll=True)
-        dormant = (timers / "DORMANT").read_text()
         assert "com.test.task-recheck" not in dormant
         assert (timers / "com.test.task-recheck.timer").is_file()
 
-    def test_the_arming_flag_lands_on_the_unit_only_when_the_tier_arms_it(
+    def test_a_fleet_that_parks_it_lands_on_the_dormant_list(
         self, tmp_path, monkeypatch
     ):
-        """#1383's class: a timer unit sources no .env, so without this line
-        the fleet's own arming never reaches the door and the job no-ops
-        forever however loudly the operator armed it."""
+        """The manifest gate still WORKS, it just is not the default any more:
+        a fleet that says enroll: false still stops the backbone enrolling."""
+        timers = self._compose(tmp_path, monkeypatch, enroll=False)
+        dormant = (timers / "DORMANT").read_text()
+        assert "com.test.task-recheck" in dormant
+        assert (timers / "com.test.task-recheck.timer").is_file()
+
+    def test_the_tiers_value_lands_on_the_unit_BOTH_ways(
+        self, tmp_path, monkeypatch
+    ):
+        """#1383's class, and its inverse. A timer unit sources no .env, so
+        whatever the tier decided has to be stamped or it never reaches the
+        door. Under the old dormant default only a "1" was worth carrying;
+        under an on-by-default rule the "0" is the one that matters, because
+        an off switch nobody can reach is an off switch that does not exist.
+        """
         armed = self._compose(tmp_path, monkeypatch, armed="1")
         service = (armed / "com.test.task-recheck.service").read_text()
         plist = (armed / "com.test.task-recheck.plist").read_text()
         assert "Environment=TASK_RECHECK_ENABLED=1" in service
         assert "<key>TASK_RECHECK_ENABLED</key>" in plist
 
-        unarmed = self._compose(tmp_path, monkeypatch, armed="0")
+        off = self._compose(tmp_path, monkeypatch, armed="0")
+        assert "Environment=TASK_RECHECK_ENABLED=0" in (
+            off / "com.test.task-recheck.service").read_text()
+        off_plist = (off / "com.test.task-recheck.plist").read_text()
+        assert "<key>TASK_RECHECK_ENABLED</key>" in off_plist
+        assert "<string>0</string>" in off_plist
+
+    def test_a_tier_that_says_nothing_stamps_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """Silence is not a value. With no tier assigning the flag the unit
+        carries no line at all and the launcher's own default (ON) applies —
+        one place decides, not two."""
+        timers = self._compose(tmp_path, monkeypatch, armed=None)
         assert "TASK_RECHECK_ENABLED" not in (
-            unarmed / "com.test.task-recheck.service").read_text()
+            timers / "com.test.task-recheck.service").read_text()
 
     def test_the_flag_is_scoped_to_this_job(self, tmp_path, monkeypatch):
         """A door's arming is stamped on the unit whose script reads it, and

@@ -471,13 +471,42 @@ def _task_age_display(bs: BotStatus) -> str:
     return s
 
 
-def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
+def switches_off_note(fleet_name: str, switch_states: list | None) -> str:
+    """The header line naming any TARGET-WORKFLOW door that is off here.
+
+    The dispatch -> re-check -> act-or-escalate -> answer -> close loop is what
+    this system is for, and each of its reactions has a switch. A fleet that
+    turned one off gets a table where nothing ever chases anything, which reads
+    exactly like a fleet where nothing is wrong. So the state is said on the
+    line an operator already reads, not only in `doctor`, which is a command
+    they have to think to run.
+
+    Scoped to the REACTION doors on purpose — not every off switch. A quieter
+    probe or a cold-rung daemon changes latency and detail; these three change
+    whether anything happens at all. A header that named every knob would be
+    scrolled past, which is the same failure as saying nothing.
+    """
+    from . import switches as _sw
+
+    off = _sw.target_workflow_off(switch_states or [])
+    if not off:
+        return ""
+    return ", ".join(
+        f"{s.switch.key} off on {fleet_name}" for s in off
+    ) + " — this reaction will not happen (claudlobby doctor --switches)"
+
+
+def format_table(statuses: list[BotStatus], fleet_name: str,
+                 switch_states: list | None = None) -> str:
     """Format the status table as a string."""
     now = datetime.now(timezone.utc)
     lines: list[str] = []
 
     # Header
     lines.append(_bold(f"Fleet: {fleet_name}"))
+    note = switches_off_note(fleet_name, switch_states)
+    if note:
+        lines.append(_yellow(f"  {note}"))
     lines.append("")
 
     if not statuses:
@@ -580,7 +609,8 @@ def format_bot_detail(bs: BotStatus) -> str:
     return "\n".join(lines) + "\n"
 
 
-def format_json(statuses: list[BotStatus], fleet_name: str) -> str:
+def format_json(statuses: list[BotStatus], fleet_name: str,
+                switch_states: list | None = None) -> str:
     """JSON output for scripting."""
     bots = []
     for bs in statuses:
@@ -607,4 +637,13 @@ def format_json(statuses: list[BotStatus], fleet_name: str) -> str:
                 "last_completed": bs.last_completed,
             }
         )
-    return json.dumps({"fleet": fleet_name, "bots": bots}, indent=2) + "\n"
+    payload: dict = {"fleet": fleet_name, "bots": bots}
+    if switch_states is not None:
+        # The scripted twin of the header line: a consumer that renders its own
+        # dashboard must be able to see a disabled reaction too, and an absent
+        # key is not the same claim as an empty list.
+        payload["switches_off"] = [
+            s.switch.key for s in switch_states
+            if s.switch.target_workflow and not s.on and not s.unknown
+        ]
+    return json.dumps(payload, indent=2) + "\n"

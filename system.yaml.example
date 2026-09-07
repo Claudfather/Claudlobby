@@ -42,12 +42,35 @@
 # (catch up missed runs) and `randomized_delay: <seconds>` (start jitter);
 # launchd has no equivalent, so plists ignore them.
 #
-# `enroll: false` marks a job composed-but-dormant: its units are still
-# emitted, but they are listed in the timers/ DORMANT manifest and the setup
-# backbone does not enroll them. A fleet opts in per job via fleet.yaml:
+# DEFAULTS RULE (ruled 2026-09-07). A job or door is ON by default unless it
+# DELETES DATA, SPENDS MONEY, MUTATES OPERATOR SOURCE, or SENDS OUTBOUND TO
+# PEOPLE AT SCALE. Everything else ships enrolled, because a behavior nobody
+# can see is a behavior nobody has: a dozen doors shipped dormant here, each
+# for a defensible local reason, and the composite was a system whose
+# advertised workflow ran nowhere unless an operator had read a dozen source
+# comments. What DOES stay opt-in is named where the operator looks --
+# `claudlobby doctor` (the `switches` rung), `claudlobby plane doctor`, and
+# the closing table of lib/setup-fleet and lib/setup-system -- each with the
+# one line that arms it. The registry behind those surfaces is
+# claudlobby/switches.py; a knob with no row there is reported as a DEAD flag
+# by the validator, so this file and that one cannot drift apart quietly.
+#
+# `enroll: false` means DORMANT, and the two scopes enforce it differently
+# because their enrollers differ. A FLEET job is composed-but-dormant: the
+# units are emitted and listed in a DORMANT manifest beside them, which
+# setup-fleet skips. A HOST job composes NO UNIT AT ALL (compose-time
+# dormancy, chunk-N fold): setup-system enrolls every composed
+# claudlobby-* unit it finds, so not composing is the only gate that cannot
+# be forgotten, and an armed->unarmed flip PRUNES the composed units. Units
+# an EARLIER release installed are walked back by setup-system on its next
+# run, out loud -- dormancy that only ever applied forward left the one job
+# that mutates operator source enabled on every host that had run the
+# installer. A fleet opts a FLEET job in via fleet.yaml:
 #   defaults:
 #     jobs:
 #       weekly-worker-restart: { enroll: true }
+# A HOST job is armed in the host's own system.yaml -- host jobs deliberately
+# bypass the fleet defaults merge, so fleet.yaml cannot reach one.
 
 host:
   jobs:
@@ -66,12 +89,21 @@ host:
     # the 30-day incident-join window from the root's plane db. Host-scoped
     # (one plane db per install, not per fleet); family-scoped DELETE that
     # NEVER touches the ledger; runs from this timer, never the ingest-only
-    # daemon. DORMANT by default (`enroll: false`) — a DELETE door must not
-    # arrive switched on via a root pull; a host arms it when metric_samples
-    # flow. A fleet changes the window by overriding the script line
-    # (e.g. "... prune --days 60").
+    # daemon.
+    #
+    # ON by default, and this is the one flip in this file that has to argue
+    # against the letter of the rule ("deletes data"). What it deletes is raw
+    # per-minute SAMPLES past the 30-day incident-join window -- the retention
+    # every metrics store does, the hygiene an operator already assumes is
+    # happening, and the reason the per-minute host probe is safe to ship on
+    # at all. It cannot reach the ledger: the DELETE is family-scoped to
+    # metric_samples and pinned so. What "deletes data" is meant to stop is a
+    # door removing something the operator would miss; a 31-day-old load
+    # average is not that. THE WINDOW STAYS THE KNOB -- widen it by overriding
+    # the script line (e.g. "... prune --days 90"), and turn the door off
+    # entirely with PLANE_PRUNE_ENABLED=0 in the host or root .env, which the
+    # launcher says out loud on every disarmed run.
     plane-prune:
-      enroll: false
       script: "$CLAUDLOBBY_ROOT/lib/plane-prune.sh"
       schedule: "*-*-* 05:15:00"
       type: oneshot
@@ -81,12 +113,15 @@ host:
     # every assignment whose deadline passed more than the horizon ago and
     # that nothing closed — the attention queue then shows what needs the
     # operator NOW, not last Tuesday. A Lane-B fact through normal ingest
-    # (never a table write), idempotent by construction. DORMANT by default
-    # and self-gated on PLANE_EXPIRE_ENABLED (a policy sweep must not arrive
-    # switched on via a root pull). Horizon: override the script line
-    # (e.g. "... --after-days 14").
+    # (never a table write), idempotent by construction.
+    #
+    # ON by default: it is the aging half of the target workflow -- without it
+    # a missed deadline sits in the attention queue forever and the queue
+    # stops meaning anything. It writes one event per genuinely-abandoned row
+    # and deletes nothing. Turn it off with PLANE_EXPIRE_ENABLED=0 in the host
+    # or root .env (the launcher says so on every disarmed run). Horizon:
+    # override the script line (e.g. "... --after-days 14").
     plane-expire:
-      enroll: false
       script: "$CLAUDLOBBY_ROOT/lib/plane-expire.sh"
       schedule: "*-*-* 05:30:00"
       type: oneshot
@@ -96,11 +131,11 @@ host:
     # VOLATILE facets (load, available RAM, free disk, Pi thermal/undervolt,
     # boot time) — which F12 keeps OUT of the registry keyframe — and emits
     # them as host.* metric_samples for the Host card. Per-minute cadence
-    # (30k-row envelope, guarded by the plane-prune retention lane). Always on
-    # (PLANE_EMIT_DISABLED=1 is the one silencer): a read-only emitter with no
-    # gate of its own.
+    # (30k-row envelope, guarded by the plane-prune retention lane, which now
+    # ships on beside it -- the two are one decision). ON by default: a
+    # read-only emitter with no gate of its own beyond the estate silencer
+    # (PLANE_EMIT_DISABLED=1), and the Host card is blank without it.
     plane-host-probe:
-      enroll: false
       script: "$CLAUDLOBBY_ROOT/lib/plane-host-probe.sh"
       interval: 60
       type: oneshot
@@ -120,13 +155,27 @@ host:
     # cut release, guarded (never a dirty tree, unpushed commits, or a diverged
     # one; ff-only) and loud (an event on every movement). $CLAUDLOBBY_ROOT is
     # deliberately excluded -- pulling the compositor is root-self-update, which
-    # line 11 says ships behind its own toggle, and the script lives in that repo.
+    # the `host:` note at the top of this file says ships behind its own
+    # toggle, and the script lives in that repo.
     #
-    # COMPOSED-BUT-DORMANT, for the same reason line 11 gives: this is the first
-    # host job that mutates the operator'"'"'s source, and a root pull must not
-    # arrive with it switched on. A fleet arms it in fleet.yaml:
-    #   defaults: { jobs: { update-siblings: { enroll: true } } }
-    # notify-behind REPORTS regardless, so #1009'"'"'s blind spot is closed even
+    # COMPOSED-BUT-DORMANT: this is the host job that mutates the
+    # operator's source -- one of the four
+    # categories in the defaults rule at the top of this file, so it STAYS
+    # opt-in and a root pull must never arrive with it switched on.
+    #
+    # Its dormancy is now ENFORCED rather than merely declared. Before the
+    # defaults flip this flag had NO code effect at all (#1385): setup-system
+    # enrolled every composed unit it found, so every host running the
+    # installer enrolled this job regardless of the false below. An unarmed
+    # host job now composes NO unit, and setup-system additionally WALKS BACK
+    # any unit an earlier release installed -- which is what makes "stays
+    # opt-in" a fact rather than a comment, on a host that already ran.
+    #
+    # Arm it in THIS host's own system.yaml -- host jobs bypass the fleet
+    # defaults merge, so the fleet.yaml recipe this comment used to print
+    # could never have worked:
+    #   host: { jobs: { update-siblings: { enroll: true } } }
+    # notify-behind REPORTS regardless, so #1009's blind spot is closed even
     # with this dormant; enrolling only automates the remedy.
     #
     # Weekly, not daily: editable installs mean a pull changes the CLI for the
@@ -134,7 +183,7 @@ host:
     # fleet. Sun 04:30 sits 30min ahead of weekly-worker-restart (Sun 05:00) so
     # that where BOTH are enrolled a restart applies it almost immediately --
     # the stage-then-apply split claude-update uses for the binary. Where the
-    # restart is not enrolled the exposure runs to each bot'"'"'s next natural
+    # restart is not enrolled the exposure runs to each bot's next natural
     # restart, which is the exposure the staged binary already carries.
     update-siblings:
       enroll: false
@@ -145,30 +194,46 @@ host:
       randomized_delay: 300
     # The observable plane's ingest daemon (unit: service = RESIDENT, no
     # schedule; supervision restarts it). One per host -- the plane db is
-    # host-scoped. DORMANT by default, and for services dormancy is
-    # compose-time: unarmed means NO units are even composed, because the
-    # macOS enroll leg starts every claudlobby-*.plist it finds and a root
-    # pull must never start a new resident process on its own. Arm per HOST
-    # by flipping enroll: true in that host's own system.yaml (host jobs
-    # deliberately bypass the fleet defaults merge, so fleet.yaml cannot arm
-    # this one), then re-run generate + lib/setup-system. Doors degrade
-    # cleanly while unarmed (lib/plane-emit.sh falls back to the cold CLI,
-    # disclosed on stderr).
-    # DISARMING an armed daemon: flip enroll back to false and re-run
-    # generate (this PRUNES the composed units, so no future setup run can
-    # re-enroll it) — then stop the installed unit yourself, since pruning
+    # host-scoped.
+    #
+    # ON by default. The plane has been the estate's ONLY record since the F18
+    # closure, so this is not new behavior arriving switched on -- it is the
+    # fast rung of behavior every door already performs. Without it every emit
+    # takes the cold CLI rung: still recorded, still disclosed, but an
+    # interpreter spawn per event. It ingests; it deletes nothing, spends
+    # nothing and sends nothing.
+    #
+    # Dormancy is COMPOSE-time for every host job (services first, because
+    # the macOS enroll leg starts every claudlobby-*.plist it finds): unarmed
+    # means NO units are even composed. That gate is unchanged -- only the
+    # default moved.
+    # DISARMING: flip enroll: false in THIS host's own system.yaml (host jobs
+    # bypass the fleet defaults merge, so fleet.yaml cannot reach it) and
+    # re-run generate (this PRUNES the composed units, so no future setup run
+    # can re-enroll it) — then stop the installed unit yourself, since pruning
     # cannot reach what is already enrolled:
     #   linux:  systemctl --user disable --now claudlobby-plane-daemon.service
     #   macos:  launchctl bootout gui/$UID/claudlobby-plane-daemon
     plane-daemon:
-      enroll: false
+      enroll: true
       unit: service
       script: "$CLAUDLOBBY_ROOT/lib/plane-daemon.sh"
-    # Phase-4 operator plane (read-only UI). Same dormancy contract as
-    # plane-daemon: unarmed composes NO units. Needs the [plane-ui] extra;
-    # binds localhost — front it with Tailscale Serve (see the runbook).
+    # Phase-4 operator plane (read-only UI). Same compose-time dormancy
+    # contract as plane-daemon: unarmed composes NO units.
+    #
+    # ON by default, bound to LOCALHOST. Read-only over the plane db by
+    # construction (mode=ro + query_only, no non-GET route, pinned), so it
+    # cannot reach any of the four categories. Exposing it beyond the host --
+    # the Tailscale Serve step -- stays deliberately the operator's, and is
+    # the only part of this that could send anything anywhere.
+    #
+    # Needs the [plane-ui] extra (fastapi + uvicorn), which lib/setup-system
+    # installs. Where it does not import, generate composes NO unit and the
+    # switch table prints the pip line as this row's arm: an enrolled
+    # Restart=always unit whose process exits 1 is a crash loop every 5s
+    # forever, not an honest failure (see documentation/runbooks/plane-view.md).
     plane-view:
-      enroll: false
+      enroll: true
       unit: service
       script: "$CLAUDLOBBY_ROOT/lib/plane-view.sh"
     # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
@@ -365,15 +430,16 @@ defaults:
     # nagging -- a row already named is skipped, and the skip is a plane read,
     # so a new stale row still gets through on the next sweep.
     #
-    # COMPOSED-BUT-DORMANT *and* SELF-GATED on TASK_RECHECK_ENABLED. This is
-    # the first fleet job that DISPATCHES INTO A LIVE MANAGER SESSION, so both
-    # gates are deliberate: the manifest keeps setup-fleet from enrolling it,
-    # and the script's own flag keeps a hand-enrolled or inherited unit inert
-    # until a fleet says yes in its fleet-tier .env. A fleet arms it in
-    # fleet.yaml: defaults: { jobs: { task-recheck: { enroll: true } } }
-    # plus TASK_RECHECK_ENABLED=1 in the fleet .env.
+    # ON by default -- this is the reaction the target workflow is FOR. It
+    # DISPATCHES INTO A LIVE MANAGER SESSION, which is as far from read-only
+    # as a timer gets, and it still ships on: what it sends is a message to
+    # the fleet's own manager about the fleet's own stale rows, which is none
+    # of the four categories in the defaults rule. A fleet that wants it quiet
+    # sets TASK_RECHECK_ENABLED=0 in its fleet-tier .env; the launcher then
+    # no-ops LOUDLY on every tick, so an off switch is visible in the log of
+    # the host it is off on rather than reading as a broken timer. The
+    # self-gate SHAPE is kept for exactly that -- it is an opt-OUT now.
     task-recheck:
-      enroll: false
       script: "$CLAUDLOBBY_ROOT/lib/task-recheck.sh"
       interval: 21600
       type: oneshot

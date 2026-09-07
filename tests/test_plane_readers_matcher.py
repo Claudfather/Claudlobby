@@ -333,7 +333,14 @@ def test_the_composer_stamps_no_transition_flag_whatever_the_tier_says(tmp_path,
     pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
     assert "PLANE_READ_" not in pulse and "PLANE_LEGACY_WRITE_" not in pulse
     assert "Environment=PLANE_EMIT_ENABLED=1" in pulse
-    assert "fleet-pulse" not in FLEET_JOB_ARMING and FLEET_JOB_ARMING["keepalive"] == ("PLANE_EMIT_ENABLED",)
+    # The per-job table is DERIVED from claudlobby/switches.py since chunk N
+    # and holds only jobs whose SCRIPT reads a flag. `keepalive` left it with
+    # no change to composed output: the baseline stamp above already puts the
+    # emission flag on EVERY fleet job unit, which the `pulse` assertion two
+    # lines up is the live proof of.
+    assert "fleet-pulse" not in FLEET_JOB_ARMING
+    assert "keepalive" not in FLEET_JOB_ARMING
+    assert FLEET_JOB_ARMING["task-recheck"] == ("TASK_RECHECK_ENABLED",)
 
 
 def test_the_stdlib_readers_hold_no_cutover_twin():

@@ -209,7 +209,7 @@ Applied to every bot. Merge rules by type:
 
 #### `fleet.defaults.jobs.<name>.enroll`
 
-System jobs flagged `enroll: false` (e.g. `weekly-worker-restart` — bouncing workers is disruptive) are **composed-but-dormant**: their units are generated and listed in the timers/ `DORMANT` manifest, but `setup-fleet` does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
+System jobs flagged `enroll: false` are **composed-but-dormant**: their units are generated and listed in the timers/ `DORMANT` manifest, but `setup-fleet` does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
 
 ```yaml
 fleet:
@@ -217,6 +217,36 @@ fleet:
     jobs:
       weekly-worker-restart: { enroll: true }
 ```
+
+Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
+
+#### Defaults: what a fleet gets without asking
+
+**A job or door is ON by default unless it deletes data, spends money, mutates operator source, or sends outbound to people at scale.** A fleet that declares nothing gets the whole reaction loop — the dispatch deadline, the manager's scheduled re-check, expiry, the plane's own recording and equipment — running. What stays opt-in is listed below with the one line that arms it, and `claudlobby doctor --switches` prints the live version of the table for a given fleet, with each row's current state and the tier that set it. `claudlobby status`'s header names any reaction door turned off, so a disabled reaction is never silent.
+
+<!-- BEGIN GENERATED: switches -->
+<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby doctor --switches --markdown -->
+
+| Switch | Ships | Scope | Carrier | Flip it with |
+|---|---|---|---|---|
+| `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
+| `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
+| `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
+| `registry-scan` | **on** | generate | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
+
+<!-- END GENERATED: switches -->
+
+**Which carrier — the `Carrier` column, and why it is a column.** The two carriers reach different places, so a switch has to name the one that actually reaches its door; a table that names the other is worse than no table, because you write the flag, watch nothing change, and conclude the door is broken.
+
+- **`fleet.yaml` `env:`** (declared per bot under `bots.<name>.env`, not in `defaults:`) is composed into that bot's `bot.conf`, which `start-bot.sh` sources with `set -a`. It is the **only** carrier that reaches a door running inside a bot's Claude session — the SessionEnd digest, a spin-down the bot runs itself. It reaches neither `generate` nor a timer.
+- **The fleet-tier `.env`** is read by `generate`, and the composer carries the tier's **resolved value** onward to the places that cannot read it themselves: an `Environment=` line on the timer unit (a unit sources no `.env` at all) and, for the estate silencer, an export in `bot.conf`. A tier assignment on its own does **not** reach a session — `start-bot.sh` sources the tiers *before* `set -a`, so a bare `VAR=value` line is assigned unexported and dies with that shell.
+
+Under an on-by-default rule the stamp matters most for the `0`: an off switch that cannot reach the door is not an off switch. Only an exact `0` disarms; an empty assignment (`export FLAG=`) wins at its tier but is not a `0`, so the door stays on. A disarmed door no-ops **loudly** in its log — a silent skip reads exactly like a broken timer.
+
+Host-scoped switches (`plane-daemon`, `plane-view`, `plane-prune`, `plane-expire`, `plane-host-probe`, `update-siblings`) are **not** reachable from `fleet.yaml` — host jobs bypass the fleet defaults merge. See [`system-yaml-schema.md`'s Defaults section](system-yaml-schema.md#defaults-the-rule).
 
 ### `fleet.teams`
 

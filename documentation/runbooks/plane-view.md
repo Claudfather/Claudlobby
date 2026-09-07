@@ -19,9 +19,9 @@ touch nothing: no non-GET route exists (pinned by
 ## Run it
 
 ```bash
-pip install -e '.[plane-ui]'          # FastAPI/uvicorn — optional extra
-claudlobby plane view                 # binds 127.0.0.1:8899
-claudlobby plane open                 # print/launch the URL (§17's open verb)
+python3 -m pip install -e '.[plane-ui]'   # FastAPI/uvicorn — part of the documented install
+claudlobby plane view                     # binds 127.0.0.1:8899
+claudlobby plane open                     # print/launch the URL (§17's open verb)
 ```
 
 `/healthz` is a **data-freshness probe**: it answers 503 whenever the plane
@@ -30,10 +30,25 @@ recorder simply has not written yet — so wire monitors accordingly. The
 header's recorder pill is a live daemon PROBE (typed handshake), never
 socket-file presence.
 
-Supervised: arm `plane-view.enroll: true` under `host.jobs` in the HOST's
-system.yaml (compose-time dormancy, exactly like `plane-daemon`), regenerate,
-enroll. Knobs: `PLANE_VIEW_PORT`; `PLANE_VIEW_HOST` is the raw-bind dev
-fallback only.
+Supervised: **enrolled by default since chunk N** — `plane-view` composes
+its units and `lib/setup-system` enrolls them, because a read-only localhost
+UI reaches none of the four categories the defaults rule reserves for opt-in.
+Exposing it beyond the host (Tailscale Serve, below) stays deliberately your
+step. To turn it off, set `plane-view.enroll: false` under `host.jobs` in
+**this host's own** system.yaml (compose-time dormancy, exactly like
+`plane-daemon` — regenerating then prunes the units), then stop the installed
+unit. Knobs: `PLANE_VIEW_PORT`; `PLANE_VIEW_HOST` is the raw-bind dev fallback
+only.
+
+**It needs the `[plane-ui]` extra, and the compositor checks.** Where fastapi
+and uvicorn do not import in the install's venv, `generate` composes **no**
+view unit at all and `claudlobby doctor --switches` renders `plane-view` off
+with `pip install -e '.[plane-ui]'` as its arm line. That is the fold's F1:
+"the unit exits saying so" is an honest failure for a hand run and a **crash
+loop every 5s, forever** under `Restart=always` — and enrolling by default is
+what turns the first into the second. `lib/setup-system` installs the extra
+(first install and upgrade both), so a host that followed the documented path
+has it.
 
 ## Front it with Tailscale Serve (the ruled exposure)
 

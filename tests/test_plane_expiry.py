@@ -136,22 +136,49 @@ def test_cli_dry_run_then_live(tmp_path):
 def _launcher(root, *argv, armed):
     env = dict(os.environ, CLAUDLOBBY_ROOT=str(root),
                PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
-    if armed:
-        env["PLANE_EXPIRE_ENABLED"] = "1"
+    # Since the defaults flip the flag is an opt-OUT: absence RUNS the sweep,
+    # and only an exact 0 stops it. The harness spells both explicitly rather
+    # than relying on absence, so the pin reads the same way the door does.
+    env["PLANE_EXPIRE_ENABLED"] = "1" if armed else "0"
     return subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), *argv],
                           capture_output=True, text=True, timeout=120, env=env)
 
 
-def test_launcher_self_gates(tmp_path):
+def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path):
+    """Opt-OUT since the defaults flip. Two halves, and the second is the one
+    the ruling is about: a door turned off must SAY so, because a silent skip
+    is indistinguishable from a broken timer and that ambiguity is exactly
+    what a dormant-by-default estate taught operators to ignore."""
     root = _root(tmp_path)
     _seed(root)
-    d = _launcher(root, "--dry-run", armed=False)
-    assert d.returncode == 0 and "dormant" in d.stderr
-    a = _launcher(root, "--dry-run", armed=True)
-    assert a.returncode == 0 and "would expire 1" in a.stdout
+    on = _launcher(root, "--dry-run", armed=True)
+    assert on.returncode == 0 and "would expire 1" in on.stdout
+    off = _launcher(root, "--dry-run", armed=False)
+    assert off.returncode == 0
+    # REWRITTEN by the fold (F6): the loud line is now the SHARED gate's
+    # (lib-common `switch_is_on`), not this door's own copy — four launchers
+    # had four spellings of one comparison. What is pinned is unchanged: the
+    # door names itself, names the flag, and says what will not happen.
+    assert "plane-expire: OFF here" in off.stderr
+    assert "PLANE_EXPIRE_ENABLED=0" in off.stderr
+    assert "no assignment will be expired" in off.stderr
+    assert "would expire" not in off.stdout
 
 
-def test_job_composes_dormant_and_arms_on_its_own_flag(tmp_path, monkeypatch):
+def test_launcher_runs_with_no_flag_at_all(tmp_path):
+    """Absence is ON — the flip itself, pinned. This is the assertion that
+    fails if someone restores `${FLAG:-0}` while leaving the comments alone."""
+    import os as _os
+    root = _root(tmp_path)
+    _seed(root)
+    env = dict(HOME=str(root), CLAUDLOBBY_ROOT=str(root),
+               PATH=f"{REPO / '.venv' / 'bin'}:" + _os.environ.get("PATH", ""))
+    r = subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), "--dry-run"],
+                       capture_output=True, text=True, timeout=120, env=env)
+    assert r.returncode == 0 and "would expire 1" in r.stdout
+
+
+def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     import yaml
     from claudlobby.composer import compose_host_timers
     from claudlobby.paths import Paths
@@ -160,7 +187,9 @@ def test_job_composes_dormant_and_arms_on_its_own_flag(tmp_path, monkeypatch):
 
     job = yaml.safe_load((REPO / "claudlobby" / "system.yaml").read_text())[
         "host"]["jobs"]["plane-expire"]
-    assert job["enroll"] is False and "plane-expire.sh" in job["script"]
+    # Enrolled by default since the defaults flip: absence of `enroll` IS
+    # enrolled for a host timer.
+    assert job.get("enroll", True) is True and "plane-expire.sh" in job["script"]
     root = tmp_path / "r"
     (root / "claudlobby").mkdir(parents=True)
     (root / "claudlobby" / "system.yaml").write_text(
@@ -178,6 +207,32 @@ def test_job_composes_dormant_and_arms_on_its_own_flag(tmp_path, monkeypatch):
     assert "Environment=PLANE_EXPIRE_ENABLED=1" in (
         out / "claudlobby-plane-expire.service").read_text()
     assert "PLANE_EXPIRE" not in (out / "claudlobby-plane-prune.service").read_text()
+
+
+def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
+    """The load-bearing half of an opt-out default: a host timer runs in a
+    CLOSED env, so if the composer only ever stamped a "1" then writing
+    PLANE_EXPIRE_ENABLED=0 in the host .env would change nothing and the sweep
+    would keep firing with no way to tell why (#1383's class, inverted)."""
+    import yaml  # noqa: F401 — mirrors the fixture above
+    from claudlobby.composer import compose_host_timers
+    from claudlobby.paths import Paths
+    from claudlobby.env_tiers import Resolution
+    import claudlobby.env_tiers as et
+
+    root = tmp_path / "off"
+    (root / "claudlobby").mkdir(parents=True)
+    (root / "claudlobby" / "system.yaml").write_text(
+        "host:\n  jobs:\n    plane-expire:\n"
+        "      script: \"$CLAUDLOBBY_ROOT/lib/plane-expire.sh\"\n"
+        "      schedule: \"*-*-* 05:30:00\"\n      type: oneshot\n")
+    monkeypatch.setattr(et, "read_tiers", lambda paths, bot_name=None, fleet_name=None: [])
+    monkeypatch.setattr(et, "cascade", lambda tiers: {
+        "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
+                                           value="0", tier="host", path=None)})
+    out = compose_host_timers(Paths(root=root))
+    assert "Environment=PLANE_EXPIRE_ENABLED=0" in (
+        out / "claudlobby-plane-expire.service").read_text()
 
 
 def _progress(root, wi, aid):

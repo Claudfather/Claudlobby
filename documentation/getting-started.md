@@ -21,8 +21,13 @@ git clone https://github.com/Claudfather/Claudlobby.git
 cd Claudlobby
 python3 -m venv .venv
 source .venv/bin/activate
-python3 -m pip install -e .
+python3 -m pip install -e '.[plane-ui]'
 ```
+
+`[plane-ui]` is FastAPI + uvicorn (two pure-Python wheels) — the read-only operator plane
+`claudlobby plane view`, which is enrolled by default. Leave the extra off and the compositor
+composes **no** unit for it rather than supervising a process that cannot start; `claudlobby
+doctor --switches` then lists `plane-view` as off, with this pip line as the way to arm it.
 
 **The virtualenv is required, not a style preference.** Homebrew python (macOS) and Debian /
 Raspberry Pi OS system python are both marked externally-managed under

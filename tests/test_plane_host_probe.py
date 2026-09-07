@@ -130,18 +130,25 @@ def test_records_without_any_flag_and_disabled_silences_it(tmp_path):
     assert not db_path(root2).is_file()
 
 
-def test_probe_job_composes_dormant_and_arms_on_the_emit_flag(tmp_path,
-                                                              monkeypatch):
+def test_probe_job_ships_enrolled_and_carries_the_emit_flag(tmp_path,
+                                                            monkeypatch):
     from claudlobby.composer import compose_host_timers
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
 
+    import yaml
+    # The shipped tier enrolls it since the defaults flip (chunk N): a
+    # read-only per-minute emitter is none of the four categories, and the
+    # Host card is blank without it.
+    shipped = yaml.safe_load(
+        (REPO / "claudlobby" / "system.yaml").read_text())["host"]["jobs"]
+    assert shipped["plane-host-probe"].get("enroll", True) is True
     root = tmp_path / "r"
     (root / "claudlobby").mkdir(parents=True)
     (root / "claudlobby" / "system.yaml").write_text(
         "host:\n  jobs:\n"
-        "    plane-host-probe:\n      enroll: false\n"
+        "    plane-host-probe:\n"
         "      script: \"$CLAUDLOBBY_ROOT/lib/plane-host-probe.sh\"\n"
         "      interval: 60\n      type: oneshot\n")
     monkeypatch.setattr(et, "read_tiers",
@@ -151,7 +158,13 @@ def test_probe_job_composes_dormant_and_arms_on_the_emit_flag(tmp_path,
             name="PLANE_EMIT_ENABLED", value="1", tier="host", path=None)})
     out = compose_host_timers(Paths(root=root))
     svc = (out / "claudlobby-plane-host-probe.service").read_text()
-    assert "Environment=PLANE_EMIT_ENABLED=1" in svc
+    # The probe has no flag of its OWN — it is gated by the estate silencer
+    # (plane_armed / PLANE_EMIT_DISABLED), so the composer stamps it nothing.
+    # Pinned because the pre-flip build stamped a PLANE_EMIT_ENABLED nothing
+    # in the probe ever read: a carrier for a flag no door consults is the
+    # dead-flag shape one layer down.
+    assert "PLANE_EMIT_ENABLED" not in svc
+    assert "plane-host-probe.sh" in svc
 
 
 def test_launcher_parses_and_references():

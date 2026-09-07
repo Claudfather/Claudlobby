@@ -55,7 +55,22 @@ def register_subparsers(sub) -> None:
 
     pdr = sub.add_parser(
         "doctor",
-        help="Pre-flight fleet health diagnostic (env, MCP, services, creds)",
+        help="Pre-flight fleet health diagnostic (env, MCP, services, creds,"
+        " switches)",
+    )
+    pdr.add_argument(
+        "--switches",
+        action="store_true",
+        help="Print ONLY the switch table — every knob the system ships, its"
+        " state here, and the one line that flips it (what setup-fleet and"
+        " setup-system print at the end of a run)",
+    )
+    pdr.add_argument(
+        "--markdown",
+        action="store_true",
+        help="With --switches: print the GENERATED doc blocks (the three"
+        " schema/architecture tables are rendered from the registry, not"
+        " hand-kept) so a doc can be regenerated after a switch changes",
     )
     pdr.set_defaults(func=cmd_doctor)
 

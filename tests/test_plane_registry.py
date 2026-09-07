@@ -13,6 +13,7 @@ DORMANCY (an unarmed fleet emits nothing).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -55,8 +56,11 @@ def _fleet_root(tmp_path: Path, *, armed: bool = True,
     # arming surface.
     if not (root / "lib").exists():
         (root / "lib").symlink_to(REPO / "lib")
-    if armed:
-        (root / ".env").write_text("PLANE_EMIT_ENABLED=1\n")
+    # Opt-OUT since the defaults flip (chunk N): the scan runs unless a tier
+    # says exactly 0. `armed=False` therefore writes the OFF value rather than
+    # nothing — absence is now the ON case and has its own pin below.
+    (root / ".env").write_text(
+        "PLANE_EMIT_ENABLED=%s\n" % ("1" if armed else "0"))
     worker = ("\n    worker-1:\n"
               "      expertise: [software-engineering]\n"
               "      reports_to: lead\n") if worker_stanza else "\n"
@@ -398,11 +402,54 @@ def test_empty_but_complete_scan_tombstones_everything_in_scope(tmp_path):
     assert "bot:test-fleet/worker-1" in stones
 
 
-def test_unarmed_fleet_emits_nothing(tmp_path):
-    """Dormancy (estate rule): no PLANE_EMIT_ENABLED=1 -> None, zero db."""
+def test_a_tier_that_says_zero_emits_nothing(tmp_path):
+    """The opt-OUT half: PLANE_EMIT_ENABLED=0 -> None, zero db."""
     root = _fleet_root(tmp_path, armed=False)
     assert _scan(root) is None
     assert not (root / "state" / "plane" / "plane.db").exists()
+
+
+def test_an_explicit_zero_beats_an_unreachable_resolver(tmp_path,
+                                                        monkeypatch, caplog):
+    """The fold's F3. Failing OPEN is right for a resolver that cannot say
+    which tier set a flag — under an on-by-default rule the alternative is
+    silently dropping the keyframes every later reader joins against. It is
+    NOT right when we can read the answer: the CLI already loaded the fleet's
+    .env into os.environ, so an operator who wrote PLANE_EMIT_ENABLED=0 has
+    said so, and scanning over it is ignoring an instruction in hand rather
+    than recovering from a failure.
+
+    Only an exact 0 does this — an unset value still scans, which keeps the
+    failure falling in the on-by-default direction."""
+    import claudlobby.env_tiers as et
+
+    root = _fleet_root(tmp_path, armed=False)
+    (root / ".env").unlink()          # the tier is gone; the process env is not
+    monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
+
+    def boom(*a, **k):
+        raise et.ResolverUnavailable("no resolver")
+
+    monkeypatch.setattr(et, "resolve", boom)
+    with caplog.at_level(logging.INFO):
+        assert _scan(root) is None
+    assert not (root / "state" / "plane" / "plane.db").exists()
+    assert "PLANE_EMIT_ENABLED=0" in caplog.text
+    caplog.clear()
+    # ...and with nothing set at all, the same failure still SCANS.
+    monkeypatch.delenv("PLANE_EMIT_ENABLED")
+    assert _scan(root) is not None
+
+
+def test_a_fleet_with_no_flag_at_all_SCANS(tmp_path):
+    """The defaults flip itself (chunk N). A keyframe of what the fleet IS is
+    what every later metric sample joins to, so a plane whose registry lane
+    never ran renders an estate of unnamed uids — which is what the whole
+    estate looked like while this shipped dormant. Absence is ON."""
+    root = _fleet_root(tmp_path)
+    (root / ".env").unlink()
+    s = _scan(root)
+    assert s is not None and s["entities"] > 0
 
 
 def test_assembly_is_deterministic(tmp_path):
@@ -441,11 +488,13 @@ def test_defaults_env_tier_does_not_arm(tmp_path):
     a tier the estate does not use — so the feature was dead in production
     while every test passed. Arming resolves ONLY through the runtime's
     .env tier cascade; the dead tier is regression-locked here."""
-    root = _fleet_root(tmp_path, armed=False)
+    root = _fleet_root(tmp_path, armed=False)       # .env tier says 0
     text = (root / "fleet.yaml").read_text().replace(
         "    env: {}", '    env: {PLANE_EMIT_ENABLED: "1"}')
     (root / "fleet.yaml").write_text(text)
-    assert _scan(root) is None                       # defaults.env ≠ arming
+    # Still None: the defaults tier cannot arm, and post-flip it cannot
+    # DISARM either — only the .env tier is consulted, which here says 0.
+    assert _scan(root) is None                       # defaults.env ≠ the tier
 
 
 def test_vaultless_fleet_never_tombstones_a_vault(tmp_path):

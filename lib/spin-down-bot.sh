@@ -19,12 +19,13 @@
 #   $SPINDOWN_ACTOR    overrides the recorded actor, so a bot-driven teardown
 #                      names itself instead of masquerading as the host user.
 #
-# $SPINDOWN_RECEIPT_ENABLED — "1" ARMS the teardown receipt for this fleet.
-# DEFAULT 0 (dormant): the flags above still parse and the teardown is
-# unchanged, but no ledger row is written. lib/ is a shared install, so this is
-# what keeps a root-pull from making new behavior live on a destructive door
-# without a canary. Arm per fleet in fleet.yaml `env:`, canary on a throwaway
-# first.
+# $SPINDOWN_RECEIPT_ENABLED — "0" turns the teardown receipt OFF for this
+# fleet. DEFAULT ON since the defaults flip (chunk N): the receipt is the only
+# thing that survives a --purge, so a fleet whose bot vanished has something to
+# read; it records, it destroys nothing, and it costs one plane event per
+# teardown. The canary reasoning that made it dormant was about a NEW door
+# arriving on a destructive path via a root pull -- the door is no longer new,
+# and the record is the part of a destructive teardown an operator most needs.
 #
 # The RAM lever that holds under keepalive — and a destructive door; see
 # $_sd_warning below / --help.
@@ -81,15 +82,14 @@ sd_log() { printf 'spin-down[%s]: %s\n' "$SLUG" "$*"; }
 # host-global, so the fleet is also what distinguishes same-named bots.
 emit_teardown_receipt() {
     local action="spin-down" actor fleet data
-    # DORMANT BY DEFAULT — the rollout contract. lib/ is a SHARED install: every
-    # bot on every fleet reads this same file, so a change here cannot be staged
-    # per-bot and a routine root-pull for something unrelated would otherwise
-    # make new behavior live on the destructive teardown door with no canary.
-    # Only an explicit "1" arms it; a fleet opts in via SPINDOWN_RECEIPT_ENABLED
-    # in its fleet.yaml `env:`, one fleet at a time. Same shape as
-    # SESSION_DIGEST_ENABLED in transcript-digest.sh.
-    if [ "${SPINDOWN_RECEIPT_ENABLED:-0}" != "1" ]; then
-        sd_log "receipt: dormant (set SPINDOWN_RECEIPT_ENABLED=1 to arm this fleet)"
+    # ON BY DEFAULT since the defaults flip (chunk N) — an opt-OUT. The receipt
+    # is written BEFORE the destructive legs and is the one record that
+    # outlives a --purge, which is exactly when a reader has nothing else to
+    # go on. Only an exact 0 disarms it (an empty assignment is a win at its
+    # tier, #1213, but is not a 0), and the disarm is said out loud so a
+    # missing receipt is never a mystery.
+    if ! switch_is_on SPINDOWN_RECEIPT_ENABLED spindown-receipt \
+        "this teardown will leave no record"; then
         return 0
     fi
     [ "$PURGE" -eq 1 ] && action="spin-down --purge"
