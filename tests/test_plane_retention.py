@@ -165,8 +165,8 @@ def test_custom_window_and_negative_refused(tmp_path):
 def _cli(root: Path, *argv, armed=True):
     import os
     env = dict(os.environ)
-    if armed:
-        env["PLANE_PRUNE_ENABLED"] = "1"   # the launcher self-gate
+    # Opt-OUT since the defaults flip: absence RUNS, only an exact 0 stops it.
+    env["PLANE_PRUNE_ENABLED"] = "1" if armed else "0"   # the launcher self-gate
     return subprocess.run(
         [sys.executable, "-m", "claudlobby", "--root", str(root),
          "plane", *argv], capture_output=True, text=True, timeout=120, env=env)
@@ -189,12 +189,18 @@ def test_cli_prune_ages_out_and_dry_run_is_safe(tmp_path):
     assert empty.returncode == 0
 
 
-def test_prune_job_composes_dormant_and_reads_root():
+def test_prune_job_ships_enrolled_and_reads_root():
+    """Chunk N: retention ships ON. The rule says a door that DELETES DATA
+    stays opt-in, and this is the one argued exception: what it deletes is raw
+    per-minute SAMPLES past the 30-day incident-join window — the retention
+    every metrics store does, and the reason the per-minute host probe is safe
+    to ship on. The ledger is out of reach by construction (family-scoped
+    DELETE, pinned elsewhere in this file), and the window stays the knob."""
     import yaml
     sysyaml = yaml.safe_load(
         (REPO / "claudlobby" / "system.yaml").read_text())
     job = sysyaml["host"]["jobs"]["plane-prune"]
-    assert job["enroll"] is False             # a DELETE door never auto-arms
+    assert job.get("enroll", True) is True
     assert "plane-prune.sh" in job["script"]
 
 
@@ -204,28 +210,43 @@ def _launcher(root: Path, *argv, armed):
     # its PATH rung, so put the repo venv there (how the estate resolves)
     env = dict(os.environ, CLAUDLOBBY_ROOT=str(root),
                PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
-    if armed:
-        env["PLANE_PRUNE_ENABLED"] = "1"
+    # Opt-OUT since the defaults flip: absence RUNS, only an exact 0 stops it.
+    env["PLANE_PRUNE_ENABLED"] = "1" if armed else "0"
     return subprocess.run(
         ["bash", str(REPO / "lib" / "plane-prune.sh"), *argv],
         capture_output=True, text=True, timeout=120, env=env)
 
 
-def test_launcher_self_gates_on_the_arming_flag(tmp_path):
-    """r-gauntlet: enroll:false is NOT enforced for host timers
-    (setup-system enrolls every composed unit), so for a DELETE door the
-    launcher self-gates — unarmed, it no-ops loudly and deletes nothing;
-    armed, it runs. Defense in depth beyond the dormant manifest."""
+def test_launcher_runs_by_default_and_its_off_switch_is_LOUD(tmp_path):
+    """Opt-OUT since chunk N. The off half still deletes nothing AND says so:
+    a plane growing without bound because a flag was set two months ago and
+    forgotten is precisely what a silent skip buys."""
     root = _root(tmp_path)
     _sample(root)
     _backdate_all(root, days_old=40)
-    dormant = _launcher(root, "--dry-run", armed=False)
-    assert dormant.returncode == 0
-    assert "dormant" in dormant.stderr
-    assert _counts(root)[0] == 1              # unarmed touched nothing
-    armed = _launcher(root, armed=True)
-    assert armed.returncode == 0
-    assert _counts(root)[0] == 0              # armed pruned
+    off = _launcher(root, "--dry-run", armed=False)
+    assert off.returncode == 0
+    assert "OFF on this host" in off.stderr
+    assert "PLANE_PRUNE_ENABLED=0" in off.stderr
+    assert _counts(root)[0] == 1              # off touched nothing
+    on = _launcher(root, armed=True)
+    assert on.returncode == 0
+    assert _counts(root)[0] == 0              # on pruned
+
+
+def test_launcher_prunes_with_no_flag_at_all(tmp_path):
+    """Absence is ON — the flip itself. Fails if `${FLAG:-0}` comes back."""
+    import os
+    root = _root(tmp_path)
+    _sample(root)
+    _backdate_all(root, days_old=40)
+    env = {k: v for k, v in os.environ.items() if k != "PLANE_PRUNE_ENABLED"}
+    env.update(CLAUDLOBBY_ROOT=str(root),
+               PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
+    r = subprocess.run(["bash", str(REPO / "lib" / "plane-prune.sh")],
+                       capture_output=True, text=True, timeout=120, env=env)
+    assert r.returncode == 0, r.stderr
+    assert _counts(root)[0] == 0
 
 
 def test_cli_negative_window_is_a_clean_refusal(tmp_path):

@@ -394,6 +394,20 @@ def cmd_plane_doctor(args) -> int:
              "run `claudlobby --fleet <name> plane registry --verify` —"
              " the read-only estate-vs-scan check (doctor stays lightweight;"
              " re-derivation is that door's job)")
+        # The plane-scoped switch subset — the same registry and the same
+        # renderer `claudlobby doctor` uses, filtered to the plane's own doors.
+        # A plane whose daemon, probe, retention or expiry sweep is off is not
+        # BROKEN, so this is never a failing rung: it is the answer to "why is
+        # the Host card empty / why does nothing expire", which is otherwise a
+        # question you can only answer by reading four source files.
+        try:
+            from .. import switches as _sw
+            _rows = _sw.resolve(paths, None)
+            rung(True, "switches", _sw.summary_line(
+                [r for r in _rows if r.switch.plane]))
+            print(_sw.format_table(_rows, plane_only=True))
+        except Exception as exc:  # noqa: BLE001 — a health command never crashes
+            rung(True, "switches", f"unavailable: {exc}")
         return 0 if failing == 0 else 1
 
     return _guarded("plane doctor", run)

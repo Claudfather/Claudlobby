@@ -209,7 +209,7 @@ Applied to every bot. Merge rules by type:
 
 #### `fleet.defaults.jobs.<name>.enroll`
 
-System jobs flagged `enroll: false` (e.g. `weekly-worker-restart` — bouncing workers is disruptive) are **composed-but-dormant**: their units are generated and listed in the timers/ `DORMANT` manifest, but `setup-fleet` does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
+System jobs flagged `enroll: false` are **composed-but-dormant**: their units are generated and listed in the timers/ `DORMANT` manifest, but `setup-fleet` does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
 
 ```yaml
 fleet:
@@ -217,6 +217,26 @@ fleet:
     jobs:
       weekly-worker-restart: { enroll: true }
 ```
+
+Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
+
+#### Defaults: what a fleet gets without asking
+
+**A job or door is ON by default unless it deletes data, spends money, mutates operator source, or sends outbound to people at scale.** A fleet that declares nothing gets the whole reaction loop — the dispatch deadline, the manager's scheduled re-check, expiry, the plane's own recording and equipment — running. What stays opt-in is listed below with the one line that arms it, and `claudlobby doctor --switches` prints the live version of the table for a given fleet, with each row's current state and the tier that set it. `claudlobby status`'s header names any reaction door turned off, so a disabled reaction is never silent.
+
+| Switch a fleet controls | Ships | Flip it with |
+|---|---|---|
+| `task-recheck` (the manager's re-check) | **on** | `TASK_RECHECK_ENABLED=0` in the fleet `.env`, or `defaults.jobs.task-recheck.enroll: false` |
+| `registry-scan` (keyframes at `generate`) | **on** | `PLANE_EMIT_ENABLED=0` in the fleet `.env` |
+| `spindown-receipt` | **on** | `SPINDOWN_RECEIPT_ENABLED=0` in the fleet `.env` |
+| plane recording (every door) | **on** | `PLANE_EMIT_DISABLED=1` — the harness exemption; silences everything |
+| `session-digest` | **off** — model spend | `SESSION_DIGEST_ENABLED=1` in the fleet `.env` |
+| `code-audit-sweep` | **off** — spend + outbound issues | the `sweep:` block below |
+| `weekly-worker-restart` | **off** — bounces live sessions | `defaults.jobs.weekly-worker-restart.enroll: true` |
+
+**Which carrier.** `fleet.yaml`'s `env:` block reaches composed `bot.conf`, so a bot **session** sees it; it does NOT reach `generate`-time code or a scheduler-run timer. The fleet-tier **`.env`** reaches all three, so it is the single carrier worth using for a switch. A timer unit sources no `.env` at all — the composer stamps the tier's resolved value as an `Environment=` line, which under an on-by-default rule matters most for the `0`: an off switch that cannot reach the door is not an off switch. Only an exact `0` disarms; an empty assignment (`export FLAG=`) wins at its tier but is not a `0`, so the door stays on. A disarmed door no-ops **loudly** in its log — a silent skip reads exactly like a broken timer.
+
+Host-scoped switches (`plane-daemon`, `plane-view`, `plane-prune`, `plane-expire`, `plane-host-probe`, `update-siblings`) are **not** reachable from `fleet.yaml` — host jobs bypass the fleet defaults merge. See [`system-yaml-schema.md`'s Defaults section](system-yaml-schema.md#defaults-the-rule).
 
 ### `fleet.teams`
 

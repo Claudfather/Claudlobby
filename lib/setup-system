@@ -645,6 +645,15 @@ phase_host_jobs() {
         found=1
         base="$(basename "$t" ".$ext")" # claudlobby-<job>
         jobname="${base#claudlobby-}"
+        # Composed-but-dormant HOST timer. Until the defaults flip this loop
+        # enrolled every composed unit, so `enroll: false` on a host timer was
+        # a comment rather than a control (#1385) -- and the one job carrying
+        # it, update-siblings, MUTATES OPERATOR SOURCE. Same manifest and same
+        # shared predicate setup-fleet uses for fleet jobs.
+        if unit_is_dormant "$host_timers_dir" "$base"; then
+            log "· dormant (opt-in): $base — enable via this host's system.yaml: host: { jobs: { $jobname: { enroll: true } } }"
+            continue
+        fi
         local adopt_arg=()
         [ "$ADOPT" = 1 ] && adopt_arg=(--adopt)
         if TIMER_DIR="$host_timers_dir" UNIT_NAME="$base" "$enroller" "$jobname" \
@@ -705,6 +714,15 @@ phase_report() {
         for step in "${NEXT_STEPS[@]}"; do
             echo "    - $step"
         done
+    fi
+    # The switches table -- the no-silent-switches surface for a HOST run.
+    # One renderer (claudlobby/switches.py), called by both shell setup doors
+    # and by `claudlobby doctor`, so what setup prints and what doctor prints
+    # cannot drift. Non-fatal and non-blocking: an install too old for the
+    # flag, or no importable package, simply prints nothing extra -- a summary
+    # is not worth failing a setup run over.
+    if [ "$DRY_RUN" != 1 ]; then
+        claudlobby_cli doctor --switches 2>/dev/null || true
     fi
     echo
     if [ "$DRY_RUN" = 1 ]; then

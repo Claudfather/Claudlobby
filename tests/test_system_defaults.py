@@ -1092,7 +1092,11 @@ class TestDormantManifest:
         entries = [
             line for line in manifest.splitlines() if line and not line.startswith("#")
         ]
-        assert entries == ["com.test.task-recheck", "com.test.weekly-worker-restart"]
+        # task-recheck left this list in chunk N — the reaction the target
+        # workflow is for ships enrolled. weekly-worker-restart stays: it
+        # bounces live worker sessions, and long-running context is the thing
+        # this system exists to keep.
+        assert entries == ["com.test.weekly-worker-restart"]
         # Composed-but-dormant: the units are still emitted (F4 lock).
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()
         assert (timers_dir / "com.test.weekly-worker-restart.service").is_file()
@@ -1110,6 +1114,6 @@ class TestDormantManifest:
         entries = [
             line for line in manifest.splitlines() if line and not line.startswith("#")
         ]
-        assert entries == ["com.test.task-recheck"]   # the enrolled one is gone from the list
+        assert entries == []   # the enrolled one is gone from the list
         # Still composed, of course.
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()

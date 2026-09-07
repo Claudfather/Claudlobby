@@ -30,10 +30,16 @@ recorder simply has not written yet — so wire monitors accordingly. The
 header's recorder pill is a live daemon PROBE (typed handshake), never
 socket-file presence.
 
-Supervised: arm `plane-view.enroll: true` under `host.jobs` in the HOST's
-system.yaml (compose-time dormancy, exactly like `plane-daemon`), regenerate,
-enroll. Knobs: `PLANE_VIEW_PORT`; `PLANE_VIEW_HOST` is the raw-bind dev
-fallback only.
+Supervised: **enrolled by default since chunk N** — `plane-view` composes
+its units and `lib/setup-system` enrolls them, because a read-only localhost
+UI reaches none of the four categories the defaults rule reserves for opt-in.
+Exposing it beyond the host (Tailscale Serve, below) stays deliberately your
+step. To turn it off, set `plane-view.enroll: false` under `host.jobs` in
+**this host's own** system.yaml (compose-time dormancy, exactly like
+`plane-daemon` — regenerating then prunes the units), then stop the installed
+unit. Knobs: `PLANE_VIEW_PORT`; `PLANE_VIEW_HOST` is the raw-bind dev fallback
+only. It needs the `[plane-ui]` extra: without it the unit exits saying so,
+which is the honest failure rather than a silent dead port.
 
 ## Front it with Tailscale Serve (the ruled exposure)
 

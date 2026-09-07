@@ -55,8 +55,11 @@ def _fleet_root(tmp_path: Path, *, armed: bool = True,
     # arming surface.
     if not (root / "lib").exists():
         (root / "lib").symlink_to(REPO / "lib")
-    if armed:
-        (root / ".env").write_text("PLANE_EMIT_ENABLED=1\n")
+    # Opt-OUT since the defaults flip (chunk N): the scan runs unless a tier
+    # says exactly 0. `armed=False` therefore writes the OFF value rather than
+    # nothing — absence is now the ON case and has its own pin below.
+    (root / ".env").write_text(
+        "PLANE_EMIT_ENABLED=%s\n" % ("1" if armed else "0"))
     worker = ("\n    worker-1:\n"
               "      expertise: [software-engineering]\n"
               "      reports_to: lead\n") if worker_stanza else "\n"
@@ -398,11 +401,22 @@ def test_empty_but_complete_scan_tombstones_everything_in_scope(tmp_path):
     assert "bot:test-fleet/worker-1" in stones
 
 
-def test_unarmed_fleet_emits_nothing(tmp_path):
-    """Dormancy (estate rule): no PLANE_EMIT_ENABLED=1 -> None, zero db."""
+def test_a_tier_that_says_zero_emits_nothing(tmp_path):
+    """The opt-OUT half: PLANE_EMIT_ENABLED=0 -> None, zero db."""
     root = _fleet_root(tmp_path, armed=False)
     assert _scan(root) is None
     assert not (root / "state" / "plane" / "plane.db").exists()
+
+
+def test_a_fleet_with_no_flag_at_all_SCANS(tmp_path):
+    """The defaults flip itself (chunk N). A keyframe of what the fleet IS is
+    what every later metric sample joins to, so a plane whose registry lane
+    never ran renders an estate of unnamed uids — which is what the whole
+    estate looked like while this shipped dormant. Absence is ON."""
+    root = _fleet_root(tmp_path)
+    (root / ".env").unlink()
+    s = _scan(root)
+    assert s is not None and s["entities"] > 0
 
 
 def test_assembly_is_deterministic(tmp_path):
@@ -441,11 +455,13 @@ def test_defaults_env_tier_does_not_arm(tmp_path):
     a tier the estate does not use — so the feature was dead in production
     while every test passed. Arming resolves ONLY through the runtime's
     .env tier cascade; the dead tier is regression-locked here."""
-    root = _fleet_root(tmp_path, armed=False)
+    root = _fleet_root(tmp_path, armed=False)       # .env tier says 0
     text = (root / "fleet.yaml").read_text().replace(
         "    env: {}", '    env: {PLANE_EMIT_ENABLED: "1"}')
     (root / "fleet.yaml").write_text(text)
-    assert _scan(root) is None                       # defaults.env ≠ arming
+    # Still None: the defaults tier cannot arm, and post-flip it cannot
+    # DISARM either — only the .env tier is consulted, which here says 0.
+    assert _scan(root) is None                       # defaults.env ≠ the tier
 
 
 def test_vaultless_fleet_never_tombstones_a_vault(tmp_path):

@@ -2821,6 +2821,107 @@ harness_check "  ...and no credential of any identity was served" "$r"
 rm -rf "$GA_ROOT"
 
 # =============================================================================
+# Chunk N — THE TARGET BEHAVIOR SHIPS ON. A fleet that declares NOTHING must
+# compose the whole reaction loop enrolled, and the one off switch a fleet is
+# expected to use must actually REACH the door and be LOUD when it fires.
+#
+# Composition is unit-tested; this leg exists because the two halves that
+# matter are not composition. A timer runs in a CLOSED env, so "the .env says
+# 0" and "the unit carries the 0" are different facts, and the second is the
+# one production depends on. And the no-op has to be observable: the whole
+# ruling is that a disabled reaction must never be silent, which is a property
+# of the real script running with a real environment, not of a fixture.
+# =============================================================================
+SW_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-sw.XXXXXX")"
+for _d in library templates voices lib; do
+    ln -s "$VAL_REPO/$_d" "$SW_ROOT/$_d"
+done
+cat > "$SW_ROOT/fleet.yaml" <<'SWEOF'
+fleet:
+  name: sw-validate
+  service_prefix: com.swvalidate
+  bots:
+    m1:
+      expertise: [orchestration]
+SWEOF
+
+sw_generate() {  # $1 = optional .env body ("" = no .env at all)
+    rm -rf "$SW_ROOT/runtime" "$SW_ROOT/.env"
+    [ -n "${1:-}" ] && printf '%s' "$1" > "$SW_ROOT/.env"
+    ( cd "$SW_ROOT" && PLANE_EMIT_DISABLED=1 "$VAL_CLI" --root "$SW_ROOT" generate ) \
+        > "$SW_ROOT/gen.log" 2>&1 || true
+}
+SW_FT="$SW_ROOT/runtime/fleet/timers"
+SW_HT="$SW_ROOT/runtime/_host/timers"
+
+sw_generate ""
+r=no; [ -f "$SW_FT/com.swvalidate.task-recheck.timer" ] \
+    && ! grep -qxF "com.swvalidate.task-recheck" "$SW_FT/DORMANT" && r=yes
+harness_check "chunk N a fleet declaring NOTHING enrols the re-check (the reaction the loop is for)" "$r"
+
+r=yes
+for _j in plane-expire plane-prune plane-host-probe; do
+    [ -f "$SW_HT/claudlobby-$_j.timer" ] || r=no
+    grep -qxF "claudlobby-$_j" "$SW_HT/DORMANT" 2>/dev/null && r=no
+done
+harness_check "  ...and the host sweeps: expiry, retention, the host probe" "$r"
+
+r=yes
+for _s in plane-daemon plane-view; do
+    [ -f "$SW_HT/claudlobby-$_s.service" ] || r=no
+    [ -f "$SW_HT/claudlobby-$_s.plist" ] || r=no
+done
+harness_check "  ...and the resident services: the ingest daemon and the operator plane" "$r"
+
+# The other half of the ruling: what STAYS off must be off for real. Before
+# this chunk `enroll: false` on a host timer had no code effect at all, so the
+# one job that mutates operator source enrolled on every host (#1385).
+r=no; grep -qxF "claudlobby-update-siblings" "$SW_HT/DORMANT" 2>/dev/null && r=yes
+harness_check "  ...while update-siblings (mutates operator source) is manifest-DORMANT" "$r"
+r=no; [ -f "$SW_HT/claudlobby-update-siblings.timer" ] && r=yes
+harness_check "  ...composed but not enrolled (inspectable, hand-enrollable, never automatic)" "$r"
+
+# --- the off switch: composed, carried, and LOUD ----------------------------
+sw_generate 'TASK_RECHECK_ENABLED=0
+'
+r=no; grep -q "^Environment=TASK_RECHECK_ENABLED=0$" \
+    "$SW_FT/com.swvalidate.task-recheck.service" && r=yes
+harness_check "chunk N a fleet .env saying 0 REACHES the systemd unit (a timer sources no .env)" "$r"
+r=no; grep -q "<string>0</string>" "$SW_FT/com.swvalidate.task-recheck.plist" \
+    && grep -q "TASK_RECHECK_ENABLED" "$SW_FT/com.swvalidate.task-recheck.plist" && r=yes
+harness_check "  ...and the launchd plist (both platforms, or half the estate is unreachable)" "$r"
+
+# `set -e` is armed here, so capture the rc on the || side: a bare $? after a
+# nonzero command aborts the whole harness and no summary line is ever printed.
+_sw_rc=0
+env CLAUDLOBBY_ROOT="$SW_ROOT" TASK_RECHECK_ENABLED=0 PATH="/usr/bin:/bin" \
+    bash "$VAL_REPO/lib/task-recheck.sh" sw-validate \
+    > "$SW_ROOT/off.out" 2> "$SW_ROOT/off.err" || _sw_rc=$?
+[ "$_sw_rc" -eq 0 ] && r=yes || r=no
+harness_check "  ...the launcher no-ops CLEANLY with it (a timer must not go red for being off)" "$r"
+grep -q "OFF for this fleet" "$SW_ROOT/off.err" && r=yes || r=no
+harness_check "  ...and LOUDLY (a silent skip reads exactly like a broken timer)" "$r"
+
+# A tier that says nothing must leave the unit alone, so the launcher's own
+# default is the ONE place the answer lives.
+sw_generate ""
+grep -q "TASK_RECHECK_ENABLED" "$SW_FT/com.swvalidate.task-recheck.service" && r=no || r=yes
+harness_check "  ...while a silent tier stamps nothing (one default, not two)" "$r"
+
+# And the surface the ruling actually asks for: the switches are NAMED where
+# the operator looks, with the line that flips them.
+"$VAL_CLI" --root "$SW_ROOT" doctor --switches > "$SW_ROOT/sw.txt" 2>&1 || true
+r=yes
+for _k in update-siblings session-digest code-audit-sweep; do
+    grep -q "$_k" "$SW_ROOT/sw.txt" || r=no
+done
+harness_check "chunk N doctor --switches names every opt-in that ships OFF" "$r"
+grep -q "arm: SESSION_DIGEST_ENABLED=1" "$SW_ROOT/sw.txt" && r=yes || r=no
+harness_check "  ...each with the one line that arms it" "$r"
+
+rm -rf "$SW_ROOT"
+
+# =============================================================================
 # PR-B T9 — the observable-plane dual-write leg: a REAL daemon on a temp root,
 # the REAL dispatch door through the REAL shim, and the ladder's degradation
 # observed rather than claimed. Gated: no venv CLI resolvable -> the leg skips

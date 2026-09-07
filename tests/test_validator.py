@@ -491,9 +491,40 @@ class TestObservabilityValidation:
         paths = _make_paths(fleet_dir)
         paths.env_file.write_text("PLANE_READ_OPEN=1\nPLANE_LEGACY_WRITE_REPORT=0\nGITHUB_PAT=ghp_x\n")
         report = validate(fleet, paths)
-        flagged = [w for w in report.warnings if "retired cutover flag" in w]
+        flagged = [w for w in report.warnings if "retired cutover" in w]
         assert any("PLANE_READ_OPEN" in w for w in flagged) and any("PLANE_LEGACY_WRITE_REPORT" in w for w in flagged)
-        assert not any("GITHUB_PAT" in w for w in flagged)
+        assert not any("GITHUB_PAT" in w for w in report.warnings)
+        assert not report.errors
+
+    def test_every_dead_flag_warns_not_just_the_two_prefixes(self, fleet_dir, monkeypatch):
+        """Chunk N: the sweep is DERIVED from the switch registry, so a flag
+        stops being warned about the moment a door stops reading it — nobody
+        has to remember to add a row.
+
+        Three tiers, and each carries different knowledge: a RETIRED name says
+        what it used to do (PLANE_SHADOW_ENABLED — the shadow was deleted in
+        F18 R2a and the Mini's engineering .env still carried it, which is the
+        live case this closes); an unknown flag in one of OUR namespaces says
+        no shipped door reads it; and a live switch, or a fleet's OWN tooling
+        variable, says nothing at all. That last one is load-bearing: warning
+        about MYTOOL_ENABLED would teach operators to skim the check, which
+        costs more than the flag it caught."""
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        paths.env_file.write_text(
+            "PLANE_SHADOW_ENABLED=1\n"      # retired by name
+            "PLANE_WIDGET_ENABLED=1\n"      # our namespace, no door
+            "TASK_RECHECK_ENABLED=0\n"      # a LIVE switch, turned off
+            "MYTOOL_ENABLED=1\n"            # not ours
+        )
+        report = validate(fleet, paths)
+        dead = [w for w in report.warnings if "DEAD flag" in w]
+        assert any("PLANE_SHADOW_ENABLED" in w and "shadow was deleted" in w
+                   for w in dead)
+        assert any("PLANE_WIDGET_ENABLED" in w for w in dead)
+        assert not any("TASK_RECHECK_ENABLED" in w for w in report.warnings)
+        assert not any("MYTOOL_ENABLED" in w for w in report.warnings)
         assert not report.errors
 
     def test_a_retired_observability_key_is_disclosed_not_ignored(self, fleet_dir, monkeypatch):

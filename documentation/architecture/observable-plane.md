@@ -292,13 +292,38 @@ the walk in `documentation/plans/2026-09-02-plane-cutover-f18-design-walk.md`.
 
 ## Operations
 
-**Arming carriers** — `PLANE_EMIT_ENABLED` (the generate-time registry scan
-only: every runtime door is always on since F18 R1, and `PLANE_EMIT_DISABLED=1`
-is the harness exemption that silences one), `PLANE_EXPIRE_ENABLED`, `PLANE_PRUNE_ENABLED` (the two
-host sweeps self-gate). Put them in the fleet
-`.env` tier: sessions get them through `bot.conf`, timers through the composed
-`Environment=` lines, and `generate` reads the same cascade. `env_tiers.armed`
-is the one definition of "resolves to 1".
+**Switches — what is on, what is opt-in, how to turn a door off.** Since the
+defaults flip (chunk N) **the whole plane ships ON**, under the estate rule: a
+job or door is on by default unless it deletes data, spends money, mutates
+operator source, or sends outbound to people at scale. Nothing the plane does
+is any of those — it records, it reads, and its one DELETE is family-scoped
+metric-sample retention.
+
+| Door | Ships | Turn it off with |
+|---|---|---|
+| every runtime door's recording | **on** | `PLANE_EMIT_DISABLED=1` — the ruled harness exemption; silences ALL of them at once |
+| `plane-daemon` (ingest) | **on** | `host.jobs.plane-daemon.enroll: false` in this host's `system.yaml`, `generate` (prunes the units), then stop the installed unit |
+| `plane-view` (operator plane, localhost) | **on** | same shape; exposing it beyond the host (Tailscale Serve) stays the operator's step |
+| `plane-host-probe` (per-minute host facets) | **on** | `enroll: false`, or the silencer |
+| `plane-prune` (30-day metric-sample retention) | **on** | `PLANE_PRUNE_ENABLED=0` in the host or root `.env`; the window is the other knob (`--days N` on the script line) |
+| `plane-expire` (attention aging, 7-day horizon) | **on** | `PLANE_EXPIRE_ENABLED=0` in the host or root `.env` |
+| registry scan at `generate` | **on** | `PLANE_EMIT_ENABLED=0` in the fleet `.env` |
+
+Nothing plane-scoped is opt-in. `claudlobby plane doctor` prints this table
+with each row's live state and the tier that set it; `claudlobby doctor
+--switches` prints the whole estate's.
+
+**Carriers.** Put a flag in the fleet (or host/root) `.env` tier: sessions get
+it through `bot.conf`, timers through the composed `Environment=` lines, and
+`generate` reads the same cascade. `fleet.yaml`'s `env:` reaches `bot.conf`
+only — never `generate`, never a timer. Since these are now **opt-outs** the
+composer stamps the tier's **resolved value**, `0` included: a host timer
+sources no `.env`, so an off switch that never reached the unit would not be
+an off switch at all. Only an exact `0` disarms (an empty assignment wins at
+its tier, #1213, but is not a `0`), and a disarmed door no-ops **loudly** —
+a silent skip is indistinguishable from a broken timer. `env_tiers.resolves_to`
+is the one definition of what a flag value means; the registry of switches is
+`claudlobby/switches.py`, and every surface above derives from it.
 
 **Migrations** — `claudlobby/plane/migrations/NNNN_*.sql`, `user_version`-gated
 (`migrations.py`); the daemon migrates at start, and so do `plane status` /

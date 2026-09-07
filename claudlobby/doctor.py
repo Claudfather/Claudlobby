@@ -39,6 +39,11 @@ class Check:
 @dataclass
 class DoctorReport:
     checks: list[Check] = field(default_factory=list)
+    #: the switch table, carried alongside the checks so `format_report` can
+    #: print it whole. A Check's `detail` is one line by construction and the
+    #: switches are the one thing here an operator has to READ rather than
+    #: scan, so the rung carries a summary and the rows ride here.
+    switch_rows: list = field(default_factory=list)
 
     def add(self, name: str, status: str, detail: str = "") -> None:
         self.checks.append(Check(name=name, status=status, detail=detail))
@@ -569,6 +574,31 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
 # ----------------------------------------------------------------------
 
 
+def check_switches(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """The `switches` rung — every knob the system ships, and its state here.
+
+    This rung exists because of what the defaults flip does NOT change: four
+    doors still ship off, and a door that ships off with no surface is
+    indistinguishable from a door that does not exist. The ruling that put
+    everything else on is the same ruling that says what stays off must be
+    NAMED where the operator looks, with the one line that arms it — so this
+    is not a nice-to-have beside the flip, it is the other half of it.
+
+    Never a FAILURE, and never a warning either. A fleet that turned the
+    re-check off did so on purpose; flagging it would train operators to
+    ignore the rung, which is how the surface stops working. It reports.
+    """
+    from . import switches as _sw
+
+    try:
+        rows = _sw.resolve(paths, fleet)
+    except Exception as exc:  # noqa: BLE001 — a health command never crashes
+        report.add("switches", "warn", f"could not resolve: {exc}")
+        return
+    report.switch_rows = rows
+    report.add("switches", "pass", _sw.summary_line(rows))
+
+
 def check_fleet_validation(
     fleet: FleetConfig, paths: Paths, report: DoctorReport
 ) -> None:
@@ -599,6 +629,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     """Run all doctor checks and return the report."""
     report = DoctorReport()
     check_fleet_validation(fleet, paths, report)
+    check_switches(fleet, paths, report)
     check_env_vars(fleet, paths, report)
     check_mcp_configs(fleet, paths, report)
     check_npx_cache(paths, report)
@@ -624,4 +655,7 @@ def format_report(report: DoctorReport) -> str:
     p, w, f = len(report.passed), len(report.warnings), len(report.failures)
     lines.append(f"  {p} passed, {w} warnings, {f} failures")
     lines.append("")
+    if report.switch_rows:
+        from . import switches as _sw
+        lines.append(_sw.format_table(report.switch_rows))
     return "\n".join(lines)

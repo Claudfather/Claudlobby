@@ -16,17 +16,23 @@
 
 set -euo pipefail
 
-# SELF-GATE -- arming is an env flag, not the timer's mere existence. The
-# `enroll: false` manifest keeps the setup backbone from enrolling the unit, and
-# this makes dormancy TRUE for the case the manifest cannot cover: a unit
-# enrolled by hand, or a fleet that armed the job before reading what it does.
-# This door DISPATCHES INTO A LIVE MANAGER SESSION, which is as far from
-# read-only as a timer gets, so it must not arrive switched on via a root pull
-# (the PLANE_EXPIRE_ENABLED / SESSION_DIGEST_ENABLED pattern). A fleet arms it
-# with TASK_RECHECK_ENABLED=1 in its fleet-tier .env; unarmed, the timer fires
-# and no-ops LOUDLY.
-if [ "${TASK_RECHECK_ENABLED:-0}" != "1" ]; then
-    printf 'task-recheck: dormant (set TASK_RECHECK_ENABLED=1 in the fleet .env to arm the re-check)\n' >&2
+# OFF-SWITCH -- an opt-OUT since the defaults flip (chunk N). The re-check is
+# the reaction the target workflow is FOR, so it ships ON: unset, or any value
+# but an exact 0, runs. A fleet turns it off with TASK_RECHECK_ENABLED=0 in its
+# fleet-tier .env, and the composer stamps that 0 onto this unit (a timer runs
+# in a CLOSED env and sources no .env -- #1383).
+#
+# The no-op is LOUD on purpose. A silent skip is indistinguishable from a
+# broken timer, and the whole point of the ruling is that a disabled reaction
+# must never be invisible: this line is what an operator finds in the journal
+# when they ask why nothing was re-checked. `claudlobby doctor`'s switches rung
+# and `claudlobby status`'s header say the same thing before they have to ask.
+#
+# Only an exact 0 disarms. An EMPTY assignment is a win at its tier (#1213) but
+# is not a 0, so `export TASK_RECHECK_ENABLED=` leaves the door on -- the same
+# rule env_tiers.resolves_to applies everywhere else.
+if [ "${TASK_RECHECK_ENABLED:-1}" = "0" ]; then
+    printf 'task-recheck: OFF for this fleet (TASK_RECHECK_ENABLED=0) -- no re-check will be sent; unset it, or set 1, to restore the default\n' >&2
     exit 0
 fi
 

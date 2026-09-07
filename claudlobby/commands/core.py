@@ -32,6 +32,26 @@ def cmd_doctor(args) -> int:
 
     paths = _resolve_paths(args)
     _load_env(paths)
+    if getattr(args, "switches", False):
+        # The table ALONE — the form lib/setup-fleet and lib/setup-system
+        # call, so their closing summary and this command's rung come from
+        # one renderer rather than a bash copy that drifts. Deliberately
+        # cheap: no service probes, no credential curls, no npx cache walk.
+        #
+        # The fleet is OPTIONAL here, which the full doctor's is not:
+        # lib/setup-system runs once per HOST and a host with overlay fleets
+        # has no root fleet.yaml at all, so requiring one would have made the
+        # host door print nothing — the exact silence this chunk exists to
+        # remove. Without a fleet the fleet-scoped rows fall back to their
+        # shipped defaults and the host rows are still true.
+        from .. import switches as _sw
+        from ..config import load_fleet
+        try:
+            fleet, _md = load_fleet(paths.fleet_yaml)
+        except Exception:  # noqa: BLE001 — no fleet is a host run, not an error
+            fleet = None
+        print(_sw.format_table(_sw.resolve(paths, fleet)))
+        return 0
     fleet, _md = _load_fleet_or_exit(paths)
     report = run_doctor(fleet, paths)
     print(format_report(report))
@@ -422,6 +442,14 @@ def cmd_status(args) -> int:
     use_json = getattr(args, "json", False)
 
     statuses = collect_fleet_status(fleet, paths)
+    # A disabled reaction must never be silent (the defaults ruling). Resolving
+    # the switches shells the env-tier resolver once; a failure leaves the
+    # header unchanged rather than taking the dashboard down with it.
+    try:
+        from .. import switches as _sw
+        switch_states = _sw.resolve(paths, fleet)
+    except Exception:  # noqa: BLE001 — status must render regardless
+        switch_states = None
 
     if bot_filter:
         matches = [bs for bs in statuses if bs.name == bot_filter]
@@ -429,15 +457,15 @@ def cmd_status(args) -> int:
             log.error("bot %r not found in fleet %r", bot_filter, fleet.name)
             return 1
         if use_json:
-            sys.stdout.write(format_json(matches, fleet.name))
+            sys.stdout.write(format_json(matches, fleet.name, switch_states))
         else:
             sys.stdout.write(format_bot_detail(matches[0]))
         return 0
 
     if use_json:
-        sys.stdout.write(format_json(statuses, fleet.name))
+        sys.stdout.write(format_json(statuses, fleet.name, switch_states))
     else:
-        sys.stdout.write(format_table(statuses, fleet.name))
+        sys.stdout.write(format_table(statuses, fleet.name, switch_states))
     return 0
 
 

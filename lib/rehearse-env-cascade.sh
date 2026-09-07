@@ -323,7 +323,7 @@ fi
 
 # ------------------------------------------------- 4: survive down + up
 say "== 4: spin-down (real) then spin-up, resolution must be intact =="
-say "   SPINDOWN_RECEIPT_ENABLED=${SPINDOWN_RECEIPT_ENABLED:-<unset — dormant, no receipt expected>}"
+say "   SPINDOWN_RECEIPT_ENABLED=${SPINDOWN_RECEIPT_ENABLED:-<unset — ON by default since chunk N; a receipt is expected>}"
 CLAUDLOBBY_ROOT="$EXPORT_ROOT" FLEET_NAME="$FLEET" \
     bash "$EXPORT_ROOT/lib/spin-down-bot.sh" --reason "#1226 cascade rehearsal" \
     "$BOT_DIR" >>"$WORK/spindown.log" 2>&1

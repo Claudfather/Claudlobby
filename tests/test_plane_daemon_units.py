@@ -249,11 +249,19 @@ def test_launcher_127_when_python3_cannot_import_claudlobby(tmp_path):
     assert "no claudlobby CLI resolvable" in r.stderr
 
 
-def test_example_system_yaml_ships_the_daemon_dormant():
+def test_example_system_yaml_ships_the_daemon_ARMED():
+    """The defaults flip (chunk N): the ingest daemon ships ON.
+
+    The plane has been the estate's only record since the F18 closure, so a
+    dormant daemon meant every emit paid an interpreter spawn while the
+    behavior itself ran regardless — a default that bought nothing and cost
+    latency on the cheapest hardware the north star names. The COMPOSE-time
+    dormancy machinery is untouched and still pinned by the tests above; only
+    the shipped value moved."""
     text = (REPO / "system.yaml.example").read_text()
     assert "plane-daemon:" in text
     block = text.split("plane-daemon:", 1)[1]
-    assert block.splitlines()[1].strip() == "enroll: false"
+    assert block.splitlines()[1].strip() == "enroll: true"
     assert "unit: service" in block
 
 

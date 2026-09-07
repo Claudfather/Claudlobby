@@ -25,6 +25,7 @@ import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
 from . import defaults, dotenv, tool_resolve
+from . import switches as _switches
 from .config import (
     GITHUB_APP_ENV_VARS,
     BotConfig,
@@ -3904,17 +3905,44 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
     )
 
 
-# Fleet jobs whose SCRIPT reads an arming flag (the closed-scheduler-env class
+# Jobs whose SCRIPT reads a switch flag (the closed-scheduler-env class
 # #1383): the composer resolves each through the runtime tier cascade and
-# stamps it on exactly that unit. Add a row per dormant door.
-FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = {
-    "keepalive": ("PLANE_EMIT_ENABLED",),
-    # The task loop's re-check (chunk M-B, #1481) self-gates on this flag, and a
-    # timer unit sources no .env — so without the Environment= line the door is
-    # UNREACHABLE however loudly a fleet arms it in its .env (#1383's class,
-    # measured twice already: briefing, then keepalive).
-    "task-recheck": ("TASK_RECHECK_ENABLED",),
-}
+# stamps it on exactly that unit. Without the Environment= line the flag is
+# UNREACHABLE however loudly a tier sets it — measured three times now
+# (briefing, keepalive, the host sweeps).
+#
+# DERIVED from claudlobby/switches.py, never re-listed: a knob's spelling
+# living in two files is how the estate ended up with a `.env` full of flags
+# nothing read. `keepalive: PLANE_EMIT_ENABLED` used to sit here and is gone
+# without any change to composed output — the baseline stamp below already
+# puts that flag on EVERY fleet job unit, so the row was a duplicate of a
+# duplicate.
+FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = _switches.jobs_with_env(
+    _switches.FLEET_JOB)
+HOST_JOB_ARMING: dict[str, tuple[str, ...]] = _switches.jobs_with_env(
+    _switches.HOST_JOB, _switches.HOST_SERVICE)
+
+
+def _switch_env(cascade, flags) -> dict[str, str]:
+    """The Environment= values a unit must carry for *flags*.
+
+    Stamps the RESOLVED value, not a hardcoded "1" — which is the whole
+    difference an opt-OUT default makes. Under the old dormancy rule only an
+    arming "1" was worth carrying, because absence already meant off; now
+    absence means ON, so it is the OFF switch that has to reach the closed
+    scheduler env. Without this a fleet writing TASK_RECHECK_ENABLED=0 in its
+    .env would watch the timer keep firing and have no way to tell why.
+
+    Only an exact "0"/"1" is carried. An empty assignment wins at its tier
+    (#1213) but is neither, and both the shell gates and this function read it
+    the same way: the door's default applies, so there is nothing to stamp.
+    """
+    out: dict[str, str] = {}
+    for flag in flags:
+        res = cascade.get(flag)
+        if res is not None and res.value in ("0", "1"):
+            out[flag] = res.value
+    return out
 
 
 def compose_fleet_timers(
@@ -3987,10 +4015,10 @@ def compose_fleet_timers(
         _cascade = _env_tiers.cascade(
             _env_tiers.read_tiers(paths, fleet_name=fleet.name)
         )
-        for _job, _flags in FLEET_JOB_ARMING.items():       # one row since F18 R3: keepalive's emission arming
-            _armed = {f: "1" for f in _flags if _env_tiers.armed(_cascade, f)}
-            if _armed:
-                job_extra_env[_job] = _armed
+        for _job, _flags in FLEET_JOB_ARMING.items():
+            _stamp = _switch_env(_cascade, _flags)
+            if _stamp:
+                job_extra_env[_job] = _stamp
         plane_extra_env = job_extra_env.get("keepalive")
         # EVERY fleet job unit carries the emission flag when the tier arms it:
         # any script that sources lib-common can land a fleet event (the ERR
@@ -3998,6 +4026,11 @@ def compose_fleet_timers(
         # estate: fleet-pulse, the fleet's main emitter, composed with the
         # read flags but not this one, so a whole sweep's events
         # reached only the JSONL (Phase B1's first deploy).
+        # Stays an ARMED-only stamp, deliberately, while the per-job flags
+        # above carry the resolved value: PLANE_EMIT_ENABLED is read at
+        # GENERATE time (the registry scan), by the compositor, not by any
+        # timer script. A stamp exists so a script can read its own flag, so
+        # spelling a "0" onto units that never look at it would be noise.
         if _env_tiers.armed(_cascade, "PLANE_EMIT_ENABLED"):
             job_baseline_env = {"PLANE_EMIT_ENABLED": "1"}
     except _env_tiers.ResolverUnavailable as exc:
@@ -4236,6 +4269,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
         return timers_dir
 
     timers_dir.mkdir(parents=True, exist_ok=True)
+    _host_cascade: dict = {}      # lazily filled by the first job that asks
     for name, cfg in host_jobs.items():
         if cfg.get("unit") == "service":
             # Resident host services (first tenant: the plane ingest daemon).
@@ -4267,27 +4301,18 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                         )
             continue
         sched = _resolve_timer_schedule(cfg, {})
-        # Arming carrier for a self-gated host door (chunk 3a.1): a host
-        # timer starts with a CLOSED env, so a door that self-gates on a
-        # flag (plane-prune on PLANE_PRUNE_ENABLED) needs it stamped as an
-        # Environment= line — the same closed-scheduler-env problem the
-        # keepalive door solved for fleet timers (#1383). Resolved ONCE
-        # through the host tier cascade (no fleet name → host+root tiers)
-        # and stamped only on the job that reads it; a resolver failure
-        # composes UNARMED (the safe default for a DELETE door).
-        # Host doors that emit into the plane self-gate on a closed
-        # scheduler env, so the flag is stamped from the host tier cascade
-        # (chunk 3a.1). plane-prune uses its OWN flag (a DELETE door earns
-        # a dedicated arm); plane-host-probe is read-only emission and uses
-        # the standard PLANE_EMIT_ENABLED.
-        if name == "plane-prune":
-            extra_env = _host_job_plane_arming(paths, "PLANE_PRUNE_ENABLED")
-        elif name == "plane-host-probe":
-            extra_env = _host_job_plane_arming(paths, "PLANE_EMIT_ENABLED")
-        elif name == "plane-expire":
-            extra_env = _host_job_plane_arming(paths, "PLANE_EXPIRE_ENABLED")
-        else:
-            extra_env = None
+        # Switch carrier for a self-gated host door (chunk 3a.1): a host timer
+        # starts with a CLOSED env, so a door that consults a flag needs it
+        # stamped as an Environment= line — the same problem the keepalive
+        # door solved for fleet timers (#1383). Which job reads which flag is
+        # DERIVED from the switch registry (HOST_JOB_ARMING), so a new
+        # self-gated door adds a row there and nothing here; plane-host-probe
+        # has no flag of its own, being read-only emission gated by the estate
+        # silencer. The cascade is read once per generate, on the first job
+        # that needs it (a resolver subprocess costs ~240ms on a Pi and every
+        # host job would otherwise pay it).
+        extra_env = _host_job_switch_env(
+            paths, HOST_JOB_ARMING.get(name, ()), _host_cascade)
         _write_timer_units(
             timers_dir,
             f"claudlobby-{name}",
@@ -4302,25 +4327,70 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             randomized_delay=int(cfg.get("randomized_delay") or 0),
             extra_env=extra_env,
         )
+    # Host DORMANT manifest — the enforcement half of `enroll: false` for a
+    # plain host TIMER. Until the defaults flip this flag had no code effect
+    # at all (#1385): compose_host_timers read `enroll` only inside the
+    # `unit: service` branch, and setup-system enrolled every composed
+    # claudlobby-*.timer it found, so `update-siblings` — the one host job
+    # that MUTATES OPERATOR SOURCE — was enrolled on every host that ran the
+    # installer, with a comment beside it claiming otherwise.
+    #
+    # That was survivable while most doors shipped dormant; under a rule that
+    # ships doors ON it is not, because "stays opt-in" becomes the only thing
+    # standing between a root pull and the four categories. So host timers get
+    # the manifest fleet jobs already have, written by the same atomic writer
+    # and read by setup-system through the same `unit_is_dormant` helper —
+    # one mechanism, not a second one that can disagree.
+    #
+    # Composed-but-dormant, deliberately: the units are still written, so a
+    # host can enroll one by hand and so the shape of what would run is
+    # inspectable. Only ENROLLMENT is withheld. (A `unit: service` job is a
+    # different contract — dormancy there is compose-time, above, because the
+    # macOS plist glob would start it.)
+    dormant = [
+        f"claudlobby-{n}" for n, c in host_jobs.items()
+        if c.get("unit") != "service" and c.get("enroll", True) is False
+    ]
+    _write_timers_manifest(
+        timers_dir,
+        "DORMANT",
+        [
+            "# Composed-but-dormant HOST units — setup-system does not enroll",
+            "# these. Opt in via this host's own system.yaml:",
+            "#   host: { jobs: { <name>: { enroll: true } } }",
+        ],
+        dormant,
+    )
     return timers_dir
 
 
-def _host_job_plane_arming(paths: Paths, flag: str) -> dict[str, str] | None:
-    """Resolve a plane arming flag from the host tier cascade for a
-    self-gated host door's Environment= line. None = unarmed (the safe
-    default: a resolver failure never arms). `flag` is the door's own
-    variable (PLANE_PRUNE_ENABLED for the DELETE door, PLANE_EMIT_ENABLED
-    for read-only emission)."""
-    from . import env_tiers as _env_tiers
-    try:
-        res = _env_tiers.cascade(_env_tiers.read_tiers(paths)).get(flag)
-    except _env_tiers.ResolverUnavailable as exc:
-        _log.warning("host-job arming unresolved for %s (%s) — composes"
-                     " UNARMED", flag, exc)
+def _host_job_switch_env(paths: Paths, flags, cache: dict) -> dict[str, str] | None:
+    """Resolve a self-gated host door's flags from the HOST tier cascade
+    (no fleet name → host + root tiers) for its Environment= lines.
+
+    None = stamp nothing, which since the defaults flip means "the door's own
+    default applies" rather than "unarmed". A resolver failure therefore no
+    longer silences a door — it leaves it at the shipped default and says so.
+    That reversal is the point of the ruling: the old direction failed toward
+    a host where retention and expiry silently never ran.
+
+    *cache* is the caller's per-generate dict: the cascade is read once and
+    reused, since the resolver is a subprocess and nothing about it changes
+    between two jobs of the same run."""
+    if not flags:
         return None
-    if res is not None and res.value == "1":
-        return {flag: "1"}
-    return None
+    if "cascade" not in cache:
+        from . import env_tiers as _env_tiers
+        try:
+            cache["cascade"] = _env_tiers.cascade(_env_tiers.read_tiers(paths))
+        except _env_tiers.ResolverUnavailable as exc:
+            _log.warning("host-job switch env unresolved (%s) — composing"
+                         " with the shipped defaults", exc)
+            cache["cascade"] = None
+    cascade = cache["cascade"]
+    if cascade is None:
+        return None
+    return _switch_env(cascade, flags) or None
 
 
 def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:

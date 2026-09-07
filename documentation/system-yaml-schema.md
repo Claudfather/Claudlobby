@@ -109,14 +109,77 @@ knowing before you write a `schedule:`:
   maps cleanly to `StartInterval` on both platforms) for anything that needs
   to fire more often than daily.
 
+## Defaults: the rule
+
+**A job or door is ON by default unless it deletes data, spends money,
+mutates operator source, or sends outbound to people at scale.** Whatever
+stays opt-in is NAMED where the operator looks — `claudlobby doctor`'s
+`switches` rung, `claudlobby plane doctor`'s plane-scoped subset, and the
+closing table of `lib/setup-fleet` / `lib/setup-system` — each with the one
+line that arms it.
+
+The rule is not caution about defaults; it is that **a behavior nobody can
+see is a behavior nobody has.** A dozen doors here shipped dormant, each for
+a defensible local reason, and the composite was a system whose advertised
+workflow — a dispatch carries a deadline, the manager is re-checked on a
+schedule, it acts or escalates, the operator answers one question, the row
+closes — ran nowhere unless an operator had read a dozen source comments and
+armed a dozen flags.
+
+Every knob is declared once, in `claudlobby/switches.py`, and each surface
+derives from it: the composer's `Environment=` arming tables, the validator's
+dead-flag warning, the three rendered tables. **A `*_ENABLED` key in one of
+claudlobby's own namespaces that no switch claims is reported as a DEAD flag
+by `claudlobby validate`** — so a door deleted tomorrow warns about its
+leftover flag without anyone maintaining a list.
+
+| Switch | Ships | Scope | Off / on with |
+|---|---|---|---|
+| `task-recheck` | **on** | fleet job | `TASK_RECHECK_ENABLED=0` in the fleet `.env` |
+| `plane-expire` | **on** | host job | `PLANE_EXPIRE_ENABLED=0` in the host/root `.env` |
+| `plane-prune` | **on** | host job | `PLANE_PRUNE_ENABLED=0` in the host/root `.env` |
+| `plane-host-probe` | **on** | host job | `enroll: false`, or the estate silencer |
+| `plane-daemon` | **on** | host service | `enroll: false` + stop the installed unit |
+| `plane-view` | **on** | host service | `enroll: false` + stop the installed unit |
+| `registry-scan` | **on** | generate | `PLANE_EMIT_ENABLED=0` in the fleet `.env` |
+| `spindown-receipt` | **on** | door | `SPINDOWN_RECEIPT_ENABLED=0` in the fleet `.env` |
+| `plane-recording` | **on** | every door | `PLANE_EMIT_DISABLED=1` (the harness exemption) |
+| `update-siblings` | **off** — mutates operator source | host job | `enroll: true` in this host's `system.yaml` |
+| `session-digest` | **off** — model spend | hook | `SESSION_DIGEST_ENABLED=1` in the fleet `.env` |
+| `code-audit-sweep` | **off** — spend + outbound issues | fleet job | `sweep: { enabled: true }` in `fleet.yaml` |
+| `weekly-worker-restart` | **off** — bounces live sessions | fleet job | `defaults.jobs.weekly-worker-restart.enroll: true` |
+
+Run `claudlobby doctor --switches` for the live version of this table with
+each row's current state and the tier that set it.
+
+**Two flips are worth their own sentence.** `plane-prune` DELETES, which the
+rule reserves for opt-in — but what it deletes is raw per-minute metric
+samples past the 30-day incident-join window, family-scoped so the ledger is
+out of reach, which is the retention an operator already assumes is happening
+and the reason the per-minute host probe is safe to ship on. The window stays
+the knob. And `weekly-worker-restart` matches none of the four categories yet
+stays off: it bounces live worker sessions, and durable context is the thing
+this system exists to keep — the fifth category, stated rather than smuggled.
+
+**Polarity.** A flag with an ON default is an **opt-out**: only an exact `0`
+disarms it, and the door then no-ops **loudly**, so a disabled reaction shows
+up in the journal of the host it is disabled on rather than reading as a
+broken timer. An empty assignment (`export FLAG=`) wins at its tier (#1213)
+but is not a `0`, so it leaves the door on — the shell gates, the composer and
+the rendered table all read it that way.
+
 ## `host.jobs` — the current roster
 
 | Job | Schedule | `persistent` | `randomized_delay` | `enroll` |
 |---|---|---|---|---|
 | `claude-update` | `*-*-* 04:00:00` | true | 600s | *(absent — enrolled)* |
 | `notify-behind` | `*-*-* 08:00:00` | true | 600s | *(absent — enrolled)* |
-| `update-siblings` | `Sun *-*-* 04:30:00` | true | 300s | `false` (see flag below) |
-| `plane-daemon` | — (`unit: service`) | — | — | `false` |
+| `update-siblings` | `Sun *-*-* 04:30:00` | true | 300s | `false` — **the one opt-in host job** |
+| `plane-daemon` | — (`unit: service`) | — | — | `true` |
+| `plane-view` | — (`unit: service`) | — | — | `true` |
+| `plane-prune` | `*-*-* 05:15:00` | true | 600s | *(absent — enrolled)* |
+| `plane-expire` | `*-*-* 05:30:00` | true | 600s | *(absent — enrolled)* |
+| `plane-host-probe` | every 60s | — | — | *(absent — enrolled)* |
 | `disk-monitor` | `*-*-* 05:00:00` | true | 600s | *(absent — enrolled)* |
 | `fleet-memory-check` | `*-*-* 05:30:00` | true | 600s | *(absent — enrolled)* |
 | `orphan-browser-reaper` | `*-*-* 05:45:00` | true | 600s | *(absent — enrolled)* |
@@ -168,53 +231,35 @@ enforcement mechanism — and even which value counts as the default — is
 |---|---|---|---|
 | Fleet job (`defaults.jobs`, e.g. `weekly-worker-restart`) | enrolled (`enroll` defaults to `True`) | compose-time listing **and** enroll-time skip | The unit files ARE written; the job's basename is additionally added to a `DORMANT` manifest sidecar in the fleet's `runtime/fleet/timers/`. `lib/setup-fleet` and `reconcile-fleet.sh`'s job-drift audit both call the shared `unit_is_dormant()` helper (`lib-common.sh`) against that manifest and skip enrolling/flagging anything listed in it. A fleet opts a dormant job in with `defaults: { jobs: { <name>: { enroll: true } } }` in its own `fleet.yaml` — see [`fleet-yaml-schema.md`'s `fleet.defaults.jobs.<name>.enroll`](fleet-yaml-schema.md#fleetdefaultsjobsnameenroll). |
 | Host service (`host.jobs`, `unit: service`, e.g. `plane-daemon`) | **dormant** (`cfg.get("enroll") is True` — a strict identity check, so absence or any non-`True` value is dormant) | compose-time only | If `enroll` is not exactly `true`, **zero files are written** — there is nothing for `setup-system` to find, let alone enroll. Note the default direction is the *opposite* of a plain timer job: a service is dormant unless explicitly armed; a timer is enrolled unless explicitly parked. |
-| Host timer (`host.jobs`, no `unit: service`, e.g. `update-siblings`) | enrolled (no gate reads `enroll` at all) | **not enforced by code today** | See below. |
+| Host timer (`host.jobs`, no `unit: service`, e.g. `update-siblings`) | enrolled | compose-time listing **and** enroll-time skip | Same shape as a fleet job, since the defaults flip closed #1385: the unit files ARE written, the basename is added to a `DORMANT` manifest in `runtime/_host/timers/`, and `lib/setup-system` calls the shared `unit_is_dormant()` helper against it before enrolling. A host opts one in through **its own `system.yaml`** — `host: { jobs: { <name>: { enroll: true } } }` — never through `fleet.yaml`, which cannot reach a host job at all. |
 
-### The gap: `update-siblings`'s `enroll: false` is not enforced
+### History: `update-siblings`'s `enroll: false` used to do nothing
 
-**Tracked as [#1385](https://github.com/Claudfather/Claudlobby/issues/1385).**
+**[#1385](https://github.com/Claudfather/Claudlobby/issues/1385) — closed by
+the defaults flip.** For most of this file's life the flag above had no code
+effect at all. `compose_host_timers` read `enroll` only inside the
+`cfg.get("unit") == "service"` branch, so a plain host timer's units were
+written every `generate` regardless; and `lib/setup-system`'s `phase_host_jobs`
+globbed `claudlobby-*.timer` / `claudlobby-*.plist` and enrolled **every file
+it found**, never calling `unit_is_dormant()` — which had exactly two callers,
+both fleet-scoped — because `compose_host_timers` wrote no host manifest for
+it to check. So a plain `lib/setup-system` run enrolled `update-siblings`, the
+one host job that **mutates operator source**, on every host, with a comment
+beside it claiming the opposite.
 
-`update-siblings` is, as of this writing, the only `host.jobs` entry that is
-a plain timer (not `unit: service`) and also carries `enroll: false`. Tracing
-both sides of the enrollment path shows that flag currently has **no code
-effect**:
+It was survivable while nearly everything here shipped dormant. Under a rule
+that ships doors **on**, "stays opt-in" becomes the only thing standing
+between a root pull and the four categories, so the gap had to close with the
+flip rather than after it: host timers now get the same `DORMANT` manifest
+fleet jobs have, written by the same atomic writer and read through the same
+shared predicate.
 
-- **Compose side.** `compose_host_timers` (`composer.py`) only reads `enroll`
-  inside the `cfg.get("unit") == "service"` branch. For every other job —
-  the branch `update-siblings` falls into — `_write_timer_units` is called
-  unconditionally, with no `enroll` check at all. Its `.timer`/`.service`
-  files are written every `generate`, armed or not.
-- **Enroll side.** `lib/setup-system`'s `phase_host_jobs` globs
-  `claudlobby-*.timer` (Linux) / `claudlobby-*.plist` (macOS) in the composed
-  host-timers directory and enrolls **every file it finds**, unconditionally.
-  It never calls `unit_is_dormant()` (that helper has exactly two callers,
-  both in fleet-scoped scripts — `lib/setup-fleet` and
-  `lib/reconcile-fleet.sh`) and there is no host-level `DORMANT` manifest for
-  it to check in the first place — `compose_host_timers` never writes one.
-
-So a plain `lib/setup-system` run enrolls `update-siblings` regardless of
-`enroll: false`. The inline comment beside the job in `system.yaml` — and the
-`update-siblings.sh` row in root `CLAUDE.md`'s lifecycle-scripts table —
-both describe arming it from a fleet with
-`defaults: { jobs: { update-siblings: { enroll: true } } }`. That recipe is
-the mechanism for a **fleet-level** dormant job (the `weekly-worker-restart`
-row in the table above); it cannot reach a **host** job. `load_host_jobs()`
-(`config.py`) reads only `system.yaml`'s `host:` section, independent of any
-`FleetConfig` — its own docstring states the property directly: host jobs
-"deliberately bypass the fleet defaults merge." `plane-daemon`'s comment,
-three weeks newer (added 2026-08-26 vs. `update-siblings`'s 2026-08-05),
-states the correct version for a host job: arm it "in that host's own
-system.yaml (host jobs deliberately bypass the fleet defaults merge, so
-fleet.yaml cannot arm this one)." It's a plausible read of the history that
-compose-time dormancy enforcement was built for the `unit: service` shape
-`plane-daemon` introduced and was never retrofitted onto the plain-timer
-branch `update-siblings` had already been using — but regardless of how it
-got this way, **as implemented, a host running `lib/setup-system` today will
-enroll `update-siblings` even with `enroll: false` in `system.yaml`.** Until
-the timer branch gains the same compose-time gate `unit: service` has, the
-only reliable way to keep it dormant is operator discipline: don't enroll it
-(skip that unit when running the installer, or disable it manually after),
-not the `enroll:` flag.
+The old comment also printed the wrong recipe — `defaults: { jobs: {
+update-siblings: { enroll: true } } }` in `fleet.yaml`, which is the
+**fleet-job** mechanism and could never have reached a host job.
+`load_host_jobs()` reads only `system.yaml`'s `host:` section, independent of
+any `FleetConfig`; its docstring says host jobs "deliberately bypass the fleet
+defaults merge." Arm a host job in **that host's own `system.yaml`**.
 
 ## `defaults.hooks`
 
@@ -377,16 +422,20 @@ Enrollment is a **separate step** from composition in both cases —
 This file participates in two structurally different dormancy mechanisms
 used throughout the codebase, and it's worth keeping them distinct:
 
-1. **Env-var self-gate inside an always-composed artifact.** A hook script
-   is composed onto *every* bot unconditionally (cheap, harmless on its own)
-   but checks an env var at runtime and no-ops unless armed. The dormant
-   hook in `defaults.hooks` above (`transcript-digest.sh`) works this way —
-   `SESSION_DIGEST_ENABLED=1` is armed
-   **in a fleet's own `fleet.yaml` `env:` block**, not anywhere in
-   `system.yaml`. (The plane hooks are always on; `PLANE_EMIT_ENABLED=1` lives
-   in the fleet `.env` tier and arms only the generate-time registry scan.)
-   This file's only role is composing the always-present hook entry; the
-   arming lever lives entirely downstream, per fleet.
+1. **Env-var self-gate inside an always-composed artifact.** A script is
+   composed onto *every* bot or unit unconditionally (cheap, harmless on its
+   own) and consults an env var at runtime. Since the defaults flip most of
+   these are **opt-outs** — `TASK_RECHECK_ENABLED`, `PLANE_EXPIRE_ENABLED`,
+   `PLANE_PRUNE_ENABLED`, `SPINDOWN_RECEIPT_ENABLED` all run unless a tier
+   says exactly `0`, and say so loudly when it does. The one remaining
+   opt-**in** self-gate is `transcript-digest.sh`'s `SESSION_DIGEST_ENABLED=1`
+   (model spend), armed in a fleet's own `.env`. `PLANE_EMIT_ENABLED` still
+   reaches only the generate-time registry scan, now as an opt-out;
+   `PLANE_EMIT_DISABLED=1` is the one silencer for every runtime door.
+   Remember the carrier split: a **timer** unit sources no `.env`, so the
+   composer stamps the tier's resolved value as an `Environment=` line — which
+   under an on-by-default rule matters most for the `0`, since an off switch
+   that cannot reach the door is not an off switch.
 2. **`enroll:` gates whether the scheduling artifact exists or gets enrolled
    at all** — a property of the job/service entry itself, not runtime
    behavior inside an always-present script. This is the mechanism the
