@@ -23,12 +23,13 @@ set -euo pipefail
 # The no-op is LOUD: a plane growing without bound because a flag was set two
 # months ago and forgotten is the failure this line prevents. Only an exact 0
 # disarms — an empty assignment is a win at its tier (#1213) but is not a 0.
-if [ "${PLANE_PRUNE_ENABLED:-1}" = "0" ]; then
-    printf 'plane-prune: OFF on this host (PLANE_PRUNE_ENABLED=0) -- metric samples will accumulate without bound; unset it, or set 1, to restore the default\n' >&2
-    exit 0
-fi
-
+# The comparison is switch_is_on (lib-common) — polarity in one place.
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
+switch_is_on PLANE_PRUNE_ENABLED plane-prune "metric samples will accumulate without bound" || exit 0
+
 ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 export CLAUDLOBBY_ROOT="$ROOT"
 

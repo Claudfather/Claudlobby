@@ -233,6 +233,23 @@ def cmd_plane_spool(args) -> int:
     return _guarded("plane spool", run)
 
 
+def _switch_fleet(paths):
+    """The fleet whose switches this run may speak for, or None.
+
+    Optional by the same rule ``doctor --switches`` uses: a host with overlay
+    fleets has no root fleet.yaml, and a host-wide plane doctor must still
+    print its host rows. What it must NOT do is answer for a fleet nobody
+    named — `resolve` marks those rows unknown.
+    """
+    from ..config import load_fleet
+
+    try:
+        fleet, _md = load_fleet(paths.fleet_yaml)
+        return fleet
+    except Exception:  # noqa: BLE001 — no fleet is a host run, not an error
+        return None
+
+
 def cmd_plane_doctor(args) -> int:
     """Kernel-scoped health rungs (§10/§17 — the golden-path doctor grows in
     Phase 2; these are the checks the kernel alone can answer). Exit 0 when
@@ -402,7 +419,14 @@ def cmd_plane_doctor(args) -> int:
         # question you can only answer by reading four source files.
         try:
             from .. import switches as _sw
-            _rows = _sw.resolve(paths, None)
+            # The fleet this run was GIVEN, not None (F5). `plane doctor
+            # --fleet f` and `claudlobby --fleet f doctor --switches` were
+            # answering differently about the same fleet: this door discarded
+            # the name and then reported fleet-tier switches as their shipped
+            # defaults, which is an assertion about a scope it never read.
+            # Without a --fleet the rows say "not read here" rather than
+            # inventing one.
+            _rows = _sw.resolve(paths, _switch_fleet(paths))
             rung(True, "switches", _sw.summary_line(
                 [r for r in _rows if r.switch.plane]))
             print(_sw.format_table(_rows, plane_only=True))

@@ -55,10 +55,17 @@
 # claudlobby/switches.py; a knob with no row there is reported as a DEAD flag
 # by the validator, so this file and that one cannot drift apart quietly.
 #
-# `enroll: false` marks a job composed-but-dormant: its units are still
-# emitted, but they are listed in a DORMANT manifest beside them -- fleet
-# jobs and, since the defaults flip, host timers too -- and the setup
-# backbone does not enroll them. A fleet opts a FLEET job in via fleet.yaml:
+# `enroll: false` means DORMANT, and the two scopes enforce it differently
+# because their enrollers differ. A FLEET job is composed-but-dormant: the
+# units are emitted and listed in a DORMANT manifest beside them, which
+# setup-fleet skips. A HOST job composes NO UNIT AT ALL (compose-time
+# dormancy, chunk-N fold): setup-system enrolls every composed
+# claudlobby-* unit it finds, so not composing is the only gate that cannot
+# be forgotten, and an armed->unarmed flip PRUNES the composed units. Units
+# an EARLIER release installed are walked back by setup-system on its next
+# run, out loud -- dormancy that only ever applied forward left the one job
+# that mutates operator source enabled on every host that had run the
+# installer. A fleet opts a FLEET job in via fleet.yaml:
 #   defaults:
 #     jobs:
 #       weekly-worker-restart: { enroll: true }
@@ -157,12 +164,12 @@ host:
     # opt-in and a root pull must never arrive with it switched on.
     #
     # Its dormancy is now ENFORCED rather than merely declared. Before the
-    # defaults flip this flag had NO code effect at all (#1385): host timers
-    # had no DORMANT manifest and setup-system enrolled every composed unit it
-    # found, so every host running the installer enrolled this job regardless
-    # of the false below. Host timers now get the same manifest fleet jobs
-    # have, and setup-system honors it -- which is what makes "stays opt-in"
-    # a fact rather than a comment.
+    # defaults flip this flag had NO code effect at all (#1385): setup-system
+    # enrolled every composed unit it found, so every host running the
+    # installer enrolled this job regardless of the false below. An unarmed
+    # host job now composes NO unit, and setup-system additionally WALKS BACK
+    # any unit an earlier release installed -- which is what makes "stays
+    # opt-in" a fact rather than a comment, on a host that already ran.
     #
     # Arm it in THIS host's own system.yaml -- host jobs bypass the fleet
     # defaults merge, so the fleet.yaml recipe this comment used to print
@@ -196,10 +203,10 @@ host:
     # interpreter spawn per event. It ingests; it deletes nothing, spends
     # nothing and sends nothing.
     #
-    # For services dormancy stays COMPOSE-time: unarmed means NO units are
-    # even composed, because the macOS enroll leg starts every
-    # claudlobby-*.plist it finds. That gate is unchanged -- only the default
-    # moved.
+    # Dormancy is COMPOSE-time for every host job (services first, because
+    # the macOS enroll leg starts every claudlobby-*.plist it finds): unarmed
+    # means NO units are even composed. That gate is unchanged -- only the
+    # default moved.
     # DISARMING: flip enroll: false in THIS host's own system.yaml (host jobs
     # bypass the fleet defaults merge, so fleet.yaml cannot reach it) and
     # re-run generate (this PRUNES the composed units, so no future setup run
@@ -218,9 +225,13 @@ host:
     # construction (mode=ro + query_only, no non-GET route, pinned), so it
     # cannot reach any of the four categories. Exposing it beyond the host --
     # the Tailscale Serve step -- stays deliberately the operator's, and is
-    # the only part of this that could send anything anywhere. Needs the
-    # [plane-ui] extra; without it the unit exits saying so, which is the
-    # honest failure (see documentation/runbooks/plane-view.md).
+    # the only part of this that could send anything anywhere.
+    #
+    # Needs the [plane-ui] extra (fastapi + uvicorn), which lib/setup-system
+    # installs. Where it does not import, generate composes NO unit and the
+    # switch table prints the pip line as this row's arm: an enrolled
+    # Restart=always unit whose process exits 1 is a crash loop every 5s
+    # forever, not an honest failure (see documentation/runbooks/plane-view.md).
     plane-view:
       enroll: true
       unit: service

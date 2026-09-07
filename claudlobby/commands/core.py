@@ -46,6 +46,17 @@ def cmd_doctor(args) -> int:
         # shipped defaults and the host rows are still true.
         from .. import switches as _sw
         from ..config import load_fleet
+        if getattr(args, "markdown", False):
+            # The doc blocks, for regeneration. The three schema/architecture
+            # tables used to be a fourth hand-kept copy of the registry; they
+            # are now a generated block, pinned by test, and this is the door
+            # the failure message points at. Deliberately state-FREE: a doc
+            # must describe what ships, never what this host happens to have.
+            for doc, kw in _sw.DOC_BLOCKS.items():
+                print(f"--- {doc}")
+                print(_sw.format_markdown(**kw))
+                print()
+            return 0
         try:
             fleet, _md = load_fleet(paths.fleet_yaml)
         except Exception:  # noqa: BLE001 — no fleet is a host run, not an error

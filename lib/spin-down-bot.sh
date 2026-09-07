@@ -88,8 +88,8 @@ emit_teardown_receipt() {
     # go on. Only an exact 0 disarms it (an empty assignment is a win at its
     # tier, #1213, but is not a 0), and the disarm is said out loud so a
     # missing receipt is never a mystery.
-    if [ "${SPINDOWN_RECEIPT_ENABLED:-1}" = "0" ]; then
-        sd_log "receipt: OFF for this fleet (SPINDOWN_RECEIPT_ENABLED=0) -- this teardown will leave no record"
+    if ! switch_is_on SPINDOWN_RECEIPT_ENABLED spindown-receipt \
+        "this teardown will leave no record"; then
         return 0
     fi
     [ "$PURGE" -eq 1 ] && action="spin-down --purge"

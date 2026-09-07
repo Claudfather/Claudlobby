@@ -34,6 +34,8 @@ consumer DERIVES from it:
 * ``doctor`` / ``plane doctor`` / ``setup-fleet`` / ``setup-system`` — the
   table the operator reads.
 * ``status`` — the header line that names a target-workflow door turned off.
+* the three schema/architecture docs — a GENERATED block rendered by
+  :func:`format_markdown`, pinned by test, rather than a fourth hand-kept copy.
 
 **Polarity is a field, not a convention.** Three shapes ship:
 
@@ -53,9 +55,28 @@ consumer DERIVES from it:
     name; renaming it would break the exemption for one release's benefit.
 
 Only an exact ``"0"`` / ``"1"`` decides. ``env_tiers.resolves_to`` is the one
-comparison, so this module agrees with the composer, the bash gates and the
-runtime about what "set" means — including that an empty assignment is a WIN
-(#1213) and therefore is NOT a ``"0"``.
+comparison — called, never re-implemented — so this module agrees with the
+composer, the bash gates and the runtime about what "set" means, including
+that an empty assignment is a WIN (#1213) and therefore is NOT a ``"0"``.
+
+**And the carrier is a field too.** The first build hand-wrote each row's
+``arm`` / ``disarm`` string, and four of them named a carrier that cannot
+reach the door they gate — which makes the table worse than no table, because
+a reader who follows it watches the flag do nothing and concludes the door is
+broken. So the carrier is declared and the two lines are DERIVED from it:
+
+``.env`` tier (of the switch's own scope)
+    Read at ``generate`` time, and carried by the composer onto the unit
+    (``Environment=``) and into ``bot.conf``. On its own it does NOT reach a
+    bot session: ``start-bot.sh`` sources the tiers BEFORE ``set -a``, so a
+    bare ``VAR=value`` is assigned unexported and dies with that shell.
+``fleet.yaml env:`` → ``bot.conf``
+    The session carrier, and the only one for a door that runs INSIDE a bot's
+    Claude session (the SessionEnd digest; a spin-down the bot runs itself).
+    Declared per bot — ``defaults.env`` is not merged into a bot's env.
+``system.yaml enroll`` / ``fleet.yaml defaults.jobs``
+    Not a flag at all: compose-time. Unarmed composes no unit, so there is
+    nothing for a setup run to enroll.
 """
 
 from __future__ import annotations
@@ -79,19 +100,49 @@ OPT_OUT = "opt-out"
 OPT_IN = "opt-in"
 SILENCER = "silencer"
 
+# --- carriers: what an operator actually writes, and where it lands ---------
+ENV_FLEET = "fleet .env"
+ENV_HOST = "host/root .env"
+BOT_CONF = "fleet.yaml env: → bot.conf"
+ENROLL_HOST = "system.yaml enroll"
+ENROLL_FLEET = "fleet.yaml"
+
+#: Carriers whose scope is a FLEET. A host-wide run (``lib/setup-system``,
+#: ``plane doctor`` without ``--fleet``) has not read these, and saying so is
+#: the whole of F5: an unread scope reported as "shipped default" is an
+#: assertion about something nobody looked at.
+FLEET_SCOPED_CARRIERS = frozenset({ENV_FLEET, BOT_CONF, ENROLL_FLEET})
+
+_ENV_WHERE = {
+    ENV_FLEET: "the fleet-tier .env",
+    ENV_HOST: "the host or root .env",
+    BOT_CONF: ("fleet.yaml bots.NAME.env: (then generate; the bot reads it at"
+               " its next start — a .env tier does NOT reach a session)"),
+}
+
 
 @dataclass(frozen=True)
 class Switch:
-    """One shipped knob: what it is, how it is spelled, which way it points."""
+    """One shipped knob: what it is, how it is spelled, which way it points,
+    and — the field the fold added — which carrier actually reaches it."""
 
     key: str  #: stable id — the job name where there is one
     scope: str
     polarity: str
+    carrier: str
     what: str  #: one line, what turning it on actually does
-    arm: str  #: the ONE line that turns it on
-    disarm: str  #: the ONE line that turns it off
     env: str | None = None  #: the variable a tier sets, when there is one
     job: str | None = None  #: the system.yaml job whose `enroll` also gates it
+    #: the dotted config key an enroll carrier writes, when it is not the
+    #: default ``host.jobs.<job>.enroll`` / ``defaults.jobs.<job>.enroll``
+    config: str = ""
+    #: what else the arming stanza needs beside the boolean, when it needs
+    #: anything (the sweep names an owner bot and its repos)
+    config_extra: str = ""
+    #: the optional install extra the door needs to RUN. A door whose extra is
+    #: absent is not composed at all (F1): supervision would turn "exits
+    #: saying so" into a crash loop every 5s, forever.
+    requires_extra: str = ""
     plane: bool = False  #: rendered by `plane doctor`'s scoped subset
     #: named by `claudlobby status`'s header when OFF — a door whose being off
     #: means a REACTION does not happen (the dispatch→re-check→escalate→close
@@ -103,6 +154,47 @@ class Switch:
     def default_on(self) -> bool:
         return self.polarity != OPT_IN
 
+    @property
+    def fleet_scoped(self) -> bool:
+        return self.carrier in FLEET_SCOPED_CARRIERS
+
+    @property
+    def arm(self) -> str:
+        """The ONE line that turns it on — derived from the carrier."""
+        return _carrier_lines(self)[0]
+
+    @property
+    def disarm(self) -> str:
+        """The ONE line that turns it off — derived from the carrier."""
+        return _carrier_lines(self)[1]
+
+
+def _carrier_lines(sw: Switch) -> tuple[str, str]:
+    """(arm, disarm) for *sw*, from its carrier. One derivation, so a row
+    cannot name a carrier in one field and a different one in the other."""
+    where = _ENV_WHERE.get(sw.carrier)
+    if where is not None:
+        var = sw.env
+        if sw.polarity == OPT_IN:
+            return f"{var}=1 in {where}", f"unset {var} — off by default"
+        if sw.polarity == SILENCER:
+            return (f"unset {var} — recording by default",
+                    f"{var}=1 in {where} — the ruled harness exemption;"
+                    " silences EVERY door at once")
+        return f"unset {var} — on by default", f"{var}=0 in {where}"
+    if sw.carrier == ENROLL_HOST:
+        key = sw.config or f"host.jobs.{sw.job}.enroll"
+        return (
+            f"{key}: true in THIS host's system.yaml (host jobs bypass the"
+            " fleet merge), then generate + lib/setup-system",
+            f"{key}: false in THIS host's system.yaml, then generate (composes"
+            " no unit) + lib/setup-system (walks back the installed one)",
+        )
+    key = sw.config or f"defaults.jobs.{sw.job}.enroll"
+    extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
+    return (f"{key}: true in fleet.yaml{extra}, then generate + lib/setup-fleet",
+            f"{key}: false in fleet.yaml, then generate + lib/setup-fleet")
+
 
 #: Every switch the shipped system has. Adding a door with a knob means adding
 #: a row here — that is the whole contract, and the validator's dead-flag
@@ -113,163 +205,155 @@ SWITCHES: tuple[Switch, ...] = (
         key="task-recheck",
         scope=FLEET_JOB,
         polarity=OPT_OUT,
+        carrier=ENV_FLEET,
         env="TASK_RECHECK_ENABLED",
         job="task-recheck",
         plane=True,
         target_workflow=True,
         what="every 6h, hand each manager ONE re-check of its rows past "
              "deadline, with the four verbs (chase/supersede/withdraw/escalate)",
-        arm="unset TASK_RECHECK_ENABLED (on by default)",
-        disarm="TASK_RECHECK_ENABLED=0 in the fleet .env",
     ),
     Switch(
         key="plane-expire",
         scope=HOST_JOB,
         polarity=OPT_OUT,
+        carrier=ENV_HOST,
         env="PLANE_EXPIRE_ENABLED",
         job="plane-expire",
         plane=True,
         target_workflow=True,
         what="age the attention queue: a terminal `expired` task event for a "
              "deadline nothing closed in 7 days",
-        arm="unset PLANE_EXPIRE_ENABLED (on by default)",
-        disarm="PLANE_EXPIRE_ENABLED=0 in the host or root .env",
     ),
     Switch(
         key="plane-recording",
         scope=DOOR,
         polarity=SILENCER,
+        # The .env tier, and the composer carries the resolved value BOTH ways
+        # — onto every fleet job unit (a timer sources no .env) and into
+        # bot.conf (a session sees no unexported tier assignment). Before the
+        # fold this switch reached neither: silencing a fleet left its timers
+        # recording, which is the shape of an off switch that is not one.
+        carrier=ENV_FLEET,
         env="PLANE_EMIT_DISABLED",
         plane=True,
         target_workflow=True,
         what="every door records on the plane (dispatch, report, heartbeat, "
              "hooks) — the loop has no memory without it",
-        arm="unset PLANE_EMIT_DISABLED (recording by default)",
-        disarm="PLANE_EMIT_DISABLED=1 — the ruled harness exemption; silences "
-               "EVERY door at once",
     ),
     # ---------------- the plane's own equipment, on ------------------------
     Switch(
         key="plane-daemon",
         scope=HOST_SERVICE,
         polarity=OPT_OUT,
+        carrier=ENROLL_HOST,
         job="plane-daemon",
         plane=True,
         what="the resident ingest daemon — without it every emit takes the "
              "cold CLI rung (slower, still recorded)",
-        arm="host.jobs.plane-daemon.enroll: true in system.yaml, then "
-            "generate + lib/setup-system",
-        disarm="host.jobs.plane-daemon.enroll: false in system.yaml, then "
-               "generate (prunes the units), then stop the installed one: "
-               "systemctl --user disable --now claudlobby-plane-daemon.service"
-               " / launchctl bootout gui/$UID/claudlobby-plane-daemon",
     ),
     Switch(
         key="plane-view",
         scope=HOST_SERVICE,
         polarity=OPT_OUT,
+        carrier=ENROLL_HOST,
         job="plane-view",
+        requires_extra="plane-ui",
         plane=True,
         what="the read-only operator plane on localhost (needs the [plane-ui] "
              "extra; fronting it with Tailscale Serve stays yours)",
-        arm="host.jobs.plane-view.enroll: true in system.yaml, then generate "
-            "+ lib/setup-system",
-        disarm="host.jobs.plane-view.enroll: false in system.yaml, then "
-               "generate, then stop the installed unit",
     ),
     Switch(
         key="plane-host-probe",
         scope=HOST_JOB,
         polarity=OPT_OUT,
+        # Enroll, and ONLY enroll. The probe reads the estate silencer, but a
+        # host timer's env is closed and this switch has no flag of its own to
+        # stamp — so an arm line naming PLANE_EMIT_DISABLED pointed at a
+        # carrier that never arrives. Silencing the estate is its own row.
+        carrier=ENROLL_HOST,
         job="plane-host-probe",
         plane=True,
         what="per-minute host facets (load, RAM, disk, Pi thermal) as "
              "host.* metric samples for the Host card",
-        arm="unset PLANE_EMIT_DISABLED (on by default)",
-        disarm="host.jobs.plane-host-probe.enroll: false in system.yaml "
-               "(or PLANE_EMIT_DISABLED=1, which silences every door)",
     ),
     Switch(
         key="plane-prune",
         scope=HOST_JOB,
         polarity=OPT_OUT,
+        carrier=ENV_HOST,
         env="PLANE_PRUNE_ENABLED",
         job="plane-prune",
         plane=True,
         what="metric-sample retention: age raw host.*/bot.* samples past 30 "
              "days by ingested_at — family-scoped, the ledger is never touched",
-        arm="unset PLANE_PRUNE_ENABLED (on by default)",
-        disarm="PLANE_PRUNE_ENABLED=0 in the host or root .env",
     ),
     Switch(
         key="registry-scan",
         scope=GENERATE,
         polarity=OPT_OUT,
+        carrier=ENV_FLEET,
         env="PLANE_EMIT_ENABLED",
         plane=True,
         what="one registry keyframe scan per `generate` — what the fleet IS, "
              "so every metric sample has something to join to",
-        arm="unset PLANE_EMIT_ENABLED (on by default)",
-        disarm="PLANE_EMIT_ENABLED=0 in the fleet .env",
     ),
     # ---------------- other doors, on --------------------------------------
     Switch(
         key="spindown-receipt",
         scope=DOOR,
         polarity=OPT_OUT,
+        # bot.conf, not a .env tier: spin-down loads the bot's own bot.conf and
+        # is commonly run BY a bot session, where an unexported tier assignment
+        # was never in the environment to begin with.
+        carrier=BOT_CONF,
         env="SPINDOWN_RECEIPT_ENABLED",
         what="a bot_teardown_started receipt before spin-down runs its legs, "
              "so a --purge still leaves a record of who tore what down",
-        arm="unset SPINDOWN_RECEIPT_ENABLED (on by default)",
-        disarm="SPINDOWN_RECEIPT_ENABLED=0 in the fleet .env",
     ),
     # ---------------- the opt-ins (rendered FIRST) -------------------------
     Switch(
         key="update-siblings",
         scope=HOST_JOB,
         polarity=OPT_IN,
+        carrier=ENROLL_HOST,
         job="update-siblings",
         why_opt_in="mutates operator source",
         what="weekly fast-forward of sibling framework checkouts to their "
              "newest cut release (notify-behind REPORTS regardless)",
-        arm="host.jobs.update-siblings.enroll: true in system.yaml, then "
-            "generate + lib/setup-system",
-        disarm="host.jobs.update-siblings.enroll: false in system.yaml, then "
-               "generate + lib/setup-system",
     ),
     Switch(
         key="session-digest",
         scope=DOOR,
         polarity=OPT_IN,
+        # The SessionEnd hook runs inside the bot's Claude session, so bot.conf
+        # is the only carrier that reaches it.
+        carrier=BOT_CONF,
         env="SESSION_DIGEST_ENABLED",
         why_opt_in="model spend (a Haiku pass per finished session)",
         what="distil each finished session into one structured JSONL row for "
              "the fleet monitor",
-        arm="SESSION_DIGEST_ENABLED=1 in the fleet .env",
-        disarm="unset SESSION_DIGEST_ENABLED (off by default)",
     ),
     Switch(
         key="code-audit-sweep",
         scope=FLEET_JOB,
         polarity=OPT_IN,
+        carrier=ENROLL_FLEET,
+        config="sweep.enabled",
+        config_extra="owner_bot and repos",
         why_opt_in="model spend + outbound GitHub issues",
         what="rolling code audit: pick the stalest repo and dispatch the "
              "audit into its owner bot's session",
-        arm="sweep: { enabled: true, owner_bot: <bot>, repos: [...] } in "
-            "fleet.yaml",
-        disarm="remove the fleet.yaml sweep: block (off by default)",
     ),
     Switch(
         key="weekly-worker-restart",
         scope=FLEET_JOB,
         polarity=OPT_IN,
+        carrier=ENROLL_FLEET,
         job="weekly-worker-restart",
         why_opt_in="bounces live worker sessions (context is the thing this "
                    "system exists to keep)",
         what="Sunday restart of worker bots onto the staged Claude Code binary",
-        arm="defaults: { jobs: { weekly-worker-restart: { enroll: true } } } "
-            "in fleet.yaml",
-        disarm="remove that stanza (off by default)",
     ),
 )
 
@@ -327,13 +411,57 @@ def jobs_with_env(*scopes: str) -> dict[str, tuple[str, ...]]:
     the flag is unreachable however loudly a tier sets it (#1383, measured
     twice — briefing, then keepalive). The stamp exists FOR THE SCRIPT THAT
     READS THE FLAG, which is why a switch with no ``job`` (the generate-time
-    registry scan) contributes nothing here: no timer script reads it.
+    registry scan, the estate silencer) contributes nothing here: no timer
+    script reads it by that name. The silencer reaches units through the
+    fleet-job BASELINE stamp instead — every unit, not one job's.
     """
     out: dict[str, tuple[str, ...]] = {}
     for s in SWITCHES:
         if s.job and s.env and (not scopes or s.scope in scopes):
             out[s.job] = (*out.get(s.job, ()), s.env)
     return out
+
+
+# ---------------------------------------------------------------------------
+# runnability — a door that cannot start must not be supervised
+# ---------------------------------------------------------------------------
+
+_EXTRA_MODULES = {"plane-ui": ("fastapi", "uvicorn")}
+
+
+def extra_available(extra: str) -> bool:
+    """Does *extra* import in THIS install — the venv that would run the door?
+
+    Asked at compose time, because the alternative is a supervised unit that
+    exits 1 and is relaunched every 5s forever. "The unit exits saying so" is
+    an honest failure for a hand run and a crash loop under supervision, and
+    only the second is what enrolling by default produces (F1).
+    """
+    from importlib.util import find_spec
+
+    mods = _EXTRA_MODULES.get(extra)
+    if not mods:
+        return True
+    for mod in mods:
+        try:
+            if find_spec(mod) is None:
+                return False
+        except (ImportError, ValueError):  # a broken/partial install
+            return False
+    return True
+
+
+def missing_extra(job: str) -> str:
+    """The extra *job* needs and does not have, or ""."""
+    for s in SWITCHES:
+        if s.job == job and s.requires_extra:
+            if not extra_available(s.requires_extra):
+                return s.requires_extra
+    return ""
+
+
+def extra_install_line(extra: str) -> str:
+    return f"pip install -e '.[{extra}]' in the install's venv, then generate"
 
 
 # ---------------------------------------------------------------------------
@@ -349,9 +477,15 @@ class SwitchState:
     on: bool
     source: str  #: "default" | "<tier> .env" | "system.yaml" | "fleet.yaml"
     detail: str = ""
-    #: the env cascade could not be reached — ``on`` is the DECLARED default,
-    #: never a measurement. Said, never quietly rendered as fact.
+    #: the state could not be READ — ``on`` is the DECLARED default, never a
+    #: measurement. Said, never quietly rendered as fact. Two causes ship, and
+    #: :attr:`unknown_reason` names which: the env resolver was unreachable,
+    #: or this run named no fleet and the switch is fleet-scoped.
     unknown: bool = False
+    unknown_reason: str = ""  #: "resolver" | "no-fleet"
+    #: overrides the switch's derived arm line when a RUNTIME fact changes it
+    #: (today: the [plane-ui] extra being absent).
+    arm_override: str = ""
 
     @property
     def label(self) -> str:
@@ -361,23 +495,37 @@ class SwitchState:
             return "on"
         return "off (opt-in)" if self.switch.polarity == OPT_IN else "off"
 
+    @property
+    def arm(self) -> str:
+        return self.arm_override or self.switch.arm
+
+    @property
+    def disarm(self) -> str:
+        return self.switch.disarm
+
 
 def _env_state(cascade, sw: Switch) -> tuple[bool | None, str]:
-    """(on, tier) from the cascade, or (None, "") when no tier assigns it."""
+    """(on, tier) from the cascade, or (None, "") when no tier assigns it.
+
+    The ``"0"``/``"1"`` compare is ``env_tiers.resolves_to``'s and nothing
+    else's — the same call the composer's stamp and the bash gates make. An
+    EMPTY assignment is a win at its tier (#1213) but is neither value, so it
+    leaves the door at its default, which is the honest reading of
+    ``export FLAG=``.
+    """
     if not sw.env:
         return None, ""
     res = cascade.get(sw.env)
     if res is None:
         return None, ""
+    from .env_tiers import resolves_to
+
     tier = f"{res.tier} .env"
     if sw.polarity == OPT_IN:
-        return res.value == "1", tier
+        return resolves_to(cascade, sw.env, "1"), tier
     if sw.polarity == SILENCER:
-        return res.value != "1", tier
-    # opt-out: only an exact "0" turns it off. An EMPTY assignment is a win
-    # (#1213) but is not "0", so it leaves the door on — which is the honest
-    # reading of `export FLAG=` and the same rule env_tiers.resolves_to applies.
-    return res.value != "0", tier
+        return not resolves_to(cascade, sw.env, "1"), tier
+    return not resolves_to(cascade, sw.env, "0"), tier
 
 
 def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
@@ -402,6 +550,14 @@ def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
     return cfg.get("enroll", True) is not False, where
 
 
+#: What a host-wide run says about a scope it never opened. F5: the first build
+#: reported these as "shipped default", which is an assertion about a fleet
+#: nobody named — the same class as an unreachable reader answering "nothing".
+NO_FLEET_DETAIL = ("no fleet named — fleet-tier switches not read; run"
+                   " `claudlobby --fleet <name> doctor --switches`")
+RESOLVER_DETAIL = "env resolver unreachable — showing the shipped default"
+
+
 def resolve(
     paths: Paths,
     fleet: FleetConfig | None = None,
@@ -413,11 +569,15 @@ def resolve(
     Opt-ins lead the list on purpose: they are the rows a reader must act on,
     and a table that buries the four off switches under the nine on ones has
     named them without surfacing them.
+
+    ``fleet=None`` is a HOST run (``lib/setup-system``, ``plane doctor`` with
+    no ``--fleet``). Its host rows are true; its fleet-scoped rows are UNKNOWN
+    and say so, because the fleet tier was never read.
     """
     from . import env_tiers as _env_tiers
     from .config import load_host_jobs
 
-    unknown = False
+    unresolved = False
     if cascade is None:
         try:
             cascade = _env_tiers.cascade(
@@ -426,7 +586,7 @@ def resolve(
                 )
             )
         except _env_tiers.ResolverUnavailable:
-            cascade, unknown = {}, True
+            cascade, unresolved = {}, True
 
     try:
         host_jobs = load_host_jobs()
@@ -467,13 +627,33 @@ def resolve(
             source = tier
         elif source == "default" and env_on is not None:
             source = tier
+
         detail = ""
-        if unknown and sw.env:
-            detail = "env resolver unreachable — showing the shipped default"
+        reason = ""
+        unknown = False
+        if unresolved and sw.env:
+            detail, reason, unknown = RESOLVER_DETAIL, "resolver", True
+        elif fleet is None and sw.fleet_scoped:
+            detail, reason, unknown = NO_FLEET_DETAIL, "no-fleet", True
+            source = "?"
+
+        arm_override = ""
+        extra = missing_extra(sw.job) if sw.job else ""
+        if extra:
+            # F1: the door cannot run here, so the unit is not composed and
+            # "on" would be a claim about a process that does not exist.
+            on, unknown, reason = False, False, ""
+            source = f"the [{extra}] extra is not installed"
+            detail = (f"{extra} does not import in this install — no unit is"
+                      " composed (a supervised unit that cannot start is a"
+                      " crash loop, not an honest failure)")
+            arm_override = extra_install_line(extra) + " + lib/setup-system"
+
         rows.append(
             SwitchState(
                 switch=sw, on=on, source=source, detail=detail,
-                unknown=bool(unknown and sw.env),
+                unknown=unknown, unknown_reason=reason,
+                arm_override=arm_override,
             )
         )
     rows.sort(key=lambda r: (r.switch.polarity != OPT_IN, r.switch.key))
@@ -519,9 +699,15 @@ def format_table(states: list[SwitchState], *, plane_only: bool = False) -> str:
             if sw.why_opt_in:
                 out.append(f"    {'':<{name_w}}  stays off — "
                            f"{sw.why_opt_in}")
-            line = sw.arm if not st.on else sw.disarm
-            verb = "arm" if not st.on else "turn off"
-            out.append(f"    {'':<{name_w}}  {verb}: {line}")
+            # An UNKNOWN row prints BOTH directions: we do not know which way
+            # it is set, so printing only one would be picking a side.
+            if st.unknown:
+                out.append(f"    {'':<{name_w}}  arm: {st.arm}")
+                out.append(f"    {'':<{name_w}}  turn off: {st.disarm}")
+            else:
+                line = st.arm if not st.on else st.disarm
+                verb = "arm" if not st.on else "turn off"
+                out.append(f"    {'':<{name_w}}  {verb}: {line}")
             if st.detail:
                 out.append(f"    {'':<{name_w}}  ! {st.detail}")
             out.append("")
@@ -530,9 +716,13 @@ def format_table(states: list[SwitchState], *, plane_only: bool = False) -> str:
            "(the only four reasons a door ships off: it deletes data, spends"
            " money, mutates operator source, or sends outbound at scale)")
     render(rest, "on by default", "")
-    n_off = sum(1 for s in rest if not s.on)
-    out.append(f"  {len(rows)} shipped · {len(opt_in)} opt-in (off)"
-               f" · {n_off} on-by-default door(s) turned off here")
+    n_off = sum(1 for s in rest if not s.on and not s.unknown)
+    n_unknown = sum(1 for s in rows if s.unknown)
+    tail = (f"  {len(rows)} shipped · {len(opt_in)} opt-in (off)"
+            f" · {n_off} on-by-default door(s) turned off here")
+    if n_unknown:
+        tail += f" · {n_unknown} not read here"
+    out.append(tail)
     out.append("")
     return "\n".join(out)
 
@@ -541,13 +731,59 @@ def summary_line(states: list[SwitchState]) -> str:
     """The one-line form the doctor rung carries in its Check detail."""
     opt_in = [s for s in states if s.switch.polarity == OPT_IN]
     rest = [s for s in states if s.switch.polarity != OPT_IN]
-    off = [s for s in rest if not s.on]
+    off = [s for s in rest if not s.on and not s.unknown]
     unknown = [s for s in states if s.unknown]
-    parts = [f"{len(states)} shipped", f"{len(rest) - len(off)} on",
+    parts = [f"{len(states)} shipped",
+             f"{len(rest) - len(off) - sum(1 for s in rest if s.unknown)} on",
              f"{len(opt_in)} opt-in (off)"]
     if off:
         parts.append("turned off here: " + ", ".join(s.switch.key for s in off))
-    if unknown:
+    if any(s.unknown_reason == "resolver" for s in unknown):
         parts.append("env resolver unreachable — env states are the shipped"
                      " defaults, not a reading")
+    if any(s.unknown_reason == "no-fleet" for s in unknown):
+        parts.append("no fleet named — fleet-tier switches not read")
     return " · ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# the DOC block — the fourth copy, deleted (F8)
+# ---------------------------------------------------------------------------
+
+#: The three hand-written tables the fold replaced. Each doc carries the block
+#: between these markers; `tests/test_switches.py` asserts the file's block
+#: equals this render, and `claudlobby doctor --switches --markdown` prints
+#: them for regeneration. A doc table is a copy of the registry like any other,
+#: and the estate's recurring defect is a copy drifting (#892/#1143).
+DOC_BEGIN = "<!-- BEGIN GENERATED: switches -->"
+DOC_END = "<!-- END GENERATED: switches -->"
+
+#: doc path (repo-relative) -> the filter its table carries.
+DOC_BLOCKS: dict[str, dict] = {
+    "documentation/system-yaml-schema.md": {},
+    "documentation/fleet-yaml-schema.md": {"fleet_only": True},
+    "documentation/architecture/observable-plane.md": {"plane_only": True},
+}
+
+
+def format_markdown(*, plane_only: bool = False,
+                    fleet_only: bool = False) -> str:
+    """The SHIPPED registry as a markdown table — host-independent by
+    construction (it renders declarations, never this host's state), so the
+    same bytes belong in a doc and a diff of them is a real change."""
+    rows = [s for s in SWITCHES
+            if (s.plane or not plane_only) and (s.fleet_scoped or not fleet_only)]
+    out = [DOC_BEGIN,
+           "<!-- Generated from claudlobby/switches.py — do not hand-edit."
+           " Regenerate: claudlobby doctor --switches --markdown -->",
+           "",
+           "| Switch | Ships | Scope | Carrier | Flip it with |",
+           "|---|---|---|---|---|"]
+    for s in sorted(rows, key=lambda s: (s.polarity != OPT_IN, s.key)):
+        ships = (f"**off** — {s.why_opt_in}" if s.polarity == OPT_IN
+                 else "**on**")
+        flip = s.arm if s.polarity == OPT_IN else s.disarm
+        out.append(f"| `{s.key}` | {ships} | {s.scope} | {s.carrier} |"
+                   f" {flip} |")
+    out += ["", DOC_END]
+    return "\n".join(out)

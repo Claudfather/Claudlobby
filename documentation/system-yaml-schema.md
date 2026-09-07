@@ -133,21 +133,26 @@ claudlobby's own namespaces that no switch claims is reported as a DEAD flag
 by `claudlobby validate`** — so a door deleted tomorrow warns about its
 leftover flag without anyone maintaining a list.
 
-| Switch | Ships | Scope | Off / on with |
-|---|---|---|---|
-| `task-recheck` | **on** | fleet job | `TASK_RECHECK_ENABLED=0` in the fleet `.env` |
-| `plane-expire` | **on** | host job | `PLANE_EXPIRE_ENABLED=0` in the host/root `.env` |
-| `plane-prune` | **on** | host job | `PLANE_PRUNE_ENABLED=0` in the host/root `.env` |
-| `plane-host-probe` | **on** | host job | `enroll: false`, or the estate silencer |
-| `plane-daemon` | **on** | host service | `enroll: false` + stop the installed unit |
-| `plane-view` | **on** | host service | `enroll: false` + stop the installed unit |
-| `registry-scan` | **on** | generate | `PLANE_EMIT_ENABLED=0` in the fleet `.env` |
-| `spindown-receipt` | **on** | door | `SPINDOWN_RECEIPT_ENABLED=0` in the fleet `.env` |
-| `plane-recording` | **on** | every door | `PLANE_EMIT_DISABLED=1` (the harness exemption) |
-| `update-siblings` | **off** — mutates operator source | host job | `enroll: true` in this host's `system.yaml` |
-| `session-digest` | **off** — model spend | hook | `SESSION_DIGEST_ENABLED=1` in the fleet `.env` |
-| `code-audit-sweep` | **off** — spend + outbound issues | fleet job | `sweep: { enabled: true }` in `fleet.yaml` |
-| `weekly-worker-restart` | **off** — bounces live sessions | fleet job | `defaults.jobs.weekly-worker-restart.enroll: true` |
+<!-- BEGIN GENERATED: switches -->
+<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby doctor --switches --markdown -->
+
+| Switch | Ships | Scope | Carrier | Flip it with |
+|---|---|---|---|---|
+| `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
+| `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `update-siblings` | **off** — mutates operator source | host job | system.yaml enroll | host.jobs.update-siblings.enroll: true in THIS host's system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |
+| `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
+| `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in THIS host's system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-expire` | **on** | host job | host/root .env | PLANE_EXPIRE_ENABLED=0 in the host or root .env |
+| `plane-host-probe` | **on** | host job | system.yaml enroll | host.jobs.plane-host-probe.enroll: false in THIS host's system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-prune` | **on** | host job | host/root .env | PLANE_PRUNE_ENABLED=0 in the host or root .env |
+| `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
+| `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in THIS host's system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `registry-scan` | **on** | generate | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
+
+<!-- END GENERATED: switches -->
 
 Run `claudlobby doctor --switches` for the live version of this table with
 each row's current state and the tier that set it.
@@ -231,7 +236,7 @@ enforcement mechanism — and even which value counts as the default — is
 |---|---|---|---|
 | Fleet job (`defaults.jobs`, e.g. `weekly-worker-restart`) | enrolled (`enroll` defaults to `True`) | compose-time listing **and** enroll-time skip | The unit files ARE written; the job's basename is additionally added to a `DORMANT` manifest sidecar in the fleet's `runtime/fleet/timers/`. `lib/setup-fleet` and `reconcile-fleet.sh`'s job-drift audit both call the shared `unit_is_dormant()` helper (`lib-common.sh`) against that manifest and skip enrolling/flagging anything listed in it. A fleet opts a dormant job in with `defaults: { jobs: { <name>: { enroll: true } } }` in its own `fleet.yaml` — see [`fleet-yaml-schema.md`'s `fleet.defaults.jobs.<name>.enroll`](fleet-yaml-schema.md#fleetdefaultsjobsnameenroll). |
 | Host service (`host.jobs`, `unit: service`, e.g. `plane-daemon`) | **dormant** (`cfg.get("enroll") is True` — a strict identity check, so absence or any non-`True` value is dormant) | compose-time only | If `enroll` is not exactly `true`, **zero files are written** — there is nothing for `setup-system` to find, let alone enroll. Note the default direction is the *opposite* of a plain timer job: a service is dormant unless explicitly armed; a timer is enrolled unless explicitly parked. |
-| Host timer (`host.jobs`, no `unit: service`, e.g. `update-siblings`) | enrolled | compose-time listing **and** enroll-time skip | Same shape as a fleet job, since the defaults flip closed #1385: the unit files ARE written, the basename is added to a `DORMANT` manifest in `runtime/_host/timers/`, and `lib/setup-system` calls the shared `unit_is_dormant()` helper against it before enrolling. A host opts one in through **its own `system.yaml`** — `host: { jobs: { <name>: { enroll: true } } }` — never through `fleet.yaml`, which cannot reach a host job at all. |
+| Host timer (`host.jobs`, no `unit: service`, e.g. `update-siblings`) | enrolled | compose-time only, **plus a walk-back** | Same shape as a host SERVICE since the chunk-N fold: if `enroll` is `false`, **zero files are written** (and any previously composed unit is pruned), so there is nothing for `setup-system` to find. It is not the fleet-job shape because the enrollers differ — `setup-system` enrols every composed `claudlobby-*` unit it finds, so not composing is the only gate that cannot be forgotten, and a manifest describing units nobody composed is a second mechanism that can only disagree with the first. What compose-time dormancy cannot reach — a unit an EARLIER release already installed — `lib/setup-system` disables and removes on its next run (`walk_back_uncomposed_host_units`), out loud. A host opts one in through **its own `system.yaml`** — `host: { jobs: { <name>: { enroll: true } } }` — never through `fleet.yaml`, which cannot reach a host job at all. |
 
 ### History: `update-siblings`'s `enroll: false` used to do nothing
 
@@ -250,9 +255,19 @@ beside it claiming the opposite.
 It was survivable while nearly everything here shipped dormant. Under a rule
 that ships doors **on**, "stays opt-in" becomes the only thing standing
 between a root pull and the four categories, so the gap had to close with the
-flip rather than after it: host timers now get the same `DORMANT` manifest
-fleet jobs have, written by the same atomic writer and read through the same
-shared predicate.
+flip rather than after it.
+
+The flip closed it with the fleet-job mechanism — compose the unit, list it in
+a `DORMANT` manifest, teach `setup-system` to skip it. The **fold** moved it
+one rung lower, to the mechanism host *services* already used: an unarmed host
+job composes no unit at all. Two reasons. A manifest is a second mechanism to
+keep in step with the first, and this one existed for a single job. And
+dormancy that only applies *forward* is not dormancy: every host that had
+already run the installer kept `claudlobby-update-siblings` **enabled and
+firing weekly** while every new surface called it off — so `setup-system` now
+also walks back any installed `claudlobby-*` unit the current compose no
+longer emits, refusing on an empty compose so a torn `generate` cannot tear
+down a healthy host.
 
 The old comment also printed the wrong recipe — `defaults: { jobs: {
 update-siblings: { enroll: true } } }` in `fleet.yaml`, which is the

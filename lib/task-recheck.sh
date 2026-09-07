@@ -31,12 +31,16 @@ set -euo pipefail
 # Only an exact 0 disarms. An EMPTY assignment is a win at its tier (#1213) but
 # is not a 0, so `export TASK_RECHECK_ENABLED=` leaves the door on -- the same
 # rule env_tiers.resolves_to applies everywhere else.
-if [ "${TASK_RECHECK_ENABLED:-1}" = "0" ]; then
-    printf 'task-recheck: OFF for this fleet (TASK_RECHECK_ENABLED=0) -- no re-check will be sent; unset it, or set 1, to restore the default\n' >&2
-    exit 0
-fi
-
+#
+# The comparison itself is switch_is_on (lib-common), not a fourth copy of
+# `${FLAG:-1}` = 0: polarity belongs in ONE place or the flag comes to mean
+# something different from what the switch table says it means.
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
+switch_is_on TASK_RECHECK_ENABLED task-recheck "no re-check will be sent" || exit 0
+
 ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 export CLAUDLOBBY_ROOT="$ROOT"
 

@@ -226,8 +226,11 @@ def test_launcher_runs_by_default_and_its_off_switch_is_LOUD(tmp_path):
     _backdate_all(root, days_old=40)
     off = _launcher(root, "--dry-run", armed=False)
     assert off.returncode == 0
-    assert "OFF on this host" in off.stderr
+    # REWRITTEN by the fold (F6): the loud line comes from the shared gate
+    # (lib-common `switch_is_on`) now — same three facts, one definition.
+    assert "plane-prune: OFF here" in off.stderr
     assert "PLANE_PRUNE_ENABLED=0" in off.stderr
+    assert "accumulate without bound" in off.stderr
     assert _counts(root)[0] == 1              # off touched nothing
     on = _launcher(root, armed=True)
     assert on.returncode == 0

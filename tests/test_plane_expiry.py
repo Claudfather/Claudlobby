@@ -155,7 +155,13 @@ def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path):
     assert on.returncode == 0 and "would expire 1" in on.stdout
     off = _launcher(root, "--dry-run", armed=False)
     assert off.returncode == 0
-    assert "OFF on this host" in off.stderr and "PLANE_EXPIRE_ENABLED=0" in off.stderr
+    # REWRITTEN by the fold (F6): the loud line is now the SHARED gate's
+    # (lib-common `switch_is_on`), not this door's own copy — four launchers
+    # had four spellings of one comparison. What is pinned is unchanged: the
+    # door names itself, names the flag, and says what will not happen.
+    assert "plane-expire: OFF here" in off.stderr
+    assert "PLANE_EXPIRE_ENABLED=0" in off.stderr
+    assert "no assignment will be expired" in off.stderr
     assert "would expire" not in off.stdout
 
 

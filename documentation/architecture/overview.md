@@ -203,10 +203,13 @@ envelope, identity (aliases vs minted uids), the write spine and its ladder (dae
 CLI → spool), every door and the flag that arms it, the read side (and which doors are NOT
 read-only), the F18 cutover as history (the closure deleted its machinery), migrations and retention.
 
-Two properties matter at this altitude. **Everything is dormant by default**: a fleet that never
-sets `PLANE_EMIT_ENABLED=1` in its `.env` tier pays nothing; the ingest daemon, the view daemon and
-the sweeps are separately armed host jobs (`system.yaml`, see
-[`system-yaml-schema.md`](../system-yaml-schema.md#unit-service--resident-host-services)). And
+Two properties matter at this altitude. **The plane ships ON** (chunk N — it was dormant by
+default until then, and a behavior nobody can see is a behavior nobody has): every runtime door
+records, `generate` scans the registry, and the ingest daemon, the view daemon and the sweeps are
+enrolled host jobs. Nothing it does reaches the four categories the defaults rule reserves for
+opt-in. Turning any of it off is one line, named where the operator looks — `claudlobby doctor
+--switches` (`system.yaml`, see
+[`system-yaml-schema.md`](../system-yaml-schema.md#defaults-the-rule)). And
 **nothing in `fleet.yaml` or `runtime/bots/` changes shape because of it** — the plane records what
 the doors already do. The legacy JSONL ledgers are gone: the F18 closure (#1467) removed every
 writer, moved every reader onto the plane, and deleted the transition machinery.

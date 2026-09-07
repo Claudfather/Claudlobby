@@ -65,6 +65,13 @@ def register_subparsers(sub) -> None:
         " state here, and the one line that flips it (what setup-fleet and"
         " setup-system print at the end of a run)",
     )
+    pdr.add_argument(
+        "--markdown",
+        action="store_true",
+        help="With --switches: print the GENERATED doc blocks (the three"
+        " schema/architecture tables are rendered from the registry, not"
+        " hand-kept) so a doc can be regenerated after a switch changes",
+    )
     pdr.set_defaults(func=cmd_doctor)
 
     pcr = sub.add_parser(

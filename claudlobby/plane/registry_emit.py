@@ -600,6 +600,21 @@ def run_generate_scan(paths, fleet) -> dict | None:
         _res = _env_tiers.resolve(
             paths, fleet_name=fleet.name).get("PLANE_EMIT_ENABLED")
     except _env_tiers.ResolverUnavailable as exc:
+        # ...but an EXPLICIT opt-out beats a fail-open scan (F3). The CLI
+        # already loaded the fleet's .env into os.environ (_load_env), so an
+        # operator who wrote PLANE_EMIT_ENABLED=0 is visible here even when
+        # the tier resolver — a subprocess, and the thing that just failed —
+        # cannot say which tier it came from. Scanning over a `0` we can read
+        # is not failing open, it is ignoring an instruction we have in hand.
+        # ONLY an exact 0 does this: an unset value still scans, which is the
+        # direction the on-by-default rule wants a failure to fall in.
+        _explicit = os.environ.get("PLANE_EMIT_ENABLED")
+        if _explicit == "0":
+            log.info("registry scan: env resolver unreachable (%s), but"
+                     " PLANE_EMIT_ENABLED=0 is set in this process's"
+                     " environment — NOT scanning (an explicit opt-out is"
+                     " honored without the resolver)", exc)
+            return None
         log.warning("registry scan: env resolver unreachable (%s) — scanning"
                     " anyway (on by default; PLANE_EMIT_ENABLED=0 opts out)",
                     exc)

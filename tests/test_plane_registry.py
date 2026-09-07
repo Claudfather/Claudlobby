@@ -13,6 +13,7 @@ DORMANCY (an unarmed fleet emits nothing).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -406,6 +407,38 @@ def test_a_tier_that_says_zero_emits_nothing(tmp_path):
     root = _fleet_root(tmp_path, armed=False)
     assert _scan(root) is None
     assert not (root / "state" / "plane" / "plane.db").exists()
+
+
+def test_an_explicit_zero_beats_an_unreachable_resolver(tmp_path,
+                                                        monkeypatch, caplog):
+    """The fold's F3. Failing OPEN is right for a resolver that cannot say
+    which tier set a flag — under an on-by-default rule the alternative is
+    silently dropping the keyframes every later reader joins against. It is
+    NOT right when we can read the answer: the CLI already loaded the fleet's
+    .env into os.environ, so an operator who wrote PLANE_EMIT_ENABLED=0 has
+    said so, and scanning over it is ignoring an instruction in hand rather
+    than recovering from a failure.
+
+    Only an exact 0 does this — an unset value still scans, which keeps the
+    failure falling in the on-by-default direction."""
+    import claudlobby.env_tiers as et
+
+    root = _fleet_root(tmp_path, armed=False)
+    (root / ".env").unlink()          # the tier is gone; the process env is not
+    monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
+
+    def boom(*a, **k):
+        raise et.ResolverUnavailable("no resolver")
+
+    monkeypatch.setattr(et, "resolve", boom)
+    with caplog.at_level(logging.INFO):
+        assert _scan(root) is None
+    assert not (root / "state" / "plane" / "plane.db").exists()
+    assert "PLANE_EMIT_ENABLED=0" in caplog.text
+    caplog.clear()
+    # ...and with nothing set at all, the same failure still SCANS.
+    monkeypatch.delenv("PLANE_EMIT_ENABLED")
+    assert _scan(root) is not None
 
 
 def test_a_fleet_with_no_flag_at_all_SCANS(tmp_path):

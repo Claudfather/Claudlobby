@@ -2862,7 +2862,6 @@ harness_check "chunk N a fleet declaring NOTHING enrols the re-check (the reacti
 r=yes
 for _j in plane-expire plane-prune plane-host-probe; do
     [ -f "$SW_HT/claudlobby-$_j.timer" ] || r=no
-    grep -qxF "claudlobby-$_j" "$SW_HT/DORMANT" 2>/dev/null && r=no
 done
 harness_check "  ...and the host sweeps: expiry, retention, the host probe" "$r"
 
@@ -2875,11 +2874,20 @@ harness_check "  ...and the resident services: the ingest daemon and the operato
 
 # The other half of the ruling: what STAYS off must be off for real. Before
 # this chunk `enroll: false` on a host timer had no code effect at all, so the
-# one job that mutates operator source enrolled on every host (#1385).
-r=no; grep -qxF "claudlobby-update-siblings" "$SW_HT/DORMANT" 2>/dev/null && r=yes
-harness_check "  ...while update-siblings (mutates operator source) is manifest-DORMANT" "$r"
-r=no; [ -f "$SW_HT/claudlobby-update-siblings.timer" ] && r=yes
-harness_check "  ...composed but not enrolled (inspectable, hand-enrollable, never automatic)" "$r"
+# one job that mutates operator source enrolled on every host (#1385). The
+# fold moved that gate one rung lower -- an unarmed host job composes NO unit,
+# the same contract services already had -- because setup-system enrols every
+# composed claudlobby-* unit it finds, so a manifest is a second mechanism
+# that can only disagree with the first.
+r=yes; ls "$SW_HT"/claudlobby-update-siblings.* >/dev/null 2>&1 && r=no
+harness_check "  ...while update-siblings (mutates operator source) composes NO unit at all" "$r"
+r=yes; [ -f "$SW_HT/DORMANT" ] && r=no
+harness_check "  ...and no DORMANT manifest survives it (no list of units nobody composed)" "$r"
+r=yes
+for _s in plane-daemon plane-view; do
+    [ -f "$SW_HT/claudlobby-$_s.service" ] || r=no
+done
+harness_check "  ...while the armed jobs beside it are untouched by the prune" "$r"
 
 # --- the off switch: composed, carried, and LOUD ----------------------------
 sw_generate 'TASK_RECHECK_ENABLED=0
@@ -2899,7 +2907,14 @@ env CLAUDLOBBY_ROOT="$SW_ROOT" TASK_RECHECK_ENABLED=0 PATH="/usr/bin:/bin" \
     > "$SW_ROOT/off.out" 2> "$SW_ROOT/off.err" || _sw_rc=$?
 [ "$_sw_rc" -eq 0 ] && r=yes || r=no
 harness_check "  ...the launcher no-ops CLEANLY with it (a timer must not go red for being off)" "$r"
-grep -q "OFF for this fleet" "$SW_ROOT/off.err" && r=yes || r=no
+# The loud line comes from lib-common's shared switch_is_on gate since the
+# fold (F6) -- four launchers had four spellings of one comparison. Same three
+# facts pinned: the door names itself, names the flag, and says what will not
+# happen while it is off.
+r=yes
+for _p in "task-recheck: OFF here" "TASK_RECHECK_ENABLED=0" "no re-check will be sent"; do
+    grep -q "$_p" "$SW_ROOT/off.err" || r=no
+done
 harness_check "  ...and LOUDLY (a silent skip reads exactly like a broken timer)" "$r"
 
 # A tier that says nothing must leave the unit alone, so the launcher's own
@@ -2907,6 +2922,23 @@ harness_check "  ...and LOUDLY (a silent skip reads exactly like a broken timer)
 sw_generate ""
 grep -q "TASK_RECHECK_ENABLED" "$SW_FT/com.swvalidate.task-recheck.service" && r=no || r=yes
 harness_check "  ...while a silent tier stamps nothing (one default, not two)" "$r"
+
+# --- the fold (F2): the SILENCER reaches every door the fleet runs ---------
+# It reached `generate` and nothing else: a bot session sees no unexported
+# tier assignment (start-bot.sh sources the tiers before `set -a`) and a timer
+# unit sources no .env at all, so a fleet that "silenced the plane" kept both
+# recording. An off switch that reaches one of its doors is not an off switch.
+sw_generate 'PLANE_EMIT_DISABLED=1
+'
+r=no; grep -q "^Environment=PLANE_EMIT_DISABLED=1$" \
+    "$SW_FT/com.swvalidate.task-recheck.service" && r=yes
+harness_check "chunk N fold a fleet .env silencer REACHES the timer unit (not just generate)" "$r"
+r=no; grep -q "^export PLANE_EMIT_DISABLED=1$" \
+    "$SW_ROOT/runtime/bots/m1/bot.conf" && r=yes
+harness_check "  ...and the bot session, through bot.conf (a tier alone never does)" "$r"
+sw_generate ""
+r=yes; grep -q "PLANE_EMIT_DISABLED" "$SW_ROOT/runtime/bots/m1/bot.conf" && r=no
+harness_check "  ...and a fleet that says nothing carries nothing (the door owns its default)" "$r"
 
 # And the surface the ruling actually asks for: the switches are NAMED where
 # the operator looks, with the line that flips them.

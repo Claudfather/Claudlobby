@@ -21,12 +21,13 @@ set -euo pipefail
 # The no-op is LOUD: a silent skip reads as a broken timer, and a disabled
 # reaction must never be invisible. Only an exact 0 disarms — an empty
 # assignment is a win at its tier (#1213) but is not a 0.
-if [ "${PLANE_EXPIRE_ENABLED:-1}" = "0" ]; then
-    printf 'plane-expire: OFF on this host (PLANE_EXPIRE_ENABLED=0) -- no assignment will be expired; unset it, or set 1, to restore the default\n' >&2
-    exit 0
-fi
-
+# The comparison is switch_is_on (lib-common) — polarity in one place.
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
+switch_is_on PLANE_EXPIRE_ENABLED plane-expire "no assignment will be expired" || exit 0
+
 ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 export CLAUDLOBBY_ROOT="$ROOT"
 

@@ -30,6 +30,8 @@
 #   debounce_notify    — fire-once notification with file-based marker
 #   debounce_clear     — clear a debounce marker for re-firing
 #   resolve_bots_dir   — fleet-aware runtime/bots path resolution
+#   switch_is_on       — THE opt-out gate (polarity in one place; loud no-op)
+#   walk_back_uncomposed_host_units — disable host units nothing composes now
 #
 # Variables set on source:
 #   CLAUDLOBBY_ROOT — repo root (auto-detected from this file's location)
@@ -3476,8 +3478,105 @@ EOF
 # job — composed-but-dormant, opt-in via fleet.yaml). One predicate shared by
 # setup-fleet and reconcile-fleet so enrollment and audit can never drift.
 # Missing manifest → nothing is dormant; -x keeps comment lines inert.
+# FLEET jobs only since the chunk-N fold: an unarmed HOST job composes no unit
+# at all, so there is nothing to list and nothing to skip (walk_back_
+# uncomposed_host_units is the other half, for units already installed).
 unit_is_dormant() {
     grep -qxF "${2:?unit basename required}" "${1:?timers dir required}/DORMANT" 2>/dev/null
+}
+
+# switch_is_on <VAR> <door-name> [<consequence>]
+# THE opt-out gate every self-gating door calls (chunk N fold, F6). Polarity
+# lives here and nowhere else: unset -- or set to anything that is not an
+# exact 0 -- is ON (rc 0); an exact 0 is OFF, prints the door's no-op line on
+# stderr and returns 1.
+#
+# One definition because the four launchers had four copies of the same
+# comparison, and a copy is how a fleet ends up with a flag that means one
+# thing in bash and another in the table an operator reads. It is the shell
+# twin of env_tiers.resolves_to: an EMPTY assignment wins at its tier (#1213)
+# but is not a 0, so `export FLAG=` leaves the door on.
+#
+# The no-op is LOUD by construction rather than by each caller remembering:
+# a silent skip is indistinguishable from a broken timer, which is the whole
+# point of the ruling that puts these doors on by default. <consequence> is
+# the one clause that says what will not happen while it is off.
+switch_is_on() {
+    local var="${1:?switch variable required}" door="${2:?door name required}"
+    local consequence="${3:-}" value
+    eval "value=\${$var-}"
+    [ "$value" = "0" ] || return 0
+    printf '%s: OFF here (%s=0)%s -- unset it, or set 1, to restore the default\n' \
+        "$door" "$var" "${consequence:+ -- $consequence}" >&2
+    return 1
+}
+
+# walk_back_uncomposed_host_units <composed-timers-dir> [--dry-run]
+# Dormancy that WALKS BACK (chunk N fold, F4). Compose-time dormancy stops a
+# host job from being enrolled in future; it cannot reach a unit a previous
+# release already installed. So every INSTALLED claudlobby-* unit with no
+# composed counterpart is disabled and removed here, saying so -- the host
+# that ran the installer before this chunk keeps `claudlobby-update-siblings`
+# enrolled and running while the switch table calls it off, which is the
+# opacity the whole rule exists to end.
+#
+# What "should not be enrolled" IS "installed and no longer composed", so no
+# manifest is read: a manifest describing units that were not composed is a
+# second mechanism that can only disagree with the first.
+#
+# REFUSES on an empty composed dir. A generate that emitted nothing is an
+# unreachable instrument, not evidence that every host job is dormant, and
+# acting on it would tear down a healthy host (source_state's rule: absence of
+# evidence is not evidence of absence).
+walk_back_uncomposed_host_units() {
+    local dir="${1:?composed timers dir required}" dry="${2:-}"
+    local installed_dir f base composed=0 n=0
+    [ -n "${_OS:-}" ] || detect_os
+
+    for f in "$dir"/claudlobby-*.timer "$dir"/claudlobby-*.service "$dir"/claudlobby-*.plist; do
+        if [ -e "$f" ]; then composed=1; break; fi
+    done
+    if [ "$composed" != 1 ]; then
+        printf 'walk-back: no composed host units in %s -- refusing to walk anything back (an empty compose is not evidence of dormancy)\n' "$dir" >&2
+        return 0
+    fi
+
+    _wb_still_composed() {  # <base> -- any composed unit file for it
+        [ -e "$dir/$1.timer" ] || [ -e "$dir/$1.service" ] || [ -e "$dir/$1.plist" ]
+    }
+
+    if [ "${_OS:-}" = "Linux" ]; then
+        installed_dir="$HOME/.config/systemd/user"
+        for f in "$installed_dir"/claudlobby-*.timer "$installed_dir"/claudlobby-*.service; do
+            [ -e "$f" ] || continue
+            base="$(basename "$f")"; base="${base%.*}"
+            _wb_still_composed "$base" && continue
+            printf 'walk-back: %s is installed but no longer composed (opt-in or removed) -- disabling\n' "$base"
+            if [ "$dry" = "--dry-run" ]; then continue; fi
+            systemctl --user disable --now "$base.timer" >/dev/null 2>&1 || true
+            systemctl --user disable --now "$base.service" >/dev/null 2>&1 || true
+            rm -f "$installed_dir/$base.timer" "$installed_dir/$base.service"
+            n=$((n + 1))
+        done
+        if [ "$n" -gt 0 ] && [ "$dry" != "--dry-run" ]; then
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+        fi
+    else
+        installed_dir="$HOME/Library/LaunchAgents"
+        for f in "$installed_dir"/claudlobby-*.plist; do
+            [ -e "$f" ] || continue
+            base="$(basename "$f" .plist)"
+            _wb_still_composed "$base" && continue
+            printf 'walk-back: %s is installed but no longer composed (opt-in or removed) -- unloading\n' "$base"
+            if [ "$dry" = "--dry-run" ]; then continue; fi
+            launchctl bootout "gui/$(id -u)/$base" >/dev/null 2>&1 \
+                || launchctl unload -w "$f" >/dev/null 2>&1 || true
+            rm -f "$f"
+            n=$((n + 1))
+        done
+    fi
+    unset -f _wb_still_composed
+    return 0
 }
 
 # resolve_timer_unit <caller-name> <timer-name> [<fleet-name>]
