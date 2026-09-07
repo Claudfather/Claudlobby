@@ -113,12 +113,15 @@ passthrough arm carries **2 and 3 only**; a `4` there was dead code. A
 CLI's rc verbatim — there the install itself is behind the db and no rung can
 help.
 
-The startup check READS `PRAGMA user_version` and never calls `migrate()`,
-which is not a micro-optimization: `migrate()` creates the db and writes it,
-so running it before `_bind()` meant a `plane serve` REFUSED for a bad
-`--socket` parent, or because another daemon already held the lock, still
-created and migrated the live plane on its way out — the very act that makes
-a running daemon stale, with 0010's seconds-long write lock taken outside the
+There is no separate startup check: the daemon's first writes after bind —
+the lifecycle receipt and the startup spool drain — go through `migrate()`,
+which refuses a db newer than the code before writing anything, and that
+refusal is what exits the daemon. Everything that touches the db runs after
+`_bind()`, so a `plane serve` REFUSED for a bad `--socket` parent, or because
+another daemon already holds the lock, never touches the plane at all. The
+first build ran `migrate()` BEFORE bind, and a refused serve from a newer
+checkout migrated the live plane on its way out — the very act that makes a
+running daemon stale, with 0010's seconds-long write lock taken outside the
 daemon lock.
 
 **Deploying a migration.** A pull that carries one leaves every resident

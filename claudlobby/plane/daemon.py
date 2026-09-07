@@ -76,7 +76,7 @@ from pathlib import Path
 from typing import Optional
 
 from .contracts import ContractViolation
-from .db import connect, connect_ro, db_file, db_path
+from .db import connect, db_file, db_path
 from .emit_api import emit_batch
 from .ids import ensure_host_uid
 from .migrations import SCHEMA_USER_VERSION, DowngradeError, migrate
@@ -276,83 +276,6 @@ class PlaneDaemon:
         )
         return PlaneDowngradeExit(str(exc))
 
-    def _read_user_version(self) -> Optional[int]:
-        """``PRAGMA user_version`` through a READ connection — the startup
-        check's whole mechanism, and deliberately NOT ``migrate()``.
-
-        migrate() CREATES the db (db_path mkdirs, connect creates the file)
-        and then WRITES it, holding 0010's seconds-long write lock. Run from
-        the startup check it did that on paths that never serve at all: a
-        `plane serve` REFUSED for a bad --socket parent, or because another
-        daemon already holds the lock, still created and migrated the live
-        plane on its way out (reproduced). That is #1485's own trigger — a
-        serve invoked from a newer checkout against the live root is exactly
-        how the RUNNING daemon becomes the stale one.
-
-        A db that does not exist has no version to be stale about, so there is
-        nothing to check and nothing is created: ``db_file`` is a pure join,
-        so asking leaves no directory behind either."""
-        path = db_file(self.root)
-        if not path.is_file():
-            return None
-        try:
-            conn = connect_ro(path)
-        except sqlite3.Error:
-            # The mode=ro URI cannot create the -shm a WAL db needs once its
-            # writer has closed (plane-readers.connect documents the same
-            # fallback, measured on the estate's 3.9): a plain connection held
-            # read-only by query_only. The file exists, so this creates
-            # nothing either.
-            conn = sqlite3.connect(str(path), timeout=5.0)
-            conn.execute("PRAGMA query_only = 1")
-        try:
-            return conn.execute("PRAGMA user_version").fetchone()[0]
-        finally:
-            conn.close()
-
-    def _assert_supported_schema(self) -> None:
-        """The startup half of the check (#1485). Runs AFTER _bind(), as the
-        first statement inside the serve loop's try/finally: the downgrade
-        exit must still unlink the socket and drop the lifetime lock, and
-        every refusal that precedes bind has to reach its refusal without this
-        check having touched the db at all. The socket therefore exists for
-        the bind-to-check window; a door that hits it inside that window gets
-        the typed `downgrade` reply, which plane-socket-client.py maps to the
-        shim's cold rung — the same landing as the ENOENT it meets afterwards.
-
-        A db this process cannot READ is NOT a downgrade: it is disclosed and
-        the daemon serves. What "serves" means there is narrow and honest —
-        the socket ANSWERS, with a typed refusal, and the process lives. It is
-        NOT "serves anyway, spooling": the spool covers a retryable
-        OperationalError (busy/locked/IO/full) and nothing else, so a corrupt
-        db answers `internal` and a root whose state/ is a regular file
-        answers `contract_violation` (measured — the capture policy under
-        state/ is unreadable before the db is reached). That is the posture
-        that existed before this check, kept."""
-        try:
-            current = self._read_user_version()
-        except (sqlite3.Error, OSError) as exc:
-            # OSError as well as sqlite3.Error. The first version caught only
-            # the latter, so a root whose state/ is a regular file (db_path's
-            # mkdir raising NotADirectoryError) killed the daemon at startup
-            # with a traceback — under launchd KeepAlive a permanent crash
-            # loop, where before the check the daemon disclosed and served.
-            # Reading through db_file removes THAT mkdir from this path, so
-            # here the catch is defensive; the live OSError moved to
-            # _optimize, whose catch is widened for the same reason.
-            print(f"plane-daemon: schema check skipped ({exc})", file=sys.stderr)
-            return
-        if current is None or current <= SCHEMA_USER_VERSION:
-            return
-        # Worded byte-identically to migrate()'s refusal so the exit line
-        # reads the same whichever of the three detectors fired.
-        raise self._downgrade_exit(DowngradeError(
-            f"plane.db user_version={current} is newer than this code"
-            f" (supports <={SCHEMA_USER_VERSION}) — refusing downgrade"
-        ))
-
-    # -- lifecycle events (best-effort: the recorder's own heartbeat must
-    #    never kill the recorder) ------------------------------------------
     def _emit_system(self, event: str, data: Optional[dict] = None) -> None:
         try:
             host = ensure_host_uid(self.root / "state")
@@ -602,15 +525,20 @@ class PlaneDaemon:
             signal.signal(signal.SIGINT, self.stop)
         print(f"plane-daemon: serving on {self.sock_path}", file=sys.stderr)
         try:
-            # Ordering is load-bearing (#1485 fold). The schema check is the
-            # FIRST statement inside the try, so (a) the downgrade exit still
-            # unlinks the socket and drops the lifetime lock on its way out,
-            # and (b) nothing that WRITES the db — the lifecycle receipt, the
-            # startup drain, which migrates — runs against a db this process
-            # refuses. Everything before this point is bind, and bind's own
-            # refusals must never migrate anything: that is what put the live
-            # plane a version ahead of the daemon serving it.
-            self._assert_supported_schema()
+            # Ordering is load-bearing (#1485 fold). Everything that touches
+            # the db runs INSIDE the try, after bind: the lifecycle receipt
+            # and the startup drain both go through migrate(), which REFUSES
+            # a db newer than this code before writing anything — so the
+            # startup drain is the stale-daemon detector at startup (the
+            # interval drain is the same detector on a quiet daemon, _handle
+            # on a busy one), the downgrade exit still unlinks the socket and
+            # drops the lifetime lock on its way out, and every refusal that
+            # precedes bind reaches its refusal without the db being touched.
+            # There is deliberately NO separate pre-check: the first build's
+            # pre-bind migrate() was the act that put the live plane a version
+            # ahead of the daemon serving it (a serve refused for a bad socket
+            # parent still migrated on its way out), and a read-only check
+            # after bind was a second detector the drain already is.
             self._emit_system("daemon_started")
             self._drain_spool(reason="startup")
             self._optimize()
