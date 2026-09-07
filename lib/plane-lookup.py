@@ -160,8 +160,8 @@ def main(argv=None) -> int:
                     " --assignee narrows it")
     ap.add_argument("--escalated", action="store_true",
                     help="print the fleet's OPEN escalations, tab-separated (needs --fleet) —"
-                    " M-B's fleet-pulse read for the `escalated` task event; NO consumer yet,"
-                    " the paging half lands with M-B")
+                    " fleet-pulse.sh's `_task_escalations` reads this for the `escalated` task"
+                    " event and pages the operator once per assignment (chunk M-B)")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
     ap.add_argument("--events", action="store_true",

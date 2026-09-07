@@ -423,7 +423,17 @@ def _dispatch_section(
     doors, paths: Paths, bot_id: str, now: int, degraded: list[Degradation],
     fleet_name: str | None = None, plane=None,
 ) -> dict:
-    """open / overdue / orphaned, all three from the #835 doors.
+    """open / overdue / orphaned / dispatched.
+
+    The first three are the #835 doors' own axis — what was assigned TO this
+    bot. ``dispatched`` (the fold's F2) is the other direction — what this bot
+    assigned to others, as a manager — from ``fleet_open_rows`` rather than a
+    second definition of open: three surfaces (the re-check digest's overflow
+    line, the dispatch protocol, ``observable-plane.md`` §6) told a manager
+    ``claudlobby brief --bot <manager>`` would list the rows it dispatched,
+    and this section had only ever answered "what was assigned to me"
+    (reproduced: briefing a manager holding three open dispatches rendered an
+    empty section).
 
     ``doors`` is passed in rather than loaded here: importing the matcher
     executes a module, and the caller needs it too.
@@ -434,6 +444,8 @@ def _dispatch_section(
     cap, and the orphan split. The rendered ``past_due`` flag means literally
     ``now > expected_by`` and is not a claim that the watchdog is alarming.
     """
+    from .plane.inventory import short_alias as _alias_of
+
     # THE PLANE IS THE ONLY SOURCE (F18 R2a). The two ledgers this section once
     # probed — omitting itself when either was absent, because the matcher
     # failed OPEN on a missing report ledger and served a wall of finished
@@ -506,13 +518,57 @@ def _dispatch_section(
             f"the matcher installed at {paths.lib / 'dispatch-overdue.py'} predates the"
             f" plane-only reader (no {', '.join(missing)}) — pull the install and re-run,"
             " so no dispatch state is served rather than a wrong one", "#1467")
+    menu: dict = {}
+    menu_ready = True
+    dispatched_ready = False
+    dispatched_raw: list[dict] = []
     try:
         # the caller's session when it holds one (build_brief opens ONE plane
         # for every section), else this section's own
         with (contextlib.nullcontext(plane) if plane is not None
               else doors.open_plane(**plane_ctx)) as session:
             over, orph = doors._classify_all(now, max_age, bots_dir, plane=session)
-            open_rows = doors.open_dispatches(bot_id, plane=session)
+            menu_ready = hasattr(session.pr, "open_assignment_ids")
+            entry = session.roster.get(bot_id.lower()) if menu_ready else None
+            # F7 (M-B fold, #1481): ONE read of the bot's own open set serves
+            # both the row list and the (dispatched_at, task_id) ->
+            # assignment_id index `menu_facts` keys on below — this used to
+            # run the bot's OPEN_SQL twice, once through the shared matcher
+            # door and again through `open_assignment_ids`, for the identical
+            # (fleet, bot_id) pair. `open_rows_indexed` is the single-read
+            # twin of the two calls it replaces; an install whose readers
+            # predate it, or whose entry the plane cannot name, falls back to
+            # the original two-call shape unchanged.
+            index: dict = {}
+            if menu_ready and entry is not None and hasattr(session.pr, "open_rows_indexed"):
+                open_rows, index = session.pr.open_rows_indexed(
+                    session.conn, session.fleet, bot_id, entry=entry)
+            else:
+                open_rows = doors.open_dispatches(bot_id, plane=session)
+                if menu_ready and entry is not None:
+                    index = session.pr.open_assignment_ids(
+                        session.conn, session.fleet, bot_id, entry=entry)
+            # M5 (chunk M-B, #1481): the MENU facts, from the same session and
+            # the same readers — a manager running `/brief` by hand must see
+            # what the re-check timer would send it, and neither may re-derive
+            # "open" or "escalated" beside the other. Keyed by (dispatched_at,
+            # task_id), the pair the tuples above are keyed by: a task id may
+            # legitimately repeat across a re-dispatch, and picking the newest
+            # would attach one row's escalation to another's line.
+            if menu_ready:
+                facts = session.pr.menu_facts(session.conn, list(index.values()))
+                menu = {k: facts.get(asg, {}) for k, asg in index.items()}
+            # F2 (M-B fold, #1481): what THIS bot DISPATCHED, as a manager.
+            # `fleet_open_rows` is already scoped to the DISPATCHING fleet, so
+            # filtering its `assigned_by` down to this bot's own alias is the
+            # manager's list — never a second definition of "open".
+            dispatched_ready = menu_ready and hasattr(session.pr, "fleet_open_rows")
+            if dispatched_ready:
+                who = bot_id.lower()
+                dispatched_raw = [
+                    r for r in session.pr.fleet_open_rows(session.conn, session.fleet)
+                    if (_alias_of(r.get("assigned_by")) or "").lower() == who
+                ]
     except doors.PlaneUnreachable as exc:
         return _withhold(
             f"the plane cannot answer: {exc} — restore the plane db (state/plane/plane.db)"
@@ -544,6 +600,70 @@ def _dispatch_section(
             )
         )
 
+    if not menu_ready:
+        # The keys are ADDITIVE, so their absence is invisible unless it is
+        # said: a field neither present nor listed does not exist (the module's
+        # own rule). The rows themselves are sound, so this is `labeled`, not a
+        # withheld section.
+        degraded.append(
+            Degradation(
+                field="dispatches",
+                mode="labeled",
+                reason=(
+                    f"the readers installed at {paths.lib / 'plane-readers.py'} predate "
+                    "the task-loop menu, so the rows carry no last_progress_at, "
+                    "escalated or nudged fact — pull the install and re-run"
+                ),
+                issue="#1481",
+            )
+        )
+    elif not dispatched_ready:
+        # menu_ready without dispatched_ready means an install between the
+        # menu (`open_assignment_ids`/`menu_facts`) and `fleet_open_rows` —
+        # both landed together in this chunk, so this is a defensive label
+        # for a partial pull rather than an expected steady state.
+        degraded.append(
+            Degradation(
+                field="dispatches",
+                mode="labeled",
+                reason=(
+                    f"the readers installed at {paths.lib / 'plane-readers.py'} predate "
+                    "fleet_open_rows, so rows this bot dispatched as a manager are not "
+                    "listed under dispatched — pull the install and re-run"
+                ),
+                issue="#1481",
+            )
+        )
+
+    def _menu(da: int, tid: str | None) -> dict:
+        """The row's own menu facts, or nothing. `-` is the id-less marker the
+        matcher prints; the index keys those rows under None."""
+        f = menu.get((da, tid if tid and tid != "-" else None), {})
+        return {
+            "age_s": max(0, now - da),
+            "last_progress_at": f.get("last_progress_at"),
+            "escalated": f.get("escalated"),
+            "nudged": f.get("nudged"),
+        } if menu_ready else {"age_s": max(0, now - da)}
+
+    def _dispatched_entry(r: dict) -> dict:
+        """One row THIS bot dispatched, `fleet_open_rows`'s own dict shape —
+        already carrying the menu facts, so no second `_menu` join is needed
+        here the way the tuple-shaped open/overdue rows require one."""
+        da = _epoch(r.get("occurred_at"))
+        exp = _epoch(r.get("expected_by"))
+        return {
+            "task_id": r.get("task_id") or "-",
+            "assignee": _alias_of(r.get("assignee")) or r.get("assignee") or "unknown",
+            "dispatched_at": _iso(da),
+            "expected_by": _iso(exp),
+            "past_due": exp is not None and now > exp,
+            "age_s": max(0, now - da) if da is not None else None,
+            "last_progress_at": r.get("last_progress_at"),
+            "escalated": r.get("escalated"),
+            "nudged": r.get("nudged"),
+        }
+
     return {
         "open": [
             {
@@ -551,6 +671,7 @@ def _dispatch_section(
                 "dispatched_at": _iso(da),
                 "expected_by": _iso(exp),
                 "past_due": exp is not None and now > exp,
+                **_menu(da, tid),
             }
             for da, exp, tid in open_rows
         ],
@@ -560,6 +681,7 @@ def _dispatch_section(
                 "dispatched_at": _iso(da),
                 "expected_by": _iso(exp),
                 "overdue_by_s": elapsed,
+                **_menu(da, tid),
             }
             for da, exp, elapsed, tid in overdue_rows
         ],
@@ -572,6 +694,7 @@ def _dispatch_section(
             }
             for da, exp, elapsed, tid in orphan_rows
         ],
+        "dispatched": [_dispatched_entry(r) for r in dispatched_raw],
     }
 
 
@@ -826,6 +949,40 @@ def _short(ts: str | None) -> str:
     return (ts or "—")[:19].replace("T", " ")
 
 
+def _verb_menu_line() -> str:
+    """The four verbs and their commands, from the ONE definition (M5, #1481).
+
+    Imported here rather than at module scope: `commands/task.py` reaches back
+    into this module for the plane session, and a top-level import in both
+    directions is a cycle waiting for the first person who imports them in the
+    unlucky order."""
+    from .commands.task import verb_commands
+
+    return verb_commands("<task-id>", "<assignee>")
+
+
+def _menu_suffix(row: dict) -> str:
+    """What a dispatch row says about itself beyond its clock: whether anyone
+    is waiting on the human, whether anyone has poked it, and whether it has
+    moved at all. Rendered only when the fact exists — an absent key means the
+    install's readers predate the menu (said in `degraded[]`), and a `None`
+    means the plane holds no such fact, which is not the same as `no`."""
+    bits = []
+    esc = row.get("escalated") or None
+    if esc:
+        q = " ".join((esc.get("question") or "").split()) or "question not recorded"
+        bits.append(f"ESCALATED by {esc.get('by') or 'unknown'}: {q}")
+    nud = row.get("nudged") or None
+    if nud:
+        bits.append(f"nudged by {nud.get('by') or 'someone'} {_short(nud.get('at'))}")
+    if "last_progress_at" in row:
+        bits.append(
+            f"last progress {_short(row['last_progress_at'])}"
+            if row.get("last_progress_at") else "no progress on this row"
+        )
+    return ("  | " + " | ".join(bits)) if bits else ""
+
+
 def format_brief(brief: dict) -> str:
     """Sectioned plain text. Degraded fields are marked at the section header
     AND listed in full at the end — the inline marker is where the reader's eye
@@ -909,18 +1066,55 @@ def format_brief(brief: dict) -> str:
             flag = "  PAST DUE" if r["past_due"] else ""
             out.append(
                 f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
-                f"  due {_short(r['expected_by'])}{flag}"
+                f"  due {_short(r['expected_by'])}{flag}{_menu_suffix(r)}"
             )
         out.extend(more)
-        for label in ("overdue", "orphaned"):
-            shown, more = rows(d[label])
-            out.append(f"  {label} ({len(d[label])})")
-            for r in shown:
-                out.append(
-                    f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
-                    f"  +{r['overdue_by_s'] // 60}m past deadline"
-                )
-            out.extend(more)
+        shown, more = rows(d["overdue"])
+        out.append(f"  overdue ({len(d['overdue'])})")
+        for r in shown:
+            out.append(
+                f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
+                f"  +{r['overdue_by_s'] // 60}m past deadline{_menu_suffix(r)}"
+            )
+        out.extend(more)
+        # `orphaned` rows carry no assignment_id in the matcher's own tuple
+        # shape (dispatched_at, expected_by, elapsed, task_id) — there is
+        # nothing to key `menu_facts` on, so `_menu_suffix` would silently
+        # render an escalated orphan as if nobody had raised it (the fold's
+        # F7, reproduced: no key means no bit rendered and no disclosure
+        # either). Omitted rather than faked.
+        shown, more = rows(d["orphaned"])
+        out.append(f"  orphaned ({len(d['orphaned'])})")
+        for r in shown:
+            out.append(
+                f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
+                f"  +{r['overdue_by_s'] // 60}m past deadline"
+            )
+        out.extend(more)
+        # THE MENU, ONCE (M5, #1481) — the same four verbs and the same
+        # commands the re-check timer sends, from the one definition in
+        # `commands/task.py`, so a manager reading `/brief` by hand sees
+        # exactly what the timer would have said. Under the section rather
+        # than per row: repeating four commands per row is the wall of text
+        # the brief's own capping rule exists to prevent.
+        out.append(f"  act on a row: {_verb_menu_line()}")
+        # F2 (M-B fold, #1481): the OTHER axis — what this bot DISPATCHED, as
+        # a manager. `open`/`overdue`/`orphaned` above answer "what was
+        # assigned to me"; three surfaces told a manager this door would list
+        # what it sent out, and it never had (reproduced: `--bot <manager>`
+        # rendered an empty section for a manager holding open dispatches).
+        dispatched = d.get("dispatched", [])
+        shown, more = rows(dispatched)
+        out.append(f"  dispatched by you ({len(dispatched)})")
+        for r in shown:
+            flag = "  PAST DUE" if r["past_due"] else ""
+            out.append(
+                f"    {r['task_id']:<26} to {r['assignee']:<12}"
+                f" sent {_short(r['dispatched_at'])}"
+                f"  due {_short(r['expected_by'])}{flag}{_menu_suffix(r)}"
+            )
+        out.extend(more)
+        out.append(f"  act on a row you dispatched: {_verb_menu_line()}")
     out.append("")
 
     w = brief.get("workstreams") or {}

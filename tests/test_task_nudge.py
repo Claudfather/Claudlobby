@@ -129,8 +129,12 @@ def test_a_nudge_records_the_fact_and_asks_the_tasks_manager(tmp_path, sent, mon
     assert "port the parser" in message and "assignee ramanujan" in message
     for verb in ("chase", "supersede", "withdraw", "escalate"):
         assert verb in message
-    assert f"task-act.sh withdraw {tid}" in message
-    assert f"dispatch-task.sh --supersedes {tid}" in message
+    # F7 (M-B fold): the commands are prefixed $CLAUDLOBBY_ROOT/lib/ — a bare
+    # `task-act.sh`/`dispatch-task.sh` is not on a bot's PATH (start-bot.sh's
+    # exported PATH has no fleet lib/), so a manager pasting the bare form
+    # would have run nothing.
+    assert f"$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw {tid}" in message
+    assert f"$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes {tid}" in message
 
 
 def test_the_ask_is_recorded_as_a_communication_and_a_submitted_transmission(tmp_path, sent, monkeypatch):

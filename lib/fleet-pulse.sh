@@ -143,21 +143,33 @@ python3 "$LIB_DIR/dispatch-overdue.py" --orphans --fleet "$fleet" \
     --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
 
 
+# --- ONE send-and-disclose primitive for every debounced reader-outage page
+# (the fold's F7): `_overdue_page`, `_events_page` and `_esc_task_page` were
+# three hand-typed copies differing only in the printf TAG and which global
+# they flagged on failure — a fourth reader-outage page would have been a
+# fourth copy. `debounce_notify` invokes its callback with exactly ONE
+# argument (the message), so each name below stays a thin wrapper naming its
+# own TAG and forwarding `_READER_PAGE_FAILED` into the flag its OWN caller
+# already reads — the guards themselves are untouched.
+_READER_PAGE_FAILED=0
+_reader_page() {  # _reader_page <tag> <message>
+    local _tag="$1" _rc=0
+    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+        "$LIB_DIR/tg-post.sh" "$2" >/dev/null 2>&1 || _rc=$?
+    _READER_PAGE_FAILED=0
+    if [ "$_rc" -ne 0 ]; then
+        printf '%s ALERT-DELIVERY-FAILED escalation %s: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$_tag" "$_rc" >&2
+        _READER_PAGE_FAILED=1
+    fi
+}
+
 # --- Cutover overdue-reader guard (chunk 5): a REFUSED --all is not "nothing overdue" ---
 # The overdue reader refuses (rc 3) when the plane cannot serve — there is
 # nothing to fall back to; the sweep above keeps its rc and stderr,
 # and this guard pages -- debounced, like every other notice here -- so a dark
 # watchdog is a paged watchdog. rc 0 clears the marker; any other rc is
 # disclosed on stderr and never paged (rc 2 is a call-shape bug, not an outage).
-_overdue_page() {
-    local _rc=0
-    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
-        "$LIB_DIR/tg-post.sh" "$1" >/dev/null 2>&1 || _rc=$?
-    if [ "$_rc" -ne 0 ]; then
-        printf '%s ALERT-DELIVERY-FAILED escalation overdue_reader_unreachable: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$_rc" >&2
-        _OVERDUE_PAGE_FAILED=1
-    fi
-}
+_overdue_page() { _reader_page overdue_reader_unreachable "$1"; _OVERDUE_PAGE_FAILED=$_READER_PAGE_FAILED; }
 
 # A brand-new fleet pages this guard ONCE: its first pulse's pre-sweep runs before
 # the sweep's own emissions mint the fleet's identity, so the matcher refuses
@@ -589,15 +601,7 @@ fi
 # reached under a declared flip has left the watchdog dark for critical fleet
 # events — paged (debounced), cleared once it reads again. Runs AFTER the
 # escalation and summary reads, which are what discover the outage.
-_events_page() {
-    local _rc=0
-    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
-        "$LIB_DIR/tg-post.sh" "$1" >/dev/null 2>&1 || _rc=$?
-    if [ "$_rc" -ne 0 ]; then
-        printf '%s ALERT-DELIVERY-FAILED escalation events_reader_unreachable: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$_rc" >&2
-        _EVENTS_PAGE_FAILED=1
-    fi
-}
+_events_page() { _reader_page events_reader_unreachable "$1"; _EVENTS_PAGE_FAILED=$_READER_PAGE_FAILED; }
 _events_reader_guard() {
     if [ "${_EVENTS_SOURCE:-}" != unreachable ]; then
         debounce_clear "$state_dir" fleet events_reader_unreachable
@@ -613,6 +617,102 @@ _events_reader_guard() {
 }
 
 _overdue_reader_guard || true
+
+# --- The fleet's OPEN escalations, paged ONCE each (chunk M-B, #1481) --------
+# `escalated` is a MANAGER asking the HUMAN a question about one task, and it
+# is NON-terminal by ruling: the row stays open while the human decides, so
+# nothing in the open set, the overdue set or the critical-events read can see
+# it. This is the only sweep leg that can, and the operator learns about it
+# here or not at all.
+#
+# ONCE PER ESCALATION, keyed by ASSIGNMENT ID -- not the time-window debounce
+# the burst detectors use. A question is not a burst: it is true until it is
+# answered, so re-paging it every ten minutes would train the operator to mute
+# the channel, while a 6-hour re-notify would tell them nothing new. The marker
+# is dropped when the row LEAVES this read (a report, a supersede, a withdraw
+# or any progress clears the arm), so a genuine re-escalation pages again --
+# the state follows the plane rather than a clock.
+#
+# A REFUSED READ IS NOT "NOTHING ESCALATED" (the rule the other two readers
+# here already carry): rc != 0 pages the same debounced guard shape and, above
+# all, touches no marker -- otherwise a plane outage would silently drop every
+# marker and page the whole backlog again when it came back.
+#
+# PER-FLEET SEEN-FILE (the fold's F1): `state_dir` is HOST-GLOBAL
+# ($CLAUDLOBBY_ROOT/state/pulse -- one root can compose several fleets, each
+# running its own sweep against the SAME directory), while a sweep's own read
+# is scoped to ONE fleet. A directory of per-assignment marker files shared by
+# every fleet's sweep meant the "forget" loop below -- built from THIS
+# fleet's read alone -- deleted every OTHER fleet's markers too, so a
+# two-fleet host re-paged every open escalation on its owner's very next
+# sweep (reproduced). One flat file per fleet (the `_emit_new_orphans`
+# pattern) fixes it and drops the mkdir/glob it needed.
+_esc_task_page() { _reader_page task_escalated_reader "$1"; _ESC_TASK_PAGE_FAILED=$_READER_PAGE_FAILED; }
+_esc_task_seen="$state_dir/${fleet}.escalated"
+_task_escalations() {
+    [ -n "$_ESCALATION_CHAT_ID" ] || return 0
+    local _rc=0 _rows _seen _asg _tid _by _at _q _msg _esc_rc _esc_err _why _m _keep
+    _rows=$(safe_mktemp)
+    python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalated \
+        --fleet "$fleet" >"$_rows" 2>"$state_dir/.escalated-err" || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        _why=$(tail -1 "$state_dir/.escalated-err" 2>/dev/null | cut -c1-200)
+        echo "fleet-pulse: escalated reader UNREACHABLE (rc=$_rc): ${_why} - a manager waiting on the human cannot be seen this pass" >&2
+        _ESC_TASK_PAGE_FAILED=0
+        debounce_notify "$state_dir" fleet escalated_reader_unreachable _esc_task_page \
+            "FLEET ALERT: the escalated-task reader for ${fleet} is UNREACHABLE - a manager raising a task for you cannot be seen until the plane is restored. (${_why})" \
+            "" 600 || true
+        [ "${_ESC_TASK_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet escalated_reader_unreachable
+        rm -f "$_rows" "$state_dir/.escalated-err"
+        return 0
+    fi
+    debounce_clear "$state_dir" fleet escalated_reader_unreachable
+    rm -f "$state_dir/.escalated-err"
+    _seen=$(safe_mktemp)
+    # TAB-separated by the door, exactly so a question with spaces survives.
+    while IFS="$(printf '\t')" read -r _asg _tid _by _at _q; do
+        [ -n "$_asg" ] || continue
+        printf '%s\n' "$_asg" >> "$_seen"
+        grep -qxF "$_asg" "$_esc_task_seen" 2>/dev/null && continue
+        # The question is CONTENT: a metadata-mode capture legitimately strips
+        # it, and saying so is the honest page -- an empty quote would read as
+        # a manager who raised a task and asked nothing.
+        if [ -n "$_q" ]; then
+            _msg="NEEDS YOU ($fleet): task $_tid escalated by $_by: $_q"
+        else
+            _msg="NEEDS YOU ($fleet): task $_tid escalated by $_by (question not recorded - ask them)"
+        fi
+        _esc_rc=0
+        _esc_err=$(TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
+            TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+            "$LIB_DIR/tg-post.sh" "$_msg" 2>&1) || _esc_rc=$?
+        if [ "$_esc_rc" -eq 0 ]; then
+            printf '%s\n' "$_asg" >> "$_esc_task_seen"
+        else
+            # Never mark a page that reached nobody: the marker is what buys
+            # silence, and an escalation silenced by a failed send is a
+            # question the human never hears (the burst detector's rule).
+            printf '%s ALERT-DELIVERY-FAILED escalation task_escalated %s: tg-post exit %s (%s) -- marker NOT set, will retry next pass\n' \
+                "$(ts_iso)" "$_tid" "$_esc_rc" "$(printf '%s' "$_esc_err" | tr '\n' ' ' | cut -c1-200)" >&2
+            emit_fleet_event "alert_delivery_failed" "pulse" \
+                "$(printf '{"for_event":"task_escalated","task_id":"%s","channel":"telegram","exit":%s,"debounced":false}' \
+                    "$(json_escape "$_tid")" "$_esc_rc")" "" fleet
+        fi
+    done < "$_rows"
+    # Rows that no longer escalate: forget them from THIS FLEET's seen-file
+    # only, so a genuine re-escalation pages again.
+    if [ -s "$_esc_task_seen" ]; then
+        _keep=$(safe_mktemp)
+        while IFS= read -r _m; do
+            [ -n "$_m" ] || continue
+            grep -qxF "$_m" "$_seen" 2>/dev/null && printf '%s\n' "$_m" >> "$_keep"
+        done < "$_esc_task_seen"
+        mv "$_keep" "$_esc_task_seen"
+    fi
+    rm -f "$_rows" "$_seen"
+    return 0
+}
+_task_escalations || true
 
 if [ -n "$_ESCALATION_CHAT_ID" ]; then
     # Compute window start (portable: GNU date then BSD date fallback)

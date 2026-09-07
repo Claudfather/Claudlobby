@@ -352,3 +352,28 @@ defaults:
       script: "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge"
       schedule: "Sat *-*-* 07:00:00"
       type: oneshot
+    # The task loop's re-check trigger (chunk M-B, #1481): hand each manager
+    # ONE id-less re-check listing their open rows past deadline or older than
+    # the max age (48h), with the four verbs and their commands, and ask for a
+    # report naming what it did per row. The manager's answers are the plane
+    # facts M-A added -- a chase, a supersede, a withdraw, an escalation -- so
+    # the loop closes without a second bookkeeping surface.
+    #
+    # Every 6h, not daily: a re-check the fleet reads once a day is a report,
+    # and the rows it names are ones a manager can act on now. The per-ROW
+    # repeat window (24h, `--repeat-h`) is what keeps the cadence from becoming
+    # nagging -- a row already named is skipped, and the skip is a plane read,
+    # so a new stale row still gets through on the next sweep.
+    #
+    # COMPOSED-BUT-DORMANT *and* SELF-GATED on TASK_RECHECK_ENABLED. This is
+    # the first fleet job that DISPATCHES INTO A LIVE MANAGER SESSION, so both
+    # gates are deliberate: the manifest keeps setup-fleet from enrolling it,
+    # and the script's own flag keeps a hand-enrolled or inherited unit inert
+    # until a fleet says yes in its fleet-tier .env. A fleet arms it in
+    # fleet.yaml: defaults: { jobs: { task-recheck: { enroll: true } } }
+    # plus TASK_RECHECK_ENABLED=1 in the fleet .env.
+    task-recheck:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/task-recheck.sh"
+      interval: 21600
+      type: oneshot

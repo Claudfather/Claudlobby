@@ -4987,3 +4987,109 @@ class TestComposeBotConfTelegramStateDirExported:
             if ln.strip().startswith("TELEGRAM_STATE_DIR=")
         ]
         assert not bare, f"unexported TELEGRAM_STATE_DIR line(s) present: {bare}"
+
+
+class TestTaskRecheckTimer:
+    """The task loop's re-check job composes DORMANT and armed by the tier
+    cascade (chunk M-B, #1481).
+
+    Two gates, deliberately: the DORMANT manifest keeps setup-fleet from
+    enrolling the unit, and the script's own TASK_RECHECK_ENABLED keeps a
+    hand-enrolled or inherited unit inert. This is the first fleet job that
+    DISPATCHES INTO A LIVE MANAGER SESSION, so neither gate alone is the
+    posture: a manifest cannot stop an operator's `systemctl enable`, and a
+    flag cannot stop the backbone from enrolling what it composes.
+    """
+
+    _FLEET = """\
+        fleet:
+          name: rc-fleet
+          service_prefix: com.test
+          bots:
+            kev:
+              expertise: [eng]
+    """
+
+    def _compose(self, tmp_path, monkeypatch, *, armed="0", enroll=None):
+        from textwrap import dedent
+
+        from claudlobby.composer import compose_fleet_timers
+        from claudlobby.config import load_fleet
+        from claudlobby.env_tiers import Resolution
+        from claudlobby.paths import Paths
+
+        root = tmp_path / "f"
+        root.mkdir(parents=True, exist_ok=True)
+        manifest = dedent(self._FLEET)
+        if enroll is not None:
+            # `fleet.defaults.jobs.<name>.enroll` — under `fleet:`, which is
+            # where load_fleet reads a fleet's own defaults from; a top-level
+            # `defaults:` is silently nobody's.
+            manifest += (
+                "  defaults:\n    jobs:\n      task-recheck:\n"
+                f"        enroll: {str(bool(enroll)).lower()}\n"
+            )
+        (root / "fleet.yaml").write_text(manifest)
+        fleet, md = load_fleet(root / "fleet.yaml")
+        paths = Paths(root=root, fleet_dir=root)
+
+        import claudlobby.env_tiers as env_tiers_mod
+
+        res = Resolution(name="TASK_RECHECK_ENABLED", value=armed, tier="fleet",
+                         path=None)
+        monkeypatch.setattr(env_tiers_mod, "read_tiers",
+                            lambda paths, fleet_name=None, bot_name=None: [])
+        monkeypatch.setattr(env_tiers_mod, "cascade",
+                            lambda tiers: {"TASK_RECHECK_ENABLED": res})
+        return compose_fleet_timers(fleet, paths, md)
+
+    def test_the_unit_composes_and_runs_the_launcher_with_the_fleet(
+        self, tmp_path, monkeypatch
+    ):
+        timers = self._compose(tmp_path, monkeypatch)
+        service = (timers / "com.test.task-recheck.service").read_text()
+        assert (timers / "com.test.task-recheck.timer").is_file()
+        assert "lib/task-recheck.sh rc-fleet" in service
+
+    def test_it_is_dormant_by_default(self, tmp_path, monkeypatch):
+        timers = self._compose(tmp_path, monkeypatch)
+        dormant = [
+            ln for ln in (timers / "DORMANT").read_text().splitlines()
+            if ln and not ln.startswith("#")
+        ]
+        assert "com.test.task-recheck" in dormant
+
+    def test_a_fleet_that_enrolls_it_leaves_the_dormant_list(
+        self, tmp_path, monkeypatch
+    ):
+        timers = self._compose(tmp_path, monkeypatch, enroll=True)
+        dormant = (timers / "DORMANT").read_text()
+        assert "com.test.task-recheck" not in dormant
+        assert (timers / "com.test.task-recheck.timer").is_file()
+
+    def test_the_arming_flag_lands_on_the_unit_only_when_the_tier_arms_it(
+        self, tmp_path, monkeypatch
+    ):
+        """#1383's class: a timer unit sources no .env, so without this line
+        the fleet's own arming never reaches the door and the job no-ops
+        forever however loudly the operator armed it."""
+        armed = self._compose(tmp_path, monkeypatch, armed="1")
+        service = (armed / "com.test.task-recheck.service").read_text()
+        plist = (armed / "com.test.task-recheck.plist").read_text()
+        assert "Environment=TASK_RECHECK_ENABLED=1" in service
+        assert "<key>TASK_RECHECK_ENABLED</key>" in plist
+
+        unarmed = self._compose(tmp_path, monkeypatch, armed="0")
+        assert "TASK_RECHECK_ENABLED" not in (
+            unarmed / "com.test.task-recheck.service").read_text()
+
+    def test_the_flag_is_scoped_to_this_job(self, tmp_path, monkeypatch):
+        """A door's arming is stamped on the unit whose script reads it, and
+        nowhere else — a wider grant would arm a sibling job's env with a flag
+        it has no business seeing."""
+        timers = self._compose(tmp_path, monkeypatch, armed="1")
+        others = [p for p in timers.glob("com.test.*.service")
+                  if p.name != "com.test.task-recheck.service"]
+        assert others
+        for unit in others:
+            assert "TASK_RECHECK_ENABLED" not in unit.read_text(), unit.name

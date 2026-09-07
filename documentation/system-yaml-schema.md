@@ -271,6 +271,15 @@ units — one set per fleet, not one per host. Current roster:
 | `reload-fleet` | `*-*-* 03:30:00` | *(absent — enrolled)* |
 | `weekly-worker-restart` | `Sun *-*-* 05:00:00` | `false` (enforced — see [Dormancy](#dormancy-enroll-semantics-differ-by-scope)) |
 | `data-sweep` | `Sat *-*-* 07:00:00` (script carries `--purge`) | *(absent — enrolled)* |
+| `task-recheck` | `interval: 21600` (6h) | `false` (enforced) **and** self-gated on `TASK_RECHECK_ENABLED=1` |
+
+`task-recheck` carries **two** gates because it is the first fleet job that
+dispatches into a live manager session (#1481): the manifest keeps
+`setup-fleet` from enrolling the unit, and `lib/task-recheck.sh` no-ops loudly
+unless the fleet's `.env` arms `TASK_RECHECK_ENABLED=1`. Arming that flag also
+composes it onto the unit (`FLEET_JOB_ARMING`, `composer.py`) — a timer unit
+sources no `.env`, so without that line the door would be unreachable however
+loudly the fleet armed it (#1383).
 
 Merge (`_merge_system_into_defaults`'s `jobs` branch, `config.py`) is
 **by job name**, with **field-level shallow spread within a job**: a fleet's
