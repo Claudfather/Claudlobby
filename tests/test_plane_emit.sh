@@ -112,4 +112,34 @@ rc=0
 printf 'not json' | PLANE_EMIT_CLI="$recorder" RECORDER_EXIT=0 PLANE_SOCKET="$sockdir/absent" bash "$SHIM" 2>"$tmpdir/err6" || rc=$?
 [ "$rc" -eq 2 ] || { echo "FAIL(6): rc=$rc (want 2)"; exit 1; }
 
+# Test 7 (#1485): a `downgrade` refusal is NOT a verdict. The daemon that
+# answers it is running older code than the db it opened; the cold rung is a
+# fresh interpreter on the install CURRENT code, so it commits. Live on the
+# Mini this cost 261 heartbeat samples in ~15 minutes.
+rm -f "$RECORDER_LOG" "$RECORDER_COPY" "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
+start_daemon '{"ok": false, "code": "downgrade", "error": "plane.db user_version=10 is newer than this code (supports <=9) - refusing downgrade"}'
+rc=0
+out=$(printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" 2>"$tmpdir/err7") || rc=$?
+stop_daemon
+[ "$rc" -eq 0 ] || { echo "FAIL(7): downgrade rc=$rc (want 0 via the cold rung)"; cat "$tmpdir/err7"; exit 1; }
+[ -e "$RECORDER_LOG" ] || { echo "FAIL(7): the cold rung was never invoked"; exit 1; }
+[ "$(wc -l < "$RECORDER_LOG")" -eq 1 ] || { echo "FAIL(7): cold rung ran $(wc -l < "$RECORDER_LOG") times, want exactly 1"; exit 1; }
+grep -q "falling back to cold CLI" "$tmpdir/err7" || { echo "FAIL(7): fallback not disclosed"; exit 1; }
+grep -q "older code than the db it opened" "$tmpdir/err7" || { echo "FAIL(7): the stale-daemon condition was not named"; exit 1; }
+# Exactly once: the id the daemon SAW is the id the cold rung replayed, so a
+# lost ack classifies as duplicate rather than landing a second row.
+seen_id=$(grep -o '"event_id": "ev_[0-9a-f]*"' "$tmpdir/seen.jsonl" | tail -1)
+[ -n "$seen_id" ] || { echo "FAIL(7): daemon saw no pre-minted id"; exit 1; }
+grep -q "$seen_id" "$RECORDER_COPY" || { echo "FAIL(7): replayed batch minted a NEW id ($seen_id absent) - a duplicate row"; exit 1; }
+
+# Test 8 (#1485 companion): a contract_violation still passes through with no
+# cold attempt. The two must not move together - that is the whole rule.
+rm -f "$RECORDER_LOG" "$RECORDER_COPY" "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
+start_daemon '{"ok": false, "code": "contract_violation", "error": "bad message_class"}'
+rc=0
+printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" 2>"$tmpdir/err8" || rc=$?
+stop_daemon
+[ "$rc" -eq 2 ] || { echo "FAIL(8): verdict rc=$rc (want 2)"; exit 1; }
+[ ! -e "$RECORDER_LOG" ] || { echo "FAIL(8): a contract violation fell back to the cold rung"; exit 1; }
+
 echo "PASS: all plane-emit shim tests passed"

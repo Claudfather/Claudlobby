@@ -52,6 +52,65 @@ def test_armed_service_composes_service_and_plist_no_timer(tmp_path, monkeypatch
     assert "<key>RunAtLoad</key>" in pbody
 
 
+def test_service_relaunches_on_a_NONZERO_exit(tmp_path, monkeypatch):
+    """#1485. The ingest daemon exits 4 when the db outruns its loaded code,
+    so the composed units are what turns that exit into a repair. Both forms
+    already relaunch on ANY exit; this pins them against a narrowing.
+
+    launchd: `KeepAlive` must be the bare <true/>, not the dictionary form.
+    `<key>KeepAlive</key><dict><key>SuccessfulExit</key><true/></dict>` would
+    relaunch ONLY on a clean exit and strand the daemon on exactly the exit
+    this fix introduces — and it is one word away from the correct dictionary
+    form, which is reason enough to pin the shape rather than the key."""
+    out = _compose(tmp_path, monkeypatch,
+                   {"plane-daemon": {**SERVICE_JOB, "enroll": True}})
+    body = (out / "claudlobby-plane-daemon.service").read_text()
+    assert "Restart=always" in body, "on-success/no would strand the exit"
+    # RestartSec keeps a permanent-condition loop under systemd's default
+    # start limit (5 starts / 10s); without it the unit latches `failed` and
+    # stops relaunching, which is the incident again with extra steps.
+    rsec = [ln for ln in body.splitlines() if ln.startswith("RestartSec=")]
+    assert len(rsec) == 1, rsec
+    assert int(rsec[0].split("=", 1)[1]) >= 2, rsec
+
+    pbody = (out / "claudlobby-plane-daemon.plist").read_text()
+    squashed = "".join(pbody.split())
+    assert "<key>KeepAlive</key><true/>" in squashed, (
+        "KeepAlive must be unconditional — a SuccessfulExit dict would skip"
+        f" the downgrade exit: {pbody}"
+    )
+    assert "SuccessfulExit" not in pbody
+
+
+def test_the_exit_line_lands_somewhere_a_person_can_read(tmp_path, monkeypatch):
+    """#1485 fold. The daemon's ONE exit line is the only record a stale exit
+    leaves — a process that refuses the db cannot write a row about refusing
+    it — and launchd sends an unredirected service's stdio to /dev/null, so on
+    macOS a relaunch loop was invisible: no plane row, no log, nothing.
+
+    Pinned against `plane.daemon.DAEMON_LOG_NAME` rather than a literal,
+    because the exit line PRINTS that path: if the two drift, the daemon sends
+    an operator to a file that holds nothing, which is worse than silence."""
+    from claudlobby.plane.daemon import DAEMON_LOG_NAME
+
+    out = _compose(tmp_path, monkeypatch,
+                   {"plane-daemon": {**SERVICE_JOB, "enroll": True}})
+    log = tmp_path / "state" / DAEMON_LOG_NAME
+    squashed = "".join((out / "claudlobby-plane-daemon.plist").read_text().split())
+    assert f"<key>StandardOutPath</key><string>{log}</string>" in squashed
+    assert f"<key>StandardErrorPath</key><string>{log}</string>" in squashed
+    # launchd drops output when the DIRECTORY is missing, so compose must
+    # provision it — a path pinned into a plist nobody can write to is the
+    # same silence with extra steps.
+    assert log.parent.is_dir(), "state/ must exist for launchd to open the log"
+
+    # systemd carries no redirect on purpose: an unredirected unit's stderr is
+    # already in the journal, and a StandardOutput= would move it out of
+    # `journalctl -u` where every other unit's output lives.
+    body = (out / "claudlobby-plane-daemon.service").read_text()
+    assert "StandardOutput=" not in body and "StandardError=" not in body
+
+
 def test_unarmed_service_composes_nothing(tmp_path, monkeypatch):
     out = _compose(tmp_path, monkeypatch,
                    {"plane-daemon": {**SERVICE_JOB, "enroll": False}})
