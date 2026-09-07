@@ -180,13 +180,19 @@ def verb_commands(task_id: str, assignee: str = "<bot>") -> str:
     `assignee` names the worker the chase would go to — known from the row, so
     the command is copy-pasteable rather than a template. An id-less row has no
     task id to name: the caller passes the assignment id, which `--assignment`
-    takes on both acts."""
+    takes on both acts.
+
+    Prefixed `$CLAUDLOBBY_ROOT/lib/` (the fold's F7): `start-bot.sh`'s
+    exported PATH does not include the fleet's `lib/`, so a bare
+    `task-act.sh`/`dispatch-task.sh` a manager pastes verbatim from this line
+    resolves to nothing — every OTHER example in the dispatch protocol already
+    prefixes it, and a command a manager cannot run is not really the menu."""
     bot = assignee or "<bot>"
     return (
-        f'chase (dispatch-task.sh --type query {bot} "…"),'
-        f' supersede (dispatch-task.sh --supersedes {task_id} {bot} "…"),'
-        f' withdraw (task-act.sh withdraw {task_id} --reason "…")'
-        f' or escalate (task-act.sh escalate {task_id} "…")'
+        f'chase ($CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query {bot} "…"),'
+        f' supersede ($CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes {task_id} {bot} "…"),'
+        f' withdraw ($CLAUDLOBBY_ROOT/lib/task-act.sh withdraw {task_id} --reason "…")'
+        f' or escalate ($CLAUDLOBBY_ROOT/lib/task-act.sh escalate {task_id} "…")'
     )
 
 
@@ -401,6 +407,18 @@ DEFAULT_REPEAT_H = 24.0
 # payload the send path has never been measured on. The rest are NOT stamped —
 # only a row the manager was actually told about counts as re-checked — so they
 # lead the next run instead of being silently skipped for a day.
+#
+# THIS CAP BOUNDS ROWS, NOT BYTES (the fold's F6): a title is authored prose
+# with no length contract, and eight rows of whole dispatch titles measured
+# 3272 characters in one message before `_clip` — a row count says nothing
+# about the pane send's actual size when the row's own content is unbounded.
+# `_clip`'s ~80-char title cap (the id already carries the rest of a row's
+# identity) brings a realistic worst case — long title, one nudge fact, no
+# escalation (F5 excludes those before they ever reach here) — down to
+# roughly 2.4KB for 8 rows plus the overflow and waiting footers (measured).
+# The cap is still ROWS, deliberately: a byte cap would silently drop
+# whichever row happened to push the message over, which row that is
+# depending on send order rather than staleness.
 RECHECK_MAX_ROWS = 8
 
 
@@ -436,14 +454,19 @@ def _deadline_phrase(expected_by: str | None, now: datetime) -> str:
     return f"deadline in {_span((at - now).total_seconds())}"
 
 
-def row_is_due(row, *, now: datetime, max_age_s: float) -> bool:
-    """A row the re-check names: its deadline has passed, or it has been open
-    longer than the max age. The two are OR'd because they catch different
-    failures — a deadline that passed is a promise broken, and an ageing row
-    with no deadline (every id-less dispatch, and every row dispatched before
-    M-A) has no promise to break and would otherwise never be re-checked at
-    all. A row whose dispatch instant is unreadable is NOT due: the plane
-    cannot date it, so no clock claim about it would be true."""
+def row_would_be_due(row, *, now: datetime, max_age_s: float) -> bool:
+    """The clock-and-deadline half of `row_is_due`, WITHOUT the escalation
+    exemption (F5) — its deadline has passed, or it has been open longer than
+    the max age. The two are OR'd because they catch different failures — a
+    deadline that passed is a promise broken, and an ageing row with no
+    deadline (every id-less dispatch, and every row dispatched before M-A)
+    has no promise to break and would otherwise never be re-checked at all. A
+    row whose dispatch instant is unreadable is NOT due: the plane cannot
+    date it, so no clock claim about it would be true.
+
+    Named and kept separate so `cmd_task_recheck` can still ask "would this
+    row otherwise be due" for an escalated row, to report it in the
+    'waiting on the human' footer rather than making it silently vanish."""
     at = _instant(row.get("occurred_at"))
     if at is None:
         return False
@@ -453,11 +476,37 @@ def row_is_due(row, *, now: datetime, max_age_s: float) -> bool:
     return (now - at).total_seconds() > max_age_s
 
 
+def row_is_due(row, *, now: datetime, max_age_s: float) -> bool:
+    """A row the re-check names. An ESCALATED row is exempt (the fold's F5):
+    its newest word is `escalated` (`fleet_open_rows`'s own `menu_facts` join
+    — the same fact the digest's line renders, never re-derived here), which
+    means a manager already raised it and the row is the HUMAN's to answer,
+    not the manager's to chase again. Left in, a manager who did the right
+    thing got the automated four-verb nag on the SAME PASS fleet-pulse pages
+    the operator about the very same row (reproduced). See
+    `row_would_be_due` for the clock-and-deadline test alone."""
+    if row.get("escalated"):
+        return False
+    return row_would_be_due(row, now=now, max_age_s=max_age_s)
+
+
+def _clip(text: str, limit: int = 80) -> str:
+    """A free-text field capped so ONE row cannot dominate the pane send (the
+    fold's F6): a dispatch TITLE is authored prose with no length contract of
+    its own, and eight rows of whole titles measured 3272 characters in one
+    message — most of it a title nobody needed to read in full, since the
+    task id already carries the row's own identity for every act. `limit`
+    bounds the visible text; the id is always still there to look the rest
+    up by."""
+    text = text or ""
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
 def recheck_row_line(row, *, index: int, now: datetime) -> str:
     """What the manager is told about ONE row — and, byte for byte, what the
     plane records as the ask about it."""
     tid = row.get("task_id") or row.get("assignment_id") or "?"
-    title = _one_line(row.get("title") or "") or "untitled"
+    title = _clip(_one_line(row.get("title") or "") or "untitled")
     assignee = _short(row.get("assignee") or "") or "unknown"
     bits = [f"assignee {assignee}", _age(row.get("occurred_at"), now),
             _deadline_phrase(row.get("expected_by"), now)]
@@ -477,12 +526,18 @@ def recheck_row_line(row, *, index: int, now: datetime) -> str:
 
 
 def recheck_digest(lines: list[str], *, fleet: str, max_age_h: float,
-                   extra: int = 0, manager: str = "") -> str:
+                   extra: int = 0, manager: str = "", waiting: int = 0) -> str:
     """The whole message, ONE line (tmux `send-keys` reads a newline as a
     RETURN — `_one_line`'s lesson, applied to the assembly rather than after
     it). The verbs are stated once, as a template the row lines fill: naming
     the four commands per row is the same sentence eight times over, and the
-    row lines already carry the id and the assignee it needs."""
+    row lines already carry the id and the assignee it needs.
+
+    `waiting` (the fold's F5) is a COUNT, never row lines: an escalated row
+    is the human's to answer, not the manager's to be nagged about, so it
+    never reaches `lines` — this only says how many were left out for that
+    reason, without the four verbs, so the manager does not read silence as
+    "nothing else is stale"."""
     head = (f"TASK RE-CHECK ({fleet}): {len(lines)} open row(s) of yours are past"
             f" deadline or older than {max_age_h:g}h.")
     tail = (f" For EACH: {verb_commands('<task-id>', '<assignee>')}."
@@ -490,7 +545,9 @@ def recheck_digest(lines: list[str], *, fleet: str, max_age_h: float,
             " back next sweep.")
     more = (f" (+{extra} more of yours are stale; `claudlobby brief --bot"
             f" {manager}` lists them all.)") if extra > 0 else ""
-    return _one_line(head + " " + " ".join(lines) + more + tail)
+    waiting_line = (f" (waiting on the human: {waiting} row(s) already escalated"
+                    " — no verbs needed there.)") if waiting > 0 else ""
+    return _one_line(head + " " + " ".join(lines) + more + waiting_line + tail)
 
 
 def recheck_ask_request(row, *, msg_id: str, manager: str, body: str) -> dict:
@@ -534,11 +591,17 @@ def _group_by_manager(rows: list[dict]) -> tuple[dict, list[dict]]:
 
 
 def _collect_due(plane, *, now: datetime, max_age_s: float, repeat_s: float
-                 ) -> tuple[list[dict], list[dict]]:
+                 ) -> tuple[list[dict], list[dict], list[dict]]:
     """(rows to re-check, rows a re-check already named inside the repeat
-    window) — ONE plane session, the stdlib readers' own answers."""
+    window, rows ESCALATED and waiting on the human) — ONE plane session, the
+    stdlib readers' own answers. The third list (the fold's F5) is never
+    named to a manager as a row to act on — it exists so the digest can say
+    how many of a manager's stale rows are the human's to answer, rather than
+    the manager reading silence as "nothing else is stale"."""
     rows = plane.pr.fleet_open_rows(plane.conn, plane.fleet)
     due = [r for r in rows if row_is_due(r, now=now, max_age_s=max_age_s)]
+    waiting = [r for r in rows if r.get("escalated")
+              and row_would_be_due(r, now=now, max_age_s=max_age_s)]
     stamps = plane.pr.rechecked_at(plane.conn, [r["assignment_id"] for r in due])
     fresh, held = [], []
     for row in due:
@@ -547,7 +610,7 @@ def _collect_due(plane, *, now: datetime, max_age_s: float, repeat_s: float
             held.append(row)
         else:
             fresh.append(row)
-    return fresh, held
+    return fresh, held, waiting
 
 
 def cmd_task_recheck(args) -> int:
@@ -568,8 +631,23 @@ def cmd_task_recheck(args) -> int:
     # contract, `--fleet F --root R`, is exactly this shape.
     fleet_arg = _one_line(getattr(args, "recheck_fleet", "") or "")
     paths = _resolve_paths(args)
-    max_age_s = float(getattr(args, "max_age_h", DEFAULT_MAX_AGE_H)) * 3600
-    repeat_s = float(getattr(args, "repeat_h", DEFAULT_REPEAT_H)) * 3600
+    max_age_h = getattr(args, "max_age_h", DEFAULT_MAX_AGE_H)
+    repeat_h = getattr(args, "repeat_h", DEFAULT_REPEAT_H)
+    # A NEGATIVE window is refused, loudly (the fold's F7 — `dispatch-task.sh`
+    # `_reject_non_integer`'s precedent, M-A's `--deadline-min`): argparse's
+    # `type=float` already refuses a non-number before this door ever runs,
+    # but it has no opinion on sign, and a negative age/repeat window is not
+    # a real request. ZERO is not refused: `--max-age-h 0` is the honest way
+    # to ask for every open row with a readable dispatch instant, since any
+    # already-dispatched row is then "older than" a zero-length window.
+    for flag, value in (("--max-age-h", max_age_h), ("--repeat-h", repeat_h)):
+        if value < 0:
+            print(f"recheck: {flag} must be zero or positive, got {value:g}"
+                  " (0 = every open row with a readable dispatch instant"
+                  " qualifies on age alone)", file=sys.stderr)
+            return 2
+    max_age_s = float(max_age_h) * 3600
+    repeat_s = float(repeat_h) * 3600
     dry = bool(getattr(args, "dry_run", False))
 
     if os.environ.get("PLANE_EMIT_DISABLED") == "1":
@@ -597,12 +675,18 @@ def cmd_task_recheck(args) -> int:
                   " predate the task-loop menu — pull the install and re-run",
                   file=sys.stderr)
             return 3
-        fresh, held = _collect_due(plane, now=now, max_age_s=max_age_s,
-                                   repeat_s=repeat_s)
+        fresh, held, waiting = _collect_due(plane, now=now, max_age_s=max_age_s,
+                                           repeat_s=repeat_s)
     finally:
         plane.close()
 
     by_manager, orphans = _group_by_manager(fresh)
+    # F5: escalated-and-otherwise-due rows, per manager — a COUNT for the
+    # digest's footer, never a list of rows to act on (their orphans are
+    # discarded here: an escalated row with no nameable manager still names
+    # nobody to footer it for, and the row itself is already excluded from
+    # `fresh` regardless of who owns it).
+    waiting_by_manager, _waiting_orphans = _group_by_manager(waiting)
     for row in orphans:
         print(f"recheck: {row.get('task_id') or row['assignment_id']} has no"
               " manager on the plane (no assigned_by the registry can name) —"
@@ -614,6 +698,8 @@ def cmd_task_recheck(args) -> int:
               f" {max_age_s / 3600:g}h"
               + (f" ({len(held)} row(s) re-checked inside the last"
                  f" {repeat_s / 3600:g}h)" if held else "")
+              + (f" ({len(waiting)} row(s) waiting on the human, already"
+                 " escalated)" if waiting else "")
               + " — nothing sent")
         return 0
 
@@ -623,7 +709,8 @@ def cmd_task_recheck(args) -> int:
         lines = [recheck_row_line(r, index=i, now=now)
                  for i, r in enumerate(named, 1)]
         message = recheck_digest(lines, fleet=fleet, max_age_h=max_age_s / 3600,
-                                 extra=len(rows) - len(named), manager=manager)
+                                 extra=len(rows) - len(named), manager=manager,
+                                 waiting=len(waiting_by_manager.get(manager, [])))
         if dry:
             print(f"[dry-run] {manager}: {len(named)} row(s)")
             print(f"[dry-run] {message}")

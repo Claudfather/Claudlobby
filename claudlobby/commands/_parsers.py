@@ -219,11 +219,13 @@ def register_subparsers(sub) -> None:
     ptr.add_argument("--max-age-h", dest="max_age_h", type=float,
                      default=DEFAULT_MAX_AGE_H,
                      help="Also re-check a row open longer than this, deadline "
-                     "or not (default: 48)")
+                     "or not (default: 48; 0 = every open row with a readable "
+                     "dispatch instant qualifies on age alone; negative refused)")
     ptr.add_argument("--repeat-h", dest="repeat_h", type=float,
                      default=DEFAULT_REPEAT_H,
                      help="Skip a row a re-check already named inside this "
-                     "window — read from the plane, not a state file (default: 24)")
+                     "window — read from the plane, not a state file "
+                     "(default: 24; negative refused)")
     ptr.add_argument("--dry-run", dest="dry_run", action="store_true",
                      help="Print what each manager would be sent; record and "
                      "send nothing")

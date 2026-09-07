@@ -227,30 +227,46 @@ bookkeeping surface to reconcile.
    --reason …` closes it (`cancelled`, terminal for every reader); a
    re-dispatch with `--supersedes` retires it and opens the replacement.
 3. **The manager can ask you a question about a row** — `task-act.sh escalate
-   <id> "…"` — and the row STAYS OPEN while you decide. Each escalation is
-   paged to the fleet's Telegram chat exactly ONCE, by fleet-pulse, as
-   `NEEDS YOU (<fleet>): task <id> escalated by <manager>: <question>`. The
-   page is keyed by the row, not by a clock: it goes quiet when any act clears
-   the raise (progress, a report, a withdrawal, a supersede) and speaks again
-   if the manager raises the row afresh. A nudge does not clear it.
+   <id> "…"` — and the row STAYS OPEN while you decide, and is EXEMPT from the
+   re-check timer below (item 5): it is the human's to answer, not the
+   manager's to be nagged about (the M-B fold's F5). Each escalation is paged
+   to the fleet's Telegram chat exactly ONCE, by fleet-pulse, as
+   `NEEDS YOU (<fleet>): task <id> escalated by <manager>: <question>`, keyed
+   by assignment id in a PER-FLEET seen-file (`state/pulse/<fleet>.escalated`
+   — the fold's F1: `state/pulse/` is host-global, one root composing several
+   fleets, so a single shared marker directory let one fleet's forget-loop
+   erase another's markers and re-page its whole backlog). The page is keyed
+   by the row, not by a clock: it goes quiet when any act clears the raise
+   (progress, a report, a withdrawal, a supersede) and speaks again if the
+   manager raises the row afresh. A nudge does not clear it.
 4. **You can poke a row** — `claudlobby task nudge <id> "why"` records who
    asked and sends that task's own manager a one-row re-check. From Telegram,
    ask the manager to run it for you ("nudge <task-id> …").
 5. **The clock pokes for you.** Where a fleet arms `task-recheck`, every 6h
    each manager gets ONE message listing their rows past deadline or older
-   than 48h — id, title, assignee, age, deadline, last progress, and whether
-   anyone escalated or nudged it — with the four verbs and their exact
-   commands, and is asked to report what it did per row. A row already named
-   inside the repeat window (24h) is skipped, and that skip is a PLANE READ:
-   the ask itself is recorded per row, stamped
+   than 48h — id, title (clipped to ~80 chars, the fold's F6: the id already
+   carries the row's full identity), assignee, age, deadline, last progress,
+   and whether anyone nudged it — with the four verbs and their exact
+   commands, and is asked to report what it did per row. An escalated row is
+   never named (item 3); a "waiting on the human: N row(s)" footer names the
+   count where a digest is already going out for other reasons. A row already
+   named inside the repeat window (24h) is skipped, and that skip is a PLANE
+   READ: the ask itself is recorded per row, stamped
    `source_ref = task-recheck:<assignment_id>`, so there is no timer state
-   file to lose, to stale, or to lie. A row nobody asked about — because a
-   send failed or the plane refused the record — comes back next sweep, which
-   is the safe direction.
-6. **The same list by hand.** `claudlobby brief --bot <manager>` renders the
-   open and overdue rows with those facts and prints the same four verbs once
-   under the section, so a manager reading a brief sees exactly what the timer
-   would have sent.
+   file to lose, to stale, or to lie — **and the stamp counts only when the
+   ask LANDED** (the fold's F4): the ask is recorded before the send, so
+   `rechecked_at` additionally requires that same communication's `msg_id` to
+   carry a `pane_submitted` transmission, never a `failed` one. A row nobody
+   asked about — because the send failed, or the plane refused the record —
+   comes back next sweep, which is the safe direction.
+6. **The same list by hand.** `claudlobby brief --bot <manager>` renders, under
+   its own `dispatched` heading, the rows the manager assigned that are still
+   open, with those facts, and prints the same four verbs once under that
+   heading — the fold's F2: this used to be described here as the bot's own
+   `open`/`overdue` rows (the ASSIGNEE's axis), which is a different question
+   and read empty for a manager holding no work of its own. A bot's own
+   open/overdue rows, if it also carries work as a worker, are the separate
+   `open`/`overdue` headings in the same brief.
 
 The re-check is deliberately a COMMUNICATION and never a task: an id'd
 re-check would open a row nobody closes, which is the defect the loop exists

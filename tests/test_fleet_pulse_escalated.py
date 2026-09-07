@@ -55,8 +55,8 @@ def _pulse_lib(tmp_path, capture, *, lookup_stub=None):
     return libdir
 
 
-def _pulse(root, libdir, **extra):
-    env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F,
+def _pulse(root, libdir, *, fleet=F, **extra):
+    env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": fleet,
            "PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_CLI": str(CLI),
            "PLANE_SOCKET": str(root / "no-daemon.sock"),
            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -65,7 +65,7 @@ def _pulse(root, libdir, **extra):
            # above the number of dead sandbox bots, so the burst detector's own
            # pages cannot be mistaken for this leg's
            "FLEET_PULSE_ESCALATION_THRESHOLD": "9", **extra}
-    return subprocess.run(["bash", str(libdir / "fleet-pulse.sh"), F],
+    return subprocess.run(["bash", str(libdir / "fleet-pulse.sh"), fleet],
                           capture_output=True, text=True, timeout=300, env=env)
 
 
@@ -81,11 +81,11 @@ def _scene(tmp_path):
     return root, paths, wi, asg
 
 
-def _act(root, wi, asg, event, ts, **detail):
+def _act(root, wi, asg, event, ts, *, fleet=F, **detail):
     out = emit_batch(root, [{
-        "event_type": "task", "emitter": "task-act", "fleet": F, "occurred_at": ts,
+        "event_type": "task", "emitter": "task-act", "fleet": fleet, "occurred_at": ts,
         "payload": {"work_item_id": wi, "assignment_id": asg, "event": event,
-                    "actor": f"bot:{F}/mgr", **detail}}])
+                    "actor": f"bot:{fleet}/mgr", **detail}}])
     assert all(o.status == "committed" for o in out), out
 
 
@@ -95,6 +95,14 @@ def _pages(capture: Path) -> list[str]:
 
 def _escalation_pages(capture: Path) -> list[str]:
     return [ln for ln in _pages(capture) if "escalated by" in ln]
+
+
+def _seen(root: Path, fleet: str = F) -> set[str]:
+    """The per-fleet escalation seen-file's content (F1's fix — one flat
+    file per fleet under the HOST-GLOBAL `state/pulse/`, not a directory of
+    per-assignment marker files shared by every fleet's sweep)."""
+    f = root / "state" / "pulse" / f"{fleet}.escalated"
+    return set(f.read_text().split()) if f.exists() else set()
 
 
 @needs_tmux
@@ -111,7 +119,7 @@ def test_an_open_escalation_pages_the_operator_once(tmp_path):
     assert len(paged) == 1, _pages(capture) + [r.stderr[-1500:]]
     assert "task t-esc-0001 escalated by mgr" in paged[0]
     assert "do we ship without the migration" in paged[0]
-    assert (root / "state" / "pulse" / "escalated" / asg).exists()
+    assert asg in _seen(root)
 
     # ...and a second sweep, with the question still open, says nothing new
     r2 = _pulse(root, libdir)
@@ -135,7 +143,7 @@ def test_an_answered_escalation_is_forgotten_so_a_re_raise_pages_again(tmp_path)
     r = _pulse(root, libdir)
     assert r.returncode == 0, r.stderr[-2000:]
     assert len(_escalation_pages(capture)) == 1                  # nothing to say
-    assert not (root / "state" / "pulse" / "escalated" / asg).exists()
+    assert asg not in _seen(root)
 
     _act(root, wi, asg, "escalated", "2026-09-02T12:00:00Z", by="mgr", question="q2")
     r = _pulse(root, libdir)
@@ -177,6 +185,52 @@ def test_a_refused_read_pages_its_own_guard_and_keeps_every_marker(tmp_path):
     assert "escalated reader UNREACHABLE" in r.stderr
     assert any("escalated-task reader for f is UNREACHABLE" in p
                for p in _pages(capture)), _pages(capture)
-    assert (root / "state" / "pulse" / "escalated" / asg).exists()
+    assert asg in _seen(root)
     # the question itself is not re-paged by the outage
     assert len(_escalation_pages(capture)) == 1
+
+
+@needs_tmux
+def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_path):
+    """F1: `state_dir` is HOST-GLOBAL (one root, several fleets), so a marker
+    keyed by assignment id alone in ONE shared directory meant fleet A's
+    "forget" loop — built from A's own read — deleted fleet B's markers too,
+    re-paging every open escalation on B's very next sweep (reproduced
+    pre-fix). Two fleets sharing one root, one escalation each: each pages
+    once, and fleet A's second sweep pages nothing new — proving A's sweep
+    never touched B's file and vice versa."""
+    root, paths, wi_f, asg_f = _scene(tmp_path)
+    g = "g"
+    (root / "local" / g / "runtime" / "bots" / "w1" / "data").mkdir(parents=True, exist_ok=True)
+    (root / "local" / g / "runtime" / "bots" / "w1" / "bot.conf").write_text(
+        "TMUX_SOCKET=esc-none-g-w1\n")
+    (root / "local" / g / "fleet.yaml").write_text(
+        "fleet:\n  name: g\n  service_prefix: com.test\n  bots:\n"
+        "    w1:\n      expertise: [software-engineering]\n")
+    wi_g, asg_g, _msg = _live_dispatch(root, "9", "t-esc-g001",
+                                       ts="2026-09-01T10:00:00Z", bot="w1", fleet=g)
+    _act(root, wi_f, asg_f, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="qf")
+    _act(root, wi_g, asg_g, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="qg",
+         fleet=g)
+
+    capture = tmp_path / "tg.log"
+    libdir = _pulse_lib(tmp_path, capture)
+
+    r_f = _pulse(root, libdir)
+    assert r_f.returncode == 0, r_f.stderr[-2000:]
+    r_g = _pulse(root, libdir, fleet=g)
+    assert r_g.returncode == 0, r_g.stderr[-2000:]
+    paged = _escalation_pages(capture)
+    assert len(paged) == 2, paged
+    assert any("t-esc-0001" in p for p in paged)
+    assert any("t-esc-g001" in p for p in paged)
+    assert asg_f in _seen(root, F) and asg_g in _seen(root, g)
+    # each fleet's marker file holds ONLY its own row — the shared
+    # host-global state_dir never let one fleet's file absorb the other's
+    assert asg_g not in _seen(root, F) and asg_f not in _seen(root, g)
+
+    # fleet f's second sweep must page NOTHING new: g's sweep (and its own
+    # forget loop) never touched f's per-fleet seen-file.
+    r_f2 = _pulse(root, libdir)
+    assert r_f2.returncode == 0, r_f2.stderr[-2000:]
+    assert len(_escalation_pages(capture)) == 2, _pages(capture)

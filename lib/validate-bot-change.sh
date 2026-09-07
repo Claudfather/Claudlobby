@@ -731,11 +731,22 @@ tesc_paged2=$(grep -c 'escalated by valtescmgr' "$_tesc_pages" 2>/dev/null || tr
 harness_check "#1481 a second sweep does NOT re-page the same question (once per escalation)" "$r"
 
 # An act clears the arm, so the marker is forgotten and the row goes quiet.
+# The marker lives in a PER-FLEET seen-file now (the M-B fold's F1 — a
+# directory shared by every fleet's sweep let one fleet's forget-loop erase
+# another's markers), so this checks that file's line count rather than a
+# directory listing; `[ -s ]` first so a missing/empty file (the honest
+# "nothing marked" state) never fails a redirect or a pipeline under
+# set -e/pipefail the way `ls`/`wc <` on an absent path would.
+_tesc_seen="$ROOT/state/pulse/${_tesc_fleet}.escalated"
 CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$_tesc_fleet" MANAGER_TMUX="valnomgr1481" \
     "$LIB_DIR/report-back.sh" valtescbot progress "on it" --progress 30 \
     --task t-1481-0020 >/dev/null 2>&1 || true
 _tesc_run
-tesc_marker=$(ls "$ROOT/state/pulse/escalated" 2>/dev/null | wc -l | tr -d ' ')
+if [ -s "$_tesc_seen" ]; then
+    tesc_marker=$(wc -l < "$_tesc_seen" | tr -d ' ')
+else
+    tesc_marker=0
+fi
 [ "${tesc_marker:-1}" = "0" ] && r=yes || r=no
 harness_check "#1481 an answered escalation is FORGOTTEN (so a re-raise pages again)" "$r"
 

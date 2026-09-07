@@ -97,16 +97,35 @@ def connect(root: str, *, retries: int = 1) -> sqlite3.Connection:
 # BYTE-IDENTICAL to queries.OPEN_ASSIGNMENTS_AT_SQL (pinned by test).
 TERMINAL = ('completed', 'failed', 'cancelled', 'returned_blocked', 'superseded', 'reassigned', 'expired')
 _TERMINAL = "(" + ",".join(f"'{e}'" for e in TERMINAL) + ")"
+# Whether assignment `a` is CLOSED: a terminal task event lands on it
+# directly, or — only for an id'd dispatch-log ref — on a SIBLING assignment
+# sharing the same (assignee, source_ref) pair, the shape a re-dispatch under
+# one task id takes (one terminal report closes every row that ever carried
+# the id). Factored out (chunk M-B fold, F3) so OPEN_SQL below and
+# FLEET_OPEN_SQL further down share ONE "is this row closed" in this file,
+# rather than a second hand-typed copy that can drift: FLEET_OPEN_SQL used to
+# test only `t.assignment_id = a.assignment_id`, which left the FIRST half of
+# a re-dispatched pair open forever once the one terminal report landed on
+# the SECOND (reproduced — the re-check timer kept asking about a task every
+# reader else already called done). Byte-identical to the fragment
+# `queries.OPEN_ASSIGNMENTS_AT_SQL` inlines — OPEN_SQL's own pin against that
+# constant is what keeps this file's copy from forking. Binds (at, at, at,
+# at); None = everything landed.
+_SIBLING_CLOSURE = (
+    "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    "    AND t.event IN " + _TERMINAL +
+    " AND (? IS NULL OR t.occurred_at <= ?)"
+    "    AND (t.assignment_id = a.assignment_id"
+    "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
+    "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
+    "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
+    "              AND (? IS NULL OR s.occurred_at <= ?)))))"
+)
 OPEN_SQL = (
-    'SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a WHER'
-    'E a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)  AND NOT EXISTS (SELECT 1 FROM '
-    "events t WHERE t.kind='task'    AND t.event IN "
-    + _TERMINAL +
-    ' AND (? IS NULL OR t.occurred_at <= ?)    AND (t.assignment_id = a.assignment_id      OR ('
-    "a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'         "
-    ' AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s            WHERE s.assi'
-    'gnee_uid = a.assignee_uid AND s.source_ref = a.source_ref              AND (? IS NULL OR s'
-    '.occurred_at <= ?))))) ORDER BY a.occurred_at, a.ingest_seq'
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a"
+    " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
+    + _SIBLING_CLOSURE +
+    " ORDER BY a.occurred_at, a.ingest_seq"
 )
 ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
 # The bot's last sign of life: a linked `progress` task event OR the
@@ -995,9 +1014,21 @@ MENU_PROGRESS_SQL = (
     " WHERE e.kind = 'task' AND e.event = 'progress' AND e.assignment_id IN (%s)"
     " GROUP BY e.assignment_id"
 )
+# A row counts as re-checked only when its ask actually LANDED (the fold's
+# F4): the communication alone used to be enough, but `cmd_task_recheck`
+# records it BEFORE the send (intent before transport), so a manager-down
+# send left the row stamped and silent for the whole repeat window while the
+# docs promised it would come back next sweep (reproduced: two managers, one
+# send failing, both rows stamped). `pane_submitted` is the one state
+# `commands.task.transmission_request` ever emits on success — this carrier
+# has no `carrier_accepted` / `recipient_acknowledged` rung, unlike Telegram's
+# — so it, not the general activation set, is the fact this join needs.
 RECHECKED_SQL = (
     "SELECT c.source_ref, MAX(c.occurred_at) FROM communications c"
-    " WHERE c.source_ref IN (%s) GROUP BY c.source_ref"
+    " WHERE c.source_ref IN (%s)"
+    " AND EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
+    "   AND x.msg_id = c.msg_id AND x.event='pane_submitted')"
+    " GROUP BY c.source_ref"
 )
 # The FLEET's open rows: scoped by the assignment's own `fleet_uid`, which is
 # the DISPATCHING fleet — the manager's, not the assignee's. That is the scope
@@ -1006,13 +1037,24 @@ RECHECKED_SQL = (
 # over assignees would hand a manager's stale rows to the wrong fleet's timer
 # and hide them from their own.
 #
-# Open closes per ASSIGNMENT here (`_NT_A`, attention and expiry's question),
-# not per (bot, task id) as the LIST reader's `OPEN_SQL` does — the same choice
-# the acts made in M-A, and for the same reason: a re-check names ONE row for a
-# manager to act on.
+# Closure is `_SIBLING_CLOSURE` — OPEN_SQL's own test, shared rather than
+# copied (chunk M-B fold, F3). It used to be `_NT_A` (terminal-on-THIS-
+# assignment only), which disagreed with every other reader's definition of
+# "open" on exactly the shape a manager re-dispatching under one task id
+# produces: two assignments sharing a `dispatch-log:<id>` source_ref, one
+# terminal report landing on whichever one `plane-lookup.py` resolved as
+# newest. `OPEN_SQL`/`OPEN_ASSIGNMENTS_AT_SQL` correctly call the WHOLE task
+# closed the moment either half gets a terminal event; `_NT_A` left the OTHER
+# half open forever, so the re-check timer kept naming a task the matcher and
+# the brief already called done (reproduced). `_SIBLING_CLOSURE` needs no
+# `assignee_uid` scope of its own — the sibling subquery inside it is already
+# scoped to `a.assignee_uid`, independent of whatever scopes the OUTER query
+# (here, the fleet; in OPEN_SQL, the same assignee) — so it composes with
+# EITHER outer scope with no change of meaning.
 FLEET_OPEN_SQL = (
     "SELECT " + _OPEN_ROW_COLS_SQL + ", a.source_ref, a.expected_by" + _OPEN_ROW_FROM
-    + " WHERE a.fleet_uid = ? AND" + _NT_A
+    + " WHERE a.fleet_uid = ?"
+    + _SIBLING_CLOSURE
     + " ORDER BY a.occurred_at, a.ingest_seq")
 FLEET_OPEN_COLS = _OPEN_ROW_COLS + ("source_ref", "expected_by")
 # SQLITE_MAX_VARIABLE_NUMBER is 999 on the stock builds the estate ships with,
@@ -1059,10 +1101,15 @@ def menu_facts(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, dict
 
 
 def rechecked_at(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, str]:
-    """assignment_id → the newest instant a re-check NAMED it, from the stamp
+    """assignment_id → the newest instant a re-check LANDED for it: the stamp
     the re-check writes (`RECHECK_REF_PREFIX + assignment_id` on the
-    communication it records for that row). Absent = never re-checked, which is
-    a plane read like any other — there is no timer state file to lose."""
+    communication it records for that row) counts only when RECHECKED_SQL's
+    join finds a `pane_submitted` transmission for that same communication
+    (the fold's F4) — a recorded ASK that never reached the manager is not a
+    re-check, or a manager-down window would go silent for the whole repeat
+    window instead of asking again next sweep. Absent = never (successfully)
+    re-checked, which is a plane read like any other — there is no timer
+    state file to lose."""
     out: dict[str, str] = {}
     ids = [a for a in assignment_ids if a]
     if not ids:
@@ -1081,8 +1128,10 @@ def fleet_open_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
     Empty = the fleet has nothing open; a plane that cannot answer RAISES
     (`connect`), so the caller refuses instead of reporting a quiet fleet."""
     uid = fleet_uid(conn, fleet)
+    # uid for the scope, then the 4 `_SIBLING_CLOSURE` binds — None throughout,
+    # "everything landed": this reads the CURRENT open set, never an as-of one.
     rows = [dict(zip(FLEET_OPEN_COLS, r))
-            for r in conn.execute(FLEET_OPEN_SQL, (uid,))]
+            for r in conn.execute(FLEET_OPEN_SQL, (uid, None, None, None, None))]
     facts = menu_facts(conn, [r["assignment_id"] for r in rows])
     for r in rows:
         # None for an id-less dispatch (a `sha:` ref, or none) — the row is
@@ -1110,3 +1159,32 @@ def open_assignment_ids(conn: sqlite3.Connection, fleet: str, bot: str,
             continue
         out[(da, _task_id(source_ref))] = asg
     return out
+
+
+def open_rows_indexed(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+                      *, entry: Optional[dict] = None, idd_only: bool = True
+                      ) -> tuple[list[tuple[int, Optional[int], Optional[str]]], dict]:
+    """`open_rows` and `open_assignment_ids`, from ONE `open_assignments` read
+    (chunk M-B fold, F7). `brief._dispatch_section` used to call both
+    separately for the SAME (fleet, bot) — the shared matcher door's
+    `open_dispatches` (itself `open_rows`) to get the row list, then
+    `open_assignment_ids` again to key `menu_facts` — two round trips over
+    the identical `OPEN_SQL` scan. This runs it once and derives both shapes
+    from the same rows, provably the same values `open_rows(idd_only=...)`
+    and `open_assignment_ids` would each return on their own: the index keeps
+    EVERY row (id-less included, `_task_id` may be None), matching
+    `open_assignment_ids`'s own no-filter; the row list applies `idd_only`
+    exactly where `open_rows` does. A row whose `occurred_at` does not parse
+    is dropped from both, as it already was from each alone."""
+    rows: list[tuple[int, Optional[int], Optional[str]]] = []
+    index: dict = {}
+    for occurred_at, source_ref, asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
+        da = _epoch(occurred_at)
+        if da is None:
+            continue
+        tid = _task_id(source_ref)
+        index[(da, tid)] = asg
+        if idd_only and tid is None:
+            continue
+        rows.append((da, _epoch(expected_by), tid))
+    return rows, index

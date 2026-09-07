@@ -169,10 +169,11 @@ def test_a_stale_row_reaches_its_own_manager_with_the_menu(tmp_path, sent):
     assert "deadline passed" in message
     for verb in task_cmd.TASK_VERBS:
         assert verb in message
-    # the exact commands, not advice
-    assert "task-act.sh withdraw <task-id> --reason" in message
-    assert "dispatch-task.sh --supersedes <task-id>" in message
-    assert "dispatch-task.sh --type query" in message
+    # the exact commands, not advice — prefixed $CLAUDLOBBY_ROOT/lib/ (F7): a
+    # bare `task-act.sh`/`dispatch-task.sh` is not on a bot's PATH
+    assert "$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw <task-id> --reason" in message
+    assert "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes <task-id>" in message
+    assert "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query" in message
     assert "\n" not in message                   # tmux reads a newline as RETURN
 
 
@@ -190,38 +191,45 @@ def test_each_manager_gets_its_own_message(tmp_path, sent):
 
 
 def test_the_row_facts_the_manager_needs_ride_the_line(tmp_path, sent):
-    """The menu is only useful over the facts: is anyone waiting on the human,
-    has anyone poked it, has it moved at all."""
+    """The menu is only useful over the facts: has anyone poked it, has it
+    moved at all. (Rewritten for the fold's F5: this row used ALSO to carry
+    an escalation and assert it showed on the line — but an escalated row no
+    longer reaches `cmd_task_recheck`'s message at all, see
+    `test_an_escalated_rows_line_still_names_the_question` below for that
+    rendering, unit-tested directly against `recheck_row_line` since the row
+    that would exercise it through the door is exactly the row the fold
+    refuses to send.)"""
     _full_capture(tmp_path)
     _seed_row(tmp_path, task_id="t-facts", dispatched=_ago(30), expected_by=_ago(6))
     _seed_task_event(tmp_path, task_id="t-facts", event="progress", at=_ago(20),
                      actor=f"bot:{F}/ramanujan")
-    _seed_task_event(tmp_path, task_id="t-facts", event="escalated", at=_ago(3),
-                     actor=f"bot:{F}/erlich", by="erlich",
-                     question="do we ship without the migration")
-
-    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
-    message = sent[0][1]
-    assert "ESCALATED by erlich" in message
-    assert "do we ship without the migration" in message
-    assert "last progress 20h ago" in message
-
-
-def test_an_escalation_survives_a_later_nudge_on_the_line(tmp_path, sent):
-    """The M-A fold's F1, on this surface: a nudge is an ASK, not an ANSWER.
-    Read through one window the nudge would displace the raise and the line
-    would stop saying the human owes an answer."""
-    _full_capture(tmp_path)
-    _seed_row(tmp_path, task_id="t-both", dispatched=_ago(30), expected_by=_ago(6))
-    _seed_task_event(tmp_path, task_id="t-both", event="escalated", at=_ago(5),
-                     actor=f"bot:{F}/erlich", by="erlich", question="which repo")
-    _seed_task_event(tmp_path, task_id="t-both", event="nudged", at=_ago(1),
+    _seed_task_event(tmp_path, task_id="t-facts", event="nudged", at=_ago(2),
                      actor="human:chris", by="chris", reason="any movement")
 
     assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
     message = sent[0][1]
-    assert "ESCALATED by erlich" in message and "which repo" in message
+    assert "last progress 20h ago" in message
     assert "nudged by chris" in message
+
+
+def test_an_escalated_rows_line_still_names_the_question(tmp_path):
+    """`recheck_row_line`'s escalated rendering is unchanged by F5 — it is
+    `row_is_due` that stops such a row from ever reaching `cmd_task_recheck`'s
+    message, not this function. Also pins the M-A fold's F1 on this surface: a
+    LATER nudge does not displace the raise (`fleet_open_rows`'s own
+    `menu_facts` join is what `escalated`/`nudged` come from, so a row can
+    legitimately carry both at once)."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    row = {"task_id": "t-both", "title": "port the parser",
+           "assignee": f"bot:{F}/ramanujan", "occurred_at": _ago(30),
+           "expected_by": _ago(6), "last_progress_at": None,
+           "escalated": {"question": "which repo", "by": "erlich", "at": _ago(5)},
+           "nudged": {"by": "chris", "at": _ago(1)}}
+    line = task_cmd.recheck_row_line(row, index=1, now=now)
+    assert "ESCALATED by erlich" in line and "which repo" in line
+    assert "nudged by chris" in line
 
 
 # --- what the re-check records (and how the debounce reads it) ---------------
@@ -343,6 +351,141 @@ def test_a_withdrawn_row_is_never_re_checked(tmp_path, sent):
 
     assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
     assert sent == []
+
+
+def test_a_redispatched_id_with_one_terminal_report_is_not_due(tmp_path, sent):
+    """F3 (M-B fold, #1481): `fleet_open_rows` used to close per ASSIGNMENT
+    while the list reader (`OPEN_SQL` / `queries.OPEN_ASSIGNMENTS_AT_SQL`)
+    closes per (assignee, source_ref) — a re-dispatch under one task id with
+    ONE terminal report left the FIRST assignment open forever under this
+    door while every other reader called the task done (reproduced: the
+    re-check timer kept naming a task the matcher and the brief already
+    called finished)."""
+    worker = f"bot:{F}/ramanujan"
+    mgr = f"bot:{F}/erlich"
+    emit_batch(tmp_path, [
+        {"event_type": "work_item", "emitter": "t", "fleet": F,
+         "source_ref": "dispatch-log:t-redispatch",
+         "payload": {"work_item_id": "wi_" + "a" * 32, "title": "port the parser",
+                     "created_by": mgr}},
+        {"event_type": "assignment", "emitter": "t", "fleet": F,
+         "source_ref": "dispatch-log:t-redispatch", "occurred_at": _ago(40),
+         "payload": {"assignment_id": "asg_" + "1" * 32, "work_item_id": "wi_" + "a" * 32,
+                     "assignee": worker, "assigned_by": mgr,
+                     "expected_by": _ago(30)}},
+        {"event_type": "assignment", "emitter": "t", "fleet": F,
+         "source_ref": "dispatch-log:t-redispatch", "occurred_at": _ago(20),
+         "payload": {"assignment_id": "asg_" + "2" * 32, "work_item_id": "wi_" + "a" * 32,
+                     "assignee": worker, "assigned_by": mgr,
+                     "expected_by": _ago(6)}},
+        {"event_type": "task", "emitter": "t", "fleet": F, "occurred_at": _ago(1),
+         "payload": {"event": "completed", "work_item_id": "wi_" + "a" * 32,
+                     "assignment_id": "asg_" + "2" * 32, "actor": worker}},
+    ])
+
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert sent == []
+
+
+def test_a_failed_send_does_not_debounce_but_a_landed_one_does(tmp_path, monkeypatch):
+    """F4 (M-B fold, #1481): a row counts as re-checked only when its ask
+    LANDED. `cmd_task_recheck` records the ask BEFORE the send (intent before
+    transport), so a manager-down send used to leave the row stamped and
+    silent for the whole repeat window — the docs promised it would come back
+    next sweep, and the code did not. Two managers, one send failing: the
+    failed manager's row is due again next run; the other's is held."""
+    _full_capture(tmp_path)
+    _seed_row(tmp_path, task_id="t-fails", mgr="erlich", bot="ramanujan",
+              dispatched=_ago(30), expected_by=_ago(6))
+    _seed_row(tmp_path, task_id="t-lands", mgr="gilfoyle", bot="dinesh",
+              dispatched=_ago(30), expected_by=_ago(6))
+
+    def flaky(paths, bot, message, fleet=None):
+        return (1, "session not found") if bot == "erlich" else (0, "")
+    monkeypatch.setattr(task_cmd, "send_to_bot", flaky)
+
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 1
+    asks_1 = [c for c in _comms(tmp_path) if c["message_class"] == "task_request"]
+    assert len(asks_1) == 2                # both asks recorded, regardless of send outcome
+
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 1
+    asks_2 = [c for c in _comms(tmp_path) if c["message_class"] == "task_request"]
+    tids = [c["body"] for c in asks_2]
+    # erlich's send failed: no pane_submitted transmission landed for its ask,
+    # so the row is due again — a SECOND ask for t-fails.
+    assert sum("t-fails" in b for b in tids) == 2
+    # gilfoyle's send landed: the row is held inside the repeat window.
+    assert sum("t-lands" in b for b in tids) == 1
+
+
+def test_an_escalated_row_is_not_due_and_the_digest_says_so(tmp_path, sent):
+    """F5 (M-B fold, #1481): a manager who correctly escalated must not ALSO
+    get the automated four-verb nag for the same row while fleet-pulse pages
+    the operator about it on the same pass."""
+    _full_capture(tmp_path)
+    _seed_row(tmp_path, task_id="t-esc", dispatched=_ago(30), expected_by=_ago(6))
+    _seed_task_event(tmp_path, task_id="t-esc", event="escalated", at=_ago(2),
+                     actor=f"bot:{F}/erlich", by="erlich", question="which repo")
+    # a normal stale row from the SAME manager, so a message still goes out
+    _seed_row(tmp_path, task_id="t-plain", dispatched=_ago(30), expected_by=_ago(6),
+              title="the second one")
+
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert len(sent) == 1
+    message = sent[0][1]
+    assert "t-esc" not in message                    # no automated nag on an escalated row
+    assert "t-plain" in message
+    assert "waiting on the human: 1 row(s)" in message
+
+
+def test_an_escalated_row_with_nothing_else_due_sends_nothing(tmp_path, sent, capsys):
+    """The footer is attached to a digest that is already going out; a
+    manager whose ENTIRE stale set is escalated gets no automated message at
+    all this sweep — the hand-run door still discloses the count."""
+    _seed_row(tmp_path, task_id="t-esc-only", dispatched=_ago(30), expected_by=_ago(6))
+    _seed_task_event(tmp_path, task_id="t-esc-only", event="escalated", at=_ago(2),
+                     actor=f"bot:{F}/erlich", by="erlich", question="which repo")
+
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert sent == []
+    assert "1 row(s) waiting on the human" in capsys.readouterr().out
+
+
+def test_the_title_is_clipped_so_the_cap_bounds_bytes_not_just_rows(tmp_path, sent):
+    """F6 (M-B fold, #1481): the 8-row cap bounds ROWS, not the pane send — a
+    title is authored prose with no length contract, and eight whole titles
+    measured 3272 characters in one message. The id still carries the row's
+    full identity for every act, so clipping the title loses nothing an act
+    needs."""
+    _seed_row(tmp_path, task_id="t-long", dispatched=_ago(30), expected_by=_ago(6),
+              title="x" * 248)
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    message = sent[0][1]
+    assert "x" * 81 not in message                    # never the whole 248-char title
+    assert "x" * 80 + "…" in message
+    assert "t-long" in message                        # the id still names the row in full
+
+
+def test_a_negative_window_is_refused(tmp_path, sent, capsys):
+    """F7 (M-B fold, #1481): argparse's `type=float` already refuses a
+    non-number before this door runs; it has no opinion on sign, and a
+    negative age/repeat window is not a real request."""
+    _seed_row(tmp_path, task_id="t-neg", dispatched=_ago(30), expected_by=_ago(6))
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path, max_age_h=-1)) == 2
+    assert sent == []
+    assert "--max-age-h must be zero or positive" in capsys.readouterr().err
+
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path, repeat_h=-1)) == 2
+    assert sent == []
+
+
+def test_a_zero_max_age_qualifies_every_open_row_with_a_readable_instant(tmp_path, sent):
+    """`--max-age-h 0` is not refused: it is the honest way to ask for every
+    open row with a readable dispatch instant, since any already-dispatched
+    row is then "older than" a zero-length window."""
+    _seed_row(tmp_path, task_id="t-any-age", dispatched=_ago(1), expected_by=_ahead(23))
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path, max_age_h=0)) == 0
+    assert len(sent) == 1 and "t-any-age" in sent[0][1]
 
 
 def test_the_scope_is_the_dispatching_fleet_not_the_assignee(tmp_path, sent):

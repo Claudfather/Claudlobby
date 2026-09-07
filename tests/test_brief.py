@@ -276,7 +276,9 @@ def test_brief_json_schema_v1(paths: Paths):
         "degraded",
     ):
         assert key in brief, f"envelope is missing {key}"
-    assert set(brief["dispatches"]) == {"open", "overdue", "orphaned"}
+    # F2 (M-B fold, #1481) added `dispatched` ADDITIVELY inside `dispatches` —
+    # the envelope's own top-level key set (asserted above) is unchanged.
+    assert set(brief["dispatches"]) == {"open", "overdue", "orphaned", "dispatched"}
     assert set(brief["reports"]) == {"cursor", "unacked", "source"}
     # Round-trips as JSON — R4 consumes this envelope, not the text form.
     json.dumps(brief)
@@ -732,26 +734,29 @@ def test_a_matcher_predating_the_plane_only_reader_withholds_the_section(
 
 
 def test_a_failure_after_the_first_answer_withholds_all_three(paths: Paths, monkeypatch):
-    """Both questions ride ONE plane session; a failure on the second (the
-    open list) withholds the section whole and names all three fields — the
-    structural lens found only `open` named, so overdue was neither present
-    nor listed."""
+    """Both questions ride ONE plane session; a failure on the SECOND read
+    (the bot's own open set) withholds the section whole and names all three
+    fields — the structural lens found only `open` named, so overdue was
+    neither present nor listed.
+
+    Rewritten for F7 (M-B fold, #1481): this section no longer calls
+    `doors.open_dispatches` on the happy path once the install carries
+    `open_rows_indexed` (the single-read reader that replaced it plus a
+    second call to `open_assignment_ids`) — patching `open_dispatches` no
+    longer represents "a failure on the second read", so this patches the
+    reader that actually runs there now. `load_lib_module` memoizes on (path,
+    mtime), so the module `_plane_readers()` returns here is the exact object
+    `_dispatch_section`'s own session will use — no wrapper needed."""
     _seed_plane(paths)
     import claudlobby.brief as brief_mod
 
-    real = brief_mod.load_dispatch_doors
+    doors_mod = brief_mod.load_dispatch_doors(paths)
+    pr = doors_mod._plane_readers()
 
-    class _Flaky:
-        def __init__(self, mod):
-            self._mod = mod
+    def _boom(*a, **k):
+        raise doors_mod.PlaneUnreachable("gone mid-brief")
 
-        def __getattr__(self, name):
-            return getattr(self._mod, name)
-
-        def open_dispatches(self, *a, **k):
-            raise self._mod.PlaneUnreachable("gone mid-brief")
-
-    monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Flaky(real(p)))
+    monkeypatch.setattr(pr, "open_rows_indexed", _boom)
     brief = build_brief(_fleet(), paths, "alex", NOW)
     assert brief["dispatches"] == {}
     omitted = {x["field"] for x in brief["degraded"] if x["mode"] == "omitted"}
@@ -1337,8 +1342,10 @@ def test_the_text_render_prints_the_four_verbs_once(paths: Paths):
     assert len(menu) == 1, "the menu belongs under the section, not on every row"
     for verb in ("chase", "supersede", "withdraw", "escalate"):
         assert verb in menu[0]
-    assert "task-act.sh withdraw <task-id> --reason" in menu[0]
-    assert "dispatch-task.sh --supersedes <task-id>" in menu[0]
+    # F7 (M-B fold): prefixed $CLAUDLOBBY_ROOT/lib/ — a bare `task-act.sh` /
+    # `dispatch-task.sh` is not on a bot's PATH
+    assert "$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw <task-id> --reason" in menu[0]
+    assert "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes <task-id>" in menu[0]
 
 
 def test_the_render_names_an_escalation_on_the_row(paths: Paths):
@@ -1361,8 +1368,82 @@ def test_the_menu_is_one_definition_with_the_re_check(paths: Paths):
 
 def test_json_keeps_its_schema_1_top_level_keys(paths: Paths):
     """The menu keys are additive INSIDE a row; the envelope's own key set is
-    pinned, and a new top-level key is a schema change."""
+    pinned, and a new top-level key is a schema change. `dispatched` (F2, the
+    M-B fold) is one more additive key inside `dispatches` — not a new
+    top-level key of the envelope, which is what this test actually pins."""
     _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"))
     brief = build_brief(_fleet(), paths, "alex", NOW)
-    assert set(brief["dispatches"]) == {"open", "overdue", "orphaned"}
+    assert set(brief["dispatches"]) == {"open", "overdue", "orphaned", "dispatched"}
     assert brief["schema"] == SCHEMA_VERSION
+
+
+# --- M-B fold F2: the manager's own list ---------------------------------
+
+
+def _fleet_with_manager(**kw) -> FleetConfig:
+    """`_fleet()` plus a manager bot, `mgr` — `plane_fixtures._live_dispatch`'s
+    own hardcoded `assigned_by`, so any row `_land`/`_dispatch` creates is
+    already dispatched BY this bot without a second dispatch helper."""
+    bots = {
+        "alex": BotConfig(bot_id="alex", name="Alex", expertise=["software-engineering"]),
+        "mgr": BotConfig(bot_id="mgr", name="Mgr", expertise=[]),
+    }
+    base = dict(bots=bots)
+    base.update(kw)
+    return _fleet(**base)
+
+
+def test_dispatched_lists_the_managers_own_rows_and_open_still_lists_the_workers(
+    paths: Paths,
+):
+    """F2 (M-B fold, #1481): three surfaces (the re-check digest's overflow
+    line, the dispatch protocol, observable-plane.md §6) told a manager
+    `claudlobby brief --bot <manager>` would list the rows it dispatched;
+    brief's section was the bot as ASSIGNEE and rendered empty for a manager
+    holding no work of its own (reproduced). `mgr` is the fixture's own
+    manager alias — briefing IT must show the rows under `dispatched`, and
+    briefing the WORKER must still show them under `open` (the fold's pin)."""
+    fleet = _fleet_with_manager()
+    _land_all(paths, [
+        _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-one"),
+        _dispatch("alex", NOW - 8000, NOW - 2000, task_id="t-two"),
+        _dispatch("alex", NOW - 7000, NOW - 1000, task_id="t-three"),
+    ])
+
+    mgr_dispatches = build_brief(fleet, paths, "mgr", NOW)["dispatches"]
+    assert {r["task_id"] for r in mgr_dispatches["dispatched"]} == {
+        "t-one", "t-two", "t-three"
+    }
+    assert mgr_dispatches["open"] == []          # mgr is not the ASSIGNEE of any of these
+    assert all(r["assignee"] == "alex" for r in mgr_dispatches["dispatched"])
+
+    worker_dispatches = build_brief(fleet, paths, "alex", NOW)["dispatches"]
+    assert {r["task_id"] for r in worker_dispatches["open"]} == {
+        "t-one", "t-two", "t-three"
+    }
+    assert worker_dispatches["dispatched"] == []  # alex dispatched none of these
+
+
+def test_dispatched_rows_carry_the_menu_facts_and_render_under_their_own_heading(
+    paths: Paths,
+):
+    """`dispatched` rows carry the same escalated/nudged facts as open/overdue
+    (from `fleet_open_rows`'s own `menu_facts` join), and the text render
+    shows them under a heading and verb-line of their own."""
+    fleet = _fleet_with_manager()
+    wi, asg = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-esc"))
+    _land_act(paths, asg, wi, "escalated", NOW - 1000, by="lead", question="which repo")
+
+    d = build_brief(fleet, paths, "mgr", NOW)["dispatches"]
+    row = {r["task_id"]: r for r in d["dispatched"]}["t-esc"]
+    assert row["escalated"]["question"] == "which repo"
+    assert row["escalated"]["by"] == "lead"
+
+    text = format_brief(build_brief(fleet, paths, "mgr", NOW))
+    assert "dispatched by you (1)" in text
+    assert "ESCALATED by lead: which repo" in text
+    menu = [ln for ln in text.splitlines()
+            if ln.startswith("  act on a row you dispatched:")]
+    assert len(menu) == 1
+    for verb in ("chase", "supersede", "withdraw", "escalate"):
+        assert verb in menu[0]
