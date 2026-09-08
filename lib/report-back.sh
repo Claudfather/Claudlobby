@@ -329,8 +329,12 @@ bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" "$MESSAGE" || rb_send_rc=$?
 if [ "$PLANE_ARMED" = "1" ]; then
     _plane_state="pane_submitted"
     [ "$rb_send_rc" -ne 0 ] && _plane_state="failed"
+    # fold F1: report-back calls bot_tmux_send IN-SHELL, so the wire proof it
+    # computed is already in PLANE_WIRE_SHA256/PLANE_WIRE_BYTES; _wire_frag rides
+    # it on the pane_submitted row so the delivery JOIN can prove the report
+    # reached the manager.
     printf '{"events":[%s]}' \
-        "$(plane_tx_event report-back "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$MANAGER_SESSION" "$_plane_state")" \
+        "$(plane_tx_event report-back "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$MANAGER_SESSION" "$_plane_state" "$(_wire_frag "$_plane_state")")" \
         | plane_emit_events report-back || true
 fi
 

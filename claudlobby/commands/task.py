@@ -137,6 +137,11 @@ def recheck_requests(row, *, msg_id: str, who: str, manager: str,
             "msg_id": msg_id,
             "sender": f"human:{who}",
             "recipient": manager,
+            # chunk P fold F3: the delivery JOIN admits a `received` proof only
+            # when its destination is this recipient — the receiver records the
+            # short bot name, so the short name must be on the communication too
+            # (recheck_ask_request already carries it; the nudge did not).
+            "recipient_raw": _short(manager) or manager,
             "message_class": "task_request",
             "command_type": "query",
             "work_item_id": row["work_item_id"],
@@ -146,22 +151,31 @@ def recheck_requests(row, *, msg_id: str, who: str, manager: str,
 
 
 def transmission_request(row, *, msg_id: str, destination: str, ok: bool,
-                         detail: str = "") -> dict:
+                         detail: str = "",
+                         wire: tuple[str, int] | None = None) -> dict:
     """What the carrier did with the ask. `pane_submitted` is the strongest
     fact tmux can yield (§6b) and is only claimed when the send returned 0;
     anything else is `failed` and says so. Fabricating the accepted state on
     a send that failed is the one thing this must never do — the whole point
     of recording the ask is that a manager who was never reached looks
-    different from one who ignored it."""
+    different from one who ignored it.
+
+    On a submission (ok), it rides the SENDER's wire proof (chunk P fold F1/F5)
+    so the delivery JOIN can read DELIVERED for the ask; `wire` is None when the
+    send did not yield a proof (a sha-less host), and the JOIN then stays at
+    unconfirmed rather than fabricating a verdict."""
+    payload = {
+        "msg_id": msg_id, "attempt_no": 1, "carrier": "tmux",
+        "destination": destination,
+        "state": "pane_submitted" if ok else "failed",
+        **({"error": _one_line(detail)[:512]} if (not ok and detail) else {}),
+    }
+    if ok and wire:
+        payload["wire_sha256"], payload["wire_bytes"] = wire[0], wire[1]
     return {
         "event_type": "transmission", "emitter": "task-nudge",
         "fleet": row["fleet"],
-        "payload": {
-            "msg_id": msg_id, "attempt_no": 1, "carrier": "tmux",
-            "destination": destination,
-            "state": "pane_submitted" if ok else "failed",
-            **({"error": _one_line(detail)[:512]} if (not ok and detail) else {}),
-        },
+        "payload": payload,
     }
 
 
@@ -213,7 +227,9 @@ def recheck_message(row, *, task_id: str, who: str, why: str,
     )
 
 
-def send_to_bot(paths, bot: str, message: str, fleet: str | None = None) -> tuple[int, str]:
+def send_to_bot(paths, bot: str, message: str, fleet: str | None = None,
+                msg_id: str | None = None,
+                wire_out: str | None = None) -> tuple[int, str]:
     """Hand the message to a bot through `lib/dispatch.sh`, the ONE cross-
     socket send primitive (it resolves the bot's private tmux socket itself).
     The CLI runs on the HOST, not inside a bot session, so it cannot use
@@ -241,12 +257,71 @@ def send_to_bot(paths, bot: str, message: str, fleet: str | None = None) -> tupl
     env["CLAUDLOBBY_ROOT"] = str(paths.root)
     if fleet:
         env["CLAUDLOBBY_FLEET"] = fleet
+    # chunk P fold F5: carry the plane routing trailer so the RECEIVER records a
+    # `received` proof. Without it the nudge/recheck class was UNCONFIRMED
+    # forever — a timer-driven send whose delivery could never be shown. bash
+    # bot_tmux_send grammar-guards this value before it touches the payload.
+    # PLANE_WIRE_OUT (fold F1) lets that same door hand back the wire proof so
+    # the delivery JOIN reads DELIVERED, not merely records a receipt.
+    if msg_id:
+        env["PLANE_MSG_ID"] = msg_id
+    if wire_out:
+        env["PLANE_WIRE_OUT"] = str(wire_out)
     try:
         r = subprocess.run(["bash", str(script), bot, message],
                            capture_output=True, text=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, f"{type(exc).__name__}: {exc}"
     return r.returncode, (r.stderr or "").strip()
+
+
+def _read_wire_out(path: str) -> tuple[str, int] | None:
+    """Read the `sha=`/`bytes=` pair lib/lib-common.sh:bot_tmux_send wrote as the
+    delivery-JOIN wire proof (chunk P fold F1). Returns (wire_sha256, wire_bytes)
+    or None (a sha-less host, or a faked send that never ran the door)."""
+    try:
+        sha: str | None = None
+        nbytes: int | None = None
+        for line in Path(path).read_text().splitlines():
+            key, _, val = line.partition("=")
+            if key == "sha":
+                sha = val
+            elif key == "bytes":
+                try:
+                    nbytes = int(val)
+                except ValueError:
+                    nbytes = None
+        if sha and nbytes is not None:
+            return sha, nbytes
+    except OSError:
+        pass
+    return None
+
+
+def _send_to_bot_with_wire(paths, bot: str, message: str, *,
+                           fleet: str | None = None,
+                           msg_id: str | None = None
+                           ) -> tuple[int, str, tuple[str, int] | None]:
+    """`send_to_bot` plus the chunk-P wire proof (fold F1/F5): run the send with a
+    scratch file bot_tmux_send writes its wire proof to, and return
+    (rc, err, wire) where wire is (wire_sha256, wire_bytes) or None. The
+    nudge/recheck transmission rides that proof so the delivery JOIN reads
+    DELIVERED rather than staying UNCONFIRMED. `send_to_bot` stays the
+    monkeypatched seam — a fake that does not run dispatch.sh leaves the file
+    empty and wire is None, which the delivery JOIN treats as unconfirmed."""
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="plane-wire-")
+    os.close(fd)
+    try:
+        rc, err = send_to_bot(paths, bot, message, fleet=fleet,
+                              msg_id=msg_id, wire_out=path)
+        wire = _read_wire_out(path)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return rc, err, wire
 
 
 def manager_of(row) -> str:
@@ -360,10 +435,12 @@ def cmd_task_nudge(args) -> int:
         print(f"nudge: the re-check was NOT recorded ({verdict or 'no outcome'})"
               " — sending it anyway; the nudge itself stands", file=sys.stderr)
 
-    rc, err = send_to_bot(paths, manager, message, fleet=row["fleet"])
+    rc, err, wire = _send_to_bot_with_wire(paths, manager, message,
+                                           fleet=row["fleet"], msg_id=msg_id)
     if asked:
         _emit(paths.root, [transmission_request(
-            row, msg_id=msg_id, destination=manager, ok=(rc == 0), detail=err)])
+            row, msg_id=msg_id, destination=manager, ok=(rc == 0), detail=err,
+            wire=wire)])
     if rc != 0:
         print(f"nudge: recorded, but the re-check did NOT reach {manager}"
               f" (rc={rc}{': ' + err if err else ''}) — the nudge stands on the"
@@ -729,11 +806,17 @@ def cmd_task_recheck(args) -> int:
             print(f"recheck: the plane did NOT record the ask to {manager}"
                   f" ({verdict or 'no outcome'}) — sending anyway; these rows"
                   " will be re-checked again next sweep", file=sys.stderr)
-        send_rc, err = send_to_bot(paths, manager, message, fleet=fleet)
+        # fold F5: one digest is one physical send, so it carries ONE trailer —
+        # ids[0], whose row can then read DELIVERED (the receiver records a
+        # `received` for it); the other rows stay UNCONFIRMED (no receipt of
+        # their own). The one wire proof rides every row's transmission; it is
+        # inert on a row that has no matching `received`.
+        send_rc, err, wire = _send_to_bot_with_wire(paths, manager, message,
+                                                    fleet=fleet, msg_id=ids[0])
         if asked:
             _emit(paths.root, [
                 transmission_request(r, msg_id=m, destination=manager,
-                                     ok=(send_rc == 0), detail=err)
+                                     ok=(send_rc == 0), detail=err, wire=wire)
                 for r, m in zip(named, ids)])
         if send_rc != 0:
             print(f"recheck: the re-check did NOT reach {manager}"

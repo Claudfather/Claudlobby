@@ -836,6 +836,99 @@ _pane_send_payload sock "$SYNTH_ID" "$payload2500" >/dev/null 2>&1
 assert_eq "the chunk count is reset after a send" "0" "$_PANE_CHUNK_N"
 assert_eq "the payload is not still resident in the chunk array" "" "${_PANE_CHUNKS[0]:-}"
 
+echo "=== chunk P (#1501): the plane routing trailer rides bot_tmux_send ==="
+
+# bot_tmux_send is the ONE place the trailer is appended. run_bot_send drives it
+# exactly as a door does (the has-session precheck passes on the stub, which
+# returns 0 for any verb it does not special-case), so these assertions cover
+# the real sanitize -> append -> chunk path, not a re-derivation.
+run_bot_send() {
+    local text="$1"; shift
+    : > "$SENT_LOG"; : > "$ORDER_LOG"; : > "$RAW_LOG"
+    rm -f "$CHUNK_DIR"/*; CHUNK_N=0
+    printf '%s\n' "$@" > "$PANE_SCRIPT"
+    bot_tmux_send sock "$SYNTH_ID" "$text"
+}
+VALID_MSGID="msg_0123456789abcdef0123456789abcdef"
+
+export PLANE_MSG_ID="$VALID_MSGID"
+run_bot_send "[BOTCOMMAND] mgr | task | do the thing" "$FIXTURES/input-clean-submit.txt"
+cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
+joined=$(cat "$TMPD/joined")
+r=$(grep -c "⟦plane:$VALID_MSGID⟧" "$TMPD/joined" || true)
+assert_eq "a minted PLANE_MSG_ID appends the trailer exactly once" "1" "$r"
+case "$joined" in *$'\n'"⟦plane:$VALID_MSGID⟧") r=yes ;; *) r=no ;; esac
+assert_eq "the trailer is the payload's OWN final line" "yes" "$r"
+lastchunk=$(ls "$CHUNK_DIR"/[0-9]* | sort | tail -1)
+case "$(cat "$lastchunk")" in *"⟦plane:$VALID_MSGID⟧") r=yes ;; *) r=no ;; esac
+assert_eq "the trailer is intact in the LAST chunk" "yes" "$r"
+unset PLANE_MSG_ID
+
+# The load-bearing survival property: a 2.5KB tokened dispatch chunks (chunk O),
+# and the concatenation of the chunks is byte-identical to what bot_tmux_send
+# built — the multibyte trailer included — so the join key survives the head
+# loss that #1493 measured, riding the last chunk.
+export PLANE_MSG_ID="$VALID_MSGID"
+run_bot_send "$payload2500" "$FIXTURES/input-clean-submit.txt"
+chunk_count=$(ls "$CHUNK_DIR"/[0-9]* | wc -l | tr -d ' ')
+[ "$chunk_count" -gt 1 ] && r=yes || r=no
+assert_eq "a 2.5KB tokened payload is chunked (more than one chunk)" "yes" "$r"
+cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
+joined=$(cat "$TMPD/joined")
+expected="$(sanitize_tmux_input "$payload2500")"$'\n'"⟦plane:$VALID_MSGID⟧"
+assert_eq "the chunks rejoin byte-identical to sanitize(body)+trailer" "$expected" "$joined"
+r=$(grep -c "⟦plane:$VALID_MSGID⟧" "$TMPD/joined" || true)
+assert_eq "the trailer appears exactly once across a multi-chunk send" "1" "$r"
+unset PLANE_MSG_ID
+
+# No PLANE_MSG_ID -> no trailer (a raw human prompt / keepalive reload is
+# untracked and must stay byte-for-byte what was asked).
+run_bot_send "plain dispatch with no plane id" "$FIXTURES/input-clean-submit.txt"
+cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
+r=$(grep -c "plane:msg_" "$TMPD/joined" || true)
+assert_eq "no PLANE_MSG_ID -> no trailer appended" "0" "$r"
+
+# A non-minted PLANE_MSG_ID must never inject a newline or a stray glyph — it is
+# refused and disclosed, the send proceeds untagged.
+export PLANE_MSG_ID="not-a-minted-id; rm -rf /"
+run_bot_send "dispatch with a garbage id" "$FIXTURES/input-clean-submit.txt" 2>"$TMPD/bt-stderr.log"
+cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
+r=$(grep -c "⟦plane:" "$TMPD/joined" || true)
+assert_eq "a non-minted PLANE_MSG_ID appends NO trailer" "0" "$r"
+r=$(grep -c 'not a minted id' "$TMPD/bt-stderr.log" || true)
+assert_eq "...and discloses why on stderr" "1" "$r"
+unset PLANE_MSG_ID
+
+# F6 (fold): the bash `=~ $` anchor matches BEFORE a trailing newline, so the id
+# grammar alone would accept "msg_<32hex>\n" and inject a newline into the
+# payload. The added embedded-newline guard must refuse it: no trailer, no wire
+# proof, disclosed on stderr.
+export PLANE_MSG_ID="$VALID_MSGID"$'\n'
+run_bot_send "dispatch with a newline-suffixed id" "$FIXTURES/input-clean-submit.txt" 2>"$TMPD/bt-nl.log"
+cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
+r=$(grep -c "⟦plane:" "$TMPD/joined" || true)
+assert_eq "a newline-suffixed PLANE_MSG_ID appends NO trailer (F6)" "0" "$r"
+r=$(grep -c 'not a minted id' "$TMPD/bt-nl.log" || true)
+assert_eq "...and discloses why (F6)" "1" "$r"
+[ -z "${PLANE_WIRE_SHA256:-}" ] && r=yes || r=no
+assert_eq "a refused id records NO wire proof (F6)" "yes" "$r"
+unset PLANE_MSG_ID
+
+echo "=== chunk P fold F1: bot_tmux_send records the SENDER's wire proof ==="
+# The delivery JOIN's basis: the sha256 + byte length of the EXACT bytes on the
+# wire for the message proper (safe, AFTER sanitize and BEFORE the trailer).
+# Assert the door's computation IS sanitize + sha256_prefixed, and that it
+# EXCLUDES the trailer (the receiver hashes arrival-minus-trailer, so both ends
+# must span the same bytes).
+export PLANE_MSG_ID="$VALID_MSGID"
+run_bot_send "[BOTCOMMAND] mgr | task | do the thing" "$FIXTURES/input-clean-submit.txt"
+_expect_safe="$(sanitize_tmux_input "[BOTCOMMAND] mgr | task | do the thing")"
+assert_eq "the wire proof sha is sha256_prefixed(sanitize(payload))" \
+    "$(sha256_prefixed "$_expect_safe")" "${PLANE_WIRE_SHA256:-}"
+assert_eq "the wire proof byte length is len(safe), trailer EXCLUDED" \
+    "$(printf '%s' "$_expect_safe" | wc -c | tr -d ' ')" "${PLANE_WIRE_BYTES:-}"
+unset PLANE_MSG_ID
+
 echo ""
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

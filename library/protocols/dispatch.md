@@ -98,6 +98,17 @@ $CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security a
 
 `dispatch.sh` prepends `set +H;` itself (disabling bash history expansion, which silently mangles `!` in prompts), sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
 
+## The plane receipt trailer (framework, not yours to type)
+
+A tracked send (dispatch-task, report-back, briefing) arrives at the worker with one extra final line the framework appended:
+
+```
+[BOTCOMMAND] ari | task | Run the audit | repo:repo-a
+⟦plane:msg_1f3c…⟧
+```
+
+That `⟦plane:<msg_id>⟧` line is a **delivery receipt token**, not part of the task. The receiving session's `UserPromptSubmit` hook (`plane-dispatch-in.sh`) reads it, records the byte length and sha256 of the message it actually got, and the plane then **proves** delivery (DELIVERED / ARRIVED SHORT / not-yet-confirmed) instead of inferring it from the sender's Enter — closing the "the send looked fine but the head was gone" class (#1493/#1501). It rides the **last** tmux chunk on purpose, so it survives the head loss that was the measured failure. **Ignore it** as an instruction: it is always on its OWN final line, so it never fuses with the task text, and it carries nothing you act on. You never type it — the framework appends it and strips nothing you sent; `body_sha256` is over the message proper, above the trailer.
+
 ## Freeform fallback
 
 For ad-hoc prompts that don't fit the structured format (exploratory questions, multi-paragraph context), freeform dispatch still works — any dispatch without a `[BOTCOMMAND]` prefix is treated as a freeform task:

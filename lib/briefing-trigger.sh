@@ -81,12 +81,23 @@ if [ "$PLANE_ARMED" = "1" ]; then
 fi
 _plane_transmission() {
     [ "$PLANE_ARMED" = "1" ] || return 0
+    # fold F1: a submission-class state carries the delivery-JOIN wire proof,
+    # read back from PLANE_WIRE_OUT across the dispatch.sh subprocess boundary.
     printf '{"events":[%s]}' \
-        "$(plane_tx_event briefing-trigger "$FLEET" tmux "$PLANE_MSG_ID" "$BOT" "$1")" \
+        "$(plane_tx_event briefing-trigger "$FLEET" tmux "$PLANE_MSG_ID" "$BOT" "$1" "$(_wire_frag "$1")")" \
         | plane_emit_events briefing-trigger || true
 }
 
-if "$LIB_DIR/dispatch.sh" "$BOT" "/briefing $SLOT"; then
+# PLANE_MSG_ID across the process boundary (chunk P, #1501): the briefing is a
+# tracked communication, so bot_tmux_send tags the send and the receiver records
+# delivery. Empty when the plane is unarmed -> no trailer.
+# fold F1: PLANE_WIRE_OUT scratch file so bot_tmux_send (inside dispatch.sh) can
+# hand back the wire proof for the pane_submitted row. Auto-cleaned on EXIT via
+# lib-common's tmpdir trap (the else branch exits before any explicit removal).
+_plane_wire_out=""
+[ "$PLANE_ARMED" = "1" ] && _plane_wire_out=$(safe_mktemp)
+if PLANE_MSG_ID="$PLANE_MSG_ID" PLANE_WIRE_OUT="$_plane_wire_out" "$LIB_DIR/dispatch.sh" "$BOT" "/briefing $SLOT"; then
+    _read_wire_out "$_plane_wire_out"
     echo "$TS DISPATCH $BOT/$SLOT — /briefing $SLOT sent" >> "$LOG"
     emit_fleet_event briefing_dispatched briefing "$(briefing_data ok)" "$BOT_DIR" "$BOT"
     _plane_transmission "pane_submitted"

@@ -133,7 +133,7 @@ def _transmissions(root):
 def sent(monkeypatch):
     calls = []
 
-    def fake(paths, bot, message, fleet=None):
+    def fake(paths, bot, message, fleet=None, **_):
         calls.append((bot, message, fleet))
         return 0, ""
 
@@ -400,7 +400,7 @@ def test_a_failed_send_does_not_debounce_but_a_landed_one_does(tmp_path, monkeyp
     _seed_row(tmp_path, task_id="t-lands", mgr="gilfoyle", bot="dinesh",
               dispatched=_ago(30), expected_by=_ago(6))
 
-    def flaky(paths, bot, message, fleet=None):
+    def flaky(paths, bot, message, fleet=None, **_):
         return (1, "session not found") if bot == "erlich" else (0, "")
     monkeypatch.setattr(task_cmd, "send_to_bot", flaky)
 

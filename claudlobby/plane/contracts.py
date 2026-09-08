@@ -36,6 +36,15 @@ ATTEMPT_STATES = (
     # at send) — accepted is not consumed, so this is NOT activation evidence.
     "send_attempted", "carrier_accepted", "carrier_queued", "pane_submitted",
     "failed", "unknown", "recipient_acknowledged", "duplicate_suppressed",
+    # received (chunk P, #1501): the RECEIVER's own fact — a UserPromptSubmit
+    # hook in the receiving session recorded the byte length and sha256 of the
+    # prompt it actually got (`received_bytes` / `received_sha256`, in detail),
+    # keyed to the sender's msg_id. It is DELIBERATELY NOT in any activation or
+    # submission set (ACTIVATION_TX_EVENTS, queries._TX_OPEN): it is the join's
+    # second leg, not stronger evidence of the sender's own submission, and
+    # folding it into activation would silently reshape TASK_STATUS/ATTENTION.
+    # A tmux/pane fact (see _CARRIER_ONLY_STATES).
+    "received",
 )
 TASK_EVENTS = (
     # 22 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
@@ -233,6 +242,9 @@ _CARRIER_ONLY_STATES = {
     "pane_submitted": ("tmux",),
     "carrier_queued": ("tmux",),
     "carrier_accepted": ("telegram-tgpost", "telegram-bridge"),
+    # received (chunk P): a pane fact like pane_submitted — the receiving
+    # session got it over tmux. tmux-only until a channel receiver ever emits it.
+    "received": ("tmux",),
 }
 
 
@@ -246,6 +258,27 @@ class Transmission(_Strict):
     error: Optional[str] = None
     part_no: Optional[int] = Field(None, ge=1)     # bridge chunking (round-2 F10)
     part_count: Optional[int] = Field(None, ge=1)
+    # The RECEIVER's proof (chunk P): the byte length and sha256 of the prompt
+    # the receiving session actually got, trailer stripped. They ride `detail`
+    # (like error/part_no), never a dedicated column — the delivery JOIN
+    # (queries.DELIVERY_STATUS_SQL) compares received_sha256/received_bytes to
+    # the SENDER's WIRE proof below (chunk P fold F1), not to the communication's
+    # body hash: the body is the raw logical message, but the receiver hashes
+    # what came off the wire, which `sanitize_tmux_input` rewrote (newlines and
+    # tabs -> spaces, runs squeezed). Comparing the receiver's arrival against the
+    # raw body read every multi-line / tabbed / double-spaced dispatch as ALTERED
+    # or TRUNCATED though fully delivered.
+    received_bytes: Optional[int] = Field(None, ge=0)
+    received_sha256: Optional[str] = None
+    # The SENDER's WIRE proof (chunk P fold F1): the byte length and sha256 of the
+    # EXACT bytes bot_tmux_send put on the wire for the message proper —
+    # sanitize_tmux_input(payload), the `set +H; ` prefix included, the routing
+    # trailer NOT. The receiver hashes (arrival minus trailer) which equals that
+    # for EVERY shape, so DELIVERED fires for a whole delivery regardless of
+    # sanitize. Rides `detail` on a SUBMISSION-class tmux fact (pane_submitted /
+    # carrier_queued — both put these bytes on the pane); the JOIN reads it there.
+    wire_bytes: Optional[int] = Field(None, ge=0)
+    wire_sha256: Optional[str] = None
 
     def model_post_init(self, __context) -> None:
         allowed = _CARRIER_ONLY_STATES.get(self.state)
@@ -254,6 +287,40 @@ class Transmission(_Strict):
                 f"state {self.state!r} is impossible for carrier"
                 f" {self.carrier!r} (allowed: {', '.join(allowed)})"
             )
+        # The proof pair belongs ONLY to a `received` fact, and a `received`
+        # fact is worthless without it — the join has nothing to compare
+        # otherwise. Enforced both directions so a mis-emitting door fails
+        # loud rather than landing a verdict-less row.
+        has_proof = self.received_bytes is not None or self.received_sha256 is not None
+        if self.state == "received":
+            if self.received_bytes is None or self.received_sha256 is None:
+                raise ValueError(
+                    "a 'received' transmission must carry received_bytes AND"
+                    " received_sha256 (the delivery join's proof)"
+                )
+        elif has_proof:
+            raise ValueError(
+                f"received_bytes/received_sha256 are only valid on a 'received'"
+                f" transmission, not {self.state!r}"
+            )
+        # The WIRE proof (chunk P fold F1) is the SENDER's half of the join and
+        # rides a submission-class tmux fact only: the bytes it names are the
+        # ones a pane received. Unlike the received proof it is OPTIONAL there (a
+        # host with no sha tool records the fact without it, and the join then
+        # cannot upgrade past 'unconfirmed' — never a false verdict), but a wire
+        # proof on any other state is a mis-emitting door and fails loud.
+        has_wire = self.wire_bytes is not None or self.wire_sha256 is not None
+        if has_wire:
+            if self.state not in ("pane_submitted", "carrier_queued"):
+                raise ValueError(
+                    "wire_bytes/wire_sha256 are only valid on a submission-class"
+                    f" tmux transmission (pane_submitted/carrier_queued), not"
+                    f" {self.state!r}"
+                )
+            if self.wire_bytes is None or self.wire_sha256 is None:
+                raise ValueError(
+                    "a wire proof must carry wire_bytes AND wire_sha256 together"
+                )
 
 
 class WorkItem(_Strict):

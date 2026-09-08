@@ -162,6 +162,47 @@ class TestClassifyArrival:
 
 
 # --------------------------------------------------------------------------
+# via_hook_agrees — chunk P (#1501): the instrument checking the instrument
+# --------------------------------------------------------------------------
+
+
+class TestViaHookAgrees:
+    """The pure agreement predicate the --via-hook cross-check rests on: does
+    the RECEIVER hook's `received` fact match this probe's transcript verdict?"""
+
+    def test_whole_agrees_when_the_received_sha_matches(self):
+        assert _fn("via_hook_agrees", "whole", "sha256:aa", "100",
+                   "sha256:aa", "100") == "agree"
+
+    def test_whole_disagrees_when_the_sha_differs(self):
+        # a whole arrival the hook hashed to something else is a real finding
+        assert _fn("via_hook_agrees", "whole", "sha256:aa", "100",
+                   "sha256:bb", "100") == "disagree"
+
+    def test_head_lost_agrees_when_fewer_bytes_arrived(self):
+        assert _fn("via_hook_agrees", "head-lost", "sha256:aa", "100",
+                   "sha256:bb", "78") == "agree"
+
+    def test_head_lost_disagrees_when_the_full_length_arrived(self):
+        # head-lost that the hook read as full-length contradicts the verdict
+        assert _fn("via_hook_agrees", "head-lost", "sha256:aa", "100",
+                   "sha256:bb", "100") == "disagree"
+
+    def test_tail_lost_agrees_when_fewer_bytes_arrived(self):
+        assert _fn("via_hook_agrees", "tail-lost", "sha256:aa", "100",
+                   "sha256:bb", "40") == "agree"
+
+    def test_absent_and_other_make_no_claim(self):
+        for verdict in ("absent", "other"):
+            assert _fn("via_hook_agrees", verdict, "sha256:aa", "100",
+                       "sha256:bb", "0") == "skip"
+
+    def test_a_non_numeric_received_byte_count_is_a_disagreement_not_a_crash(self):
+        assert _fn("via_hook_agrees", "head-lost", "sha256:aa", "100",
+                   "sha256:bb", "") == "disagree"
+
+
+# --------------------------------------------------------------------------
 # parse_sizes
 # --------------------------------------------------------------------------
 

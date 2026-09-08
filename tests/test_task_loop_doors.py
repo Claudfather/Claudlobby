@@ -325,7 +325,12 @@ def test_migration_0010_widens_the_task_check_without_losing_a_row(tmp_path):
             " VALUES (?, 'ev_' || ?, '2', 'x', 'x', 'h', 't', 'task', 'escalated', 'wi')",
             (seq + 1, "c" * 32))
 
-    assert migrate(conn) == SCHEMA_USER_VERSION == 10
+    # migrate() applies the rest of the ladder — 0010's widen AND every later
+    # rebuild (0011 added `received`, chunk P) — reaching SCHEMA_USER_VERSION.
+    # The row/index preservation asserted below therefore holds ACROSS all of
+    # them: 0011 is the same 12-step rebuild and preserves both, so this pin
+    # only had to learn a later migration exists, not weaken what it checks.
+    assert migrate(conn) == SCHEMA_USER_VERSION
     assert [r[0] for r in conn.execute("SELECT event FROM events")] == ["progress"]
     after_idx = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events'")}
