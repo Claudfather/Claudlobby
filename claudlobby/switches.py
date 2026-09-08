@@ -4,8 +4,27 @@
 
 * deletes data,
 * spends money,
-* mutates operator source, or
-* sends outbound to people at scale.
+* mutates operator source,
+* sends outbound to people at scale, or
+* **has no deployment gate** (amended #1265).
+
+The first four are about what a door DOES when it runs. The fifth is about how
+it ARRIVES, and it exists because ``lib/`` is read on demand, per use: a root
+pull is in force for every bot on its next call, with no restart gate and no
+canary window. Where that is the whole delivery mechanism there is no step at
+which one bot can be staged ahead of the others, so the flag is not a hedge
+about the behaviour — it is the only stageable rollout available, and arming
+one fleet IS the canary. It is deliberately narrow, and the test is DELIBERATENESS
+rather than mechanism: a gate is something a human has to CHOOSE, never
+something that happens on the next scheduled run. A restart, a per-fleet
+compose, or an enrollment that is ALREADY opt-in all count. Automatic
+enrollment does not — ``lib/setup-fleet`` skips only the jobs in the composed
+DORMANT manifest, so a job that is not opt-in is enrolled on the next setup run
+with nobody deciding to. Naming enrollment itself as a gate would therefore
+disqualify ``boot-capture``, whose enrollment is automatic *precisely absent
+this flag*: the flag is what creates the gate, so it cannot also be the reason
+the category does not apply. A door claiming the category must additionally do
+nothing from the four above.
 
 Whatever stays opt-in must be NAMED where the operator looks — ``claudlobby
 doctor``, ``claudlobby plane doctor``, and the closing summary of
@@ -321,6 +340,37 @@ SWITCHES: tuple[Switch, ...] = (
         why_opt_in="mutates operator source",
         what="weekly fast-forward of sibling framework checkouts to their "
              "newest cut release (notify-behind REPORTS regardless)",
+    ),
+    Switch(
+        key="boot-capture",
+        scope=HOST_JOB,
+        polarity=OPT_IN,
+        carrier=ENROLL_HOST,
+        job="boot-capture",
+        why_opt_in="no deployment gate — lib/ is read on demand per use, so "
+                   "the pull that delivers it is in force on every bot at once "
+                   "and nothing can be staged ahead. Enrollment is the only "
+                   "canary available; flip it on once one host has run it "
+                   "through a real boot",
+        what="record every declared bot at its first observation after a host "
+             "boot — session_created, .spawn with the instant it was read, the "
+             "journal Started time and the derived self-start label — so a boot "
+             "measurement no longer needs a bot to be awake to take it",
+    ),
+    Switch(
+        key="boot-capture-stamp",
+        scope=DOOR,
+        polarity=OPT_IN,
+        # start-bot.sh runs before any session exists and loads the bot conf
+        # itself; a .env tier assignment is not in that environment.
+        carrier=BOT_CONF,
+        env="BOOT_CAPTURE_ENABLED",
+        why_opt_in="no deployment gate, and more sharply than boot-capture: "
+                   "this half has no enrollment step at all, so a root pull "
+                   "reaches every bot start immediately",
+        what="stamp the instant start-bot.sh actually injects a payload into a "
+             "pane, which the service rung is not a proxy for (measured: rungs "
+             "fire to the second, sessions appear 36-168s later)",
     ),
     Switch(
         key="session-digest",

@@ -144,7 +144,7 @@ mk_transcript() {  # mk_transcript <fleet> <bot> <name> <ts> <n_assistant> [mtim
 run_snapshot() {  # run_snapshot <journal_epoch> [extra env assignments...]
     local j="$1"; shift
     env CLAUDLOBBY_ROOT="$ROOT" CLAUDE_CONFIG_DIR="$CFG" \
-        SELFSTART_BOOT_EPOCH="$BOOT" SELFSTART_JOURNAL_BOOT_EPOCH="$j" \
+        CLAUDLOBBY_BOOT_EPOCH="$BOOT" SELFSTART_JOURNAL_BOOT_EPOCH="$j" \
         "$@" bash "$SNAP" 2>&1
 }
 

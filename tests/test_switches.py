@@ -63,13 +63,38 @@ def _state(rows, key):
 # ---------------------------------------------------------------------------
 
 
-def test_exactly_the_four_categories_ship_off():
-    """The rule has four reasons and no fifth. Every opt-in must NAME which one
-    keeps it off — an unexplained off switch is how a default quietly becomes
-    a habit, which is the state this chunk found the estate in."""
+def test_exactly_the_categories_that_ship_off():
+    """Every opt-in must NAME what keeps it off — an unexplained off switch is
+    how a default quietly becomes a habit, which is the state this chunk found
+    the estate in.
+
+    FOUR REASONS WERE COST. The fifth is not (#1265, amended deliberately and
+    NOT by widening the set quietly): a door with **no deployment gate**. `lib/`
+    is read on demand, per use, so a root pull is in force on every bot on its
+    next call — no restart, no canary window, no step at which one bot could be
+    staged ahead of the others. For those the flag is not a hedge about the
+    behaviour, it is the ONLY stageable rollout the estate has.
+
+    The distinction is load-bearing and narrow. The four cost categories ask
+    *what does this do when it runs*; this one asks *how does it arrive*. A door
+    claiming it must answer BOTH: it does nothing from the four list, AND there
+    is no other gate between merge and every host.
+
+    A GATE IS SOMETHING A HUMAN CHOOSES, not a mechanism that exists. Automatic
+    enrollment is not a gate: `lib/setup-fleet:22-24` skips only what the
+    composed DORMANT manifest lists, so a job that is not opt-in is enrolled on
+    the next setup run with nobody deciding to. Reading "it has an enrollment
+    step" as disqualifying would rule out `boot-capture`, whose enrollment is
+    automatic *precisely absent this flag* — the flag is what creates its gate.
+    A restart, a per-fleet compose, or an already-opt-in enrollment do qualify.
+
+    This list is an allowlist on purpose: adding to it is meant to cost a
+    visible test edit and an argued reason, never a silent registry entry."""
     opt_in = {s.key for s in sw.SWITCHES if s.polarity == sw.OPT_IN}
     assert opt_in == {"update-siblings", "session-digest", "code-audit-sweep",
-                      "weekly-worker-restart"}
+                      "weekly-worker-restart",
+                      # no deployment gate — see the docstring
+                      "boot-capture", "boot-capture-stamp"}
     for s in sw.SWITCHES:
         if s.polarity == sw.OPT_IN:
             assert s.why_opt_in, f"{s.key} ships off with no stated reason"
@@ -501,7 +526,7 @@ def test_the_composer_arming_tables_are_derived_not_listed():
 def test_the_validator_namespaces_come_from_the_registry():
     """Derived, so a door deleted tomorrow warns without anyone touching the
     validator — and a fleet's own MYTOOL_ENABLED never does."""
-    assert sw.namespaces() == {"TASK", "PLANE", "SESSION", "SPINDOWN"}
+    assert sw.namespaces() == {"TASK", "PLANE", "SESSION", "SPINDOWN", "BOOT"}
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED
 

@@ -138,6 +138,8 @@ leftover flag without anyone maintaining a list.
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
+| `boot-capture` | **off** — no deployment gate — lib/ is read on demand per use, so the pull that delivers it is in force on every bot at once and nothing can be staged ahead. Enrollment is the only canary available; flip it on once one host has run it through a real boot | host job | system.yaml enroll | host.jobs.boot-capture.enroll: true in THIS host's system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |
+| `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `update-siblings` | **off** — mutates operator source | host job | system.yaml enroll | host.jobs.update-siblings.enroll: true in THIS host's system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |

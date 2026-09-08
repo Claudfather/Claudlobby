@@ -163,7 +163,8 @@
 # re-deriving a snapshot against a known boot instant.
 #   CLAUDLOBBY_ROOT               repo root (denominator source)
 #   CLAUDE_CONFIG_DIR             transcript root (default ~/.claude)
-#   SELFSTART_BOOT_EPOCH          override the boot instant
+#   CLAUDLOBBY_BOOT_EPOCH         override the boot instant
+#   SELFSTART_ROWS_OUT            also write the per-bot rows (TSV) to this path
 #   SELFSTART_JOURNAL_BOOT_EPOCH  override the journal boot record
 #   SELFSTART_ALLOW_PARTIAL=1     proceed past an unparseable manifest, loudly
 #   SELFSTART_ALLOW_DUPLICATE_NAMES=1
@@ -296,35 +297,10 @@ die_loud() {
 }
 
 # ── Boot instant ────────────────────────────────────────────────────────────
-# GOTCHA (#1043): never `date -u -d "$(uptime -s)"`. uptime -s prints LOCAL
-# time; -u makes date re-read that local string AS UTC, landing one offset off —
-# silently wrong rather than obviously wrong. Parse local -> epoch first, then
-# format FROM the epoch with -u.
-resolve_boot_epoch() {
-    if [ -n "${SELFSTART_BOOT_EPOCH:-}" ]; then
-        printf '%s\n' "$SELFSTART_BOOT_EPOCH"; return 0
-    fi
-    local s e
-    s="$(uptime -s 2>/dev/null)"
-    if [ -n "$s" ]; then
-        e="$(date -d "$s" +%s 2>/dev/null)"
-        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
-    fi
-    # macOS has no `uptime -s`; kern.boottime prints  { sec = 1786..., usec = ... }
-    s="$(sysctl -n kern.boottime 2>/dev/null)"
-    if [ -n "$s" ]; then
-        e="$(printf '%s\n' "$s" | sed -n 's/.*sec *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
-        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
-    fi
-    # Linux without uptime(1): /proc/uptime is monotonic seconds since boot.
-    if [ -r /proc/uptime ]; then
-        local up now
-        up="$(cut -d. -f1 < /proc/uptime 2>/dev/null)"
-        now="$(date +%s 2>/dev/null)"
-        if [ -n "$up" ] && [ -n "$now" ]; then printf '%s\n' "$((now - up))"; return 0; fi
-    fi
-    return 1
-}
+# resolve_boot_epoch and boot_rung_for both live in lib-common.sh (#1265).
+# They were private here while this script was their only reader; the post-boot
+# recorder is the second, and two copies of when-a-bot-was-due would let the
+# two describe the same boot differently with nothing flagging it.
 
 epoch_to_iso_utc() {
     date -u -d "@$1" +%Y-%m-%dT%H:%M:%S 2>/dev/null \
@@ -674,29 +650,7 @@ TOTAL="$(wc -l < "$TMP/declared" | tr -d ' ')"
 # Claude Code projects root.
 transcript_dir_for() { printf '%s/projects/%s\n' "$CFG_DIR" "$(printf '%s' "$1" | tr '/' '-')"; }
 
-# A bot cannot have self-started before systemd has launched it, and the boot
-# ladder means most of them have not for the first minute. Each bot waits on an
-# `ExecStartPre=/bin/sleep N` rung composed into its own unit (3s stagger,
-# host-global, so a 21-bot host runs rungs 0..60). Read the rung rather than
-# assume one: the stagger is a composer constant that will move, and hardcoding
-# it here would silently decay.
-#
-# Anchored to start-of-line because the composed unit carries an explanatory
-# COMMENT mentioning ExecStartPre, which an unanchored match would read as the
-# directive. Returns -1 when no rung can be read (no unit, or a launchd plist,
-# which staggers elsewhere) — never 0, because "no gate" and "gate at zero" must
-# not be the same answer: an unreadable rung has to be reported as unknown
-# rather than quietly asserting the bot was due.
-boot_rung_for() {
-    local d="$1" u r
-    for u in "$d"/*.service; do
-        [ -f "$u" ] || continue
-        r="$(grep -E '^[[:space:]]*ExecStartPre=.*sleep[[:space:]]+[0-9]+' "$u" 2>/dev/null \
-             | sed -n 's/.*sleep[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -1)"
-        if [ -n "$r" ]; then printf '%s\n' "$r"; return 0; fi
-    done
-    printf '%s\n' "-1"
-}
+# The boot-ladder rung reader is boot_rung_for, sourced from lib-common.sh.
 
 # ── Rung pre-pass ───────────────────────────────────────────────────────────
 # The ladder END bounds arrival for every bot, so it has to be known BEFORE the
@@ -967,6 +921,26 @@ EOF
         "$bot" "$fleet" "$cls" "$raw" "$filtered" "$(basename "$newest")" "$first_ts" "$why" \
         "$start_cls:$start_ts" >> "$TMP/rows"
 done < "$TMP/declared_rung"
+
+# ── Machine-readable rows (opt-in seam, #1265) ──────────────────────────────
+# The page above is for a human. The post-boot recorder needs the same verdict
+# as DATA, and it must not parse the prose to get it — a second reader deriving
+# the label from rendered text is the private-copy defect one layer up.
+#
+# So the classifier stays the sole owner of the label and simply hands its own
+# rows out when asked. Opt-in, because a default write would put a file in the
+# path of every operator who runs this by hand. Field order is the internal one:
+#   bot  fleet  class  raw  filtered  newest  first_ts  why  start_cls:start_ts
+#
+# Copied here rather than at exit: the rows are complete at this point, and a
+# later refusal (exit 4/5/6) must still hand over what it classified — a
+# recorder that got nothing because the page was stamped TOO EARLY would lose
+# the boot, which is the whole failure #1265 exists to stop. The exit code
+# travels beside the rows so the caller can label them, never silently.
+if [ -n "${SELFSTART_ROWS_OUT:-}" ]; then
+    cat "$TMP/rows" > "$SELFSTART_ROWS_OUT" 2>/dev/null \
+        || echo "selfstart-snapshot: could not write rows to $SELFSTART_ROWS_OUT" >&2
+fi
 
 # ── Undeclared leftovers (reported, never counted) ──────────────────────────
 : > "$TMP/undeclared"

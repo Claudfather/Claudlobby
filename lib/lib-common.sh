@@ -2999,6 +2999,122 @@ boot_start_class() {
     printf '%s\t%s\n' "$cls" "$ts"
 }
 
+# ── Boot facts: the doors a boot measurement reads ──────────────────────────
+# Promoted here from selfstart-snapshot.sh (#1265), where both were private.
+# That script was the only reader; the post-boot recorder is the second, and a
+# private copy of a boot fact is exactly how a fleet-wide predicate forks —
+# the rule declared_bots_strict and boot_start_class are already here for.
+#
+# The rung reader matters most: it decides when a bot was DUE, and two answers
+# to that question would let the recorder and the snapshot describe the same
+# boot differently with nothing flagging the disagreement.
+
+# resolve_boot_epoch — this host boot instant, epoch seconds. rc 1 if nothing
+# answers. Override with CLAUDLOBBY_BOOT_EPOCH (test seam).
+#
+# GOTCHA (#1043): never `date -u -d "$(uptime -s)"`. uptime -s prints LOCAL
+# time; -u makes date re-read that local string AS UTC, landing one offset off —
+# silently wrong rather than obviously wrong. Parse local -> epoch first, then
+# format FROM the epoch with -u.
+resolve_boot_epoch() {
+    if [ -n "${CLAUDLOBBY_BOOT_EPOCH:-}" ]; then
+        printf '%s\n' "$CLAUDLOBBY_BOOT_EPOCH"; return 0
+    fi
+    local s e
+    s="$(uptime -s 2>/dev/null)"
+    if [ -n "$s" ]; then
+        e="$(date -d "$s" +%s 2>/dev/null)"
+        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
+    fi
+    # macOS has no `uptime -s`; kern.boottime prints  { sec = 1786..., usec = ... }
+    s="$(sysctl -n kern.boottime 2>/dev/null)"
+    if [ -n "$s" ]; then
+        e="$(printf '%s\n' "$s" | sed -n 's/.*sec *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
+        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
+    fi
+    # Linux without uptime(1): /proc/uptime is monotonic seconds since boot.
+    if [ -r /proc/uptime ]; then
+        local up now
+        up="$(cut -d. -f1 < /proc/uptime 2>/dev/null)"
+        now="$(date +%s 2>/dev/null)"
+        if [ -n "$up" ] && [ -n "$now" ]; then printf '%s\n' "$((now - up))"; return 0; fi
+    fi
+    return 1
+}
+
+# boot_rung_for <bot_dir> — the boot-ladder rung this bot waits on, seconds.
+#
+# A bot cannot have self-started before systemd has launched it, and the boot
+# ladder means most of them have not for the first minute. Each bot waits on an
+# `ExecStartPre=/bin/sleep N` rung composed into its own unit (3s stagger,
+# host-global, so a 21-bot host runs rungs 0..60). Read the rung rather than
+# assume one: the stagger is a composer constant that will move, and hardcoding
+# it here would silently decay.
+#
+# Anchored to start-of-line because the composed unit carries an explanatory
+# COMMENT mentioning ExecStartPre, which an unanchored match would read as the
+# directive. Returns -1 when no rung can be read (no unit, or a launchd plist,
+# which staggers elsewhere) — never 0, because "no gate" and "gate at zero" must
+# not be the same answer: an unreadable rung has to be reported as unknown
+# rather than quietly asserting the bot was due.
+boot_rung_for() {
+    local d="$1" u r
+    for u in "$d"/*.service; do
+        [ -f "$u" ] || continue
+        r="$(grep -E '^[[:space:]]*ExecStartPre=.*sleep[[:space:]]+[0-9]+' "$u" 2>/dev/null \
+             | sed -n 's/.*sleep[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -1)"
+        if [ -n "$r" ]; then printf '%s\n' "$r"; return 0; fi
+    done
+    printf '%s\n' "-1"
+}
+
+# inject_stamp <bot_dir> <kind> <state> [rc] [begin_epoch] -> prints the epoch
+# Gated by BOOT_CAPTURE_ENABLED=1 (per fleet); see the gate below for why.
+# Record the instant start-bot.sh actually injects a keystroke payload into a
+# pane (#1265 blocker 2). The service rung is NOT a proxy for it: measured on
+# the 2026-09-07 boot every rung fired to the second off basic.target while the
+# session appeared 36-168s later, so every bit of the variance sits downstream
+# of ExecStart and none of it was recorded anywhere.
+#
+# A FILE, and deliberately not a plane event. This runs inside the boot storm
+# being measured; a shim spawn per send would perturb the measurement it exists
+# to take. boot-capture.sh reads the file and does the emitting, off the hot
+# path.
+#
+# Written TWICE per send — `sending` before the call, `done` after — so a send
+# that never returns leaves `state=sending` on disk rather than leaving nothing.
+# A hung injection is the failure this issue is about, and it must not be the
+# one case that records silence. start-bot.sh runs under `set -e`, so a failing
+# send exits the script and the `sending` stamp is what survives; that is the
+# intended record and no caller needs to catch the status to get it.
+#
+# Carries the boot epoch it belongs to. Like data/.spawn, the file is
+# overwritten on every start, so a keepalive restart replaces a boot stamp with
+# a plausible one describing a different event. Without this field the two are
+# indistinguishable and the later one reads as authoritative.
+inject_stamp() {
+    local bot_dir="$1" kind="$2" state="$3" rc="${4:-}" begin="${5:-}"
+    local now boot="" dur="-"
+    now="$(date +%s 2>/dev/null)" || return 0
+    # The epoch is printed unconditionally: the caller pairs `sending` with
+    # `done` using it, and a gate that changed the RETURN shape would make the
+    # call sites branch on arming. Only the WRITE is gated.
+    printf '%s\n' "$now"
+    # OPT-IN, per fleet (BOOT_CAPTURE_ENABLED=1 in fleet.yaml `env:`). Not
+    # caution about the write — it is a 60-byte file — but delivery: lib/ is
+    # read on demand per use, so a root pull puts this on every bot on its next
+    # start with no restart gate and no canary window. The flag is the only
+    # place a rollout can be staged one fleet at a time.
+    [ "${BOOT_CAPTURE_ENABLED:-0}" = "1" ] || return 0
+    [ -n "$bot_dir" ] && [ -d "$bot_dir" ] || return 0
+    boot="$(resolve_boot_epoch 2>/dev/null)" || boot=""
+    [ -n "$begin" ] && dur=$(( now - begin ))
+    mkdir -p "$bot_dir/data" 2>/dev/null || true
+    printf 'state=%s kind=%s at=%s epoch=%s boot=%s rc=%s dur=%s\n' \
+        "$state" "$kind" "$(ts_iso)" "$now" "${boot:--}" "${rc:--}" "$dur" \
+        > "$bot_dir/data/.inject" 2>/dev/null || true
+}
+
 # fleet_service_prefix <fleet.yaml-path>
 # Emit the fleet's service_prefix (composer default "claudlobby" when unset).
 # Mirrors claudlobby's documented schema — `service_prefix:` at 2-space indent
