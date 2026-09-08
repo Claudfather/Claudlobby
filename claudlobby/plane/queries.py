@@ -156,6 +156,64 @@ _TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
 _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
               " AND e.msg_id = a.dispatch_msg_id AND e.event='failed')")
 
+# --- the delivery JOIN (chunk P, #1501) ---------------------------------------
+# Delivery, derived ONCE here — the honest replacement for reading
+# `pane_submitted` as "delivered". The sender's Enter cannot see what the
+# receiver ingested (94 of 180 large sends the week before chunk O were wrong);
+# the RECEIVER's own row can. A `received` transmission carries the byte length
+# and sha256 of the prompt the receiving session actually got (received_bytes /
+# received_sha256, in `detail`, landed by lib/plane-dispatch-in.sh), keyed to
+# the sender's msg_id; this JOINs it against the communication's body hash
+# (body_sha256 / body_bytes, computed at ingest over the message proper —
+# contracts.cap_body). Columns: (msg_id, body_bytes, received_bytes, delivery):
+#
+#   delivered    a received proof whose sha256 == body_sha256
+#   truncated    a received proof SHORTER than body_bytes (sha then necessarily
+#                differs — the #1493 head/tail-loss shape; the caller reads the
+#                shortfall off body_bytes - received_bytes)
+#   altered      a received proof neither equal nor shorter: same-or-greater
+#                length, different sha — arrived but not intact (a pane
+#                transform, e.g. sanitize_tmux_input collapsing a multi-line
+#                body's newlines to spaces). Named, never folded into delivered.
+#   unconfirmed  a pane_submitted but NO received proof: the tail (and its
+#                routing trailer) was lost — 8 of 180 — or the receiver was
+#                mid-turn/down, or the send rode a carrier this hook does not see
+#   NULL         no pane_submitted at all — nothing was submitted to a pane, so
+#                there is no tmux-delivery verdict to render for this message
+#
+# The NEWEST `received` wins (a re-send mints a fresh msg_id, so in practice
+# there is one — MAX(ingest_seq) is defensive). Format with ph = the msg_id
+# placeholders; bind the msg_ids once. json_extract reads the proof out of
+# `detail`, the NEWEST_ACK_SQL idiom.
+DELIVERY_STATUS_SQL = (
+    "SELECT c.msg_id AS msg_id, c.body_bytes AS body_bytes,"
+    " r.received_bytes AS received_bytes,"
+    " CASE"
+    "  WHEN r.received_sha256 IS NOT NULL AND r.received_sha256 = c.body_sha256"
+    "    THEN 'delivered'"
+    "  WHEN r.received_sha256 IS NOT NULL AND r.received_bytes < c.body_bytes"
+    "    THEN 'truncated'"
+    "  WHEN r.received_sha256 IS NOT NULL THEN 'altered'"
+    "  WHEN s.msg_id IS NOT NULL THEN 'unconfirmed'"
+    "  ELSE NULL"
+    " END AS delivery"
+    " FROM communications c"
+    " LEFT JOIN ("
+    "  SELECT e.msg_id AS msg_id,"
+    "   json_extract(e.detail, '$.received_sha256') AS received_sha256,"
+    "   json_extract(e.detail, '$.received_bytes') AS received_bytes"
+    "  FROM events e"
+    "  WHERE e.kind='transmission' AND e.event='received'"
+    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
+    "    WHERE e2.kind='transmission' AND e2.event='received' AND e2.msg_id = e.msg_id)"
+    " ) r ON r.msg_id = c.msg_id"
+    " LEFT JOIN ("
+    "  SELECT DISTINCT msg_id FROM events"
+    "  WHERE kind='transmission' AND event='pane_submitted'"
+    " ) s ON s.msg_id = c.msg_id"
+    " WHERE c.msg_id IN ({ph})"
+)
+
 # --- the HUMAN arms (chunk M-A, #1481) ----------------------------------------
 # Two acts a person takes on ONE task, both already just task events: a
 # manager's `escalated` (it asks the human a question, and is NON-terminal —

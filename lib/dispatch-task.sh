@@ -701,8 +701,14 @@ if [ "$PLANE_ARMED" = "1" ]; then
 fi
 
 # Send via the low-level race-safe primitive (re-validates the session).
+# Carry PLANE_MSG_ID ACROSS the dispatch.sh process boundary (chunk P, #1501):
+# bot_tmux_send reads it and appends the `⟦plane:<msg_id>⟧` routing trailer on
+# its own final line, so the receiver's UserPromptSubmit hook can record what
+# actually arrived and the delivery JOIN can prove it. Per-command env so it
+# scopes to THIS send only and never leaks to another bot_tmux_send. Empty
+# (an unarmed plane minted no id) -> no trailer, an untracked send by design.
 send_rc=0
-"$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
+PLANE_MSG_ID="$PLANE_MSG_ID" "$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
 
 # Outcome-typed transmission (PR-B T4/§6b #7): clean send into an idle pane =
 # pane_submitted; clean send into a pane the pre-send probe saw BUSY =

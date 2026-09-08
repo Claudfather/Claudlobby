@@ -86,7 +86,10 @@ _plane_transmission() {
         | plane_emit_events briefing-trigger || true
 }
 
-if "$LIB_DIR/dispatch.sh" "$BOT" "/briefing $SLOT"; then
+# PLANE_MSG_ID across the process boundary (chunk P, #1501): the briefing is a
+# tracked communication, so bot_tmux_send tags the send and the receiver records
+# delivery. Empty when the plane is unarmed -> no trailer.
+if PLANE_MSG_ID="$PLANE_MSG_ID" "$LIB_DIR/dispatch.sh" "$BOT" "/briefing $SLOT"; then
     echo "$TS DISPATCH $BOT/$SLOT — /briefing $SLOT sent" >> "$LOG"
     emit_fleet_event briefing_dispatched briefing "$(briefing_data ok)" "$BOT_DIR" "$BOT"
     _plane_transmission "pane_submitted"

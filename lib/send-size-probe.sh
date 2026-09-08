@@ -90,7 +90,8 @@
 #
 # Usage: send-size-probe.sh [--arm chunked|unchunked|both] [--n N]
 #                           [--sizes "500 900 ..."] [--deadline SECS]
-#                           [--filler varied|repeat|ident2] [--keep] [--reap]
+#                           [--filler varied|repeat|ident2] [--via-hook]
+#                           [--keep] [--reap]
 #   --arm A          chunked (the shipped default), unchunked
 #                    (PANE_SEND_CHUNK_BYTES=0, the pre-fix control), or both.
 #                    Default both.
@@ -105,6 +106,14 @@
 #                    recipient-side defect — so they measure the TUI rather than
 #                    the pty. `ident2` is the realistic form of it (ordinary
 #                    numbered lines, not one repeated character).
+#   --via-hook       chunk P (#1501): after each send, run the RECEIVER hook
+#                    (plane-dispatch-in.sh) against the arrived text and assert
+#                    the `received` fact it emits AGREES with this probe's own
+#                    transcript verdict (whole -> sha matches; head/tail-lost ->
+#                    fewer bytes than sent). The instrument checking the
+#                    instrument. Any disagreement fails the run (rc 1); a host
+#                    with no plane recorder degrades to `unavailable`, never a
+#                    false disagreement. OFF by default; zero cost when unset.
 #   --keep           keep the scratch tree (config dir, transcripts, rows.tsv).
 #   --reap           kill any leftover sendprobe tmux server and remove its
 #                    socket, then exit. Needs no gate: it destroys only this
@@ -247,6 +256,79 @@ classify_arrival() {
         printf 'other'
     fi
     return 0
+}
+
+# --- chunk P (#1501): the receiver-hook cross-check (--via-hook) --------------
+# via_hook_agrees <verdict> <payload_sha> <payload_bytes> <received_sha> <received_bytes>
+# The instrument checking the instrument: does the RECEIVER hook's `received`
+# fact agree with THIS probe's independent transcript verdict? Prints exactly
+# one of agree / disagree / skip.
+#   whole      -> the hook must hash the arrival identical to the sent payload
+#   head-lost  -> a strict suffix, so FEWER bytes than sent
+#   tail-lost  -> a strict prefix, also FEWER bytes (in production the lost tail
+#                 takes the trailer with it and NO received fact lands — the
+#                 honest UNCONFIRMED; here the probe hands the hook the arrived
+#                 text directly, so shorter-than-sent is the checkable invariant)
+#   absent / other -> no claim (skip)
+via_hook_agrees() {
+    local verdict="$1" psha="$2" pbytes="$3" rsha="$4" rbytes="$5"
+    case "$verdict" in
+        whole)
+            [ "$rsha" = "$psha" ] && printf 'agree' || printf 'disagree' ;;
+        head-lost|tail-lost)
+            case "$rbytes" in ''|*[!0-9]*) printf 'disagree'; return 0 ;; esac
+            [ "$rbytes" -lt "$pbytes" ] && printf 'agree' || printf 'disagree' ;;
+        *)  printf 'skip' ;;
+    esac
+    return 0
+}
+
+# payload_sha256 <text> -- "sha256:<hex>" over the UTF-8 bytes, the form the
+# plane stores (contracts.cap_body). Neither BSD `shasum` nor GNU `sha256sum` is
+# guaranteed, so a missing tool prints nothing + returns 1 and the caller treats
+# the cross-check as unavailable rather than manufacturing a disagreement.
+payload_sha256() {
+    local hex=""
+    if command -v shasum >/dev/null 2>&1; then
+        hex=$(printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}')
+    elif command -v sha256sum >/dev/null 2>&1; then
+        hex=$(printf '%s' "$1" | sha256sum 2>/dev/null | awk '{print $1}')
+    fi
+    [ -n "$hex" ] && printf 'sha256:%s' "$hex" || return 1
+}
+
+# hook_received_fact <arrived_text> <msg_id> <emit_root>
+# Run the SHIPPED receiver hook on a prompt built from the arrived text plus a
+# routing trailer, then read back the `received` fact it emitted. Prints
+# `<received_sha256> <received_bytes>` on success, nothing on any failure (no
+# hook, no CLI to record with, no row) so the caller degrades to "unavailable"
+# rather than a false disagreement. Exercises the real hook, never a copy.
+hook_received_fact() {
+    local arrived="$1" msgid="$2" root="$3"
+    local hookp; hookp="$(dirname "${BASH_SOURCE[0]}")/plane-dispatch-in.sh"
+    [ -f "$hookp" ] || return 1
+    mkdir -p "$root/state/plane" 2>/dev/null || return 1
+    printf '{"*": "full"}' > "$root/state/plane/capture.json" 2>/dev/null || return 1
+    local prompt json
+    prompt="set +H; ${arrived}"$'\n'"⟦plane:${msgid}⟧"
+    json=$(printf '%s' "$prompt" | python3 -S -E -c \
+        'import json,sys; print(json.dumps({"prompt": sys.stdin.read()}))' 2>/dev/null) || return 1
+    printf '%s' "$json" | \
+        CLAUDLOBBY_ROOT="$root" FLEET_NAME="sendprobe" BOT_ID="probe" \
+        PLANE_EMIT_DISABLED="" bash "$hookp" >/dev/null 2>&1 || true
+    local db="$root/state/plane/plane.db"
+    [ -f "$db" ] || return 1
+    python3 -S -E - "$db" "$msgid" <<'PYQ' 2>/dev/null || return 1
+import json, sqlite3, sys
+db, msgid = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+r = conn.execute("SELECT detail FROM events WHERE kind='transmission'"
+                 " AND event='received' AND msg_id=?", (msgid,)).fetchone()
+if not r or not r[0]:
+    sys.exit(1)
+d = json.loads(r[0])
+print(d.get("received_sha256", ""), d.get("received_bytes", ""))
+PYQ
 }
 
 # parse_sizes <string> — space- or comma-separated byte sizes, one per line.
@@ -436,6 +518,11 @@ SIZES_RAW="500 900 1100 1500 2100 3100 4200"
 DEADLINE=25
 FILLER=varied
 KEEP=0
+# --via-hook (chunk P, #1501): after each send, run the RECEIVER hook
+# (plane-dispatch-in.sh) against the arrived text and assert the `received`
+# fact it emits AGREES with this probe's own transcript verdict — the
+# instrument checking the instrument. OFF by default; zero cost when unset.
+VIA_HOOK=0
 # Globals, deliberately not locals of main: the EXIT trap fires after main has
 # returned, when its locals are already out of scope, so a `local base` would
 # leave the tmux server and the scratch tree behind exactly when the run failed.
@@ -515,6 +602,7 @@ main() {
             --sizes)    SIZES_RAW="${2:-}"; shift 2 ;;
             --deadline) DEADLINE="${2:-}"; shift 2 ;;
             --filler)   FILLER="${2:-}"; shift 2 ;;
+            --via-hook) VIA_HOOK=1; shift ;;
             --keep)     KEEP=1; shift ;;
             # Before every gate below: reaping needs no real `claude`, no
             # SEND_PROBE_REAL, and no dependency it might be waiting on — it
@@ -718,6 +806,8 @@ main() {
     esac
 
     local rep=1 size arm tok payload got verdict arrived cap
+    local vh_msgid vh_root vh_fact vh_psha vh_rsha vh_rbytes vh_agree
+    local via_hook_disagree=0 via_hook_checked=0
     while [ "$rep" -le "$REPS" ]; do
         for size in $sizes; do
             # Arms inner: the two share the same minute of host conditions.
@@ -746,6 +836,24 @@ main() {
                 printf '%s\t%s\t%s\t%s\t%s\n' "$arm" "$size" "$rep" "$verdict" "$arrived" >> "$rows"
                 printf '  rep %d  %-9s %5s bytes -> %-9s arrived %s\n' \
                     "$rep" "$arm" "$size" "$verdict" "$arrived"
+                # chunk P: the receiver hook cross-check. Only when armed and
+                # when there is an arrival to hand the hook.
+                if [ "$VIA_HOOK" = "1" ] && [ "$verdict" != "absent" ]; then
+                    vh_msgid="msg_$(printf '%s' "$tok" | { shasum -a 256 2>/dev/null || sha256sum 2>/dev/null; } | cut -c1-32)"
+                    vh_root="$PROBE_BASE/viahook/$tok"
+                    vh_fact=$(hook_received_fact "$got" "$vh_msgid" "$vh_root" || true)
+                    vh_psha=$(payload_sha256 "$payload" || true)
+                    if [ -n "$vh_fact" ] && [ -n "$vh_psha" ]; then
+                        vh_rsha=${vh_fact%% *}; vh_rbytes=${vh_fact##* }
+                        vh_agree=$(via_hook_agrees "$verdict" "$vh_psha" "$size" "$vh_rsha" "$vh_rbytes")
+                        via_hook_checked=$((via_hook_checked + 1))
+                        [ "$vh_agree" = "disagree" ] && via_hook_disagree=$((via_hook_disagree + 1))
+                        printf '        via-hook: %-8s (hook received %s bytes of %s sent)\n' \
+                            "$vh_agree" "$vh_rbytes" "$size"
+                    else
+                        printf '        via-hook: unavailable (no recorder or no fact)\n'
+                    fi
+                fi
             done
         done
         rep=$((rep + 1))
@@ -757,6 +865,13 @@ main() {
         render_table "$arm" "$rows"
         echo ""
     done
+    if [ "$VIA_HOOK" = "1" ]; then
+        printf 'via-hook cross-check: %s checked, %s disagreed\n' \
+            "$via_hook_checked" "$via_hook_disagree"
+        # A disagreement is a real finding — the hook read something other than
+        # what the transcript verdict says arrived — so the run fails loud.
+        [ "$via_hook_disagree" -eq 0 ] || return 1
+    fi
     return 0
 }
 

@@ -1400,6 +1400,30 @@ bot_tmux_send() {
     fi
     local safe
     safe=$(sanitize_tmux_input "$text")
+    # chunk P (#1501): the plane routing trailer. When the emitting door set
+    # PLANE_MSG_ID (dispatch-task, report-back, briefing-trigger -- the doors
+    # that emit a plane communication and send through tmux), append it as
+    # a marker on its OWN final line, AFTER sanitize (so sanitize cannot strip
+    # the marker) and BEFORE pane_send_verified (so chunk O chunks the whole
+    # payload byte-safe and the marker rides the LAST chunk -- surviving the
+    # head loss that was #1493's measured failure). The receiver's
+    # UserPromptSubmit hook (plane-dispatch-in.sh) recognises the marker,
+    # strips it plus any `set +H; ` prefix, and records the byte length + sha256
+    # of the message it actually got, keyed to <msg_id> -- which the delivery
+    # JOIN compares to the sender's body_sha256. body_sha256 is UNCHANGED: the
+    # door hashed the message proper before this line, and the marker rides on a
+    # line below it. GRAMMAR-GUARDED (a minted msg id only), so a stray env
+    # value can never inject a newline or a stray marker glyph into the payload.
+    # A send with no PLANE_MSG_ID (a raw human prompt, a keepalive /reload)
+    # carries no trailer and is an untracked prompt by design.
+    local _plane_msg_pat='^msg_[0-9a-f]{32}$'
+    if [ -n "${PLANE_MSG_ID:-}" ]; then
+        if [[ "$PLANE_MSG_ID" =~ $_plane_msg_pat ]]; then
+            safe="$safe"$'\n'"⟦plane:${PLANE_MSG_ID}⟧"
+        else
+            echo "bot_tmux_send: PLANE_MSG_ID '$PLANE_MSG_ID' is not a minted id -- no plane trailer appended" >&2
+        fi
+    fi
     pane_send_verified "$peer_socket" "$session" "$safe"
 }
 
