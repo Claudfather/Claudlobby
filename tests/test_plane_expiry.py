@@ -50,17 +50,40 @@ def _complete(root, wi, aid):
                                    "event": "completed"}}])
 
 
-def _seed(root):
-    stale = _dispatch(root, "a", expected_by=NOW - timedelta(days=10))
-    fresh = _dispatch(root, "b", expected_by=NOW - timedelta(days=2))
-    done = _dispatch(root, "c", expected_by=NOW - timedelta(days=30))
+def _live_now():
+    """The instant the CLI and the launcher will actually use."""
+    return datetime.now(timezone.utc)
+
+
+def _seed(root, ref):
+    """Seed the three rows RELATIVE to `ref`. The parameter is REQUIRED, and
+    that is the fix rather than an inconvenience.
+
+    This file has two kinds of test and they run on two different clocks: the
+    in-process ones pass `now=NOW` to `expirable()` and are frozen, while the
+    CLI and launcher ones shell out to a real process that reads the wall
+    clock. While the seed hardcoded NOW, the second kind was a time bomb —
+    `fresh` (NOW - 2d) sat 7 days short of the horizon on 2026-09-02 and
+    crossed it on 2026-09-07T12:00:00Z, at which point the sweep counted 2
+    where the assertion says 1. It went off 15 minutes after the last green
+    run on main and took every PR on the repo with it (#1498).
+
+    A default value here would re-arm it: the next live-clock test would get
+    the frozen instant by omission, which is precisely how this one was
+    written. So every caller must say which clock it is on, and the DATES
+    disappear — only the offsets remain, and those hold at every instant.
+    `test_the_seed_holds_at_any_instant` pins that.
+    """
+    stale = _dispatch(root, "a", expected_by=ref - timedelta(days=10))
+    fresh = _dispatch(root, "b", expected_by=ref - timedelta(days=2))
+    done = _dispatch(root, "c", expected_by=ref - timedelta(days=30))
     _complete(root, *done)
     return stale, fresh, done
 
 
 def test_only_stale_non_terminal_assignments_are_expirable(tmp_path):
     root = _root(tmp_path)
-    stale, fresh, done = _seed(root)
+    stale, fresh, done = _seed(root, NOW)
     conn = connect(db_path(root))
     try:
         plan = expirable(conn, now=NOW, after_days=7)
@@ -71,9 +94,41 @@ def test_only_stale_non_terminal_assignments_are_expirable(tmp_path):
     assert plan.unattributed == []
 
 
+def test_the_seed_holds_at_any_instant(tmp_path):
+    """The property the hardcoded dates did not have (#1498).
+
+    The old seed was correct on the day it was written and wrong seven days
+    later, and nothing in the file said which day that was. This asserts the
+    invariant instead of the dates: at ANY reference instant the seed produces
+    exactly one expirable row, so no clock can arm it.
+
+    The instants below are deliberately chosen to include the one that did:
+    2026-09-07T12:00Z is when the old `fresh` row (NOW - 2d) crossed the 7-day
+    horizon and turned a green suite red for the whole repo.
+    """
+    for i, ref in enumerate([
+        datetime(2020, 1, 1, tzinfo=timezone.utc),
+        NOW,
+        datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc),   # the trigger
+        datetime(2026, 9, 7, 12, 0, 1, tzinfo=timezone.utc),
+        _live_now(),
+        datetime(2099, 12, 31, tzinfo=timezone.utc),
+    ]):
+        root = _root(tmp_path / f"i{i}")
+        stale, _fresh, _done = _seed(root, ref)
+        conn = connect(db_path(root))
+        try:
+            plan = expirable(conn, now=ref, after_days=7)
+        finally:
+            conn.close()
+        assert [r["assignment_id"] for r in plan.rows] == [stale[1]], (
+            f"seed is not clock-relative at {ref.isoformat()}"
+        )
+
+
 def test_expired_event_clears_attention_and_sets_status_idempotently(tmp_path):
     root = _root(tmp_path)
-    stale, fresh, done = _seed(root)
+    stale, fresh, done = _seed(root, NOW)
     conn = connect(db_path(root))
     try:
         before = [r[0] for r in conn.execute(
@@ -111,7 +166,7 @@ def _cli(root, *argv):
 
 def test_cli_dry_run_then_live(tmp_path):
     root = _root(tmp_path)
-    _seed(root)
+    _seed(root, _live_now())   # shells out: real clock, not NOW
     dry = _cli(root, "--dry-run")
     assert dry.returncode == 0 and "would expire 1" in dry.stdout
     conn = connect(db_path(root))
@@ -150,7 +205,7 @@ def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path):
     is indistinguishable from a broken timer and that ambiguity is exactly
     what a dormant-by-default estate taught operators to ignore."""
     root = _root(tmp_path)
-    _seed(root)
+    _seed(root, _live_now())   # shells out: real clock, not NOW
     on = _launcher(root, "--dry-run", armed=True)
     assert on.returncode == 0 and "would expire 1" in on.stdout
     off = _launcher(root, "--dry-run", armed=False)
@@ -170,7 +225,7 @@ def test_launcher_runs_with_no_flag_at_all(tmp_path):
     fails if someone restores `${FLAG:-0}` while leaving the comments alone."""
     import os as _os
     root = _root(tmp_path)
-    _seed(root)
+    _seed(root, _live_now())   # shells out: real clock, not NOW
     env = dict(HOME=str(root), CLAUDLOBBY_ROOT=str(root),
                PATH=f"{REPO / '.venv' / 'bin'}:" + _os.environ.get("PATH", ""))
     r = subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), "--dry-run"],
@@ -289,7 +344,7 @@ def test_concurrent_sweeps_collapse_to_one_expired_row(tmp_path):
     so two sweeps that both read non-terminal and both emit produce ONE
     ledger row — idempotent concurrently, not just in sequence."""
     root = _root(tmp_path)
-    _seed(root)
+    _seed(root, NOW)
     conn = connect(db_path(root))
     try:
         plan = expirable(conn, now=NOW, after_days=7)
