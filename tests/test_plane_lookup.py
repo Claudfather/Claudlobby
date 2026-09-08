@@ -118,6 +118,26 @@ def test_not_found_is_empty_rc0_and_unreachable_is_rc3(tmp_path):
     assert un.returncode == 3 and un.stdout == "" and "unreachable" in un.stderr
 
 
+def test_by_assignment_returns_open_only_unless_any_state(tmp_path):
+    """#1492: `--by-assignment <asg>` names the row only while it is OPEN — task-act
+    resolves an OPEN row through it — and `--any-state` also names a CLOSED row so the
+    refusal can still print its `sha:` key. Pins the `open_only` flag: inverting it
+    makes task-act's refusal blind to a closed row and its act reach for one."""
+    root = _root(tmp_path)
+    wi_o, asg_o, _ = _dispatch(root, "a", "sha:" + "a" * 32)   # stays OPEN
+    wi_c, asg_c, _ = _dispatch(root, "c", "sha:" + "b" * 32)   # closed below
+    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
+                       "source_ref": "dispatch-log:sha:" + "b" * 32,
+                       "payload": {"work_item_id": wi_c, "assignment_id": asg_c,
+                                   "event": "completed", "actor": f"bot:{F}/w1"}}])
+    # OPEN: named with or without --any-state
+    assert _run(root, "--by-assignment", asg_o).stdout.split()[:2] == [wi_o, asg_o]
+    assert _run(root, "--by-assignment", asg_o, "--any-state").stdout.split()[:2] == [wi_o, asg_o]
+    # CLOSED: EMPTY without --any-state (open_only), named WITH it
+    assert _run(root, "--by-assignment", asg_c).stdout.strip() == ""
+    assert _run(root, "--by-assignment", asg_c, "--any-state").stdout.split()[:2] == [wi_c, asg_c]
+
+
 def test_superseded_event_makes_the_old_assignment_terminal(tmp_path):
     """What --supersedes now buys: the retired assignment leaves the open set."""
     root = _root(tmp_path)
