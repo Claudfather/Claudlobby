@@ -89,9 +89,16 @@ def test_every_switch_carries_both_directions():
 def test_the_target_workflow_doors_are_the_reaction_chain():
     """Scoped narrowly on purpose: status's header names these and nothing
     else. A header that listed every off switch would be scrolled past, which
-    is the same failure as printing nothing."""
+    is the same failure as printing nothing.
+
+    `pane-send-chunking` joined the set in the chunk-O fold and earns it the
+    same way the other three do: with chunking off, a dispatch over 1 KB
+    arrives TAIL ONLY, so the envelope and the task id are gone, the worker
+    cannot report against an id it never received, and the row never closes.
+    The loop stops closing rather than merely slowing down."""
     assert {s.key for s in sw.SWITCHES if s.target_workflow} == {
-        "task-recheck", "plane-expire", "plane-recording"}
+        "task-recheck", "plane-expire", "plane-recording",
+        "pane-send-chunking"}
 
 
 def test_a_fresh_fleet_has_everything_but_the_opt_ins_on(tmp_path):
@@ -101,7 +108,8 @@ def test_a_fresh_fleet_has_everything_but_the_opt_ins_on(tmp_path):
     assert off == {s.key for s in sw.SWITCHES if s.polarity == sw.OPT_IN}
     assert {"task-recheck", "plane-expire", "plane-prune", "plane-daemon",
             "plane-view", "plane-host-probe", "registry-scan",
-            "spindown-receipt", "plane-recording"} <= on
+            "spindown-receipt", "plane-recording",
+            "pane-send-chunking"} <= on
 
 
 def test_the_shipped_tier_agrees_with_the_registry():
@@ -501,7 +509,7 @@ def test_the_composer_arming_tables_are_derived_not_listed():
 def test_the_validator_namespaces_come_from_the_registry():
     """Derived, so a door deleted tomorrow warns without anyone touching the
     validator — and a fleet's own MYTOOL_ENABLED never does."""
-    assert sw.namespaces() == {"TASK", "PLANE", "SESSION", "SPINDOWN"}
+    assert sw.namespaces() == {"TASK", "PLANE", "SESSION", "SPINDOWN", "PANE"}
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED
 
@@ -589,6 +597,70 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
     qpaths = Paths(root=quiet, fleet_dir=quiet)
     assert "PLANE_EMIT_DISABLED" not in compose_bot_conf(
         qfleet.bots["kev"], qfleet, qpaths)
+
+
+# ---------------------------------------------------------------------------
+# the chunk-O fold: a knob that restores a data-losing send is NAMED (F8)
+# ---------------------------------------------------------------------------
+
+
+def test_pane_send_chunking_is_a_registered_switch(tmp_path):
+    """`PANE_SEND_CHUNK_BYTES=0` restores the pre-#1493 single send — the one
+    that lost the head of 94 of 180 large dispatches in a week — and it reaches
+    a live bot through `fleet.yaml env:` -> bot.conf like any other session
+    knob. "Nobody would set that" is a hope, not a mechanism; the registry is
+    the mechanism.
+
+    It is an opt-OUT whose value is a BYTE CAP rather than a boolean, which the
+    polarity already handles correctly: only an exact `0` is off, so `900`,
+    `450` and an empty assignment all leave chunking on."""
+    s = sw.by_key("pane-send-chunking")
+    assert s.polarity == sw.OPT_OUT and s.scope == sw.DOOR
+    assert s.env == "PANE_SEND_CHUNK_BYTES"
+    # bot.conf, for session-digest's reason: the door runs inside a bot session
+    # and start-bot.sh sources the .env tiers before `set -a`.
+    assert s.carrier == sw.BOT_CONF
+    assert "bots.NAME.env:" in s.disarm
+    # ...and the `what` says BOTH carriers, because a host-side sender (a hand
+    # run, a timer's dispatch) reads the host or root .env instead.
+    assert "byte cap" in s.what and "host or root .env" in s.what
+
+    rows = _resolve(tmp_path)
+    assert _state(rows, "pane-send-chunking").on is True
+    # a byte cap that is not 0 is still ON — the polarity must not read "set"
+    # as "armed"
+    assert _state(_resolve(tmp_path / "cap", "PANE_SEND_CHUNK_BYTES=450\n"),
+                  "pane-send-chunking").on is True
+    off = _state(_resolve(tmp_path / "off", "PANE_SEND_CHUNK_BYTES=0\n"),
+                 "pane-send-chunking")
+    assert off.on is False and off.label == "off"
+
+
+def test_chunking_off_reaches_status_header_and_the_table(tmp_path):
+    """The other half of F8: named where the operator looks. A dispatch that
+    arrives TAIL ONLY has lost its envelope and its task id, so the row can
+    never be reported against and never closes — which is a reaction that does
+    not happen, not a slower one."""
+    from claudlobby.status import switches_off_note
+
+    rows = _resolve(tmp_path, "PANE_SEND_CHUNK_BYTES=0\n")
+    st = _state(rows, "pane-send-chunking")
+    assert st in sw.target_workflow_off(rows)
+    assert "pane-send-chunking off on demo" in switches_off_note("demo", rows)
+    assert "pane-send-chunking" in sw.summary_line(rows)
+    assert "pane-send-chunking" in sw.format_table(rows)
+
+
+def test_the_lib_door_and_the_registry_spell_the_knob_the_same_way():
+    """The shell reads the variable and the table describes it; a rename on one
+    side and not the other is how the estate ended up with flags nothing read.
+    Pinned against the door's own source, not a second list."""
+    body = (REPO / "lib" / "lib-common.sh").read_text()
+    assert "PANE_SEND_CHUNK_BYTES" in body
+    # the loud line the fold added, so an off switch is visible in the logs of
+    # the host it is off on
+    assert "chunking OFF (PANE_SEND_CHUNK_BYTES=0)" in body
+    assert "pane-send-chunking" in body   # the door points at its registry row
 
 
 # ---------------------------------------------------------------------------

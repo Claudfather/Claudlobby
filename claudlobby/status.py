@@ -482,9 +482,9 @@ def switches_off_note(fleet_name: str, switch_states: list | None) -> str:
     they have to think to run.
 
     Scoped to the REACTION doors on purpose — not every off switch. A quieter
-    probe or a cold-rung daemon changes latency and detail; these three change
-    whether anything happens at all. A header that named every knob would be
-    scrolled past, which is the same failure as saying nothing.
+    probe or a cold-rung daemon changes latency and detail; these change whether
+    anything happens at all. A header that named every knob would be scrolled
+    past, which is the same failure as saying nothing.
     """
     from . import switches as _sw
 

@@ -10,6 +10,12 @@
 # sits relative to the bottom of the pane, and a hand-drawn approximation that
 # puts the prompt on the last line would pass while production fails — which is
 # exactly how the previous `tail -3` verify shipped dead.
+#
+# RUN IT UNDER `/bin/bash`. tests/test_sh_suites.py drives every suite through
+# `shutil.which("bash")`, which is the right default for Linux; on macOS the
+# fleet's own doors run under `/bin/bash`, which is 3.2, and that is the shell
+# whose parameter expansion and locale behaviour the byte-splitter below
+# depends on. `/bin/bash tests/test_pane_send_verified.sh`.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -121,6 +127,12 @@ bot_tmux() {
             fi
             printf '%s\n' "$*" >> "$SENT_LOG"
             printf 'send\n' >> "$ORDER_LOG"
+            # A tmux that fails MID-PAYLOAD (chunk O fold, F6). Recorded first,
+            # so the failing chunk is still visible in the log; the caller sees
+            # the non-zero exit a dying pane would give it.
+            if [ -n "${FAIL_ON_CHUNK:-}" ] && [ "$CHUNK_N" = "$FAIL_ON_CHUNK" ]; then
+                return 1
+            fi
             ;;
         capture-pane)
             local remaining fixture
@@ -534,6 +546,19 @@ assert_eq "no chunk begins on a UTF-8 continuation byte" "0" "$split"
 r=$(chunk_bytes "$CHUNK_DIR/001")
 assert_eq "the boundary backs off the partial character (899, not 900)" "899" "$r"
 
+# THE CAP, RE-ASSERTED ON MULTIBYTE (chunk O fold, F5). The cap loop above runs
+# on the ASCII payload only, and the two are not the same test: the cap is a
+# BYTE cap, and everything that could make it a character cap by mistake —
+# dropping `local LC_ALL=C` from the splitter, comparing with ${#s} outside it —
+# is invisible on ASCII and doubles or triples the chunk on multibyte. Measured:
+# with `local LC_ALL=C` removed, an all-em-dash payload comes out as 2 chunks of
+# 2700 bytes, which the assertions above catch only by accident.
+over=0
+for f in "$CHUNK_DIR"/*; do
+    [ "$(chunk_bytes "$f")" -le 900 ] || over=$((over + 1))
+done
+assert_eq "no chunk exceeds the cap on a MULTIBYTE payload either" "0" "$over"
+
 cat "$CHUNK_DIR"/* > "$TMPD/rejoined"
 printf '%s' "$mbpayload" > "$TMPD/original"
 r=$(cmp -s "$TMPD/original" "$TMPD/rejoined" && echo same || echo differs)
@@ -586,6 +611,230 @@ r=$(grep -c '^Enter$' "$SENT_LOG" || true)
 assert_eq "repair path: one Enter per send, never per chunk" "2" "$r"
 r=$(grep -cE '"reason": ?"resent-after-box-drew"' "$CAPTURE" || true)
 assert_eq "repair path: still recorded on the plane" "1" "$r"
+
+echo "=== a trailing ';' survives tmux (chunk O fold, F1) ==="
+
+# THE defect. tmux parses its argv as a COMMAND LIST, so a `;` that ENDS an
+# argument is a separator rather than a character: `send-keys -l -- 'A;'` types
+# `A` and exits 0. Measured on tmux 3.6a against a real pane running `cat` —
+# `A;` -> `A`, `B;;` -> `B;`, a lone `;` -> nothing — and reproduced end to end,
+# a 2100-byte payload whose byte 900 is a `;` arriving 2099 bytes long.
+#
+# The single-send era risked only the payload's LAST byte. Chunking puts one
+# boundary every 900 bytes, so the exposure is per boundary now.
+
+_pane_send_keys_arg 'ends-with-one;'
+assert_eq "a trailing ';' is escaped for tmux" 'ends-with-one\;' "$_PANE_SEND_ARG"
+_pane_send_keys_arg 'ends-with-two;;'
+assert_eq "only the LAST ';' is escaped (the others are already literal)" \
+    'ends-with-two;\;' "$_PANE_SEND_ARG"
+_pane_send_keys_arg ';'
+assert_eq "a lone ';' would vanish entirely without the escape" '\;' "$_PANE_SEND_ARG"
+# The shape the RAW send already corrupted: tmux unescapes a trailing `\;`, so a
+# payload genuinely ending in backslash-semicolon arrived as a bare `;`. Doubling
+# the backslash round-trips it, which the pre-fix send never did.
+_pane_send_keys_arg 'ends-with-esc\;'
+assert_eq "a payload ending in a literal backslash-';' round-trips too" \
+    'ends-with-esc\\;' "$_PANE_SEND_ARG"
+_pane_send_keys_arg 'mid;string'
+assert_eq "a ';' anywhere else is untouched" 'mid;string' "$_PANE_SEND_ARG"
+_pane_send_keys_arg 'no semicolon at all'
+assert_eq "a chunk with no ';' is passed through byte for byte" \
+    'no semicolon at all' "$_PANE_SEND_ARG"
+
+# ...and the door actually uses it: the ARGV tmux receives, not just the helper.
+r=$(run_send 'a payload that ends in a semicolon;' "$FIXTURES/input-clean-submit.txt")
+assert_eq "the door sends the ESCAPED argument, not the raw chunk" \
+    'a payload that ends in a semicolon\;' "$(cat "$CHUNK_DIR/001")"
+
+echo "=== ...and a real tmux agrees (F1, live) ==="
+
+# A stub can only show the shape. Whether tmux delivers what the shape claims is
+# a property of tmux, so this leg drives the REAL binary — a throwaway server, a
+# pane reading in raw mode (canonical mode line-buffers and caps a line at
+# MAX_CANON, which is a different mechanism and would swallow the answer).
+if command -v tmux >/dev/null 2>&1; then
+    RT_SOCK="panefoldrt$$"
+    RT_DIR="$TMPD/roundtrip"
+    mkdir -p "$RT_DIR"
+    # kill-server leaves the SOCKET FILE behind, and a directory of dead
+    # harness sockets is litter an operator then has to tell apart from a live
+    # bot's — send-size-probe.sh's probe_cleanup rule, same reason.
+    rt_reap() {
+        tmux -L "$RT_SOCK" kill-server 2>/dev/null || true
+        rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$RT_SOCK" 2>/dev/null || true
+    }
+    trap 'rt_reap; rm -rf "$TMPD"' EXIT
+    rt_out="$RT_DIR/received"
+    tmux -L "$RT_SOCK" new-session -d -s rt -x 200 -y 50 "stty raw -echo; cat > $rt_out"
+    sleep 1
+    for probe in 'x;' 'x;;' ';' 'plain'; do
+        : > "$rt_out"
+        _pane_send_keys_arg "$probe"
+        tmux -L "$RT_SOCK" send-keys -t rt -l -- "$_PANE_SEND_ARG"
+        sleep 0.7
+        assert_eq "real tmux: '$probe' arrives byte-exact" "$probe" "$(cat "$rt_out")"
+    done
+    rt_reap
+    trap 'rm -rf "$TMPD"' EXIT
+else
+    echo "  SKIP: no tmux on PATH — the live round trip needs one"
+fi
+
+echo "=== no two adjacent chunks are ever byte-identical (F2) ==="
+
+# Measured on claude 2.1.263 / macOS: two identical 900-byte blocks of ORDINARY
+# numbered-line text arrived 900 bytes SHORT, one block gone from the middle;
+# 1200 identical bytes plus a varied tail arrived whole; thirty identical 60-byte
+# lines whose phase did not align with the cap arrived whole. So the trigger is
+# `chunk[i] == chunk[i-1]` and nothing about how long the identical run is — the
+# probe's old note ("needs ~1800 identical bytes") described one instance of it.
+# 31 identical 60-byte log lines starting on a boundary is enough, which a
+# dispatch quoting a log reaches without trying.
+split_report() {   # <payload> <cap> -> "<n> <adjacent-equal> <over-cap> <total>"
+    local LC_ALL=C
+    _pane_split_bytes "$1" "$2"
+    local k=0 prev="" dup=0 over=0 total=0 c
+    while [ "$k" -lt "$_PANE_CHUNK_N" ]; do
+        c=${_PANE_CHUNKS[$k]}
+        [ "$c" = "$prev" ] && dup=$((dup + 1))
+        [ "${#c}" -le "$2" ] || over=$((over + 1))
+        total=$((total + ${#c}))
+        prev=$c
+        k=$((k + 1))
+    done
+    printf '%s %s %s %s' "$_PANE_CHUNK_N" "$dup" "$over" "$total"
+}
+
+ident3600=$(printf 'a%.0s' $(seq 1 3600))
+r=$(split_report "$ident3600" 900)
+assert_eq "3600 identical bytes: no adjacent pair equal, none over cap, all bytes kept" \
+    "0 0 3600" "$(printf '%s' "$r" | cut -d' ' -f2-4)"
+
+# The realistic shape: 60-byte lines, phase-aligned with the 900 cap so that
+# chunk boundaries land on line boundaries and consecutive chunks are identical.
+period60=""
+i=0; while [ $i -lt 80 ]; do period60="${period60}$(printf 'L%.0s' $(seq 1 59))
+"; i=$((i + 1)); done
+r=$(split_report "$period60" 900)
+assert_eq "a 60-byte-period payload: no adjacent pair equal, none over cap" \
+    "0 0" "$(printf '%s' "$r" | cut -d' ' -f2-3)"
+LC_ALL=C p60len=${#period60}
+assert_eq "the 60-byte-period payload rejoins to its full length" \
+    "$p60len" "$(printf '%s' "$r" | cut -d' ' -f4)"
+
+# The degenerate cap keeps its STATED bound rather than looping: at cap 1 there
+# is no shorter chunk to take, so adjacent 1-byte chunks may repeat and progress
+# is what matters. Asserted so the floor is a decision, not an accident.
+r=$(split_report "aaaa" 1)
+assert_eq "cap 1: still terminates and keeps every byte (adjacent dups allowed)" \
+    "4 0 4" "$(printf '%s' "$r" | cut -d' ' -f1,3,4)"
+
+echo "=== the inter-chunk settle is real (F3) ==="
+
+# A mutant replacing `[ "$idx" -eq 0 ] || sleep "$settle"` with `:` passed the
+# whole suite. The settle is half the mechanism — the cap stops a chunk FILLING
+# the 1 KB pty queue, and this is what gives the reader time to empty it — so
+# the calls are counted, not assumed.
+SLEEP_LOG="$TMPD/sleeps.log"
+: > "$SLEEP_LOG"
+# Stubbed rather than shortened: the values are what identify which sleep is
+# which, and the real thing would only cost wall clock.
+sleep() { printf '%s\n' "${1:-}" >> "$SLEEP_LOG"; }
+count_sleeps() { grep -cx "$1" "$SLEEP_LOG" || true; }
+
+export PANE_SEND_CHUNK_SETTLE_S=0.3
+export PANE_SEND_SETTLE_S=0.7          # distinct, so the pre-Enter settle is countable
+: > "$SLEEP_LOG"
+r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
+assert_eq "a 3-chunk payload still sends 3 chunks + 1 Enter" "4" "$r"
+assert_eq "...and settles exactly twice BETWEEN the three chunks" "2" "$(count_sleeps 0.3)"
+assert_eq "...at the configured inter-chunk value, not the default" "0" "$(count_sleeps 0.15)"
+assert_eq "...and the pre-Enter settle is its own, separate, single sleep" \
+    "1" "$(count_sleeps 0.7)"
+
+# One chunk, no boundary, no settle: the common send pays nothing for this.
+: > "$SLEEP_LOG"
+run_send 'short payload' "$FIXTURES/input-clean-submit.txt" >/dev/null
+assert_eq "a single-chunk payload sleeps between no chunks at all" "0" "$(count_sleeps 0.3)"
+
+# A malformed value falls back to the DEFAULT, and the fallback is what runs —
+# the existing pin proves the send completes, this one proves it still settles.
+export PANE_SEND_CHUNK_SETTLE_S=not-a-number
+: > "$SLEEP_LOG"
+run_send "$payload2500" "$FIXTURES/input-clean-submit.txt" >/dev/null
+assert_eq "a malformed settle still settles, at the default value" \
+    "2" "$(count_sleeps 0.15)"
+
+unset -f sleep count_sleeps
+export PANE_SEND_CHUNK_SETTLE_S=0
+export PANE_SEND_SETTLE_S=0
+
+echo "=== a mid-payload chunk failure is DISCLOSED (F6) ==="
+
+# When send-keys fails at chunk k>0 the door returns 1 with k chunks already
+# typed and no Enter — so a partial payload is sitting in the input box and the
+# NEXT send concatenates onto it. It is not repaired here on purpose: the
+# obvious clear is a C-c, and a second Ctrl-C in Claude Code exits the session,
+# which is a failure path that can kill a bot. So it is said, and recorded.
+run_send_failing() {
+    local text="$1"; shift
+    : > "$SENT_LOG"; : > "$ORDER_LOG"; : > "$RAW_LOG"
+    rm -f "$CHUNK_DIR"/*; CHUNK_N=0
+    printf '%s\n' "$@" > "$PANE_SCRIPT"
+    local rc=0
+    pane_send_verified sock "$SYNTH_ID" "$text" 2>"$TMPD/send-stderr.log" || rc=$?
+    printf '%s' "$rc"
+}
+
+: > "$CAPTURE"
+r=$(FAIL_ON_CHUNK=2 run_send_failing "$payload2500" "$FIXTURES/input-clean-submit.txt")
+assert_eq "a chunk that fails mid-payload fails the send (never a silent partial)" "1" "$r"
+r=$(grep -c 'chunk 2 of 3 failed' "$TMPD/send-stderr.log" || true)
+assert_eq "the door says WHICH chunk failed" "1" "$r"
+r=$(grep -c '900 bytes left unsubmitted in the box' "$TMPD/send-stderr.log" || true)
+assert_eq "...and how many bytes it left in the box for the next send to run into" "1" "$r"
+r=$(grep -cE '"event": ?"send_miss"' "$CAPTURE" || true)
+assert_eq "the partial is on the plane as a send_miss (the send did NOT land)" "1" "$r"
+r=$(grep -cE '"partial": ?"2/3"' "$CAPTURE" || true)
+assert_eq "the event carries which chunk of how many" "1" "$r"
+r=$(grep -cE '"reason": ?"chunk-send-failed"' "$CAPTURE" || true)
+assert_eq "...named apart from an enter-swallowed retry, which routes differently" "1" "$r"
+# No Enter went out: there is nothing submitted to verify, and firing one would
+# submit the truncated head of a dispatch as if it were the whole thing.
+r=$(grep -c '^Enter$' "$SENT_LOG" || true)
+assert_eq "a failed partial never submits what did arrive" "0" "$r"
+
+echo "=== chunking off is a NAMED, LOUD switch (F8) ==="
+
+# PANE_SEND_CHUNK_BYTES=0 reaches a bot through `fleet.yaml env:` -> bot.conf
+# like any other session knob, so it can restore the pre-fix send on a live
+# fleet. It is registered in claudlobby/switches.py (pinned in
+# tests/test_switches.py) and the door says so every time it runs unchunked: a
+# silent no-op is indistinguishable from a working send.
+export PANE_SEND_CHUNK_BYTES=0
+run_send_failing "$payload2500" "$FIXTURES/input-clean-submit.txt" >/dev/null
+r=$(grep -c 'chunking OFF (PANE_SEND_CHUNK_BYTES=0)' "$TMPD/send-stderr.log" || true)
+assert_eq "the unchunked door names itself and its variable on stderr" "1" "$r"
+r=$(grep -c 'lose their head' "$TMPD/send-stderr.log" || true)
+assert_eq "...and says what it costs" "1" "$r"
+# The trailing-';' guard applies to the legacy shape too: the pre-fix primitive
+# had the same defect on the payload's last byte, and leaving it in would make
+# the probe's control arm measure a ';' as well as the pty queue.
+run_send_failing 'legacy shape with a trailing semicolon;' \
+    "$FIXTURES/input-clean-submit.txt" >/dev/null
+r=$(grep -c -- 'legacy shape with a trailing semicolon\\;' "$RAW_LOG" || true)
+assert_eq "the unchunked path escapes a trailing ';' as well" "1" "$r"
+unset PANE_SEND_CHUNK_BYTES
+
+echo "=== the split does not stay resident after the send (F7) ==="
+
+# _PANE_CHUNKS has to be a global — bash 3.2 cannot return an array — so without
+# a reset the bytes of the last thing a bot sent live for the whole life of the
+# shell, and keepalive's runs for the life of the host.
+_pane_send_payload sock "$SYNTH_ID" "$payload2500" >/dev/null 2>&1
+assert_eq "the chunk count is reset after a send" "0" "$_PANE_CHUNK_N"
+assert_eq "the payload is not still resident in the chunk array" "" "${_PANE_CHUNKS[0]:-}"
 
 echo ""
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="

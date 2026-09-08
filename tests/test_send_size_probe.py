@@ -84,6 +84,33 @@ class TestProbePayload:
         assert "z" * 1500 in out
         assert len(out.encode()) == 2100
 
+    @pytest.mark.parametrize("size", [2100, 3100, 4200])
+    def test_the_ident2_filler_makes_adjacent_chunks_IDENTICAL(self, size):
+        """The realistic form of the recipient-side trigger (chunk O fold, F2).
+
+        The earlier reading of that finding — "it needs ~1800 consecutive
+        identical bytes, which no dispatch has" — was wrong, and a
+        one-character filler is what made it look right. The trigger is
+        `chunk[i] == chunk[i-1]` and nothing else, so this filler reaches it
+        with ORDINARY numbered-line text.
+
+        The block has to START at byte 0, head marker included, or the repeat
+        is offset by the marker's length and no two 900-byte windows align —
+        which would make the filler certify a shape it never produced.
+        """
+        out = _fn("probe_payload", str(size), "TOK123", "ident2")
+        assert len(out.encode()) == size
+        assert out[:900] == out[900:1800]
+        assert out.startswith("TOK123H") and out.endswith("TTOK123")
+
+    def test_the_ident2_filler_carries_NO_newline(self):
+        """send-keys -l types a newline as a newline, so the TUI submits there
+        and the payload arrives as several turns. Measured on the first real
+        run of this filler: the positive control came back `tail-lost` on a
+        100-byte payload, a shape no pty queue can produce."""
+        for size in (100, 900, 2100, 4200):
+            assert "\n" not in _fn("probe_payload", str(size), "TOK123", "ident2")
+
     @pytest.mark.parametrize("size", [100, 500, 900, 1024, 2100, 4200])
     def test_the_repeat_filler_is_also_exact(self, size):
         assert len(_fn("probe_payload", str(size), "TOK123", "repeat").encode()) == size
@@ -290,6 +317,114 @@ class TestWizardHint:
 
 
 # --------------------------------------------------------------------------
+# the constructed child environment (chunk O fold, F4)
+# --------------------------------------------------------------------------
+
+
+class TestChildEnvironment:
+    """The probe's two safety claims — it cannot spend, it cannot touch a
+    fleet — rest entirely on what crosses into the child. The first cut set two
+    variables on the command line and let `tmux new-session` pass the rest of
+    the caller's environment through, so both claims held only in the
+    environment their author happened to run in.
+
+    Pinned on the LADDER, with no boot: the command line is what decides, and a
+    test that needed a real `claude` to check it would be skipped on every host
+    that most needs the check.
+    """
+
+    def _cmd(self) -> str:
+        return _fn("probe_child_command", "/usr/bin/claude", "/scratch/cwd",
+                   "/scratch/cfg", "/scratch/home", "/scratch/env.txt")
+
+    def test_the_child_env_is_BUILT_not_inherited(self):
+        cmd = self._cmd()
+        assert "env -i" in cmd, cmd
+        # everything the child is allowed, and it is allowed nothing else
+        for var in ("PATH=", "HOME='/scratch/home'", "TERM=", "LANG=",
+                    "LC_ALL=", "CLAUDE_CONFIG_DIR='/scratch/cfg'",
+                    "ANTHROPIC_BASE_URL='http://127.0.0.1:9'"):
+            assert var in cmd, f"{var} missing from: {cmd}"
+
+    def test_the_dead_base_url_is_not_routed_around(self):
+        """CLAUDE_CODE_USE_BEDROCK / _USE_VERTEX bypass ANTHROPIC_BASE_URL
+        entirely, so with either inherited the "cannot spend" claim was simply
+        false. They are not on the command line, and `env -i` drops them."""
+        cmd = self._cmd()
+        assert "CLAUDE_CODE_USE" not in cmd
+        assert "ANTHROPIC_API_KEY" not in cmd
+
+    def test_the_pane_dumps_its_own_environment_before_exec(self):
+        """A constructed ladder is a CLAIM until something reads back what the
+        child actually got. `ps eww` was measured and rejected — on macOS it
+        prints the command and no environment at all, so a check built on it
+        reads clean by construction."""
+        cmd = self._cmd()
+        assert "/scratch/env.txt" in cmd
+        assert cmd.rstrip().endswith("""exec "/usr/bin/claude"'"""), cmd
+
+
+class TestEnvLeaks:
+    def test_a_clean_environment_reports_nothing(self):
+        assert _fn("probe_env_leaks",
+                   "PATH=/bin HOME=/tmp/h TERM=xterm LANG=C.UTF-8 "
+                   "CLAUDE_CONFIG_DIR=/tmp/c ANTHROPIC_BASE_URL=http://127.0.0.1:9"
+                   ) == ""
+
+    @pytest.mark.parametrize("leak", [
+        "ANTHROPIC_API_KEY=sk-ant-xxxx",     # spend
+        "CLAUDE_CODE_USE_BEDROCK=1",         # routes around the dead base URL
+        "CLAUDE_CODE_USE_VERTEX=1",
+        "BOT_DIR=/opt/fleet/runtime/bots/kev",   # the #846 vector
+        "CLAUDLOBBY_ROOT=/opt/fleet",
+        "FLEET_NAME=production",
+    ])
+    def test_each_forbidden_family_is_caught(self, leak):
+        out = _fn("probe_env_leaks", f"PATH=/bin {leak} TERM=xterm")
+        assert out.strip() == leak.split("=")[0]
+
+    def test_the_families_are_PREFIXES_not_a_fixed_list(self):
+        """CLAUDE_CODE_USE_* and CLAUDLOBBY_* are open families — whatever
+        routes around the base URL next is in one of them. A list of exact
+        names would go stale in the direction that reads clean, which is the
+        only direction that matters here."""
+        out = _fn("probe_env_leaks",
+                  "CLAUDE_CODE_USE_SOMETHING_NEW=1 CLAUDLOBBY_SRC=/x")
+        assert set(out.split()) == {"CLAUDE_CODE_USE_SOMETHING_NEW",
+                                    "CLAUDLOBBY_SRC"}
+
+    def test_a_value_containing_a_glob_does_not_expand(self, tmp_path):
+        # `for tok in $text` word-splits; without `set -f` a value carrying `*`
+        # would expand into the working directory's filenames.
+        assert _fn("probe_env_leaks", "PATH=/bin:* TERM=xterm") == ""
+
+
+# --------------------------------------------------------------------------
+# the reaper (chunk O fold, F7)
+# --------------------------------------------------------------------------
+
+
+class TestReap:
+    def test_it_removes_only_sendprobe_sockets(self, tmp_path):
+        """The EXIT/INT/TERM/HUP trap covers the ordinary paths; this is the
+        door for a run that still got away — a closed terminal used to leave a
+        tmux server holding a live `claude` and a socket an operator then has
+        to tell apart from a bot's. Scoped by the harness's own prefix."""
+        (tmp_path / "sendprobe1234").write_text("")
+        (tmp_path / "sendprobe5678").write_text("")
+        keep = tmp_path / "ari"          # a real bot's socket, same directory
+        keep.write_text("")
+        out = _fn("probe_reap", str(tmp_path))
+        assert "reaped 2 leftover probe server(s)" in out
+        assert keep.exists(), "the reaper took a socket that was not its own"
+        assert not (tmp_path / "sendprobe1234").exists()
+
+    def test_an_empty_directory_reaps_nothing_and_says_so(self, tmp_path):
+        assert "reaped 0 leftover probe server(s)" in _fn("probe_reap",
+                                                          str(tmp_path))
+
+
+# --------------------------------------------------------------------------
 # CLI contract
 # --------------------------------------------------------------------------
 
@@ -319,6 +454,14 @@ class TestCli:
         r = self._run("--filler", "sideways")
         assert r.returncode == 2
         assert "--filler must be" in r.stderr
+
+    def test_reap_needs_no_gate(self):
+        """It exists for the run that did NOT finish, so it must not sit behind
+        SEND_PROBE_REAL or a dependency check that run may have been waiting
+        on. It destroys only this harness's own litter."""
+        r = self._run("--reap")
+        assert r.returncode == 0, r.stderr
+        assert "reaped" in r.stdout
 
     def test_it_refuses_to_boot_without_the_real_gate(self):
         # A real `claude` must never start from a plain test sweep.
