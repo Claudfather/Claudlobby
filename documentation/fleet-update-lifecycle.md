@@ -129,6 +129,61 @@ assume a composed permission change is inert on a running bot either. The missin
 instrument is a probe run in a **fresh session with the deny present at start**,
 which is the control that separates "not enforced" from "not yet re-read".
 
+**MECHANISM — why a `deny` is honoured in every mode and an `allow` is not.** A
+**bare-name** deny (`Write`, `Bash`) is enforced by **removing the tool from the
+session's toolset**, not by gating a call. Measured on a throwaway bot with
+`deny: ["Bash"]` composed at the project tier *and* bare `Bash` present in the
+user tier: the model answered *"I don't have a shell/Bash tool in this session,
+so I can't run `date`"* and emitted **zero** `Bash` tool calls. That is the same
+shape as the production error a reviewer bot hit reaching for `Write` — *"No such
+tool available: Write. Write is disabled for this session, in subagents as well
+as here."* A removed tool is absent before any mode logic runs, which is why the
+deny holds under `-p` and under `--permission-mode auto` alike; an **allow** is a
+gate, and auto opens it (already recorded above — see the inert `allow`-probe
+bullet; that finding is **not** restated here). It also explains the shape
+asymmetry measured separately on 2026-08-24: a **path-scoped** deny — the rule
+actually measured that day was `Read(//<dir>/**)`, not an `Edit` form — *cannot*
+remove a tool, because it constrains an argument rather than a capability, so it
+must be evaluated per call. That per-call evaluation reaching `Bash` as well as
+the named tool is an **inference here and a measurement elsewhere**: see the
+evidence trail below. **The practical consequence: a bare-name deny
+on one tool does not bind a different tool.** A `Write` deny leaves `Bash`
+untouched, so a heredoc writes freely — nothing is circumvented, because at that
+layer there is no rule to circumvent.
+
+**Pinned, and measured on a throwaway.** `claude 2.1.240`,
+`Linux 6.12.75+rpt-rpi-2712` (aarch64). A disposable project directory and two
+isolated `CLAUDE_CONFIG_DIR`s, auth+trust pre-seeded (without the trust key the
+composed `settings.local.json` is dropped wholesale). **No production bot was
+probed and no real settings file was modified** — `~/.claude/settings.json` was
+copied, never edited, and verified unchanged afterwards at 223 allow entries with
+`deny` absent; the throwaway tree, its credential copies and its tmux server were
+destroyed at the end.
+
+**Evidence trail — an independent later measurement, recorded separately.** The
+probe quoted above was run the morning of 2026-09-01 and its session is gone. A
+fuller permission ladder was run the same afternoon on the ai-platform fleet and
+**does** survive as raw verbatim rows — `2026-09-01-1406-arm-E-grid.psv`, beside
+`2026-08-24-permissions-effectiveness-baseline-970.md`, in that fleet's shared
+planning and knowledge trees. It is not the same probe and does not carry the
+sentence quoted above; it is an independent run that lands on the same mechanism.
+Three of its cells matter here. A bare `Bash` deny returned `NO_TOOL` with the
+verbatim *"No such tool available: Bash. Bash is disabled for this session, in
+subagents as well as here."*, and a bare `Write` deny returned the same shape. A
+path-scoped rule returned a **per-call** refusal instead — *"File is in a
+directory that is denied by your permission settings."* — confirming the
+asymmetry above. And the practical consequence is not inferred there but
+**observed with effect**: under a bare `Write` deny, a `python3` heredoc routed
+through `Bash` wrote the target file successfully.
+
+**What this does NOT establish.** Whether a bare-name deny also removes the tool
+from *subagents* (the production error string claims it does; not measured here).
+Whether `Bash(cat *)` prefix-matches a heredoc redirect. Whether a bare allow
+entry bypasses hook pattern checks. And **where** the removal is performed — whether the
+toolset is trimmed at session construction, at each request assembly, or somewhere
+else entirely. Nothing in this document establishes that, and this measurement does
+not close it either.
+
 ### Partial result — a different instrument, and what it does *not* answer
 
 The probe above is permission-shaped and inert here. A **file-read** probe is not, and it
