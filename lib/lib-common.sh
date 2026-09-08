@@ -1555,7 +1555,10 @@ _pane_split_bytes() {
             chunk=${text:i:len}
             # The F2 rule. Only an EQUAL chunk retries, and it retries once:
             # `lim` strictly decreases, so the next candidate is shorter than
-            # `prev` and cannot match it.
+            # `prev` and cannot match it. This codes around a `claude` TUI quirk
+            # (two byte-identical adjacent chunks lose one), so it is pinned to a
+            # binary that moves: lib/send-size-probe.sh --filler ident2 is the
+            # re-measurement instrument (#1493); re-run it on a claude-major bump.
             [ "$chunk" = "$prev" ] && [ "$len" -gt 1 ] || break
             lim=$((len - 1))
         done
@@ -1688,8 +1691,7 @@ _pane_send_payload() {
     # mistiming it. Digits with at most one decimal point; anything else is the
     # default.
     case "$settle" in
-        ''|*[!0-9.]*|*.*.*) settle="$_PANE_SEND_CHUNK_SETTLE_DEFAULT" ;;
-        .) settle="$_PANE_SEND_CHUNK_SETTLE_DEFAULT" ;;
+        ''|*[!0-9.]*|*.*.*|.) settle="$_PANE_SEND_CHUNK_SETTLE_DEFAULT" ;;
     esac
     while [ "$idx" -lt "$_PANE_CHUNK_N" ]; do
         # Between chunks only. A single-chunk payload — every send under the cap,

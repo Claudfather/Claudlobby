@@ -57,7 +57,10 @@
 # in the environment its author happened to test in.
 #
 # So the child gets `env -i` plus an explicit base — boot-strand-sampler.sh's
-# run_start_bot ladder, same reasoning — and the isolation is ASSERTED rather
+# run_start_bot ladder, same reasoning (this is a third copy of that ladder and
+# its forbidden-name set; the estate's copies are the tracked #846 seam — when
+# that seam lands, this and probe_env_leaks fold into it) — and the isolation is
+# ASSERTED rather
 # than asserted-about: the pane dumps its own environment before exec'ing
 # `claude`, and a dump carrying anything from the forbidden set REFUSES (rc 3).
 # An UNREADABLE dump refuses too. A canary that silently fell back to the real
@@ -243,18 +246,6 @@ classify_arrival() {
     else
         printf 'other'
     fi
-    return 0
-}
-
-# median <n...> — integer median of the numbers on argv, empty for no argv.
-# Lower of the two middles for an even count: a reported figure that is one of
-# the observations beats an average that is none of them, and every loss this
-# measures is quantised, so an interpolated midpoint would name a byte count the
-# instrument never saw.
-median() {
-    [ "$#" -gt 0 ] || { printf ''; return 0; }
-    local mid=$(( ($# + 1) / 2 ))
-    printf '%s\n' "$@" | sort -n | sed -n "${mid}p" | tr -d '\n'
     return 0
 }
 

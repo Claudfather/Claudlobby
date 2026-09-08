@@ -3,7 +3,7 @@
 Two tiers, the tests/test_boot_strand_sampler.py shape:
 
 1. Hermetic (always on): the probe's pure helpers — the arrival classifier, the
-   payload builder, the median, the size parser, the table renderer, the
+   payload builder, the size parser, the table renderer, the
    scratch-path guard and the canonicalizer — driven directly, zero boots and
    zero model calls. These are what turn a transcript into a verdict, so a
    defect in one silently rewrites every row of a real run.
@@ -162,25 +162,8 @@ class TestClassifyArrival:
 
 
 # --------------------------------------------------------------------------
-# median / parse_sizes
+# parse_sizes
 # --------------------------------------------------------------------------
-
-
-class TestMedian:
-    def test_odd_count(self):
-        assert _fn("median", "30", "10", "20") == "20"
-
-    def test_even_count_takes_the_lower_middle(self):
-        # A reported figure that is one of the observations, not an average that
-        # is none of them — every loss here is quantised.
-        assert _fn("median", "10", "20", "30", "40") == "20"
-
-    def test_no_observations_is_empty(self):
-        assert _fn("median") == ""
-
-    def test_sorts_numerically_not_lexically(self):
-        # "1006" sorts before "478" as text; as numbers it does not.
-        assert _fn("median", "1006", "478", "2036") == "1006"
 
 
 class TestParseSizes:
