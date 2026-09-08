@@ -232,6 +232,30 @@ def test_an_escalated_rows_line_still_names_the_question(tmp_path):
     assert "nudged by chris" in line
 
 
+def test_the_row_line_carries_a_runnable_close_command(tmp_path):
+    """#1492 fix 3: each row line ends in the VERBATIM close command for THAT
+    row, keyed by the identifier the row actually has — a task id for an id'd
+    row, the assignment id for an id-less one (which task-act now takes
+    directly). The line is self-sufficient, so the manager pastes it rather
+    than hunting for the key form (three failed invocations in the 2026-09-07
+    sweep, because the digest handed out asg ids the close door would not take)."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    idd = {"task_id": "t-x", "assignment_id": "asg_x", "title": "port the parser",
+           "assignee": f"bot:{F}/ramanujan", "occurred_at": _ago(30),
+           "expected_by": _ago(6), "last_progress_at": None}
+    line = task_cmd.recheck_row_line(idd, index=1, now=now)
+    assert '$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw t-x --reason "…"' in line
+    # an id-less row has no task id — the close command names the asg id, and
+    # #1492's task-act change is what makes that a command the manager can run.
+    idless = {"task_id": "", "assignment_id": "asg_note", "title": "a peer note",
+              "assignee": f"bot:{F}/ramanujan", "occurred_at": _ago(30),
+              "expected_by": None, "last_progress_at": None}
+    line2 = task_cmd.recheck_row_line(idless, index=2, now=now)
+    assert '$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw asg_note --reason "…"' in line2
+
+
 # --- what the re-check records (and how the debounce reads it) ---------------
 
 

@@ -146,6 +146,23 @@ def plane_dispatch_row(root: Path) -> dict | None:
     }
 
 
+def plane_construct_counts(root: Path) -> dict:
+    """How many of each construct the plane holds from the dispatch door: the
+    #1491 pin — a control type records the communication ALONE, so its
+    work_items and assignments must be 0 while its communications is 1. None of
+    the tables existing (nothing recorded) counts as zero of each."""
+    if not (root / "state" / "plane" / "plane.db").exists():
+        return {"communications": 0, "work_items": 0, "assignments": 0}
+    with _ro(root) as conn:
+        return {
+            t: conn.execute(
+                f"SELECT COUNT(*) FROM {t} WHERE emitter = 'dispatch-task'"
+                if t == "communications" else f"SELECT COUNT(*) FROM {t}"
+            ).fetchone()[0]
+            for t in ("communications", "work_items", "assignments")
+        }
+
+
 def plane_report_rows(root: Path) -> list[dict]:
     """Every report the plane holds, oldest first: the report communication's
     body is the [BOTREPORT] line as sent — the summary the door was given

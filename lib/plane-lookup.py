@@ -134,6 +134,29 @@ def _all_open(a) -> int:
     return _with_plane(a.root, fn)
 
 
+def _by_assignment(a) -> int:
+    """`--by-assignment <asg_id> [--any-state]`: `<work_item_id>
+    <assignment_id> <dispatch_msg_id|-> <assignee|-> <fleet|-> <source_ref|->`
+    for the one assignment, or nothing. OPEN only unless `--any-state`.
+
+    The acts' asg-first door (#1492): the re-check digest hands a manager
+    `asg_` ids, and an id-less row has no task id to name — its real key is
+    the content hash in `source_ref`. `task-act.sh` resolves the `asg_` id to
+    that key here and acts through the by-task-id path, so the act stamps the
+    row's real `dispatch-log:sha:<hex>` rather than a fabricated
+    `dispatch-log:asg_...`; the refusal reads `--any-state` to name the sha
+    key even for a row it will not act on. Empty = no such (open) assignment
+    (rc 0); unreachable = rc 3."""
+    def fn(pr, conn):
+        row = pr.assignment_by_id(conn, a.by_assignment, open_only=not a.any_state)
+        if row is not None:
+            print(f"{row['work_item_id']} {row['assignment_id']}"
+                  f" {row['dispatch_msg_id'] or '-'} {row['assignee'] or '-'}"
+                  f" {row['fleet'] or '-'} {row['source_ref'] or '-'}")
+        return 0
+    return _with_plane(a.root, fn)
+
+
 def _escalated(a) -> int:
     """`--escalated --fleet F`: `<assignment_id> <task_id> <by> <occurred_at>
     <question>` per OPEN escalation, oldest first, TAB-separated so a question
@@ -164,6 +187,13 @@ def main(argv=None) -> int:
                     " event and pages the operator once per assignment (chunk M-B)")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
+    ap.add_argument("--by-assignment", default=None,
+                    help="resolve ONE assignment by its asg id to '<wi> <asg> <msg|-> <assignee|->"
+                    " <fleet|-> <source_ref|->' (the acts' asg-first door #1492); OPEN only unless"
+                    " --any-state")
+    ap.add_argument("--any-state", action="store_true",
+                    help="--by-assignment: match a CLOSED assignment too (the refusal reads this to"
+                    " name the sha key of a row it will not act on)")
     ap.add_argument("--events", action="store_true",
                     help="print the fleet's events as legacy JSONL rows, oldest first (needs --fleet;"
                     " --since <iso> bounds; --bot / --type filter) — Phase B, the bot-events ledger from the plane")
@@ -196,6 +226,8 @@ def main(argv=None) -> int:
         if not (a.fleet and a.bot):
             ap.error("--open-idless needs --fleet and --bot")
         return _open_idless(a)
+    if a.by_assignment:
+        return _by_assignment(a)
     if a.workstreams:
         if not a.fleet:
             ap.error("--workstreams needs --fleet")

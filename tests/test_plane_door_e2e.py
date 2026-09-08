@@ -151,36 +151,35 @@ def test_dispatch_task_armed_lands_the_construct_triple(tmp_path, armed):
     assert statuses[row["plane_assignment_id"]] == "open"
 
 
-def test_dispatch_query_armed_lands_the_triple_under_the_importers_content_key(tmp_path, armed):
-    """Cutover chunk 6a: an id-less dispatch (query / cancel / compact /
-    restart) lands work_item + assignment + communication like any other,
-    keyed `dispatch-log:sha:<content key of the ledger line>` — the exact key
-    the importer derives, so a later import classifies as a duplicate and
-    the flipped readers can see an overdue id-less dispatch and apply the
-    resolver's id-less guard."""
+@pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
+def test_a_control_dispatch_records_the_communication_alone(tmp_path, armed, t):
+    """#1491: a CONTROL type (query / cancel / compact / restart) lands the
+    communication and NOTHING else — no work_item, no assignment. Chunk 6a
+    minted the triple for every dispatch id-less ones included, which left a
+    `query` an open assignment with `expected_by = null` that no report could
+    close and that blanked the resolver head while it was the worker's newest
+    assignment (#1418). The communication still carries its `dispatch-log:sha:`
+    provenance (the join key the importer/parity derive), and message_class /
+    command_type are unchanged. The gate is the TYPE, so this holds for all
+    four control verbs, not just the `query` the review measured."""
     libdir, env = armed
-    r = _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "what is the retry logic"', env)
+    r = _bash(f'"{libdir}/dispatch-task.sh" --type {t} w1 "a peer note"', env)
     assert r.returncode == 0, r.stderr
     conn = connect(db_path(tmp_path))
     comm = conn.execute(
-        "SELECT message_class, command_type, work_item_id, source_ref FROM communications"
-    ).fetchone()
-    asg = conn.execute("SELECT source_ref, assignment_id, work_item_id, expected_by FROM assignments").fetchone()
+        "SELECT message_class, command_type, work_item_id, assignment_id, source_ref"
+        " FROM communications").fetchone()
     n_wi = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
+    n_asg = conn.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
     conn.close()
-    row = _plane_row(tmp_path)
-    assert comm["message_class"] == "question" and comm["command_type"] == "query"
-    assert row["task_id"] == "" and row["plane_msg_id"].startswith("msg_")
-    # the deadline is withheld: no plane expected_by — a query that could go
-    # "overdue" paged the shadow on every unanswered one (measured live 2026-09-03)
-    assert row["expected_by"] is None and asg["expected_by"] is None
-    assert n_wi == 1 and asg is not None
-    # keyed by the content key of the row as the retired ledger wrote it —
-    # deterministic from the dispatch itself, 32 hex, the importer's derivation
-    assert asg["source_ref"] == comm["source_ref"]
-    assert re.fullmatch(r"dispatch-log:sha:[0-9a-f]{32}", asg["source_ref"]), asg["source_ref"]
-    assert asg["assignment_id"] == row["plane_assignment_id"] and asg["work_item_id"] == row["plane_work_item_id"]
-    assert comm["work_item_id"] == asg["work_item_id"]
+    # the communication IS recorded, with its provenance ref and its class
+    assert comm is not None
+    assert comm["command_type"] == t
+    assert comm["message_class"] == ("question" if t == "query" else "raw_control")
+    assert re.fullmatch(r"dispatch-log:sha:[0-9a-f]{32}", comm["source_ref"]), comm["source_ref"]
+    # but it links to no construct — and none was minted
+    assert comm["work_item_id"] is None and comm["assignment_id"] is None
+    assert n_wi == 0 and n_asg == 0, "a control type minted a work_item/assignment (#1491)"
 
 
 def test_a_disabled_door_records_nothing_and_still_sends(tmp_path, armed):
@@ -365,16 +364,17 @@ def test_plane_failure_never_blocks_the_door(tmp_path, armed):
 
 def test_an_idless_report_answers_open_idless_dispatches_through_the_real_doors(tmp_path, armed):
     """Cutover chunk 6a, driven through the REAL doors: an id'd task, then an
-    id-less query, then a terminal report with no --task. Before the report
-    the resolver answers nothing (the id-less dispatch is unanswered); the
-    report closes the query's assignment on the plane, and afterwards the
-    resolver hands back the id'd task."""
+    id-less RAW-TEXT send (the id-less shape that still mints a triple after
+    #1491 — a control type mints none), then a terminal report with no --task.
+    Before the report the resolver answers nothing (the id-less dispatch is
+    unanswered); the report closes the raw-text send's assignment on the plane,
+    and afterwards the resolver hands back the id'd task."""
     import subprocess as _sp
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "build the door"', env)
     assert r.returncode == 0, r.stderr
     task_id = _plane_row(tmp_path)["task_id"]
-    r = _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "what is the retry logic"', env)
+    r = _bash(f'"{libdir}/dispatch-task.sh" w1 "what is the retry logic"', env)   # raw text: id-less, deadline-bearing
     assert r.returncode == 0, r.stderr
     r = _bash(f'"{libdir}/report-back.sh" w1 progress "looking"', env)     # a non-terminal report first
     assert r.returncode == 0, r.stderr

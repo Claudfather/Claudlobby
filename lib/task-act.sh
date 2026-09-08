@@ -2,8 +2,15 @@
 # task-act.sh — a MANAGER's two acts on one open task (chunk M-A, #1481).
 #
 # Usage:
-#   task-act.sh withdraw <task-id> --reason "why" [--assignment <asg_id>]
-#   task-act.sh escalate <task-id> "the question" [--assignment <asg_id>]
+#   task-act.sh withdraw <key> --reason "why" [--assignment <asg_id>]
+#   task-act.sh escalate <key> "the question" [--assignment <asg_id>]
+#
+# <key> is any of: a task id (`t-...`); the content-hash key of an id-less row
+# (`sha:<hex32>`, which is what `assignments.source_ref` carries after
+# `dispatch-log:`); or the assignment id the re-check digest hands out
+# (`asg_...`), which the door resolves to the row's own key (#1492). The digest
+# and `--assignment` speak asg ids, an id-less row has no `t-` id, so the door
+# takes whichever identifier the caller actually has.
 #
 # WITHDRAW retires a dispatch the manager no longer wants answered -- the
 # undelivered broadcast, the task overtaken by events -- as a terminal
@@ -57,8 +64,12 @@ install_error_trap ""
 _usage() {
     cat >&2 <<'USAGE'
 Usage:
-  task-act.sh withdraw <task-id> --reason "why"
-  task-act.sh escalate <task-id> "the question for the human"
+  task-act.sh withdraw <key> --reason "why"
+  task-act.sh escalate <key> "the question for the human"
+
+  <key> is a task id (t-...), an id-less row's content key (sha:<hex32>, from
+  assignments.source_ref after "dispatch-log:"), or the asg id the re-check
+  digest hands out (asg_...). The tool resolves whichever you have.
 USAGE
     exit 1
 }
@@ -129,6 +140,59 @@ if ! plane_armed task-act --require-fleet; then
     echo "task-act: the plane is not armed here -- the act is the record, so nothing was done" >&2
     exit 3
 fi
+
+# --- #1492: accept the asg id the re-check digest hands out ------------------
+# The digest names an id-less row only by its asg id, and that row has no task
+# id -- its real key is the content hash in source_ref (dispatch-log:sha:<hex>).
+# Take what the sweep gives: resolve the asg id to the row OWN dispatch key and
+# act through the by-task-id path below, so the event stamps the row REAL
+# source_ref rather than a fabricated dispatch-log:asg_... ; --assignment then
+# narrows the by-task-id result to exactly this row.
+case "$TASK_ID" in
+    asg_*)
+        _asg_id="$TASK_ID"
+        _asg_rc=0
+        _asg_open=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" \
+            --by-assignment "$_asg_id") || _asg_rc=$?
+        if [ "$_asg_rc" -eq 3 ]; then
+            echo "task-act: the plane could not be read (rc 3) -- unreachable, not empty" >&2
+            exit 3
+        elif [ "$_asg_rc" -ne 0 ]; then
+            echo "task-act: the assignment lookup was refused (rc $_asg_rc) -- a malformed call" >&2
+            exit 1
+        fi
+        if [ -n "$_asg_open" ]; then
+            # <wi> <asg> <msg|-> <assignee|-> <fleet|-> <source_ref>
+            _sref=$(printf '%s\n' "$_asg_open" | awk 'NF{print $6; exit}')
+            case "$_sref" in
+                dispatch-log:*)
+                    TASK_ID="${_sref#dispatch-log:}"   # the row OWN key (sha:<hex> or t-<id>)
+                    ASSIGNMENT="$_asg_id"              # narrow to exactly this row
+                    ;;
+                *)
+                    echo "task-act: $_asg_id resolved to an unexpected key ($_sref) -- refusing" >&2
+                    exit 2
+                    ;;
+            esac
+        else
+            # No OPEN assignment by that id. Name the sha form if the row exists
+            # at all (already closed?), so the caller learns the canonical key
+            # rather than hitting a dead end (#1492).
+            _any=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" \
+                --by-assignment "$_asg_id" --any-state) || true
+            _any_sref=$(printf '%s\n' "$_any" | awk 'NF{print $6; exit}')
+            if [ -n "$_any_sref" ] && [ "$_any_sref" != "-" ]; then
+                _key="${_any_sref#dispatch-log:}"
+                echo "task-act: $_asg_id is an assignment id and names no OPEN row (already closed?)." >&2
+                echo "task-act: this row key is $_key -- close an OPEN row by that key with:" >&2
+                echo "  \$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw $_key --reason \"why\"" >&2
+            else
+                echo "task-act: no assignment $_asg_id on the plane (a wrong or already-reaped asg id)" >&2
+            fi
+            exit 2
+        fi
+        ;;
+esac
 
 # --- resolve the row, or refuse naming the candidates ------------------------
 # --task-id= joined with `=`: a task id a human typed may start with `-`, and
