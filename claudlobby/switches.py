@@ -6,10 +6,13 @@
 * spends money,
 * mutates operator source,
 * sends outbound to people at scale, or
-* **has no deployment gate** (amended #1265).
+* **has no deployment gate** (added #1265).
 
-The first four are about what a door DOES when it runs. The fifth is about how
-it ARRIVES, and it exists because ``lib/`` is read on demand, per use: a root
+The cost reasons are about what a door DOES when it runs. This one is about
+how it ARRIVES — a different axis, so the list is deliberately not numbered
+here or in its test (``weekly-worker-restart`` already states a reason outside
+the original four, and a prose count over a registry is the thing that rots).
+It exists and it exists because ``lib/`` is read on demand, per use: a root
 pull is in force for every bot on its next call, with no restart gate and no
 canary window. Where that is the whole delivery mechanism there is no step at
 which one bot can be staged ahead of the others, so the flag is not a hedge

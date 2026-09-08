@@ -182,22 +182,38 @@ session_created_for() {
     case "$out" in ''|*[!0-9]*) printf '%s\n' - ;; *) printf '%s\n' "$out" ;; esac
 }
 
+# stat_mtime (lib-common) owns the portable stat ladder; this only adds the
+# "-" sentinel, so an unreadable mtime cannot enter a row as a number.
 file_mtime_epoch() {
-    local f="$1" v
-    [ -f "$f" ] || { printf '%s\n' -; return 0; }
-    v="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"
+    local v
+    [ -f "$1" ] || { printf '%s\n' -; return 0; }
+    v="$(stat_mtime "$1" 2>/dev/null)"
     case "$v" in ''|*[!0-9]*) printf '%s\n' - ;; *) printf '%s\n' "$v" ;; esac
 }
 
 # The injection stamp start-bot.sh writes at the actual send (#1265 blocker 2).
 # Perishable for the same reason .spawn is — overwritten on every start — so it
 # is read here, at first observation, not at close.
-inject_field() {
-    local f="$1" key="$2" v
-    [ -f "$f" ] || { printf '%s\n' -; return 0; }
-    v="$(tr ' ' '\n' < "$f" 2>/dev/null | sed -n "s/^${key}=//p" | head -1)"
-    [ -n "$v" ] || v=-
-    printf '%s\n' "$v"
+#
+# Read ONCE per bot into INJ_*, never once per field: this is the hot loop the
+# design keeps deliberately light, and a fork per field per bot per tick is the
+# load this file claims not to add.
+read_inject() {
+    INJ_STATE=- INJ_KIND=- INJ_EPOCH=- INJ_BOOT=- INJ_DUR=-
+    [ -f "$1" ] || return 0
+    local line kv k v
+    IFS= read -r line < "$1" 2>/dev/null || return 0
+    for kv in $line; do
+        k="${kv%%=*}"; v="${kv#*=}"
+        [ -n "$v" ] || v=-
+        case "$k" in
+            state) INJ_STATE="$v" ;;
+            kind)  INJ_KIND="$v" ;;
+            epoch) INJ_EPOCH="$v" ;;
+            boot)  INJ_BOOT="$v" ;;
+            dur)   INJ_DUR="$v" ;;
+        esac
+    done
 }
 
 # ── Status mode ─────────────────────────────────────────────────────────────
@@ -231,13 +247,11 @@ while IFS="$(printf '\t')" read -r bot fleet botdir; do
     # cannot otherwise tell a boot-spawn from a restart-spawn.
     spawn="$(file_mtime_epoch "$botdir/data/.spawn")"
     read_at="$(date +%s)"
-    inj="$botdir/data/.inject"
+    read_inject "$botdir/data/.inject"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$bot" "$fleet" "$sc" "$spawn" "$read_at" \
         "$(boot_rung_for "$botdir")" \
-        "$(inject_field "$inj" state)" "$(inject_field "$inj" kind)" \
-        "$(inject_field "$inj" epoch)" "$(inject_field "$inj" boot)" \
-        "$(inject_field "$inj" dur)" >> "$OBS"
+        "$INJ_STATE" "$INJ_KIND" "$INJ_EPOCH" "$INJ_BOOT" "$INJ_DUR" >> "$OBS"
 done < "$DIR/declared"
 
 SEEN_N="$(observed_names | wc -l | tr -d ' ')"
@@ -303,8 +317,24 @@ SNAP_RC=$?
 # the plane is the only recorder, and a private ledger here would fork exactly
 # the surface that closure removed.
 jnum() { case "$1" in ''|-|*[!0-9]*) printf 'null' ;; *) printf '%s' "$1" ;; esac; }
-closed_field() {
-    tr ' ' '\n' < "$1/closed" 2>/dev/null | sed -n "s/^$2=//p" | head -1
+# One pass over the close line; the six fields were six tr|sed|head pipelines
+# over the same 100 bytes.
+read_closed() {
+    CLOSE_REASON_R=- CLOSE_DECLARED=- CLOSE_OBSERVED=- CLOSE_LADDER=- \
+        CLOSE_DERIVED=false CLOSE_BOUND=-
+    local line kv k v
+    IFS= read -r line < "$1/closed" 2>/dev/null || return 0
+    for kv in $line; do
+        k="${kv%%=*}"; v="${kv#*=}"
+        case "$k" in
+            reason)         CLOSE_REASON_R="$v" ;;
+            declared)       CLOSE_DECLARED="$v" ;;
+            observed)       CLOSE_OBSERVED="$v" ;;
+            ladder_end)     CLOSE_LADDER="$v" ;;
+            ladder_derived) CLOSE_DERIVED="$v" ;;
+            bound_s)        CLOSE_BOUND="$v" ;;
+        esac
+    done
 }
 
 emit_boot() {
@@ -312,12 +342,9 @@ emit_boot() {
     local ladder_end ladder_derived bound_s
     [ -f "$d/closed" ] || return 0
     boot_epoch="$(basename "$d")"
-    reason="$(closed_field "$d" reason)"
-    declared="$(closed_field "$d" declared)"
-    observed="$(closed_field "$d" observed)"
-    ladder_end="$(closed_field "$d" ladder_end)"
-    ladder_derived="$(closed_field "$d" ladder_derived)"
-    bound_s="$(closed_field "$d" bound_s)"
+    read_closed "$d"
+    reason="$CLOSE_REASON_R"; declared="$CLOSE_DECLARED"; observed="$CLOSE_OBSERVED"
+    ladder_end="$CLOSE_LADDER"; ladder_derived="$CLOSE_DERIVED"; bound_s="$CLOSE_BOUND"
     case "$ladder_derived" in true|false) ;; *) ladder_derived=false ;; esac
     unaccounted="$(sed -n 's/.*unaccounted=\(.*\)$/\1/p' "$d/closed")"
     [ -f "$d/snapshot.rc" ] && snap_rc="$(cat "$d/snapshot.rc")"

@@ -68,8 +68,11 @@ def test_exactly_the_categories_that_ship_off():
     how a default quietly becomes a habit, which is the state this chunk found
     the estate in.
 
-    FOUR REASONS WERE COST. The fifth is not (#1265, amended deliberately and
-    NOT by widening the set quietly): a door with **no deployment gate**. `lib/`
+    THE COST REASONS ASK WHAT A DOOR DOES WHEN IT RUNS. This one asks how it
+    ARRIVES (#1265, added deliberately and NOT by widening the set quietly), and
+    the list is not numbered on purpose — `weekly-worker-restart` already states
+    a reason outside the original four. The category: a door with **no
+    deployment gate**. `lib/`
     is read on demand, per use, so a root pull is in force on every bot on its
     next call — no restart, no canary window, no step at which one bot could be
     staged ahead of the others. For those the flag is not a hedge about the

@@ -40,17 +40,26 @@ assert_absent() {
 }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/bccap.XXXXXX")" || exit 3
-# Every tmux socket this harness creates lives INSIDE the scratch dir, so the
-# rm -rf below reaps them by construction rather than by remembering. Sockets
-# default to /tmp/tmux-<uid>/, where kill-server leaves the file behind and a
-# repeated run silently litters — and several fleet tools enumerate that
-# directory to find bots, so the litter is a growing false-positive surface.
-# Reap as a first-class verb, the coldstart-harness.sh convention.
-export TMUX_TMPDIR="$TMP/tmux"
-mkdir -p "$TMUX_TMPDIR"
+# Sockets get their OWN short-path dir, reaped in cleanup below. Two constraints
+# that pull in opposite directions:
+#
+#   REAP — tmux defaults to /tmp/tmux-<uid>/, where kill-server leaves the file
+#   behind, so repeated runs litter a directory several fleet tools enumerate to
+#   find bots: a growing false-positive surface. Reap as a first-class verb, the
+#   coldstart-harness.sh convention.
+#
+#   LENGTH — but this must NOT live under $TMP. An AF_UNIX path is capped near
+#   104 bytes, and test_sh_suites.py runs every bash suite with TMPDIR set to a
+#   pytest tmp_path; nesting the sockets under that blows the cap, every
+#   new-session fails silently, and the harness reports bots that were never
+#   captured. Measured: passes standalone (TMPDIR unset), fails under pytest.
+#
+# So: /tmp directly, which is also where tmux itself puts its sockets.
+TMUX_TMPDIR="$(mktemp -d /tmp/bctmux.XXXXXX)" || exit 3
+export TMUX_TMPDIR
 cleanup() {
     for s in $SOCKETS; do tmux -L "$s" kill-server 2>/dev/null; done
-    rm -rf "$TMP"
+    rm -rf "$TMP" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -116,6 +125,22 @@ assert_eq "the late bot is captured on the tick its session appears" "1" \
     "$(awk -F'\t' '$1=="beta"{print 1}' "$D1/observed.tsv")"
 assert_contains "the boot closes complete once every declared bot is seen" "reason=complete" "$(cat "$D1/closed")"
 assert_eq "no bot is recorded twice" "2" "$(wc -l < "$D1/observed.tsv" | tr -d ' ')"
+
+echo "== 1b. a real injection stamp lands in the row =="
+# Without this the stamp parser is only ever exercised on a MISSING file, and a
+# reader that returns "-" for everything passes that test perfectly.
+R1B="$TMP/r1b"; mkroot "$R1B" stamped:9
+B1B=$(( $(date +%s) - 100 ))
+printf 'state=done kind=startup at=2026-09-07T19:00:00-04:00 epoch=1788820000 boot=%s rc=0 dur=7\n' \
+    "$B1B" > "$R1B/local/testfleet/runtime/bots/stamped/data/.inject"
+session_up "$R1B" stamped
+tick "$R1B" "$B1B" > /dev/null
+D1B="$(statedir "$R1B" "$B1B")"
+assert_eq "the send state is recorded"      "done"       "$(awk -F'\t' '$1=="stamped"{print $7}' "$D1B/observed.tsv")"
+assert_eq "and which payload it was"        "startup"    "$(awk -F'\t' '$1=="stamped"{print $8}' "$D1B/observed.tsv")"
+assert_eq "and the send instant"            "1788820000" "$(awk -F'\t' '$1=="stamped"{print $9}' "$D1B/observed.tsv")"
+assert_eq "and the boot it belongs to"      "$B1B"       "$(awk -F'\t' '$1=="stamped"{print $10}' "$D1B/observed.tsv")"
+assert_eq "and how long the send took"      "7"          "$(awk -F'\t' '$1=="stamped"{print $11}' "$D1B/observed.tsv")"
 
 echo "== 2. the ladder end is DERIVED from the composed rungs =="
 assert_contains "ladder end is the max composed rung, not a constant" "ladder_end=21" "$(cat "$D1/closed")"
