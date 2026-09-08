@@ -3099,7 +3099,13 @@ inject_stamp() {
     # The epoch is printed unconditionally: the caller pairs `sending` with
     # `done` using it, and a gate that changed the RETURN shape would make the
     # call sites branch on arming. Only the WRITE is gated.
-    printf '%s\n' "$now"
+    #
+    # `|| true` because start-bot.sh runs under `set -euo pipefail` and reaches
+    # this through `_inject_t0="$(inject_stamp ...)"`: an unguarded failure here
+    # propagates out of the command substitution and ABORTS THE BOT BOOT. Every
+    # other statement in this function is already fail-open; this was the one
+    # asymmetry, and a stamp must never be able to cost a boot (#1496 review).
+    printf '%s\n' "$now" || true
     # OPT-IN, per fleet (BOOT_CAPTURE_ENABLED=1 in fleet.yaml `env:`). Not
     # caution about the write — it is a 60-byte file — but delivery: lib/ is
     # read on demand per use, so a root pull puts this on every bot on its next
@@ -3113,6 +3119,15 @@ inject_stamp() {
     printf 'state=%s kind=%s at=%s epoch=%s boot=%s rc=%s dur=%s\n' \
         "$state" "$kind" "$(ts_iso)" "$now" "${boot:--}" "${rc:--}" "$dur" \
         > "$bot_dir/data/.inject" 2>/dev/null || true
+    # Fail-open made STRUCTURAL rather than incidental. Today every exit path
+    # already returns 0, but only because of statement ORDER: the
+    # `[ -n "$begin" ] && dur=...` above returns 1 whenever begin is empty,
+    # which is every `sending` call, and it is harmless solely because two
+    # statements follow it. Reorder them and this function starts returning 1
+    # into `_inject_t0="$(inject_stamp ...)"` under start-bot.sh's `set -e`.
+    # A stamp must never be able to cost a boot, so say so once, here, instead
+    # of depending on which line happens to be last.
+    return 0
 }
 
 # fleet_service_prefix <fleet.yaml-path>

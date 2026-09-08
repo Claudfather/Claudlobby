@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "tests" / "test_boot_capture.sh"
 
 # Raise this when cases are added; never lower it to make a red wrapper green.
-MIN_ASSERTIONS = 36
+MIN_ASSERTIONS = 39
 
 pytestmark = pytest.mark.skipif(
     shutil.which("tmux") is None,

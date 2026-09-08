@@ -278,8 +278,16 @@ host:
     # So enrollment IS the canary, and it is the only one available: the units
     # compose inert, ride whatever pull happens, and a host turns the recorder on
     # deliberately afterwards while watching it. Without that, the first host to
-    # run it is every host. Arm in fleet.yaml:
-    #   defaults: { jobs: { boot-capture: { enroll: true } } }
+    # run it is every host.
+    #
+    # Host-job dormancy is COMPOSE-time, so unarmed emits no unit at all and no
+    # setup run can re-enroll it. Armed in THIS host's OWN system.yaml -- host
+    # jobs deliberately bypass the fleet defaults merge (load_host_jobs reads
+    # only this file's `host.jobs`), so a fleet.yaml recipe cannot reach one:
+    #   host:
+    #     jobs:
+    #       boot-capture: { enroll: true }
+    # then `claudlobby generate` + `lib/setup-system`.
     #
     # The stamp half of #1265 (inject_stamp, called from start-bot.sh) has no
     # enrollment step at all -- it runs on every bot start the instant lib/ moves

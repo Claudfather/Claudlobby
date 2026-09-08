@@ -204,6 +204,34 @@ assert_contains "with its duration" "dur=1" "$(cat "$IB/data/.inject" 2>/dev/nul
 assert_eq "the epoch is returned even when unarmed, so callers do not branch" "1" \
     "$(bash -c ". '$LIBC'; v=\$(inject_stamp '$IB' startup sending); case \"\$v\" in ''|*[!0-9]*) echo 0;; *) echo 1;; esac" 2>/dev/null)"
 
+echo "== 8b. a failing stamp must never cost a boot =="
+# start-bot.sh reaches inject_stamp through `_inject_t0="$(inject_stamp ...)"`
+# under `set -euo pipefail`, with no guard at the call site, so any nonzero
+# return from this function aborts the boot (#1496 review).
+#
+# What is asserted is the RETURN, not a downstream symptom. The review predicted
+# an abort from the epoch printf; measured, that does not reproduce — bash does
+# not exit on a failing command inside a function when further statements follow
+# it, so the printf was never the reachable hazard. The reachable one is the
+# function returning nonzero at all, which is what this pins.
+#
+# Positive control included: the write must genuinely fail, or a green result
+# here means only that nothing was tested.
+RO="$TMP/rodir"; mkdir -p "$RO/data"; chmod a-w "$RO/data"
+_stamp_rc() {
+    bash -c "
+        . '$LIBC'
+        export BOOT_CAPTURE_ENABLED=1
+        inject_stamp '$RO' startup $1 >/dev/null 2>&1
+        echo \$?
+    " 2>/dev/null
+}
+assert_eq "control: the stamp really could not be written" "no" \
+    "$([ -f "$RO/data/.inject" ] && echo yes || echo no)"
+assert_eq "an unwritable stamp still returns 0"      "0" "$(_stamp_rc sending)"
+assert_eq "and so does the second stamp of the pair" "0" "$(_stamp_rc done)"
+chmod u+w "$RO/data"
+
 echo "== 9. a host-scoped sweep carries no fleet identity of its own =="
 # tick() exports a misleading FLEET_NAME on purpose: run by hand from inside a
 # bot session, an ambient fleet would stamp every row on every fleet with it.
