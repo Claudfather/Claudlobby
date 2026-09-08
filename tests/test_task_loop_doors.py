@@ -139,6 +139,68 @@ def test_a_silenced_plane_refuses_the_act_rather_than_doing_it_unrecorded(tmp_pa
     assert _task_events(tmp_path, row["plane_assignment_id"]) == []
 
 
+# --- #1492: close an id-less row by the asg id the digest hands out ----------
+
+def test_an_asg_id_closes_an_open_idless_row(tmp_path):
+    """#1492: the re-check digest hands the manager `asg_` ids; task-act takes
+    one directly. A raw-text send is the id-less shape (no task id, `sha:`
+    source_ref), so the asg id is its ONLY handle. Withdrawing by that asg id
+    must close the row AND stamp the row's REAL `dispatch-log:sha:` key, never
+    a fabricated `dispatch-log:asg_...`."""
+    libdir, env = _plane_lib(tmp_path)
+    _full_capture(tmp_path)
+    r = _bash(f'"{libdir}/dispatch-task.sh" w1 "just a note"', env)     # raw text: id-less
+    assert r.returncode == 0, r.stderr
+    row = _plane_row(tmp_path)
+    asg = row["plane_assignment_id"]
+    assert row["task_id"] == "" and asg.startswith("asg_")
+    before = _lookup(tmp_path, libdir, env, "--open-idless", "--fleet", F, "--bot", "w1")
+    assert asg in before.stdout, before.stdout                          # open before
+
+    act = _bash(f'"{libdir}/task-act.sh" withdraw {asg} --reason "the note is stale"', env)
+    assert act.returncode == 0, (act.returncode, act.stdout, act.stderr)
+    events = _task_events(tmp_path, asg)
+    assert [e for e, _ in events] == ["cancelled"]
+    assert json.loads(events[0][1])["reason"] == "the note is stale"
+    # the act stamped the row's REAL content key, not the asg id
+    sref = _rows(tmp_path, "SELECT source_ref FROM events WHERE assignment_id = ?"
+                           " AND kind='task' AND event='cancelled'", (asg,))[0][0]
+    assert sref.startswith("dispatch-log:sha:"), sref
+    after = _lookup(tmp_path, libdir, env, "--open-idless", "--fleet", F, "--bot", "w1")
+    assert asg not in after.stdout, after.stdout                        # closed after
+
+
+def test_a_bad_asg_refusal_names_the_sha_form_and_the_close_command(tmp_path):
+    """#1492: an `asg_` id that names no OPEN row is refused ACTIONABLY — the
+    refusal prints the row's `sha:<hex>` content key and the exact close
+    command, not the dead-end pointer at `claudlobby brief` that sent three
+    invocations looking. Here the row is already withdrawn, so its asg names a
+    CLOSED row whose key the door can still read and name."""
+    libdir, env = _plane_lib(tmp_path)
+    _full_capture(tmp_path)
+    r = _bash(f'"{libdir}/dispatch-task.sh" w1 "just a note"', env)
+    assert r.returncode == 0, r.stderr
+    asg = _plane_row(tmp_path)["plane_assignment_id"]
+    assert _bash(f'"{libdir}/task-act.sh" withdraw {asg} --reason "first"', env).returncode == 0
+    # the same asg now names a CLOSED row
+    act = _bash(f'"{libdir}/task-act.sh" withdraw {asg} --reason "again"', env)
+    assert act.returncode == 2, (act.returncode, act.stdout, act.stderr)
+    assert "sha:" in act.stderr, act.stderr                             # names the canonical key form
+    assert "task-act.sh withdraw sha:" in act.stderr, act.stderr        # the runnable close command
+
+
+def test_an_unknown_asg_id_refuses_without_naming_a_key(tmp_path):
+    """An asg id the plane never saw has no key to name — the refusal says so
+    (rc 2) rather than inventing one or pointing at a sha it cannot produce."""
+    libdir, env = _plane_lib(tmp_path)
+    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "seed the plane"', env)
+    assert r.returncode == 0, r.stderr                                  # the db exists now
+    act = _bash(f'"{libdir}/task-act.sh" withdraw asg_deadbeef00000000000000000000dead'
+                ' --reason "x"', env)
+    assert act.returncode == 2, (act.returncode, act.stderr)
+    assert "no assignment" in act.stderr, act.stderr
+
+
 # --- escalate ---------------------------------------------------------------
 
 def test_escalate_is_non_terminal_and_readable_by_the_watchdog(tmp_path):

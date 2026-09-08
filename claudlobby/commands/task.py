@@ -581,7 +581,11 @@ def _clip(text: str, limit: int = 80) -> str:
 
 def recheck_row_line(row, *, index: int, now: datetime) -> str:
     """What the manager is told about ONE row — and, byte for byte, what the
-    plane records as the ask about it."""
+    plane records as the ask about it. Ends in the VERBATIM close command for
+    THIS row (#1492): an id-less row has no task id, so the digest's only
+    handle on it is the assignment id, and `task-act.sh` now takes that id
+    directly — so the line becomes self-sufficient rather than handing the
+    manager an identifier the close door would not accept."""
     tid = row.get("task_id") or row.get("assignment_id") or "?"
     title = _clip(_one_line(row.get("title") or "") or "untitled")
     assignee = _short(row.get("assignee") or "") or "unknown"
@@ -599,7 +603,11 @@ def recheck_row_line(row, *, index: int, now: datetime) -> str:
     if nud:
         bits.append(f"nudged by {_short(nud.get('by') or '') or 'someone'}"
                     f" {_age(nud.get('at'), now)}")
-    return f"[{index}] task {tid} ({title}) — " + ", ".join(bits)
+    line = f"[{index}] task {tid} ({title}) — " + ", ".join(bits)
+    if tid != "?":
+        line += (f' — close: $CLAUDLOBBY_ROOT/lib/task-act.sh withdraw {tid}'
+                 ' --reason "…"')
+    return line
 
 
 def recheck_digest(lines: list[str], *, fleet: str, max_age_h: float,

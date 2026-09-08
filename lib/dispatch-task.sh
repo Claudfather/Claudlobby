@@ -480,10 +480,15 @@ PLANE_MSG_ID="" PLANE_WI_ID="" PLANE_ASG_ID=""
 # over-reported. Not found in the plane → no wiring, disclosed.
 SUP_WI="" SUP_ASG="" SUP_MSG="" sup_frag="" sup_ev=""
 if [ "$PLANE_ARMED" = "1" ]; then
-    # Cutover chunk 6a: EVERY dispatch mints the construct triple, id-less ones
-    # too (query / cancel / compact / restart) -- the plane must hold every
-    # dispatch the legacy ledger holds, or the flipped readers cannot see an
-    # overdue id-less dispatch nor apply the resolver id-less guard (#1418).
+    # The ids are minted for EVERY armed dispatch -- the communication needs its
+    # msg id, and --supersedes needs an assignment id for successor_id whatever
+    # the type. WHICH of them the emission actually USES is decided at emit time
+    # (#1491): a TRACKED shape (task; raw-text inherits type=task) lands the
+    # work_item + assignment, a control type (query / cancel / compact / restart)
+    # records the communication ALONE. Chunk 6a once minted the triple for every
+    # dispatch id-less ones included, which left a `query` an open assignment no
+    # report could ever close (38 in 14 days on one host) that also blanked the
+    # resolver head (#1418); the gate now lives beside the emit.
     PLANE_MSG_ID="$(plane_mint_id msg)"
     PLANE_WI_ID="$(plane_mint_id wi)"
     PLANE_ASG_ID="$(plane_mint_id asg)"
@@ -639,13 +644,30 @@ _plane_emit_intent() {
             echo "dispatch-task: --supersedes $DISPATCH_SUPERSEDES not found in the plane — legacy-only supersession" >&2
         fi
     fi
+    # #1491: ONLY a tracked shape lands a work_item + assignment. A control type
+    # (query / cancel / compact / restart) records the COMMUNICATION ALONE --
+    # matching the mint gate above, the legacy ledger, and the dispatch
+    # protocol's own contract (a `query` "mints nothing"). An open assignment for
+    # a note that asks nothing is a row no report can close, and while it is the
+    # worker's newest assignment it BLANKS the resolver head (#1418) and hijacks
+    # the worker's next report. The gate is the TYPE, never the id: a raw-text
+    # send inherits the default type=task, so it keeps its id-less deadline-
+    # bearing triple (the documented bot+time "one report closes all open
+    # dispatches for that bot" path); a missing sha tool leaves no ref to key the
+    # triple on, so a raw-text send degrades to communication-only there too (the
+    # disclosed fallback above). The plane ids stay minted regardless, so
+    # --supersedes on any type still retires its target with successor_id intact.
+    local emit_triple=""
+    if [ "$DISPATCH_TYPE" = "task" ] && [ -n "$dispatch_ref" ]; then
+        emit_triple=1
+    fi
     local link_frag="" ws_frag="" repo_frag="" deadline_frag="" iso_deadline=""
-    if [ -n "$PLANE_WI_ID" ]; then
+    if [ -n "$emit_triple" ]; then
         link_frag="\"work_item_id\":\"$PLANE_WI_ID\",\"assignment_id\":\"$PLANE_ASG_ID\","
     fi
     local comm wi_ev asg_ev
     comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
-    if [ -n "$dispatch_ref" ]; then
+    if [ -n "$emit_triple" ]; then
         # The plane's deadline MIRRORS the dispatch row's: a control dispatch (query /
         # cancel / compact / restart) withholds it on both sides, for the reason
         # written above the null — an id-less row with a deadline goes overdue
@@ -666,8 +688,13 @@ _plane_emit_intent() {
         printf -v _batch '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}"
         plane_emit_events dispatch-task <<<"$_batch"       # same shell: PLANE_EMIT_LAST_RC reaches the record decision
     else
+        # Communication only (a control type, or a raw-text send on a host with
+        # no sha tool). A --supersedes STILL rides here: the note retires its
+        # target even though the note itself is untracked -- the retire is the
+        # point, and the successor id is minted whether or not the note's own
+        # triple is emitted.
         local _batch
-        printf -v _batch '{"events":[%s]}' "$comm"
+        printf -v _batch '{"events":[%s%s]}' "$comm" "${sup_ev:+,$sup_ev}"
         plane_emit_events dispatch-task <<<"$_batch"
     fi
 }
