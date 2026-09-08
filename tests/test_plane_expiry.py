@@ -21,7 +21,16 @@ from claudlobby.plane.queries import ATTENTION_SQL, TASK_STATUS_SQL, attention_p
 from tests.plane_fixtures import plane_root
 
 REPO = Path(__file__).resolve().parent.parent
-NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+# The REAL clock, not a literal instant, and that is load-bearing rather than
+# lazy. Three of these tests run lib/plane-expire.sh as a SUBPROCESS, which
+# reads the wall clock; every other test seeds its rows at NOW +/- N days. Pin
+# NOW to a fixed past instant and the two clocks drift apart at one day per day
+# until the `fresh` row (NOW - 2d) crosses the 7-day horizon by the real clock
+# and the launcher expires 2 where the fixture says 1 — which is exactly what
+# happened, on schedule, five days after the literal was written. Every
+# assertion here is about a RELATIONSHIP between seeded rows and the horizon, so
+# a live NOW keeps all of them intact and keeps the subprocess in agreement.
+NOW = datetime.now(timezone.utc)
 F = "example-fleet"
 
 

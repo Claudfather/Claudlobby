@@ -300,6 +300,33 @@ SWITCHES: tuple[Switch, ...] = (
     ),
     # ---------------- other doors, on --------------------------------------
     Switch(
+        key="pane-send-chunking",
+        scope=DOOR,
+        polarity=OPT_OUT,
+        # bot.conf, for the same reason session-digest and spindown-receipt use
+        # it: the door runs inside a bot's own session (every dispatch, every
+        # boot, every keepalive reload), and start-bot.sh sources the .env tiers
+        # BEFORE `set -a`, so a bare tier assignment never reaches it. A
+        # host-side sender — a hand-run lib/ script, a timer's dispatch — reads
+        # the host or root .env instead, which is why the `what` below names
+        # both: one door, two kinds of caller.
+        carrier=BOT_CONF,
+        env="PANE_SEND_CHUNK_BYTES",
+        # A REACTION door, and it earns the label the same way the other three
+        # do: with chunking off, a dispatch over 1 KB arrives TAIL ONLY — the
+        # `[BOTCOMMAND] <manager> | task | …` envelope and the task id gone. The
+        # worker then cannot report against an id it never received, the row
+        # never closes, and the re-check chases something nobody can answer. The
+        # loop does not merely get slower; it stops closing.
+        target_workflow=True,
+        what="hand every pane send to the pty in 900-byte chunks — a single "
+             "write over 1 KB loses its head on macOS (94 of 180 large sends "
+             "in a week). NOT a boolean: the value is a byte cap, and only an "
+             "exact 0 turns chunking off, restoring the pre-fix send. Reaches "
+             "a bot through fleet.yaml env: -> bot.conf; a host-side sender "
+             "reads it from the host or root .env",
+    ),
+    Switch(
         key="spindown-receipt",
         scope=DOOR,
         polarity=OPT_OUT,

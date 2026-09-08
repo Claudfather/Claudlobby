@@ -1415,6 +1415,303 @@ bot_tmux_send() {
 # verify-retry below is for — where before it was silent and permanent, so the
 # longer window has stopped earning its cost on every other send.
 _PANE_SEND_SETTLE_DEFAULT=0.3
+# Chunk size (BYTES) for the keystroke half of a send, and the pause between
+# chunks (#1493). A payload never goes to tmux in one piece any more, and the
+# reason is a measured data loss rather than tidiness.
+#
+# THE MEASUREMENT. Every pane_submitted communication of a week on the estate's
+# macOS host, checked head-slice and tail-slice against the RECIPIENT's own
+# session transcript: under 1 KB, 182 of 182 arrived whole; over 1 KB, 86 of
+# 180. Of the other 94, EIGHTY-FIVE arrived TAIL ONLY — the head gone, taking
+# the `[BOTCOMMAND] <manager> | task | …` envelope and the task id with it — 8
+# head only, 19 absent. The amount lost is quantised: bodies of 1.3-1.8 K lost
+# 1006-1022 chars, bodies of 2.2-2.5 K lost 1818-2036. One or two multiples of
+# 1024 BYTES. Every one of those sends is recorded `pane_submitted`, which is a
+# sender-side inference; the door recorded a delivery it could not observe.
+#
+# THE MECHANISM this fits. One `send-keys` writes the whole payload into the
+# pane's pty in a single go. The macOS pty input queue is 1024 bytes (TTYHOG).
+# The reader is `claude` in raw mode, and Apple's cfmakeraw clears IMAXBEL —
+# with IMAXBEL clear the BSD tty layer answers an input-queue overflow by
+# FLUSHING the queue, discarding what is buffered, rather than dropping the
+# incoming byte. So a reader that has not drained the first 1 KB before the
+# writer fills it loses that 1 KB outright. It is a race, which is why the
+# whole-rate above 1 KB is 26-65% rather than 0, and it cannot fire below 1 KB,
+# which is why that row is 100%. (Linux's line discipline buffers 4 KB and drops
+# the NEW bytes on overflow, so the Pi shows the mirror symptom — tail loss
+# above 4 KB — of the same primitive.)
+#
+# 900 leaves ~120 bytes of headroom under the 1024 the queue holds, so a chunk
+# cannot fill it even accounting for what the reader has not yet drained; the
+# settle then gives the reader a window to empty the queue before the next chunk
+# lands. Measured on this host by lib/send-size-probe.sh, which is the A/B
+# instrument for exactly this pair of knobs.
+#
+# PANE_SEND_CHUNK_BYTES=0 restores the legacy single unchunked send-keys. It
+# exists for ONE reason — the probe's control arm, which has to drive the real
+# primitive in its pre-fix shape or it would be measuring a fixture. It is not
+# an operator tuning knob and there is no situation in which a fleet wants it.
+#
+# Which is exactly why it is a NAMED switch (chunk O fold, F8): the value
+# reaches a bot through `fleet.yaml env:` -> bot.conf like every other session
+# knob, so "nobody would set this" is a hope rather than a mechanism. It is
+# registered in claudlobby/switches.py as the opt-out `pane-send-chunking`, so
+# `claudlobby doctor --switches`, `claudlobby status`'s off-note and the schema
+# docs all name it — and the door says so on stderr each time it runs
+# unchunked, because a silent restoration of a send that loses data is the
+# shape this whole chunk exists to end.
+_PANE_SEND_CHUNK_BYTES_DEFAULT=900
+_PANE_SEND_CHUNK_SETTLE_DEFAULT=0.15
+# The 64 UTF-8 continuation bytes (0x80-0xBF) as one literal string — the
+# membership set the splitter tests a candidate boundary byte against. Built
+# once at source time with `printf -v` (no fork, no subshell) because the split
+# runs on every send on every bot.
+printf -v _PANE_UTF8_CONT \
+    '\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf\xb0\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf'
+
+# _pane_split_bytes <text> <max_bytes>
+# Fill the array _PANE_CHUNKS (and _PANE_CHUNK_N with its length) with byte
+# slices of <text>, each at most <max_bytes> bytes, whose concatenation is
+# <text> byte for byte.
+#
+# BYTES, not characters, and that is the whole difficulty. The queue this dodges
+# counts bytes, so the cap has to be a byte cap — but bash's ${#s} and ${s:i:n}
+# count CHARACTERS under a UTF-8 locale, so a naive slice would cap the wrong
+# unit and, worse, `${s:i:n}` would silently re-encode. `local LC_ALL=C` puts
+# both operators back on bytes for the duration of this function only (measured
+# in bash 3.2: the same string reads 13 outside and 17 inside). The locale stays
+# local so the send loop below, and tmux with it, runs under the caller's.
+#
+# A byte cap can land INSIDE a multibyte character, and dispatch bodies carry em
+# dashes, arrows and checkmarks routinely. So the boundary is backed off while
+# the byte that would START the next chunk is a continuation byte — at most 3
+# times, the longest continuation run a valid UTF-8 character has. Still a
+# continuation byte after three: the input is not valid UTF-8, no boundary
+# exists to find, and the cap is honoured rather than the search running on. The
+# `len > 1` guard keeps progress guaranteed for any cap, including one smaller
+# than a single character.
+#
+# NO TWO ADJACENT CHUNKS ARE EVER BYTE-IDENTICAL, and that rule is a measured
+# recipient-side defect rather than tidiness (chunk O fold, F2). Measured on
+# `claude 2.1.263` / macOS: two identical 900-byte blocks of ORDINARY numbered
+# text — not a degenerate one-character filler — arrived 900 bytes SHORT, one
+# whole block gone out of the middle; 1200 identical bytes followed by a varied
+# tail arrived whole; thirty identical 60-byte lines whose phase did not align
+# with the cap arrived whole. So the trigger is exactly `chunk[i] == chunk[i-1]`,
+# which any repeated region whose period divides the cap and starts on a chunk
+# boundary reaches — 31 identical 60-byte log lines is enough, and a dispatch
+# quoting a log or a table gets there without trying.
+#
+# The remedy is the cheapest one that cannot recur: when the chunk just cut
+# equals the one before it, cut one byte shorter and back off again. One
+# decrement settles it for good — equality requires equal LENGTHS, so a shorter
+# chunk cannot match its predecessor — and a wholly degenerate payload simply
+# alternates 900/899. `len > 1` still floors it, so a cap of 1 (no shipped
+# configuration has one) keeps its stated bound: adjacent 1-byte chunks may
+# repeat, because the alternative is no progress at all.
+#
+# Pure builtins — no fork per chunk, no python, no iconv. This is on every
+# dispatch, every boot, every bot, including the Pi. The rule costs one string
+# compare per chunk and nothing at all on the single-chunk sends that are most
+# of them.
+_pane_split_bytes() {
+    local LC_ALL=C
+    local text="$1" max="$2"
+    local total=${#text} i=0 len back c lim chunk prev=""
+    # Cleared, not just re-counted: entries past _PANE_CHUNK_N would otherwise
+    # hold a previous payload's bytes for the life of the shell, and keepalive's
+    # is a long one.
+    _PANE_CHUNKS=()
+    _PANE_CHUNK_N=0
+    if [ "$total" -eq 0 ]; then
+        # An empty payload is still one send. Returning zero chunks would make
+        # the caller send NOTHING, turning an empty dispatch into a silent no-op.
+        _PANE_CHUNKS[0]=""
+        _PANE_CHUNK_N=1
+        return 0
+    fi
+    while [ "$i" -lt "$total" ]; do
+        # `lim` is the cap THIS boundary is allowed, and it is what the
+        # invalid-UTF-8 fallback honours rather than `max` — otherwise the
+        # identical-chunk retry below would hand back the byte it just gave up
+        # and loop for ever on a payload that is both degenerate and not UTF-8.
+        lim=$max
+        while :; do
+            len=$lim
+            if [ $((i + len)) -lt "$total" ]; then
+                back=0
+                c=${text:$((i + len)):1}
+                while [ "$len" -gt 1 ] && [ "$back" -lt 3 ]; do
+                    case "$_PANE_UTF8_CONT" in *"$c"*) ;; *) break ;; esac
+                    len=$((len - 1))
+                    back=$((back + 1))
+                    c=${text:$((i + len)):1}
+                done
+                # Three back-offs and still mid-character: not valid UTF-8.
+                # Honour the cap rather than walking backwards through the
+                # whole chunk.
+                case "$_PANE_UTF8_CONT" in *"$c"*) len=$lim ;; esac
+            fi
+            chunk=${text:i:len}
+            # The F2 rule. Only an EQUAL chunk retries, and it retries once:
+            # `lim` strictly decreases, so the next candidate is shorter than
+            # `prev` and cannot match it. This codes around a `claude` TUI quirk
+            # (two byte-identical adjacent chunks lose one), so it is pinned to a
+            # binary that moves: lib/send-size-probe.sh --filler ident2 is the
+            # re-measurement instrument (#1493); re-run it on a claude-major bump.
+            [ "$chunk" = "$prev" ] && [ "$len" -gt 1 ] || break
+            lim=$((len - 1))
+        done
+        _PANE_CHUNKS[$_PANE_CHUNK_N]=$chunk
+        _PANE_CHUNK_N=$((_PANE_CHUNK_N + 1))
+        prev=$chunk
+        i=$((i + len))
+    done
+}
+
+# _pane_send_keys_arg <chunk>
+# Set _PANE_SEND_ARG to the argument that makes tmux type <chunk> VERBATIM.
+#
+# ONE rule, and it is a measurement rather than a precaution. tmux parses its
+# argv as a COMMAND LIST, so a `;` that ENDS an argument is a command separator
+# and not a character. Measured against tmux 3.6a on a real pane running `cat`:
+# `A;` arrived as `A`, `B;;` as `B;`, and a lone `;` as nothing at all — at rc
+# 0, silently, so no caller could ever have noticed. Reproduced end to end, a
+# 2100-byte payload whose byte 900 was a `;` arrived 2099 bytes long.
+#
+# The single-send era hid nearly all of it: only the payload's LAST byte was
+# ever at risk. Chunking moves the exposure to every boundary — 0.15% of the
+# boundaries this repository's own prose produces, and higher for a dispatch
+# quoting shell or JS, where `;` is a line ending.
+#
+# The repair is the escape tmux itself unescapes: drop the trailing `;` and
+# append `\;`. Round trips measured on that same pane — `A\;` -> `A;`,
+# `a;\;` -> `a;;`, `\;` -> `;`, and `a\\;` -> `a\;`, so a payload whose last two
+# bytes are a BACKSLASH and a semicolon round-trips as well, which the raw send
+# did NOT (it arrived `a;`, the backslash eaten). A backslash anywhere else is
+# already literal (`a\;b` and `a\b` both arrived unchanged), so nothing else is
+# touched. The escaped argument is one byte longer than the chunk; at the 900
+# cap that is 901 bytes on the wire, still ~120 under the 1024 the pty holds.
+#
+# Sets a global rather than printing its answer: this runs per chunk on every
+# dispatch, every boot, every bot, and a command substitution would fork for it.
+_pane_send_keys_arg() {
+    _PANE_SEND_ARG="$1"
+    case "$_PANE_SEND_ARG" in
+        *\;) _PANE_SEND_ARG="${_PANE_SEND_ARG%\;}\\;" ;;
+    esac
+}
+
+# Drop the payload the last split left resident. _PANE_CHUNKS has to be a global
+# — bash 3.2 has no way to hand an array back — so without this the bytes of the
+# last thing a bot sent stay live for the whole life of the shell, and
+# keepalive's is a shell that runs for the life of the host.
+_pane_forget_chunks() {
+    unset _PANE_CHUNKS
+    _PANE_CHUNK_N=0
+}
+
+# _pane_send_partial <session> <idx> <n>
+# A chunk failed mid-payload (chunk O fold, F6): <idx> chunks are already typed,
+# no Enter has gone, and the residue sits in the input box where the NEXT send
+# will concatenate onto it.
+#
+# Disclosed, never repaired here. The obvious clear is a `C-c`, and a second
+# Ctrl-C in Claude Code EXITS the session — a failure path that can kill a bot
+# is worse than the residue it tidies. The verify/recovery path above already
+# owns what happens next; this rung owns the record, which the residue otherwise
+# leaves nowhere at all.
+#
+# send_miss, not a new event name: the send did NOT land, which is exactly what
+# fleet-pulse's escalation reads that event to mean. send_retry is the opposite
+# case — the payload reached the pane and only the Enter was swallowed — and
+# blurring the two would misroute both.
+_pane_send_partial() {
+    local LC_ALL=C
+    local session="$1" idx="$2" n="$3"
+    local k=0 bytes=0
+    while [ "$k" -lt "$idx" ]; do
+        bytes=$((bytes + ${#_PANE_CHUNKS[$k]}))
+        k=$((k + 1))
+    done
+    printf 'pane_send: chunk %s of %s failed -- %s bytes left unsubmitted in the box\n' \
+        "$((idx + 1))" "$n" "$bytes" >&2
+    emit_fleet_event send_miss dispatch \
+        "$(printf '{"session":"%s","reason":"chunk-send-failed","partial":"%s/%s","unsubmitted_bytes":%s}' \
+            "$(json_escape "$session")" "$((idx + 1))" "$n" "$bytes")"
+}
+
+# _pane_send_payload <socket> <session> <text>
+# The keystroke half of a send: <text> into the pane, chunked, no Enter. The one
+# home for it, so pane_send_verified and the repair path below cannot diverge on
+# how a payload reaches a pty.
+#
+# `-l --` on every chunk. `-l` is load-bearing on its own, independent of the
+# chunking: without it tmux looks the argument up as a KEY NAME first, so a
+# chunk that happens to spell one ("Enter", "Space", "BSpace") would be sent as
+# that key instead of as its characters — a hazard the single-send shape hid
+# only because a whole dispatch never spells a key name, and one that slicing a
+# payload into 900-byte pieces does not create but does make thinkable. `--`
+# ends option parsing so a chunk beginning with `-` is text, not a flag. Byte
+# transparency of the pair was verified against tmux 3.6a on a real pane
+# (backslashes, quotes, `$`, backticks and multibyte all round-tripped identical).
+_pane_send_payload() {
+    local socket="$1" session="$2" text="$3"
+    local max="${PANE_SEND_CHUNK_BYTES:-$_PANE_SEND_CHUNK_BYTES_DEFAULT}"
+    # A malformed knob falls back to the default rather than aborting a send:
+    # this runs inside startup and watchdog paths, and a typo in an env file
+    # must not be able to strand a bot.
+    case "$max" in ''|*[!0-9]*) max=$_PANE_SEND_CHUNK_BYTES_DEFAULT ;; esac
+    if [ "$max" -le 0 ]; then
+        # The pre-#1493 shape, including the absent -l. The probe's control arm
+        # has to exercise the primitive as production ran it; a control that
+        # differs anywhere is measuring something else.
+        #
+        # ONE deliberate difference (chunk O fold, F1): the trailing-`;` guard
+        # applies here too. The pre-fix primitive had that bug on the payload's
+        # LAST byte, and leaving it in would make the control measure a `;` as
+        # well as the pty queue — two mechanisms, one number.
+        #
+        # An off switch says so out loud (F8). PANE_SEND_CHUNK_BYTES reaches a
+        # bot through `fleet.yaml env:` -> bot.conf, so a fleet can restore the
+        # pre-fix send without meaning to; a silent no-op is how a disarmed door
+        # reads as a broken one.
+        printf 'pane_send: chunking OFF (PANE_SEND_CHUNK_BYTES=0) -- sends over 1 KB can lose their head on macOS\n' >&2
+        _pane_send_keys_arg "$text"
+        bot_tmux "$socket" send-keys -t "$session" "$_PANE_SEND_ARG"
+        return $?
+    fi
+    _pane_split_bytes "$text" "$max"
+    local idx=0
+    local settle="${PANE_SEND_CHUNK_SETTLE_S:-$_PANE_SEND_CHUNK_SETTLE_DEFAULT}"
+    # Validated for the same reason the cap is, and one direction further: a
+    # `sleep` that rejects its argument returns non-zero, and `[ ] || sleep` is
+    # a compound whose failure ABORTS the caller under set -e — so a typo in an
+    # env file would strand a bot half way through a payload rather than merely
+    # mistiming it. Digits with at most one decimal point; anything else is the
+    # default.
+    case "$settle" in
+        ''|*[!0-9.]*|*.*.*|.) settle="$_PANE_SEND_CHUNK_SETTLE_DEFAULT" ;;
+    esac
+    while [ "$idx" -lt "$_PANE_CHUNK_N" ]; do
+        # Between chunks only. A single-chunk payload — every send under the cap,
+        # which is most of them — pays nothing at all for this. It is half the
+        # mechanism, not a garnish: the cap keeps a chunk from FILLING the pty
+        # queue and this is what gives the reader time to empty it, so
+        # tests/test_pane_send_verified.sh counts the calls (a mutant that
+        # deleted this line passed the whole suite before it did).
+        [ "$idx" -eq 0 ] || sleep "$settle"
+        _pane_send_keys_arg "${_PANE_CHUNKS[$idx]}"
+        if ! bot_tmux "$socket" send-keys -t "$session" -l -- "$_PANE_SEND_ARG"; then
+            _pane_send_partial "$session" "$idx" "$_PANE_CHUNK_N"
+            _pane_forget_chunks
+            return 1
+        fi
+        idx=$((idx + 1))
+    done
+    _pane_forget_chunks
+    return 0
+}
 # Verify budget: how long to let the input box clear on its own before
 # concluding the Enter was swallowed, as a poll interval x a tick count (both
 # named, so the resulting budget is readable here rather than only derivable
@@ -1910,7 +2207,10 @@ _pane_recover_unconfirmed_send() {
     emit_fleet_event send_blind_recovered dispatch \
         "$(printf '{"session":"%s","reason":"resent-after-box-drew","box":"%s"}' \
             "$(json_escape "$session")" "$_PANE_BOX_NEVER")"
-    bot_tmux "$socket" send-keys -t "$session" "$text" 2>/dev/null || return 0
+    # Through _pane_send_payload, so the repair is chunked exactly as the
+    # original send was (#1493). A resend that re-created the pre-fix shape
+    # would repair a pre-draw loss by committing a 1 KB one.
+    _pane_send_payload "$socket" "$session" "$text" 2>/dev/null || return 0
     sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"
     bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
     return 0
@@ -1918,8 +2218,16 @@ _pane_recover_unconfirmed_send() {
 
 # pane_send_verified <socket> <session> <text>
 # THE verified pane send, and the one home for the send/settle/Enter/verify-retry
-# dance: send <text>, let the buffer settle, send Enter, then poll the input box
-# and re-send Enter once if the payload is still sitting there unsubmitted.
+# dance: send <text> in pty-sized chunks, let the buffer settle, send Enter once,
+# then poll the input box and re-send Enter once if the payload is still sitting
+# there unsubmitted.
+#
+# The keystrokes go out as N chunks of at most PANE_SEND_CHUNK_BYTES, not as one
+# send-keys — see _pane_send_payload and the knobs above for the measurement
+# (#1493). Everything downstream is unchanged and stays anchored to the WHOLE
+# payload: the probe is the full text, the verify tests one input box, and the
+# submit is one Enter after the last chunk. Chunking is a property of how the
+# bytes cross the pty, not of what was sent, and nothing but the pty may see it.
 #
 # Sends <text> VERBATIM — no sanitize pass, no `set +H;` prefix. THIS is why the
 # slash-command sites cannot route through a sanitizing helper: a slash command
@@ -1959,7 +2267,7 @@ pane_send_verified() {
         mkdir -p "$PANE_VERIFY_TRACE" 2>/dev/null || true
         printf '%s' "$probe" > "$PANE_VERIFY_TRACE/payload" 2>/dev/null || true
     fi
-    bot_tmux "$socket" send-keys -t "$session" "$text" || return 1
+    _pane_send_payload "$socket" "$session" "$text" || return 1
     sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"
     bot_tmux "$socket" send-keys -t "$session" Enter || return 1
 
