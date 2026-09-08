@@ -675,10 +675,13 @@ _plane_emit_intent() {
 _plane_emit_transmission() {
     # Outcome-typed AFTER the send (§6b #7): a clean send into a BUSY pane is
     # carrier_queued (accepted-not-consumed, not activation); a clean send
-    # into an idle pane is pane_submitted; a miss is failed.
+    # into an idle pane is pane_submitted; a miss is failed. A submission-class
+    # state carries the delivery-JOIN wire proof (fold F1), read back from
+    # PLANE_WIRE_OUT across the dispatch.sh subprocess boundary; _wire_frag emits
+    # it only for pane_submitted / carrier_queued and only when it is present.
     local state="$1"
     printf '{"events":[%s]}' \
-        "$(plane_tx_event dispatch-task "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$WORKER_SESSION" "$state")" \
+        "$(plane_tx_event dispatch-task "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$WORKER_SESSION" "$state" "$(_wire_frag "$state")")" \
         | plane_emit_events dispatch-task
 }
 
@@ -708,7 +711,16 @@ fi
 # scopes to THIS send only and never leaks to another bot_tmux_send. Empty
 # (an unarmed plane minted no id) -> no trailer, an untracked send by design.
 send_rc=0
-PLANE_MSG_ID="$PLANE_MSG_ID" "$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
+# fold F1: carry a PLANE_WIRE_OUT scratch file across the dispatch.sh subprocess
+# boundary so bot_tmux_send can hand back the wire proof (sha256 + byte length of
+# the exact bytes it put on the wire) for the pane_submitted/carrier_queued row
+# below. Per-command env, armed only when the plane is (an empty value -> no
+# proof written, an untracked send).
+_plane_wire_out=""
+[ "$PLANE_ARMED" = "1" ] && _plane_wire_out=$(safe_mktemp)
+PLANE_MSG_ID="$PLANE_MSG_ID" PLANE_WIRE_OUT="$_plane_wire_out" "$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
+_read_wire_out "$_plane_wire_out"
+[ -n "$_plane_wire_out" ] && rm -f "$_plane_wire_out" 2>/dev/null || true
 
 # Outcome-typed transmission (PR-B T4/§6b #7): clean send into an idle pane =
 # pane_submitted; clean send into a pane the pre-send probe saw BUSY =

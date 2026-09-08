@@ -899,6 +899,36 @@ r=$(grep -c 'not a minted id' "$TMPD/bt-stderr.log" || true)
 assert_eq "...and discloses why on stderr" "1" "$r"
 unset PLANE_MSG_ID
 
+# F6 (fold): the bash `=~ $` anchor matches BEFORE a trailing newline, so the id
+# grammar alone would accept "msg_<32hex>\n" and inject a newline into the
+# payload. The added embedded-newline guard must refuse it: no trailer, no wire
+# proof, disclosed on stderr.
+export PLANE_MSG_ID="$VALID_MSGID"$'\n'
+run_bot_send "dispatch with a newline-suffixed id" "$FIXTURES/input-clean-submit.txt" 2>"$TMPD/bt-nl.log"
+cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
+r=$(grep -c "⟦plane:" "$TMPD/joined" || true)
+assert_eq "a newline-suffixed PLANE_MSG_ID appends NO trailer (F6)" "0" "$r"
+r=$(grep -c 'not a minted id' "$TMPD/bt-nl.log" || true)
+assert_eq "...and discloses why (F6)" "1" "$r"
+[ -z "${PLANE_WIRE_SHA256:-}" ] && r=yes || r=no
+assert_eq "a refused id records NO wire proof (F6)" "yes" "$r"
+unset PLANE_MSG_ID
+
+echo "=== chunk P fold F1: bot_tmux_send records the SENDER's wire proof ==="
+# The delivery JOIN's basis: the sha256 + byte length of the EXACT bytes on the
+# wire for the message proper (safe, AFTER sanitize and BEFORE the trailer).
+# Assert the door's computation IS sanitize + sha256_prefixed, and that it
+# EXCLUDES the trailer (the receiver hashes arrival-minus-trailer, so both ends
+# must span the same bytes).
+export PLANE_MSG_ID="$VALID_MSGID"
+run_bot_send "[BOTCOMMAND] mgr | task | do the thing" "$FIXTURES/input-clean-submit.txt"
+_expect_safe="$(sanitize_tmux_input "[BOTCOMMAND] mgr | task | do the thing")"
+assert_eq "the wire proof sha is sha256_prefixed(sanitize(payload))" \
+    "$(sha256_prefixed "$_expect_safe")" "${PLANE_WIRE_SHA256:-}"
+assert_eq "the wire proof byte length is len(safe), trailer EXCLUDED" \
+    "$(printf '%s' "$_expect_safe" | wc -c | tr -d ' ')" "${PLANE_WIRE_BYTES:-}"
+unset PLANE_MSG_ID
+
 echo ""
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

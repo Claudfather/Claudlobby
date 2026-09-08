@@ -148,68 +148,98 @@ _TX_ACTIVATION = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
 # a carrier fact to re-send, a never-activated one may be a bot that is down.
 # Their union is byte-equivalent to the old single arm (a `failed` row IS a
 # transmission row), so ATTENTION_SQL's population is unchanged.
+# chunk P fold F2: `received` is the RECEIVER's own fact, not evidence the
+# SENDER attempted a dispatch, so it must NOT satisfy "a transmission exists for
+# this dispatch". Without this filter a `received` row alone (the sender's
+# pane_submitted lost — plane down at dispatch, up at receipt) made
+# `never_activated` fire for a message that was demonstrably received.
 _TX_EXISTS = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-              " AND e.msg_id = a.dispatch_msg_id)")
+              " AND e.msg_id = a.dispatch_msg_id AND e.event <> 'received')")
 _TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
                  " AND e.msg_id = a.dispatch_msg_id"
                  f" AND e.event IN ({_TX_ACTIVATION}))")
 _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
               " AND e.msg_id = a.dispatch_msg_id AND e.event='failed')")
 
-# --- the delivery JOIN (chunk P, #1501) ---------------------------------------
+# --- the delivery JOIN (chunk P, #1501; fold F1/F3) ---------------------------
 # Delivery, derived ONCE here — the honest replacement for reading
 # `pane_submitted` as "delivered". The sender's Enter cannot see what the
 # receiver ingested (94 of 180 large sends the week before chunk O were wrong);
 # the RECEIVER's own row can. A `received` transmission carries the byte length
 # and sha256 of the prompt the receiving session actually got (received_bytes /
 # received_sha256, in `detail`, landed by lib/plane-dispatch-in.sh), keyed to
-# the sender's msg_id; this JOINs it against the communication's body hash
-# (body_sha256 / body_bytes, computed at ingest over the message proper —
-# contracts.cap_body). Columns: (msg_id, body_bytes, received_bytes, delivery):
+# the sender's msg_id.
 #
-#   delivered    a received proof whose sha256 == body_sha256
-#   truncated    a received proof SHORTER than body_bytes (sha then necessarily
-#                differs — the #1493 head/tail-loss shape; the caller reads the
-#                shortfall off body_bytes - received_bytes)
-#   altered      a received proof neither equal nor shorter: same-or-greater
-#                length, different sha — arrived but not intact (a pane
-#                transform, e.g. sanitize_tmux_input collapsing a multi-line
-#                body's newlines to spaces). Named, never folded into delivered.
-#   unconfirmed  a pane_submitted but NO received proof: the tail (and its
-#                routing trailer) was lost — 8 of 180 — or the receiver was
-#                mid-turn/down, or the send rode a carrier this hook does not see
-#   NULL         no pane_submitted at all — nothing was submitted to a pane, so
-#                there is no tmux-delivery verdict to render for this message
+# fold F1: it JOINs that against the SENDER's WIRE proof (wire_sha256 /
+# wire_bytes, in `detail` on a submission-class tmux fact — bot_tmux_send hashes
+# the EXACT bytes it put on the wire), NOT the communication's body hash. The
+# body is the raw logical message; the receiver hashes what came off the wire,
+# which `sanitize_tmux_input` rewrote (newlines/tabs -> spaces). Comparing the
+# arrival against the raw body read every multi-line / tabbed / double-spaced
+# dispatch as ALTERED or TRUNCATED though fully delivered. The wire proof and the
+# arrival are the SAME bytes, so DELIVERED fires for every shape.
 #
-# The NEWEST `received` wins (a re-send mints a fresh msg_id, so in practice
-# there is one — MAX(ingest_seq) is defensive). Format with ph = the msg_id
-# placeholders; bind the msg_ids once. json_extract reads the proof out of
-# `detail`, the NEWEST_ACK_SQL idiom.
+# fold F3: the `received` row must be addressed to THIS communication's recipient
+# (destination = recipient_raw). An untracked prompt that merely QUOTES a real
+# trailer plants a `received` under someone else's destination — the ON clause
+# makes it inert rather than a misattributed verdict.
+#
+# Columns: (msg_id, wire_bytes, received_bytes, delivery):
+#
+#   delivered    a received proof whose sha256 == the wire proof's sha256
+#   truncated    a received proof genuinely SHORTER than the wire (real tail
+#                loss — the #1493 shape; the caller reads the shortfall off
+#                wire_bytes - received_bytes). `<`, never `<=`/`!=`: an arrival
+#                that is equal-or-longer with a differing sha is ALTERED, not lost
+#   altered      a received proof compared against a wire proof and neither equal
+#                nor shorter: arrived transformed, not lost. GUARDED on the wire
+#                proof existing (fold): you cannot call an arrival "altered"
+#                with nothing to compare it to, so a receipt with no wire proof
+#                (a sha-less host; a pre-fold row) degrades to unconfirmed/NULL,
+#                never a false "ARRIVED ALTERED" alarm
+#   unconfirmed  a submission-class fact (pane_submitted / carrier_queued) but NO
+#                usable received proof: the tail was lost, or the receiver was
+#                mid-turn/down, or the receipt lacked a wire proof to verify
+#   NULL         nothing was submitted to a pane — no tmux-delivery verdict
+#
+# The NEWEST `received` / submission wins (a re-send mints a fresh msg_id, so in
+# practice there is one — MAX(ingest_seq) is defensive). Format with ph = the
+# msg_id placeholders; bind the msg_ids once. json_extract reads each proof out
+# of `detail`, the NEWEST_ACK_SQL idiom.
 DELIVERY_STATUS_SQL = (
-    "SELECT c.msg_id AS msg_id, c.body_bytes AS body_bytes,"
+    "SELECT c.msg_id AS msg_id, s.wire_bytes AS wire_bytes,"
     " r.received_bytes AS received_bytes,"
     " CASE"
-    "  WHEN r.received_sha256 IS NOT NULL AND r.received_sha256 = c.body_sha256"
-    "    THEN 'delivered'"
-    "  WHEN r.received_sha256 IS NOT NULL AND r.received_bytes < c.body_bytes"
-    "    THEN 'truncated'"
-    "  WHEN r.received_sha256 IS NOT NULL THEN 'altered'"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_sha256 IS NOT NULL"
+    "   AND r.received_sha256 = s.wire_sha256 THEN 'delivered'"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_bytes IS NOT NULL"
+    "   AND r.received_bytes < s.wire_bytes THEN 'truncated'"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_sha256 IS NOT NULL"
+    "    THEN 'altered'"
     "  WHEN s.msg_id IS NOT NULL THEN 'unconfirmed'"
     "  ELSE NULL"
     " END AS delivery"
     " FROM communications c"
     " LEFT JOIN ("
     "  SELECT e.msg_id AS msg_id,"
+    "   json_extract(e.detail, '$.destination') AS destination,"
     "   json_extract(e.detail, '$.received_sha256') AS received_sha256,"
     "   json_extract(e.detail, '$.received_bytes') AS received_bytes"
     "  FROM events e"
     "  WHERE e.kind='transmission' AND e.event='received'"
     "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
     "    WHERE e2.kind='transmission' AND e2.event='received' AND e2.msg_id = e.msg_id)"
-    " ) r ON r.msg_id = c.msg_id"
+    " ) r ON r.msg_id = c.msg_id AND r.destination = c.recipient_raw"
     " LEFT JOIN ("
-    "  SELECT DISTINCT msg_id FROM events"
-    "  WHERE kind='transmission' AND event='pane_submitted'"
+    "  SELECT e.msg_id AS msg_id,"
+    "   json_extract(e.detail, '$.wire_sha256') AS wire_sha256,"
+    "   json_extract(e.detail, '$.wire_bytes') AS wire_bytes"
+    "  FROM events e"
+    "  WHERE e.kind='transmission' AND e.event IN ('pane_submitted','carrier_queued')"
+    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
+    "    WHERE e2.kind='transmission'"
+    "     AND e2.event IN ('pane_submitted','carrier_queued')"
+    "     AND e2.msg_id = e.msg_id)"
     " ) s ON s.msg_id = c.msg_id"
     " WHERE c.msg_id IN ({ph})"
 )

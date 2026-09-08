@@ -18,20 +18,21 @@
 # tracked message and is recorded as nothing — the zero-fork prefilter below
 # exits before any python spawn, so an ordinary prompt pays almost nothing.
 #
-# THE STRIP BOUNDARY IS THE CRUX. The sender hashed the MESSAGE PROPER
-# (contracts.cap_body over the `body`), WITHOUT the `set +H; ` that
-# `lib/dispatch.sh` prepends later and WITHOUT the trailer `bot_tmux_send`
-# appends later. So to make received_sha256 == body_sha256 the hook strips
-# EXACTLY those two: the trailer (with its own-line separator) and, if present,
-# a single leading `set +H; ` prefix. What remains is hashed (sha256, UTF-8
-# bytes) and byte-counted; both ride the `received` transmission keyed to
-# <msg_id>, and the delivery JOIN (queries.DELIVERY_STATUS_SQL) compares them to
-# the communication's body hash: equal -> DELIVERED, shorter -> TRUNCATED, a
-# pane submission with no such row -> UNCONFIRMED. The equality holds for a
-# sanitize-STABLE body (single-line, single-spaced — the dominant envelope
-# shape); a body sanitize would rewrite (a multi-line dispatch, whose newlines
-# `sanitize_tmux_input` collapses to spaces on the way out) reads ALTERED rather
-# than DELIVERED — honest, never a false all-clear.
+# THE STRIP BOUNDARY IS THE CRUX (chunk P fold F1). The sender records a WIRE
+# proof: the sha256 + byte length of the EXACT bytes bot_tmux_send put on the
+# wire for the message proper — sanitize_tmux_input(payload), the `set +H; `
+# prefix `lib/dispatch.sh` may prepend INCLUDED, the trailer bot_tmux_send
+# appends on its own last line NOT. So this hook strips EXACTLY ONE thing: the
+# trailer (with its own-line separator). What remains is that same wire form; it
+# is hashed (sha256, UTF-8 bytes) and byte-counted, and both ride the `received`
+# transmission keyed to <msg_id>. The delivery JOIN
+# (queries.DELIVERY_STATUS_SQL) compares them to the sender's WIRE proof: equal
+# -> DELIVERED, genuinely shorter -> TRUNCATED, transformed -> ALTERED, a pane
+# submission with no such row -> UNCONFIRMED. Comparing the wire form on BOTH
+# ends is what makes DELIVERED fire for every shape — a multi-line / tabbed /
+# double-spaced dispatch (whose newlines sanitize collapses to spaces on the way
+# out) now delivers cleanly, where the pre-fold body-hash comparison read it
+# ALTERED though fully delivered.
 #
 # STDOUT DISCIPLINE IS LOAD-BEARING: UserPromptSubmit stdout is ADDED TO THE
 # MODEL'S CONTEXT. Every path here writes NOTHING to stdout — the parser output
@@ -101,16 +102,16 @@ if not m:
           " as a minted trailer — not recorded", file=sys.stderr)
     sys.exit(0)
 msg_id = m.group(1)
-# Strip EXACTLY what the sender did not hash. First the trailer and its
-# own-line separator (rstrip only \r\n — a trailing SPACE is the sanitized
-# body's own and stays, matching what the sender's carrier produced).
+# fold F1: strip ONLY the trailer and its own-line separator (rstrip \r\n — a
+# trailing SPACE is the sanitized wire's own and stays). What remains is the
+# FULL wire form the sender put on the pane: sanitize_tmux_input(payload),
+# INCLUDING any leading `set +H; ` dispatch.sh prepended. The sender records the
+# sha256 of exactly those bytes as its wire proof, so hashing the arrival minus
+# trailer matches it for EVERY shape. (Before the fold this also stripped a
+# leading `set +H; ` to match the body hash — which only held for a sanitize-
+# stable single-line body; multi-line / tabbed / double-spaced dispatches then
+# read ALTERED though fully delivered.)
 remainder = prompt[:m.start()].rstrip("\r\n")
-# Then a single leading `set +H; ` — dispatch.sh prepends it to a non-slash
-# payload; report-back and a slash-command briefing carry none, so it is
-# stripped only when present.
-PREFIX = "set +H; "
-if remainder.startswith(PREFIX):
-    remainder = remainder[len(PREFIX):]
 raw = remainder.encode("utf-8")
 event = {
     "event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": fleet,

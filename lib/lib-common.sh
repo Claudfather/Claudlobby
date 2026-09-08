@@ -603,6 +603,45 @@ plane_tx_event() {
         "$(json_escape "$5")" "$6" "${7:-}"
 }
 
+# --- the delivery-JOIN wire proof (chunk P fold F1) -------------------------
+# bot_tmux_send computes the SENDER's wire proof (sha256 + byte length of the
+# EXACT bytes it put on the wire for the message proper) and exposes it two ways:
+# as the globals PLANE_WIRE_SHA256 / PLANE_WIRE_BYTES for an IN-SHELL caller
+# (report-back), and — because dispatch-task / briefing / the task CLI send
+# through the dispatch.sh SUBPROCESS where a global cannot cross back — written
+# to the file named by PLANE_WIRE_OUT. These two helpers are the door's side.
+
+# _read_wire_out <file> — populate PLANE_WIRE_SHA256 / PLANE_WIRE_BYTES from the
+# file bot_tmux_send wrote across the dispatch.sh process boundary. Resets them
+# first so a prior send in the same process cannot leak a stale proof; an empty
+# arg or a missing/empty file leaves them empty (no wire proof recorded).
+_read_wire_out() {
+    PLANE_WIRE_SHA256=""; PLANE_WIRE_BYTES=""
+    [ -n "${1:-}" ] && [ -f "$1" ] || return 0
+    local _k _v
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+            sha) PLANE_WIRE_SHA256="$_v" ;;
+            bytes) PLANE_WIRE_BYTES="$_v" ;;
+        esac
+    done < "$1"
+    return 0
+}
+
+# _wire_frag <state> — the plane_tx_event tail fragment carrying the wire proof,
+# emitted ONLY on a submission-class tmux state (pane_submitted / carrier_queued
+# — the states whose bytes reached a pane) and ONLY when the proof is present.
+# Leading comma, wire_bytes an unquoted JSON number. Empty otherwise.
+_wire_frag() {
+    case "$1" in
+        pane_submitted|carrier_queued) ;;
+        *) return 0 ;;
+    esac
+    [ -n "${PLANE_WIRE_SHA256:-}" ] && [ -n "${PLANE_WIRE_BYTES:-}" ] || return 0
+    printf ',"wire_sha256":"%s","wire_bytes":%s' \
+        "$PLANE_WIRE_SHA256" "$PLANE_WIRE_BYTES"
+}
+
 # plane_peer_fleet <session> — fleet name for stamping a plane alias of the
 # bot owning <session>: its OWN bot.conf first (#1372 F7 — path parsing
 # misattributed nested vault layouts), then the path component before
@@ -1410,15 +1449,43 @@ bot_tmux_send() {
     # UserPromptSubmit hook (plane-dispatch-in.sh) recognises the marker,
     # strips it plus any `set +H; ` prefix, and records the byte length + sha256
     # of the message it actually got, keyed to <msg_id> -- which the delivery
-    # JOIN compares to the sender's body_sha256. body_sha256 is UNCHANGED: the
-    # door hashed the message proper before this line, and the marker rides on a
-    # line below it. GRAMMAR-GUARDED (a minted msg id only), so a stray env
-    # value can never inject a newline or a stray marker glyph into the payload.
-    # A send with no PLANE_MSG_ID (a raw human prompt, a keepalive /reload)
-    # carries no trailer and is an untracked prompt by design.
+    # JOIN compares to the sender's WIRE proof (fold F1), recorded just below.
+    # GRAMMAR-GUARDED (a minted msg id only), so a stray env value can never
+    # inject a newline or a stray marker glyph into the payload. A send with no
+    # PLANE_MSG_ID (a raw human prompt, a keepalive /reload) carries no trailer
+    # and is an untracked prompt by design.
+    #
+    # fold F1 -- the delivery-JOIN wire proof. The receiver used to be compared
+    # against body_sha256 (the RAW logical message), but the wire passes the
+    # payload through sanitize_tmux_input, so a multi-line / tabbed / double-
+    # spaced dispatch read TRUNCATED or ALTERED though fully delivered. Instead,
+    # record the sha256 + byte length of the EXACT bytes going on the wire for
+    # the message proper -- `safe`, AFTER sanitize and BEFORE the trailer -- and
+    # the delivery JOIN compares the receiver's arrival (which is those same
+    # bytes) against THIS. body_sha256 is UNCHANGED and untouched here.
+    PLANE_WIRE_SHA256=""; PLANE_WIRE_BYTES=""
     local _plane_msg_pat='^msg_[0-9a-f]{32}$'
     if [ -n "${PLANE_MSG_ID:-}" ]; then
-        if [[ "$PLANE_MSG_ID" =~ $_plane_msg_pat ]]; then
+        # F6 (fold): the bash `=~ $` anchor matches BEFORE a trailing newline, so
+        # a value ending in a newline would pass the pattern and inject one into
+        # the payload -- reject any embedded newline outright (defense in depth;
+        # not reachable via the mint).
+        if [[ "$PLANE_MSG_ID" =~ $_plane_msg_pat ]] && [[ "$PLANE_MSG_ID" != *$'\n'* ]]; then
+            # The proof over the pre-trailer wire bytes. Exposed as globals for an
+            # IN-SHELL caller (report-back) and, when PLANE_WIRE_OUT is set,
+            # written there for a caller across the dispatch.sh subprocess
+            # boundary (dispatch-task / briefing / the task CLI). A sha-less host
+            # records the trailer but no proof, and the JOIN then stays at
+            # unconfirmed rather than fabricating a verdict.
+            PLANE_WIRE_SHA256=$(sha256_prefixed "$safe" 2>/dev/null || true)
+            if [ -n "$PLANE_WIRE_SHA256" ]; then
+                PLANE_WIRE_BYTES=$(printf '%s' "$safe" | wc -c)
+                PLANE_WIRE_BYTES=$((PLANE_WIRE_BYTES))
+                if [ -n "${PLANE_WIRE_OUT:-}" ]; then
+                    printf 'sha=%s\nbytes=%s\n' "$PLANE_WIRE_SHA256" "$PLANE_WIRE_BYTES" \
+                        > "$PLANE_WIRE_OUT" 2>/dev/null || true
+                fi
+            fi
             safe="$safe"$'\n'"⟦plane:${PLANE_MSG_ID}⟧"
         else
             echo "bot_tmux_send: PLANE_MSG_ID '$PLANE_MSG_ID' is not a minted id -- no plane trailer appended" >&2
@@ -4427,4 +4494,23 @@ sha256_hex32() {
     else
         printf '%s' "$1" | sha256sum | cut -c1-32
     fi
+}
+
+# sha256_prefixed <string> -- "sha256:" + the FULL 64 hex chars of sha256 over
+# the exact bytes (no trailing newline), the format contracts.cap_body and the
+# receiver hook (plane-dispatch-in.sh) both use, so the delivery JOIN compares
+# the sender's wire proof and the receiver's arrival proof byte-for-byte (chunk
+# P fold F1). Empty stdout + nonzero if no sha tool resolves; the caller then
+# records the fact without a wire proof and the JOIN stays at unconfirmed.
+sha256_prefixed() {
+    local _h
+    if command -v shasum >/dev/null 2>&1; then
+        _h=$(printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1) || return 1
+    elif command -v sha256sum >/dev/null 2>&1; then
+        _h=$(printf '%s' "$1" | sha256sum | cut -d' ' -f1) || return 1
+    else
+        return 1
+    fi
+    [ -n "$_h" ] || return 1
+    printf 'sha256:%s' "$_h"
 }

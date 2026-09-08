@@ -384,6 +384,40 @@ def test_f7_terminal_dominates_late_ack_replay(tmp_path: Path):
     assert _statuses(tmp_path)[aid] == "completed"
 
 
+def test_fold_f2_a_lone_received_does_not_make_never_activated_fire(tmp_path: Path):
+    """fold F2: `received` is the RECEIVER's own fact, not evidence the SENDER
+    attempted a dispatch. Before the fix _TX_EXISTS matched any transmission, so
+    a `received` with no pane_submitted (the plane down at dispatch, up at
+    receipt) surfaced the assignment as `never_activated` — attention for a
+    message that was demonstrably received. Control: a lone carrier_queued
+    (accepted by the TUI, never consumed) SHOULD still fire never_activated, so
+    the filter narrows exactly `received` and nothing more."""
+    from claudlobby.plane.queries import ATTENTION_SQL, attention_params
+
+    # an assignment whose ONLY transmission is a `received` proof — which
+    # _seed_assignment cannot emit (the contract requires the proof pair), so it
+    # is seeded here directly against the same dispatch_msg_id.
+    msg = mint_msg_id()
+    recd = _seed_assignment(tmp_path, dispatch_msg=msg)
+    emit_batch(tmp_path, [
+        {"event_type": "transmission", "emitter": "fx", "fleet": "example-fleet",
+         "payload": {"msg_id": msg, "attempt_no": 1, "carrier": "tmux",
+                     "destination": "w1", "state": "received",
+                     "received_bytes": 12, "received_sha256": "sha256:" + "a" * 64}},
+    ])
+    # control: a lone carrier_queued exists, is not activation, is not failed —
+    # it must STILL surface as never_activated.
+    queued = _seed_assignment(tmp_path, dispatch_msg=mint_msg_id(),
+                              tx_events=(("carrier_queued", 1),))
+    conn = connect(db_path(tmp_path))
+    attention = {r[0] for r in conn.execute(
+        ATTENTION_SQL,
+        attention_params("2999-01-01T00:00:00+00:00")).fetchall()}
+    conn.close()
+    assert recd not in attention, "a lone `received` must NOT surface as attention"
+    assert queued in attention, "a lone carrier_queued still needs attention"
+
+
 # --- F8: malformed spool shapes --------------------------------------------
 
 def test_f8_malformed_spool_shapes_quarantine_never_crash_or_vanish(env):

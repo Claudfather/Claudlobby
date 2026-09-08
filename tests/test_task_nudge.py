@@ -90,7 +90,7 @@ def sent(monkeypatch):
     so its only send door is `lib/dispatch.sh` against a live tmux server."""
     calls = []
 
-    def fake(paths, bot, message, fleet=None):
+    def fake(paths, bot, message, fleet=None, **_):
         calls.append((bot, message, fleet))
         return 0, ""
 
@@ -173,7 +173,7 @@ def test_a_failed_send_records_the_failure_rather_than_claiming_delivery(tmp_pat
     makes recording the ask worthless."""
     monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
     monkeypatch.setattr(task_cmd, "send_to_bot",
-                        lambda paths, bot, message, fleet=None: (1, "session not found"))
+                        lambda paths, bot, message, fleet=None, **_: (1, "session not found"))
     tid = _seed(tmp_path)
     rc = task_cmd.cmd_task_nudge(_Args(tmp_path, tid, as_who="chris"))
     assert rc == 1
@@ -341,3 +341,61 @@ def test_the_send_carries_the_rows_fleet_in_the_environment(tmp_path, monkeypatc
     assert seen["env"]["CLAUDLOBBY_FLEET"] == "engineering"
     assert seen["env"]["CLAUDLOBBY_ROOT"] == str(tmp_path)
     assert "BOT_DIR" not in seen["env"] and "FLEET_NAME" not in seen["env"]
+
+
+def test_fold_f5_send_to_bot_puts_the_msg_id_on_the_wire_as_plane_msg_id(tmp_path, monkeypatch):
+    """fold F5: send_to_bot used to omit PLANE_MSG_ID, so bot_tmux_send appended
+    no routing trailer, the receiver recorded no `received`, and the whole
+    nudge/recheck class was UNCONFIRMED forever. A msg_id kwarg now rides the
+    environment as PLANE_MSG_ID (the trailer), and wire_out as PLANE_WIRE_OUT
+    (the wire proof channel, fold F1); omitting msg_id leaves the send untagged."""
+    import subprocess
+
+    from claudlobby.paths import Paths
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "dispatch.sh").write_text("#!/bin/bash\nexit 0\n")
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["env"] = kw.get("env") or {}
+
+        class R:
+            returncode, stderr = 0, ""
+        return R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.delenv("PLANE_MSG_ID", raising=False)
+    paths = Paths(tmp_path)
+    mid = "msg_" + "a" * 32
+    task_cmd.send_to_bot(paths, "lead", "NUDGE …", fleet="eng",
+                         msg_id=mid, wire_out="/tmp/wire-proof")
+    assert seen["env"]["PLANE_MSG_ID"] == mid
+    assert seen["env"]["PLANE_WIRE_OUT"] == "/tmp/wire-proof"
+    # ...and omitting it leaves the send untagged (a raw human prompt shape)
+    seen.clear()
+    task_cmd.send_to_bot(paths, "lead", "NUDGE …", fleet="eng")
+    assert "PLANE_MSG_ID" not in seen["env"]
+    assert "PLANE_WIRE_OUT" not in seen["env"]
+
+
+def test_fold_f5_a_nudge_tags_the_send_with_the_communications_own_msg_id(tmp_path, monkeypatch):
+    """fold F5, end to end: `task nudge` must tag its send with the SAME msg_id
+    it minted for the communication, so the receiver's `received` pairs with the
+    right message in the delivery JOIN. Runs the real door and reads the plane."""
+    _full_capture(tmp_path)
+    tid = _seed(tmp_path)
+    seen = {}
+
+    def fake(paths, bot, message, fleet=None, msg_id=None, wire_out=None):
+        seen["msg_id"] = msg_id
+        return 0, ""
+
+    monkeypatch.setattr(task_cmd, "send_to_bot", fake)
+    assert task_cmd.cmd_task_nudge(_Args(tmp_path, tid, as_who="chris")) == 0
+    conn = connect(db_path(tmp_path))
+    comm_ids = {r[0] for r in conn.execute(
+        "SELECT msg_id FROM communications WHERE message_class='task_request'").fetchall()}
+    conn.close()
+    assert seen.get("msg_id") and seen["msg_id"] in comm_ids, (
+        "the nudge send must carry the communication's own msg_id as the trailer")
