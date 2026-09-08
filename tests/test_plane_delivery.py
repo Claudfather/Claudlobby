@@ -26,6 +26,12 @@ from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.migrations import migrate
 
 BODY = "[BOTCOMMAND] erlich | task | Onboard a new ingest source: KAIT"
+# A dispatch whose STORED body is multi-line but whose WIRE form (what sanitize
+# put on the wire, what the receiver got) is the one-line collapse. body_sha256
+# and wire_sha256 differ here, so a delivered verdict is only correct when the
+# JOIN compares the WIRE hash — the whole point of the fold's F1.
+MLINE_BODY = "do the first thing\n\nthen the second\tindented"
+MLINE_WIRE = "do the first thing then the second indented"
 DEST = "ramanujan"                       # recipient_raw AND the received destination
 
 
@@ -101,6 +107,13 @@ def _seed(root):
         _comm(_mid("7"), BODY), _submitted(_mid("7"), BODY), _received(_mid("7"), longer),
         # the guard: a received with NO wire proof to compare cannot be 'altered'
         _comm(_mid("8"), BODY), _submitted(_mid("8"), None), _received(_mid("8"), altered),
+        # THE WIRE-NOT-BODY pin (kills the mutant that compares body_sha256): the
+        # body the plane STORED differs from what went on the WIRE (a multi-line
+        # dispatch sanitize collapses to one line). The received matches the WIRE,
+        # so the message is DELIVERED — but only if the JOIN reads wire_sha256.
+        # Comparing body_sha256 (the raw multi-line form) would read 'altered'.
+        _comm(_mid("9"), MLINE_BODY), _submitted(_mid("9"), MLINE_WIRE),
+        _received(_mid("9"), MLINE_WIRE),
     ])
 
 
@@ -109,7 +122,7 @@ def _delivery(root):
     conn = connect(str(db))
     migrate(conn)
     conn.row_factory = sqlite3.Row
-    ids = [_mid(t) for t in "12345678"]
+    ids = [_mid(t) for t in "123456789"]
     ph = ",".join("?" * len(ids))
     return {r["msg_id"]: dict(r)
             for r in conn.execute(q.DELIVERY_STATUS_SQL.format(ph=ph), ids)}
@@ -120,6 +133,15 @@ def _delivery(root):
 def test_delivered_when_received_sha_equals_wire_sha(tmp_path):
     _seed(tmp_path)
     assert _delivery(tmp_path)[_mid("1")]["delivery"] == "delivered"
+
+
+def test_delivered_compares_the_WIRE_not_the_body(tmp_path):
+    # msg 9's stored body is multi-line; its wire form (what the receiver got)
+    # is the one-line collapse, so body_sha256 != wire_sha256. A received that
+    # matches the WIRE must read DELIVERED. If the JOIN compared body_sha256 it
+    # would read 'altered' — this is the pin for the fold's whole reason.
+    _seed(tmp_path)
+    assert _delivery(tmp_path)[_mid("9")]["delivery"] == "delivered"
 
 
 def test_truncated_when_received_is_shorter(tmp_path):
