@@ -50,6 +50,13 @@
 # bypass the fleet defaults merge, so fleet.yaml cannot reach one.
 
 host:
+  # Host jobs are host-scoped by design and so pass NO fleet. Which manager
+  # receives their [FLEET-ALERT]/[FLEET-NOTICE] is therefore NOT decided here --
+  # declare it as CLAUDLOBBY_ALERT_MANAGER in the ROOT .env (#1517). It is
+  # deliberately not a field in this file: system.yaml is package-owned and
+  # tracked, so a bot name here would commit a fleet-specific value and make an
+  # accidental recipient look deliberate. Undeclared still works and now
+  # discloses itself -- see documentation/environment-variables.md.
   jobs:
     # Stage the latest Claude Code binary daily (download-only; the staged
     # binary is applied on a bot's next natural restart or the weekly worker

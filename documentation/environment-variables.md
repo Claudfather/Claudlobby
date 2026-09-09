@@ -97,6 +97,42 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | `RC_READY_TIMEOUT_S` | env override (`start-bot.sh`) | Seconds to wait for the `remote-control is active` readiness string before logging TIMEOUT and emitting the `rc_timeout` event (default: 90). Not composed from fleet.yaml — a raw override for slow hosts and the test harness |
 | `KEEPALIVE_BOOT_GRACE_S` | env override (`lib-common.sh` `service_is_starting`) | Seconds a unit may stay mid-start before keepalive stops treating it as booting and restarts it, and fleet-pulse resumes alarming (default: 300). Budgets ONE phase — `ExecStart`, bounded by `RC_READY_TIMEOUT_S` — so the composed boot stagger never eats it. Raise it only on a host where cold starts genuinely exceed it; the cap is what stops a wedged `start-bot.sh` suppressing the watchdog forever (#1002). Not composed from fleet.yaml |
 
+## Host-Job Alert Routing
+
+| Variable | Purpose |
+|---|---|
+| `CLAUDLOBBY_ALERT_MANAGER` | Bot ID that receives `[FLEET-ALERT]` / `[FLEET-NOTICE]` from **host-scoped** jobs. Declared in the **root** `.env`. |
+
+A host job (`disk-monitor`, `host-health-check`, `notify-behind`, …) is host-scoped by
+design and so passes no fleet. With nothing declared, the signal resolver falls through to a
+cross-fleet glob that expands **lexically**, and the recipient becomes whichever fleet directory
+sorts first — a choice nobody made, that a newly-added directory moves silently, and whose loss
+the previous recipient cannot detect, because alerts stopping looks exactly like alerts not
+firing (#1517).
+
+Set this to the bot that should actually read host alerts:
+
+```sh
+# <root>/.env  — the ROOT tier, because a host job occupies the host/root scope
+CLAUDLOBBY_ALERT_MANAGER=clog
+```
+
+Per the env contract above, the **name** is documented here and the **value** lives in the
+gitignored `.env`. It deliberately does **not** live in `system.yaml`: that file is
+package-owned and tracked, so a bot name there would commit a fleet-specific value *and* make
+an accidental recipient look like a deliberate one to the next reader.
+
+**Scope is the host tier only.** A per-fleet job (`fleet-pulse`, `creds-check`) passes its
+fleet, resolves its own manager first, and is unaffected whether or not this is set.
+
+**Undeclared is still supported and is now auditable.** With nothing declared the cross-fleet
+fallback still runs — removing it would strand every host that has declared nothing — but it
+emits an `alert_recipient_resolved` event naming the manager, the fleet it crossed into, and how
+many fleets could have answered. The event is self-clearing: declare a recipient that resolves
+and it goes quiet, so its presence in the ledger *is* the signal that a host still has an
+undeclared one. A declaration that cannot be resolved (absent, or the same bot ID in two fleets)
+falls back rather than dropping the alert, and says so loudly.
+
 ## Code-Audit Sweep
 
 Emitted only into the `fleet.sweep.owner_bot`'s `bot.conf` (see `fleet.sweep` in the fleet.yaml schema reference) — the fleet-level nightly selector (`lib/code-audit-sweep.sh`) needs to resolve exactly one owner.
