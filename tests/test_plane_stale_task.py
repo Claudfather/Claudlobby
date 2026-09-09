@@ -43,6 +43,9 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
               worker: str = "bot:f/worker", heartbeat: str | None = None,
               progress_age_h: float | None = None,
               marker_progress_age_h: float | None = None,
+              idless: bool = False,
+              at_override: str | None = None,
+              progress_at_override: str | None = None,
               expected_by: str | None = None, terminal: str | None = None) -> str:
     """One dispatched assignment stamped `dispatch_age_h` hours ago, with the
     knobs the pins turn: a delivery (pane_submitted) transmission, a heartbeat
@@ -50,7 +53,11 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
     `report_status` progress marker, a deadline, a terminal report."""
     _full_capture(root)
     stem = (h * 32)[:32]
-    at = _ago(hours=dispatch_age_h)
+    at = at_override or _ago(hours=dispatch_age_h)
+    # the envelope source_ref: an id-less dispatch is `dispatch-log:sha:<key>`,
+    # an id'd one `dispatch-log:<task_id>` (dispatch-task.sh's two shapes). The
+    # id-less shape is what the actor `report_status` marker resets (branch 2).
+    ref = ("dispatch-log:sha:" if idless else "dispatch-log:t-") + stem
     asg = {"assignment_id": "asg_" + stem, "work_item_id": "wi_" + stem,
            "assignee": worker, "assigned_by": MGR, "dispatch_msg_id": "msg_" + stem}
     if expected_by:
@@ -60,7 +67,7 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
          "payload": {"work_item_id": "wi_" + stem, "title": f"task {h}",
                      "created_by": MGR}},
         {"event_type": "assignment", "emitter": "t", "fleet": "f",
-         "occurred_at": at, "payload": asg},
+         "occurred_at": at, "source_ref": ref, "payload": asg},
         {"event_type": "communication", "emitter": "t", "fleet": "f",
          "occurred_at": at,
          "payload": {"msg_id": "msg_" + stem, "sender": MGR, "recipient": worker,
@@ -83,7 +90,7 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
     if progress_age_h is not None:
         emit_batch(root, [{
             "event_type": "task", "emitter": "t", "fleet": "f",
-            "occurred_at": _ago(hours=progress_age_h),
+            "occurred_at": progress_at_override or _ago(hours=progress_age_h),
             "payload": {"event": "progress", "work_item_id": "wi_" + stem,
                         "assignment_id": "asg_" + stem, "actor": worker}}])
     if marker_progress_age_h is not None:
@@ -175,12 +182,53 @@ def test_a_recent_progress_report_resets_the_clock(tmp_path):
 
 
 def test_an_idless_progress_marker_resets_the_clock(tmp_path):
-    # the id-less path: a `report_status` progress marker on the actor 1h ago
-    # (an id-less progress report resolves no assignment) also resets it
+    # the id-less path: for an ID-LESS assignment (source_ref `dispatch-log:sha:`)
+    # an actor `report_status` progress marker 1h ago (which resolves no specific
+    # assignment) resets the clock — because that is the only fresh-activity
+    # signal an id-less task has.
     asg = _dispatch(tmp_path, "f", dispatch_age_h=8, heartbeat="IDLE",
-                    marker_progress_age_h=1)
+                    idless=True, marker_progress_age_h=1)
     r = _row(tmp_path, asg)
     assert r["attention"] is False
+
+
+def test_an_idd_task_is_not_reset_by_a_siblings_idless_marker(tmp_path):
+    # fold F1: the actor marker resets ONLY id-less tasks. An ID'D assignment
+    # carries its own linked `progress` event (branch 1); a bare actor marker is
+    # a DIFFERENT task's id-less report and must not silence this one. Before the
+    # fold the marker matched on the actor alone and masked a genuinely stuck
+    # id'd task — the whole point of stale_task. Here: an id'd task dispatched 8h
+    # ago, idle, with an actor marker 1h ago → STILL stale.
+    asg = _dispatch(tmp_path, "e", dispatch_age_h=8, heartbeat="IDLE",
+                    idless=False, marker_progress_age_h=1)
+    r = _row(tmp_path, asg)
+    assert r["attention"] is True
+    assert r["attention_reason"] == ["stale_task"]
+
+
+def test_since_uses_the_epoch_latest_instant_under_mixed_offsets(tmp_path):
+    # fold F2: the display "since" (attention_since / the tier clock) is the
+    # instant whose EPOCH is greatest, not the lexically-greatest string. Every
+    # estate door stamps UTC so this cannot fire today, but the envelope accepts
+    # any offset and ingest stores it RAW (isoformat, no to-UTC), so a non-UTC
+    # emitter would trip a lexical MAX. Construct the disagreement: the dispatch
+    # is real-EARLIER (NOW-8h) but written +09:00 so its STRING sorts LATER; the
+    # linked progress is real-LATER (NOW-7h) at +00:00. The arm must date from
+    # the progress (epoch-latest), never the dispatch (lexical-latest).
+    disp = (NOW - timedelta(hours=8)).astimezone(timezone(timedelta(hours=9)))
+    prog = NOW - timedelta(hours=7)  # +00:00
+    # self-guard: the two orderings genuinely disagree for this NOW
+    assert disp.isoformat() > prog.isoformat()   # lexical: the dispatch wins
+    assert disp < prog                           # epoch:   the progress wins
+    asg = _dispatch(tmp_path, "d", dispatch_age_h=8, heartbeat="IDLE",
+                    progress_age_h=7, at_override=disp.isoformat(),
+                    progress_at_override=prog.isoformat())
+    r = _row(tmp_path, asg)
+    assert r["attention_reason"] == ["stale_task"]
+    # the arm dates from the epoch-latest activity (the progress), NOT the
+    # lexically-latest string (the dispatch). Old lexical MAX returned `disp`.
+    assert r["attention_since"] == prog.isoformat()
+    assert r["attention_since"] != disp.isoformat()
 
 
 def test_old_progress_still_leaves_it_stale(tmp_path):

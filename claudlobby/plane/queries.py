@@ -354,8 +354,9 @@ STALE_TASK_RED_S = 3 * 24 * 3600      # ...this long: raise, loud (the tier boun
 # id'd dispatch, by assignment_id) OR a `report_status` marker on the bot's
 # actor with status=progress (an id-less progress report resolves no id, F18
 # R2a; report_status subject_kind is `actor`, so subject_uid = a.assignee_uid).
-# MAX over occurred_at mirrors LAST_PROGRESS_SQL's own tolerance. Both branches
-# hit a partial index (idx_events_task_assignment / idx_events_subject).
+# MAX over occurred_at is the progress clock's own tolerance (the M-A grace).
+# Both branches hit a partial index (idx_events_task_assignment /
+# idx_events_subject).
 _STALE_PROGRESS_AT = (
     "(SELECT MAX(t) FROM ("
     " SELECT e.occurred_at AS t FROM events e WHERE e.kind='task'"
@@ -363,14 +364,26 @@ _STALE_PROGRESS_AT = (
     " UNION ALL"
     " SELECT e.occurred_at FROM events e WHERE e.kind='system'"
     "  AND e.event='report_status' AND e.subject_uid = a.assignee_uid"
-    "  AND json_extract(e.detail, '$.status') = 'progress'))"
+    "  AND json_extract(e.detail, '$.status') = 'progress'"
+    # fold F1: an id-less progress marker is bot-scoped (it resolves no
+    # assignment), so it may reset only an ID-LESS task's clock -- never an
+    # id'd sibling's, which reports progress via branch 1 (the LINKED event).
+    # Without this, a bot doing an id-less note masked a genuinely-stuck id'd
+    # task it was also holding. Residual (inherent, documented): an id-less
+    # marker still resets the bot's OTHER id-less tasks -- they share no id.
+    "  AND a.source_ref LIKE 'dispatch-log:sha:%'))"
 )
 
 # The card's date for the arm ("no progress since …") — the later of the
 # dispatch and the newest progress, as an ISO instant. This is the arm's `_at`
 # column and carries no `?`.
 _STALE_SINCE_AT = (
-    "MAX(a.occurred_at, COALESCE(" + _STALE_PROGRESS_AT + ", a.occurred_at))"
+    # fold F2: pick the instant whose EPOCH is greatest -- NOT a lexical string
+    # MAX, which under mixed tz offsets picks the real-earlier instant and
+    # over-states the age/tier. Display now agrees with the firing predicate.
+    "(CASE WHEN " + _STALE_PROGRESS_AT + " IS NOT NULL AND "
+    + _epoch(_STALE_PROGRESS_AT) + " > " + _epoch("a.occurred_at")
+    + " THEN " + _STALE_PROGRESS_AT + " ELSE a.occurred_at END)"
 )
 
 # presence.working's recorded half as a correlated EXISTS on `a`: the assignee
