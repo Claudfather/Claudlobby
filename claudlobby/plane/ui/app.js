@@ -81,6 +81,18 @@ function latestTx(msg) {
 }
 
 function deliveryLine(msg) {
+  // chunk P fold F4: prefer the SERVER's receiver-proven verdict. delivery_state
+  // is the plain-language rendering of the delivery JOIN (the receiver's own
+  // `received` proof vs the sender's wire proof) — the honest replacement for
+  // reading the sender's pane_submitted as "delivered". Only when there is no
+  // such verdict (a non-tmux carrier, e.g. a Telegram carrier_accepted) do we
+  // fall back to the latest transmission's carrier state.
+  if (msg.delivery_state) {
+    const cls = msg.delivery === "delivered" ? "ok"
+      : (msg.delivery === "truncated" || msg.delivery === "altered") ? "bad"
+      : "pend"; // unconfirmed
+    return `<div class="delivery ${cls}">${esc(msg.delivery_state)}</div>`;
+  }
   const t = latestTx(msg);
   if (!t) return "";
   const cls = t.event === "failed" ? "bad" : t.activated ? "ok" : "pend";

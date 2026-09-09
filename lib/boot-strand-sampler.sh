@@ -349,9 +349,14 @@ count_send_retries() {
 #
 # Unforwarded — no pre-registered ladder sweeps them. Set in the caller env
 # they are dropped by env -i, and knob_disclosure prints them as SCRUBBED
-# rather than letting the run silently measure defaults.
+# rather than letting the run silently measure defaults. The #1493 chunk knobs
+# join this list deliberately: a boot sample must measure the SHIPPED send, and
+# the instrument for sweeping chunk size is lib/send-size-probe.sh, which drives
+# the primitive directly against the recipient transcript rather than through a
+# whole boot. Forwarding them here would put a second, unpinned arm axis into a
+# design whose arm identity is already pre-registered.
 _FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS PANE_VERIFY_TRACE"
-_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS"
+_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_CHUNK_BYTES PANE_SEND_CHUNK_SETTLE_S"
 
 # Field separator for the fate records below: ASCII unit separator, NOT a tab.
 # Tab is an IFS-whitespace character, so `IFS=<tab> read` collapses adjacent

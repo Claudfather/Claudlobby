@@ -82,9 +82,32 @@ def test_supersedes_retires_this_workers_assignment_not_a_same_id_twin(tmp_path)
     assert statuses[twin[2]] != "superseded", "another bot's same-id assignment was retired"
 
 
+def test_a_control_type_supersede_still_retires_its_target(tmp_path):
+    """#1491 keeps --supersedes working on a CONTROL type: the note retires its
+    target even though the note itself mints NO assignment of its own. The plane
+    ids stay minted precisely so the `superseded` event's successor_id survives;
+    only the note's own triple is withheld. (Pins the else-branch sup_ev: revert
+    it and the victim stays open.)"""
+    libdir, env = _plane_lib(tmp_path)
+    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "the real task"', env)
+    assert r.returncode == 0, r.stderr
+    victim = _plane_row(tmp_path)
+    n_before = _rows(tmp_path, "SELECT COUNT(*) FROM assignments")[0][0]
+    r = _bash(f'"{libdir}/dispatch-task.sh" --type query --supersedes {victim["task_id"]}'
+              ' w1 "retiring that, here is a note"', env)
+    assert r.returncode == 0, r.stderr
+    statuses = {r[0]: r[1] for r in _rows(tmp_path, TASK_STATUS_SQL)}
+    assert statuses[victim["plane_assignment_id"]] == "superseded", statuses
+    # the query minted no assignment of its own — the count is unchanged
+    n_after = _rows(tmp_path, "SELECT COUNT(*) FROM assignments")[0][0]
+    assert n_after == n_before, "the query note minted an assignment (#1491)"
+
+
 def test_every_terminal_report_closes_the_bots_open_idless_dispatches(tmp_path):
     libdir, env = _plane_lib(tmp_path)
-    r = _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "what is the retry logic"', env)   # id-less
+    # a raw-text send is the id-less shape that still mints an assignment after
+    # #1491 (a control type mints none), so it is what the id-less closer acts on
+    r = _bash(f'"{libdir}/dispatch-task.sh" w1 "what is the retry logic"', env)   # id-less
     assert r.returncode == 0, r.stderr
     idless = _plane_row(tmp_path)
     assert idless["task_id"] == ""

@@ -299,6 +299,37 @@ def open_assignments_for_task(conn: sqlite3.Connection, task_id: str) -> list[di
             for r in conn.execute(TASK_OPEN_SQL, (DISPATCH + task_id,))]
 
 
+# --- resolve ONE assignment by its id (the acts' asg-first door, #1492) -------
+# The re-check digest hands a manager `asg_` ids, and an id-less row has no task
+# id to name — its real key is the content hash in ``source_ref``. `task-act.sh`
+# takes what the sweep gives: it resolves an ``asg_`` id to the row's OWN
+# dispatch key here and acts through the by-task-id path, so the act stamps the
+# row's real ``dispatch-log:sha:<hex>`` provenance rather than a fabricated
+# ``dispatch-log:asg_...``. `open_only` uses the SAME "no terminal task event"
+# fragment the by-task-id lookup does (``_NT_A``), so a closed asg answers empty
+# exactly as a closed task id does; the ANY form is what a refusal reads to name
+# the sha key even for a row it will not act on.
+_ASG_ROW_COLS = ("work_item_id", "assignment_id", "dispatch_msg_id",
+                 "source_ref", "assignee", "fleet")
+_ASG_ROW_SELECT = (
+    "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.source_ref,"
+    " i.alias AS assignee, f.alias AS fleet FROM assignments a"
+    " LEFT JOIN identity_registry i ON i.uid = a.assignee_uid"
+    " LEFT JOIN identity_registry f ON f.uid = a.fleet_uid"
+    " WHERE a.assignment_id = ?")
+
+
+def assignment_by_id(conn: sqlite3.Connection, asg_id: str, *, open_only: bool = True
+                     ) -> Optional[dict]:
+    """The one assignment row for ``asg_id`` (#1492) — the ``_ASG_ROW_COLS``
+    keys. None when no such assignment, or (with ``open_only``) when it already
+    carries a terminal task event, the same way ``open_assignments_for_task``
+    answers empty for a closed task id."""
+    sql = _ASG_ROW_SELECT + (" AND" + _NT_A if open_only else "")
+    row = conn.execute(sql, (asg_id,)).fetchone()
+    return dict(zip(_ASG_ROW_COLS, row)) if row is not None else None
+
+
 def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, max_age: int,
                  progress_grace: int, entry: Optional[dict] = None
                  ) -> list[tuple[int, int, int, Optional[str]]]:

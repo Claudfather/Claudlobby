@@ -480,10 +480,15 @@ PLANE_MSG_ID="" PLANE_WI_ID="" PLANE_ASG_ID=""
 # over-reported. Not found in the plane → no wiring, disclosed.
 SUP_WI="" SUP_ASG="" SUP_MSG="" sup_frag="" sup_ev=""
 if [ "$PLANE_ARMED" = "1" ]; then
-    # Cutover chunk 6a: EVERY dispatch mints the construct triple, id-less ones
-    # too (query / cancel / compact / restart) -- the plane must hold every
-    # dispatch the legacy ledger holds, or the flipped readers cannot see an
-    # overdue id-less dispatch nor apply the resolver id-less guard (#1418).
+    # The ids are minted for EVERY armed dispatch -- the communication needs its
+    # msg id, and --supersedes needs an assignment id for successor_id whatever
+    # the type. WHICH of them the emission actually USES is decided at emit time
+    # (#1491): a TRACKED shape (task; raw-text inherits type=task) lands the
+    # work_item + assignment, a control type (query / cancel / compact / restart)
+    # records the communication ALONE. Chunk 6a once minted the triple for every
+    # dispatch id-less ones included, which left a `query` an open assignment no
+    # report could ever close (38 in 14 days on one host) that also blanked the
+    # resolver head (#1418); the gate now lives beside the emit.
     PLANE_MSG_ID="$(plane_mint_id msg)"
     PLANE_WI_ID="$(plane_mint_id wi)"
     PLANE_ASG_ID="$(plane_mint_id asg)"
@@ -639,13 +644,30 @@ _plane_emit_intent() {
             echo "dispatch-task: --supersedes $DISPATCH_SUPERSEDES not found in the plane — legacy-only supersession" >&2
         fi
     fi
+    # #1491: ONLY a tracked shape lands a work_item + assignment. A control type
+    # (query / cancel / compact / restart) records the COMMUNICATION ALONE --
+    # matching the mint gate above, the legacy ledger, and the dispatch
+    # protocol's own contract (a `query` "mints nothing"). An open assignment for
+    # a note that asks nothing is a row no report can close, and while it is the
+    # worker's newest assignment it BLANKS the resolver head (#1418) and hijacks
+    # the worker's next report. The gate is the TYPE, never the id: a raw-text
+    # send inherits the default type=task, so it keeps its id-less deadline-
+    # bearing triple (the documented bot+time "one report closes all open
+    # dispatches for that bot" path); a missing sha tool leaves no ref to key the
+    # triple on, so a raw-text send degrades to communication-only there too (the
+    # disclosed fallback above). The plane ids stay minted regardless, so
+    # --supersedes on any type still retires its target with successor_id intact.
+    local emit_triple=""
+    if [ "$DISPATCH_TYPE" = "task" ] && [ -n "$dispatch_ref" ]; then
+        emit_triple=1
+    fi
     local link_frag="" ws_frag="" repo_frag="" deadline_frag="" iso_deadline=""
-    if [ -n "$PLANE_WI_ID" ]; then
+    if [ -n "$emit_triple" ]; then
         link_frag="\"work_item_id\":\"$PLANE_WI_ID\",\"assignment_id\":\"$PLANE_ASG_ID\","
     fi
     local comm wi_ev asg_ev
     comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
-    if [ -n "$dispatch_ref" ]; then
+    if [ -n "$emit_triple" ]; then
         # The plane's deadline MIRRORS the dispatch row's: a control dispatch (query /
         # cancel / compact / restart) withholds it on both sides, for the reason
         # written above the null — an id-less row with a deadline goes overdue
@@ -666,8 +688,13 @@ _plane_emit_intent() {
         printf -v _batch '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}"
         plane_emit_events dispatch-task <<<"$_batch"       # same shell: PLANE_EMIT_LAST_RC reaches the record decision
     else
+        # Communication only (a control type, or a raw-text send on a host with
+        # no sha tool). A --supersedes STILL rides here: the note retires its
+        # target even though the note itself is untracked -- the retire is the
+        # point, and the successor id is minted whether or not the note's own
+        # triple is emitted.
         local _batch
-        printf -v _batch '{"events":[%s]}' "$comm"
+        printf -v _batch '{"events":[%s%s]}' "$comm" "${sup_ev:+,$sup_ev}"
         plane_emit_events dispatch-task <<<"$_batch"
     fi
 }
@@ -675,10 +702,13 @@ _plane_emit_intent() {
 _plane_emit_transmission() {
     # Outcome-typed AFTER the send (§6b #7): a clean send into a BUSY pane is
     # carrier_queued (accepted-not-consumed, not activation); a clean send
-    # into an idle pane is pane_submitted; a miss is failed.
+    # into an idle pane is pane_submitted; a miss is failed. A submission-class
+    # state carries the delivery-JOIN wire proof (fold F1), read back from
+    # PLANE_WIRE_OUT across the dispatch.sh subprocess boundary; _wire_frag emits
+    # it only for pane_submitted / carrier_queued and only when it is present.
     local state="$1"
     printf '{"events":[%s]}' \
-        "$(plane_tx_event dispatch-task "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$WORKER_SESSION" "$state")" \
+        "$(plane_tx_event dispatch-task "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$WORKER_SESSION" "$state" "$(_wire_frag "$state")")" \
         | plane_emit_events dispatch-task
 }
 
@@ -701,8 +731,23 @@ if [ "$PLANE_ARMED" = "1" ]; then
 fi
 
 # Send via the low-level race-safe primitive (re-validates the session).
+# Carry PLANE_MSG_ID ACROSS the dispatch.sh process boundary (chunk P, #1501):
+# bot_tmux_send reads it and appends the `⟦plane:<msg_id>⟧` routing trailer on
+# its own final line, so the receiver's UserPromptSubmit hook can record what
+# actually arrived and the delivery JOIN can prove it. Per-command env so it
+# scopes to THIS send only and never leaks to another bot_tmux_send. Empty
+# (an unarmed plane minted no id) -> no trailer, an untracked send by design.
 send_rc=0
-"$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
+# fold F1: carry a PLANE_WIRE_OUT scratch file across the dispatch.sh subprocess
+# boundary so bot_tmux_send can hand back the wire proof (sha256 + byte length of
+# the exact bytes it put on the wire) for the pane_submitted/carrier_queued row
+# below. Per-command env, armed only when the plane is (an empty value -> no
+# proof written, an untracked send).
+_plane_wire_out=""
+[ "$PLANE_ARMED" = "1" ] && _plane_wire_out=$(safe_mktemp)
+PLANE_MSG_ID="$PLANE_MSG_ID" PLANE_WIRE_OUT="$_plane_wire_out" "$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
+_read_wire_out "$_plane_wire_out"
+[ -n "$_plane_wire_out" ] && rm -f "$_plane_wire_out" 2>/dev/null || true
 
 # Outcome-typed transmission (PR-B T4/§6b #7): clean send into an idle pane =
 # pane_submitted; clean send into a pane the pre-send probe saw BUSY =

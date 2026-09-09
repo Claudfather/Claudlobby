@@ -194,6 +194,14 @@ def _family_values(payload, party, entity=None) -> tuple[str, dict]:
                 "error": payload.error,
                 "part_no": payload.part_no,
                 "part_count": payload.part_count,
+                # chunk P: the receiver's proof for a `received` fact — the
+                # delivery JOIN reads these out of detail via json_extract.
+                "received_bytes": payload.received_bytes,
+                "received_sha256": payload.received_sha256,
+                # chunk P fold F1: the SENDER's wire proof on a submission-class
+                # fact — the join's other leg, read out of detail the same way.
+                "wire_bytes": payload.wire_bytes,
+                "wire_sha256": payload.wire_sha256,
             }.items() if v is not None
         }
         return "events", {

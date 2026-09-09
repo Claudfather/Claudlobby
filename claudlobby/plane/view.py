@@ -73,6 +73,7 @@ from .presence import STALE_AFTER_S, _parse_iso, derive_presence, presence_count
 from .sampler import PaneSampler, discover_bot_dirs
 from .queries import (
     ACTIVATION_TX_EVENTS,
+    DELIVERY_STATUS_SQL,
     ATTENTION_ARMS,
     ATTENTION_ARMS_SQL,
     HUMAN_ARMS,
@@ -308,6 +309,30 @@ def _channel_names(root: Path) -> dict:
 _TERMINAL_SET = frozenset(TERMINAL_TASK_EVENTS)
 _ACTIVATION_SET = frozenset(ACTIVATION_TX_EVENTS)
 
+# chunk P (#1501): the RECEIVER's delivery verdict rendered in plain language —
+# the honest replacement for reading the sender's `pane_submitted` as
+# "delivered". The status is derived ONCE in queries.DELIVERY_STATUS_SQL (the
+# receiver's `received` proof joined against the sender's body hash); this only
+# names it. TRUNCATED is loud and quantified; a message with no verdict (None —
+# nothing was submitted to a pane) shows no delivery line at all.
+_DELIVERY_PHRASE = {
+    "delivered": "confirmed by the receiver",
+    "unconfirmed": "sent, not yet confirmed",
+    "altered": "ARRIVED ALTERED",
+}
+
+
+def _delivery_phrase(row: dict) -> str | None:
+    status = row.get("delivery")
+    if status is None:
+        return None
+    if status == "truncated":
+        # fold F1: the shortfall is against what was SENT on the wire, not the
+        # raw body — the JOIN now returns wire_bytes as the reference size.
+        short = (row.get("wire_bytes") or 0) - (row.get("received_bytes") or 0)
+        return f"ARRIVED SHORT by {short} bytes"
+    return _DELIVERY_PHRASE.get(status, status)
+
 
 def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
                    fleet: str | None = None) -> dict:
@@ -349,14 +374,23 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
         return {"threads": []}
     msg_ids = [c["msg_id"] for c in comms]
     ph = ",".join("?" * len(msg_ids))
+    # fold F4: `received` is the RECEIVER's proof, consumed ONLY by the delivery
+    # JOIN below (rendered as delivery_state). It must NOT enter the display tx
+    # list, or app.js's latest-tx would render the raw token "received" as the
+    # newest carrier state for every delivered message — a regression.
     tx_rows = [dict(r) for r in conn.execute(
         f"SELECT msg_id, event, carrier, attempt_no, occurred_at, ingest_seq"
         f" FROM events WHERE kind='transmission' AND msg_id IN ({ph})"
+        f" AND event <> 'received'"
         f" ORDER BY ingest_seq", msg_ids).fetchall()]
     tx_by_msg: dict = {}
     for t in tx_rows:
         t["activated"] = t["event"] in _ACTIVATION_SET
         tx_by_msg.setdefault(t["msg_id"], []).append(t)
+    # chunk P: the per-message delivery verdict (the receiver's own fact) — one
+    # read, keyed by msg_id, from the one definition.
+    delivery_by_msg = {r["msg_id"]: dict(r) for r in conn.execute(
+        DELIVERY_STATUS_SQL.format(ph=ph), msg_ids).fetchall()}
 
     # Identity keeps its fleet where it matters (U2): each party's fleet is
     # read off ITS OWN alias (inventory.fleet_of, the one spelling) — never
@@ -418,6 +452,10 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
         c.pop("recipient_raw", None)
         c["body_words"] = body_words(c["body"])
         c["tx"] = tx_by_msg.get(c["msg_id"], [])
+        # chunk P: the receiver's verdict for THIS message, story-first.
+        _dv = delivery_by_msg.get(c["msg_id"], {})
+        c["delivery"] = _dv.get("delivery")
+        c["delivery_state"] = _delivery_phrase(_dv)
         t["messages"].append(c)
 
     wi_ids = [t["work_item_id"] for t in threads.values() if t["work_item_id"]]

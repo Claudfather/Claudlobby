@@ -377,6 +377,17 @@ defaults:
     UserPromptSubmit:
       - command: "$CLAUDLOBBY_ROOT/lib/plane-telegram-in.sh"
         timeout: 15
+      # Delivery becomes a JOIN (chunk P, #1501): the RECEIVER records what it
+      # actually got. A tracked dispatch/report/briefing arrives with a
+      # `⟦plane:<msg_id>⟧` trailer on its own final line; this hook recognises
+      # it, strips it plus any `set +H; ` prefix, and records the byte length +
+      # sha256 of the message proper as a `received` transmission keyed to the
+      # sender's msg_id. The delivery view then PROVES delivery instead of
+      # inferring it from the sender's Enter. Matches the trailer ONLY --
+      # ordinary prompts exit at a zero-fork prefilter -- and stdout stays empty
+      # on every path (UserPromptSubmit stdout feeds the model). Same dormancy.
+      - command: "$CLAUDLOBBY_ROOT/lib/plane-dispatch-in.sh"
+        timeout: 15
     # Observable-plane Telegram carrier, the RC-relay OUTBOUND half (#1412):
     # when a bot answers a Telegram-initiated turn with plain final text
     # (no reply tool call) the bridge's RC auto-relay delivers it and no
