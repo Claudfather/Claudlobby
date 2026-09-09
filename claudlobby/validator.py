@@ -372,7 +372,7 @@ def _validate_env_contracts(paths: Paths, report: ValidationReport) -> None:
     surface have no paired MCP fragment at all (`type: cli` integrations —
     neon, railway, snowflake), so an MCP-only gate is not merely deferred for
     them, it is structurally unreachable forever. Among those are
-    ``RAILWAY_API_TOKEN``, ``RAILWAY_PERSONAL_TOKEN``, ``NEON_API_KEY`` and the
+    ``RAILWAY_PERSONAL_TOKEN``, ``RAILWAY_PERSONAL_PROJECT_TOKEN``, ``NEON_API_KEY`` and the
     two Snowflake key vars — the exact credentials whose silent blanking
     started this workstream.
 

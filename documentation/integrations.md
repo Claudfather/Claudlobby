@@ -365,7 +365,7 @@ Services, deployments, environments, logs.
 
 **Skills:** `/claudna:railway status` (service overview), `/claudna:railway logs` (view/debug logs), `/claudna:railway deploy` (deploy/update services).
 
-**Setup:** set `RAILWAY_API_TOKEN` (work workspace) and/or `RAILWAY_PERSONAL_TOKEN` (personal workspace) — fleet-tier env vars, no `railway login` needed. See [library/integrations/railway.md](../library/integrations/railway.md).
+**Setup:** set `RAILWAY_PERSONAL_TOKEN` (ACCOUNT-scoped — answers `me`, reaches every workspace) and/or `RAILWAY_PERSONAL_PROJECT_TOKEN` (WORKSPACE-scoped — answers `projects`, cannot answer `me`) — fleet-tier env vars, no `railway login` needed. The split is scope, not which workspace. See [library/integrations/railway.md](../library/integrations/railway.md).
 
 ### Modal
 

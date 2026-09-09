@@ -603,3 +603,150 @@ class TestCheckCredentialsScoping:
         assert report.checks[0].status == "warn"
         assert "cannot read the .env cascade" in report.checks[0].detail
         assert "no value" not in report.checks[0].detail
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _declare_railway(root: Path) -> "FleetConfig":  # noqa: F821
+    """Give the fixture fleet the REAL Railway integration doc, and declare it.
+
+    The real doc rather than a stub on purpose: the defect this class guards is
+    `doctor`'s table disagreeing with the declared contract, so a test carrying
+    its own private copy of the contract could never see it.
+    """
+    (root / "library" / "integrations" / "railway.md").write_bytes(
+        (REPO_ROOT / "library" / "integrations" / "railway.md").read_bytes()
+    )
+    (root / "fleet.yaml").write_text(
+        dedent("""\
+        fleet:
+          name: test-fleet
+          service_prefix: com.test
+          bots:
+            worker:
+              expertise: [eng]
+              mcp: [github]
+              integrations: [railway]
+              telegram:
+                handle: w_bot
+    """)
+    )
+    fleet, _md = load_fleet(root / "fleet.yaml")
+    return fleet
+
+
+def _declared_railway_vars() -> set[str]:
+    """The Railway vars the shipped integration contract declares."""
+    import yaml
+
+    text = (REPO_ROOT / "library" / "integrations" / "railway.md").read_text()
+    front = text.split("---", 2)[1]
+    return set(yaml.safe_load(front)["env_contract"])
+
+
+class TestRailwayProbesMatchTheDeclaredContract:
+    """The part that EXECUTES, rather than restating the rule in prose.
+
+    `doctor` probed a retired variable for months because its table was a copy
+    of `creds-check.sh`'s kept in sync by hand. Fixing that once is not enough:
+    the defect came back through a REFACTOR — #1377 rebuilt this block around a
+    declaration-keyed probe registry and carried `RAILWAY_API_TOKEN` forward
+    into it, so a fleet declaring the two live tokens would have had Railway
+    silently drop out of the intersection.
+
+    A comment saying "change one, change both" does not survive that. This does.
+    """
+
+    def test_the_probe_table_names_exactly_the_declared_railway_vars(self):
+        from claudlobby.doctor import _CREDENTIAL_PROBES
+
+        probed = {v for v, (kind, _host) in _CREDENTIAL_PROBES.items() if kind == "railway"}
+        assert probed == _declared_railway_vars(), (
+            "doctor's Railway probes and library/integrations/railway.md have "
+            "diverged. A declared var with no probe drops out of the probe "
+            "intersection; a probe for an undeclared var can never fire."
+        )
+
+    def test_every_probed_railway_var_has_a_scope_matched_query(self):
+        from claudlobby.doctor import _CREDENTIAL_PROBES, _RAILWAY_QUERIES
+
+        probed = {v for v, (kind, _host) in _CREDENTIAL_PROBES.items() if kind == "railway"}
+        assert probed == set(_RAILWAY_QUERIES), (
+            "a Railway var reachable by the probe registry with no entry here "
+            "would raise KeyError mid-diagnostic"
+        )
+
+
+class TestEachRailwayTokenIsProbedWithAQueryItCanAnswer:
+    """ONE PROBE FOR ALL TOKENS IS THE BUG.
+
+    A workspace-scoped token is not bound to an account, so it cannot answer
+    `me` BY CONSTRUCTION. Probing it that way reports a working credential as
+    dead — which is what made this fleet's credential alert fire daily against
+    two working tokens until the operator learned to ignore it.
+    """
+
+    @staticmethod
+    def _recorder(monkeypatch) -> list:
+        calls: list = []
+
+        class _R:
+            stdout = '{"data":{}}\n200'
+            returncode = 0
+
+        def _fake(headers, extra_args):
+            calls.append(extra_args)
+            return _R()
+
+        monkeypatch.setattr("claudlobby.doctor._curl_with_config", _fake)
+        return calls
+
+    @staticmethod
+    def _railway_payloads(calls) -> str:
+        return "\n".join(
+            " ".join(c) for c in calls if any("backboard.railway" in a for a in c)
+        )
+
+    def _run(self, doctor_fleet, monkeypatch, env_line: str) -> str:
+        root, _fleet, paths = doctor_fleet
+        fleet = _declare_railway(root)
+        TestCheckCredentialsScoping._stage_cascade(paths, monkeypatch)
+        for var in _declared_railway_vars():
+            monkeypatch.delenv(var, raising=False)
+        (paths.root / ".env").write_text(env_line)
+        calls = self._recorder(monkeypatch)
+
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, DoctorReport())
+        return self._railway_payloads(calls)
+
+    def test_a_workspace_token_is_probed_with_projects_and_never_with_me(
+        self, doctor_fleet, monkeypatch
+    ):
+        probes = self._run(
+            doctor_fleet, monkeypatch, "RAILWAY_PERSONAL_PROJECT_TOKEN=t\n"
+        )
+        assert "projects" in probes, "the workspace token was not probed at all"
+        assert "me{" not in probes, (
+            "a workspace-scoped token cannot answer `me` by construction; "
+            "probing it that way reports a working credential as dead"
+        )
+
+    def test_an_account_token_is_probed_with_me(self, doctor_fleet, monkeypatch):
+        """The positive control. A test that only ever sees `projects` cannot
+        tell per-token probing from `projects`-for-everything."""
+        probes = self._run(doctor_fleet, monkeypatch, "RAILWAY_PERSONAL_TOKEN=t\n")
+        assert "me{" in probes, "the account token was not probed with `me`"
+
+    def test_both_declared_tokens_get_their_own_probe(self, doctor_fleet, monkeypatch):
+        probes = self._run(
+            doctor_fleet,
+            monkeypatch,
+            "RAILWAY_PERSONAL_TOKEN=t\nRAILWAY_PERSONAL_PROJECT_TOKEN=t2\n",
+        )
+        assert "me{" in probes and "projects" in probes, (
+            "one dead token among several is not `Railway is broken`; each "
+            "declared token gets its own probe"
+        )

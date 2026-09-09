@@ -2,7 +2,7 @@
 title: "Lesson: Railway — fail loud, never fabricate deploy state"
 ---
 
-Railway auth lives in `.env.shared` as `RAILWAY_API_TOKEN` (account-wide) — not to be confused with `RAILWAY_TOKEN`, which is the project-scoped variant. The CLI picks it up automatically when `.env.shared` is sourced, plus the per-directory project link in `~/.railway/config.json`.
+Railway auth lives in the `.env` tiers as `RAILWAY_PERSONAL_TOKEN` (ACCOUNT-scoped: answers `me`, reaches every workspace) and `RAILWAY_PERSONAL_PROJECT_TOKEN` (WORKSPACE-scoped: answers `projects`, and cannot answer `me` — that is the token kind, not a broken credential). The CLI picks them up when the tiers are sourced, plus the per-directory project link in `~/.railway/config.json`. **A rejected token still returns HTTP 200** with the refusal in the body, which is the first thing the rule below is about.
 
 **The rule:** if Railway returns an auth or link error, report it verbatim. **Never fabricate deploy state.** A truthful "Railway auth broken, could not confirm deploy" beats a hallucinated "deploy landed at 18:42Z." When a worker reports Railway data to you, require the raw command output or a GraphQL 200 payload — "I ran `railway status` and it says X" is not evidence; the output is.
 
