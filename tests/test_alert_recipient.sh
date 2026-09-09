@@ -90,7 +90,13 @@ assert_eq "a declared-but-unresolvable recipient is LOUD, not silently substitut
     "$(cap_count '"origin":"declared-unresolved"')"
 
 cap_reset
-_disclose_alert_recipient "$T/local/home/ai-platform/runtime/bots" "$T/local/home/ai-platform/runtime/bots/otis" "m" "discovered" ""
+# "local" is the origin THE CASCADE PRODUCES for a local hit. An earlier version
+# of this line passed "discovered" by hand, which the cascade never pairs with a
+# local scope -- so it proved a property of this function in isolation that did
+# not hold for the way it is actually called, and the suite stayed green while
+# every ordinary per-fleet alert disclosed. The integration block at the bottom
+# is what can catch that class; this line alone never could.
+_disclose_alert_recipient "$T/local/home/ai-platform/runtime/bots" "$T/local/home/ai-platform/runtime/bots/otis" "m" "local" ""
 assert_eq "a fleet-scoped LOCAL resolution stays silent (nothing was ambiguous)" "0" \
     "$(cap_count alert_recipient_resolved)"
 
@@ -126,6 +132,47 @@ resolve_alert_target "$T/runtime/bots"
 assert_eq "an env chat-id already wins, so the fallback is only reached unresolved" \
     "chat-declared" "$_alert_chat_id"
 unset TELEGRAM_GROUP_CHAT_ID
+
+echo "== INTEGRATION: the public door, not its ingredients =="
+# Every assertion above calls an INGREDIENT -- first_bot_with_conf,
+# bot_dir_for_id, _disclose_alert_recipient -- with hand-built arguments, so none
+# of them can see what the CASCADE passes. That is a structural blind spot, not a
+# thin patch of coverage: a silencer keyed on an origin the cascade never emits
+# was invisible to 17 passing assertions.
+#
+# Stub the two delivery doors so the RESOLVED MANAGER becomes observable. That is
+# the only way to see which manager a correct, silent resolution picked --
+# disclosure is quiet on exactly that path, so the event stream cannot answer it,
+# which is why the over-reach property above had no integration-level test.
+check_tmux_session() { return 0; }
+bot_tmux_send() { printf '%s\n' "$2" >> "$T/sent"; return 0; }
+# Telegram stays hermetic on its own: CLAUDLOBBY_ROOT is the temp estate, so
+# "$CLAUDLOBBY_ROOT/lib/tg-post.sh" does not exist and the send cannot leave the
+# box. It records a delivery failure, which is correct and is not asserted here.
+
+cap_reset; : > "$T/sent"
+unset CLAUDLOBBY_ALERT_MANAGER
+emit_fleet_notice "$T/local/home/ai-platform/runtime/bots" "test-notice" "routine check" >/dev/null 2>&1
+assert_eq "an ordinary per-fleet alert discloses NOTHING" "0" "$(cap_count alert_recipient_resolved)"
+assert_eq "  and still reaches its own fleet manager" "mgr-ai-platform" "$(tail -1 "$T/sent")"
+
+cap_reset; : > "$T/sent"
+export CLAUDLOBBY_ALERT_MANAGER=solo
+emit_fleet_notice "$T/local/home/ai-platform/runtime/bots" "test-notice" "routine check" >/dev/null 2>&1
+assert_eq "a declared HOST recipient does not displace a local one" "mgr-ai-platform" "$(tail -1 "$T/sent")"
+assert_eq "  and that resolution is unambiguous, so it stays silent too" "0" \
+    "$(cap_count alert_recipient_resolved)"
+unset CLAUDLOBBY_ALERT_MANAGER
+
+# POSITIVE CONTROL. The three silence assertions above are only evidence if this
+# instrument can still SEE a disclosure -- delete disclosure entirely and they
+# all pass. This is the one that fails in that case.
+cap_reset; : > "$T/sent"
+emit_fleet_notice "$T/runtime/bots" "test-notice" "host job" >/dev/null 2>&1
+assert_eq "a HOST-scope alert still announces its accidental recipient" "1" \
+    "$(cap_count alert_recipient_resolved)"
+assert_eq "  and records that nobody chose it" '"origin":"discovered"' \
+    "$(grep -o '"origin":"[^"]*"' "$PLANE_CAPTURE" | head -1)"
 
 echo ""
 echo "=== $PASS/$TOTAL passed ==="

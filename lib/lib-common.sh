@@ -4214,7 +4214,14 @@ _disclose_alert_recipient() {
         "$bots_dir"/*) scope="local" ;;
     esac
     # A local resolution by a fleet-scoped caller is unambiguous and silent.
-    [ "$scope" = "local" ] && [ "$origin" = "discovered" ] && return 0
+    # Keyed on ORIGIN, which the cascade ASSIGNS, rather than on scope, which is
+    # derived here by path matching. Requiring scope=local AND origin=discovered
+    # together can never hold and so disclosed every ordinary per-fleet alert:
+    # the cascade sets origin=local for a local hit, and leaves it at discovered
+    # only when it falls through to first_bot_with_conf_any_fleet -- which skips
+    # bots_dir, so a discovered manager is by construction outside it and its
+    # scope is always cross-fleet.
+    [ "$origin" = "local" ] && return 0
     candidates=$(host_fleet_bots_dirs | wc -l | tr -d ' ')
     [ -n "$mgr_bot" ] && mgr_fleet=$(basename "$(dirname "$(dirname "$(dirname "$mgr_bot")")")")
     emit_fleet_event "alert_recipient_resolved" "signal" "$(printf \
