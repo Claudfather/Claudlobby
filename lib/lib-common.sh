@@ -4193,6 +4193,43 @@ emit_script_error() {
 #      host, since host-scope callers run fleet-less).
 # <WORD> is the uppercase framing word (ALERT/NOTICE) the delivery prefixes
 # derive from. Both delivery channels are best-effort and never abort the caller.
+# _disclose_alert_recipient <bots_dir> <mgr_bot> <mgr> <origin> <declared>
+# Record WHICH manager a fleet signal resolved to and WHY, whenever the choice
+# was not made on purpose (#1517).
+#
+# Emits only on the paths that need auditing -- a cross-fleet fallback, or a
+# declaration that could not be resolved -- so the event is SELF-CLEARING: once
+# an operator declares a recipient that resolves, this goes quiet. Its presence
+# in the ledger is therefore the signal that a host still has an undeclared
+# recipient, which is the property the issue asks for ("auditable, and a change
+# is visible"). A local-fleet resolution discloses nothing: nothing was ambiguous.
+#
+# `candidates` is the number of fleet bots dirs that COULD have answered. It is
+# what turns "a directory added tomorrow moves this" from a worry into a number.
+_disclose_alert_recipient() {
+    local bots_dir="$1" mgr_bot="$2" mgr="$3" origin="$4" declared="$5"
+    [ "$origin" = "declared" ] && return 0
+    local scope="cross-fleet" candidates mgr_fleet=""
+    case "$mgr_bot" in
+        "$bots_dir"/*) scope="local" ;;
+    esac
+    # A local resolution by a fleet-scoped caller is unambiguous and silent.
+    # Keyed on ORIGIN, which the cascade ASSIGNS, rather than on scope, which is
+    # derived here by path matching. Requiring scope=local AND origin=discovered
+    # together can never hold and so disclosed every ordinary per-fleet alert:
+    # the cascade sets origin=local for a local hit, and leaves it at discovered
+    # only when it falls through to first_bot_with_conf_any_fleet -- which skips
+    # bots_dir, so a discovered manager is by construction outside it and its
+    # scope is always cross-fleet.
+    [ "$origin" = "local" ] && return 0
+    candidates=$(host_fleet_bots_dirs | wc -l | tr -d ' ')
+    [ -n "$mgr_bot" ] && mgr_fleet=$(basename "$(dirname "$(dirname "$(dirname "$mgr_bot")")")")
+    emit_fleet_event "alert_recipient_resolved" "signal" "$(printf \
+        '{"origin":"%s","scope":"%s","manager":"%s","manager_fleet":"%s","declared":"%s","candidate_fleets":%s}' \
+        "$(json_escape "$origin")" "$scope" "$(json_escape "$mgr")" \
+        "$(json_escape "$mgr_fleet")" "$(json_escape "$declared")" "${candidates:-0}")" "" fleet
+}
+
 _emit_fleet_signal() {
     local bots_dir="$1" event_type="$2" reason="$3" ev_source="$4" word="$5"
     local tmux_prefix="[FLEET-${word}]" tg_prefix="FLEET ${word}"
@@ -4210,9 +4247,48 @@ _emit_fleet_signal() {
     # primitive so a miss is logged, not swallowed. No manager anywhere →
     # nothing to nudge. Socket reverse-lookup uses the resolved manager's own
     # bots dir, which may be a fallback fleet's.
-    local mgr_bot mgr mgr_socket
-    mgr_bot=$(first_bot_with_conf_any_fleet "$bots_dir" MANAGER_TMUX || true)
+    local mgr_bot mgr mgr_socket _mgr_origin="discovered" _mgr_declared=""
+    # #1517: a HOST-scoped notice must reach a DECLARED reader, not a fallen-into
+    # one. A host job runs fleet-less, so bots_dir is $CLAUDLOBBY_ROOT/runtime/bots
+    # -- a path that does not exist -- and the resolver drops to a cross-fleet glob
+    # that expands LEXICALLY. Every host-job notice on this estate therefore landed
+    # on whichever fleet directory sorted first: a recipient nobody chose, that a
+    # newly-added directory moves silently, and whose loss the previous reader
+    # cannot detect (alerts stopping is indistinguishable from alerts not firing).
+    # Declared wins; discovery still runs when nothing is declared, but says so.
+    #
+    # The declaration is an ENV var, read from the root .env tier -- deliberately
+    # not system.yaml, which is package-owned and tracked, so a bot name there
+    # would commit a fleet-specific value AND make an accidental choice look
+    # deliberate to the next reader.
+    # HOST TIER ONLY. A per-fleet job (fleet-pulse, creds-check) passes its fleet
+    # in ExecStart, so its own bots_dir resolves at step 1 and it must keep
+    # resolving there -- a declared HOST recipient hijacking a fleet's own manager
+    # would be a behaviour change for jobs that were never broken. So the local
+    # probe runs FIRST and unmodified; only its failure (the host tier, which has
+    # no fleet to pass) reaches the declaration or the cross-fleet fallback.
+    mgr_bot=$(first_bot_with_conf "$bots_dir" MANAGER_TMUX || true)
+    if [ -n "$mgr_bot" ]; then
+        _mgr_origin="local"
+    fi
+    _mgr_declared="${CLAUDLOBBY_ALERT_MANAGER:-}"
+    if [ -z "$mgr_bot" ] && [ -n "$_mgr_declared" ]; then
+        mgr_bot=$(bot_dir_for_id "$_mgr_declared" || true)
+        if [ -n "$mgr_bot" ]; then
+            _mgr_origin="declared"
+        else
+            # Declared but unresolvable -- absent, or the same id in two fleets
+            # (#526). Do NOT drop the alert: losing it is worse than delivering it
+            # to a discovered reader. Fall through to discovery, and make the
+            # substitution loud, because silence is the entire defect.
+            _mgr_origin="declared-unresolved"
+        fi
+    fi
+    if [ -z "$mgr_bot" ]; then
+        mgr_bot=$(first_bot_with_conf_any_fleet "$bots_dir" MANAGER_TMUX || true)
+    fi
     mgr=$(bot_conf_get "$mgr_bot" MANAGER_TMUX "")
+    _disclose_alert_recipient "$bots_dir" "$mgr_bot" "$mgr" "$_mgr_origin" "$_mgr_declared"
     if [ -n "$mgr" ]; then
         mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$mgr_bot" MANAGER_TMUX_SOCKET "")" "$mgr" "$(dirname "$mgr_bot")")
         if check_tmux_session "$mgr" "$mgr_socket"; then
@@ -4387,26 +4463,62 @@ first_bot_with_conf() {
 # fleet event is delivered *somewhere* rather than silently dropped; a
 # fleet-scoped caller only reaches the fallback when its own fleet declares no
 # receiver at all.
+# host_fleet_bots_dirs
+# Every fleet bots dir on the host, one per line, in the order the cross-fleet
+# fallbacks walk them: flat estate first, then nested (a fleet under a system
+# container is one level deeper). Nonexistent globs are dropped, so a host with
+# only one layout prints only that layout.
+#
+# Extracted so the SEARCH and the COUNT cannot disagree (#1517). The count is
+# what makes "a fleet directory added tomorrow silently moves every host-job
+# alert" a number instead of a worry, and a second copy of these two globs is
+# exactly how that number would drift away from the walk it describes.
+host_fleet_bots_dirs() {
+    local d
+    for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots; do
+        [ -d "$d" ] || continue
+        printf '%s\n' "$d"
+    done
+}
+
 first_bot_with_conf_any_fleet() {
     local bots_dir="$1" key="$2" d
     if first_bot_with_conf "$bots_dir" "$key"; then
         return 0
     fi
-    for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
+    while IFS= read -r d; do
         [ "$d" = "$bots_dir" ] && continue
         if first_bot_with_conf "$d" "$key"; then
             return 0
         fi
-    done
-    # Nested vault: a fleet under a system container is one level deeper.
-    # first_bot_with_conf guards a nonexistent dir, so the literal glob is inert.
-    for d in "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots; do
-        [ "$d" = "$bots_dir" ] && continue
-        if first_bot_with_conf "$d" "$key"; then
-            return 0
-        fi
-    done
+    done <<EOF
+$(host_fleet_bots_dirs)
+EOF
     return 1
+}
+
+# bot_dir_for_id <bot_id>
+# Resolve a bot ID to its directory across every fleet on the host. Prints the
+# dir and returns 0 on exactly one match.
+#
+# REFUSES on a cross-fleet name collision (#526) rather than taking the first
+# hit, and that refusal is the point: this helper exists to serve a DECLARED
+# alert recipient (#1517), so resolving an ambiguous name by directory order
+# would reintroduce the exact lexical-choice defect one layer down, inside the
+# fix for it. Two fleets owning the same bot id is a real state on this estate.
+# The caller is expected to treat a refusal as "declared but unresolvable" and
+# disclose it -- never to silently discover someone else instead.
+bot_dir_for_id() {
+    local bot_id="${1:?Usage: bot_dir_for_id <bot_id>}" d hit="" n=0
+    [ -n "$bot_id" ] || return 1
+    while IFS= read -r d; do
+        [ -d "$d/$bot_id" ] || continue
+        hit="$d/$bot_id"; n=$((n + 1))
+    done <<EOF
+$(host_fleet_bots_dirs)
+EOF
+    [ "$n" -eq 1 ] || return 1
+    printf '%s' "$hit"
 }
 
 # resolve_alert_target [bots_dir]
