@@ -330,6 +330,21 @@ done
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED=1 SESSION_DIGEST_MIN_TURNS=4)"
 assert_eq "SESSION_DIGEST_ENABLED=1 arms it" ok "$(dfield "$row" status)"
 
+# --- 9. the non-blocking SAFETY NET: the ERR trap arms before set -e ----------
+# Every real path is guarded (|| true, :- defaults), so an unhandled error is
+# meant to be impossible -- but the `trap 'exit 0' ERR` is the net for one that
+# slips through, and a SessionEnd hook that exits NONZERO breaks a session end.
+# The net is only observable on an unanticipated set -e violation, which a
+# robust hook gives no clean way to force from a test; pin it STRUCTURALLY
+# instead -- present, and armed BEFORE set -e (a violation before the trap arms
+# would still exit nonzero). Kills the mutant that drops `exit 0` from the trap.
+_trap_ln=$(grep -n "trap 'exit 0' ERR" "$DIGEST" | head -1 | cut -d: -f1)
+_sete_ln=$(grep -n "set -euo pipefail" "$DIGEST" | head -1 | cut -d: -f1)
+[ -n "$_trap_ln" ] && r=yes || r=no
+assert_eq "the ERR->exit 0 non-blocking safety net is present" yes "$r"
+{ [ -n "$_trap_ln" ] && [ -n "$_sete_ln" ] && [ "$_trap_ln" -lt "$_sete_ln" ]; } && r=yes || r=no
+assert_eq "the safety net arms BEFORE set -e" yes "$r"
+
 echo
 echo "  $PASS/$TOTAL passed"
 [ "$FAIL" -eq 0 ] || exit 1
