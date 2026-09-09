@@ -229,6 +229,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
+| `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |

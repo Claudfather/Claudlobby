@@ -399,8 +399,12 @@ _RESUME_CMD="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
     if _resume_status="$(session_command_status "$_RESUME_CMD" "$BOT_DIR")"; then
         echo "$(ts_iso) RESUME — injecting resume command [$_resume_status]: $_RESUME_CMD" >> "$LOG"
+        # #1265: stamp the send instant. Written before the call and again
+        # after, so a send that never returns leaves state=sending on disk.
+        _inject_t0="$(inject_stamp "$BOT_DIR" resume sending)"
         PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
             pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD"
+        inject_stamp "$BOT_DIR" resume "done" 0 "$_inject_t0" >/dev/null
     else
         echo "$(ts_iso) RESUME SKIP — fresh checkpoint present but no resume capability [$_resume_status]; starting clean, handoff left at $_SESSION_MD" >> "$LOG"
         emit_fleet_event "resume_skipped" "startup" \
@@ -414,8 +418,14 @@ if [ -n "${STARTUP_PROMPT:-}" ]; then
     # Prose, so it keeps the 'set +H; ' history-expansion guard the resume send
     # above must omit. The TUI's input buffer can race on cold start, leaving the
     # prompt typed but unsubmitted; pane_send_verified owns the catch.
+    # #1265: the injection instant, stamped at the actual send. The service
+    # rung is not a proxy for it — measured on the 2026-09-07 boot every rung
+    # fired to the second while the session appeared 36-168s later, so all of
+    # the variance lives here and nothing recorded it.
+    _inject_t0="$(inject_stamp "$BOT_DIR" startup sending)"
     PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
         pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
+    inject_stamp "$BOT_DIR" startup "done" 0 "$_inject_t0" >/dev/null
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
