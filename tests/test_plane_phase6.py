@@ -13,7 +13,29 @@ from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.orgchart import org_tree
 from claudlobby.plane.utilization import bot_utilization
 
-NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+# The REAL clock, not a literal instant. Several tests here seed heartbeat
+# samples at NOW - N minutes and then read them back through endpoints that
+# filter on a window computed from `datetime.now()` — view.py's /api/utilization
+# passes no `now`, so the server side is always the wall clock. Pin NOW to a
+# fixed past instant and the two drift apart at one day per day until the seeded
+# samples fall outside the 7-day heartbeat window and the endpoint returns an
+# empty list, which is what happened. The fuse is set by the NEWEST sample, not
+# the oldest: _hb steps 60s, so ["BUSY","IDLE"] from NOW - 3min put the newest at
+# 2026-09-02T11:58Z, and seven days later — 2026-09-09T11:58:00Z, zero slack —
+# every run went red on `util["data"][0]` with an IndexError, on any commit. That
+# instant predicts all five CI runs on record: last green 12.5h before, first red
+# 13 minutes after (root-caused by otis).
+#
+# THE CONSTANT IS NOT THE DEFECT. Fourteen other tests in this file share it and
+# are fine. Three things have to hold together: a pinned absolute occurred_at, an
+# assertion depending on a windowed read, and that read taking the wall clock with
+# no seam. Only the third is broken — view.py's /api/utilization calls
+# bot_utilization(c, fleet=...) passing neither now= nor days=, though the
+# function accepts both.
+# Every assertion here is about a RELATIONSHIP between seeded rows and a window,
+# so a live NOW keeps all of them intact. Same fix and same reason as a423490
+# for tests/test_plane_expiry.py (#1498); this is that defect in a second file.
+NOW = datetime.now(timezone.utc)
 F = "f"
 
 
