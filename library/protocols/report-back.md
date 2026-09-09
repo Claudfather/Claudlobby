@@ -39,4 +39,4 @@ report-back.sh completed "Reviewed #943. Ran the exact gh issue list command usi
 
 **Where the detail goes:** the PR or issue comment, a doc in your `data/` or the fleet's `shared/`, or the branch itself. Put it somewhere addressable *first*, then cite the address. If it has no address yet, that is what to fix — not the wording.
 
-**Never truncate these to fit:** the blocker itself on a `blocked` report, and verbatim error output. If a blocker needs 400 characters to be actionable, use them.
+**Never truncate these to fit:** the blocker itself on a `blocked` report, verbatim error output, and any substitution of the instrument or method from what was specified. If a blocker needs 400 characters to be actionable, use them.
