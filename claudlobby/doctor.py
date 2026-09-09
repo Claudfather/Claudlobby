@@ -319,11 +319,43 @@ def _curl_with_config(
 _CREDENTIAL_PROBES: dict[str, tuple[str, str]] = {
     "GITHUB_PAT": ("github", "api.github.com"),
     "GITHUB_PERSONAL_ACCESS_TOKEN": ("github", "api.github.com"),
-    "RAILWAY_API_TOKEN": ("railway", "backboard.railway.app"),
+    "RAILWAY_PERSONAL_TOKEN": ("railway", "backboard.railway.app"),
+    "RAILWAY_PERSONAL_PROJECT_TOKEN": ("railway", "backboard.railway.app"),
+}
+
+#: The query each Railway token is DEFINITIONALLY able to answer:
+#: (graphql query, scope).
+#:
+#: ONE PROBE FOR ALL TOKENS IS THE BUG. Railway issues two kinds of token and
+#: they answer different questions -- a workspace-scoped token is not bound to
+#: an account, so it cannot answer `me` BY CONSTRUCTION, and probing it that
+#: way reports a working credential as dead.
+#:
+#: A CREDENTIAL HAS AN IDENTITY AND A REACH; THEY ARE INDEPENDENT. An identity
+#: endpoint answers nothing about access -- probe the OPERATION you need. The
+#: GitHub App branch in `lib/creds-check.sh` already embodies this (it probes
+#: `/installation/repositories` because a `ghs_` token 403s on `/user`, D13).
+#: Durable home for the rule: Claudlobby#1400.
+#:
+#: KNOWN DUPLICATION, named rather than left to be rediscovered. This table
+#: also exists in bash, as `_railway_token_specs` in `lib/creds-check.sh`, and
+#: the two cannot share a literal across languages. A previous version carried
+#: the comment "matches creds-check.sh" -- a copy kept in sync by hand, which
+#: went stale the moment the bash side was fixed, and that is how `doctor` came
+#: to probe a retired variable. Change one, change both.
+#:
+#: `TestRailwayProbesMatchTheDeclaredContract` is the part that EXECUTES: it
+#: fails if this table and `library/integrations/railway.md` stop naming the
+#: same variables. A comment restating the rule does not survive a refactor;
+#: this defect came back through one (#1377 rebuilt this block and carried the
+#: retired variable forward).
+_RAILWAY_QUERIES: dict[str, tuple[str, str]] = {
+    "RAILWAY_PERSONAL_TOKEN": ("me{email}", "account"),
+    "RAILWAY_PERSONAL_PROJECT_TOKEN": ("projects{edges{node{id}}}", "workspace"),
 }
 
 
-def _probe_github(token: str) -> str | None:
+def _probe_github(token: str, _var: str) -> str | None:
     """None on success, else a short failure reason."""
     try:
         result = _curl_with_config(
@@ -339,12 +371,16 @@ def _probe_github(token: str) -> str | None:
     return None if code == "200" else f"HTTP {code}"
 
 
-def _probe_railway(token: str) -> str | None:
+def _probe_railway(token: str, var: str) -> str | None:
     """None on success, else a short failure reason.
 
     Railway answers an auth failure with HTTP 200 and an ``errors`` body, so the
     code alone is not the verdict.
+
+    The query is chosen by SCOPE (`_RAILWAY_QUERIES`), never fixed: probing a
+    workspace token with `me` reports a working credential as dead.
     """
+    query, _scope = _RAILWAY_QUERIES[var]
     try:
         result = _curl_with_config(
             {"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -354,7 +390,7 @@ def _probe_railway(token: str) -> str | None:
                 "-w",
                 "\n%{http_code}",
                 "-d",
-                '{"query":"query{me{name}}"}',
+                f'{{"query":"query{{{query}}}"}}',
                 "https://backboard.railway.app/graphql/v2",
             ],
         )
@@ -461,7 +497,7 @@ def check_credentials(
         value = values.get(var)
         if value:
             hosts.add(host)
-            reason = _PROBE_FNS[kind](value)
+            reason = _PROBE_FNS[kind](value, var)
             if reason:
                 failures.append(f"{var} ({reason})")
             else:

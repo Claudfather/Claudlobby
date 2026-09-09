@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 
-from tests.test_creds_check_telegram import _fleet, _run
+from tests.test_creds_check_telegram import REJECTED_RAILWAY, _fleet, _run
 
 DAY = 86400
 
@@ -469,3 +469,49 @@ class TestEachRailwayTokenGetsItsOwnProbe:
             assert var in state[key]["detail"], (
                 "a skip that does not name its variable sends the reader hunting"
             )
+
+
+class TestTheRejectionThatArrivesAsHTTP200:
+    """The failure shape that actually happens against live Railway.
+
+    A rejected Railway token still answers 200 -- the refusal rides in the body
+    as a GraphQL `errors` entry -- so a status-only check calls a dead token
+    healthy. Measured on all three of this estate's tokens: every failure was a
+    200.
+
+    That branch had no automated coverage. The shared curl stub answered
+    Railway from its catch-all, which ignores `-o` and `-w`, so `$code`
+    resolved to the literal JSON body and EVERY automated failure went through
+    the non-200 branch instead. The branch that matches production was
+    validated only by a manual live run someone had to remember to repeat --
+    and a check whose real failure path is untested is the shape of defect this
+    whole PR exists to remove.
+    """
+
+    def test_a_200_with_a_graphql_errors_body_fails_and_names_the_error(self, tmp_path):
+        f = _controlled(tmp_path, railway_fails=False)
+        f["env"]["RAILWAY_PERSONAL_TOKEN"] = REJECTED_RAILWAY
+        row = _run(f)["railway_personal_token"]
+        assert row["status"] == "fail", (
+            "a 200 carrying a GraphQL refusal was read as a healthy credential"
+        )
+        assert "Not Authorized" in row["detail"], (
+            "the operator needs the provider's own reason, not a generic fail"
+        )
+        assert "HTTP" not in row["detail"], (
+            "this must be the errors branch, not the status branch -- if the "
+            "detail reads `HTTP ...` the 200 case is still untested"
+        )
+
+    def test_a_genuine_non_200_still_reports_its_status_code(self, tmp_path):
+        """The other branch, kept separate.
+
+        Without this, moving the fixture onto the 200-with-errors path would
+        trade one uncovered branch for another.
+        """
+        row = _run(_controlled(tmp_path, railway_fails=True))["railway_personal_token"]
+        assert row["status"] == "fail"
+        assert "HTTP 401" in row["detail"], (
+            "the stub now answers with a real status code; a JSON blob here "
+            "means -o/-w are being ignored again"
+        )

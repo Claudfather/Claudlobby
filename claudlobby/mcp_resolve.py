@@ -236,7 +236,7 @@ def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
             # the same two facts, and it is backfilled and gated exactly like
             # the MCP one -- deliberately, because 10 of its 21 vars have NO
             # paired MCP fragment (`type: cli`: neon, railway, snowflake), so a
-            # gate covering only fragments could never reach RAILWAY_API_TOKEN,
+            # gate covering only fragments could never reach RAILWAY_PERSONAL_TOKEN,
             # NEON_API_KEY or the Snowflake key vars. Those are the credentials
             # whose silent blanking started this workstream; exempting them
             # would have been the #1213 shape relocated one surface over.

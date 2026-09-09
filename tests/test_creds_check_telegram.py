@@ -31,6 +31,11 @@ WRONGBOT_TOKEN = "222222:wrongbotAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 REVOKED_TOKEN = "333333:revokedAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 ALL_TOKENS = (VALID_TOKEN, WRONGBOT_TOKEN, REVOKED_TOKEN)
 
+#: A Railway token the stub refuses the way the live API does: HTTP 200 with
+#: the refusal in a GraphQL `errors` body. Every other Railway token the stub
+#: sees gets a real 401, so the two failure branches keep separate coverage.
+REJECTED_RAILWAY = "not-a-real-token-rejected-with-200-and-graphql-errors"
+
 
 def _curl_stub(bindir: Path) -> None:
     """Fake curl: appends its argv to argv.log (so tests can prove no token
@@ -48,6 +53,29 @@ for a in "$@"; do
 done
 url=""
 [ -n "$cfg" ] && url=$(sed -n 's/^url *= *"\\(.*\\)"$/\\1/p' "$cfg")
+# Railway's URL rides ARGV, not the --config file, so the url-keyed cases
+# below never match it and it fell to the catch-all -- which ignores -o and
+# -w, leaving $code set to the JSON body. Answer it the way the real endpoint
+# does: body to -o, status to stdout.
+case "$*" in
+  *backboard.railway.app*)
+    out=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out="$a"
+      prev="$a"
+    done
+    tok=""
+    [ -n "$cfg" ] && tok=$(sed -n 's/^header = "Authorization: Bearer \\(.*\\)"$/\\1/p' "$cfg")
+    if [ "$tok" = "{REJECTED_RAILWAY}" ]; then
+      [ -n "$out" ] && printf '{{"errors":[{{"message":"Not Authorized"}}]}}' > "$out"
+      printf '200'
+    else
+      [ -n "$out" ] && : > "$out"
+      printf '401'
+    fi
+    exit 0 ;;
+esac
 case "$url" in
   *bot{VALID_TOKEN}/getMe*)    printf '{{"ok":true,"result":{{"username":"bot_one_bot"}}}}' ;;
   *bot{WRONGBOT_TOKEN}/getMe*) printf '{{"ok":true,"result":{{"username":"some_other_bot"}}}}' ;;
