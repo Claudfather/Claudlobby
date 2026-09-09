@@ -52,26 +52,8 @@ TS=$(ts_iso)
 # --- Available RAM (MB) -------------------------------------------------------
 # /proc/meminfo is Linux-only; fall back to `vm_stat` on macOS.
 
-avail_ram_mb() {
-    if [ -f /proc/meminfo ]; then
-        # MemAvailable is the kernel's own "this much is usable" figure.
-        # Fall back to MemFree if not present (very old kernels). Decide in
-        # END — MemFree precedes MemAvailable in /proc/meminfo, so per-line
-        # printing would emit BOTH numbers concatenated.
-        awk '/^MemAvailable:/ { avail=$2 } /^MemFree:/ { free=$2 }
-             END { v = (avail ? avail : free); printf "%d", v/1024 }' \
-            /proc/meminfo
-    else
-        # macOS: vm_stat reports pages; multiply by page size (usually 4096).
-        local page_size
-        page_size=$(pagesize 2>/dev/null || sysctl -n hw.pagesize 2>/dev/null || echo 4096)
-        vm_stat | awk -v ps="$page_size" '
-            /Pages free/               { free = $3+0 }
-            /Pages inactive/           { inactive = $3+0 }
-            /Pages speculative/        { spec = $3+0 }
-            END { printf "%d", (free + inactive + spec) * ps / 1048576 }'
-    fi
-}
+# avail_ram_mb moved to lib-common.sh (the plane host probe reads the same
+# figure — one definition). total_ram_mb stays local: only this script needs it.
 
 total_ram_mb() {
     if [ -f /proc/meminfo ]; then

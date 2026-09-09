@@ -22,7 +22,7 @@ For the observability / trust-loop behaviors, this harness *is* the Observe step
 1. stands up a throwaway bot + a manager session in a temp root (no Claude auth, no real fleet),
 2. seeds a stale tool-call marker and a past-deadline dispatch,
 3. runs the real `fleet-pulse.sh` sweep against it, and
-4. **asserts** that `activity_stuck` and `overdue_dispatch` events are emitted to `data/events/*.jsonl` and that the manager receives a `[FLEET-PULSE]` push.
+4. **asserts** that `activity_stuck` and `overdue_dispatch` events land on the plane (`claudlobby events --bot <bot>`) and that the manager receives a `[FLEET-PULSE]` push.
 
 ```bash
 bash lib/validate-bot-change.sh   # exit 0 = behavior matched intent
@@ -40,8 +40,8 @@ Some changes (a skill's actual output, a guardrail's enforcement, a protocol's w
 claudlobby --fleet <fleet> generate
 lib/spin-up-bot.sh <bot-dir>           # or restart the affected bot
 # drive the affected path, then observe:
-tail -f <bot-dir>/data/events/fleet-*.jsonl
-tail -f <bot-dir>/keepalive.log
+claudlobby events --bot <bot> --tail 20      # the plane's rows for the bot
+claudlobby uptime --bot <bot>                 # heartbeat history, from the plane
 tmux attach -t <bot>                   # watch the pane
 ```
 
@@ -69,4 +69,4 @@ Cite the observation in the PR body — claimed evidence is not evidence. See `l
 
 ## Boundary: this is not Claudosseum
 
-This loop is **pre-merge change validation** — does *this* change work. It's a claudlobby dev/operator discipline. **Longitudinal scoring** of which behaviors actually perform across hundreds of real runs ("trials and combat") is Claudosseum's job; claudlobby only *emits* the structured telemetry (the same `data/events` / `report-back.jsonl` stream) for it to consume. See `PROJECT_MISSION.md` sibling boundaries.
+This loop is **pre-merge change validation** — does *this* change work. It's a claudlobby dev/operator discipline. **Longitudinal scoring** of which behaviors actually perform across hundreds of real runs ("trials and combat") is Claudosseum's job; claudlobby only *emits* the structured telemetry (the plane's rows, the same the fleet's own doors read) for it to consume. See `PROJECT_MISSION.md` sibling boundaries.

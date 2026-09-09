@@ -15,6 +15,20 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     ("communication", "recipient_raw"): {"class": "SENSITIVE"},
     ("work_item", "body"): {"class": "CONTENT", "cap": 16_384},
     ("task", "summary"): {"class": "CONTENT", "cap": 4_096},
+    # chunk M-A (#1481) — the task loop's authored text: why a task was
+    # withdrawn or nudged, and what an escalation asks. Same class and cap as
+    # `summary`; a metadata-mode capture strips all three together.
+    ("task", "reason"): {"class": "CONTENT", "cap": 4_096},
+    ("task", "question"): {"class": "CONTENT", "cap": 4_096},
+    # `by` is METADATA, deliberately: the card must still name WHO acted after
+    # a metadata-mode capture strips the prose beside it ("needs you" with no
+    # asker is a question nobody can route). But it is AUTHORED INPUT all the
+    # same -- `--as <who>` and a bot name -- so it is capped like everything a
+    # human types (the M-A fold, F11): unregistered, it was the one authored
+    # field in the family with no cap at all, and a 4 KB "name" would ride into
+    # every attention card. Small, because it is a NAME: the doors already
+    # clamp an alias to 64 characters.
+    ("task", "by"): {"class": "METADATA", "cap": 128},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
     ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail
@@ -41,4 +55,97 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "daemon_started": "notice",
     "daemon_stopping": "notice",
     "spool_drain_completed": "notice",
+    # cutover chunk 3 — the shadow primitive's record (J4). The shadow is
+    # gone (F18 R2a); the names stay REGISTERED so the rows it recorded
+    # still classify.
+    "shadow_parity_clean": "notice",
+    "shadow_parity_diverged": "critical",
+    # cutover chunks 5 / 6b — the epochs the transition recorded (a reader
+    # declared, the legacy writes retired). The machinery is gone (F18 R3:
+    # the plane is the only source); the names stay REGISTERED so the rows
+    # the estate recorded still classify.
+    "cutover_declared": "notice",
+    "legacy_write_retired": "notice",
+    # cutover chunk 7a — a report whose status reached no task event (a terminal
+    # note that resolved nothing): the status the idle-worker check reads.
+    "report_status": "notice",
+    # cutover Phase B — the fleet events (once the per-bot data/events files,
+    # gone since F18 R1) on the plane: every `emit_fleet_event` type the estate emits, registered with the
+    # severity `claudlobby events`' CRITICAL_TYPES implies (critical pages the
+    # operator through fleet-pulse's escalation; notice is the record). An
+    # unregistered type still ingests with NULL severity (F19).
+    "session_missing": "critical",
+    "service_down": "critical",
+    "activity_stuck": "critical",
+    "script_error": "critical",
+    "overdue_dispatch": "critical",
+    "bridge_down": "critical",
+    "reload_failed": "critical",
+    "restart_failed": "critical",
+    "rc_timeout": "critical",
+    "alert_delivery_failed": "notice",
+    "dispatch_orphaned": "notice",
+    "worker_unassigned": "notice",
+    "pane_stuck": "notice",
+    "wip_uncommitted": "notice",
+    "send_miss": "notice",
+    "send_retry": "notice",
+    "send_blind": "notice",
+    "send_blind_recovered": "notice",
+    "resume_skipped": "notice",
+    "plugin_marketplace_failed": "notice",
+    "briefing_deferred": "notice",
+    "briefing_dispatched": "notice",
+    "briefing_failed": "notice",
+    "audit_selected": "notice",
+    "audit_dispatched": "notice",
+    "audit_deferred": "notice",
+    "audit_failed": "notice",
+    "sweep_repo_unreachable": "notice",
+    "bot_teardown_started": "notice",
+    "handoff_skipped": "notice",
+    "fleet_rescue": "notice",
+    # cutover B2 — the keepalive tick's transitions and the vitals hook, through
+    # the fleet-event door (the per-tick verdicts ride the heartbeat sample)
+    "keepalive_restart": "notice",
+    "bridge_heal": "notice",
+    "keepalive_skip": "notice",
+    "keepalive_reload": "notice",
+    "tool_call": "notice",
+    "session_event": "notice",
+    # chunk K (#1467): `claudlobby brief --ack` records the viewer's read
+    # position as a plane fact — informational, never an alert
+    "reports_acked": "notice",
+}
+
+# ---------------------------------------------------------------------------
+# Phase 2b: the metric-name registry (§9b MetricSample — open registry,
+# warn-on-unknown at ingest, additions by PR). Units live HERE, never on
+# rows. Seed = the spec's walked list (§9b Emitters paragraph).
+# ---------------------------------------------------------------------------
+
+METRIC_NAMES: dict[str, dict] = {
+    "host.load": {"unit": "load", "description": "1/5/15-min load triplet"},
+    "host.mem_available_mb": {"unit": "MB", "description": "available RAM"},
+    "host.disk_free_gb": {"unit": "GB", "description": "free disk"},
+    "host.thermal_flags": {"unit": "flags", "description": "Pi vcgencmd thermal"},
+    "host.undervoltage": {"unit": "bool", "description": "Pi undervoltage flag"},
+    "host.boot_time": {"unit": "iso8601", "description": "last boot instant"},
+    "host.job_ran": {"unit": "run", "description": "one sample per machinery run"},
+    "vault.behind": {"unit": "commits", "description": "behind upstream"},
+    "vault.ahead": {"unit": "commits", "description": "ahead of upstream"},
+    "vault.last_fetch_age_s": {"unit": "s", "description": "age of last fetch"},
+    "vault.fetch_failed": {"unit": "bool",
+                           "description": "a failed fetch must never render"
+                                          " as up-to-date"},
+    "bot.session_up": {"unit": "bool", "description": "tmux session alive"},
+    "bot.bridge_up": {"unit": "bool", "description": "telegram poller alive"},
+    "bot.rc_ok": {"unit": "bool", "description": "remote control live"},
+    "bot.pane_last_change_age_s": {"unit": "s", "description": "pane activity age"},
+    "bot.heartbeat": {"unit": "run", "description": "keepalive heartbeat"},
+    "bot.rss_mb": {"unit": "MB", "description": "resident set size"},
+    "env.key_state": {"unit": "state",
+                      "description": "creds-check key state (names never"
+                                     " values; the #1213 present-but-empty"
+                                     " class)"},
 }

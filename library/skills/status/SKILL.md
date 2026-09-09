@@ -29,7 +29,7 @@ Anything failing both tests is context, and context goes in a pointer.
 claudlobby --fleet "$FLEET_NAME" brief --bot "$BOT_NAME" --json
 ```
 
-`brief` is the fleet's one read door. **Do not hand-roll greps over `state/` or `data/events/`** — a
+`brief` is the fleet's one read door. **Do not hand-roll greps over `state/` — and there are no event files to grep: the events are on the plane** — a
 hand-rolled reader silently disagrees with the framework's own, and yours is the one that is wrong.
 
 It gives you: `mission`, `dispatches` (`open`/`overdue`/`orphaned`), `workstreams`, `reports.unacked`,

@@ -161,12 +161,15 @@ def test_channel_fleet_filter_scopes_the_room(tmp_path):
     assert len(both["data"]["threads"]) == 2  # no filter = the firehose
 
 
-def test_channel_unknown_fleet_is_ok_empty_not_error(tmp_path):
+def test_channel_unknown_fleet_is_a_typed_refusal(tmp_path):
     _seed_two_fleets(tmp_path)
     body = TestClient(create_app(tmp_path)).get(
         "/api/channel?fleet=nonexistent").json()
-    assert body["state"] == "ok"
-    assert body["data"]["threads"] == []  # legitimately idle — UI's word
+    # a fleet the plane does not hold is a typed refusal (U, #1467) — the
+    # room it would have shown is empty by construction, and saying so as
+    # "ok" read as a healthy empty room
+    assert body["state"] == "unknown" and "data" not in body
+    assert "nonexistent" in body["remediation"]
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +375,10 @@ def test_room_is_immune_to_like_metacharacters(tmp_path):
     client = TestClient(create_app(tmp_path))
     for evil in ("en_", "%", "engineerin_"):
         body = client.get(f"/api/channel?fleet={evil}").json()
-        assert body["state"] == "ok"
-        assert body["data"]["threads"] == [], f"{evil!r} leaked a room"
+        # not a fleet the plane holds: refused by name, never a room —
+        # so a metacharacter can neither absorb nor leak one
+        assert body["state"] == "unknown", f"{evil!r} passed as a fleet"
+        assert "data" not in body, f"{evil!r} leaked a room"
 
 
 def test_index_html_alias_is_rewritten_too(tmp_path):
@@ -449,3 +454,137 @@ def test_wedged_capture_reap_does_not_block_on_grandchild_pipe(tmp_path):
     elapsed = asyncio.run(run())
     assert elapsed < 7.0, f"reap blocked {elapsed:.1f}s on the orphan pipe"
     assert s.snapshot()["panes"][0]["status"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# The fleet dimension on the grid + presence (U4/U1, #1467)
+# ---------------------------------------------------------------------------
+
+def test_grid_fleet_filter_keeps_twin_named_bots_apart(tmp_path):
+    """`?fleet=` FILTERS the snapshot: a tab's grid shows that fleet's panes
+    only, and a same-named bot on the other fleet keeps its own slot —
+    never merged into the tab's card, never shown under the wrong tab."""
+    _bot(tmp_path, "flat", "engineering", "one")
+    _bot(tmp_path, "flat", "data", "one")
+    tmux = _fake_tmux(tmp_path, 'printf "pane content\\n"')
+    s = PaneSampler(tmp_path, tmux=str(tmux))
+    s._panes = discover_panes(tmp_path)
+
+    async def run():
+        for p in s._panes:
+            await s._capture(p, 14)
+    asyncio.run(run())
+    client = TestClient(create_app(tmp_path, sampler=s))
+    both = client.get("/api/grid").json()["data"]["panes"]
+    assert sorted((p["fleet"], p["bot"]) for p in both) == [
+        ("data", "one"), ("engineering", "one")]
+    eng = client.get("/api/grid?fleet=engineering").json()["data"]["panes"]
+    assert [(p["fleet"], p["bot"]) for p in eng] == [("engineering", "one")]
+    assert client.get("/api/grid?fleet=nope").json()["data"]["panes"] == []
+    # focus still resolves the twin by (fleet, bot) and ships ONE pane
+    foc = client.get("/api/grid?focus=one&fleet=data").json()["data"]["panes"]
+    assert [(p["fleet"], p["bot"], p["focused"]) for p in foc] == [
+        ("data", "one", True)]
+
+
+def test_presence_fleet_filter_scopes_both_halves(tmp_path):
+    """The header strip under a tab is the ROOM's counts: the recorded half
+    (heartbeat samples) and the live half (panes) are both scoped."""
+    d = tmp_path / "state" / "plane"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "capture.json").write_text('{"*": "full"}')
+    rows = []
+    for fleet in ("engineering", "data"):
+        alias = f"bot:{fleet}/one"
+        rows += [
+            {"event_type": "registry_snapshot", "emitter": "t", "fleet": fleet,
+             "payload": {"entity_type": "bot", "entity_alias": alias,
+                         "cause": "generate", "scan_id": "s1",
+                         "payload": {"alias": alias, "account": "a",
+                                     "service": "s", "model": "opus",
+                                     "posture": {"permissions_mode": "plan"},
+                                     "composed_hashes": {},
+                                     "declared_hash": "d",
+                                     "schema_version": "1"}}},
+            {"event_type": "metric_sample", "emitter": "keepalive",
+             "fleet": fleet,
+             "payload": {"subject_kind": "bot_instance", "subject": alias,
+                         "metric": "bot.heartbeat",
+                         "value": {"state": "BUSY", "marker_age_s": 3}}}]
+    emit_batch(tmp_path, rows)
+
+    class _Sampler:
+        available = True
+
+        def snapshot(self):
+            return {"panes": [{"fleet": "engineering", "bot": "one",
+                               "status": "up"},
+                              {"fleet": "data", "bot": "one", "status": "up"},
+                              {"fleet": "data", "bot": "two",
+                               "status": "down"}],
+                    "sampler_running": True}
+
+        def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    client = TestClient(create_app(tmp_path, sampler=_Sampler()))
+    host = client.get("/api/presence").json()["data"]
+    assert host["counts"]["working"] == 2 and host["counts"]["down"] == 1
+    data = client.get("/api/presence?fleet=data").json()["data"]
+    assert {b["alias"] for b in data["bots"]} == {"bot:data/one",
+                                                  "bot:data/two"}
+    assert data["counts"]["working"] == 1 and data["counts"]["down"] == 1
+    eng = client.get("/api/presence?fleet=engineering").json()["data"]
+    assert [b["alias"] for b in eng["bots"]] == ["bot:engineering/one"]
+    assert eng["counts"]["down"] == 0
+
+
+def test_overview_presence_is_each_rooms_not_the_hosts(tmp_path):
+    """U3 over U1's scoping: the strip's per-fleet presence is the SAME
+    derivation the presence panel serves under that fleet's tab — a
+    twin-named bot on the other fleet never joins this fleet's count, and
+    a dead pane on data never darkens engineering's card."""
+    d = tmp_path / "state" / "plane"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "capture.json").write_text('{"*": "full"}')
+    rows = []
+    for fleet, state in (("engineering", "BUSY"), ("data", "IDLE")):
+        alias = f"bot:{fleet}/one"
+        rows.append(
+            {"event_type": "metric_sample", "emitter": "keepalive",
+             "fleet": fleet,
+             "payload": {"subject_kind": "bot_instance", "subject": alias,
+                         "metric": "bot.heartbeat",
+                         "value": {"state": state, "marker_age_s": 3}}})
+    emit_batch(tmp_path, rows)
+
+    class _Sampler:
+        available = True
+
+        def snapshot(self):
+            return {"panes": [{"fleet": "engineering", "bot": "one",
+                               "status": "up"},
+                              {"fleet": "data", "bot": "one", "status": "up"},
+                              {"fleet": "data", "bot": "two",
+                               "status": "down"}],
+                    "sampler_running": True}
+
+        def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    client = TestClient(create_app(tmp_path, sampler=_Sampler()))
+    strip = {r["alias"]: r["presence"]["counts"]
+             for r in client.get("/api/overview").json()["data"]["fleets"]}
+    for fleet in ("engineering", "data"):
+        panel = client.get(f"/api/presence?fleet={fleet}").json()["data"]
+        assert strip[fleet] == panel["counts"], fleet
+    assert strip["engineering"] == {"working": 1, "idle": 0, "down": 0,
+                                    "stale": 0, "unknown": 0, "sampling": 0}
+    assert strip["data"] == {"working": 0, "idle": 1, "down": 1,
+                             "stale": 0, "unknown": 0, "sampling": 0}

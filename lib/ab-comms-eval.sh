@@ -1037,7 +1037,7 @@ synth_transcript() {  # $1 taskidx  $2 rep  $3 variant  $4 dispatch-text -> echo
 # --- run one paired cell -----------------------------------------------------
 # In dry-run the cell synthesizes; in real mode (F2 follow-up) it would boot a
 # real session via the #729 stage-B spike recipe (seed auth+trust ->
-# start-bot.sh -> dispatch.sh -> await the report-back.jsonl ledger row -> recover
+# start-bot.sh -> dispatch.sh -> await the report on the plane -> recover
 # the transcript). Real mode is refused upstream, so only the dry branch runs.
 run_cell() {  # $1 task  $2 taskidx  $3 rep  $4 variant
     local task="$1" ti="$2" rep="$3" variant="$4"

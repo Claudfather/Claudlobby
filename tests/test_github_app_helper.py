@@ -28,6 +28,7 @@ from tests.conftest import (
     _write_exec,
     booby_trap_git,
     constructed_env,
+    plane_emit_env,
     read_fleet_events,
 )
 
@@ -118,6 +119,7 @@ def app_env(tmp_path, rsa_key):
         GITHUB_APP_ID="999001",
         GITHUB_APP_INSTALLATION_ID="555002",
         GITHUB_APP_PRIVATE_KEY_PATH=str(rsa_key),
+        **plane_emit_env(),          # auth_mint_failed lands on the plane (no fleet: under _host)
     )
     return {"env": env, "stub": stub, "root": root, "home": home}
 

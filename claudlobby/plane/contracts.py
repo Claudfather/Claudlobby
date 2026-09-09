@@ -18,6 +18,7 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from . import SUPPORTED_SCHEMA_VERSIONS
@@ -35,21 +36,37 @@ ATTEMPT_STATES = (
     # at send) — accepted is not consumed, so this is NOT activation evidence.
     "send_attempted", "carrier_accepted", "carrier_queued", "pane_submitted",
     "failed", "unknown", "recipient_acknowledged", "duplicate_suppressed",
+    # received (chunk P, #1501): the RECEIVER's own fact — a UserPromptSubmit
+    # hook in the receiving session recorded the byte length and sha256 of the
+    # prompt it actually got (`received_bytes` / `received_sha256`, in detail),
+    # keyed to the sender's msg_id. It is DELIBERATELY NOT in any activation or
+    # submission set (ACTIVATION_TX_EVENTS, queries._TX_OPEN): it is the join's
+    # second leg, not stronger evidence of the sender's own submission, and
+    # folding it into activation would silently reshape TASK_STATUS/ATTENTION.
+    # A tmux/pane fact (see _CARRIER_ONLY_STATES).
+    "received",
 )
 TASK_EVENTS = (
-    # 20 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
+    # 22 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
     # pre-deletion tuple was 20, mis-stated as 19 — the count error predated the
     # deletion): the transmission ack row is
     # the single acknowledgement fact; activation derives through the join.
     # supplied_id_not_open ADDED (§6b #6, PR-B): the worker reported with a
     # task id that was not in the open set at report time — a fact about the
     # JOIN, not the work (4 real ledger rows; report-back already names it).
+    # escalated + nudged ADDED (chunk M-A, #1481) — the task loop's two HUMAN
+    # acts, both NON-terminal: `escalated` raises the task for human guidance
+    # and the task stays open while the human decides (ruled), `nudged` is the
+    # operator asking the manager to act on one row. Each carries its text in
+    # the detail (question / reason) and the person in `by`; each is an
+    # attention arm only while it is the assignment's newest task event, so a
+    # later act clears it with nothing to reconcile.
     "dispatch_intended", "transmission_failed", "dispatch_submitted",
     "accepted", "rejected", "progress",
     "blocked_waiting", "returned_blocked", "resumed", "completed", "failed",
     "cancelled", "deadline_changed", "superseded", "reassigned",
     "retry_created", "orphaned_by_session_loss", "recovered_after_restart",
-    "expired", "supplied_id_not_open",
+    "expired", "supplied_id_not_open", "escalated", "nudged",
 )
 DECLARATION_EVENTS = ("revision_seen", "scan_completed")
 SYSTEM_SUBJECT_KINDS = ("host", "vault", "fleet", "actor", "bot_instance", "session")
@@ -225,6 +242,9 @@ _CARRIER_ONLY_STATES = {
     "pane_submitted": ("tmux",),
     "carrier_queued": ("tmux",),
     "carrier_accepted": ("telegram-tgpost", "telegram-bridge"),
+    # received (chunk P): a pane fact like pane_submitted — the receiving
+    # session got it over tmux. tmux-only until a channel receiver ever emits it.
+    "received": ("tmux",),
 }
 
 
@@ -238,6 +258,27 @@ class Transmission(_Strict):
     error: Optional[str] = None
     part_no: Optional[int] = Field(None, ge=1)     # bridge chunking (round-2 F10)
     part_count: Optional[int] = Field(None, ge=1)
+    # The RECEIVER's proof (chunk P): the byte length and sha256 of the prompt
+    # the receiving session actually got, trailer stripped. They ride `detail`
+    # (like error/part_no), never a dedicated column — the delivery JOIN
+    # (queries.DELIVERY_STATUS_SQL) compares received_sha256/received_bytes to
+    # the SENDER's WIRE proof below (chunk P fold F1), not to the communication's
+    # body hash: the body is the raw logical message, but the receiver hashes
+    # what came off the wire, which `sanitize_tmux_input` rewrote (newlines and
+    # tabs -> spaces, runs squeezed). Comparing the receiver's arrival against the
+    # raw body read every multi-line / tabbed / double-spaced dispatch as ALTERED
+    # or TRUNCATED though fully delivered.
+    received_bytes: Optional[int] = Field(None, ge=0)
+    received_sha256: Optional[str] = None
+    # The SENDER's WIRE proof (chunk P fold F1): the byte length and sha256 of the
+    # EXACT bytes bot_tmux_send put on the wire for the message proper —
+    # sanitize_tmux_input(payload), the `set +H; ` prefix included, the routing
+    # trailer NOT. The receiver hashes (arrival minus trailer) which equals that
+    # for EVERY shape, so DELIVERED fires for a whole delivery regardless of
+    # sanitize. Rides `detail` on a SUBMISSION-class tmux fact (pane_submitted /
+    # carrier_queued — both put these bytes on the pane); the JOIN reads it there.
+    wire_bytes: Optional[int] = Field(None, ge=0)
+    wire_sha256: Optional[str] = None
 
     def model_post_init(self, __context) -> None:
         allowed = _CARRIER_ONLY_STATES.get(self.state)
@@ -246,6 +287,40 @@ class Transmission(_Strict):
                 f"state {self.state!r} is impossible for carrier"
                 f" {self.carrier!r} (allowed: {', '.join(allowed)})"
             )
+        # The proof pair belongs ONLY to a `received` fact, and a `received`
+        # fact is worthless without it — the join has nothing to compare
+        # otherwise. Enforced both directions so a mis-emitting door fails
+        # loud rather than landing a verdict-less row.
+        has_proof = self.received_bytes is not None or self.received_sha256 is not None
+        if self.state == "received":
+            if self.received_bytes is None or self.received_sha256 is None:
+                raise ValueError(
+                    "a 'received' transmission must carry received_bytes AND"
+                    " received_sha256 (the delivery join's proof)"
+                )
+        elif has_proof:
+            raise ValueError(
+                f"received_bytes/received_sha256 are only valid on a 'received'"
+                f" transmission, not {self.state!r}"
+            )
+        # The WIRE proof (chunk P fold F1) is the SENDER's half of the join and
+        # rides a submission-class tmux fact only: the bytes it names are the
+        # ones a pane received. Unlike the received proof it is OPTIONAL there (a
+        # host with no sha tool records the fact without it, and the join then
+        # cannot upgrade past 'unconfirmed' — never a false verdict), but a wire
+        # proof on any other state is a mis-emitting door and fails loud.
+        has_wire = self.wire_bytes is not None or self.wire_sha256 is not None
+        if has_wire:
+            if self.state not in ("pane_submitted", "carrier_queued"):
+                raise ValueError(
+                    "wire_bytes/wire_sha256 are only valid on a submission-class"
+                    f" tmux transmission (pane_submitted/carrier_queued), not"
+                    f" {self.state!r}"
+                )
+            if self.wire_bytes is None or self.wire_sha256 is None:
+                raise ValueError(
+                    "a wire proof must carry wire_bytes AND wire_sha256 together"
+                )
 
 
 class WorkItem(_Strict):
@@ -288,6 +363,24 @@ class TaskEvent(_Strict):
     @classmethod
     def _summary_byte_cap(cls, v):
         return _reject_over_cap("task", "summary", v)
+    # The task loop's human acts (chunk M-A, #1481): `reason` is why a manager
+    # withdrew or an operator nudged, `question` is what an escalation asks,
+    # `by` is who did it as the door knew them. Their OWN fields rather than
+    # `summary` because the attention card reads the question back by name and
+    # a door may want both a summary and a reason on one event; CONTENT-capped
+    # like every authored text, so a restrictive capture mode strips them
+    # together with it rather than leaking prose past the policy.
+    reason: Optional[str] = None
+    question: Optional[str] = None
+    by: Optional[str] = None
+
+    # `by` is METADATA (it survives a metadata capture, or a card would say
+    # "needs you" with no asker) but it is still authored input, so it is
+    # capped from the same registry — small, because it is a NAME.
+    @field_validator("reason", "question", "by")
+    @classmethod
+    def _act_text_byte_cap(cls, v, info):
+        return _reject_over_cap("task", info.field_name, v)
     pr_url: Optional[str] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
@@ -317,9 +410,20 @@ class SystemEvent(_Strict):
     subject_kind: Optional[Literal[SYSTEM_SUBJECT_KINDS]] = None
     subject_uid: Optional[str] = Field(None, min_length=1)
     subject_alias: Optional[str] = None
+    # `subject` (cutover Phase B): an ALIAS to resolve at ingest — the
+    # MetricSample form — for emitters that cannot know a uid (a bash door's
+    # `emit_fleet_event`). Needs subject_kind, excludes the uid anchor pair;
+    # ingest mints/looks up the uid and stamps subject_alias from it.
+    subject: Optional[str] = Field(None, min_length=1)
     data: Optional[dict] = None
 
     def model_post_init(self, __context) -> None:
+        if self.subject is not None:
+            if self.subject_kind is None:
+                raise ValueError("subject (an alias) needs subject_kind")
+            if self.subject_uid is not None or self.subject_alias is not None:
+                raise ValueError("subject (an alias) excludes the uid anchor pair — one or the other")
+            return
         if (self.subject_uid is None) != (self.subject_kind is None):
             raise ValueError(
                 "subject_kind and subject_uid are an anchor pair — both or neither"
@@ -363,6 +467,249 @@ class WorkstreamEvent(_Strict):
         return _reject_over_cap("workstream_event", info.field_name, v)
 
 
+# ---------------------------------------------------------------------------
+# Phase 2b — the registry lane (spec §9b: field lists FINAL 2026-08-20).
+# Entity payloads are keyframes of slow-changing RESOLVED state; volatile
+# telemetry goes to metric_samples (F12/F20). uid fields are Optional on the
+# WIRE: uids are system-minted (F10) — ingest resolves entity_alias through
+# identity_registry and the stored entity_uid COLUMN is authoritative; a
+# payload-carried uid is advisory. Fields marked sensitive in §9b keep their
+# classification at render (§11) — the wire carries them verbatim.
+# ---------------------------------------------------------------------------
+
+
+class _HostSystem(_Strict):
+    claudlobby_version: str
+    claude_version: str
+    node_version: Optional[str] = None
+    python_version: str
+    host_jobs: list[dict] = []
+    plugins: list[dict] = []
+    emitters: list[dict] = []
+    defaults_tier_hash: str
+
+
+class HostPayload(_Strict):
+    host_uid: Optional[str] = None
+    aliases: dict
+    os: Literal["linux", "darwin"]
+    arch: str
+    kernel: str
+    ram_total_mb: int
+    disk_total_gb: int
+    system: _HostSystem
+    declared_fleets: list[str]
+    schema_version: str
+
+
+class _VaultCompat(_Strict):
+    floor: str
+    cli_version: Optional[str] = None
+    # Optional, deviating from §9b's bare bool DELIBERATELY: no compat
+    # probe runs at generate, and a fabricated verdict frozen by the hash
+    # gate is the lie this lane exists to kill. None = no probe ran.
+    ok: Optional[bool] = None
+
+
+class VaultPayload(_Strict):
+    vault_uid: Optional[str] = None
+    alias: str
+    role: Literal["primary", "mounted"]
+    mount_path: str
+    remote: str                                   # sensitive (§11)
+    compat: _VaultCompat
+    carries_fleets: bool
+    gitignore_safe: bool
+    schema_version: str
+
+
+class _FleetGroup(_Strict):
+    name: str
+    manager: str
+    members: list[str]
+    mission: Optional[str] = None
+
+
+class _FleetDefaults(_Strict):
+    model: str
+    effort: Optional[str] = None
+    account: str
+    list_tier_hashes: dict[str, str]
+
+
+class FleetPayload(_Strict):
+    fleet_uid: Optional[str] = None
+    alias: str
+    service_prefix: str
+    mission: Optional[str] = None
+    mission_file: Optional[dict] = None
+    manager: object                               # str | [str] — F5 scalar
+    groups: list[_FleetGroup] = []
+    org_edges: list[dict] = []
+    roster: list[str]
+    defaults_summary: _FleetDefaults
+    env_keys: list[str] = []                      # names ONLY, never values
+    jobs: list[dict] = []
+    plugins_additional: list[str] = []
+    vault_binding: dict
+    telegram: Optional[dict] = None               # group_alias only (§11)
+    declared_hash: str
+    vault_rev: Optional[str] = None
+    schema_version: str
+
+
+class ProjectPayload(_Strict):
+    project_uid: Optional[str] = None
+    key: str
+    fleet_uid: Optional[str] = None
+    title: str
+    repos: list[str]
+    tier: Literal["auto", "review", "preview", "human"]
+    validation_hash: str
+    mission_file: Optional[dict] = None
+    declared_hash: str
+    vault_rev: Optional[str] = None
+    schema_version: str
+
+
+class LibraryItemPayload(_Strict):
+    library_item_uid: Optional[str] = None
+    category: str
+    name: str
+    source_tier: Literal["shared", "fleet-overlay"]
+    fleet_uid: Optional[str] = None
+    content_hash: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    declared_hash: str
+    vault_rev: Optional[str] = None
+    schema_version: str
+
+
+class _BotPosture(_Strict):
+    permissions_mode: str                         # sensitive as a block (§11)
+    tool_allow: list[str] = []
+    tool_deny: list[str] = []
+    sandbox: dict = {}
+    permissions_grants: dict = {}
+    hooks: list[dict] = []
+    env_keys: list[str] = []
+    rc_enabled: bool = False
+    telegram: dict = {}
+    git_credentials_profile: Optional[str] = None
+
+
+class BotPayload(_Strict):
+    actor_uid: Optional[str] = None
+    bot_instance_uid: Optional[str] = None
+    alias: str                                    # "bot:<fleet>/<name>"
+    display_name: Optional[str] = None
+    fleet_uid: Optional[str] = None
+    account: str
+    service: str
+    model: str
+    effort: Optional[str] = None
+    org: dict = {}
+    equipment: dict = {}
+    posture: _BotPosture
+    schedule: dict = {}
+    vault_binding: Optional[dict] = None
+    composed_hashes: dict
+    declared_hash: str
+    vault_rev: Optional[str] = None
+    schema_version: str
+
+
+ENTITY_PAYLOADS: dict[str, type[BaseModel]] = {
+    "host": HostPayload,
+    "vault": VaultPayload,
+    "fleet": FleetPayload,
+    "project": ProjectPayload,
+    "library_item": LibraryItemPayload,
+    "bot": BotPayload,
+}
+
+# entity_type -> identity_registry kind. Bot keyframes key on the INSTANCE
+# (§9b: entity_uid is the per-host supervised install; the logical actor is
+# reachable through the payload and confirmed alongside at ingest).
+ENTITY_IDENTITY_KIND: dict[str, str] = {
+    "host": "host", "vault": "vault", "fleet": "fleet",
+    "bot": "bot_instance", "project": "project",
+    "library_item": "library_item",
+}
+
+
+class RegistrySnapshot(_Strict):
+    entity_type: Literal["host", "vault", "fleet", "bot", "project",
+                         "library_item"]
+    entity_alias: str = Field(min_length=1)
+    tombstone: bool = False
+    # dict on the wire, validated against ENTITY_PAYLOADS[entity_type] by
+    # validate_request; None iff tombstone (mirrors the DDL CHECK).
+    payload: Optional[dict] = None
+    cause: Literal["generate", "probe", "equip", "migration"]
+    scan_id: str = Field(min_length=1)
+    vault_rev: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _payload_iff_not_tombstone(self):
+        if self.tombstone and self.payload is not None:
+            raise ValueError("a tombstone carries no payload")
+        if not self.tombstone and self.payload is None:
+            raise ValueError("a non-tombstone snapshot requires a payload")
+        return self
+
+
+class MetricSample(_Strict):
+    subject_kind: Literal["host", "vault", "fleet", "actor", "bot_instance",
+                          "session"]
+    subject: str = Field(min_length=1)            # alias; uid resolved at ingest
+    metric: str = Field(min_length=1)   # open registry (registries.
+                                        # METRIC_NAMES): ingest WARNS on
+                                        # unknown, never rejects
+    value: object = Field(...)                    # number | bool | str | object
+
+    @field_validator("value")
+    @classmethod
+    def _value_not_none(cls, v):
+        if v is None:
+            raise ValueError("a sample without a value is not a sample")
+        return v
+    status: Optional[Literal["ok", "warn", "alert"]] = None
+
+
+class Declaration(_Strict):
+    """events kind=declaration — the provenance chain that never disappears
+    into the hash gate: revision_seen records every newly observed vault
+    revision even when resolved state is byte-identical; scan_completed is
+    the fact that makes tombstones valid (same scan_id, complete=true)."""
+
+    event: Literal["revision_seen", "scan_completed"]
+    subject_kind: Literal["vault", "host"]
+    subject: str = Field(min_length=1)            # alias; uid resolved at ingest
+    vault_rev: Optional[str] = None               # revision_seen detail
+    scan_id: Optional[str] = None                 # scan_completed detail (REQUIRED there)
+    scope: Optional[str] = None
+    counts: Optional[dict] = None
+    complete: Optional[bool] = None
+    source_rev: Optional[str] = None   # optional BY DESIGN: vaultless fleets scan too
+
+    @model_validator(mode="after")
+    def _per_token_detail(self):
+        if self.event == "scan_completed":
+            if not self.scan_id:
+                raise ValueError("scan_completed requires scan_id (round-3"
+                                 " F11: a completion must join its"
+                                 " tombstones)")
+            if self.complete is None or self.counts is None \
+                    or self.scope is None:
+                raise ValueError("scan_completed requires scope, counts and"
+                                 " complete (§9d detail)")
+        if self.event == "revision_seen" and not self.vault_rev:
+            raise ValueError("revision_seen requires vault_rev")
+        return self
+
+
 FAMILIES: dict[str, type[BaseModel]] = {
     "communication": Communication,
     "transmission": Transmission,
@@ -372,6 +719,9 @@ FAMILIES: dict[str, type[BaseModel]] = {
     "system": SystemEvent,
     "workstream": Workstream,
     "workstream_event": WorkstreamEvent,
+    "registry_snapshot": RegistrySnapshot,
+    "metric_sample": MetricSample,
+    "declaration": Declaration,
 }
 
 # Wire family -> physical events.kind where the two DIFFER — the spec-ruling-#8
@@ -430,6 +780,18 @@ def validate_request(raw: dict) -> tuple[EmitRequest, BaseModel]:
         payload = model.model_validate(env.payload)
     except ValidationError as exc:
         raise ContractViolation(exc.errors()) from exc
+    if isinstance(payload, RegistrySnapshot) and payload.payload is not None:
+        # the inner entity payload is typed per entity_type (§9b FINAL):
+        # a snapshot whose payload fails its entity contract is a contract
+        # verdict at the door, never a stored malformed keyframe
+        entity_model = ENTITY_PAYLOADS[payload.entity_type]
+        try:
+            entity_model.model_validate(payload.payload)
+        except ValidationError as exc:
+            raise ContractViolation(
+                [{"loc": ("payload", payload.entity_type, *e["loc"]),
+                  "msg": e["msg"]} for e in exc.errors()]
+            ) from exc
     return env, payload
 
 

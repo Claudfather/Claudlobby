@@ -52,13 +52,13 @@ claudlobby --fleet "$FLEET_NAME" report-back --since 24h 2>/dev/null \
 Any bot listed there is asking to be restarted — pair it with its completed
 count in the same window before deciding.
 
-**Two things about that command that used to make it lie.** The ledger is
-per-fleet, so `--fleet` is what makes it read a real file; without it the root
-tier resolves, nothing is found, and the empty result reads as "nobody is
-degraded" (#1216). And the pipe hides the exit status — `grep`'s rc is what you
-get back, so check the command alone before trusting an empty grep. Since #1216
-a flagless run prints `cannot read the report-back ledger` and exits 1, which
-`grep -i` will filter out of your view: run it unpiped once if the result is
+**Two things about that command that used to make it lie.** The plane's rows
+are per fleet, so `--fleet` is what scopes the query; a run that cannot be
+scoped refuses (rc 3) rather than reading as "nobody is degraded" (#1216's
+lesson). And the pipe hides the exit status — `grep`'s rc is what you
+get back, so check the command alone before trusting an empty grep. A refused run
+prints `claudlobby report-back: UNREACHABLE — …` on stderr and exits 3, which a
+`grep -i` on stdout will filter out of your view: run it unpiped once if the result is
 empty and you are about to act on that.
 
 

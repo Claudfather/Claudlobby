@@ -13,28 +13,19 @@ Pull-based observability for fleet managers. Two writers produce events; manager
 |--------|--------|-----------|--------------|
 | Bot vitals | `lib/bot-vitals.sh` | Every tool call (Claude Code hook) | `vitals` |
 | Fleet pulse | `lib/fleet-pulse.sh` | Cron (every 5 min) | `pulse` |
-| Keepalive idle marker | `lib/keepalive.sh` | Every keepalive run (60s timer) | Marker file (`data/.idle`), not JSONL |
+| Keepalive | `lib/keepalive.sh` | Every keepalive run (60s timer) | `keepalive` — `bot.heartbeat` / `bot.session_up` samples and `keepalive_*` and `bridge_heal` events on the plane, plus the `data/.idle` marker |
 
-Both write the same JSONL schema to the same bot-local directory. Managers read one path per bot regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
+Every writer lands on the plane through `emit_fleet_event`; managers read one door, `claudlobby events`, regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
 
 ## Where to Read
 
-Each bot writes its own events to:
-
-```
-<bot-dir>/data/events/fleet-YYYY-MM-DD.jsonl
-```
-
-All paths are derivable from fleet.yaml. For a fleet named `<fleet>`:
-
-```
-$CLAUDLOBBY_ROOT/local/<fleet>/runtime/bots/<bot>/data/events/fleet-$(date +%Y-%m-%d).jsonl
-```
-
-**That is where the data lives, not how a manager should read it.** Do not use `resolve_bots_dir`
-to iterate bot directories and read this path directly — see "Reading Events" below for why, and
-use `claudlobby events` instead. `resolve_bots_dir` stays the right tool for cases that only need
-bot *names* (e.g. enumerating who exists), not for reaching into `data/events/` across bots.
+Every bot's events are recorded on the plane — the host's flight recorder,
+`$CLAUDLOBBY_ROOT/state/plane/plane.db` — and nowhere else (F18 closure: the
+per-bot `data/events/*.jsonl` files are gone). Read them through
+`claudlobby events` (`--fleet <fleet> events --since 24h [--bot <bot>] [--json]`),
+which renders the same `{ts, bot, type, source, data}` rows the ledgers had.
+Never open the database by hand from a session; `resolve_bots_dir` stays the
+right tool for cases that only need bot *names* (e.g. enumerating who exists).
 
 ## Event Schema
 

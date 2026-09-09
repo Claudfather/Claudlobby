@@ -40,32 +40,45 @@ DISCOVER_INTERVAL = 60.0  # roster changes are generate-time events
 THUMB_CONCURRENCY = 4     # Pi-right: bound the fork burst per sweep
 
 
-def discover_panes(root: Path) -> list[dict]:
-    """Every bot on the host: (fleet, bot, socket). Layout enumeration is
-    paths._iter_fleet_dirs (the ONE nested-aware fleet walk) and the socket
-    is paths.tmux_socket_for_bot (the ONE bot.conf socket reader — which
-    honors TMUX_SOCKET, the composer's single-quote form, and FLEET_NAME
-    fail-fast). A grid over a read-only daemon must not fork either SSOT."""
+def discover_bot_dirs(root: Path) -> list[tuple[str, str, Path]]:
+    """Every bot directory on the host as (fleet, bot, dir). Layout
+    enumeration is paths._iter_fleet_dirs (the ONE nested-aware fleet walk)
+    plus root/CLI mode (the fleet label is root.name); a bot dir is one that
+    carries a bot.conf. The grid's pane discovery and the overview's orphan
+    split both walk THROUGH here — two copies of the layout rule drift on
+    the next layout change."""
     root = Path(root)
-    out = []
+    out: list[tuple[str, str, Path]] = []
     fleet_dirs = list(_iter_fleet_dirs(root / "local"))
     if (root / "runtime" / "bots").is_dir():
         fleet_dirs.append(root)  # root/CLI mode: the fleet label is root.name
     for fleet_dir in fleet_dirs:
         bots = fleet_dir / "runtime" / "bots"
-        if not bots.is_dir():
+        try:
+            entries = sorted(bots.iterdir()) if bots.is_dir() else []
+        except OSError:
             continue
-        for bot_dir in sorted(bots.iterdir()):
-            if not (bot_dir / "bot.conf").is_file():
-                continue
-            try:
-                sock = tmux_socket_for_bot(bot_dir)
-            except ValueError:
-                sock = ""  # FLEET_NAME set but socket empty — skip, disclosed
-            if not sock:
-                continue
-            out.append({"fleet": fleet_dir.name, "bot": bot_dir.name,
-                        "socket": sock})
+        for bot_dir in entries:
+            if (bot_dir / "bot.conf").is_file():
+                out.append((fleet_dir.name, bot_dir.name, bot_dir))
+    return out
+
+
+def discover_panes(root: Path) -> list[dict]:
+    """Every bot on the host with a socket: (fleet, bot, socket) —
+    discover_bot_dirs gated by paths.tmux_socket_for_bot (the ONE bot.conf
+    socket reader — which honors TMUX_SOCKET, the composer's single-quote
+    form, and FLEET_NAME fail-fast). A grid over a read-only daemon must not
+    fork either SSOT."""
+    out = []
+    for fleet, bot, bot_dir in discover_bot_dirs(root):
+        try:
+            sock = tmux_socket_for_bot(bot_dir)
+        except ValueError:
+            sock = ""  # FLEET_NAME set but socket empty — skip, disclosed
+        if not sock:
+            continue
+        out.append({"fleet": fleet, "bot": bot, "socket": sock})
     return out
 
 

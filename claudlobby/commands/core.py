@@ -14,11 +14,14 @@ from ..diff import diff_bot, promote_bot
 from ..source_state import (
     SOURCE_ABSENT,
     UNREACHABLE_REMEDIES,
+    probe_dir,
     probe_source,
+    scan_dir,
     unreachable_line,
 )
 from ..validator import validate
 from ._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
+from ._helpers import refuse_unreachable
 
 log = logging.getLogger("claudlobby")
 
@@ -29,6 +32,37 @@ def cmd_doctor(args) -> int:
 
     paths = _resolve_paths(args)
     _load_env(paths)
+    if getattr(args, "switches", False):
+        # The table ALONE — the form lib/setup-fleet and lib/setup-system
+        # call, so their closing summary and this command's rung come from
+        # one renderer rather than a bash copy that drifts. Deliberately
+        # cheap: no service probes, no credential curls, no npx cache walk.
+        #
+        # The fleet is OPTIONAL here, which the full doctor's is not:
+        # lib/setup-system runs once per HOST and a host with overlay fleets
+        # has no root fleet.yaml at all, so requiring one would have made the
+        # host door print nothing — the exact silence this chunk exists to
+        # remove. Without a fleet the fleet-scoped rows fall back to their
+        # shipped defaults and the host rows are still true.
+        from .. import switches as _sw
+        from ..config import load_fleet
+        if getattr(args, "markdown", False):
+            # The doc blocks, for regeneration. The three schema/architecture
+            # tables used to be a fourth hand-kept copy of the registry; they
+            # are now a generated block, pinned by test, and this is the door
+            # the failure message points at. Deliberately state-FREE: a doc
+            # must describe what ships, never what this host happens to have.
+            for doc, kw in _sw.DOC_BLOCKS.items():
+                print(f"--- {doc}")
+                print(_sw.format_markdown(**kw))
+                print()
+            return 0
+        try:
+            fleet, _md = load_fleet(paths.fleet_yaml)
+        except Exception:  # noqa: BLE001 — no fleet is a host run, not an error
+            fleet = None
+        print(_sw.format_table(_sw.resolve(paths, fleet)))
+        return 0
     fleet, _md = _load_fleet_or_exit(paths)
     report = run_doctor(fleet, paths)
     print(format_report(report))
@@ -242,6 +276,24 @@ def cmd_generate(args) -> int:
 
     _warn_unresolvable_skill_refs(paths)
 
+    # Phase 2b: the generate-time registry scan (cause=generate). NON-
+    # BLOCKING and dormant: unarmed fleets (no PLANE_EMIT_ENABLED=1 in the
+    # fleet env) return None silently, and a scan failure must never break
+    # a generate — the composed estate is correct with or without its
+    # keyframes; the scan just records what generate produced.
+    try:
+        from ..plane.registry_emit import run_generate_scan
+        summary = run_generate_scan(paths, fleet)
+        if summary:
+            log.info(
+                "registry scan %s: %d entities (%d tombstoned,"
+                " complete=%s) — %s",
+                summary["scan_id"], summary["entities"],
+                summary["tombstoned"], summary["complete"],
+                summary["outcomes"])
+    except Exception as exc:  # noqa: BLE001 — non-blocking by contract
+        log.warning("registry scan failed (generate unaffected): %s", exc)
+
     return 0
 
 
@@ -401,6 +453,14 @@ def cmd_status(args) -> int:
     use_json = getattr(args, "json", False)
 
     statuses = collect_fleet_status(fleet, paths)
+    # A disabled reaction must never be silent (the defaults ruling). Resolving
+    # the switches shells the env-tier resolver once; a failure leaves the
+    # header unchanged rather than taking the dashboard down with it.
+    try:
+        from .. import switches as _sw
+        switch_states = _sw.resolve(paths, fleet)
+    except Exception:  # noqa: BLE001 — status must render regardless
+        switch_states = None
 
     if bot_filter:
         matches = [bs for bs in statuses if bs.name == bot_filter]
@@ -408,20 +468,20 @@ def cmd_status(args) -> int:
             log.error("bot %r not found in fleet %r", bot_filter, fleet.name)
             return 1
         if use_json:
-            sys.stdout.write(format_json(matches, fleet.name))
+            sys.stdout.write(format_json(matches, fleet.name, switch_states))
         else:
             sys.stdout.write(format_bot_detail(matches[0]))
         return 0
 
     if use_json:
-        sys.stdout.write(format_json(statuses, fleet.name))
+        sys.stdout.write(format_json(statuses, fleet.name, switch_states))
     else:
-        sys.stdout.write(format_table(statuses, fleet.name))
+        sys.stdout.write(format_table(statuses, fleet.name, switch_states))
     return 0
 
 
 def cmd_report_back(args) -> int:
-    """Query the report-back ledger — human-readable table of bot work events.
+    """Query the fleet's reports on the plane — a human-readable table of bot work events.
 
     #1216: an unreachable ledger and a ledger with no matching rows must not
     render alike. They did — both were an ``INFO`` line on *stderr* and rc 0 with
@@ -440,33 +500,6 @@ def cmd_report_back(args) -> int:
     is *not* true of ``dispatch-overdue.py`` — see ``source_state``.
     """
     paths = _resolve_paths(args)
-
-    # Resolve ledger path (fleet_state owns the overlay-vs-root rule; the shell
-    # twin is fleet_runtime_dir in lib-common.sh, used by report-back.sh)
-    ledger = paths.fleet_state / "report-back.jsonl"
-
-    probe = probe_source(ledger)
-    if probe.unreachable:
-        # Name the fleet-tier remedy only in root mode, where it is the actual
-        # cause. In overlay mode --fleet was already passed, so suggesting it
-        # would send the reader to re-run the command they just ran.
-        #
-        # And only for ABSENT. The tier remedy answers "the file is not here",
-        # so on UNREADABLE -- where the file WAS reached and the fix is
-        # permissions -- it is advice for a different fault, in the one state
-        # whose entire purpose is being distinguishable (#1227 review).
-        remedy = (
-            ""
-            if getattr(args, "fleet", None) or probe.state != SOURCE_ABSENT
-            else UNREACHABLE_REMEDIES["fleet_tier"]
-        )
-        line = unreachable_line("the report-back ledger", probe, remedy=remedy)
-        # --json makes stdout MACHINE-facing, so the disclosure moves to stderr
-        # there: a prose line emitted into a JSONL stream is the phantom-row
-        # defect this fix exists to prevent, re-created by the fix. rc carries it
-        # in both modes; the placement only decides which reader also sees text.
-        print(line, file=sys.stderr if args.json else sys.stdout)
-        return 1
 
     # Parse --since into a cutoff timestamp
     cutoff = None
@@ -489,39 +522,34 @@ def cmd_report_back(args) -> int:
                 )
                 return 1
 
-    # Read and filter entries
-    entries = []
-    total_rows = 0
-    for line in ledger.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = _json.loads(line)
-        except _json.JSONDecodeError:
-            continue
-        total_rows += 1
-        if args.bot and entry.get("bot") != args.bot:
-            continue
-        if args.status and entry.get("status") != args.status:
-            continue
-        if cutoff:
-            try:
-                ts = datetime.fromisoformat(entry["ts"].replace("Z", "+00:00"))
-                if ts < cutoff:
-                    continue
-            except (KeyError, ValueError):
-                continue
-        entries.append(entry)
+    # The plane, the only source (F18 R2b): no ledger probe, no retirement
+    # fact, no file. An unreachable plane REFUSES (rc 3) with the remedy —
+    # never an empty table, which would read as "this worker is fresh"
+    # (#1216's incident, re-created).
+    from ..brief import plane_session
+    plane, note = plane_session(paths)
+    if plane is None:
+        return refuse_unreachable("report-back", note)
+    try:
+        rows = plane.pr.report_rows(plane.conn, plane.fleet, since=cutoff.isoformat() if cutoff else None)
+    except Exception as exc:
+        return refuse_unreachable("report-back", f"the plane cannot answer: {exc}")
+    finally:
+        plane.close()
+    source = f"the plane (fleet {plane.fleet})"
+    total_rows = len(rows)
+    entries = [plane.pr.public(r) for r in rows
+               if (not args.bot or r.get("bot") == args.bot)
+               and (not args.status or r.get("status") == args.status)]
 
     if not entries:
-        # Emptiness is stated POSITIVELY, naming the ledger that was read and how
-        # many rows it holds. "0 matched of 34 rows in <path>" cannot be confused
-        # with "cannot read <path>", which is the whole point: the reader learns
+        # Emptiness is stated POSITIVELY, naming the source that was read and
+        # how many rows it holds. "0 matched of 34 rows" cannot be confused with
+        # "cannot read the plane", which is the whole point: the reader learns
         # the instrument worked and the filter is what excluded everything. Left
         # on stderr under --json so an empty JSONL stream stays empty.
         print(
-            f"0 event(s) matched — read {total_rows} row(s) from {ledger}",
+            f"0 event(s) matched — read {total_rows} row(s) from {source}",
             file=sys.stderr if args.json else sys.stdout,
         )
         return 0
@@ -549,16 +577,16 @@ def cmd_report_back(args) -> int:
 def cmd_brief(args) -> int:
     """The fleet's one read door — composed state for one bot.
 
-    Read-only apart from a single write: ``--ack`` advances that viewer's
-    report cursor. Every other artifact it touches (dispatch log, report
-    ledger, workstream registry, event files) is opened for reading only.
+    Read-only apart from a single emission: ``--ack`` records that viewer's
+    read position on the plane (a `reports_acked` system event, chunk K).
+    Everything else it touches is the plane, opened read-only.
     """
     from ..brief import (
         boot_provenance,
         build_brief,
         format_boot_brief,
         format_brief,
-        write_cursor,
+        record_ack,
     )
 
     paths = _resolve_paths(args)
@@ -607,17 +635,34 @@ def cmd_brief(args) -> int:
                 bot_id,
             )
             return 1
-        # Advance to the newest row the caller was just shown, so the ack covers
-        # exactly what was rendered — never a row that arrived mid-run.
+        # Ack exactly what was rendered — the newest row the caller was just
+        # shown, by the plane's own ordering — never a row that arrived mid-run.
         unacked = reports.get("unacked", [])
         if unacked:
-            write_cursor(paths, bot_id, unacked[-1]["ts"])
-            log.info(
-                "acked %d report(s) for %s — cursor at %s",
-                len(unacked),
-                bot_id,
-                unacked[-1]["ts"],
-            )
+            newest = unacked[-1]   # sorted by (ts, seq): the last is the newest
+            outcome = record_ack(paths, fleet.name, bot_id,
+                                 acked_through_seq=newest.get("seq") or 0,
+                                 acked_through_ts=newest["ts"], count=len(unacked))
+            if outcome.status == "failed":
+                # A failed emit is a failed ack: the plane is the only record,
+                # so nothing was marked seen — the reports read unacked again.
+                log.error(
+                    "did NOT record the ack for %s (%s) — %d report(s) still"
+                    " read unacked; there is no other record",
+                    bot_id, outcome.detail, len(unacked),
+                )
+                return 1
+            if outcome.status == "spooled":
+                log.warning(
+                    "ack for %s spooled (%s) — the plane holds it after `claudlobby plane"
+                    " spool retry`; until then the %d report(s) still read unacked",
+                    bot_id, outcome.detail, len(unacked),
+                )
+            else:
+                log.info(
+                    "acked %d report(s) for %s — recorded on the plane (%s) through seq %s",
+                    len(unacked), bot_id, outcome.detail, newest.get("seq"),
+                )
         else:
             log.info("nothing to ack for %s", bot_id)
     return 0
@@ -626,27 +671,18 @@ def cmd_brief(args) -> int:
 def cmd_workstreams(args) -> int:
     """Read-only view of the fleet workstream registry. Writes go exclusively
     through lib/workstream-update.sh and the /workstream manager skill."""
-    from ..workstreams import format_list, format_show, load_workstreams, registry_path
+    from ..workstreams import format_list, format_show
 
     paths = _resolve_paths(args)
 
-    # Same class as #1216: ``load_workstreams`` returns {} for an absent registry
-    # AND for an empty one, so ``format_list`` printed "No workstreams." either
-    # way — a manager reading that cannot tell "this fleet has no open
-    # workstreams" from "this fleet's registry was never created, or I resolved
-    # the wrong tier". Probed here rather than inside load_workstreams because
-    # that function is also imported by brief.py, which has its own remedy
-    # (label the section) and must keep its current contract.
-    registry = registry_path(paths)
-    probe = probe_source(registry)
-    if probe.unreachable:
-        remedy = (
-            "" if getattr(args, "fleet", None) else UNREACHABLE_REMEDIES["fleet_tier"]
-        )
-        print(unreachable_line("the workstream registry", probe, remedy=remedy))
-        return 1
+    # The plane, the only source (F18 R2b): an unreachable plane refuses (rc 3)
+    # with the note — never "No workstreams." from a registry that could not be
+    # read (#1216's class).
+    from ..workstreams import plane_workstreams
+    workstreams, note = plane_workstreams(paths)
+    if workstreams is None:
+        return refuse_unreachable("workstreams", note)
 
-    workstreams = load_workstreams(paths)
     if getattr(args, "ws_command", "list") == "show":
         entry = workstreams.get(args.id)
         if not entry:
@@ -659,17 +695,52 @@ def cmd_workstreams(args) -> int:
 
 
 def cmd_uptime(args) -> int:
-    """Per-bot uptime, MTBR, and restart-rate metrics from keepalive logs."""
+    """Per-bot uptime, MTBR, and restart-rate metrics from the plane's
+    heartbeat samples and restart transitions (F18 closure R2b)."""
     from ..uptime import WINDOWS, aggregate_fleet, format_json, format_table
 
     paths = _resolve_paths(args)
     bots_dir = paths.runtime_bots
-    if not bots_dir.is_dir():
-        log.error("runtime bots dir not found: %s", bots_dir)
+    # probe_dir, never is_dir()+glob: an unreadable bots dir (or ancestor)
+    # made a live fleet render as successful emptiness — "No bots found" at
+    # rc 0, the unreachable-vs-empty collapse this module exists to kill
+    # (external round 2, probed; source_state named this caller and the
+    # audit found it had never been wired).
+    # scan_dir, and the returned list IS what aggregate_fleet consumes — a
+    # probe followed by aggregate_fleet's own glob re-opened the directory,
+    # and glob swallows a mid-iteration OSError: a LIVE bot behind a benign
+    # entry vanished at rc 0 (external round 4, probed).
+    probe, bot_dirs = scan_dir(bots_dir)
+    if not probe.reachable:
+        line = unreachable_line("the runtime bots dir", probe)
+        print(line, file=sys.stderr if args.json else sys.stdout)
         return 1
 
     windows = [args.window] if args.window else list(WINDOWS.keys())
-    results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot)
+    # F18 closure R2b: the plane is the ONLY source — the heartbeat samples,
+    # the dead-session fact and the restart transitions keepalive lands
+    # there; no keepalive.log, no retirement fact. A plane that cannot
+    # answer REFUSES (rc 3): an empty table would read as a fleet that never
+    # ran. The readers are the install's own stdlib script, like the bash
+    # doors' (never this checkout's copy).
+    import sqlite3
+
+    from ..brief import plane_session
+    from ..uptime import entries_from_plane
+    plane, note = plane_session(paths)
+    if plane is None:
+        return refuse_unreachable("uptime", note)
+    since = (datetime.now(timezone.utc) - max(WINDOWS.values())).isoformat()
+
+    def entries_for(bot_dir):
+        return entries_from_plane(plane.pr, plane.conn, plane.fleet, bot_dir.name, since)
+    try:
+        results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
+                                  bot_dirs=bot_dirs, entries_for=entries_for)
+    except (plane.pr.PlaneUnreachable, sqlite3.Error) as exc:
+        return refuse_unreachable("uptime", f"the plane could not answer ({exc})")
+    finally:
+        plane.close()
 
     if not results:
         log.info("No bots found in %s", bots_dir)

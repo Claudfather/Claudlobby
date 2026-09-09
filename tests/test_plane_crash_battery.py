@@ -173,9 +173,10 @@ def test_derivation_fixtures(tmp_path: Path):
         tx(m2, "pane_submitted"), tx(m2, "recipient_acknowledged"),
     ])
     conn = connect(db_path(tmp_path))
-    from claudlobby.plane.queries import ATTENTION_SQL
+    from claudlobby.plane.queries import ATTENTION_SQL, attention_params
 
-    attention = [r[0] for r in conn.execute(ATTENTION_SQL, ("2026-06-01",))]
+    attention = [r[0] for r in conn.execute(ATTENTION_SQL,
+                                            attention_params("2026-06-01"))]
     assert attention == [a2], f"attention must surface ONLY the successor: {attention}"
     # terminal dominance: complete a2, then a late progress must not reopen
     emit_batch(tmp_path, [
@@ -188,7 +189,7 @@ def test_derivation_fixtures(tmp_path: Path):
     ])
     from claudlobby.plane.queries import RECONCILIATION_SQL, TASK_STATUS_SQL
 
-    statuses = dict(conn.execute(TASK_STATUS_SQL).fetchall())
+    statuses = {r[0]: r[1] for r in conn.execute(TASK_STATUS_SQL)}
     assert statuses[a2] == "completed", (
         f"terminal must dominate late progress: {statuses[a2]}")
     assert statuses[a1] == "reassigned"

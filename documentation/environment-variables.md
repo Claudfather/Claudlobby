@@ -92,9 +92,8 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `OBSERVABILITY_PULSE_INTERVAL` | `bots.<name>.observability.pulse_interval` | Seconds between heartbeat pulses (default: 300) |
-| `OBSERVABILITY_REAP_DAYS` | `bots.<name>.observability.reap_days` | Days to retain event files (default: 7) |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | `bots.<name>.observability.activity_stuck_threshold` | Seconds of inactivity before flagged stuck (default: 1800) |
-| `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue (default: 1800) |
+| `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue. Composed for every bot since #1481; 86400 (24h) when the fleet declares none, `0` = open-ended. SECONDS — 24h is 1440 minutes, and only `--deadline-min` speaks minutes |
 | `RC_READY_TIMEOUT_S` | env override (`start-bot.sh`) | Seconds to wait for the `remote-control is active` readiness string before logging TIMEOUT and emitting the `rc_timeout` event (default: 90). Not composed from fleet.yaml — a raw override for slow hosts and the test harness |
 | `KEEPALIVE_BOOT_GRACE_S` | env override (`lib-common.sh` `service_is_starting`) | Seconds a unit may stay mid-start before keepalive stops treating it as booting and restarts it, and fleet-pulse resumes alarming (default: 300). Budgets ONE phase — `ExecStart`, bounded by `RC_READY_TIMEOUT_S` — so the composed boot stagger never eats it. Raise it only on a host where cold starts genuinely exceed it; the cap is what stops a wedged `start-bot.sh` suppressing the watchdog forever (#1002). Not composed from fleet.yaml |
 
@@ -131,7 +130,7 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 ## Opt-in Feature Flags
 
 A handful of shared `lib/` hooks and scripts compose into **every** bot on **every** fleet
-(via `system.yaml` `defaults.hooks` or a shared `lib/` script), but ship **dormant by default** —
+(via `system.yaml` `defaults.hooks` or a shared `lib/` script), but ship **dormant by default** (the plane hooks are the exception since F18 R1: always on, `PLANE_EMIT_DISABLED=1` the one silencer) —
 each is a no-op until the specific var below is set to `"1"` under the relevant bot's
 `bots.<name>.env` (which lands in that bot's `bot.conf` and is inherited by hooks/scripts running
 in its session). This is the equippable-dormant pattern: a shared install cannot be staged
@@ -141,9 +140,9 @@ per-bot, so rollout is gated per-fleet (or per-bot) instead of going live estate
 | Variable | Consumer | Description |
 |----------|----------|--------------|
 | `SESSION_DIGEST_ENABLED` | `lib/transcript-digest.sh` (SessionEnd hook) | `"1"` arms per-session Haiku transcript digesting for this bot. Default `0` (dormant) |
-| `PLANE_EMIT_ENABLED` | `lib/plane-session-start.sh` (SessionStart hook) | `"1"` arms observable-plane session-identity emission (`session_uid`/`process_uid`) for this bot. Default `0` (dormant) |
-| `PLANE_EMIT_DISABLED` | `lib/plane-emit.sh`, `lib/plane-session-start.sh` | `"1"` forces a no-op regardless of `PLANE_EMIT_ENABLED` — the harness/test exemption. Opposite polarity from the other flags on this list |
-| `SPINDOWN_RECEIPT_ENABLED` | `lib/spin-down-bot.sh` | `"1"` arms the `bot_teardown_started` fleet-ledger receipt on teardown for this bot's fleet. Default `0` (dormant) |
+| `PLANE_EMIT_ENABLED` | `claudlobby generate` (`registry_emit.py`) | An opt-**OUT** since chunk N: the generate-time registry keyframe scan runs unless the fleet-tier `.env` resolves this to exactly `"0"`. Not a runtime door gate — every door is always on since F18 R1 |
+| `PLANE_EMIT_DISABLED` | `lib/plane-emit.sh`, every hook, every fleet timer | `"1"` silences every plane door — the harness/test exemption, the one silencer. Opposite polarity from the other flags on this list. Set it in the fleet-tier `.env`: the composer carries the resolved value onto every fleet job unit (a timer sources no `.env`) and into `bot.conf` (a session sees no unexported tier assignment), so one line reaches all three |
+| `SPINDOWN_RECEIPT_ENABLED` | `lib/spin-down-bot.sh` | An opt-**OUT** since chunk N: the `bot_teardown_started` receipt is written unless this is exactly `"0"` (it is the one record that survives a `--purge`) |
 
 ## Plugins
 

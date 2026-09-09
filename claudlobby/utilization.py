@@ -1,8 +1,10 @@
 """Worker utilization rollup — busy/idle % per bot over rolling windows.
 
-Reads existing data sources (keepalive logs, fleet-state.json) to compute
-per-bot busy/idle percentages. No new data collection — pure aggregation of
-existing keepalive samples.
+The busy/idle series is the plane's ``bot.heartbeat`` samples (F18 closure
+R2b: ``claudlobby.plane.utilization.heartbeat_series`` is the ONE reader,
+shared with the operator plane's surface; keepalive.log is gone), joined with
+fleet-state.json for the declared status and current task. No new data
+collection — pure aggregation of recorded samples.
 
 Two access paths, deliberately distinct:
 
@@ -26,11 +28,31 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .paths import Paths
-from .uptime import _MAX_INTERVAL_SECS, _fmt_duration, collect_bot_logs
+from .uptime import _MAX_INTERVAL_SECS, _fmt_duration
 
 log = logging.getLogger("claudlobby.utilization")
 
 _STALL_THRESHOLD_SECS = int(os.environ.get("UTILIZATION_STALL_SECS", "7200"))
+
+
+class PlaneUnreachable(RuntimeError):
+    """The plane cannot answer (no db, unreadable, no schema): the rollup
+    refuses rather than rendering every bot 0% busy — unreachable is not
+    empty (#1216)."""
+
+
+def fleet_heartbeat_series(conn, fleet: str, now: datetime) -> dict[str, list[tuple[datetime, str]]]:
+    """``{bot name (lower-cased): [(instant, state), ...]}`` for one fleet from
+    the plane — the alias's tail is the bot's name, matched case-insensitively
+    like every per-bot plane read (a case-variant alias mints a second
+    identity; the series are merged in time order)."""
+    from .plane.utilization import heartbeat_series      # lazy: that module imports the math from here
+    out: dict[str, list[tuple[datetime, str]]] = {}
+    for alias, entries in heartbeat_series(conn, now=now, fleet=fleet).items():
+        out.setdefault(alias.rsplit("/", 1)[-1].lower(), []).extend(entries)
+    for entries in out.values():
+        entries.sort(key=lambda e: e[0])
+    return out
 
 
 @dataclass
@@ -71,7 +93,11 @@ def _compute_busy_pct(
             duration = (windowed[i + 1][0] - ts).total_seconds()
         else:
             duration = (now - ts).total_seconds()
-        duration = min(duration, _MAX_INTERVAL_SECS)
+        # cap a gap at 10 min of the preceding state (pinned legacy choice), and
+        # CLAMP a negative duration to 0: a log never produced one, but a
+        # time-skewed or out-of-order sample series can, and a negative
+        # denominator renders as -50% / 300% (plane gauntlet, probed)
+        duration = max(0.0, min(duration, _MAX_INTERVAL_SECS))
 
         if state == "BUSY":
             busy_secs += duration
@@ -126,15 +152,15 @@ def load_fleet_state(paths: Paths) -> dict:
 
 def compute_bot_utilization(
     bot_name: str,
-    bot_dir: Path,
+    entries: list[tuple[datetime, str]],
     fleet_state_bot: dict,
     now: datetime | None = None,
 ) -> BotUtilization:
-    """Compute utilization for a single bot."""
+    """Compute utilization for a single bot from its (instant, state) series
+    (the plane's, via ``fleet_heartbeat_series``; empty = no sample recorded)."""
     if now is None:
         now = datetime.now(timezone.utc)
 
-    entries = collect_bot_logs(bot_dir)
     entries = [
         (
             ts.astimezone(timezone.utc)
@@ -183,10 +209,25 @@ def compute_fleet_utilization(
     paths: Paths,
     bot_names: list[str] | None = None,
     now: datetime | None = None,
+    *,
+    fleet: str | None = None,
 ) -> list[BotUtilization]:
-    """Compute utilization for all bots (or a subset) in a fleet."""
+    """Compute utilization for all bots (or a subset) in a fleet, from the
+    plane. *fleet* names the plane's rows (default: the overlay's name); a
+    plane that cannot answer raises ``PlaneUnreachable`` — never a rollup of
+    zeros."""
     if now is None:
         now = datetime.now(timezone.utc)
+    from .brief import plane_session
+    plane, note = plane_session(paths, fleet=fleet)     # the ONE plane door (root mode resolves its fleet)
+    if plane is None:
+        raise PlaneUnreachable(note)
+    try:
+        series = fleet_heartbeat_series(plane.conn, plane.fleet, now)
+    except Exception as exc:                          # a schema the reader cannot use: refuse
+        raise PlaneUnreachable(f"the plane could not answer: {exc}") from exc
+    finally:
+        plane.close()
 
     fleet_state = load_fleet_state(paths)
     bots_state = fleet_state.get("bots", {})
@@ -204,10 +245,8 @@ def compute_fleet_utilization(
         )
 
     for name in bot_names:
-        bot_dir = bots_dir / name
-        if not bot_dir.is_dir():
-            continue
-        util = compute_bot_utilization(name, bot_dir, bots_state.get(name, {}), now=now)
+        util = compute_bot_utilization(name, series.get(name.lower(), []),
+                                       bots_state.get(name, {}), now=now)
         results.append(util)
 
     return results
@@ -258,3 +297,10 @@ def format_utilization_summary(results: list[BotUtilization]) -> str:
         else:
             parts.append(f"{u.name} {int(u.busy_pct_24h)}% busy")
     return "team utilization: " + ", ".join(parts) if parts else "no bots"
+
+
+# Public names for the ONE definition of busy/idle math, so the plane's
+# heartbeat-series reader (claudlobby.plane.utilization) imports a stable
+# contract rather than a private helper an unwitting rename could break.
+compute_busy_pct = _compute_busy_pct
+find_state_transition = _find_state_transition

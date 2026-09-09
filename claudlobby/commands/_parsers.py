@@ -31,6 +31,9 @@ from .plane import (
     cmd_emit,
     cmd_emit_batch,
     cmd_plane_doctor,
+    cmd_plane_expire,
+    cmd_plane_prune,
+    cmd_plane_registry,
     cmd_plane_schema,
     cmd_plane_open,
     cmd_plane_serve,
@@ -39,6 +42,8 @@ from .plane import (
     cmd_plane_status,
 )
 from .scaffolding import cmd_new_bot, cmd_new_guardrail, cmd_new_skill
+from .task import (DEFAULT_MAX_AGE_H, DEFAULT_REPEAT_H, cmd_task_nudge,
+                   cmd_task_recheck)
 
 
 def register_subparsers(sub) -> None:
@@ -50,7 +55,22 @@ def register_subparsers(sub) -> None:
 
     pdr = sub.add_parser(
         "doctor",
-        help="Pre-flight fleet health diagnostic (env, MCP, services, creds)",
+        help="Pre-flight fleet health diagnostic (env, MCP, services, creds,"
+        " switches)",
+    )
+    pdr.add_argument(
+        "--switches",
+        action="store_true",
+        help="Print ONLY the switch table — every knob the system ships, its"
+        " state here, and the one line that flips it (what setup-fleet and"
+        " setup-system print at the end of a run)",
+    )
+    pdr.add_argument(
+        "--markdown",
+        action="store_true",
+        help="With --switches: print the GENERATED doc blocks (the three"
+        " schema/architecture tables are rendered from the registry, not"
+        " hand-kept) so a doc can be regenerated after a switch changes",
     )
     pdr.set_defaults(func=cmd_doctor)
 
@@ -175,6 +195,56 @@ def register_subparsers(sub) -> None:
     ws_sub.add_parser("list", help="List all workstreams (default)")
     pws_show = ws_sub.add_parser("show", help="Show one workstream by id")
     pws_show.add_argument("id", help="Workstream id (e.g. ws-ship-the-widget)")
+
+    # The task loop's operator door (chunk M-A, #1481). A subcommand group from
+    # the start, because M's other verbs land beside `nudge` rather than as
+    # top-level commands of their own.
+    pt = sub.add_parser("task", help="Acts on ONE task (the plane's assignments)")
+    t_sub = pt.add_subparsers(dest="task_action", required=True)
+    ptn = t_sub.add_parser(
+        "nudge",
+        help="Record a nudge on an open task and ask its manager to act",
+    )
+    ptn.add_argument("task_id", help="The dispatch's task id (e.g. t-1757000000-ab12)")
+    ptn.add_argument("why", nargs="?", default="",
+                     help="Why you are nudging — carried to the manager and recorded")
+    ptn.add_argument("--as", dest="as_who", default=None,
+                     help="Who is nudging (default: $USER) — the actor is human:<who>;"
+                     " letters, digits, '.', '-', '_' (it mints a plane identity)")
+    ptn.add_argument("--assignment", default=None,
+                     help="Act on THIS assignment (asg_...) when the task id matches"
+                     " more than one open row — the remedy the refusal names")
+    ptn.set_defaults(func=cmd_task_nudge)
+
+    # M4 (chunk M-B): the re-check the dormant `task-recheck` fleet timer runs,
+    # and the same door by hand. `--fleet` here names the PLANE's fleet (an
+    # alias in a per-root db), which is a different question from the global
+    # `--fleet`'s overlay — the matcher's own `--fleet F --root R` shape. It
+    # carries its own dest for a mechanical reason too: an argparse subparser
+    # copies its whole namespace over the parent's, so a second `--fleet` on
+    # `dest="fleet"` would erase a global one given before the subcommand.
+    ptr = t_sub.add_parser(
+        "recheck",
+        help="Ask each manager to act on their stale rows (chase, supersede, "
+        "withdraw, escalate) — the task-recheck timer's door",
+    )
+    ptr.add_argument("--fleet", dest="recheck_fleet", default=None,
+                     help="Fleet whose managers to re-check, as the PLANE names it (default: "
+                     "the overlay's / fleet.yaml's own name)")
+    ptr.add_argument("--max-age-h", dest="max_age_h", type=float,
+                     default=DEFAULT_MAX_AGE_H,
+                     help="Also re-check a row open longer than this, deadline "
+                     "or not (default: 48; 0 = every open row with a readable "
+                     "dispatch instant qualifies on age alone; negative refused)")
+    ptr.add_argument("--repeat-h", dest="repeat_h", type=float,
+                     default=DEFAULT_REPEAT_H,
+                     help="Skip a row a re-check already named inside this "
+                     "window — read from the plane, not a state file "
+                     "(default: 24; negative refused)")
+    ptr.add_argument("--dry-run", dest="dry_run", action="store_true",
+                     help="Print what each manager would be sent; record and "
+                     "send nothing")
+    ptr.set_defaults(func=cmd_task_recheck)
 
     pu = sub.add_parser(
         "uptime",
@@ -409,14 +479,14 @@ def register_subparsers(sub) -> None:
 
     pev = sub.add_parser(
         "events",
-        help="Tail/filter JSONL events across all bots",
+        help="Tail/filter the fleet's events on the plane",
     )
     pev.add_argument("--bot", help="Filter by bot name")
     pev.add_argument(
         "--type", help="Filter by event type (e.g. service_down, tool_call)"
     )
     pev.add_argument(
-        "--source", help="Filter by source (vitals, pulse, keepalive, lib)"
+        "--source", help="Filter by the emitting script (vitals, pulse, keepalive, lib)"
     )
     pev.add_argument(
         "--critical",
@@ -467,6 +537,52 @@ def register_subparsers(sub) -> None:
     po.set_defaults(func=cmd_plane_open)
     psc = psub.add_parser("schema", help="Export JSON Schemas (envelope + families)")
     psc.set_defaults(func=cmd_plane_schema)
+    ppr = psub.add_parser(
+        "prune",
+        help="Age out raw metric_samples past the retention window (30d;"
+        " family-scoped, never the ledger)")
+    ppr.add_argument("--days", type=int, default=None,
+                     help="Retention window in days (default 30)")
+    ppr.add_argument("--dry-run", action="store_true",
+                     help="Report the count without deleting")
+    ppr.set_defaults(func=cmd_plane_prune)
+    pex = psub.add_parser(
+        "expire",
+        help="Attention expiry sweep: emit `expired` for assignments overdue"
+        " past the horizon (7d; a Lane-B fact through ingest, idempotent)")
+    pex.add_argument("--after-days", type=int, default=None,
+                     help="Days an overdue assignment must be QUIET (no task"
+                     " event) before it expires (default 7; 0 = anything overdue"
+                     " and silent right now — sharp)")
+    pex.add_argument("--dry-run", action="store_true",
+                     help="Report the count without emitting")
+    pex.set_defaults(func=cmd_plane_expire)
+    prg = psub.add_parser(
+        "registry",
+        help="Registry lane reads: current state, history, changes, verify")
+    prg.add_argument("--type", choices=(
+        "host", "vault", "fleet", "bot", "project", "library_item"),
+        help="Filter current listing by entity type")
+    # DELIBERATELY NOT --fleet: that dest is the global overlay selector
+    # (_resolve_paths consumes it), and sharing it made a legal db-scope
+    # query refuse unless a whole overlay existed by that name (gauntlet,
+    # probed). --verify uses the GLOBAL --fleet, which it genuinely needs.
+    prg.add_argument("--scope", dest="scope_fleet", metavar="FLEET",
+                     help="Filter the listing by fleet scope (a db fact —"
+                     " needs no overlay)")
+    mode = prg.add_mutually_exclusive_group()
+    mode.add_argument("--show", metavar="ALIAS",
+                      help="One entity's current payload (alias or uid)")
+    mode.add_argument("--history", metavar="ALIAS",
+                      help="One entity's SCD windows (alias or uid)")
+    mode.add_argument("--changes", type=int, nargs="?", const=20,
+                      metavar="N", help="Recent field-level changes"
+                      " (default 20)")
+    mode.add_argument("--verify", action="store_true",
+                      help="Hash-verify the projection against the"
+                      " re-derived estate (root-mode fleet.yaml, or the"
+                      " global --fleet <name> for an overlay)")
+    prg.set_defaults(func=cmd_plane_registry)
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
     psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])
     psp.add_argument("name", nargs="?", help="Spool file name (inspect/quarantine)")

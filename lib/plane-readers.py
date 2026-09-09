@@ -1,0 +1,1221 @@
+#!/usr/bin/env python3
+"""plane-readers.py — the plane answering the LIST readers and the RESOLVER, stdlib
+(cutover chunks 5 + 6a).
+
+The matcher (``dispatch-overdue.py``) is a stdlib script every consumer shells,
+so its plane source cannot import the package (the ``plane-lookup.py`` /
+the retired shadow check's precedent — every stdlib door imports THIS module's ``connect``
+so the read-only open, its schema probe and its transient retry live once).
+This module is the stdlib twin of the package definitions — keep them in step
+(the open SQL is pinned byte-identical):
+
+- ``open_rows``     ↔ ``claudlobby.plane.queries.OPEN_ASSIGNMENTS_AT_SQL`` +
+                      the plane's own open set (`queries.OPEN_ASSIGNMENTS_AT_SQL`)
+- ``overdue_rows``  ↔ the watchdog's overdue rules (deadline
+                      passed, the expiry cap, the bot's own ``progress`` inside
+                      the grace — the watchdog's rules, mirrored; id-less rows
+                      are KEPT, as that reader keeps them)
+- ``answering_idless`` / ``head`` ↔ ``dispatch-overdue._answering_an_idless_dispatch``
+                      + ``open_task_id`` (the resolver, chunk 6a: while the bot's
+                      NEWEST assignment is an id-less dispatch nothing has
+                      answered, resolve nothing — the next terminal report
+                      answers THAT, never the oldest id'd row, #1418). The
+                      report door closes id-less assignments on the bot's next
+                      terminal report (``plane-lookup.py --open-idless``), which
+                      is what makes the guard answerable from the plane.
+
+Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
+``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
+rollback is the flag, not a silent fallback.
+"""
+
+from __future__ import annotations
+
+import os
+import json
+import sqlite3
+import time
+from datetime import datetime, timezone
+from typing import Optional
+
+
+class PlaneUnreachable(RuntimeError):
+    pass
+
+
+def db_file(root: str) -> str:
+    return os.path.join(root, "state", "plane", "plane.db")
+
+
+OPEN_RETRY_S = 0.25
+
+
+def _open(path: str, readonly_uri: bool) -> sqlite3.Connection:
+    conn = (sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0) if readonly_uri
+            else sqlite3.connect(path, timeout=2.0))
+    conn.execute("PRAGMA query_only = 1")
+    conn.execute("SELECT 1 FROM identity_registry LIMIT 0")   # the schema is there
+    return conn
+
+
+def connect(root: str, *, retries: int = 1) -> sqlite3.Connection:
+    """A connection that only READS, whose first read has succeeded.
+
+    The `mode=ro` URI open is tried first. On a WAL database whose writer
+    has closed (no `-wal`/`-shm` beside it), the SQLite bundled with the
+    system python3 the bash doors run answers "unable to open database
+    file" for a read-only URI — it cannot create the shared-memory file
+    from a read-only handle. That was the Mini's ~20s "transient" after a
+    daemon restart, and it is deterministic under /usr/bin/python3 3.9. So
+    a CANTOPEN falls back to a normal connection held read-only by
+    `PRAGMA query_only` (SQLite may create the WAL side files; the pragma
+    refuses every write). Anything else is retried once after a short
+    pause, then raised: refuse, never answer empty."""
+    path = db_file(root)
+    if not os.path.isfile(path):
+        raise PlaneUnreachable(f"no plane db at {path}")
+    last: Optional[Exception] = None
+    for attempt in range(retries + 1):
+        try:
+            return _open(path, readonly_uri=True)
+        except sqlite3.OperationalError as exc:
+            last = exc
+            if "unable to open" in str(exc):
+                try:
+                    return _open(path, readonly_uri=False)
+                except sqlite3.Error as exc2:
+                    last = exc2
+        except sqlite3.Error as exc:
+            last = exc
+        if attempt < retries:
+            time.sleep(OPEN_RETRY_S)
+    raise PlaneUnreachable(f"plane db unreadable: {last}") from last
+
+
+# ONE list of the terminal task events, feeding every SQL below — the
+# package's TERMINAL_TASK_EVENTS pattern; OPEN_SQL assembled from it stays
+# BYTE-IDENTICAL to queries.OPEN_ASSIGNMENTS_AT_SQL (pinned by test).
+TERMINAL = ('completed', 'failed', 'cancelled', 'returned_blocked', 'superseded', 'reassigned', 'expired')
+_TERMINAL = "(" + ",".join(f"'{e}'" for e in TERMINAL) + ")"
+# Whether assignment `a` is CLOSED: a terminal task event lands on it
+# directly, or — only for an id'd dispatch-log ref — on a SIBLING assignment
+# sharing the same (assignee, source_ref) pair, the shape a re-dispatch under
+# one task id takes (one terminal report closes every row that ever carried
+# the id). Factored out (chunk M-B fold, F3) so OPEN_SQL below and
+# FLEET_OPEN_SQL further down share ONE "is this row closed" in this file,
+# rather than a second hand-typed copy that can drift: FLEET_OPEN_SQL used to
+# test only `t.assignment_id = a.assignment_id`, which left the FIRST half of
+# a re-dispatched pair open forever once the one terminal report landed on
+# the SECOND (reproduced — the re-check timer kept asking about a task every
+# reader else already called done). Byte-identical to the fragment
+# `queries.OPEN_ASSIGNMENTS_AT_SQL` inlines — OPEN_SQL's own pin against that
+# constant is what keeps this file's copy from forking. Binds (at, at, at,
+# at); None = everything landed.
+_SIBLING_CLOSURE = (
+    "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    "    AND t.event IN " + _TERMINAL +
+    " AND (? IS NULL OR t.occurred_at <= ?)"
+    "    AND (t.assignment_id = a.assignment_id"
+    "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
+    "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
+    "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
+    "              AND (? IS NULL OR s.occurred_at <= ?)))))"
+)
+OPEN_SQL = (
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a"
+    " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
+    + _SIBLING_CLOSURE +
+    " ORDER BY a.occurred_at, a.ingest_seq"
+)
+ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
+# The bot's last sign of life: a linked `progress` task event OR the
+# `report_status` marker an id-less progress report lands on the actor (the
+# legacy grace deferred on any progress report BY BOT, and a progress report
+# resolves no id — F18 R2a). Both halves span EVERY uid of the bot (`%s` =
+# the marks): a case-variant alias mints a second actor, and a grace bound to
+# the first one paged a live, reporting worker (the adversarial lens).
+# Params: (*uids, at, *uids, at).
+LAST_PROGRESS_SQL = (
+    "SELECT MAX(t) FROM ("
+    "SELECT e.occurred_at AS t FROM events e WHERE e.kind = 'task' AND e.event = 'progress'"
+    " AND e.actor_uid IN (%s) AND e.occurred_at <= ?"
+    " UNION ALL"
+    " SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = 'report_status'"
+    " AND e.subject_uid IN (%s) AND json_extract(e.detail, '$.status') = 'progress' AND e.occurred_at <= ?)"
+)
+DISPATCH = "dispatch-log:"
+IDLESS = DISPATCH + "sha:"
+# The bot's newest assignment across its uids, as of an instant (one query, the
+# same tie-break the open list uses: occurred_at, then ingest order).
+_NEWEST_SQL = (
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.work_item_id FROM assignments a"
+    " WHERE a.assignee_uid IN (%s) AND (? IS NULL OR a.occurred_at <= ?)"
+    " ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
+)
+ASSIGNMENT_TERMINAL_SQL = (
+    "SELECT 1 FROM events e WHERE e.kind = 'task' AND e.event IN " + _TERMINAL +
+    " AND e.assignment_id = ? AND (? IS NULL OR e.occurred_at <= ?) LIMIT 1"
+)
+WORK_ITEM_SQL = "SELECT work_item_id FROM assignments WHERE assignment_id = ?"
+
+
+def _epoch(iso: Optional[str]) -> Optional[int]:
+    if not iso:
+        return None
+    try:
+        return int(datetime.fromisoformat(iso).timestamp())
+    except ValueError:
+        return None
+
+
+def roster(conn: sqlite3.Connection, fleet: str) -> dict[str, dict]:
+    """bot (lower-cased key, the legacy bot key) → {"uids": [...], "actor": uid|None}
+    from ONE registry scan: every identity whose alias is ``bot:<fleet>/<name>``.
+    Empty = the plane holds no bot of this fleet at all."""
+    prefix = f"bot:{fleet}/"
+    out: dict[str, dict] = {}
+    for alias, uid, kind in conn.execute(ROSTER_SQL, (prefix + "%",)):
+        if not alias.startswith(prefix):
+            continue
+        entry = out.setdefault(alias[len(prefix):].lower(), {"uids": [], "actor": None})
+        entry["uids"].append(uid)
+        if kind == "actor" and entry["actor"] is None:
+            entry["actor"] = uid
+    return out
+
+
+def bot_entry(conn: sqlite3.Connection, fleet: str, bot: str) -> Optional[dict]:
+    """One bot's registry entry (case-insensitive alias, like the legacy bot key)."""
+    return roster(conn, fleet).get(bot.lower())
+
+
+def open_assignments(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+                     *, entry: Optional[dict] = None) -> list[tuple]:
+    """The bot's OPEN assignments as of *at* (None = everything landed), oldest
+    first: (occurred_at, source_ref, assignment_id, expected_by)."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    out: list[tuple] = []
+    for uid in (entry or {}).get("uids", []):
+        out.extend(tuple(r) for r in conn.execute(OPEN_SQL, (uid, at, at, at, at, at, at)))
+    out.sort(key=lambda r: (r[0] or ""))
+    return out
+
+
+def _task_id(source_ref: Optional[str]) -> Optional[str]:
+    if source_ref and source_ref.startswith(DISPATCH) and not source_ref.startswith(IDLESS):
+        return source_ref[len(DISPATCH):]
+    return None
+
+
+def open_rows(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+              *, entry: Optional[dict] = None, idd_only: bool = True
+              ) -> list[tuple[int, Optional[int], Optional[str]]]:
+    """The legacy ``open_dispatches`` tuple shape — (dispatched_at, expected_by,
+    task_id), oldest first — from the plane. ``idd_only`` drops rows with no
+    legacy task id (``sha:`` refs, or none): the open LIST is id'd rows only;
+    the overdue reader keeps them (task_id None → the legacy ``-``)."""
+    out: list[tuple[int, Optional[int], Optional[str]]] = []
+    for occurred_at, source_ref, _asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
+        tid = _task_id(source_ref)
+        if idd_only and tid is None:
+            continue
+        da = _epoch(occurred_at)
+        if da is None:
+            continue
+        out.append((da, _epoch(expected_by), tid))
+    return out
+
+
+def open_idless_assignments(conn: sqlite3.Connection, fleet: str, bot: str,
+                            at: Optional[str] = None, *, entry: Optional[dict] = None
+                            ) -> list[tuple[str, str]]:
+    """(work_item_id, assignment_id) for every OPEN id-less dispatch of the bot
+    (a ``sha:``-keyed assignment), oldest first — what the report door closes
+    on the bot's next terminal report, as the legacy ledger closes id-less
+    rows by any later terminal report."""
+    out: list[tuple[str, str]] = []
+    for _at, source_ref, asg, _exp in open_assignments(conn, fleet, bot, at, entry=entry):
+        if source_ref and source_ref.startswith(IDLESS):
+            wi = conn.execute(WORK_ITEM_SQL, (asg,)).fetchone()
+            out.append((wi[0] if wi else "", asg))
+    return out
+
+
+# --- the task loop's two acts, resolved by TASK ID (chunk M-A, #1481) ---------
+# `task-act.sh withdraw|escalate <task-id>` is run by a MANAGER that does not
+# know the assignee — a manager holds task ids, not the roster — so unlike
+# `--supersedes` it cannot scope the lookup by assignee. It resolves against
+# every OPEN assignment carrying the id instead and REFUSES when more than one
+# matches: a task id is unique per dispatch but NOT across bots (#526 lets two
+# fleets hold the same name, and a re-dispatch under the same id is legal), and
+# guessing which row a manager meant is how the wrong worker's task gets
+# cancelled. Open closes per ASSIGNMENT — attention and expiry's question,
+# not the list reader's per-(bot, task id) one — because an act names one row.
+#
+# The fold's F6: this question was written out three times (here, in
+# `commands/task.py`, and implicitly in both refusal ladders). It is defined
+# ONCE in `queries.OPEN_BY_TASK_REF_SQL`, of which this is the BYTE-IDENTICAL
+# stdlib twin, pinned by test the way `OPEN_SQL` is — a bash door cannot
+# import the package, and two spellings of "open" is how one door refuses an
+# id another door acts on. `--assignment` NARROWS this result in the caller
+# rather than adding a second query: a lookup by assignment alone would act
+# on a row belonging to another task while stamping the named task's
+# `source_ref` as the act's provenance.
+_NT_A = (
+    " NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    "   AND t.assignment_id = a.assignment_id AND t.event IN " + _TERMINAL + ")"
+)
+# Split into COLUMNS and FROM (chunk M-B) so the fleet-scoped read below can
+# ask for two more columns off the SAME joins rather than carrying a second
+# copy of them. The assembled `_OPEN_ROW_SELECT` is unchanged BYTE FOR BYTE —
+# `TASK_OPEN_SQL` is pinned identical to `queries.OPEN_BY_TASK_REF_SQL`, and
+# that pin is the thing keeping the acts' definition of "open under this id"
+# from forking between bash and the package.
+_OPEN_ROW_COLS_SQL = (
+    "a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.occurred_at,"
+    " w.title, i.alias AS assignee, m.alias AS assigned_by, f.alias AS fleet"
+)
+_OPEN_ROW_FROM = (
+    " FROM assignments a"
+    " LEFT JOIN work_items w ON w.work_item_id = a.work_item_id"
+    " LEFT JOIN identity_registry i ON i.uid = a.assignee_uid"
+    " LEFT JOIN identity_registry m ON m.uid = a.assigned_by_uid"
+    " LEFT JOIN identity_registry f ON f.uid = a.fleet_uid"
+)
+_OPEN_ROW_SELECT = "SELECT " + _OPEN_ROW_COLS_SQL + _OPEN_ROW_FROM
+TASK_OPEN_SQL = (
+    _OPEN_ROW_SELECT + " WHERE a.source_ref = ? AND" + _NT_A
+    + " ORDER BY a.ingest_seq DESC")
+_OPEN_ROW_COLS = ("work_item_id", "assignment_id", "dispatch_msg_id",
+                  "occurred_at", "title", "assignee", "assigned_by", "fleet")
+
+
+def open_assignments_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    """One dict per OPEN assignment stamped ``dispatch-log:<task_id>``, newest
+    first — the `_OPEN_ROW_COLS` keys. Empty = nothing open under that id
+    (which is NOT the same as no such id: a closed one answers empty too, and
+    the caller says so)."""
+    return [dict(zip(_OPEN_ROW_COLS, r))
+            for r in conn.execute(TASK_OPEN_SQL, (DISPATCH + task_id,))]
+
+
+# --- resolve ONE assignment by its id (the acts' asg-first door, #1492) -------
+# The re-check digest hands a manager `asg_` ids, and an id-less row has no task
+# id to name — its real key is the content hash in ``source_ref``. `task-act.sh`
+# takes what the sweep gives: it resolves an ``asg_`` id to the row's OWN
+# dispatch key here and acts through the by-task-id path, so the act stamps the
+# row's real ``dispatch-log:sha:<hex>`` provenance rather than a fabricated
+# ``dispatch-log:asg_...``. `open_only` uses the SAME "no terminal task event"
+# fragment the by-task-id lookup does (``_NT_A``), so a closed asg answers empty
+# exactly as a closed task id does; the ANY form is what a refusal reads to name
+# the sha key even for a row it will not act on.
+_ASG_ROW_COLS = ("work_item_id", "assignment_id", "dispatch_msg_id",
+                 "source_ref", "assignee", "fleet")
+_ASG_ROW_SELECT = (
+    "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.source_ref,"
+    " i.alias AS assignee, f.alias AS fleet FROM assignments a"
+    " LEFT JOIN identity_registry i ON i.uid = a.assignee_uid"
+    " LEFT JOIN identity_registry f ON f.uid = a.fleet_uid"
+    " WHERE a.assignment_id = ?")
+
+
+def assignment_by_id(conn: sqlite3.Connection, asg_id: str, *, open_only: bool = True
+                     ) -> Optional[dict]:
+    """The one assignment row for ``asg_id`` (#1492) — the ``_ASG_ROW_COLS``
+    keys. None when no such assignment, or (with ``open_only``) when it already
+    carries a terminal task event, the same way ``open_assignments_for_task``
+    answers empty for a closed task id."""
+    sql = _ASG_ROW_SELECT + (" AND" + _NT_A if open_only else "")
+    row = conn.execute(sql, (asg_id,)).fetchone()
+    return dict(zip(_ASG_ROW_COLS, row)) if row is not None else None
+
+
+def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, max_age: int,
+                 progress_grace: int, entry: Optional[dict] = None
+                 ) -> list[tuple[int, int, int, Optional[str]]]:
+    """The legacy ``--all`` row shape — (dispatched_at, expected_by, elapsed,
+    task_id) — from the plane, the watchdog's rules mirrored; task_id None
+    for an id-less row (the caller prints ``-``)."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    at = datetime.fromtimestamp(now, timezone.utc).isoformat()
+    rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=False)
+    last_progress = None
+    uids = (entry or {}).get("uids", [])
+    if progress_grace > 0 and uids:
+        marks = ",".join("?" * len(uids))
+        row = conn.execute(LAST_PROGRESS_SQL % (marks, marks), (*uids, at, *uids, at)).fetchone()
+        last_progress = _epoch(row[0]) if row and row[0] else None
+    out: list[tuple[int, int, int, Optional[str]]] = []
+    for da, exp, tid in rows:
+        if exp is None or now <= exp:
+            continue
+        if max_age > 0 and (now - da) > max_age:
+            continue
+        if last_progress is not None and da < last_progress <= now \
+                and (now - last_progress) <= progress_grace:
+            continue
+        out.append((da, exp, now - exp, tid))
+    return out
+
+
+def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+                     *, entry: Optional[dict] = None) -> bool:
+    """True while the bot's NEWEST assignment (as of *at*) is an id-less
+    dispatch nothing has answered: a ``sha:``-keyed assignment with no
+    terminal task event of its own. The report door lands that event on the
+    bot's next terminal report (any status the legacy ledger calls
+    terminal), so the guard releases exactly when the legacy one does."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    uids = (entry or {}).get("uids", [])
+    if not uids:
+        return False
+    row = conn.execute(_NEWEST_SQL % ",".join("?" * len(uids)), (*uids, at, at)).fetchone()
+    if row is None or not (row[1] or "").startswith(IDLESS):
+        return False
+    return conn.execute(ASSIGNMENT_TERMINAL_SQL, (row[2], at, at)).fetchone() is None
+
+
+def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+         *, entry: Optional[dict] = None) -> Optional[str]:
+    """The resolver's answer from the plane: the oldest open id'd dispatch,
+    or None — including None while an id-less dispatch is unanswered."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    if entry is None or answering_idless(conn, fleet, bot, at, entry=entry):
+        return None
+    rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=True)
+    return rows[0][2] if rows else None
+
+
+# The idle-worker check (chunk 7a, the last reader to get a plane path): per
+# bot, the NEWEST report by the bot — of ANY status, exactly as the legacy
+# rule reads the newest report row and only then asks whether it is terminal
+# (a later `progress` means the worker is busy, not idle) — against the NEWEST
+# assignment to it. Purely temporal; it never asks whether work is open. The
+# report door lands every report as a `report` communication and, when it
+# resolved an assignment, a task event; the communication is the newest-report
+# fact (a report on nothing still counts, as its ledger row does), the task
+# event beside it carries the status.
+# Every per-bot query spans ALL of the bot's uids (a case-variant alias mints a
+# second actor; the roster collapses them, so must the reads — the adversarial
+# lens found a report under the second uid vanishing from the idle check).
+_NEWEST_REPORT_SQL = (
+    "SELECT c.occurred_at, c.msg_id FROM communications c"
+    " WHERE c.message_class = 'report' AND c.sender_uid IN (%s) AND (? IS NULL OR c.occurred_at <= ?)"
+    " ORDER BY c.occurred_at DESC, c.ingest_seq DESC LIMIT 1"
+)
+_REPORT_TASK_EVENT_SQL = (
+    "SELECT e.event, a.source_ref FROM events e"
+    " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.source_ref = ? AND e.actor_uid IN (%s)"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+# a report that resolved nothing carries its status as a report_status system
+# event on the bot, under the same report-back:<msg> ref (chunk 7a)
+_REPORT_STATUS_SQL = (
+    "SELECT json_extract(e.detail, '$.status') FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'report_status' AND e.source_ref = ? AND e.subject_uid IN (%s)"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+LEGACY_TO_EVENT = {"completed": "completed", "failed": "failed", "blocked": "returned_blocked"}
+REPORT_STATUS_EVENTS = ("completed", "failed", "returned_blocked", "progress")
+NEWEST_ASSIGNMENT_SQL = (
+    "SELECT a.occurred_at FROM assignments a WHERE a.assignee_uid IN (%s)"
+    " AND (? IS NULL OR a.occurred_at <= ?) ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
+)
+# The task events that render as a legacy report STATUS. `cancelled` joined
+# them with the withdraw door (chunk M-A, #1481): it was already terminal for
+# the open set, so a withdrawn row left `--open` correctly while every status
+# render showed the raw event name — the two vocabularies said different
+# things about the same fact.
+LEGACY_STATUS = {"completed": "completed", "failed": "failed",
+                 "returned_blocked": "blocked", "cancelled": "cancelled"}
+
+
+# --- the report ledger from the plane (cutover chunk C3) -------------------------
+# A legacy report row {ts, bot, task_id, status, summary, pr_url, issues, skill,
+# progress, artifact, task_anomaly, plane_msg_id} is a `report` communication
+# (source_ref report-back:<msg>) plus the task event the door landed under the
+# same ref — status, summary, pr_url, progress; the task id off the linked
+# assignment's dispatch-log ref — else the report_status marker an id-less
+# terminal note carries, else the body's own `[BOTREPORT] bot | status |
+# summary | progress:N | pr:URL` under full capture. `ts` renders in the legacy
+# form (UTC, seconds, `Z`) so every brief cursor keeps comparing correctly.
+# THE definition of a fleet's reports — byte-identical to queries.FLEET_REPORTS_SQL
+# (pinned): the room axis, sent by the fleet or addressed to it.
+FLEET_REPORTS_SQL = (
+    "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref,"
+    " c.ingest_seq"
+    " FROM communications c"
+    " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
+    " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
+    " ORDER BY c.occurred_at, c.ingest_seq"
+)
+_REPORT_STATUS_EVENT_SQL = (
+    "SELECT e.event, e.detail, a.source_ref FROM events e"
+    " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.source_ref = ? AND e.actor_uid = ?"
+    " AND e.event IN ('completed', 'failed', 'returned_blocked', 'progress')"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+_REPORT_MARKER_SQL = (
+    "SELECT json_extract(e.detail, '$.status') FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'report_status' AND e.source_ref = ? AND e.subject_uid = ?"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+REPORT_FIELDS = ("ts", "bot", "task_id", "status", "summary", "pr_url", "issues", "skill",
+                 "progress", "artifact", "task_anomaly", "plane_msg_id")
+
+
+def legacy_ts(occurred_at: Optional[str]) -> str:
+    """The legacy ledger's instant form: UTC, whole seconds, `Z`."""
+    try:
+        dt = datetime.fromisoformat((occurred_at or "").replace("Z", "+00:00"))
+    except ValueError:
+        return occurred_at or ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_report_body(body: Optional[str]) -> dict:
+    """The fields the wire line carries: `[BOTREPORT] <bot> | <status> |
+    <summary> [| progress:N] [| pr:URL] [| artifact:URL] …` — the door's own
+    format (report-back.sh header). Empty when the capture policy stripped
+    the body."""
+    out: dict = {}
+    if not body or "|" not in body:
+        return out
+    text = body.strip()
+    if text.startswith("[BOTREPORT]"):
+        text = text[len("[BOTREPORT]"):].strip()
+    parts = [x.strip() for x in text.split(" | ")]
+    if len(parts) >= 2:
+        out["status"] = parts[1]
+    if len(parts) >= 3:
+        out["summary"] = parts[2]
+    for extra in parts[3:]:
+        key, _, val = extra.partition(":")
+        if key in ("progress", "pr", "artifact", "issues", "skill") and val:
+            out["pr_url" if key == "pr" else key] = val
+    return out
+
+
+def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = None,
+                bot: Optional[str] = None, status: Optional[str] = None,
+                since_seq: Optional[int] = None) -> list[dict]:
+    """The fleet's reports as legacy rows, oldest first. Private keys: `_source`
+    (`task_event` / `marker` / `body` — which leg named the status) and
+    `_body_stripped` (the capture policy kept no body, so a report the plane
+    holds only as a communication renders an empty summary — disclosed, never
+    invented)."""
+    uid = fleet_uid(conn, fleet)
+    since = since_form(since)
+    prefix = f"bot:{fleet}/"
+    out: list[dict] = []
+    for occurred_at, msg_id, sender_uid, sender_alias, body, ref, seq in conn.execute(
+            FLEET_REPORTS_SQL, (uid, fleet, since, since, since_seq, since_seq)):
+        alias = sender_alias or ""
+        # a sender on another fleet reads fleet/name — the fleet axis's rule
+        name = alias.removeprefix(prefix) if alias.startswith(prefix) else alias.removeprefix("bot:")
+        if bot and name.lower() != bot.lower():
+            continue
+        parsed = parse_report_body(body)
+        row = {k: "" for k in REPORT_FIELDS}
+        row.update({"ts": legacy_ts(occurred_at), "bot": name, "plane_msg_id": msg_id or "",
+                    "summary": parsed.get("summary", ""), "pr_url": parsed.get("pr_url", ""),
+                    "progress": parsed.get("progress", ""), "artifact": parsed.get("artifact", ""),
+                    "issues": parsed.get("issues", ""), "skill": parsed.get("skill", ""),
+                    "status": parsed.get("status", ""), "_source": "body" if parsed else "none",
+                    "_body_stripped": not body,
+                    # the plane's ordering authority (§4) — what an ack points at
+                    "_seq": seq})
+        ev = conn.execute(_REPORT_STATUS_EVENT_SQL, (ref, sender_uid)).fetchone()
+        if ev is not None:
+            event, detail, dispatch_ref = ev
+            row["status"] = LEGACY_STATUS.get(event, event)
+            try:
+                data = json.loads(detail) if detail else {}
+            except ValueError:
+                data = {}
+            if data.get("summary"):
+                row["summary"] = data["summary"]
+            if data.get("pr_url"):
+                row["pr_url"] = data["pr_url"]
+            if data.get("progress") is not None and data.get("progress") != "":
+                row["progress"] = str(data["progress"])
+            row["task_id"] = _task_id(dispatch_ref) or ""
+            row["_source"] = "task_event"
+        else:
+            marker = conn.execute(_REPORT_MARKER_SQL, (ref, sender_uid)).fetchone()
+            if marker and marker[0]:
+                row["status"] = marker[0]
+                row["_source"] = "marker" if not parsed else "body"
+        if status and row["status"] != status:
+            continue
+        out.append(row)
+    return out
+
+
+# The viewer's newest ack (chunk K, #1467): `brief --ack` records ONE
+# `reports_acked` system event on the viewer's own actor, its detail the
+# `ingest_seq` the ack reaches. Both anchors are matched (subject and actor),
+# spanning EVERY uid the bot's alias variants minted (the R2a rule: a
+# case-variant alias is a second actor, and an ack bound to one uid would read
+# as "never acked" from the other).
+NEWEST_ACK_SQL = (
+    "SELECT json_extract(e.detail, '$.acked_through_seq') AS seq,"
+    " json_extract(e.detail, '$.acked_through_ts') AS ts,"
+    " json_extract(e.detail, '$.count') AS count,"
+    " e.occurred_at AS acked_at, e.subject_alias AS acked_by, e.ingest_seq AS landed_seq"
+    " FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'reports_acked'"
+    " AND (e.subject_uid IN ({ph}) OR e.actor_uid IN ({ph}))"
+    " AND json_type(e.detail, '$.acked_through_seq') = 'integer'"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+
+
+def ack_from_row(row) -> Optional[dict]:
+    """A NEWEST_ACK_SQL row -> {seq, ts, count, acked_at, by, landed_seq}; the
+    SQL already skipped rows with no readable cursor, so this only unpacks."""
+    if row is None:
+        return None
+    seq, ts, count, acked_at, by, landed_seq = row
+    return {"seq": int(seq), "ts": ts or legacy_ts(acked_at), "count": count,
+            "acked_at": acked_at, "by": by, "landed_seq": landed_seq}
+
+
+def newest_ack(conn: sqlite3.Connection, uids: list) -> Optional[dict]:
+    """The newest readable ack among *uids* (a viewer's, or every actor of a
+    fleet — the card's glance), or None when none of them ever acked."""
+    if not uids:
+        return None
+    marks = ",".join("?" * len(uids))
+    return ack_from_row(conn.execute(NEWEST_ACK_SQL.format(ph=marks), (*uids, *uids)).fetchone())
+
+
+# The legacy report statuses that END a task (the matcher's `_TERMINAL` in
+# ledger terms): what an unacked list and the card count as needing a read.
+# `cancelled` rides with the withdraw door (chunk M-A, #1481) so this set and
+# `dispatch-overdue.py::_TERMINAL` keep naming the same statuses; no report
+# carries it today (the door emits the task event, not a report), which is
+# why adding it changes no live count.
+TERMINAL_STATUSES = frozenset({"completed", "failed", "blocked", "cancelled"})
+
+
+def unacked_rows(rows: list, acked_seq: Optional[int], terminal=TERMINAL_STATUSES) -> list[dict]:
+    """The reports a read position has not reached: newer than the ack by
+    `ingest_seq` (the ordering authority) and either terminal or of NO known
+    status — a report the plane holds with no task fact still needs reading
+    (fail toward showing more); a `progress` note is never unacked. THE one
+    rule brief's list and the overview card share, so what the manager sees
+    is exactly what the card counts and an ack clears both."""
+    keep = [r for r in rows
+            if (r.get("status") in terminal or not r.get("status"))
+            and (acked_seq is None or (r.get("_seq") or 0) > acked_seq)]
+    keep.sort(key=lambda r: (r.get("ts") or "", r.get("_seq") or 0))
+    return keep
+
+
+TASK_TEXTS_SQL = (
+    "SELECT a.source_ref, w.title FROM assignments a"
+    " JOIN work_items w ON w.work_item_id = a.work_item_id"
+    " WHERE a.assignee_uid IN (%s) AND a.source_ref LIKE 'dispatch-log:%%'"
+    " AND a.source_ref NOT LIKE 'dispatch-log:sha:%%'"
+)
+
+
+def task_texts(conn: sqlite3.Connection, fleet: str, bot: str) -> dict[str, str]:
+    """{task_id: the dispatch text} for one bot from the plane — the work item's
+    title IS the dispatch text (the door stores it whole). The supersede
+    hint's reference comparison once read the dispatch log's `task` field;
+    after the retirement that file is frozen."""
+    entry = roster(conn, fleet).get(bot.lower())
+    if not entry or not entry["uids"]:
+        return {}
+    marks = ",".join("?" * len(entry["uids"]))
+    return {_task_id(ref): title for ref, title in conn.execute(TASK_TEXTS_SQL % marks, tuple(entry["uids"]))
+            if _task_id(ref)}
+
+
+# --- keepalive entries (cutover B2): what `claudlobby uptime` reads ---------------
+# The keepalive.log's (instant, state) pairs from the plane: the heartbeat
+# samples the tick emits (BUSY / IDLE / UNKNOWN in the sample's value), the
+# dead-session fact (`bot.session_up` = false → DOWN, which counts as no
+# uptime like the log's gap), and the RESTART transitions the tick lands as
+# `keepalive_restart` fleet events. The alias is matched case-insensitively
+# (the tick's BOT_NAME vs the directory name uptime keys on).
+HEARTBEAT_ENTRIES_SQL = (
+    "SELECT m.occurred_at, m.metric, m.value FROM metric_samples m"
+    " JOIN identity_registry i ON i.uid = m.subject_uid"
+    " WHERE lower(i.alias) = lower(?) AND m.metric IN ('bot.heartbeat', 'bot.session_up')"
+    " AND m.occurred_at >= ? ORDER BY m.occurred_at, m.ingest_seq"
+)
+RESTART_EVENTS_SQL = (
+    "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = 'keepalive_restart'"
+    " AND e.source_ref LIKE 'fleet-events:%' AND lower(e.subject_alias) = lower(?) AND e.occurred_at >= ?"
+)
+
+
+def keepalive_entries(conn: sqlite3.Connection, fleet: str, bot: str,
+                      since: Optional[str]) -> list[tuple[str, str]]:
+    """[(occurred_at, state)] for one bot since *since*, oldest first — the
+    log's line pairs, from the plane."""
+    alias = f"bot:{fleet}/{bot}"
+    since = since_form(since) or ""
+    out: list[tuple[str, str]] = []
+    for at, metric, value in conn.execute(HEARTBEAT_ENTRIES_SQL, (alias, since)):
+        if metric == "bot.session_up":
+            state = "DOWN"
+        else:
+            try:
+                state = (json.loads(value) if value else {}).get("state") or "UNKNOWN"
+            except ValueError:
+                state = "UNKNOWN"
+        out.append((at, state))
+    for (at,) in conn.execute(RESTART_EVENTS_SQL, (alias, since)):
+        out.append((at, "RESTART"))
+    out.sort()
+    return out
+
+
+# --- the workstream registry from the plane (cutover A2) --------------------------
+# the registry the door once wrote as workstreams.json, materialized from the plane: {updated, workstreams: {id:
+# {id, fleet, title, project, status, owner_bot, next, task_ids, refs,
+# opened_ts, last_progress_ts, lease_expires_ts, renewals[, closed_ts]}}}. The
+# plane holds the construct (title, owner, project, opened instant) and the
+# verb events the same door lands (progressed.next_step, renewed.renewed_until
+# + note, blocked.note, closed.disposition, archived); an archived (pruned)
+# workstream is absent from the registry, as the prune verb drops it. The lease
+# of a never-renewed workstream is the opening instant plus the fleet's lease
+# days — the door computed it from the same knob when it opened the row.
+WS_CONSTRUCTS_SQL = (
+    "SELECT w.workstream_id, w.title, w.project_key, w.occurred_at, i.alias, w.goal FROM workstreams w"
+    " LEFT JOIN identity_registry i ON i.uid = w.owner_uid"
+    " WHERE w.fleet_uid = ? ORDER BY w.occurred_at, w.ingest_seq"
+)
+WS_EVENTS_SQL = (
+    "SELECT e.workstream_id, e.event, e.occurred_at, e.renewed_until, e.detail FROM events e"
+    " WHERE e.kind = 'workstream' AND e.fleet_uid = ? ORDER BY e.ingest_seq"
+)
+
+
+def _plus_days(iso: str, days: int) -> str:
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    from datetime import timedelta
+    return (dt + timedelta(days=days)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+EMPTY_REGISTRY = {"updated": "1970-01-01T00:00:00Z", "workstreams": {}}
+
+
+def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int = 14,
+                        or_empty: bool = False) -> dict:
+    """The registry the door would have written, from the plane. A fleet the
+    plane holds no identity for REFUSES (a wrong root is not 'nothing
+    recorded') — except for the WRITER: the first open of a fresh fleet is
+    exactly the call that must work, and the plane cannot hold the fleet's
+    identity before its first row lands, so the door asks with or_empty and
+    starts from the empty registry (F18 closure R1: there is no file to start
+    from any more)."""
+    try:
+        uid = fleet_uid(conn, fleet)
+    except PlaneUnreachable:
+        if or_empty:
+            return {**json.loads(json.dumps(EMPTY_REGISTRY)), "archived": []}
+        raise
+    prefix = f"bot:{fleet}/"
+    entries: dict = {}
+    for wid, title, project, opened, owner_alias, goal in conn.execute(WS_CONSTRUCTS_SQL, (uid,)):
+        entries[wid] = {
+            "id": wid, "fleet": fleet, "title": title or "",
+            "project": project or None, "status": "active",
+            "owner_bot": (owner_alias.removeprefix(prefix) if owner_alias and owner_alias.startswith(prefix)
+                          else (owner_alias or None)),
+            "next": goal or None, "task_ids": [], "refs": {"issues": [], "prs": []},
+            "opened_ts": legacy_ts(opened), "last_progress_ts": legacy_ts(opened),
+            "lease_expires_ts": _plus_days(opened or "", lease_days), "renewals": [],
+        }
+    newest = max((e["opened_ts"] for e in entries.values()), default="")
+    archived: set = set()
+    for wid, event, at, renewed_until, detail in conn.execute(WS_EVENTS_SQL, (uid,)):
+        e = entries.get(wid)
+        if e is None:
+            continue
+        try:
+            data = json.loads(detail) if detail else {}
+        except ValueError:
+            data = {}
+        ts = legacy_ts(at)
+        newest = max(newest, ts)
+        if event == "progressed":
+            e["last_progress_ts"] = ts
+            e["lease_expires_ts"] = _plus_days(at or "", lease_days)
+            if data.get("next_step"):
+                e["next"] = data["next_step"]
+        elif event == "renewed":
+            if renewed_until:
+                e["lease_expires_ts"] = legacy_ts(renewed_until)
+            e["renewals"].append({"ts": ts, "note": data.get("note") or ""})
+        elif event == "blocked":
+            e["status"] = "blocked"
+            if data.get("note"):
+                e["next"] = data["note"]
+        elif event == "unblocked":
+            e["status"] = "active"
+        elif event == "closed":
+            e["status"] = data.get("disposition") or "done"
+            e["closed_ts"] = ts
+        elif event == "archived":
+            archived.add(wid)
+    for wid in archived:
+        entries.pop(wid, None)
+    out = {"updated": newest, "workstreams": entries}
+    if or_empty:
+        # the WRITER's view carries the archived ids too: a construct id is
+        # unique per fleet on the plane, so the slug dedup must see what was
+        # pruned (found by the R1 gauntlet: a re-opened title re-minted the
+        # archived id and ingest refused it)
+        out["archived"] = sorted(archived)
+    return out
+
+
+def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_threshold: int = 0,
+                    at: Optional[str] = None) -> dict[str, tuple[int, int, str, str]]:
+    """The legacy ``unassigned_all`` shape — {bot: (reported_at, idle_seconds,
+    task_id, status)} — from the plane: workers whose newest report is
+    terminal and were never re-tasked afterwards (the #1024 mirror)."""
+    out: dict[str, tuple[int, int, str, str]] = {}
+    for bot, entry in roster(conn, fleet).items():
+        uids = entry["uids"]
+        if not uids:
+            continue
+        marks = ",".join("?" * len(uids))
+        rep = conn.execute(_NEWEST_REPORT_SQL % marks, (*uids, at, at)).fetchone()
+        if rep is None:
+            continue
+        rts = _epoch(rep[0])
+        if rts is None:
+            continue
+        ref = f"report-back:{rep[1]}"
+        ev = conn.execute(_REPORT_TASK_EVENT_SQL % marks, (ref, *uids)).fetchone()
+        status = ev[0] if ev else None
+        if status is None:
+            marker = conn.execute(_REPORT_STATUS_SQL % marks, (ref, *uids)).fetchone()
+            status = LEGACY_TO_EVENT.get(marker[0]) if marker and marker[0] else None
+        if status not in ("completed", "failed", "returned_blocked"):
+            continue                                   # the newest report is not terminal (progress, or a bare note)
+        asg = conn.execute(NEWEST_ASSIGNMENT_SQL % marks, (*uids, at, at)).fetchone()
+        last_d = _epoch(asg[0]) if asg and asg[0] else None
+        if last_d is not None and last_d > rts:
+            continue                                   # re-tasked after reporting: the loop is intact
+        idle = now - rts
+        if idle < 0 or idle < idle_threshold:
+            continue
+        out[bot] = (rts, idle, (_task_id(ev[1]) if ev else None) or "-", LEGACY_STATUS.get(status, status))
+    return out
+
+
+# The bot-events ledger from the plane (Phase B): every system event the
+# fleet's `emit_fleet_event` door landed — selected by PROVENANCE (the
+# source_ref prefix the door stamps, never an event-name list, so the plane's
+# own machinery and a report door's marker can never leak in) and rendered
+# back as the legacy row {ts, bot, type, source, data} so every reader keeps
+# its row contract. The door stamps occurred_at in UTC (`+00:00` once stored),
+# so `since` — normalised to that form by since_form — compares lexically on
+# the indexed column. The filters ride in the SQL: brief asks for one bot's day.
+FLEET_UID_SQL = "SELECT uid FROM identity_registry WHERE kind = 'fleet' AND alias = ? LIMIT 1"
+FLEET_EVENTS_PREFIX = "fleet-events:"
+FLEET_EVENTS_SQL = (
+    "SELECT e.occurred_at, e.event, e.severity, e.subject_kind, e.subject_alias,"
+    " e.detail, e.detail_truncated FROM events e"
+    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.source_ref LIKE ?"
+    " AND (? IS NULL OR e.occurred_at >= ?)"
+    " AND (? IS NULL OR e.event = ?)"
+    " AND (? IS NULL OR lower(e.subject_alias) = lower(?))"
+    " ORDER BY e.occurred_at, e.ingest_seq"
+)
+# fleet-pulse's escalation, answered for EVERY critical type in one read (a
+# sweep used to spawn this once per bot per type): which bots carry which
+# critical fleet event strictly after the window start — the legacy grep's
+# own compare — and when the latest landed. Critical = the severity the
+# registry stamped at ingest, one definition.
+ESCALATION_SQL = (
+    "SELECT e.subject_alias, e.event, MAX(e.occurred_at) FROM events e"
+    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.source_ref LIKE ?"
+    " AND e.severity = 'critical' AND e.subject_kind = 'actor' AND e.occurred_at > ?"
+    " AND (? IS NULL OR e.event = ?)"
+    " GROUP BY e.subject_alias, e.event"
+)
+
+
+def since_form(since: Optional[str]) -> Optional[str]:
+    """A window start in the form the door STORES occurred_at in — UTC,
+    isoformat (`Z` lands as `+00:00`) — so the lexical compare in the SQL is
+    an instant compare: an aware instant is converted, a NAIVE one is the
+    host's local clock (fleet-pulse's `date +%Y-%m-%dT%H:%M` window) and is
+    converted from it. A string that is not an instant is refused, never
+    compared as text."""
+    if not since:
+        return None
+    try:
+        dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"since must be an ISO instant, not {since!r}") from exc
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def fleet_uid(conn: sqlite3.Connection, fleet: str) -> str:
+    """The fleet's identity uid. Every fleet-scoped row minted it at its first
+    ingest, so a fleet the plane holds no identity for is a plane that never
+    saw the fleet — a wrong root, refused rather than read as 'nothing recorded'."""
+    row = conn.execute(FLEET_UID_SQL, (fleet,)).fetchone()
+    if row is None:
+        raise PlaneUnreachable(f"no identity for fleet {fleet!r} in the plane"
+                               " — a wrong root is not 'nothing recorded'")
+    return row[0]
+
+
+def legacy_event_row(occurred_at, event, severity, subject_kind, subject_alias,
+                     detail, truncated, fleet) -> dict:
+    """One plane system event as the legacy ledger row it stands for. The
+    private keys carry what the row never had: the registry-stamped severity,
+    and whether the detail was truncated (then data is {} and disclosed)."""
+    data = {}
+    if detail and not truncated:
+        try:
+            data = json.loads(detail)
+        except ValueError:
+            data = {}
+    prefix = f"bot:{fleet}/"
+    if subject_kind == "fleet":
+        bot = "fleet"
+    elif subject_kind == "host":
+        bot = "host"          # a host job's receipt (fleet "_host"): the retired file said "fleet"; the plane says host
+    else:
+        bot = (subject_alias or "?").removeprefix(prefix)
+    return {"ts": (data.get("legacy_ts") or (occurred_at or "").replace("+00:00", "Z")),
+            "bot": bot, "type": event, "source": data.get("source") or "plane",
+            "data": data.get("data") if isinstance(data.get("data"), dict) else {},
+            "_severity": severity, "_truncated": bool(truncated)}
+
+
+def public(row: dict) -> dict:
+    """The legacy row shape, private keys stripped — one definition for the
+    CLI, the package and the tests."""
+    return {k: v for k, v in row.items() if not k.startswith("_")}
+
+
+def fleet_events(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = None,
+                 bot: Optional[str] = None, event_type: Optional[str] = None) -> list[dict]:
+    """The fleet's events as legacy rows, oldest first (`--critical` and
+    `--source` are the reader's own vocabulary, filtered on the rows)."""
+    uid = fleet_uid(conn, fleet)
+    alias = f"bot:{fleet}/{bot}" if bot and bot != "fleet" else None
+    since = since_form(since)
+    rows = [legacy_event_row(*row, fleet) for row in conn.execute(
+        FLEET_EVENTS_SQL, (uid, FLEET_EVENTS_PREFIX + "%", since, since,
+                           event_type, event_type, alias, alias))]
+    if bot == "fleet":
+        rows = [r for r in rows if r["bot"] == "fleet"]
+    return rows
+
+
+def escalation(conn: sqlite3.Connection, fleet: str, window_start: Optional[str], *,
+               event_type: Optional[str] = None) -> dict[tuple[str, str], str]:
+    """{(bot, type): latest_instant} for every bot carrying a CRITICAL fleet
+    event strictly after *window_start* — fleet-pulse's escalation question,
+    every type at once (or one, with *event_type*)."""
+    uid = fleet_uid(conn, fleet)
+    prefix = f"bot:{fleet}/"
+    return {(alias.removeprefix(prefix), ev): at
+            for alias, ev, at in conn.execute(
+                ESCALATION_SQL, (uid, FLEET_EVENTS_PREFIX + "%", since_form(window_start) or "",
+                                 event_type, event_type))
+            if alias and alias.startswith(prefix)}
+
+
+# --- the OPEN escalations of a fleet (chunk M-A, #1481) -----------------------
+# `escalated` is NON-TERMINAL by ruling — the task stays open while the human
+# decides — so nothing in the open set or the status ladder distinguishes it,
+# and fleet-pulse needs its own read to page the operator. An escalation holds
+# only while it is the assignment's NEWEST task event, the same rule
+# `queries.ATTENTION_ARMS` applies: a manager who re-dispatches, withdraws or
+# whose worker reports progress has answered it, and the card and the page
+# must go quiet together rather than on two different rules.
+#
+# Scoped by the EVENT's fleet, not the assignment's assignee: the escalation is
+# the MANAGER's act, and it is that fleet's operator who owes the answer, even
+# where the work sits on another fleet's bot (44.6% of dispatch traffic is
+# cross-fleet).
+#
+# `ESCALATION_IGNORED` is the fold's F1 and the byte-identical twin of
+# `queries.ESCALATION_IGNORED` (pinned): a NUDGE is an ask, not an answer, so
+# it must not displace a raise. Left in the window, escalate → nudge deleted
+# the escalation from this read and from the card at once, permanently,
+# because nothing re-raises it.
+ESCALATION_IGNORED = ("supplied_id_not_open", "nudged")
+_ESC_SKIP = ",".join(f"'{e}'" for e in ESCALATION_IGNORED)
+ESCALATED_SQL = (
+    "SELECT e.assignment_id, a.source_ref,"
+    " json_extract(e.detail, '$.by'), e.occurred_at,"
+    " json_extract(e.detail, '$.question')"
+    " FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.event = 'escalated' AND e.fleet_uid = ?"
+    " AND e.ingest_seq = (SELECT n.ingest_seq FROM events n WHERE n.kind = 'task'"
+    "   AND n.assignment_id = e.assignment_id AND n.event NOT IN (" + _ESC_SKIP + ")"
+    "   ORDER BY n.ingest_seq DESC LIMIT 1)"
+    " AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind = 'task'"
+    "   AND t.event IN " + _TERMINAL + " AND t.assignment_id = e.assignment_id)"
+    " ORDER BY e.occurred_at, e.ingest_seq"
+)
+
+
+def escalated_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
+    """The fleet's OPEN escalations, oldest first — one dict per assignment
+    whose newest task event is `escalated`: {assignment_id, task_id, by,
+    occurred_at, question}. `task_id` is `-` for an id-less dispatch (nothing
+    to name it by), and a missing `by` / `question` renders empty rather than
+    fabricated — a capture mode may legitimately have stripped the text."""
+    uid = fleet_uid(conn, fleet)
+    out = []
+    for asg, ref, by, at, question in conn.execute(ESCALATED_SQL, (uid,)):
+        out.append({"assignment_id": asg, "task_id": _task_id(ref) or "-",
+                    "by": by or "-", "occurred_at": at or "",
+                    "question": question or ""})
+    return out
+
+
+# --- the task loop's MENU and its re-check debounce (chunk M-B, #1481) --------
+# Three questions the re-check timer and the brief's task section both ask of a
+# row, answered HERE rather than twice: what the row's own history says
+# (`menu_facts`), which rows a re-check already named (`rechecked_at`), and
+# which rows a FLEET's managers own (`fleet_open_rows`). The timer sends the
+# menu and the brief prints it, and a manager must not be offered one set of
+# facts by the door and another by the page.
+#
+# `NEWEST_TASK_IGNORED` is the package's constant (`queries.NEWEST_TASK_IGNORED`,
+# pinned equal): `supplied_id_not_open` is a JOIN anomaly, not a lifecycle
+# state, so it never counts as the row's newest word. The escalation's window
+# additionally skips `nudged` — a nudge is an ASK, not an ANSWER (the M-A fold's
+# F1), and reading the two arms through ONE window silently extinguishes an
+# escalation the moment anyone nudges the row.
+NEWEST_TASK_IGNORED = ("supplied_id_not_open",)
+ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged",)
+_ESC_SKIP = ",".join(f"'{e}'" for e in ESCALATION_IGNORED)
+
+# The ONE stamp that says a re-check NAMED a row: the `source_ref` of the
+# communication the re-check records for it. The emitter reads this constant off
+# this module rather than spelling the prefix again (`commands/task.py` holds
+# the plane session already), so the write and the read cannot drift.
+RECHECK_REF_PREFIX = "task-recheck:"
+
+
+def _newest_task_sql(ignore: tuple) -> str:
+    """The row's newest task event inside a window, for a SET of assignments —
+    the batched twin of `queries._newest_task`, whose per-row correlated form
+    is right for a query already scanning `assignments`."""
+    skip = ",".join(f"'{e}'" for e in ignore)
+    return (
+        "SELECT e.assignment_id, e.event, e.occurred_at,"
+        " json_extract(e.detail, '$.by'), json_extract(e.detail, '$.question')"
+        " FROM events e WHERE e.kind = 'task' AND e.assignment_id IN (%s)"
+        " AND e.ingest_seq = (SELECT n.ingest_seq FROM events n WHERE n.kind = 'task'"
+        "   AND n.assignment_id = e.assignment_id"
+        f"   AND n.event NOT IN ({skip})"
+        "   ORDER BY n.ingest_seq DESC LIMIT 1)"
+    )
+
+
+MENU_NEWEST_SQL = _newest_task_sql(NEWEST_TASK_IGNORED)     # the nudge's window
+MENU_ANSWER_SQL = _newest_task_sql(ESCALATION_IGNORED)      # the escalation's
+# Last progress ON THIS ROW. Deliberately not the bot's own newest progress
+# (`LAST_PROGRESS_SQL`, which the watchdog's grace uses): that one spans every
+# uid of the bot and answers "is this worker alive", and borrowing it here would
+# report movement on a row nobody has touched — the menu's whole question.
+MENU_PROGRESS_SQL = (
+    "SELECT e.assignment_id, MAX(e.occurred_at) FROM events e"
+    " WHERE e.kind = 'task' AND e.event = 'progress' AND e.assignment_id IN (%s)"
+    " GROUP BY e.assignment_id"
+)
+# A row counts as re-checked only when its ask actually LANDED (the fold's
+# F4): the communication alone used to be enough, but `cmd_task_recheck`
+# records it BEFORE the send (intent before transport), so a manager-down
+# send left the row stamped and silent for the whole repeat window while the
+# docs promised it would come back next sweep (reproduced: two managers, one
+# send failing, both rows stamped). `pane_submitted` is the one state
+# `commands.task.transmission_request` ever emits on success — this carrier
+# has no `carrier_accepted` / `recipient_acknowledged` rung, unlike Telegram's
+# — so it, not the general activation set, is the fact this join needs.
+RECHECKED_SQL = (
+    "SELECT c.source_ref, MAX(c.occurred_at) FROM communications c"
+    " WHERE c.source_ref IN (%s)"
+    " AND EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
+    "   AND x.msg_id = c.msg_id AND x.event='pane_submitted')"
+    " GROUP BY c.source_ref"
+)
+# The FLEET's open rows: scoped by the assignment's own `fleet_uid`, which is
+# the DISPATCHING fleet — the manager's, not the assignee's. That is the scope
+# `escalated_rows` already uses and for its reason: the row belongs to whoever
+# dispatched it, and 44.6% of dispatch traffic crosses fleets, so a roster walk
+# over assignees would hand a manager's stale rows to the wrong fleet's timer
+# and hide them from their own.
+#
+# Closure is `_SIBLING_CLOSURE` — OPEN_SQL's own test, shared rather than
+# copied (chunk M-B fold, F3). It used to be `_NT_A` (terminal-on-THIS-
+# assignment only), which disagreed with every other reader's definition of
+# "open" on exactly the shape a manager re-dispatching under one task id
+# produces: two assignments sharing a `dispatch-log:<id>` source_ref, one
+# terminal report landing on whichever one `plane-lookup.py` resolved as
+# newest. `OPEN_SQL`/`OPEN_ASSIGNMENTS_AT_SQL` correctly call the WHOLE task
+# closed the moment either half gets a terminal event; `_NT_A` left the OTHER
+# half open forever, so the re-check timer kept naming a task the matcher and
+# the brief already called done (reproduced). `_SIBLING_CLOSURE` needs no
+# `assignee_uid` scope of its own — the sibling subquery inside it is already
+# scoped to `a.assignee_uid`, independent of whatever scopes the OUTER query
+# (here, the fleet; in OPEN_SQL, the same assignee) — so it composes with
+# EITHER outer scope with no change of meaning.
+FLEET_OPEN_SQL = (
+    "SELECT " + _OPEN_ROW_COLS_SQL + ", a.source_ref, a.expected_by" + _OPEN_ROW_FROM
+    + " WHERE a.fleet_uid = ?"
+    + _SIBLING_CLOSURE
+    + " ORDER BY a.occurred_at, a.ingest_seq")
+FLEET_OPEN_COLS = _OPEN_ROW_COLS + ("source_ref", "expected_by")
+# SQLITE_MAX_VARIABLE_NUMBER is 999 on the stock builds the estate ships with,
+# so every IN-list read below is chunked. A fleet holding 22 open rows never
+# reaches it; a year of history does.
+_IN_CHUNK = 400
+
+
+def _chunks(items: list, size: int = _IN_CHUNK):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def _marks(n: int) -> str:
+    return ",".join("?" * n)
+
+
+def menu_facts(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, dict]:
+    """assignment_id → {"last_progress_at", "escalated", "nudged"} for the rows
+    named, and nothing for a row with no such facts.
+
+    `escalated` is {question, by, at} only while `escalated` is the row's newest
+    word inside the ESCALATION window, `nudged` is {by, at} only while `nudged`
+    is its newest inside the nudge window — the two arms of
+    `queries.ATTENTION_ARMS`, read here so the timer and the brief say what the
+    card says. A missing `by` / `question` is None rather than invented: a
+    metadata-mode capture legitimately strips authored text."""
+    out: dict[str, dict] = {}
+    ids = [a for a in assignment_ids if a]
+    if not ids:
+        return out
+    for chunk in _chunks(ids):
+        marks = _marks(len(chunk))
+        for asg, at in conn.execute(MENU_PROGRESS_SQL % marks, chunk):
+            out.setdefault(asg, {})["last_progress_at"] = at
+        for asg, event, at, by, _q in conn.execute(MENU_NEWEST_SQL % marks, chunk):
+            if event == "nudged":
+                out.setdefault(asg, {})["nudged"] = {"by": by, "at": at}
+        for asg, event, at, by, question in conn.execute(MENU_ANSWER_SQL % marks, chunk):
+            if event == "escalated":
+                out.setdefault(asg, {})["escalated"] = {
+                    "question": question, "by": by, "at": at}
+    return out
+
+
+def rechecked_at(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, str]:
+    """assignment_id → the newest instant a re-check LANDED for it: the stamp
+    the re-check writes (`RECHECK_REF_PREFIX + assignment_id` on the
+    communication it records for that row) counts only when RECHECKED_SQL's
+    join finds a `pane_submitted` transmission for that same communication
+    (the fold's F4) — a recorded ASK that never reached the manager is not a
+    re-check, or a manager-down window would go silent for the whole repeat
+    window instead of asking again next sweep. Absent = never (successfully)
+    re-checked, which is a plane read like any other — there is no timer
+    state file to lose."""
+    out: dict[str, str] = {}
+    ids = [a for a in assignment_ids if a]
+    if not ids:
+        return out
+    for chunk in _chunks(ids):
+        refs = [RECHECK_REF_PREFIX + a for a in chunk]
+        for ref, at in conn.execute(RECHECKED_SQL % _marks(len(refs)), refs):
+            if at:
+                out[ref[len(RECHECK_REF_PREFIX):]] = at
+    return out
+
+
+def fleet_open_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
+    """Every OPEN assignment the fleet's managers dispatched, oldest first —
+    the `_OPEN_ROW_COLS` keys plus `expected_by`, `task_id` and the menu facts.
+    Empty = the fleet has nothing open; a plane that cannot answer RAISES
+    (`connect`), so the caller refuses instead of reporting a quiet fleet."""
+    uid = fleet_uid(conn, fleet)
+    # uid for the scope, then the 4 `_SIBLING_CLOSURE` binds — None throughout,
+    # "everything landed": this reads the CURRENT open set, never an as-of one.
+    rows = [dict(zip(FLEET_OPEN_COLS, r))
+            for r in conn.execute(FLEET_OPEN_SQL, (uid, None, None, None, None))]
+    facts = menu_facts(conn, [r["assignment_id"] for r in rows])
+    for r in rows:
+        # None for an id-less dispatch (a `sha:` ref, or none) — the row is
+        # still the manager's to act on, and the caller names it by assignment.
+        r["task_id"] = _task_id(r["source_ref"])
+        f = facts.get(r["assignment_id"], {})
+        r["last_progress_at"] = f.get("last_progress_at")
+        r["escalated"] = f.get("escalated")
+        r["nudged"] = f.get("nudged")
+    return rows
+
+
+def open_assignment_ids(conn: sqlite3.Connection, fleet: str, bot: str,
+                        at: Optional[str] = None, *, entry: Optional[dict] = None
+                        ) -> dict:
+    """(dispatched_at epoch, task_id or None) → assignment_id for the bot's OPEN
+    rows — the key `open_rows` and `overdue_rows` return their tuples under, so
+    a caller can attach `menu_facts` to a row it already has WITHOUT a second
+    definition of open and without guessing which assignment a repeated task id
+    means (a re-dispatch under one id is legal; the pair separates them)."""
+    out: dict = {}
+    for occurred_at, source_ref, asg, _exp in open_assignments(conn, fleet, bot, at, entry=entry):
+        da = _epoch(occurred_at)
+        if da is None:
+            continue
+        out[(da, _task_id(source_ref))] = asg
+    return out
+
+
+def open_rows_indexed(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+                      *, entry: Optional[dict] = None, idd_only: bool = True
+                      ) -> tuple[list[tuple[int, Optional[int], Optional[str]]], dict]:
+    """`open_rows` and `open_assignment_ids`, from ONE `open_assignments` read
+    (chunk M-B fold, F7). `brief._dispatch_section` used to call both
+    separately for the SAME (fleet, bot) — the shared matcher door's
+    `open_dispatches` (itself `open_rows`) to get the row list, then
+    `open_assignment_ids` again to key `menu_facts` — two round trips over
+    the identical `OPEN_SQL` scan. This runs it once and derives both shapes
+    from the same rows, provably the same values `open_rows(idd_only=...)`
+    and `open_assignment_ids` would each return on their own: the index keeps
+    EVERY row (id-less included, `_task_id` may be None), matching
+    `open_assignment_ids`'s own no-filter; the row list applies `idd_only`
+    exactly where `open_rows` does. A row whose `occurred_at` does not parse
+    is dropped from both, as it already was from each alone."""
+    rows: list[tuple[int, Optional[int], Optional[str]]] = []
+    index: dict = {}
+    for occurred_at, source_ref, asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
+        da = _epoch(occurred_at)
+        if da is None:
+            continue
+        tid = _task_id(source_ref)
+        index[(da, tid)] = asg
+        if idd_only and tid is None:
+            continue
+        rows.append((da, _epoch(expected_by), tid))
+    return rows, index

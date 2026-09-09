@@ -70,7 +70,7 @@ def test_f11_anomaly_token_is_not_a_lifecycle_status(tmp_path):
                      "event": "supplied_id_not_open"}},
     ])
     conn = connect(db_path(tmp_path))
-    statuses = dict(conn.execute(TASK_STATUS_SQL).fetchall())
+    statuses = {r[0]: r[1] for r in conn.execute(TASK_STATUS_SQL)}
     conn.close()
     assert statuses[aid] == "open", (
         "the JOIN anomaly must never surface as the visible lifecycle state")

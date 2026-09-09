@@ -25,6 +25,7 @@ import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
 from . import defaults, dotenv, tool_resolve
+from . import switches as _switches
 from .config import (
     GITHUB_APP_ENV_VARS,
     BotConfig,
@@ -455,6 +456,14 @@ _TELEGRAM_HANDLE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
 # drift here would silently spawn a second server for the same socket name.
 _TMUX_TMPDIR = "/tmp"
 
+# THE composed dispatch deadline when a fleet declares none (chunk M-A, #1481;
+# ruled: 24h). SECONDS — the unit `OBSERVABILITY_DISPATCH_DEADLINE` has always
+# carried and `dispatch-task.sh` adds to `now`; 24h is 1440 MINUTES, and
+# composing that number here would make every dispatch overdue in 24 minutes.
+# A fleet's own `dispatch_deadline` overrides; `0` disables (the door mints no
+# `expected_by`, so the row is open-ended and never pages).
+DEFAULT_DISPATCH_DEADLINE_S = 86_400
+
 
 def _shq(v: object) -> str:
     """Shell-quote a value for safe embedding in sourced bash scripts.
@@ -781,8 +790,37 @@ def compose_bot_gitconfig(bot: BotConfig, paths: Paths) -> str | None:
     return out
 
 
-def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
-    """Render one bot's bot.conf (env exports sourced at startup); returns the file text."""
+def _bot_conf_cascade(paths: Paths, fleet: FleetConfig,
+                      cascade: dict | None) -> dict:
+    """The fleet's .env cascade for a bot.conf render — threaded when the
+    caller already read it, resolved here otherwise, and EMPTY (never a
+    guess) when the resolver is unreachable: an unresolvable tier stamps
+    nothing, which leaves each door at its own default rather than composing
+    a value nobody wrote."""
+    if cascade is not None:
+        return cascade
+    from . import env_tiers as _env_tiers
+
+    try:
+        return _env_tiers.cascade(
+            _env_tiers.read_tiers(paths, fleet_name=fleet.name))
+    except _env_tiers.ResolverUnavailable as exc:
+        _log.warning("bot.conf: env resolver unreachable (%s) — composing no"
+                     " switch carriers (each door keeps its own default)", exc)
+        return {}
+
+
+def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
+                     *, cascade: dict | None = None) -> str:
+    """Render one bot's bot.conf (env exports sourced at startup); returns the file text.
+
+    ``cascade`` is the fleet's resolved ``.env`` tier cascade, threaded by
+    ``compose_fleet`` so one generate reads the resolver once. A caller with
+    none (``generate --bot``, ``diff``, a test) gets it resolved here, which
+    keeps THIS function the single definition of what lands in bot.conf — a
+    diff that resolved differently from a generate would report drift that
+    does not exist.
+    """
     # Defense-in-depth: validate identifiers embedded in double-quoted lines
     # that require shell variable expansion ($HOME, $CLAUDLOBBY_ROOT).
     if not _SAFE_NAME_RE.match(bot.bot_id):
@@ -960,65 +998,60 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             if val:
                 lines.append(f"export MODEL_STRATEGY_{key.upper()}={_shq(val)}")
 
-    # Observability — pulse interval and event retention.
+    # Observability — pulse interval and the watchdog thresholds.
     # Values may be None when system defaults are disabled via system_defaults: false.
+    # The block is UNCONDITIONAL since chunk M-A (#1481): the dispatch
+    # deadline is composed for every bot, so there is no longer a shape of
+    # fleet.yaml that yields no observability section.
     obs = bot.observability
-    if any(
-        v is not None
-        for v in [
-            obs.pulse_interval,
-            obs.reap_days,
-            obs.activity_stuck_threshold,
-            obs.dispatch_deadline,
-            obs.bridge_heal,
-            obs.bridge_heal_max_attempts,
-            obs.unassigned_check,
-            obs.unassigned_threshold,
-            obs.unassigned_max_age,
-        ]
-    ):
-        lines.append("")
-        lines.append("# Observability")
-        if obs.pulse_interval is not None:
-            lines.append(
-                f"export OBSERVABILITY_PULSE_INTERVAL={_shq(obs.pulse_interval)}"
-            )
-        if obs.reap_days is not None:
-            lines.append(f"export OBSERVABILITY_REAP_DAYS={_shq(obs.reap_days)}")
-        if obs.activity_stuck_threshold is not None:
-            lines.append(
-                f"export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD={_shq(obs.activity_stuck_threshold)}"
-            )
-        if obs.dispatch_deadline is not None:
-            lines.append(
-                f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(obs.dispatch_deadline)}"
-            )
-        if obs.bridge_heal is not None:
-            # keepalive.sh gates on the string "1"; emit a shell boolean (1/0),
-            # NOT _shq(bool) which renders "True"/"False" and would leave the
-            # gate closed.
-            lines.append(
-                f"export OBSERVABILITY_BRIDGE_HEAL={'1' if obs.bridge_heal else '0'}"
-            )
-        if obs.bridge_heal_max_attempts is not None:
-            lines.append(
-                f"export BRIDGE_HEAL_MAX_ATTEMPTS={_shq(obs.bridge_heal_max_attempts)}"
-            )
-        if obs.unassigned_check is not None:
-            # Same shell-boolean rule as bridge_heal above: fleet-pulse gates on
-            # the string "1", so _shq(bool) would render "True" and leave the
-            # check silently off.
-            lines.append(
-                f"export OBSERVABILITY_UNASSIGNED_CHECK={'1' if obs.unassigned_check else '0'}"
-            )
-        if obs.unassigned_threshold is not None:
-            lines.append(
-                f"export OBSERVABILITY_UNASSIGNED_THRESHOLD={_shq(obs.unassigned_threshold)}"
-            )
-        if obs.unassigned_max_age is not None:
-            lines.append(
-                f"export OBSERVABILITY_UNASSIGNED_MAX_AGE={_shq(obs.unassigned_max_age)}"
-            )
+    lines.append("")
+    lines.append("# Observability")
+    if obs.pulse_interval is not None:
+        lines.append(
+            f"export OBSERVABILITY_PULSE_INTERVAL={_shq(obs.pulse_interval)}"
+        )
+    if obs.activity_stuck_threshold is not None:
+        lines.append(
+            f"export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD={_shq(obs.activity_stuck_threshold)}"
+        )
+    # A DEADLINE BY DEFAULT (chunk M-A, #1481). An unset value used to
+    # write no line at all, leaving the door on its own literal — so the
+    # one fact the overdue watchdog reads depended on whether the system
+    # defaults tier happened to be on. It is composed either way now:
+    # 24h, the ruled default, in the SECONDS this variable has always
+    # carried (1440 MINUTES — writing 1440 here would be 24 minutes and
+    # would page the whole fleet). A fleet's own `dispatch_deadline`
+    # still wins, and `0` composes as `0`, which the door reads as an
+    # open-ended dispatch.
+    deadline = (DEFAULT_DISPATCH_DEADLINE_S if obs.dispatch_deadline is None
+                else obs.dispatch_deadline)
+    lines.append(f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(deadline)}")
+    if obs.bridge_heal is not None:
+        # keepalive.sh gates on the string "1"; emit a shell boolean (1/0),
+        # NOT _shq(bool) which renders "True"/"False" and would leave the
+        # gate closed.
+        lines.append(
+            f"export OBSERVABILITY_BRIDGE_HEAL={'1' if obs.bridge_heal else '0'}"
+        )
+    if obs.bridge_heal_max_attempts is not None:
+        lines.append(
+            f"export BRIDGE_HEAL_MAX_ATTEMPTS={_shq(obs.bridge_heal_max_attempts)}"
+        )
+    if obs.unassigned_check is not None:
+        # Same shell-boolean rule as bridge_heal above: fleet-pulse gates on
+        # the string "1", so _shq(bool) would render "True" and leave the
+        # check silently off.
+        lines.append(
+            f"export OBSERVABILITY_UNASSIGNED_CHECK={'1' if obs.unassigned_check else '0'}"
+        )
+    if obs.unassigned_threshold is not None:
+        lines.append(
+            f"export OBSERVABILITY_UNASSIGNED_THRESHOLD={_shq(obs.unassigned_threshold)}"
+        )
+    if obs.unassigned_max_age is not None:
+        lines.append(
+            f"export OBSERVABILITY_UNASSIGNED_MAX_AGE={_shq(obs.unassigned_max_age)}"
+        )
 
     # Project validation tiers (projects.yaml) — the repo -> closure-bar map,
     # emitted into EVERY bot's conf: any sprint/runner bot must resolve a
@@ -1047,6 +1080,22 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"export PROJECT_REPOS_{project.env_slug}="
                 f"{_shq(' '.join(project.repos))}"
             )
+
+    # THE ESTATE SILENCER, carried to the session (F2). start-bot.sh sources
+    # the .env tiers BEFORE `set -a`, so a bare `PLANE_EMIT_DISABLED=1` in a
+    # tier is assigned unexported and dies with that shell — it never reaches
+    # `claude`, its hooks, or any lib/ door a bot runs itself. bot.conf IS the
+    # session carrier, so the composer bridges the tier's resolved value here.
+    # Stamped only when a tier actually says 0 or 1: an unset flag must leave
+    # the door's own default as the ONE place the answer lives (an empty
+    # assignment wins at its tier, #1213, but is neither value).
+    _silencer = _switch_env(_bot_conf_cascade(paths, fleet, cascade),
+                            ("PLANE_EMIT_DISABLED",))
+    if _silencer:
+        lines.append("")
+        lines.append("# Plane recording (the estate silencer; claudlobby doctor --switches)")
+        for _k, _v in _silencer.items():
+            lines.append(f"export {_k}={_shq(_v)}")
 
     # Workstream registry bounds (fleet.workstreams). Read from the env by the
     # single-writer helper (lib/workstream-update.sh) at open/renew time.
@@ -1685,6 +1734,39 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 # ----------------------------------------------------------------------
 
 
+def resolve_effective_protocols(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
+) -> list[str]:
+    """The protocols a bot is ACTUALLY composed with: the declared list plus
+    the system defaults that are available to this fleet (manager-role
+    defaults only for a manager), then the fleet-fit exclusions applied to
+    the FINAL list. ONE definition: the compose path and the plane's
+    registry keyframe both call this, so what the registry records is what
+    the bot runs with — a keyframe of the declared-only list read every
+    default protocol as "unused" on every overlay fleet (#1405 gauntlet).
+
+    The exclusions run OUTSIDE the defaults branch, because the hazard is
+    the DECLARED half — which the availability gate never sees. Measured
+    before that line existed: a vault-wired fleet declaring
+    `shared-documentation` composed the hand-scan form, the vault form and
+    the template's vault section — three `Shared Documentation` headings
+    with opposite instructions (#1172 in a worse form). Opting out of the
+    defaults must not re-admit a declared form that does not fit the fleet.
+    """
+    facts = defaults.Facts(
+        shared_docs=paths.shared_docs is not None,
+        vault_wired=bot_is_vault_wired(bot),
+    )
+    protocol_names = list(bot.protocols)
+    sd = fleet.system_defaults
+    if sd.enabled and sd.protocols:
+        roles = (defaults.ROLE_MANAGER,) if is_manager else ()
+        for name in defaults.resolve("protocols", roles):
+            if defaults.available(name, facts) and name not in protocol_names:
+                protocol_names.append(name)
+    return defaults.resolve_exclusions(protocol_names, facts)
+
+
 def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
     """Return the list of integration names to use for a bot.
 
@@ -1769,26 +1851,8 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # matters. `tests/test_shared_docs_default.py` pins the agreement on the
     # composed FILE rather than at the predicate, so it holds however either
     # side is spelled.
-    facts = defaults.Facts(
-        shared_docs=paths.shared_docs is not None,
-        vault_wired=bot_is_vault_wired(bot),
-    )
-    protocol_names = list(bot.protocols)
-    sd = fleet.system_defaults
-    if sd.enabled and sd.protocols:
-        roles = (defaults.ROLE_MANAGER,) if is_manager else ()
-        for name in defaults.resolve("protocols", roles):
-            if defaults.available(name, facts) and name not in protocol_names:
-                protocol_names.append(name)
-    # Applied to the FINAL list, and OUTSIDE the opt-out branch above, because
-    # the hazard is the DECLARED half — which the availability gate never sees.
-    # Measured before this line existed: a vault-wired fleet declaring
-    # `shared-documentation` composed the hand-scan form, the vault form, and
-    # the template's vault section — three `Shared Documentation` headings with
-    # opposite instructions, which is #1172 in a worse form than the original.
-    # Outside the branch because opting out of the DEFAULTS must not re-admit a
-    # declared form that does not fit the fleet.
-    protocol_names = defaults.resolve_exclusions(protocol_names, facts)
+    protocol_names = resolve_effective_protocols(
+        bot, fleet, paths, is_manager=is_manager)
 
     # Projects table composes for managers only (F6-style context budget:
     # workers resolve tiers from the bot.conf env map, not prose).
@@ -2656,6 +2720,7 @@ def compose_bot(
     log=None,
     *,
     boot_delay_s: int | None = None,
+    cascade: dict | None = None,
 ) -> Path:
     """Compose one bot's full runtime dir (CLAUDE.md, bot.conf, .mcp.json, units, skill symlinks); returns bot_dir.
 
@@ -2689,7 +2754,8 @@ def compose_bot(
     mcp = compose_mcp_json(bot, paths)
     (bot_dir / ".mcp.json").write_text(json.dumps(mcp, indent=2) + "\n")
 
-    (bot_dir / "bot.conf").write_text(compose_bot_conf(bot, fleet, paths))
+    (bot_dir / "bot.conf").write_text(
+        compose_bot_conf(bot, fleet, paths, cascade=cascade))
 
     # Per-org git credential routing. None ⇒ the bot declares no credentials, so
     # remove any file a previous compose left behind rather than stranding stale
@@ -3391,6 +3457,20 @@ def _write_service_units(
     deferred systemd-only enhancement — launchd's needs launch_activate_socket
     via ctypes, and a platform-asymmetric v1 buys complexity first).
 
+    RELAUNCH-ON-NONZERO-EXIT IS LOAD-BEARING, NOT INCIDENTAL (#1485). The
+    ingest daemon now EXITS 4 when the db is newer than its loaded code, so
+    that a pull carrying a migration is repaired by the supervisor instead of
+    by an operator noticing. Both forms below already cover it and are pinned
+    by test: systemd `Restart=always` restarts on any exit (`RestartSec=5`
+    keeps a permanent-condition loop under systemd's default start limit of
+    5 starts / 10s, so a genuinely un-updated install throttles rather than
+    latching `failed`); launchd `KeepAlive` <true/> likewise relaunches on any
+    exit, throttled to ~10s — which is strictly stronger than the
+    `SuccessfulExit false` dictionary form, and the reason we do not swap to
+    it. Anything that narrows either one re-arms the incident. A relaunch
+    LOOP also has to be readable by whoever comes looking, which is what the
+    stdio capture below is for.
+
     Emitted ONLY for armed jobs — see the compose_host_timers branch for why
     dormancy must be compose-time for services."""
     from .path_audit import SourceFinding, denied_source_paths, source_findings_error
@@ -3411,6 +3491,21 @@ def _write_service_units(
 
     script_expanded = script.replace("$CLAUDLOBBY_ROOT", str(paths.root))
     tool_path = _scheduler_tool_path(paths.root)
+
+    # #1485 fold — WHERE THE RELAUNCH LOOP IS VISIBLE. The ingest daemon's
+    # one exit line is the only record of a stale-daemon exit (a process that
+    # refuses the db cannot write to it), and launchd sends an unredirected
+    # service's stdio to /dev/null, so on macOS that line went nowhere and a
+    # loop was invisible. launchd opens both paths O_APPEND, so the file
+    # accumulates the loop rather than truncating per relaunch. ONE file for
+    # both streams on purpose: the daemon narrates on stderr only, and the
+    # exit line has to name a single path (plane.daemon.DAEMON_LOG_NAME —
+    # pinned against this one by test). systemd needs no equivalent: an
+    # unredirected unit's stderr already lands in the journal
+    # (`journalctl --user -u claudlobby-<name>`), which is why the .service
+    # below carries no StandardOutput=/StandardError= of its own.
+    log_path = paths.root / "state" / f"{name}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     service_lines = [
         "# Generated by claudlobby — do not hand-edit.",
@@ -3459,6 +3554,10 @@ def _write_service_units(
             "  </dict>",
             "  <key>WorkingDirectory</key>",
             f"  <string>{paths.root}</string>",
+            "  <key>StandardOutPath</key>",
+            f"  <string>{log_path}</string>",
+            "  <key>StandardErrorPath</key>",
+            f"  <string>{log_path}</string>",
             "  <key>RunAtLoad</key>",
             "  <true/>",
             "  <key>KeepAlive</key>",
@@ -3488,6 +3587,7 @@ def _write_timer_units(
     telegram_group_chat_id: str | None = None,
     fleet_pulse_env: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
+    abandon_children: bool = False,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -3575,6 +3675,15 @@ def _write_timer_units(
     # not a fourth hand-rolled block.
     for var, value in (extra_env or {}).items():
         service_lines.append(f"Environment={var}={value}")
+    if abandon_children:
+        # The script backgrounds work that must outlive the job (keepalive's
+        # per-bot plane emit, reaped on its own clock). With the default
+        # control-group kill, the LAST bot's emit dies at sweep exit every
+        # tick — measured live: the alphabetically-last bot landed 1
+        # heartbeat in 7 days while every sibling landed ~1300, and a manual
+        # tick outside the supervisor landed at once. Same rationale as the
+        # bot service unit's KillMode=process.
+        service_lines.append("KillMode=process")
     service_lines.append(f"ExecStart={exec_start}")
     (timers_dir / f"{service_name}.service").write_text("\n".join(service_lines) + "\n")
 
@@ -3735,6 +3844,10 @@ def _write_timer_units(
             "  </dict>",
         ]
         plist_lines.extend(cal_interval)
+    if abandon_children:
+        # launchd kills the job's process group at exit unless told to abandon
+        # it — see the KillMode=process note above (same live measurement)
+        plist_lines.extend(["  <key>AbandonProcessGroup</key>", "  <true/>"])
     plist_lines.extend(
         [
             "</dict>",
@@ -3839,6 +3952,51 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
     )
 
 
+# Jobs whose SCRIPT reads a switch flag (the closed-scheduler-env class
+# #1383): the composer resolves each through the runtime tier cascade and
+# stamps it on exactly that unit. Without the Environment= line the flag is
+# UNREACHABLE however loudly a tier sets it — measured three times now
+# (briefing, keepalive, the host sweeps).
+#
+# DERIVED from claudlobby/switches.py, never re-listed: a knob's spelling
+# living in two files is how the estate ended up with a `.env` full of flags
+# nothing read. `keepalive: PLANE_EMIT_ENABLED` used to sit here and is gone
+# without any change to composed output — the baseline stamp below already
+# puts that flag on EVERY fleet job unit, so the row was a duplicate of a
+# duplicate.
+FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = _switches.jobs_with_env(
+    _switches.FLEET_JOB)
+HOST_JOB_ARMING: dict[str, tuple[str, ...]] = _switches.jobs_with_env(
+    _switches.HOST_JOB, _switches.HOST_SERVICE)
+
+
+def _switch_env(cascade, flags) -> dict[str, str]:
+    """The Environment= values a unit must carry for *flags*.
+
+    Stamps the RESOLVED value, not a hardcoded "1" — which is the whole
+    difference an opt-OUT default makes. Under the old dormancy rule only an
+    arming "1" was worth carrying, because absence already meant off; now
+    absence means ON, so it is the OFF switch that has to reach the closed
+    scheduler env. Without this a fleet writing TASK_RECHECK_ENABLED=0 in its
+    .env would watch the timer keep firing and have no way to tell why.
+
+    Only an exact "0"/"1" is carried, and the compare is
+    ``env_tiers.resolves_to`` rather than a fourth hand-rolled ``== "0"``:
+    an empty assignment wins at its tier (#1213) but is neither value, and the
+    shell gates, the switch table and this function must agree about that or
+    the table stops describing the units.
+    """
+    from . import env_tiers as _et
+
+    out: dict[str, str] = {}
+    for flag in flags:
+        for value in ("0", "1"):
+            if _et.resolves_to(cascade, flag, value):
+                out[flag] = value
+                break
+    return out
+
+
 def compose_fleet_timers(
     fleet: FleetConfig,
     paths: Paths,
@@ -3889,6 +4047,61 @@ def compose_fleet_timers(
     timers_dir.mkdir(parents=True, exist_ok=True)
     prefix = fleet.service_prefix
 
+    # Scheduler-run scripts live in a CLOSED env — the fleet-tier .env a bot
+    # session sources never reaches them, so PLANE_EMIT_ENABLED composed
+    # nowhere and a timer-run door was UNREACHABLE in production (#1383,
+    # first found on briefing; the keepalive presence door is the second
+    # consumer — its per-minute tick runs from the keepalive job unit).
+    # Resolve the fleet arming ONCE through the runtime tier cascade and
+    # stamp it as an Environment= line on exactly the jobs whose scripts
+    # read it; a resolver failure stamps NOTHING and says so, which since
+    # the defaults flip leaves each door at its own default rather than
+    # silencing it (the old wording said UNARMED, from the era when absence
+    # meant off).
+    from . import env_tiers as _env_tiers
+
+    # Which fleet job reads which arming flag — a TABLE, so the next dormant
+    # door adds a row rather than a branch; each flag resolves through the
+    # one cascade read below.
+    job_extra_env: dict[str, dict[str, str]] = {}
+    job_baseline_env: dict[str, str] = {}
+    try:
+        _cascade = _env_tiers.cascade(
+            _env_tiers.read_tiers(paths, fleet_name=fleet.name)
+        )
+        for _job, _flags in FLEET_JOB_ARMING.items():
+            _stamp = _switch_env(_cascade, _flags)
+            if _stamp:
+                job_extra_env[_job] = _stamp
+        # EVERY fleet job unit carries the emission flag when the tier arms it:
+        # any script that sources lib-common can land a fleet event (the ERR
+        # trap alone), and a timer unit sources no .env — measured on the live
+        # estate: fleet-pulse, the fleet's main emitter, composed with the
+        # read flags but not this one, so a whole sweep's events
+        # reached only the JSONL (Phase B1's first deploy).
+        # Stays an ARMED-only stamp, deliberately, while the per-job flags
+        # above carry the resolved value: PLANE_EMIT_ENABLED is read at
+        # GENERATE time (the registry scan), by the compositor, not by any
+        # timer script. A stamp exists so a script can read its own flag, so
+        # spelling a "0" onto units that never look at it would be noise.
+        if _env_tiers.armed(_cascade, "PLANE_EMIT_ENABLED"):
+            job_baseline_env = {"PLANE_EMIT_ENABLED": "1"}
+        # THE SILENCER, on every fleet job unit — the fold's F2. The switch
+        # table told an operator to put PLANE_EMIT_DISABLED in the fleet .env,
+        # and that reached generate and nothing else: a timer sources no .env,
+        # so a fleet that silenced the plane kept its own timers recording.
+        # An off switch that reaches only some of its doors is not an off
+        # switch. Stamped as the RESOLVED value (0 or 1), like every other
+        # opt-out, and by the same one-comparison helper.
+        job_baseline_env.update(_switch_env(_cascade, ("PLANE_EMIT_DISABLED",)))
+    except _env_tiers.ResolverUnavailable as exc:
+        _log.warning(
+            "plane switch carriers unresolved (%s) — timer units carry no"
+            " Environment= line, so each door keeps its own default (since"
+            " the defaults flip that is ON, not off)",
+            exc,
+        )
+
     if emit_defaults:
         for name, cfg in timers.items():
             sched = _resolve_timer_schedule(cfg, merged_defaults)
@@ -3904,11 +4117,13 @@ def compose_fleet_timers(
                 fleet.name,
                 paths,
                 persistent=bool(cfg.get("persistent", False)),
+                abandon_children=bool(cfg.get("abandon_children", False)),
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
+                extra_env=({**job_baseline_env, **job_extra_env.get(name, {})} or None),
             )
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
@@ -3961,24 +4176,12 @@ def compose_fleet_timers(
     # the fleet's arming through the runtime's OWN tier cascade (env_tiers —
     # Paths.env_file is the write tier, and reading it as the answer was the
     # #1226 defect) and carry it as an Environment= line. Arming lands on
-    # briefing timers at the NEXT generate; a resolver failure composes
-    # UNARMED (the pre-fix state) and says so.
-    briefing_extra_env: dict[str, str] | None = None
-    if briefing_bots:
-        from . import env_tiers as _env_tiers
-
-        try:
-            _res = _env_tiers.cascade(
-                _env_tiers.read_tiers(paths, fleet_name=fleet.name)
-            ).get("PLANE_EMIT_ENABLED")
-            if _res is not None and _res.value == "1":
-                briefing_extra_env = {"PLANE_EMIT_ENABLED": "1"}
-        except _env_tiers.ResolverUnavailable as exc:
-            _log.warning(
-                "briefing plane arming unresolved (%s) — briefing timers "
-                "compose UNARMED",
-                exc,
-            )
+    # briefing timers at the NEXT generate; a resolver failure stamps nothing
+    # and says so, which leaves each door at its own default.
+    # The per-(bot, slot) briefing units are composed on their own path: they
+    # carry the same baseline (emission + retirement flags) as every other
+    # fleet job unit — briefing-trigger lands fleet events too.
+    briefing_extra_env = (dict(job_baseline_env) or None)
     composed_briefing: set[str] = set()
     for bot_id, bot in briefing_bots:
         for slot, expr in bot.briefing.slots.items():
@@ -4108,6 +4311,19 @@ def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) ->
     return target
 
 
+def _prune_host_units(timers_dir: Path, base: str) -> None:
+    """Remove every composed unit file for *base* — the armed→unarmed leg of
+    compose-time dormancy. Pruning stops future (re)enrollment; an already
+    INSTALLED unit is walked back by ``lib/setup-system`` on its next run,
+    which is the half a composer can never reach."""
+    for ext in ("timer", "service", "plist"):
+        leftover = timers_dir / f"{base}.{ext}"
+        if leftover.exists():
+            leftover.unlink()
+            _log.info("pruned dormant host unit %s (armed→unarmed)",
+                      leftover.name)
+
+
 def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path:
     """Emit host-global singleton units from system.yaml ``host.jobs``.
 
@@ -4128,7 +4344,47 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
         return timers_dir
 
     timers_dir.mkdir(parents=True, exist_ok=True)
+    _host_cascade: dict = {}      # lazily filled by the first job that asks
     for name, cfg in host_jobs.items():
+        # COMPOSE-TIME DORMANCY, now for every host job shape (F7). A host
+        # timer that is not armed composes NO unit, exactly as a service does
+        # — so there is no manifest to keep, nothing for setup-system to skip,
+        # and an armed->unarmed flip PRUNES rather than leaving files a later
+        # setup run could still enroll. The composed-but-dormant manifest this
+        # replaces was written for a world where `enroll: false` had no code
+        # effect at all (#1385); a manifest for what is not composed is a
+        # second mechanism that can only disagree with the first.
+        #
+        # It also collapses the walk-back problem: what "should not be
+        # enrolled" is now exactly "what is installed and no longer composed",
+        # which setup-system can see without reading any manifest.
+        #
+        # A door whose install EXTRA is missing is dormant on the same rung
+        # (F1): `plane-view` without fastapi/uvicorn composes a Restart=always
+        # unit whose process exits 1, i.e. a crash loop every 5s forever. Not
+        # composing it keeps the honest failure honest, and the switch table
+        # prints the pip line as its arm.
+        _extra = _switches.missing_extra(name)
+        # The two shapes default OPPOSITE ways, and the asymmetry is the
+        # safety property rather than an oversight: a TIMER with no `enroll`
+        # key is armed (that is how every shipped host job reads), while a
+        # SERVICE must say `enroll: true` in as many words — the macOS leg
+        # bootstraps every claudlobby-*.plist it finds, so a resident process
+        # must never arrive by omission.
+        if cfg.get("unit") == "service":
+            _declared = cfg.get("enroll") is True
+        else:
+            _declared = cfg.get("enroll", True) is not False
+        _armed = _declared and not _extra
+        if not _armed:
+            if _extra:
+                _log.warning(
+                    "%s: the [%s] extra does not import here — composing NO"
+                    " unit (a supervised unit that cannot start is a crash"
+                    " loop). %s", name, _extra,
+                    _switches.extra_install_line(_extra))
+            _prune_host_units(timers_dir, f"claudlobby-{name}")
+            continue
         if cfg.get("unit") == "service":
             # Resident host services (first tenant: the plane ingest daemon).
             # Dormancy is COMPOSE-time, not enroll-time, and that is a safety
@@ -4143,22 +4399,24 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             # Pruning stops future (re)enrollment only — an already-INSTALLED
             # unit keeps running until disabled; the disarm recipe is printed
             # beside the knob in system.yaml.
-            if cfg.get("enroll") is True:
-                _write_service_units(
-                    timers_dir, f"claudlobby-{name}", name,
-                    cfg.get("script", ""), paths,
-                )
-            else:
-                for ext in ("service", "plist"):
-                    leftover = timers_dir / f"claudlobby-{name}.{ext}"
-                    if leftover.exists():
-                        leftover.unlink()
-                        _log.info(
-                            "pruned dormant service unit %s (armed→unarmed)",
-                            leftover.name,
-                        )
+            _write_service_units(
+                timers_dir, f"claudlobby-{name}", name,
+                cfg.get("script", ""), paths,
+            )
             continue
         sched = _resolve_timer_schedule(cfg, {})
+        # Switch carrier for a self-gated host door (chunk 3a.1): a host timer
+        # starts with a CLOSED env, so a door that consults a flag needs it
+        # stamped as an Environment= line — the same problem the keepalive
+        # door solved for fleet timers (#1383). Which job reads which flag is
+        # DERIVED from the switch registry (HOST_JOB_ARMING), so a new
+        # self-gated door adds a row there and nothing here; plane-host-probe
+        # has no flag of its own, being read-only emission gated by the estate
+        # silencer. The cascade is read once per generate, on the first job
+        # that needs it (a resolver subprocess costs ~240ms on a Pi and every
+        # host job would otherwise pay it).
+        extra_env = _host_job_switch_env(
+            paths, HOST_JOB_ARMING.get(name, ()), _host_cascade)
         _write_timer_units(
             timers_dir,
             f"claudlobby-{name}",
@@ -4169,9 +4427,48 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             None,
             paths,
             persistent=bool(cfg.get("persistent", False)),
+            abandon_children=bool(cfg.get("abandon_children", False)),
             randomized_delay=int(cfg.get("randomized_delay") or 0),
+            extra_env=extra_env,
         )
+    # No host DORMANT manifest (F7). It existed for ONE job and for a single
+    # release, as the enforcement half of a flag that until then had no code
+    # effect (#1385) — but a manifest describes units that were COMPOSED, and
+    # an unarmed host job now composes none. A leftover from an older generate
+    # is removed so nothing reads a list of units that are not there.
+    stale_manifest = timers_dir / "DORMANT"
+    if stale_manifest.exists():
+        stale_manifest.unlink()
     return timers_dir
+
+
+def _host_job_switch_env(paths: Paths, flags, cache: dict) -> dict[str, str] | None:
+    """Resolve a self-gated host door's flags from the HOST tier cascade
+    (no fleet name → host + root tiers) for its Environment= lines.
+
+    None = stamp nothing, which since the defaults flip means "the door's own
+    default applies" rather than "unarmed". A resolver failure therefore no
+    longer silences a door — it leaves it at the shipped default and says so.
+    That reversal is the point of the ruling: the old direction failed toward
+    a host where retention and expiry silently never ran.
+
+    *cache* is the caller's per-generate dict: the cascade is read once and
+    reused, since the resolver is a subprocess and nothing about it changes
+    between two jobs of the same run."""
+    if not flags:
+        return None
+    if "cascade" not in cache:
+        from . import env_tiers as _env_tiers
+        try:
+            cache["cascade"] = _env_tiers.cascade(_env_tiers.read_tiers(paths))
+        except _env_tiers.ResolverUnavailable as exc:
+            _log.warning("host-job switch env unresolved (%s) — composing"
+                         " with the shipped defaults", exc)
+            cache["cascade"] = None
+    cascade = cache["cascade"]
+    if cascade is None:
+        return None
+    return _switch_env(cascade, flags) or None
 
 
 def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
@@ -4189,6 +4486,12 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
         ]:
             (paths.shared_docs / subdir).mkdir(parents=True, exist_ok=True)
 
+    # ONE resolver read per generate, threaded into every bot.conf: the switch
+    # carriers the composer bridges (today the estate silencer) come from the
+    # runtime's own tier cascade, and reading it per bot would pay a subprocess
+    # 21 times on a Pi for an answer that cannot change mid-run.
+    _fleet_cascade = _bot_conf_cascade(paths, fleet, None)
+
     out: dict[str, Path] = {}
     # Collect every bot's compose failure rather than aborting on the first (G1):
     # one generate should surface all offenders, so an operator fixes the fleet in
@@ -4205,7 +4508,8 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
             # The sibling-manifest walk behind that derivation is cached for the
             # process (see _host_boot_rung_bases), so the re-derivation costs one
             # walk per fleet rather than one per bot.
-            out[bot_name] = compose_bot(bot, fleet, paths, log=log)
+            out[bot_name] = compose_bot(bot, fleet, paths, log=log,
+                                        cascade=_fleet_cascade)
         except ValueError as e:
             failures.append((bot_name, str(e)))
     if failures:

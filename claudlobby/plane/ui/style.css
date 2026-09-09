@@ -60,6 +60,16 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .actor .dot.live { background: var(--ok); }
 .actor small { color: var(--dim); margin-left: auto; font-size: 11px; }
 .actor .prov-badge { color: var(--warn); font-size: 11px; }
+/* item 6 (#1479): under `all` the roster groups by fleet — a small header
+   per group instead of every fleet interleaved by last-seen. Sticky so the
+   fleet a row belongs to is still readable once the rail is scrolled. */
+.rail-head { display: flex; align-items: baseline; gap: 8px;
+             position: sticky; top: 0; z-index: 1; background: var(--bg);
+             padding: 8px 8px 3px; margin-top: 4px;
+             border-bottom: 1px solid var(--edge); }
+.rail-head b { font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+               color: var(--dim); }
+.rail-head small { color: var(--dim); font-size: 11px; margin-left: auto; }
 
 /* channel — threads */
 .thread {
@@ -142,6 +152,33 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
   body { overflow: auto; height: auto; }
 }
 
+/* cross-fleet mark (U2): a thread whose two fleets differ says so, and
+   its names render fleet-qualified in every room */
+.tag.xfleet { color: var(--purple); border: 1px solid var(--purple);
+              background: none; font-weight: 600; }
+.t-head .tag.xfleet { margin-left: 4px; }
+
+/* the overview strip (U3): one card per fleet + the host, above the panels */
+.overview { display: flex; gap: 8px; padding: 6px 10px 8px; flex-wrap: wrap;
+            border-bottom: 1px solid var(--edge); flex: none; }
+.overview:empty { display: none; }
+.overview .panel-state { padding: 6px 10px; flex: 1; text-align: left; }
+.ov-card { background: var(--panel); border: 1px solid var(--edge);
+           border-radius: 8px; padding: 6px 10px; font-size: 12px;
+           color: var(--dim); min-width: 200px; flex: 1 1 200px; }
+.ov-card.pick { cursor: pointer; }
+.ov-card.pick:hover { border-color: var(--accent); }
+.ov-card.on { border-color: var(--accent); }
+.ov-card .ov-head { display: flex; gap: 8px; align-items: baseline; }
+.ov-card .ov-head b { color: var(--ink); font-size: 13px; }
+.ov-card .ov-head small { margin-left: auto; }
+.ov-card .ov-line { margin-top: 2px; display: flex; gap: 6px; flex-wrap: wrap;
+                    align-items: baseline; }
+.ov-card .ov-bad { color: var(--bad); font-weight: 600; }
+.ov-card .ov-warn { color: var(--warn); }
+.ov-card .ov-ok { color: var(--ok); }
+.ov-card.ov-host { border-style: dashed; flex: 0 1 220px; }
+
 /* view nav + fleet tabs */
 #view-nav { display: flex; gap: 6px; }
 #view-nav .on { color: var(--accent); border-color: var(--accent); }
@@ -158,6 +195,20 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
                      padding: 6px 10px; border-bottom: 1px solid var(--edge);
                      font-size: 12.5px; }
 .pane-card .p-head small { color: var(--dim); margin-left: auto; }
+
+/* presence verdict badge (the derived working/idle/down word, #1361) */
+.pres { font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  font-weight: 600; letter-spacing: .02em; }
+.pres-working { background: color-mix(in srgb, var(--ok) 22%, transparent);
+  color: var(--ok); }
+.pres-idle { background: color-mix(in srgb, var(--dim) 20%, transparent);
+  color: var(--dim); }
+.pres-down { background: color-mix(in srgb, var(--bad) 22%, transparent);
+  color: var(--bad); }
+.pres-stale, .pres-unknown { background: color-mix(in srgb, var(--warn) 20%,
+  transparent); color: var(--warn); }
+.pres-sampling { color: var(--dim); }
+.presence-strip .pres { margin-left: 4px; }
 .pane-card pre, #focus-pane {
   margin: 0; padding: 8px 10px; font: 10.5px/1.35 ui-monospace, SFMono-Regular,
   Menlo, monospace; color: var(--ink); overflow: hidden; white-space: pre-wrap;
@@ -188,3 +239,114 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .a-34{color:#58a6ff}.a-35{color:#bc8cff}.a-36{color:#39c5cf}.a-37{color:#b1bac4}
 .a-90{color:#6e7681}.a-91{color:#ffa198}.a-92{color:#56d364}.a-93{color:#e3b341}
 .a-94{color:#79c0ff}.a-95{color:#d2a8ff}.a-96{color:#56d4dd}.a-97{color:#f0f6fc}
+
+/* search */
+#search { margin-left: auto; background: var(--panel); color: var(--ink);
+          border: 1px solid var(--edge); border-radius: 6px;
+          padding: 4px 10px; font-size: 12.5px; width: 240px; }
+#search:focus { outline: 1px solid var(--accent); }
+/* scoped: a GLOBAL h2 flex rule collapsed the whitespace in
+   every other header ("event stream(raw ledger)") — gauntlet */
+#rail-channel h2 { display: flex; align-items: center; }
+.hit { padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+.hit .snip { font-size: 13px; margin-top: 2px; }
+.hit mark { background: transparent; color: var(--accent); font-weight: 600; }
+.hit small { color: var(--dim); }
+
+/* trust panel */
+.trust-block { padding: 10px 14px; border-bottom: 1px solid var(--edge); }
+.trust-block h3 { font-size: 11px; letter-spacing: .09em;
+                  text-transform: uppercase; color: var(--dim);
+                  margin-bottom: 8px; }
+.trust-row { display: flex; gap: 10px; align-items: baseline;
+             padding: 3px 0; font-size: 13px; }
+.trust-row b { min-width: 180px; font-weight: 500; }
+.trust-row small { color: var(--dim); }
+.trust-num { font-size: 20px; font-weight: 600; margin-right: 6px; }
+.trust-ok { color: var(--ok); } .trust-warn { color: var(--warn); }
+.trust-bad { color: var(--bad); }
+.reason { font: 11.5px ui-monospace, Menlo, monospace; color: var(--dim);
+          padding: 2px 0 2px 12px; word-break: break-all; }
+
+
+/* fleet inventory + equipment (#1405) */
+.inv-head { color: var(--dim); font-size: 12px; margin: 6px 0 10px; }
+.bot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px; margin-bottom: 14px; }
+.bot-card { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  cursor: pointer; background: var(--panel); }
+.bot-card:hover, .bot-card:focus { border-color: var(--ok); outline: none; }
+.bot-card .bc-head { display: flex; justify-content: space-between; gap: 6px; }
+.bot-card .bc-head small, .bot-card .bc-org { color: var(--dim); font-size: 11px; }
+.bot-card .bc-counts { font-size: 12px; margin: 4px 0; }
+.proj-row { display: flex; justify-content: space-between; padding: 3px 0;
+  border-bottom: 1px solid var(--line); }
+.proj-row small, .lib-row small, .lib-group summary small { color: var(--dim); }
+.lib-group { margin: 4px 0; }
+.lib-group summary { cursor: pointer; padding: 3px 0; }
+.lib-row { display: flex; justify-content: space-between; padding: 2px 0 2px 14px;
+  font-size: 12px; }
+.lib-row.unused { color: var(--dim); }
+#equip-detail { border: 1px solid var(--ok); border-radius: 6px; padding: 10px 12px;
+  margin-bottom: 12px; background: var(--panel); }
+.ed-head { display: flex; align-items: center; gap: 8px; }
+.ed-head small { color: var(--dim); }
+.ed-head .ed-close { margin-left: auto; }
+.ed-mission { color: var(--dim); font-size: 12px; margin: 4px 0 8px; }
+.ed-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.ed-cols h4 { margin: 8px 0 4px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--dim); }
+.eq-row { margin: 3px 0; display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
+.eq-row b { min-width: 90px; font-size: 12px; }
+.chip { font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  background: color-mix(in srgb, var(--dim) 18%, transparent); }
+.chg-row { font-size: 12px; padding: 2px 0; }
+.chg-row small { color: var(--dim); margin-right: 6px; }
+.hash-row { display: flex; justify-content: space-between; font-size: 11px; }
+.dim { color: var(--dim); font-size: 12px; }
+@media (max-width: 800px) { .ed-cols { grid-template-columns: 1fr; } }
+
+/* org chart + utilization (Phase 6) */
+.org { margin: 4px 0 10px; }
+.org summary { cursor: pointer; }
+.org-tree, .org-tree ul { list-style: none; padding-left: 16px; margin: 2px 0; }
+.org-tree li { position: relative; padding: 1px 0; font-size: 12px; }
+.org-tree li::before { content: "└ "; color: var(--dim); }
+.org-tree li.cycle { color: var(--warn); }
+.bot-card .bc-util { font-size: 11px; color: var(--dim); }
+
+/* chunk L (#1479): long bodies clamp with a toggle; the card says why it needs you;
+   the header's totals warn.
+   The clamp height is DERIVED from app.js's CLAMP_LINES, which sets
+   --clamp-lines on the root: the number that decides a body is long and the
+   height it is cut to must be one constant, or a body clamps at a height
+   that shows more (or less) than the lines it was judged on. */
+.msg .body.clamp { max-height: calc(var(--clamp-lines) * 1.44em);
+  overflow: hidden; position: relative; }
+.msg .body.clamp::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0;
+  height: 2.5em; background: linear-gradient(to bottom, transparent, var(--panel)); }
+.msg .body.clamp.open { max-height: none; }
+.msg .body.clamp.open::after { display: none; }
+.msg button.more { font-size: 11px; color: var(--accent); background: none; border: 0;
+  padding: 2px 0; cursor: pointer; }
+/* item 6 (#1479), seen live: the remedy was cut at the rail's right edge on
+   a narrow window ("— re-s" then the rest on the next line). The whole line
+   must read, so it wraps and clips nothing of its own — and `--supersedes`,
+   the longest token the rail carries, may break inside itself rather than
+   run past the edge. What clips it there is `body { overflow: hidden }` (the
+   app fills the viewport), NOT the `.scroll` container: `overflow-y: auto`
+   makes the OTHER axis `auto` too, which scrolls rather than clips (fold
+   F8 — the earlier comment named the wrong mechanism). */
+.card .why { color: var(--bad); font-size: 11.5px; margin-top: 3px;
+             white-space: normal; overflow-wrap: anywhere; clear: right; }
+.card .why small { color: var(--dim); }
+/* An outstanding nudge INSIDE its grace (#1481 fold F11): information, not an
+   alarm — same geometry as `.why`, the dim voice rather than the bad one, so
+   the card does not read as a second warning. */
+.card .note { color: var(--dim); font-size: 11.5px; margin-top: 3px;
+              white-space: normal; overflow-wrap: anywhere; clear: right; }
+#fleet-totals b.warn { color: var(--bad); }
+#fleet-totals small { color: var(--dim); }
+#fleet-totals small.warn { color: var(--warn); }
+#fleet-totals .dim { font-size: inherit; }
+.host-facts { color: var(--dim); font-size: 11px; padding: 4px 8px; }

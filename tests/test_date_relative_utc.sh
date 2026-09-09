@@ -66,23 +66,8 @@ got=$(TZ=America/New_York date_relative "-7 days" "%Z")
 want=$(TZ=America/New_York date -d "-7 days" +%Z)
 assert_eq "%Z stays the local zone name" "$want" "$got"
 
-echo "=== rotate_jsonl_by_ts retention is zone-invariant ==="
-# The consumer that carried the defect into production.
-#
-# THE AGE IS CHOSEN TO REACH THE DEFECT, and a comfortable one does not. A
-# six-day-old row survives a seven-day window even with twelve hours of skew,
-# so that assertion passes against the BUG and guards nothing -- measured, not
-# assumed. At 6d18h the margin is six hours, narrower than the largest real UTC
-# offset, so the skew decides the outcome: kept when the cutoff is honest,
-# reaped east of UTC when it is not.
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
-near_boundary=$(date -u -d "-6 days -18 hours" +%Y-%m-%dT%H:%M:%SZ)
-for z in $ZONES; do
-    printf '{"ts":"%s","task_id":"t-1-keepme"}\n' "$near_boundary" > "$TMPD/l.jsonl"
-    TZ="$z" rotate_jsonl_by_ts "$TMPD/l.jsonl"
-    assert_eq "TZ=$z keeps a 6d18h row under a 7-day window" "1" "$(wc -l < "$TMPD/l.jsonl" | tr -d ' ')"
-done
+# (rotate_jsonl_by_ts — the consumer that carried the defect into production —
+# went with the ledgers in the F18 closure; date_relative itself is pinned above.)
 
 echo
 echo "=== $PASS passed, $FAIL failed, $TOTAL total ==="

@@ -335,12 +335,26 @@ reconcile() {
     "$LIB_DIR/reconcile-fleet.sh" "$FLEET" || FAILURES=$((FAILURES + 1))
 }
 
+# --- 5. switches (the no-silent-switches surface) ------------------------------
+# Every knob the system ships, its state on THIS fleet, and the one line that
+# flips it -- the three opt-ins first. Printed at the end of a setup run
+# because that is where an operator is already looking, and because the whole
+# reason the defaults flipped is that a door nobody can see is a door nobody
+# has. ONE renderer (claudlobby/switches.py) serves this, setup-system and
+# `claudlobby doctor`, so the three cannot disagree. Non-fatal by design: an
+# older install without the flag prints nothing and setup still succeeds.
+print_switches() {
+    # shellcheck disable=SC2086
+    claudlobby_cli ${FLEET:+--fleet "$FLEET"} doctor --switches 2>/dev/null || true
+}
+
 reconcile_briefing_timers
 enroll_jobs
 migrate_legacy_keepalive
 warm_npx_cache
 spin_up_bots
 reconcile
+print_switches
 
 if [ "$FAILURES" -gt 0 ]; then
     log "done with $FAILURES failure(s) — fix + re-run (idempotent)"

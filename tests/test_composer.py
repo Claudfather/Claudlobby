@@ -2941,13 +2941,12 @@ class TestComposeBotConfObservability:
 
         obs = ObservabilityConfig(
             pulse_interval=300,
-            reap_days=7,
             activity_stuck_threshold=1800,
             dispatch_deadline=1800,
         )
         conf = self._compose(tmp_path, observability=obs)
         assert "export OBSERVABILITY_PULSE_INTERVAL=300" in conf
-        assert "export OBSERVABILITY_REAP_DAYS=7" in conf
+        assert "OBSERVABILITY_REAP_DAYS" not in conf          # the knob is retired (F18 closure): never composed
         assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1800" in conf
         assert "export OBSERVABILITY_DISPATCH_DEADLINE=1800" in conf
 
@@ -2956,13 +2955,11 @@ class TestComposeBotConfObservability:
 
         obs = ObservabilityConfig(
             pulse_interval=60,
-            reap_days=14,
             activity_stuck_threshold=600,
             dispatch_deadline=900,
         )
         conf = self._compose(tmp_path, observability=obs)
         assert "export OBSERVABILITY_PULSE_INTERVAL=60" in conf
-        assert "export OBSERVABILITY_REAP_DAYS=14" in conf
         assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=600" in conf
         assert "export OBSERVABILITY_DISPATCH_DEADLINE=900" in conf
 
@@ -2973,9 +2970,83 @@ class TestComposeBotConfObservability:
         conf = self._compose(tmp_path, observability=obs)
         assert "# Observability" in conf
 
-    def test_observability_section_skipped_when_all_none(self, tmp_path):
-        conf = self._compose(tmp_path)
-        assert "# Observability" not in conf
+    def test_a_deadline_is_composed_even_when_the_fleet_declares_none(self, tmp_path):
+        """M1 (#1481): an unset `dispatch_deadline` used to compose NOTHING —
+        with the system-defaults tier off, the one fact the overdue watchdog
+        reads depended on a bash literal nobody could see from fleet.yaml. The
+        ruled default is 24h, and it is composed in SECONDS: 1440 is 24h in
+        MINUTES, and composing that number would make every dispatch overdue
+        in 24 minutes fleet-wide."""
+        from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S
+
+        conf = self._compose(tmp_path)                 # no observability at all
+        assert DEFAULT_DISPATCH_DEADLINE_S == 86_400   # 24h, the ruling, in seconds
+        assert "# Observability" in conf
+        assert "export OBSERVABILITY_DISPATCH_DEADLINE=86400" in conf
+        # ...and nothing else is invented for a fleet that declared nothing
+        assert "OBSERVABILITY_PULSE_INTERVAL" not in conf
+        assert "OBSERVABILITY_BRIDGE_HEAL" not in conf
+
+    def test_a_bare_fleet_yaml_composes_the_ruled_default(self, tmp_path):
+        """FOLD F2, and the case the M-A pin missed: it covered the fleet with
+        the system-defaults tier OFF, which is the RARE shape. A normal
+        fleet.yaml takes `claudlobby/system.yaml`'s `observability` tier, and
+        that tier still said 1800 — so the ruled 24h reached nobody, measured
+        on exactly this shape. The tier is the value the estate actually
+        composes; the composer constant is only the fallback beneath it."""
+        from textwrap import dedent as _dedent
+
+        from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S, compose_bot_conf
+        from claudlobby.config import load_fleet
+        from claudlobby.paths import Paths
+
+        root = tmp_path / "claudlobby"
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+        (root / "fleet.yaml").write_text(_dedent("""\
+            fleet:
+              name: test-fleet
+              service_prefix: com.test
+              bots:
+                worker:
+                  expertise: [eng]
+        """))
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        conf = compose_bot_conf(fleet.bots["worker"], fleet,
+                                Paths(root=root, fleet_dir=root))
+        assert "export OBSERVABILITY_DISPATCH_DEADLINE=86400" in conf
+        assert fleet.bots["worker"].observability.dispatch_deadline == \
+            DEFAULT_DISPATCH_DEADLINE_S
+
+    def test_one_number_three_places_and_they_are_pinned_together(self):
+        """FOLD F2. The default deadline is spelled in THREE files — the
+        system-defaults tier, the composer's constant, and `dispatch-task.sh`'s
+        own literal for a bot.conf composed before M-A. Two of them moved to
+        86400 and the third did not, which is how the ruling shipped and
+        changed nothing. Pinned together so the next move has to visit all
+        three."""
+        import re
+        from pathlib import Path as _P
+
+        from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S
+
+        repo = _P(__file__).resolve().parent.parent
+        tier = re.search(r"^    dispatch_deadline: (\d+)$",
+                         (repo / "claudlobby" / "system.yaml").read_text(), re.M)
+        door = re.search(r'DEADLINE_S="\$\{OBSERVABILITY_DISPATCH_DEADLINE:-(\d+)\}"',
+                         (repo / "lib" / "dispatch-task.sh").read_text())
+        assert tier and door
+        assert int(tier.group(1)) == int(door.group(1)) == DEFAULT_DISPATCH_DEADLINE_S
+        assert DEFAULT_DISPATCH_DEADLINE_S == 86_400      # 24h in SECONDS, the ruling
+
+    def test_a_zero_deadline_composes_as_zero_and_disables_the_clock(self, tmp_path):
+        """`0` is the open-ended dispatch, not "now": it must reach bot.conf
+        as 0 so the door withholds `expected_by` entirely."""
+        from claudlobby.config import ObservabilityConfig
+
+        conf = self._compose(tmp_path, observability=ObservabilityConfig(dispatch_deadline=0))
+        assert "export OBSERVABILITY_DISPATCH_DEADLINE=0" in conf
 
     def test_bridge_heal_emits_shell_1_not_python_true(self, tmp_path):
         """keepalive.sh:130 gates on the string '1'; a bool True rendered via the
@@ -4916,3 +4987,140 @@ class TestComposeBotConfTelegramStateDirExported:
             if ln.strip().startswith("TELEGRAM_STATE_DIR=")
         ]
         assert not bare, f"unexported TELEGRAM_STATE_DIR line(s) present: {bare}"
+
+
+class TestTaskRecheckTimer:
+    """The task loop's re-check job composes ENROLLED (chunk N) and carries
+    whatever its tier says about TASK_RECHECK_ENABLED.
+
+    It shipped dormant behind two gates in chunk M-B; the defaults flip turns
+    both around. What it sends is a message to the fleet's OWN manager about
+    the fleet's OWN stale rows — none of the four categories the rule reserves
+    for opt-in — and it is the reaction the whole target workflow exists to
+    produce, so shipping it off meant shipping a loop that ran nowhere.
+
+    The GATE SHAPE is deliberately kept, inverted: a fleet writes
+    TASK_RECHECK_ENABLED=0 and the launcher no-ops loudly. Which makes the
+    stamp below load-bearing in the opposite direction from #1383 — a timer
+    unit sources no .env, so if the composer only ever carried a "1" then the
+    off switch would be unreachable and the job would keep firing with nothing
+    to explain why.
+    """
+
+    _FLEET = """\
+        fleet:
+          name: rc-fleet
+          service_prefix: com.test
+          bots:
+            kev:
+              expertise: [eng]
+    """
+
+    def _compose(self, tmp_path, monkeypatch, *, armed="0", enroll=None):
+        from textwrap import dedent
+
+        from claudlobby.composer import compose_fleet_timers
+        from claudlobby.config import load_fleet
+        from claudlobby.env_tiers import Resolution
+        from claudlobby.paths import Paths
+
+        root = tmp_path / "f"
+        root.mkdir(parents=True, exist_ok=True)
+        manifest = dedent(self._FLEET)
+        if enroll is not None:
+            # `fleet.defaults.jobs.<name>.enroll` — under `fleet:`, which is
+            # where load_fleet reads a fleet's own defaults from; a top-level
+            # `defaults:` is silently nobody's.
+            manifest += (
+                "  defaults:\n    jobs:\n      task-recheck:\n"
+                f"        enroll: {str(bool(enroll)).lower()}\n"
+            )
+        (root / "fleet.yaml").write_text(manifest)
+        fleet, md = load_fleet(root / "fleet.yaml")
+        paths = Paths(root=root, fleet_dir=root)
+
+        import claudlobby.env_tiers as env_tiers_mod
+
+        # armed=None models a tier that assigns the key NOWHERE — distinct
+        # from one that assigns "0", and the distinction is the point: silence
+        # leaves the launcher's own default in charge.
+        cas: dict = {}
+        if armed is not None:
+            cas["TASK_RECHECK_ENABLED"] = Resolution(
+                name="TASK_RECHECK_ENABLED", value=armed, tier="fleet",
+                path=None)
+        monkeypatch.setattr(env_tiers_mod, "read_tiers",
+                            lambda paths, fleet_name=None, bot_name=None: [])
+        monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: cas)
+        return compose_fleet_timers(fleet, paths, md)
+
+    def test_the_unit_composes_and_runs_the_launcher_with_the_fleet(
+        self, tmp_path, monkeypatch
+    ):
+        timers = self._compose(tmp_path, monkeypatch)
+        service = (timers / "com.test.task-recheck.service").read_text()
+        assert (timers / "com.test.task-recheck.timer").is_file()
+        assert "lib/task-recheck.sh rc-fleet" in service
+
+    def test_it_is_ENROLLED_by_default(self, tmp_path, monkeypatch):
+        """The flip: a fresh fleet that declares nothing gets the re-check."""
+        timers = self._compose(tmp_path, monkeypatch)
+        dormant = [
+            ln for ln in (timers / "DORMANT").read_text().splitlines()
+            if ln and not ln.startswith("#")
+        ]
+        assert "com.test.task-recheck" not in dormant
+        assert (timers / "com.test.task-recheck.timer").is_file()
+
+    def test_a_fleet_that_parks_it_lands_on_the_dormant_list(
+        self, tmp_path, monkeypatch
+    ):
+        """The manifest gate still WORKS, it just is not the default any more:
+        a fleet that says enroll: false still stops the backbone enrolling."""
+        timers = self._compose(tmp_path, monkeypatch, enroll=False)
+        dormant = (timers / "DORMANT").read_text()
+        assert "com.test.task-recheck" in dormant
+        assert (timers / "com.test.task-recheck.timer").is_file()
+
+    def test_the_tiers_value_lands_on_the_unit_BOTH_ways(
+        self, tmp_path, monkeypatch
+    ):
+        """#1383's class, and its inverse. A timer unit sources no .env, so
+        whatever the tier decided has to be stamped or it never reaches the
+        door. Under the old dormant default only a "1" was worth carrying;
+        under an on-by-default rule the "0" is the one that matters, because
+        an off switch nobody can reach is an off switch that does not exist.
+        """
+        armed = self._compose(tmp_path, monkeypatch, armed="1")
+        service = (armed / "com.test.task-recheck.service").read_text()
+        plist = (armed / "com.test.task-recheck.plist").read_text()
+        assert "Environment=TASK_RECHECK_ENABLED=1" in service
+        assert "<key>TASK_RECHECK_ENABLED</key>" in plist
+
+        off = self._compose(tmp_path, monkeypatch, armed="0")
+        assert "Environment=TASK_RECHECK_ENABLED=0" in (
+            off / "com.test.task-recheck.service").read_text()
+        off_plist = (off / "com.test.task-recheck.plist").read_text()
+        assert "<key>TASK_RECHECK_ENABLED</key>" in off_plist
+        assert "<string>0</string>" in off_plist
+
+    def test_a_tier_that_says_nothing_stamps_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """Silence is not a value. With no tier assigning the flag the unit
+        carries no line at all and the launcher's own default (ON) applies —
+        one place decides, not two."""
+        timers = self._compose(tmp_path, monkeypatch, armed=None)
+        assert "TASK_RECHECK_ENABLED" not in (
+            timers / "com.test.task-recheck.service").read_text()
+
+    def test_the_flag_is_scoped_to_this_job(self, tmp_path, monkeypatch):
+        """A door's arming is stamped on the unit whose script reads it, and
+        nowhere else — a wider grant would arm a sibling job's env with a flag
+        it has no business seeing."""
+        timers = self._compose(tmp_path, monkeypatch, armed="1")
+        others = [p for p in timers.glob("com.test.*.service")
+                  if p.name != "com.test.task-recheck.service"]
+        assert others
+        for unit in others:
+            assert "TASK_RECHECK_ENABLED" not in unit.read_text(), unit.name

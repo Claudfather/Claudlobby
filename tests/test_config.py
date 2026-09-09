@@ -661,7 +661,6 @@ class TestObservabilityConfig:
     _SYSTEM_OBS = {
         "observability": {
             "pulse_interval": 300,
-            "reap_days": 7,
             "activity_stuck_threshold": 1800,
             "dispatch_deadline": 1800,
         }
@@ -671,42 +670,56 @@ class TestObservabilityConfig:
         """With system defaults merged into defaults, bot gets the values."""
         bot = _coerce_bot("test", {"expertise": ["eng"]}, self._SYSTEM_OBS)
         assert bot.observability.pulse_interval == 300
-        assert bot.observability.reap_days == 7
+        assert bot.observability.activity_stuck_threshold == 1800
 
     def test_none_when_no_system_defaults(self):
         """Without system defaults, observability fields are None."""
         bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
         assert bot.observability.pulse_interval is None
-        assert bot.observability.reap_days is None
+        assert bot.observability.activity_stuck_threshold is None
 
     def test_from_bot(self):
         raw = {
             "expertise": ["eng"],
-            "observability": {"pulse_interval": 60, "reap_days": 14},
+            "observability": {"pulse_interval": 60, "activity_stuck_threshold": 900},
         }
         bot = _coerce_bot("test", raw, {})
         assert bot.observability.pulse_interval == 60
-        assert bot.observability.reap_days == 14
+        assert bot.observability.activity_stuck_threshold == 900
 
     def test_from_defaults(self):
-        defaults = {"observability": {"pulse_interval": 120, "reap_days": 30}}
+        defaults = {"observability": {"pulse_interval": 120, "activity_stuck_threshold": 30}}
         bot = _coerce_bot("test", {"expertise": ["eng"]}, defaults)
         assert bot.observability.pulse_interval == 120
-        assert bot.observability.reap_days == 30
+        assert bot.observability.activity_stuck_threshold == 30
 
     def test_bot_overrides_defaults(self):
-        defaults = {"observability": {"pulse_interval": 120, "reap_days": 30}}
+        defaults = {"observability": {"pulse_interval": 120, "activity_stuck_threshold": 30}}
         raw = {"expertise": ["eng"], "observability": {"pulse_interval": 60}}
         bot = _coerce_bot("test", raw, defaults)
         assert bot.observability.pulse_interval == 60
-        assert bot.observability.reap_days == 30  # inherited from defaults
+        assert bot.observability.activity_stuck_threshold == 30  # inherited from defaults
 
     def test_partial_bot_inherits_defaults(self):
-        defaults = {"observability": {"pulse_interval": 120, "reap_days": 30}}
-        raw = {"expertise": ["eng"], "observability": {"reap_days": 3}}
+        defaults = {"observability": {"pulse_interval": 120, "activity_stuck_threshold": 30}}
+        raw = {"expertise": ["eng"], "observability": {"activity_stuck_threshold": 3}}
         bot = _coerce_bot("test", raw, defaults)
         assert bot.observability.pulse_interval == 120  # inherited from defaults
-        assert bot.observability.reap_days == 3
+        assert bot.observability.activity_stuck_threshold == 3
+
+    def test_a_retired_key_loads_and_is_recorded_not_read(self):
+        """`observability.reap_days` has no reader since the F18 closure (#1467).
+        A manifest that still sets it must load (never a crash on an old
+        fleet.yaml), the key is RECORDED on the config so `validate` can say
+        so, and the merge carries the record from either side."""
+        bot = _coerce_bot("test", {"expertise": ["eng"], "observability": {"reap_days": 3, "pulse_interval": 60}}, {})
+        assert bot.observability.pulse_interval == 60
+        assert bot.observability.retired == ("reap_days",)
+        assert not hasattr(bot.observability, "reap_days")
+        inherited = _coerce_bot("test", {"expertise": ["eng"]}, {"observability": {"reap_days": 7}})
+        assert inherited.observability.retired == ("reap_days",)
+        clean = _coerce_bot("test", {"expertise": ["eng"]}, {"observability": {"pulse_interval": 60}})
+        assert clean.observability.retired == ()
 
     def test_bot_explicit_default_value_not_dropped(self):
         """Bot explicitly sets pulse_interval to 300 (the system default) —
@@ -758,11 +771,11 @@ class TestObservabilityConfig:
         the shape that would surface "the deployed bot.conf lacks the flag" if the
         bug were in the merge/thread path (rather than, as #591's was, operational).
 
-        The package system.yaml supplies observability.reap_days but NOT
-        bridge_heal, so the two assertions pin both halves of the wiring the
-        isolated test missed: bridge_heal reaches the bot ONLY via the fleet-
-        defaults side of the merge, and reap_days reaches it ONLY by threading the
-        system tier through merged_defaults into _coerce_bot.
+        The package system.yaml supplies observability.activity_stuck_threshold
+        but NOT bridge_heal, so the two assertions pin both halves of the wiring
+        the isolated test missed: bridge_heal reaches the bot ONLY via the fleet-
+        defaults side of the merge, and activity_stuck_threshold reaches it ONLY
+        by threading the system tier through merged_defaults into _coerce_bot.
         """
         root = tmp_path / "claudlobby"
         (root / "library" / "expertise").mkdir(parents=True)
@@ -786,7 +799,7 @@ class TestObservabilityConfig:
         # Fleet-only key survives the merge and reaches the per-bot config.
         assert obs.bridge_heal is True
         # System-only key threads through merged_defaults into _coerce_bot.
-        assert obs.reap_days == 7
+        assert obs.activity_stuck_threshold == 1800
 
 
 class TestGitCredentialsParsing:

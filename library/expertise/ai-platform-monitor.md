@@ -20,7 +20,7 @@ Pre-aggregated evidence, and nothing else:
 | Source | What it gives you |
 |---|---|
 | The transcript-digest log | One row per finished session — what worked, what failed, what the operator would change |
-| `data/events/*.jsonl` per bot | The `fleet-observability` event stream |
+| `claudlobby events --bot <bot>` (the plane) | The `fleet-observability` event stream |
 | vitals · utilization · report-back rollups | Fleet-level aggregates |
 
 **You never read raw transcripts.** They are large, they are full of secrets, and

@@ -31,6 +31,8 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install_error_trap ""
 
 FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
+# the doors this script runs anchor their fleet events on it (F18 R1)
+[ -z "$FLEET" ] || export CLAUDLOBBY_FLEET="${CLAUDLOBBY_FLEET:-$FLEET}"
 LOG_DIR="${CLAUDLOBBY_ROOT}/state"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/weekly-worker-restart.log"

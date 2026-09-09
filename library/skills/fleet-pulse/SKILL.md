@@ -10,7 +10,7 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 
 ## How it works
 
-`fleet-pulse.sh` runs outside the LLM — it checks tmux sessions, systemd services, pane freshness, and git WIP for every bot in the fleet. Results are written as JSONL events to each bot's `data/events/fleet-YYYY-MM-DD.jsonl`. This skill reads those events, presents a summary, and acts on them.
+`fleet-pulse.sh` runs outside the LLM — it checks tmux sessions, systemd services, pane freshness, and git WIP for every bot in the fleet. Results are recorded on the plane as fleet events (nothing lives in a file any more). This skill reads them through `claudlobby events`, presents a summary, and acts on them.
 
 ## Steps
 
@@ -22,10 +22,9 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 
 2. **Read today's events**
 
-   For each bot directory in `$CLAUDLOBBY_ROOT/local/$FLEET_NAME/runtime/bots/<bot>/`:
-   - Read `data/events/fleet-YYYY-MM-DD.jsonl` (today's date)
-   - Parse each line as JSON: `{"ts": "...", "bot": "...", "type": "...", "source": "pulse", "data": {...}}`
-   - If a `<bot-name>` argument was given, filter to only that bot's events
+   The events live on the plane, not in a file (F18 closure). Read them through the CLI:
+   - `claudlobby --fleet $FLEET_NAME events --since 24h --json` (add `--bot <bot-name>` when an argument was given)
+   - Parse each line as JSON: `{"ts": "...", "bot": "...", "type": "...", "source": "pulse", "data": {...}}` — the same row shape the ledgers had
 
 3. **Summarize findings**
 

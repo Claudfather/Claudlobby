@@ -24,12 +24,12 @@
 #
 # A refused start INVALIDATES any previous identity (the stale file is
 # removed) — retaining it attributed the new session's work to the old one.
-# DORMANT unless the fleet armed PLANE_EMIT_ENABLED=1; every path exits 0 —
+# SILENT only under PLANE_EMIT_DISABLED=1 (the harness exemption); every path exits 0 —
 # a hook must never break a boot.
 
 set -u
 
-[ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || exit 0
+[ "${PLANE_EMIT_DISABLED:-0}" != "1" ] || exit 0
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
 
 bot_dir="${BOT_DIR:-}"

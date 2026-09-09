@@ -253,19 +253,20 @@ class TestSocketWrappers:
     def test_bot_tmux_send_logs_send_miss_on_empty_socket(self, tmp_path):
         """A cross-socket send with no resolvable socket must emit a send_miss
         event (observable) and return non-zero — never a silent drop."""
+        from tests.conftest import plane_emit_env, read_fleet_events
         d = _write_bot_conf(tmp_path / "alpha")
         out, err, rc = _run_bash(
             _src('bot_tmux_send "" lead "hello there"'),
-            env={"BOT_DIR": str(d), "BOT_ID": "alpha"},
+            env={"BOT_DIR": str(d), "BOT_ID": "alpha", "FLEET_NAME": "fleet-a",
+                 "CLAUDLOBBY_ROOT": str(tmp_path), **plane_emit_env()},
         )
         assert rc != 0
         assert "dropped" in err.lower()
-        # The send_miss event landed in the sending bot's ledger, attributed to
-        # it via the event's top-level "bot" field.
-        events = list((d / "data" / "events").glob("fleet-*.jsonl"))
-        assert events, "expected a fleet-*.jsonl event file"
-        body = events[0].read_text()
-        assert '"type":"send_miss"' in body
+        # The send_miss event landed on the plane (F18 R1: no ledger file),
+        # attributed to the sending bot via the row's top-level "bot" field.
+        assert not list((d / "data" / "events").glob("fleet-*.jsonl"))
+        body = read_fleet_events(tmp_path)
+        assert '"type":"send_miss"' in body, (body, err)
         assert '"bot":"alpha"' in body
 
 

@@ -103,7 +103,6 @@ fleet:
     #     - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
     # observability:                               # uncomment to override system default values
     #   pulse_interval: 300
-    #   reap_days: 7
     #   # Mirror watchdog (#1024): flag a worker that reported and was then
     #   # never re-dispatched. OFF by default — it reports that the ASSIGNMENT
     #   # loop stalled, so arm it only where someone acts on that.

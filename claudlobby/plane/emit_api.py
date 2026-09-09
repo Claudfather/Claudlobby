@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +35,7 @@ from .db import connect, db_path
 from .ids import ensure_host_uid, mint_event_id
 from .ingest import ingest_many
 from .migrations import DowngradeError, migrate
-from .spool import SpoolWriteError, is_retryable, spool_write
+from .spool import SpoolWriteError, is_retryable, is_transient_lock, spool_write
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,14 @@ def _capture_mode(modes: dict, fleet: str | None) -> str:
     """Fleet-keyed capture mode from the loaded plane config; default
     'metadata' (F7/F23). The caller's request never decides this."""
     return modes.get(fleet or "", modes.get("*", "metadata"))
+
+
+# Public aliases: the trust surface (view.py) is a second consumer of the
+# capture policy — reader and mode-resolution rule alike must have ONE
+# definition, or the panel silently disagrees with the recorder about what
+# policy is in force (the words-vs-metadata knob, where disagreement bites).
+load_capture_config = _load_capture_config
+capture_mode = _capture_mode
 
 
 def _apply_capture(raw: dict, modes: dict) -> dict:
@@ -138,6 +147,33 @@ def _finalize(raw: dict) -> dict:
     return out
 
 
+def validate_item(finalized: dict, modes: dict):
+    """ONE item's validation, exactly as the batch door does it — RAW first,
+    then the capture-transformed form when capture changed it. Returns
+    ``(validated, captured)``; ``captured`` is what ingest and the spool
+    receive. RAW validation runs FIRST for EVERY family (#1372 review F1):
+    the T8 skip for communications let capture LAUNDER invalid wire (a
+    list-of-pairs payload, privacy="bogus") into a committed row, and an
+    over-cap authored field with REJECT semantics (task summary, work_item
+    body) is STRIPPED by metadata mode, so validating only the captured
+    form would accept it. The second pass is paid only when capture actually
+    changed the request (``_apply_capture``'s identity contract). Public so
+    a batch PRODUCER (the legacy importer) can refuse one unit instead of
+    discovering the refusal when the whole batch aborts here."""
+    first = validate_request(finalized)
+    if CONTENT_FIELDS.get(finalized.get("event_type")):
+        c = _apply_capture(finalized, modes)
+    else:
+        c = finalized
+    return (first if c is finalized else validate_request(c)), c
+
+
+# A retryable lock is retried this many times, with a growing pause, before a
+# batch is spooled (fresh-plane first-writer races; see emit_batch).
+LOCK_RETRY_ATTEMPTS = 6
+LOCK_RETRY_BACKOFF_S = 0.15
+
+
 def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
@@ -154,8 +190,6 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     shape. The second (transformed-form) pass runs only when capture actually
     changed the request (_apply_capture's identity contract); communications
     always change under capture, so they pay both passes."""
-    finalized = [_finalize(dict(r)) if isinstance(r, dict) else r
-                 for r in raw_requests]
     captured: list = []
     items = []
     # Capture config loads AT MOST ONCE per batch (gauntlet round): a report
@@ -163,53 +197,60 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     # event. Lazy, not eager, so a content-free batch (pure transmissions)
     # keeps succeeding under a broken capture.json exactly as before.
     modes: dict | None = None
-    for r in finalized:
-        # RAW validation runs FIRST for EVERY family — #1372 review F1: the
-        # T8 skip for communications let capture LAUNDER invalid wire (a
-        # list-of-pairs payload, privacy="bogus") into a committed row,
-        # because dict(payload) reshapes pairs and the privacy stamp
-        # overwrites the invalid token. The T8 win survives where it was
-        # measured (identity-return skips the second pass); communications
-        # pay the double pass as the price of the capture rewrite.
-        first = validate_request(r)                    # ContractViolation propagates
-        if CONTENT_FIELDS.get(r.get("event_type")):
-            if modes is None:
-                modes = _load_capture_config(root)     # CaptureConfigError propagates
-            c = _apply_capture(r, modes)
-        else:
-            c = r
+    for raw in raw_requests:
+        r = _finalize(dict(raw)) if isinstance(raw, dict) else raw
+        if modes is None and CONTENT_FIELDS.get(r.get("event_type")):
+            modes = _load_capture_config(root)         # CaptureConfigError propagates
+        item, c = validate_item(r, modes or {})        # ContractViolation propagates
         captured.append(c)
-        items.append(first if c is r else validate_request(c))
-    try:
-        conn = connect(db_path(root))
+        items.append(item)
+    attempt = 0
+    while True:
         try:
-            migrate(conn)                               # DowngradeError propagates
-            host = ensure_host_uid(Path(root) / "state")
-            results = ingest_many(conn, items, host_uid=host)
-        finally:
+            conn = connect(db_path(root))
             try:
-                conn.close()
-            except sqlite3.Error:
-                # Post-review fix: a WAL-flush failure on close, AFTER a
-                # successful commit, must not fall into the spool path —
-                # that reported committed events as "spooled" and queued a
-                # redundant replay. A close failure after a FAILED ingest
-                # changes nothing (that exception already routed).
-                pass
-    except (DowngradeError, ContractViolation):
-        raise
-    except sqlite3.OperationalError as exc:
-        # Spool ONLY whitelisted-retryable codes (round-4 F6): IntegrityError
-        # never lands here (a bug, propagates), and a missing table / SQL typo
-        # — OperationalError but equally bugs — propagate loudly too.
-        if not is_retryable(exc):
+                migrate(conn)                               # DowngradeError propagates
+                host = ensure_host_uid(Path(root) / "state")
+                results = ingest_many(conn, items, host_uid=host)
+            finally:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    # Post-review fix: a WAL-flush failure on close, AFTER a
+                    # successful commit, must not fall into the spool path —
+                    # that reported committed events as "spooled" and queued a
+                    # redundant replay. A close failure after a FAILED ingest
+                    # changes nothing (that exception already routed).
+                    pass
+            break
+        except (DowngradeError, ContractViolation):
             raise
-        # The spool stores the policy-applied envelope, never a fuller body (§11).
-        path = spool_write(root, captured, str(exc))    # raises SpoolWriteError
-        return [
-            EmitOutcome(r["event_id"], "spooled", detail=str(path))
-            for r in captured
-        ]
+        except sqlite3.OperationalError as exc:
+            # Spool ONLY whitelisted-retryable codes (round-4 F6): IntegrityError
+            # never lands here (a bug, propagates), and a missing table / SQL typo
+            # — OperationalError but equally bugs — propagate loudly too.
+            if not is_retryable(exc):
+                raise
+            # A transient LOCK is RETRIED in-process before it is spooled: two
+            # first emitters on a brand-new plane race the WAL switch and the
+            # first migration, a case SQLite refuses to wait on (a would-be
+            # deadlock returns BUSY at once, busy_timeout or not), and the
+            # loser's whole batch went to the spool — measured 3 of 10 pairs
+            # (Phase B: a door's detached fleet event beside its own emission
+            # is exactly that pair). The transaction rolled back, so a retry
+            # re-ingests nothing twice. Only contention is retried: a readonly
+            # / I/O / full / cannot-open fault spools at once, as before — the
+            # spool is the record for those, and a pause would only delay it.
+            attempt += 1
+            if is_transient_lock(exc) and attempt < LOCK_RETRY_ATTEMPTS:
+                time.sleep(LOCK_RETRY_BACKOFF_S * attempt)
+                continue
+            # The spool stores the policy-applied envelope, never a fuller body (§11).
+            path = spool_write(root, captured, str(exc))    # raises SpoolWriteError
+            return [
+                EmitOutcome(r["event_id"], "spooled", detail=str(path))
+                for r in captured
+            ]
     return [
         EmitOutcome(res.event_id, "duplicate" if res.duplicate else "committed")
         for res in results

@@ -12,12 +12,12 @@
 #   --lines N         Lines per log file (default: 20)
 #   --grep PATTERN    Filter output lines matching this pattern
 #   --bot BOT         Show logs for a single bot only
-#   --events          Include data/events/*.jsonl (off by default — can be noisy)
+#   (events are not files: `claudlobby events --bot <bot> --tail N` reads them from the plane)
 #
 # Examples:
 #   tail-fleet.sh --fleet my-fleet
 #   tail-fleet.sh --fleet my-fleet --grep ERROR
-#   tail-fleet.sh --bot astrid --lines 50 --events
+#   tail-fleet.sh --bot astrid --lines 50
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +29,6 @@ FLEET=""
 LINES=20
 GREP_PATTERN=""
 BOT_FILTER=""
-INCLUDE_EVENTS=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,7 +36,7 @@ while [ $# -gt 0 ]; do
         --lines)  LINES="$2"; shift 2 ;;
         --grep)   GREP_PATTERN="$2"; shift 2 ;;
         --bot)    BOT_FILTER="$2"; shift 2 ;;
-        --events) INCLUDE_EVENTS=1; shift ;;
+        --events) echo "tail-fleet: --events is gone -- the fleet's events are on the plane: claudlobby events --bot <bot> --tail N" >&2; exit 2 ;;
         -h|--help) show_help; exit 0 ;;
         *) echo "tail-fleet: unknown option '$1'" >&2; exit 2 ;;
     esac
@@ -74,12 +73,6 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
         for f in "$bot_dir"logs/*.log "$bot_dir"logs/*.jsonl; do
             [ -f "$f" ] && _logs+=("$f")
         done
-        # Optionally include event JSONL files
-        if [ "$INCLUDE_EVENTS" -eq 1 ] && [ -d "${bot_dir}data/events" ]; then
-            for f in "$bot_dir"data/events/*.jsonl; do
-                [ -f "$f" ] && _logs+=("$f")
-            done
-        fi
 
         [ "${#_logs[@]}" -eq 0 ] && continue
 

@@ -87,7 +87,7 @@ precedent). ``--payload-json`` is the offline seam that keeps every rule here a
 pure function, unit-testable with no network.
 
   pr-review-state.py <owner/repo> [--pr N] [--limit N] [--json]
-                     [--payload-json FILE] [--attribute] [--ledger-root DIR]
+                     [--payload-json FILE] [--attribute] [--plane-root DIR]
 """
 
 from __future__ import annotations
@@ -482,11 +482,15 @@ def fetch_open_numbers(repo: str, limit: int) -> list[int]:
     return [r["number"] for r in rows]
 
 
-def ledger_identity_for(repo: str, number: int, ledger_root: str) -> dict:
-    """Observed reviewer names keyed by review timestamp, via ``lib/who-reviewed.py``.
+def ledger_identity_for(repo: str, number: int, plane_root: str, *, module=None) -> dict:
+    """Observed reviewer names keyed by review timestamp, via ``lib/who-reviewed.py``
+    — the PLANE's report rows under *plane_root* (F18 closure R2b-1: the ledgers
+    are gone, and the first plane-only who-reviewed left this caller reaching for
+    its deleted loaders, so attribution failed soft on every PR — the spec lens).
 
-    Lazily imported and OPT-IN (``--attribute``): it needs a ledger root, and a
+    Lazily imported and OPT-IN (``--attribute``): it needs a plane root, and a
     module that reached for one unbidden could not be unit-tested without a fleet.
+    *module* is the seam the test drives (a preloaded who-reviewed stand-in).
 
     Returns ``(mapping, error)``. It fails SOFT but never SILENT, and that shape is
     scar tissue from writing it the other way first: the original swallowed every
@@ -498,17 +502,17 @@ def ledger_identity_for(repo: str, number: int, ledger_root: str) -> dict:
     first version of this function broke it inside the module written to enforce it.
     """
     try:
-        import importlib.util
+        if module is None:
+            import importlib.util
 
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "who-reviewed.py")
-        spec = importlib.util.spec_from_file_location("who_reviewed", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        rows: list[dict] = []
-        # (fleet, path) — that order is who-reviewed's, verified by reading it.
-        for fleet, ledger_path in module.discover_ledgers(ledger_root):
-            loaded, _ = module.load_ledger(ledger_path, fleet)
-            rows.extend(loaded)
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "who-reviewed.py")
+            spec = importlib.util.spec_from_file_location("who_reviewed", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        # (rows, why) — an unreachable plane is a reason, never an empty answer
+        rows, why = module.load_plane_rows(plane_root)
+        if why is not None:
+            return {}, f"the plane is unreachable: {why}"
         events = module.fetch_events(repo, number)
         # "bot" is present only on the MATCH path; UNKNOWN and AMBIGUOUS omit it,
         # and neither may be turned into a name here — who-reviewed refuses a
@@ -621,13 +625,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--canonical", action="store_true",
                         help="flag verdicts landing on .comments[]")
     parser.add_argument("--attribute", action="store_true",
-                        help="cross-check header identity against the report-back ledger")
-    parser.add_argument("--ledger-root", default=os.environ.get("CLAUDLOBBY_ROOT", ""))
+                        help="cross-check header identity against the plane's report rows")
+    parser.add_argument("--plane-root", default=os.environ.get("CLAUDLOBBY_ROOT", ""),
+                        help="the CLAUDLOBBY_ROOT whose state/plane/plane.db holds the reports")
     args = parser.parse_args(argv)
     selftest()
 
-    if args.attribute and not args.ledger_root:
-        print("--attribute needs --ledger-root (or CLAUDLOBBY_ROOT)", file=sys.stderr)
+    if args.attribute and not args.plane_root:
+        print("--attribute needs --plane-root (or CLAUDLOBBY_ROOT)", file=sys.stderr)
         return RC_USAGE
 
     try:
@@ -662,11 +667,11 @@ def main(argv: list[str] | None = None) -> int:
         identity = {}
         if args.attribute and payload.get("number"):
             identity, attr_error = ledger_identity_for(
-                args.repo, payload["number"], args.ledger_root
+                args.repo, payload["number"], args.plane_root
             )
             if attr_error:
                 print(
-                    f"warning: --attribute could not read the ledger for "
+                    f"warning: --attribute could not read the plane for "
                     f"#{payload['number']} ({attr_error}); identity falls back to "
                     "UNKNOWN, which is NOT the same as 'nobody was attributable'",
                     file=sys.stderr,

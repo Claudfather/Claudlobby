@@ -30,12 +30,18 @@ git clone https://github.com/Claudfather/Claudlobby.git
 cd Claudlobby
 python3 -m venv .venv               # required — see note below
 source .venv/bin/activate
-python3 -m pip install -e .
+python3 -m pip install -e '.[plane-ui]'
 claude                              # opens Claude Code in the repo
 ```
 
 Then type `/setup` — it checks your host, collects credentials, and spins up claudfather (the built-in setup assistant) on Telegram. Continue setup from your phone.
 
+> **Why `[plane-ui]`.** The operator plane (`claudlobby plane view`) is enrolled by default
+> and needs FastAPI + uvicorn — two pure-Python wheels. Install without the extra and the
+> compositor deliberately composes no unit for it, so nothing crash-loops; `claudlobby doctor
+> --switches` then shows `plane-view` off with this pip line as its arm. Everything else works
+> either way.
+>
 > **Why the venv is not optional.** Homebrew python (macOS) and Debian/Raspberry Pi system
 > python are both marked externally-managed under [PEP 668](https://peps.python.org/pep-0668/),
 > so a bare `pip install -e .` is *refused* on the two hosts this project targets first. Note
@@ -52,7 +58,7 @@ Then type `/setup` — it checks your host, collects credentials, and spins up c
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git
 cd Claudlobby
-python3 -m venv .venv && source .venv/bin/activate && python3 -m pip install -e .
+python3 -m venv .venv && source .venv/bin/activate && python3 -m pip install -e '.[plane-ui]'
 
 cp fleet.yaml.seed fleet.yaml       # one bot (claudfather) — the blessed first run
 cp .env.seed.example .env           # fill in your Telegram token + GitHub PAT
@@ -122,9 +128,9 @@ claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
 claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
 claudlobby status [--bot <name>] # fleet health dashboard
 claudlobby doctor                # pre-flight fleet health diagnostic
-claudlobby report-back           # query bot work event ledger (--since, --bot)
+claudlobby report-back           # worker reports from the plane (--since, --bot)
 claudlobby uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
-claudlobby events                # tail/filter JSONL events across all bots
+claudlobby events                # fleet events from the plane (--bot, --type, --critical)
 claudlobby new-bot               # interactive bot scaffolding
 claudlobby new-skill             # scaffold a new skill directory
 claudlobby new-guardrail         # scaffold a new guardrail file
@@ -137,7 +143,7 @@ claudlobby warm-cache            # pre-download npx packages for MCP servers
 **Gives you:**
 
 - `library/` — 19 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 53 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 17 MCP fragments (github, github-app, gws, google-analytics, google-search-console, meta-ads, meta-business, posthog, notion, linear, slack, shopify, printify, homeassistant, docker, spotify, granola), 24 guardrails, 39 protocols
-- `lib/` — 79 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
+- `lib/` — 90 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
 - `bin/claudlobby` — the Python compositor
 - `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
 

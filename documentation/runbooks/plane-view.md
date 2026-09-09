@@ -7,16 +7,21 @@ description: Serving the Phase-4 read-only operator plane and fronting it with T
 
 The Phase-4 v1 UI (design walk 2026-08-28): a strictly read-only window over
 the plane db — the story-first channel, attention queue, tasks, fleet roster,
-and an SSE live stream. It can observe everything and touch nothing: no
-non-GET route exists (pinned by `tests/test_plane_view.py`), and every db
-connection opens `mode=ro` with `PRAGMA query_only`.
+header totals (bots · working · need you · overdue — summed by
+`/api/overview` itself, and rendered with the disclosures the fleet cards
+carry: the unconfirmed share of the bot count, a live poll that is degraded
+or unavailable, and "no fleet recorded" rather than four zeros when the host
+has recorded none), and an SSE live stream. It can observe everything and
+touch nothing: no non-GET route exists (pinned by
+`tests/test_plane_view.py`), and every db connection opens `mode=ro` with
+`PRAGMA query_only`.
 
 ## Run it
 
 ```bash
-pip install -e '.[plane-ui]'          # FastAPI/uvicorn — optional extra
-claudlobby plane view                 # binds 127.0.0.1:8899
-claudlobby plane open                 # print/launch the URL (§17's open verb)
+python3 -m pip install -e '.[plane-ui]'   # FastAPI/uvicorn — part of the documented install
+claudlobby plane view                     # binds 127.0.0.1:8899
+claudlobby plane open                     # print/launch the URL (§17's open verb)
 ```
 
 `/healthz` is a **data-freshness probe**: it answers 503 whenever the plane
@@ -25,10 +30,25 @@ recorder simply has not written yet — so wire monitors accordingly. The
 header's recorder pill is a live daemon PROBE (typed handshake), never
 socket-file presence.
 
-Supervised: arm `plane-view.enroll: true` under `host.jobs` in the HOST's
-system.yaml (compose-time dormancy, exactly like `plane-daemon`), regenerate,
-enroll. Knobs: `PLANE_VIEW_PORT`; `PLANE_VIEW_HOST` is the raw-bind dev
-fallback only.
+Supervised: **enrolled by default since chunk N** — `plane-view` composes
+its units and `lib/setup-system` enrolls them, because a read-only localhost
+UI reaches none of the four categories the defaults rule reserves for opt-in.
+Exposing it beyond the host (Tailscale Serve, below) stays deliberately your
+step. To turn it off, set `plane-view.enroll: false` under `host.jobs` in
+**this host's own** system.yaml (compose-time dormancy, exactly like
+`plane-daemon` — regenerating then prunes the units), then stop the installed
+unit. Knobs: `PLANE_VIEW_PORT`; `PLANE_VIEW_HOST` is the raw-bind dev fallback
+only.
+
+**It needs the `[plane-ui]` extra, and the compositor checks.** Where fastapi
+and uvicorn do not import in the install's venv, `generate` composes **no**
+view unit at all and `claudlobby doctor --switches` renders `plane-view` off
+with `pip install -e '.[plane-ui]'` as its arm line. That is the fold's F1:
+"the unit exits saying so" is an honest failure for a hand run and a **crash
+loop every 5s, forever** under `Restart=always` — and enrolling by default is
+what turns the first into the second. `lib/setup-system` installs the extra
+(first install and upgrade both), so a host that followed the documented path
+has it.
 
 ## Front it with Tailscale Serve (the ruled exposure)
 
@@ -55,6 +75,121 @@ flipping capture starts words at the flip, never retroactively.
 Optional `state/plane/channels.json` maps raw carrier addresses to names
 (`{"-100123": "Engineering group"}`) so a Telegram destination never renders
 as a raw chat id.
+
+## Two fleets on one host (U, #1467)
+
+A host that runs more than one fleet gets the **fleet dimension**: a tab strip
+(one tab per fleet the plane records, plus `all`), an overview strip above the
+channel (one card per fleet, one host card), and every board scoped to the tab.
+
+- **Tabs and the default.** `/api/fleets` lists every fleet from the registry's
+  fleet identities (never the roster rail's last-seen window, so a quiet fleet
+  keeps its tab). `default` is the fleet whose *room* moved most recently — a
+  communication sent by the fleet or to it — and is the tab a first visit opens;
+  the viewer's pick is remembered per browser (`localStorage` key `plane.fleet`).
+  `_`-prefixed scope sentinels (the `_host` fleet the host probe emits under) are
+  never fleets or participants.
+- **One axis, every route.** `/api/tasks`, `/api/identities`, `/api/channel`,
+  `/api/search`, `/api/grid`, `/api/presence`, `/api/inventory`, `/api/org` and
+  `/api/utilization` take `?fleet=<name>`. A fleet's bots are the aliases in
+  `bot:<fleet>/…` — one case-sensitive rule on every arm (`queries.fleet_alias_range`
+  in SQL, `inventory.fleet_of` in Python), so a fleet named `en_` cannot absorb
+  `eng`'s bots and `Eng` is not `eng`. `fleet=` (empty) and `fleet=all` are the
+  host-wide read. A fleet the plane holds **no identity for** (while it holds
+  others) answers a typed `unknown` state naming the fleets it does hold — the
+  plane's own rule, never a healthy empty room; a plane holding no fleet yet lets
+  the name through to the route's idle remedy (`generate`). The grid and presence
+  routes also accept a fleet the sampler knows from disk before its first row.
+- **The roster rail.** Inside a room, a flat list ordered by last-seen. Under
+  `all` — the only read that spans fleets — the rail groups by fleet under a
+  small header (the fleet's alias, its bot count) so the fleets do not
+  interleave; recency still orders the rows inside a group and the groups
+  themselves. Humans belong to every room and no fleet, so they get their own
+  group, headed `humans` and counted `N humans`. No row is dropped by the
+  grouping. WHICH fleet a row belongs to is stamped by the API (`fleet` on
+  every identity row — `inventory.fleet_of`, the one Python spelling of the
+  axis); the page parses no alias of its own.
+- **Names.** Inside a room, bare names. Wherever two fleets meet — the `all` room,
+  a cross-fleet thread in either room, an all-fleets inventory — every bot reads
+  `fleet/name` (`inventory.qualified_labels`), so a twin (`erlich` on both fleets)
+  and a unique name are both unambiguous. Each channel message carries
+  `sender_fleet` / `recipient_fleet` read off the parties' own aliases (never the
+  fleet the row was emitted under) and a `cross_fleet` mark.
+- **The overview card.** Per fleet: `bots` (with the `provisional` part disclosed —
+  actors no registry scan has confirmed; a mistyped dispatch target mints one),
+  presence counts scoped to the room, `open` (**the matcher's rule**,
+  `OPEN_ASSIGNMENTS_AT_SQL` per actor — the same count `claudlobby brief --bot`,
+  fleet-pulse and `dispatch-overdue.py` show), `attention` and `overdue` (the
+  attention queue's rows and its deadline arm), `orphaned` (the watchdog's
+  `.spawn` split; `null` with a reason when the view's root holds no bot
+  directories for the fleet), the newest report and the 24-hour report count,
+  `last_activity_at` (ledger time) and the capture policy. The host card: recorder
+  up/down, spool, rows, ingest lag with its state (`none` / `ok` / `warn` past
+  120s, stamped by the API), and the host probe's newest facets (load, RAM, disk,
+  thermal, under-voltage) — `null` until `plane-host-probe` has ever recorded.
+  A figure whose source is absent is `null` with a reason, never `0`.
+- **Unacked reports (chunk K).** `claudlobby brief --ack` records the viewer's read
+  position as a plane fact — one `reports_acked` system event on the manager's actor,
+  its detail the `ingest_seq` the ack reaches — through the cold emit door (so `--ack`
+  is the one brief door that writes, and it runs `migrate()`). A fleet's reports are ONE
+  definition (`queries.FLEET_REPORTS_SQL`): report-class communications on its room
+  axis, sent by the fleet or addressed to it. The card counts, through the same rule
+  the brief lists (`plane-readers.unacked_rows`: terminal or status-less reports past
+  the fleet's newest readable ack by any of its actors; a `progress` note never),
+  "N unacked · acked by <bot> 2h ago"; a fleet that has never acked reads
+  `no ack recorded` (`null` + reason), never a count of everything ever; a
+  `reports_acked` row with no readable cursor is skipped, not a reset. No cursor file
+  exists any more: a failed emit is a failed ack (rc 1, said on stderr), a spooled one
+  is disclosed and takes effect when the spool drains, and `PLANE_EMIT_DISABLED=1`
+  refuses to ack.
+
+## The attention rail
+
+A card says WHY it needs you and what clears it — the arm that put it in the
+queue (`escalated` / `send_failed` / `never_activated` / `nudged` / `overdue`,
+in the operator's priority order), dated by the server's own instant.
+
+Two of those arms are HUMAN acts rather than machine faults (chunk M-A,
+#1481). `escalated` is a manager asking you a question — the card reads
+`needs you: <question> — asked by <manager> 5m ago`, and the task stays OPEN
+while you decide, so nothing is lost by taking your time; answer on Telegram
+and the manager's next act (a re-dispatch, a withdrawal, or the worker's next
+report) clears the card by itself. `nudged` is your own nudge gone
+unanswered for half an hour: `nudged 40m ago by chris, no act yet`. Both hold
+only while they are the assignment's newest task event, so there is no
+"un-escalate" button to remember and none to forget. The doors are
+`lib/task-act.sh` (a manager's `withdraw` / `escalate`), `claudlobby task
+nudge <task-id>` and Telegram; **the page stays read-only** until the
+exposure walk lands a write path with a principal on every request. A card
+whose question reads "not recorded" is a fleet on metadata capture, which
+drops authored prose at the door — the arm and the person still stand. **One note dispatched to N bots is one card**: the rows share no
+id (every send mints its own work item), so `/api/tasks` keys a broadcast by
+what it really shares — sender, the words AS STORED, status, arm, and a
+dispatch instant inside a minute — and the card reads `→ jian-yang, issey,
+damodaran, ramanujan · 4 bots` above the one reason line, dated by its worst
+member. Only rows that still need you join a card, so the recipients listed
+are the ones to chase, not everyone the note reached, and **one row per
+recipient**: a second open dispatch of the same words to the same bot is a
+re-dispatch, not a member, and keeps its own card. Anything the API cannot
+show is one broadcast — a different sender, arm, status or instant, a row
+with no words, or two notes told apart only by a trailing `| ref:…` the card
+does not render — stays its own card.
+
+Two things the counts are NOT. The `attention` badge counts ROWS, not cards,
+so it agrees with the header's "N need you" — a four-bot card is four. And
+every count on this page is **per board window and per room**: `/api/tasks`
+reads the newest 200 assignments of the fleet you are in, so a fleet busier
+than that window, or work sitting in another fleet's room, is outside what
+the rail can count. Use `claudlobby brief --bot <manager>` for the fleet's
+whole open set.
+
+The 60s window is measured, not assumed: on the production plane (2026-09-05)
+the widest real multi-recipient spread was 28s and a six-recipient broadcast
+spread 5–6s, about a second per recipient. It is a constant, not a knob. The
+inference retires entirely the day `lib/dispatch-task.sh` reuses one work
+item across a fan-out — the schema already allows N assignments per work item
+— because then the view groups by `work_item_id` and the window goes with the
+guess.
 
 ## The grid shows raw terminals — operators only (ruling 2026-08-29)
 

@@ -30,6 +30,8 @@
 #   debounce_notify    — fire-once notification with file-based marker
 #   debounce_clear     — clear a debounce marker for re-firing
 #   resolve_bots_dir   — fleet-aware runtime/bots path resolution
+#   switch_is_on       — THE opt-out gate (polarity in one place; loud no-op)
+#   walk_back_uncomposed_host_units — disable host units nothing composes now
 #
 # Variables set on source:
 #   CLAUDLOBBY_ROOT — repo root (auto-detected from this file's location)
@@ -219,10 +221,13 @@ with_lock() {
         ( "$_FLOCK_BIN" -x 200; "$@" ) 200>"$lockfile"
         return $?
     fi
-    local lockdir="${lockfile}.d" i=0
+    # 30s budget (WITH_LOCK_WAIT_S), not 5: a critical section that reaches
+    # the plane through the cold-CLI rung runs 1-2s, and a waiter that gives up
+    # runs UNLOCKED — measured by the R1 gauntlet with six concurrent opens.
+    local lockdir="${lockfile}.d" i=0 _max=$(( ${WITH_LOCK_WAIT_S:-30} * 20 ))
     while ! mkdir "$lockdir" 2>/dev/null; do
         i=$((i + 1))
-        [ "$i" -ge 100 ] && break
+        [ "$i" -ge "$_max" ] && break
         sleep 0.05
     done
     local rc=0
@@ -376,7 +381,7 @@ auth_curl_cfg() {
 # sed. Values containing ANY control character take the python3 path — JSON
 # forbids raw chars below 0x20 in strings, sed is line-oriented and cannot
 # escape the newline it never sees, and a raw newline splits a single-line
-# JSONL ledger row, which the line-oriented rotation then truncates into
+# JSON row (the dispatch row the door composes), which line-oriented rotation truncates into
 # permanently invalid JSON (#530). json.dumps produces exact JSON string
 # escaping for every control character; [[:cntrl:]] (POSIX class, bash 3.2
 # case-glob safe) routes them all, not just the common \n\r\t.
@@ -487,25 +492,29 @@ mint_task_id() {
 # spawn; every DOOR already sources lib-common before its plane block.
 
 # plane_armed <door> [--require-fleet] [--require-bot] -> rc 0 armed, 1 not.
-# THE arming predicate: PLANE_EMIT_ENABLED=1 arms, PLANE_EMIT_DISABLED=1
-# (harness override) wins. Identity preconditions are DISCLOSED skips — the
-# silent variants were drift, not decisions: fleet-scoped rows cannot exist
-# without the identity, and a one-line stderr disclosure is how an operator
-# learns why an armed fleet shows no rows from one door.
+# THE arming predicate (F18 closure, R1): the plane is the ONLY recorder and
+# it is always on — PLANE_EMIT_DISABLED=1 (the harness exemption) is the one
+# thing that silences a door. PLANE_EMIT_ENABLED is no longer read: an
+# env-gated arming loses records the day the legacy line is gone (measured:
+# a pre-stop hook run with no flag in its environment wrote its
+# handoff_skipped into a legacy file the retirement had frozen). Identity
+# preconditions are DISCLOSED skips — the silent variants were drift, not
+# decisions: fleet-scoped rows cannot exist without the identity, and a
+# one-line stderr disclosure is how an operator learns why a fleet shows no
+# rows from one door.
 plane_armed() {
     local door="$1"; shift || true
-    [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || return 1
     [ "${PLANE_EMIT_DISABLED:-0}" != "1" ] || return 1
     while [ $# -gt 0 ]; do
         case "$1" in
             --require-fleet)
                 if [ -z "${FLEET_NAME:-}" ]; then
-                    echo "$door: PLANE_EMIT_ENABLED but FLEET_NAME is empty — plane rows are fleet-scoped, skipping plane record (door action unaffected)" >&2
+                    echo "$door: FLEET_NAME is empty — plane rows are fleet-scoped, skipping plane record (door action unaffected)" >&2
                     return 1
                 fi ;;
             --require-bot)
                 if [ -z "${BOT_NAME:-}" ]; then
-                    echo "$door: PLANE_EMIT_ENABLED but BOT_NAME is empty — skipping plane record (door action unaffected)" >&2
+                    echo "$door: BOT_NAME is empty — skipping plane record (door action unaffected)" >&2
                     return 1
                 fi ;;
         esac
@@ -526,11 +535,61 @@ plane_mint_id() {
 # plane_emit_events <door> — stdin {"events":[...]} routed through THE shim
 # (plane-emit.sh: socket -> cold CLI -> spool). stdout discarded; stderr
 # passes through (the fallback disclosure is the contract); rc never
-# propagates — dual-write, the legacy record is load-bearing.
+# propagates — a door's real action is never blocked by its record.
+# The wrapper SURFACES the result: PLANE_EMIT_LAST_RC is 0 after a recorded
+# emission and the shim rc after a failed one, so a door can say LOUDLY that
+# its action was not recorded — since the F18 closure there is no other record.
+# Feed it through a here-string (`plane_emit_events door <<<"$batch"`), never a
+# pipeline, wherever the caller needs PLANE_EMIT_LAST_RC afterwards: a pipeline
+# runs the function in a subshell and the result never comes back.
+PLANE_EMIT_LAST_RC=0
 plane_emit_events() {
-    local door="$1"
-    "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || \
-        echo "$door: plane record failed rc=$? (door action unaffected — legacy record stands)" >&2
+    local door="$1" _rc=0
+    "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || _rc=$?
+    PLANE_EMIT_LAST_RC=$_rc
+    if [ "$_rc" -ne 0 ]; then
+        echo "$door: plane record failed rc=$_rc (door action unaffected)" >&2
+    fi
+    return 0
+}
+
+# plane_kill_tree <pid> -- kill a process and everything under it (recursive
+# pgrep -P: portable where macOS bash 3.2 has no pkill -g / setsid). The
+# keepalive tick carries the same form inside its reaper subshell; a bare kill
+# of a pipeline leader ORPHANS the wedged CLI alive. `|| true` inside the
+# substitution: pgrep exits 1 at every leaf, which is the terminating case.
+plane_kill_tree() {
+    local _p="$1" _c
+    for _c in $(pgrep -P "$_p" 2>/dev/null || true); do plane_kill_tree "$_c"; done
+    kill -9 "$_p" 2>/dev/null || true
+}
+
+# plane_emit_bounded <door> <seconds> <batch> -- the batch through the shim,
+# WAITED on for at most the bound, then reaped (whole tree): the shape for a
+# door that must know whether its record landed but must not hold a watchdog
+# tick behind a wedged rung. PLANE_EMIT_LAST_RC = the shim's rc, 143 when
+# reaped -- "not recorded", disclosed; the plane may still hold the row (a
+# kill after the commit), and a retry is never a second row because ingest
+# dedupes on the pre-minted event id.
+plane_emit_bounded() {
+    local door="$1" bound="$2" batch="$3" _pid _i=0 _rc=0
+    "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
+    _pid=$!
+    while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt "$bound" ]; do
+        sleep 1; _i=$((_i + 1))
+    done
+    if kill -0 "$_pid" 2>/dev/null; then
+        plane_kill_tree "$_pid"
+        _rc=143
+        echo "$door: plane record reaped at ${bound}s (rung wedged) -- not recorded" >&2
+    else
+        wait "$_pid" || _rc=$?
+    fi
+    PLANE_EMIT_LAST_RC=$_rc
+    if [ "$_rc" -ne 0 ] && [ "$_rc" -ne 143 ]; then
+        echo "$door: plane record failed rc=$_rc (door action unaffected)" >&2
+    fi
+    return 0
 }
 
 # plane_tx_event <emitter> <fleet> <carrier> <msg_id> <destination> <state>
@@ -542,6 +601,45 @@ plane_tx_event() {
     printf '{"event_type":"transmission","emitter":"%s","fleet":"%s","payload":{"msg_id":"%s","attempt_no":1,"carrier":"%s","destination":"%s","state":"%s"%s}}' \
         "$1" "$(json_escape "$2")" "$4" "$3" \
         "$(json_escape "$5")" "$6" "${7:-}"
+}
+
+# --- the delivery-JOIN wire proof (chunk P fold F1) -------------------------
+# bot_tmux_send computes the SENDER's wire proof (sha256 + byte length of the
+# EXACT bytes it put on the wire for the message proper) and exposes it two ways:
+# as the globals PLANE_WIRE_SHA256 / PLANE_WIRE_BYTES for an IN-SHELL caller
+# (report-back), and — because dispatch-task / briefing / the task CLI send
+# through the dispatch.sh SUBPROCESS where a global cannot cross back — written
+# to the file named by PLANE_WIRE_OUT. These two helpers are the door's side.
+
+# _read_wire_out <file> — populate PLANE_WIRE_SHA256 / PLANE_WIRE_BYTES from the
+# file bot_tmux_send wrote across the dispatch.sh process boundary. Resets them
+# first so a prior send in the same process cannot leak a stale proof; an empty
+# arg or a missing/empty file leaves them empty (no wire proof recorded).
+_read_wire_out() {
+    PLANE_WIRE_SHA256=""; PLANE_WIRE_BYTES=""
+    [ -n "${1:-}" ] && [ -f "$1" ] || return 0
+    local _k _v
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+            sha) PLANE_WIRE_SHA256="$_v" ;;
+            bytes) PLANE_WIRE_BYTES="$_v" ;;
+        esac
+    done < "$1"
+    return 0
+}
+
+# _wire_frag <state> — the plane_tx_event tail fragment carrying the wire proof,
+# emitted ONLY on a submission-class tmux state (pane_submitted / carrier_queued
+# — the states whose bytes reached a pane) and ONLY when the proof is present.
+# Leading comma, wire_bytes an unquoted JSON number. Empty otherwise.
+_wire_frag() {
+    case "$1" in
+        pane_submitted|carrier_queued) ;;
+        *) return 0 ;;
+    esac
+    [ -n "${PLANE_WIRE_SHA256:-}" ] && [ -n "${PLANE_WIRE_BYTES:-}" ] || return 0
+    printf ',"wire_sha256":"%s","wire_bytes":%s' \
+        "$PLANE_WIRE_SHA256" "$PLANE_WIRE_BYTES"
 }
 
 # plane_peer_fleet <session> — fleet name for stamping a plane alias of the
@@ -574,24 +672,6 @@ epoch_to_iso_utc() {
         return 0  # BSD/macOS
     fi
     date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ  # GNU/Linux
-}
-
-# rotate_jsonl_by_ts <ledger>
-# Shared self-rotation for ts-keyed JSONL ledgers (dispatch-log.jsonl,
-# report-back.jsonl): keep entries newer than OBSERVABILITY_REAP_DAYS
-# (default 7). Call inside the caller's with_lock critical section.
-# CONSTRAINT: keep DISPATCH_OVERDUE_MAX_AGE_S (default 24h) BELOW this
-# window — a max_age raised past it would let rotation silently prune a
-# still-alerting dispatch row.
-rotate_jsonl_by_ts() {
-    local ledger="$1"
-    local reap_days="${OBSERVABILITY_REAP_DAYS:-7}"
-    local cutoff
-    cutoff=$(date_relative "-${reap_days} days" "%Y-%m-%dT%H:%M:%SZ") || return 0
-    local tmp
-    tmp=$(safe_mktemp)
-    awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\"") ; if (a[1] >= cutoff) print }' "$ledger" > "$tmp" \
-        && mv "$tmp" "$ledger"
 }
 
 # --- tmux helpers ------------------------------------------------------------
@@ -1236,46 +1316,92 @@ bot_tmux() {
     "$_TMUX_BIN" -L "$socket" "$@"
 }
 
-# Append one event to a bot's JSONL ledger (data/events/fleet-YYYY-MM-DD.jsonl)
-# — the SAME ledger fleet-pulse reads and escalates. Best-effort: never fails
-# the caller, because startup/observability paths must not abort on a log write.
-# Identity: explicit bot_dir/bot_id win, else ambient $BOT_DIR/$BOT_ID. An
-# explicitly EMPTY bot_dir ("") forces the fleet-level ledger (state/events,
-# bot:"fleet") and ignores ambient identity — used by _emit_fleet_signal and by
-# emit_script_error's host-context (no bot dir) path. data_json must be a valid
-# JSON value (default {}).
-# Usage: emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
-# The shared per-source event write behind fleet-pulse / code-audit-sweep's
-# checks and _tmux_send_miss below; each passes its own <source> and emits here.
+# emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
+# Record one fleet event on the plane — the ONE door behind fleet-pulse /
+# code-audit-sweep's checks, the keepalive tick's transitions, the vitals hook,
+# _tmux_send_miss below and every other lib/ breadcrumb. Best-effort: never
+# fails the caller, because startup/observability paths must not abort on a
+# record. Identity: explicit bot_dir/bot_id win, else ambient $BOT_DIR/$BOT_ID.
+# An explicitly EMPTY bot_dir ("") forces the FLEET-level anchor (bot "fleet")
+# and ignores ambient identity — used by _emit_fleet_signal and by
+# emit_script_error's host-context (no bot dir) path; with no fleet anywhere
+# the anchor is the HOST (fleet "_host", subject_kind host, the hostname — the
+# probe's convention), never silence. data_json must be a valid JSON value
+# (default {}).
+# The event is a SYSTEM event anchored on the bot's actor (by alias, resolved
+# at ingest) or, for a fleet-level receipt, on the fleet; stamped UTC so every
+# fleet event compares lexically on the stored column; its source_ref is the
+# content key of the row exactly as the retired ledgers wrote it
+# (fleet-events:sha:<key>) — the readers select fleet events by that prefix,
+# never by an event-name list, so the plane's own machinery can never read as
+# a fleet event, and the key stayed stable across the F18 closure. The
+# emission is WAITED on, bounded (FLEET_EVENT_EMIT_TIMEOUT_S, default 10):
+# this door runs inside every lib/ hot path (the keepalive tick's ERR trap
+# included) and a wedged rung must never hold a tick for a minute; a reaped
+# or failed emission is disclosed as "not recorded" — the shim's spool is the
+# durability below that, there is no file. The caller's own PLANE_EMIT_LAST_RC
+# is RESTORED afterwards (a report door that emits a send_miss between its
+# emit and its own verdict must judge its own emission, never this one).
 emit_fleet_event() {
     local event_type="${1:?emit_fleet_event: <type> required}"
     local event_source="${2:-unknown}"
     local data_json="${3:-}"
     # No-colon ${4-…}: an explicitly EMPTY bot_dir stays empty (forcing the
-    # fleet-level branch) instead of falling back to ambient $BOT_DIR.
+    # fleet-level anchor) instead of falling back to ambient $BOT_DIR.
     local bot_dir="${4-${BOT_DIR:-}}"
     local bot_id="${5-}"
     [ -n "$data_json" ] || data_json='{}'
-    local events_dir
     if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
-        events_dir="$bot_dir/data/events"
         [ -n "$bot_id" ] || bot_id="${BOT_ID:-$(basename "$bot_dir")}"
     else
-        # Fleet-level ledger: identity is the explicit bot_id or "fleet" — never
+        # Fleet-level anchor: identity is the explicit bot_id or "fleet" — never
         # ambient $BOT_ID, so a host job's alert is not misattributed to a bot.
-        events_dir="${CLAUDLOBBY_ROOT:-}/state/events"
         [ -n "$bot_id" ] || bot_id="fleet"
     fi
-    mkdir -p "$events_dir" 2>/dev/null || return 0
-    local ts today
-    ts=$(ts_iso); today=$(date +%Y-%m-%d)
-    printf '{"ts":"%s","bot":"%s","type":"%s","source":"%s","data":%s}\n' \
-        "$ts" "$bot_id" "$event_type" "$event_source" "$data_json" \
-        >> "$events_dir/fleet-${today}.jsonl" 2>/dev/null || true
+    # The fleet: a session's FLEET_NAME, else the timer units' CLAUDLOBBY_FLEET
+    # (the composer stamps that one; resolve_bots_dir reads the same pair),
+    # else — for a bot-anchored call — the bot's OWN bot.conf (plane_peer_fleet's
+    # rule: a hand-run pre-stop hook carries the bot dir and nothing else).
+    local _fleet="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}" _kind _subj
+    if [ -z "$_fleet" ] && [ -n "$bot_dir" ] && [ -d "$bot_dir" ] && [ "$bot_id" != "fleet" ]; then
+        _fleet="$(bot_conf_get "$bot_dir" FLEET_NAME "" 2>/dev/null || true)"
+    fi
+    plane_armed emit_fleet_event || return 0
+    local ts _line _batch _detail _src _key _utc _outer_rc="${PLANE_EMIT_LAST_RC:-0}"
+    ts=$(ts_iso)
+    if [ -n "$_fleet" ] && [ "$bot_id" != "fleet" ]; then
+        _kind=actor; _subj="bot:$_fleet/$bot_id"
+    elif [ -n "$_fleet" ]; then
+        _kind=fleet; _subj="$_fleet"                # the plane's fleet alias is the bare name
+    else
+        # No fleet anywhere (a host job: disk-monitor, host-health-check, a
+        # sibling pull): the HOST is the anchor — the probe's own convention
+        # (fleet "_host", subject_kind host, the hostname) — never silence.
+        # The old state/events/ file took these lines; the plane takes them now.
+        _fleet="_host"; _kind=host; bot_id="host"
+        _subj="$(hostname 2>/dev/null || printf unknown-host)"
+    fi
+    # The row as the retired ledgers wrote it, composed ONCE (printf -v, no
+    # fork) for its CONTENT KEY alone — the plane row's provenance.
+    printf -v _line '{"ts":"%s","bot":"%s","type":"%s","source":"%s","data":%s}' \
+        "$ts" "$bot_id" "$event_type" "$event_source" "$data_json"
+    # event_source is the one caller-shaped string; type, fleet and bot are
+    # identifiers by construction (a malformed one is refused at ingest and
+    # disclosed).
+    _src=$(json_escape "$event_source")
+    _key=$(sha256_hex32 "$_line" 2>/dev/null || true)
+    _utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf -v _detail '{"source":"%s","legacy_ts":"%s","data":%s}' "$_src" "$ts" "$data_json"
+    printf -v _batch '{"events":[{"event_type":"system","emitter":"%s","source_ref":"fleet-events:sha:%s","fleet":"%s","occurred_at":"%s","payload":{"event":"%s","subject_kind":"%s","subject":"%s","data":%s}}]}' \
+        "$_src" "$_key" "$_fleet" "$_utc" "$event_type" "$_kind" "$(json_escape "$_subj")" "$_detail"
+    # stderr passes through: a failed or reaped emission is DISCLOSED, that is the contract
+    plane_emit_bounded emit_fleet_event "${FLEET_EVENT_EMIT_TIMEOUT_S:-10}" "$_batch"
+    PLANE_EMIT_LAST_RC="$_outer_rc"
+    return 0
 }
 
 # _tmux_send_miss <session> <socket> <reason>
-# Emit a send_miss event to the caller bot's JSONL ledger (best-effort) plus a
+# Emit a send_miss event to the plane, attributed to the caller bot (best-effort), plus a
 # stderr breadcrumb, so a dropped cross-socket send becomes observable instead
 # of silently swallowed. Internal to bot_tmux_send. The sending bot is the
 # event's top-level "bot", resolved by emit_fleet_event from BOT_DIR / BOT_ID.
@@ -1313,6 +1439,58 @@ bot_tmux_send() {
     fi
     local safe
     safe=$(sanitize_tmux_input "$text")
+    # chunk P (#1501): the plane routing trailer. When the emitting door set
+    # PLANE_MSG_ID (dispatch-task, report-back, briefing-trigger -- the doors
+    # that emit a plane communication and send through tmux), append it as
+    # a marker on its OWN final line, AFTER sanitize (so sanitize cannot strip
+    # the marker) and BEFORE pane_send_verified (so chunk O chunks the whole
+    # payload byte-safe and the marker rides the LAST chunk -- surviving the
+    # head loss that was #1493's measured failure). The receiver's
+    # UserPromptSubmit hook (plane-dispatch-in.sh) recognises the marker,
+    # strips it plus any `set +H; ` prefix, and records the byte length + sha256
+    # of the message it actually got, keyed to <msg_id> -- which the delivery
+    # JOIN compares to the sender's WIRE proof (fold F1), recorded just below.
+    # GRAMMAR-GUARDED (a minted msg id only), so a stray env value can never
+    # inject a newline or a stray marker glyph into the payload. A send with no
+    # PLANE_MSG_ID (a raw human prompt, a keepalive /reload) carries no trailer
+    # and is an untracked prompt by design.
+    #
+    # fold F1 -- the delivery-JOIN wire proof. The receiver used to be compared
+    # against body_sha256 (the RAW logical message), but the wire passes the
+    # payload through sanitize_tmux_input, so a multi-line / tabbed / double-
+    # spaced dispatch read TRUNCATED or ALTERED though fully delivered. Instead,
+    # record the sha256 + byte length of the EXACT bytes going on the wire for
+    # the message proper -- `safe`, AFTER sanitize and BEFORE the trailer -- and
+    # the delivery JOIN compares the receiver's arrival (which is those same
+    # bytes) against THIS. body_sha256 is UNCHANGED and untouched here.
+    PLANE_WIRE_SHA256=""; PLANE_WIRE_BYTES=""
+    local _plane_msg_pat='^msg_[0-9a-f]{32}$'
+    if [ -n "${PLANE_MSG_ID:-}" ]; then
+        # F6 (fold): the bash `=~ $` anchor matches BEFORE a trailing newline, so
+        # a value ending in a newline would pass the pattern and inject one into
+        # the payload -- reject any embedded newline outright (defense in depth;
+        # not reachable via the mint).
+        if [[ "$PLANE_MSG_ID" =~ $_plane_msg_pat ]] && [[ "$PLANE_MSG_ID" != *$'\n'* ]]; then
+            # The proof over the pre-trailer wire bytes. Exposed as globals for an
+            # IN-SHELL caller (report-back) and, when PLANE_WIRE_OUT is set,
+            # written there for a caller across the dispatch.sh subprocess
+            # boundary (dispatch-task / briefing / the task CLI). A sha-less host
+            # records the trailer but no proof, and the JOIN then stays at
+            # unconfirmed rather than fabricating a verdict.
+            PLANE_WIRE_SHA256=$(sha256_prefixed "$safe" 2>/dev/null || true)
+            if [ -n "$PLANE_WIRE_SHA256" ]; then
+                PLANE_WIRE_BYTES=$(printf '%s' "$safe" | wc -c)
+                PLANE_WIRE_BYTES=$((PLANE_WIRE_BYTES))
+                if [ -n "${PLANE_WIRE_OUT:-}" ]; then
+                    printf 'sha=%s\nbytes=%s\n' "$PLANE_WIRE_SHA256" "$PLANE_WIRE_BYTES" \
+                        > "$PLANE_WIRE_OUT" 2>/dev/null || true
+                fi
+            fi
+            safe="$safe"$'\n'"⟦plane:${PLANE_MSG_ID}⟧"
+        else
+            echo "bot_tmux_send: PLANE_MSG_ID '$PLANE_MSG_ID' is not a minted id -- no plane trailer appended" >&2
+        fi
+    fi
     pane_send_verified "$peer_socket" "$session" "$safe"
 }
 
@@ -1328,6 +1506,303 @@ bot_tmux_send() {
 # verify-retry below is for — where before it was silent and permanent, so the
 # longer window has stopped earning its cost on every other send.
 _PANE_SEND_SETTLE_DEFAULT=0.3
+# Chunk size (BYTES) for the keystroke half of a send, and the pause between
+# chunks (#1493). A payload never goes to tmux in one piece any more, and the
+# reason is a measured data loss rather than tidiness.
+#
+# THE MEASUREMENT. Every pane_submitted communication of a week on the estate's
+# macOS host, checked head-slice and tail-slice against the RECIPIENT's own
+# session transcript: under 1 KB, 182 of 182 arrived whole; over 1 KB, 86 of
+# 180. Of the other 94, EIGHTY-FIVE arrived TAIL ONLY — the head gone, taking
+# the `[BOTCOMMAND] <manager> | task | …` envelope and the task id with it — 8
+# head only, 19 absent. The amount lost is quantised: bodies of 1.3-1.8 K lost
+# 1006-1022 chars, bodies of 2.2-2.5 K lost 1818-2036. One or two multiples of
+# 1024 BYTES. Every one of those sends is recorded `pane_submitted`, which is a
+# sender-side inference; the door recorded a delivery it could not observe.
+#
+# THE MECHANISM this fits. One `send-keys` writes the whole payload into the
+# pane's pty in a single go. The macOS pty input queue is 1024 bytes (TTYHOG).
+# The reader is `claude` in raw mode, and Apple's cfmakeraw clears IMAXBEL —
+# with IMAXBEL clear the BSD tty layer answers an input-queue overflow by
+# FLUSHING the queue, discarding what is buffered, rather than dropping the
+# incoming byte. So a reader that has not drained the first 1 KB before the
+# writer fills it loses that 1 KB outright. It is a race, which is why the
+# whole-rate above 1 KB is 26-65% rather than 0, and it cannot fire below 1 KB,
+# which is why that row is 100%. (Linux's line discipline buffers 4 KB and drops
+# the NEW bytes on overflow, so the Pi shows the mirror symptom — tail loss
+# above 4 KB — of the same primitive.)
+#
+# 900 leaves ~120 bytes of headroom under the 1024 the queue holds, so a chunk
+# cannot fill it even accounting for what the reader has not yet drained; the
+# settle then gives the reader a window to empty the queue before the next chunk
+# lands. Measured on this host by lib/send-size-probe.sh, which is the A/B
+# instrument for exactly this pair of knobs.
+#
+# PANE_SEND_CHUNK_BYTES=0 restores the legacy single unchunked send-keys. It
+# exists for ONE reason — the probe's control arm, which has to drive the real
+# primitive in its pre-fix shape or it would be measuring a fixture. It is not
+# an operator tuning knob and there is no situation in which a fleet wants it.
+#
+# Which is exactly why it is a NAMED switch (chunk O fold, F8): the value
+# reaches a bot through `fleet.yaml env:` -> bot.conf like every other session
+# knob, so "nobody would set this" is a hope rather than a mechanism. It is
+# registered in claudlobby/switches.py as the opt-out `pane-send-chunking`, so
+# `claudlobby doctor --switches`, `claudlobby status`'s off-note and the schema
+# docs all name it — and the door says so on stderr each time it runs
+# unchunked, because a silent restoration of a send that loses data is the
+# shape this whole chunk exists to end.
+_PANE_SEND_CHUNK_BYTES_DEFAULT=900
+_PANE_SEND_CHUNK_SETTLE_DEFAULT=0.15
+# The 64 UTF-8 continuation bytes (0x80-0xBF) as one literal string — the
+# membership set the splitter tests a candidate boundary byte against. Built
+# once at source time with `printf -v` (no fork, no subshell) because the split
+# runs on every send on every bot.
+printf -v _PANE_UTF8_CONT \
+    '\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf\xb0\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf'
+
+# _pane_split_bytes <text> <max_bytes>
+# Fill the array _PANE_CHUNKS (and _PANE_CHUNK_N with its length) with byte
+# slices of <text>, each at most <max_bytes> bytes, whose concatenation is
+# <text> byte for byte.
+#
+# BYTES, not characters, and that is the whole difficulty. The queue this dodges
+# counts bytes, so the cap has to be a byte cap — but bash's ${#s} and ${s:i:n}
+# count CHARACTERS under a UTF-8 locale, so a naive slice would cap the wrong
+# unit and, worse, `${s:i:n}` would silently re-encode. `local LC_ALL=C` puts
+# both operators back on bytes for the duration of this function only (measured
+# in bash 3.2: the same string reads 13 outside and 17 inside). The locale stays
+# local so the send loop below, and tmux with it, runs under the caller's.
+#
+# A byte cap can land INSIDE a multibyte character, and dispatch bodies carry em
+# dashes, arrows and checkmarks routinely. So the boundary is backed off while
+# the byte that would START the next chunk is a continuation byte — at most 3
+# times, the longest continuation run a valid UTF-8 character has. Still a
+# continuation byte after three: the input is not valid UTF-8, no boundary
+# exists to find, and the cap is honoured rather than the search running on. The
+# `len > 1` guard keeps progress guaranteed for any cap, including one smaller
+# than a single character.
+#
+# NO TWO ADJACENT CHUNKS ARE EVER BYTE-IDENTICAL, and that rule is a measured
+# recipient-side defect rather than tidiness (chunk O fold, F2). Measured on
+# `claude 2.1.263` / macOS: two identical 900-byte blocks of ORDINARY numbered
+# text — not a degenerate one-character filler — arrived 900 bytes SHORT, one
+# whole block gone out of the middle; 1200 identical bytes followed by a varied
+# tail arrived whole; thirty identical 60-byte lines whose phase did not align
+# with the cap arrived whole. So the trigger is exactly `chunk[i] == chunk[i-1]`,
+# which any repeated region whose period divides the cap and starts on a chunk
+# boundary reaches — 31 identical 60-byte log lines is enough, and a dispatch
+# quoting a log or a table gets there without trying.
+#
+# The remedy is the cheapest one that cannot recur: when the chunk just cut
+# equals the one before it, cut one byte shorter and back off again. One
+# decrement settles it for good — equality requires equal LENGTHS, so a shorter
+# chunk cannot match its predecessor — and a wholly degenerate payload simply
+# alternates 900/899. `len > 1` still floors it, so a cap of 1 (no shipped
+# configuration has one) keeps its stated bound: adjacent 1-byte chunks may
+# repeat, because the alternative is no progress at all.
+#
+# Pure builtins — no fork per chunk, no python, no iconv. This is on every
+# dispatch, every boot, every bot, including the Pi. The rule costs one string
+# compare per chunk and nothing at all on the single-chunk sends that are most
+# of them.
+_pane_split_bytes() {
+    local LC_ALL=C
+    local text="$1" max="$2"
+    local total=${#text} i=0 len back c lim chunk prev=""
+    # Cleared, not just re-counted: entries past _PANE_CHUNK_N would otherwise
+    # hold a previous payload's bytes for the life of the shell, and keepalive's
+    # is a long one.
+    _PANE_CHUNKS=()
+    _PANE_CHUNK_N=0
+    if [ "$total" -eq 0 ]; then
+        # An empty payload is still one send. Returning zero chunks would make
+        # the caller send NOTHING, turning an empty dispatch into a silent no-op.
+        _PANE_CHUNKS[0]=""
+        _PANE_CHUNK_N=1
+        return 0
+    fi
+    while [ "$i" -lt "$total" ]; do
+        # `lim` is the cap THIS boundary is allowed, and it is what the
+        # invalid-UTF-8 fallback honours rather than `max` — otherwise the
+        # identical-chunk retry below would hand back the byte it just gave up
+        # and loop for ever on a payload that is both degenerate and not UTF-8.
+        lim=$max
+        while :; do
+            len=$lim
+            if [ $((i + len)) -lt "$total" ]; then
+                back=0
+                c=${text:$((i + len)):1}
+                while [ "$len" -gt 1 ] && [ "$back" -lt 3 ]; do
+                    case "$_PANE_UTF8_CONT" in *"$c"*) ;; *) break ;; esac
+                    len=$((len - 1))
+                    back=$((back + 1))
+                    c=${text:$((i + len)):1}
+                done
+                # Three back-offs and still mid-character: not valid UTF-8.
+                # Honour the cap rather than walking backwards through the
+                # whole chunk.
+                case "$_PANE_UTF8_CONT" in *"$c"*) len=$lim ;; esac
+            fi
+            chunk=${text:i:len}
+            # The F2 rule. Only an EQUAL chunk retries, and it retries once:
+            # `lim` strictly decreases, so the next candidate is shorter than
+            # `prev` and cannot match it. This codes around a `claude` TUI quirk
+            # (two byte-identical adjacent chunks lose one), so it is pinned to a
+            # binary that moves: lib/send-size-probe.sh --filler ident2 is the
+            # re-measurement instrument (#1493); re-run it on a claude-major bump.
+            [ "$chunk" = "$prev" ] && [ "$len" -gt 1 ] || break
+            lim=$((len - 1))
+        done
+        _PANE_CHUNKS[$_PANE_CHUNK_N]=$chunk
+        _PANE_CHUNK_N=$((_PANE_CHUNK_N + 1))
+        prev=$chunk
+        i=$((i + len))
+    done
+}
+
+# _pane_send_keys_arg <chunk>
+# Set _PANE_SEND_ARG to the argument that makes tmux type <chunk> VERBATIM.
+#
+# ONE rule, and it is a measurement rather than a precaution. tmux parses its
+# argv as a COMMAND LIST, so a `;` that ENDS an argument is a command separator
+# and not a character. Measured against tmux 3.6a on a real pane running `cat`:
+# `A;` arrived as `A`, `B;;` as `B;`, and a lone `;` as nothing at all — at rc
+# 0, silently, so no caller could ever have noticed. Reproduced end to end, a
+# 2100-byte payload whose byte 900 was a `;` arrived 2099 bytes long.
+#
+# The single-send era hid nearly all of it: only the payload's LAST byte was
+# ever at risk. Chunking moves the exposure to every boundary — 0.15% of the
+# boundaries this repository's own prose produces, and higher for a dispatch
+# quoting shell or JS, where `;` is a line ending.
+#
+# The repair is the escape tmux itself unescapes: drop the trailing `;` and
+# append `\;`. Round trips measured on that same pane — `A\;` -> `A;`,
+# `a;\;` -> `a;;`, `\;` -> `;`, and `a\\;` -> `a\;`, so a payload whose last two
+# bytes are a BACKSLASH and a semicolon round-trips as well, which the raw send
+# did NOT (it arrived `a;`, the backslash eaten). A backslash anywhere else is
+# already literal (`a\;b` and `a\b` both arrived unchanged), so nothing else is
+# touched. The escaped argument is one byte longer than the chunk; at the 900
+# cap that is 901 bytes on the wire, still ~120 under the 1024 the pty holds.
+#
+# Sets a global rather than printing its answer: this runs per chunk on every
+# dispatch, every boot, every bot, and a command substitution would fork for it.
+_pane_send_keys_arg() {
+    _PANE_SEND_ARG="$1"
+    case "$_PANE_SEND_ARG" in
+        *\;) _PANE_SEND_ARG="${_PANE_SEND_ARG%\;}\\;" ;;
+    esac
+}
+
+# Drop the payload the last split left resident. _PANE_CHUNKS has to be a global
+# — bash 3.2 has no way to hand an array back — so without this the bytes of the
+# last thing a bot sent stay live for the whole life of the shell, and
+# keepalive's is a shell that runs for the life of the host.
+_pane_forget_chunks() {
+    unset _PANE_CHUNKS
+    _PANE_CHUNK_N=0
+}
+
+# _pane_send_partial <session> <idx> <n>
+# A chunk failed mid-payload (chunk O fold, F6): <idx> chunks are already typed,
+# no Enter has gone, and the residue sits in the input box where the NEXT send
+# will concatenate onto it.
+#
+# Disclosed, never repaired here. The obvious clear is a `C-c`, and a second
+# Ctrl-C in Claude Code EXITS the session — a failure path that can kill a bot
+# is worse than the residue it tidies. The verify/recovery path above already
+# owns what happens next; this rung owns the record, which the residue otherwise
+# leaves nowhere at all.
+#
+# send_miss, not a new event name: the send did NOT land, which is exactly what
+# fleet-pulse's escalation reads that event to mean. send_retry is the opposite
+# case — the payload reached the pane and only the Enter was swallowed — and
+# blurring the two would misroute both.
+_pane_send_partial() {
+    local LC_ALL=C
+    local session="$1" idx="$2" n="$3"
+    local k=0 bytes=0
+    while [ "$k" -lt "$idx" ]; do
+        bytes=$((bytes + ${#_PANE_CHUNKS[$k]}))
+        k=$((k + 1))
+    done
+    printf 'pane_send: chunk %s of %s failed -- %s bytes left unsubmitted in the box\n' \
+        "$((idx + 1))" "$n" "$bytes" >&2
+    emit_fleet_event send_miss dispatch \
+        "$(printf '{"session":"%s","reason":"chunk-send-failed","partial":"%s/%s","unsubmitted_bytes":%s}' \
+            "$(json_escape "$session")" "$((idx + 1))" "$n" "$bytes")"
+}
+
+# _pane_send_payload <socket> <session> <text>
+# The keystroke half of a send: <text> into the pane, chunked, no Enter. The one
+# home for it, so pane_send_verified and the repair path below cannot diverge on
+# how a payload reaches a pty.
+#
+# `-l --` on every chunk. `-l` is load-bearing on its own, independent of the
+# chunking: without it tmux looks the argument up as a KEY NAME first, so a
+# chunk that happens to spell one ("Enter", "Space", "BSpace") would be sent as
+# that key instead of as its characters — a hazard the single-send shape hid
+# only because a whole dispatch never spells a key name, and one that slicing a
+# payload into 900-byte pieces does not create but does make thinkable. `--`
+# ends option parsing so a chunk beginning with `-` is text, not a flag. Byte
+# transparency of the pair was verified against tmux 3.6a on a real pane
+# (backslashes, quotes, `$`, backticks and multibyte all round-tripped identical).
+_pane_send_payload() {
+    local socket="$1" session="$2" text="$3"
+    local max="${PANE_SEND_CHUNK_BYTES:-$_PANE_SEND_CHUNK_BYTES_DEFAULT}"
+    # A malformed knob falls back to the default rather than aborting a send:
+    # this runs inside startup and watchdog paths, and a typo in an env file
+    # must not be able to strand a bot.
+    case "$max" in ''|*[!0-9]*) max=$_PANE_SEND_CHUNK_BYTES_DEFAULT ;; esac
+    if [ "$max" -le 0 ]; then
+        # The pre-#1493 shape, including the absent -l. The probe's control arm
+        # has to exercise the primitive as production ran it; a control that
+        # differs anywhere is measuring something else.
+        #
+        # ONE deliberate difference (chunk O fold, F1): the trailing-`;` guard
+        # applies here too. The pre-fix primitive had that bug on the payload's
+        # LAST byte, and leaving it in would make the control measure a `;` as
+        # well as the pty queue — two mechanisms, one number.
+        #
+        # An off switch says so out loud (F8). PANE_SEND_CHUNK_BYTES reaches a
+        # bot through `fleet.yaml env:` -> bot.conf, so a fleet can restore the
+        # pre-fix send without meaning to; a silent no-op is how a disarmed door
+        # reads as a broken one.
+        printf 'pane_send: chunking OFF (PANE_SEND_CHUNK_BYTES=0) -- sends over 1 KB can lose their head on macOS\n' >&2
+        _pane_send_keys_arg "$text"
+        bot_tmux "$socket" send-keys -t "$session" "$_PANE_SEND_ARG"
+        return $?
+    fi
+    _pane_split_bytes "$text" "$max"
+    local idx=0
+    local settle="${PANE_SEND_CHUNK_SETTLE_S:-$_PANE_SEND_CHUNK_SETTLE_DEFAULT}"
+    # Validated for the same reason the cap is, and one direction further: a
+    # `sleep` that rejects its argument returns non-zero, and `[ ] || sleep` is
+    # a compound whose failure ABORTS the caller under set -e — so a typo in an
+    # env file would strand a bot half way through a payload rather than merely
+    # mistiming it. Digits with at most one decimal point; anything else is the
+    # default.
+    case "$settle" in
+        ''|*[!0-9.]*|*.*.*|.) settle="$_PANE_SEND_CHUNK_SETTLE_DEFAULT" ;;
+    esac
+    while [ "$idx" -lt "$_PANE_CHUNK_N" ]; do
+        # Between chunks only. A single-chunk payload — every send under the cap,
+        # which is most of them — pays nothing at all for this. It is half the
+        # mechanism, not a garnish: the cap keeps a chunk from FILLING the pty
+        # queue and this is what gives the reader time to empty it, so
+        # tests/test_pane_send_verified.sh counts the calls (a mutant that
+        # deleted this line passed the whole suite before it did).
+        [ "$idx" -eq 0 ] || sleep "$settle"
+        _pane_send_keys_arg "${_PANE_CHUNKS[$idx]}"
+        if ! bot_tmux "$socket" send-keys -t "$session" -l -- "$_PANE_SEND_ARG"; then
+            _pane_send_partial "$session" "$idx" "$_PANE_CHUNK_N"
+            _pane_forget_chunks
+            return 1
+        fi
+        idx=$((idx + 1))
+    done
+    _pane_forget_chunks
+    return 0
+}
 # Verify budget: how long to let the input box clear on its own before
 # concluding the Enter was swallowed, as a poll interval x a tick count (both
 # named, so the resulting budget is readable here rather than only derivable
@@ -1823,7 +2298,10 @@ _pane_recover_unconfirmed_send() {
     emit_fleet_event send_blind_recovered dispatch \
         "$(printf '{"session":"%s","reason":"resent-after-box-drew","box":"%s"}' \
             "$(json_escape "$session")" "$_PANE_BOX_NEVER")"
-    bot_tmux "$socket" send-keys -t "$session" "$text" 2>/dev/null || return 0
+    # Through _pane_send_payload, so the repair is chunked exactly as the
+    # original send was (#1493). A resend that re-created the pre-fix shape
+    # would repair a pre-draw loss by committing a 1 KB one.
+    _pane_send_payload "$socket" "$session" "$text" 2>/dev/null || return 0
     sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"
     bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
     return 0
@@ -1831,8 +2309,16 @@ _pane_recover_unconfirmed_send() {
 
 # pane_send_verified <socket> <session> <text>
 # THE verified pane send, and the one home for the send/settle/Enter/verify-retry
-# dance: send <text>, let the buffer settle, send Enter, then poll the input box
-# and re-send Enter once if the payload is still sitting there unsubmitted.
+# dance: send <text> in pty-sized chunks, let the buffer settle, send Enter once,
+# then poll the input box and re-send Enter once if the payload is still sitting
+# there unsubmitted.
+#
+# The keystrokes go out as N chunks of at most PANE_SEND_CHUNK_BYTES, not as one
+# send-keys — see _pane_send_payload and the knobs above for the measurement
+# (#1493). Everything downstream is unchanged and stays anchored to the WHOLE
+# payload: the probe is the full text, the verify tests one input box, and the
+# submit is one Enter after the last chunk. Chunking is a property of how the
+# bytes cross the pty, not of what was sent, and nothing but the pty may see it.
 #
 # Sends <text> VERBATIM — no sanitize pass, no `set +H;` prefix. THIS is why the
 # slash-command sites cannot route through a sanitizing helper: a slash command
@@ -1872,7 +2358,7 @@ pane_send_verified() {
         mkdir -p "$PANE_VERIFY_TRACE" 2>/dev/null || true
         printf '%s' "$probe" > "$PANE_VERIFY_TRACE/payload" 2>/dev/null || true
     fi
-    bot_tmux "$socket" send-keys -t "$session" "$text" || return 1
+    _pane_send_payload "$socket" "$session" "$text" || return 1
     sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"
     bot_tmux "$socket" send-keys -t "$session" Enter || return 1
 
@@ -2154,6 +2640,15 @@ debounce_notify() {
     local marker="$state_dir/${bot_id}.${suffix}"
     local window="${FLEET_PULSE_REARM_WINDOW_S:-$_REARM_WINDOW_S_DEFAULT}"
     local fire=0 seen="" raw="" last_rearm=0 new_rearm=0 now
+    # Out-variable for callers that must distinguish "suppressed by the
+    # debounce" from "sent" — those are different facts and a caller that
+    # cannot tell them apart reports notices that were never raised. Reset
+    # per call, deliberately: this is a shell global, so a caller in a loop
+    # would otherwise read the PREVIOUS iteration verdict. Never a return
+    # code, for the reason _emit_fleet_signal documents at length — callers
+    # here run `set -euo pipefail` and call this unguarded, so a non-zero
+    # would abort the watchdog that detected the condition.
+    _DEBOUNCE_FIRED=0
     if [ ! -f "$marker" ]; then
         # First sighting of the condition always fires, and records NO re-arm —
         # so the first recipient change afterwards is still free.
@@ -2184,6 +2679,7 @@ debounce_notify() {
         fi
     fi
     if [ "$fire" -eq 1 ]; then
+        _DEBOUNCE_FIRED=1
         "$notify_fn" "$message"
         # Written only on fire, deliberately: the marker's MTIME is what
         # marker_age_within reads for the renotify window above, so touching it
@@ -2413,6 +2909,33 @@ sed_i() {
     fi
 }
 
+# --- Portable host facets (shared by fleet-memory-check + the plane probe) ---
+
+# avail_ram_mb — available RAM in MB, cross-platform. One definition (moved
+# from fleet-memory-check.sh so the plane host probe reads the SAME figure
+# a health check does — a second copy would drift the number the operator
+# sees between the two surfaces).
+avail_ram_mb() {
+    if [ -f /proc/meminfo ]; then
+        # MemAvailable is the kernel's own "this much is usable" figure.
+        # Fall back to MemFree if not present (very old kernels). Decide in
+        # END — MemFree precedes MemAvailable in /proc/meminfo, so per-line
+        # printing would emit BOTH numbers concatenated.
+        awk '/^MemAvailable:/ { avail=$2 } /^MemFree:/ { free=$2 }
+             END { v = (avail ? avail : free); printf "%d", v/1024 }' \
+            /proc/meminfo
+    else
+        # macOS: vm_stat reports pages; multiply by page size (usually 4096).
+        local page_size
+        page_size=$(pagesize 2>/dev/null || sysctl -n hw.pagesize 2>/dev/null || echo 4096)
+        vm_stat | awk -v ps="$page_size" '
+            /Pages free/               { free = $3+0 }
+            /Pages inactive/           { inactive = $3+0 }
+            /Pages speculative/        { spec = $3+0 }
+            END { printf "%d", (free + inactive + spec) * ps / 1048576 }'
+    fi
+}
+
 # --- Portable df -------------------------------------------------------------
 
 df_pcent() {
@@ -2479,7 +3002,7 @@ resolve_bots_dir() {
 }
 
 # fleet_runtime_dir
-# Directory for fleet-scoped runtime state (report-back.jsonl, workstreams.json):
+# Directory for fleet-scoped runtime state (the brief cursors, the workstreams lock):
 # overlay local/<fleet>/runtime, else root runtime/fleet. The bash twin of
 # Paths.fleet_state — the one home for this overlay-vs-root rule.
 # Usage: DIR=$(fleet_runtime_dir [fleet-name])
@@ -2566,20 +3089,6 @@ _env_tier_row() {
 # consumer wants when it must report on the ones that are NOT there.
 env_tier_present_files() {
     env_tier_rows "$@" | awk -F'\t' '$3 == "present" { print $2 }'
-}
-
-# dispatch_ledger_path
-# The manager-written dispatch ledger, on stdout. Host-global (one file per
-# CLAUDLOBBY_ROOT), unlike the per-fleet report ledger fleet_runtime_dir locates.
-# One home because the writer (dispatch-task.sh) and both readers (fleet-pulse's
-# watchdog, report-back's open-dispatch resolver) must agree byte-for-byte: a
-# resolver reading a different file than the watchdog would re-resolve rows the
-# watchdog still considers open. Self-locating fallback so a caller with no
-# CLAUDLOBBY_ROOT exported still resolves the install it was invoked from.
-dispatch_ledger_path() {
-    local root="${CLAUDLOBBY_ROOT:-}"
-    [ -n "$root" ] || root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    printf '%s' "$root/state/dispatch-log.jsonl"
 }
 
 # host_bots_dirs
@@ -2889,6 +3398,137 @@ boot_start_class() {
     printf '%s\t%s\n' "$cls" "$ts"
 }
 
+# ── Boot facts: the doors a boot measurement reads ──────────────────────────
+# Promoted here from selfstart-snapshot.sh (#1265), where both were private.
+# That script was the only reader; the post-boot recorder is the second, and a
+# private copy of a boot fact is exactly how a fleet-wide predicate forks —
+# the rule declared_bots_strict and boot_start_class are already here for.
+#
+# The rung reader matters most: it decides when a bot was DUE, and two answers
+# to that question would let the recorder and the snapshot describe the same
+# boot differently with nothing flagging the disagreement.
+
+# resolve_boot_epoch — this host boot instant, epoch seconds. rc 1 if nothing
+# answers. Override with CLAUDLOBBY_BOOT_EPOCH (test seam).
+#
+# GOTCHA (#1043): never `date -u -d "$(uptime -s)"`. uptime -s prints LOCAL
+# time; -u makes date re-read that local string AS UTC, landing one offset off —
+# silently wrong rather than obviously wrong. Parse local -> epoch first, then
+# format FROM the epoch with -u.
+resolve_boot_epoch() {
+    if [ -n "${CLAUDLOBBY_BOOT_EPOCH:-}" ]; then
+        printf '%s\n' "$CLAUDLOBBY_BOOT_EPOCH"; return 0
+    fi
+    local s e
+    s="$(uptime -s 2>/dev/null)"
+    if [ -n "$s" ]; then
+        e="$(date -d "$s" +%s 2>/dev/null)"
+        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
+    fi
+    # macOS has no `uptime -s`; kern.boottime prints  { sec = 1786..., usec = ... }
+    s="$(sysctl -n kern.boottime 2>/dev/null)"
+    if [ -n "$s" ]; then
+        e="$(printf '%s\n' "$s" | sed -n 's/.*sec *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
+        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
+    fi
+    # Linux without uptime(1): /proc/uptime is monotonic seconds since boot.
+    if [ -r /proc/uptime ]; then
+        local up now
+        up="$(cut -d. -f1 < /proc/uptime 2>/dev/null)"
+        now="$(date +%s 2>/dev/null)"
+        if [ -n "$up" ] && [ -n "$now" ]; then printf '%s\n' "$((now - up))"; return 0; fi
+    fi
+    return 1
+}
+
+# boot_rung_for <bot_dir> — the boot-ladder rung this bot waits on, seconds.
+#
+# A bot cannot have self-started before systemd has launched it, and the boot
+# ladder means most of them have not for the first minute. Each bot waits on an
+# `ExecStartPre=/bin/sleep N` rung composed into its own unit (3s stagger,
+# host-global, so a 21-bot host runs rungs 0..60). Read the rung rather than
+# assume one: the stagger is a composer constant that will move, and hardcoding
+# it here would silently decay.
+#
+# Anchored to start-of-line because the composed unit carries an explanatory
+# COMMENT mentioning ExecStartPre, which an unanchored match would read as the
+# directive. Returns -1 when no rung can be read (no unit, or a launchd plist,
+# which staggers elsewhere) — never 0, because "no gate" and "gate at zero" must
+# not be the same answer: an unreadable rung has to be reported as unknown
+# rather than quietly asserting the bot was due.
+boot_rung_for() {
+    local d="$1" u r
+    for u in "$d"/*.service; do
+        [ -f "$u" ] || continue
+        r="$(grep -E '^[[:space:]]*ExecStartPre=.*sleep[[:space:]]+[0-9]+' "$u" 2>/dev/null \
+             | sed -n 's/.*sleep[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -1)"
+        if [ -n "$r" ]; then printf '%s\n' "$r"; return 0; fi
+    done
+    printf '%s\n' "-1"
+}
+
+# inject_stamp <bot_dir> <kind> <state> [rc] [begin_epoch] -> prints the epoch
+# Gated by BOOT_CAPTURE_ENABLED=1 (per fleet); see the gate below for why.
+# Record the instant start-bot.sh actually injects a keystroke payload into a
+# pane (#1265 blocker 2). The service rung is NOT a proxy for it: measured on
+# the 2026-09-07 boot every rung fired to the second off basic.target while the
+# session appeared 36-168s later, so every bit of the variance sits downstream
+# of ExecStart and none of it was recorded anywhere.
+#
+# A FILE, and deliberately not a plane event. This runs inside the boot storm
+# being measured; a shim spawn per send would perturb the measurement it exists
+# to take. boot-capture.sh reads the file and does the emitting, off the hot
+# path.
+#
+# Written TWICE per send — `sending` before the call, `done` after — so a send
+# that never returns leaves `state=sending` on disk rather than leaving nothing.
+# A hung injection is the failure this issue is about, and it must not be the
+# one case that records silence. start-bot.sh runs under `set -e`, so a failing
+# send exits the script and the `sending` stamp is what survives; that is the
+# intended record and no caller needs to catch the status to get it.
+#
+# Carries the boot epoch it belongs to. Like data/.spawn, the file is
+# overwritten on every start, so a keepalive restart replaces a boot stamp with
+# a plausible one describing a different event. Without this field the two are
+# indistinguishable and the later one reads as authoritative.
+inject_stamp() {
+    local bot_dir="$1" kind="$2" state="$3" rc="${4:-}" begin="${5:-}"
+    local now boot="" dur="-"
+    now="$(date +%s 2>/dev/null)" || return 0
+    # The epoch is printed unconditionally: the caller pairs `sending` with
+    # `done` using it, and a gate that changed the RETURN shape would make the
+    # call sites branch on arming. Only the WRITE is gated.
+    #
+    # `|| true` because start-bot.sh runs under `set -euo pipefail` and reaches
+    # this through `_inject_t0="$(inject_stamp ...)"`: an unguarded failure here
+    # propagates out of the command substitution and ABORTS THE BOT BOOT. Every
+    # other statement in this function is already fail-open; this was the one
+    # asymmetry, and a stamp must never be able to cost a boot (#1496 review).
+    printf '%s\n' "$now" || true
+    # OPT-IN, per fleet (BOOT_CAPTURE_ENABLED=1 in fleet.yaml `env:`). Not
+    # caution about the write — it is a 60-byte file — but delivery: lib/ is
+    # read on demand per use, so a root pull puts this on every bot on its next
+    # start with no restart gate and no canary window. The flag is the only
+    # place a rollout can be staged one fleet at a time.
+    [ "${BOOT_CAPTURE_ENABLED:-0}" = "1" ] || return 0
+    [ -n "$bot_dir" ] && [ -d "$bot_dir" ] || return 0
+    boot="$(resolve_boot_epoch 2>/dev/null)" || boot=""
+    [ -n "$begin" ] && dur=$(( now - begin ))
+    mkdir -p "$bot_dir/data" 2>/dev/null || true
+    printf 'state=%s kind=%s at=%s epoch=%s boot=%s rc=%s dur=%s\n' \
+        "$state" "$kind" "$(ts_iso)" "$now" "${boot:--}" "${rc:--}" "$dur" \
+        > "$bot_dir/data/.inject" 2>/dev/null || true
+    # Fail-open made STRUCTURAL rather than incidental. Today every exit path
+    # already returns 0, but only because of statement ORDER: the
+    # `[ -n "$begin" ] && dur=...` above returns 1 whenever begin is empty,
+    # which is every `sending` call, and it is harmless solely because two
+    # statements follow it. Reorder them and this function starts returning 1
+    # into `_inject_t0="$(inject_stamp ...)"` under start-bot.sh's `set -e`.
+    # A stamp must never be able to cost a boot, so say so once, here, instead
+    # of depending on which line happens to be last.
+    return 0
+}
+
 # fleet_service_prefix <fleet.yaml-path>
 # Emit the fleet's service_prefix (composer default "claudlobby" when unset).
 # Mirrors claudlobby's documented schema — `service_prefix:` at 2-space indent
@@ -3168,13 +3808,37 @@ repo_newest_tag() {
 # stalled condition stays quiet; a worsening one speaks up.
 #
 # Requires BOTS_DIR and STATE_DIR in the caller's scope.
+#
+# Sets _CURRENCY_OUTCOME to the verdict of THIS call: `delivered`,
+# `undelivered` (raised, but the channel rejected it) or `suppressed` (the
+# debounce fired nothing at all). Three values rather than a boolean because
+# collapsing any two of them re-creates the bug this seam exists to close: a
+# caller that logs "raised" for all three cannot distinguish a healthy fleet
+# from a dead Telegram token, and the log is the artifact a human audits.
+#
+# BOTH globals are reset before the call. _ALERT_DELIVERED is set inside
+# _emit_fleet_signal and _DEBOUNCE_FIRED inside debounce_notify, so both
+# survive across a caller loop; read without a reset, the second repo in a
+# sweep inherits the first repo verdict. Measured shape, not a hypothetical:
+# notify-behind sweeps every framework checkout in one process.
 notify_currency() {
     local name="${1:?notify_currency: <repo-name> required}"
     local etype="${2:?notify_currency: <event_type> required}"
     local distinct="${3-}" message="${4:?notify_currency: <message> required}"
     _nc_emit() { emit_fleet_notice "$BOTS_DIR" "$etype" "$1"; }
+    _CURRENCY_OUTCOME=suppressed
+    _ALERT_DELIVERED=0
+    _DEBOUNCE_FIRED=0
     debounce_notify "$STATE_DIR" "$name" "$etype" _nc_emit \
         "$message" "$distinct" "${CURRENCY_RENOTIFY_S:-604800}"
+    if [ "${_DEBOUNCE_FIRED:-0}" -eq 1 ]; then
+        if [ "${_ALERT_DELIVERED:-0}" -eq 1 ]; then
+            _CURRENCY_OUTCOME=delivered
+        else
+            _CURRENCY_OUTCOME=undelivered
+        fi
+    fi
+    return 0
 }
 
 # currency_clear <repo-name> <event_type>
@@ -3344,8 +4008,105 @@ EOF
 # job — composed-but-dormant, opt-in via fleet.yaml). One predicate shared by
 # setup-fleet and reconcile-fleet so enrollment and audit can never drift.
 # Missing manifest → nothing is dormant; -x keeps comment lines inert.
+# FLEET jobs only since the chunk-N fold: an unarmed HOST job composes no unit
+# at all, so there is nothing to list and nothing to skip (walk_back_
+# uncomposed_host_units is the other half, for units already installed).
 unit_is_dormant() {
     grep -qxF "${2:?unit basename required}" "${1:?timers dir required}/DORMANT" 2>/dev/null
+}
+
+# switch_is_on <VAR> <door-name> [<consequence>]
+# THE opt-out gate every self-gating door calls (chunk N fold, F6). Polarity
+# lives here and nowhere else: unset -- or set to anything that is not an
+# exact 0 -- is ON (rc 0); an exact 0 is OFF, prints the door's no-op line on
+# stderr and returns 1.
+#
+# One definition because the four launchers had four copies of the same
+# comparison, and a copy is how a fleet ends up with a flag that means one
+# thing in bash and another in the table an operator reads. It is the shell
+# twin of env_tiers.resolves_to: an EMPTY assignment wins at its tier (#1213)
+# but is not a 0, so `export FLAG=` leaves the door on.
+#
+# The no-op is LOUD by construction rather than by each caller remembering:
+# a silent skip is indistinguishable from a broken timer, which is the whole
+# point of the ruling that puts these doors on by default. <consequence> is
+# the one clause that says what will not happen while it is off.
+switch_is_on() {
+    local var="${1:?switch variable required}" door="${2:?door name required}"
+    local consequence="${3:-}" value
+    eval "value=\${$var-}"
+    [ "$value" = "0" ] || return 0
+    printf '%s: OFF here (%s=0)%s -- unset it, or set 1, to restore the default\n' \
+        "$door" "$var" "${consequence:+ -- $consequence}" >&2
+    return 1
+}
+
+# walk_back_uncomposed_host_units <composed-timers-dir> [--dry-run]
+# Dormancy that WALKS BACK (chunk N fold, F4). Compose-time dormancy stops a
+# host job from being enrolled in future; it cannot reach a unit a previous
+# release already installed. So every INSTALLED claudlobby-* unit with no
+# composed counterpart is disabled and removed here, saying so -- the host
+# that ran the installer before this chunk keeps `claudlobby-update-siblings`
+# enrolled and running while the switch table calls it off, which is the
+# opacity the whole rule exists to end.
+#
+# What "should not be enrolled" IS "installed and no longer composed", so no
+# manifest is read: a manifest describing units that were not composed is a
+# second mechanism that can only disagree with the first.
+#
+# REFUSES on an empty composed dir. A generate that emitted nothing is an
+# unreachable instrument, not evidence that every host job is dormant, and
+# acting on it would tear down a healthy host (source_state's rule: absence of
+# evidence is not evidence of absence).
+walk_back_uncomposed_host_units() {
+    local dir="${1:?composed timers dir required}" dry="${2:-}"
+    local installed_dir f base composed=0 n=0
+    [ -n "${_OS:-}" ] || detect_os
+
+    for f in "$dir"/claudlobby-*.timer "$dir"/claudlobby-*.service "$dir"/claudlobby-*.plist; do
+        if [ -e "$f" ]; then composed=1; break; fi
+    done
+    if [ "$composed" != 1 ]; then
+        printf 'walk-back: no composed host units in %s -- refusing to walk anything back (an empty compose is not evidence of dormancy)\n' "$dir" >&2
+        return 0
+    fi
+
+    _wb_still_composed() {  # <base> -- any composed unit file for it
+        [ -e "$dir/$1.timer" ] || [ -e "$dir/$1.service" ] || [ -e "$dir/$1.plist" ]
+    }
+
+    if [ "${_OS:-}" = "Linux" ]; then
+        installed_dir="$HOME/.config/systemd/user"
+        for f in "$installed_dir"/claudlobby-*.timer "$installed_dir"/claudlobby-*.service; do
+            [ -e "$f" ] || continue
+            base="$(basename "$f")"; base="${base%.*}"
+            _wb_still_composed "$base" && continue
+            printf 'walk-back: %s is installed but no longer composed (opt-in or removed) -- disabling\n' "$base"
+            if [ "$dry" = "--dry-run" ]; then continue; fi
+            systemctl --user disable --now "$base.timer" >/dev/null 2>&1 || true
+            systemctl --user disable --now "$base.service" >/dev/null 2>&1 || true
+            rm -f "$installed_dir/$base.timer" "$installed_dir/$base.service"
+            n=$((n + 1))
+        done
+        if [ "$n" -gt 0 ] && [ "$dry" != "--dry-run" ]; then
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+        fi
+    else
+        installed_dir="$HOME/Library/LaunchAgents"
+        for f in "$installed_dir"/claudlobby-*.plist; do
+            [ -e "$f" ] || continue
+            base="$(basename "$f" .plist)"
+            _wb_still_composed "$base" && continue
+            printf 'walk-back: %s is installed but no longer composed (opt-in or removed) -- unloading\n' "$base"
+            if [ "$dry" = "--dry-run" ]; then continue; fi
+            launchctl bootout "gui/$(id -u)/$base" >/dev/null 2>&1 \
+                || launchctl unload -w "$f" >/dev/null 2>&1 || true
+            rm -f "$f"
+            n=$((n + 1))
+        done
+    fi
+    unset -f _wb_still_composed
+    return 0
 }
 
 # resolve_timer_unit <caller-name> <timer-name> [<fleet-name>]
@@ -3406,9 +4167,9 @@ extract_bot_conf_var() {
 # --- Script error events ------------------------------------------------------
 
 # emit_script_error <bot_dir> <script_name> <exit_code> <message>
-# Write a script_error event to the bot's JSONL event log.
+# Land a script_error event on the plane, attributed to the bot.
 # For scripts that run outside a bot context, pass "" for bot_dir and
-# the event is written to $CLAUDLOBBY_ROOT/state/events/.
+# the event is attributed to the fleet (or the host sentinel).
 emit_script_error() {
     local bot_dir="$1" script_name="$2" exit_code="$3" message="$4"
     local data
@@ -3425,7 +4186,7 @@ emit_script_error() {
 # _emit_fleet_signal <bots_dir> <event_type> <reason> <ev_source> <WORD>
 # Shared body for emit_failure_alert / emit_fleet_notice. It
 #   1. emits a fleet-observability event {type:<event_type>, source:<ev_source>,
-#      data.reason} to $CLAUDLOBBY_ROOT/state/events/fleet-<date>.jsonl, and
+#      data.reason} on the plane, anchored on the fleet, and
 #   2. signals the fleet manager via a tmux nudge AND the Telegram channel
 #      (chat id resolved like fleet-pulse: env override, else the first bot that
 #      declares TELEGRAM_GROUP_CHAT_ID — falling back across every fleet on the
@@ -3854,12 +4615,33 @@ seed_claude_auth_and_trust() {
 
 # --- Fleet event-ledger retention -------------------------------------------
 
-# reap_event_files <events_dir> <name_glob> <reap_days> — delete JSONL event
-# files older than <reap_days>. The caller resolves <reap_days> in its own
-# context (process env, bot.conf, or a script-specific override) and passes it
-# in; only the find shape lives here. No-op when <events_dir> is absent.
-reap_event_files() {
-    local events_dir="$1" name_glob="$2" reap_days="$3"
-    [ -d "$events_dir" ] || return 0
-    find "$events_dir" -name "$name_glob" -type f -mtime +"$reap_days" -delete 2>/dev/null || true
+# sha256_hex32 <string> -- the first 32 hex chars of sha256 over the exact bytes
+# (no trailing newline): the dispatch door's `dispatch-log:sha:` content key
+# (plane.ids.derive_hex) for an id-less dispatch, derived from the row it would
+# once have written, so the ref is deterministic from the dispatch itself.
+sha256_hex32() {
+    if command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$1" | shasum -a 256 | cut -c1-32
+    else
+        printf '%s' "$1" | sha256sum | cut -c1-32
+    fi
+}
+
+# sha256_prefixed <string> -- "sha256:" + the FULL 64 hex chars of sha256 over
+# the exact bytes (no trailing newline), the format contracts.cap_body and the
+# receiver hook (plane-dispatch-in.sh) both use, so the delivery JOIN compares
+# the sender's wire proof and the receiver's arrival proof byte-for-byte (chunk
+# P fold F1). Empty stdout + nonzero if no sha tool resolves; the caller then
+# records the fact without a wire proof and the JOIN stays at unconfirmed.
+sha256_prefixed() {
+    local _h
+    if command -v shasum >/dev/null 2>&1; then
+        _h=$(printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1) || return 1
+    elif command -v sha256sum >/dev/null 2>&1; then
+        _h=$(printf '%s' "$1" | sha256sum | cut -d' ' -f1) || return 1
+    else
+        return 1
+    fi
+    [ -n "$_h" ] || return 1
+    printf 'sha256:%s' "$_h"
 }

@@ -1,16 +1,17 @@
 #!/bin/bash
-# Manager dispatch wrapper — record the task to the dispatch ledger, then send.
+# Manager dispatch wrapper — record the dispatch on the plane, then send.
 # Usage: dispatch-task.sh [flags] <worker-session> <task...>
 #
 # Flags:
-#   --deadline-min N   Override default deadline (minutes)
+#   --deadline-min N   Override default deadline (minutes). 0 = open-ended:
+#                      no expected_by is minted, so the row never goes overdue.
 #   --repo NAME        Target repo (adds repo:<NAME> to envelope)
 #   --priority LEVEL   Priority level (adds priority:<LEVEL> to envelope)
 #   --ref URL          Reference URL (adds ref:<URL> to envelope)
-#   --workstream ID    Workstream this task advances (envelope + ledger)
+#   --workstream ID    Workstream this task advances (envelope + plane work item)
 #   --supersedes ID    This dispatch REPLACES an earlier one; the named task id is
 #                      retired rather than left to age out and page. Opt-in, and
-#                      inert when omitted — see the ledger-write comment below.
+#                      inert when omitted — see the record comment below.
 #                      When omitted and the bot already has an open row that
 #                      references the same issue, a note names the id to pass
 #                      (#1032). It never blocks and never guesses.
@@ -23,7 +24,7 @@
 #                      (default task). Implies --botcommand. ONLY `task` mints.
 #
 # `task` envelope sends MINT a task id (mint_task_id, lib-common), record it in
-# the ledger row AND transmit it as `task:<id>` — join semantics live in
+# the dispatch row AND transmit it as `task:<id>` — join semantics live in
 # dispatch-overdue.py (overdue_all docstring). Raw-text sends (no flags) stay
 # id-less: an id recorded but never transmitted would guarantee a
 # false-positive overdue, since the worker cannot echo what it never saw.
@@ -45,15 +46,17 @@
 # format and the tracking used to be the same decision — `--botcommand` alone
 # minted — which meant a manager who wanted the fleet message format for a peer
 # note got a permanently open row as a side effect. They are separate now.
-# Every send still writes a ledger row; only `task` writes one with an id.
+# Every send still records a communication on the plane; only `task` records a
+# work item + assignment with an id.
 #
-# Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by,
-# claudron_hits,supersedes,open_at_dispatch} to state/dispatch-log.jsonl (self-rotated via
-# rotate_jsonl_by_ts) so the fleet-pulse watchdog can flag `overdue_dispatch`
-# if no terminal [BOTREPORT] (completed|failed|blocked) arrives by expected_by.
+# The plane's assignment (its expected_by) is what the fleet-pulse watchdog
+# reads to flag `overdue_dispatch` if no terminal [BOTREPORT]
+# (completed|failed|blocked) arrives by expected_by.
 # Manager identity is this bot's $BOT_ID; the deadline defaults to
-# $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can be
-# overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
+# $OBSERVABILITY_DISPATCH_DEADLINE (composed into EVERY bot.conf since chunk
+# M-A, #1481 -- 86400s / 24h when the fleet declares no `dispatch_deadline`)
+# and can be overridden with --deadline-min. Either door takes 0 to mean
+# open-ended. Sending itself reuses lib/dispatch.sh.
 #
 # Claudron query-before preflight (plan P1e, fork F7) — env-knobbed, off by
 # default:
@@ -62,7 +65,7 @@
 # When enabled and the claudron CLI + CLAUDRON_VAULT_PATH resolve, the task
 # text gains a single-line "[fleet memory: <title> (<abs path>); ...]" prefix
 # of lookup pointers (titles + paths only, never note bodies — the worker
-# reads the files itself). claudron_hits in the ledger row records how many
+# reads the files itself). claudron_hits in the dispatch row records how many
 # pointers were injected ("" = preflight did not run, "0" = ran, no hits).
 set -euo pipefail
 
@@ -152,7 +155,7 @@ fi
 
 # --- Claudron query-before preflight (plan P1e, fork F7) --------------------
 # Prepends compact fleet-memory pointers to the task before the envelope is
-# built, so both enveloped and raw-text dispatches carry them and the ledger
+# built, so both enveloped and raw-text dispatches carry them and the dispatch row
 # records the enriched task. The wedge must never block a dispatch: any
 # missing prerequisite, lookup failure, or unparseable output degrades to a
 # plain send. CLAUDRON_VAULT_PATH is the canonical vault address and the CLI
@@ -305,9 +308,9 @@ _claudron_query_before() {
     # sanitized to printable-by-construction before use: pipes become "/"
     # (the [BOTCOMMAND] envelope is pipe-delimited) and runs of whitespace OR
     # control bytes collapse to single spaces — an embedded newline would
-    # split the single-line ledger row into invalid JSON that line-oriented
+    # split the single-line dispatch row into invalid JSON that line-oriented
     # rotation then truncates, and a non-whitespace control (a YAML "\e" in a
-    # note title reaches here as a raw ESC) would ledger bytes the worker
+    # note title reaches here as a raw ESC) would record bytes the worker
     # never receives once the tmux-side sanitizer strips them.
     # Any unexpected JSON shape exits 1 into the return-0 net.
     parsed=$(printf '%s' "$raw" | python3 -c '
@@ -404,16 +407,47 @@ else
     DISPATCH_MSG="$TASK"
 fi
 
+# The deadline, in SECONDS (--deadline-min is the one door in minutes). The
+# composer writes OBSERVABILITY_DISPATCH_DEADLINE into every bot.conf since
+# chunk M-A (#1481) -- 86400 when the fleet declares none -- so this literal
+# is only ever reached by a bot.conf composed before that, or by a hand run
+# with no bot.conf. It matches the composed default rather than the old 1800
+# so the two can never disagree about the same fact.
+#
+# ZERO DISABLES, on either door: an open-ended dispatch mints no expected_by
+# at all, the same `null` a control dispatch carries. Not "now + 0", which
+# would be overdue in the second it was sent -- the loudest possible reading
+# of "no deadline please".
+#
+# A NON-INTEGER IS REFUSED HERE, LOUDLY (the M-A fold, F8). The guard used to
+# leave one alone "so the arithmetic below discloses it" -- and the arithmetic
+# does not: `$(( abc * 60 ))` under `set -u` is an unbound-variable fault
+# inside the ERR trap, which exited 0 having sent nothing and recorded
+# nothing. A typo on either door (`--deadline-min abc`, or a bot.conf carrying
+# `OBSERVABILITY_DISPATCH_DEADLINE=abc`) silently dropped the whole dispatch.
+# The glob is `*[!0-9]*` and NOT `*[!0-9-]*`: allowing `-` let `12-34` through
+# the class test and into `[ "$X" -le 0 ]`, which is itself an error, and a
+# NEGATIVE deadline is not a thing anyway -- `0` is the door for open-ended.
+_reject_non_integer() {
+    case "$2" in
+        ''|*[!0-9]*)
+            echo "dispatch-task: $1 must be a non-negative integer, got '$2' (0 = open-ended)" >&2
+            exit 1 ;;
+    esac
+}
 if [ -n "$DEADLINE_MIN" ]; then
+    _reject_non_integer --deadline-min "$DEADLINE_MIN"
     DEADLINE_S=$(( DEADLINE_MIN * 60 ))
 else
-    DEADLINE_S="${OBSERVABILITY_DISPATCH_DEADLINE:-1800}"
+    DEADLINE_S="${OBSERVABILITY_DISPATCH_DEADLINE:-86400}"
+    _reject_non_integer OBSERVABILITY_DISPATCH_DEADLINE "$DEADLINE_S"
+fi
+if [ "$DEADLINE_S" -le 0 ]; then
+    EXPECTED_BY_JSON="null"
 fi
 
 MANAGER="${BOT_ID:-${BOT_NAME:-unknown}}"
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
-LEDGER="$(dispatch_ledger_path)"
-mkdir -p "$(dirname "$LEDGER")"
 
 now_epoch=$(date +%s)
 expected_by=$(( now_epoch + DEADLINE_S ))
@@ -423,58 +457,41 @@ expected_by=$(( now_epoch + DEADLINE_S ))
 [ -n "$EXPECTED_BY_JSON" ] || EXPECTED_BY_JSON="$expected_by"
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# --- undeclared-supersession visibility (#1032) -------------------------------
-# `--supersedes` retired ZERO rows in a week here because nobody passed it, while
-# 25 of 43 mispaired rows were re-dispatch shaped — exactly its case. A usage gap
-# closed by intending to remember is not closed, so the tool says it at the only
-# moment the intent exists.
-#
-# TWO TIERS, and the split is a measurement not a preference. 51% of id'd
-# dispatches go to a bot that already holds an open row, so speaking on that would
-# fire on half of all traffic — the same dead-signal defect #1032 is about. Only
-# the shared-reference case (11%) is said out loud; the count is recorded.
-#
-# Never blocks and never rewrites intent: queueing two tasks on one bot is
-# legitimate, and the tool cannot tell a queue from a replacement. Skipped
-# entirely when the caller already declared, and fail-open at every step — a
-# dispatch must never fail because a hint helper was unavailable.
-OPEN_AT_DISPATCH=0
-if [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
-    _dt_reports="$(fleet_runtime_dir)/report-back.jsonl"
-    _dt_hint=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" \
-        --bot "$WORKER_SESSION" --dispatch-log "$LEDGER" \
-        --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || true)
-    OPEN_AT_DISPATCH=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" --count-only \
-        --bot "$WORKER_SESSION" --dispatch-log "$LEDGER" \
-        --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || echo 0)
-    case "$OPEN_AT_DISPATCH" in ''|*[!0-9]*) OPEN_AT_DISPATCH=0 ;; esac
-    # Only the loud tier is printed, and only when the caller has NOT declared.
-    if [ -z "$DISPATCH_SUPERSEDES" ] && [ -n "$_dt_hint" ]; then
-        printf '%s\n' "$_dt_hint" >&2
-    fi
-fi
-
 # Escape backslash + double-quote for valid JSON (no jq dependency).
 safe_task=$(json_escape "$TASK")
 
-# --- observable-plane dual-write (PR-B T4; phase-2 plan §3/§6b) ----------------
-# DORMANT unless the fleet arms PLANE_EMIT_ENABLED=1 (SESSION_DIGEST_ENABLED
-# precedent — a root pull must never activate door behavior, and an unarmed
-# fleet pays zero latency). PLANE_EMIT_DISABLED=1 (harness override) wins.
-# The legacy ledger stays load-bearing; every plane failure is disclosed on
-# stderr and NEVER blocks the dispatch. Construct ids are minted HERE and
-# recorded in the ledger row so report-back can join without a db read.
+# --- the plane record (PR-B T4; phase-2 plan §3/§6b; F18 closure R1) ----------
+# The plane is the ONLY record of a dispatch: PLANE_EMIT_DISABLED=1 (the harness
+# exemption) is the one thing that silences it. Every plane failure is disclosed
+# on stderr and NEVER blocks the dispatch — the send is the mission — but an
+# unrecorded dispatch is said LOUDLY, because there is no other record.
+# Construct ids are minted HERE; report-back joins through the plane's own
+# source_ref (dispatch-log:<task_id>).
 PLANE_ARMED=0
 if plane_armed dispatch-task --require-fleet; then
     PLANE_ARMED=1
 fi
 PLANE_MSG_ID="" PLANE_WI_ID="" PLANE_ASG_ID=""
+# --supersedes → the plane (cutover chunk 1): look the superseded dispatch up
+# BY ITS LEGACY TASK ID (source_ref), set supersedes_msg_id on this dispatch's
+# communication, and emit a terminal `superseded` task event on the retired
+# assignment (successor_id = this assignment). Until now --supersedes was
+# JSONL-only (14 of 189 closed rows historically), so the plane's "open" set
+# over-reported. Not found in the plane → no wiring, disclosed.
+SUP_WI="" SUP_ASG="" SUP_MSG="" sup_frag="" sup_ev=""
 if [ "$PLANE_ARMED" = "1" ]; then
+    # The ids are minted for EVERY armed dispatch -- the communication needs its
+    # msg id, and --supersedes needs an assignment id for successor_id whatever
+    # the type. WHICH of them the emission actually USES is decided at emit time
+    # (#1491): a TRACKED shape (task; raw-text inherits type=task) lands the
+    # work_item + assignment, a control type (query / cancel / compact / restart)
+    # records the communication ALONE. Chunk 6a once minted the triple for every
+    # dispatch id-less ones included, which left a `query` an open assignment no
+    # report could ever close (38 in 14 days on one host) that also blanked the
+    # resolver head (#1418); the gate now lives beside the emit.
     PLANE_MSG_ID="$(plane_mint_id msg)"
-    if [ -n "$TASK_ID" ]; then
-        PLANE_WI_ID="$(plane_mint_id wi)"
-        PLANE_ASG_ID="$(plane_mint_id asg)"
-    fi
+    PLANE_WI_ID="$(plane_mint_id wi)"
+    PLANE_ASG_ID="$(plane_mint_id asg)"
 fi
 
 # Recipient context, fail-open: the alias needs the RECIPIENT fleet (§6b #4 —
@@ -520,6 +537,40 @@ _plane_peer_context() {
 }
 [ "$PLANE_ARMED" = "1" ] && { _plane_peer_context "$WORKER_SESSION" || true; }
 
+# --- undeclared-supersession visibility (#1032) -------------------------------
+# `--supersedes` retired ZERO rows in a week here because nobody passed it, while
+# 25 of 43 mispaired rows were re-dispatch shaped — exactly its case. A usage gap
+# closed by intending to remember is not closed, so the tool says it at the only
+# moment the intent exists.
+#
+# TWO TIERS, and the split is a measurement not a preference. 51% of id'd
+# dispatches go to a bot that already holds an open row, so speaking on that would
+# fire on half of all traffic — the same dead-signal defect #1032 is about. Only
+# the shared-reference case (11%) is said out loud; the count is recorded.
+#
+# Never blocks and never rewrites intent: queueing two tasks on one bot is
+# legitimate, and the tool cannot tell a queue from a replacement. Skipped
+# entirely when the caller already declared, and fail-open at every step — a
+# dispatch must never fail because a hint helper was unavailable.
+OPEN_AT_DISPATCH=0
+if [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
+    # ONE run answers both tiers: line 1 is the open-row count (the quiet
+    # tier), the rest the note (the loud tier). Asked AFTER the peer context
+    # and for the WORKER's fleet: the sender's roster does not hold a
+    # cross-fleet worker (44.6% of dispatches), so the hint read 0 open
+    # there and could never speak (the structural lens, F18 R2a).
+    _dt_out=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" \
+        --bot "$WORKER_SESSION" --task "$TASK" --ref "$DISPATCH_REF" \
+        --fleet "${PLANE_PEER_FLEET:-${FLEET_NAME:-}}" 2>/dev/null || true)
+    OPEN_AT_DISPATCH=$(printf '%s\n' "$_dt_out" | head -n 1)
+    case "$OPEN_AT_DISPATCH" in ''|*[!0-9]*) OPEN_AT_DISPATCH=0 ;; esac
+    _dt_hint=$(printf '%s\n' "$_dt_out" | tail -n +2)
+    # Only the loud tier is printed, and only when the caller has NOT declared.
+    if [ -z "$DISPATCH_SUPERSEDES" ] && [ -n "$_dt_hint" ]; then
+        printf '%s\n' "$_dt_hint" >&2
+    fi
+fi
+
 _plane_emit_intent() {
     # Intent BEFORE transport (F9): the communication (and for id'd tasks the
     # work_item + assignment) exists before the first send attempt.
@@ -556,94 +607,147 @@ _plane_emit_intent() {
     # Fragments built via if/else, never inline `$([ ... ] && ...)` — a false
     # test inside a command substitution returns rc 1 into the assignment and
     # errexit kills the door.
+    # The dispatch ref: the legacy task id, or the importer content key of the
+    # dispatch row for an id-less dispatch (cutover chunk 6a) -- one ref for the
+    # live door and any later import, so they classify as one fact.
+    local dispatch_ref
+    if [ -n "$TASK_ID" ]; then
+        dispatch_ref="dispatch-log:$TASK_ID"
+    else
+        local _key
+        _key=$(sha256_hex32 "$DISPATCH_RECORD" 2>/dev/null || true)
+        if [ -z "$_key" ]; then
+            # No sha tool on this host: disclose, and emit the communication only
+            # rather than mint a malformed ref (unreachable on Linux/macOS).
+            echo "dispatch-task: no sha256 tool -- id-less dispatch emitted as a communication only" >&2
+            dispatch_ref=""
+        else
+            dispatch_ref="dispatch-log:sha:$_key"
+        fi
+    fi
     src_ref=""
-    [ -n "$TASK_ID" ] && src_ref="\"source_ref\":\"dispatch-log:$TASK_ID\","
+    [ -n "$dispatch_ref" ] && src_ref="\"source_ref\":\"$dispatch_ref\","
+    if [ -n "$DISPATCH_SUPERSEDES" ] && [ -n "$PLANE_ASG_ID" ]; then
+        # scoped to THIS worker (#518's rule, which the legacy join carried and
+        # the first plane build dropped): a same-named id held by another bot
+        # is never the one this dispatch retires
+        _sup=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
+            --task-id "$DISPATCH_SUPERSEDES" \
+            --assignee "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION" 2>/dev/null || true)
+        if [ -n "$_sup" ]; then
+            SUP_WI=${_sup%% *}; _sup=${_sup#* }; SUP_ASG=${_sup%% *}; SUP_MSG=${_sup##* }
+            [ -n "$SUP_MSG" ] && [ "$SUP_MSG" != "$SUP_ASG" ] && sup_frag="\"supersedes_msg_id\":\"$SUP_MSG\","
+            # source_ref names THIS dispatch (the successor): the supersession is a
+            # fact this row created; the retired row is named by assignment_id.
+            sup_ev="{\"event_type\":\"task\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$SUP_WI\",\"assignment_id\":\"$SUP_ASG\",\"event\":\"superseded\",\"successor_id\":\"$PLANE_ASG_ID\"}}"
+        else
+            echo "dispatch-task: --supersedes $DISPATCH_SUPERSEDES not found in the plane — legacy-only supersession" >&2
+        fi
+    fi
+    # #1491: ONLY a tracked shape lands a work_item + assignment. A control type
+    # (query / cancel / compact / restart) records the COMMUNICATION ALONE --
+    # matching the mint gate above, the legacy ledger, and the dispatch
+    # protocol's own contract (a `query` "mints nothing"). An open assignment for
+    # a note that asks nothing is a row no report can close, and while it is the
+    # worker's newest assignment it BLANKS the resolver head (#1418) and hijacks
+    # the worker's next report. The gate is the TYPE, never the id: a raw-text
+    # send inherits the default type=task, so it keeps its id-less deadline-
+    # bearing triple (the documented bot+time "one report closes all open
+    # dispatches for that bot" path); a missing sha tool leaves no ref to key the
+    # triple on, so a raw-text send degrades to communication-only there too (the
+    # disclosed fallback above). The plane ids stay minted regardless, so
+    # --supersedes on any type still retires its target with successor_id intact.
+    local emit_triple=""
+    if [ "$DISPATCH_TYPE" = "task" ] && [ -n "$dispatch_ref" ]; then
+        emit_triple=1
+    fi
     local link_frag="" ws_frag="" repo_frag="" deadline_frag="" iso_deadline=""
-    if [ -n "$PLANE_WI_ID" ]; then
+    if [ -n "$emit_triple" ]; then
         link_frag="\"work_item_id\":\"$PLANE_WI_ID\",\"assignment_id\":\"$PLANE_ASG_ID\","
     fi
     local comm wi_ev asg_ev
-    comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
-    if [ -n "$TASK_ID" ]; then
-        iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
-        [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
+    comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
+    if [ -n "$emit_triple" ]; then
+        # The plane's deadline MIRRORS the dispatch row's: a control dispatch (query /
+        # cancel / compact / restart) withholds it on both sides, for the reason
+        # written above the null — an id-less row with a deadline goes overdue
+        # and names nothing. The first 6a build stamped it on the plane only, so
+        # the plane read "overdue" on queries the row deliberately kept silent
+        # and the shadow paged on every one of them.
+        if [ "$EXPECTED_BY_JSON" != "null" ]; then
+            iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
+            [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
+        fi
         [ -n "$DISPATCH_WORKSTREAM" ] && ws_frag=",\"workstream_id\":\"$(json_escape "$DISPATCH_WORKSTREAM")\""
         case "$DISPATCH_REPO" in
             */*) repo_frag=",\"repo\":\"$(json_escape "$DISPATCH_REPO")\"" ;;
         esac
-        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}}}"
-        asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
-        printf '{"events":[%s,%s,%s]}' "$wi_ev" "$asg_ev" "$comm" | plane_emit_events dispatch-task
+        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}}}"
+        asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
+        local _batch
+        printf -v _batch '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}"
+        plane_emit_events dispatch-task <<<"$_batch"       # same shell: PLANE_EMIT_LAST_RC reaches the record decision
     else
-        printf '{"events":[%s]}' "$comm" | plane_emit_events dispatch-task
+        # Communication only (a control type, or a raw-text send on a host with
+        # no sha tool). A --supersedes STILL rides here: the note retires its
+        # target even though the note itself is untracked -- the retire is the
+        # point, and the successor id is minted whether or not the note's own
+        # triple is emitted.
+        local _batch
+        printf -v _batch '{"events":[%s%s]}' "$comm" "${sup_ev:+,$sup_ev}"
+        plane_emit_events dispatch-task <<<"$_batch"
     fi
 }
 
 _plane_emit_transmission() {
     # Outcome-typed AFTER the send (§6b #7): a clean send into a BUSY pane is
     # carrier_queued (accepted-not-consumed, not activation); a clean send
-    # into an idle pane is pane_submitted; a miss is failed.
+    # into an idle pane is pane_submitted; a miss is failed. A submission-class
+    # state carries the delivery-JOIN wire proof (fold F1), read back from
+    # PLANE_WIRE_OUT across the dispatch.sh subprocess boundary; _wire_frag emits
+    # it only for pane_submitted / carrier_queued and only when it is present.
     local state="$1"
     printf '{"events":[%s]}' \
-        "$(plane_tx_event dispatch-task "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$WORKER_SESSION" "$state")" \
+        "$(plane_tx_event dispatch-task "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$WORKER_SESSION" "$state" "$(_wire_frag "$state")")" \
         | plane_emit_events dispatch-task
 }
 
-_append_ledger() {
-    # `supersedes` is the one field that records INTENT rather than what happened.
-    # A re-dispatch replaces an earlier task; the older row will never be separately
-    # answered, so it ages out and pages the manager about work that shipped. Nothing
-    # downstream can infer that from the ledger, because the ledger records what was
-    # SENT, never what was MEANT — two dispatches to one bot look identical whether
-    # the second replaces the first or queues behind it. Only the caller knows, and
-    # only at this moment.
-    #
-    # OPT-IN, AND THAT IS THE SAFETY PROPERTY. Omitting the flag reproduces today's
-    # behaviour exactly: the row retires on nothing and the watchdog eventually pages.
-    # So a forgotten flag costs a false page — the status quo — and can never retire a
-    # dispatch someone still owes. The failure mode of forgetting is inert, which is
-    # what makes this safe to default off. Inferring supersession from timing instead
-    # was measured and rejected: over 189 closed rows, 14 were "superseded" by a later
-    # closure and still answered afterwards, 3 of them unambiguously genuine work
-    # answered 6-7h late. Retiring those would have turned a false-page bug into a
-    # silently-dropped-task bug.
-    #
-    # `open_at_dispatch` is the QUIET tier of the #1032 visibility pair: how many
-    # rows this bot already had open when this one was minted. It is recorded
-    # rather than spoken because it is true of 51% of dispatches — see the
-    # two-tier note above. Recording it is what makes the usage gap MEASURABLE:
-    # `open_at_dispatch > 0 AND supersedes == ""` is the population that should
-    # shrink as the declaration habit lands, and without the field there is no
-    # before to compare an after against. Digits by construction (validated to 0
-    # on any non-numeric), so no escaping.
-    #
-    # Schema-uniform rows: task_id/workstream/claudron_hits/supersedes/
-    # open_at_dispatch always emitted (empty = absent, matching the report
-    # ledger's always-emit convention; every consumer treats "" as falsy).
-    # claudron_hits is digits-or-empty by construction (the preflight parser
-    # prints a count), so no escaping.
-    # plane_* fields (PR-B T4): the plane construct ids this dispatch minted,
-    # recorded so report-back can join legacy task id -> plane rows without a
-    # db read. Always emitted, empty when the plane is unarmed — the same
-    # schema-uniform convention as task_id/workstream above; every existing
-    # consumer reads fields by name and treats "" as falsy. Ids are hex
-    # constants by construction, so no escaping.
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID" >> "$LEDGER"
-    rotate_jsonl_by_ts "$LEDGER"
-}
-with_lock "$LEDGER.lock" _append_ledger
-
+# The dispatch row exactly as the retired ledger wrote it, composed ONCE
+# (printf -v: no fork) and kept for its CONTENT KEY alone: an id-less
+# dispatch's plane ref is dispatch-log:sha:<key> of this text (the importer's
+# derivation for an unstamped row), so the ref stayed stable across the F18
+# closure. Nothing writes it anywhere.
+printf -v DISPATCH_RECORD '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID"
 # Plane intent BEFORE transport (F9): a crash between here and the send leaves
-# an intent with no transmission — visible, and exactly what reconciliation
-# exists to surface. (The legacy ledger row above is already down either way.)
+# an intent with no transmission, visible, and exactly what reconciliation
+# exists to surface. An emission the shim could not record is DISCLOSED loudly
+# and the send proceeds: the send is the mission, and there is no other record.
 if [ "$PLANE_ARMED" = "1" ]; then
     _plane_emit_intent || true
+    if [ "${PLANE_EMIT_LAST_RC:-0}" -ne 0 ]; then
+        echo "dispatch-task: the plane did NOT record this dispatch (rc=$PLANE_EMIT_LAST_RC) -- sending anyway; there is no other record" >&2
+    fi
 fi
 
 # Send via the low-level race-safe primitive (re-validates the session).
+# Carry PLANE_MSG_ID ACROSS the dispatch.sh process boundary (chunk P, #1501):
+# bot_tmux_send reads it and appends the `⟦plane:<msg_id>⟧` routing trailer on
+# its own final line, so the receiver's UserPromptSubmit hook can record what
+# actually arrived and the delivery JOIN can prove it. Per-command env so it
+# scopes to THIS send only and never leaks to another bot_tmux_send. Empty
+# (an unarmed plane minted no id) -> no trailer, an untracked send by design.
 send_rc=0
-"$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
+# fold F1: carry a PLANE_WIRE_OUT scratch file across the dispatch.sh subprocess
+# boundary so bot_tmux_send can hand back the wire proof (sha256 + byte length of
+# the exact bytes it put on the wire) for the pane_submitted/carrier_queued row
+# below. Per-command env, armed only when the plane is (an empty value -> no
+# proof written, an untracked send).
+_plane_wire_out=""
+[ "$PLANE_ARMED" = "1" ] && _plane_wire_out=$(safe_mktemp)
+PLANE_MSG_ID="$PLANE_MSG_ID" PLANE_WIRE_OUT="$_plane_wire_out" "$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
+_read_wire_out "$_plane_wire_out"
+[ -n "$_plane_wire_out" ] && rm -f "$_plane_wire_out" 2>/dev/null || true
 
 # Outcome-typed transmission (PR-B T4/§6b #7): clean send into an idle pane =
 # pane_submitted; clean send into a pane the pre-send probe saw BUSY =

@@ -323,9 +323,12 @@ def _seed_assignment(root: Path, *, dispatch_msg, tx_events=()) -> str:
 
 
 def _statuses(root: Path) -> dict:
+    # TASK_STATUS_SQL is (assignment_id, status, terminal_at) since the chunk
+    # L fold (#1479) — the instant now rides the same row as the status; this
+    # ladder asks only about the status.
     from claudlobby.plane.queries import TASK_STATUS_SQL
     conn = connect(db_path(root))
-    out = dict(conn.execute(TASK_STATUS_SQL).fetchall())
+    out = {r[0]: r[1] for r in conn.execute(TASK_STATUS_SQL).fetchall()}
     conn.close()
     return out
 
@@ -379,6 +382,40 @@ def test_f7_terminal_dominates_late_ack_replay(tmp_path: Path):
                      "destination": "w1", "state": "recipient_acknowledged"}},
     ])
     assert _statuses(tmp_path)[aid] == "completed"
+
+
+def test_fold_f2_a_lone_received_does_not_make_never_activated_fire(tmp_path: Path):
+    """fold F2: `received` is the RECEIVER's own fact, not evidence the SENDER
+    attempted a dispatch. Before the fix _TX_EXISTS matched any transmission, so
+    a `received` with no pane_submitted (the plane down at dispatch, up at
+    receipt) surfaced the assignment as `never_activated` — attention for a
+    message that was demonstrably received. Control: a lone carrier_queued
+    (accepted by the TUI, never consumed) SHOULD still fire never_activated, so
+    the filter narrows exactly `received` and nothing more."""
+    from claudlobby.plane.queries import ATTENTION_SQL, attention_params
+
+    # an assignment whose ONLY transmission is a `received` proof — which
+    # _seed_assignment cannot emit (the contract requires the proof pair), so it
+    # is seeded here directly against the same dispatch_msg_id.
+    msg = mint_msg_id()
+    recd = _seed_assignment(tmp_path, dispatch_msg=msg)
+    emit_batch(tmp_path, [
+        {"event_type": "transmission", "emitter": "fx", "fleet": "example-fleet",
+         "payload": {"msg_id": msg, "attempt_no": 1, "carrier": "tmux",
+                     "destination": "w1", "state": "received",
+                     "received_bytes": 12, "received_sha256": "sha256:" + "a" * 64}},
+    ])
+    # control: a lone carrier_queued exists, is not activation, is not failed —
+    # it must STILL surface as never_activated.
+    queued = _seed_assignment(tmp_path, dispatch_msg=mint_msg_id(),
+                              tx_events=(("carrier_queued", 1),))
+    conn = connect(db_path(tmp_path))
+    attention = {r[0] for r in conn.execute(
+        ATTENTION_SQL,
+        attention_params("2999-01-01T00:00:00+00:00")).fetchall()}
+    conn.close()
+    assert recd not in attention, "a lone `received` must NOT surface as attention"
+    assert queued in attention, "a lone carrier_queued still needs attention"
 
 
 # --- F8: malformed spool shapes --------------------------------------------
@@ -467,13 +504,13 @@ def test_f10_0002_applies_against_an_existing_v1_database(tmp_path: Path, monkey
     """The upgrade path, not just the fresh path: a db stamped v1 by 0001
     alone must gain 0002's index from a plain migrate()."""
     files = migrations_mod._migration_files()
-    assert [n for n, _ in files] == [1, 2, 3, 4]
+    assert [n for n, _ in files] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     conn = connect(db_path(tmp_path))
     monkeypatch.setattr(migrations_mod, "SCHEMA_USER_VERSION", 1)
     monkeypatch.setattr(migrations_mod, "_migration_files", lambda: files[:1])
     assert migrations_mod.migrate(conn) == 1
     monkeypatch.undo()
-    assert migrations_mod.migrate(conn) == 4
+    assert migrations_mod.migrate(conn) == migrations_mod.SCHEMA_USER_VERSION
     names = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     conn.close()
@@ -492,9 +529,12 @@ def test_f11_oldest_is_min_spooled_at_not_filename_order(env):
     # filename order (aaa < fff) puts the YOUNG entry first:
     (sd / ("ev_" + "a" * 32 + ".json")).write_text(json.dumps(young))
     (sd / ("ev_" + "f" * 32 + ".json")).write_text(json.dumps(old))
-    from claudlobby.commands.plane import _oldest_spooled_at
-    from claudlobby.plane.spool import spool_entries
-    assert _oldest_spooled_at(spool_entries(root)) == "2026-08-20T10:00:00+00:00"
+    # the dict-based private helper became spool.oldest_spooled_at (path-
+    # based, shared by trust/status/doctor — external round 4); the SAME
+    # semantics stay pinned: min spooled_at, never filename order
+    from claudlobby.plane.spool import oldest_spooled_at, scan_spool
+    sc = scan_spool(root)
+    assert oldest_spooled_at(sc.pending) == "2026-08-20T10:00:00+00:00"
 
 
 def test_f11_spool_inspect_prints_entry_with_history(env):

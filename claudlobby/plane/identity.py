@@ -61,7 +61,14 @@ def resolve_party(
 
 
 def provisional_actors(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """The typo-suspect list: lazily-minted actors a generate scan never
+    confirmed. EXCLUDES ``human:`` actors — a human minted from a real
+    Telegram message is a known external party, NEVER in a declared
+    roster, so it is legitimately-provisional forever and is not a typo
+    suspect. Counting it trained the doctor rung and the trust panel to
+    cry wolf on the operator's own name (live-flagged)."""
     return conn.execute(
         "SELECT uid, alias, first_seen, last_seen FROM identity_registry"
-        " WHERE kind = 'actor' AND provisional = 1 ORDER BY first_seen"
+        " WHERE kind = 'actor' AND provisional = 1"
+        " AND alias NOT LIKE 'human:%' ORDER BY first_seen"
     ).fetchall()

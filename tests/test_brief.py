@@ -7,15 +7,32 @@ broken:
   1. **The dispatch sections are the shared doors' output, not a re-join.**
      Asserted by calling ``lib/dispatch-overdue.py`` directly and comparing, so
      a re-implementation that drifted from the watchdog would fail even if it
-     looked right on its own.
+     looked right on its own. Since the F18 closure (R2a) the doors read the
+     PLANE and nothing else: every dispatch fixture below lands on a plane
+     under the root (the live door's own event shapes), and "the ledger is
+     absent / unreadable" became "the plane is unreachable" — one state, one
+     remedy, the section omitted rather than zeroed.
   2. **A field this door cannot serve truthfully is never served silently.**
      Every degradation test checks the disclosure AND that the section did not
      quietly become an innocent-looking empty list.
+
+Since the F18 closure (R2b) EVERY section reads the plane: reports land as the
+report door lands them (a communication plus the task event or the
+`report_status` marker), workstreams as the workstream door's construct and
+verb events. Deleted with the ledgers: test_corrupt_registry_is_omitted_not_reported_as_empty
+(no file to corrupt), test_poisoned_report_row_is_counted_not_silently_dropped and
+test_poisoned_dispatch_row_is_counted (the #911 label measured malformed JSONL
+rows; the plane holds no row to drop), test_residence_mismatch_bound_disclosed_only_in_overlay_mode
+(the #526 label warned of a cross-fleet join the per-fleet alias cannot
+produce), test_missing_report_ledger_omits_reports_rather_than_zero (→
+test_a_plane_that_never_saw_the_fleet_omits_reports_rather_than_zero),
+TestBootProvenance's registry-file cases, TestUnlistableBotsDir.test_the_alerts_section_degrades_instead_of_raising
+and TestAlertsAbsentBotsDir (the alerts section reads no bots dir — →
+TestAlertsReadThePlane).
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -28,11 +45,9 @@ from claudlobby.brief import (
     boot_provenance,
     build_brief,
     format_boot_brief,
-    cursor_path,
     format_brief,
+    record_ack,
     load_dispatch_doors,
-    read_cursor,
-    write_cursor,
 )
 from claudlobby.config import BotConfig, FleetConfig, ProjectConfig, ScopeConfig
 from claudlobby.paths import Paths
@@ -40,7 +55,6 @@ from claudlobby.paths import Paths
 from tests.conftest import (
     dispatch_row as _dispatch,
     report_row as _report,
-    write_jsonl as _write_jsonl,
 )
 
 NOW = 2_000_000
@@ -69,18 +83,18 @@ def _fleet(**kw) -> FleetConfig:
 
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
-    """A claudlobby root with the REAL dispatch matcher in lib/.
+    """A claudlobby root with the REAL dispatch matcher in lib/ (and the
+    stdlib plane readers it imports beside itself).
 
     Copied rather than stubbed: the point of the dispatch assertions is that
     the brief and the watchdog share one implementation, which a stub would
     quietly sever.
     """
     (tmp_path / "lib").mkdir()
-    shutil.copy(
-        REPO_ROOT / "lib" / "dispatch-overdue.py",
-        tmp_path / "lib" / "dispatch-overdue.py",
-    )
-    (tmp_path / "state").mkdir()
+    for name in ("dispatch-overdue.py", "plane-readers.py", "plane-lookup.py"):
+        shutil.copy(REPO_ROOT / "lib" / name, tmp_path / "lib" / name)
+    (tmp_path / "state" / "plane").mkdir(parents=True)
+    (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "full"}')   # bodies kept, as on the estate
     (tmp_path / "runtime" / "fleet").mkdir(parents=True)
     (tmp_path / "runtime" / "bots" / "alex" / "data").mkdir(parents=True)
     return tmp_path
@@ -91,35 +105,147 @@ def paths(root: Path) -> Paths:
     return Paths(root=root, fleet_dir=None)
 
 
-def _dlog(paths: Paths) -> Path:
-    return paths.root / "state" / "dispatch-log.jsonl"
+FLEET = "test-fleet"
 
 
-def _rlog(paths: Paths) -> Path:
-    return paths.fleet_state / "report-back.jsonl"
+@pytest.fixture(autouse=True)
+def _plane_carrier(monkeypatch):
+    """Root mode names no fleet (``Paths.fleet_name`` is None), so the matcher
+    reads the fleet from the carrier every session and timer carries."""
+    monkeypatch.setenv("CLAUDLOBBY_FLEET", FLEET)
+    for k in list(__import__("os").environ):
+        if k.startswith("PLANE_READ_") or k == "FLEET_NAME":
+            monkeypatch.delenv(k, raising=False)
 
 
-def _registry(paths: Paths) -> Path:
-    return paths.fleet_state / "workstreams.json"
+def _iso(epoch: int) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
 
 
-def _ws(**kw) -> dict:
-    base = {
-        "id": "ws-x",
-        "title": "Ship the widget",
-        "status": "active",
-        "owner_bot": "alex",
-        "next": "build the door",
-        "opened_ts": "2026-07-01T00:00:00Z",
-        "last_progress_ts": "2026-07-01T00:00:00Z",
-        "lease_expires_ts": "2026-07-15T00:00:00Z",
-    }
-    base.update(kw)
-    return base
+_SEQ = [0]
 
 
-def _write_registry(paths: Paths, entries: dict) -> None:
-    _registry(paths).write_text(json.dumps({"updated": "x", "workstreams": entries}))
+def _land(paths: Paths, row: dict, *, fleet: str = FLEET) -> tuple[str, str]:
+    """Land one legacy-shaped dispatch row on the plane under ``paths.root``
+    as the live door lands it (work item + assignment + communication) —
+    the importer suite's helper, with the fleet the brief's carrier names."""
+    from tests.plane_fixtures import _live_dispatch
+    _SEQ[0] += 1
+    tid = row.get("task_id") or f"t-{_SEQ[0]}-0000"
+    n = f"{_SEQ[0]:x}"
+    wi, asg, _msg = _live_dispatch(
+        paths.root, n, tid, ts=_iso(row["dispatched_at"]), bot=row["bot"],
+        expected_by=_iso(row["expected_by"]) if isinstance(row.get("expected_by"), int) else None,
+        fleet=fleet, ref=None if row.get("task_id") else f"dispatch-log:sha:{n:0>32}")
+    return wi, asg
+
+
+def _land_all(paths: Paths, rows: list[dict]) -> None:
+    for r in rows:
+        _land(paths, r)
+
+
+def _land_report(paths: Paths, row: dict, *, fleet: str = FLEET) -> None:
+    """A report row as the real report door lands it: the report communication
+    (its body the wire line, so the summary parses), then EITHER the task
+    event on the assignment carrying the row's id (looked up by its
+    ``dispatch-log:<id>`` ref) OR — when nothing linked — the ``report_status``
+    marker that carries the status (the door's one-fact rule)."""
+    from claudlobby.plane.db import connect_ro, db_file
+    from claudlobby.plane.emit_api import emit_batch
+    _SEQ[0] += 1
+    msg = f"msg_{'f' * 24}{_SEQ[0]:0>8x}"
+    ref = f"report-back:{msg}"
+    bot, status = row["bot"], row.get("status", "")
+    body = f"[BOTREPORT] {bot} | {status} | {row.get('summary', 'r')}"
+    events = [{"event_type": "communication", "emitter": "report-back", "fleet": fleet,
+               "source_ref": ref, "occurred_at": row["ts"],
+               "payload": {"msg_id": msg, "sender": f"bot:{fleet}/{bot}", "recipient": f"bot:{fleet}/lead",
+                           "recipient_raw": "lead", "message_class": "report", "body": body}}]
+    tid = row.get("task_id")
+    if tid and status in ("completed", "failed", "blocked", "progress"):
+        conn = connect_ro(db_file(paths.root))
+        try:
+            hit = conn.execute("SELECT work_item_id, assignment_id FROM assignments WHERE source_ref = ?"
+                               " ORDER BY ingest_seq DESC LIMIT 1", (f"dispatch-log:{tid}",)).fetchone()
+        finally:
+            conn.close()
+        if hit:
+            events.append({"event_type": "task", "emitter": "report-back", "fleet": fleet,
+                           "source_ref": ref, "occurred_at": row["ts"],
+                           "payload": {"work_item_id": hit[0], "assignment_id": hit[1],
+                                       "event": row["status"], "actor": f"bot:{fleet}/{bot}"}})
+    if len(events) == 1 and status in ("completed", "failed", "blocked", "progress"):
+        events.append({"event_type": "system", "emitter": "report-back", "fleet": fleet,
+                       "source_ref": ref, "occurred_at": row["ts"],
+                       "payload": {"event": "report_status", "subject_kind": "actor",
+                                   "subject": f"bot:{fleet}/{bot}", "data": {"status": status, "msg_id": msg}}})
+    out = emit_batch(paths.root, events)
+    assert all(o.status == "committed" for o in out), out
+
+
+def _land_ws(paths: Paths, wid: str, *, opened_ts: str, last_progress_ts: str | None = None,
+             lease_expires_ts: str | None = None, status: str = "active", title: str = "Ship the widget",
+             owner: str = "alex", nxt: str = "build the door", fleet: str = FLEET) -> None:
+    """One workstream as the workstream door lands it: the construct, then the
+    verb events that give it a progress instant, a renewed lease and a status."""
+    from claudlobby.plane.emit_api import emit_batch
+    actor, ref = f"bot:{fleet}/{owner}", f"workstreams:{wid}"
+    events = [{"event_type": "workstream", "emitter": "workstream-update", "fleet": fleet,
+               "source_ref": ref, "occurred_at": opened_ts,
+               "payload": {"workstream_id": wid, "title": title, "opened_by": actor, "owner": actor, "goal": nxt}}]
+
+    def verb(event: str, at: str, **extra) -> None:
+        events.append({"event_type": "workstream_event", "emitter": "workstream-update", "fleet": fleet,
+                       "source_ref": ref, "occurred_at": at,
+                       "payload": {"workstream_id": wid, "event": event, "actor": actor, **extra}})
+
+    at = last_progress_ts or opened_ts
+    if last_progress_ts:
+        verb("progressed", last_progress_ts, next_step=nxt)
+    if lease_expires_ts:
+        verb("renewed", at, renewed_until=lease_expires_ts, note="renewed")
+    if status == "done":
+        verb("closed", at, disposition="done")
+    elif status == "blocked":
+        verb("blocked", at, note="blocked")
+    out = emit_batch(paths.root, events)
+    assert all(o.status == "committed" for o in out), out
+
+
+def _plane_rows(paths: Paths) -> int:
+    from claudlobby.plane.db import connect_ro, db_file
+    conn = connect_ro(db_file(paths.root))
+    try:
+        return conn.execute("SELECT (SELECT COUNT(*) FROM events) + (SELECT COUNT(*) FROM workstreams)"
+                            " + (SELECT COUNT(*) FROM communications)").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _seed_plane(paths: Paths) -> None:
+    """A plane that knows this fleet's bots (the registry rows every emission
+    mints) but holds no dispatch — the genuine "nothing open" state."""
+    from claudlobby.plane.emit_api import emit_batch
+    out = emit_batch(paths.root, [{
+        "event_type": "system", "emitter": "test", "fleet": FLEET,
+        "payload": {"event": "keepalive_skip", "subject_kind": "actor", "subject": f"bot:{FLEET}/alex",
+                    "data": {"source": "test", "legacy_ts": "2026-05-27T10:00:00Z", "data": {}}}}])
+    assert out[0].status == "committed", out
+
+
+def _dispatch_ctx(paths: Paths) -> dict:
+    return {"fleet": FLEET, "root": str(paths.root)}
+
+
+def _seed_plane_for(paths: Paths, fleet: str) -> None:
+    from claudlobby.plane.emit_api import emit_batch
+    out = emit_batch(paths.root, [{
+        "event_type": "system", "emitter": "test", "fleet": fleet,
+        "payload": {"event": "keepalive_skip", "subject_kind": "actor", "subject": f"bot:{fleet}/alex",
+                    "data": {"source": "test", "legacy_ts": "2026-05-27T10:00:00Z", "data": {}}}}])
+    assert out[0].status == "committed", out
 
 
 def _find(brief: dict, field: str, issue: str | None = None) -> list[dict]:
@@ -134,8 +260,7 @@ def _find(brief: dict, field: str, issue: str | None = None) -> list[dict]:
 
 
 def test_brief_json_schema_v1(paths: Paths):
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
+    _seed_plane(paths)                       # every section is served from the plane
     brief = build_brief(_fleet(), paths, "alex", NOW)
 
     assert brief["schema"] == SCHEMA_VERSION
@@ -151,8 +276,10 @@ def test_brief_json_schema_v1(paths: Paths):
         "degraded",
     ):
         assert key in brief, f"envelope is missing {key}"
-    assert set(brief["dispatches"]) == {"open", "overdue", "orphaned"}
-    assert set(brief["reports"]) == {"cursor", "unacked"}
+    # F2 (M-B fold, #1481) added `dispatched` ADDITIVELY inside `dispatches` —
+    # the envelope's own top-level key set (asserted above) is unchanged.
+    assert set(brief["dispatches"]) == {"open", "overdue", "orphaned", "dispatched"}
+    assert set(brief["reports"]) == {"cursor", "unacked", "source"}
     # Round-trips as JSON — R4 consumes this envelope, not the text form.
     json.dumps(brief)
 
@@ -175,8 +302,7 @@ def test_mission_carries_pointers_not_inlined_charters(paths: Paths, tmp_path: P
             ),
         },
     )
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
+    _seed_plane(paths)
     m = build_brief(fleet, paths, "alex", NOW)["mission"]
 
     assert m["anchor"] == "Ship things that earn their keep."
@@ -191,26 +317,22 @@ def test_mission_carries_pointers_not_inlined_charters(paths: Paths, tmp_path: P
 
 def test_brief_dispatch_sections_match_overdue_doors(paths: Paths):
     """The three sections must BE the shared doors' output, not a second join."""
-    _write_jsonl(
-        _dlog(paths),
-        [
-            _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"),
-            _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-early"),
-            _dispatch("ari", NOW - 9000, NOW - 3000, task_id="t-other-bot"),
-        ],
-    )
-    _write_jsonl(_rlog(paths), [])
+    _land_all(paths, [
+        _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"),
+        _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-early"),
+        _dispatch("ari", NOW - 9000, NOW - 3000, task_id="t-other-bot"),
+    ])
 
     doors = load_dispatch_doors(paths)
     d = build_brief(_fleet(), paths, "alex", NOW)["dispatches"]
 
     expected_overdue = doors.overdue_all(
-        str(_dlog(paths)), str(_rlog(paths)), NOW, bots_dir=str(paths.runtime_bots)
+        NOW, bots_dir=str(paths.runtime_bots), **_dispatch_ctx(paths)
     ).get("alex", [])
     assert [r["task_id"] for r in d["overdue"]] == [t[3] for t in expected_overdue]
     assert [r["task_id"] for r in d["overdue"]] == ["t-late"]
 
-    expected_open = doors.open_dispatches("alex", str(_dlog(paths)), str(_rlog(paths)))
+    expected_open = doors.open_dispatches("alex", **_dispatch_ctx(paths))
     assert [r["task_id"] for r in d["open"]] == [t[2] for t in expected_open]
 
     # Another bot's rows never leak into this bot's brief.
@@ -219,14 +341,10 @@ def test_brief_dispatch_sections_match_overdue_doors(paths: Paths):
 
 def test_open_is_deadline_blind_superset_of_overdue(paths: Paths):
     """The readable distinction the door was built for: open-but-not-yet-due."""
-    _write_jsonl(
-        _dlog(paths),
-        [
-            _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"),
-            _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-early"),
-        ],
-    )
-    _write_jsonl(_rlog(paths), [])
+    _land_all(paths, [
+        _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"),
+        _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-early"),
+    ])
     d = build_brief(_fleet(), paths, "alex", NOW)["dispatches"]
 
     assert [r["task_id"] for r in d["open"]] == ["t-late", "t-early"]  # oldest first
@@ -239,87 +357,209 @@ def test_open_is_deadline_blind_superset_of_overdue(paths: Paths):
 
 
 def test_terminal_report_closes_an_open_dispatch(paths: Paths):
-    _write_jsonl(
-        _dlog(paths), [_dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-1")]
-    )
-    _write_jsonl(_rlog(paths), [_report("alex", "2026-08-08T00:00:00Z", task_id="t-1")])
+    # The plane answers AS OF `now`: a report must land before the instant the
+    # brief asks about, or it has not happened yet by the plane's account.
+    _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-1"))
+    _land_report(paths, _report("alex", _iso(NOW - 100), task_id="t-1"))
     d = build_brief(_fleet(), paths, "alex", NOW)["dispatches"]
     assert d["open"] == []
     assert d["overdue"] == []
 
 
-def test_missing_matcher_omits_dispatches_rather_than_reporting_zero(paths: Paths):
-    """An unloadable door must not render as 'nothing open'."""
+def test_missing_matcher_omits_every_plane_section_rather_than_reporting_zero(paths: Paths):
+    """An unloadable matcher must not render as 'nothing open' — and since
+    every plane read rides its session (R2b-1 fold), the reports, alerts and
+    workstreams sections are withheld with it, each field named."""
     (paths.lib / "dispatch-overdue.py").unlink()
-    _write_jsonl(
-        _dlog(paths), [_dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-1")]
-    )
-    _write_jsonl(_rlog(paths), [])
+    _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-1"))
 
     brief = build_brief(_fleet(), paths, "alex", NOW)
-    assert brief["dispatches"] == {}
-    entry = _find(brief, "dispatches", "#835")
-    assert entry and entry[0]["mode"] == "omitted"
+    assert brief["dispatches"] == {} and brief["reports"] == {} and brief["workstreams"] == {}
+    assert brief["alerts"] == []
+    omitted = {x["field"] for x in brief["degraded"] if x["mode"] == "omitted" and x["issue"] == "#1467"}
+    assert {"dispatches.open", "dispatches.overdue", "dispatches.orphaned", "reports", "alerts",
+            "workstreams"} <= omitted
+    entry = _find(brief, "dispatches.open", "#1467")
+    assert entry and "matcher" in entry[0]["reason"]
     assert "unavailable" in format_brief(brief)
 
 
 # --- unacked reports + the ack cursor -----------------------------------------
 
 
-def test_brief_ack_cursor_roundtrip(paths: Paths):
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(
-        _rlog(paths),
-        [
-            _report("vera", "2026-08-08T10:00:00Z", status="completed"),
-            _report("mason", "2026-08-08T11:00:00Z", status="blocked"),
-            _report("vera", "2026-08-08T11:30:00Z", status="progress"),
-        ],
-    )
+def _acked_events(paths: Paths) -> list[tuple]:
+    import sqlite3
+    conn = sqlite3.connect(paths.root / "state" / "plane" / "plane.db")
+    try:
+        return conn.execute(
+            "SELECT subject_alias, severity, detail FROM events WHERE kind='system'"
+            " AND event='reports_acked' ORDER BY ingest_seq").fetchall()
+    finally:
+        conn.close()
+
+
+def _ack(paths: Paths, bot: str, unacked: list[dict]):
+    newest = max(unacked, key=lambda r: r["seq"] or 0)
+    return record_ack(paths, FLEET, bot, acked_through_seq=newest["seq"],
+                      acked_through_ts=newest["ts"], count=len(unacked))
+
+
+def test_brief_ack_is_a_plane_fact_and_the_unacked_list_shrinks(paths: Paths):
+    """Chunk K (#1467): `--ack` records ONE `reports_acked` system event on the
+    viewer's own actor; the unacked list is what lies past it on the plane's
+    own ordering (`ingest_seq`), and no cursor file exists anywhere."""
+    _seed_plane(paths)
+    for row in (
+        _report("vera", "2026-08-08T10:00:00Z", status="completed"),
+        _report("mason", "2026-08-08T11:00:00Z", status="blocked"),
+        _report("vera", "2026-08-08T11:30:00Z", status="progress"),
+    ):
+        _land_report(paths, row)
     fleet = _fleet()
 
     brief = build_brief(fleet, paths, "alex", NOW)
     unacked = brief["reports"]["unacked"]
     # progress is not terminal — it closes nothing and acks nothing.
     assert [r["status"] for r in unacked] == ["completed", "blocked"]
+    assert all(isinstance(r["seq"], int) for r in unacked)
     assert brief["reports"]["cursor"] is None
 
-    write_cursor(paths, "alex", unacked[-1]["ts"])
+    out = _ack(paths, "alex", unacked)
+    assert out.recorded, out
     again = build_brief(fleet, paths, "alex", NOW)
     assert again["reports"]["unacked"] == []
-    assert again["reports"]["cursor"] == "2026-08-08T11:00:00Z"
-    assert read_cursor(paths, "alex") == "2026-08-08T11:00:00Z"
+    assert again["reports"]["cursor"] == "2026-08-08T11:00:00Z"   # the legacy-form ts, for the render
+
+    (alias, severity, detail), = _acked_events(paths)
+    assert alias == f"bot:{FLEET}/alex" and severity == "notice"
+    data = json.loads(detail)
+    assert set(data) == {"acked_through_seq", "acked_through_ts", "count"}
+    assert data["acked_through_seq"] == max(r["seq"] for r in unacked) and data["count"] == 2
+
+    # a report landing after the ack reads unacked again
+    _land_report(paths, _report("vera", "2026-08-08T12:00:00Z", status="completed"))
+    assert [r["ts"] for r in build_brief(fleet, paths, "alex", NOW)["reports"]["unacked"]] == [
+        "2026-08-08T12:00:00Z"]
+    assert not list(paths.root.rglob("brief-cursor-*"))        # no JSON state, anywhere
 
 
-def test_cursor_is_per_bot(paths: Paths):
-    """Two managers acking the same ledger must not clobber each other."""
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [_report("vera", "2026-08-08T10:00:00Z")])
-    write_cursor(paths, "alex", "2026-08-08T23:00:00Z")
+def test_ack_is_per_viewer_on_the_plane(paths: Paths):
+    """Two managers acking the same reports must not clobber each other: the
+    fact is anchored on the acking bot's own actor."""
+    _seed_plane(paths)
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
+    alex = build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"]
+    assert _ack(paths, "alex", alex).recorded
 
     assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
     assert len(build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"]) == 1
-    assert cursor_path(paths, "alex") != cursor_path(paths, "ari")
 
 
-def test_corrupt_cursor_fails_toward_showing_too_much(paths: Paths):
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [_report("vera", "2026-08-08T10:00:00Z")])
-    cursor_path(paths, "alex").write_text("{not json")
+def test_a_malformed_ack_is_no_read_position_and_erases_none(paths: Paths):
+    """A `reports_acked` row whose detail carries no integer cursor is not an
+    ack: alone, the report shows (never hides — #949/#1024); landing AFTER a
+    valid ack it does not reset the viewer to "never acked" — the newest
+    READABLE ack holds (adversarial lens: one bad row erased a valid cursor)."""
+    from claudlobby.plane.emit_api import emit_batch
 
-    assert len(build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"]) == 1
+    def malformed():
+        return emit_batch(paths.root, [{
+            "event_type": "system", "emitter": "brief", "fleet": FLEET,
+            "payload": {"event": "reports_acked", "subject_kind": "actor",
+                        "subject": f"bot:{FLEET}/alex", "data": {"note": "no cursor here"}}}])[0].status
+
+    _seed_plane(paths)
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
+    assert malformed() == "committed"
+    reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    assert len(reports["unacked"]) == 1 and reports["cursor"] is None
+
+    assert _ack(paths, "alex", reports["unacked"]).recorded
+    assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
+    assert malformed() == "committed"
+    again = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    assert again["unacked"] == [] and again["cursor"] == "2026-08-08T10:00:00Z"
+
+
+def test_a_silenced_plane_is_a_failed_ack(paths: Paths, monkeypatch):
+    """`PLANE_EMIT_DISABLED=1` is the one silencer (the harness exemption): a
+    plane that will not hold the ack marks nothing — failed, said by name,
+    no fact recorded — never a quiet rc 0 that reads as acked."""
+    from claudlobby.brief import record_ack
+
+    _seed_plane(paths)
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
+    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
+    assert out.status == "failed" and "PLANE_EMIT_DISABLED" in out.detail
+    assert _acked_events(paths) == []
+
+
+def test_a_fleets_reports_are_the_room_axis_and_progress_is_never_unacked(paths: Paths):
+    """ONE definition of a fleet's reports (queries.FLEET_REPORTS_SQL): a worker on
+    ANOTHER fleet reporting to this fleet's manager is this fleet's report — it
+    reaches the manager's brief (the card counts it, so the brief must list it,
+    or no ack could ever clear it); a `progress` note is never unacked; a
+    report the plane holds with no status at all still needs reading."""
+    from claudlobby.plane.emit_api import emit_batch
+
+    _seed_plane(paths)
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
+    _land_report(paths, {"bot": "vera", "ts": "2026-08-08T10:30:00Z", "status": "progress",
+                         "summary": "halfway"})
+    emit_batch(paths.root, [{
+        "event_type": "communication", "emitter": "report-back", "fleet": "other",
+        "source_ref": "report-back:msg_" + "9" * 32, "occurred_at": "2026-08-08T11:00:00Z",
+        "payload": {"msg_id": "msg_" + "9" * 32, "sender": "bot:other/zed",
+                    "recipient": f"bot:{FLEET}/alex", "recipient_raw": "alex",
+                    "message_class": "report",
+                    "body": "[BOTREPORT] zed | completed | cross-fleet done"}}])
+    reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    assert [(r["bot"], r["status"]) for r in reports["unacked"]] == [
+        ("vera", "completed"), ("other/zed", "completed")]
+    assert _ack(paths, "alex", reports["unacked"]).recorded
+    assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
+
+
+def test_failed_emit_is_a_failed_ack(paths: Paths, monkeypatch, caplog):
+    """A failed emit marks nothing seen: rc 1, said by name, no fact recorded,
+    the reports read unacked again — there is no file to fall back on."""
+    import argparse
+    import logging
+
+    import claudlobby.plane.emit_api as emit_api
+    from claudlobby.commands.core import cmd_brief
+
+    fleet_dir = paths.root / "local" / "f1"
+    (fleet_dir / "runtime").mkdir(parents=True)
+    _write_fleet_yaml(fleet_dir, "f1", ["alex"])
+    _seed_plane_for(paths, "f1")
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"), fleet="f1")
+
+    def boom(root, reqs):
+        raise RuntimeError("disk on fire")
+    monkeypatch.setattr(emit_api, "emit_batch", boom)
+    args = argparse.Namespace(fleet="f1", root=str(paths.root), seed=False, bot="alex",
+                              json=False, ack=True, boot=False)
+    with caplog.at_level(logging.ERROR, logger="claudlobby"):
+        assert cmd_brief(args) == 1
+    assert "did NOT record the ack" in caplog.text and "disk on fire" in caplog.text
+    assert _acked_events(paths) == []
+
+
+def test_no_cursor_file_is_written_or_read_anywhere():
+    """The deletion, pinned: no door under claudlobby/ or lib/ names the file."""
+    import subprocess
+    out = subprocess.run(["grep", "-rn", "-E", "brief-cursor|read_cursor|write_cursor|cursor_path",
+                          str(REPO_ROOT / "claudlobby"), str(REPO_ROOT / "lib")],
+                         capture_output=True, text=True)
+    assert out.returncode == 1 and out.stdout == "", out.stdout
 
 
 def test_reports_are_fleet_wide_not_self_scoped(paths: Paths):
     """'What did my workers finish that I have not acted on' — not 'my own'."""
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(
-        _rlog(paths),
-        [
-            _report("vera", "2026-08-08T10:00:00Z"),
-            _report("mason", "2026-08-08T10:05:00Z"),
-        ],
-    )
+    _seed_plane(paths)
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
+    _land_report(paths, _report("mason", "2026-08-08T10:05:00Z"))
     bots = {
         r["bot"]
         for r in build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"]
@@ -331,31 +571,16 @@ def test_reports_are_fleet_wide_not_self_scoped(paths: Paths):
 
 
 def test_brief_stall_flags_readonly(paths: Paths):
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
+    _seed_plane(paths)
     # now = 2_000_000 epoch ≈ 1970-01-24; use epochs so the arithmetic is explicit.
     fresh = "1970-01-23T00:00:00Z"  # ~1 day before NOW
     old = "1970-01-01T00:00:00Z"  # ~23 days before NOW → past the 14d lease
-    _write_registry(
-        paths,
-        {
-            "ws-fresh": _ws(
-                id="ws-fresh",
-                last_progress_ts=fresh,
-                lease_expires_ts="1999-01-01T00:00:00Z",
-            ),
-            "ws-stale": _ws(
-                id="ws-stale",
-                last_progress_ts=old,
-                lease_expires_ts="1999-01-01T00:00:00Z",
-            ),
-            "ws-expired": _ws(
-                id="ws-expired", last_progress_ts=fresh, lease_expires_ts=old
-            ),
-            "ws-done": _ws(id="ws-done", status="done"),
-        },
-    )
-    before = hashlib.sha256(_registry(paths).read_bytes()).hexdigest()
+    far = "1999-01-01T00:00:00Z"
+    _land_ws(paths, "ws-fresh", opened_ts=old, last_progress_ts=fresh, lease_expires_ts=far)
+    _land_ws(paths, "ws-stale", opened_ts=old, lease_expires_ts=far)            # progress = opened, 23 days ago
+    _land_ws(paths, "ws-expired", opened_ts=old, last_progress_ts=fresh, lease_expires_ts=old)
+    _land_ws(paths, "ws-done", opened_ts=old, status="done")
+    before = _plane_rows(paths)
 
     w = build_brief(_fleet(), paths, "alex", NOW)["workstreams"]
 
@@ -366,26 +591,22 @@ def test_brief_stall_flags_readonly(paths: Paths):
     assert flags["ws-expired"] == (False, True)
     assert {e["id"] for e in w["stalled"]} == {"ws-stale", "ws-expired"}
 
-    # THE read-only assertion: the registry is byte-identical after a brief run.
-    assert hashlib.sha256(_registry(paths).read_bytes()).hexdigest() == before
+    # THE read-only assertion: the plane holds exactly the rows it held before a brief run.
+    assert _plane_rows(paths) == before
 
 
-def test_corrupt_registry_is_omitted_not_reported_as_empty(paths: Paths):
-    """'No workstreams' and 'the registry failed to load' are different answers."""
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
-    _registry(paths).write_text("{ this is not json")
+def test_workstreams_are_omitted_when_the_plane_cannot_answer(paths: Paths):
+    """'No workstreams' and 'the plane could not be read' are different answers."""
+    assert not (paths.root / "state" / "plane" / "plane.db").exists()
 
     brief = build_brief(_fleet(), paths, "alex", NOW)
     assert brief["workstreams"] == {}
-    entry = _find(brief, "workstreams", "#911")
-    assert entry and entry[0]["mode"] == "omitted"
+    entry = _find(brief, "workstreams", "#1467")
+    assert entry and entry[0]["mode"] == "omitted" and "plane" in entry[0]["reason"]
 
 
-def test_genuinely_empty_registry_is_not_degraded(paths: Paths):
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
-    _write_registry(paths, {})
+def test_a_plane_that_holds_the_fleet_but_no_workstream_is_not_degraded(paths: Paths):
+    _seed_plane(paths)
 
     brief = build_brief(_fleet(), paths, "alex", NOW)
     assert brief["workstreams"] == {"active": [], "stalled": []}
@@ -393,17 +614,8 @@ def test_genuinely_empty_registry_is_not_degraded(paths: Paths):
 
 
 def test_lease_window_follows_the_writer(paths: Paths, monkeypatch):
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
-    _write_registry(
-        paths,
-        {
-            "ws-x": _ws(
-                last_progress_ts="1970-01-18T00:00:00Z",  # ~6 days before NOW
-                lease_expires_ts="1999-01-01T00:00:00Z",
-            )
-        },
-    )
+    _seed_plane(paths)
+    _land_ws(paths, "ws-x", opened_ts="1970-01-18T00:00:00Z")           # progress = opened, ~6 days before NOW
     assert (
         build_brief(_fleet(), paths, "alex", NOW)["workstreams"]["active"][0]["stalled"]
         is False
@@ -419,51 +631,19 @@ def test_lease_window_follows_the_writer(paths: Paths, monkeypatch):
 # --- the R0 trust gate --------------------------------------------------------
 
 
-def test_poisoned_report_row_is_counted_not_silently_dropped(paths: Paths):
-    """#911: readers drop invalid rows silently. The door states how many."""
-    _write_jsonl(_dlog(paths), [])
-    _rlog(paths).write_text(
-        json.dumps(_report("vera", "2026-08-08T10:00:00Z"))
-        + "\n"
-        + '{"ts":"2026-08-08T10:01:00Z","bot":"vera","summary":"broke "it""}\n'
-    )
-    brief = build_brief(_fleet(), paths, "alex", NOW)
-
-    entry = _find(brief, "reports", "#911")
-    assert entry and entry[0]["mode"] == "labeled"
-    assert "1 row(s)" in entry[0]["reason"]
-    # Labeled, not omitted — the rows that DID parse are still served.
-    assert len(brief["reports"]["unacked"]) == 1
-    assert "[degraded: #911]" in format_brief(brief)
-
-
-def test_poisoned_dispatch_row_is_counted(paths: Paths):
-    _dlog(paths).write_text(
-        json.dumps(_dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-1"))
-        + "\n"
-        + "{ broken\n"
-    )
-    _write_jsonl(_rlog(paths), [])
-    brief = build_brief(_fleet(), paths, "alex", NOW)
-
-    entry = _find(brief, "dispatches", "#911")
-    assert entry and entry[0]["mode"] == "labeled"
-    assert "1 row(s)" in entry[0]["reason"]
-    assert [r["task_id"] for r in brief["dispatches"]["open"]] == ["t-1"]
-
-
-def test_clean_ledgers_raise_no_911_disclosure(paths: Paths):
-    """The #911 label is MEASURED, so it must vanish when the data is clean."""
-    _write_jsonl(_dlog(paths), [_dispatch("alex", NOW - 100, NOW + 100, task_id="t-1")])
-    _write_jsonl(_rlog(paths), [_report("vera", "2026-08-08T10:00:00Z")])
+def test_the_911_label_retired_with_the_ledgers(paths: Paths):
+    """#911 measured malformed JSONL rows the readers dropped; the plane holds
+    no row to drop, so the label is gone rather than perpetually clean."""
+    _land(paths, _dispatch("alex", NOW - 100, NOW + 100, task_id="t-1"))
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
     brief = build_brief(_fleet(), paths, "alex", NOW)
     assert [d for d in brief["degraded"] if d["issue"] == "#911"] == []
+    assert len(brief["reports"]["unacked"]) == 1
 
 
 def test_alerts_are_labeled_until_the_event_type_ssot_lands(paths: Paths):
     """#903: absence of an alert is not evidence of health, and says so."""
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
+    _seed_plane(paths)
     brief = build_brief(_fleet(), paths, "alex", NOW)
 
     entry = _find(brief, "alerts", "#903")
@@ -476,15 +656,13 @@ def test_alert_label_clears_when_the_ssot_symbol_appears(paths: Paths, monkeypat
     from claudlobby import known_values
 
     monkeypatch.setattr(known_values, "FLEET_EVENT_TYPES", {"disk_high"}, raising=False)
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
+    _seed_plane(paths)
     assert _find(build_brief(_fleet(), paths, "alex", NOW), "alerts", "#903") == []
 
 
 def test_utilization_is_recorded_as_omitted(paths: Paths):
     """The cut section is an answer, not a gap to be inferred from absence."""
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
+    _seed_plane(paths)
     brief = build_brief(_fleet(), paths, "alex", NOW)
 
     entry = _find(brief, "utilization", "#891")
@@ -492,31 +670,26 @@ def test_utilization_is_recorded_as_omitted(paths: Paths):
     assert "utilization" not in set(brief) - {"degraded"}
 
 
-def test_residence_mismatch_bound_disclosed_only_in_overlay_mode(root: Path):
-    """#526: the dispatch log is host-global; report ledgers are per-fleet, so
-    another fleet's bot appears in this log with its reports in a file this
-    brief never opens. Labeled whenever the section is served at all."""
+def test_no_residence_mismatch_label_on_the_plane(root: Path):
+    """The #526 label warned that a host-global dispatch log joined per-fleet
+    report ledgers on bot name alone. The plane's join is the per-fleet alias,
+    so the collision cannot occur and the standing label is gone — in overlay
+    mode too, where it used to fire whenever the section was served."""
     fleet_dir = root / "local" / "f1"
     (fleet_dir / "runtime" / "bots").mkdir(parents=True)
     overlay = Paths(root=root, fleet_dir=fleet_dir)
-    rootmode = Paths(root=root, fleet_dir=None)
-    for p in (overlay, rootmode):
-        _write_jsonl(_dlog(p), [_dispatch("alex", NOW - 100, NOW + 100, task_id="t-1")])
-        _write_jsonl(_rlog(p), [])
+    _land(overlay, _dispatch("alex", NOW - 100, NOW + 100, task_id="t-1"), fleet="f1")
 
-    entry = _find(build_brief(_fleet(), overlay, "alex", NOW), "dispatches", "#526")
-    assert entry and entry[0]["mode"] == "labeled"
-    assert (
-        _find(build_brief(_fleet(), rootmode, "alex", NOW), "dispatches", "#526") == []
-    )
+    brief = build_brief(_fleet(), overlay, "alex", NOW)
+    assert [r["task_id"] for r in brief["dispatches"]["open"]] == ["t-1"]
+    assert _find(brief, "dispatches", "#526") == []
 
 
 # --- rendering ----------------------------------------------------------------
 
 
 def test_format_marks_degraded_sections_inline_and_lists_them(paths: Paths):
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
+    _seed_plane(paths)
     text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
 
     assert "ALERTS" in text and "[degraded: #903]" in text
@@ -526,50 +699,101 @@ def test_format_marks_degraded_sections_inline_and_lists_them(paths: Paths):
         assert section in text
 
 
-def test_subfield_degradation_marks_its_parent_section_header(
+def test_a_matcher_predating_the_plane_only_reader_withholds_the_section(
     paths: Paths, monkeypatch
 ):
-    """A degraded `dispatches.open` must not render a clean DISPATCHES header
-    above an `open (0)` that is not a measurement."""
+    """The matcher is the INSTALL's; one that predates the plane-only reader
+    (F18 R2a) has ledger-era signatures that would raise out of a read-only
+    command. The WHOLE section is withheld, all three fields named, and the
+    DISPATCHES header carries the issue."""
+    _seed_plane(paths)
     import claudlobby.brief as brief_mod
 
     real = brief_mod.load_dispatch_doors
 
     class _Old:
-        """A matcher from before the open-list door existed."""
-
         def __init__(self, mod):
             self._mod = mod
 
         def __getattr__(self, name):
-            if name == "open_dispatches":
+            if name == "open_plane":
                 raise AttributeError(name)
             return getattr(self._mod, name)
 
     monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Old(real(p)))
-    _write_jsonl(_dlog(paths), [_dispatch("alex", NOW - 100, NOW + 100, task_id="t-1")])
-    _write_jsonl(_rlog(paths), [])
-
     brief = build_brief(_fleet(), paths, "alex", NOW)
-    entry = _find(brief, "dispatches.open", "#904")
-    assert entry and entry[0]["mode"] == "omitted"
-    assert brief["dispatches"]["open"] == []
-    # Overdue/orphaned are unaffected — only the open list degrades.
-    assert "overdue" in brief["dispatches"]
-
+    assert brief["dispatches"] == {}
+    omitted = {x["field"] for x in brief["degraded"] if x["mode"] == "omitted"}
+    assert {"dispatches.open", "dispatches.overdue", "dispatches.orphaned"} <= omitted
+    entry = _find(brief, "dispatches.open", "#1467")
+    assert entry and "predates" in entry[0]["reason"]
     header = next(
         ln for ln in format_brief(brief).splitlines() if ln.startswith("DISPATCHES")
     )
-    assert "#904" in header
+    assert "#1467" in header
+
+
+def test_a_failure_after_the_first_answer_withholds_all_three(paths: Paths, monkeypatch):
+    """Both questions ride ONE plane session; a failure on the SECOND read
+    (the bot's own open set) withholds the section whole and names all three
+    fields — the structural lens found only `open` named, so overdue was
+    neither present nor listed.
+
+    Rewritten for F7 (M-B fold, #1481): this section no longer calls
+    `doors.open_dispatches` on the happy path once the install carries
+    `open_rows_indexed` (the single-read reader that replaced it plus a
+    second call to `open_assignment_ids`) — patching `open_dispatches` no
+    longer represents "a failure on the second read", so this patches the
+    reader that actually runs there now. `load_lib_module` memoizes on (path,
+    mtime), so the module `_plane_readers()` returns here is the exact object
+    `_dispatch_section`'s own session will use — no wrapper needed."""
+    _seed_plane(paths)
+    import claudlobby.brief as brief_mod
+
+    doors_mod = brief_mod.load_dispatch_doors(paths)
+    pr = doors_mod._plane_readers()
+
+    def _boom(*a, **k):
+        raise doors_mod.PlaneUnreachable("gone mid-brief")
+
+    monkeypatch.setattr(pr, "open_rows_indexed", _boom)
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert brief["dispatches"] == {}
+    omitted = {x["field"] for x in brief["degraded"] if x["mode"] == "omitted"}
+    assert {"dispatches.open", "dispatches.overdue", "dispatches.orphaned"} <= omitted
+
+
+def test_the_dispatches_section_opens_the_plane_once(paths: Paths, monkeypatch):
+    """One session for both questions (the simplify lens found two opens —
+    each an importlib exec, a connect and a registry scan)."""
+    _seed_plane(paths)
+    import claudlobby.brief as brief_mod
+
+    real = brief_mod.load_dispatch_doors
+    opened: list[int] = []
+
+    class _Counting:
+        def __init__(self, mod):
+            self._mod = mod
+
+        def __getattr__(self, name):
+            return getattr(self._mod, name)
+
+        def open_plane(self, *a, **k):
+            opened.append(1)
+            return self._mod.open_plane(*a, **k)
+
+    monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Counting(real(p)))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert "open" in brief["dispatches"] and "overdue" in brief["dispatches"]
+    assert len(opened) == 1
 
 
 def test_text_output_caps_long_sections_and_discloses_the_cap(paths: Paths):
     """Silent truncation reads as exhaustive coverage."""
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(
-        _rlog(paths),
-        [_report("vera", f"2026-08-08T10:{n:02d}:00Z") for n in range(25)],
-    )
+    _seed_plane(paths)
+    for n in range(25):
+        _land_report(paths, _report("vera", f"2026-08-08T10:{n:02d}:00Z"))
     brief = build_brief(_fleet(), paths, "alex", NOW)
     text = format_brief(brief)
 
@@ -603,10 +827,7 @@ def test_overdue_honours_the_env_expiry_cap_like_the_cli(paths: Paths, monkeypat
     var. A brief that ignored it would disagree with the very watchdog it
     mirrors, and 'byte-consistent with --all' is the contract."""
     # ~2.8h old: past its deadline, but inside the 24h default expiry cap.
-    _write_jsonl(
-        _dlog(paths), [_dispatch("alex", NOW - 10_000, NOW - 5_000, task_id="t-old")]
-    )
-    _write_jsonl(_rlog(paths), [])
+    _land(paths, _dispatch("alex", NOW - 10_000, NOW - 5_000, task_id="t-old"))
 
     overdue = build_brief(_fleet(), paths, "alex", NOW)["dispatches"]["overdue"]
     assert [r["task_id"] for r in overdue] == ["t-old"]
@@ -622,95 +843,55 @@ def test_overdue_honours_the_env_expiry_cap_like_the_cli(paths: Paths, monkeypat
 # --- consuming the shared doors defensively (#526 / #1014) ---------------------
 
 
-def test_missing_report_ledger_omits_dispatches_rather_than_alarming(paths: Paths):
-    """The matcher fails OPEN here: with nothing to join against, every closed
-    dispatch in history comes back overdue at rc 0. The precondition below
-    asserts that fail-open directly, so this test still means something if the
-    door is ever fixed underneath us."""
-    _write_jsonl(
-        _dlog(paths),
-        [
-            _dispatch("alex", NOW - 10_000, NOW - 5_000, task_id=f"t-{i}")
-            for i in range(5)
-        ],
-    )
-    # The ledger that would close all five is ABSENT — not empty, absent.
-    assert not _rlog(paths).exists()
+def test_an_unreachable_plane_omits_dispatches_rather_than_alarming(paths: Paths):
+    """No plane under the root: the matcher REFUSES (rc 3 / PlaneUnreachable —
+    never "nothing open"), and the brief OMITS the section with the remedy
+    named rather than serving a zero as truth."""
+    assert not (paths.root / "state" / "plane" / "plane.db").exists()
 
     doors = load_dispatch_doors(paths)
-    raw = doors.overdue_all(str(_dlog(paths)), str(_rlog(paths)), NOW)
-    assert len(raw.get("alex", [])) == 5, "precondition: the door fails open"
+    with pytest.raises(doors.PlaneUnreachable):
+        doors.overdue_all(NOW, **_dispatch_ctx(paths))       # precondition: the door refuses
 
     brief = build_brief(_fleet(), paths, "alex", NOW)
-    assert brief["dispatches"] == {}, "a wall of false overdue work was served"
-    entry = _find(brief, "dispatches", "#526")
-    assert entry and entry[0]["mode"] == "omitted"
-    assert "absent" in entry[0]["reason"]
-
+    entries = _find(brief, "dispatches.overdue", "#1467") + _find(brief, "dispatches.open", "#1467")
+    assert entries and all(e["mode"] == "omitted" for e in entries)
+    assert all("plane" in e["reason"] and "state/plane/plane.db" in e["reason"] for e in entries)
+    # never zero (a false all-clear): the section is not served, and says so
+    assert brief["dispatches"] == {}, "a false all-clear was served for an unreachable plane"
     text = format_brief(brief)
-    assert "#526" in next(ln for ln in text.splitlines() if ln.startswith("DISPATCHES"))
     assert "unavailable" in text
 
 
-def test_unreadable_report_ledger_omits_rather_than_raising(paths: Paths, monkeypatch):
-    """The other half: an unreadable ledger raises out of the matcher entirely,
-    which would take out a read-only command."""
-    _write_jsonl(_dlog(paths), [_dispatch("alex", NOW - 100, NOW + 100, task_id="t-1")])
-    _write_jsonl(_rlog(paths), [])
-
-    real_read_text = Path.read_text
-    target = _rlog(paths)
-
-    def _boom(self, *a, **kw):
-        if self == target:
-            raise PermissionError(13, "Permission denied")
-        return real_read_text(self, *a, **kw)
-
-    monkeypatch.setattr(Path, "read_text", _boom)
+def test_a_plane_that_knows_the_fleet_but_holds_no_dispatch_is_answered_not_omitted(paths: Paths):
+    """The genuine "nothing open" state: the plane holds the fleet's bots (the
+    registry rows every emission mints) and no dispatch — answered as empty
+    lists, no omission."""
+    _seed_plane(paths)
     brief = build_brief(_fleet(), paths, "alex", NOW)
-
-    assert brief["dispatches"] == {}
-    assert brief["reports"] == {}
-    assert _find(brief, "dispatches", "#526")[0]["mode"] == "omitted"
-    assert "unreadable" in _find(brief, "dispatches", "#526")[0]["reason"]
-
-
-def test_an_empty_but_present_ledger_is_answered_not_omitted(paths: Paths):
-    """Existence, not emptiness, is the line: a fleet that has not reported yet
-    genuinely has every dispatch open, and that answer is TRUE."""
-    _write_jsonl(_dlog(paths), [_dispatch("alex", NOW - 100, NOW + 100, task_id="t-1")])
-    _write_jsonl(_rlog(paths), [])  # exists, zero rows
-
-    brief = build_brief(_fleet(), paths, "alex", NOW)
-    assert [r["task_id"] for r in brief["dispatches"]["open"]] == ["t-1"]
-    assert brief["reports"]["unacked"] == []
+    assert brief["dispatches"]["open"] == [] and brief["dispatches"]["overdue"] == []
     assert [d for d in _find(brief, "dispatches") if d["mode"] == "omitted"] == []
 
 
-def test_missing_dispatch_log_omits_rather_than_manufacturing_an_all_clear(
-    paths: Paths,
-):
-    _write_jsonl(_rlog(paths), [_report("vera", "2026-08-08T10:00:00Z")])
-    assert not _dlog(paths).exists()
-
+def test_a_plane_that_never_saw_the_fleet_is_unreachable_not_empty(paths: Paths):
+    """A schema-valid plane holding no bot of the named fleet is a wrong root or
+    a fleet it never saw: refused, never read as "nothing open" (#1014's class)."""
+    _land(paths, _dispatch("alex", NOW - 100, NOW + 100, task_id="t-1"), fleet="another-fleet")
     brief = build_brief(_fleet(), paths, "alex", NOW)
+    entries = _find(brief, "dispatches.open", "#1467")
+    assert entries and entries[0]["mode"] == "omitted" and "holds no bot of fleet" in entries[0]["reason"]
     assert brief["dispatches"] == {}
-    entry = _find(brief, "dispatches", "#1014")
-    assert entry and entry[0]["mode"] == "omitted"
-    # Reports are independent and still served.
-    assert len(brief["reports"]["unacked"]) == 1
 
 
-def test_missing_report_ledger_omits_reports_rather_than_zero(paths: Paths):
-    """'unacked (0)' from an unreadable ledger asserts nobody is waiting on a
-    decision — #949 and #1024 exactly, re-created by the fix."""
-    _write_jsonl(_dlog(paths), [])
-    assert not _rlog(paths).exists()
+def test_a_plane_that_never_saw_the_fleet_omits_reports_rather_than_zero(paths: Paths):
+    """'unacked (0)' from a plane that holds no bot of the fleet asserts nobody
+    is waiting on a decision — #949 and #1024 exactly, re-created by the fix."""
+    _land(paths, _dispatch("alex", NOW - 100, NOW + 100, task_id="t-1"), fleet="another-fleet")
 
     brief = build_brief(_fleet(), paths, "alex", NOW)
     assert brief["reports"] == {}
-    entry = _find(brief, "reports", "#526")
-    assert entry and entry[0]["mode"] == "omitted"
+    entry = _find(brief, "reports", "#1467")
+    assert entry and entry[0]["mode"] == "omitted" and "holds no bot of fleet" in entry[0]["reason"]
 
     text = format_brief(brief)
     assert "unacked (0)" not in text
@@ -723,8 +904,7 @@ def test_orphan_list_is_labeled_when_respawn_cannot_be_detected(paths: Paths):
     """#1014's family: no bots dir means the empty orphan list is a construction,
     not a measurement."""
     shutil.rmtree(paths.runtime_bots)
-    _write_jsonl(_dlog(paths), [_dispatch("alex", NOW - 100, NOW + 100, task_id="t-1")])
-    _write_jsonl(_rlog(paths), [])
+    _land(paths, _dispatch("alex", NOW - 100, NOW + 100, task_id="t-1"))
 
     brief = build_brief(_fleet(), paths, "alex", NOW)
     entry = _find(brief, "dispatches.orphaned", "#1014")
@@ -734,8 +914,7 @@ def test_orphan_list_is_labeled_when_respawn_cannot_be_detected(paths: Paths):
 
 
 def test_orphan_label_absent_when_the_bots_dir_exists(paths: Paths):
-    _write_jsonl(_dlog(paths), [_dispatch("alex", NOW - 100, NOW + 100, task_id="t-1")])
-    _write_jsonl(_rlog(paths), [])
+    _land(paths, _dispatch("alex", NOW - 100, NOW + 100, task_id="t-1"))
     assert _find(build_brief(_fleet(), paths, "alex", NOW), "dispatches.orphaned") == []
 
 
@@ -767,8 +946,7 @@ def test_ack_refuses_when_the_report_section_was_not_served(paths: Paths, caplog
 
     from claudlobby.commands.core import cmd_brief
 
-    _write_jsonl(_dlog(paths), [])
-    assert not _rlog(paths).exists()  # ledger absent -> section omitted
+    assert not (paths.root / "state" / "plane" / "plane.db").exists()  # no plane -> section omitted
 
     fleet_dir = paths.root / "local" / "f1"
     (fleet_dir / "runtime").mkdir(parents=True)
@@ -793,144 +971,82 @@ def test_ack_refuses_when_the_report_section_was_not_served(paths: Paths, caplog
         assert cmd_brief(args) == 1
     assert "refusing to ack" in caplog.text
     assert "not found" not in caplog.text
-    assert not cursor_path(Paths(root=paths.root, fleet_dir=fleet_dir), "alex").exists()
+    assert not (paths.root / "state" / "plane" / "plane.db").exists()   # a refusal records nothing
 
 
-def test_ack_succeeds_when_the_ledger_is_readable(paths: Paths):
-    """The positive control for the test above — same fixture, readable ledger,
-    so a refusal here would mean the guard fires on the wrong condition."""
+def test_ack_succeeds_when_the_plane_answers(paths: Paths):
+    """The positive control for the test above — same fixture, a plane that
+    answers, so a refusal here would mean the guard fires on the wrong condition."""
     import argparse
 
     from claudlobby.commands.core import cmd_brief
 
-    _write_jsonl(_dlog(paths), [])
     fleet_dir = paths.root / "local" / "f1"
     (fleet_dir / "runtime").mkdir(parents=True)
     _write_fleet_yaml(fleet_dir, "f1", ["alex"])
-    (fleet_dir / "runtime" / "report-back.jsonl").write_text(
-        json.dumps(_report("vera", "2026-08-08T10:00:00Z")) + "\n"
-    )
+    _seed_plane_for(paths, "f1")
+    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"), fleet="f1")
 
     args = argparse.Namespace(
         fleet="f1", root=str(paths.root), seed=False, bot="alex", json=False, ack=True
     )
     assert cmd_brief(args) == 0
-    assert cursor_path(Paths(root=paths.root, fleet_dir=fleet_dir), "alex").exists()
+    (alias, severity, detail), = _acked_events(paths)
+    assert alias == "bot:f1/alex" and json.loads(detail)["count"] == 1
 
 
 # --- the omit suppresses true positives too, and must say how many ------------
 
 
-def test_omitted_dispatches_counts_the_rows_it_could_not_adjudicate(paths: Paths):
-    """The omit is honest but lossy: with no ledger, a genuinely overdue
-    dispatch and a finished one are the same bytes. What must not happen is the
-    real one going unmentioned — under-reporting is the worse failure, because a
-    noisy watchdog gets audited and a silent one does not."""
-    _write_jsonl(
-        _dlog(paths),
-        [
-            _dispatch("alex", NOW - 10_000, NOW - 5_000, task_id="t-past-1"),
-            _dispatch("alex", NOW - 9_000, NOW - 4_000, task_id="t-past-2"),
-            _dispatch("alex", NOW - 100, NOW + 5_000, task_id="t-not-yet-due"),
-            _dispatch("ari", NOW - 10_000, NOW - 5_000, task_id="t-other-bot"),
-        ],
-    )
-    assert not _rlog(paths).exists()
-
+def test_an_omitted_dispatch_section_carries_no_count_and_says_unavailable(paths: Paths):
+    """The old ledger omission counted the past-deadline rows it could not
+    adjudicate (the dispatch log was still readable while the report ledger
+    was not). With the plane there is no half-readable state: unreachable
+    means every list is unknown, so the entries carry no count and the render
+    says unavailable — never a reassuring 0."""
+    assert not (paths.root / "state" / "plane" / "plane.db").exists()
     brief = build_brief(_fleet(), paths, "alex", NOW)
-    assert brief["dispatches"] == {}
-
-    entry = _find(brief, "dispatches", "#526")[0]
-    # This bot's past-deadline rows only: not the future one, not the peer's.
-    assert entry["count"] == 2
-    assert "2 dispatch row(s)" in entry["reason"]
-    assert "could not be adjudicated" in entry["reason"]
-
-    # And it reaches the section header, not just the degraded block — where a
-    # bare "unavailable" would read the same as hiding nothing.
-    text = format_brief(brief)
-    assert "2 row(s) past deadline, status undeterminable" in text
-
-
-def test_unadjudicated_count_is_none_when_even_the_denominator_is_unknown(
-    paths: Paths,
-):
-    """The dispatch log is the unreadable side, so the count itself cannot be
-    taken. Stated as None, never rendered as a reassuring 0."""
-    _write_jsonl(_rlog(paths), [])
-    assert not _dlog(paths).exists()
-
-    entry = _find(build_brief(_fleet(), paths, "alex", NOW), "dispatches", "#1014")[0]
-    assert entry["count"] is None
-    assert "could not be adjudicated" not in entry["reason"]
-
-
-def test_no_past_deadline_rows_reports_no_count_rather_than_zero_noise(paths: Paths):
-    _write_jsonl(
-        _dlog(paths), [_dispatch("alex", NOW - 100, NOW + 5_000, task_id="t-1")]
-    )
-    assert not _rlog(paths).exists()
-
-    entry = _find(build_brief(_fleet(), paths, "alex", NOW), "dispatches", "#526")[0]
-    assert entry["count"] == 0
-    assert "(unavailable — see DEGRADED)" in format_brief(
-        build_brief(_fleet(), paths, "alex", NOW)
-    )
+    for e in _find(brief, "dispatches.open", "#1467") + _find(brief, "dispatches.overdue", "#1467"):
+        assert e["count"] is None
+    assert "(unavailable — see DEGRADED)" in format_brief(brief)
 
 
 def test_every_degradation_carries_the_count_key(paths: Paths):
     """R4 reads this envelope; an absent key and a null one are different bugs."""
-    _write_jsonl(_dlog(paths), [])
-    _write_jsonl(_rlog(paths), [])
+    _seed_plane(paths)
     for d in build_brief(_fleet(), paths, "alex", NOW)["degraded"]:
         assert "count" in d, d
 # --- #1102 R3 / M1: the boot payload (locked fork R3-F1, O-B+r) ---------------
 
 
 class TestBootProvenance:
-    """boot_provenance() — the door-side facts rule 2 renders. Interim for
-    #1122: computed from the same reads the door already performs; the helper
-    is deleted when the envelope carries these facts."""
+    """boot_provenance() — the door-side facts rule 2 renders, from the PLANE
+    (F18 R2b). Interim for #1122; the helper is deleted when the envelope
+    carries these facts."""
 
-    def test_ledger_counts_ever_and_24h(self, paths: Paths):
-        rows = [
+    def test_counts_dispatches_ever_and_24h(self, paths: Paths):
+        _land_all(paths, [
             _dispatch("alex", NOW - 90_000, NOW - 89_000, task_id="t-old"),
             _dispatch("alex", NOW - 100, NOW + 500, task_id="t-new"),
-        ]
-        _write_jsonl(_dlog(paths), rows)
+        ])
         prov = boot_provenance(paths, NOW)
-        assert prov["dispatch_ledger"]["state"] == "ok"
-        assert prov["dispatch_ledger"]["rows_ever"] == 2
-        assert prov["dispatch_ledger"]["rows_24h"] == 1
+        assert prov["dispatches"]["state"] == "ok"
+        assert prov["dispatches"]["rows_ever"] == 2
+        assert prov["dispatches"]["rows_24h"] == 1
 
-    def test_ledger_absent_is_state_not_zero(self, paths: Paths):
+    def test_an_unreachable_plane_is_state_not_zero(self, paths: Paths):
+        assert not (paths.root / "state" / "plane" / "plane.db").exists()
         prov = boot_provenance(paths, NOW)
-        assert prov["dispatch_ledger"]["state"] == "absent"
-        assert "rows_ever" not in prov["dispatch_ledger"]
+        assert prov["dispatches"]["state"] == "unreachable"
+        assert "rows_ever" not in prov["dispatches"]
+        assert prov["registry"]["present"] is False and "entries" not in prov["registry"]
 
-    def test_registry_absent_vs_present(self, paths: Paths):
-        from claudlobby.workstreams import registry_path
-
-        assert boot_provenance(paths, NOW)["registry"]["present"] is False
-        rp = registry_path(paths)
-        rp.parent.mkdir(parents=True, exist_ok=True)
-        rp.write_text('{"workstreams": []}')
+    def test_registry_entries_come_from_the_plane(self, paths: Paths):
+        _seed_plane(paths)
         prov = boot_provenance(paths, NOW)
-        assert prov["registry"]["present"] is True
-        assert prov["registry"]["entries"] == 0
-
-    def test_corrupt_registry_is_unreadable_never_zero_entries(self, paths: Paths):
-        # load_workstreams flattens corrupt to {} — a false-quiet. The raw
-        # read here must keep corrupt distinguishable (#1122 owns the
-        # envelope-level fix).
-        from claudlobby.workstreams import registry_path
-
-        rp = registry_path(paths)
-        rp.parent.mkdir(parents=True, exist_ok=True)
-        rp.write_text("{not json")
-        prov = boot_provenance(paths, NOW)
-        assert prov["registry"]["present"] is True
-        assert prov["registry"]["entries"] is None
+        assert prov["registry"] == {"present": True, "entries": 0}
+        _land_ws(paths, "ws-a", opened_ts="1970-01-20T00:00:00Z")
+        assert boot_provenance(paths, NOW)["registry"]["entries"] == 1
 
 
 class TestBootRender:
@@ -939,9 +1055,10 @@ class TestBootRender:
     with disclosed overflow."""
 
     def _brief(self, paths_: Paths, **ledgers):
-        _write_jsonl(_dlog(paths_), ledgers.get("dispatches", []))
-        if "reports" in ledgers:
-            _write_jsonl(_rlog(paths_), ledgers["reports"])
+        rows = ledgers.get("dispatches", [])
+        _land_all(paths_, rows)
+        if not rows:
+            _seed_plane(paths_)                       # a plane that knows the fleet, nothing open
         return build_brief(_fleet(), paths_, "alex", NOW)
 
     def test_all_quiet_renders_provenance_never_bare_zero(self, paths: Paths):
@@ -949,13 +1066,14 @@ class TestBootRender:
         out = format_boot_brief(brief, boot_provenance(paths, NOW))
         assert "all quiet" in out
         assert "0 open" in out
-        assert "rows ever" in out  # ledger provenance present
-        assert "registry: absent" in out
+        # the provenance clause, from the plane
+        assert "plane: 0 dispatches ever, 0 in 24h" in out
+        assert "registry: 0 entries" in out
         assert "claudlobby brief --bot alex" in out  # the door line
         # never a bare zero: the quiet line must carry its provenance clause
         for line in out.splitlines():
             if "0 open" in line:
-                assert "ledger" in line
+                assert "plane" in line
 
     def test_busy_case_prioritizes_orphaned_then_overdue_then_open(
         self, paths: Paths
@@ -1002,8 +1120,9 @@ class TestBootRender:
         assert "full state: claudlobby brief" in out  # door line survived
 
     def test_omitted_dispatches_render_unavailable_not_zero(self, paths: Paths):
-        # No report ledger -> the door omits the dispatch section (#526 defence).
-        brief = self._brief(paths, dispatches=[])
+        # No plane under the root -> the door omits the dispatch section (#1467).
+        assert not (paths.root / "state" / "plane" / "plane.db").exists()
+        brief = build_brief(_fleet(), paths, "alex", NOW)
         assert not brief["dispatches"]
         out = format_boot_brief(brief, boot_provenance(paths, NOW))
         assert "UNAVAILABLE" in out
@@ -1017,12 +1136,11 @@ class TestBootRender:
         assert "MISSION" not in out and "mission" not in out
 
     def test_labeled_degradation_marks_the_dispatch_line(self, paths: Paths):
-        _write_jsonl(_dlog(paths), [])
-        (_dlog(paths)).write_text(_dlog(paths).read_text() + "not json at all\n")
-        _write_jsonl(_rlog(paths), [])
+        _seed_plane(paths)
+        shutil.rmtree(paths.runtime_bots)                 # the orphan list labeled (#1014)
         brief = build_brief(_fleet(), paths, "alex", NOW)
         out = format_boot_brief(brief, boot_provenance(paths, NOW))
-        assert "#911" in out
+        assert "#1014" in out
 
 
 class TestBootCLI:
@@ -1050,13 +1168,12 @@ class TestBootCLI:
         )
         return fleet_dir
 
-    def test_boot_flag_renders_quiet_payload_end_to_end(self, paths: Paths, capsys):
+    def test_boot_flag_renders_quiet_payload_end_to_end(self, paths: Paths, capsys, monkeypatch):
         from claudlobby.commands.core import cmd_brief
 
-        _write_jsonl(_dlog(paths), [])
+        monkeypatch.setenv("CLAUDLOBBY_FLEET", "f1")
         fleet_dir = self._fleet_dir(paths)
-        # per-fleet report ledger present-and-empty -> dispatches served empty
-        _write_jsonl(fleet_dir / "runtime" / "report-back.jsonl", [])
+        _seed_plane_for(paths, "f1")
         assert cmd_brief(self._args(paths.root)) == 0
         out = capsys.readouterr().out
         assert "all quiet" in out
@@ -1065,7 +1182,6 @@ class TestBootCLI:
     def test_boot_is_mutually_exclusive_with_json_and_ack(self, paths: Paths):
         from claudlobby.commands.core import cmd_brief
 
-        _write_jsonl(_dlog(paths), [])
         self._fleet_dir(paths)
         assert cmd_brief(self._args(paths.root, json=True)) == 1
         assert cmd_brief(self._args(paths.root, ack=True)) == 1
@@ -1074,28 +1190,9 @@ class TestBootCLI:
 class TestUnlistableBotsDir:
     """brief's own contract is that it never serves a number it knows is wrong.
 
-    An unlistable runtime/bots is the dir-source twin of the unreadable ledger
-    this PR already handles: ``is_dir()`` passes, then iteration fails (#1227
-    review follow-on — these two sites are inside the swept set).
+    An unlistable runtime/bots is the dir-source twin of an unreachable plane:
+    ``is_dir()`` passes, then iteration fails (#1227 review follow-on).
     """
-
-    def test_the_alerts_section_degrades_instead_of_raising(self, paths):
-        import os as _os
-
-        from claudlobby.brief import _alerts_section
-
-        if _os.geteuid() == 0:
-            pytest.skip("root ignores the mode bits")
-        bots = paths.runtime_bots
-        (bots / "alex" / "data" / "events").mkdir(parents=True, exist_ok=True)
-        bots.chmod(0o000)
-        try:
-            degraded: list = []
-            out = _alerts_section(paths, "alex", 1787000000, degraded)
-            assert out == []
-            assert degraded, "an unreachable alert source must be disclosed"
-        finally:
-            bots.chmod(0o755)
 
     def test_orphans_are_omitted_and_disclosed_not_reported_as_none(self, paths):
         """'no orphans' and 'could not look' have opposite remedies."""
@@ -1105,8 +1202,7 @@ class TestUnlistableBotsDir:
 
         if _os.geteuid() == 0:
             pytest.skip("root ignores the mode bits")
-        _dlog(paths).write_text("")
-        _rlog(paths).write_text("")
+        _seed_plane(paths)
         doors = load_dispatch_doors(paths)
         bots = paths.runtime_bots
         bots.chmod(0o000)
@@ -1118,49 +1214,236 @@ class TestUnlistableBotsDir:
             bots.chmod(0o755)
 
 
-class TestAlertsAbsentBotsDir:
-    """vera's Blocking 2 (#1227 round 2, dropped rather than deferred).
-
-    Round 2 disclosed the UNREADABLE bots dir and left ABSENT returning `[]`
-    with nothing in `degraded[]`. A reader then sees no alerts and no statement
-    that the door could not be opened — a false all-clear in the one module
-    whose stated property is that it never serves a number it knows is wrong.
-
-    The fix follows the shape already in this file: brief labels the orphan list
-    when it is empty by construction without a bots dir (#1014). Same rule, same
-    absent input, same file — it just had not been applied here.
+class TestAlertsReadThePlane:
+    """The alerts section reads the plane and nothing else (F18 R2b): no flag,
+    no bots dir, no event files. A plane that cannot answer is OMITTED — an
+    empty list would mean "could not look", not "nothing is wrong" — and a
+    plane that holds the fleet with no critical event is a real zero.
     """
 
-    def test_an_absent_bots_dir_is_disclosed_and_names_the_path(self, paths):
-        import shutil
-
+    def test_an_unreachable_plane_is_omitted_and_says_so(self, paths):
         from claudlobby.brief import _alerts_section
 
-        shutil.rmtree(paths.runtime_bots)
-        assert not paths.runtime_bots.exists()
+        assert not (paths.root / "state" / "plane" / "plane.db").exists()
         degraded: list = []
         out = _alerts_section(paths, "alex", 1787000000, degraded)
         assert out == []
-        assert degraded, "an unreachable alert source must be disclosed"
-        assert any(str(paths.runtime_bots) in d.reason for d in degraded), (
-            f"the disclosure must name the path: {[d.reason for d in degraded]}"
-        )
+        omitted = [d for d in degraded if d.field == "alerts" and d.mode == "omitted"]
+        assert omitted and omitted[0].issue == "#1467" and "cannot answer" in omitted[0].reason
 
-    def test_a_present_but_empty_bots_dir_is_a_real_zero(self, paths):
-        """The positive control, and the line brief draws everywhere else.
-
-        Presence, not emptiness. A bots dir that exists and holds no events is a
-        fleet that has emitted nothing, and for it an empty alert list is the
-        TRUE answer — it must NOT be degraded. If this collapses into the case
-        above, the disclosure has stopped meaning anything.
-        """
+    def test_a_plane_that_holds_the_fleet_is_a_real_zero(self, paths):
+        """The positive control, and the line brief draws everywhere else:
+        presence, not emptiness."""
         from claudlobby.brief import _alerts_section
 
-        assert paths.runtime_bots.is_dir()
+        _seed_plane(paths)
         degraded: list = []
         out = _alerts_section(paths, "alex", 1787000000, degraded)
         assert out == []
-        assert not [d for d in degraded if "bots directory" in d.reason], (
-            f"a present-but-empty bots dir was wrongly degraded: "
-            f"{[d.reason for d in degraded]}"
+        assert not [d for d in degraded if d.field == "alerts" and d.mode == "omitted"], (
+            f"a plane that holds the fleet was wrongly omitted: {[d.reason for d in degraded]}"
         )
+
+
+def test_build_brief_opens_the_plane_once_for_every_section(paths: Paths, monkeypatch):
+    """One session for the dispatches, workstreams, reports and alerts sections
+    (a brief once opened the plane five times and exec'd the readers six — the
+    R2b-1 simplify lens)."""
+    _seed_plane(paths)
+    import claudlobby.brief as brief_mod
+
+    real = brief_mod.load_dispatch_doors
+    opened: list[int] = []
+
+    class _Counting:
+        def __init__(self, mod):
+            self._mod = mod
+
+        def __getattr__(self, name):
+            return getattr(self._mod, name)
+
+        def open_plane(self, *a, **k):
+            opened.append(1)
+            return self._mod.open_plane(*a, **k)
+
+    monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Counting(real(p)))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert "open" in brief["dispatches"] and "unacked" in brief["reports"] and "active" in brief["workstreams"]
+    assert len(opened) == 1, opened
+
+
+# --- M5: the task-loop menu on the dispatch rows (chunk M-B, #1481) ----------
+
+
+def _land_act(paths: Paths, asg: str, wi: str, event: str, ts: int, **detail) -> None:
+    """One task event on a row, as `task-act.sh` / `task nudge` land theirs."""
+    from claudlobby.plane.emit_api import emit_batch
+    out = emit_batch(paths.root, [{
+        "event_type": "task", "emitter": "test", "fleet": FLEET,
+        "occurred_at": _iso(ts),
+        "payload": {"work_item_id": wi, "assignment_id": asg, "event": event,
+                    "actor": f"bot:{FLEET}/lead", **detail},
+    }])
+    assert all(o.status == "committed" for o in out), out
+
+
+def test_open_and_overdue_rows_carry_the_menu_facts(paths: Paths):
+    """A manager running /brief by hand must see what the re-check timer would
+    have sent it: how old the row is, whether it has moved, and whether anyone
+    is waiting on a human."""
+    wi, asg = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"))
+    _land_act(paths, asg, wi, "progress", NOW - 4000)
+    _land_act(paths, asg, wi, "escalated", NOW - 1000, by="lead",
+              question="do we ship without the migration")
+
+    d = build_brief(_fleet(), paths, "alex", NOW)["dispatches"]
+    row = {r["task_id"]: r for r in d["open"]}["t-late"]
+    assert row["age_s"] == 9000
+    assert row["expected_by"].startswith(_iso(NOW - 3000)[:19])   # the deadline
+    assert row["last_progress_at"].startswith(_iso(NOW - 4000)[:19])
+    assert row["escalated"]["question"] == "do we ship without the migration"
+    assert row["escalated"]["by"] == "lead"
+    assert row["nudged"] is None
+    # the same facts on the overdue row — one reader, both lists
+    over = {r["task_id"]: r for r in d["overdue"]}["t-late"]
+    assert over["escalated"] == row["escalated"] and over["age_s"] == 9000
+
+
+def test_a_nudge_shows_and_does_not_extinguish_an_escalation(paths: Paths):
+    """M-A's F1 on this surface: a nudge is an ASK, not an ANSWER."""
+    wi, asg = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-both"))
+    _land_act(paths, asg, wi, "escalated", NOW - 2000, by="lead", question="which repo")
+    _land_act(paths, asg, wi, "nudged", NOW - 100, by="chris", reason="any movement")
+
+    row = {r["task_id"]: r for r in
+           build_brief(_fleet(), paths, "alex", NOW)["dispatches"]["open"]}["t-both"]
+    assert row["escalated"]["question"] == "which repo"
+    assert row["nudged"]["by"] == "chris"
+
+
+def test_a_row_with_no_acts_reports_none_rather_than_omitting_the_keys(paths: Paths):
+    """`None` is "the plane holds no such fact"; a missing KEY would mean the
+    install's readers predate the menu, which is a different claim and is said
+    in degraded[]."""
+    _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-quiet"))
+    row = {r["task_id"]: r for r in
+           build_brief(_fleet(), paths, "alex", NOW)["dispatches"]["open"]}["t-quiet"]
+    assert row["last_progress_at"] is None
+    assert row["escalated"] is None and row["nudged"] is None
+
+
+def test_the_text_render_prints_the_four_verbs_once(paths: Paths):
+    _land_all(paths, [
+        _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"),
+        _dispatch("alex", NOW - 8000, NOW - 3000, task_id="t-late2"),
+    ])
+    text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
+    menu = [ln for ln in text.splitlines() if ln.startswith("  act on a row:")]
+    assert len(menu) == 1, "the menu belongs under the section, not on every row"
+    for verb in ("chase", "supersede", "withdraw", "escalate"):
+        assert verb in menu[0]
+    # F7 (M-B fold): prefixed $CLAUDLOBBY_ROOT/lib/ — a bare `task-act.sh` /
+    # `dispatch-task.sh` is not on a bot's PATH
+    assert "$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw <task-id> --reason" in menu[0]
+    assert "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes <task-id>" in menu[0]
+
+
+def test_the_render_names_an_escalation_on_the_row(paths: Paths):
+    wi, asg = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-esc"))
+    _land_act(paths, asg, wi, "escalated", NOW - 1000, by="lead", question="which repo")
+    text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
+    line = [ln for ln in text.splitlines() if "t-esc" in ln][0]
+    assert "ESCALATED by lead: which repo" in line
+
+
+def test_the_menu_is_one_definition_with_the_re_check(paths: Paths):
+    """The timer's message and the brief's line must never offer a manager
+    different options for the same situation (M-A said so where it wrote the
+    nudge's copy; this is the pin)."""
+    from claudlobby.brief import _verb_menu_line
+    from claudlobby.commands.task import verb_commands
+
+    assert _verb_menu_line() == verb_commands("<task-id>", "<assignee>")
+
+
+def test_json_keeps_its_schema_1_top_level_keys(paths: Paths):
+    """The menu keys are additive INSIDE a row; the envelope's own key set is
+    pinned, and a new top-level key is a schema change. `dispatched` (F2, the
+    M-B fold) is one more additive key inside `dispatches` — not a new
+    top-level key of the envelope, which is what this test actually pins."""
+    _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-late"))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert set(brief["dispatches"]) == {"open", "overdue", "orphaned", "dispatched"}
+    assert brief["schema"] == SCHEMA_VERSION
+
+
+# --- M-B fold F2: the manager's own list ---------------------------------
+
+
+def _fleet_with_manager(**kw) -> FleetConfig:
+    """`_fleet()` plus a manager bot, `mgr` — `plane_fixtures._live_dispatch`'s
+    own hardcoded `assigned_by`, so any row `_land`/`_dispatch` creates is
+    already dispatched BY this bot without a second dispatch helper."""
+    bots = {
+        "alex": BotConfig(bot_id="alex", name="Alex", expertise=["software-engineering"]),
+        "mgr": BotConfig(bot_id="mgr", name="Mgr", expertise=[]),
+    }
+    base = dict(bots=bots)
+    base.update(kw)
+    return _fleet(**base)
+
+
+def test_dispatched_lists_the_managers_own_rows_and_open_still_lists_the_workers(
+    paths: Paths,
+):
+    """F2 (M-B fold, #1481): three surfaces (the re-check digest's overflow
+    line, the dispatch protocol, observable-plane.md §6) told a manager
+    `claudlobby brief --bot <manager>` would list the rows it dispatched;
+    brief's section was the bot as ASSIGNEE and rendered empty for a manager
+    holding no work of its own (reproduced). `mgr` is the fixture's own
+    manager alias — briefing IT must show the rows under `dispatched`, and
+    briefing the WORKER must still show them under `open` (the fold's pin)."""
+    fleet = _fleet_with_manager()
+    _land_all(paths, [
+        _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-one"),
+        _dispatch("alex", NOW - 8000, NOW - 2000, task_id="t-two"),
+        _dispatch("alex", NOW - 7000, NOW - 1000, task_id="t-three"),
+    ])
+
+    mgr_dispatches = build_brief(fleet, paths, "mgr", NOW)["dispatches"]
+    assert {r["task_id"] for r in mgr_dispatches["dispatched"]} == {
+        "t-one", "t-two", "t-three"
+    }
+    assert mgr_dispatches["open"] == []          # mgr is not the ASSIGNEE of any of these
+    assert all(r["assignee"] == "alex" for r in mgr_dispatches["dispatched"])
+
+    worker_dispatches = build_brief(fleet, paths, "alex", NOW)["dispatches"]
+    assert {r["task_id"] for r in worker_dispatches["open"]} == {
+        "t-one", "t-two", "t-three"
+    }
+    assert worker_dispatches["dispatched"] == []  # alex dispatched none of these
+
+
+def test_dispatched_rows_carry_the_menu_facts_and_render_under_their_own_heading(
+    paths: Paths,
+):
+    """`dispatched` rows carry the same escalated/nudged facts as open/overdue
+    (from `fleet_open_rows`'s own `menu_facts` join), and the text render
+    shows them under a heading and verb-line of their own."""
+    fleet = _fleet_with_manager()
+    wi, asg = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-esc"))
+    _land_act(paths, asg, wi, "escalated", NOW - 1000, by="lead", question="which repo")
+
+    d = build_brief(fleet, paths, "mgr", NOW)["dispatches"]
+    row = {r["task_id"]: r for r in d["dispatched"]}["t-esc"]
+    assert row["escalated"]["question"] == "which repo"
+    assert row["escalated"]["by"] == "lead"
+
+    text = format_brief(build_brief(fleet, paths, "mgr", NOW))
+    assert "dispatched by you (1)" in text
+    assert "ESCALATED by lead: which repo" in text
+    menu = [ln for ln in text.splitlines()
+            if ln.startswith("  act on a row you dispatched:")]
+    assert len(menu) == 1
+    for verb in ("chase", "supersede", "withdraw", "escalate"):
+        assert verb in menu[0]

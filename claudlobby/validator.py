@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 from . import dotenv, tool_resolve
 from .claudron_compat import CLAUDRON_INTEGRATION_URL
 from .config import (
+    _RETIRED_OBSERVABILITY_KEYS,
     _PROJECT_VALIDATION_KEYS,
     GITHUB_APP_ENV_VARS,
     FleetConfig,
@@ -980,15 +981,13 @@ def _validate_bots(
                 report.warnings.append(
                     f"bot '{bot_name}': observability.pulse_interval > 3600s (1h) is unusually long — got {obs.pulse_interval}"
                 )
-        if obs.reap_days is not None:
-            if obs.reap_days <= 0:
-                report.warnings.append(
-                    f"bot '{bot_name}': observability.reap_days must be > 0 (got {obs.reap_days})"
-                )
-            elif obs.reap_days > 365:
-                report.warnings.append(
-                    f"bot '{bot_name}': observability.reap_days > 365 is unusually long — got {obs.reap_days}"
-                )
+        for retired_key in obs.retired:
+            # A key nothing reads is a lie in the config surface: said, never
+            # silently ignored (and never refused — an old manifest must load).
+            report.warnings.append(
+                f"bot '{bot_name}': observability.{retired_key} has no reader since the F18 closure"
+                f" — remove it ({_RETIRED_OBSERVABILITY_KEYS.get(retired_key, 'retired')})"
+            )
         if obs.bridge_heal_max_attempts is not None and not (
             1 <= obs.bridge_heal_max_attempts <= 10
         ):
@@ -1658,6 +1657,66 @@ def _validate_placeholders(fleet: FleetConfig, report: ValidationReport) -> None
             )
 
 
+def _warn_dead_flags(fleet_env: dict, paths: Paths, report: ValidationReport) -> None:
+    """Warn on every ``.env`` flag no shipped door reads any more.
+
+    A flag with no reader is a lie in the config surface: it looks like a
+    control, it is written down as if it were one, and nothing on the host
+    consults it. The estate already had two — the F18 closure deleted the
+    shadow while ``PLANE_SHADOW_ENABLED`` kept sitting in a live engineering
+    ``.env``, and the two cutover prefixes outlived their readers by a release.
+
+    Three tiers, deliberately, because they carry different amounts of
+    knowledge and the message should say which:
+
+    1. A RETIRED name gets its own sentence — we know what it used to do and
+       when it stopped, and telling someone that is what turns "delete this
+       line" from an instruction into a decision they can check.
+    2. A retired PREFIX covers a whole family without listing it.
+    3. Anything else spelled ``<NS>_..._ENABLED`` in one of OUR namespaces —
+       derived from :func:`switches.namespaces`, never listed — that no
+       registered switch claims. This is the tier that keeps working: delete a
+       door tomorrow, forget to touch this file, and its flag still warns.
+
+    Bounded to claudlobby's own namespaces on purpose. A fleet's ``.env`` is
+    also where its own tooling keeps ``MYTOOL_ENABLED``; warning about that
+    would be wrong, and it would train operators to skim past the check, which
+    costs more than the flag it caught.
+
+    Warned, never refused: an old tier must still load, and a stale flag is
+    inert by definition — the harm is the belief, not the value.
+    """
+    from . import switches as _sw
+
+    known = _sw.env_names()
+    namespaces = _sw.namespaces()
+    for key in sorted(fleet_env):
+        if key in known:
+            continue
+        if key in _sw.RETIRED:
+            report.warnings.append(
+                f"{paths.env_file}: {key} is a DEAD flag — {_sw.RETIRED[key]};"
+                " remove the line"
+            )
+            continue
+        prefix_hit = next(
+            (why for pre, why in _sw.RETIRED_PREFIXES if key.startswith(pre)),
+            None,
+        )
+        if prefix_hit:
+            report.warnings.append(
+                f"{paths.env_file}: {key} is {prefix_hit} — remove the line"
+            )
+            continue
+        if key.endswith("_ENABLED") and key.split("_", 1)[0] in namespaces:
+            report.warnings.append(
+                f"{paths.env_file}: {key} is a DEAD flag — no shipped door"
+                " reads it (every switch claudlobby ships is listed by"
+                " `claudlobby doctor --switches`); remove the line, or fix the"
+                " spelling if you meant one of those"
+            )
+
+
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
@@ -1668,6 +1727,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_placeholders(fleet, report)
 
     fleet_env = dotenv.read(paths.env_file)
+    _warn_dead_flags(fleet_env, paths, report)
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)

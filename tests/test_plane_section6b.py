@@ -17,6 +17,7 @@ from claudlobby.plane.queries import (
     ATTENTION_SQL,
     RECONCILIATION_SQL,
     TASK_STATUS_SQL,
+    attention_params,
 )
 
 FUTURE = "2027-01-01T00:00:00+00:00"
@@ -69,11 +70,11 @@ def test_zero_producer_reads_quiet_never_all_alarm(tmp_path: Path):
     and reconciliation pinned at 100%. A missing producer must read EMPTY."""
     a1 = _seed(tmp_path, tx_events=())
     a2 = _seed(tmp_path, tx_events=())
-    attention = [r[0] for r in _q(tmp_path, ATTENTION_SQL, (CUTOFF,))]
+    attention = [r[0] for r in _q(tmp_path, ATTENTION_SQL, attention_params(CUTOFF))]
     assert attention == [], (
         f"zero transmission rows must not alarm: {attention}")
     assert _q(tmp_path, RECONCILIATION_SQL)[0][0] == 0
-    statuses = dict(_q(tmp_path, TASK_STATUS_SQL))
+    statuses = {r[0]: r[1] for r in _q(tmp_path, TASK_STATUS_SQL)}
     assert statuses[a1] == statuses[a2] == "created_not_sent", (
         "contract exists != active: no evidence means not-yet-sent, not open")
 
@@ -83,7 +84,7 @@ def test_overdue_overlay_still_fires_without_a_producer(tmp_path: Path):
     evidence — it must survive the empty-not-everything rewrite."""
     late = _seed(tmp_path, expected_by=PAST, tx_events=())
     ontime = _seed(tmp_path, expected_by=FUTURE, tx_events=())
-    attention = [r[0] for r in _q(tmp_path, ATTENTION_SQL, (CUTOFF,))]
+    attention = [r[0] for r in _q(tmp_path, ATTENTION_SQL, attention_params(CUTOFF))]
     assert late in attention and ontime not in attention
 
 
@@ -93,8 +94,8 @@ def test_submission_is_activation_for_tmux(tmp_path: Path):
     attention set."""
     aid = _seed(tmp_path, tx_events=(("send_attempted", 1),
                                      ("pane_submitted", 1)))
-    assert dict(_q(tmp_path, TASK_STATUS_SQL))[aid] == "open"
-    assert aid not in [r[0] for r in _q(tmp_path, ATTENTION_SQL, (CUTOFF,))]
+    assert {r[0]: r[1] for r in _q(tmp_path, TASK_STATUS_SQL)}[aid] == "open"
+    assert aid not in [r[0] for r in _q(tmp_path, ATTENTION_SQL, attention_params(CUTOFF))]
 
 
 def test_trouble_evidence_alarms_failed_and_queued(tmp_path: Path):
@@ -103,7 +104,7 @@ def test_trouble_evidence_alarms_failed_and_queued(tmp_path: Path):
     behind a busy turn (carrier_queued, §6b #7)."""
     failed = _seed(tmp_path, tx_events=(("send_attempted", 1), ("failed", 1)))
     queued = _seed(tmp_path, tx_events=(("carrier_queued", 1),))
-    attention = [r[0] for r in _q(tmp_path, ATTENTION_SQL, (CUTOFF,))]
+    attention = [r[0] for r in _q(tmp_path, ATTENTION_SQL, attention_params(CUTOFF))]
     assert failed in attention and queued in attention
 
 
@@ -111,7 +112,7 @@ def test_carrier_queued_is_pending_not_open(tmp_path: Path):
     """The new token ingests (manifest + DDL CHECK agree) and reads as an
     outstanding attempt: accepted-but-parked is not consumed."""
     aid = _seed(tmp_path, tx_events=(("carrier_queued", 1),))
-    assert dict(_q(tmp_path, TASK_STATUS_SQL))[aid] == "pending_unacknowledged"
+    assert {r[0]: r[1] for r in _q(tmp_path, TASK_STATUS_SQL)}[aid] == "pending_unacknowledged"
 
 
 def test_queued_then_submitted_activates(tmp_path: Path):
@@ -119,8 +120,8 @@ def test_queued_then_submitted_activates(tmp_path: Path):
     evidence."""
     aid = _seed(tmp_path, tx_events=(("carrier_queued", 1),
                                      ("pane_submitted", 1)))
-    assert dict(_q(tmp_path, TASK_STATUS_SQL))[aid] == "open"
-    assert aid not in [r[0] for r in _q(tmp_path, ATTENTION_SQL, (CUTOFF,))]
+    assert {r[0]: r[1] for r in _q(tmp_path, TASK_STATUS_SQL)}[aid] == "open"
+    assert aid not in [r[0] for r in _q(tmp_path, ATTENTION_SQL, attention_params(CUTOFF))]
 
 
 def test_supplied_id_not_open_ingests_as_task_fact(tmp_path: Path):
@@ -147,7 +148,7 @@ def test_ack_still_tightens_and_terminal_still_dominates(tmp_path: Path):
     """The tightening case and the monotone reducer survive the rewrite."""
     aid = _seed(tmp_path, tx_events=(("pane_submitted", 1),
                                      ("recipient_acknowledged", 1)))
-    assert dict(_q(tmp_path, TASK_STATUS_SQL))[aid] == "open"
+    assert {r[0]: r[1] for r in _q(tmp_path, TASK_STATUS_SQL)}[aid] == "open"
     conn = connect(db_path(tmp_path))
     wi = conn.execute(
         "SELECT work_item_id FROM assignments WHERE assignment_id = ?",
@@ -161,4 +162,4 @@ def test_ack_still_tightens_and_terminal_still_dominates(tmp_path: Path):
          "payload": {"work_item_id": wi, "assignment_id": aid,
                      "event": "progress", "progress": 5}},
     ])
-    assert dict(_q(tmp_path, TASK_STATUS_SQL))[aid] == "completed"
+    assert {r[0]: r[1] for r in _q(tmp_path, TASK_STATUS_SQL)}[aid] == "completed"

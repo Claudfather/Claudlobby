@@ -10,7 +10,7 @@ import os
 import subprocess
 import time
 
-from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
+from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, plane_emit_env, read_fleet_events
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
@@ -30,7 +30,8 @@ def _signal_root(tmp_path, bots_at="runtime/bots"):
 
 def _run(script, args, root, tmp_path, extra_env=None):
     env = _scrubbed_env(
-        CLAUDLOBBY_ROOT=str(root), TG_CAPTURE=str(tmp_path / "tg-capture")
+        CLAUDLOBBY_ROOT=str(root), TG_CAPTURE=str(tmp_path / "tg-capture"),
+        **plane_emit_env(),          # the host job's receipt lands on the plane under _host
     )
     env.update(extra_env or {})
     return subprocess.run(
@@ -54,8 +55,11 @@ class TestDataSweep:
     # Everything else under data/ is durable by default, however old —
     # including unvetted .log names (a LevelDB-style 000003.log is live
     # database state, not a text log).
-    EPHEMERAL = ["events/old.jsonl", "cron.log", "ledger.json.bak"]
-    DURABLE = ["scripts/audit-tracker.py", "ledger.json", "notes.md", "000003.log"]
+    EPHEMERAL = ["cron.log", "ledger.json.bak"]
+    # An events file is no longer the sweep's (F18 closure R2b-2): nothing
+    # writes `data/events/*.jsonl` and nothing reads it, so a leftover is the
+    # operator's archive — durable to this sweep, however old.
+    DURABLE = ["scripts/audit-tracker.py", "ledger.json", "notes.md", "000003.log", "events/old.jsonl"]
 
     def _fleet_data(self, root):
         data = root / "local" / "f7" / "runtime" / "bots" / "b1" / "data"

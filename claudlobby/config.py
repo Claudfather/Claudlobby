@@ -115,15 +115,17 @@ class SystemDefaultsConfig:
 
 @dataclass
 class ObservabilityConfig:
-    """Fleet observability settings — pulse interval and event retention.
+    """Fleet observability settings — pulse interval and the watchdog thresholds.
 
     Composed into bot.conf as env vars so bot-vitals.sh and fleet-pulse.sh
     can read them at runtime.  Fields use None sentinel so _merge_observability
     can distinguish "not set" from "explicitly set to the default value".
+    ``retired`` names the keys a manifest still sets that nothing reads any
+    more (see _RETIRED_OBSERVABILITY_KEYS) — carried so `validate` can say so,
+    never consumed by a door.
     """
 
     pulse_interval: int | None = None  # seconds between heartbeat pulses
-    reap_days: int | None = None  # days to retain event files before reaping
     # seconds of no tool-call activity (while not idle) before a bot is flagged
     # activity_stuck — catches an animated-but-hung session that pane_stuck misses
     activity_stuck_threshold: int | None = None
@@ -151,6 +153,8 @@ class ObservabilityConfig:
     # distinguishable from "resolved" and a strand outliving the window goes
     # quiet. <= 0 disables the cap and keeps reporting forever.
     unassigned_max_age: int | None = None
+    # keys a manifest still sets that have no reader (disclosed by the validator)
+    retired: tuple[str, ...] = ()
 
 
 # Field -> environment variable, for the fleet-pulse escalation knobs (#1120).
@@ -1199,11 +1203,22 @@ def _merge_tool_permissions(
     )
 
 
+# Keys that once meant something and now have no reader. `observability.reap_days`
+# aged the per-bot event files (fleet-pulse's reap_events, keepalive's own
+# reaper); the F18 closure (#1467) removed the files and the reapers with them,
+# and the plane's `plane prune` retention took over. A manifest that still sets
+# one is not refused (the loader must not crash on an old fleet.yaml) — it is
+# RECORDED here and `claudlobby validate` warns, naming the key.
+_RETIRED_OBSERVABILITY_KEYS: dict[str, str] = {
+    "reap_days": "no reader since the F18 closure (#1467) — the event files it aged are gone;"
+                 " the plane's `plane prune` retention replaced them",
+}
+
+
 def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
     if not raw:
         return ObservabilityConfig()
     pi = raw.get("pulse_interval")
-    rd = raw.get("reap_days")
     ast = raw.get("activity_stuck_threshold")
     dd = raw.get("dispatch_deadline")
     bh = raw.get("bridge_heal")
@@ -1213,7 +1228,6 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
     uma = raw.get("unassigned_max_age")
     return ObservabilityConfig(
         pulse_interval=int(pi) if pi is not None else None,
-        reap_days=int(rd) if rd is not None else None,
         activity_stuck_threshold=int(ast) if ast is not None else None,
         dispatch_deadline=int(dd) if dd is not None else None,
         bridge_heal=bool(bh) if bh is not None else None,
@@ -1221,6 +1235,7 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
         unassigned_check=bool(uc) if uc is not None else None,
         unassigned_threshold=int(ut) if ut is not None else None,
         unassigned_max_age=int(uma) if uma is not None else None,
+        retired=tuple(k for k in _RETIRED_OBSERVABILITY_KEYS if k in raw),
     )
 
 
@@ -1321,9 +1336,6 @@ def _merge_observability(
         pulse_interval=override.pulse_interval
         if override.pulse_interval is not None
         else default.pulse_interval,
-        reap_days=override.reap_days
-        if override.reap_days is not None
-        else default.reap_days,
         activity_stuck_threshold=override.activity_stuck_threshold
         if override.activity_stuck_threshold is not None
         else default.activity_stuck_threshold,
@@ -1345,6 +1357,7 @@ def _merge_observability(
         unassigned_max_age=override.unassigned_max_age
         if override.unassigned_max_age is not None
         else default.unassigned_max_age,
+        retired=tuple(dict.fromkeys(default.retired + override.retired)),
     )
 
 

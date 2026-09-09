@@ -205,6 +205,16 @@ silently. And "queued" is a third state, not a synonym for delivered — a send
 queued behind an erroring turn is discarded (#1048), so delivery is conditional
 on the current turn ending cleanly.
 
+It could also arrive **partially**, and for a week on this estate it usually did:
+a payload over 1 KB handed to one `tmux send-keys` overflowed the pane's 1024-byte
+pty input queue, which on macOS FLUSHES rather than drops, so 85 of 180 large
+sends arrived with their head — envelope and task id included — gone, all of them
+recorded `pane_submitted` (#1493). `pane_send_verified` now writes the payload in
+900-byte chunks with a short settle between them, and `lib/send-size-probe.sh`
+measures the result against the recipient's own transcript. The wider point stands
+unchanged and is the reason this paragraph is in a lifecycle doc: `pane_submitted`
+is a **sender-side inference**, not an observation of arrival.
+
 Sender visibility is **manual, instantaneous, and absent by default** — not
 impossible. Polling the recipient's pane at that instant does show it; nothing
 shows it to you afterwards.

@@ -39,6 +39,11 @@ class Check:
 @dataclass
 class DoctorReport:
     checks: list[Check] = field(default_factory=list)
+    #: the switch table, carried alongside the checks so `format_report` can
+    #: print it whole. A Check's `detail` is one line by construction and the
+    #: switches are the one thing here an operator has to READ rather than
+    #: scan, so the rung carries a summary and the rows ride here.
+    switch_rows: list = field(default_factory=list)
 
     def add(self, name: str, status: str, detail: str = "") -> None:
         self.checks.append(Check(name=name, status=status, detail=detail))
@@ -304,136 +309,203 @@ def _curl_with_config(
         os.unlink(cfg_path)
 
 
-#: The Railway tokens a fleet may declare, and the query each is
-#: DEFINITIONALLY able to answer: (variable, graphql query, scope).
+#: Probes, keyed by the env-var name a fleet DECLARES. Membership here is what
+#: makes a credential probeable; it is never what makes it probed. A var reaches
+#: a probe only by being declared AND resolving to a value through the .env
+#: cascade -- see `check_credentials`.
 #:
-#: ONE PROBE FOR ALL TOKENS IS THE BUG. Railway issues two kinds of token and
-#: they answer different questions — a workspace-scoped token is not bound to
-#: an account, so it cannot answer `me` BY CONSTRUCTION and probing it that way
-#: reports a working credential as dead.
-#:
-#: A CREDENTIAL HAS AN IDENTITY AND A REACH; THEY ARE INDEPENDENT. An identity
-#: endpoint answers nothing about access — probe the OPERATION you need. The
-#: GitHub App branch in `lib/creds-check.sh` already embodies this (it probes
-#: `/installation/repositories` because a `ghs_` token 403s on `/user`, D13).
-#: Durable home for the rule: Claudlobby#1400.
-#:
-#: KNOWN DUPLICATION, named rather than left to be rediscovered. This table
-#: also exists in bash, as `_railway_token_specs` in `lib/creds-check.sh`, and
-#: the two cannot share a literal across languages. The previous version of
-#: this block carried the comment "matches creds-check.sh" — it was a copy kept
-#: in sync by hand, and it went stale the moment the bash side was fixed, which
-#: is exactly how `doctor` came to probe a retired variable. Change one, change
-#: both, and prefer a shared declaration if a third consumer ever appears.
-_RAILWAY_TOKENS: tuple[tuple[str, str, str], ...] = (
-    ("RAILWAY_PERSONAL_TOKEN", "me{email}", "account"),
-    ("RAILWAY_PERSONAL_PROJECT_TOKEN", "projects{edges{node{id}}}", "workspace"),
-)
+#: Each entry names the host it contacts, because a diagnostic that opens a
+#: network connection should be able to say where to (#1377).
+_CREDENTIAL_PROBES: dict[str, tuple[str, str]] = {
+    "GITHUB_PAT": ("github", "api.github.com"),
+    "GITHUB_PERSONAL_ACCESS_TOKEN": ("github", "api.github.com"),
+    "RAILWAY_API_TOKEN": ("railway", "backboard.railway.app"),
+}
 
 
-def check_credentials(paths: Paths, report: DoctorReport) -> None:
-    """Probe key credentials for validity (GitHub PAT, Railway tokens).
+def _probe_github(token: str) -> str | None:
+    """None on success, else a short failure reason."""
+    try:
+        result = _curl_with_config(
+            {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+            ["-o", "/dev/null", "-w", "%{http_code}", "https://api.github.com/user"],
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return "timeout"
+    code = result.stdout.strip()
+    return None if code == "200" else f"HTTP {code}"
 
-    Shares `creds-check.sh`'s mechanics deliberately: tokens ride a `--config`
-    tmpfile rather than argv, and a Railway 200 is still inspected for a
-    GraphQL `errors` body. It does NOT share its token table — see
-    `_RAILWAY_TOKENS` for that duplication and why it is called out.
+
+def _probe_railway(token: str) -> str | None:
+    """None on success, else a short failure reason.
+
+    Railway answers an auth failure with HTTP 200 and an ``errors`` body, so the
+    code alone is not the verdict.
     """
-    checks_run = 0
-    failures = []
-
-    # GitHub PAT
-    gh_pat = os.environ.get("GITHUB_PAT") or os.environ.get(
-        "GITHUB_PERSONAL_ACCESS_TOKEN"
-    )
-    if gh_pat:
-        checks_run += 1
+    try:
+        result = _curl_with_config(
+            {"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            [
+                "-X",
+                "POST",
+                "-w",
+                "\n%{http_code}",
+                "-d",
+                '{"query":"query{me{name}}"}',
+                "https://backboard.railway.app/graphql/v2",
+            ],
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return "timeout"
+    lines = result.stdout.strip().rsplit("\n", 1)
+    body = lines[0] if len(lines) == 2 else ""
+    code = lines[-1]
+    if code != "200":
+        return f"HTTP {code}"
+    if body:
         try:
-            result = _curl_with_config(
-                {
-                    "Authorization": f"Bearer {gh_pat}",
-                    "Accept": "application/vnd.github+json",
-                },
-                [
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "https://api.github.com/user",
-                ],
-            )
-            if result.stdout.strip() != "200":
-                failures.append(f"GITHUB_PAT (HTTP {result.stdout.strip()})")
-        except (subprocess.TimeoutExpired, OSError):
-            failures.append("GITHUB_PAT (timeout)")
+            resp = json.loads(body)
+            if "errors" in resp:
+                return "graphql error: " + resp["errors"][0].get("message", "unknown")[:120]
+        except (json.JSONDecodeError, IndexError, KeyError):
+            pass
+    return None
 
-    # Railway — PER TOKEN, each probed with a query it can DEFINITIONALLY
-    # answer. See `_RAILWAY_TOKENS` for why one probe for all is the bug.
-    railway_declared = 0
-    for varname, query, scope in _RAILWAY_TOKENS:
-        token = os.environ.get(varname)
-        if not token:
-            continue
-        railway_declared += 1
-        checks_run += 1
-        try:
-            result = _curl_with_config(
-                {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                [
-                    "-X",
-                    "POST",
-                    "-w",
-                    "\n%{http_code}",
-                    "-d",
-                    '{"query":"query{' + query + '}"}',
-                    "https://backboard.railway.app/graphql/v2",
-                ],
-            )
-            # stdout = response body + \n + http code
-            lines = result.stdout.strip().rsplit("\n", 1)
-            body = lines[0] if len(lines) == 2 else ""
-            code = lines[-1]
-            if code != "200":
-                failures.append(f"{varname} (HTTP {code})")
-            elif body:
-                # A REJECTED Railway token still answers 200 — the refusal
-                # rides in the body. A status-only check calls it healthy.
-                try:
-                    resp = json.loads(body)
-                    if "errors" in resp:
-                        msg = resp["errors"][0].get("message", "unknown error")[:120]
-                        failures.append(
-                            f"{varname} ({scope}) (graphql error: {msg})"
-                        )
-                except (json.JSONDecodeError, IndexError, KeyError):
-                    pass
-        except (subprocess.TimeoutExpired, OSError):
-            failures.append(f"{varname} (timeout)")
 
-    # A declared-nothing Railway is SAID, never merely skipped. This block
-    # used to read one variable behind `if token:`; when that variable was
-    # retired, the whole probe stopped running and `checks_run` simply never
-    # incremented — no error, no message, and `doctor` lost Railway coverage
-    # while reporting a clean run. Absence has to be visible or removing a
-    # credential silently removes its check.
-    if railway_declared == 0:
+_PROBE_FNS = {"github": _probe_github, "railway": _probe_railway}
+
+
+def check_credentials(
+    fleet: FleetConfig, paths: Paths, report: DoctorReport
+) -> None:
+    """Probe the credentials THIS FLEET DECLARES, resolved through the .env cascade.
+
+    Two opposite defects used to live here, and fixing either alone makes the
+    other worse, which is why they move together (#1377).
+
+    **It read `os.environ` directly.** A `RAILWAY_API_TOKEN` in the operator's
+    shell was probed -- a live authenticated call to a third party -- and its
+    result reported as *this fleet's* health, on a fleet declaring no Railway
+    anything. So a fleet's verdict depended on what happened to be exported in
+    the shell that ran the command, and a stranger following the README made an
+    outbound call they were never told about. Measured: a clean seed fleet
+    reported `[FAIL] credentials -- invalid: RAILWAY_API_TOKEN`.
+
+    **It also never read the .env cascade**, which is where the runtime actually
+    resolves credentials. So the mirror case reported `no credential env vars
+    found to probe` on all four fleets of this estate, every one of which
+    declares `GITHUB_PAT` and stores it in a tier. Gating on declaration WITHOUT
+    fixing this would have turned "probes the wrong thing" into "probes
+    nothing" -- a check that had stopped working while reading as clean.
+
+    So: declarations come from `credentials.declared_for_fleet` (which routes to
+    `mcp_resolve.required_vars` and covers both the MCP and integration
+    surfaces) and values from `credentials.resolved_view` (the same four-tier
+    cascade `Paths.env_resolved` gives the runtime). Neither is re-derived here
+    -- a private copy is how the two disagree, and a checker disagreeing with
+    the runtime is the bug class this function is an instance of.
+
+    **The process environment is deliberately NOT a value source.** A bot
+    resolves from the cascade, never from the operator's interactive shell, so
+    an ambient-only value says nothing about whether the fleet works. It is
+    detected and REPORTED rather than silently probed or silently dropped: that
+    state is real, confusing, and worth naming.
+
+    Coverage is stated on every outcome. "Nothing was probed" has three causes
+    with different remedies -- nothing probeable is declared, a declared var has
+    no value, or a value exists only in the shell -- and collapsing them into
+    one reassuring line is the defect this function already shipped once.
+    """
+    from .credentials import declared_for_fleet, resolved_view
+
+    try:
+        declarations, _ = declared_for_fleet(fleet, paths)
+    except Exception:  # noqa: BLE001 - a broken manifest must not crash doctor
+        report.add("credentials", "warn", "could not read fleet declarations")
+        return
+    # ResolverUnavailable is RAISED by design and must not be folded into an
+    # empty mapping: "the cascade could not be read" and "the cascade holds no
+    # value" have opposite remedies, and collapsing them would report every
+    # declared credential as unset — a fresh instance of the unreachable-vs-empty
+    # defect, inside a fix for its sibling. Caught by this function's own
+    # positive control, which is the only test here that asserts a probe FIRES.
+    from .env_tiers import ResolverUnavailable
+
+    try:
+        _, values, _ = resolved_view(paths)
+    except ResolverUnavailable as exc:
         report.add(
             "credentials",
             "warn",
-            "Railway unprobed: neither "
-            + " nor ".join(v for v, _, _ in _RAILWAY_TOKENS)
-            + " is set",
+            f"cannot read the .env cascade, so nothing was probed: {exc}",
         )
+        return
+    except Exception:  # noqa: BLE001 - an unreadable tier file must not crash doctor
+        report.add("credentials", "warn", "cannot read the .env cascade, so nothing was probed")
+        return
 
-    if checks_run == 0:
-        report.add("credentials", "warn", "no credential env vars found to probe")
-    elif failures:
-        report.add("credentials", "fail", f"invalid: {', '.join(failures)}")
+    declared_names = {d.var for d in declarations}
+    source_of = {d.var: f"{d.kind}/{d.source}" for d in declarations}
+
+    probed_ok: list[str] = []
+    failures: list[str] = []
+    shell_only: list[str] = []
+    no_value: list[str] = []
+    hosts: set[str] = set()
+
+    for var in sorted(declared_names & set(_CREDENTIAL_PROBES)):
+        kind, host = _CREDENTIAL_PROBES[var]
+        value = values.get(var)
+        if value:
+            hosts.add(host)
+            reason = _PROBE_FNS[kind](value)
+            if reason:
+                failures.append(f"{var} ({reason})")
+            else:
+                probed_ok.append(f"{var} via {source_of.get(var, kind)}")
+        elif os.environ.get(var):
+            shell_only.append(var)
+        else:
+            no_value.append(var)
+
+    # Declared, but nothing here knows how to probe it. Named so a pass cannot
+    # be read as "every declared credential was checked".
+    unprobeable = sorted(declared_names - set(_CREDENTIAL_PROBES))
+
+    scope: list[str] = []
+    if hosts:
+        scope.append("contacted " + ", ".join(sorted(hosts)))
+    if shell_only:
+        scope.append(
+            f"{', '.join(shell_only)} set in your shell but absent from every "
+            f".env tier, so a bot would not see it — not probed"
+        )
+    if no_value:
+        scope.append(f"declared with no value: {', '.join(no_value)} (see env-vars)")
+    if unprobeable:
+        scope.append(f"{len(unprobeable)} declared var(s) have no probe: {', '.join(unprobeable)}")
+    tail = ("; " + "; ".join(scope)) if scope else ""
+
+    if failures:
+        report.add("credentials", "fail", f"invalid: {', '.join(failures)}{tail}")
+    elif probed_ok:
+        report.add(
+            "credentials", "pass", f"{len(probed_ok)} probed OK ({', '.join(probed_ok)}){tail}"
+        )
+    elif shell_only or no_value:
+        report.add("credentials", "warn", f"nothing probed{tail}")
     else:
-        report.add("credentials", "pass", f"{checks_run} credential(s) valid")
+        # Correct-and-complete silence: this fleet declares nothing this check
+        # knows how to probe, so there was never anything to do. Says so, rather
+        # than implying credentials were validated.
+        report.add(
+            "credentials",
+            "pass",
+            f"no probeable credential declared by this fleet{tail}",
+        )
 
 
 # ----------------------------------------------------------------------
@@ -621,6 +693,31 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
 # ----------------------------------------------------------------------
 
 
+def check_switches(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """The `switches` rung — every knob the system ships, and its state here.
+
+    This rung exists because of what the defaults flip does NOT change: four
+    doors still ship off, and a door that ships off with no surface is
+    indistinguishable from a door that does not exist. The ruling that put
+    everything else on is the same ruling that says what stays off must be
+    NAMED where the operator looks, with the one line that arms it — so this
+    is not a nice-to-have beside the flip, it is the other half of it.
+
+    Never a FAILURE, and never a warning either. A fleet that turned the
+    re-check off did so on purpose; flagging it would train operators to
+    ignore the rung, which is how the surface stops working. It reports.
+    """
+    from . import switches as _sw
+
+    try:
+        rows = _sw.resolve(paths, fleet)
+    except Exception as exc:  # noqa: BLE001 — a health command never crashes
+        report.add("switches", "warn", f"could not resolve: {exc}")
+        return
+    report.switch_rows = rows
+    report.add("switches", "pass", _sw.summary_line(rows))
+
+
 def check_fleet_validation(
     fleet: FleetConfig, paths: Paths, report: DoctorReport
 ) -> None:
@@ -651,11 +748,12 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     """Run all doctor checks and return the report."""
     report = DoctorReport()
     check_fleet_validation(fleet, paths, report)
+    check_switches(fleet, paths, report)
     check_env_vars(fleet, paths, report)
     check_mcp_configs(fleet, paths, report)
     check_npx_cache(paths, report)
     check_services(fleet, paths, report)
-    check_credentials(paths, report)
+    check_credentials(fleet, paths, report)
     check_claudron(fleet, paths, report)
     return report
 
@@ -676,4 +774,7 @@ def format_report(report: DoctorReport) -> str:
     p, w, f = len(report.passed), len(report.warnings), len(report.failures)
     lines.append(f"  {p} passed, {w} warnings, {f} failures")
     lines.append("")
+    if report.switch_rows:
+        from . import switches as _sw
+        lines.append(_sw.format_table(report.switch_rows))
     return "\n".join(lines)

@@ -155,3 +155,12 @@ def _add_migration_args(parser) -> None:
         action="store_true",
         help="Write changes (default: dry-run preview only)",
     )
+
+
+def refuse_unreachable(command: str, note: str) -> int:
+    """The one refusal every plane-only reader prints (F18 closure, R2b-1):
+    the plane cannot answer, so NOTHING is served rather than a wrong answer —
+    unreachable is not empty. rc 3, deliberately not 2 (a malformed call) nor
+    1 (the thing asked failed): the question could not be answered."""
+    print(f"claudlobby {command}: UNREACHABLE — {note}", file=sys.stderr)
+    return 3

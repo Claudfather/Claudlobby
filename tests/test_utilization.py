@@ -1,4 +1,10 @@
-"""Tests for worker utilization rollup (claudlobby/utilization.py)."""
+"""Tests for worker utilization rollup (claudlobby/utilization.py).
+
+F18 closure R2b: the series is the plane's heartbeat samples — `compute_bot_utilization`
+takes a bot's (instant, state) entries and `compute_fleet_utilization` opens the
+plane for the fleet (refusing, never zeros, when it cannot). The keepalive.log
+fixtures went with the file (test_no_keepalive_log became test_no_samples).
+"""
 
 from __future__ import annotations
 
@@ -6,8 +12,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from claudlobby.plane.emit_api import emit_batch
 from claudlobby.utilization import (
     BotUtilization,
+    PlaneUnreachable,
     _compute_busy_pct,
     _find_state_transition,
     compute_bot_utilization,
@@ -15,6 +23,8 @@ from claudlobby.utilization import (
     format_utilization_summary,
     write_utilization_json,
 )
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _make_entries(
@@ -30,14 +40,29 @@ def _make_entries(
     ]
 
 
-def _make_bot_dir(tmp_path: Path, bot_name: str, log_lines: list[str]) -> Path:
-    """Create a bot dir with a keepalive.log file."""
+def _make_bot_dir(tmp_path: Path, bot_name: str) -> Path:
+    """Create a bot dir (the fleet rollup discovers bots by their bot.conf)."""
     bot_dir = tmp_path / bot_name
     bot_dir.mkdir(parents=True)
     (bot_dir / "bot.conf").write_text(f"BOT_ID={bot_name}\n")
-    if log_lines:
-        (bot_dir / "keepalive.log").write_text("\n".join(log_lines) + "\n")
     return bot_dir
+
+
+def _series(now: datetime, states: list[str], step: timedelta = timedelta(minutes=1)) -> list[tuple[datetime, str]]:
+    """Entries ending at `now`, one per `step`, in time order."""
+    n = len(states)
+    return [(now - step * (n - i), s) for i, s in enumerate(states)]
+
+
+def _land_heartbeats(root: Path, fleet: str, bot: str, entries) -> None:
+    """The bot's heartbeat samples on a plane under `root`, as keepalive lands them."""
+    (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    out = emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": fleet,
+                             "occurred_at": ts.isoformat(),
+                             "payload": {"subject_kind": "bot_instance", "subject": f"bot:{fleet}/{bot}",
+                                         "metric": "bot.heartbeat", "value": {"state": state}}}
+                            for ts, state in entries])
+    assert all(o.status == "committed" for o in out), out
 
 
 # ── _compute_busy_pct ────────────────────────────────────────────────────────
@@ -138,65 +163,51 @@ class TestFindStateTransition:
 
 
 class TestComputeBotUtilization:
-    def test_idle_bot(self, tmp_path):
+    def test_idle_bot(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        log_lines = [
-            f"{(now - timedelta(minutes=m)).strftime('%Y-%m-%dT%H:%M:%S+00:00')} IDLE — at prompt"
-            for m in range(10, 0, -1)
-        ]
-        bot_dir = _make_bot_dir(tmp_path, "eng-1", log_lines)
-        util = compute_bot_utilization("eng-1", bot_dir, {"status": "idle"}, now=now)
+        util = compute_bot_utilization("eng-1", _series(now, ["IDLE"] * 10), {"status": "idle"}, now=now)
 
         assert util.busy_pct_24h == 0.0
         assert util.idle_since is not None
         assert util.current_task_age_secs is None
         assert util.stall is False
 
-    def test_busy_bot(self, tmp_path):
+    def test_busy_bot(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        log_lines = [
-            f"{(now - timedelta(minutes=m)).strftime('%Y-%m-%dT%H:%M:%S+00:00')} BUSY — active"
-            for m in range(10, 0, -1)
-        ]
-        bot_dir = _make_bot_dir(tmp_path, "eng-1", log_lines)
-        util = compute_bot_utilization("eng-1", bot_dir, {"status": "working"}, now=now)
+        util = compute_bot_utilization("eng-1", _series(now, ["BUSY"] * 10), {"status": "working"}, now=now)
 
         assert util.busy_pct_24h == 100.0
         assert util.idle_since is None
         assert util.current_task_age_secs is not None
         assert util.current_task_age_secs > 0
 
-    def test_stall_detection(self, tmp_path):
+    def test_stall_detection(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        # Bot has been busy for 3 hours (> 2h stall threshold)
-        log_lines = [
-            f"{(now - timedelta(hours=3, minutes=-m)).strftime('%Y-%m-%dT%H:%M:%S+00:00')} BUSY — active"
-            for m in range(0, 180)  # every minute for 3h
-        ]
-        bot_dir = _make_bot_dir(tmp_path, "eng-1", log_lines)
-        util = compute_bot_utilization("eng-1", bot_dir, {"status": "working"}, now=now)
+        # Bot has been busy for 3 hours (> 2h stall threshold), a sample a minute
+        util = compute_bot_utilization("eng-1", _series(now, ["BUSY"] * 180), {"status": "working"}, now=now)
 
         assert util.stall is True
         assert util.current_task_age_secs > 7200
 
-    def test_no_keepalive_log(self, tmp_path):
-        bot_dir = _make_bot_dir(tmp_path, "eng-1", [])
-        util = compute_bot_utilization(
-            "eng-1", bot_dir, {}, now=datetime.now(timezone.utc)
-        )
+    def test_no_samples(self):
+        util = compute_bot_utilization("eng-1", [], {}, now=datetime.now(timezone.utc))
 
         assert util.busy_pct_24h == 0.0
         assert util.idle_since is None
         assert util.current_task_age_secs is None
 
-    def test_fleet_state_fields(self, tmp_path):
+    def test_naive_entries_are_read_as_utc(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        bot_dir = _make_bot_dir(tmp_path, "eng-1", [])
+        naive = [(ts.replace(tzinfo=None), s) for ts, s in _series(now, ["BUSY"] * 3)]
+        assert compute_bot_utilization("eng-1", naive, {}, now=now).busy_pct_24h == 100.0
+
+    def test_fleet_state_fields(self):
+        now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         fleet_state = {
             "status": "working",
             "current_task": "Fix auth bug",
         }
-        util = compute_bot_utilization("eng-1", bot_dir, fleet_state, now=now)
+        util = compute_bot_utilization("eng-1", [], fleet_state, now=now)
 
         assert util.state == "working"
         assert util.current_task == "Fix auth bug"
@@ -206,42 +217,67 @@ class TestComputeBotUtilization:
 
 
 class TestComputeFleetUtilization:
-    def test_discovers_bots_from_dirs(self, tmp_path):
+    def _paths(self, tmp_path):
+        (tmp_path / "library").mkdir(exist_ok=True)
+        (tmp_path / "lib").exists() or (tmp_path / "lib").symlink_to(REPO / "lib")
+        from claudlobby.paths import Paths
+        return Paths(root=tmp_path)
+
+    def test_discovers_bots_from_dirs_and_reads_their_series_from_the_plane(self, tmp_path):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         bots_dir = tmp_path / "bots"
         bots_dir.mkdir()
-        _make_bot_dir(bots_dir, "eng-1", [])
-        _make_bot_dir(bots_dir, "eng-2", [])
+        _make_bot_dir(bots_dir, "eng-1")
+        _make_bot_dir(bots_dir, "eng-2")
+        _land_heartbeats(tmp_path, "f", "eng-1", _series(now, ["BUSY"] * 5))
+        paths = self._paths(tmp_path)
 
-        # Minimal paths
-        (tmp_path / "library").mkdir()
-        (tmp_path / "lib").mkdir()
-        from claudlobby.paths import Paths
-
-        paths = Paths(root=tmp_path)
-
-        results = compute_fleet_utilization(bots_dir, paths, now=now)
-        assert len(results) == 2
+        results = compute_fleet_utilization(bots_dir, paths, now=now, fleet="f")
         assert {r.name for r in results} == {"eng-1", "eng-2"}
+        by_name = {r.name: r for r in results}
+        assert by_name["eng-1"].busy_pct_24h == 100.0          # the plane's samples
+        assert by_name["eng-2"].busy_pct_24h == 0.0            # no sample recorded: nothing to roll up
 
     def test_explicit_bot_names(self, tmp_path):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         bots_dir = tmp_path / "bots"
         bots_dir.mkdir()
-        _make_bot_dir(bots_dir, "eng-1", [])
-        _make_bot_dir(bots_dir, "eng-2", [])
+        _make_bot_dir(bots_dir, "eng-1")
+        _make_bot_dir(bots_dir, "eng-2")
+        _land_heartbeats(tmp_path, "f", "eng-2", _series(now, ["IDLE"] * 2))
+        paths = self._paths(tmp_path)
 
-        (tmp_path / "library").mkdir()
-        (tmp_path / "lib").mkdir()
-        from claudlobby.paths import Paths
-
-        paths = Paths(root=tmp_path)
-
-        results = compute_fleet_utilization(
-            bots_dir, paths, bot_names=["eng-1"], now=now
-        )
+        results = compute_fleet_utilization(bots_dir, paths, bot_names=["eng-1"], now=now, fleet="f")
         assert len(results) == 1
         assert results[0].name == "eng-1"
+
+    def test_a_case_variant_alias_joins_the_bots_series(self, tmp_path):
+        """A `bot:f/ENG-1` identity is the same bot as `eng-1` (the roster rule
+        every per-bot plane read follows)."""
+        now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
+        bots_dir = tmp_path / "bots"
+        bots_dir.mkdir()
+        _make_bot_dir(bots_dir, "eng-1")
+        _land_heartbeats(tmp_path, "f", "ENG-1", _series(now, ["BUSY"] * 3))
+        results = compute_fleet_utilization(bots_dir, self._paths(tmp_path), now=now, fleet="f")
+        assert results[0].busy_pct_24h == 100.0
+
+    def test_an_unreachable_plane_refuses_rather_than_rolling_up_zeros(self, tmp_path):
+        import pytest
+
+        bots_dir = tmp_path / "bots"
+        bots_dir.mkdir()
+        _make_bot_dir(bots_dir, "eng-1")
+        with pytest.raises(PlaneUnreachable, match="plane"):
+            compute_fleet_utilization(bots_dir, self._paths(tmp_path), fleet="f")
+
+    def test_no_fleet_named_is_refused(self, tmp_path):
+        import pytest
+
+        bots_dir = tmp_path / "bots"
+        bots_dir.mkdir()
+        with pytest.raises(PlaneUnreachable, match="fleet"):
+            compute_fleet_utilization(bots_dir, self._paths(tmp_path))
 
 
 # ── write_utilization_json ───────────────────────────────────────────────────
@@ -251,7 +287,7 @@ class TestWriteUtilizationJson:
     def test_writes_valid_json(self, tmp_path):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         (tmp_path / "library").mkdir()
-        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib").symlink_to(REPO / "lib")
         from claudlobby.paths import Paths
 
         paths = Paths(root=tmp_path)
@@ -277,7 +313,7 @@ class TestWriteUtilizationJson:
     def test_creates_state_dir(self, tmp_path):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         (tmp_path / "library").mkdir()
-        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib").symlink_to(REPO / "lib")
         from claudlobby.paths import Paths
 
         paths = Paths(root=tmp_path)
