@@ -345,10 +345,26 @@ _CREDENTIAL_PROBES: dict[str, tuple[str, str]] = {
 #: to probe a retired variable. Change one, change both.
 #:
 #: `TestRailwayProbesMatchTheDeclaredContract` is the part that EXECUTES: it
-#: fails if this table and `library/integrations/railway.md` stop naming the
-#: same variables. A comment restating the rule does not survive a refactor;
-#: this defect came back through one (#1377 rebuilt this block and carried the
-#: retired variable forward).
+#: fails when this table and `library/integrations/railway.md` stop naming the
+#: same variables.
+#:
+#: It exists because the two are changed by DIFFERENT PRs and nothing watched
+#: the pair. #1381 (661e4db, taking fork (a) of #1377) moved this block from a
+#: direct `os.environ` read to a declaration-keyed registry and carried
+#: `RAILWAY_API_TOKEN` into it -- correct at the time, since the contract still
+#: declared that name. The change that retires the name is a different PR. So
+#: neither is wrong alone, and together they leave the registry and the contract
+#: naming different variables, with Railway declared but never probed.
+#:
+#: Measured in exactly that state, doctor reports:
+#:
+#:     warn -- nothing probed; ...; 2 declared var(s) have no probe:
+#:     RAILWAY_PERSONAL_PROJECT_TOKEN, RAILWAY_PERSONAL_TOKEN
+#:
+#: so the coverage loss is SAID, not silent -- the honest-reporting rungs added
+#: with the registry hold. What is lost is the probe itself. That is the gap
+#: this table closes, and the test is what keeps it closed: a comment saying
+#: "change one, change both" cannot see a second PR.
 _RAILWAY_QUERIES: dict[str, tuple[str, str]] = {
     "RAILWAY_PERSONAL_TOKEN": ("me{email}", "account"),
     "RAILWAY_PERSONAL_PROJECT_TOKEN": ("projects{edges{node{id}}}", "workspace"),
