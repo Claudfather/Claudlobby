@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # transcript-digest.sh — SessionEnd hook: distil a finished session into one
-# structured JSONL row via a cheap Haiku pass. The ingestion layer for the
-# ai-platform fleet-monitor (#785 Phase A), which reasons over per-session
-# digests and never over raw transcripts.
+# structured `session_digest` plane fact via a cheap Haiku pass. The ingestion
+# layer for the ai-platform fleet-monitor (#785 Phase A), which reasons over
+# per-session digests and never over raw transcripts.
+#
+# #1503 moved the SINK — the distillation is unchanged; only the destination
+# is. The digest was the LAST production code path writing a JSONL data record
+# (a `transcript-digest-<date>.jsonl` row) outside the SQLite plane the F18
+# closure made the sole recorder. It now emits a `system` event
+# (event=session_digest, kind=system is REGISTRY-governed so no migration —
+# F19) on the bot's actor through the same shim every other door uses
+# (lib/plane-emit.sh). No file is written any more.
 #
 # Usage in fleet.yaml / system.yaml defaults:
 #   hooks:
@@ -31,11 +39,12 @@
 #      defaults to ~20k tokens: bounded quota AND correctness, since a real
 #      transcript is ~5M tokens and cannot enter a 200K context at all.
 #
-# Qualifying gate: a session under SESSION_DIGEST_MIN_TURNS still gets a row --
-# a `skipped` one, written WITHOUT a model call. The gate bounds spend; it never
-# costs the time-series. That is deliberately distinct from a `ok` row whose
-# rubric fields all came back empty, which is the model saying "nothing notable
-# happened" about a session that did qualify. The monitor needs to tell those apart.
+# Qualifying gate: a session under SESSION_DIGEST_MIN_TURNS still gets a fact --
+# a `skipped` one (data.status=skipped), emitted WITHOUT a model call. The gate
+# bounds spend; it never costs the time-series. That is deliberately distinct
+# from an `ok` fact whose rubric fields all came back empty, which is the model
+# saying "nothing notable happened" about a session that did qualify. The
+# monitor needs to tell those apart, so the status rides `data`.
 #
 # Env:
 #   SESSION_DIGEST_ENABLED     — "1" ARMS this fleet. DEFAULT 0 (dormant): the
@@ -45,11 +54,16 @@
 #   SESSION_DIGEST_TAIL_CHARS  — tail-cap on the distilled text (default 80000)
 #   SESSION_DIGEST_MODEL       — extraction model (default haiku)
 #   SESSION_DIGEST_TIMEOUT     — seconds for the model call (default 120)
-#   SESSION_DIGEST_LOG_DIR     — output dir (default $CLAUDLOBBY_ROOT/state/transcript-digests)
+#   PLANE_EMIT_DISABLED        — "1" is the plane silencer (the ruled harness
+#                                exemption). With the plane the only sink, it
+#                                silences this hook too — checked up front so a
+#                                silenced bot spends no model call.
 #   CLAUDE_BIN                 — model binary override (harness seam)
 #
-# Non-blocking by contract: every failure path still writes a row and exits 0.
-# A digest failure must never delay or break a session ending.
+# Non-blocking by contract: every failure path still emits a fact (or discloses
+# a failed record on stderr) and exits 0. A digest failure — including a plane
+# the shim could not reach — must never delay or break a session ending, and a
+# record the shim could not land is said LOUDLY, never silently dropped.
 
 trap 'exit 0' ERR
 set -euo pipefail
@@ -69,16 +83,29 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # to prevent. Checked before any other work so a dormant bot costs nothing.
 [ "${SESSION_DIGEST_ENABLED:-0}" = "1" ] || exit 0
 
+# ALSO self-gate on the plane silencer (#1503). PLANE_EMIT_DISABLED=1 is the
+# ruled harness exemption that no-ops every plane door; the plane is now this
+# hook's only sink, so a silenced bot has nothing to record — exit before
+# spending a model call on a digest nobody keeps (the plane-session-start.sh /
+# plane-telegram-in.sh estate pattern).
+[ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
+
 MIN_TURNS="${SESSION_DIGEST_MIN_TURNS:-6}"
 TAIL_CHARS="${SESSION_DIGEST_TAIL_CHARS:-80000}"
 MODEL="${SESSION_DIGEST_MODEL:-haiku}"
 MODEL_TIMEOUT="${SESSION_DIGEST_TIMEOUT:-120}"
-LOG_DIR="${SESSION_DIGEST_LOG_DIR:-$CLAUDLOBBY_ROOT/state/transcript-digests}"
+FLEET="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"
+
+# The digest is recorded on the bot's ACTOR (subject = bot:<fleet>/<name>,
+# resolved at ingest). With no fleet there is no well-formed actor alias to
+# attribute it to, so disclose and exit 0 rather than emit an unroutable
+# subject — the plane-telegram-in.sh guard. A composed bot always carries both.
+if [ -z "${BOT_ID:-}" ] || [ -z "$FLEET" ]; then
+    echo "transcript-digest: armed but BOT_ID/fleet unset — no actor to attribute the digest to, not recording" >&2
+    exit 0
+fi
 
 payload="$(cat 2>/dev/null || true)"
-
-mkdir -p "$LOG_DIR" 2>/dev/null || true
-OUT="$LOG_DIR/transcript-digest-$(date +%Y-%m-%d).jsonl"
 
 # --- Stage 1: locate + distil ------------------------------------------------
 # One python3 pass emits a tab-separated header line (turns, tool_calls,
@@ -214,19 +241,38 @@ header="$(head -n 1 "$WORK" 2>/dev/null || true)"
 TURNS="$(printf '%s' "$header" | cut -f1)"
 TOOL_CALLS="$(printf '%s' "$header" | cut -f2)"
 TBYTES="$(printf '%s' "$header" | cut -f3)"
-TPATH="$(printf '%s' "$header" | cut -f4)"
 case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
 case "$TOOL_CALLS" in ''|*[!0-9]*) TOOL_CALLS=0 ;; esac
 case "$TBYTES" in ''|*[!0-9]*) TBYTES=0 ;; esac
 
+# The transcript-stable session uid the SessionStart hook published (T7,
+# plane-session-start.sh) — carried in `data` so a digest joins the session's
+# other plane facts on the same uid. Absent BOT_DIR / file -> empty, omitted.
+# (report-back.sh's _plane_session_uid, inlined: nothing else here needs it.)
+_plane_session_uid() {
+    local f="${BOT_DIR:-}/data/.plane-session"
+    [ -f "$f" ] || return 0
+    sed -n 's/.*"session_uid":"\(sess_[0-9a-f]*\)".*/\1/p' "$f" | head -1
+}
+
 # emit_row <status> [rubric_json] [error]
+# Records the finished-session digest as a `system` event (event=session_digest)
+# on the bot's actor, through the shim (plane-emit.sh). The session identity,
+# the capture rubric, the model + counters and the ok/skipped/error status all
+# ride the opaque `data` object — a system event forbids the session_uid stream
+# column, and `data` is DIAGNOSTIC (truncated over-cap at ingest, never
+# stripped by capture mode). NON-BLOCKING: plane_emit_events discloses a failed
+# record on stderr and never propagates its rc, so the hook still exits 0.
 emit_row() {
-    STATUS_VAL="$1" RUBRIC_VAL="${2:-}" ERR_VAL="${3:-}" \
-    TS_VAL="$(ts_iso)" SID_VAL="$payload" \
-    BOT_VAL="${BOT_ID:-unknown}" FLEET_VAL="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}" \
-    TURNS_VAL="$TURNS" TOOLS_VAL="$TOOL_CALLS" TB_VAL="$TBYTES" \
-    DC_VAL="$DIGEST_CHARS" MODEL_VAL="$MODEL" TPATH_VAL="$TPATH" \
-    python3 - >>"$OUT" 2>/dev/null <<'PYEOF' || true
+    local _batch
+    _batch="$(
+        STATUS_VAL="$1" RUBRIC_VAL="${2:-}" ERR_VAL="${3:-}" \
+        OCCURRED_VAL="$(ts_iso)" SID_VAL="$payload" \
+        BOT_VAL="$BOT_ID" FLEET_VAL="$FLEET" \
+        SESS_UID_VAL="$(_plane_session_uid || true)" \
+        TURNS_VAL="$TURNS" TOOLS_VAL="$TOOL_CALLS" TB_VAL="$TBYTES" \
+        DC_VAL="$DIGEST_CHARS" MODEL_VAL="$MODEL" \
+        python3 - 2>/dev/null <<'PYEOF' || true
 import json, os
 
 def env(k, d=""):
@@ -237,22 +283,26 @@ try:
 except (json.JSONDecodeError, ValueError):
     p = {}
 
-row = {
-    "ts": env("TS_VAL"),
+# The digest record lives in `data` (opaque DIAGNOSTIC detail on a system
+# event), preserving every field the retired JSONL row carried but the bot /
+# fleet, which the subject alias now carries.
+data = {
+    "status": env("STATUS_VAL"),
     "session_id": p.get("session_id") or "",
-    "bot": env("BOT_VAL"),
-    "fleet": env("FLEET_VAL"),
     "cwd": p.get("cwd") or "",
     "reason": p.get("reason") or "",
-    "status": env("STATUS_VAL"),
     "turns": int(env("TURNS_VAL", "0")),
     "tool_calls": int(env("TOOLS_VAL", "0")),
     "transcript_bytes": int(env("TB_VAL", "0")),
     "digest_chars": int(env("DC_VAL", "0")),
     "model": env("MODEL_VAL"),
-    # capture's session-mode rubric, reused verbatim as the schema
+    # the capture session-mode rubric, reused verbatim as the schema
     "context": "", "worked": "", "failed": "", "would_change": "", "reusable": "",
 }
+
+sess_uid = env("SESS_UID_VAL")
+if sess_uid:
+    data["session_uid"] = sess_uid
 
 rub = env("RUBRIC_VAL")
 if rub:
@@ -261,23 +311,46 @@ if rub:
         if isinstance(d, dict):
             for k in ("context", "worked", "failed", "would_change", "reusable"):
                 v = d.get(k)
-                row[k] = v if isinstance(v, str) else ("" if v is None else json.dumps(v))
+                data[k] = v if isinstance(v, str) else ("" if v is None else json.dumps(v))
     except (json.JSONDecodeError, ValueError):
-        row["status"] = "error"
-        row["error"] = "model returned unparseable JSON"
+        data["status"] = "error"
+        data["error"] = "model returned unparseable JSON"
 
 e = env("ERR_VAL")
 if e:
-    row["error"] = e
+    data["error"] = e
 
-print(json.dumps(row, ensure_ascii=False))
+fleet = env("FLEET_VAL")
+bot = env("BOT_VAL")
+event = {
+    "event_type": "system",
+    "emitter": "transcript-digest",
+    "fleet": fleet,
+    "occurred_at": env("OCCURRED_VAL"),
+    "payload": {
+        "event": "session_digest",
+        "subject_kind": "actor",
+        "subject": "bot:%s/%s" % (fleet, bot),
+        "data": data,
+    },
+}
+sid = data["session_id"]
+if sid:
+    event["source_ref"] = "session-digest:" + sid
+print(json.dumps({"events": [event]}, ensure_ascii=False))
 PYEOF
+    )"
+    [ -n "$_batch" ] || return 0
+    # THE shim (socket -> cold CLI -> spool). plane_emit_events discloses a
+    # failed record on stderr and never blocks the hook; PLANE_EMIT_DISABLED
+    # is already handled at the top gate, so it is not reached here.
+    plane_emit_events session-digest <<<"$_batch" || true
 }
 
 DIGEST_CHARS=0
 
 # --- Qualifying gate ---------------------------------------------------------
-# Below the floor: record the session, spend nothing. Distinct from an `ok` row
+# Below the floor: record the session, spend nothing. Distinct from an `ok` fact
 # with empty rubric fields, which is the model finding nothing notable.
 if [ "$TURNS" -lt "$MIN_TURNS" ]; then
     emit_row "skipped" "" "below min_turns=$MIN_TURNS"

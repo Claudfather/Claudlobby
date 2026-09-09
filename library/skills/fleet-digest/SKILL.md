@@ -1,6 +1,6 @@
 ---
 name: fleet-digest
-description: "Assemble the monitor's pass input. Joins the transcript-digest log with vitals, utilization, and report-back rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
+description: "Assemble the monitor's pass input. Joins the plane's session_digest events with vitals, utilization, and report-back rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
 argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"
@@ -19,30 +19,65 @@ token-discipline sections before changing anything here.
 **Arguments:** `$1` = window in days (default `7`). `$2` = fleet filter
 (default: all fleets).
 
-## Step 1 — Locate the log
+## Step 1 — Enumerate the fleets in scope
+
+The digest is a `session_digest` **system event on the plane** (#1503 — there is
+no `transcript-digest` file any more). `claudlobby events` reads the plane one
+fleet at a time, so first fix the set of fleets to sweep: `$2` if given,
+otherwise every fleet declared on the host (the same discovery `setup-fleets`
+uses).
 
 ```bash
-DIGEST_DIR="${SESSION_DIGEST_LOG_DIR:-$CLAUDLOBBY_ROOT/state/transcript-digests}"
+if [ -n "${2:-}" ]; then
+  FLEETS="$2"
+else
+  FLEETS="$(for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml \
+                      "$CLAUDLOBBY_ROOT"/local/*/*/fleet.yaml; do
+    [ -f "$fy" ] && basename "$(dirname "$fy")"
+  done | sort -u)"
+fi
 ```
 
-If the directory does not exist, **stop and say so**. That is a complete,
-correct result: the digester is dormant by default (`SESSION_DIGEST_ENABLED=1`
-arms a fleet), so an absent log means the instrument is off, not that the estate
-was quiet. Do not fall back to any other source and do not infer health.
+## Step 2 — Assemble the window from the plane
 
-## Step 2 — Select the window
+`claudlobby events` has no day filter, so bound the window on the row `ts`. For
+each fleet, pull its `session_digest` events and reshape each plane row back to
+the flat shape the rest of this skill reads: the pre-aggregated digest rides
+`.data`, while `bot` and `ts` sit on the row — lift `.data` up and carry `bot`,
+`ts` and the fleet.
 
 ```bash
 DAYS="${1:-7}"
-for i in $(seq 0 $((DAYS - 1))); do
-  date -d "-$i day" +%Y-%m-%d 2>/dev/null || date -v-"$i"d +%Y-%m-%d
-done | while read -r d; do
-  f="$DIGEST_DIR/transcript-digest-$d.jsonl"; [ -f "$f" ] && cat "$f"
-done > /tmp/window.jsonl
+SINCE="$(date -d "-$((DAYS - 1)) day" +%Y-%m-%d 2>/dev/null \
+         || date -v-"$((DAYS - 1))"d +%Y-%m-%d)"
+
+: > /tmp/window.jsonl
+: > /tmp/coverage.txt
+for F in $FLEETS; do
+  out="$(claudlobby --fleet "$F" events --type session_digest --json)"; rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # rc 3 is the plane REFUSING (unreachable), which is NOT "no rows". Coverage
+    # for this fleet is UNKNOWN — record it and never infer health from it.
+    printf '%s\tUNREACHABLE\n' "$F" >> /tmp/coverage.txt; continue
+  fi
+  n="$(printf '%s\n' "$out" \
+    | jq -c --arg fleet "$F" --arg since "$SINCE" \
+        'select((.ts // "")[0:10] >= $since) | .data + {fleet: $fleet, bot: .bot, ts: .ts}' \
+    | tee -a /tmp/window.jsonl | wc -l | tr -d " ")"
+  printf '%s\t%s\n' "$F" "$n" >> /tmp/coverage.txt
+done
 ```
 
-Record **which dates had a file and which did not** — a missing date is a
-coverage fact, not something to smooth over.
+`/tmp/coverage.txt` now holds one row per fleet — a row count, or `UNREACHABLE`.
+A fleet with **zero rows and no error** has the digester **off**: dormant is the
+default (`SESSION_DIGEST_ENABLED=1` arms a fleet), so that absence means the
+instrument is off, not that the fleet was quiet.
+
+**If `/tmp/window.jsonl` is empty and no fleet was `UNREACHABLE`, stop and say
+so.** That is a complete, correct result: the digester is dormant across the
+scope. Do not fall back to any other source and do not infer health. A fleet
+marked `UNREACHABLE` is the opposite fact — the plane could not be read there, so
+its coverage is unknown rather than empty; report that too, and do not infer.
 
 ## Step 3 — Coverage first, before any aggregation
 
@@ -59,11 +94,12 @@ jq -s '{
 }' /tmp/window.jsonl
 ```
 
-Then state, explicitly:
+Then state, explicitly (`/tmp/coverage.txt` carries a row per fleet):
 
-- days requested vs days with a file
-- fleets present in the log vs fleets on the host (a fleet on the host with zero
-  rows has the digester **off** — name it; that absence is itself reportable)
+- days requested vs days with data
+- fleets with data vs fleets in scope with the digester **off** (zero rows, no
+  error — name them; that absence is itself reportable) vs fleets `UNREACHABLE`
+  (the plane refused — coverage there is unknown, not empty)
 - counts of `ok` / `skipped` / `error`
 
 `skipped` means the session was below `SESSION_DIGEST_MIN_TURNS`. It is **not** a
@@ -128,7 +164,7 @@ reasoning pass confidently wrong, and `no-fabrication` covers exactly this.
 ```
 COVERAGE
   window: <N> days requested, <M> days with data (missing: <dates>)
-  fleets in log: <list>   |   fleets with digester OFF: <list>
+  fleets with data: <list>  |  digester OFF: <list>  |  UNREACHABLE: <list>
   rows: <N> ok · <N> skipped · <N> error
   truncation: <none | what was dropped and why>
 
@@ -142,7 +178,7 @@ ROLLUPS
   uptime / utilization / report-back highlights, or the verbatim failure
 
 UNRESOLVED
-  anything the log could not answer — a gap here is a finding for /fleet-observe
+  anything the digests could not answer — a gap here is a finding for /fleet-observe
 ```
 
 ## Do not

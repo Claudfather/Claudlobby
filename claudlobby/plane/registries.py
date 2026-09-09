@@ -116,6 +116,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # chunk K (#1467): `claudlobby brief --ack` records the viewer's read
     # position as a plane fact — informational, never an alert
     "reports_acked": "notice",
+    # #1503: the per-finished-session digest (transcript-digest.sh SessionEnd
+    # hook), moved off the retired transcript-digest-<date>.jsonl onto the
+    # plane. Informational — the monitor's substrate, never an alert.
+    "session_digest": "notice",
 }
 
 # ---------------------------------------------------------------------------
