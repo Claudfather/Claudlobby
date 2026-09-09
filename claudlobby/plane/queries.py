@@ -5,18 +5,29 @@ renewal horizons compare against NOW ("renewed UNTIL" means until: an
 expired renewal protects nothing — round-6 counterexample), while activity
 recency compares against CUTOFF = now − policy_window. Both latest-by-
 ingest_seq: ledger order is authoritative, producer timestamps may arrive
-out of order. ATTENTION_SQL and ATTENTION_ARMS_SQL bind ONE value per
-`?`-bearing arm, in ARM ORDER, through `attention_params` /
-`attention_arms_params` (chunk M-A, #1481) — the arms-with-columns form binds
-the same tuple TWICE, the columns then the filter. Positional binds were
-hand-written at five call sites while there was exactly one `?`; a second
-arm made a mis-ordered pair a silently WRONG answer rather than an error, so
-the tuple is derived from one `now` in one place.
+out of order. ATTENTION_SQL and ATTENTION_ARMS_SQL bind the `?`-bearing
+arms' values in ARM ORDER, through `attention_params` /
+`attention_arms_params` (chunk M-A,
+#1481) — one value per arm for `nudged`/`overdue`, THREE for `stale_task`
+(chunk T: the not-overdue instant, the amber cutoff, the heartbeat-freshness
+cutoff), all off one `now`. The arms-with-columns form binds the same tuple
+TWICE, the columns then the filter (every arm's `?`s live in its predicate,
+which is both a column and a filter term; its `_at`/tier carry none, so the
+doubling holds). Positional binds were hand-written at five call sites while
+there was exactly one `?`; a second arm made a mis-ordered pair a silently
+WRONG answer rather than an error, so the tuple is derived from one `now` in
+one place.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+
+# presence's freshness horizon is the SAME constant the stale_task suppression
+# reads a heartbeat against — imported, not re-declared, so "a fresh recording"
+# means one thing to the presence panel and to this arm (presence.py is a pure
+# module and imports nothing from the plane, so this direction has no cycle).
+from .presence import STALE_AFTER_S
 
 TERMINAL_TASK_EVENTS = (
     "completed", "failed", "cancelled", "returned_blocked",
@@ -314,6 +325,100 @@ def _epoch(expr: str) -> str:
     return f"CAST(strftime('%s', {expr}) AS INTEGER)"
 
 
+# --- the stale in-flight task arm (chunk T) -----------------------------------
+# Present-tense attention the other arms miss: an assignment that is OPEN, held
+# by a bot, and NOT MOVING — aging with no progress and with NO deadline (or one
+# not yet passed). `overdue` is the same shape once a promise is broken and it
+# LEADS; this arm is the softer, deadline-less case and EXCLUDES an overdue row
+# (the not-overdue term), so one row never double-raises.
+#
+# THE CRUX — suppressed while the assignee is presence=working. A bot deep in a
+# long task is not stuck; an idle/stale/down bot holding an old open task is the
+# signal. presence.working (presence.py) is, in the half SQL can see, a FRESH
+# `bot.heartbeat` reading BUSY, so the suppression is expressed HERE against the
+# SAME latest-heartbeat-by-ingest_seq primitive LATEST_HEARTBEAT_SQL derives
+# presence from — one definition of "working", SQL-side so the rail and the
+# header count read it identically, not a second Python derivation forked across
+# the two. The one thing the recorded half cannot see is the LIVE poll's `down`
+# override (a session that DIED within the last staleness horizon while its last
+# beat said BUSY): that fails SAFE — the arm stays quiet until the beat goes
+# stale (<= STALE_AFTER_S) and then fires, the correct verdict for a down bot
+# still holding an open task. An UNREACHABLE plane raises nothing at all — the
+# whole attention read degrades (source_state), so "no progress signal because
+# the plane is down" is never mis-read as staleness.
+STALE_TASK_AMBER_S = 6 * 3600         # held this long with no progress: raise, soft
+STALE_TASK_RED_S = 3 * 24 * 3600      # ...this long: raise, loud (the tier boundary)
+
+# The instant of the bot's last sign of life ON THIS TASK: the M-A progress
+# clock's two sources, scoped to the row — a linked `progress` task event (an
+# id'd dispatch, by assignment_id) OR a `report_status` marker on the bot's
+# actor with status=progress (an id-less progress report resolves no id, F18
+# R2a; report_status subject_kind is `actor`, so subject_uid = a.assignee_uid).
+# MAX over occurred_at mirrors LAST_PROGRESS_SQL's own tolerance. Both branches
+# hit a partial index (idx_events_task_assignment / idx_events_subject).
+_STALE_PROGRESS_AT = (
+    "(SELECT MAX(t) FROM ("
+    " SELECT e.occurred_at AS t FROM events e WHERE e.kind='task'"
+    "  AND e.event='progress' AND e.assignment_id = a.assignment_id"
+    " UNION ALL"
+    " SELECT e.occurred_at FROM events e WHERE e.kind='system'"
+    "  AND e.event='report_status' AND e.subject_uid = a.assignee_uid"
+    "  AND json_extract(e.detail, '$.status') = 'progress'))"
+)
+
+# The card's date for the arm ("no progress since …") — the later of the
+# dispatch and the newest progress, as an ISO instant. This is the arm's `_at`
+# column and carries no `?`.
+_STALE_SINCE_AT = (
+    "MAX(a.occurred_at, COALESCE(" + _STALE_PROGRESS_AT + ", a.occurred_at))"
+)
+
+# presence.working's recorded half as a correlated EXISTS on `a`: the assignee
+# alias (the ACTOR's — the heartbeat's subject is the bot_instance TWIN under
+# the same alias, a different uid, so the match is by alias not uid) has a
+# LATEST `bot.heartbeat` (max ingest_seq, ledger order authoritative) that is
+# FRESH (ingested at/after the freshness cutoff) and reads BUSY. Seeks the
+# (subject_uid, metric, ingest_seq) index (migration 0006). Binds ONE `?` = the
+# heartbeat-freshness cutoff (now - STALE_AFTER_S). A non-object/poison `value`
+# yields NULL state (not BUSY) → not working → the arm may fire, the safe way.
+_ASSIGNEE_WORKING = (
+    "EXISTS (SELECT 1 FROM metric_samples ms"
+    "  JOIN ingest_ledger g ON g.ingest_seq = ms.ingest_seq"
+    "  WHERE ms.metric = 'bot.heartbeat'"
+    "   AND ms.subject_uid IN (SELECT r.uid FROM identity_registry r"
+    "     WHERE r.alias = (SELECT ai.alias FROM identity_registry ai"
+    "       WHERE ai.uid = a.assignee_uid))"
+    "   AND ms.ingest_seq = (SELECT MAX(m2.ingest_seq) FROM metric_samples m2"
+    "     WHERE m2.metric = 'bot.heartbeat' AND m2.subject_uid = ms.subject_uid)"
+    "   AND json_extract(ms.value, '$.state') = 'BUSY'"
+    "   AND " + _epoch("g.ingested_at") + " >= " + _epoch("?") + ")"
+)
+
+# The arm predicate. `?` order (bound by `attention_params` in ARM ORDER):
+#   1) now             — not-overdue: no deadline, or the deadline has not passed
+#   2) amber cutoff     — aged: the LATER of dispatch/progress predates it
+#   3) hb-fresh cutoff  — working: the freshness gate inside _ASSIGNEE_WORKING
+# NULL expected_by is NOT overdue (the deadline-less case is the whole point);
+# without the guard `NOT (NULL < now)` is NULL and would drop every such row.
+#
+# HOLDING requires DELIVERY (_TX_ACTIVATED): a bot cannot be "sitting on" a task
+# a send never got to it. That gate also keeps stale_task mutually exclusive
+# with the send-trouble arms (send_failed / never_activated are both NOT
+# _TX_ACTIVATED), so a queued-and-never-delivered old task raises THEIR remedy
+# ("re-send / is the bot up") and not this one ("chase the worker") — a
+# never-delivered task is not the bot's fault to chase. No transmission evidence
+# at all is silence, not this alarm (the §6b #2 producer-gap rule the send arms
+# already hold).
+_STALE_TASK = (
+    "(" + _TX_ACTIVATED
+    + " AND (a.expected_by IS NULL OR " + _epoch("a.expected_by") + " >= " + _epoch("?") + ")"
+    " AND MAX(" + _epoch("a.occurred_at") + ", COALESCE("
+    + _epoch(_STALE_PROGRESS_AT) + ", " + _epoch("a.occurred_at") + ")) < "
+    + _epoch("?")
+    + " AND NOT " + _ASSIGNEE_WORKING + ")"
+)
+
+
 # (name, predicate, since_expr, window) — the ONE list both surfaces below are
 # built from, so a new arm cannot reach the queue without also reaching the
 # column the card renders its reason from, the column it dates that reason by,
@@ -348,6 +453,10 @@ ATTENTION_ARMS = (
      _NEWEST_AT, NEWEST_TASK_IGNORED),
     ("overdue", f"({_epoch('a.expected_by')} < {_epoch('?')})",
      "a.expected_by", None),
+    # LAST in the order so `overdue` (and every louder arm) LEADS a row that is
+    # both — and its predicate already excludes an overdue row, so belt and
+    # suspenders: stale_task never rides in front, and never double-raises one.
+    ("stale_task", _STALE_TASK, _STALE_SINCE_AT, None),
 )
 
 # The arms a PERSON raised, and therefore the only arms that carry the fact
@@ -378,18 +487,42 @@ _ARM_FACT_COLS = tuple(
 _ARM_FILTER = "(" + " OR ".join(sql for _, sql, _at, _w in ATTENTION_ARMS) + ")"
 
 
+def _instant_before(now: str, seconds: float) -> str:
+    """`now` less `seconds`, as an isoformat instant — the ONE shift every
+    attention cutoff is a call of, so they cannot compute it three ways.
+    Compared as an instant (`_epoch`) downstream, so its offset is its own."""
+    return (datetime.fromisoformat(now.replace("Z", "+00:00"))
+            - timedelta(seconds=seconds)).isoformat()
+
+
 def nudge_cutoff(now: str) -> str:
     """The instant a nudge must PREDATE to be an unanswered one — `now` less
-    the grace. Compared as an instant (`_epoch`), so its offset is its own."""
-    return (datetime.fromisoformat(now.replace("Z", "+00:00"))
-            - timedelta(seconds=NUDGE_GRACE_S)).isoformat()
+    the grace."""
+    return _instant_before(now, NUDGE_GRACE_S)
+
+
+def stale_amber_cutoff(now: str) -> str:
+    """The instant a task's last activity (max of dispatch and newest progress)
+    must PREDATE for the task to read as stale — `now` less the amber window."""
+    return _instant_before(now, STALE_TASK_AMBER_S)
+
+
+def heartbeat_fresh_cutoff(now: str) -> str:
+    """The instant a `bot.heartbeat` must be ingested AT OR AFTER for its
+    assignee to count as working — presence's OWN freshness horizon
+    (STALE_AFTER_S), so the arm's suppression and the presence panel agree on
+    what 'a fresh recording' is."""
+    return _instant_before(now, STALE_AFTER_S)
 
 
 def attention_params(now: str) -> tuple:
-    """ATTENTION_SQL's binds: ONE value per `?`-bearing arm, in ARM ORDER.
-    Both derive from a single `now`, so the queue can never read the nudge
-    grace off one clock and the deadline off another."""
-    return (nudge_cutoff(now), now)
+    """ATTENTION_SQL's binds, in ARM ORDER: the nudge grace, the overdue
+    deadline, then stale_task's three — the not-overdue instant (`now`), the
+    amber cutoff, the heartbeat-freshness cutoff. All derive from a single
+    `now`, so the queue can never read one window off a clock the others don't
+    share."""
+    return (nudge_cutoff(now), now,
+            now, stale_amber_cutoff(now), heartbeat_fresh_cutoff(now))
 
 
 def attention_arms_params(now: str) -> tuple:

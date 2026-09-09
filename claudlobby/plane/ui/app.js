@@ -277,6 +277,14 @@ const WHY = {
                   "the manager owes a chase, supersede, withdraw or escalate"],
   overdue: (r) => [`overdue ${ago(r.expected_by || r.attention_since)}`,
                    "chase the worker, or re-dispatch with a new deadline"],
+  // chunk T — a task the bot is HOLDING but not moving on: open, delivered,
+  // aging, no progress, and (the crux) the assignee is not working right now.
+  // Tiered by age; `stale_tier` (amber|red) makes the card read louder as it
+  // ages. `attention_since` is the last activity — dispatch, or newest progress.
+  stale_task: (r) => [
+    `no progress — last moved ${ago(r.attention_since)}`
+      + (r.stale_tier === "red" ? " (badly stale)" : ""),
+    "chase the worker, or withdraw it (task-act.sh withdraw <id>)"],
 };
 
 function attentionWhy(r) {

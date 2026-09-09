@@ -80,6 +80,7 @@ from .queries import (
     LATEST_HEARTBEAT_SQL,
     NON_TERMINAL_CLAUSE,
     NUDGE_STATE_SQL,
+    STALE_TASK_RED_S,
     TASK_STATUS_SQL,
     TERMINAL_TASK_EVENTS,
     OPEN_ASSIGNMENTS_AT_SQL, attention_arms_params, fleet_alias_range,
@@ -596,6 +597,22 @@ def _stamp_broadcasts(rows: list[dict],
         _close()
 
 
+def _stale_tier(arm, now: str) -> str | None:
+    """The freshness TIER of a stale_task row (amber → red by age), off the
+    arm's OWN `stale_task_at` — the last-activity instant (dispatch, or newest
+    progress) the query already stamped, so the tier and the arm cannot read a
+    different clock. None when the row is not stale_task; amber below the red
+    boundary, red at or past it, so the card reads louder as the held task
+    ages. A parse failure degrades to amber (raise soft), never to no-tier."""
+    if not arm or not arm["stale_task"]:
+        return None
+    since = _parse_iso(arm["stale_task_at"])
+    ref = _parse_iso(now)
+    if since is None or ref is None:
+        return "amber"
+    return "red" if (ref - since).total_seconds() >= STALE_TASK_RED_S else "amber"
+
+
 def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
     # `fleet` scopes the board to that fleet's ASSIGNEES (U1 — the same axis
     # every per-fleet route filters on); with no fleet the host-wide board
@@ -672,6 +689,9 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
         since = arm[reasons[0] + "_at"] if reasons else None
         r["attention_reason"] = reasons
         r["attention_since"] = since
+        # the stale_task freshness tier (amber|red), off the arm's own since —
+        # the card renders "held 6h" soft vs a loud "held 3d" (chunk T)
+        r["stale_tier"] = _stale_tier(arm, now)
         # WHAT the human said, WHO said it and WHY — off the LEADING arm's own
         # columns (fold F10), which is both a scope and a source fix. One
         # shared `arm_*` set read the row's newest task event whatever arm
