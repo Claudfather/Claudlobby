@@ -3,8 +3,13 @@ permissions:
   allow: [Agent, WebFetch, WebSearch]
   # NO `deny:` HERE. Deliberate, and do not "simplify" it back (#1406).
   #
-  # This carried `deny: [Write, Edit, NotebookEdit]` from 2026-05-09, meaning to
-  # make a reviewer read-only. It never did. A BARE TOOL NAME blocks the native
+  # This carried `deny: [Write, Edit, NotebookEdit]` from 2026-05-09. WHAT IT WAS
+  # FOR IS NOT RECORDED ANYWHERE, and an earlier version of this comment said it
+  # meant "to make a reviewer read-only" — an intent this file does not support
+  # and nothing else states either. Corrected 2026-09-01. The ONLY prohibition
+  # this file actually carries is in its prose below: no committing code, no
+  # merging PRs, no auto-filing issues. That is narrower than read-only, and it
+  # is the thing to reason about. A BARE TOOL NAME blocks the native
   # tool and does not bind Bash at all, so it read as a constraint while
   # enforcing nothing against a shell. Measured independently on two fleets:
   # `python3 -c` open()/write() created and removed a file under it, and `cat`
@@ -93,15 +98,26 @@ permissions:
   # count above shows writes kept landing on bots carrying the rule — that is
   # the scale. The count alone does not prove HOW each file was written, and no
   # claim here rests on it doing so.
-  # NEITHER SHAPE MAKES A REVIEWER READ-ONLY: bare removes a tool and Bash walks
+  # NEITHER SHAPE ENFORCES WHAT THIS FILE PROHIBITS: bare removes a tool and Bash walks
   # past it; path-scoped filters command forms and an interpreter walks past
   # that. The rule traded away was one that pushed writes off the audited native
   # tools and onto a shell, while breaking the harness memory instruction that
   # tells every bot to write memory with Write. Do not read the absence of a
-  # deny here as "a reviewer is read-only". It never was, and removing the rule
-  # did not open anything that was closed. Making a reviewer actually read-only
-  # is a real and still-unsolved problem; it is tracked in #1406 and #970, not
-  # here, and it will not be solved by a declaration in this file.
+  # deny here as "a reviewer is read-only". It never was, no part of this file
+  # asks for that, and removing the rule did not open anything that was closed.
+  #
+  # WHAT IS ACTUALLY UNENFORCED, and it is not the write question: the three
+  # prohibitions in the prose below are held BY INSTRUCTION ONLY. `bash_allow`
+  # on the line beneath this comment grants `git` and `gh`, which compose as
+  # `Bash(git *)` and `Bash(gh *)` — the tools for committing, merging and
+  # filing, i.e. exactly the three things the prose forbids, granted seven lines
+  # above the sentence forbidding them. That is #1415. Note the bound it carries:
+  # the GRANT is established by reading the composed file; whether a reviewer
+  # CAN in practice merge is an inference nobody has tested, because the only
+  # direct test mutates a real repo. State the grant, not the capability.
+  #
+  # Enforcing any of this is tracked in #1415, #1406 and #970 — not here, and
+  # not solvable by a declaration in this file.
   bash_allow: [git, gh, grep, find, cat, head, tail, diff]
 ---
 
