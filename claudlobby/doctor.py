@@ -356,15 +356,22 @@ _CREDENTIAL_PROBES: dict[str, tuple[str, str]] = {
 #: neither is wrong alone, and together they leave the registry and the contract
 #: naming different variables, with Railway declared but never probed.
 #:
-#: Measured in exactly that state, doctor reports:
+#: Measured in exactly that state, on a fleet declaring both integrations and
+#: holding every declared token in the cascade:
 #:
-#:     warn -- nothing probed; ...; 2 declared var(s) have no probe:
-#:     RAILWAY_PERSONAL_PROJECT_TOKEN, RAILWAY_PERSONAL_TOKEN
+#:     [pass] 1 probed OK (GITHUB_PAT via mcp/github); contacted api.github.com;
+#:            2 declared var(s) have no probe: RAILWAY_PERSONAL_PROJECT_TOKEN,
+#:            RAILWAY_PERSONAL_TOKEN
 #:
-#: so the coverage loss is SAID, not silent -- the honest-reporting rungs added
-#: with the registry hold. What is lost is the probe itself. That is the gap
-#: this table closes, and the test is what keeps it closed: a comment saying
-#: "change one, change both" cannot see a second PR.
+#: One outbound call. Railway declared, credentials stored, never contacted --
+#: and the verdict is PASS. The loss is disclosed, but in a trailing clause
+#: under a green headline, so it is not silent and not loud either. On a fleet
+#: declaring ONLY railway the primary clause reads "no probeable credential
+#: declared by this fleet", which is false for a fleet that declares two.
+#:
+#: That `else` branch is main's and is tracked separately (#1513); what this
+#: table fixes is the drift that reaches it. The test is what keeps it fixed:
+#: a comment saying "change one, change both" cannot see a second PR.
 _RAILWAY_QUERIES: dict[str, tuple[str, str]] = {
     "RAILWAY_PERSONAL_TOKEN": ("me{email}", "account"),
     "RAILWAY_PERSONAL_PROJECT_TOKEN": ("projects{edges{node{id}}}", "workspace"),
