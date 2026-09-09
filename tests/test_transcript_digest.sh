@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
 # tests/test_transcript_digest.sh — transcript-digest SessionEnd hook contract.
-# Real python3/awk + a stubbed model binary: asserts the two things that decide
-# whether this is safe to run fleet-wide on every session — WHAT reaches the
-# model (quota + secrets) and WHAT lands in the log (the monitor's substrate).
+# Real python3/awk + a stubbed model binary + a stubbed plane CLI: asserts the
+# two things that decide whether this is safe to run fleet-wide on every session
+# — WHAT reaches the model (quota + secrets) and WHAT lands on the PLANE (the
+# monitor's substrate).
 #
-# The distinction this suite exists to protect: a `skipped` row (below the
-# qualifying gate, written with ZERO model spend) and an `ok` row whose rubric
+# #1503 moved the SINK: the hook no longer appends a `transcript-digest-<date>`
+# JSONL row (the last production JSONL data record outside the plane). It emits
+# a `system` event (event=session_digest) on the bot's actor through the shim
+# (lib/plane-emit.sh). This suite captures the emitted batch via the cold-rung
+# stub (tests/plane_capture_cli.sh) driven through the real shim, and asserts on
+# the event and its `data` object — never a file, which it also proves is gone.
+#
+# The distinction this suite exists to protect: a `skipped` fact (below the
+# qualifying gate, emitted with ZERO model spend) and an `ok` fact whose rubric
 # fields are all empty (the model saying "nothing notable happened") are
 # different signals. Collapsing them would either blow the quota or blind the
 # monitor to idle bots.
 #
-# Fully hermetic: stubbed model, scratch CLAUDLOBBY_ROOT, no network, no real
-# `claude` invocation, no fleet notices. Standalone bash (not pytest-collected);
-# runs under macOS /bin/bash (3.2).
+# Fully hermetic: stubbed model, stubbed plane CLI, dead socket, scratch
+# CLAUDLOBBY_ROOT, no network, no real `claude`/plane, no fleet notices.
+# Standalone bash (not pytest-collected); runs under macOS /bin/bash (3.2).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/../lib"
 DIGEST="$LIB_DIR/transcript-digest.sh"
+CAPTURE_CLI="$SCRIPT_DIR/plane_capture_cli.sh"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {
@@ -30,7 +39,14 @@ assert_eq() {
 }
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/bin" "$T/root"
+mkdir -p "$T/bin" "$T/root/state/plane" "$T/botdir/data"
+
+# A published session identity (the SessionStart hook's file) so the digest can
+# carry the transcript-stable session_uid, as it does on a live bot. 32 hex
+# chars is the sess_ shape plane-session-start.sh publishes.
+SESS_UID="sess_$(python3 -c 'print("a"*32)')"
+printf '{"session_uid":"%s","process_uid":"proc_x","derived_at":"now"}\n' \
+    "$SESS_UID" > "$T/botdir/data/.plane-session"
 
 # make_transcript <file> <pairs> [secret]
 make_transcript() {
@@ -56,50 +72,70 @@ stub_model() {
     chmod +x "$T/bin/claude"
 }
 
-# run_digest <transcript> [env assignments...] -> the JSONL row
+# run_digest <transcript> [env assignments...] -> the captured plane event
+# (one JSON line per emitted event; the hook emits one, so the last line is it).
+# The shim's socket rung fails against a dead socket and falls back to the cold
+# CLI, which is the capture stub — so this drives the REAL recording spine.
 run_digest() {
     local tx="$1"; shift
-    rm -rf "$T/out"; : > "$T/prompt-seen.txt"
+    : > "$T/capture.jsonl"; : > "$T/err.txt"; rm -f "$T/prompt-seen.txt"
     local pay
     pay="$(TX="$tx" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
     # ENABLED=1 first so a caller's explicit assignment in "$@" still wins (env
     # takes the last). The hook is dormant by default, so every behavioural case
     # below has to arm it — which is itself the point being asserted in §9.
     printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
-        PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_LOG_DIR="$T/out" \
-        SESSION_DIGEST_ENABLED=1 "$@" bash "$DIGEST" >/dev/null 2>&1 || true
-    cat "$T/out"/*.jsonl 2>/dev/null || true
+        BOT_DIR="$T/botdir" PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude \
+        SESSION_DIGEST_ENABLED=1 \
+        PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+        PLANE_CAPTURE="$T/capture.jsonl" \
+        "$@" bash "$DIGEST" >/dev/null 2>"$T/err.txt" || true
+    tail -n 1 "$T/capture.jsonl" 2>/dev/null || true
 }
 
 # run_digest_unarmed <transcript> — no SESSION_DIGEST_ENABLED at all, i.e. what
 # an un-opted-in fleet actually runs after generate composes the hook.
 run_digest_unarmed() {
-    rm -rf "$T/out"; : > "$T/prompt-seen.txt"
+    : > "$T/capture.jsonl"; rm -f "$T/prompt-seen.txt"
     local pay
     pay="$(TX="$1" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
     printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
-        PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_LOG_DIR="$T/out" \
+        BOT_DIR="$T/botdir" PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude \
+        PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+        PLANE_CAPTURE="$T/capture.jsonl" \
         bash "$DIGEST" >/dev/null 2>&1 || true
-    cat "$T/out"/*.jsonl 2>/dev/null || true
+    cat "$T/capture.jsonl" 2>/dev/null || true
 }
 
-# field <row> <key>
+# field <event-json> <key>  — a TOP-LEVEL key on the captured event
 field() { ROW="$1" K="$2" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get(os.environ["K"],""))' 2>/dev/null || true; }
+# dfield <event-json> <key> — a key inside the event's `data` object
+dfield() { ROW="$1" K="$2" python3 -c 'import json,os;print((json.loads(os.environ["ROW"]).get("data") or {}).get(os.environ["K"],""))' 2>/dev/null || true; }
+# no_jsonl_written — the whole point of #1503: NO transcript-digest file exists
+no_jsonl_written() { [ -z "$(find "$T" -name 'transcript-digest-*.jsonl' 2>/dev/null)" ] && echo yes || echo no; }
 
 echo "transcript-digest: hook contract"
 
 make_transcript "$T/tx.jsonl" 4 "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
-# --- 1. the ok path ----------------------------------------------------------
+# --- 1. the ok path: a session_digest system event on the bot's actor --------
 stub_model "'{\"context\":\"c\",\"worked\":\"w\",\"failed\":\"f\",\"would_change\":\"g\",\"reusable\":\"r\"}'"
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=4)"
-assert_eq "qualifying session emits status=ok" ok "$(field "$row" status)"
-assert_eq "rubric field 'worked' lands in the row"  w "$(field "$row" worked)"
-assert_eq "rubric field 'would_change' lands"       g "$(field "$row" would_change)"
-assert_eq "turns counted (user+assistant, 4 pairs)" 8 "$(field "$row" turns)"
-assert_eq "tool_use blocks counted"                 4 "$(field "$row" tool_calls)"
-assert_eq "bot carried onto the row"            tbot "$(field "$row" bot)"
-assert_eq "session_id carried from the payload" sess-1 "$(field "$row" session_id)"
+assert_eq "emits a system event"            system "$(field "$row" event_type)"
+assert_eq "event token is session_digest"   session_digest "$(field "$row" event)"
+assert_eq "subject is the bot's actor alias" bot:tfleet/tbot "$(field "$row" subject)"
+assert_eq "subject_kind is actor"           actor "$(field "$row" subject_kind)"
+assert_eq "qualifying session -> data.status=ok" ok "$(dfield "$row" status)"
+assert_eq "rubric field 'worked' lands in data"  w "$(dfield "$row" worked)"
+assert_eq "rubric field 'would_change' lands"    g "$(dfield "$row" would_change)"
+assert_eq "turns counted (user+assistant, 4 pairs)" 8 "$(dfield "$row" turns)"
+assert_eq "tool_use blocks counted"                 4 "$(dfield "$row" tool_calls)"
+assert_eq "session_id carried from the payload" sess-1 "$(dfield "$row" session_id)"
+assert_eq "session_uid carried from .plane-session" "$SESS_UID" "$(dfield "$row" session_uid)"
+# THE #1503 pin: the sink is the plane, NOT a JSONL file.
+assert_eq "NO transcript-digest-*.jsonl is written" yes "$(no_jsonl_written)"
+[ -n "$row" ] && r=yes || r=no
+assert_eq "the plane event actually landed"          yes "$r"
 
 # --- 2. tool_result + attachment must not reach the model --------------------
 # They dominate transcript bytes and carry the least digest signal per token.
@@ -126,8 +162,8 @@ assert_eq "credential was replaced, not silently dropped" yes "$r"
 # Added after an adversarial battery found six families walking straight past
 # the original list: the `sk-` rule is hyphen-anchored and missed Stripe's
 # underscore forms, and AWS / Slack / JWT / env-dump / PEM had no rule at all.
-# This hook runs fleet-wide and writes to a shared log, so the blast radius of a
-# miss is every session on the host.
+# This hook runs fleet-wide and its digest lands on a shared plane, so the blast
+# radius of a miss is every session on the host.
 check_family() {  # <label> <synthetic-secret> [needle]
     local label="$1" secret="$2" needle="${3:-$2}"
     make_transcript "$T/sec.jsonl" 4 "$secret"
@@ -162,7 +198,7 @@ check_family "PEM private key"     "-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCA
 # --- 3c. over-redaction guard ------------------------------------------------
 # The generic name=value rule must not eat ordinary session content. PATH and
 # PATTERN both contain "PAT"; redacting them would blind the digest to exactly
-# the kind of detail these rows exist to carry.
+# the kind of detail these facts exist to carry.
 make_transcript "$T/keep.jsonl" 4 "PATH=/usr/local/bin:/usr/bin PATTERN=chromium min_turns=6"
 stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
 run_digest "$T/keep.jsonl" SESSION_DIGEST_MIN_TURNS=4 >/dev/null
@@ -172,23 +208,25 @@ assert_eq "PATH= survives the generic rule"    yes "$r"
 case "$seen" in *"PATTERN=chromium"*) r=yes ;; *) r=no ;; esac
 assert_eq "PATTERN= survives the generic rule" yes "$r"
 
-# --- 4. the qualifying gate: a row, at zero model cost -----------------------
+# --- 4. the qualifying gate: a fact, at zero model cost ----------------------
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=99)"
-assert_eq "below-gate session still emits a row" skipped "$(field "$row" status)"
-assert_eq "below-gate row still carries turns"         8 "$(field "$row" turns)"
+assert_eq "below-gate session still emits a fact" skipped "$(dfield "$row" status)"
+assert_eq "below-gate fact is still session_digest" session_digest "$(field "$row" event)"
+assert_eq "below-gate fact still carries turns"        8 "$(dfield "$row" turns)"
 [ -s "$T/prompt-seen.txt" ] && r=yes || r=no
 assert_eq "below-gate session spends NO model call"   no "$r"
+assert_eq "below-gate path writes NO JSONL either"   yes "$(no_jsonl_written)"
 
-# --- 5. the null row is distinct from the skipped row ------------------------
+# --- 5. the null fact is distinct from the skipped fact ----------------------
 # A qualified session where the model found nothing notable. "N tool calls,
 # nothing notable" is the idle-bot signal the monitor exists to catch, so it
-# must be an `ok` row with empty fields, never a skip and never a dropped line.
+# must be an `ok` fact with empty fields, never a skip and never a dropped one.
 stub_model "'{\"context\":\"routine triage\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=4)"
-assert_eq "null row is status=ok, not skipped" ok "$(field "$row" status)"
-assert_eq "null row keeps context"  "routine triage" "$(field "$row" context)"
-assert_eq "null row has empty worked"           "" "$(field "$row" worked)"
-assert_eq "null row still carries tool_calls"    4 "$(field "$row" tool_calls)"
+assert_eq "null fact is status=ok, not skipped" ok "$(dfield "$row" status)"
+assert_eq "null fact keeps context"  "routine triage" "$(dfield "$row" context)"
+assert_eq "null fact has empty worked"           "" "$(dfield "$row" worked)"
+assert_eq "null fact still carries tool_calls"    4 "$(dfield "$row" tool_calls)"
 
 # --- 6. tail-cap bounds what reaches the model -------------------------------
 # Correctness, not just cost: a real transcript is ~5M tokens and cannot enter
@@ -196,7 +234,7 @@ assert_eq "null row still carries tool_calls"    4 "$(field "$row" tool_calls)"
 make_transcript "$T/big.jsonl" 300
 stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
 row="$(run_digest "$T/big.jsonl" SESSION_DIGEST_MIN_TURNS=4 SESSION_DIGEST_TAIL_CHARS=5000)"
-dc="$(field "$row" digest_chars)"
+dc="$(dfield "$row" digest_chars)"
 # The distillation header embeds transcript_path, so digest_chars carries the
 # fixture dir's length on top of the tail-capped text. A fixed slack silently
 # assumed a short ambient /tmp; the bound names the path term instead (#846 —
@@ -208,36 +246,69 @@ sz="$(wc -c < "$T/prompt-seen.txt" | tr -d ' ')"
 [ "$sz" -le 7000 ] && r=yes || r=no
 assert_eq "prompt sent to the model stays bounded (<=7000, got $sz)" yes "$r"
 row="$(run_digest "$T/big.jsonl" SESSION_DIGEST_MIN_TURNS=4 SESSION_DIGEST_TAIL_CHARS=40000)"
-dc2="$(field "$row" digest_chars)"
+dc2="$(dfield "$row" digest_chars)"
 [ "$dc2" -gt "$dc" ] && r=yes || r=no
 assert_eq "a larger cap really sends more (cap is honored, not fixed)" yes "$r"
 
-# --- 7. failure is loud in the log and silent to the session -----------------
+# --- 7. failure is loud on the plane and silent to the session ---------------
 # A SessionEnd hook that blocks or throws would break session teardown.
 stub_model "'not json at all'"
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=4)"
-assert_eq "unparseable model output -> status=error" error "$(field "$row" status)"
-[ -n "$(field "$row" error)" ] && r=yes || r=no
-assert_eq "error row explains itself" yes "$r"
+assert_eq "unparseable model output -> data.status=error" error "$(dfield "$row" status)"
+[ -n "$(dfield "$row" error)" ] && r=yes || r=no
+assert_eq "error fact explains itself" yes "$r"
 
 rm -f "$T/bin/claude"
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=4 CLAUDE_BIN=no-such-binary)"
-assert_eq "absent model binary -> status=error" error "$(field "$row" status)"
+assert_eq "absent model binary -> data.status=error" error "$(dfield "$row" status)"
+stub_model "'{\"context\":\"c\"}'"
 
 pay='{"session_id":"s","transcript_path":"/nonexistent/nope.jsonl","cwd":"/tmp"}'
-rm -rf "$T/out"
-printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot PATH="$T/bin:/usr/bin:/bin" \
-    SESSION_DIGEST_LOG_DIR="$T/out" bash "$DIGEST" >/dev/null 2>&1; rc=$?
+: > "$T/capture.jsonl"
+printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
+    PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 \
+    PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+    PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>&1; rc=$?
 assert_eq "missing transcript still exits 0 (never blocks session end)" 0 "$rc"
 
-printf '%s' '' | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot PATH="$T/bin:/usr/bin:/bin" \
-    SESSION_DIGEST_LOG_DIR="$T/out" bash "$DIGEST" >/dev/null 2>&1; rc=$?
+printf '%s' '' | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
+    PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 \
+    PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+    PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>&1; rc=$?
 assert_eq "empty payload still exits 0" 0 "$rc"
 
-# --- 8. the kill switch ------------------------------------------------------
-rm -rf "$T/out"
+# --- 7b. a plane the shim cannot reach is DISCLOSED, hook still exits 0 -------
+# The cold rung fails (its command exits nonzero) after the dead socket; the
+# record is lost but SAID LOUDLY on stderr — never silently dropped — and the
+# SessionEnd hook must still exit 0 (non-blocking).
+printf '#!/bin/bash\nexit 1\n' > "$T/bin/failcli"; chmod +x "$T/bin/failcli"
+stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
+: > "$T/capture.jsonl"; : > "$T/err.txt"
+pay="$(TX="$T/tx.jsonl" python3 -c 'import json,os;print(json.dumps({"session_id":"s","transcript_path":os.environ["TX"],"cwd":"/tmp"}))')"
+printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
+    PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 SESSION_DIGEST_MIN_TURNS=4 \
+    PLANE_EMIT_CLI="bash $T/bin/failcli" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+    PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>"$T/err.txt"; rc=$?
+assert_eq "plane failure: hook still exits 0" 0 "$rc"
+[ ! -s "$T/capture.jsonl" ] && r=yes || r=no
+assert_eq "plane failure: nothing was recorded" yes "$r"
+case "$(cat "$T/err.txt")" in *"plane record failed"*) r=yes ;; *) r=no ;; esac
+assert_eq "plane failure is DISCLOSED on stderr, not silent" yes "$r"
+stub_model "'{\"context\":\"c\"}'"
+
+# --- 8. the kill switch: SESSION_DIGEST_ENABLED=0 ----------------------------
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED=0)"
-assert_eq "SESSION_DIGEST_ENABLED=0 writes nothing at all" "" "$row"
+assert_eq "SESSION_DIGEST_ENABLED=0 records nothing at all" "" "$row"
+
+# --- 8b. PLANE_EMIT_DISABLED=1 is the plane silencer -------------------------
+# The hook self-gates on it up front (the plane is now its only sink): exit 0,
+# nothing recorded, and — the point — NO model call spent on a digest nobody
+# keeps.
+stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
+row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=4 PLANE_EMIT_DISABLED=1)"
+assert_eq "PLANE_EMIT_DISABLED=1 records nothing" "" "$row"
+[ -s "$T/prompt-seen.txt" ] && r=yes || r=no
+assert_eq "PLANE_EMIT_DISABLED=1 spends NO model call" no "$r"
 
 # --- 9. dormant by default (the rollout contract) ----------------------------
 # The hook composes into every bot on every fleet the moment this merges. If it
@@ -245,20 +316,19 @@ assert_eq "SESSION_DIGEST_ENABLED=0 writes nothing at all" "" "$row"
 # 4 fleets simultaneously — an uncanaried estate-wide Haiku roll. It must do
 # NOTHING until a fleet opts in, so that rollout is one fleet at a time.
 stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
-row="$(run_digest_unarmed "$T/tx.jsonl")"
-assert_eq "unarmed fleet writes NO row" "" "$row"
+out="$(run_digest_unarmed "$T/tx.jsonl")"
+assert_eq "unarmed fleet records NOTHING" "" "$out"
 [ -s "$T/prompt-seen.txt" ] && r=yes || r=no
 assert_eq "unarmed fleet spends NO model call" no "$r"
-[ -d "$T/out" ] && r=yes || r=no
-assert_eq "unarmed fleet does not even create the log dir" no "$r"
+assert_eq "unarmed fleet writes no JSONL either" yes "$(no_jsonl_written)"
 
 # Only an explicit "1" arms it — a stray truthy-looking value must not.
 for v in 0 yes true ""; do
     row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED="$v")"
     assert_eq "SESSION_DIGEST_ENABLED='$v' stays dormant" "" "$row"
 done
-row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED=1)"
-assert_eq "SESSION_DIGEST_ENABLED=1 arms it" ok "$(field "$row" status)"
+row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED=1 SESSION_DIGEST_MIN_TURNS=4)"
+assert_eq "SESSION_DIGEST_ENABLED=1 arms it" ok "$(dfield "$row" status)"
 
 echo
 echo "  $PASS/$TOTAL passed"
