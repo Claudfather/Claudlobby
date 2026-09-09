@@ -653,6 +653,23 @@ def test_daemon_exits_when_the_db_outruns_it_mid_life(tmp_path: Path):
     try:
         _await_bind(proc, sock)
 
+        # READINESS IS A COMPLETED ROUND TRIP, not a bound socket, and this
+        # line is the whole fix for a race that failed 5/5 here and 2/3 in CI.
+        # _await_bind returns when the socket appears, but the daemon still has
+        # startup work after that: it migrates the db and emits daemon_started.
+        # A version bump landing inside that window makes the daemon refuse at
+        # STARTUP and exit before it ever accepts this connection — so the
+        # client sees ConnectionResetError instead of the typed refusal, and
+        # the test silently becomes a duplicate of its own sibling,
+        # test_daemon_starting_up_stale_exits_and_leaves_no_socket.
+        #
+        # Measured, not reasoned: without this, 0 of 5 runs reached the reply;
+        # with it, 6 of 6. Gating on the migrated user_version is NOT enough —
+        # it is observable at 3 and 9 mid-migration, and the race survived it.
+        # Only a reply proves the serve loop is live, which is the property
+        # `mid_life` in this test name actually means.
+        assert send_batch(sock, [_comm("b", body="readiness")])["ok"] is True
+
         _bump_user_version(tmp_path, NEWER)
 
         reply = send_batch(sock, [_comm("a", body="after the migration")])
