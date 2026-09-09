@@ -47,7 +47,20 @@ testpaths = ["tests"]
 # unrun platform-gated test is nearly as invisible as a trivially-passing one —
 # and "2299 passed, 7 skipped" reads like coverage. The reasons already existed;
 # nothing was printing them.
-addopts = "-rs"
+#
+# -fE is NOT decoration on that: `-r` is STORE, not append, so the bare `-rs`
+# above REPLACED pytest's default `fE` and blanked every failure name from the
+# short-summary block (#1509). A red run printed a wall of SKIPPED and named
+# nothing — the count line still said "N failed", so a reader knew how many and
+# not which, which is the worst pair available. Restoring f and E costs nothing
+# and keeps the skip reasons the -rs was added for.
+#
+# The blast radius is any invocation that does NOT pass its own -r. CI is
+# exactly that (.github/workflows/test.yml runs `pytest -v`), while CLAUDE.md's
+# regression-diff recipe passes `-ra` and was never affected — measured both
+# ways, and pinned by tests/test_pytest_reportchars.py so a future -r edit
+# cannot silently blank the names again.
+addopts = "-rsfE"
 # Registered so `pytest -m vault` selects the vault-mode gate and unknown-marker
 # warnings stay quiet. These tests importorskip/skipif on the [vault] extra, so
 # they SKIP in the default `.[dev]` lane and RUN in the dedicated vault-tests CI
