@@ -277,6 +277,14 @@ const WHY = {
                   "the manager owes a chase, supersede, withdraw or escalate"],
   overdue: (r) => [`overdue ${ago(r.expected_by || r.attention_since)}`,
                    "chase the worker, or re-dispatch with a new deadline"],
+  // chunk U — a bot that REPORTED it is blocked and waiting: its newest task
+  // event is `blocked_waiting` (non-terminal; the task stays open until the
+  // block clears). `attention_since` is when it blocked. Leads a stale row,
+  // which excludes it — so an aged block reads this, never "no progress".
+  blocked_waiting: (r) => [
+    `blocked, waiting on you since ${ago(r.attention_since)}`,
+    "clear the block (it resumes on its own), or withdraw it"
+      + " (task-act.sh withdraw <id>)"],
   // chunk T — a task the bot is HOLDING but not moving on: open, delivered,
   // aging, no progress, and (the crux) the assignee is not working right now.
   // Tiered by age; `stale_tier` (amber|red) makes the card read louder as it
