@@ -7,6 +7,10 @@ age (amber → red). Rides the existing attention plumbing (ATTENTION_ARMS →
 ATTENTION_ARMS_SQL → the rail + the header's "need you" count); the
 presence-suppression heartbeat join is the one new input.
 
+Chunk U adds the sibling `blocked_waiting` arm at the tail of this file: a bot
+that REPORTED it is blocked (newest task event `blocked_waiting`) leads a stale
+row, which excludes it, so an aged block reads `blocked_waiting`, never both.
+
 Fixtures are seeded through the real emit spine (`emit_batch`) in real shapes;
 ids are faked hex. Timestamps are relative to real `now` (the view's clock).
 """
@@ -44,6 +48,8 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
               progress_age_h: float | None = None,
               marker_progress_age_h: float | None = None,
               idless: bool = False,
+              blocked_age_h: float | None = None,
+              resumed_age_h: float | None = None,
               at_override: str | None = None,
               progress_at_override: str | None = None,
               expected_by: str | None = None, terminal: str | None = None) -> str:
@@ -92,6 +98,22 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
             "event_type": "task", "emitter": "t", "fleet": "f",
             "occurred_at": progress_at_override or _ago(hours=progress_age_h),
             "payload": {"event": "progress", "work_item_id": "wi_" + stem,
+                        "assignment_id": "asg_" + stem, "actor": worker}}])
+    if blocked_age_h is not None:
+        # the bot reports it is blocked and waiting (a non-terminal task event) —
+        # the assignment stays open, its newest event becomes `blocked_waiting`
+        emit_batch(root, [{
+            "event_type": "task", "emitter": "t", "fleet": "f",
+            "occurred_at": _ago(hours=blocked_age_h),
+            "payload": {"event": "blocked_waiting", "work_item_id": "wi_" + stem,
+                        "assignment_id": "asg_" + stem, "actor": worker}}])
+    if resumed_age_h is not None:
+        # the block cleared: a later `resumed` makes the newest event no longer
+        # `blocked_waiting`, so the arm falls away
+        emit_batch(root, [{
+            "event_type": "task", "emitter": "t", "fleet": "f",
+            "occurred_at": _ago(hours=resumed_age_h),
+            "payload": {"event": "resumed", "work_item_id": "wi_" + stem,
                         "assignment_id": "asg_" + stem, "actor": worker}}])
     if marker_progress_age_h is not None:
         emit_batch(root, [{
@@ -330,3 +352,47 @@ def test_an_unreachable_plane_fires_no_false_stale_task(tmp_path):
         db.chmod(0o600)
     assert body["state"] != "ok"
     assert not body.get("data", {}).get("assignments")
+
+
+# --- the blocked_waiting arm (chunk U) ----------------------------------------
+
+def test_blocked_waiting_fires_for_an_open_block(tmp_path):
+    # the bot reported `blocked_waiting` 1h ago and is idle: it needs the
+    # operator, and the newest task event is the block
+    asg = _dispatch(tmp_path, "b1", dispatch_age_h=2, heartbeat="IDLE",
+                    blocked_age_h=1)
+    r = _row(tmp_path, asg)
+    assert r["attention"] is True
+    assert r["attention_reason"] == ["blocked_waiting"]
+    # dated from the block itself (the newest task event)
+    assert r["attention_since"] == _ago(hours=1)
+
+
+def test_an_aged_block_reads_blocked_not_stale(tmp_path):
+    # THE exclusion pin. An old dispatch (8h), idle, now `blocked_waiting`: a
+    # block is not "progress", so without the _STALE_TASK exclusion this would
+    # ALSO trip stale_task and double-raise `["blocked_waiting","stale_task"]`.
+    # The explicit block must lead alone.
+    asg = _dispatch(tmp_path, "b2", dispatch_age_h=8, heartbeat="IDLE",
+                    blocked_age_h=1)
+    r = _row(tmp_path, asg)
+    assert r["attention_reason"] == ["blocked_waiting"]
+    assert "stale_task" not in r["attention_reason"]
+
+
+def test_a_resumed_block_falls_away(tmp_path):
+    # `blocked_waiting` then a later `resumed`: the newest event is no longer
+    # the block, and the task is moving again recently — no arm fires
+    asg = _dispatch(tmp_path, "b3", dispatch_age_h=3, heartbeat="IDLE",
+                    blocked_age_h=2, resumed_age_h=0.5)
+    r = _row(tmp_path, asg)
+    assert r["attention"] is False
+
+
+def test_a_completed_block_leaves_the_queue(tmp_path):
+    # `blocked_waiting` then a terminal `completed`: the assignment closes, so
+    # it is out of the non-terminal queue entirely
+    asg = _dispatch(tmp_path, "b4", dispatch_age_h=3, heartbeat="IDLE",
+                    blocked_age_h=2, terminal="completed")
+    r = _row(tmp_path, asg)
+    assert r["attention"] is False

@@ -428,6 +428,12 @@ _STALE_TASK = (
     " AND MAX(" + _epoch("a.occurred_at") + ", COALESCE("
     + _epoch(_STALE_PROGRESS_AT) + ", " + _epoch("a.occurred_at") + ")) < "
     + _epoch("?")
+    # a task the bot SAID it is blocked on is led by `blocked_waiting`, not
+    # re-derived as a silent stall here (the same lead-and-exclude the
+    # not-overdue clause above does for `overdue`). No `?` -- attention_params
+    # is unchanged.
+    + " AND (" + _NEWEST_EVENT + " IS NULL OR " + _NEWEST_EVENT
+    + " != 'blocked_waiting')"
     + " AND NOT " + _ASSIGNEE_WORKING + ")"
 )
 
@@ -466,9 +472,18 @@ ATTENTION_ARMS = (
      _NEWEST_AT, NEWEST_TASK_IGNORED),
     ("overdue", f"({_epoch('a.expected_by')} < {_epoch('?')})",
      "a.expected_by", None),
-    # LAST in the order so `overdue` (and every louder arm) LEADS a row that is
-    # both — and its predicate already excludes an overdue row, so belt and
-    # suspenders: stale_task never rides in front, and never double-raises one.
+    # a bot that SAID it is blocked and waiting: its newest task event is
+    # `blocked_waiting` — non-terminal (the task stays open while it waits, the
+    # escalated/nudged family), so `_NON_TERMINAL_A` keeps it in the queue. An
+    # EXPLICIT block dated by the bot outranks an INFERRED stall, so it leads
+    # stale_task and stale_task excludes it above — an aged block reads
+    # `blocked_waiting`, never both. No `?`, so attention_params is unchanged.
+    ("blocked_waiting", f"({_NEWEST_EVENT} = 'blocked_waiting')",
+     _NEWEST_AT, None),
+    # LAST in the order so `overdue`/`blocked_waiting` (and every louder arm)
+    # LEAD a row that is both — and its predicate already excludes an overdue
+    # or blocked row, so belt and suspenders: stale_task never rides in front,
+    # and never double-raises one.
     ("stale_task", _STALE_TASK, _STALE_SINCE_AT, None),
 )
 
