@@ -69,8 +69,9 @@ LIB = REPO / "lib"
 # does not exist off Darwin. The reason names `launchctl` specifically rather
 # than "macOS", so a reader of a skipped run learns exactly which rung is
 # missing instead of guessing at the whole platform. Paired with
-# `addopts = "-rs"` (pyproject.toml) this prints on every run rather than
-# collapsing into a bare `s`.
+# `addopts = "-rsfE"` (pyproject.toml) this prints on every run rather than
+# collapsing into a bare `s`. The `s` is the half that does that; `fE` restores
+# the failure names the bare `-rs` had replaced (#1509).
 needs_launchctl = pytest.mark.skipif(
     platform.system() != "Darwin",
     reason=(
