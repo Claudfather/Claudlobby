@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# session-pid.sh — answer "which Claude Code session am I running INSIDE?"
+# claude-session-pid.sh — answer "which Claude Code session am I running INSIDE?"
 #
 # A skill that reports its own bot health does not need to SEARCH for itself.
 # It is already running inside the session it describes, so the honest question
@@ -29,11 +29,11 @@
 # plausible wrong number is the defect this door exists to remove.
 #
 # Usage:
-#   session-pid.sh [--pid]      pid of the Claude Code session (default)
-#   session-pid.sh --etime      elapsed run time, ps etime format
-#   session-pid.sh --rss-mb     resident memory, as "487 MB"
-#   session-pid.sh --summary    "PID 8864 | up 04:12:33 | 487 MB"
-#   session-pid.sh --from PID   start the walk at PID instead of the caller
+#   claude-session-pid.sh [--pid]      pid of the Claude Code session (default)
+#   claude-session-pid.sh --etime      elapsed run time, ps etime format
+#   claude-session-pid.sh --rss-mb     resident memory, as "487 MB"
+#   claude-session-pid.sh --summary    "PID 8864 | up 04:12:33 | 487 MB"
+#   claude-session-pid.sh --from PID   start the walk at PID instead of the caller
 #
 # Exit: 0 resolved | 2 usage | 3 unresolved
 
@@ -88,7 +88,7 @@ while [ $# -gt 0 ]; do
         --pid|--etime|--rss-mb|--summary) mode="$1"; shift ;;
         --from) start="${2:-}"; shift 2 || usage ;;
         -h|--help) usage ;;
-        *) printf 'session-pid.sh: unknown argument: %s\n' "$1" >&2; usage ;;
+        *) printf 'claude-session-pid.sh: unknown argument: %s\n' "$1" >&2; usage ;;
     esac
 done
 
@@ -97,12 +97,12 @@ done
 [ -z "$start" ] && start="$PPID"
 
 if ! case "$start" in ''|*[!0-9]*) false ;; *) true ;; esac; then
-    printf 'session-pid.sh: --from expects a pid, got: %s\n' "$start" >&2
+    printf 'claude-session-pid.sh: --from expects a pid, got: %s\n' "$start" >&2
     exit 2
 fi
 
 if ! session_pid=$(resolve_session_pid "$start"); then
-    printf 'session-pid.sh: no Claude Code process in the ancestry of pid %s — ' "$start" >&2
+    printf 'claude-session-pid.sh: no Claude Code process in the ancestry of pid %s — ' "$start" >&2
     printf 'not reporting a process-table guess. See Claudlobby #1525.\n' >&2
     printf 'unknown\n'
     exit 3

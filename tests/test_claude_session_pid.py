@@ -1,4 +1,4 @@
-"""Tests for lib/session-pid.sh — the session-scoped self-identity door (#1525).
+"""Tests for lib/claude-claude-session-pid.sh — the session-scoped self-identity door (#1525).
 
 The defect this door replaces was not that the old expression errored. It was
 that it returned a PLAUSIBLE WRONG NUMBER: `pgrep -f 'claude' | head -1` on a
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-DOOR = Path(__file__).resolve().parent.parent / "lib" / "session-pid.sh"
+DOOR = Path(__file__).resolve().parent.parent / "lib" / "claude-session-pid.sh"
 
 
 def run(args, **kw):
@@ -147,7 +147,7 @@ SKILLS = ["selfcheck", "review-status", "status-personal", "eng-status"]
 @pytest.mark.parametrize("skill", SKILLS)
 def test_skill_uses_the_door(skill):
     p = DOOR.parent.parent / "library" / "skills" / skill / "SKILL.md"
-    assert "session-pid.sh" in p.read_text(), f"{skill} does not consume the door"
+    assert "claude-session-pid.sh" in p.read_text(), f"{skill} does not consume the door"
 
 
 @pytest.mark.parametrize("skill", SKILLS)
