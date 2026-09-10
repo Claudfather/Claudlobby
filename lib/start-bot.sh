@@ -317,6 +317,18 @@ _pretoken="$(resolve_bot_telegram_token "$BOT_DIR" 2>/dev/null || true)"
 # The pane pid IS the claude pid: the pane runs `. .tmux-env; exec claude ...`,
 # and exec replaces the shell in place rather than forking.
 #
+# NOT `lib/claude-session-pid.sh` (#1531), and the difference is load-bearing
+# rather than stylistic. That door answers "which session am I running INSIDE?"
+# by walking UP from the caller's own ancestry. start-bot.sh is the PARENT that
+# just launched this session -- it is not inside it, so the walk would resolve
+# to whatever launched start-bot. That is frequently ANOTHER bot's claude, since
+# spin-up-bot.sh is routinely run from a manager's session, and the gate would
+# then compare this bot's poller against the MANAGER's pid and read not_mine on
+# every boot. Its `--from PID` does not rescue it either: the only pid worth
+# starting from is the pane pid, and from there the walk returns that same pid
+# immediately. Same words, different question -- resolve from the session we
+# created, not from the ancestry we happen to sit in.
+#
 # Deliberately NOT a threshold on the elapsed time. `after 0s` is the symptom
 # that exposed this, not the defect -- a race that resolved in 1.2s would read
 # healthy again under any floor. The defect is asking about the SLOT when the
