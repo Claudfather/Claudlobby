@@ -150,6 +150,21 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
   main { grid-template-columns: 1fr; overflow-y: auto; }
   main > section { border-right: 0; border-bottom: 1px solid var(--edge); }
   body { overflow: auto; height: auto; }
+  /* mobile is triage only (item 7 / §16): put what-needs-me FIRST, then the
+     channel, then the roster — so the attention rail is no longer stranded
+     below the entire channel. The header counts already sit above `main`.
+     `order` applies to these grid items in the single-column stack. */
+  #rail-right   { order: 1; }
+  #rail-channel { order: 2; }
+  #rail-fleet   { order: 3; }
+  /* the desktop sizes (attention 40%, tasks flex:1, debug 30%) are relative to
+     a full-height column that no longer exists once stacked — release them all
+     so each rail takes its natural content height (tasks' flex-basis:0 would
+     otherwise collapse it to nothing, letting the channel ride up over it) */
+  #rail-attention { max-height: none; }
+  #rail-right > div { flex: none; }
+  /* the header's pills wrap rather than overflow, so the counts stay legible */
+  header { flex-wrap: wrap; }
 }
 
 /* cross-fleet mark (U2): a thread whose two fleets differ says so, and
