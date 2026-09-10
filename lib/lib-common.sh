@@ -767,9 +767,20 @@ bot_expects_no_token() {
     [ "$(bot_conf_get "$bot_dir" EXPECT_NO_TOKEN "")" = "1" ]
 }
 
+# bridge_state <bot_dir> [pre_resolved_token] [owner_session_pid]
+#
+# Third argument SCOPES the verdict to one session (#1530). Without it the
+# question is "does this BOT have a live bridge", which is what keepalive and
+# rolling-restart mean. With it the question is "is this bridge MINE", which is
+# what a bring-up gate means -- and the two differ for several seconds on every
+# restart, because the outgoing session's poller is still alive and still owns
+# the slot while the incoming session is starting. A bot-scoped answer to a
+# session-scoped question is what let start-bot.sh log READY for a bridge that
+# went dark 3.7s later. Callers passing two arguments or fewer are unaffected.
 bridge_state() {
     local bot_dir="${1:?Usage: bridge_state /path/to/bot/dir}"
     local handle state_dir token pidfile pid comm ppid pcomm environ environ_lines args psline _anc _hop _exe
+    local want_owner="${3:-}" _claude_pid=""
 
     handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "")" || true
     if [ -z "$handle" ]; then printf '%s' "no_handle"; return 1; fi
@@ -869,6 +880,7 @@ bridge_state() {
         [ -n "$_anc" ] && [ "$_anc" -gt 1 ] || break
         psline="$(ps -o ppid=,comm= -p "$_anc" 2>/dev/null)" || true
         [ -n "$psline" ] || break
+        _claude_pid="$_anc"                              # the pid we are ABOUT to describe
         read -r _anc pcomm <<<"$psline"                  # _anc advances to the parent
         case "$pcomm" in
             claude | */claude) break ;;                  # live claude ancestor → owned
@@ -880,6 +892,14 @@ bridge_state() {
         claude | */claude) ;;
         *) printf '%s' "no_bridge"; return 1 ;;
     esac
+
+    # Session scope (#1530). `_claude_pid` is the pid the loop was DESCRIBING when
+    # it matched, not `_anc` -- the read advances `_anc` to that claude's OWN
+    # parent (the tmux server), so comparing `_anc` here would compare a session
+    # against a tmux server and never match.
+    if [ -n "$want_owner" ] && [ "$_claude_pid" != "$want_owner" ]; then
+        printf '%s' "not_mine"; return 1
+    fi
 
     printf '%s' "up"
     return 0
@@ -949,6 +969,21 @@ bridge_bringup_verify() {
     local bot_dir="${1:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
     local bots_dir="${2:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
     local timeout="${3:-45}"
+    # Fourth argument scopes the verdict to one session, same contract as
+    # bridge_state's third (#1530). This is the SECOND READY-shaped emitter and
+    # it needs scoping for the same reason the first did: on 2026-09-10 the gate
+    # logged READY at 19:38:02 and THIS function logged `BRIDGE_READY — Telegram
+    # poller up` at 19:38:06, both reading the outgoing session's poller, and the
+    # second one fired AFTER that poller had already exited at 19:38:05.731.
+    # Fixing only the gate would have left the boot still claiming success.
+    local owner="${4:-}" vtoken
+    # Resolve the token ONCE, not once per poll. Threading it in is also what
+    # makes the scoped call below well-formed: bridge_state keys "a pre-resolved
+    # token was supplied" on argument COUNT, so passing an empty string as $2 to
+    # reach $3 would be read as "this bot has no token" and return no_token for
+    # every bot. Resolving here keeps that contract intact -- and a genuinely
+    # tokenless bot still resolves to empty, which is the correct no_token.
+    vtoken="$(resolve_bot_telegram_token "$bot_dir" 2>/dev/null || true)"
     local marker="$bot_dir/data/.bridge-down" state="" bot_id elapsed=0 heal_note=""
     bot_id="$(basename "$bot_dir")"
 
@@ -959,10 +994,12 @@ bridge_bringup_verify() {
     # Count elapsed sleeps rather than reading the clock so the rare dark-bridge
     # poll spawns no per-iteration `date`.
     while :; do
-        state="$(bridge_state "$bot_dir" 2>/dev/null || true)"
+        state="$(bridge_state "$bot_dir" "$vtoken" "$owner" 2>/dev/null || true)"
         case "$state" in
             up | no_token | no_handle) break ;;
         esac
+        # not_mine keeps polling deliberately: the outgoing holder may exit and
+        # our own poller claim within the window, which is a real recovery.
         if [ "$elapsed" -ge "$timeout" ]; then break; fi
         sleep 1
         elapsed=$((elapsed + 1))
@@ -987,6 +1024,16 @@ bridge_bringup_verify() {
             fi ;;
         unknown)
             printf '%s' "unknown" ;;
+        not_mine)
+            # A live poller exists and is NOT ours. Our bridge is down, so this
+            # escalates like no_bridge -- but names the actual condition, because
+            # the remedy differs: nothing failed to spawn, the previous session
+            # never released the slot.
+            mkdir -p "$bot_dir/data" 2>/dev/null || true
+            : > "$marker" 2>/dev/null || true
+            emit_failure_alert "$bots_dir" "bridge_down" \
+                "$bot_id Telegram bridge not ours at bring-up — a poller is up but owned by another session; inbound dark for THIS session until the holder exits" || true
+            printf '%s' "missing:not_mine" ;;
         *) # no_bridge (or an empty read) — a verified-dark bridge
             mkdir -p "$bot_dir/data" 2>/dev/null || true
             : > "$marker" 2>/dev/null || true
