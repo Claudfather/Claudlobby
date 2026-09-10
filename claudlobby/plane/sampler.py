@@ -31,8 +31,8 @@ from pathlib import Path
 
 from ..paths import _iter_fleet_dirs, tmux_socket_for_bot
 
-THUMB_LINES = 14
-FOCUS_LINES = 44
+THUMB_LINES = 10          # grid: a calm glance, not a wall of terminal
+FOCUS_LINES = 2000        # focus: deep SCROLLBACK, so the overlay can be read
 THUMB_INTERVAL = 5.0
 FOCUS_INTERVAL = 1.0
 FOCUS_TTL = 30.0          # focus decays back to thumbnail cadence untouched
@@ -166,13 +166,23 @@ class PaneSampler:
         running = self._task is not None and not self._task.done()
         return {"panes": panes, "sampler_running": running}
 
-    async def _capture(self, pane: dict, lines: int) -> None:
-        sess = pane["bot"]
+    def _capture_argv(self, pane: dict, scrollback: int) -> list:
+        # `-p -e` prints the pane with its colours. `-S -N` extends the capture
+        # N lines back into the SCROLLBACK — that is what gives the focus
+        # overlay history to scroll through. Grid thumbnails pass scrollback=0
+        # and read only the visible screen (cheap, glanceable); the slice
+        # (`[-lines:]`) still bounds whatever comes back.
+        argv = [self.tmux, "-L", pane["socket"], "capture-pane",
+                "-t", pane["bot"], "-p", "-e"]
+        if scrollback > 0:
+            argv += ["-S", f"-{scrollback}"]
+        return argv
+
+    async def _capture(self, pane: dict, lines: int, scrollback: int = 0) -> None:
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
-                self.tmux, "-L", pane["socket"], "capture-pane",
-                "-t", sess, "-p", "-e",  # visible screen; the slice bounds it
+                *self._capture_argv(pane, scrollback),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL)
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=4.0)
@@ -231,7 +241,7 @@ class PaneSampler:
                 pane = next((p for p in self._panes
                              if (p["fleet"], p["bot"]) == focused), None)
                 if pane:
-                    await self._capture(pane, FOCUS_LINES)
+                    await self._capture(pane, FOCUS_LINES, scrollback=FOCUS_LINES)
             if now - last_thumb >= THUMB_INTERVAL:
                 last_thumb = now
                 # Bounded gather, not serial (measured: 18 panes serial 1.09s,
