@@ -480,7 +480,14 @@ function renderHeader(env) {
     + (t.live_poll !== "ok"
        ? ` <small class="warn" title="the pane sampler is not answering — the`
          + ` working count is the recorded half only">live poll`
-         + ` ${esc(t.live_poll)}</small>` : "");
+         + ` ${esc(t.live_poll)}</small>` : "")
+    // the recorder failing to RECORD is the worst gap (it makes an empty board
+    // a lie), so it rides the header, not just the trust tab. Detail is on
+    // Trust; here it is a loud one-liner naming the gap(s).
+    + ((t.recorder_gaps && t.recorder_gaps.length)
+       ? ` · <b class="warn" title="the recorder itself is failing — see the`
+         + ` Trust tab for detail">⚠ recorder: `
+         + `${t.recorder_gaps.map((g) => esc(g.label)).join(", ")}</b>` : "");
 }
 
 // The machinery rail's host line — from the OVERVIEW's host block, the same
