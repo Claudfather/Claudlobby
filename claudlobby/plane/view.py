@@ -42,7 +42,7 @@ import os
 import re
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:  # §14: optional UI features degrade without disabling the core ledger
@@ -888,14 +888,7 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
     qscan = scan_spool(root)
     quarantine_state = qscan.quarantine_state
     if quarantine_state == "ok":
-        entries = []
-        for f in qscan.quarantined:
-            try:
-                if f.is_file():
-                    entries.append((f.stat().st_mtime, f))
-            except OSError:
-                continue  # reaped mid-walk — skip the entry, never crash
-        entries.sort(reverse=True)
+        entries = _quarantined_entries(qscan)  # the ONE count (shared w/ header)
         quarantined = len(entries)
         for _, f in entries[:5]:
             sidecar = f.with_name(f.name + ".reason")
@@ -1295,7 +1288,9 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
         "samples": _host_samples(conn),
     }
     return {"fleets": rows, "default": fl["default"], "host": host,
-            "capture_config": capture_state, "totals": _totals(rows, live_poll)}
+            "capture_config": capture_state,
+            "totals": {**_totals(rows, live_poll),
+                       "recorder_gaps": _recorder_gaps(host)}}
 
 
 # worst-first: the header must not report a healthy poll because one fleet's
@@ -1326,6 +1321,70 @@ def _totals(rows: list[dict], live_poll: str) -> dict:
     }
 
 
+# The spool should drain in seconds; entries older than this mean ingest is
+# STALLED (a wedged or down daemon still lets plane-emit spool, so a growing
+# spool with an aging head is how a blind recorder shows itself). Generous, so
+# a burst that is draining does not read as a stall.
+RECORDER_SPOOL_STALL_S = 600
+
+
+def _quarantined_entries(qscan) -> list:
+    """The quarantine files newest-first — the ONE count the trust panel and
+    the header gap both read, so they cannot disagree (external round's rule:
+    a divergence here is the false all-clear this whole surface exists to
+    kill). Per-file guarded: the daemon reaps this dir concurrently, and one
+    entry reaped between glob and stat must not take the count down."""
+    entries = []
+    for f in qscan.quarantined:
+        try:
+            if f.is_file():
+                entries.append((f.stat().st_mtime, f))
+        except OSError:
+            continue  # reaped mid-walk — skip the entry, never crash
+    entries.sort(reverse=True)
+    return entries
+
+
+def _recorder_gaps(state: dict) -> list:
+    """The recorder failing to RECORD — the worst failure, because it makes an
+    empty board a lie, so it belongs in the header beside the presence counts,
+    not buried on the trust tab. A PURE function of `_recorder_state` (plus its
+    `quarantined`): no re-reading, so the header and the Host card read one
+    truth. Each gap carries a stable `kind`, a plain-language `label`, and a
+    `severity`. Daemon liveness is deliberately NOT duplicated here — it is
+    already on the Host card, and a down daemon surfaces anyway as the spool
+    backs up (spool_stalled)."""
+    gaps = []
+    q = state.get("quarantined") or 0
+    if q:
+        gaps.append({"kind": "quarantined", "count": q, "severity": "high",
+                     "label": f"{q} event{'s' if q != 1 else ''} refused"})
+    if state.get("quarantine_state") == "unreadable":
+        # cannot list the refused events — the false all-clear this surface
+        # exists to kill (a green zero from a tree the reader cannot reach)
+        gaps.append({"kind": "quarantine_unreadable", "severity": "high",
+                     "label": "quarantine unreadable"})
+    if state.get("spool_state") == "unreadable":
+        gaps.append({"kind": "spool_unreadable", "severity": "high",
+                     "label": "spool unreadable"})
+    elif (state.get("spool_files") or 0) > 0 and state.get("spool_oldest_at"):
+        try:
+            oldest = datetime.fromisoformat(
+                state["spool_oldest_at"].replace("Z", "+00:00"))
+            # a spooled_at may be naive (a producer that dropped its offset) —
+            # treat it as UTC rather than raising on aware-minus-naive
+            if oldest.tzinfo is None:
+                oldest = oldest.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - oldest).total_seconds()
+        except (ValueError, AttributeError, TypeError):
+            age = None
+        if age is not None and age > RECORDER_SPOOL_STALL_S:
+            n = state["spool_files"]
+            gaps.append({"kind": "spool_stalled", "count": n, "severity": "high",
+                         "label": f"ingest stalled — {n} pending"})
+    return gaps
+
+
 def _recorder_state(root: Path) -> dict:
     """The recorder's liveness and spool, shared by the summary and the
     Host card. Socket path honors PLANE_SOCKET like the shim and doctor
@@ -1333,8 +1392,12 @@ def _recorder_state(root: Path) -> dict:
     overridden-socket defect the last gauntlet fixed in doctor,
     re-imported). Liveness is a PROBE, not file presence: a crashed
     daemon's stale socket file stats fine (health from an artifact — the
-    fail-toward-fine direction)."""
+    fail-toward-fine direction). `quarantined` is the refused-event count
+    (the same door and count the trust panel reads) so the header gap and
+    the trust tab cannot disagree."""
     spool, spool_oldest, spool_state = _spool_pending(root)
+    qscan = scan_spool(root)
+    quarantined = len(_quarantined_entries(qscan))
     sock = Path(os.environ["PLANE_SOCKET"]) if os.environ.get("PLANE_SOCKET") \
         else socket_path(Path(root))
     return {
@@ -1343,6 +1406,8 @@ def _recorder_state(root: Path) -> dict:
         "spool_files": spool,
         "spool_oldest_at": spool_oldest,
         "spool_state": spool_state,
+        "quarantined": quarantined,
+        "quarantine_state": qscan.quarantine_state,
     }
 
 
