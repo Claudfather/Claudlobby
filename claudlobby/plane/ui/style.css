@@ -32,6 +32,10 @@ header h1 { font-size: 15px; font-weight: 600; margin-right: 6px; }
 .pill.ghost[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
 .dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+/* an ALIVE (up) pane: green like the roster's live dot. Without this the grid
+   fell through to the red base for every up bot, so an idle-but-healthy fleet
+   read as a wall of alarm; red now means only what it should — a down session. */
+.dot.live { background: var(--ok); }
 .dot.warn { background: var(--warn); }
 main { flex: 1; display: grid; grid-template-columns: 220px 1fr 400px; min-height: 0; }
 main > section { border-right: 1px solid var(--edge); display: flex; flex-direction: column; min-height: 0; }
