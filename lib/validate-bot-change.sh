@@ -1510,6 +1510,81 @@ if [ "$fail" -gt "$_rc_fail_before" ]; then
     echo "  [start-bot timeout stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.timeout.out" 2>/dev/null || echo "    (none)"
 fi
 
+# === Scenario 2b-bis: readiness is SESSION-scoped, not bot-scoped (#1530) ===
+# 2b proved the gate TIMEOUTs when NO poller came up. The defect #1530 fixes is the
+# other shape entirely, and it is the one that reads as success: a poller that is
+# alive, owned by this bot, lineage-proven under a live `claude` -- and belonging to
+# the OUTGOING session. Every predicate the gate had said `up`, so it logged
+# `READY — Telegram poller up after 0s`, and the bridge was dark 3.7s later when
+# that holder exited and removed its own pidfile.
+#
+# Only a real boot can prove this. The unit tests pin bridge_state's third argument;
+# they cannot show that start-bot RESOLVES its own pane pid and threads it in, which
+# is where the bug actually lived.
+#
+# The foreign tree is the production shape -- claude -> bun (`bun ... start`) -> bun
+# server.ts -- because a poller forked directly under `claude` would skip the shim
+# walk. Its bins live in a SEPARATE dir: $RB_ROOT/bin/claude is start-bot's own stub
+# and must not be replaced.
+echo ""
+echo "=== validate-bot-change: session-scoped readiness (#1530) ==="
+_scope_fail_before=$fail
+_SC_BIN="$RB_ROOT/scopebin"
+mkdir -p "$_SC_BIN"
+cp "$(command -v bash)" "$_SC_BIN/bun"
+cp "$(command -v bash)" "$_SC_BIN/claude"
+chmod +x "$_SC_BIN/bun" "$_SC_BIN/claude"
+cat > "$_SC_BIN/leaf.sh" <<LEAF
+echo \$\$ > "$RB_DIR/state/bot.pid"
+sleep 45
+true
+LEAF
+printf '"%s" "%s" server.ts &\nwait\n' "$_SC_BIN/bun" "$_SC_BIN/leaf.sh" > "$_SC_BIN/wrapper.sh"
+printf '"%s" "%s" start &\nwait\n'     "$_SC_BIN/bun" "$_SC_BIN/wrapper.sh" > "$_SC_BIN/tree.sh"
+rm -f "$RB_DIR/state/bot.pid"
+env TELEGRAM_STATE_DIR="$RB_DIR/state" setsid "$_SC_BIN/claude" "$_SC_BIN/tree.sh" >/dev/null 2>&1 &
+_SC_ROOT_PID=$!
+# Wait for the foreign poller to actually hold the slot; without this the run can
+# race and assert against a bot.pid that does not exist yet, which would PASS for
+# the wrong reason (it would just be scenario 2b again).
+_sc_ok=no
+for _ in $(seq 1 100); do
+    [ -s "$RB_DIR/state/bot.pid" ] && { _sc_ok=yes; break; }
+    sleep 0.05
+done
+harness_check "foreign-session poller holds the slot before the boot (fixture precondition)" "$_sc_ok"
+# The bot-scoped question must answer `up` here -- that is exactly what misled the
+# gate. If this reads anything else the scenario is not reproducing #1530 and the
+# assertions below would pass vacuously.
+[ "$(bridge_state "$RB_DIR" 2>/dev/null || true)" = "up" ] && r=yes || r=no
+harness_check "  ...and bot-scoped bridge_state still reads up (the misleading answer)" "$r"
+
+rm -f "$RB_DIR/logs/startup.log"
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.scope.out" 2>&1 || true
+sleep 1
+
+# THE CASE THAT MUST FLIP.
+grep -q 'READY — Telegram poller up' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
+harness_check "another session's live poller does NOT log READY (#1530 flip)" "$r"
+grep -q 'owned by another session' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "  ...and the TIMEOUT names WHY (not-ours, distinct from no-poller)" "$r"
+grep -q 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "  ...and bring-up still escalates BRIDGE_MISSING (no regression)" "$r"
+
+kill -9 -"$_SC_ROOT_PID" 2>/dev/null || kill -9 "$_SC_ROOT_PID" 2>/dev/null || true
+rm -f "$RB_DIR/state/bot.pid"
+
+if [ "$fail" -gt "$_scope_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: #1530 session-scope checks failed ---"
+    echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
+    echo "  [start-bot scope stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.scope.out" 2>/dev/null || echo "    (none)"
+fi
+
 # === Scenario 2c: RC readiness ESCALATION — fleet-pulse pages on an rc_timeout burst (#533) ===
 # 2b proved start-bot EMITS rc_timeout. This proves the downstream half: fleet-pulse reads
 # that event from >= threshold bots within the window and FIRES the escalation page. The real

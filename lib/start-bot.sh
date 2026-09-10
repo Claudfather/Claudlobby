@@ -305,6 +305,30 @@ _ready=0
 # few cores. Threaded into bridge_state so the loop only re-checks the changing
 # part (the live poller pid) (#756).
 _pretoken="$(resolve_bot_telegram_token "$BOT_DIR" 2>/dev/null || true)"
+# Session scope for the readiness question (#1530). `bridge_state` alone answers
+# "does this BOT have a live bridge", and on every restart that is TRUE of the
+# OUTGOING session for several seconds after we start -- its poller is alive and
+# still holds the slot. Measured: this gate logged `READY — Telegram poller up
+# after 0s` at 19:38:02, the incoming poller deferred to that holder and exited
+# at 19:38:05.731, the outgoing session then removed the pidfile it owned, and
+# the bot ran with no bridge at all. The gate was satisfied on its FIRST poll,
+# which is only possible when the thing it found predates us.
+#
+# The pane pid IS the claude pid: the pane runs `. .tmux-env; exec claude ...`,
+# and exec replaces the shell in place rather than forking.
+#
+# Deliberately NOT a threshold on the elapsed time. `after 0s` is the symptom
+# that exposed this, not the defect -- a race that resolved in 1.2s would read
+# healthy again under any floor. The defect is asking about the SLOT when the
+# question is about our own SESSION, so the fix is to ask the right question.
+_session_pid="$(bot_tmux "$TMUX_SOCKET" list-panes -t "$TMUX_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 | tr -cd '0-9')" || true
+if [ -z "$_session_pid" ]; then
+    # Unresolvable session pid must not TIMEOUT every boot -- that would trade a
+    # false all-clear for a false alarm plus a 90s stall. Fall back to the
+    # bot-scoped question, but SAY SO: a silent fallback to the weaker predicate
+    # is exactly the failure being fixed, and this line is greppable.
+    echo "$(ts_iso) SCOPE_UNRESOLVED — no pane pid for $TMUX_SESSION; readiness falls back to bot-scoped (may accept the outgoing session's poller)" >> "$LOG"
+fi
 for _i in $(seq 1 "$_rc_iters"); do
     if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
@@ -317,7 +341,8 @@ for _i in $(seq 1 "$_rc_iters"); do
     # Code initialized far enough to spawn its MCP plugin, and is immune to string
     # drift (the #710/#741 bridge-truth family). Bots with no channel (no_handle) or
     # a declared tokenless canary have no poller to await: ready at once, no alert.
-    case "$(bridge_state "$BOT_DIR" "$_pretoken" 2>/dev/null || true)" in
+    _bstate="$(bridge_state "$BOT_DIR" "$_pretoken" "$_session_pid" 2>/dev/null || true)"
+    case "$_bstate" in
         up)
             _elapsed=$(( $(date +%s) - _poll_start ))
             echo "$(ts_iso) READY — Telegram poller up after ${_elapsed}s" >> "$LOG"
@@ -340,7 +365,15 @@ for _i in $(seq 1 "$_rc_iters"); do
     sleep 0.5
 done
 if [ "$_ready" -eq 0 ]; then
-    echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, Telegram poller never reached bridge_state=up, proceeding anyway" >> "$LOG"
+    if [ "${_bstate:-}" = "not_mine" ]; then
+        # A live poller exists and belongs to another session -- the #1530 shape
+        # run to its ceiling. Distinct from "no poller came up" because the
+        # remedy differs: this one usually means the outgoing session never
+        # released the slot, not that bring-up failed.
+        echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, a Telegram poller is up but owned by another session (not ours), proceeding anyway" >> "$LOG"
+    else
+        echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, Telegram poller never reached bridge_state=up, proceeding anyway" >> "$LOG"
+    fi
     # Emit a fleet event so a genuine readiness regression reaches fleet-pulse's
     # escalation instead of just appending to a log. Now gated on bridge ground
     # truth, so this fires only when the poller really never came up — a true
@@ -444,7 +477,7 @@ fi
 # heal ladder (Fork F1=b). No second wait-knob here: a slow host raises poll 1's
 # RC_READY_TIMEOUT_S (which owns the wait); this verify is a single check (0) by
 # construction, never a redundant re-wait past an already-declared timeout.
-_bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" 0)"
+_bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" 0 "$_session_pid")"
 case "$_bridge_verdict" in
     ready)     echo "$(ts_iso) BRIDGE_READY — Telegram poller up" >> "$LOG" ;;
     expected:no_token) echo "$(ts_iso) BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert" >> "$LOG" ;;
