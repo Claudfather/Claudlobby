@@ -16,11 +16,18 @@ Full self-diagnostic for an always-on personal assistant. Extends the generic ma
 ### 1. Session Info
 
 ```bash
-echo "Uptime: $(ps -o etime= -p $(pgrep -f 'claude' | head -1) 2>/dev/null || echo 'unknown')"
-echo "PID: $(pgrep -f 'claude' | head -1)"
-echo "Memory: $(ps -o rss= -p $(pgrep -f 'claude' | head -1) 2>/dev/null | awk '{printf "%.0f MB", $1/1024}')"
+"$CLAUDLOBBY_ROOT/lib/session-pid.sh" --summary
 tmux list-sessions 2>/dev/null
 ```
+
+*Identity comes from the session you are running **inside**, via the shipped
+`session-pid.sh` door — never a process-table search. On a host where every bot
+runs as the same uid, `pgrep -f 'claude' | head -1` matches every bot on the box
+and resolves to the earliest-started match, which is structurally a tmux
+**server** rather than a Claude session. It returns the same wrong pid to every
+caller, so two bots comparing notes get identical numbers and read that as
+corroboration (Claudlobby #1525). The door prints `unknown` and exits 3 when it
+cannot resolve; it never guesses.*
 
 ### 2. MCP Server Connectivity
 
