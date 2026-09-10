@@ -147,7 +147,12 @@ SKILLS = ["selfcheck", "review-status", "status-personal", "eng-status"]
 @pytest.mark.parametrize("skill", SKILLS)
 def test_skill_uses_the_door(skill):
     p = DOOR.parent.parent / "library" / "skills" / skill / "SKILL.md"
-    assert "claude-session-pid.sh" in p.read_text(), f"{skill} does not consume the door"
+    text = p.read_text()
+    # Anchored, NOT a bare substring: `claude-claude-session-pid.sh` contains
+    # `claude-session-pid.sh`, so the loose form passed for a full review round
+    # while every shipped caller was rc 127 (#1531 round 2).
+    assert "/lib/claude-session-pid.sh" in text, f"{skill} does not consume the door"
+    assert "claude-claude-session-pid.sh" not in text, f"{skill} carries the doubled-prefix path"
 
 
 @pytest.mark.parametrize("skill", SKILLS)
@@ -195,3 +200,92 @@ def test_ambient_claude_processes_do_not_leak_in():
     r = run(["--from", "1"])
     assert r.returncode == 3
     assert r.stdout.strip() == "unknown"
+
+
+# --- the gate that would have caught the doubled-prefix ship (#1531 round 2) ---
+#
+# A rename introduced `claude-claude-session-pid.sh` into all four skill fences.
+# 19/19 tests passed and CI was green while every shipped caller returned rc 127.
+# Three independent checks missed it for ONE reason: a mangled name CONTAINS the
+# correct name, so every substring test -- the assertion below's old form, and a
+# `grep -v` exclusion used to verify the rename -- was satisfied by the break.
+#
+# The lesson is that no amount of reading the reference catches this. Only
+# resolving it does. These tests resolve it.
+
+import re as _re
+
+_LIB_REF = _re.compile(
+    r'(?:\$CLAUDLOBBY_ROOT|\{\{CLAUDLOBBY_ROOT\}\})/(lib/[A-Za-z0-9._-]+)'
+)
+
+
+def _skill_lib_refs():
+    """Every lib/ path referenced by any shipped skill, with its source line."""
+    skills = DOOR.parent.parent / "library" / "skills"
+    for path in sorted(skills.glob("*/SKILL.md")):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            for m in _LIB_REF.finditer(line):
+                yield path, lineno, m.group(1), line
+
+
+def test_every_lib_path_a_skill_references_exists_on_disk():
+    """Repo-wide, not just this door: a skill that names a lib/ script the
+    repo does not ship is a rc-127 at the caller.
+
+    Deliberately broader than the PR that added it -- the failure class is
+    'the reference was never resolved', which is not specific to one door.
+    """
+    repo = DOOR.parent.parent
+    missing = [
+        f"{p.relative_to(repo)}:{n}: {rel}"
+        for p, n, rel, _ in _skill_lib_refs()
+        if not (repo / rel).exists()
+    ]
+    assert not missing, "skills reference lib/ paths that do not exist:\n  " + "\n  ".join(missing)
+
+
+def test_the_existence_check_rejects_the_shape_that_shipped():
+    """Control: prove the check above can FAIL.
+
+    A test that has never been shown to reject the real defect is
+    indistinguishable from one that cannot. Feeds it the exact mangled name.
+    """
+    repo = DOOR.parent.parent
+    assert not (repo / "lib/claude-claude-session-pid.sh").exists()
+    assert (repo / "lib/claude-session-pid.sh").exists()
+    # and the substring form that passed for a whole review round:
+    assert "claude-session-pid.sh" in "claude-claude-session-pid.sh", (
+        "if this ever stops holding, the containment trap is gone and the "
+        "anchored assertions below can be relaxed"
+    )
+
+
+@pytest.mark.parametrize("skill", SKILLS)
+def test_the_skill_line_actually_runs(skill):
+    """EXECUTE the line the skill contains, rather than reading it.
+
+    Asserts only that the door RESOLVES -- never rc 127, never
+    'No such file or directory'. It deliberately does not assert rc 0: in CI
+    there is no Claude session in the ancestry, so the door correctly refuses
+    with rc 3 and prints `unknown`. Both are healthy; a missing file is not.
+    """
+    repo = DOOR.parent.parent
+    path = repo / "library" / "skills" / skill / "SKILL.md"
+    lines = [
+        l.strip() for l in path.read_text().splitlines()
+        if "CLAUDLOBBY_ROOT" in l and "claude-session-pid" in l and l.strip().startswith('"')
+    ]
+    assert lines, f"{skill}: no executable door line found to run"
+
+    for line in lines:
+        r = subprocess.run(
+            ["bash", "-c", line],
+            capture_output=True, text=True,
+            env={**os.environ, "CLAUDLOBBY_ROOT": str(repo)},
+        )
+        assert r.returncode != 127, (
+            f"{skill}: the shipped line is not executable (rc 127): {line}\n{r.stderr}"
+        )
+        assert "No such file" not in r.stderr, f"{skill}: {r.stderr}"
+        assert r.returncode in (0, 3), f"{skill}: unexpected rc {r.returncode}: {r.stderr}"

@@ -16,7 +16,7 @@ Full self-diagnostic for an always-on personal assistant. Extends the generic ma
 ### 1. Session Info
 
 ```bash
-"$CLAUDLOBBY_ROOT/lib/claude-claude-session-pid.sh" --summary
+"$CLAUDLOBBY_ROOT/lib/claude-session-pid.sh" --summary
 tmux list-sessions 2>/dev/null
 ```
 

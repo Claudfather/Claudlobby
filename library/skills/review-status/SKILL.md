@@ -9,7 +9,7 @@ Quick health check. Run:
 
 ```bash
 echo "Session: $(tmux display-message -p '#{session_name}' 2>/dev/null)"
-"$CLAUDLOBBY_ROOT/lib/claude-claude-session-pid.sh" --summary
+"$CLAUDLOBBY_ROOT/lib/claude-session-pid.sh" --summary
 ```
 
 *Identity comes from the session you are running **inside**, via the shipped

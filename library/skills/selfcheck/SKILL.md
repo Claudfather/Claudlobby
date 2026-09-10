@@ -14,7 +14,7 @@ Self-diagnostic for the manager. Checks session health, MCP connections, fleet h
 ### 1. Session Info
 
 ```bash
-"$CLAUDLOBBY_ROOT/lib/claude-claude-session-pid.sh" --summary
+"$CLAUDLOBBY_ROOT/lib/claude-session-pid.sh" --summary
 tmux list-sessions 2>/dev/null
 ```
 
