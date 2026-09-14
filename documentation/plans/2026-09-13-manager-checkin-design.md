@@ -196,12 +196,42 @@ guessed around:
 |---|---|---|
 | **dispatch** | an open/backlog task fits an idle worker; routed by judgment, rationale recorded | `dispatch-task.sh` |
 | **propose** | no well-defined work exists; generate task(s) from mission + knowledge + recent work into the intake store (§8); **must carry repo · project · rigor tier** | `emit-batch` (work_item) + `task_proposed` |
-| **ask** | a real decision needs the operator, *or* no worthwhile work can be found ("ask for tasks") | one Telegram post, shaped by §9 |
+| **ask** | the **surfacing judgment** (below) concludes the operator should hear something — a fork only they can resolve, or nothing worthwhile can be found ("ask for tasks") | one Telegram post, shaped by §9 |
 | **sprint** | **only if** ≥ `SPRINT_MIN_ISSUES` (default 5) mission-aligned issues are open **and** ≥ 1 worker is idle **and** no sprint ran within `SPRINT_MIN_GAP_S` (default 24 h) | `/autonomous-sprint` (inherits §9) |
 | **nothing** | all work in flight, nothing worthwhile — **recorded**, so "checked and chose nothing" is a fact, not silence | — |
 
 **RECORD before ACT** (§7): the decision exists even if the action fails (the
 crash-correctness rule the plane's write spine already follows).
+
+**The surfacing judgment — the Instinct gate.** A check-in is the manager's own
+re-engagement cycle; the operator never sees it. Whether *anything* reaches the
+operator is a separate judgment the manager makes on every check-in, and its
+default answer is **no**. Most check-ins end in `dispatch`, `propose` or `nothing`
+with no message at all. The judgment weighs, at minimum:
+
+- **Does this genuinely need a human?** — a fork the manager cannot resolve (a
+  `requires-approval` boundary in `PROJECT_MISSION.md`, a rigor tier that mandates
+  sign-off, conflicting priorities, a proposal on a review/human-tier project).
+- **Would the operator want to know?** — a deliverable ready (a PR, a finding), a
+  blocker that stalls the fleet, a failure with cost.
+- **What has changed since the operator was last told?** — only new information;
+  never a restatement.
+- **Has enough accumulated to be worth one message?** — several small things
+  coalesce into one post; one small thing waits, unless urgent.
+- **The operator's availability and responsiveness** — read from the plane: time
+  since their last message, whether the last `ask` was answered. Two open,
+  unanswered asks means the fleet proceeds on its best tier-gated judgment or
+  waits quietly — it does not pile on a third.
+- **What Claudron knows about how the operator wants to be engaged** — captured
+  preferences ("batch these", "never during X") are inputs, not decoration.
+- **An urgency floor** — a `blocked` that stalls everything, or a failure with real
+  cost, breaks through regardless.
+
+The judgment is **recorded** (§7, `raise`): whether it decided to surface, why, and
+what it *held* for later — so "why did it / didn't it tell me" is a row, and the
+instinct is tuned on data (ask-rate, held items, whether asks were answered) rather
+than on a cadence. **Nothing about the poll interval or the check-in gap touches the
+operator; they bound cost, not attention.**
 
 **Failure posture.** Any READ that fails lands in `inputs_seen.unavailable`, and with
 degraded inputs the allowed actions narrow to `ask | nothing` — **never propose from
@@ -226,6 +256,8 @@ lib-common's existing `emit_fleet_event checkin_decision manager-checkin '<json>
                    "unavailable": ["gh"] },
   "action": "dispatch | propose | ask | sprint | nothing",
   "rationale": "<= 600 chars, the manager's words",
+  "raise": { "decided": false, "reason": "<why it surfaced, or why not>",
+             "held": ["<items deferred to a later post>"] },
   "targets": { "assignment_ids": [], "work_item_ids": [], "msg_id": null } }
 ```
 
@@ -262,12 +294,13 @@ No Jinja branching exists inside library bodies (`defaults.py:190-193`); the pre
 for two audiences in one file is `dispatch.md` (`## The task loop` for managers,
 `## Manager: active-plan monitoring`). So: **one file, two sections.**
 
-**`## Manager`** — a post to the operator has a fixed shape: **one status line, one
-ask with named options, one pointer** (plane URL or PR). Post **only** when a decision
-is needed, something is done (a deliverable), something is blocked, or the check-in
-chose `ask`. A check-in that dispatches or chooses `nothing` posts **nothing** — it is
-in the plane. At most one post per check-in; several qualifying items coalesce into
-one message. Never restate the rigor in the message; point to it.
+**`## Manager`** — **whether to post at all is the surfacing judgment (§6): silence is
+the default, and a post is the exception the judgment must justify and record.** A
+check-in that dispatches, proposes or chooses `nothing` posts **nothing** — it is in
+the plane. When the judgment does say post, the shape is fixed: **one status line,
+one ask with named options, one pointer** (plane URL or PR). At most one post per
+check-in; several qualifying items coalesce into one message; held items wait for
+the next justified post. Never restate the rigor in the message; point to it.
 
 **`## Worker`** — one thin line on start / done / blocked. No milestone cadence. Detail
 goes through `report-back.sh` to the manager and the plane, not to Telegram.
@@ -407,11 +440,13 @@ fleet-active delta.
 
 ## 16. Open questions for the operator
 
-1. Poll and gap defaults — 15-min poll, 45-min minimum gap between check-ins?
+1. Poll and gap — **cost and responsiveness only; they never touch the operator.**
+   15-min poll, 60-min gap, with backoff-on-`nothing` as cost hygiene?
 2. Sprint conditions — ≥ 5 mission-aligned issues, ≥ 1 idle worker, 24-h gap?
 3. Proposals — cap of 3 per check-in; manager self-approves with your standing veto in
    v1, or every proposal waits for you?
 4. Worker thin updates — to Telegram, or to the plane only?
-5. Manager → operator budget — the predicate alone (decision / done / blocked / ask),
-   or also a hard daily cap?
+5. **The surfacing judgment (§6)** — anything missing from its inputs, and is the
+   urgency floor (`blocked` that stalls the fleet, a failure with real cost) drawn in
+   the right place?
 6. Which fleet is the canary?
