@@ -37,13 +37,21 @@ Record `email`, `orgName` and `subscriptionType` **now**. This is the only cheap
 ### 2. Establish blast radius — MANDATORY, not optional
 
 ```bash
-grep -rn 'CLAUDE_CONFIG_DIR' "$CLAUDLOBBY_ROOT"/local/*/runtime/bots/*/bot.conf
+# host_bots_dirs resolves root, flat AND nested layouts. Do not re-derive the
+# path shape here — that is the whole defect class (#920). It is sourced in a
+# subshell because lib-common.sh arms `set -euo pipefail` at source time, which
+# must not follow you into this shell; `/dev/null` keeps grep off stdin if the
+# resolver ever returns nothing.
+grep -Hn 'CLAUDE_CONFIG_DIR' \
+  $(. "$CLAUDLOBBY_ROOT/lib/lib-common.sh" >/dev/null 2>&1; \
+    host_bots_dirs | sed 's:$:/*/bot.conf:') /dev/null
 ```
 
-Read the result carefully — **the line existing is not the same as the setting being active**:
+**First, check that the query returned anything at all** — then read the hits carefully, because **the line existing is not the same as the setting being active**:
 
 | What you see | What it means |
 |---|---|
+| **Nothing at all**, or only a `No such file or directory` warning | **The query failed. This does not mean no bot sets the variable.** Any live host has bots, so an empty result means the paths did not resolve — not that nothing is configured. **Stop here.** You have no count and no fleet names, which is exactly what the rest of this step requires you to report. Fix the query before going near Step 3. |
 | Every hit is **commented out** (`# CLAUDE_CONFIG_DIR=...`) | Every bot on the host shares **one keychain credential**, across **all fleets**. A relog re-authenticates all of them at once. |
 | A bot sets it to its own path, uncommented | That bot has an isolated credential and is unaffected by a relog of the default. |
 
