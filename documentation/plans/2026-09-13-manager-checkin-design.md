@@ -177,11 +177,19 @@ timer-driven through `bot_is_busy` + `dispatch.sh`.
 
 A fleet-ops skill, `library/skills/checkin/SKILL.md` (claudlobby's by the boundary
 placement test: it operates the fleet). The contract is fixed; the judgment is the
-manager's.
+manager's. **The skill is a thin reasoning wrapper, tightly coupled to the scripts
+that anchor it:** every read goes through a named door (`brief`, `claudron lookup`,
+`gh`, the previous check-in row) and every write through `checkin-record.sh` and the
+existing dispatch/emit doors — it never freelances a read or a write. That coupling
+is what makes the reasoning inspectable and the edges deterministic, and it is what
+ships with managers by default (§10).
 
 **READ** — in order, all cheap, all SSOT; each step's failure is *recorded*, never
 guessed around:
 
+0. **The previous check-in** — this manager's newest `checkin_decision` row (§7):
+   its `inputs_seen` snapshot is *the state at the last check-in*, its `action` and
+   `raise` are what was done and what was held. A pure plane read, no state file.
 1. `claudlobby brief --bot $BOT_ID --json` — recent work, open tasks, stalls, unacked
    reports (the plane's one read door).
 2. `claudron lookup --limit 5 <project>` for the fleet's active projects (knowledge).
@@ -189,6 +197,11 @@ guessed around:
    and rigor).
 4. `gh issue list --state open` over the fleet's repos, mission-aligned filter (the
    external backlog).
+5. **The delta** — now vs. the previous check-in: tasks opened / completed / stalled /
+   cleared, issues appeared, messages arrived, held items still pending. **The delta
+   is the primary signal** for both the action and the surfacing judgment: an
+   unchanged world argues for `nothing` and silence; what changed is what may be
+   worth acting on or saying.
 
 **DECIDE — exactly one action:**
 
@@ -214,8 +227,9 @@ with no message at all. The judgment weighs, at minimum:
   sign-off, conflicting priorities, a proposal on a review/human-tier project).
 - **Would the operator want to know?** — a deliverable ready (a PR, a finding), a
   blocker that stalls the fleet, a failure with cost.
-- **What has changed since the operator was last told?** — only new information;
-  never a restatement.
+- **What has changed since the operator was last told?** — the delta against the
+  previous check-in's snapshot (READ step 5), and against the last post's `held`
+  items; only new information, never a restatement.
 - **Has enough accumulated to be worth one message?** — several small things
   coalesce into one post; one small thing waits, unless urgent.
 - **The operator's availability and responsiveness** — read from the plane: time
@@ -250,10 +264,13 @@ lib-common's existing `emit_fleet_event checkin_decision manager-checkin '<json>
 `detail` (schema 1):
 
 ```json
-{ "schema": 1, "checkin_id": "ck_<32hex>",
+{ "schema": 1, "checkin_id": "ck_<32hex>", "prev_checkin_id": "ck_<32hex> | null",
   "inputs_seen": { "open_tasks": 0, "stalls": 0, "unacked": 0,
                    "issues_considered": 0, "knowledge_hits": 0,
                    "unavailable": ["gh"] },
+  "delta": { "tasks_opened": 0, "tasks_completed": 0, "stalls_appeared": 0,
+             "stalls_cleared": 0, "issues_new": 0, "messages_new": 0,
+             "held_pending": 0 },
   "action": "dispatch | propose | ask | sprint | nothing",
   "rationale": "<= 600 chars, the manager's words",
   "raise": { "decided": false, "reason": "<why it surfaced, or why not>",
