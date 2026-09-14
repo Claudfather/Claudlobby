@@ -92,6 +92,22 @@ job"* (`documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md:25,51`).
 5. **Ships as a manager default** (the primary carrier), after the rollout ladder.
 6. **Equipment linking.** A library item may `requires:` another; the compositor
    brings it. Improve the system as we go.
+7. **A project's ideation autonomy is its own construct** — `planning.initiative`
+   (`autonomous | propose | none`, default `none`), beside and independent of closure
+   rigor `validation.tier`. Review rules and planning rules never blend. `initiative`
+   gates **origination only**: a project's open work is managed by the same instinct
+   regardless.
+8. **The check-in is a portfolio decision.** With 5–10 projects carrying different
+   grants, the manager allocates idle capacity *across* projects — project × action —
+   and the record carries which project and why.
+9. **Focus memory, not static priority.** Where the operator's attention is —
+   declared ("focus on A, B, C this week") and empirical (derived from the plane) —
+   is a first-class, time-scoped, *soft* input. No `priority:` field: one `high`
+   would starve every other project.
+10. **No gravedigging.** Dormancy is a negative signal for new effort; a dormant
+    project is revived only by explicit direction (an issue, an ask, a focus
+    declaration) — the operator can always steer back to dormant work, the manager
+    never digs it up on its own.
 
 ## 3. Goals and non-goals
 
@@ -193,25 +209,46 @@ guessed around:
 1. `claudlobby brief --bot $BOT_ID --json` — recent work, open tasks, stalls, unacked
    reports (the plane's one read door).
 2. `claudron lookup --limit 5 <project>` for the fleet's active projects (knowledge).
-3. `PROJECT_MISSION.md` + `PROJECT_TIER_*` / `PROJECT_REPOS_*` from `bot.conf` (goal
-   and rigor).
+3. `PROJECT_MISSION.md` + per-project `PROJECT_TIER_*` / `PROJECT_REPOS_*` /
+   `PROJECT_INITIATIVE_*` from `bot.conf` (goal, rigor, and ideation grant).
 4. `gh issue list --state open` over the fleet's repos, mission-aligned filter (the
-   external backlog).
-5. **The delta** — now vs. the previous check-in: tasks opened / completed / stalled /
-   cleared, issues appeared, messages arrived, held items still pending. **The delta
-   is the primary signal** for both the action and the surfacing judgment: an
-   unchanged world argues for `nothing` and silence; what changed is what may be
-   worth acting on or saying.
+   external backlog), grouped by project.
+5. **Focus** — the current declared focus (`focus_declared`, unexpired) and the
+   empirical focus derivation (§8c): where the operator's attention has been.
+6. **The delta** — now vs. the previous check-in, per project: tasks opened /
+   completed / stalled / cleared, issues appeared, messages arrived, held items still
+   pending. **The delta is the primary signal** for both the action and the surfacing
+   judgment: an unchanged world argues for `nothing` and silence; what changed is
+   what may be worth acting on or saying.
 
-**DECIDE — exactly one action:**
+**Everything above is read per project.** The check-in is a portfolio decision: it
+allocates idle capacity across the fleet's projects, each carrying its own
+`initiative` grant and closure `tier`.
+
+**DECIDE — one project, then exactly one action:**
 
 | action | when | through |
 |---|---|---|
 | **dispatch** | an open/backlog task fits an idle worker; routed by judgment, rationale recorded | `dispatch-task.sh` |
-| **propose** | no well-defined work exists; generate task(s) from mission + knowledge + recent work into the intake store (§8); **must carry repo · project · rigor tier** | `emit-batch` (work_item) + `task_proposed` |
+| **propose** | no well-defined work exists on a project whose `initiative` is `autonomous` or `propose`; generate task(s) from mission + knowledge + recent work into the intake store (§8); **must carry repo · project · rigor tier** | `emit-batch` (work_item) + `task_proposed` |
 | **ask** | the **surfacing judgment** (below) concludes the operator should hear something — a fork only they can resolve, or nothing worthwhile can be found ("ask for tasks") | one Telegram post, shaped by §9 |
 | **sprint** | **only if** ≥ `SPRINT_MIN_ISSUES` (default 5) mission-aligned issues are open **and** ≥ 1 worker is idle **and** no sprint ran within `SPRINT_MIN_GAP_S` (default 24 h) | `/autonomous-sprint` (inherits §9) |
 | **nothing** | all work in flight, nothing worthwhile — **recorded**, so "checked and chose nothing" is a fact, not silence | — |
+
+**The allocation rule — how the project is chosen.** Attention is a weighting, never
+a ranking:
+
+- **Floor:** every project with open work or a blocker is checked on every check-in,
+  regardless of its `initiative` or focus — open work is managed everywhere.
+- **Tilt:** *new* effort (proposals, picking backlog issues) goes preferentially and
+  proportionally to projects in declared focus and with recent empirical attention —
+  never exclusively; a single focused project cannot starve the rest.
+- **Grant:** proposals only where `initiative` is `autonomous` or `propose`; a `none`
+  project originates nothing.
+- **Never stalest-first:** no attention + no focus + no open work = left alone. A
+  dormant project is revived only by explicit direction. (The rolling audit's
+  "stalest repo" heuristic is the anti-pattern this rule exists to avoid.)
+- Mission alignment and backlog depth weigh in; the `rationale` records the weighing.
 
 **RECORD before ACT** (§7): the decision exists even if the action fails (the
 crash-correctness rule the plane's write spine already follows).
@@ -267,11 +304,13 @@ lib-common's existing `emit_fleet_event checkin_decision manager-checkin '<json>
 { "schema": 1, "checkin_id": "ck_<32hex>", "prev_checkin_id": "ck_<32hex> | null",
   "inputs_seen": { "open_tasks": 0, "stalls": 0, "unacked": 0,
                    "issues_considered": 0, "knowledge_hits": 0,
+                   "focus_declared": ["<slug>"], "focus_empirical_top": ["<slug>"],
                    "unavailable": ["gh"] },
   "delta": { "tasks_opened": 0, "tasks_completed": 0, "stalls_appeared": 0,
              "stalls_cleared": 0, "issues_new": 0, "messages_new": 0,
              "held_pending": 0 },
   "action": "dispatch | propose | ask | sprint | nothing",
+  "project_key": "<slug the action was taken on, or null>",
   "rationale": "<= 600 chars, the manager's words",
   "raise": { "decided": false, "reason": "<why it surfaced, or why not>",
              "held": ["<items deferred to a later post>"] },
@@ -298,12 +337,80 @@ neither an assignment nor a `task_rejected`.
 `project_key`, and the project's rigor tier resolved from `projects.yaml`; the skill
 refuses to propose otherwise. This is also the fix for today's 0/374.
 
-**Approve** = dispatch it. `dispatch-task.sh` gains `--work-item <id>` so an approved
-proposal's work_item is *reused* rather than a second one minted (otherwise the
-proposal and the dispatch would be two rows for one piece of work). **Veto** = the
-operator replies; the manager records `task_rejected`. In v1 the manager may
-self-approve a proposal (dispatch it) with the operator's standing veto; a formal
+**Approval is gated by the project's `planning.initiative` (§8b), never by its
+closure tier.** `autonomous` → the manager dispatches its own proposal; the operator
+holds a standing veto. `propose` → the proposal waits in the store and surfaces
+through the judgment as one `ask`; the operator approves before anything starts.
+`none` → no proposal is made. **Approve** = dispatch it: `dispatch-task.sh` gains
+`--work-item <id>` so an approved proposal's work_item is *reused* rather than a
+second one minted (otherwise the proposal and the dispatch would be two rows for one
+piece of work). **Veto** = `task_rejected`, which *withdraws* the work through the
+existing withdraw door — a real action, so the standing veto is honest. A formal
 approval door is C.
+
+## 8b. `planning.initiative` — a project's ideation autonomy
+
+Closure rigor and ideation autonomy are different axes and must not blend. On
+`projects.yaml`, beside the existing closure block and independent of it:
+
+```yaml
+projects:
+  my-repo:
+    title: My Repo
+    repos: [acme/my-repo]
+    planning:                  # how work is ORIGINATED
+      initiative: autonomous   # autonomous | propose | none   (default: none)
+    validation:                # how work is CLOSED
+      tier: review
+```
+
+| phase block | its dial | values |
+|---|---|---|
+| `planning:` — how work is originated | `initiative:` | `autonomous · propose · none` |
+| `validation:` — how work is closed | `tier:` | `auto · review · preview · human` |
+
+`review` is one closure *tier*, not the block's name — closure is also `auto` (CI
+green), `preview` (link posted + ack) and `human`; `validation` is the umbrella. The
+blocks mirror each other phase-to-phase, the dials dial-to-dial.
+
+- **Default `none`** — a project grants initiative explicitly; a root pull never
+  makes a manager start originating work nobody opted into (no silent switches).
+  Deliberately asymmetric with `validation.tier`'s default of `review`.
+- **Origination only.** `initiative` never freezes a project: its open work is
+  dispatched, chased and re-routed by the same instinct regardless.
+- **Composition** mirrors the tier: `planning.initiative` flattens to
+  `PROJECT_INITIATIVE_<SLUG>` in every `bot.conf` beside `PROJECT_TIER_<SLUG>`;
+  `known_values.py` carries the value set; the validator rejects anything else;
+  `projects-yaml-schema.md` documents the block. Room to grow without a rename — a
+  per-project `proposal_cap` or `sources:` belong here if evidence ever asks.
+- **No `priority:` field.** A static `high` would monopolize the manager and starve
+  every other project. Prioritization is focus (§8c): soft and time-scoped.
+
+## 8c. Fleet focus — where the operator's attention is
+
+Prioritizing across a portfolio needs to know what the operator cares about *now*,
+without a ranking that can block everything else. Focus has two sources and one
+concept:
+
+- **Declared.** The operator says "focus on A, B, C this week" — to the manager on
+  Telegram, or `claudlobby focus set a b c --until 7d`. Either lands the same
+  `focus_declared` system event (F19, no migration) in the plane:
+  `{projects: [slugs], window: {from, until}, source: operator | manager, note}`.
+  A time-scoped operational *commitment*, so it is plane, not vault (Claudron may
+  later hold the durable pattern — "the operator tends to focus on X in Q3"). The
+  latest unexpired declaration wins; the default window is seven days. The manager's
+  skill recognizes a focus statement and records it through `lib/focus-declare.sh`.
+- **Empirical.** Derived at read time — a Lane-C query, no table — as
+  recency-weighted attention per project: the operator's messages in threads tied to
+  a project's work items, dispatches to it, reports and reviews on it. Presence's
+  sibling: a derivation, never stored.
+- **Read door.** `claudlobby focus` shows both (declared with its window; empirical
+  top-N with the evidence counts). The check-in reads both in READ step 5 and records
+  what it saw (§7).
+
+Focus is a **weighting, never a ranking**: it tilts where new effort goes and cannot
+zero out a project with open work (the allocation rule, §6). The operator can always
+steer back to dormant work by declaring it; the manager never digs it up on its own.
 
 ## 9. The check-in protocol — `library/protocols/checkin.md`
 
@@ -316,8 +423,9 @@ the default, and a post is the exception the judgment must justify and record.**
 check-in that dispatches, proposes or chooses `nothing` posts **nothing** — it is in
 the plane. When the judgment does say post, the shape is fixed: **one status line,
 one ask with named options, one pointer** (plane URL or PR). At most one post per
-check-in; several qualifying items coalesce into one message; held items wait for
-the next justified post. Never restate the rigor in the message; point to it.
+check-in; several qualifying items coalesce into one message **across all projects
+— one post covers the portfolio, never one per project**; held items wait for the
+next justified post. Never restate the rigor in the message; point to it.
 
 **`## Worker`** — one thin line on start / done / blocked. No milestone cadence. Detail
 goes through `report-back.sh` to the manager and the plane, not to Telegram.
@@ -386,9 +494,15 @@ before and after — the same discipline as the routing spike: numbers, not vibe
 ## 12. Rollout — five chunks, the ladder the repo mandates
 
 1. **The contract** — `/checkin` skill, `checkin.md` protocol (+ the supersede edits),
-   `checkin-record.sh`, the severity entry, and `requires:` linking (compositor +
-   validator + `list-library`). For the canary the protocol is declared per manager
-   in `fleet.yaml`; dormant on `PLANE_EMIT_ENABLED`.
+   `checkin-record.sh`, the severity entry, `requires:` linking (compositor +
+   validator + `list-library`), and the `planning.initiative` construct (§8b: config,
+   `PROJECT_INITIATIVE_*` composition, `known_values`, validator, schema doc). For
+   the canary the protocol is declared per manager in `fleet.yaml`; dormant on
+   `PLANE_EMIT_ENABLED`. The skill's focus read (step 5) records `unavailable`
+   until 1b lands.
+1b. **Focus** (§8c) — the `focus_declared` event + severity entry,
+   `lib/focus-declare.sh`, the empirical derivation query, and `claudlobby focus
+   set / show`. Small; its own gauntlet.
 2. **The trigger** — `manager-checkin.sh`, the fleet job, the `Switch` row, and the
    **mandatory empirical gate**: extend `lib/validate-bot-change.sh` (it already
    drives `task recheck` against a throwaway bot, `:619-655` — the exact template):
@@ -457,13 +571,15 @@ fleet-active delta.
 
 ## 16. Open questions for the operator
 
-1. Poll and gap — **cost and responsiveness only; they never touch the operator.**
-   15-min poll, 60-min gap, with backoff-on-`nothing` as cost hygiene?
-2. Sprint conditions — ≥ 5 mission-aligned issues, ≥ 1 idle worker, 24-h gap?
-3. Proposals — cap of 3 per check-in; manager self-approves with your standing veto in
-   v1, or every proposal waits for you?
+1. ~~Poll and gap~~ **Settled:** 15-min poll, 60-min gap, backoff-on-`nothing` as
+   cost hygiene; none of it touches the operator.
+2. Sprint conditions — ≥ 5 mission-aligned issues, ≥ 1 idle worker, 24-h gap? Now a
+   portfolio question: are the conditions evaluated per project or fleet-wide, and
+   does focus gate which project a sprint may target?
+3. ~~Proposals~~ **Settled:** cap 3 per check-in across the portfolio; approval gated
+   by `planning.initiative` (§8b); focus, never a static priority, steers allocation
+   (§8c); no gravedigging.
 4. Worker thin updates — to Telegram, or to the plane only?
-5. **The surfacing judgment (§6)** — anything missing from its inputs, and is the
-   urgency floor (`blocked` that stalls the fleet, a failure with real cost) drawn in
-   the right place?
+5. ~~The surfacing judgment~~ **Settled:** inputs and urgency floor as drawn in §6;
+   the delta vs. the previous check-in is the primary signal.
 6. Which fleet is the canary?
