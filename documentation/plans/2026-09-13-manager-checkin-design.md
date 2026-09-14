@@ -43,17 +43,17 @@ rationale (§7), so choice and error become distinguishable going forward.
 - a mission chain — `fleet.mission` → `PROJECT_MISSION.md` (north star, in-bounds,
   success metrics); per-project rigor tiers in `projects.yaml`;
 - a scorer — `/autonomous-sprint` ranks open issues mission 40 / impact 25 /
-  effort 20 / deps 15 (`library/skills/autonomous-sprint/SKILL.md:74-81`);
+  effort 20 / deps 15 (`library/skills/autonomous-sprint/SKILL.md:76-81`);
 - a generator for an empty backlog — *"If fewer than 5 mission-aligned open issues
   exist: run a product-vision pass to generate new issues… then re-evaluate"*
-  (`SKILL.md:59-66`).
+  (`SKILL.md:59-68`).
 
 And nothing starts it. `lib/sprint-trigger.sh` is hand-wired cron only, never
 composed, and defaults `MANAGER_TMUX` to a stale name (`:15`). `autonomous_runner.cadence`
 renders into CLAUDE.md (`templates/claude.md.j2:87`) but **`lib/runner-tick.sh` does
 not exist** — it is unfireable. Every wired trigger (keepalive, fleet-pulse) is
 health-only. Bots boot into `STARTUP_PROMPT` *"Idle and await Telegram messages"*
-(`composer.py:1212`). The prose triggers ("fleet idle + backlog non-empty → auto-fire
+(`composer.py:1261`). The prose triggers ("fleet idle + backlog non-empty → auto-fire
 a sprint", `library/expertise/orchestration.md:59`) need an already-running LLM turn
 and so can never fire from idle. The goal-aware plan's own re-audit says it plainly:
 *"P6 ignition… Not shipped… neither sprint-trigger nor runner-tick is a composed
@@ -63,7 +63,7 @@ job"* (`documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md:25,51`).
 
 - *Fatigue is already at the ceiling.* Protocols say *"Idle silence is a bug"*
   (`proactivity-discipline.md:7`); workers post a Telegram milestone every 2–3 min
-  of work (`worker-lifecycle.md:117,195`); sprints *"emit everything to Telegram"*;
+  of work (`worker-lifecycle.md:119,197`); sprints *"emit everything to Telegram"*;
   the runner beacons "no eligible work" every tick. `token-efficiency` governs
   density *"never frequency"* (`:39`) — **no primitive today reduces message count.**
   Naive ignition would flood the operator.
@@ -169,10 +169,10 @@ every fact; git holds every declaration.
 ## 5. The trigger — `manager-checkin`, one fleet job
 
 **Not** a unit per manager. The closer precedent is `task-recheck` on main: one
-composed fleet job (`system.yaml:483-485`, `interval`) whose script groups by
-`assigned_by` and sends per manager via `dispatch.sh` (`commands/task.py:230-276`),
+composed fleet job (`claudlobby/system.yaml:483-486`, `interval`) whose script groups by
+`assigned_by` and sends per manager via `dispatch.sh` (`commands/task.py:230,790-826`),
 **rate-limiting by a plane read** — `source_ref=task-recheck:<asg>` stamped and read
-back (`:465-500`), *"no timer state file to lose or to lie."* Reuse that shape.
+back (`:458-499`), *"no timer state file to lose or to lie."* Reuse that shape.
 
 `lib/manager-checkin.sh <fleet>`, run by the fleet job `<prefix>.manager-checkin`
 (`interval: 900`, **`enroll: false`**), per bot dir:
@@ -183,7 +183,7 @@ back (`:465-500`), *"no timer state file to lose or to lie."* Reuse that shape.
    `requires:` composes (§10), so this one test is how a worker, a coordinator and
    an opted-out manager are all excluded, and how an operator un-equips: drop the
    protocol, regenerate, the injection stops. `bot_is_manager` alone is not enough
-   — it is true for a coordinator too (`composer.py:1189` composes the self-pointer
+   — it is true for a coordinator too (`composer.py:1238` composes the self-pointer
    for every member of `manager_bots()`); the leaf-manager rule lives at compose
    time (§10), and the trigger reads its result.
 2. Session up? else skip (`checkin_skipped_down`).
@@ -198,8 +198,10 @@ back (`:465-500`), *"no timer state file to lose or to lie."* Reuse that shape.
    then emit `checkin_triggered` with `source_ref manager-checkin:<bot>:<epoch>`.
 
 **Arming.** A `Switch` row in `claudlobby/switches.py`:
-`Switch(name="manager-checkin", polarity=OPT_IN, carrier=ENROLL_FLEET,
-why_opt_in="spends money — a manager turn per idle interval")`. The composer stamps
+`Switch(key="manager-checkin", scope=FLEET_JOB, polarity=OPT_IN,
+carrier=ENROLL_FLEET, job="manager-checkin", plane=True, what="every 15 min,
+inject /checkin into an idle, equipped leaf manager — spends money, a manager
+turn per idle interval")` (the field names are `switches.py:224-237`'s). The composer stamps
 the resolved arming as `Environment=` on the unit (`composer.py:4072-4076`); the
 script gates with `switch_is_on` and no-ops loudly (`task-recheck.sh:19-42`);
 doctor, status and the validator all render from the registry. That is what
@@ -339,10 +341,15 @@ of dripping them out one dispatch at a time.
 
 One `system` event per check-in, **registry-governed under F19 — no migration**
 (`plane/registries.py`; add `SYSTEM_EVENT_SEVERITY["checkin_decision"] = "notice"`).
-Emitted by a small door the skill invokes, `lib/checkin-record.sh`, which calls
-lib-common's existing `emit_fleet_event checkin_decision manager-checkin '<json>'
-"$BOT_DIR" "$BOT"` (builds the actor-anchored system envelope; dormant on
-`PLANE_EMIT_ENABLED` like every door). Subject = the manager.
+Emitted by a small door the skill invokes, `lib/checkin-record.sh`, which validates
+the record against `lib/checkin-contract.py` (schema 1, stdlib) and builds the
+actor-anchored system envelope the way `report-back.sh` does — `subject_kind:
+actor`, `subject: bot:<fleet>/<manager>`, the decision as `data`, and
+`source_ref: checkin:<checkin_id>` (the task-recheck stamp idiom: the ref is the
+address a reader joins on) — through `plane_emit_events`. The plane is always on
+since the F18 closure; `PLANE_EMIT_DISABLED=1` (the harness exemption) is the one
+thing that silences it, and the door says so at rc 1 — for this door the record
+IS the action. Subject = the manager.
 
 `detail` (schema 1):
 
@@ -503,8 +510,8 @@ requires:
 ```
 
 **Compositor.** After a bot's protocols are resolved (declared + gated defaults +
-role overlay, `composer.py:1776-1791`), collect `requires.skills` across them and
-union into the bot's skill set before `link_skills` (`composer.py:1380`). v1 scope is
+role overlay, `composer.py:1737-1766`), collect `requires.skills` across them and
+union into the bot's skill set before `link_skills` (`composer.py:1429`). v1 scope is
 protocols → skills; the schema is generic (`requires.<entity_type>: [names]`) so
 protocols → guardrails or skills → mcp can follow without a format change.
 **Validator:** an unresolvable requirement (a skill absent from the library) is an
@@ -512,7 +519,7 @@ error; `list-library` shows requirements. **Opt-out semantics:** opting a bot ou
 protocol drops that protocol's requirements unless the skill is declared directly.
 
 **Why this matters here.** The protocol role-default is *already wired*
-(`defaults.resolve("protocols", roles)` at `composer.py:1779`; no entry uses it yet),
+(`defaults.resolve("protocols", roles)` at `composer.py:1763`; no entry uses it yet),
 while skills are `_UNARGUED` and `link_skills` iterates `bot.skills` only — a skill in
 the registry does not symlink (measured, `naked-bot-observation-gate.md:234-251`).
 With linking, `REGISTRY["protocols"].roles = {"leaf-manager": ("checkin",)}` brings
@@ -526,8 +533,8 @@ chunk 5 before the overlay is populated (§12).
 
 **Leaf managers, not every manager.** `ROLE_MANAGER` is true for every member of
 `manager_bots()` — including a coordinator whose reports are themselves managers
-(`config.py:731-753` widened it for exactly that bot), and the composed
-`MANAGER_TMUX` self-pointer (`composer.py:1189`) follows the same set, so
+(`config.py:735-757` widened it for exactly that bot), and the composed
+`MANAGER_TMUX` self-pointer (`composer.py:1238`) follows the same set, so
 `bot_is_manager` cannot tell the two apart at runtime either. Two managers reasoning
 over one portfolio is the pile-on the allocation rule forbids (§6), and a
 coordinator's idle question is a different one — "are my managers progressing?" —
@@ -537,7 +544,7 @@ where it is the manager, plus `manages:`) is not itself in `manager_bots()`. A
 cross-fleet `manages:` target is unresolvable here and counts as a report — the
 conservative direction is to equip. `defaults.py:360-384` names this exact seam:
 add the predicate first, then the key to `DETECTABLE_ROLES`, and the composer passes
-both roles at `composer.py:1779`. Where a fleet has one team and no `manages:` chain
+both roles at `composer.py:1763`. Where a fleet has one team and no `manages:` chain
 — the shape every manifest inspected so far has — the two roles name the same bot;
 the role exists for the coordinator it must skip.
 
@@ -555,7 +562,7 @@ accept them).
 ## 11. Instrumentation and the read door
 
 `claudlobby checkins [--fleet F] [--bot B] [--since 7d] [--json]` — registered beside
-`workstreams` (`commands/_parsers.py:171-180`) over `collect_plane_events`
+`workstreams` (`commands/_parsers.py:189-197`) over `collect_plane_events`
 (`commands/events.py:57`). Lists each check-in: when, `inputs_seen`, action,
 rationale, targets, and **outcome so far** (dispatched task's status; proposal
 open/dispatched/rejected; whether an `ask` was answered). `--proposals` lists the
@@ -574,9 +581,14 @@ before and after — the same discipline as the routing spike: numbers, not vibe
    `checkin-record.sh`, the severity entry, `requires:` linking (compositor +
    validator + `list-library`), and the `planning.initiative` construct (§8b: config,
    `PROJECT_INITIATIVE_*` composition, `known_values`, validator, schema doc). For
-   the canary the protocol is declared per manager in `fleet.yaml`; dormant on
-   `PLANE_EMIT_ENABLED`. The skill's focus read (step 5) records `unavailable`
-   until 1b lands.
+   the canary the protocol is declared per manager in `fleet.yaml`. The plane is
+   always on (`PLANE_EMIT_DISABLED=1` is the only silencer). The skill's focus read
+   (step 5) records `unavailable` until 1b lands. Also in this chunk, pulled forward
+   because the skill cannot honour its contract without them: the `leaf-manager`
+   role and the `requires.role` warning (§10), `lib/checkin-propose.sh` (propose /
+   reject) with `dispatch-task.sh --project` and `--work-item` (§8), and a minimal
+   `claudlobby checkins` (rows, `--last`, `--proposals`; `--summary` and the outcome
+   join stay in chunk 3). Plan: `2026-09-14-manager-checkin-chunk1-contract.md`.
 1b. **Focus** (§8c) — the `focus_declared` event + severity entry,
    `lib/focus-declare.sh`, the empirical derivation query, and `claudlobby focus
    set / show`. Small; its own gauntlet.
