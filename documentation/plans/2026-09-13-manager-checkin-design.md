@@ -118,6 +118,13 @@ job"* (`documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md:25,51`).
     for it.** One thin line on start / done / blocked. The plane records every line
     regardless of carrier, so nothing is lost to a channel and volume is always
     measurable.
+13. **The canary is the engineering fleet — the one that develops the framework
+    repos — and the check-in belongs to leaf managers.** Ruled 2026-09-14 over the
+    bounded alternative (the business-data fleet): a richer backlog makes each
+    burn-in day more informative, and the loop into the framework repos is contained
+    by the burn-in's initiative grants (§12.4), not by avoiding the fleet. A manager
+    whose every in-fleet report is itself a manager (a coordinator) is not equipped by
+    default — its idle question is a portfolio of portfolios, which is Phase C (§15).
 
 ## 3. Goals and non-goals
 
@@ -170,7 +177,15 @@ back (`:465-500`), *"no timer state file to lose or to lie."* Reuse that shape.
 `lib/manager-checkin.sh <fleet>`, run by the fleet job `<prefix>.manager-checkin`
 (`interval: 900`, **`enroll: false`**), per bot dir:
 
-1. `bot_is_manager` (lib-common; reads the composed `MANAGER_TMUX == BOT_ID`) — else skip.
+1. **Equipped and a manager** — `bot_is_manager` (lib-common; reads the composed
+   `MANAGER_TMUX == BOT_ID`) *and* the composed `checkin` skill symlink resolves
+   under the bot's `.claude/skills/` — else skip silently. The symlink is what
+   `requires:` composes (§10), so this one test is how a worker, a coordinator and
+   an opted-out manager are all excluded, and how an operator un-equips: drop the
+   protocol, regenerate, the injection stops. `bot_is_manager` alone is not enough
+   — it is true for a coordinator too (`composer.py:1189` composes the self-pointer
+   for every member of `manager_bots()`); the leaf-manager rule lives at compose
+   time (§10), and the trigger reads its result.
 2. Session up? else skip (`checkin_skipped_down`).
 3. `bot_is_busy` → skip and record `checkin_skipped_busy`. **Never inject into a
    live turn** (the `briefing-trigger.sh:56-63` rule).
@@ -500,10 +515,36 @@ protocol drops that protocol's requirements unless the skill is declared directl
 (`defaults.resolve("protocols", roles)` at `composer.py:1779`; no entry uses it yet),
 while skills are `_UNARGUED` and `link_skills` iterates `bot.skills` only — a skill in
 the registry does not symlink (measured, `naked-bot-observation-gate.md:234-251`).
-With linking, `REGISTRY["protocols"].roles = {"manager": ("checkin",)}` brings the
-skill — **the manager default is one line**, and the four skill-default additions
-(role-scoped `link_skills`, a `SystemDefaultsConfig.skills` opt-out key, the
-INSTRUCT-evidence test line, a manager arm in `naked-bot-observe.py`) are not needed.
+With linking, `REGISTRY["protocols"].roles = {"leaf-manager": ("checkin",)}` brings
+the skill — **the manager default is one line**, and three of the four skill-default
+additions (role-scoped `link_skills`, a `SystemDefaultsConfig.skills` opt-out key,
+the INSTRUCT-evidence test line) are not needed. The fourth — **a manager arm in
+`naked-bot-observe.py`** — *is* needed, and not as skill machinery: the gate
+composes no manager today (`naked-bot-observation-gate.md:294-296`), so a
+role-scoped default is invisible to `--baseline` until an arm exists. It lands in
+chunk 5 before the overlay is populated (§12).
+
+**Leaf managers, not every manager.** `ROLE_MANAGER` is true for every member of
+`manager_bots()` — including a coordinator whose reports are themselves managers
+(`config.py:731-753` widened it for exactly that bot), and the composed
+`MANAGER_TMUX` self-pointer (`composer.py:1189`) follows the same set, so
+`bot_is_manager` cannot tell the two apart at runtime either. Two managers reasoning
+over one portfolio is the pile-on the allocation rule forbids (§6), and a
+coordinator's idle question is a different one — "are my managers progressing?" —
+which is Phase C (§15). So the check-in registers under a **second detectable role,
+`leaf-manager`**: a manager at least one of whose in-fleet reports (`teams.*.workers`
+where it is the manager, plus `manages:`) is not itself in `manager_bots()`. A
+cross-fleet `manages:` target is unresolvable here and counts as a report — the
+conservative direction is to equip. `defaults.py:360-384` names this exact seam:
+add the predicate first, then the key to `DETECTABLE_ROLES`, and the composer passes
+both roles at `composer.py:1779`. Where a fleet has one team and no `manages:` chain
+— the shape every manifest inspected so far has — the two roles name the same bot;
+the role exists for the coordinator it must skip.
+
+**Validator surface (no silent switches).** The `checkin` protocol declared on a bot
+the trigger will never inject into (a worker, a coordinator) is a `generate` warning
+that says why. The skill still links — `/checkin` runs by hand — only the injection
+is withheld (§5 step 1).
 
 **Other QoL noticed, to fold in as we go:** `SystemDefaultsConfig` silently drops
 unknown opt-out keys (gate doc `:151-181`) — surface a validator warning;
@@ -549,17 +590,36 @@ before and after — the same discipline as the routing spike: numbers, not vibe
    throwaway manager → goes idle → `/checkin` injected → `checkin_decision` lands →
    the Telegram shape holds. Cite the observation in the PR body.
 3. **The read door** — `claudlobby checkins` + the panel seam.
-4. **Canary** — arm one fleet (`defaults.jobs.manager-checkin: {enroll: true}` +
-   `generate` + `setup-fleet`); *"arming one fleet IS the canary"* (`switches.py:15-20`).
-   Pick a fleet whose manager is not running the rollout (the canary-rollout
-   protocol's "never the manager" rule inverts here). Burn in ≥ 3 days; judge on
-   `checkins --summary` + fleet-active %.
-5. **Default** — `REGISTRY["protocols"].roles["manager"] = ("checkin",)`; the
-   INSTRUCT bar argued in the PR; run `lib/naked-bot-observe.py --baseline`, name the
-   delta (a new CLAUDE.md section *and* a new symlink — both surfaces), replace the
-   *current* baseline in place, never the frozen anchor. The **job's** polarity stays
-   `OPT_IN` (it spends money) unless burn-in argues otherwise — a burn-in decision,
-   not a design one.
+4. **Canary — the engineering fleet** (ruling 13). Arm it
+   (`defaults.jobs.manager-checkin: {enroll: true}` + `generate` + `setup-fleet`);
+   *"arming one fleet IS the canary"* (`switches.py:15-20`). The canary-rollout
+   protocol's "never the manager" rule inverts here — the check-in's subject *is* the
+   manager, so the operator drives the arming, not a bot. The chunk opens by
+   **reading the fleet's manifest and recording** the manager chain (leaf vs.
+   coordinator, §10), each project's `validation.tier`, and which bots carry
+   Telegram — the facts the burn-in is judged against — and by measuring the fleet's
+   own 7-day fleet-active baseline the way §1 measured the estate's. **The
+   initiative grants are deliberately small:** `autonomous` on one project the
+   fleet owns end-to-end whose closure tier is `review` and which is *not* the
+   compositor repo (this fleet develops the framework the check-in ships in; an
+   autonomous dispatch into the repo being gauntleted is the feedback loop ruling 13
+   accepted and this grant contains); `propose` on one framework repo, so the ask
+   path is exercised against a real backlog; `none` elsewhere. Burn in ≥ 3 days;
+   judge on `checkins --summary` (action distribution, ask-rate, proposal acceptance,
+   skip reasons) and the fleet-active delta against that baseline. A fleet that
+   records `nothing` correctly on a quiet day passes the surfacing judgment; it is
+   not a failed burn-in.
+5. **Default** — first the gate's **leaf-manager arm**: `naked-bot-observe.py`
+   composes no manager today (`naked-bot-observation-gate.md:294-296` says so, and
+   says a populated role overlay is invisible to it until one exists), so the arm
+   lands and the baseline is re-recorded *before* the overlay is populated — a delta
+   the gate cannot see is the failure it exists to catch. Then
+   `REGISTRY["protocols"].roles["leaf-manager"] = ("checkin",)`; the INSTRUCT bar
+   argued in the PR; run `lib/naked-bot-observe.py --baseline`, name the delta on the
+   manager arm (a new CLAUDE.md section *and* a new symlink — both surfaces) and the
+   *absence* of one on the worker arm, replace the *current* baseline in place, never
+   the frozen anchor. The **job's** polarity stays `OPT_IN` (it spends money) unless
+   burn-in argues otherwise — a burn-in decision, not a design one.
 
 **Sequencing that matters for the canary:** a skill symlink is live the instant it
 lands (no restart, no canary window — `fleet-update-lifecycle.md:32,45`); the protocol
@@ -571,8 +631,12 @@ deploy, live verification, record.
 
 ## 13. Testing
 
-**Unit.** Trigger: manager filter, session gate, busy gate, rate-limit read, unreachable
-→ no fire, `switch_is_on` gate. `checkin-record.sh`: payload → contract, schema 1.
+**Unit.** Trigger: the manager + equipment gate (a worker, a coordinator and an
+un-equipped manager all skip; an equipped leaf manager fires), session gate, busy
+gate, rate-limit read, unreachable → no fire, `switch_is_on` gate. `leaf-manager`
+detection: a team manager is leaf; a `manages:`-only coordinator whose reports are
+all managers is not; a cross-fleet target makes it leaf; the `generate` warning on a
+`checkin` protocol the trigger will never inject into. `checkin-record.sh`: payload → contract, schema 1.
 Intake projection. `requires:` resolution, validator error on a missing skill,
 opt-out drops requirements, `list-library` shows them. Protocol composition: both
 sections present, the exclusive swap. Read door: rc 3 on unreachable, summary math,
@@ -607,6 +671,9 @@ fleet-active delta.
   outputs feeding the intake store, all subject to the well-defined bar.
 - **Right-time scheduling** — quiet hours, batching windows, "wait for the complete
   picture" before a post.
+- **The coordinator's cycle** — a manager-of-managers checking in over its
+  managers' portfolios (progress, rebalancing, loans); v1 equips leaf managers only
+  (§10), so the shape is named here and built nowhere yet.
 - **Cross-fleet coordination** — managers negotiating loaned workers (#1132).
 
 ## 16. Open questions for the operator
@@ -625,4 +692,8 @@ fleet-active delta.
    for it; recorded in the plane regardless of carrier; measurable.
 5. ~~The surfacing judgment~~ **Settled:** inputs and urgency floor as drawn in §6;
    the delta vs. the previous check-in is the primary signal.
-6. Which fleet is the canary?
+6. ~~Which fleet is the canary~~ **Settled (2026-09-14):** the engineering fleet —
+   the one that develops the framework repos. The operator ruled for the richer
+   backlog over the bounded blast radius; the loop into the framework is contained by
+   the burn-in's initiative grants (§12.4), and the coordinator question the choice
+   raised is settled by the `leaf-manager` role (§10).
