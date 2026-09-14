@@ -108,6 +108,10 @@ job"* (`documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md:25,51`).
     project is revived only by explicit direction (an issue, an ask, a focus
     declaration) — the operator can always steer back to dormant work, the manager
     never digs it up on its own.
+11. **The sprint is the legacy skill, scalpeled** — its scoring kept as the batch's
+    ordering; its trigger, GitHub-only input, generator and emit-everything cut. The
+    check-in is its only caller, on conditions, with no time gap: capacity, focus
+    and initiative are the throttles (§6b).
 
 ## 3. Goals and non-goals
 
@@ -232,7 +236,7 @@ allocates idle capacity across the fleet's projects, each carrying its own
 | **dispatch** | an open/backlog task fits an idle worker; routed by judgment, rationale recorded | `dispatch-task.sh` |
 | **propose** | no well-defined work exists on a project whose `initiative` is `autonomous` or `propose`; generate task(s) from mission + knowledge + recent work into the intake store (§8); **must carry repo · project · rigor tier** | `emit-batch` (work_item) + `task_proposed` |
 | **ask** | the **surfacing judgment** (below) concludes the operator should hear something — a fork only they can resolve, or nothing worthwhile can be found ("ask for tasks") | one Telegram post, shaped by §9 |
-| **sprint** | **only if** ≥ `SPRINT_MIN_ISSUES` (default 5) mission-aligned issues are open **and** ≥ 1 worker is idle **and** no sprint ran within `SPRINT_MIN_GAP_S` (default 24 h) | `/autonomous-sprint` (inherits §9) |
+| **sprint** | a single project has **≥ 5 well-defined, unstarted work items** (proposals in the intake store *or* mission-aligned issues triaged in) **and** grants `initiative: autonomous` **and** is in focus **and** ≥ 2 workers are idle (batch ≤ idle workers) **and** has no unresolved sprint work in flight. No time gap — capacity, focus and initiative are the throttles. | the **scalpeled** `/autonomous-sprint` (§6b), every dispatch tagged `sprint_id` |
 | **nothing** | all work in flight, nothing worthwhile — **recorded**, so "checked and chose nothing" is a fact, not silence | — |
 
 **The allocation rule — how the project is chosen.** Attention is a weighting, never
@@ -288,6 +292,27 @@ operator; they bound cost, not attention.**
 degraded inputs the allowed actions narrow to `ask | nothing` — **never propose from
 partial information** (the junk guard). Runaway guards: at most `CHECKIN_MAX_PROPOSALS`
 (default 3) proposals per check-in; `ask` respects the protocol's budget (§9).
+
+## 6b. The sprint, scalpeled
+
+The legacy `/autonomous-sprint` skill is the right batch-execution *engine* and the
+wrong autonomous *agent*. It is kept and cut precisely — never bridged to as it
+stands:
+
+| keep | cut |
+|---|---|
+| the scoring (mission 40 / impact 25 / effort 20 / deps 15) — now used to *order items within a batch* | its standalone trigger (`sprint-trigger.sh`, hand-cron, stale default) — **the check-in is its only caller** |
+| dispatch through the existing task doors | its GitHub-only input — the backlog is **the plane**: the project's unstarted `work_item`s (proposals) plus mission-aligned issues triaged in at sprint time (each becomes a `work_item` carrying the issue ref on dispatch — the existing `--ref` pattern) |
+| | its empty-backlog generator (the `product-vision` pass) — **generation is the check-in's `propose`**, capped and initiative-gated; the sprint never invents work |
+| | "emit everything to Telegram" — it inherits the check-in protocol (§9): one plan post, one summary |
+
+The batch is one fact: every dispatch in a sprint carries a shared `sprint_id` in
+`detail`, so "what did that sprint do and how did it turn out" is one plane query —
+and "this project still has unresolved sprint work" (the no-pile-on condition) is a
+read, not a timer. The loop this closes is the point of the whole design:
+**ideate → accumulate → batch.** Proposals accumulate across check-ins; once enough
+sit on a focused, `autonomous` project, one check-in executes them together instead
+of dripping them out one dispatch at a time.
 
 ## 7. The decision record — `checkin_decision`
 
@@ -503,6 +528,10 @@ before and after — the same discipline as the routing spike: numbers, not vibe
 1b. **Focus** (§8c) — the `focus_declared` event + severity entry,
    `lib/focus-declare.sh`, the empirical derivation query, and `claudlobby focus
    set / show`. Small; its own gauntlet.
+1c. **Scalpel the sprint** (§6b) — cut the legacy skill to the batch engine: plane
+   backlog in, generator out, protocol-shaped, `sprint_id` tagged, its trigger
+   retired. Until it lands, the check-in's `sprint` action records `nothing` with
+   reason `sprint unavailable`.
 2. **The trigger** — `manager-checkin.sh`, the fleet job, the `Switch` row, and the
    **mandatory empirical gate**: extend `lib/validate-bot-change.sh` (it already
    drives `task recheck` against a throwaway bot, `:619-655` — the exact template):
@@ -573,9 +602,11 @@ fleet-active delta.
 
 1. ~~Poll and gap~~ **Settled:** 15-min poll, 60-min gap, backoff-on-`nothing` as
    cost hygiene; none of it touches the operator.
-2. Sprint conditions — ≥ 5 mission-aligned issues, ≥ 1 idle worker, 24-h gap? Now a
-   portfolio question: are the conditions evaluated per project or fleet-wide, and
-   does focus gate which project a sprint may target?
+2. ~~Sprint conditions~~ **Settled:** per project — ≥ 5 well-defined unstarted items
+   (proposals or triaged issues), `initiative: autonomous`, in focus, ≥ 2 idle
+   workers (batch ≤ idle), no unresolved sprint work on that project; **no time
+   gap**. The sprint is the scalpeled legacy skill (§6b), routed to only by the
+   check-in.
 3. ~~Proposals~~ **Settled:** cap 3 per check-in across the portfolio; approval gated
    by `planning.initiative` (§8b); focus, never a static priority, steers allocation
    (§8c); no gravedigging.
