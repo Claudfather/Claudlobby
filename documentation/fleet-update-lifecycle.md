@@ -176,6 +176,46 @@ asymmetry above. And the practical consequence is not inferred there but
 **observed with effect**: under a bare `Write` deny, a `python3` heredoc routed
 through `Bash` wrote the target file successfully.
 
+**Reachability bound on that trail — read it before treating the citation as
+load-bearing.** Those two files are **not present on this Pi** (`claude 2.1.240`,
+`Linux 6.12.75+rpt-rpi-2712`, aarch64): a `local/`-wide search returns zero matches
+for either name, and zero `.psv` files anywhere in that tree. Run twice, by two
+bots independently, each with a positive control proving the search reached the
+named tree. What that licenses is narrow — **the rows are unreachable from here,
+which is not the same as absent.** Other hosts on the estate were not searched, and
+this document cannot tell you which one holds them. A reader elsewhere should
+confirm presence before citing these rows; **no reader should treat this paragraph
+as the sole support for anything above it.** It is not — the two paragraphs below
+reach the same conclusions without it.
+
+**The path-scoped half needs no external file: this document already measured it.**
+The RESOLVED 2026-08-24 table above ran a **control** cell (Read tool on a scratch
+file → allowed) beside its treatment (`Read(//<dir>/**)` → DENIED). Had that deny
+removed the `Read` tool, the control would have failed with it. It did not, so the
+rule was evaluated **per call** — the asymmetry above, from this document's own
+cells, on two bots, with no dependence on the trail.
+
+**A second route needs no file at all, and any session can run it on itself.**
+Compare a session's composed `deny` list against the tools that session actually
+has. Both sides have now been observed on this host at `claude 2.1.240`, in two
+different bot sessions:
+
+| the session's deny for that tool | is the tool in the session? | observed |
+|---|---|---|
+| **bare name** (`Write`, `Edit`) | **absent** — not in the active tool list, and not findable in the deferred pool by exact name | navi, 2026-09-14 |
+| **path-scoped only** (`Edit(//<dir>/**)`) | **present** — declared and usable on paths the rule does not name | branden, 2026-09-14 |
+
+A gate would leave the tool declared with a schema and refuse at call time; in the
+first row there is no schema to find. Same host, same binary, differing only in the
+shape of the rule — which is the asymmetry this section claims, reproduced without
+either cited file. The removal side is corroborated again by an unrelated
+production incident months earlier, where a bot under a bare `Edit` deny hit the
+same error shape quoted above for `Write` (*"No such tool available: Edit. Edit is
+disabled for this session, in subagents as well as here."*) — reported on that
+bot's authority from its own memory, not re-run here. **The second row is presence
+only:** it does not re-measure that a per-call refusal fires, which is what the
+2026-08-24 cells above already show.
+
 **What this does NOT establish.** Whether a bare-name deny also removes the tool
 from *subagents* (the production error string claims it does; not measured here).
 Whether `Bash(cat *)` prefix-matches a heredoc redirect. Whether a bare allow
