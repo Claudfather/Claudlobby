@@ -84,7 +84,9 @@ job"* (`documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md:25,51`).
    runtime fact and operational commitment — **every new thing here lands in the
    plane as an event or construct, never as a side file.** Git stays the SSOT for
    declared configuration; Claudron for knowledge. The plane references both,
-   never copies them (consume by contract).
+   never copies them (consume by contract). **Every occurrence — a check-in, a
+   decision, a proposal, a sprint, a Telegram line — is recorded and recreatable
+   from the plane alone.** Carriers deliver; the plane remembers.
 4. **Team loud, human edge thin.** Bot↔bot communication stays constant — that is
    the work happening. The **manager** is the channel to the operator (Telegram),
    in clean updates and requests for direction. Workers may post to Telegram,
@@ -112,6 +114,10 @@ job"* (`documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md:25,51`).
     ordering; its trigger, GitHub-only input, generator and emit-everything cut. The
     check-in is its only caller, on conditions, with no time gap: capacity, focus
     and initiative are the throttles (§6b).
+12. **Worker updates go to Telegram — and should — where the worker is configured
+    for it.** One thin line on start / done / blocked. The plane records every line
+    regardless of carrier, so nothing is lost to a channel and volume is always
+    measurable.
 
 ## 3. Goals and non-goals
 
@@ -452,8 +458,13 @@ check-in; several qualifying items coalesce into one message **across all projec
 — one post covers the portfolio, never one per project**; held items wait for the
 next justified post. Never restate the rigor in the message; point to it.
 
-**`## Worker`** — one thin line on start / done / blocked. No milestone cadence. Detail
-goes through `report-back.sh` to the manager and the plane, not to Telegram.
+**`## Worker`** — one thin line on start / done / blocked, **to Telegram where the
+worker is configured for it** (and it should be, where it is); plane-only where it
+is not. No milestone cadence. Detail goes through `report-back.sh` to the manager
+and the plane. **Every line is a recorded communication regardless of carrier** —
+the outbound Telegram hook already lands each reply as a `communication` +
+`carrier_accepted` transmission — so the plane recreates every occurrence, and
+"worker Telegram lines per day" is one query if volume ever needs tuning.
 
 **Supersedes** (edits, plus an `EXCLUSIVE_GROUPS` entry where a clean swap applies):
 `worker-lifecycle.md` milestone-every-2–3-min → removed; `proactivity-discipline.md`
@@ -610,7 +621,8 @@ fleet-active delta.
 3. ~~Proposals~~ **Settled:** cap 3 per check-in across the portfolio; approval gated
    by `planning.initiative` (§8b); focus, never a static priority, steers allocation
    (§8c); no gravedigging.
-4. Worker thin updates — to Telegram, or to the plane only?
+4. ~~Worker thin updates~~ **Settled:** to Telegram where the worker is configured
+   for it; recorded in the plane regardless of carrier; measurable.
 5. ~~The surfacing judgment~~ **Settled:** inputs and urgency floor as drawn in §6;
    the delta vs. the previous check-in is the primary signal.
 6. Which fleet is the canary?
