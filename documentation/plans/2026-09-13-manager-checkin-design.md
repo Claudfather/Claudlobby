@@ -653,7 +653,8 @@ nothing composes differently on the estate until the canary has earned it.**
    rule. **After merge and pull** the operator equips the canary leaf manager by
    hand (`protocols: [checkin]`, `skills: [checkin]`), a dry run proves the skill
    text, and **one real hand-fired `/checkin` lands the first row** — the deploy's
-   positive control, pasted on the PR. Pre-change baselines (worker-active %,
+   positive control, pasted on the PR (cycle 5: the join id is looked up, not only
+   shape-checked, and the control joins on the recorded id). Pre-change baselines (worker-active %,
    manager-active % and fleet-active % from one CTE; the fleet's outbound Telegram
    volume split by carrier — `telegram-bridge`, the reply hook, AND `telegram-tgpost`,
    the door an injected check-in's `ask` posts through — all fleet-scoped,
@@ -664,7 +665,13 @@ nothing composes differently on the estate until the canary has earned it.**
    the `validate-bot-change.sh` extension (throwaway manager → idle → `/checkin`
    injected → `checkin_decision` lands). The trigger gates on the composed skill
    symlink, which by-hand declaration already scopes to the canary manager. From
-   here the canary manager checks in on the beat. Also the `BOT_NAME` residue the
+   here the canary manager checks in on the beat — **and stays on it through chunks 3
+   and 4, so no reading taken after this instant is pre-treatment**; the trigger's
+   arming instant is recorded as a second boundary the way chunk 1 records `T0`.
+   Prior art the trigger consumes or retires by name: `lib/sprint-trigger.sh` (the
+   shipped schedule-driven idle-manager nudge, with its busy-skip gate) and
+   `lib/briefing-trigger.sh` (a composed per-(bot,slot) timer firing a slash
+   command). Also the `BOT_NAME` residue the
    trigger's timer env exposes: `keepalive.sh:102`'s heartbeat subject and
    `plane_armed --require-bot` (`lib-common.sh:510-516`) still key on `BOT_NAME`
    where every other alias uses `BOT_ID` — moved here, with the trigger's harness to
@@ -680,8 +687,13 @@ nothing composes differently on the estate until the canary has earned it.**
    distribution, ask-rate, skip reasons, the `considered` lists), the
    **worker-active delta** (the headline) with the manager-active and fleet-active
    deltas beside it, **and the outbound-Telegram delta by carrier** (`telegram-bridge`
-   + `telegram-tgpost`) against the chunk-1 baselines, re-taken the same way before
-   arming.
+   + `telegram-tgpost`) against the chunk-1 baselines **anchored at `T0` and never
+   superseded** — a re-take before arming is a secondary figure, labelled as carrying
+   every check-in fired since `T0` (the manager has been on the beat since chunk 2,
+   so it is not a baseline) — and, beside the activity deltas, a closure measure: the
+   completion rate of `checkin_dispatch`-joined dispatches through chunk 3's outcome
+   join, so the verdict is not an activity number the loop's own dispatch volume
+   inflates.
 
 **After the canary, as its evidence allows** (each keeps its label for
 cross-reference):
