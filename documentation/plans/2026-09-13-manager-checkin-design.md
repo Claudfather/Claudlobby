@@ -1,3 +1,11 @@
+---
+title: "Manager check-in — the idle-manager ignition loop"
+type: plan
+status: draft
+owner: fleet owner
+created: 2026-09-13
+---
+
 # Manager check-in — the idle-manager ignition loop
 
 **Status:** DESIGN, 2026-09-13. Phase-5 step one, toward the full intake pipeline (§15).
@@ -311,9 +319,15 @@ instinct is tuned on data (ask-rate, held items, whether asks were answered) rat
 than on a cadence. **Nothing about the poll interval or the check-in gap touches the
 operator; they bound cost, not attention.**
 
-**Failure posture.** Any READ that fails lands in `inputs_seen.unavailable`, and with
-degraded inputs the allowed actions narrow to `ask | nothing` — **never propose from
-partial information** (the junk guard). Runaway guards: at most `CHECKIN_MAX_PROPOSALS`
+**Failure posture — per input.** Any READ that fails lands in
+`inputs_seen.unavailable`. The plane unreachable (or `brief`'s `dispatches` /
+`workstreams` / `reports` / `alerts` degraded) narrows the actions to `ask | nothing`
+— never act blind on the fleet's own state. `gh` or Claudron unavailable narrows only
+the **source** of new work: open, plane-known tasks are still dispatchable; fresh
+backlog the manager could not read is not — the fleet must not idle exactly when
+GitHub hiccups (local-first). `brief`'s standing `utilization` degradation (#891) is
+always present and is not an input of the skill. **Never propose from partial
+information** (the junk guard). Runaway guards: at most `CHECKIN_MAX_PROPOSALS`
 (default 3) proposals per check-in; `ask` respects the protocol's budget (§9).
 
 ## 6b. The sprint, scalpeled
@@ -348,7 +362,7 @@ actor`, `subject: bot:<fleet>/<manager>`, the decision as `data`, and
 `source_ref: checkin:<checkin_id>` (the task-recheck stamp idiom: the ref is the
 address a reader joins on) — through `plane_emit_events`. The plane is always on
 since the F18 closure; `PLANE_EMIT_DISABLED=1` (the harness exemption) is the one
-thing that silences it, and the door says so at rc 1 — for this door the record
+thing that silences it, and the door says so at rc 3 — for this door the record
 IS the action. Subject = the manager.
 
 `detail` (schema 1 — what one hand-equipped manager can produce in chunk 1; later
@@ -358,6 +372,7 @@ chunks ADD fields and enum values as schema 2, never rewrite):
 { "schema": 1, "checkin_id": "ck_<32hex>", "prev_checkin_id": "ck_<32hex> | null",
   "inputs_seen": { "open_tasks": 0, "stalls": 0, "unacked": 0,
                    "issues_considered": 0, "knowledge_hits": 0,
+                   "considered": ["<candidate> — <why not chosen>"],
                    "unavailable": ["gh"] },
   "delta": { "tasks_opened": 0, "tasks_completed": 0, "stalls_appeared": 0,
              "stalls_cleared": 0, "issues_new": 0, "messages_new": null,
@@ -365,9 +380,17 @@ chunks ADD fields and enum values as schema 2, never rewrite):
   "action": "dispatch | ask | nothing",
   "project_key": "<slug the action was taken on, or null>",
   "rationale": "<= 600 chars, the manager's words",
-  "raise": { "decided": false, "reason": "<why it surfaced, or why not — required both ways>",
+  "raise": { "decided": false, "reason": "<why it surfaced, or why not — required both ways, <= 600>",
              "held": ["<items deferred to a later post>"] } }
 ```
+
+`inputs_seen.considered` is the losers list — every candidate weighed and passed
+over, one capped line each — because **a selector can only be judged against what
+it did NOT pick** (`lib/sprint-selection-record.py:11-24`, Phase 0 of #974: "a
+winner-only record of a stochastic scorer is an unauditable ledger that LOOKS
+audited"). Every list is capped (≤ 10 × ≤ 200 chars) and every free-text field ≤ 600,
+so the record stays far under the 16 KiB DIAGNOSTIC cap; a truncated record is still
+LISTED by the read door, marked, never dropped.
 
 Every `delta` count is `int | null`: **null means "could not measure" and is never
 collapsed to 0**, because an unchanged delta is the skill's primary argument for
@@ -610,49 +633,59 @@ adversarial, YAGNI re-cut: **each piece lands in the chunk that consumes it, and
 nothing composes differently on the estate until the canary has earned it.**
 
 1. **The record and the run** (plan: `2026-09-14-manager-checkin-chunk1-contract.md`,
-   cycle 2) — the schema-1 contract + `checkin-record.sh`; `dispatch-task.sh
-   --project` (the well-defined bar; fixes the measured 0/374) and `--checkin` (the
-   join row); the two severity lines; `claudlobby checkins` (rows, `--last`); the
-   `checkin.md` protocol (additive, no `requires:`) and the `/checkin` skill with
-   actions `dispatch | ask | nothing`. The canary leaf manager is equipped **by
-   hand** (`protocols: [checkin]`, `skills: [checkin]`). Gate: the doors on a real
-   plane through the harness, plus **one real `/checkin --dry-run` on the canary
-   manager** before merge — the skill and protocol are runtime behaviour and the
-   runtime gate covers them. Pre-change baselines (fleet-active %, Telegram post
-   volume) recorded in the PR.
+   cycle 3) — the schema-1 contract (with the losers list) + `checkin-record.sh`;
+   `dispatch-task.sh --project` (the well-defined bar; fixes the measured 0/374)
+   and `--checkin` (the join row, atomic with the assignment); the `tg-post.sh`
+   alias fix; the two severity lines; `claudlobby checkins` (rows, `--last`); the
+   `checkin.md` protocol (additive, no `requires:`, no self-fire clause) and the
+   `/checkin` skill with actions `dispatch | ask | nothing` and a per-input degraded
+   rule. **After merge and pull** the operator equips the canary leaf manager by
+   hand (`protocols: [checkin]`, `skills: [checkin]`), a dry run proves the skill
+   text, and **one real hand-fired `/checkin` lands the first row** — the deploy's
+   positive control, pasted on the PR. Pre-change baselines (fleet-active %, the
+   fleet's outbound Telegram volume — both fleet-scoped, instant-compared) recorded
+   in the PR.
+2. **The trigger** — `manager-checkin.sh`, the fleet job, the `Switch` row, and
+   the `validate-bot-change.sh` extension (throwaway manager → idle → `/checkin`
+   injected → `checkin_decision` lands). The trigger gates on the composed skill
+   symlink, which by-hand declaration already scopes to the canary manager. From
+   here the canary manager checks in on the beat.
+3. **The read door, whole** — `checkins --summary` and `--limit`, SQL-bound
+   `--since`, the outcome join (dispatch via `checkin_dispatch`; asks by alias +
+   time window, or a `checkin-ask.sh` door if that proves ambiguous), the panel seam.
+4. **Canary — the engineering fleet** (ruling 13). Arm the job on that fleet;
+   the fleet declares `checkin` in its `defaults.protocols`, so every bot in it
+   composes the new protocol, whose preamble governs where it composes beside an
+   older cadence rule (F3, locked 2026-09-15: "retire those and make check-in the
+   beat", in chunk 5). Burn in ≥ 3 days; judge on `checkins --summary` (action
+   distribution, ask-rate, skip reasons, the `considered` lists), the fleet-active
+   delta **and the outbound-Telegram delta** against the chunk-1 baselines,
+   re-taken the same way before arming.
+
+**After the canary, as its evidence allows** (each keeps its label for
+cross-reference):
+
 1b. **Focus** (§8c) — `focus_declared`, `lib/focus-declare.sh`, the empirical
    derivation, `claudlobby focus`; the two focus fields join `inputs_seen` as
    schema 2.
 1c. **Scalpel the sprint** (§6b) — the `sprint` action joins the enum.
-1d. **Intake** (§8, §8b) — **gated on canary evidence** (open question 7): the
-   `planning.initiative` construct with its doctor surface (no silent switches —
-   `switches.py:30-36`), `lib/checkin-propose.sh` (propose / reject, the
-   well-defined bar as a refusal, the proposal cap enforced by the door — a count
-   of `task_proposed` rows per `checkin_id`, never prose), `dispatch-task.sh
-   --work-item` (looking the id up, as `--supersedes` does), the proposals
-   projection and `checkins --proposals`, the `propose` action.
-2. **The trigger** — `manager-checkin.sh`, the fleet job, the `Switch` row, and
-   the `validate-bot-change.sh` extension (throwaway manager → idle → `/checkin`
-   injected → `checkin_decision` lands). The trigger gates on the composed skill
-   symlink, which by-hand declaration already scopes to the canary manager.
-3. **The read door, whole** — `checkins --summary`, the outcome join (dispatch via
-   `checkin_dispatch`; asks by alias + time window, or `checkin-ask.sh` if that
-   proves ambiguous), the panel seam.
-4. **Canary — the engineering fleet** (ruling 13). Arm the job on that fleet; burn
-   in ≥ 3 days against the chunk-1 baselines; judge on `checkins --summary` and the
-   fleet-active delta. The canary fleet declares `checkin` in its `defaults.protocols`, so every
-   bot in it composes the new protocol, whose Worker section governs where it
-   composes beside an older cadence rule — the thin edge on one fleet with no
-   library edit (fork F3, locked 2026-09-15: "retire those and make check-in the
-   beat", in chunk 5).
+1d. **Intake** (§8, §8b) — gated on the canary's `ask`-for-tasks rows on an empty
+   project (question 7, settled): the `planning.initiative` construct with its
+   doctor surface (no silent switches — `switches.py:30-36`), `lib/checkin-propose.sh`
+   (propose / reject, the well-defined bar as a refusal, the proposal cap enforced
+   by the door — a count of `task_proposed` rows per `checkin_id`, never prose),
+   `dispatch-task.sh --work-item` (looking the id up, as `--supersedes` does), the
+   proposals projection and `checkins --proposals`, the `propose` action.
 5. **Default** — `requires:` linking **with the grant union** (§10), the
    `leaf-manager` role (with the cross-fleet direction of §10), the naked-bot gate's
    leaf-manager arm, then the registry line; the cadence-retirement edits land
    estate-wide with a **grep-derived sweep** (`milestone|beacon|2.3 min|10.15
-   min|Idle silence` over `library/` — the in-repo precedent is `a2a2210` followed
-   by `8386263`'s "six more residue sites") and a test that asserts over the grep,
-   not a hand list. The job's polarity stays `OPT_IN` unless the burn-in argues
-   otherwise.
+   min|Idle silence|never go silent` over `library/` — today that set includes
+   `protocols/telegram-routing.md:29`, `expertise/orchestration.md:108`,
+   `protocols/comms-topology.md:74`, `skills/lifecycle/SKILL.md:37`; the in-repo
+   precedent is `a2a2210` followed by `8386263`'s "six more residue sites") and a
+   test that asserts over the grep, not a hand list. The job's polarity stays
+   `OPT_IN` unless the burn-in argues otherwise.
 
 **Sequencing that matters for the canary:** a skill symlink is live the instant it
 lands (no restart, no canary window — `fleet-update-lifecycle.md:32,45`); the protocol
@@ -668,7 +701,7 @@ deploy, live verification, record.
 un-equipped manager all skip; an equipped leaf manager fires), session gate, busy
 gate, rate-limit read, unreachable → no fire, `switch_is_on` gate. `leaf-manager`
 detection: a team manager is leaf; a `manages:`-only coordinator whose reports are
-all managers is not; a cross-fleet target makes it leaf; the `generate` warning on a
+all managers is not; a cross-fleet target does NOT make it leaf (F5); the `generate` warning on a
 `checkin` protocol the trigger will never inject into. `checkin-record.sh`: payload → contract, schema 1.
 Intake projection. `requires:` resolution, validator error on a missing skill,
 opt-out drops requirements, `list-library` shows them. Protocol composition: both
