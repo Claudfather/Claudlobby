@@ -693,7 +693,19 @@ nothing composes differently on the estate until the canary has earned it.**
    so it is not a baseline) — and, beside the activity deltas, a closure measure: the
    completion rate of `checkin_dispatch`-joined dispatches through chunk 3's outcome
    join, so the verdict is not an activity number the loop's own dispatch volume
-   inflates.
+   inflates, grouped by the project's declared tier (the north star's rigor clause;
+   `project_key` is first-class on the work item).
+
+   **Pre-registered bar (cycle 6, before any beat).** The unit is raw worker-busy
+   minutes per week on the canary fleet against its `T0` reading — this fleet's own
+   pre-treatment figure is ~30 a week (0.3% of ~10,000 observed minutes, measured
+   read-only 2026-09-15), so one 30-minute dispatch doubles it; §1's 5.3% is two
+   fleets over 18 bots and is NOT this fleet's baseline. The feature is judged
+   **working** when, over the burn-in scaled to a week, worker-busy minutes are at
+   least 2× the `T0` reading AND at least half of the `checkin_dispatch`-joined
+   dispatches reached a terminal report; **inert** below 2×; **harmful** at 2× or
+   more with fewer than half closing (dispatch volume without closure). The control
+   fleet's delta over the same window is subtracted before the comparison.
 
 **After the canary, as its evidence allows** (each keeps its label for
 cross-reference):
