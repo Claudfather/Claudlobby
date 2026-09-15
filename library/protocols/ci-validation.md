@@ -36,11 +36,10 @@ If the endpoint returns checks, only those are required — others are informati
 
 Never merge with failing or pending required checks. This is non-negotiable — even if the reviewer approved and the code looks correct. CI is the final gate.
 
-**Interaction with existing guardrails:**
+**Interaction with the surrounding policy (guardrails and protocols):**
 
 - `no-push-main` — CI validation adds to, not replaces, the branch-only workflow
-- `merge-policy-human` — human still clicks merge; this protocol gates the manager's *recommendation* to merge
-- `merge-policy-auto-*` — in auto-merge fleets where the manager executes merge, this protocol's gate logic applies equally; the manager runs the CI gate before executing `gh pr merge`
+- whichever merge policy the fleet composes — this gate runs first either way. Where the manager only *recommends* a merge, it gates the recommendation; where the manager *executes* one, it gates the `gh pr merge`. The gate does not change with the policy, so this protocol names no policy file
 - `verify-before-merge` — CI check happens *before* verify-before-merge (no point parsing a verdict if CI is red)
 
 ## 2. CI failure routing
