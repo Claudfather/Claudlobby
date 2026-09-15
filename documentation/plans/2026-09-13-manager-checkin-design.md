@@ -1,7 +1,7 @@
 ---
 title: "Manager check-in — the idle-manager ignition loop"
-type: plan
-status: draft
+type: spec
+status: approved
 owner: fleet owner
 created: 2026-09-13
 ---
@@ -371,7 +371,7 @@ chunks ADD fields and enum values as schema 2, never rewrite):
 ```json
 { "schema": 1, "checkin_id": "ck_<32hex>", "prev_checkin_id": "ck_<32hex> | null",
   "inputs_seen": { "open_tasks": 0, "stalls": 0, "unacked": 0,
-                   "issues_considered": 0, "knowledge_hits": 0,
+                   "issues_seen": 0, "issues_considered": 0, "knowledge_hits": 0,
                    "considered": ["<candidate> — <why not chosen>"],
                    "unavailable": ["gh"] },
   "delta": { "tasks_opened": 0, "tasks_completed": 0, "stalls_appeared": 0,
@@ -392,9 +392,16 @@ audited"). Every list is capped (≤ 10 × ≤ 200 chars) and every free-text fi
 so the record stays far under the 16 KiB DIAGNOSTIC cap; a truncated record is still
 LISTED by the read door, marked, never dropped.
 
-Every `delta` count is `int | null`: **null means "could not measure" and is never
-collapsed to 0**, because an unchanged delta is the skill's primary argument for
-silence. `focus_declared` / `focus_empirical_top` join `inputs_seen` with chunk 1b;
+Every `delta` count and every `inputs_seen` count is `int | null`: **null means
+"could not measure" and is never collapsed to 0**, because an unchanged delta is the
+skill's primary argument for silence; a MISSING count is a contract defect, never a
+0 (cycle-3 B3). `prev_checkin_id` is required (null = READ 0 answered "none"), so a
+skipped READ 0 cannot pose as a first check-in. `inputs_seen.issues_seen` is the RAW
+backlog count before the mission filter, beside `issues_considered` (the filtered
+count): `sprint-selection-record.py:26-42`'s rule — without the unfiltered count a
+broken filter and a genuinely empty backlog produce the same row, which is exactly
+the 1d gate (F1). On `action: dispatch`, `considered` must be non-empty: a selection
+with no losers is not a selection (cycle-3 R4). `focus_declared` / `focus_empirical_top` join `inputs_seen` with chunk 1b;
 `propose` and `sprint` widen the `action` enum with their chunks.
 
 **Links are reverse links, recorded by the door that acts** — RECORD before ACT
@@ -619,8 +626,12 @@ Refuses an unreachable plane at rc 3 (`source_state.py`), never a clean empty.
 
 This is the operator's "log how it works" instrument: every check-in is a row.
 The same query feeds a "decisions" panel on the operator plane and the analytics page
-(#1541). **The outcome measure for the whole feature is fleet-active %** (#1541)
-before and after — the same discipline as the routing spike: numbers, not vibes.
+(#1541). **The outcome measure for the whole feature is worker-active %** — the
+fleet's bots MINUS the manager the loop runs in, per observed minute — with
+manager-active % and fleet-active % reported beside it (#1541), before and after: a
+check-in turn is manager activity, and a loop that dispatches nothing must not be
+able to raise the number it is judged by (cycle-3 B8). The same discipline as the
+routing spike: numbers, not vibes.
 
 ## 12. Rollout — the ladder the repo mandates (re-sequenced 2026-09-15)
 
@@ -633,7 +644,7 @@ adversarial, YAGNI re-cut: **each piece lands in the chunk that consumes it, and
 nothing composes differently on the estate until the canary has earned it.**
 
 1. **The record and the run** (plan: `2026-09-14-manager-checkin-chunk1-contract.md`,
-   cycle 3) — the schema-1 contract (with the losers list) + `checkin-record.sh`;
+   cycle 4) — the schema-1 contract (with the losers list) + `checkin-record.sh`;
    `dispatch-task.sh --project` (the well-defined bar; fixes the measured 0/374)
    and `--checkin` (the join row, atomic with the assignment); the `tg-post.sh`
    alias fix; the two severity lines; `claudlobby checkins` (rows, `--last`); the
@@ -642,14 +653,22 @@ nothing composes differently on the estate until the canary has earned it.**
    rule. **After merge and pull** the operator equips the canary leaf manager by
    hand (`protocols: [checkin]`, `skills: [checkin]`), a dry run proves the skill
    text, and **one real hand-fired `/checkin` lands the first row** — the deploy's
-   positive control, pasted on the PR. Pre-change baselines (fleet-active %, the
-   fleet's outbound Telegram volume — both fleet-scoped, instant-compared) recorded
-   in the PR.
+   positive control, pasted on the PR. Pre-change baselines (worker-active %,
+   manager-active % and fleet-active % from one CTE; the fleet's outbound Telegram
+   volume split by carrier — `telegram-bridge`, the reply hook, AND `telegram-tgpost`,
+   the door an injected check-in's `ask` posts through — all fleet-scoped,
+   instant-compared) recorded in the PR. The canary manager is restarted after it is
+   equipped (one bot, the rolling-restart posture) so the protocol is in context for
+   the run; that instant is the pre-treatment boundary.
 2. **The trigger** — `manager-checkin.sh`, the fleet job, the `Switch` row, and
    the `validate-bot-change.sh` extension (throwaway manager → idle → `/checkin`
    injected → `checkin_decision` lands). The trigger gates on the composed skill
    symlink, which by-hand declaration already scopes to the canary manager. From
-   here the canary manager checks in on the beat.
+   here the canary manager checks in on the beat. Also the `BOT_NAME` residue the
+   trigger's timer env exposes: `keepalive.sh:102`'s heartbeat subject and
+   `plane_armed --require-bot` (`lib-common.sh:510-516`) still key on `BOT_NAME`
+   where every other alias uses `BOT_ID` — moved here, with the trigger's harness to
+   prove the presence join still holds.
 3. **The read door, whole** — `checkins --summary` and `--limit`, SQL-bound
    `--since`, the outcome join (dispatch via `checkin_dispatch`; asks by alias +
    time window, or a `checkin-ask.sh` door if that proves ambiguous), the panel seam.
@@ -658,9 +677,11 @@ nothing composes differently on the estate until the canary has earned it.**
    composes the new protocol, whose preamble governs where it composes beside an
    older cadence rule (F3, locked 2026-09-15: "retire those and make check-in the
    beat", in chunk 5). Burn in ≥ 3 days; judge on `checkins --summary` (action
-   distribution, ask-rate, skip reasons, the `considered` lists), the fleet-active
-   delta **and the outbound-Telegram delta** against the chunk-1 baselines,
-   re-taken the same way before arming.
+   distribution, ask-rate, skip reasons, the `considered` lists), the
+   **worker-active delta** (the headline) with the manager-active and fleet-active
+   deltas beside it, **and the outbound-Telegram delta by carrier** (`telegram-bridge`
+   + `telegram-tgpost`) against the chunk-1 baselines, re-taken the same way before
+   arming.
 
 **After the canary, as its evidence allows** (each keeps its label for
 cross-reference):

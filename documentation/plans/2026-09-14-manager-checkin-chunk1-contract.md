@@ -10,15 +10,15 @@ created: 2026-09-14
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Reforge cycle 3 (2026-09-15).** Cycle 2 of `/ironclad` (PR #1550, second review comment; log `scratch/ironclad-2026-09-15_cycle2/verified.md`, 52 claims confirmed) returned 10 blockers against the cycle-2 body: seven mechanical (a door edit placed before the variable it tests, a flag-guard test that could never fire, a test with colliding kwargs, two grant shapes that cannot match their invocations, three README count pins, a harness control that passes on an empty id) and three design (the degraded rule re-created the blocker it replaced, the chunk never produced a real row, and the record could not be judged). All are folded here, plus twelve risks and the remaining YAGNI cuts the cost-benefit lens named. The cycle-2 body is at `273a3db` and `scratch/ironclad-2026-09-15_cycle2/snapshot-cycle2/plan.md`.
+> **Reforge cycle 4 (2026-09-15).** Cycle 3 of `/ironclad` (PR #1550, third review comment; log `scratch/ironclad-2026-09-15_cycle3/verified.md`, 44 claims confirmed) returned 8 blockers against the cycle-3 body — one rule defect (the degraded rule keyed on a field's *presence* in `degraded[]`, which a real fleet's brief always populates, so `dispatch` was unreachable for the third cycle running), one trap defect (a refused decision landed a `critical` `script_error` row through the ERR trap that bash fires inside a command substitution), and six mechanical (a `null` the contract refused, a 34-`?` glob, a wrapped test needle, a nested fence that truncated the skill deliverable, a carrier filter blind to `tg-post.sh`, a headline metric the check-in itself inflates) — plus twelve risks and the gaps. All are folded here; every mechanism this cycle introduces was **run before it was written** (the form-D pipeline under the real trap, the worker/manager CTE and the carrier split on a seeded plane, the `brief --json` degraded shapes captured live, the whitespace-collapsing grant matcher). The cycle-3 body is at `a90b86b` and `scratch/ironclad-2026-09-15_cycle3/snapshot-cycle3/plan.md`.
 
-**Goal:** One leaf manager, equipped by hand (`protocols: [checkin]`, `skills: [checkin]` in its `fleet.yaml`), runs `/checkin` for real after this chunk merges and deploys: it reads the SSOT through named doors, decides `dispatch | ask | nothing`, records the decision as one plane row BEFORE acting, and any dispatch it makes is joined to that row. `claudlobby checkins --last` shows that row. That real run — not a dry run — is the deploy's positive control and is pasted on the PR.
+**Goal:** One leaf manager, equipped by hand (`protocols: [checkin]`, `skills: [checkin]` in its `fleet.yaml`), runs `/checkin` for real after this chunk merges and deploys: it reads the SSOT through named doors, decides `dispatch | ask | nothing`, records the decision as one plane row BEFORE acting, and any dispatch it makes is joined to that row. `claudlobby checkins --last` shows that row. That real run — not a dry run — is the deploy's positive control and is pasted on the PR, which states **which clause of this Goal the run proved** (the record alone, or the record and the join).
 
-**Architecture:** One bash door and one CLI read door over the plane, plus a skill and a protocol. The decision is one `checkin_decision` system event (no migration; one severity line). The dispatch join is a second system event, `checkin_dispatch`, that `dispatch-task.sh --checkin` appends to the dispatch batch, atomic with the assignment — the `--supersedes` precedent. Nothing composes differently on the estate: no template change, no `bot.conf` change, no protocol edit beyond one additive new file, no defaults, no trigger. `lib/` changes (the two dispatch flags, one alias fix) are additive and byte-identical without the flags; the canary manager is declared by the operator, by hand, after merge.
+**Architecture:** One bash door and one CLI read door over the plane, plus a skill and a protocol. The decision is one `checkin_decision` system event (no migration; one severity line). The dispatch join is a second system event, `checkin_dispatch`, that `dispatch-task.sh --checkin` appends to the dispatch batch, atomic with the assignment — the `--supersedes` precedent. Nothing composes differently on the estate: no template change, no `bot.conf` change, no protocol edit beyond one additive new file, no defaults, no trigger. `lib/` changes (the two dispatch flags, one alias fix in `tg-post.sh`) are additive and byte-identical without the flags; the canary manager is declared by the operator, by hand, after merge.
 
 **Tech Stack:** Python 3.11 (stdlib + the package's existing pydantic), bash 3.2-compatible `lib/` scripts sourcing `lib-common.sh`, SQLite plane (schema 11), pytest.
 
-**Spec:** `documentation/plans/2026-09-13-manager-checkin-design.md` — this plan implements its §12 chunk 1 as re-sequenced in cycle 3. Executors read both.
+**Spec:** `documentation/plans/2026-09-13-manager-checkin-design.md` — this plan implements its §12 chunk 1 as re-sequenced in cycle 3 and re-measured in cycle 4 (§7 schema rules, §11 worker-active headline, §12.1/§12.4 baselines by carrier). Executors read both.
 
 ## Scope
 
@@ -34,42 +34,46 @@ created: 2026-09-14
 | an `ask` door and `targets.msg_id` | **3 — read door + outcome join** (F4) | asks join by alias + time window; `tg-post.sh`'s alias is fixed here so that join can work |
 | `sprint` action; `focus_*` fields | **1c**, **1b** (schema 2) | not read by this chunk's skill |
 | `checkins --summary`, `--limit`, SQL-bound `--since` | **3** | no consumer before the outcome join |
+| the `BOT_NAME` residue: `keepalive.sh:102`'s heartbeat subject and `plane_armed --require-bot` (`lib-common.sh:510-516`) key on `BOT_NAME` where every other alias uses `BOT_ID` (cycle-3 R3, gap) | **2 — trigger** | the trigger runs under the timer env, and the heartbeat subject is the presence join's key — moving it needs the trigger's harness to prove the join still holds; today `start-bot.sh` exports both names, so it is latent |
 
 ## Decision Forks
 
-- **F1 — Defer `propose` and the intake store past the canary.** *Options:* defer to 1d gated on canary evidence / build now. *Lean:* defer. *Ratifier:* operator. **Status: locked** (2026-09-15) — evidence: operator: "okay sure. some fleets on my personal projects would have less issues on their given domains. but yes these work systems we're testing on have thousands." The canary measures `dispatch` on a deep backlog; 1d ships `propose` for the thin-backlog fleets, gated on the canary's `ask`-for-tasks rows on an empty project.
-- **F2 — Defer `requires:` linking and the `leaf-manager` role to chunk 5.** *Options:* defer / build now. *Lean:* defer. *Ratifier:* operator. **Status: locked** — evidence: operator instruction ("NOT overbuilding, YAGNI"); no consumer before chunk 5; cycle-1 B8 (linked but never granted) and R2 (the cross-fleet direction) are written into spec §10 so chunk 5 builds them right.
-- **F3 — Where the cadence-retirement edits land.** *Options:* (a) chunk 5 estate-wide with the default; during chunk 4 the canary fleet declares `checkin` in `defaults.protocols`, whose preamble states that it governs where it composes beside an older cadence rule; (b) chunk 2; (c) chunk 4. *Lean:* (a). *Ratifier:* operator. **Status: locked** (2026-09-15) — evidence: operator: "Yes I agree with this approach. Lets retire those and make check in the beat."
-- **F4 — `ask` has no door in chunk 1.** *Options:* (a) asks join to decisions by alias + time window in chunk 3; a door only if that proves ambiguous; (b) build now. *Lean:* (a). *Ratifier:* operator. **Status: locked** — evidence: YAGNI instruction; `targets.msg_id` was an unfillable field (cycle-1 B11). Consequence folded (cycle-2 R2): `tg-post.sh:81` writes the sender alias from `BOT_NAME` while every other door uses `BOT_ID` — fixed in Task 2 so the chunk-3 join can work.
-- **F5 — A cross-fleet `manages:` target does NOT make a manager leaf.** *Options:* count it / do not. *Lean:* do not. *Ratifier:* operator. **Status: locked** — evidence: `config.py:736-748`; spec §10 and §13 corrected. Consumed by chunk 5.
+- **F1 — Defer `propose` and the intake store past the canary.** *Context:* the spec's `propose` action needs an intake store, a proposal cap and a projection; its consumer is the thin-backlog fleet. *Options:* defer to 1d gated on canary evidence / build now. *Lean:* defer. *Ratifier:* operator. **Status: locked** (2026-09-15) — evidence: operator: "okay sure. some fleets on my personal projects would have less issues on their given domains. but yes these work systems we're testing on have thousands." The canary measures `dispatch` on a deep backlog; 1d ships `propose` for the thin-backlog fleets, gated on the canary's `ask`-for-tasks rows on an empty project — which schema 1's `issues_seen` (the raw count) makes distinguishable from a broken filter (cycle-3 R4).
+- **F2 — Defer `requires:` linking and the `leaf-manager` role to chunk 5.** *Context:* both exist to make the default registry line correct; the canary is equipped by hand. *Options:* defer / build now. *Lean:* defer. *Ratifier:* operator. **Status: locked** — evidence: operator instruction ("NOT overbuilding, YAGNI"); no consumer before chunk 5; cycle-1 B8 (linked but never granted) and R2 (the cross-fleet direction) are written into spec §10 so chunk 5 builds them right.
+- **F3 — Where the cadence-retirement edits land.** *Context:* `orchestration.md:108`, `comms-topology.md:74`, `inbound-acknowledgment.md:42` and their siblings mandate a beat the check-in replaces; retiring them is estate-wide. *Options:* (a) chunk 5 estate-wide with the default; during chunk 4 the canary fleet declares `checkin` in `defaults.protocols`, whose preamble states that it governs where it composes beside an older cadence rule; (b) chunk 2; (c) chunk 4. *Lean:* (a). *Ratifier:* operator. **Status: locked** (2026-09-15) — evidence: operator: "Yes I agree with this approach. Lets retire those and make check in the beat."
+- **F4 — `ask` has no door in chunk 1.** *Context:* an `ask` is a Telegram post the outbound hook (or `tg-post.sh`) already records as a communication from the manager's alias. *Options:* (a) asks join to decisions by alias + time window in chunk 3; a door only if that proves ambiguous; (b) build now. *Lean:* (a). *Ratifier:* operator. **Status: locked** — evidence: YAGNI instruction; `targets.msg_id` was an unfillable field (cycle-1 B11). Consequence folded (cycle-2 R2, cycle-3 R3): `tg-post.sh:81` writes the sender alias from `BOT_NAME`; Task 2 makes it `${BOT_ID:-$BOT_NAME}` so the chunk-3 join can work for a session while hand callers that set only `BOT_NAME` keep working.
+- **F5 — A cross-fleet `manages:` target does NOT make a manager leaf.** *Context:* `config.py:736-748` resolves `manages:` within the fleet; a cross-fleet target is a peer, not a report. *Options:* count it / do not. *Lean:* do not. *Ratifier:* operator. **Status: locked** — evidence: `config.py:736-748`; spec §10 and §13 corrected. Consumed by chunk 5.
 
 ## Risks
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| The skill text is wrong on first contact with a real manager (a refused decision, a door the model cannot drive) | the first real run fails | the dry run precedes the real run (Task 7 steps 8–9); skill text is library content, live on the next `generate`, so a fix is a follow-up PR against `library/` with no restart |
+| The skill text is wrong on first contact with a real manager (a refused decision, a door the model cannot drive) | the first real run fails | the dry run precedes the real run (Task 7 steps 8–9) and prints the exact ACT command line it would run; skill text is library content, live on the next `generate`, so a fix is a follow-up PR against `library/` with no restart |
 | `lib/dispatch-task.sh` reaches every fleet on pull with no per-bot canary | a regression in the door hits the estate | the flags are additive; behaviour without them is pinned byte-identical by `tests/test_task_id_dispatch.py` + `tests/test_dispatch_task.sh`; the harness runs the real door; the real run on the canary is the positive control |
-| The manager reads the record's `considered` list as licence to write essays | the 16 KiB DIAGNOSTIC cap truncates the record | every list is capped in the contract (≤ 10 × ≤ 200 chars); `rationale` and `raise.reason` ≤ 600; a truncated row is still LISTED by the read door |
+| The manager reads the record's `considered` list as licence to write essays | the 16 KiB DIAGNOSTIC cap truncates the record | every list is capped in the contract (≤ 10 × ≤ 200 chars); `rationale` and `raise.reason` ≤ 600 — a maximal record measures 7,887 bytes (cycle 3), so the cap is defensive; a truncated row is still LISTED by the read door |
 | GitHub or Claudron is unreachable at check-in time | the manager cannot see the backlog | the degraded rule is per input: plane-known open work is still dispatchable; only backlog-sourced new work is withheld |
-| The chunk-1 baselines drift before chunk 4 judges against them | the outcome measure is not attributable | Task 0 records them fleet-scoped and instant-compared; spec §12.4 names both as the judging inputs; chunk 4 re-takes them the same way before arming |
+| The record lands and the ACT then fails (a partial RECORD-before-ACT) | a decision row that reads as acted on | the skill records a follow-up check-in naming the failure (`prev_checkin_id` set, `action: nothing`); `task-act.sh withdraw` is the undo for a dispatch that must not stand; chunk 3's outcome join makes the pair visible |
+| The chunk-1 baselines drift before chunk 4 judges against them, or measure the manager's own check-in turns | the outcome measure is not attributable | Task 0 records worker-active % (the headline), manager-active % and fleet-active % from one CTE, fleet-scoped and instant-compared, and the Telegram volume by carrier; spec §11/§12.4 name them; chunk 4 re-takes them the same way before arming; the canary manager's restart instant (Task 7 step 7) is the pre-treatment boundary |
 
 ## Global Constraints
 
 Every task's requirements include these. Exact values are copied from the spec and from `CLAUDE.md`.
 
-- **The repo is PUBLIC.** No PII, real chat ids, user ids, handles, tokens, tailnet names or fleet-specific paths in any committed asset, test, fixture or commit message. Fixtures are shape-verbatim with faked identifiers. Never `@`-mention a bot name in GitHub-bound text.
-- **bash 3.2 target.** `set -euo pipefail`; source `lib-common.sh`; quote every variable; `printf '%s'` for values; **no apostrophes in comments inside `$( )`** (`tests/test_bash_parse.py` gates `lib/` and every `library/**/*.sh`). **Never guard a flag value with `${2:?…}`** — an expansion fault exits rc 0 through lib-common's EXIT trap (`lib-common.sh:337`; `dispatch-task.sh:94-95` documents it and uses `_flag_val`).
+- **The repo is PUBLIC.** No PII, real chat ids, user ids, handles, tokens, tailnet names or fleet-specific paths in any committed asset, test, fixture or commit message. Fixtures are shape-verbatim with faked identifiers. Never `@`-mention a bot name in GitHub-bound text. The canary fleet, its manager and the host's install root are named by the operator (ruling 13) into shell variables at Task 0 — never written into this plan, a commit or a PR comment.
+- **bash 3.2 target.** `set -euo pipefail`; source `lib-common.sh`; quote every variable; `printf '%s'` for values; **no apostrophes in comments inside a command substitution** (`tests/test_bash_parse.py` gates `lib/` and every `library/**/*.sh`). **Never guard a flag value with `${2:?…}`** — an expansion fault exits rc 0 through lib-common's EXIT trap (`lib-common.sh:337`; `dispatch-task.sh:94-95` documents it and uses `_flag_val`).
+- **The ERR trap fires INSIDE a command substitution.** `install_error_trap` arms `set -E` and an ERR trap that calls `emit_script_error` (`script_error` is `critical`, `registries.py:80`); bash fires that trap for a failing command inside `$( )` whatever surrounds the substitution — `if !`, `||`, `set +e` — measured (cycle 3), and re-measured for this cycle: a door that EXPECTS a nonzero child runs it as a **top-level `if` pipeline into a file** (form D: `if printf … | python3 … > "$tmp"; then`), which fires nothing on either path; a substitution form lands a `critical` row while the door says "nothing recorded".
 - **New `system` event kinds need NO migration and NO contract change** (`contracts.py:389-418`). Register severity with one line per kind in `claudlobby/plane/registries.py:54`.
 - **The `Assignment` payload is `_Strict` (`contracts.py:344`)** — the join is its own system event in the same batch.
 - **The plane is always on.** `plane_armed` (`lib-common.sh:495-524`) is opt-OUT: `PLANE_EMIT_DISABLED=1` is the only silencer.
 - **Emit from bash through `plane_emit_events <door> <<<"$batch"`** (a here-string, never a pipeline). Every `system` event is actor-anchored `"subject_kind":"actor","subject":"bot:<fleet>/<bot_id>"` — **`BOT_ID`, never `BOT_NAME`** (`lib-common.sh:1420`; `config.py:521`). Ids are minted by `plane_mint_id <prefix>` (`lib-common.sh:526-533`), never a private copy.
-- **Doors' rc ladder follows `task-act.sh:55-56`:** 0 acted · 1 usage · 2 refused · 3 the plane could not record.
-- **Skill grants** follow the shipped shapes: `Bash(<cmd> *)` for a command (`status/SKILL.md:6-8`), `Bash(*<script>*)` star-bounded with **no space** for a lib script (`restart/SKILL.md:4`), `mcp__plugin_telegram_telegram__reply` for posting. A pipeline is matched per subcommand (`permissions-model.md:52`), so a door is invoked directly with a here-doc, never through `cat |`. **Never `Bash(claudron *)`** — the boundary allows verbs only (`claudron-integration.md:29`; Invariant 5 `tests/test_boundary_invariants.py:275-292`): `Bash(claudron lookup *)`.
-- **Read doors:** unreachable ≠ empty — `refuse_unreachable("checkins", note)` (`commands/_helpers.py:160`, prints `UNREACHABLE` upper-case, rc 3). The shared plane session's connection **yields tuples** (`plane-readers.py:53-58`; `status.py:218`) — `plane_session` for the reachability/roster refusal, then `plane.db.open_ro(root)` (`commands/task.py:51`) for named rows.
+- **Doors' rc ladder follows `task-act.sh:55-56`:** 0 acted · 1 usage · 2 refused · 3 the plane could not record. A read door's usage error is rc 2 too (`--since` unparseable) — `report-back` uses rc 1 for the same case; the ladder wins here and the docstring says so.
+- **Skill grants** follow the shipped shapes: `Bash(<cmd> *)` for a command (`status/SKILL.md:6-8`), `Bash(*<script>*)` star-bounded with **no space** for a lib script (`restart/SKILL.md:4`), `mcp__plugin_telegram_telegram__reply` for posting. A pipeline is matched per subcommand (`permissions-model.md:52`), so a door is invoked directly with a here-doc, never through `cat |`. **Never `Bash(claudron *)`** — the boundary allows verbs only (`claudron-integration.md:29`; Invariant 5 `tests/test_boundary_invariants.py:275-292`): `Bash(claudron lookup *)`. `gh` gets the one verb it needs: `Bash(gh issue list *)`.
+- **`brief --json` degrades by MODE, not by presence.** Each `degraded[]` entry is `{field, mode, reason, issue, count}` (`brief.py:157-185`); `mode` is `labeled` (present, bounded) or `omitted` (absent by design). Captured live this cycle on a composed fleet: with no plane db every one of `dispatches.open/overdue/orphaned`, `workstreams`, `reports`, `alerts` arrives `omitted` (#1467); with a plane present the list is **never empty** — `alerts: labeled` (#903, `brief.py:823`, unconditional) and `dispatches.orphaned: labeled` (#1014) on every call, plus the standing `utilization: omitted` (#891). A rule that reads *any* entry naming a field as "unavailable" can never dispatch on a real fleet (cycle-1 B9 → cycle-2 B6 → cycle-3 B1); the rule keys on `mode == "omitted"`.
+- **Read doors:** unreachable ≠ empty — `refuse_unreachable("checkins", note)` (`commands/_helpers.py:160`, prints `UNREACHABLE` upper-case, rc 3). The shared plane session's connection **yields tuples** (`plane-readers.py:53-58`; `status.py:218`) — `plane_session` for the reachability/roster refusal, then `plane.db.open_ro(root)` (`commands/task.py:51`) for named rows. A fleet the plane has never seen refuses at rc 3 by `plane_session`'s roster rule (#1014's class) — inherited deliberately, pinned by test.
 - **Line numbers** are as of `main` @ `a96b47f`. Re-anchor by the symbol named beside a line, never by the number.
 - **Tests run unsandboxed; the baseline is red** (~46 failed / 2 errors on macOS). Under the sandbox, macOS `mktemp` ignores `TMPDIR` and `lib-common.sh`'s source-time `mktemp -d` fails — every bash-door test fails spuriously (the ~250-phantom mode CLAUDE.md documents). The gate is *names + counts* (Task 7), never `pytest | grep`; never pipe `claudlobby validate` or `diff` into `head`/`grep` — redirect to a file, read rc, then read the file.
-- **Test command form:** `./.venv/bin/pytest tests/<file>.py -q` from the worktree, whose `.venv` Task 0 creates. Pre-existing test files this plan names, all present on main: `tests/test_skill_ref_resolution.py`, `tests/test_task_id_dispatch.py`, `tests/test_dispatch_type.py`, `tests/test_dispatch_task.sh`, `tests/test_bash_parse.py`, `tests/test_plane_system_events.py`, `tests/test_main.py`, `tests/test_readme_library_counts.py`, `tests/test_boundary_invariants.py`.
-- **Operator config (`local/<fleet>/fleet.yaml`) is REPORTED, never edited by the executor**, and **no unmerged code ever runs on the live host**: the canary manager is equipped after merge and pull (Task 7 step 7).
+- **Test command form:** `./.venv/bin/pytest tests/<file>.py -q` from `$WT`, whose `.venv` Task 0 creates. Pre-existing test files this plan names, all present on main: `tests/test_skill_ref_resolution.py`, `tests/test_task_id_dispatch.py`, `tests/test_dispatch_type.py`, `tests/test_dispatch_task.sh`, `tests/test_bash_parse.py`, `tests/test_plane_system_events.py`, `tests/test_main.py`, `tests/test_readme_library_counts.py`, `tests/test_boundary_invariants.py`, and the twelve `tg-post.sh` suites Task 2 runs (`tests/test_tg_post.sh`, `test_creds_check_telegram.py`, `test_fleet_pulse_escalated.py`, `test_fleet_pulse_events_plane.py`, `test_maintenance_jobs.py`, `test_notify_behind.py`, `test_plane_gauntlet_doors.py`, `test_plane_events_door.py`, `test_alert_recipient.sh`, `test_system_defaults.py`, `test_orphan_browser_reaper.sh`, `test_host_health_check.sh`).
+- **Operator config (`local/<fleet>/fleet.yaml`) is REPORTED, never edited by the executor**, and **no unmerged code ever runs on the live host**: the canary manager is equipped after merge and pull (Task 7 step 7). Read-only queries against the live plane (Task 0) are the one thing that touches the host before merge.
 - **Commits:** message via `git commit -F <file>`; end every message with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 
 ## File structure
@@ -78,43 +82,47 @@ Every task's requirements include these. Exact values are copied from the spec a
 | Path | Responsibility |
 |---|---|
 | `lib/checkin-contract.py` | Stdlib contract for the schema-1 decision record: `normalize(obj, checkin_id)` lists every defect; CLI filter stdin → normalized JSON, rc 2 with reasons. |
-| `lib/checkin-record.sh` | The decision door: mint `ck_` id → validate → ONE `checkin_decision` system event, `source_ref checkin:<id>`. No flags but `--dry-run`/`--help`. |
-| `claudlobby/commands/checkins.py` | `claudlobby checkins` — rows newest first, `--last`, `--bot`, `--since`, `--json`; rc 3 on an unreachable plane. |
+| `lib/checkin-record.sh` | The decision door: mint `ck_` id → validate (form D) → ONE `checkin_decision` system event, `source_ref checkin:<id>`. No flags but `--dry-run`/`--help`; `--dry-run` prints `DRY-RUN <id>`. |
+| `claudlobby/commands/checkins.py` | `claudlobby checkins` — rows newest first, `--last`, `--bot`, `--since`, `--json`; text capped at 10 rows with a disclosure line; rc 3 on an unreachable plane. |
 | `library/protocols/checkin.md` | The check-in protocol: preamble (the precedence sentence), `## Manager` (the surfacing judgment; one line, one ask, one pointer), `## Worker` (one thin line on start/done/blocked). No `requires:`; no self-fire clause. |
-| `library/skills/checkin/SKILL.md` | The `/checkin` reasoning contract: READ 0–5 through named doors, DECIDE one project then one of `dispatch \| ask \| nothing`, RECORD before ACT, the per-input degraded rule, the surfacing judgment. |
+| `library/skills/checkin/SKILL.md` | The `/checkin` reasoning contract: READ 0–5 through named doors (incl. `claudlobby status --json` for who is idle), DECIDE one project then one of `dispatch \| ask \| nothing`, RECORD before ACT, the mode-keyed per-input degraded rule, the surfacing judgment, the follow-up rule for a failed ACT. |
 | `tests/test_checkin_contract.py` | The contract + the two severity registrations. |
-| `tests/test_checkin_doors.py` | `checkin-record.sh` (Task 1), `dispatch-task.sh --project/--checkin` and the `tg-post.sh` alias (Task 2) — stub transport, real plane. |
+| `tests/test_checkin_doors.py` | `checkin-record.sh` (Task 1), `dispatch-task.sh --project/--checkin` and the `tg-post.sh` alias (Task 2) — stub transport, real plane; a refusal on the real rig lands NO row. |
 | `tests/test_checkins_cli.py` | The read door over a seeded plane. |
-| `tests/test_checkin_library.py` | The protocol composes both sections; the skill is coupled to its doors by name; its grants match its own command lines and contain no forbidden wildcard. |
+| `tests/test_checkin_library.py` | The protocol composes both sections; the skill file is whole; the skill is coupled to its doors by name; its grants match its own command lines (whitespace-collapsed) and contain no forbidden wildcard. |
 
 **Modify**
 | Path | Change |
 |---|---|
-| `lib/dispatch-task.sh:5-24, 78-82, 104-117, 350-354, 395-405, 660-667, 681-689` | `--project KEY`, `--checkin ck_<32hex>`; `DISPATCH_PROJECT` opens the envelope gate; `project_key` on the work item; a `checkin_dispatch` system event appended to the batch AFTER the `emit_triple` gate; disclosure when `--checkin` rides an untracked dispatch. |
-| `lib/tg-post.sh:81` | sender alias `bot:$FLEET_NAME/$BOT_ID` (was `BOT_NAME`). |
-| `library/protocols/dispatch.md:29-34, 126` | `project:<key>` row in the envelope field table; `--project` in the tracked-dispatch recipe. |
+| `lib/dispatch-task.sh:5-24, 78-82, 104-117, 350-354, 395-405, 660-667, 681-689` | `--project KEY`, `--checkin ck_<32hex>`; `DISPATCH_PROJECT` opens the envelope gate; `project_key` on the work item; a `checkin_dispatch` system event appended to the batch AFTER the `emit_triple` gate, `task_id` null on an id-less dispatch; disclosure when `--checkin` rides an untracked dispatch. |
+| `lib/tg-post.sh:81` (+ the comment at `:64`) | sender alias `bot:$FLEET_NAME/${BOT_ID:-$BOT_NAME}` (was `BOT_NAME`; `set -u` at `:13`, hand callers set only `BOT_NAME`). |
+| `library/protocols/dispatch.md:29-34, 126` | `project:<key>` row in the envelope field table; `--project` in the tracked-dispatch recipe. (`worker-lifecycle.md` has no `workstream:` field list — measured 0 occurrences — so it is not touched.) |
 | `claudlobby/plane/registries.py:54-123` | two severity lines. |
-| `claudlobby/plane/queries.py` (append) | `CHECKIN_ROWS_SQL`. |
+| `claudlobby/plane/queries.py` (append) | `CHECKIN_ROWS_SQL` — the light form: `subject_alias, occurred_at, detail, detail_truncated, ingest_seq`. |
 | `claudlobby/commands/_parsers.py:189-197` + imports | registers `checkins` beside `workstreams` (a standalone import line after the `from .core import (…)` block). |
 | `lib/validate-bot-change.sh` (append a block) | the empirical gate for the record door and the read door. |
-| `README.md:145-146` | library counts 54 skills / 40 protocols / 93 lib scripts (`tests/test_readme_library_counts.py` pins them). |
-| `documentation/guides/observability.md` (question→door table), `CLAUDE.md` (lib table; `commands/` line; Key Commands), `CHANGELOG.md` | rows for the two lib scripts and `checkins`. |
+| `README.md:145-146` | library counts 54 skills / 40 protocols / **92** lib scripts — measured with `tests/test_readme_library_counts.py`'s own rule (it excludes `.py`, so `checkin-contract.py` does not count). |
+| `documentation/guides/observability.md` (question→door table, three cells), `CLAUDE.md` (lib table; `commands/` line → 15 files; Key Commands), `CHANGELOG.md` | rows for the two lib scripts and `checkins`. |
 
 **Sizing:** Task 0 S · Task 1 L · Task 2 M · Task 3 M · Task 4 M · Task 5 S · Task 6 S · Task 7 L in wall time (the gauntlet costs roughly Tasks 1–6 combined).
 
 ---
 
-### Task 0: Worktree, venv, baseline — and the two measurements this feature is judged on
+### Task 0: Worktree, venv, baseline — and the three measurements this feature is judged on
 
-**Files:** none changed. Produces the branch, the venv, the *before* leg every later gate diffs against, and the two pre-change baselines (fleet-scoped, outbound-only, instant-compared — cycle-2 R1).
+**Files:** none changed. Produces the branch, the venv, the *before* leg every later gate diffs against, and the pre-change baselines (fleet-scoped, outbound-only, instant-compared, split worker/manager and by carrier — cycle-2 R1, cycle-3 B7/B8).
+
+**Interfaces:** produces `$WT` (every later step runs from it), `$TMPDIR/before.txt` + `$TMPDIR/run_before.txt` (Task 7 step 3 diffs against them), `$CK_FLEET` / `$CK_MGR` / `$MINI_ROOT` (the canary names from ruling 13 and the host's install root — the directory `claudlobby-plane-daemon.plist` was composed for, NOT a `~/Projects` guess (the first three cycles assumed one; measured this cycle, it does not exist on the host) — set by the executor from the operator's words, **never** `ls | head -1`, never written into a committed file), and `$TMPDIR/baseline.md` (pasted into the PR body).
 
 - [ ] **Step 1: Worktree on a fresh branch off main**
 
 ```bash
+WT="$HOME/Projects/claudlobby-worktrees/ck1"      # the one path every later step uses
+mkdir -p "$(dirname "$WT")"
 cd /Users/chris/Projects/Claudlobby
 git fetch -q origin main
-git worktree add -b checkin/chunk1-record "$SCRATCH/ck1-wt" origin/main
-cd "$SCRATCH/ck1-wt" && git log --oneline -1
+git worktree add -b checkin/chunk1-record "$WT" origin/main
+cd "$WT" && git log --oneline -1
 ```
 Expected: one line, the tip of `origin/main`.
 
@@ -123,8 +131,9 @@ Expected: one line, the tip of `origin/main`.
 ```bash
 python3 -m venv .venv && ./.venv/bin/python -m pip install -q -e '.[dev]'
 ./.venv/bin/python -c "import claudlobby, pathlib; print(pathlib.Path(claudlobby.__file__).resolve())"
+ls .venv/bin/claudlobby
 ```
-Expected: a path under `$SCRATCH/ck1-wt/claudlobby/`. Any other path: stop — the editable finder is shadowing the worktree.
+Expected: a path under `$WT/claudlobby/` and the console script present (the door tests reach the plane through it via `PLANE_EMIT_CLI`). Any other path: stop — the editable finder is shadowing the worktree.
 
 - [ ] **Step 3: The before leg, names + counts (unsandboxed)**
 
@@ -135,34 +144,63 @@ wc -l < "$TMPDIR/before.txt"; tail -1 "$TMPDIR/run_before.txt"
 ```
 Expected: `rc=1` (the baseline is red) and a `N failed, M passed` line. rc 2/4/5/127 means the run did not complete.
 
-- [ ] **Step 4: The two baselines for the canary fleet, read-only, pasted into `$TMPDIR/baseline.md`**
+- [ ] **Step 4: The baselines for the canary fleet, read-only, pasted into `$TMPDIR/baseline.md`**
 
-Fleet-active % (any bot of THIS fleet BUSY per observed minute, last 7 days — the spike's definition, scoped) and the fleet's outbound Telegram volume (the fatigue number: messages SENT by this fleet's bots, never the operator's inbound). `<canary-fleet>` is the fleet name the operator named (ruling 13) — never `ls | head -1`. Instants are compared as instants (`strftime('%s', …)`), the rule `_epoch()` exists for. A plain `sqlite3` open is read-safe on the WAL db (`-readonly` is the CANTOPEN case `plane-readers._open` works around).
+The install root, the fleet and the manager are the three host facts the executor sets from the operator (the layout there is flat, `local/<fleet>/`, and the two-glob below covers a nested one too). Three activity numbers from ONE CTE over the fleet's `bot.heartbeat` samples (any bot BUSY per observed minute, last 7 days, the spike's definition scoped): **worker-active %** — the headline, every bot of the fleet EXCEPT the manager the loop runs in, because a ~2-minute check-in turn every 45 minutes is ~4 points of manager activity against a 5.3% baseline and must not score itself (cycle-3 B8) — beside **manager-active %** and **fleet-active %**. The manager's samples are excluded by uid: `keepalive.sh:124` emits the heartbeat with `subject_kind: bot_instance`, `subject: bot:<fleet>/<bot>`, and ingest resolves that alias to a registry row (`identity.py:19-49`, `UNIQUE (kind, alias)`), so `subject_uid NOT IN (SELECT uid FROM identity_registry WHERE kind = 'bot_instance' AND alias = 'bot:<fleet>/<manager>')` is the exclusion — the same join `queries.py:398-405` uses. The query REFUSES when that subquery finds no row (a misspelt manager would silently count as a worker) and when the fleet has no samples (`0/0`).
+
+The fatigue number is the fleet's outbound Telegram volume — messages SENT by this fleet's bots, never the operator's inbound — **by carrier**: `telegram-bridge` (the MCP reply hook, `plane-telegram-out.sh:13`) AND `telegram-tgpost` (`tg-post.sh:102`, the door every INJECTED check-in's `ask` posts through — a filter on the first alone is blind to 100% of trigger-fired asks, cycle-3 B7). One message with two attempts counts once (`COUNT(DISTINCT msg_id)`). Both queries were run on a seeded plane this cycle (worker 2/4, manager 2/4, fleet 3/4; bridge 1, tgpost 1, total 2 with a human inbound and a tmux send excluded).
+
+Instants are compared as instants (`strftime('%s', …)`), the rule `_epoch()` exists for. A plain `sqlite3` open is read-safe on the WAL db (`-readonly` is the CANTOPEN case `plane-readers._open` works around). The canary names ride the ssh command string as env assignments, so the quoted heredoc stays quoted.
 
 ```bash
-ssh -o BatchMode=yes mini 'bash -s' <<'EOF' | tee "$TMPDIR/baseline.md"
+CK_FLEET="…"   # the engineering fleet's name — ruling 13, as the operator spells it in local/*/<fleet>/fleet.yaml
+CK_MGR="…"     # its leaf manager's bot id
+MINI_ROOT="…"  # the claudlobby install root on the host (where state/plane/plane.db and .venv live)
+: "${CK_FLEET:?set CK_FLEET from ruling 13 first}"; : "${CK_MGR:?set CK_MGR from ruling 13 first}"; : "${MINI_ROOT:?set MINI_ROOT to the install root on the host}"
+ssh -o BatchMode=yes mini "CK_FLEET=$CK_FLEET CK_MGR=$CK_MGR MINI_ROOT=$MINI_ROOT bash -s" <<'EOF' | tee "$TMPDIR/baseline.md"
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
-DB=~/Projects/claudlobby/state/plane/plane.db
-FLEET="<canary-fleet>"
-echo "## baseline $(date -u +%F) fleet=$FLEET"
-sqlite3 "$DB" "
-WITH hb AS (
+cd "$MINI_ROOT" || exit 1
+DB=state/plane/plane.db
+echo "## baseline $(date -u +%FT%TZ) fleet=$CK_FLEET manager=$CK_MGR"
+ls local/"$CK_FLEET"/projects.yaml local/*/"$CK_FLEET"/projects.yaml 2>/dev/null \
+  || echo "projects.yaml: ABSENT for $CK_FLEET -- dispatch is unavailable to the skill by its own rule; the run can prove the record only"
+act=$(sqlite3 "$DB" "
+WITH mgr AS (SELECT uid FROM identity_registry WHERE kind = 'bot_instance' AND alias = 'bot:$CK_FLEET/$CK_MGR'),
+hb AS (
   SELECT strftime('%Y-%m-%d %H:%M', m.occurred_at) AS minute,
-         MAX(json_extract(m.value, '\$.state') = 'BUSY') AS busy
+         MAX(COALESCE(json_extract(m.value, '\$.state') = 'BUSY', 0) AND m.subject_uid NOT IN (SELECT uid FROM mgr)) AS worker_busy,
+         MAX(COALESCE(json_extract(m.value, '\$.state') = 'BUSY', 0) AND m.subject_uid IN (SELECT uid FROM mgr)) AS manager_busy
   FROM metric_samples m
   WHERE m.metric = 'bot.heartbeat'
-    AND m.fleet_uid = (SELECT uid FROM identity_registry WHERE kind = 'fleet' AND alias = '$FLEET')
+    AND m.fleet_uid = (SELECT uid FROM identity_registry WHERE kind = 'fleet' AND alias = '$CK_FLEET')
     AND strftime('%s', m.occurred_at) >= strftime('%s', 'now', '-7 days')
   GROUP BY minute)
-SELECT 'fleet_active_pct', ROUND(100.0 * SUM(busy) / COUNT(*), 1), SUM(busy) || '/' || COUNT(*) || ' minutes' FROM hb;"
+SELECT 'manager_uid_rows', COUNT(*), '' FROM mgr
+UNION ALL SELECT 'worker_active_pct', ROUND(100.0 * SUM(worker_busy) / COUNT(*), 1), SUM(worker_busy) || '/' || COUNT(*) || ' minutes' FROM hb
+UNION ALL SELECT 'manager_active_pct', ROUND(100.0 * SUM(manager_busy) / COUNT(*), 1), SUM(manager_busy) || '/' || COUNT(*) || ' minutes' FROM hb
+UNION ALL SELECT 'fleet_active_pct', ROUND(100.0 * SUM(worker_busy OR manager_busy) / COUNT(*), 1), SUM(worker_busy OR manager_busy) || '/' || COUNT(*) || ' minutes' FROM hb;")
+printf '%s\n' "$act"
+case "$act" in
+  *'manager_uid_rows|0'*) echo "REFUSED: no bot_instance row for bot:$CK_FLEET/$CK_MGR -- check the spelling: sqlite3 $DB \"SELECT alias FROM identity_registry WHERE kind='bot_instance'\""; exit 3 ;;
+  *'/0 minutes'*)         echo "REFUSED: no bot.heartbeat samples for fleet $CK_FLEET in 7 days -- the fleet alias spelling (sqlite3 $DB \"SELECT alias FROM identity_registry WHERE kind='fleet'\"), or keepalive is not emitting"; exit 3 ;;
+esac
 sqlite3 "$DB" "
-SELECT 'telegram_posts_out_7d', COUNT(*) FROM communications c
-WHERE c.sender_alias >= 'bot:$FLEET/' AND c.sender_alias < 'bot:$FLEET' || '0'
+SELECT 'telegram_posts_out_7d_' || car.carrier, COUNT(DISTINCT c.msg_id)
+FROM (SELECT 'telegram-bridge' AS carrier UNION ALL SELECT 'telegram-tgpost') car
+LEFT JOIN communications c
+  ON c.sender_alias >= 'bot:$CK_FLEET/' AND c.sender_alias < 'bot:$CK_FLEET' || '0'
+ AND strftime('%s', c.occurred_at) >= strftime('%s', 'now', '-7 days')
+ AND EXISTS (SELECT 1 FROM events t WHERE t.kind = 'transmission' AND t.msg_id = c.msg_id AND t.carrier = car.carrier)
+GROUP BY car.carrier
+UNION ALL
+SELECT 'telegram_posts_out_7d_total', COUNT(DISTINCT c.msg_id) FROM communications c
+WHERE c.sender_alias >= 'bot:$CK_FLEET/' AND c.sender_alias < 'bot:$CK_FLEET' || '0'
   AND strftime('%s', c.occurred_at) >= strftime('%s', 'now', '-7 days')
-  AND EXISTS (SELECT 1 FROM events t WHERE t.kind = 'transmission' AND t.msg_id = c.msg_id AND t.carrier = 'telegram-bridge');"
+  AND EXISTS (SELECT 1 FROM events t WHERE t.kind = 'transmission' AND t.msg_id = c.msg_id AND t.carrier IN ('telegram-bridge','telegram-tgpost'));"
 EOF
+echo "ssh rc=${PIPESTATUS[0]}"
 ```
-Expected: two rows with non-zero denominators. If the first query returns `0/0`, the fleet alias spelling is not the bare name — `sqlite3 "$DB" "SELECT alias FROM identity_registry WHERE kind='fleet'"` lists the spellings; fix the literal and re-run. If the heartbeat query still returns nothing, that fleet's keepalive is not emitting `bot.heartbeat`: record that fact as the baseline rather than a number. Both rows go into the PR body (Task 7).
+Expected: `manager_uid_rows|1`, three activity rows with a non-zero denominator, three carrier rows (a zero is a real zero — the carrier row is always printed), `ssh rc=0`. rc 3 is a refusal: fix the named spelling and re-run; if the heartbeat query still returns nothing, that fleet's keepalive is not emitting `bot.heartbeat` — record that fact as the baseline rather than a number. Every row goes into the PR body (Task 7); worker-active % is the number chunk 4 judges against (spec §11, §12.4).
 
 ---
 
@@ -174,23 +212,25 @@ Expected: two rows with non-zero denominators. If the first query returns `0/0`,
 - Test: `tests/test_checkin_contract.py`, `tests/test_checkin_doors.py` (the record half)
 
 **Interfaces:**
-- Produces: `checkin-contract.py`: `normalize(obj, *, checkin_id=None) -> dict` (raises `ContractError(reasons)`; the door supplies `checkin_id`, minted by `plane_mint_id ck`; the contract validates its shape and never mints), CLI `python3 checkin-contract.py [--checkin-id ck_<32hex>] < decision.json` rc 0/2. `checkin-record.sh [--dry-run] < decision.json` → stdout `ck_<32hex>`; rc 0 recorded · 1 usage (unknown flag, no identity) · 2 contract refused · 3 plane could not record (or silenced). Identity is `BOT_ID` + `FLEET_NAME` from the environment only (no flags — nothing consumed them; cycle-2 gap). Plane row: `kind='system'`, `event='checkin_decision'`, `source_ref='checkin:<ck_id>'`, `subject_alias='bot:<fleet>/<bot_id>'`, `severity='notice'`, `detail` = the normalized record.
+- Produces: `checkin-contract.py`: `normalize(obj, *, checkin_id=None) -> dict` (raises `ContractError(reasons)`; the door supplies `checkin_id`, minted by `plane_mint_id ck`; the contract validates its shape and never mints), CLI `python3 checkin-contract.py [--checkin-id ck_<32hex>] < decision.json` rc 0/2. `checkin-record.sh [--dry-run] < decision.json` → stdout `ck_<32hex>` (`DRY-RUN ck_<32hex>` under `--dry-run`, so a dry id can never be mistaken for a recorded one); rc 0 recorded · 1 usage (unknown flag, no identity) · 2 contract refused · 3 plane could not record (or silenced). Identity is `BOT_ID` + `FLEET_NAME` from the environment only (no flags — nothing consumed them; cycle-2 gap). Plane row: `kind='system'`, `event='checkin_decision'`, `source_ref='checkin:<ck_id>'`, `subject_alias='bot:<fleet>/<bot_id>'`, `severity='notice'`, `detail` = the normalized record. **A refusal lands no row of any kind** — the contract runs as a form-D pipeline, so the ERR trap never fires (cycle-3 B2).
 - Schema 1 (the whole of it; `propose`, `sprint`, `focus_*` arrive as schema 2):
 
 ```json
-{ "schema": 1, "checkin_id": "ck_<32hex>", "prev_checkin_id": "ck_<32hex> | null",
-  "inputs_seen": { "open_tasks": 0, "stalls": 0, "unacked": 0, "issues_considered": 0,
-                   "knowledge_hits": 0,
-                   "considered": ["<candidate> — <why not chosen>", "..."],
+{ "schema": 1, "checkin_id": "ck_<32hex>", "prev_checkin_id": "ck_<32hex> | null  (REQUIRED: null = READ 0 answered none)",
+  "inputs_seen": { "open_tasks": "int | null", "stalls": "int | null", "unacked": "int | null",
+                   "issues_seen": "int | null  (the RAW backlog count, before the mission filter)",
+                   "issues_considered": "int | null  (after it)", "knowledge_hits": "int | null",
+                   "considered": ["<candidate> — <why not chosen>", "... non-empty when action is dispatch"],
                    "unavailable": ["gh"] },
-  "delta": { "tasks_opened": 0, "tasks_completed": 0, "stalls_appeared": 0, "stalls_cleared": 0,
-             "issues_new": 0, "messages_new": null, "held_pending": 0 },
+  "delta": { "tasks_opened": "int | null", "tasks_completed": "int | null", "stalls_appeared": "int | null",
+             "stalls_cleared": "int | null", "issues_new": "int | null", "messages_new": "int | null",
+             "held_pending": "int | null" },
   "action": "dispatch | ask | nothing",
-  "project_key": "<slug or null>",
+  "project_key": "<slug> | null  (a slug is REQUIRED for dispatch)",
   "rationale": "<= 600 chars",
-  "raise": { "decided": false, "reason": "<non-empty, <= 600>", "held": ["<= 10 items"] } }
+  "raise": { "decided": "true | false  (true is REQUIRED for ask)", "reason": "<non-empty, <= 600>", "held": ["<= 10 items"] } }
 ```
-`considered` is the losers list — what was weighed and passed over, one line each — because "a selector can only be judged against what it did NOT pick" (`lib/sprint-selection-record.py:11-24`, Phase 0 of #974; cycle-2 B8). Every `delta` count is `int | null`, **null = could not measure, never 0** (cycle-1 R17). `raise.reason` is required non-empty and capped like `rationale` (cycle-2 R8). Every list ≤ 10 strings of ≤ 200 chars, so the record stays far under the 16 KiB cap.
+`considered` is the losers list — what was weighed and passed over, one line each — because "a selector can only be judged against what it did NOT pick" (`lib/sprint-selection-record.py:11-24`, Phase 0 of #974; cycle-2 B8), and on `dispatch` it must be non-empty (cycle-3 R4). `issues_seen` beside `issues_considered` is the other half of that module's rule (`:26-42`): without the raw count a typo'd `PROJECT_REPOS_*` and a genuinely empty backlog produce the same row — F1's 1d gate. **Every count in `inputs_seen` and `delta` is `int | null`, null = could not measure, never 0, and a MISSING count is a defect, not a 0** (cycle-1 R17, cycle-3 B3). `prev_checkin_id` is required so a skipped READ 0 cannot record as a first check-in (cycle-3 gap). `raise.reason` is required non-empty and capped like `rationale` (cycle-2 R8). Every list ≤ 10 strings of ≤ 200 chars, so the record stays far under the 16 KiB cap (7,887 bytes maximal, measured).
 
 - [ ] **Step 1: Write the failing contract tests**
 
@@ -219,12 +259,14 @@ _spec = importlib.util.spec_from_file_location("checkin_contract", CONTRACT)
 cc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cc)
 
+INPUTS = {"open_tasks": 2, "stalls": 0, "unacked": 1, "issues_seen": 9, "issues_considered": 4,
+          "knowledge_hits": 1, "considered": ["#12 flaky test — not mission work"], "unavailable": []}
+
 
 def _decision(**over) -> dict:
     d = {
-        "inputs_seen": {"open_tasks": 2, "stalls": 0, "unacked": 1, "issues_considered": 4,
-                        "knowledge_hits": 1, "considered": ["#12 flaky test — not mission work"],
-                        "unavailable": []},
+        "prev_checkin_id": None,
+        "inputs_seen": dict(INPUTS),
         "delta": {"tasks_opened": 0, "tasks_completed": 1, "stalls_appeared": 0,
                   "stalls_cleared": 0, "issues_new": 1, "messages_new": None, "held_pending": 0},
         "action": "nothing",
@@ -242,6 +284,7 @@ def test_a_decision_normalizes_with_the_door_supplied_id():
     assert out["prev_checkin_id"] is None
     assert out["delta"]["messages_new"] is None          # null survives: could not measure
     assert out["delta"]["tasks_completed"] == 1
+    assert out["inputs_seen"]["issues_seen"] == 9 and out["inputs_seen"]["issues_considered"] == 4
     assert out["inputs_seen"]["considered"] == ["#12 flaky test — not mission work"]
     assert "targets" not in out and "focus_declared" not in out["inputs_seen"]
 
@@ -257,6 +300,37 @@ def test_prev_is_kept():
     assert out["prev_checkin_id"] == PREV
 
 
+def test_prev_checkin_id_is_required_so_a_skipped_read_0_cannot_pose_as_a_first_checkin():
+    d = _decision()
+    del d["prev_checkin_id"]
+    with pytest.raises(cc.ContractError) as exc:
+        cc.normalize(d, checkin_id=CK)
+    assert any("prev_checkin_id required" in r for r in exc.value.reasons)
+
+
+def test_an_input_count_the_manager_could_not_measure_is_null_never_zero():
+    seen = {**INPUTS, "issues_seen": None, "issues_considered": None}
+    out = cc.normalize(_decision(inputs_seen=seen), checkin_id=CK)
+    assert out["inputs_seen"]["issues_seen"] is None and out["inputs_seen"]["issues_considered"] is None
+
+
+def test_a_missing_input_count_is_a_defect_not_a_zero():
+    seen = {k: v for k, v in INPUTS.items() if k != "stalls"}
+    with pytest.raises(cc.ContractError) as exc:
+        cc.normalize(_decision(inputs_seen=seen), checkin_id=CK)
+    assert any("inputs_seen.stalls required" in r for r in exc.value.reasons)
+
+
+def test_dispatch_must_record_its_losers():
+    d = _decision(action="dispatch", project_key="shop")
+    d["inputs_seen"]["considered"] = []
+    with pytest.raises(cc.ContractError) as exc:
+        cc.normalize(d, checkin_id=CK)
+    assert any("inputs_seen.considered non-empty" in r for r in exc.value.reasons)
+    d["inputs_seen"]["considered"] = ["#12 flaky test — not mission work"]
+    assert cc.normalize(d, checkin_id=CK)["action"] == "dispatch"
+
+
 @pytest.mark.parametrize("over, needle", [
     ({"action": "dispatch"}, "must name project_key"),
     ({"action": "ask"}, "raise.decided"),
@@ -266,9 +340,9 @@ def test_prev_is_kept():
     ({"rationale": ""}, "rationale"),
     ({"project_key": "Not-A-Slug"}, "project_key"),
     ({"prev_checkin_id": "nope"}, "prev_checkin_id"),
-    ({"inputs_seen": {"open_tasks": -1}}, "inputs_seen.open_tasks"),
-    ({"inputs_seen": {"considered": ["x"] * 11}}, "inputs_seen.considered"),
-    ({"inputs_seen": {"considered": ["x" * 201]}}, "inputs_seen.considered"),
+    ({"inputs_seen": {**INPUTS, "open_tasks": -1}}, "inputs_seen.open_tasks"),
+    ({"inputs_seen": {**INPUTS, "considered": ["x"] * 11}}, "inputs_seen.considered"),
+    ({"inputs_seen": {**INPUTS, "considered": ["x" * 201]}}, "inputs_seen.considered"),
     ({"delta": {"tasks_opened": -1}}, "delta.tasks_opened"),
     ({"raise": {"decided": False, "reason": ""}}, "raise.reason"),
     ({"raise": {"decided": False, "reason": "r" * 601}}, "raise.reason must be <= 600"),
@@ -350,10 +424,15 @@ The DOOR mints the id (lib-common's plane_mint_id, the one mint every door
 uses); this module validates its shape and never mints. Schema 1 is the record
 ONE hand-equipped manager can produce this chunk: actions dispatch | ask |
 nothing. Later chunks ADD (propose, sprint, focus fields) as schema 2. Every
-`delta` count is int | null -- null means "could not measure" and is never
-collapsed to 0, because an unchanged delta is the skill's primary argument for
-silence. `inputs_seen.considered` is the losers list: a selector can only be
-judged against what it did NOT pick (lib/sprint-selection-record.py, #974).
+count in `inputs_seen` and `delta` is int | null -- null means "could not
+measure" and is never collapsed to 0, because an unchanged delta is the skill's
+primary argument for silence -- and a MISSING count is a defect, not a 0.
+`inputs_seen.considered` is the losers list: a selector can only be judged
+against what it did NOT pick (lib/sprint-selection-record.py, #974), so on
+`dispatch` it must be non-empty; `issues_seen` beside `issues_considered` is
+that module's other rule -- the raw count before the filter, so a broken filter
+and an empty backlog do not produce the same row. `prev_checkin_id` is required
+(null = READ 0 answered "none") so a skipped read cannot pose as a first check-in.
 """
 from __future__ import annotations
 
@@ -366,7 +445,7 @@ ACTIONS = ("dispatch", "ask", "nothing")
 TEXT_MAX = 600
 LIST_MAX = 10
 ITEM_MAX = 200
-INPUTS_COUNTS = ("open_tasks", "stalls", "unacked", "issues_considered", "knowledge_hits")
+INPUTS_COUNTS = ("open_tasks", "stalls", "unacked", "issues_seen", "issues_considered", "knowledge_hits")
 INPUTS_LISTS = ("considered", "unavailable")
 DELTA_COUNTS = ("tasks_opened", "tasks_completed", "stalls_appeared", "stalls_cleared",
                 "issues_new", "messages_new", "held_pending")
@@ -406,6 +485,8 @@ def normalize(obj, *, checkin_id: str | None = None) -> dict:
     elif not ID_RE.match(str(cid)):
         bad.append("checkin_id must be ck_<32 hex>")
     out["checkin_id"] = cid
+    if "prev_checkin_id" not in obj:
+        bad.append("prev_checkin_id required (null = READ 0 answered: no previous check-in)")
     prev = obj.get("prev_checkin_id")
     if prev is not None and not ID_RE.match(str(prev)):
         bad.append("prev_checkin_id must be ck_<32 hex> or null")
@@ -417,9 +498,13 @@ def normalize(obj, *, checkin_id: str | None = None) -> dict:
         seen = {}
     out["inputs_seen"] = {}
     for k in INPUTS_COUNTS:
-        v = seen.get(k, 0)
-        if not _count(v):
-            bad.append(f"inputs_seen.{k} must be a non-negative integer")
+        if k not in seen:
+            bad.append(f"inputs_seen.{k} required (a non-negative integer, or null = could not measure)")
+            out["inputs_seen"][k] = None
+            continue
+        v = seen[k]
+        if v is not None and not _count(v):
+            bad.append(f"inputs_seen.{k} must be a non-negative integer or null (null = could not measure)")
         out["inputs_seen"][k] = v
     for k in INPUTS_LISTS:
         v = seen.get(k, [])
@@ -449,6 +534,8 @@ def normalize(obj, *, checkin_id: str | None = None) -> dict:
     out["project_key"] = pk
     if action == "dispatch" and pk is None:
         bad.append("action dispatch must name project_key")
+    if action == "dispatch" and not out["inputs_seen"]["considered"]:
+        bad.append("action dispatch needs inputs_seen.considered non-empty (a selector is judged by what it did NOT pick)")
 
     rationale = obj.get("rationale")
     if not _text(rationale):
@@ -517,7 +604,8 @@ Expected: all pass.
 dispatch-task.sh --project / --checkin plus the tg-post.sh alias (Task 2).
 Two rigs: a STUB lib-common that captures the batch (tests/test_briefing_trigger.py's
 shape), and the REAL shim landing rows in a scratch plane through the cold CLI
-rung (tests/test_task_id_dispatch.py's _fake_lib / plane_env)."""
+rung (tests/test_task_id_dispatch.py's _fake_lib / plane_env). Only the real rig
+carries lib-common's ERR trap, so the refusal case runs there too."""
 
 from __future__ import annotations
 
@@ -542,6 +630,7 @@ install_error_trap() { :; }
 trap 'true' EXIT
 plane_armed() { [ "${PLANE_EMIT_DISABLED:-0}" != "1" ]; }
 plane_mint_id() { printf '%s_%s' "$1" "${STUB_MINT_HEX:-0123456789abcdef0123456789abcdef}"; }
+safe_mktemp() { mktemp "${TMPDIR:-/tmp}/ck-stub.XXXXXXXX"; }
 json_escape() { printf '%s' "$1" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read())[1:-1])'; }
 show_help() { awk 'NR == 1 { next } /^[^#]/ { exit } { sub(/^# ?/, ""); print }' "$1"; }
 plane_emit_events() { cat > "$EMIT_CAPTURE"; PLANE_EMIT_LAST_RC="${STUB_EMIT_RC:-0}"; }
@@ -551,7 +640,10 @@ STUB_CK = "ck_0123456789abcdef0123456789abcdef"
 
 
 def _decision() -> dict:
-    return {"inputs_seen": {"open_tasks": 1}, "delta": {}, "action": "nothing", "project_key": None,
+    return {"prev_checkin_id": None,
+            "inputs_seen": {"open_tasks": 1, "stalls": 0, "unacked": 0, "issues_seen": None,
+                            "issues_considered": 0, "knowledge_hits": 0, "considered": [], "unavailable": ["gh"]},
+            "delta": {}, "action": "nothing", "project_key": None,
             "rationale": "nothing worth starting",
             "raise": {"decided": False, "reason": "no delta", "held": []}}
 
@@ -564,7 +656,7 @@ def _stub_rig(tmp_path: Path) -> tuple[Path, dict]:
         shutil.copy(LIB / name, lib / name)
         (lib / name).chmod(0o755)
     env = {"EMIT_CAPTURE": str(tmp_path / "emit.json"), "FLEET_NAME": "f", "BOT_ID": "mgr",
-           "PATH": os.environ["PATH"]}
+           "TMPDIR": str(tmp_path), "PATH": os.environ["PATH"]}
     return lib, env
 
 
@@ -590,6 +682,7 @@ def test_record_lands_one_actor_anchored_decision_with_the_shared_mint(tmp_path)
     assert e["payload"]["event"] == "checkin_decision"
     assert e["payload"]["subject_kind"] == "actor" and e["payload"]["subject"] == "bot:f/mgr"
     assert e["payload"]["data"]["checkin_id"] == STUB_CK and e["payload"]["data"]["action"] == "nothing"
+    assert e["payload"]["data"]["inputs_seen"]["issues_seen"] is None      # could not measure, kept null
 
 
 def test_record_prefers_bot_id_over_bot_name(tmp_path):
@@ -634,11 +727,14 @@ def test_record_unknown_flag_is_rc_1(tmp_path):
     assert r.returncode == 1 and "unknown flag" in r.stderr and r.stdout == ""
 
 
-def test_record_dry_run_validates_and_writes_nothing(tmp_path):
+def test_record_dry_run_validates_prefixes_the_id_and_writes_nothing(tmp_path):
     lib, env = _stub_rig(tmp_path)
     r = _run(lib, "checkin-record.sh", env, json.dumps(_decision()), "--dry-run")
-    assert r.returncode == 0 and r.stdout.strip() == STUB_CK
+    assert r.returncode == 0 and r.stdout.strip() == f"DRY-RUN {STUB_CK}"   # never mistakable for a recorded id
     assert not Path(env["EMIT_CAPTURE"]).exists()
+    bad = _decision(); bad["action"] = "coffee"
+    r = _run(lib, "checkin-record.sh", env, json.dumps(bad), "--dry-run")
+    assert r.returncode == 2 and r.stdout == ""                             # validation IS the dry run's point
 
 
 def test_record_help_prints_the_whole_header(tmp_path):
@@ -665,6 +761,13 @@ def _real_rig(tmp_path: Path) -> tuple[Path, dict]:
     return lib, env
 
 
+def _rows(root: Path) -> list[tuple]:
+    if not (root / "state" / "plane" / "plane.db").exists():
+        return []
+    with _ro(root) as conn:
+        return [tuple(r) for r in conn.execute("SELECT kind, event, severity FROM events")]
+
+
 def test_the_decision_lands_on_a_real_plane(tmp_path):
     lib, env = _real_rig(tmp_path)
     r = _run(lib, "checkin-record.sh", env, json.dumps(_decision()))
@@ -679,6 +782,18 @@ def test_the_decision_lands_on_a_real_plane(tmp_path):
     assert row["severity"] == "notice" and row["source_ref"] == f"checkin:{ck}"
     assert row["subject_alias"] == "bot:f/mgr" and row["detail_truncated"] == 0
     assert json.loads(row["detail"])["action"] == "nothing"
+    assert _rows(Path(env["CLAUDLOBBY_ROOT"])) == [("system", "checkin_decision", "notice")]   # and nothing else
+
+
+def test_a_refused_decision_leaves_no_row_at_all_on_a_real_plane(tmp_path):
+    # cycle-3 B2: under the REAL lib-common the ERR trap fires inside a command
+    # substitution and lands a critical script_error while the door says "nothing
+    # recorded"; the door runs the contract as a form-D pipeline so nothing fires
+    lib, env = _real_rig(tmp_path)
+    bad = _decision(); bad["action"] = "coffee"
+    r = _run(lib, "checkin-record.sh", env, json.dumps(bad))
+    assert r.returncode == 2 and "nothing recorded" in r.stderr and r.stdout == ""
+    assert _rows(Path(env["CLAUDLOBBY_ROOT"])) == []
 ```
 
 - [ ] **Step 7: Run them to verify they fail**
@@ -699,8 +814,8 @@ Expected: every test fails on the missing `lib/checkin-record.sh`.
 # a reader joins on.
 #
 # Usage: checkin-record.sh [--dry-run] < decision.json
-#   stdout: the checkin_id (one line)
-#   exit:   0 recorded (committed or spooled)
+#   stdout: the checkin_id (one line); DRY-RUN <checkin_id> under --dry-run
+#   exit:   0 recorded (committed or spooled), or validated under --dry-run
 #           1 usage (unknown flag; no identity)
 #           2 contract refused (every reason on stderr; nothing recorded)
 #           3 the plane could not record (disclosed; nothing recorded)
@@ -735,13 +850,23 @@ fi
 
 checkin_id=$(plane_mint_id ck)
 raw=$(cat)
-if ! normalized=$(printf '%s' "$raw" | python3 "$LIB_DIR/checkin-contract.py" --checkin-id "$checkin_id"); then
+tmp=$(safe_mktemp)
+# The contract runs as a top-level pipeline into a file, never inside a
+# command substitution: install_error_trap arms an ERR trap that bash fires
+# INSIDE a substitution whatever the surrounding if/||/set +e (measured), and
+# that trap lands a critical script_error row -- a refused decision must
+# record NOTHING. A failing pipeline as an if-condition fires no trap.
+if printf '%s' "$raw" | python3 "$LIB_DIR/checkin-contract.py" --checkin-id "$checkin_id" > "$tmp"; then
+    normalized=$(cat "$tmp")
+    rm -f "$tmp"
+else
+    rm -f "$tmp"
     printf 'checkin-record: decision refused (nothing recorded)\n' >&2
     exit 2
 fi
 
 if [ "$DRY" = "1" ]; then
-    printf '%s\n' "$checkin_id"
+    printf 'DRY-RUN %s\n' "$checkin_id"
     exit 0
 fi
 if ! plane_armed checkin-record; then
@@ -760,18 +885,18 @@ fi
 printf '%s\n' "$checkin_id"
 ```
 
-`chmod 0755 lib/checkin-record.sh lib/checkin-contract.py`. The header is one contiguous `#` block from line 2 (`show_help` prints from line 2 to the first non-`#` line).
+`chmod 0755 lib/checkin-record.sh lib/checkin-contract.py`. The header is one contiguous `#` block from line 2 (`show_help` prints from line 2 to the first non-`#` line). `safe_mktemp` is lib-common's (`:339`).
 
 - [ ] **Step 9: Run the door tests to verify they pass**
 
 Run: `./.venv/bin/pytest tests/test_checkin_doors.py tests/test_bash_parse.py -q` (unsandboxed)
-Expected: all pass. `test_the_decision_lands_on_a_real_plane` proves the shim's cold rung records; its "daemon unavailable — falling back to cold CLI" stderr line is expected.
+Expected: all pass. `test_the_decision_lands_on_a_real_plane` proves the shim's cold rung records; its "daemon unavailable — falling back to cold CLI" stderr line is expected. `test_a_refused_decision_leaves_no_row_at_all_on_a_real_plane` is the trap pin: it fails on any command-substitution form of the contract call.
 
 - [ ] **Step 10: Commit**
 
 ```bash
 git add lib/checkin-contract.py lib/checkin-record.sh claudlobby/plane/registries.py tests/test_checkin_contract.py tests/test_checkin_doors.py
-printf '%s\n' 'feat(checkin): the decision record — schema-1 contract and the record door' '' 'lib/checkin-contract.py (stdlib) refuses a malformed decision with every reason;' 'the door mints the id via plane_mint_id, the contract only validates it. The' 'record carries the losers (inputs_seen.considered — a selector is judged by' 'what it did not pick, #974), null delta counts (could not measure), and a' 'capped, required raise.reason. lib/checkin-record.sh lands ONE actor-anchored' 'checkin_decision (BOT_ID alias, source_ref checkin:<id>), task-act rc ladder.' 'Spec §7.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c1.txt"
+printf '%s\n' 'feat(checkin): the decision record — schema-1 contract and the record door' '' 'lib/checkin-contract.py (stdlib) refuses a malformed decision with every reason;' 'the door mints the id via plane_mint_id, the contract only validates it. The' 'record carries the losers (inputs_seen.considered, non-empty on dispatch — a' 'selector is judged by what it did not pick, #974), the raw backlog count beside' 'the filtered one, null counts (could not measure; a missing count is a defect),' 'a required prev_checkin_id and a capped, required raise.reason.' 'lib/checkin-record.sh lands ONE actor-anchored checkin_decision (BOT_ID alias,' 'source_ref checkin:<id>), task-act rc ladder; the contract runs as a pipeline' 'into a file so a refusal fires no ERR trap and lands no row. Spec §7.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c1.txt"
 git commit -q -F "$TMPDIR/c1.txt" && git log --oneline -1
 ```
 
@@ -780,11 +905,12 @@ git commit -q -F "$TMPDIR/c1.txt" && git log --oneline -1
 ### Task 2: `dispatch-task.sh --project` and `--checkin`; the `tg-post.sh` alias; the envelope docs
 
 **Files:**
-- Modify: `lib/dispatch-task.sh:5-24` (flag docs), `:78-82` (init), `:104-117` (parse), `:350-354` (the envelope gate), `:395-405` (envelope), `:660-667` (after the `emit_triple` gate — the join block), `:681-689` (the batch); `lib/tg-post.sh:81`; `library/protocols/dispatch.md:29-34, 126`
+- Modify: `lib/dispatch-task.sh:5-24` (flag docs), `:78-82` (init), `:104-117` (parse), `:350-354` (the envelope gate), `:395-405` (envelope), `:660-667` (after the `emit_triple` gate — the join block), `:681-689` (the batch); `lib/tg-post.sh:64, 81`; `library/protocols/dispatch.md:29-34, 126`
 - Test: `tests/test_checkin_doors.py` (append the Task 2 half)
 
 **Interfaces:**
-- Produces: `--project KEY` (slug; `| project:KEY` in the envelope; opens the envelope gate; `project_key` on the work item — the fix for the measured 0/374). `--checkin ck_<32hex>`: one `system` event `checkin_dispatch` appended to the dispatch batch AFTER the `emit_triple` gate (`:660-663`) — `source_ref` = the dispatch ref, actor = `safe_sender` (the same alias the batch writes as `assigned_by`), `data = {checkin_id, assignment_id, work_item_id, task_id}` — atomic with the assignment. On an untracked dispatch (a control type, or no ref) it is **disclosed** on stderr, never silently dropped (the `--supersedes` precedent at `:645`). `tg-post.sh` writes `bot:$FLEET_NAME/$BOT_ID` so every door shares one alias rule. `checkin_dispatch`'s reader is chunk 3's outcome join (`claudlobby events` prefix-filters `fleet-events:`); the real-plane test below proves the row lands.
+- Consumes: Task 1 step 3's severity line (the join test asserts `severity == "notice"`), `_flag_val` (`dispatch-task.sh:94-95`), `safe_sender` (`:585-586`), `emit_triple` (`:660-663`), `sup_ev` (`:642`), `json_escape`.
+- Produces: `--project KEY` (slug; `| project:KEY` in the envelope; opens the envelope gate; `project_key` on the work item — the fix for the measured 0/374). `--checkin ck_<32hex>`: one `system` event `checkin_dispatch` appended to the dispatch batch AFTER the `emit_triple` gate (`:660-663`) — `source_ref` = the dispatch ref, actor = `safe_sender` (the same alias the batch writes as `assigned_by`), `data = {checkin_id, assignment_id, work_item_id, task_id}` where `task_id` is **null** on an id-less dispatch (a flagless `task` send is tracked — measured this cycle: one assignment, `dispatch-log:sha:` ref — but mints no legacy id, cycle-3 gap) — atomic with the assignment. On an untracked dispatch (a control type, or no ref) it is **disclosed** on stderr, never silently dropped (the `--supersedes` precedent at `:645`). `tg-post.sh` writes `bot:$FLEET_NAME/${BOT_ID:-$BOT_NAME}`: the id where a session exports one, the name where a hand caller sets only that (`bot-sweep-cron.sh:24`) — under `set -u` (`tg-post.sh:13`) a bare `$BOT_ID` would be an unbound-variable fault for those callers (cycle-3 R3). `checkin_dispatch`'s reader is chunk 3's outcome join (`claudlobby events` prefix-filters `fleet-events:`); the real-plane test below proves the row lands.
 
 - [ ] **Step 1: Append the failing tests**
 
@@ -835,6 +961,20 @@ def test_dispatch_checkin_appends_the_join_row_to_the_same_batch(tmp_path):
     assert link["subject_uid"] == asg["assigned_by_uid"]      # the dispatcher, by the plane's own alias rule
 
 
+def test_dispatch_checkin_on_an_id_less_task_dispatch_records_task_id_null(tmp_path):
+    # a flagless task send is TRACKED (#1491: the gate is the type) but mints no
+    # legacy id, so the join carries task_id null -- never "" (cycle-3 gap)
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+    env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
+    r = _bash(f'"{libdir}/dispatch-task.sh" --checkin {CK} w1 "fix the feed"', env=env)
+    assert r.returncode == 0, r.stderr
+    with _ro(tmp_path) as conn:
+        asg = conn.execute("SELECT source_ref FROM assignments").fetchone()
+        link = conn.execute("SELECT detail FROM events WHERE kind='system' AND event='checkin_dispatch'").fetchone()
+    assert asg is not None and asg["source_ref"].startswith("dispatch-log:sha:")
+    assert link is not None and json.loads(link["detail"])["task_id"] is None
+
+
 def test_dispatch_checkin_on_an_untracked_dispatch_is_disclosed_not_dropped(tmp_path):
     libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
@@ -860,16 +1000,16 @@ def test_dispatch_checkin_without_a_value_is_rc_1_never_0(tmp_path):
     assert r.returncode == 1 and "--checkin needs a value" in r.stderr and r.stdout == ""
 
 
-def test_tg_post_anchors_the_sender_on_bot_id():
+def test_tg_post_anchors_the_sender_on_bot_id_with_the_hand_caller_fallback():
     text = (LIB / "tg-post.sh").read_text()
-    assert 'bot:$FLEET_NAME/$BOT_ID' in text
-    assert 'bot:$FLEET_NAME/$BOT_NAME' not in text
+    assert 'bot:$FLEET_NAME/${BOT_ID:-$BOT_NAME}' in text        # a session has BOT_ID; bot-sweep-cron.sh sets only BOT_NAME
+    assert 'bot:$FLEET_NAME/$BOT_NAME"' not in text
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `./.venv/bin/pytest tests/test_checkin_doors.py -q -k "dispatch or tg_post"` (unsandboxed)
-Expected: 7 failed — `unknown flag '--project'` / `'--checkin'`, and the alias assertion.
+Expected: 8 failed — `unknown flag '--project'` / `'--checkin'`, and the alias assertion.
 
 - [ ] **Step 3: The flags**
 
@@ -908,7 +1048,7 @@ if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORI
 ```
 (f) **The join block — AFTER the `emit_triple` gate, beside `link_frag`** (`:660-667`; cycle-2 B1: placed before `:660`, `emit_triple` is unbound under `set -u` and the whole dispatch is lost). Replace the two lines `local link_frag="" ws_frag="" repo_frag="" deadline_frag="" iso_deadline=""` / `if [ -n "$emit_triple" ]; then … fi` with:
 ```bash
-    local link_frag="" ws_frag="" repo_frag="" proj_frag="" deadline_frag="" iso_deadline="" ck_ev=""
+    local link_frag="" ws_frag="" repo_frag="" proj_frag="" deadline_frag="" iso_deadline="" ck_ev="" ck_tid=""
     if [ -n "$emit_triple" ]; then
         link_frag="\"work_item_id\":\"$PLANE_WI_ID\",\"assignment_id\":\"$PLANE_ASG_ID\","
     fi
@@ -916,16 +1056,19 @@ if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORI
     # dispatch (RECORD before ACT), and the Assignment payload is strict, so
     # the link is its own system event in the SAME batch -- the supersede
     # precedent below. Only a tracked dispatch has an assignment to join; an
-    # untracked one says so, like a --supersedes that found nothing.
+    # untracked one says so, like a --supersedes that found nothing. A tracked
+    # but id-less send (no envelope flag) carries task_id null, never "".
     if [ -n "$DISPATCH_CHECKIN" ]; then
         if [ -n "$emit_triple" ]; then
-            ck_ev="{\"event_type\":\"system\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"checkin_dispatch\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"checkin_id\":\"$DISPATCH_CHECKIN\",\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"task_id\":\"$(json_escape "$TASK_ID")\"}}}"
+            ck_tid="null"
+            [ -n "$TASK_ID" ] && ck_tid="\"$(json_escape "$TASK_ID")\""
+            ck_ev="{\"event_type\":\"system\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"checkin_dispatch\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"checkin_id\":\"$DISPATCH_CHECKIN\",\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"task_id\":$ck_tid}}}"
         else
             echo "dispatch-task: --checkin ignored: a $DISPATCH_TYPE dispatch mints no assignment to join" >&2
         fi
     fi
 ```
-(`safe_sender` is the json-escaped sender alias `bot:<fleet>/<id>` built at `:585-586`, the same value the batch writes as `assigned_by`.)
+(`safe_sender` is the json-escaped sender alias `bot:<fleet>/<id>` built at `:585-586`, the same value the batch writes as `assigned_by`. The `[ -n "$TASK_ID" ] && …` list is the file's own idiom at `:629` — a false test in an AND-list neither exits nor fires the ERR trap.)
 (g) The batch (`:681-689`): the project fragment beside `repo_frag`, the join beside `sup_ev`:
 ```bash
         [ -n "$DISPATCH_PROJECT" ] && proj_frag=",\"project_key\":\"$(json_escape "$DISPATCH_PROJECT")\""
@@ -939,28 +1082,34 @@ and the `printf -v _batch` line becomes:
 
 - [ ] **Step 4: The alias fix and the envelope docs**
 
-`lib/tg-post.sh:81`: `--arg sender "bot:$FLEET_NAME/$BOT_NAME"` → `--arg sender "bot:$FLEET_NAME/$BOT_ID"`; update the comment at `:64` (`BOT_NAME` → `BOT_ID`).
+`lib/tg-post.sh:81`: `--arg sender "bot:$FLEET_NAME/$BOT_NAME"` → `--arg sender "bot:$FLEET_NAME/${BOT_ID:-$BOT_NAME}"`; the comment at `:64` says why (`BOT_ID` is the alias every plane door anchors on; `BOT_NAME` is the fallback for hand callers such as `bot-sweep-cron.sh`, which set only that). The `plane_armed --require-bot` gate at `:69` still keys on `BOT_NAME`, which every session exports beside `BOT_ID` — unchanged here, filed for chunk 2 (§Scope).
 
 `library/protocols/dispatch.md`: in the envelope field table (`:29-34`) add a row after `workstream:`:
 ```markdown
 | `project:<key>` | projects.yaml key | The project this task belongs to — the well-defined bar; lands `project_key` on the plane work item |
 ```
-and in the recipe sentence at `:126` extend the flag list: ``(or any envelope flag: `--repo`, `--priority`, `--ref`, `--workstream`, `--project`)``. Then `grep -n 'workstream:' library/protocols/worker-lifecycle.md`: if the inbound `[BOTCOMMAND]` field list there names `workstream:`, add `project:<key>` beside it in the same form (both files restate the envelope; `dispatch-task.sh:86-92` names them as the prose source).
+and in the recipe sentence at `:126` extend the flag list: ``(or any envelope flag: `--repo`, `--priority`, `--ref`, `--workstream`, `--project`)``. `worker-lifecycle.md` restates no field table (`grep -c 'workstream:'` → 0, measured) and is not touched.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass — including every suite that drives `tg-post.sh`**
 
-Run: `./.venv/bin/pytest tests/test_checkin_doors.py tests/test_task_id_dispatch.py tests/test_dispatch_type.py tests/test_bash_parse.py -q && bash tests/test_dispatch_task.sh` (unsandboxed)
-Expected: all pass (`test_dispatch_type.py` parses the protocol docs' `[BOTCOMMAND]` TYPE list — untouched by a field-table row).
+```bash
+./.venv/bin/pytest tests/test_checkin_doors.py tests/test_task_id_dispatch.py tests/test_dispatch_type.py tests/test_bash_parse.py \
+  tests/test_creds_check_telegram.py tests/test_fleet_pulse_escalated.py tests/test_fleet_pulse_events_plane.py \
+  tests/test_maintenance_jobs.py tests/test_notify_behind.py tests/test_plane_gauntlet_doors.py \
+  tests/test_plane_events_door.py tests/test_system_defaults.py -q
+for t in tests/test_dispatch_task.sh tests/test_tg_post.sh tests/test_alert_recipient.sh tests/test_orphan_browser_reaper.sh tests/test_host_health_check.sh; do
+  bash "$t" > "$TMPDIR/$(basename "$t").out" 2>&1; echo "$t rc=$?"
+done
+```
+(unsandboxed) Expected: all pass; every `rc=0`. `test_dispatch_type.py` parses the protocol docs' `[BOTCOMMAND]` TYPE list — untouched by a field-table row. A failure in a `tg-post.sh` suite is a hand caller the fallback missed: read the suite before touching the alias again.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lib/dispatch-task.sh lib/tg-post.sh library/protocols/dispatch.md library/protocols/worker-lifecycle.md tests/test_checkin_doors.py
-printf '%s\n' 'feat(dispatch-task): --project stamps project_key and opens the envelope; --checkin appends the join row' '' 'project_key on the work item fixes the measured 0/374. The checkin_dispatch' 'system event rides the SAME batch as the assignment, after the emit_triple gate' '(the supersede precedent); an untracked dispatch discloses the ignored flag.' 'tg-post.sh anchors its sender on BOT_ID like every other door. Spec §7.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c2.txt"
+git add lib/dispatch-task.sh lib/tg-post.sh library/protocols/dispatch.md tests/test_checkin_doors.py
+printf '%s\n' 'feat(dispatch-task): --project stamps project_key and opens the envelope; --checkin appends the join row' '' 'project_key on the work item fixes the measured 0/374. The checkin_dispatch' 'system event rides the SAME batch as the assignment, after the emit_triple gate' '(the supersede precedent), task_id null on an id-less tracked send; an' 'untracked dispatch discloses the ignored flag. tg-post.sh anchors its sender on' 'BOT_ID with the BOT_NAME fallback hand callers need under set -u. Spec §7.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c2.txt"
 git commit -q -F "$TMPDIR/c2.txt" && git log --oneline -1
 ```
-
-(If `worker-lifecycle.md` needed no edit, drop it from `git add`.)
 
 ---
 
@@ -972,8 +1121,8 @@ git commit -q -F "$TMPDIR/c2.txt" && git log --oneline -1
 - Test: `tests/test_checkins_cli.py`
 
 **Interfaces:**
-- Consumes: `brief.plane_session(paths, fleet) -> (plane, note)` (`brief.py:252`; its `conn` yields TUPLES), `plane.db.open_ro(root) -> (conn | None, reason)` (`db.py:28`, named rows), `_helpers.refuse_unreachable(command, note) -> int` (`:160`, prints `UNREACHABLE`), `queries.fleet_alias_range` / `fleet_range_params` / `_epoch`.
-- Produces: `CHECKIN_ROWS_SQL` (binds: fleet, fleet) ordered `occurred_at DESC, ingest_seq DESC`, truncated rows returned with NULL fields; `cmd_checkins(args) -> int`: `--fleet` (dest `checkins_fleet`), `--bot`, `--since 7d` (the report-back grammar `24h, 7d, 30m, ISO`, parsed inline — not a new helper; cycle-2 gap), `--last` (ignores `--since`), `--json`; rc 0 · 2 no fleet / bad since · 3 plane unreachable. No `--limit` (chunk 3). `--since` filters in Python over the fleet's rows — intentional through chunk 3, which binds it in SQL with `--summary`.
+- Consumes: `brief.plane_session(paths, fleet) -> (plane, note)` (`brief.py:252`; its `conn` yields TUPLES), `brief.TEXT_ROW_LIMIT` (`:122`, the shared text cap), `plane.db.open_ro(root) -> (conn | None, reason)` (`db.py:28`, named rows), `_helpers.refuse_unreachable(command, note) -> int` (`:160`, prints `UNREACHABLE`), `queries.fleet_alias_range` / `fleet_range_params` / `_epoch`.
+- Produces: `CHECKIN_ROWS_SQL` (binds: fleet, fleet) — the LIGHT form (`subject_alias, occurred_at, detail, detail_truncated, ingest_seq`; the record is parsed once in Python, the `plane-readers.py:886-907` precedent — cycle-3 gap), ordered `occurred_at DESC, ingest_seq DESC`; `cmd_checkins(args) -> int`: `--fleet` (dest `checkins_fleet`), `--bot`, `--since 7d` (the report-back grammar `24h, 7d, 30m, ISO`, parsed inline — not a new helper; cycle-2 gap), `--last` (ignores `--since`), `--json`; rc 0 · 2 no fleet / bad `--since` (the door ladder's usage code; `report-back` says 1 for the same case — deliberate, in the docstring) · 3 plane unreachable, including a fleet the plane has never seen (`plane_session`'s roster rule). Text output shows the losers and the unavailable inputs when present, and caps at `TEXT_ROW_LIMIT` rows with a disclosure line (`--json` is never capped). A row with no `data` (the contract accepts one, `contracts.py:418`) is listed, never a traceback (cycle-3 R8). No `--limit` (chunk 3). `--since` filters in Python over the fleet's rows — intentional through chunk 3, which binds it in SQL with `--summary`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1068,7 +1217,7 @@ def test_since_window(root, capsys):
     _decision(root, "mgr", CK3, age_h=2)
     assert cmd.cmd_checkins(_Args(root, since="24h", json=True)) == 0
     assert [r["checkin_id"] for r in _out(capsys)["checkins"]] == [CK2, CK3]
-    assert cmd.cmd_checkins(_Args(root, since="yesterday")) == 2
+    assert cmd.cmd_checkins(_Args(root, since="yesterday")) == 2          # usage: the door ladder's code
 
 
 def test_a_truncated_record_is_listed_and_marked_never_dropped(root, capsys):
@@ -1076,6 +1225,35 @@ def test_a_truncated_record_is_listed_and_marked_never_dropped(root, capsys):
     assert cmd.cmd_checkins(_Args(root, json=True)) == 0
     rows = _out(capsys)["checkins"]
     assert len(rows) == 1 and rows[0]["truncated"] is True and rows[0]["checkin_id"] is None
+
+
+def test_a_row_without_a_record_is_listed_not_a_traceback(root, capsys):
+    # contracts.py:418 accepts a system event with no data; the reader must not raise
+    emit_batch(root, [{"event_type": "system", "emitter": "t", "fleet": F, "source_ref": f"checkin:{CK1}",
+                       "payload": {"event": "checkin_decision", "subject_kind": "actor", "subject": f"bot:{F}/mgr"}}])
+    assert cmd.cmd_checkins(_Args(root, json=True)) == 0
+    rows = _out(capsys)["checkins"]
+    assert len(rows) == 1 and rows[0]["record"] is None and rows[0]["checkin_id"] is None and rows[0]["truncated"] is False
+    assert cmd.cmd_checkins(_Args(root)) == 0
+    assert "carries no record" in capsys.readouterr().out
+
+
+def test_the_text_listing_shows_the_losers_and_the_unavailable_inputs(root, capsys):
+    _decision(root, "mgr", CK1, age_h=1,
+              inputs_seen={"open_tasks": 1, "considered": ["#7 docs — not mission work"], "unavailable": ["gh"]})
+    assert cmd.cmd_checkins(_Args(root)) == 0
+    out = capsys.readouterr().out
+    assert "passed over: #7 docs — not mission work" in out and "unavailable: gh" in out
+
+
+def test_the_text_listing_caps_at_ten_rows_and_says_so(root, capsys):
+    for i in range(12):
+        _decision(root, "mgr", "ck_" + f"{i:032x}", age_h=i + 1)
+    assert cmd.cmd_checkins(_Args(root)) == 0
+    out = capsys.readouterr().out
+    assert "showing the newest 10 of 12" in out and out.count("surfacing:") == 10
+    assert cmd.cmd_checkins(_Args(root, json=True)) == 0
+    assert len(_out(capsys)["checkins"]) == 12                            # --json is never capped
 
 
 def test_an_empty_fleet_plane_answers_no_checkins_at_rc_0(root, capsys):
@@ -1087,6 +1265,14 @@ def test_an_empty_fleet_plane_answers_no_checkins_at_rc_0(root, capsys):
     assert cmd.cmd_checkins(_Args(root)) == 0
     out = capsys.readouterr().out
     assert F in out and "no check-ins" in out
+
+
+def test_a_fleet_the_plane_has_never_seen_refuses_at_rc_3(root, capsys):
+    # plane_session's roster rule (#1014's class), inherited on purpose: a typo'd
+    # --fleet must not read as "no rows" (cycle-3 question 2)
+    _decision(root, "mgr", CK1, age_h=1)
+    assert cmd.cmd_checkins(_Args(root, fleet="never-seen")) == 3
+    assert "UNREACHABLE" in capsys.readouterr().err
 
 
 def test_unreachable_plane_refuses_at_rc_3(tmp_path, capsys):
@@ -1113,23 +1299,14 @@ Append to `claudlobby/plane/queries.py`:
 # (schema 1). Ordered by WHEN IT HAPPENED (`occurred_at`, the clock every other
 # read of this door uses), ingest_seq as the tiebreak -- under the shim's spool
 # rung the two clocks diverge, and "the previous check-in" means the one that
-# happened last, not the one that landed last. A truncated detail is NOT a JSON
-# document (detail_truncated=1 IS the parse guard), so the CASE short-circuits
-# before json_type sees it (measured: no error, NULL fields) and the row is
-# still returned -- the read door exists to show every decision, and dropping
+# happened last, not the one that landed last. The record is parsed ONCE by the
+# reader (plane-readers.py:886-907), never extracted column by column here: a
+# truncated detail is not JSON (detail_truncated=1 IS the parse guard) and the
+# row is still returned -- the door exists to show every decision, and dropping
 # the over-cap ones would hide exactly the records that most need looking at.
 # Binds: fleet, fleet.
 CHECKIN_ROWS_SQL = (
-    "SELECT"
-    " CASE WHEN e.detail_truncated = 0 AND json_type(e.detail, '$.checkin_id') = 'text'"
-    "      THEN json_extract(e.detail, '$.checkin_id') END AS checkin_id,"
-    " CASE WHEN e.detail_truncated = 0 THEN json_extract(e.detail, '$.prev_checkin_id') END AS prev_checkin_id,"
-    " e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
-    " CASE WHEN e.detail_truncated = 0 THEN json_extract(e.detail, '$.action') END AS action,"
-    " CASE WHEN e.detail_truncated = 0 THEN json_extract(e.detail, '$.project_key') END AS project_key,"
-    " CASE WHEN e.detail_truncated = 0 THEN json_extract(e.detail, '$.raise.decided') END AS raise_decided,"
-    " CASE WHEN e.detail_truncated = 0 THEN json_extract(e.detail, '$.raise.reason') END AS raise_reason,"
-    " CASE WHEN e.detail_truncated = 0 THEN json_extract(e.detail, '$.rationale') END AS rationale,"
+    "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
     " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq"
     " FROM events e"
     " WHERE e.kind = 'system' AND e.event = 'checkin_decision'"
@@ -1150,7 +1327,10 @@ Two connections, on purpose: `brief.plane_session` is THE reachability door for
 the package (no db / no fleet / a plane that has never seen the fleet all refuse
 with a note -- unreachable is not empty), but its connection yields TUPLES
 (plane-readers.py:53-58; status.py:218). The rows are read through
-`plane.db.open_ro`, which sets sqlite3.Row -- the `commands/task.py` pattern."""
+`plane.db.open_ro`, which sets sqlite3.Row -- the `commands/task.py` pattern.
+Usage errors (no fleet, an unparseable --since) are rc 2, the door ladder's
+code, where `report-back` says 1 for the same case -- one ladder for the
+check-in's doors wins over matching a sibling reader."""
 
 from __future__ import annotations
 
@@ -1187,13 +1367,21 @@ def _bot_of(alias: str | None) -> str:
 
 def _row(r) -> dict:
     truncated = bool(r["detail_truncated"])
+    detail = r["detail"]
+    rec = json.loads(detail) if detail and not truncated else None    # a data-less row parses to nothing, never raises
+    if not isinstance(rec, dict):
+        rec = None
+    g = rec or {}
+    raise_ = g.get("raise") if isinstance(g.get("raise"), dict) else {}
+    seen = g.get("inputs_seen") if isinstance(g.get("inputs_seen"), dict) else {}
     return {
-        "checkin_id": r["checkin_id"], "prev_checkin_id": r["prev_checkin_id"],
+        "checkin_id": g.get("checkin_id"), "prev_checkin_id": g.get("prev_checkin_id"),
         "bot": _bot_of(r["subject_alias"]), "occurred_at": r["occurred_at"],
-        "action": r["action"], "project_key": r["project_key"],
-        "raise": {"decided": bool(r["raise_decided"]), "reason": r["raise_reason"]},
-        "rationale": r["rationale"], "truncated": truncated,
-        "record": None if truncated else json.loads(r["detail"]),
+        "action": g.get("action"), "project_key": g.get("project_key"),
+        "raise": {"decided": bool(raise_.get("decided")), "reason": raise_.get("reason")},
+        "rationale": g.get("rationale"),
+        "considered": list(seen.get("considered") or []), "unavailable": list(seen.get("unavailable") or []),
+        "truncated": truncated, "record": rec,
     }
 
 
@@ -1214,7 +1402,7 @@ def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | Non
 
 def cmd_checkins(args) -> int:
     paths = _resolve_paths(args)
-    from ..brief import plane_session, resolve_fleet_name
+    from ..brief import TEXT_ROW_LIMIT, plane_session, resolve_fleet_name
 
     fleet = getattr(args, "checkins_fleet", None) or resolve_fleet_name(paths)
     if not fleet:
@@ -1248,15 +1436,25 @@ def cmd_checkins(args) -> int:
         print(f"no check-ins — {scope}")
         return 0
     print(f"check-ins — {scope}: {len(rows)}")
-    for r in rows:
+    for r in rows[:TEXT_ROW_LIMIT]:
         if r["truncated"]:
             print(f"  {r['occurred_at']}  {r['bot']}  (record over the size cap — truncated at ingest)")
+            continue
+        if r["record"] is None:
+            print(f"  {r['occurred_at']}  {r['bot']}  (row carries no record)")
             continue
         raised = " · raised" if r["raise"]["decided"] else ""
         proj = f" [{r['project_key']}]" if r["project_key"] else ""
         print(f"  {r['occurred_at']}  {r['bot']}  {r['action']}{proj}{raised}  {r['checkin_id']}")
         print(f"      {r['rationale']}")
         print(f"      surfacing: {r['raise']['reason']}")
+        if r["considered"]:
+            print("      passed over: " + " · ".join(r["considered"]))
+        if r["unavailable"]:
+            print("      unavailable: " + ", ".join(r["unavailable"]))
+    if len(rows) > TEXT_ROW_LIMIT:
+        # silent truncation reads as exhaustive coverage (brief.py's rows() rule)
+        print(f"  ... showing the newest {TEXT_ROW_LIMIT} of {len(rows)} — full list in --json")
     return 0
 ```
 
@@ -1288,7 +1486,7 @@ Expected: all pass. The truncation test depends on the 16 KiB DIAGNOSTIC cap tru
 
 ```bash
 git add claudlobby/plane/queries.py claudlobby/commands/checkins.py claudlobby/commands/_parsers.py tests/test_checkins_cli.py
-printf '%s\n' 'feat(cli): claudlobby checkins — the decision rows, newest first by occurred_at' '' 'Reachability through brief.plane_session (unreachable is not empty, rc 3 via' 'refuse_unreachable), rows through plane.db.open_ro (the session yields tuples).' '--last ignores the window so an idle month never reads as a first check-in;' 'truncated records are listed and marked, never dropped. Spec §11.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c3.txt"
+printf '%s\n' 'feat(cli): claudlobby checkins — the decision rows, newest first by occurred_at' '' 'Reachability through brief.plane_session (unreachable is not empty, rc 3 via' 'refuse_unreachable, a never-seen fleet included), rows through plane.db.open_ro' '(the session yields tuples), the record parsed once in Python. --last ignores' 'the window so an idle month never reads as a first check-in; truncated and' 'data-less rows are listed and marked, never dropped; text shows the losers and' 'caps at TEXT_ROW_LIMIT with a disclosure. Spec §11.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c3.txt"
 git commit -q -F "$TMPDIR/c3.txt" && git log --oneline -1
 ```
 
@@ -1301,18 +1499,19 @@ git commit -q -F "$TMPDIR/c3.txt" && git log --oneline -1
 - Test: `tests/test_checkin_library.py`
 
 **Interfaces:**
-- The protocol is additive, declares no `requires:`, carries **no self-fire clause** (cycle-2 B7: "run it when you reach a natural idle point" fired the check-in with none of chunk 2's throttles). Its preamble carries the precedence sentence (both audiences — the live collisions are Manager-side; cycle-2 R12).
-- The skill consumes, by name: `claudlobby checkins --bot $BOT_ID --last --json` and `claudlobby checkins --bot $BOT_ID --since 7d --json` (READ 0), `claudlobby brief --bot $BOT_ID --json`, `claudron lookup --limit 5 <project>`, `PROJECT_TIER_<SLUG>` / `PROJECT_REPOS_<SLUG>`, `gh issue list`, `bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<'EOF'` (a here-doc on the door, never `cat |`), `bash "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh" --project … --checkin …`, and for `ask` the Telegram reply tool or `bash "$CLAUDLOBBY_ROOT/lib/tg-post.sh"` (the tmux-injected case has no chat to reply to).
-- Grants follow the shipped shapes exactly (Global Constraints): `Bash(claudlobby *)`, `Bash(claudron lookup *)`, `Bash(gh *)`, `Bash(*checkin-record.sh*)`, `Bash(*dispatch-task.sh*)`, `Bash(*tg-post.sh*)`, `mcp__plugin_telegram_telegram__reply`, `Read`.
+- The protocol is additive, declares no `requires:`, carries **no self-fire clause** (cycle-2 B7: "run it when you reach a natural idle point" fired the check-in with none of chunk 2's throttles). Its preamble carries the precedence sentence (both audiences — the live collisions are Manager-side; cycle-2 R12). The `## Worker` section composes into the canary manager too (one file, two sections): inert there this chunk — no worker declares the protocol before chunk 4 — and ~6 lines of context (cycle-3 gap).
+- The skill consumes, by name: `claudlobby checkins --bot $BOT_ID --last --json` and `claudlobby checkins --bot $BOT_ID --since 7d --json` (READ 0), `claudlobby brief --bot $BOT_ID --json` (READ 1), `claudlobby status --json` (READ 1b — the roster with `bots[].state` / `pane_state` / `tmux_alive` (`status.py:614-640`), the only door that answers "which worker is idle"; cycle-3 R5), `claudron lookup --limit 5 <project>`, `PROJECT_TIER_<SLUG>` / `PROJECT_REPOS_<SLUG>`, `gh issue list …` on ONE line, `bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<'EOF'` (a here-doc on the door, never `cat |`; its `--dry-run` twin is shown too), `bash "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh" --project … --checkin …`, and for `ask` the Telegram reply tool or `bash "$CLAUDLOBBY_ROOT/lib/tg-post.sh"` (the tmux-injected case has no chat to reply to).
+- Grants follow the shipped shapes exactly (Global Constraints): `Bash(claudlobby *)`, `Bash(claudron lookup *)`, `Bash(gh issue list *)`, `Bash(*checkin-record.sh*)`, `Bash(*dispatch-task.sh*)`, `Bash(*tg-post.sh*)`, `mcp__plugin_telegram_telegram__reply`, `Read`.
+- The degraded rule keys on `mode` (Global Constraints, the live capture): only an `omitted` entry on a field the skill uses makes it unavailable; `labeled` is present-and-bounded.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_checkin_library.py
 """The check-in protocol (spec §9) composes both audiences from one file; the
-skill (§6) is coupled to its doors by name, and its grants MATCH the command
-lines it writes (permissions-model.md:48-52: a space is a word boundary; a
-pipeline is matched per subcommand) and contain no forbidden wildcard
+skill (§6) is whole, is coupled to its doors by name, and its grants MATCH the
+command lines it writes (permissions-model.md:48-52: a space is a word boundary;
+a pipeline is matched per subcommand) and contain no forbidden wildcard
 (claudron-integration.md:29; boundary Invariant 5)."""
 
 import fnmatch
@@ -1331,12 +1530,18 @@ LIB = REPO / "library"
 SKILL = LIB / "skills" / "checkin" / "SKILL.md"
 
 
+def _flat(text: str) -> str:
+    """Whitespace-collapsed: prose and code spans wrap at ~85 columns, and a
+    needle that straddles a wrap must still be found (cycle-3 B5, R7)."""
+    return " ".join(text.split())
+
+
 def test_the_protocol_declares_no_requires_and_no_self_fire():
     text = (LIB / "protocols" / "checkin.md").read_text()
     fm, body = parse_frontmatter(text)
     assert fm["title"] == "Check-in" and "requires" not in fm     # equipment linking is chunk 5
     assert "natural idle point" not in body                       # the trigger is chunk 2's, with its throttles
-    assert "governs where it composes beside" in body.split("## Manager")[0]   # precedence in the PREAMBLE
+    assert "governs where it composes beside" in _flat(body.split("## Manager")[0])   # precedence in the PREAMBLE
 
 
 def test_both_sections_compose_for_a_hand_equipped_manager(fleet_dir):
@@ -1358,31 +1563,46 @@ def test_the_cadence_rules_are_untouched_in_this_chunk():
 
 
 DOORS = ["claudlobby checkins --bot $BOT_ID --last --json", "claudlobby checkins --bot $BOT_ID --since 7d --json",
-         "claudlobby brief --bot $BOT_ID --json", "claudron lookup --limit 5", "gh issue list",
-         'bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<\'EOF\'', "lib/dispatch-task.sh", "--checkin", "--project",
-         "lib/tg-post.sh", "PROJECT_TIER_", "PROJECT_REPOS_", "PROJECT_MISSION.md"]
+         "claudlobby brief --bot $BOT_ID --json", "claudlobby status --json", "claudron lookup --limit 5", "gh issue list",
+         'bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<\'EOF\'', 'bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" --dry-run <<\'EOF\'',
+         "lib/dispatch-task.sh", "--checkin", "--project", "lib/tg-post.sh", "PROJECT_TIER_", "PROJECT_REPOS_", "PROJECT_MISSION.md",
+         "pane_state", "issues_seen", "DRY-RUN"]
+
+
+def test_the_skill_file_is_whole_and_its_two_bash_blocks_are_closed():
+    # cycle-3 B6: a nested fence in the plan truncated the deliverable at the inner
+    # closer and every test still passed on the stump; pin the tail and the fences
+    text = SKILL.read_text()
+    assert "## Not in this chunk" in text and "## Rules" in text
+    assert text.count("```") == 4 and len(re.findall(r"```bash\n.*?```", text, re.S)) == 2
 
 
 def test_the_skill_is_coupled_to_its_doors():
-    text = SKILL.read_text()
+    text = _flat(SKILL.read_text())
     for d in DOORS:
         assert d in text, d
     for action in ("dispatch", "ask", "nothing"):
         assert f"**{action}**" in text, action
     assert "RECORD before ACT" in text and "considered" in text and "could not measure" in text
+    assert "follow-up check-in" in text                               # a failed ACT is recorded, never retried blind
     assert "propose" not in text.split("## Not in this chunk")[0]   # the enum the contract accepts
     assert "cat <<" not in text                                      # a pipeline is matched per subcommand
 
 
-def test_the_degraded_rule_is_per_input_and_ignores_the_standing_utilization_entry():
-    text = SKILL.read_text()
-    assert "utilization" in text and "not an input" in text        # brief's degraded[] is never empty (#891)
-    assert "plane-known" in text                                     # gh/claudron down ≠ no dispatch
+def test_the_degraded_rule_is_keyed_on_mode_omitted_per_field():
+    # brief's degraded[] is NEVER empty on a real fleet (captured live, cycle 4: a
+    # fleet with a plane carries alerts:labeled #903 and dispatches.orphaned:labeled
+    # #1014 on every call); only mode "omitted" means a field is absent (#1467)
+    rule = _flat(SKILL.read_text().split("## DECIDE")[0])
+    assert "`mode` is `omitted`" in rule and "unavailable" in rule
+    assert "`mode` is `labeled`" in rule and "present" in rule
+    assert "utilization" in rule and "not an input" in rule
+    assert "plane-known" in _flat(SKILL.read_text())
 
 
 # --- the grants match the command lines the skill itself writes --------------------
 
-FORBIDDEN = ("Bash", "Bash(bash *)", "Bash(cat *)", "Bash(claudron *)", "Bash(sh *)")
+FORBIDDEN = ("Bash", "Bash(bash *)", "Bash(cat *)", "Bash(claudron *)", "Bash(sh *)", "Bash(gh *)")
 
 
 def _bash_grant_matches(grant: str, command: str) -> bool:
@@ -1393,17 +1613,16 @@ def _bash_grant_matches(grant: str, command: str) -> bool:
 
 
 def _skill_command_lines() -> list[str]:
-    """Every `bash …`, `claudlobby …`, `claudron …`, `gh …` line inside a fenced block
-    or an inline code span of SKILL.md, first pipeline stage only (the skill must
-    not use pipelines)."""
+    """Every `bash …`, `claudlobby …`, `claudron …`, `gh …` span — inline code,
+    which MAY wrap across lines — or fenced-bash line of SKILL.md, whitespace
+    collapsed; first pipeline stage only (the skill must not use pipelines)."""
     text = SKILL.read_text()
-    cmds = re.findall(r"`((?:bash|claudlobby|claudron|gh) [^`\n]+)`", text)
+    cmds = re.findall(r"`((?:bash|claudlobby|claudron|gh) [^`]+)`", text)
     for block in re.findall(r"```bash\n(.*?)```", text, re.S):
         for line in block.splitlines():
-            line = line.strip().split("$(", 1)[-1].rstrip(")")
             if line.startswith(("bash ", "claudlobby ", "claudron ", "gh ")):
                 cmds.append(line)
-    return cmds
+    return [_flat(c) for c in cmds]
 
 
 def test_the_skill_grants_cover_its_own_commands_and_nothing_forbidden():
@@ -1414,6 +1633,8 @@ def test_the_skill_grants_cover_its_own_commands_and_nothing_forbidden():
     bash_grants = [g for g in grants if g.startswith("Bash(")]
     cmds = _skill_command_lines()
     assert cmds, "no command lines found in the skill"
+    assert any(c.startswith("gh issue list ") for c in cmds)          # the wrapped span IS collected (cycle-3 R7)
+    assert any("--dry-run" in c for c in cmds)                          # the dry run has a runnable invocation
     for c in cmds:
         assert any(_bash_grant_matches(g, c) for g in bash_grants), f"ungranted: {c!r}"
 ```
@@ -1481,15 +1702,17 @@ needs the API key`.
 
 - [ ] **Step 4: The skill**
 
-```markdown
+The deliverable below is fenced with FOUR backticks because it contains three-backtick blocks of its own (cycle-3 B6: a three-backtick outer fence closes at the first inner closer and the tail of the file is lost — and every test still passes on the stump, which is what `test_the_skill_file_is_whole…` now pins).
+
+````markdown
 ---
 name: checkin
-description: "The idle-manager check-in: read the SSOT (the plane through checkins and brief, Claudron, the mission with each project's tier and repos, the GitHub backlog), decide ONE project and ONE action, record the decision BEFORE acting, and let the surfacing judgment decide whether the operator hears anything at all. Silence is the default."
+description: "The idle-manager check-in: read the SSOT (the plane through checkins, brief and status, Claudron, the mission with each project's tier and repos, the GitHub backlog), decide ONE project and ONE action, record the decision BEFORE acting, and let the surfacing judgment decide whether the operator hears anything at all. Silence is the default."
 argument-hint: "[--dry-run]"
 tool_grants:
   - "Bash(claudlobby *)"
   - "Bash(claudron lookup *)"
-  - "Bash(gh *)"
+  - "Bash(gh issue list *)"
   - "Bash(*checkin-record.sh*)"
   - "Bash(*dispatch-task.sh*)"
   - "Bash(*tg-post.sh*)"
@@ -1514,38 +1737,50 @@ not available to you (it needs `--project`), and the check-in ends in `ask` or
 ## Arguments
 
 Parse `$ARGUMENTS`:
-- `--dry-run`: do every READ and the DECIDE, print the decision JSON, validate it
-  with `checkin-record.sh --dry-run`, record nothing, act on nothing.
+- `--dry-run`: do every READ and the DECIDE, then validate the decision through the
+  door's own dry run (the RECORD here-doc with `--dry-run`, which prints
+  `DRY-RUN <ck_id>` and records nothing), and print the exact ACT command line you
+  would have run. Act on nothing.
 
 ## READ — in order, all cheap, all SSOT
 
 A step that fails is **recorded, never guessed around**: add its name to
 `inputs_seen.unavailable` and continue. A count you could not measure is `null`
-(**could not measure**), never `0`.
+(**could not measure**), never `0` — in `inputs_seen` and in `delta` alike.
 
 0. **The previous check-in, and this week's asks** —
    `claudlobby checkins --bot $BOT_ID --last --json` (its `record.inputs_seen` is
    *the state at the last check-in*; keep its `checkin_id` for `prev_checkin_id`;
    none → `null`) and `claudlobby checkins --bot $BOT_ID --since 7d --json` (count
    the rows with `raise.decided` true: asks already raised this week). rc 3 means
-   the plane is unreachable — record `checkins` as unavailable.
+   the plane is unreachable — record `checkins` as unavailable and `prev_checkin_id`
+   as `null`; the record shows both, so a skipped read never poses as a first one.
 1. **The fleet's present** — `claudlobby brief --bot $BOT_ID --json`: `dispatches`
    (`open` / `overdue` / `orphaned` / `dispatched`, each row with `escalated`,
    `nudged`, `last_progress_at`), `workstreams` (`active`, `stalled`),
    `reports.unacked`, `alerts` (last 24h critical), `mission`. Read `degraded[]`
-   **for the fields you use**: an entry naming `dispatches`, `workstreams`,
-   `reports` or `alerts` (or a dotted child of one) makes that section
-   unavailable — treat it as unavailable, never as zero. The standing
-   `utilization` entry (#891) is always present and is **not an input** of this
-   skill; ignore it.
+   **by mode, for the fields you use**: an entry whose `mode` is `omitted` and whose
+   `field` is `dispatches`, `workstreams`, `reports` or `alerts` (or a dotted child,
+   such as `dispatches.open`) makes that section **unavailable** — never zero. An
+   entry whose `mode` is `labeled` means the field is present and bounded — a real
+   fleet's brief always carries `alerts` labeled, and usually `dispatches.orphaned`
+   — so use the field and note the bound. The standing `utilization` entry (#891)
+   is **not an input** of this skill; ignore it.
+1b. **The roster, and who is idle** — `claudlobby status --json`: `bots[]`, each with
+   `state`, `pane_state` (`BUSY` / `IDLE`), `tmux_alive`, `current_task`. `dispatch`
+   needs an alive, idle worker; the rationale names the worker and its observed
+   `pane_state`.
 2. **Knowledge** — `claudron lookup --limit 5 <project>` for each project with open
    work. Count the hits (`knowledge_hits`); read what is relevant.
 3. **The goal and each project's rigor** — `PROJECT_MISSION.md` (via
    `mission.charter` / `$FLEET_MISSION_FILE`), and per project from your env:
    `PROJECT_TIER_<SLUG>` (how work CLOSES) and `PROJECT_REPOS_<SLUG>` (its repos).
-4. **The external backlog** — `gh issue list --repo <owner/name> --state open
-   --limit 50 --json number,title,labels,updatedAt` per repo in `PROJECT_REPOS_*`;
-   filter to mission-aligned items; group by project; count `issues_considered`.
+4. **The external backlog** — per repo in `PROJECT_REPOS_*`, one line:
+   `gh issue list --repo <owner/name> --state open --limit 50 --json number,title,labels,updatedAt`.
+   Count every open issue returned as `issues_seen` (the raw number, BEFORE any
+   filter), then filter to mission-aligned items, group by project, and count those
+   as `issues_considered`. The two together are what tell a broken filter from an
+   empty backlog.
 5. **The delta** — now versus step 0, per project: tasks opened / completed /
    stalled / cleared, new issues, new messages, held items still pending. **The
    delta is the primary signal** for both the action and the surfacing judgment: an
@@ -1562,11 +1797,12 @@ never exclusively (the tilt); no attention + no open work = left alone — a dor
 project is revived only by explicit direction (never stalest-first). Mission
 alignment and backlog depth weigh in. **Record the losers:** every candidate you
 weighed and passed over goes into `inputs_seen.considered` as one line, `<candidate>
-— <why not>` (at most ten) — a decision is judged by what it did not pick.
+— <why not>` (at most ten) — a decision is judged by what it did not pick, and a
+`dispatch` with an empty `considered` is refused by the contract.
 
 | action | when | through |
 |---|---|---|
-| **dispatch** | an open or backlog item fits an idle worker; you choose the worker and the rationale says why | `bash "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh" --project <key> [--repo <owner/name>] [--ref <issue-url>] --checkin <the ck_ id the record door printed> <worker> "<task>"` — `--project` is the well-defined bar (a projects.yaml key); `--checkin` joins the dispatch to this decision |
+| **dispatch** | an open or backlog item fits an idle worker (step 1b); you choose the worker and the rationale says why | `bash "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh" --project <key> [--repo <owner/name>] [--ref <issue-url>] --checkin <the ck_ id the record door printed> <worker> "<task>"` — `--project` is the well-defined bar (a projects.yaml key); `--checkin` joins the dispatch to this decision |
 | **ask** | the surfacing judgment (below) concludes the operator should hear something — a fork only they can resolve, or the backlog holds nothing worth starting ("ask for tasks") | one Telegram post shaped by the check-in protocol (one line, one ask with named options, one pointer): the reply tool when this check-in arrived on Telegram; `bash "$CLAUDLOBBY_ROOT/lib/tg-post.sh" "<the post>"` when it was injected into your pane (there is no chat to reply to). Either way it is recorded as your communication |
 | **nothing** | all work in flight, nothing worthwhile — **recorded**, so "checked and chose nothing" is a fact, not silence | — |
 
@@ -1583,29 +1819,32 @@ regardless). Record the judgment in `raise`: `decided`, `reason` (always, in bot
 directions), and what you `held`.
 
 **Degraded inputs, per input.** The plane unreachable (`checkins` rc 3, or
-`dispatches`/`workstreams`/`reports`/`alerts` degraded in `brief`) narrows the
-actions to `ask | nothing` — never dispatch blind. `gh` or `claudron` unavailable
-narrows only the **source** of new work: you may still dispatch open, **plane-known**
-tasks; you may not pick fresh backlog issues you could not read. Record what was
-unavailable either way.
+`dispatches`/`workstreams`/`reports`/`alerts` **omitted** in `brief`, or `status`
+failing) narrows the actions to `ask | nothing` — never dispatch blind. `gh` or
+`claudron` unavailable narrows only the **source** of new work: you may still
+dispatch open, **plane-known** tasks; you may not pick fresh backlog issues you
+could not read. Record what was unavailable either way.
 
 ## RECORD before ACT
 
 Build the decision as JSON (schema 1) and record it FIRST — the decision exists even
 if the action then fails. The door is invoked directly with a here-doc (never
-through `cat |`):
+through `cat |`). Two shapes are coupled: **`ask` requires `raise.decided: true`**,
+and **`dispatch` requires `project_key: "<slug>"` and a non-empty `considered`**.
+Every `N|null` below is an integer or `null`, never omitted.
 
 ```bash
 bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<'EOF'
-{"prev_checkin_id": <from step 0, or null>,
- "inputs_seen": {"open_tasks": N, "stalls": N, "unacked": N, "issues_considered": N,
-                 "knowledge_hits": N, "considered": ["<candidate> — <why not>"], "unavailable": []},
+{"prev_checkin_id": <"ck_…" from step 0, or null>,
+ "inputs_seen": {"open_tasks": N|null, "stalls": N|null, "unacked": N|null,
+                 "issues_seen": N|null, "issues_considered": N|null, "knowledge_hits": N|null,
+                 "considered": ["<candidate> — <why not>"], "unavailable": []},
  "delta": {"tasks_opened": N|null, "tasks_completed": N|null, "stalls_appeared": N|null,
            "stalls_cleared": N|null, "issues_new": N|null, "messages_new": N|null, "held_pending": N|null},
  "action": "dispatch|ask|nothing",
- "project_key": "<slug or null>",
- "rationale": "<your words, <= 600 chars: the weighing, the worker, the why>",
- "raise": {"decided": false, "reason": "<why it surfaced, or why not, <= 600>", "held": []}}
+ "project_key": <"<slug>" for dispatch (or the project an ask is about), else null>,
+ "rationale": "<your words, <= 600 chars: the weighing, the worker and its observed state, the why>",
+ "raise": {"decided": <true for ask, else false>, "reason": "<why it surfaced, or why not, <= 600>", "held": []}}
 EOF
 ```
 
@@ -1614,7 +1853,19 @@ pass it literally** to `--checkin` (a shell variable does not survive between yo
 tool calls). rc 2: the decision was refused — every reason is on stderr; fix and
 re-record. rc 3: the plane did not record it — do **not** act on an unrecorded
 `dispatch`; say so in your next justified post. Then ACT through the door in the
-table.
+table. **If the ACT door fails** (a nonzero rc from `dispatch-task.sh` or the post),
+record a **follow-up check-in** at once — `prev_checkin_id` = the id just printed,
+`action: nothing`, the rationale naming the failure — and never retry a dispatch
+blind; the pair is what the outcome join will show.
+
+Under `--dry-run` the same here-doc goes to the door's dry run, which validates and
+prints `DRY-RUN <ck_id>`:
+
+```bash
+bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" --dry-run <<'EOF'
+{ ...the same decision JSON... }
+EOF
+```
 
 ## Not in this chunk
 
@@ -1630,24 +1881,18 @@ starting" is an `ask`, not an invention.
   hand-built plane envelopes): the doors above are the whole contract.
 - Never restate a project's tier in a post; point to it.
 - `--dry-run` never records and never acts.
-```
+````
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `./.venv/bin/pytest tests/test_checkin_library.py tests/test_skill_ref_resolution.py tests/test_dispatch_type.py tests/test_boundary_invariants.py -q`
-Expected: all pass. Then the grant shapes on a real validate, rc read first, never piped:
-
-```bash
-./.venv/bin/claudlobby --root "$(pwd)" validate > "$TMPDIR/validate.out" 2>&1; echo "rc=$?"
-grep -i 'checkin' "$TMPDIR/validate.out" || echo "no checkin findings"
-```
-Expected: the same rc `main` gives on this root (compare) and `no checkin findings`.
+Expected: all pass. (A `claudlobby validate` pass against a fresh worktree is vacuous — no `fleet.yaml`, rc 1, zero skill output, measured in cycle 3 — so the grant shapes are proven by the library test alone, and by the deploy's per-fleet `validate` in Task 7 step 6.)
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add library/protocols/checkin.md library/skills/checkin/SKILL.md tests/test_checkin_library.py
-printf '%s\n' 'feat(library): the check-in protocol (additive) and the /checkin skill' '' 'One file, two sections (Manager: the surfacing judgment; Worker: one thin line),' 'precedence in the preamble, no self-fire clause (the trigger is chunk 2 with its' 'throttles). The skill is a thin reasoning wrapper coupled to its doors by name:' 'actions dispatch | ask | nothing, the losers recorded, a per-input degraded' 'rule, grants in the shipped shapes and matched against its own command lines' 'by test. Spec §6, §9.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c4.txt"
+printf '%s\n' 'feat(library): the check-in protocol (additive) and the /checkin skill' '' 'One file, two sections (Manager: the surfacing judgment; Worker: one thin line),' 'precedence in the preamble, no self-fire clause (the trigger is chunk 2 with its' 'throttles). The skill is a thin reasoning wrapper coupled to its doors by name:' 'actions dispatch | ask | nothing, the losers and the raw backlog count recorded,' 'a per-input degraded rule keyed on brief mode=omitted, the roster read for who' 'is idle, a follow-up check-in on a failed ACT, grants in the shipped shapes and' 'matched against its own command lines by test. Spec §6, §9.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c4.txt"
 git commit -q -F "$TMPDIR/c4.txt" && git log --oneline -1
 ```
 
@@ -1658,7 +1903,7 @@ git commit -q -F "$TMPDIR/c4.txt" && git log --oneline -1
 **Files:**
 - Modify: `lib/validate-bot-change.sh` (append a scenario block before the harness summary; helpers `val_plane_ready`, `val_sql` at `:163,171`, `harness_check` at `lib-common.sh:4634`, `$VAL_CLI`, `$VAL_REPO`, `$LIB_DIR`, `$ROOT`; the harness already exports a SHORT `PLANE_SOCKET` at `:135`)
 
-**Interfaces:** consumes Tasks 1 and 3. It proves the two doors under the identity env a manager session carries and through the installed CLI, with the **positive control gated on a non-empty id** (cycle-2 B10: `grep -c ""` counts every line).
+**Interfaces:** consumes Tasks 1 and 3. It proves the two doors under the identity env a manager session carries and through the installed CLI, with the **positive control gated on a non-empty id** (cycle-2 B10: `grep -c ""` counts every line) whose shape is checked with the contract's own regex (cycle-3 B4: a 34-`?` glob failed a correct 32-hex id).
 
 - [ ] **Step 1: Append the block**
 
@@ -1675,44 +1920,49 @@ git commit -q -F "$TMPDIR/c4.txt" && git log --oneline -1
 # ===========================================================================
 echo ""
 echo "=== validate manager check-in: the decision lands and the read door joins it ==="
-CK_FLEET="valckf"
-val_plane_ready "$ROOT" "$CK_FLEET"
-ck_decision='{"inputs_seen":{"open_tasks":0,"considered":[],"unavailable":[]},"delta":{},"action":"nothing","project_key":null,"rationale":"harness: nothing worth starting","raise":{"decided":false,"reason":"no delta","held":[]}}'
-ck_id=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET" BOT_ID="valckmgr" \
+CK_FLEET_H="valckf"
+val_plane_ready "$ROOT" "$CK_FLEET_H"
+ck_decision='{"prev_checkin_id":null,"inputs_seen":{"open_tasks":0,"stalls":0,"unacked":0,"issues_seen":null,"issues_considered":0,"knowledge_hits":0,"considered":[],"unavailable":["gh"]},"delta":{},"action":"nothing","project_key":null,"rationale":"harness: nothing worth starting","raise":{"decided":false,"reason":"no delta","held":[]}}'
+ck_id=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckmgr" \
     PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
     bash "$VAL_REPO/lib/checkin-record.sh" 2> "$ROOT/ck-record.err" || true)
-case "$ck_id" in ck_??????????????????????????????????) r=yes ;; *) r=no ;; esac
+printf '%s' "$ck_id" | grep -Eq '^ck_[0-9a-f]{32}$' && r=yes || r=no
 harness_check "checkin: the record door returns a ck_<32hex> id" "$r"
 ck_row=$(val_sql "$ROOT" "SELECT json_extract(detail,'\$.action') || '|' || severity || '|' || subject_alias FROM events WHERE kind='system' AND event='checkin_decision' AND source_ref='checkin:$ck_id'")
-[ -n "$ck_id" ] && [ "$ck_row" = "nothing|notice|bot:$CK_FLEET/valckmgr" ] && r=yes || r=no
+[ -n "$ck_id" ] && [ "$ck_row" = "nothing|notice|bot:$CK_FLEET_H/valckmgr" ] && r=yes || r=no
 harness_check "checkin: ...and the decision LANDED as one actor-anchored notice row (source_ref checkin:<id>, BOT_ID alias)" "$r"
-ck_other=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET" BOT_ID="valckother" \
+ck_err=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events WHERE kind='system' AND event='script_error' AND source_ref LIKE '%checkin-record%'")
+[ "$ck_err" = "0" ] && r=yes || r=no
+harness_check "checkin: ...and the record door fired no script_error row (the ERR-trap class)" "$r"
+ck_other=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckother" \
     PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
     bash "$VAL_REPO/lib/checkin-record.sh" 2>> "$ROOT/ck-record.err" || true)
 # The CLI reaches the plane through <root>/lib/dispatch-overdue.py -- linked for
 # THIS scenario and removed after it (the #1481 neighbour rule at :652/:682).
 ln -sfn "$LIB_DIR" "$ROOT/lib"
-CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET" --json \
+CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --json \
     > "$ROOT/ck-read.out" 2> "$ROOT/ck-read.err" || true
 { [ -n "$ck_id" ] && grep -q "$ck_id" "$ROOT/ck-read.out"; } && r=yes || r=no
 harness_check "checkin: the read door LISTS the decision (positive control, gated on a non-empty id)" "$r"
-CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET" --bot valckmgr --last --json \
+CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --bot valckmgr --last --json \
     > "$ROOT/ck-read2.out" 2> "$ROOT/ck-read2.err" || true
 rm -f "$ROOT/lib"
 { [ -n "$ck_id" ] && [ -n "$ck_other" ] && grep -q "$ck_id" "$ROOT/ck-read2.out" && ! grep -q "$ck_other" "$ROOT/ck-read2.out"; } && r=yes || r=no
 harness_check "checkin: ...--bot --last returns THIS manager's newest row and not the other manager's (a real negative)" "$r"
 ```
 
-- [ ] **Step 2: Run the harness unsandboxed and read the four lines**
+The `script_error` check keys on `source_ref LIKE '%checkin-record%'` because `emit_script_error` stamps the failing script's name into the ref; a bare-root dispatch elsewhere in the harness emits two `script_error` rows of its own (pre-existing on main, measured), which this scope excludes.
+
+- [ ] **Step 2: Run the harness unsandboxed and read the five lines**
 
 Run: `bash lib/validate-bot-change.sh > "$TMPDIR/vbc.txt" 2>&1; echo "rc=$?"; grep -E 'checkin:' "$TMPDIR/vbc.txt"`
-Expected: four `PASS` lines beginning `checkin:`; the harness's overall verdict unchanged from main's (run main's harness once for the baseline if unsure — a pre-existing failure in another block is out of scope and is named, not fixed). The two `critical` `script_error` rows a bare-root dispatch emits are pre-existing on main (measured against unpatched `dispatch-task.sh`) — not a chunk-1 regression. **Paste the four lines into the PR body** (Task 7).
+Expected: five `PASS` lines beginning `checkin:`; the harness's overall verdict unchanged from main's (run main's harness once for the baseline if unsure — a pre-existing failure in another block is out of scope and is named, not fixed). If the `script_error` line fails, open `ck-record.err` and the row's `detail` before touching anything: the ref scope may not match `emit_script_error`'s stamp on this root — fix the LIKE, never the assertion. **Paste the five lines into the PR body** (Task 7).
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add lib/validate-bot-change.sh
-printf '%s\n' 'test(harness): the check-in record lands and the read door joins it' '' 'validate-bot-change.sh gains the chunk-1 scenario: record -> row under a manager' 'identity env; read door lists it (positive control first, gated on a non-empty' 'id); --bot --last excludes the other manager (a real negative). Uses the' 'harness short socket path; $ROOT/lib linked around the CLI calls like #1481.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c5.txt"
+printf '%s\n' 'test(harness): the check-in record lands and the read door joins it' '' 'validate-bot-change.sh gains the chunk-1 scenario: record -> row under a manager' 'identity env (id checked with the contract regex, zero script_error rows); read' 'door lists it (positive control first, gated on a non-empty id); --bot --last' 'excludes the other manager (a real negative). Uses the harness short socket' 'path; $ROOT/lib linked around the CLI calls like #1481.' '' 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>' > "$TMPDIR/c5.txt"
 git commit -q -F "$TMPDIR/c5.txt" && git log --oneline -1
 ```
 
@@ -1720,26 +1970,38 @@ git commit -q -F "$TMPDIR/c5.txt" && git log --oneline -1
 
 ### Task 6: `README.md`, `CLAUDE.md`, `CHANGELOG.md`, the observability guide
 
-**Files:** `README.md:145-146`; `CLAUDE.md` (the `lib/` table; the `commands/` line; `## Key Commands` → `# Operations`); `CHANGELOG.md` (`[Unreleased]`); `documentation/guides/observability.md` (the question→door table).
+**Files:** `README.md:145-146`; `CLAUDE.md` (the `lib/` table; the `commands/` line at `:471`; `## Key Commands` → `# Operations`); `CHANGELOG.md` (`[Unreleased]`, `:7`); `documentation/guides/observability.md` (the question→door table, `:10-23`, three columns).
 
-- [ ] **Step 1: README counts** — `tests/test_readme_library_counts.py` pins them: `53 skills` → `54 skills`; `39 protocols` → `40 protocols`; `91 bash lifecycle scripts` → `93 bash lifecycle scripts` (measure with `ls -d library/skills/*/ | wc -l`, `ls library/protocols/*.md | grep -vc README`, and the test's own lib rule before editing — paste the numbers, never recall them). Run: `./.venv/bin/pytest tests/test_readme_library_counts.py -q` → pass.
+**Interfaces:** consumes the landed files of Tasks 1–4; every number below is measured in the same breath as it is written (`counts-are-pasted-never-recalled`).
+
+- [ ] **Step 1: README counts** — `tests/test_readme_library_counts.py` pins them and its rule for `lib/` **excludes `.py`** (`:17-19`), so `checkin-contract.py` does not count. Measure with the test's own functions, then edit `README.md:145-146`:
+
+```bash
+./.venv/bin/python -c "from tests.test_readme_library_counts import _bash_scripts, _md_members; print('lib', len(_bash_scripts()), 'protocols', len(_md_members('protocols')))"
+ls -d library/skills/*/ | wc -l
+```
+Expected: `lib 92 protocols 40` and `54`. Then `53 skills` → `54 skills`; `39 protocols` → `40 protocols`; `91 bash lifecycle scripts` → `92 bash lifecycle scripts`. Run: `./.venv/bin/pytest tests/test_readme_library_counts.py -q` → pass. (A second in-flight branch edits the same README line — merge conflicts here are resolved by re-measuring, never by arithmetic.)
 
 - [ ] **Step 2: The lib rows** — append to the `lib/` table in `CLAUDE.md`, in the house style:
 
 ```markdown
-| `checkin-record.sh` | THE write door for a manager check-in decision (manager check-in spec §7). Mints the `ck_` id through `plane_mint_id` (the one mint), validates the schema-1 record through `checkin-contract.py`, lands ONE actor-anchored `checkin_decision` system event stamped `source_ref checkin:<id>` — the task-recheck stamp idiom, so a reader joins on the ref. **For this door the record IS the action**: rc 3 when the plane did not record or is silenced (never a silent 0), rc 2 when the contract refuses (every reason named), rc 1 for usage including a missing identity — the `task-act.sh` ladder. Identity is `BOT_ID` + `FLEET_NAME` from the environment, never `BOT_NAME` (a display field) and never a flag (nothing supplies one) |
-| `checkin-contract.py` | The schema-1 decision record, stdlib (the `dispatch-overdue.py` precedent): `normalize()` lists EVERY defect rather than the first; keeps a `delta` count `null` when the manager could not measure it (never collapsed to 0 — an unchanged delta is the skill's argument for silence); requires `raise.reason` in both directions; carries the losers in `inputs_seen.considered`, because a selector is judged by what it did NOT pick (`sprint-selection-record.py`, #974). Actions this chunk: `dispatch \| ask \| nothing`; `propose`/`sprint` widen the enum as schema 2. Also the CLI filter the door pipes through |
+| `checkin-record.sh` | THE write door for a manager check-in decision (manager check-in spec §7). Mints the `ck_` id through `plane_mint_id` (the one mint), validates the schema-1 record through `checkin-contract.py`, lands ONE actor-anchored `checkin_decision` system event stamped `source_ref checkin:<id>` — the task-recheck stamp idiom, so a reader joins on the ref. **For this door the record IS the action**: rc 3 when the plane did not record or is silenced (never a silent 0), rc 2 when the contract refuses (every reason named), rc 1 for usage including a missing identity — the `task-act.sh` ladder. The contract runs as a top-level pipeline into a file, never in a command substitution: `install_error_trap`'s ERR trap fires inside a substitution whatever surrounds it and would land a `critical` `script_error` row for a decision the door says it did not record. Identity is `BOT_ID` + `FLEET_NAME` from the environment, never `BOT_NAME` (a display field) and never a flag (nothing supplies one); `--dry-run` validates and prints `DRY-RUN <id>` |
+| `checkin-contract.py` | The schema-1 decision record, stdlib (the `dispatch-overdue.py` precedent): `normalize()` lists EVERY defect rather than the first; keeps a count `null` when the manager could not measure it (never collapsed to 0 — an unchanged delta is the skill's argument for silence) and refuses a MISSING count rather than defaulting it; requires `prev_checkin_id` (null = no previous) and `raise.reason` in both directions; carries the losers in `inputs_seen.considered` — non-empty on `dispatch` — and the raw backlog count `issues_seen` beside the filtered `issues_considered`, because a selector is judged by what it did NOT pick and a broken filter must not look like an empty backlog (`sprint-selection-record.py`, #974). Actions this chunk: `dispatch \| ask \| nothing`; `propose`/`sprint` widen the enum as schema 2. Also the CLI filter the door pipes through |
 ```
 
-and one sentence each in the existing `dispatch-task.sh` and `tg-post.sh` rows: ``Since the check-in chunk: `--project <key>` stamps `project_key` on the work item and opens the envelope; `--checkin ck_<32hex>` appends a `checkin_dispatch` join row to the SAME batch as the assignment (a strict `Assignment` payload cannot carry the id), disclosed and ignored on an untracked dispatch.`` / ``Its sender alias is `bot:$FLEET_NAME/$BOT_ID`, the rule every door shares (it was `BOT_NAME`, which silently broke any alias join for a renamed bot).``
+and one sentence each in the existing `dispatch-task.sh` and `tg-post.sh` rows: ``Since the check-in chunk: `--project <key>` stamps `project_key` on the work item and opens the envelope; `--checkin ck_<32hex>` appends a `checkin_dispatch` join row to the SAME batch as the assignment (a strict `Assignment` payload cannot carry the id; `task_id` null on an id-less tracked send), disclosed and ignored on an untracked dispatch.`` / ``Its sender alias is `bot:$FLEET_NAME/${BOT_ID:-$BOT_NAME}` — the id where a session exports one (the alias every plane door anchors on), the name where a hand caller such as `bot-sweep-cron.sh` sets only that; it was `BOT_NAME` alone, which silently broke any alias join for a renamed bot. `keepalive.sh:102`'s heartbeat subject is the remaining `BOT_NAME` alias, moved with chunk 2.``
 
-- [ ] **Step 3: The command and the guide** — in the package structure's `commands/` line add `checkins`; under `## Key Commands` → `# Operations`:
+- [ ] **Step 3: The command and the guide** — in the package structure's `commands/` line (`CLAUDE.md:471`) add `checkins` to the list and change `(14 files)` → `(15 files)`; under `## Key Commands` → `# Operations`:
 
 ```bash
 claudlobby checkins [--bot B] [--since 7d] [--last] [--json]   # the manager check-in's decisions, newest first (plane read)
 ```
 
-In `documentation/guides/observability.md`'s question→door table add: `| What did a manager decide at its last check-in, and why? | claudlobby checkins --bot <b> --last |`.
+In `documentation/guides/observability.md`'s question→door table (three columns: Question · Where to look · Command) add:
+
+```markdown
+| What did a manager decide at its last check-in, and why? | The plane (the check-in's `checkin_decision` rows) | `claudlobby checkins --bot <b> --last` |
+```
 
 - [ ] **Step 4: CHANGELOG** — under `[Unreleased]`, one bullet per landed piece (the record door + contract; `dispatch-task --project/--checkin`; the `tg-post.sh` alias; `checkins`; the protocol + skill).
 
@@ -1757,6 +2019,8 @@ git commit -q -F "$TMPDIR/c6.txt" && git log --oneline -1
 
 The operator's standing loop for every chunk. Nothing merges without all of it, and the PR body cites each observation — claimed evidence is not evidence. The real-boot gate for the skill and protocol (the CLAUDE.md-mandated runtime gate) runs **after merge and pull, on main's code, on the canary manager** — no unmerged code ever runs on the live host (cycle-2 R4), and a skill-text finding there is a follow-up PR against `library/` (live on the next `generate`, no restart), which is why the ordering no longer invalidates the gates below (cycle-2 R3).
 
+**Interfaces:** consumes `$WT`, `$TMPDIR/before.txt`, `$TMPDIR/baseline.md`, `$CK_FLEET`, `$CK_MGR` from Task 0 and every commit of Tasks 1–6; produces the PR, the merge, the deploy record and the real run's row.
+
 - [ ] **Step 1: Review lenses** — `/simplify`, then `/review-work`, then `/verify-completion` on the branch (the phase-finalization gate). Fold every finding as its own commit; re-run the touched test files.
 
 - [ ] **Step 2: Committed-code mutants, in a detached worktree** — never against uncommitted code. For each: apply, run the named tests, expect ≥ 1 failure, restore with `git checkout -- <file>`. Every anchor must occur exactly once (`assert text.count(old) == 1`); a surviving mutant is a missing test — add the test, never a weaker mutant. Bash-door tests unsandboxed.
@@ -1770,6 +2034,16 @@ MUTANTS = [
     ("null-delta-collapsed", "lib/checkin-contract.py",
      "v = delta.get(k)\n        if v is not None and not _count(v):", "v = delta.get(k) or 0\n        if not _count(v):",
      ["tests/test_checkin_contract.py"]),
+    ("null-input-collapsed", "lib/checkin-contract.py",
+     "v = seen[k]\n        if v is not None and not _count(v):", "v = seen[k] or 0\n        if not _count(v):",
+     ["tests/test_checkin_contract.py"]),
+    ("missing-input-defaults-to-zero", "lib/checkin-contract.py",
+     "if k not in seen:\n            bad.append(f\"inputs_seen.{k} required", "if k not in seen:\n            seen[k] = 0\n        if False:\n            bad.append(f\"inputs_seen.{k} required",
+     ["tests/test_checkin_contract.py"]),
+    ("prev-optional", "lib/checkin-contract.py",
+     "if \"prev_checkin_id\" not in obj:", "if False:", ["tests/test_checkin_contract.py"]),
+    ("losers-optional-on-dispatch", "lib/checkin-contract.py",
+     "if action == \"dispatch\" and not out[\"inputs_seen\"][\"considered\"]:", "if False:", ["tests/test_checkin_contract.py"]),
     ("considered-uncapped", "lib/checkin-contract.py",
      "return (isinstance(v, list) and len(v) <= LIST_MAX", "return (isinstance(v, list)",
      ["tests/test_checkin_contract.py"]),
@@ -1781,6 +2055,12 @@ MUTANTS = [
      "if [ \"${PLANE_EMIT_LAST_RC:-0}\" -ne 0 ]; then", "if false; then", ["tests/test_checkin_doors.py"]),
     ("record-uses-bot-name", "lib/checkin-record.sh",
      "BOT=\"${BOT_ID:-}\"", "BOT=\"${BOT_NAME:-${BOT_ID:-}}\"", ["tests/test_checkin_doors.py"]),
+    ("record-refusal-in-substitution", "lib/checkin-record.sh",
+     "if printf '%s' \"$raw\" | python3 \"$LIB_DIR/checkin-contract.py\" --checkin-id \"$checkin_id\" > \"$tmp\"; then",
+     "if normalized=$(printf '%s' \"$raw\" | python3 \"$LIB_DIR/checkin-contract.py\" --checkin-id \"$checkin_id\"); then",
+     ["tests/test_checkin_doors.py"]),
+    ("dry-run-unmarked", "lib/checkin-record.sh",
+     "printf 'DRY-RUN %s\\n' \"$checkin_id\"", "printf '%s\\n' \"$checkin_id\"", ["tests/test_checkin_doors.py"]),
     ("project-never-opens-gate", "lib/dispatch-task.sh",
      "|| [ -n \"$DISPATCH_WORKSTREAM\" ] || [ -n \"$DISPATCH_PROJECT\" ]; then", "|| [ -n \"$DISPATCH_WORKSTREAM\" ]; then",
      ["tests/test_checkin_doors.py"]),
@@ -1789,8 +2069,10 @@ MUTANTS = [
     ("join-dropped-silently", "lib/dispatch-task.sh",
      "echo \"dispatch-task: --checkin ignored: a $DISPATCH_TYPE dispatch mints no assignment to join\" >&2", ":",
      ["tests/test_checkin_doors.py"]),
+    ("join-task-id-empty-string", "lib/dispatch-task.sh",
+     "ck_tid=\"null\"", "ck_tid=\"\\\"\\\"\"", ["tests/test_checkin_doors.py"]),
     ("tg-post-bot-name", "lib/tg-post.sh",
-     "--arg sender \"bot:$FLEET_NAME/$BOT_ID\"", "--arg sender \"bot:$FLEET_NAME/$BOT_NAME\"", ["tests/test_checkin_doors.py"]),
+     "--arg sender \"bot:$FLEET_NAME/${BOT_ID:-$BOT_NAME}\"", "--arg sender \"bot:$FLEET_NAME/$BOT_NAME\"", ["tests/test_checkin_doors.py"]),
     ("rows-by-ingest-order", "claudlobby/plane/queries.py",
      "ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC", "ORDER BY e.ingest_seq DESC", ["tests/test_checkins_cli.py"]),
     ("last-bounded-by-since", "claudlobby/commands/checkins.py",
@@ -1798,15 +2080,20 @@ MUTANTS = [
     ("truncated-rows-dropped", "claudlobby/plane/queries.py",
      "\" WHERE e.kind = 'system' AND e.event = 'checkin_decision'\"", "\" WHERE e.kind = 'system' AND e.event = 'checkin_decision' AND e.detail_truncated = 0\"",
      ["tests/test_checkins_cli.py"]),
+    ("dataless-row-crashes", "claudlobby/commands/checkins.py",
+     "rec = json.loads(detail) if detail and not truncated else None", "rec = json.loads(detail) if not truncated else None",
+     ["tests/test_checkins_cli.py"]),
+    ("cap-undisclosed", "claudlobby/commands/checkins.py",
+     "if len(rows) > TEXT_ROW_LIMIT:", "if False:", ["tests/test_checkins_cli.py"]),
     ("claudron-wildcard-sneaks-in", "library/skills/checkin/SKILL.md",
      "  - \"Bash(claudron lookup *)\"\n", "  - \"Bash(claudron *)\"\n", ["tests/test_checkin_library.py"]),
     ("record-grant-needs-a-space", "library/skills/checkin/SKILL.md",
      "  - \"Bash(*checkin-record.sh*)\"\n", "  - \"Bash(*checkin-record.sh *)\"\n", ["tests/test_checkin_library.py"]),
     ("degraded-any-field", "library/skills/checkin/SKILL.md",
-     "is always present and is **not an input** of this\n   skill; ignore it.", "is an input like any other.",
-     ["tests/test_checkin_library.py"]),
+     "an entry whose `mode` is `omitted` and whose", "an entry of either mode whose", ["tests/test_checkin_library.py"]),
 ]
 ```
+Twenty-five mutants; `record-refusal-in-substitution` is the cycle-3 B2 pin — it survives on the stub rig (whose `install_error_trap` is a no-op) and must die on the real rig's refusal test, which is why that test exists.
 
 - [ ] **Step 3: The two-leg full-suite gate** — `before.txt` is Task 0's; the after leg runs on the FINAL committed tip, unsandboxed:
 
@@ -1815,9 +2102,10 @@ MUTANTS = [
 awk "/short test summary info/,0" "$TMPDIR/run_after.txt" | grep -E "^(FAILED|ERROR)" | sed 's/ - .*//' | sort -u > "$TMPDIR/after.txt"
 comm -13 "$TMPDIR/before.txt" "$TMPDIR/after.txt"     # failures YOU introduced — must be empty
 tail -1 "$TMPDIR/run_before.txt"; tail -1 "$TMPDIR/run_after.txt"
-./.venv/bin/pytest --collect-only -q tests/test_checkin_contract.py tests/test_checkin_doors.py tests/test_checkins_cli.py tests/test_checkin_library.py | tail -1   # the expected passed-count delta, measured
+./.venv/bin/pytest --collect-only -q tests/test_checkin_contract.py tests/test_checkin_doors.py tests/test_checkins_cli.py tests/test_checkin_library.py | tail -1   # the four new files' count, measured
+./.venv/bin/pytest --collect-only -q tests/test_bash_parse.py -k checkin-record | tail -1                                                                     # + 1: the new .sh's parametrized parse case
 ```
-Both rc must be 1 (the red baseline). Known load flakes on this host: `test_boot_capture.sh:203 (dur=1)` and the `test_github_app_wrapper` refresh loop — re-run a flake alone before calling it a regression. The after leg's `passed` must equal before's plus the collected count printed by the last line.
+Both rc must be 1 (the red baseline). Known load flakes on this host: `test_boot_capture.sh:203 (dur=1)` and the `test_github_app_wrapper` refresh loop — re-run a flake alone before calling it a regression. The after leg's `passed` must equal before's plus the two collected counts printed by the last two lines.
 
 - [ ] **Step 4: Push, open the PR, CI on Linux**
 
@@ -1825,18 +2113,18 @@ Both rc must be 1 (the red baseline). Known load flakes on this host: `test_boot
 git push -u origin checkin/chunk1-record
 gh pr create --title "feat(checkin): chunk 1 — the record and the run (contract, record door, dispatch join, read door, skill + protocol)" --body-file "$TMPDIR/pr-body.md"
 ```
-The PR body carries, in order: what landed (one line per task); **the empirical observations** — the four `checkin:` harness lines from Task 5 and the names of the two real-plane tests (`test_the_decision_lands_on_a_real_plane`, `test_dispatch_checkin_appends_the_join_row_to_the_same_batch`); the two-leg gate result (`comm -13` empty; before/after count lines pasted); the mutant table (16 names, each with the test that killed it); the two baselines from Task 0; **the canary-rollout posture** ("`lib/dispatch-task.sh` and `lib/tg-post.sh` reach every fleet on pull; the flags are additive and behaviour without them is byte-identical, pinned by `tests/test_task_id_dispatch.py` + `tests/test_dispatch_task.sh`; the real run on the canary manager is the positive control"); the spec link and the five locked forks. End with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Wait for CI green; a `test_boot_capture.sh` load flake is re-run, not waved through.
+The PR body carries, in order: what landed (one line per task); **the empirical observations** — the five `checkin:` harness lines from Task 5 and the names of the three real-plane tests (`test_the_decision_lands_on_a_real_plane`, `test_a_refused_decision_leaves_no_row_at_all_on_a_real_plane`, `test_dispatch_checkin_appends_the_join_row_to_the_same_batch`); the two-leg gate result (`comm -13` empty; before/after count lines pasted); the mutant table (25 names, each with the test that killed it); the baselines from Task 0 (worker/manager/fleet-active and the three carrier rows — numbers only, the fleet and manager unnamed); **the canary-rollout posture** ("`lib/dispatch-task.sh` and `lib/tg-post.sh` reach every fleet on pull; the flags are additive and behaviour without them is byte-identical, pinned by `tests/test_task_id_dispatch.py` + `tests/test_dispatch_task.sh`; the real run on the canary manager is the positive control"); the spec link and the five locked forks. End with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Wait for CI green; a `test_boot_capture.sh` load flake is re-run, not waved through.
 
 - [ ] **Step 5: Admin-merge with the explicit squash body** (the operator's standing authorization for gauntleted work) — `gh pr merge --squash --admin --body-file "$TMPDIR/pr-body.md"`; delete the branch.
 
 - [ ] **Step 6: Deploy to the Mini: pull, then validate every fleet**
 
-Chunk 1 composes nothing differently for any bot that does not declare `checkin`; `lib/` and the `checkins` subcommand are live on pull. Fleets are enumerated the way `lib/setup-fleets:18` does (flat or nested); nothing is piped.
+Chunk 1 composes nothing differently for any bot that does not declare `checkin`; `lib/` and the `checkins` subcommand are live on pull. Fleets are enumerated the way `lib/setup-fleets:18` does (flat or nested); nothing is piped; the canary name rides the ssh command string as in Task 0.
 
 ```bash
-ssh -o BatchMode=yes mini 'bash -s' <<'EOF'
+ssh -o BatchMode=yes mini "CK_FLEET=$CK_FLEET MINI_ROOT=$MINI_ROOT bash -s" <<'EOF'
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
-cd ~/Projects/claudlobby
+cd "$MINI_ROOT" || exit 1
 git status --porcelain | grep -q . && { echo "dirty checkout — stop"; exit 1; }
 git fetch -q origin main && git pull --ff-only
 for fy in local/*/fleet.yaml local/*/*/fleet.yaml; do
@@ -1846,33 +2134,44 @@ for fy in local/*/fleet.yaml local/*/*/fleet.yaml; do
   grep -i 'checkin' "/tmp/ck-validate-$fleet.out" || echo "  no checkin findings"
   .venv/bin/claudlobby --fleet "$fleet" diff > "/tmp/ck-diff-$fleet.out" 2>&1; echo "diff $fleet rc=$? lines=$(wc -l < "/tmp/ck-diff-$fleet.out")"
 done
-.venv/bin/claudlobby checkins --fleet "<canary-fleet>"; echo "checkins rc=$?"
+.venv/bin/claudlobby checkins --fleet "$CK_FLEET"; echo "checkins rc=$?"
 EOF
 ```
 Expected: `validate` rc unchanged from before the pull on every fleet, no `checkin` findings, `diff` empty on every fleet (nothing composes differently yet), and `claudlobby checkins` printing `no check-ins — fleet …` at rc 0 (rc 3 means the install's `lib/` predates the door — pull again).
 
-- [ ] **Step 7: Operator action — equip the canary manager** (operator config is never edited by the executor)
+- [ ] **Step 7: Operator action — equip the canary manager, then restart it once** (operator config is never edited by the executor)
 
-The operator adds two lines to the canary leaf manager's entry in `local/<system>/<canary-fleet>/fleet.yaml` — `protocols: [checkin]` and `skills: [checkin]` (appended to any existing lists; `projects.yaml` must exist for that fleet, or `dispatch` is unavailable to the skill by its own rule) — and runs `claudlobby --fleet <canary-fleet> generate --bot <manager>`. The skill symlink is live instantly; the protocol lands at the manager's next session start.
+The operator adds two lines to the canary leaf manager's entry in `local/<system>/$CK_FLEET/fleet.yaml` — `protocols: [checkin]` and `skills: [checkin]` (appended to any existing lists; Task 0 printed whether that fleet's `projects.yaml` exists — without it `dispatch` is unavailable to the skill by its own rule and the run can prove the record only) — and runs `claudlobby --fleet "$CK_FLEET" generate --bot "$CK_MGR"`. The skill symlink is live instantly; **the protocol is read at session start** (`fleet-update-lifecycle.md:32,45`), and steps 8–9 inject into the RUNNING session — so without a restart the only run this chunk performs would happen with the protocol out of context (cycle-3 R6). At an idle moment for that manager (`claudlobby --fleet "$CK_FLEET" status --bot "$CK_MGR"` reads IDLE and nothing is open to it), the operator restarts **that one bot** the way `rolling-restart.sh:104-117` restarts each of a fleet — handoff, spin-up, then a FRESH bridge-ready before anything is injected:
+
+```bash
+cd "$MINI_ROOT"
+for bd in "local/$CK_FLEET/runtime/bots/$CK_MGR" local/*/"$CK_FLEET"/runtime/bots/"$CK_MGR"; do [ -d "$bd" ] && break; done
+[ -d "$bd" ] || { echo "no bot dir for $CK_MGR"; exit 1; }
+date -u +%FT%TZ                                   # T0: the pre-treatment boundary, into the PR comment
+lib/pre-stop-handoff.sh "$bd" || true
+lib/spin-up-bot.sh "$bd"                          # idempotent: an enrolled bot is RESTARTED (spin-up-bot.sh:12-13)
+tail -n 0 -f "$bd/logs/startup.log" | grep -m1 BRIDGE_READY   # wait for the NEW session's bridge (ceiling: 180s, as rolling-restart)
+```
+`T0` goes into the PR comment as the instant before which the baselines are pre-treatment; chunk 4 re-takes them the same way before arming.
 
 - [ ] **Step 8: The dry run — the mandatory runtime gate for the skill text**
 
-Inject from the host, through the socket-aware helper (the slash payload reaches the pane bare — `dispatch.sh:26-42`): `"$CLAUDLOBBY_ROOT/lib/dispatch.sh" <manager> "/checkin --dry-run"`. Capture from the pane (`tmux -L <socket> capture-pane -p -S -200`) and the manager's transcript: (a) the decision JSON the model emitted, (b) `checkin-record.sh --dry-run`'s rc and printed `ck_` id, (c) which of READ 0–5 answered and which landed in `unavailable`. A refused decision (rc 2) or a door the model could not drive is a finding about the skill text: a follow-up PR against `library/`, live on the next `generate`, before step 9.
+Inject from the host, through the socket-aware helper (the slash payload reaches the pane bare — `dispatch.sh:26-42`): `"$CLAUDLOBBY_ROOT/lib/dispatch.sh" "$CK_MGR" "/checkin --dry-run"`. Capture from the pane (`tmux -L <socket> capture-pane -p -S -200`) and the manager's transcript: (a) the decision JSON the model emitted, (b) the door's `DRY-RUN ck_…` line and rc, (c) which of READ 0–5 answered and which landed in `unavailable`, (d) **the exact ACT command line the model printed** — the id hand-off and the `--project`/`--checkin` flags are drivable, proven without acting (cycle-3 claims 3/8). A refused decision (rc 2) or a door the model could not drive is a finding about the skill text: a follow-up PR against `library/`, live on the next `generate`, before step 9.
 
 - [ ] **Step 9: The real run — the deploy's positive control** (cycle-2 B7)
 
-`"$CLAUDLOBBY_ROOT/lib/dispatch.sh" <manager> "/checkin"`. Then, on the host: `claudlobby checkins --fleet <canary-fleet> --bot <manager> --last --json > /tmp/ck-first.json; echo "rc=$?"`. Expected: rc 0 and one row whose `record.action` is one of `dispatch | ask | nothing` with a non-empty `rationale` and `raise.reason`. If the action was `dispatch`, also `sqlite3 state/plane/plane.db "SELECT COUNT(*) FROM events WHERE event='checkin_dispatch'"` → 1. **Paste the row (identifiers faked if the PR is public-facing) and the dry-run's three captures as a PR comment.** That comment closes the chunk; the manager's next check-in waits for chunk 2's trigger.
+`"$CLAUDLOBBY_ROOT/lib/dispatch.sh" "$CK_MGR" "/checkin"`. Then, on the host, from `$MINI_ROOT`: `.venv/bin/claudlobby checkins --fleet "$CK_FLEET" --bot "$CK_MGR" --last --json > /tmp/ck-first.json; echo "rc=$?"`. Expected: rc 0 and one row whose `record.action` is one of `dispatch | ask | nothing` with a non-empty `rationale` and `raise.reason`. The action stays the manager's own — forcing a `dispatch` would corrupt the first real row. If the action was `dispatch`, also `sqlite3 "$MINI_ROOT/state/plane/plane.db" "SELECT COUNT(*) FROM events WHERE event='checkin_dispatch'"` → 1, and the undo, should that dispatch not stand, is `lib/task-act.sh withdraw <task-id> --reason "chunk-1 positive control"` (`task-act.sh:5`). **Failure branch:** rc 3, or no row, or a row the manager did not produce — the chunk has not proved its Goal on the live host: the operator removes the two lines and re-runs `generate --bot` (the skill symlink and the protocol go with them; nothing else composed differently), the finding goes into a follow-up PR against `library/`, and chunk 2 waits on it. **Paste the row (identifiers faked — the PR is public) and the dry run's four captures as a PR comment, and state which clause of the Goal the run proved**: the record alone (`ask` / `nothing`), or the record and the join (`dispatch`). That comment closes the chunk; the manager's next check-in waits for chunk 2's trigger.
 
 ---
 
-## Self-review (run against the spec and the cycle-2 review after writing; findings folded above)
+## Self-review (run against the spec and the cycle-3 review after writing; findings folded above)
 
-**Cycle-2 blockers → where each is resolved.** B1 (join block before `emit_triple`) → Task 2 step 3(f), placed after the gate beside `link_frag`; a test asserts the send happened. B2 (flag-guard test unreachable; mutant unkilled) → the record door has no value-taking flags (the `--bot`/`--fleet` cut), and the dispatch test puts `--checkin` first and alone through `_fake_lib` (the real lib-common); the `flag-guard` mutant is gone with its subject. B3 (kwarg collision) → `_record(ck, **over)` takes the id positionally. B4 (grant shape) → `Bash(*checkin-record.sh*)` etc.; the RECORD block is a here-doc on the door; the library test matches every command line the skill writes against its grants with the space-boundary rule. B5 (`Bash(claudron *)`) → `Bash(claudron lookup *)`; a forbidden list and a mutant. B6 (degraded rule) → per-input scoping; the standing `utilization` entry named as not-an-input; a test and a mutant. B7 (no real run; self-fire) → Task 7 steps 8–9 after merge; the self-fire clause cut and pinned absent. B8 (winner-only record) → `inputs_seen.considered`, capped, in schema 1; a contract test and a mutant. B9 (README pins) → Task 6 step 1. B10 (empty-id control) → `[ -n "$ck_id" ]` gates both read-door checks.
+**Cycle-3 blockers → where each is resolved.** B1 (the degraded rule keyed on presence; `dispatch` unreachable on every real fleet) → the rule keys on `mode == "omitted"` (Task 4 skill READ 1; Global Constraints carry the live capture: absent plane → all four `omitted`; plane present → `alerts: labeled`, `dispatches.orphaned: labeled`, `utilization: omitted`); a test asserts the wording and a mutant flips it. B2 (a refused decision lands a `critical` row through the ERR trap) → the door runs the contract as a form-D pipeline into a `safe_mktemp` file (Task 1 step 8, re-measured: refusal rc 2 with no trap, the substitution form fires it); a real-rig test asserts zero rows on refusal; the harness checks zero `script_error` rows; a mutant restores the substitution form. B3 (`null` refused / omitted count → 0) → `inputs_seen` counts are `int | null` with NO default; two contract tests, two mutants; the skill's template says `N|null` for both blocks. B4 (34-`?` glob) → `grep -Eq '^ck_[0-9a-f]{32}$'` (Task 5). B5 (wrapped needle) → `_flat()` before matching (Task 4 tests). B6 (nested fence truncates the skill) → a four-backtick outer fence; `test_the_skill_file_is_whole…` pins `## Rules`, four fence markers and two closed bash blocks. B7 (carrier blind to `tg-post.sh`) → the baseline counts `telegram-bridge` and `telegram-tgpost` separately and together (Task 0; spec §12.1/§12.4), measured on a seeded plane. B8 (the headline inflated by the check-in turn) → `worker_active_pct` excluding the manager by registry uid, beside `manager_active_pct` and `fleet_active_pct` from one CTE (Task 0, measured 2/4 · 2/4 · 3/4 on a seed; spec §11 names the worker delta the headline).
 
-**Cycle-2 risks.** R1 → Task 0 step 4 rewritten (fleet-scoped, outbound, `strftime`, plain open, named fleet, PATH). R2 → the reply tool granted; `tg-post.sh` named for the injected case; its alias fixed in Task 2. R3 → the real-boot gate is post-merge, so nothing invalidates the gates; spec §12 re-sequenced. R4 → merge → pull → equip → run; the posture stated in the PR body. R5 → the disclosure line + test + mutant. R6 → the field-table row and the recipe line in Task 2. R7 → READ 0 reads `--since 7d`; the protocol's rule is a rate cap. R8 → `raise.reason` ≤ 600. R9 → spec edits in the same commit (rc 3; §13; frontmatter). R10 → "read it from the output and pass it literally". R11 → `UNREACHABLE`. R12 → the precedence sentence in the preamble; chunk 5's grep gains `never go silent`.
+**Cycle-3 risks.** R1 → 92, measured with the test's own function (Task 6 step 1). R2 → the RECORD template shows the two coupled shapes and unquotes the nullable placeholders (Task 4). R3 → `${BOT_ID:-$BOT_NAME}`; the twelve `tg-post.sh` suites run in Task 2 step 5; the "every door" claim is struck from the CLAUDE.md row; `keepalive.sh:102` + `plane_armed --require-bot` filed for chunk 2 (Scope; spec §12.2). R4 → `considered` non-empty on `dispatch`; `issues_seen` beside `issues_considered` in schema 1, the contract, the skill (READ 4) and spec §7. R5 → READ 1b `claudlobby status --json`; the rationale names the worker's observed state; `pane_state` in `DOORS`. R6 → Task 7 step 7 restarts the canary manager after equipping, one bot, handoff + spin-up + fresh `BRIDGE_READY`; `T0` recorded as the pre-treatment boundary. R7 → the extractor collapses whitespace and matches `[^`]+`; the `gh` line is on one line; `Bash(gh issue list *)` and `Bash(gh *)` in `FORBIDDEN`; a test asserts the `gh` line is collected. R8 → `_row()` parses only `detail and not truncated`; a data-less row test; a mutant. R9 → `$WT`, `$CK_FLEET`, `$CK_MGR` defined in Task 0 (the names never written); the baseline refuses on `manager_uid_rows|0` and `/0 minutes`; the canary names ride the ssh command string. R10 → two conditional text lines + a test. R11 → Task 0 prints whether `projects.yaml` exists; step 9 names `task-act.sh withdraw` and the un-equip branch; the PR comment states which Goal clause was proved. R12 → the second `--collect-only` line for `test_bash_parse.py -k checkin-record`.
 
-**Cycle-2 gaps (the YAGNI cuts).** `parse_since` → inlined as `_since` (no new helper); `--limit` → gone; `--bot`/`--fleet` flags and the `flag_val` lift → gone; the dispatch tests → Task 2's own step 1; `mint_checkin_id` → the door mints via `plane_mint_id`; `plane_root` fixture used; the deploy enumerates fleets like `setup-fleets`, pipes nothing; the harness uses the exported short socket path; `checkin_dispatch`'s reader is chunk 3 (said in Task 2's Interfaces); `## Risks` and sizing added; `observability.md` row added; `test_dispatch_task.sh` in the exists-on-main list.
+**Cycle-3 gaps.** The light SQL form (Task 3); the text cap with the disclosure line + test + mutant; `DRY-RUN <id>` + the runnable dry-run block + test + mutant; `prev_checkin_id` required + test + mutant; `CLAUDE.md` `(15 files)`; the observability row has three cells; the spec is `type: spec` / `status: approved`; Task 2 `Consumes:` names Task 1's severity line; Tasks 0/6/7 carry Interfaces; `--since` rc 2 is stated in the docstring; every fork carries `Context:`; `task_id` null on an id-less tracked send (measured: a flagless `task` send lands one assignment) + test + mutant; the follow-up check-in on a failed ACT (skill + test); Task 4's vacuous `validate` step dropped; the Worker section's scoping sentence (Task 4 Interfaces); the never-seen-fleet rc 3 posture pinned by test.
 
-**Placeholder scan.** No TBD/TODO; every code step carries code. Two verification instructions name a file and a pattern rather than an edit: Task 2 step 4's `grep -n 'workstream:' worker-lifecycle.md` (mirror the row only if the field list is there) and Task 6 step 1's count measurement (paste, never recall).
+**Placeholder scan.** No TBD/TODO; every code step carries code. Operator-supplied values are shell variables set once in Task 0 (`CK_FLEET`, `CK_MGR`, `MINI_ROOT`) with `${:?}` guards at top level (not under lib-common's trap), never literals in a committed file. Two verification instructions name a measurement rather than an edit, by design: Task 6 step 1's counts (paste, never recall) and Task 7 step 3's collected counts.
 
-**Type consistency.** `normalize(obj, *, checkin_id=None)` matches the door's `--checkin-id` and every contract test. `checkin-record.sh` rc ladder 0/1/2/3 is identical in the header, the tests, the CLAUDE.md row and the skill. `CHECKIN_ROWS_SQL` binds `(fleet, fleet)` — matched in `collect_checkins`. `_Args.checkins_fleet` matches `dest="checkins_fleet"`; no `limit` anywhere. `STUB_CK` matches the stub's `plane_mint_id`. The skill's door strings match `DOORS` verbatim, and the grant test's glob rule is the documented one.
+**Type consistency.** `normalize(obj, *, checkin_id=None)` matches the door's `--checkin-id` and every contract test. `INPUTS` in the contract tests, `_decision()` in the doors tests and `ck_decision` in the harness all carry the six `inputs_seen` counts and `prev_checkin_id`. `checkin-record.sh` rc ladder 0/1/2/3 is identical in the header, the tests, the CLAUDE.md row and the skill; `DRY-RUN` is in the header, the door, the doors test, `DOORS` and the skill. `CHECKIN_ROWS_SQL` binds `(fleet, fleet)` — matched in `collect_checkins`; its five columns are the five `_row()` reads. `_Args.checkins_fleet` matches `dest="checkins_fleet"`; no `limit` anywhere. `STUB_CK` matches the stub's `plane_mint_id`. The skill's door strings match `DOORS` verbatim after whitespace collapse, and the grant test's glob rule is the documented one. `ck_tid` is declared on the same `local` line as `ck_ev` and read in the join only.
