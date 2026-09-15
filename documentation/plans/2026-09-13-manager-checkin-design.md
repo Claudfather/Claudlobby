@@ -640,9 +640,11 @@ nothing composes differently on the estate until the canary has earned it.**
    proves ambiguous), the panel seam.
 4. **Canary — the engineering fleet** (ruling 13). Arm the job on that fleet; burn
    in ≥ 3 days against the chunk-1 baselines; judge on `checkins --summary` and the
-   fleet-active delta. The cadence-retirement edits the canary is meant to earn are
-   carried on the canary fleet as `local/<fleet>/library/protocols/` overrides
-   (operator config) during the burn-in — fork F3.
+   fleet-active delta. The canary fleet declares `checkin` in its `defaults.protocols`, so every
+   bot in it composes the new protocol, whose Worker section governs where it
+   composes beside an older cadence rule — the thin edge on one fleet with no
+   library edit (fork F3, locked 2026-09-15: "retire those and make check-in the
+   beat", in chunk 5).
 5. **Default** — `requires:` linking **with the grant union** (§10), the
    `leaf-manager` role (with the cross-fleet direction of §10), the naked-bot gate's
    leaf-manager arm, then the registry line; the cadence-retirement edits land
