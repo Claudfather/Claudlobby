@@ -696,16 +696,23 @@ nothing composes differently on the estate until the canary has earned it.**
    inflates, grouped by the project's declared tier (the north star's rigor clause;
    `project_key` is first-class on the work item).
 
-   **Pre-registered bar (cycle 6, before any beat).** The unit is raw worker-busy
-   minutes per week on the canary fleet against its `T0` reading — this fleet's own
-   pre-treatment figure is ~30 a week (0.3% of ~10,000 observed minutes, measured
-   read-only 2026-09-15), so one 30-minute dispatch doubles it; §1's 5.3% is two
-   fleets over 18 bots and is NOT this fleet's baseline. The feature is judged
-   **working** when, over the burn-in scaled to a week, worker-busy minutes are at
-   least 2× the `T0` reading AND at least half of the `checkin_dispatch`-joined
-   dispatches reached a terminal report; **inert** below 2×; **harmful** at 2× or
-   more with fewer than half closing (dispatch volume without closure). The control
-   fleet's delta over the same window is subtracted before the comparison.
+   **Pre-registered bar (cycle 7, before any beat).** The unit is worker-busy minutes
+   per week on the canary fleet, expressed as a RATIO to its own `T0` reading — this
+   fleet's own pre-treatment figure is ~30 a week (0.3% of ~10,000 observed minutes,
+   measured read-only 2026-09-15), so one 30-minute dispatch doubles it; §1's 5.3%
+   is two fleets over 18 bots and is NOT this fleet's baseline. The control fleet
+   (the host's other fleet, untreated through chunk 4 by ruling 13) is measured the
+   same way against ITS OWN `T0` reading — the two fleets are not on one scale (the
+   control ran at ~4× the canary's minutes when both were read), so a raw-minute
+   subtraction would let the control's ordinary drift manufacture either verdict
+   (cycle-6 B3) — and the control's own post/`T0` ratio is the host-wide drift the
+   canary's ratio is judged against. The feature is judged **working** when, over
+   the burn-in scaled to a week, canary post/`T0` ≥ 2 × control post/`T0` AND at
+   least half of the decisions recorded with `action: dispatch` (the denominator is
+   the DECISION rows, never the join rows the judged agent writes) reached a
+   terminal report; **inert** below that; **harmful** at or above it with fewer than
+   half closing (dispatch volume without closure). With no control fleet the verdict
+   is labelled *uncontrolled* and is not a pass.
 
 **After the canary, as its evidence allows** (each keeps its label for
 cross-reference):
@@ -724,8 +731,8 @@ cross-reference):
 5. **Default** — `requires:` linking **with the grant union** (§10), the
    `leaf-manager` role (with the cross-fleet direction of §10), the naked-bot gate's
    leaf-manager arm, then the registry line; the cadence-retirement edits land
-   estate-wide with a **grep-derived sweep** (`milestone|beacon|2.3 min|10.15
-   min|Idle silence|never go silent` over `library/` — today that set includes
+   estate-wide with a **grep-derived sweep** (`grep -i -E 'milestone|beacon|2.3 min|10.15
+   min|idle silence|never go silent|never licenses silence|cadence and frequency'` over `library/`, case-insensitive — the live text reads `Never go silent`, and a case-sensitive pattern missed three of the four files named below (cycle-6 R12) — today that set includes
    `protocols/telegram-routing.md:29`, `expertise/orchestration.md:108`,
    `protocols/comms-topology.md:74`, `skills/lifecycle/SKILL.md:37`; the in-repo
    precedent is `a2a2210` followed by `8386263`'s "six more residue sites") and a
