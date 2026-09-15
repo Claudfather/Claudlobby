@@ -723,12 +723,13 @@ fleet-active delta.
    for it; recorded in the plane regardless of carrier; measurable.
 5. ~~The surfacing judgment~~ **Settled:** inputs and urgency floor as drawn in §6;
    the delta vs. the previous check-in is the primary signal.
-7. **Open (2026-09-15, from the cycle-1 reforge):** does `propose` (the intake
-   store, `planning.initiative`, chunk 1d) wait for the canary to show that
-   dispatching the existing backlog does not fill idle time? The canary fleet's
-   repos carry a deep backlog, so `propose` is the empty-backlog branch; building
-   it first builds the branch the canary is least likely to exercise. Lean: wait
-   (fork F1 in the chunk-1 plan). The operator locks it.
+7. ~~Does `propose` wait for the canary~~ **Settled (2026-09-15):** yes. The canary
+   fleet's repos carry thousands of open issues, so the canary measures `dispatch`;
+   `propose` (the intake store, `planning.initiative`, chunk 1d) follows, and its
+   real customers are the operator's thinner-backlog personal-project fleets — "some
+   fleets on my personal projects would have less issues on their given domains."
+   The canary's `ask`-for-tasks rows on an empty project are the evidence that
+   gates 1d.
 6. ~~Which fleet is the canary~~ **Settled (2026-09-14):** the engineering fleet —
    the one that develops the framework repos. The operator ruled for the richer
    backlog over the bounded blast radius; the loop into the framework is contained by
