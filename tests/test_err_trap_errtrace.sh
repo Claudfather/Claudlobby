@@ -21,8 +21,9 @@
 #
 # Hermetic: every case runs under `env -i` with a scratch CLAUDLOBBY_ROOT and a
 # scratch bot dir, so rows land in a throwaway ledger and never in a real one.
-# emit_script_error reaches only emit_fleet_event (a file append) — no tmux, no
-# network, no Telegram path. Runs under macOS /bin/bash (3.2).
+# emit_script_error reaches only emit_fleet_event, whose record is the plane —
+# captured here by tests/plane_capture_cli.sh standing in for the CLI rung (no
+# daemon, no db, no tmux, no network). Runs under macOS /bin/bash (3.2).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,7 +41,8 @@ assert_eq() {
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 BOTDIR="$T/bots/canary"
-mkdir -p "$BOTDIR/data/events" "$T/state/events"
+mkdir -p "$BOTDIR/data"
+CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
 
 # Run <body> in a pristine shell with the real trap installed, then report both
 # the body's stdout and how many script_error rows it produced, so a case can
@@ -55,10 +57,11 @@ mkdir -p "$BOTDIR/data/events" "$T/state/events"
 # delimiter, not a workaround.
 run_case() {
     local opts="$1" body="$2" out rows
-    rm -f "$BOTDIR/data/events/"*.jsonl 2>/dev/null || true
+    : > "$CAPTURE"
     out=$(
         env -i PATH="$PATH" HOME="$T" \
-            CLAUDLOBBY_ROOT="$T" BOT_DIR="$BOTDIR" BOT_ID=canary \
+            CLAUDLOBBY_ROOT="$T" BOT_DIR="$BOTDIR" BOT_ID=canary FLEET_NAME=f \
+            PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
             bash -c "
                 set $opts
                 . '$LIB_COMMON'
@@ -67,7 +70,7 @@ run_case() {
                 $body
             " 2>/dev/null
     )
-    rows=$(cat "$BOTDIR/data/events/"*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+    rows=$(grep -c '"type":"script_error"' "$CAPTURE" 2>/dev/null || true)
     printf '%s|%s' "$(printf '%s' "$out" | tr -d '\n')" "$rows"
 }
 

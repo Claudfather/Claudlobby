@@ -1,26 +1,22 @@
-"""Keepalive log aggregation — per-bot uptime, MTBR, restart-rate metrics.
+"""Uptime metrics — per-bot uptime, MTBR, restart-rate from the plane.
 
-Parses keepalive.log files (written by lib/keepalive.sh) and computes:
+The (instant, state) pairs come from the plane alone (F18 closure R2b): the
+``bot.heartbeat`` samples keepalive records each tick (BUSY / IDLE / UNKNOWN),
+the ``bot.session_up = false`` fact of a dead session (DOWN — no uptime, like
+the log's gap once was) and the ``keepalive_restart`` fleet events (RESTART),
+through ``lib/plane-readers.py::keepalive_entries``. Computes:
 - Uptime percentage over configurable windows (24h / 7d / 30d)
 - Restart count and MTBR (mean time between restarts)
 - Time-in-BUSY vs time-in-IDLE breakdown
 - First-boot timestamp for the current process
+The keepalive.log parser is gone with the file it parsed.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-# Keepalive log line format (from keepalive.sh):
-#   2026-05-17T15:28:33-04:00 BUSY — active processing
-#   2026-05-17T15:28:33-04:00 RESTART — session dead, systemctl ...
-_LOG_LINE_RE = re.compile(
-    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})\s+"
-    r"(BUSY|IDLE|RESTART|UNKNOWN|SKIP)\b"
-)
 
 WINDOWS: dict[str, timedelta] = {
     "24h": timedelta(hours=24),
@@ -32,35 +28,6 @@ WINDOWS: dict[str, timedelta] = {
 # every 60s (via keepalive-all) so gaps >10 min likely mean the bot (or the
 # host) was down — don't credit that time to any state.
 _MAX_INTERVAL_SECS = 600
-
-
-def parse_keepalive_log(log_path: Path) -> list[tuple[datetime, str]]:
-    """Parse a keepalive.log file into (timestamp, state) entries."""
-    entries: list[tuple[datetime, str]] = []
-    if not log_path.exists():
-        return entries
-    for line in log_path.read_text().splitlines():
-        m = _LOG_LINE_RE.match(line)
-        if m:
-            ts = datetime.fromisoformat(m.group(1))
-            entries.append((ts, m.group(2)))
-    return entries
-
-
-def collect_bot_logs(bot_dir: Path) -> list[tuple[datetime, str]]:
-    """Collect all keepalive entries for a bot, including rotated logs."""
-    entries: list[tuple[datetime, str]] = []
-
-    # Rotated logs first (keepalive.log.1, .2, ...) — oldest data
-    for rotated in sorted(bot_dir.glob("keepalive.log.*")):
-        if rotated.suffix != ".gz":
-            entries.extend(parse_keepalive_log(rotated))
-
-    # Current log
-    entries.extend(parse_keepalive_log(bot_dir / "keepalive.log"))
-
-    entries.sort(key=lambda e: e[0])
-    return entries
 
 
 def compute_metrics(
@@ -152,25 +119,66 @@ def compute_metrics(
     }
 
 
+def entries_from_plane(pr, conn, fleet: str, bot: str, since_iso: str) -> list[tuple[datetime, str]]:
+    """The (timestamp, state) entries `compute_metrics` consumes, from the
+    plane's keepalive entries — the heartbeat samples, the dead-session fact
+    (DOWN), the restart transitions. The only provider (F18 closure R2b)."""
+    out: list[tuple[datetime, str]] = []
+    for at, state in pr.keepalive_entries(conn, fleet, bot, since_iso):
+        try:
+            ts = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        out.append((ts, state))
+    return out
+
+
 def aggregate_fleet(
     bots_dir: Path,
     windows: list[str] | None = None,
     bot_filter: str | None = None,
+    bot_dirs: list[Path] | None = None,
+    *,
+    entries_for,
 ) -> dict:
-    """Aggregate metrics for all bots (or one) in a fleet's runtime dir."""
+    """Aggregate metrics for all bots (or one) in a fleet's runtime dir.
+
+    ``entries_for(bot_dir)`` → the bot's (instant, state) pairs, REQUIRED:
+    the plane's (``entries_from_plane``) — there is no file fallback.
+
+    ``bot_dirs``: the FULLY MATERIALIZED listing from the caller's
+    ``scan_dir`` — when given, no re-enumeration happens here. The glob
+    fallback re-opens the directory after the caller's probe, and
+    ``Path.glob`` swallows a mid-iteration OSError, so a live bot behind a
+    benign entry vanished silently at rc 0 (external round 4, probed).
+    CLI callers must pass it; the fallback survives only for direct
+    library use against dirs the caller already trusts."""
     if windows is None:
         windows = list(WINDOWS.keys())
 
     now = datetime.now(timezone.utc)
     results: dict[str, dict] = {}
 
-    for bot_conf in sorted(bots_dir.glob("*/bot.conf")):
+    if bot_dirs is not None:
+        candidates = []
+        for bd in sorted(bot_dirs):
+            try:
+                if (bd / "bot.conf").is_file():
+                    candidates.append(bd / "bot.conf")
+            except OSError:
+                continue
+    else:
+        candidates = sorted(bots_dir.glob("*/bot.conf"))
+
+    for bot_conf in candidates:
         bot_dir = bot_conf.parent
         bot_name = bot_dir.name
         if bot_filter and bot_name != bot_filter:
             continue
 
-        entries = collect_bot_logs(bot_dir)
+        entries = entries_for(bot_dir)
         results[bot_name] = {}
         for w in windows:
             results[bot_name][w] = compute_metrics(entries, WINDOWS[w], now=now)

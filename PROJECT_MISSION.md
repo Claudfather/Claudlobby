@@ -66,15 +66,25 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and t
 > (#1271, #1272, #1273, #1274 — all closed 2026-08). They were still listed here
 > as current focus after landing, which is the staleness this note exists to
 > prevent.
+>
+> **Also removed (2026-08-28 documentation audit) — both untracked, and both
+> exactly the blind spot the paragraph above warns about, since neither carried
+> a ref for the mechanical check to flag:** "Integrate clauDNA marketplace
+> plugin install into the bootstrap workflow" (`claudna@Claudfather` has been a
+> default fleet plugin, auto-installed on bot start via the generic
+> marketplace-register/install/update lifecycle in `lib/start-bot.sh`, since
+> #162, 2026-05-11) and "Extend `bot.conf` with ecosystem-aware fields (clauDNA
+> version pin, Claudron vault path, Claudosseum tenant ID)" (`CLAUDNA_VERSION` /
+> `CLAUDRON_VAULT_PATH` / `CLAUDOSSEUM_TENANT_ID` have been composer-emitted
+> `bot.conf` fields, parsed from `fleet.yaml`, since #273, 2026-05-17). Both
+> predate this document's most recent prior edit (2026-08-21) by over three
+> months.
 
-1. Integrate clauDNA marketplace plugin install into the bootstrap workflow
-2. ~~Add Claudron MCP server config to bot bootstrap~~ and document the query-before / write-after pattern — **superseded by decision C** (2026-07-18, `documentation/decisions/2026-07-18-claudron-consumption-door.md`; boundary spec §10.5.6). There is no Claudron MCP server to add to the bootstrap — it is parked as a demand-gated option. Fleet consumption goes through the **CLI door** (clauDNA's `/claudron` · `/recall` · `/capture` skills wrapping the `claudron` CLI), wired per bot by the L2 session loop: set `claudron_vault_path`, and the compositor emits `CLAUDRON_VAULT_PATH` plus the session-loop hooks. The query-before / write-after pattern is documented in a vault-wired bot's door-stamped §Shared Documentation.
-3. Optional telemetry emitter: bots write structured signal to Claudosseum if configured
-4. Extend `bot.conf` with ecosystem-aware fields (clauDNA version pin, Claudron vault path, Claudosseum tenant ID)
+1. ~~Add Claudron MCP server config to bot bootstrap~~ and document the query-before / write-after pattern — **superseded by decision C** (2026-07-18, `documentation/decisions/2026-07-18-claudron-consumption-door.md`; boundary spec §10.5.6). There is no Claudron MCP server to add to the bootstrap — it is parked as a demand-gated option. Fleet consumption goes through the **CLI door** (clauDNA's `/claudron` · `/recall` · `/capture` skills wrapping the `claudron` CLI), wired per bot by the L2 session loop: set `claudron_vault_path`, and the compositor emits `CLAUDRON_VAULT_PATH` plus the session-loop hooks. The query-before / write-after pattern is documented in a vault-wired bot's door-stamped §Shared Documentation.
+2. Optional telemetry emitter: bots write structured signal to Claudosseum if configured — still genuinely open: `CLAUDOSSEUM_TENANT_ID` is composed into `bot.conf` (see note above), but no `lib/` script or compositor module reads it to actually emit telemetry.
 
-*Items 1, 3 and 4 carry no tracking issue, so they are **not** staleness-checkable
-today. Their status was not verified as part of the #1271–#1274 correction — only
-that the two App-auth items had shipped. Add refs when their owners next touch them.*
+*Item 2 carries no tracking issue, so it is **not** staleness-checkable today.
+Add one when its owner next touches it.*
 
 ## Requires approval
 

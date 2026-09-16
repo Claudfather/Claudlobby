@@ -60,6 +60,8 @@ Your tool-call activity is observed by the fleet pulse. If your session is alive
 
 Parse the inbound. Extract type, summary, and key-value pairs. If the dispatch is freeform (no `[BOTCOMMAND]` prefix), treat summary as the full prompt and infer type as `task`.
 
+A final line of the form `⟦plane:msg_…⟧` is a framework **delivery-receipt marker**, always on its own last line — ignore it entirely; it is never part of the task.
+
 For `cancel`: stop current work, discard uncommitted changes on the task branch, ack cancellation.
 For `compact`: run `/compact`, ack.
 For `restart`: wrap up, report back, expect session restart.

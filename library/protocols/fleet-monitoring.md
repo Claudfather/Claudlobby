@@ -9,7 +9,7 @@ How a monitor bot reasons about fleet health on a schedule, over digests that
 already exist.
 
 **This protocol extends `fleet-observability`; it does not restate it.** That
-protocol owns the event stream — sources, JSONL schema, decision table, retention,
+protocol owns the event stream — sources, the plane's row shape, decision table, `plane prune` retention,
 and the read-at-decision-points cadence a *manager* uses. This one covers what is
 different about a monitor: it runs on a **schedule** rather than at decision
 points, it reasons over **pre-aggregated digests** rather than raw events, and its
@@ -95,13 +95,15 @@ The monitor reads **only** pre-aggregated sources:
 
 | Source | Path | Shape |
 |---|---|---|
-| Transcript digests | `$CLAUDLOBBY_ROOT/state/transcript-digests/transcript-digest-YYYY-MM-DD.jsonl` | one row per finished session |
-| Bot events | `<bot-dir>/data/events/fleet-YYYY-MM-DD.jsonl` | see `fleet-observability` |
+| Transcript digests | `claudlobby events --type session_digest` (the plane; #1503 — no longer a file) | one `session_digest` event per finished session |
+| Bot events | `claudlobby events` (the one door for bot events — never open `state/plane/plane.db` by hand; see `fleet-observability`, whose composed recipe this used to duplicate and now defers to) | see `fleet-observability` |
 | Rollups | `claudlobby uptime` · `utilization` · `report-back` | fleet-level aggregates |
 
 ### Digest row contract
 
-Written by `lib/transcript-digest.sh` (`SessionEnd`). Fields the monitor depends
+Emitted by `lib/transcript-digest.sh` (`SessionEnd`) as a `session_digest` system
+event on the plane (`bot` and `ts` on the row, the fleet from the query scope;
+the rest ride `.data`, which `/fleet-digest` lifts up). Fields the monitor depends
 on:
 
 | Field | Meaning |

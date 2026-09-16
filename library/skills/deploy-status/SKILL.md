@@ -25,13 +25,18 @@ vercel ls <project-name> --token=$VERCEL_TOKEN 2>&1 | head -20
 ```
 
 ### Railway
-Query via the GraphQL API (`me.workspaces.projects`, NOT `me.projects`). You may have one or multiple tokens for different workspaces.
+Query via the GraphQL API (`me.workspaces.projects`, NOT `me.projects`). Railway issues two token KINDS and they answer different queries — see `library/integrations/railway.md`. A rejected token still returns HTTP 200 with the refusal in the body, so read the body, not the status.
 
-**Workspace token(s) in `~/claudlobby/.env.shared` or `~/.env`:**
+**Use the ACCOUNT token — the query below starts at `me`, and only an account
+token can answer that.** `RAILWAY_PERSONAL_PROJECT_TOKEN` is workspace-scoped
+and returns `Not Authorized` here; that is the token kind, not a broken
+credential. (This block used to name `RAILWAY_API_TOKEN`, which is dead and
+has been removed.)
+
 ```bash
-source ~/claudlobby/.env.shared   # or wherever you keep secrets
+set -a; . ~/.env; set +a          # or wherever you keep secrets
 curl -s -X POST https://backboard.railway.com/graphql/v2 \
-  -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+  -H "Authorization: Bearer $RAILWAY_PERSONAL_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query": "{ me { workspaces { id name projects { edges { node { id name services { edges { node { id name } } } } } } } } }"}' | python3 -m json.tool
 ```

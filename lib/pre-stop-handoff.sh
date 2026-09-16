@@ -58,7 +58,18 @@ if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
     # send. A wasted keystroke into a dying pane is visible and harmless; not
     # sending when we should have loses the session silently.
     _HANDOFF_CMD="${SESSION_HANDOFF_COMMAND-$_SESSION_HANDOFF_COMMAND_DEFAULT}"
-    if _handoff_status="$(session_command_status "$_HANDOFF_CMD" "$BOT_DIR")"; then
+    # `|| true` INSIDE the substitution and the status judged by VALUE (the
+    # predicate's own table: rc 0 = available | unverifiable, rc 1 = no-command
+    # | provider-absent): on bash 3.2 a function returning 1 as the last
+    # command of a `$( )` fires the inherited ERR trap even under an `if` —
+    # one phantom `script_error` per bot per restart, measured on the flip's
+    # rolling restart (the #1460 class).
+    _handoff_status="$(session_command_status "$_HANDOFF_CMD" "$BOT_DIR" || true)"
+    case "$_handoff_status" in
+        available|unverifiable) _handoff_inject=1 ;;
+        *) _handoff_inject=0 ;;
+    esac
+    if [ "$_handoff_inject" -eq 1 ]; then
         pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_HANDOFF_CMD" || true
     else
         echo "HANDOFF SKIP — no session-handoff capability [$_handoff_status]; stopping without a fresh handoff, last one (if any) left at $HANDOFF_FILE" >&2

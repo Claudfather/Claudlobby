@@ -98,6 +98,17 @@ $CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security a
 
 `dispatch.sh` prepends `set +H;` itself (disabling bash history expansion, which silently mangles `!` in prompts), sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
 
+## The plane receipt trailer (framework, not yours to type)
+
+A tracked send (dispatch-task, report-back, briefing) arrives at the worker with one extra final line the framework appended:
+
+```
+[BOTCOMMAND] ari | task | Run the audit | repo:repo-a
+⟦plane:msg_1f3c…⟧
+```
+
+That `⟦plane:<msg_id>⟧` line is a **delivery receipt token**, not part of the task. The receiving session's `UserPromptSubmit` hook (`plane-dispatch-in.sh`) reads it, records the byte length and sha256 of the message it actually got, and the plane then **proves** delivery (DELIVERED / ARRIVED SHORT / not-yet-confirmed) instead of inferring it from the sender's Enter — closing the "the send looked fine but the head was gone" class (#1493/#1501). It rides the **last** tmux chunk on purpose, so it survives the head loss that was the measured failure. **Ignore it** as an instruction: it is always on its OWN final line, so it never fuses with the task text, and it carries nothing you act on. You never type it — the framework appends it and strips nothing you sent; `body_sha256` is over the message proper, above the trailer.
+
 ## Freeform fallback
 
 For ad-hoc prompts that don't fit the structured format (exploratory questions, multi-paragraph context), freeform dispatch still works — any dispatch without a `[BOTCOMMAND]` prefix is treated as a freeform task:
@@ -137,9 +148,28 @@ This exists because the two used to be one decision: `--botcommand` alone minted
 
 **You do not have to do anything for the worker's answer to stay harmless.** A terminal report carrying no id normally resolves to the bot's oldest open id'd dispatch (#835), which would silently close unrelated in-progress work as `completed`. That resolution is suppressed automatically while a non-`task` note is the most recent thing you sent the bot — enforced in `dispatch-overdue.py`, not by worker discipline, so it holds for a bot that has not restarted since this landed. It resumes on the bot's next report, so a peer note costs one un-auto-closed row at most, never a false completion.
 
-`task`-type envelope sends mint a `task:<id>`, record it (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) to `state/dispatch-log.jsonl`, and transmit it — the overdue watchdog then joins on identity, and the worker's terminal report closes exactly that task. A bare `dispatch-task.sh <worker> <task…>` still works but stays id-less (matched by bot+time, one report closes all open dispatches for that bot) — prefer the id-minting form for anything you want individually tracked. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself. **The page is gated, not unconditional**: recent progress from that bot, supersession, a worker respawn since dispatch, the age cap, an unreachable manager, or the debounce each suppress it — so the absence of a page is not proof all is well.
+`task`-type envelope sends mint a `task:<id>`, record it (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) on the plane as a work item + assignment, and transmit it — the overdue watchdog then joins on identity, and the worker's terminal report closes exactly that task. A bare `dispatch-task.sh <worker> <task…>` still works but stays id-less (matched by bot+time, one report closes all open dispatches for that bot) — prefer the id-minting form for anything you want individually tracked. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself. **The page is gated, not unconditional**: recent progress from that bot, supersession, a worker respawn since dispatch, the age cap, an unreachable manager, or the debounce each suppress it — so the absence of a page is not proof all is well.
 
 When you get an `overdue_dispatch` alert: check the worker (cross-reference `activity_stuck` — it may be hung, see `fleet-observability`). Then recover it, re-dispatch/reassign if it's wedged or mis-scoped, or escalate to the human. The watchdog tells you *something is overdue*; the call on what to do is yours. A worker's terminal report closes the dispatch automatically — no manual bookkeeping.
+
+## The task loop: what to do with a row that is not moving
+
+Every tracked dispatch is a row with a deadline, and a row you never close is a row the fleet keeps carrying. **Four verbs close the loop, and every one of them is a plane fact** — no side ledger, nothing to remember:
+
+| Verb | Command | When |
+|------|---------|------|
+| **chase** | `$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query <worker> "where are you on <task>?"` | You think the worker is alive and just quiet. Costs an untracked message, mints nothing. |
+| **supersede** | `$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes <task-id> <worker> "<the new task>"` | The task was mis-scoped or overtaken. Retires the old row and opens the replacement in one act. |
+| **withdraw** | `$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw <task-id> --reason "…"` | You no longer want it answered — the send never landed, or events overtook it. Terminal (`cancelled`). |
+| **escalate** | `$CLAUDLOBBY_ROOT/lib/task-act.sh escalate <task-id> "<the question>"` | You need a human to decide. **Non-terminal**: the row stays open and yours while they think. |
+
+`task-act.sh` resolves the row from the plane and **refuses an ambiguous task id** rather than guessing which worker you meant; the refusal names the rows, and `--assignment <asg_id>` picks one.
+
+**Escalation etiquette.** One escalation carries **one question**, phrased so it can be answered on Telegram in a sentence — the operator sees `NEEDS YOU (<fleet>): task <id> escalated by <you>: <question>` and nothing else about the row. Ask for a decision, not a status update. It is paged **once**: while the raise stands, no sweep repeats it, so re-escalating the same row to get attention buys nothing. **A nudge does not clear it** — a nudge is an ask, not an answer — but any real act does: progress, a terminal report, a withdrawal, a supersede. Do not escalate a row and then sit on it: the human's answer is the input to one of the other three verbs.
+
+**Re-checks arrive on their own.** Where a fleet has armed the `task-recheck` job, you will periodically receive one message listing your rows past deadline or older than the max age, with these four verbs, and asking what you did with each. **Answer it per row** — a row you leave untouched comes back next sweep, because nothing on the plane changed. **An already-escalated row is never in that list** — it is the human's to answer, not yours to be nagged about, so a re-check silently skips it (a one-line "waiting on the human: N row(s)" footer may say how many, with no verbs attached). The same list is always available by hand: `claudlobby brief --bot <you>` prints, under its own `dispatched` heading, every row you (as manager) dispatched that is still open — age, deadline, last progress, and whether anyone has escalated or nudged it — followed by this menu; your OWN open/overdue rows, if you also carry work as a worker, are a separate heading in the same brief.
+
+**A nudge from the operator.** A human can poke any open task — on the CLI as `claudlobby task nudge <task-id> "why" --as <who>`, or on Telegram by asking you to do it: a message like `nudge <task-id> [why]` means run that command for them (their name, not yours, in `--as`). **`--as` must be a safe alias** — letters, digits, `.`, `-`, `_` only, 64 chars max, because it mints a `human:<who>` plane identity — so map their display name down to one rather than passing it verbatim: `Chris R` → `chris-r` (or just their first name); a value with a space or other punctuation is refused, recording nothing. The nudge records who asked and why, and sends you the same one-row menu. Treat it as the operator saying "this one, now": act with one of the four verbs and report what you did.
 
 ## Preflight: ensure the worker is up under proper supervision
 

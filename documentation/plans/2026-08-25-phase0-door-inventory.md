@@ -2,6 +2,26 @@
 
 **Status:** COMPLETE — rebuilt 2026-08-23 against **origin/main @ `e9311da`** (every claim below measured on that ref via `git grep`/`git show`, or on the installed artifact where noted; the round-4 rebuild had reused stale-checkout facts — most damagingly tg-post's exit semantics — and this version supersedes it entirely). Bridge facts measured on the installed plugin. Ref-pinning rule: any future re-verification names its ref first.
 
+**2026-08-28 docs-audit addendum — activity vs. currency.** This inventory's status line marks the
+*audit activity* complete; it does not claim the measured facts below track main forever. `main`
+has since moved through Phase-2 PR-A (`df43c70` #1345), PR-B (`c34f12d` #1372) and an 8-reviewer
+gauntlet fix round (`039ede4`) — none of which existed at `e9311da`. Spot-checked two of the
+table's claims against the current worktree (HEAD `039ede4`): the **tg-post.sh exit-3-on-rejected-send**
+row and the **dispatch-task.sh ledger-then-send** row are both still accurate as stated — verified
+directly against `lib/tg-post.sh` (`exit 3` on a parsed `.ok:false`) and `lib/dispatch-task.sh`
+(`with_lock "$LEDGER.lock" _append_ledger` at what is now line 635, before the `lib/dispatch.sh`
+transport call at line 646). `report-back.sh`'s **send-then-ledger** row (its *legacy* JSONL
+ledger) is likewise unchanged — `bot_tmux_send` still precedes the `_emit_ledger_event` call.
+None of PR-A/PR-B/the gauntlet touched these legacy facts; what they added sits *beside* them: the
+five doors this inventory names as "semantic communications" (dispatch-task, report-back, tg-post,
+plus workstream-update and briefing-trigger per the Shim classification section below) now also
+carry an additive, dormant-by-default plane dual-write layer (`PLANE_EMIT_ENABLED=1`) that records
+its own intent-before-send order on the plane side without altering any behavior measured here —
+see `2026-08-24-observable-plane-phase2-ingest.md`'s Outcome section. This was a two-claim
+spot-check, not a full re-inventory; other rows (the bridge's per-chunk behavior, `pane_send_verified`'s
+ambiguous-success branches, etc.) were not re-verified and should not be assumed current without
+checking.
+
 ## Per-door matrix (measured @ e9311da)
 
 | Door | ID minting | Authoritative sink | Write/send order | Return semantics | Retry | Legacy readers |

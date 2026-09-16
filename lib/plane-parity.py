@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Dual-write parity: legacy JSONL ledger <-> plane rows (Phase-2 T3, plan
-§4.1). The canary's verdict instrument during door rollout and a permanent
-reconciliation door afterward. Standalone stdlib (dispatch-overdue.py
+"""Parity between an ARCHIVED JSONL ledger and the plane's rows (Phase-2 T3,
+plan §4.1). Once the dual-write canary's verdict instrument; since the F18
+closure left no live ledger, a reconciliation door for an archive. Standalone stdlib (dispatch-overdue.py
 precedent) — runs where the package is not installed.
 
 Join contract (the generalization of the plan's per-key list, and the

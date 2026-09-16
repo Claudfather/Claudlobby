@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>observable plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>observable plane</h1>
+  <nav id="view-nav">
+    <button class="pill ghost on" data-view="channel" type="button">channel</button>
+    <button class="pill ghost" data-view="grid" type="button">grid</button>
+    <button class="pill ghost" data-view="fleet" type="button">fleet</button>
+    <button class="pill ghost" data-view="trust" type="button">trust</button>
+  </nav>
+  <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
+  <span class="pill" id="fleet-totals" title="every fleet on this host — bots, working now, needing you, overdue (the overview's own figures)"><b>—</b> bots</span>
+  <span class="pill presence-strip" id="presence-strip" hidden></span>
+  <span class="spacer"></span>
+  <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">machinery</button>
+</header>
+<main>
+  <section id="rail-fleet" aria-label="fleet">
+    <h2>fleet</h2>
+    <div class="scroll" id="fleet"></div>
+  </section>
+  <section id="rail-channel" aria-label="channel">
+    <h2>channel <span id="fleet-tabs"></span>
+      <input id="search" type="search" placeholder="search the channel…"
+             aria-label="search the channel" autocomplete="off"></h2>
+    <div id="overview" class="overview" aria-label="fleets overview"></div>
+    <div class="scroll" id="search-results" hidden></div>
+    <div class="scroll" id="channel"></div>
+    <div class="scroll" id="grid" hidden></div>
+    <div class="scroll" id="fleet-room" hidden></div>
+    <div class="scroll" id="trust" hidden></div>
+  </section>
+  <section id="rail-right">
+    <div id="rail-attention" aria-label="attention">
+      <h2>attention <span id="attn-count" class="count" hidden></span></h2>
+      <div class="scroll" id="attention"></div>
+    </div>
+    <div id="rail-tasks" aria-label="tasks">
+      <h2>tasks</h2>
+      <div class="scroll" id="tasks"></div>
+    </div>
+    <div id="rail-debug" aria-label="event machinery" hidden>
+      <div class="host-facts" id="host-facts" title="the host's recorder — every fleet on this host writes here">host ingest — · rows — · spool —</div>
+      <h2>event stream <span class="hint">(raw ledger)</span></h2>
+      <div class="scroll" id="debug"></div>
+    </div>
+  </section>
+</main>
+<div id="focus-overlay" role="dialog" aria-modal="true" aria-label="focused pane" hidden>
+  <div id="focus-box">
+    <div id="focus-head"><b id="focus-title"></b>
+      <button id="focus-close" class="pill ghost" type="button">close (esc)</button></div>
+    <pre id="focus-pane"></pre>
+  </div>
+</div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

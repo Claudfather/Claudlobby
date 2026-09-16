@@ -474,3 +474,88 @@ def test_native_host_long_exec_path_reads_up(tmp_path):
         assert rc == 0
     finally:
         _kill_tree(proc)
+
+
+def _bridge_state_scoped(bot_dir: Path, home: Path, token: str, owner_pid, force_os=None):
+    """`bridge_state <bot_dir> <token> <owner_pid>` — the three-arg, session-scoped
+    form (#1530). owner_pid may be "" to exercise start-bot's unresolved-pane
+    fallback, which must behave exactly like the unscoped call."""
+    env = {**os.environ, "HOME": str(home)}
+    proc = subprocess.run(
+        ["bash", "-c", f'. "$1"; {_os_prefix(force_os)}bridge_state "$2" "$3" "$4"',
+         "_", str(LIB_COMMON), str(bot_dir), token, str(owner_pid)],
+        capture_output=True, text=True, env=env, timeout=20,
+    )
+    return proc.stdout.strip(), proc.returncode
+
+
+def _scoped_fixture(tmp_path):
+    """Owned production-shape tree; returns (bot_dir, proc). proc.pid IS the
+    `claude` pid, because _spawn_bridge runs `claude tree.sh` as the Popen."""
+    bindir = _fake_bins(tmp_path)
+    sd = tmp_path / "state"
+    bot = tmp_path / "bots" / "b1"
+    _write_bot_conf(bot, handle="b1", state_dir=sd, token_env="B1_TG_TOKEN")
+    (bot / ".env").write_text("B1_TG_TOKEN=x\n")
+    return bot, _spawn_bridge(bindir, sd)
+
+
+@requires_proc
+@both_os_branches
+def test_session_scope_rejects_another_sessions_poller(tmp_path, force_os):
+    """#1530, THE CASE THAT MUST FLIP. A live, owned, lineage-proven poller that
+    belongs to a DIFFERENT session must not read `up` to a session-scoped caller.
+
+    This is the exact shape start-bot.sh met on 2026-09-10 at 19:38:02: the
+    outgoing session's poller was alive and holding the slot, the gate asked the
+    bot-scoped question, got `up`, and logged `READY — Telegram poller up after
+    0s` for a bridge that was dark 3.7s later. Everything here is genuinely
+    healthy except the owner, which is the whole point — no other predicate
+    (pid alive, bun, server.ts, env ownership, claude ancestor) can separate
+    these two cases."""
+    bot, proc = _scoped_fixture(tmp_path)
+    try:
+        out, rc = _bridge_state_scoped(bot, tmp_path, "x", os.getpid(), force_os=force_os)
+        assert out == "not_mine", f"another session's poller must not read up; got {out!r}"
+        assert rc != 0
+    finally:
+        _kill_tree(proc)
+
+
+@requires_proc
+@both_os_branches
+def test_session_scope_accepts_its_own_poller(tmp_path, force_os):
+    """The other half — scoping must not reject a genuinely own poller, or the
+    gate would TIMEOUT on every healthy boot.
+
+    Doubles as the OFF-BY-ONE guard on the lineage walk. The walk advances its
+    cursor to the matched claude's OWN parent before the loop breaks, so an
+    implementation that compared that cursor would be comparing this session
+    against the tmux server (or the test runner) and would return `not_mine`
+    here for a correctly-owned bridge."""
+    bot, proc = _scoped_fixture(tmp_path)
+    try:
+        out, rc = _bridge_state_scoped(bot, tmp_path, "x", proc.pid, force_os=force_os)
+        assert out == "up", f"own poller must read up; got {out!r}"
+        assert rc == 0
+    finally:
+        _kill_tree(proc)
+
+
+@requires_proc
+def test_unscoped_call_is_unchanged_by_session_scoping(tmp_path):
+    """Regression guard for the OTHER callers. keepalive.sh, rolling-restart.sh
+    and bridge_down_state ask the bot-scoped question deliberately — "does this
+    bot have a live bridge" — and must keep getting `up` for a poller owned by
+    any session. An empty third argument (start-bot's unresolved-pane fallback)
+    must be identical to omitting it."""
+    bot, proc = _scoped_fixture(tmp_path)
+    try:
+        two_arg, rc2 = _bridge_state(bot, tmp_path)
+        empty_third, rc3 = _bridge_state_scoped(bot, tmp_path, "x", "")
+        assert two_arg == "up", f"unscoped must stay up; got {two_arg!r}"
+        assert (empty_third, rc3) == (two_arg, rc2), (
+            f"empty owner must equal unscoped: {empty_third!r} vs {two_arg!r}"
+        )
+    finally:
+        _kill_tree(proc)

@@ -92,11 +92,46 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `OBSERVABILITY_PULSE_INTERVAL` | `bots.<name>.observability.pulse_interval` | Seconds between heartbeat pulses (default: 300) |
-| `OBSERVABILITY_REAP_DAYS` | `bots.<name>.observability.reap_days` | Days to retain event files (default: 7) |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | `bots.<name>.observability.activity_stuck_threshold` | Seconds of inactivity before flagged stuck (default: 1800) |
-| `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue (default: 1800) |
+| `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue. Composed for every bot since #1481; 86400 (24h) when the fleet declares none, `0` = open-ended. SECONDS — 24h is 1440 minutes, and only `--deadline-min` speaks minutes |
 | `RC_READY_TIMEOUT_S` | env override (`start-bot.sh`) | Seconds to wait for the `remote-control is active` readiness string before logging TIMEOUT and emitting the `rc_timeout` event (default: 90). Not composed from fleet.yaml — a raw override for slow hosts and the test harness |
 | `KEEPALIVE_BOOT_GRACE_S` | env override (`lib-common.sh` `service_is_starting`) | Seconds a unit may stay mid-start before keepalive stops treating it as booting and restarts it, and fleet-pulse resumes alarming (default: 300). Budgets ONE phase — `ExecStart`, bounded by `RC_READY_TIMEOUT_S` — so the composed boot stagger never eats it. Raise it only on a host where cold starts genuinely exceed it; the cap is what stops a wedged `start-bot.sh` suppressing the watchdog forever (#1002). Not composed from fleet.yaml |
+
+## Host-Job Alert Routing
+
+| Variable | Purpose |
+|---|---|
+| `CLAUDLOBBY_ALERT_MANAGER` | Bot ID that receives `[FLEET-ALERT]` / `[FLEET-NOTICE]` from **host-scoped** jobs. Declared in the **root** `.env`. |
+
+A host job (`disk-monitor`, `host-health-check`, `notify-behind`, …) is host-scoped by
+design and so passes no fleet. With nothing declared, the signal resolver falls through to a
+cross-fleet glob that expands **lexically**, and the recipient becomes whichever fleet directory
+sorts first — a choice nobody made, that a newly-added directory moves silently, and whose loss
+the previous recipient cannot detect, because alerts stopping looks exactly like alerts not
+firing (#1517).
+
+Set this to the bot that should actually read host alerts:
+
+```sh
+# <root>/.env  — the ROOT tier, because a host job occupies the host/root scope
+CLAUDLOBBY_ALERT_MANAGER=clog
+```
+
+Per the env contract above, the **name** is documented here and the **value** lives in the
+gitignored `.env`. It deliberately does **not** live in `system.yaml`: that file is
+package-owned and tracked, so a bot name there would commit a fleet-specific value *and* make
+an accidental recipient look like a deliberate one to the next reader.
+
+**Scope is the host tier only.** A per-fleet job (`fleet-pulse`, `creds-check`) passes its
+fleet, resolves its own manager first, and is unaffected whether or not this is set.
+
+**Undeclared is still supported and is now auditable.** With nothing declared the cross-fleet
+fallback still runs — removing it would strand every host that has declared nothing — but it
+emits an `alert_recipient_resolved` event naming the manager, the fleet it crossed into, and how
+many fleets could have answered. The event is self-clearing: declare a recipient that resolves
+and it goes quiet, so its presence in the ledger *is* the signal that a host still has an
+undeclared one. A declaration that cannot be resolved (absent, or the same bot ID in two fleets)
+falls back rather than dropping the alert, and says so loudly.
 
 ## Code-Audit Sweep
 
@@ -127,6 +162,23 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |
 | `CLAUDRON_QUERY_BEFORE` | `bots.<name>.env` (manual opt-in) | `1` enables the dispatch query-before preflight: `dispatch-task.sh` prepends fleet-memory pointers (titles + paths from `claudron lookup`) to dispatched tasks. Off by default; needs the claudron CLI on PATH and `CLAUDRON_VAULT_PATH` set |
 | `CLAUDRON_QUERY_LIMIT` | `bots.<name>.env` (manual opt-in) | Max fleet-memory pointers injected per dispatch (default 3) |
+
+## Opt-in Feature Flags
+
+A handful of shared `lib/` hooks and scripts compose into **every** bot on **every** fleet
+(via `system.yaml` `defaults.hooks` or a shared `lib/` script), but ship **dormant by default** (the plane hooks are the exception since F18 R1: always on, `PLANE_EMIT_DISABLED=1` the one silencer) —
+each is a no-op until the specific var below is set to `"1"` under the relevant bot's
+`bots.<name>.env` (which lands in that bot's `bot.conf` and is inherited by hooks/scripts running
+in its session). This is the equippable-dormant pattern: a shared install cannot be staged
+per-bot, so rollout is gated per-fleet (or per-bot) instead of going live estate-wide on the next
+`generate` or daily reload.
+
+| Variable | Consumer | Description |
+|----------|----------|--------------|
+| `SESSION_DIGEST_ENABLED` | `lib/transcript-digest.sh` (SessionEnd hook) | `"1"` arms per-session Haiku transcript digesting for this bot. Default `0` (dormant) |
+| `PLANE_EMIT_ENABLED` | `claudlobby generate` (`registry_emit.py`) | An opt-**OUT** since chunk N: the generate-time registry keyframe scan runs unless the fleet-tier `.env` resolves this to exactly `"0"`. Not a runtime door gate — every door is always on since F18 R1 |
+| `PLANE_EMIT_DISABLED` | `lib/plane-emit.sh`, every hook, every fleet timer | `"1"` silences every plane door — the harness/test exemption, the one silencer. Opposite polarity from the other flags on this list. Set it in the fleet-tier `.env`: the composer carries the resolved value onto every fleet job unit (a timer sources no `.env`) and into `bot.conf` (a session sees no unexported tier assignment), so one line reaches all three |
+| `SPINDOWN_RECEIPT_ENABLED` | `lib/spin-down-bot.sh` | An opt-**OUT** since chunk N: the `bot_teardown_started` receipt is written unless this is exactly `"0"` (it is the one record that survives a `--purge`) |
 
 ## Plugins
 
@@ -173,3 +225,21 @@ bots:
 ```
 
 These are emitted as `export MY_CUSTOM_VAR="value"` in `bot.conf`.
+
+### Bot-Specific Secret Files
+
+`bots.<name>.secret_files` is the fleet-relative-path sibling of `env:` — it maps an env var name
+to a secret file's path *inside the fleet overlay* (service-account keys, credential files) rather
+than a literal value:
+
+```yaml
+bots:
+  my-bot:
+    secret_files:
+      GOOGLE_SERVICE_ACCOUNT_JSON: secrets/my-bot-service-account.json
+```
+
+Composes into `bot.conf` as `export GOOGLE_SERVICE_ACCOUNT_JSON="$FLEET_ROOT/secrets/my-bot-service-account.json"`
+— fleet-relative and anchored on `$FLEET_ROOT` so the path is derived rather than hand-typed
+absolute; an absolute or `~`-relative value, or one containing `..`, is rejected at `generate`. See
+[`fleet-yaml-schema.md`](fleet-yaml-schema.md#botsnamesecret_files).

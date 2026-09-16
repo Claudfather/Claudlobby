@@ -5,6 +5,19 @@ This doc is the design rationale; the locked decisions and the real-run blocker 
 reference for F2. Shipped: `lib/ab-comms-eval.sh`, `lib/ab-comms-verdict.py`,
 `tests/test_ab_comms_eval.py`.
 
+**Re-verified 2026-08-28 — claims still accurate, file grew well past this doc's original scope.**
+All three shipped files still exist (`lib/ab-comms-eval.sh` is now ~55KB, `lib/ab-comms-verdict.py`
+~10KB, `tests/test_ab_comms_eval.py` ~7.5KB — grown considerably as it picked up two more
+pre-registered experiments beyond the base scaffolding this doc describes: `--experiment
+coverage-honesty` for #866 and a `channel-brevity` cell for #728/#729's own P1 gate). The **real-run
+blocker is still open**: `grep -rn "message.id\|dedup" lib/transcript-usage.py` finds no
+message-id dedup logic, so the "parser over-counts on interactive transcripts (content-block
+multiplicity)" defect this doc flags is unfixed. Consistent with that, `AB_EVAL_REAL=1` is still
+hard-refused in the shipped script (`lib/ab-comms-eval.sh:823-824`: *"real mode (AB_EVAL_REAL=1) is
+REFUSED by this scaffolding: the task battery is an F2 stub..."*) — no real (non-`--dry-run`) A/B
+run has been unblocked for the token-efficiency protocol this doc targets. No `status:` frontmatter
+exists on this doc to update; leaving as informal WIP/checkpoint framing, which still fits.
+
 **Branch:** `feat/729-stage-c-ab-comms-eval-scaffold` (off fresh `main` @ `c8aa31f`).
 **Issue:** [#729](https://github.com/Claudfather/Claudlobby/issues/729) — P2 A/B comms-eval harness + transcript-usage parser (#727 epic; source spec #716).
 

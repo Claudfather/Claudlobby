@@ -15,21 +15,26 @@ row nobody can close, which is the defect.
 
 Sibling: tests/test_task_id_dispatch.py owns the mint itself and the id'd round
 trip; this file owns only what the type gates.
+
+F18 closure (R1): the door writes NO ledger — the plane is the only record — so
+every "row" below is the dispatch as the plane holds it (the sibling's
+`plane_dispatch_row`, in the retired row's field names), and the round trip
+seeds its open task through the REAL door rather than a hand-written ledger
+line.
 """
 
 from __future__ import annotations
 
-import datetime as dt
-import json
 import re
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
 
 from tests.conftest import _scrubbed_env
-from tests.test_task_id_dispatch import TASK_ID_RE, _fake_lib
+from tests.test_task_id_dispatch import (
+    FLEET, TASK_ID_RE, _fake_lib, plane_construct_counts, plane_dispatch_row,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_DIR = REPO_ROOT / "lib"
@@ -50,14 +55,10 @@ def _run(tmp_path: Path, args: str):
         capture_output=True,
         text=True,
         env=_scrubbed_env(**env),
-        timeout=10,
+        timeout=60,
     )
-    ledger = tmp_path / "state" / "dispatch-log.jsonl"
-    row = (
-        json.loads(ledger.read_text().splitlines()[-1])
-        if ledger.exists() and ledger.read_text().strip()
-        else None
-    )
+    # The dispatch as the PLANE holds it (None when nothing was recorded).
+    row = plane_dispatch_row(tmp_path)
     sent_f = tmp_path / "sent.txt"
     return r, row, (sent_f.read_text() if sent_f.exists() else "")
 
@@ -70,6 +71,9 @@ class TestOnlyTaskMints:
         assert r.returncode == 0, r.stderr
         assert TASK_ID_RE.match(row["task_id"]), row
         assert f"task:{row['task_id']}" in sent
+        # #1491: a task STILL lands the full construct triple.
+        counts = plane_construct_counts(tmp_path)
+        assert counts == {"communications": 1, "work_items": 1, "assignments": 1}, counts
 
     def test_query_does_not_mint_but_still_sends_and_still_ledgers(self, tmp_path):
         # Three assertions because three things could regress independently:
@@ -78,9 +82,22 @@ class TestOnlyTaskMints:
         # send or the row would pass a weaker test and lose the audit trail.
         r, row, sent = _run(tmp_path, '--type query w1 "did the sweep run?"')
         assert r.returncode == 0, r.stderr
-        assert row is not None, "a non-task send must still leave a ledger row"
+        assert row is not None, "a non-task send must still be recorded on the plane"
         assert row["task_id"] == "", row
         assert "did the sweep run?" in sent, "the message must still be delivered"
+
+    @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
+    def test_a_control_type_records_the_communication_alone(self, tmp_path, t):
+        # THE #1491 pin: a control type records exactly one communication and
+        # NO work_item / assignment. Minting an open assignment for a note that
+        # asks nothing was a row no report could close (38 in 14 days on one
+        # host) that also blanked the resolver head (#1418). The gate is the
+        # TYPE, so all four control verbs are covered, not just `query`.
+        r, _row, sent = _run(tmp_path, f'--type {t} w1 "a peer note"')
+        assert r.returncode == 0, r.stderr
+        assert "a peer note" in sent, "the message must still be delivered"
+        counts = plane_construct_counts(tmp_path)
+        assert counts == {"communications": 1, "work_items": 0, "assignments": 0}, (t, counts)
 
     def test_a_non_task_envelope_carries_no_empty_task_field(self, tmp_path):
         # An unguarded append emits a bare `| task:` — a field with no value,
@@ -130,39 +147,35 @@ class TestTheDeadlineIsGatedToo:
 
     def test_the_watchdog_does_not_page_a_non_task_row(self, tmp_path):
         # End to end through the REAL matcher, because the unit above asserts a
-        # field while the harm is an alert. A null deadline is skipped by
-        # `_classify_all`; this pins that the two agree.
+        # field while the harm is an alert. The plane's overdue reader skips an
+        # assignment with no deadline; this pins that the two agree — with a
+        # POSITIVE CONTROL beside it (a task dispatched in the same run pages
+        # at the same far-future instant), so a matcher that paged nothing at
+        # all could not pass.
         import subprocess as sp
         import time
 
-        _r, _row, _sent = _run(tmp_path, '--type query w1 "peer note"')
-        ledger = tmp_path / "state" / "dispatch-log.jsonl"
-        rows = [json.loads(x) for x in ledger.read_text().splitlines()]
-        for d in rows:
-            # Backdate BOTH. Backdating only `dispatched_at` leaves the deadline
-            # in the future, so the row is not overdue and the assertion passes
-            # whatever the gate does — the test would not operate. Caught by
-            # mutation: removing the gate left this green.
-            d["dispatched_at"] = int(time.time()) - 200
-            if isinstance(d["expected_by"], int):
-                d["expected_by"] = int(time.time()) - 100
-        ledger.write_text("".join(json.dumps(d) + "\n" for d in rows))
-        empty = tmp_path / "reports.jsonl"
-        empty.write_text("")
+        _r, note, _sent = _run(tmp_path, '--type query w1 "peer note"')
+        _r, task, _sent = _run(tmp_path, '--type task w1 "real work"')
+        assert note["expected_by"] is None and isinstance(task["expected_by"], int)
         out = sp.run(
             [
-                "python3",
-                str(LIB_DIR / "dispatch-overdue.py"),
-                "--all",
-                str(ledger),
-                str(empty),
+                "python3", str(LIB_DIR / "dispatch-overdue.py"), "--all",
+                # an hour later: the task's 600s deadline has passed, and the
+                # dispatch is still inside the matcher's expiry cap
+                # (DISPATCH_OVERDUE_MAX_AGE_S, 24h) — a day later it would be
+                # EXPIRED rather than overdue, and page nothing for that reason
+                str(int(time.time()) + 3600),
+                "--fleet", FLEET, "--root", str(tmp_path),
             ],
-            capture_output=True,
-            text=True,
-            timeout=20,
+            capture_output=True, text=True, timeout=60,
         )
         assert out.returncode == 0, out.stderr
-        assert out.stdout.strip() == "", (
+        lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 1 and task["task_id"] in lines[0], (
+            f"expected exactly the task to page; got {out.stdout!r}"
+        )
+        assert not any(ln.rstrip().endswith(" -") for ln in lines), (
             f"a peer note paged the manager: {out.stdout!r}"
         )
 
@@ -200,7 +213,7 @@ class TestUnknownTypeFailsLoud:
         r, row, sent = _run(tmp_path, '--type quiery w1 "x"')
         assert r.returncode != 0, "unknown type must not be accepted"
         assert "unknown --type" in r.stderr, r.stderr
-        assert row is None, "a refused dispatch must not write a ledger row"
+        assert row is None, "a refused dispatch must not be recorded"
         assert sent == "", "a refused dispatch must not be transmitted"
 
     def test_missing_type_value_is_a_loud_error(self, tmp_path):
@@ -255,82 +268,47 @@ class TestVocabularyMatchesTheProtocols:
 
 # --- the round trip ---------------------------------------------------------
 #
-# Everything above stops at the dispatch side: it proves the envelope withholds
-# the id, and nothing more. The property the design actually rests on is what
-# happens NEXT — and it was false. `worker-lifecycle` routes a `query` to Step 8
-# (line 66 -> line 51), so a compliant worker DOES file a terminal report; with
-# no id to echo it falls into report-back.sh's #835 resolver, which stamps the
-# bot's OLDEST open id'd dispatch. A peer note silently closed unrelated
-# in-progress work as `completed`.
-#
-# These tests fail against the tree that shipped ask 1, which is the point.
+# Everything above stops at the dispatch side. The property the design rests on
+# is what happens NEXT to the resolver — and #1491 changed the mechanism. The
+# ancestor fix (#1187) withheld the id; chunk 6a then had a `query` mint an
+# id-less ASSIGNMENT, which blanked the resolver head (#1418) so a compliant
+# worker's no-id terminal report (worker-lifecycle routes `query` to Step 8)
+# was absorbed by the note and the real task stayed open. #1491 removes the
+# note's assignment entirely: the note is now invisible to the resolver, so the
+# no-id report resolves normally to the real row. Raw text keeps its assignment
+# and so keeps shielding — the gate is the TYPE, never id-lessness.
 
 
 def _roundtrip_lib(tmp_path: Path):
     """`_fake_lib` plus the receive side. Same harness, one more leg.
 
-    report-back.sh and dispatch-overdue.py are the two the resolver needs;
-    without them report-back's lookup fails open and every arm reads clean —
-    a harness that cannot see the defect it was written for.
+    report-back.sh and dispatch-overdue.py are what the resolver needs (both
+    in the sibling's DOOR_FILES); without them report-back's lookup fails open
+    and every arm reads clean — a harness that cannot see the defect it was
+    written for. The resolver answers from the PLANE, the only source (F18
+    R2a): no ledger, no flag, no declaration — the fleet rides the FLEET_NAME
+    the harness env already carries.
     """
     libdir, env = _fake_lib(
         tmp_path, f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n'
     )
-    for name in ("report-back.sh", "dispatch-overdue.py"):
-        (libdir / name).symlink_to(LIB_DIR / name)
     env["MANAGER_TMUX"] = "lead"
+    (tmp_path / "state").mkdir(exist_ok=True)
     return libdir, env
 
 
-# RELATIVE TO NOW, never an absolute instant. An epoch pinned in a fixture is a
-# time bomb by construction, and this one went off: the row was stamped
-# 2026-08-13T10:00:00Z and silently aged past rotate_jsonl_by_ts's 7-day
-# retention at 2026-08-20T10:00:00Z, reaping itself out of the ledger it seeds.
-# The five tests below then asserted membership in an EMPTY set and went red on
-# every branch in the repo at once, including main (#918).
-#
-# Bumping the number only sets a new fuse. The age is COMPUTED, so the row is
-# an hour old on every run forever. It is also stamped ONCE here rather than
-# per-call, so ts / dispatched_at / expected_by cannot disagree the way the
-# hardcoded set did (its ts said 10:00:00Z while its dispatched_at said
-# 05:46:40Z, four hours apart in the same row).
-_SEED_AGE_S = 3600
-_SEED_DISPATCHED_AT = int(time.time()) - _SEED_AGE_S
-_SEED_TS = dt.datetime.fromtimestamp(_SEED_DISPATCHED_AT, dt.timezone.utc).strftime(
-    "%Y-%m-%dT%H:%M:%SZ"
-)
-REAL_ID = f"t-{_SEED_DISPATCHED_AT}-real"
-
-
-def _seed_open_task(tmp_path: Path, bot: str = "w1") -> Path:
-    """One real, in-progress, id'd dispatch this bot is already holding."""
-    ledger = tmp_path / "state" / "dispatch-log.jsonl"
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    # COMPACT separators, deliberately. rotate_jsonl_by_ts splits on the literal
-    # `"ts":"` and drops every line that does not yield a field (`NF>1`), so a
-    # seed written with json.dumps' default `"ts": "..."` is silently REAPED by
-    # the next shell write to the same ledger. The fixture then tests an empty
-    # log and passes for the wrong reason.
-    ledger.write_text(
-        json.dumps(
-            {
-                "ts": _SEED_TS,
-                "manager": "dara",
-                "bot": bot,
-                "task_id": REAL_ID,
-                "workstream": "",
-                "task": "implement the thing",
-                "dispatched_at": _SEED_DISPATCHED_AT,
-                "expected_by": _SEED_DISPATCHED_AT + 1800,
-                "claudron_hits": "",
-                "supersedes": "",
-                "open_at_dispatch": 0,
-            },
-            separators=(",", ":"),
-        )
-        + "\n"
+def _seed_open_task(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> str:
+    """One real, in-progress, id'd dispatch this bot is already holding —
+    through the REAL door, so it is the plane's oldest open id'd row. Returns
+    the minted id."""
+    r = subprocess.run(
+        ["bash", "-c", f'"{libdir}/dispatch-task.sh" --type task {bot} "implement the thing"'],
+        capture_output=True, text=True, env=_scrubbed_env(**env), timeout=60,
     )
-    return ledger
+    assert r.returncode == 0, r.stderr
+    row = plane_dispatch_row(tmp_path)
+    assert row and TASK_ID_RE.match(row["task_id"]), row
+    return row["task_id"]
 
 
 def _still_open(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> set[str]:
@@ -340,69 +318,101 @@ def _still_open(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> set
             str(libdir / "dispatch-overdue.py"),
             "--open",
             bot,
-            str(tmp_path / "state" / "dispatch-log.jsonl"),
-            str(tmp_path / "runtime" / "fleet" / "report-back.jsonl"),
+            "--fleet", FLEET, "--root", str(tmp_path),
         ],
         capture_output=True,
         text=True,
         env=_scrubbed_env(**env),
-        timeout=10,
-    ).stdout
-    return set(re.findall(r"t-\d+-[0-9a-z]+", out))
+        timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    return set(re.findall(r"t-\d+-[0-9a-z]+", out.stdout))
 
 
-class TestANonTaskReportClosesNothingElse:
+def _door(libdir: Path, script: str, env: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", "-c", f'"{libdir}/{script}'], capture_output=True, text=True,
+                          env=_scrubbed_env(**env), timeout=60)
+
+
+def _open_task(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> str:
+    # The resolver head straight off the plane — the id `report-back.sh` stamps
+    # when a worker omits `--task`, or "" while it is blanked (an unanswered
+    # id-less dispatch is the bot's newest assignment).
+    out = subprocess.run(
+        ["python3", str(libdir / "dispatch-overdue.py"), "--open-task", bot,
+         "--fleet", FLEET, "--root", str(tmp_path)],
+        capture_output=True, text=True, env=_scrubbed_env(**env), timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+class TestAControlNoteIsInvisibleToTheResolver:
+    """#1491 inverts the mechanism this class once tested. A control note used
+    to mint its own id-less assignment, which BLANKED the resolver head (#1418)
+    and so shielded the worker's real task from a no-id report — the review
+    called that "pure harm" for a note that by definition needs no answer.
+    After #1491 a control note mints NO assignment, so it can no longer be the
+    worker's newest open assignment and the head is not blanked: a no-id report
+    resolves normally to the real row, exactly as if the note were never sent.
+
+    RAW TEXT is unchanged — the gate is the TYPE, never id-lessness. A raw-text
+    send is id-less too but still mints a deadline-bearing assignment (matched
+    by bot+time), so it still shields the real row until a report discharges it.
+    """
+
     @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
-    def test_terminal_report_for_a_non_task_leaves_the_real_row_open(self, tmp_path, t):
-        # THE regression, all four types. `restart` and `cancel` route to a
-        # terminal report the same way `query` does; the review measured query
-        # and reasoned the rest, so they are measured here.
+    def test_a_control_note_does_not_blank_the_resolver_head(self, tmp_path, t):
+        # The brief's pin, read straight off the resolver: after a control note
+        # the bot's newest OPEN assignment is still the real id'd task, so
+        # `--open-task` hands it back rather than the "" a raw-text note yields.
+        # On main this FAILS — the note's own id-less assignment blanks the head.
         libdir, env = _roundtrip_lib(tmp_path)
-        _seed_open_task(tmp_path)
-        subprocess.run(
-            ["bash", "-c", f'"{libdir}/dispatch-task.sh" --type {t} w1 "a peer note"'],
-            capture_output=True,
-            text=True,
-            env=_scrubbed_env(**env),
-            timeout=10,
-        )
-        # A COMPLIANT worker: it echoes an id when it was given one, and it was
-        # given none. This is the arm main was safe on, which is what makes it a
-        # regression rather than a pre-existing class.
-        rb = subprocess.run(
-            ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "answered inline"'],
-            capture_output=True,
-            text=True,
-            env=_scrubbed_env(**env),
-            timeout=10,
-        )
-        assert rb.returncode == 0, rb.stderr
-        assert REAL_ID in _still_open(libdir, tmp_path, env), (
-            f"a `{t}` peer note closed unrelated in-progress work as completed"
+        real_id = _seed_open_task(libdir, tmp_path, env)
+        _door(libdir, f'dispatch-task.sh" --type {t} w1 "a peer note"', env)
+        assert _open_task(libdir, tmp_path, env) == real_id, (
+            f"a `{t}` note blanked the resolver head — the #1418 hijack #1491 removes"
         )
 
-    def test_a_raw_text_dispatch_does_not_close_it_either(self, tmp_path):
-        # Not introduced by --type: the same silent close is reachable on main
-        # through a bare raw-text send, which carries no envelope at all. That
-        # is why the guard lives in the resolver and not in the envelope — a
-        # transmit-side marker has nowhere to go on this path.
+    @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
+    def test_a_no_id_report_after_a_control_note_resolves_the_real_row(self, tmp_path, t):
+        # The end-to-end consequence, all four types. `restart` and `cancel`
+        # route to a terminal report the same way `query` does. Before #1491 the
+        # note's id-less assignment absorbed this report and the real task stayed
+        # open; now the note is invisible, so #835 FIFO closes the real row.
         libdir, env = _roundtrip_lib(tmp_path)
-        _seed_open_task(tmp_path)
-        subprocess.run(
-            ["bash", "-c", f'"{libdir}/dispatch-task.sh" w1 "a peer note"'],
-            capture_output=True,
-            text=True,
-            env=_scrubbed_env(**env),
-            timeout=10,
+        real_id = _seed_open_task(libdir, tmp_path, env)
+        _door(libdir, f'dispatch-task.sh" --type {t} w1 "a peer note"', env)
+        rb = _door(libdir, 'report-back.sh" w1 completed "answered inline"', env)
+        assert rb.returncode == 0, rb.stderr
+        assert real_id not in _still_open(libdir, tmp_path, env), (
+            f"a `{t}` note shielded the real row from resolving (#1491)"
         )
-        subprocess.run(
-            ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "answered inline"'],
-            capture_output=True,
-            text=True,
-            env=_scrubbed_env(**env),
-            timeout=10,
+
+    def test_a_raw_text_note_still_shields_the_real_row(self, tmp_path):
+        # UNCHANGED by #1491: raw text is id-less too but mints an assignment
+        # with a deadline, so it blanks the head and the first no-id report
+        # closes IT, not the real task. The gate is the TYPE, never id-lessness —
+        # this is what keeps the documented "one report closes all open
+        # dispatches for that bot" path working.
+        libdir, env = _roundtrip_lib(tmp_path)
+        real_id = _seed_open_task(libdir, tmp_path, env)
+        _door(libdir, 'dispatch-task.sh" w1 "a peer note"', env)
+        _door(libdir, 'report-back.sh" w1 completed "answered inline"', env)
+        assert real_id in _still_open(libdir, tmp_path, env)
+
+    def test_a_raw_text_note_releases_after_it_is_answered(self, tmp_path):
+        # The shield is scoped to an UNANSWERED raw-text note, not to the bot: a
+        # single note must not strand every later report. The first report
+        # discharges the note, the second resolves the real row.
+        libdir, env = _roundtrip_lib(tmp_path)
+        real_id = _seed_open_task(libdir, tmp_path, env)
+        _door(libdir, 'dispatch-task.sh" w1 "a peer note"', env)
+        for _ in range(2):
+            _door(libdir, 'report-back.sh" w1 completed "r"', env)
+        assert real_id not in _still_open(libdir, tmp_path, env), (
+            "the note was discharged by the first report; the second should resolve"
         )
-        assert REAL_ID in _still_open(libdir, tmp_path, env)
 
     def test_an_id_dispatch_still_resolves_without_an_echo(self, tmp_path):
         # THE POSITIVE CONTROL, and it is what stops the fix being "never
@@ -411,53 +421,10 @@ class TestANonTaskReportClosesNothingElse:
         # silently reverting it. Here the latest dispatch IS id'd, so the
         # resolver must still fire and close that row.
         libdir, env = _roundtrip_lib(tmp_path)
-        _seed_open_task(tmp_path)
-        subprocess.run(
-            ["bash", "-c", f'"{libdir}/dispatch-task.sh" --type task w1 "real work"'],
-            capture_output=True,
-            text=True,
-            env=_scrubbed_env(**env),
-            timeout=10,
-        )
-        subprocess.run(
-            ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "did the work"'],
-            capture_output=True,
-            text=True,
-            env=_scrubbed_env(**env),
-            timeout=10,
-        )
+        real_id = _seed_open_task(libdir, tmp_path, env)
+        _door(libdir, 'dispatch-task.sh" --type task w1 "real work"', env)
+        _door(libdir, 'report-back.sh" w1 completed "did the work"', env)
         # FIFO closes the OLDEST open row — documented #835 behaviour, unchanged.
-        assert REAL_ID not in _still_open(libdir, tmp_path, env), (
+        assert real_id not in _still_open(libdir, tmp_path, env), (
             "the resolver stopped firing for id'd dispatches — #835 reverted"
-        )
-
-    def test_a_later_report_resolves_again_once_the_note_is_discharged(self, tmp_path):
-        # The suppression is scoped to an UNANSWERED note, not to the bot. A
-        # single peer note must not strand every later report for the rest of
-        # the session — that would trade one silent-close bug for a permanent
-        # #835 outage, which is the same defect wearing the other coat.
-        libdir, env = _roundtrip_lib(tmp_path)
-        _seed_open_task(tmp_path)
-        subprocess.run(
-            [
-                "bash",
-                "-c",
-                f'"{libdir}/dispatch-task.sh" --type query w1 "a peer note"',
-            ],
-            capture_output=True,
-            text=True,
-            env=_scrubbed_env(**env),
-            timeout=10,
-        )
-        for _ in range(2):
-            subprocess.run(
-                ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "r"'],
-                capture_output=True,
-                text=True,
-                env=_scrubbed_env(**env),
-                timeout=10,
-            )
-        assert REAL_ID not in _still_open(libdir, tmp_path, env), (
-            "the note was already answered by the first report; the second "
-            "should resolve normally"
         )

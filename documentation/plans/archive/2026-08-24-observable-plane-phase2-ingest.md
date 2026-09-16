@@ -1,9 +1,50 @@
+---
+title: "Observable Plane — Phase 2: The Ingest Daemon And The Doors"
+type: plan
+status: completed
+owner: fleet owner
+created: 2026-08-24
+---
+
 # Observable plane — Phase 2: the ingest daemon and the doors
 
-**Status:** PLAN (2026-08-24). Execution gated on: PR #1341 merged; this plan reviewed per the
-operator's normal flow. Parent spec: `2026-08-18-observable-plane-design-v2.md` (authoritative on
-every model/semantic question; this plan is transport, rollout, and door work only). Door facts:
-`2026-08-25-phase0-door-inventory.md` (measured @ `e9311da`).
+**Status:** completed 2026-08-27. Shipped as two PRs: PR-A (`df43c70`, #1345 — ingest daemon, shim,
+host-service units, parity, dormant) then PR-B (`c34f12d`, #1372 — the doors emit, §6b activation
+model, five doors dual-write, session identity, Pi-verified budgets), each followed by a review-fix
+round (PR-A: `ce89c67`, 13 findings; PR-B: `a67f393` 16 findings + `c638b34` re-verification
+residuals), plus a post-merge 8-reviewer gauntlet round (`039ede4`). Outcome recorded in §Outcome
+below; the plan body beneath it is preserved as ratified and is not retro-edited.
+
+## Outcome (recorded 2026-08-28, docs-audit)
+
+Every task in §6's decomposition table has a landed commit: T0 daemon+protocol → `35f7167`; T1
+launcher+composed host-service units → `19448e8`; T2 `lib/plane-emit.sh` shim → `487ed3f`; T3
+`lib/plane-parity.py` → `a1dfada`; T4/T5/T6(a) dispatch-task/report-back/tg-post/briefing-trigger
+dual-write → `5fd028f`; T6(b) workstream door → `88fa274`; T7 SessionStart hook + `process_uid` →
+`86b4a98`; T8 capture-validation optimization → confirmed via `tests/test_plane_t8_validation_cost.py`;
+T9/T10 harness leg + doctor rungs + shim bench → `5174900`. The §6b kernel work (carrier-appropriate
+activation, `carrier_queued`) landed in `d2ea7dd` and is confirmed in
+`claudlobby/plane/contracts.py`'s `ATTEMPT_STATES`.
+
+All five named doors (`lib/dispatch-task.sh`, `lib/report-back.sh`, `lib/tg-post.sh`,
+`lib/workstream-update.sh`, `lib/briefing-trigger.sh`) confirmed carrying `PLANE_EMIT_ENABLED`-gated
+dual-write calls in this worktree. `system.yaml` confirmed carries the dormant
+`host.jobs.plane-daemon` entry (`enroll: false`, `unit: service`, `script:
+"$CLAUDLOBBY_ROOT/lib/plane-daemon.sh"`) exactly as §1's "Dormancy" row describes.
+`report-back.sh`'s "one ordering change" (§3) — plane intent recorded before the tmux send, ahead
+of the unchanged legacy send-then-ledger order — is confirmed in the current file: the plane
+intent emission (`_plane_emit_report_intent`) runs before `bot_tmux_send`, and the legacy
+`_emit_ledger_event` call still runs after it, unchanged.
+
+**Not verifiable from this repo checkout:** §4's operational rollout ladder (arming the daemon and
+each door on a real canary fleet, N days parity-clean) is fleet-`local/`-config-scoped and
+gitignored — this audit confirms the code and dormant-by-default posture, not whether any fleet has
+actually armed it.
+
+**Test evidence:** `CHANGELOG.md` records 191 plane tests across 16 suites at PR-B, plus 43 new
+regression pins from the gauntlet round (`039ede4`, failing-test set unchanged at 49 names, passed
+count 3689→3732). Independently re-run for this audit (2026-08-28, unsandboxed):
+`./.venv/bin/pytest tests/test_plane_*.py` → **265 passed, 0 failed** (current cumulative total).
 
 ## 1. Decisions carried in (all ruled; provenance noted)
 
@@ -79,6 +120,14 @@ mechanism: the shim no-ops under `PLANE_EMIT_DISABLED=1`, which harnesses export
 ruled: env flag, not socket namespace, because harnesses already own their env and a namespace
 would need daemon cooperation).
 
+**Arming (ruled at PR-B kickoff, 2026-08-26): door emission is DORMANT by default behind
+`PLANE_EMIT_ENABLED=1` in the fleet's `env:`** — the `SESSION_DIGEST_ENABLED` /
+`SPINDOWN_RECEIPT_ENABLED` precedent exactly: lib/ is a shared install that cannot be staged
+per-fleet, so a root pull must never activate new door behavior estate-wide, and an UNARMED
+fleet's doors must pay zero latency (not a ~400ms cold-CLI toll per dispatch on hosts without
+the daemon). This knob is what makes §4's one-fleet canary ladder real. `PLANE_EMIT_DISABLED=1`
+remains the harness override on top (wins over ENABLED).
+
 **The one ordering change, named as the canary's sharp edge:** report-back today SENDS then
 ledgers (`:152`/`:184`); the shim records intent BEFORE transport (F9). That flips its crash
 exposure — a crash between record and send leaves an intent with no transmission (visible,
@@ -118,7 +167,10 @@ unmeasured — measure first, adapt second. Nothing in Phase 2 touches the plugi
 - **Door-side latency budget:** p95 ≤ 200ms per shim emit on the Pi (warm 106ms + socket + bash
   overhead, headroom for the optimization to reclaim). Measured by a bench extension that drives
   the SHIM, not `emit()` — the number a door actually feels. §19.8 applies: a miss is a defect
-  investigation.
+  investigation. **Known lever named in advance (2026-08-27, from the Mac smoke):** the
+  shim's rung-1 client is a python3 spawn (~150-250ms interpreter startup on the Pi before any
+  socket work) — if the Pi budget fails, the investigation starts there (a `nc -U`/bash-native
+  send, or folding the pre-mint+send into one spawn), never at the model.
 - **Ambiguous-success branch enumeration** from `pane_send_verified` (inventory Remaining):
   enumerate, map each to transmission `unknown` vs `pane_submitted`; the mapping ships as a table
   in the dispatch-door task with a test per branch.

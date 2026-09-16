@@ -1,5 +1,13 @@
 # Review brief — observable-plane design v2 + Phase-1 plan (second independent review)
 
+**Resolved (docs-audit note, 2026-08-28):** this review's asks were addressed and the reviewed
+plan since executed. The ten implementation-blocking findings were reconciled into design v2.1
+(§2 round-2 note, §9d defect appendix — see `2026-08-18-observable-plane-design-v2.md`); the
+Phase-1 kernel then shipped (commit `b696603`, PR #1341) and received a further independent
+post-ship review (4 blocking + 9 should-fix findings, all fixed — see that spec's §19 item 7 and
+`2026-08-19-observable-plane-phase1-kernel.md`'s own Outcome section). This brief's asks are
+closed; body preserved below as the original request, not retro-edited.
+
 **Requesting:** implementation-grade review of the *current* design before Phase-1 execution. The prior external review (2026-08-18) examined spec v1; everything below postdates it and has had no independent eyes.
 **Materials:** `documentation/plans/2026-08-18-observable-plane-design-v2.md` (the spec — §9d is the column-level reference) · `documentation/plans/2026-08-19-observable-plane-phase1-kernel.md` (full-code implementation plan, 12 TDD tasks — **never executed**) · branch `design/observable-plane` (commit history = the decision trail) · v1 at `2026-08-17-…` (audit trail only).
 **Posture:** read-only review; do not treat RATIFIED/fork labels as immutable where correctness requires reopening. Everything is pre-cutover and un-executed — re-rulings cost plan-editing, not migration. This is the cheapest review this program will ever get.

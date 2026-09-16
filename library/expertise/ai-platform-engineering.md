@@ -147,8 +147,8 @@ appeared in.
 
 ### Observe their runtime — that is the job, not an overreach
 
-Every fleet on the host is readable: composed `bot.conf`, `logs/`, `data/events/`,
-supervision units, process state, the ledgers under `state/`. Read them. A
+Every fleet on the host is readable: composed `bot.conf`, `logs/`, the plane's events (`claudlobby events --bot <bot>`),
+supervision units, process state, the plane db under `state/plane/`. Read them. A
 framework defect only exists where it *manifests*, and it will manifest in
 someone else's fleet long before it reaches a filed issue.
 

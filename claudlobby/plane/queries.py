@@ -5,10 +5,29 @@ renewal horizons compare against NOW ("renewed UNTIL" means until: an
 expired renewal protects nothing — round-6 counterexample), while activity
 recency compares against CUTOFF = now − policy_window. Both latest-by-
 ingest_seq: ledger order is authoritative, producer timestamps may arrive
-out of order. ATTENTION_SQL binds (overdue_cutoff,).
+out of order. ATTENTION_SQL and ATTENTION_ARMS_SQL bind the `?`-bearing
+arms' values in ARM ORDER, through `attention_params` /
+`attention_arms_params` (chunk M-A,
+#1481) — one value per arm for `nudged`/`overdue`, THREE for `stale_task`
+(chunk T: the not-overdue instant, the amber cutoff, the heartbeat-freshness
+cutoff), all off one `now`. The arms-with-columns form binds the same tuple
+TWICE, the columns then the filter (every arm's `?`s live in its predicate,
+which is both a column and a filter term; its `_at`/tier carry none, so the
+doubling holds). Positional binds were hand-written at five call sites while
+there was exactly one `?`; a second arm made a mis-ordered pair a silently
+WRONG answer rather than an error, so the tuple is derived from one `now` in
+one place.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+# presence's freshness horizon is the SAME constant the stale_task suppression
+# reads a heartbeat against — imported, not re-declared, so "a fresh recording"
+# means one thing to the presence panel and to this arm (presence.py is a pure
+# module and imports nothing from the plane, so this direction has no cycle).
+from .presence import STALE_AFTER_S
 
 TERMINAL_TASK_EVENTS = (
     "completed", "failed", "cancelled", "returned_blocked",
@@ -16,43 +35,665 @@ TERMINAL_TASK_EVENTS = (
 )
 _TERMINAL = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
 
-ATTENTION_SQL = (
-    "SELECT a.assignment_id FROM assignments a"
-    " WHERE NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+# ONE definition of "this assignment is still open" — ATTENTION_SQL and the
+# attention-expiry sweep must agree on it, or a card can sit in the queue
+# that the sweep considers closed (or vice versa). `a` is the assignments
+# alias in the enclosing query.
+NON_TERMINAL_CLAUSE = (
+    " NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
     f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))"
-    " AND (NOT EXISTS (SELECT 1 FROM events e WHERE"
-    "   e.kind='transmission' AND e.msg_id = a.dispatch_msg_id"
-    "   AND e.event='recipient_acknowledged')"
-    "  OR a.expected_by < ?)"
 )
 
-# Attempt-status ladder below the task-event tiers (§8: activation is
-# evidence-based, derived through assignments.dispatch_msg_id -> transmission
-# rows — a contract with no acknowledged dispatch is NOT open). Submission
-# evidence (pane_submitted / carrier_accepted) reads pending_unacknowledged;
-# so does an OUTSTANDING attempt — a send_attempted/unknown/
-# duplicate_suppressed row whose attempt_no has no 'failed' verdict — because
-# a retry in flight after a failed first attempt must not report
-# dispatch_failed, while an attempt whose own verdict IS 'failed' must.
-_TX_SUBMITTED = "'pane_submitted','carrier_accepted'"
-_TX_UNRESOLVED = "'send_attempted','unknown','duplicate_suppressed'"
+# The plane's OPEN SET for one assignee AS OF an instant (cutover chunk 3, the
+# shadow primitive). Deliberately NOT NON_TERMINAL_CLAUSE: that closes per
+# ASSIGNMENT (attention and expiry's question), while the legacy list reader
+# being shadowed closes per (bot, TASK ID) — a redispatched task id with one
+# terminal report closes every row that carried it — so this closes an
+# assignment when a terminal task event by the instant names it OR a sibling
+# assignment of the same assignee with the same dispatch-log source_ref.
+# Params: (assignee_uid, at, at, at, at, at, at) — the assignee resolved to a
+# uid by the caller on the small registry (case-insensitively), so the read
+# hits idx_assignments_assignee; `at` None = unbounded (everything landed).
+# --- the fleet axis of an alias, in SQL (U) -----------------------------------
+# `bot:<fleet>/<name>`: an actor's fleet is the segment between `bot:` and the
+# first `/`. As a predicate it is a RANGE over the alias index — case-sensitive
+# like the equality arms the room queries bind (`fleet_uid`, `recipient_fleet`),
+# so one string means one fleet on every arm (a LIKE arm is ASCII-case-
+# insensitive and let `Eng` count `eng`'s bots while the room kept them apart),
+# seekable, and free of LIKE metacharacters (a fleet named `en_` cannot absorb
+# `eng`). Bind the fleet TWICE (`fleet_range_params`). Python-side, the same
+# rule is inventory.fleet_of.
+def fleet_alias_range(col: str = "alias") -> str:
+    return f"({col} >= 'bot:' || ? || '/' AND {col} < 'bot:' || ? || '0')"
 
+
+def fleet_range_params(fleet: str) -> tuple[str, str]:
+    return (fleet, fleet)
+
+
+# `_`-prefixed aliases are scope SENTINELS (the `_host` fleet the host probe
+# emits under — a host job has no real fleet), never participants: the one
+# spelling every rail, roster and fleet-list read applies.
+def not_sentinel_sql(col: str = "alias") -> str:
+    return f"{col} NOT LIKE '\\_%' ESCAPE '\\'"
+
+
+# --- a fleet's reports, and its read position (chunk K, #1467) -----------------
+# THE definition of "a fleet's reports": report-class communications on the
+# fleet's ROOM AXIS — sent by the fleet (fleet_uid) or addressed to it
+# (recipient_fleet: a worker on another fleet reporting to this fleet's manager
+# is this fleet's report). brief's unacked list, `claudlobby report-back` and
+# the overview card all read this text (lib/plane-readers.py carries the
+# byte-identical copy, pinned): a second population let the card count a report
+# the manager's brief never showed, which no ack could clear. Binds
+# (fleet_uid, fleet_alias, since, since, since_seq, since_seq).
+FLEET_REPORTS_SQL = (
+    "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref,"
+    " c.ingest_seq"
+    " FROM communications c"
+    " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
+    " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
+    " ORDER BY c.occurred_at, c.ingest_seq"
+)
+
+# The newest READABLE `reports_acked` event among a set of uids (subject OR
+# actor — an ack lands on the viewer's own actor; the uids span every alias
+# variant the bot minted, the R2a rule). Decoded by SQLite: a row whose detail
+# carries no integer cursor is not an ack and is skipped — never a reset to
+# "never acked" that erases an older valid one (adversarial lens). Format with
+# ph = the uid placeholders, bind the uids twice.
+NEWEST_ACK_SQL = (
+    "SELECT json_extract(e.detail, '$.acked_through_seq') AS seq,"
+    " json_extract(e.detail, '$.acked_through_ts') AS ts,"
+    " json_extract(e.detail, '$.count') AS count,"
+    " e.occurred_at AS acked_at, e.subject_alias AS acked_by, e.ingest_seq AS landed_seq"
+    " FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'reports_acked'"
+    " AND (e.subject_uid IN ({ph}) OR e.actor_uid IN ({ph}))"
+    " AND json_type(e.detail, '$.acked_through_seq') = 'integer'"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+
+OPEN_ASSIGNMENTS_AT_SQL = (
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by"
+    " FROM assignments a"
+    " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
+    "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    f"    AND t.event IN ({_TERMINAL}) AND (? IS NULL OR t.occurred_at <= ?)"
+    "    AND (t.assignment_id = a.assignment_id"
+    "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
+    "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
+    "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
+    "              AND (? IS NULL OR s.occurred_at <= ?)))))"
+    " ORDER BY a.occurred_at, a.ingest_seq"
+)
+
+# §6b #1/#2 (PR-B): activation derives from CARRIER-APPROPRIATE evidence —
+# submission-class rows (pane_submitted / carrier_accepted) occupy the
+# activation rung, because submission is the strongest fact the tmux carrier
+# can ever yield; a real recipient_acknowledged row TIGHTENS where a door
+# observed one, and is never inferred. carrier_queued is NOT activation
+# (accepted-but-parked behind a busy turn). And a missing producer must fail
+# toward EMPTY, never toward everything: the old attention predicate
+# (NOT EXISTS ack) inverted to all-alarm with zero producers.
+#
+# ONE definition (gauntlet round; the TERMINAL_TASK_EVENTS pattern above):
+# ATTENTION_SQL and TASK_STATUS_SQL must mean the SAME thing by "activated" —
+# two byte-identical constants under two names is how a promoted/demoted
+# token (this PR moved carrier_queued and recipient_acknowledged) splits
+# the attention view from the status view silently.
+ACTIVATION_TX_EVENTS = (
+    "pane_submitted", "carrier_accepted", "recipient_acknowledged",
+)
+_TX_ACTIVATION = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
+
+# The ARMS of attention, one definition each (chunk L fold, #1479). Attention
+# = non-terminal AND (evidence of dispatch trouble OR overdue). Trouble is
+# EVIDENCE-BASED: transmission rows exist for the dispatch, yet none reached
+# activation — a send that FAILED or one that sits queued. An assignment with
+# NO transmission rows at all is a producer gap (or a pre-doors import), which
+# is silence, not alarm (§6b #2).
+#
+# The two trouble arms partition that one predicate on whether a `failed`
+# transmission exists, because the operator's remedy differs: a failed send is
+# a carrier fact to re-send, a never-activated one may be a bot that is down.
+# Their union is byte-equivalent to the old single arm (a `failed` row IS a
+# transmission row), so ATTENTION_SQL's population is unchanged.
+# chunk P fold F2: `received` is the RECEIVER's own fact, not evidence the
+# SENDER attempted a dispatch, so it must NOT satisfy "a transmission exists for
+# this dispatch". Without this filter a `received` row alone (the sender's
+# pane_submitted lost — plane down at dispatch, up at receipt) made
+# `never_activated` fire for a message that was demonstrably received.
+_TX_EXISTS = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+              " AND e.msg_id = a.dispatch_msg_id AND e.event <> 'received')")
+_TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+                 " AND e.msg_id = a.dispatch_msg_id"
+                 f" AND e.event IN ({_TX_ACTIVATION}))")
+_TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+              " AND e.msg_id = a.dispatch_msg_id AND e.event='failed')")
+
+# --- the delivery JOIN (chunk P, #1501; fold F1/F3) ---------------------------
+# Delivery, derived ONCE here — the honest replacement for reading
+# `pane_submitted` as "delivered". The sender's Enter cannot see what the
+# receiver ingested (94 of 180 large sends the week before chunk O were wrong);
+# the RECEIVER's own row can. A `received` transmission carries the byte length
+# and sha256 of the prompt the receiving session actually got (received_bytes /
+# received_sha256, in `detail`, landed by lib/plane-dispatch-in.sh), keyed to
+# the sender's msg_id.
+#
+# fold F1: it JOINs that against the SENDER's WIRE proof (wire_sha256 /
+# wire_bytes, in `detail` on a submission-class tmux fact — bot_tmux_send hashes
+# the EXACT bytes it put on the wire), NOT the communication's body hash. The
+# body is the raw logical message; the receiver hashes what came off the wire,
+# which `sanitize_tmux_input` rewrote (newlines/tabs -> spaces). Comparing the
+# arrival against the raw body read every multi-line / tabbed / double-spaced
+# dispatch as ALTERED or TRUNCATED though fully delivered. The wire proof and the
+# arrival are the SAME bytes, so DELIVERED fires for every shape.
+#
+# fold F3: the `received` row must be addressed to THIS communication's recipient
+# (destination = recipient_raw). An untracked prompt that merely QUOTES a real
+# trailer plants a `received` under someone else's destination — the ON clause
+# makes it inert rather than a misattributed verdict.
+#
+# Columns: (msg_id, wire_bytes, received_bytes, delivery):
+#
+#   delivered    a received proof whose sha256 == the wire proof's sha256
+#   truncated    a received proof genuinely SHORTER than the wire (real tail
+#                loss — the #1493 shape; the caller reads the shortfall off
+#                wire_bytes - received_bytes). `<`, never `<=`/`!=`: an arrival
+#                that is equal-or-longer with a differing sha is ALTERED, not lost
+#   altered      a received proof compared against a wire proof and neither equal
+#                nor shorter: arrived transformed, not lost. GUARDED on the wire
+#                proof existing (fold): you cannot call an arrival "altered"
+#                with nothing to compare it to, so a receipt with no wire proof
+#                (a sha-less host; a pre-fold row) degrades to unconfirmed/NULL,
+#                never a false "ARRIVED ALTERED" alarm
+#   unconfirmed  a submission-class fact (pane_submitted / carrier_queued) but NO
+#                usable received proof: the tail was lost, or the receiver was
+#                mid-turn/down, or the receipt lacked a wire proof to verify
+#   NULL         nothing was submitted to a pane — no tmux-delivery verdict
+#
+# The NEWEST `received` / submission wins (a re-send mints a fresh msg_id, so in
+# practice there is one — MAX(ingest_seq) is defensive). Format with ph = the
+# msg_id placeholders; bind the msg_ids once. json_extract reads each proof out
+# of `detail`, the NEWEST_ACK_SQL idiom.
+DELIVERY_STATUS_SQL = (
+    "SELECT c.msg_id AS msg_id, s.wire_bytes AS wire_bytes,"
+    " r.received_bytes AS received_bytes,"
+    " CASE"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_sha256 IS NOT NULL"
+    "   AND r.received_sha256 = s.wire_sha256 THEN 'delivered'"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_bytes IS NOT NULL"
+    "   AND r.received_bytes < s.wire_bytes THEN 'truncated'"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_sha256 IS NOT NULL"
+    "    THEN 'altered'"
+    "  WHEN s.msg_id IS NOT NULL THEN 'unconfirmed'"
+    "  ELSE NULL"
+    " END AS delivery"
+    " FROM communications c"
+    " LEFT JOIN ("
+    "  SELECT e.msg_id AS msg_id,"
+    "   json_extract(e.detail, '$.destination') AS destination,"
+    "   json_extract(e.detail, '$.received_sha256') AS received_sha256,"
+    "   json_extract(e.detail, '$.received_bytes') AS received_bytes"
+    "  FROM events e"
+    "  WHERE e.kind='transmission' AND e.event='received'"
+    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
+    "    WHERE e2.kind='transmission' AND e2.event='received' AND e2.msg_id = e.msg_id)"
+    " ) r ON r.msg_id = c.msg_id AND r.destination = c.recipient_raw"
+    " LEFT JOIN ("
+    "  SELECT e.msg_id AS msg_id,"
+    "   json_extract(e.detail, '$.wire_sha256') AS wire_sha256,"
+    "   json_extract(e.detail, '$.wire_bytes') AS wire_bytes"
+    "  FROM events e"
+    "  WHERE e.kind='transmission' AND e.event IN ('pane_submitted','carrier_queued')"
+    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
+    "    WHERE e2.kind='transmission'"
+    "     AND e2.event IN ('pane_submitted','carrier_queued')"
+    "     AND e2.msg_id = e.msg_id)"
+    " ) s ON s.msg_id = c.msg_id"
+    " WHERE c.msg_id IN ({ph})"
+)
+
+# --- the HUMAN arms (chunk M-A, #1481) ----------------------------------------
+# Two acts a person takes on ONE task, both already just task events: a
+# manager's `escalated` (it asks the human a question, and is NON-terminal —
+# the task stays open while the human decides) and the operator's `nudged`
+# (it asks the manager to act). Each holds only while it is the assignment's
+# NEWEST task event, so a later `progress`, a re-dispatch's `superseded`, a
+# withdrawal's `cancelled` or any terminal event clears it with no second
+# door and no state to reconcile. "Newest" is TASK_STATUS_SQL's own rule —
+# latest by ingest_seq.
+#
+# WHICH tokens that window IGNORES is the whole correctness of the escalation
+# arm, and the M-A fold (F1) found it one token short. `supplied_id_not_open`
+# was already excluded as a JOIN anomaly rather than a lifecycle state (#1372
+# review F11); `nudged` has to be excluded from the ESCALATION's window for a
+# different reason, and the reason is what makes it a rule instead of a patch:
+# **a nudge is an ASK, not an ANSWER.** It asks the manager to act on the row
+# and changes nothing about the row itself, so it cannot be what ends the
+# manager's own raise. Left in, the sequence escalate → nudge silently
+# extinguished the escalation — off the card, off `--escalated`, off the
+# operator's queue, permanently, because nothing ever re-raises it (measured
+# on a throwaway plane, both surfaces). The ruling enumerates what DOES clear
+# an escalation — progress, a terminal report, a withdrawal, a supersede —
+# and a nudge is not among them.
+#
+# The nudge's OWN arm needs the opposite window (a nudge is exactly what it
+# looks for), so there are two, and they differ by that one token.
+NEWEST_TASK_IGNORED = ("supplied_id_not_open",)
+ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged",)
+
+
+def _newest_task(col: str, ignore: tuple = NEWEST_TASK_IGNORED) -> str:
+    skip = ",".join(f"'{e}'" for e in ignore)
+    return (f"(SELECT {col} FROM events n WHERE n.kind='task'"
+            "  AND n.assignment_id = a.assignment_id"
+            f"  AND n.event NOT IN ({skip})"
+            "  ORDER BY n.ingest_seq DESC LIMIT 1)")
+
+
+_NEWEST_EVENT = _newest_task("n.event")
+_NEWEST_AT = _newest_task("n.occurred_at")
+_NEWEST_BY = _newest_task("json_extract(n.detail, '$.by')")
+_NEWEST_ANSWER = _newest_task("n.event", ESCALATION_IGNORED)
+_NEWEST_ANSWER_AT = _newest_task("n.occurred_at", ESCALATION_IGNORED)
+
+# A nudge is an ASK, and a manager is owed a moment to act on it, so a nudge
+# is not attention until it has gone unanswered past this. Named because the
+# card's own wording quotes it ("nudged 40m ago by chris, no act yet"), and
+# because a bare literal inside the SQL string is unquotable there.
+NUDGE_GRACE_S = 30 * 60
+
+
+def _epoch(expr: str) -> str:
+    """An instant compared as an INSTANT, not as text (the M-A fold, F7).
+
+    The ledger stores `occurred_at` / `expected_by` as the emitter's own
+    isoformat, offset and all (`ingest` writes `.isoformat()` of an aware
+    datetime), so `-04:00` and `+00:00` rows sit side by side in one column.
+    A lexical `<` then compares the wall-clock DIGITS: a nudge stamped ten
+    minutes ago at `-04:00` sorts before a `+00:00` cutoff four hours older
+    and read as past the grace — reproduced, and it would have paged an
+    operator about a nudge nobody had ignored. `strftime('%s', …)` is the
+    same lesson `plane-readers.since_form` teaches on the read side (normalise
+    before comparing), applied where the STORED form cannot be normalised
+    after the fact. SQLite parses the offset suffix and fractional seconds
+    (probed); an unparseable instant yields NULL, so an arm fails OFF rather
+    than firing on garbage — which ingest's AwareDatetime makes unreachable
+    anyway."""
+    return f"CAST(strftime('%s', {expr}) AS INTEGER)"
+
+
+# --- the stale in-flight task arm (chunk T) -----------------------------------
+# Present-tense attention the other arms miss: an assignment that is OPEN, held
+# by a bot, and NOT MOVING — aging with no progress and with NO deadline (or one
+# not yet passed). `overdue` is the same shape once a promise is broken and it
+# LEADS; this arm is the softer, deadline-less case and EXCLUDES an overdue row
+# (the not-overdue term), so one row never double-raises.
+#
+# THE CRUX — suppressed while the assignee is presence=working. A bot deep in a
+# long task is not stuck; an idle/stale/down bot holding an old open task is the
+# signal. presence.working (presence.py) is, in the half SQL can see, a FRESH
+# `bot.heartbeat` reading BUSY, so the suppression is expressed HERE against the
+# SAME latest-heartbeat-by-ingest_seq primitive LATEST_HEARTBEAT_SQL derives
+# presence from — one definition of "working", SQL-side so the rail and the
+# header count read it identically, not a second Python derivation forked across
+# the two. The one thing the recorded half cannot see is the LIVE poll's `down`
+# override (a session that DIED within the last staleness horizon while its last
+# beat said BUSY): that fails SAFE — the arm stays quiet until the beat goes
+# stale (<= STALE_AFTER_S) and then fires, the correct verdict for a down bot
+# still holding an open task. An UNREACHABLE plane raises nothing at all — the
+# whole attention read degrades (source_state), so "no progress signal because
+# the plane is down" is never mis-read as staleness.
+STALE_TASK_AMBER_S = 6 * 3600         # held this long with no progress: raise, soft
+STALE_TASK_RED_S = 3 * 24 * 3600      # ...this long: raise, loud (the tier boundary)
+
+# The instant of the bot's last sign of life ON THIS TASK: the M-A progress
+# clock's two sources, scoped to the row — a linked `progress` task event (an
+# id'd dispatch, by assignment_id) OR a `report_status` marker on the bot's
+# actor with status=progress (an id-less progress report resolves no id, F18
+# R2a; report_status subject_kind is `actor`, so subject_uid = a.assignee_uid).
+# MAX over occurred_at is the progress clock's own tolerance (the M-A grace).
+# Both branches hit a partial index (idx_events_task_assignment /
+# idx_events_subject).
+_STALE_PROGRESS_AT = (
+    "(SELECT MAX(t) FROM ("
+    " SELECT e.occurred_at AS t FROM events e WHERE e.kind='task'"
+    "  AND e.event='progress' AND e.assignment_id = a.assignment_id"
+    " UNION ALL"
+    " SELECT e.occurred_at FROM events e WHERE e.kind='system'"
+    "  AND e.event='report_status' AND e.subject_uid = a.assignee_uid"
+    "  AND json_extract(e.detail, '$.status') = 'progress'"
+    # fold F1: an id-less progress marker is bot-scoped (it resolves no
+    # assignment), so it may reset only an ID-LESS task's clock -- never an
+    # id'd sibling's, which reports progress via branch 1 (the LINKED event).
+    # Without this, a bot doing an id-less note masked a genuinely-stuck id'd
+    # task it was also holding. Residual (inherent, documented): an id-less
+    # marker still resets the bot's OTHER id-less tasks -- they share no id.
+    "  AND a.source_ref LIKE 'dispatch-log:sha:%'))"
+)
+
+# The card's date for the arm ("no progress since …") — the later of the
+# dispatch and the newest progress, as an ISO instant. This is the arm's `_at`
+# column and carries no `?`.
+_STALE_SINCE_AT = (
+    # fold F2: pick the instant whose EPOCH is greatest -- NOT a lexical string
+    # MAX, which under mixed tz offsets picks the real-earlier instant and
+    # over-states the age/tier. Display now agrees with the firing predicate.
+    "(CASE WHEN " + _STALE_PROGRESS_AT + " IS NOT NULL AND "
+    + _epoch(_STALE_PROGRESS_AT) + " > " + _epoch("a.occurred_at")
+    + " THEN " + _STALE_PROGRESS_AT + " ELSE a.occurred_at END)"
+)
+
+# presence.working's recorded half as a correlated EXISTS on `a`: the assignee
+# alias (the ACTOR's — the heartbeat's subject is the bot_instance TWIN under
+# the same alias, a different uid, so the match is by alias not uid) has a
+# LATEST `bot.heartbeat` (max ingest_seq, ledger order authoritative) that is
+# FRESH (ingested at/after the freshness cutoff) and reads BUSY. Seeks the
+# (subject_uid, metric, ingest_seq) index (migration 0006). Binds ONE `?` = the
+# heartbeat-freshness cutoff (now - STALE_AFTER_S). A non-object/poison `value`
+# yields NULL state (not BUSY) → not working → the arm may fire, the safe way.
+_ASSIGNEE_WORKING = (
+    "EXISTS (SELECT 1 FROM metric_samples ms"
+    "  JOIN ingest_ledger g ON g.ingest_seq = ms.ingest_seq"
+    "  WHERE ms.metric = 'bot.heartbeat'"
+    "   AND ms.subject_uid IN (SELECT r.uid FROM identity_registry r"
+    "     WHERE r.alias = (SELECT ai.alias FROM identity_registry ai"
+    "       WHERE ai.uid = a.assignee_uid))"
+    "   AND ms.ingest_seq = (SELECT MAX(m2.ingest_seq) FROM metric_samples m2"
+    "     WHERE m2.metric = 'bot.heartbeat' AND m2.subject_uid = ms.subject_uid)"
+    "   AND json_extract(ms.value, '$.state') = 'BUSY'"
+    "   AND " + _epoch("g.ingested_at") + " >= " + _epoch("?") + ")"
+)
+
+# The arm predicate. `?` order (bound by `attention_params` in ARM ORDER):
+#   1) now             — not-overdue: no deadline, or the deadline has not passed
+#   2) amber cutoff     — aged: the LATER of dispatch/progress predates it
+#   3) hb-fresh cutoff  — working: the freshness gate inside _ASSIGNEE_WORKING
+# NULL expected_by is NOT overdue (the deadline-less case is the whole point);
+# without the guard `NOT (NULL < now)` is NULL and would drop every such row.
+#
+# HOLDING requires DELIVERY (_TX_ACTIVATED): a bot cannot be "sitting on" a task
+# a send never got to it. That gate also keeps stale_task mutually exclusive
+# with the send-trouble arms (send_failed / never_activated are both NOT
+# _TX_ACTIVATED), so a queued-and-never-delivered old task raises THEIR remedy
+# ("re-send / is the bot up") and not this one ("chase the worker") — a
+# never-delivered task is not the bot's fault to chase. No transmission evidence
+# at all is silence, not this alarm (the §6b #2 producer-gap rule the send arms
+# already hold).
+_STALE_TASK = (
+    "(" + _TX_ACTIVATED
+    + " AND (a.expected_by IS NULL OR " + _epoch("a.expected_by") + " >= " + _epoch("?") + ")"
+    " AND MAX(" + _epoch("a.occurred_at") + ", COALESCE("
+    + _epoch(_STALE_PROGRESS_AT) + ", " + _epoch("a.occurred_at") + ")) < "
+    + _epoch("?")
+    # a task the bot SAID it is blocked on is led by `blocked_waiting`, not
+    # re-derived as a silent stall here (the same lead-and-exclude the
+    # not-overdue clause above does for `overdue`). No `?` -- attention_params
+    # is unchanged.
+    + " AND (" + _NEWEST_EVENT + " IS NULL OR " + _NEWEST_EVENT
+    + " != 'blocked_waiting')"
+    + " AND NOT " + _ASSIGNEE_WORKING + ")"
+)
+
+
+# (name, predicate, since_expr, window) — the ONE list both surfaces below are
+# built from, so a new arm cannot reach the queue without also reaching the
+# column the card renders its reason from, the column it dates that reason by,
+# and (for a human arm) the columns carrying what the human said (the fold's
+# rule, F12: a new arm forces a new column, the date included — the date used
+# to live in a second list plus an if/elif ladder in the view, which is
+# exactly the shape that lets an arm ship undated).
+#
+# `window` is the newest-task-event window the arm and its facts are read in.
+# It is per-arm rather than global because F1 made the two human arms
+# genuinely disagree: the escalation's window must SKIP a later nudge (a nudge
+# does not answer a raise) while the nudge's window must not (a nudge is what
+# it looks for). A global window gets one of the two wrong, and dating or
+# quoting an arm through the OTHER arm's window is the same defect one step
+# on — an escalation dated by the nudge that followed it, quoting the nudge's
+# words as the question.
+#
+# ORDER IS THE OPERATOR'S PRIORITY (a human waiting on an answer outranks a
+# carrier fault, which outranks a clock) and also the `?` order of
+# ATTENTION_ARMS_SQL's columns — bind through `attention_params`, never by
+# hand.
+ATTENTION_ARMS = (
+    ("escalated", f"({_NEWEST_ANSWER} = 'escalated')",
+     _NEWEST_ANSWER_AT, ESCALATION_IGNORED),
+    ("send_failed", f"({_TX_FAILED} AND NOT {_TX_ACTIVATED})",
+     "a.occurred_at", None),
+    ("never_activated",
+     f"({_TX_EXISTS} AND NOT {_TX_ACTIVATED} AND NOT {_TX_FAILED})",
+     "a.occurred_at", None),
+    ("nudged",
+     f"({_NEWEST_EVENT} = 'nudged' AND {_epoch(_NEWEST_AT)} < {_epoch('?')})",
+     _NEWEST_AT, NEWEST_TASK_IGNORED),
+    ("overdue", f"({_epoch('a.expected_by')} < {_epoch('?')})",
+     "a.expected_by", None),
+    # a bot that SAID it is blocked and waiting: its newest task event is
+    # `blocked_waiting` — non-terminal (the task stays open while it waits, the
+    # escalated/nudged family), so `_NON_TERMINAL_A` keeps it in the queue. An
+    # EXPLICIT block dated by the bot outranks an INFERRED stall, so it leads
+    # stale_task and stale_task excludes it above — an aged block reads
+    # `blocked_waiting`, never both. No `?`, so attention_params is unchanged.
+    ("blocked_waiting", f"({_NEWEST_EVENT} = 'blocked_waiting')",
+     _NEWEST_AT, None),
+    # LAST in the order so `overdue`/`blocked_waiting` (and every louder arm)
+    # LEAD a row that is both — and its predicate already excludes an overdue
+    # or blocked row, so belt and suspenders: stale_task never rides in front,
+    # and never double-raises one.
+    ("stale_task", _STALE_TASK, _STALE_SINCE_AT, None),
+)
+
+# The arms a PERSON raised, and therefore the only arms that carry the fact
+# columns below (the fold's F10). The old single `arm_*` set read the row's
+# newest task event whether or not that event was what the LEADING arm was
+# about, so an OVERDUE row carrying a still-in-grace nudge reported
+# `attention_by: chris` under a reason line that never mentions a person — a
+# fact attached to the wrong claim. The nudge is not lost by narrowing this:
+# it rides `NUDGE_STATE_SQL` below, where it is true.
+HUMAN_ARMS = ("escalated", "nudged")
+
+# WHAT the human said, off the detail of the arm's OWN newest event: the
+# escalation's question is the whole point of its card ("needs you: <q>"), and
+# `by` / `reason` name the person and their words. One list of detail KEYS,
+# expanded per human arm into `<arm>_<key>`, so the columns and the arm they
+# belong to cannot drift apart and no consumer re-derives them (the chunk-L
+# fold's F2). None carries a `?`, so the bind contract stays the arms'; each
+# is NULL where that event has no such detail — including where a
+# metadata-mode capture dropped the prose, which the card renders as "not
+# recorded" rather than inventing one.
+ATTENTION_ARM_FACTS = ("question", "by", "reason")
+_ARM_FACT_COLS = tuple(
+    (f"{name}_{key}",
+     _newest_task(f"json_extract(n.detail, '$.{key}')", window))
+    for name, _sql, _at, window in ATTENTION_ARMS if name in HUMAN_ARMS
+    for key in ATTENTION_ARM_FACTS
+)
+_ARM_FILTER = "(" + " OR ".join(sql for _, sql, _at, _w in ATTENTION_ARMS) + ")"
+
+
+def _instant_before(now: str, seconds: float) -> str:
+    """`now` less `seconds`, as an isoformat instant — the ONE shift every
+    attention cutoff is a call of, so they cannot compute it three ways.
+    Compared as an instant (`_epoch`) downstream, so its offset is its own."""
+    return (datetime.fromisoformat(now.replace("Z", "+00:00"))
+            - timedelta(seconds=seconds)).isoformat()
+
+
+def nudge_cutoff(now: str) -> str:
+    """The instant a nudge must PREDATE to be an unanswered one — `now` less
+    the grace."""
+    return _instant_before(now, NUDGE_GRACE_S)
+
+
+def stale_amber_cutoff(now: str) -> str:
+    """The instant a task's last activity (max of dispatch and newest progress)
+    must PREDATE for the task to read as stale — `now` less the amber window."""
+    return _instant_before(now, STALE_TASK_AMBER_S)
+
+
+def heartbeat_fresh_cutoff(now: str) -> str:
+    """The instant a `bot.heartbeat` must be ingested AT OR AFTER for its
+    assignee to count as working — presence's OWN freshness horizon
+    (STALE_AFTER_S), so the arm's suppression and the presence panel agree on
+    what 'a fresh recording' is."""
+    return _instant_before(now, STALE_AFTER_S)
+
+
+def attention_params(now: str) -> tuple:
+    """ATTENTION_SQL's binds, in ARM ORDER: the nudge grace, the overdue
+    deadline, then stale_task's three — the not-overdue instant (`now`), the
+    amber cutoff, the heartbeat-freshness cutoff. All derive from a single
+    `now`, so the queue can never read one window off a clock the others don't
+    share."""
+    return (nudge_cutoff(now), now,
+            now, stale_amber_cutoff(now), heartbeat_fresh_cutoff(now))
+
+
+def attention_arms_params(now: str) -> tuple:
+    """ATTENTION_ARMS_SQL's binds: the arm COLUMNS, then the same arms again
+    inside the filter."""
+    return attention_params(now) * 2
+
+
+_NON_TERMINAL_A = (
+    "NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))")
+
+ATTENTION_SQL = (
+    "SELECT a.assignment_id FROM assignments a"
+    f" WHERE {_NON_TERMINAL_A}"
+    f" AND {_ARM_FILTER}"
+)
+
+# The same rows, each stamped with WHICH arms hold and the facts those arms
+# are about — so the card can say "send failed 12h ago", "overdue 2h" or
+# "needs you: <question>" instead of a bare flag, and no consumer re-derives
+# an arm in Python beside the query that selected it (the fold's F2:
+# `_fetch_tasks` had its own second derivation and `_fetch_overview` a
+# third). Binds `attention_arms_params(now)`: the arm COLUMNS, then the same
+# arms inside the filter.
+#
+# Each arm contributes TWO columns — `<name>` (does it hold) and `<name>_at`
+# (the instant that arm is about) — so `since` is a lookup, never a ladder.
+ATTENTION_ARMS_SQL = (
+    "SELECT a.assignment_id,"
+    + ",".join(f" {sql} AS {name}, {at} AS {name}_at"
+               for name, sql, at, _w in ATTENTION_ARMS)
+    + ","
+    + ",".join(f" {sql} AS {name}" for name, sql in _ARM_FACT_COLS)
+    + " FROM assignments a"
+    f" WHERE {_NON_TERMINAL_A}"
+    f" AND {_ARM_FILTER}"
+)
+
+# The row's OUTSTANDING NUDGE, whether or not the grace has passed (the fold's
+# F11). The arm above only fires past the grace, but the operator asking "did
+# anyone poke this?" is owed the answer in the first thirty minutes too — that
+# is the window in which the manager is still expected to act, and the one the
+# card can most usefully show. Same window as the arm (a nudge stays
+# outstanding only while it is the newest task event, so any later act ends
+# it), minus the clock. Selected for the rows the board already has, so the
+# caller appends its own ` AND a.assignment_id IN (…)`.
+NUDGE_STATE_SQL = (
+    "SELECT a.assignment_id,"
+    f" {_NEWEST_AT} AS nudged_at,"
+    f" {_NEWEST_BY} AS nudged_by"
+    " FROM assignments a"
+    f" WHERE {_NEWEST_EVENT} = 'nudged'"
+)
+
+# --- resolving ONE task a human names (chunk M-A fold, F6) --------------------
+# "The open assignments carrying this task id" existed three times — the
+# stdlib reader's `TASK_OPEN_SQL`, `commands/task.py`'s `OPEN_BY_TASK_SQL`,
+# and the shape both refusal ladders reason about. Three spellings of one
+# question is how a door starts refusing an id another door acts on. Here it
+# is once; `lib/plane-readers.py` carries the byte-identical stdlib twin, the
+# `OPEN_ASSIGNMENTS_AT_SQL` pattern, pinned by test.
+#
+# There is deliberately NO fleet or assignee scope in the SQL. An operator may
+# nudge or withdraw ANY task they can name — they are not a member of a fleet
+# — and the sender's roster does not hold a cross-fleet worker (44.6% of
+# dispatch traffic). Ambiguity is answered by naming the assignment
+# (`--assignment`, the fold's F5), not by silently narrowing the search to the
+# caller's own fleet and acting on whatever survives.
+#
+# Columns are the union the two callers need, so one row serves the CLI's
+# re-check message (title, age, assignee, the task's own manager) and the bash
+# door's refusal listing (dispatch_msg_id, assignee, fleet). Newest first:
+# the ORDER only decides how candidates are LISTED, never which one is acted
+# on — a single match is the only thing either door acts on.
+_OPEN_ROW_SELECT = (
+    "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.occurred_at,"
+    " w.title, i.alias AS assignee, m.alias AS assigned_by, f.alias AS fleet"
+    " FROM assignments a"
+    " LEFT JOIN work_items w ON w.work_item_id = a.work_item_id"
+    " LEFT JOIN identity_registry i ON i.uid = a.assignee_uid"
+    " LEFT JOIN identity_registry m ON m.uid = a.assigned_by_uid"
+    " LEFT JOIN identity_registry f ON f.uid = a.fleet_uid"
+)
+OPEN_BY_TASK_REF_SQL = (
+    _OPEN_ROW_SELECT + " WHERE a.source_ref = ? AND" + NON_TERMINAL_CLAUSE
+    + " ORDER BY a.ingest_seq DESC")
+
+# `--assignment <asg_id>` — the remedy the ambiguity refusal names — is NOT a
+# second query. It NARROWS this result, in the caller, so the row it acts on
+# is provably one of the rows carrying the task id the caller named; a lookup
+# by assignment alone would happily act on a row belonging to another task
+# while the act stamped the named task's `source_ref` as its provenance.
+
+# Attempt-status ladder below the task-event tiers (§8 + §6b #1): activation
+# derives through assignments.dispatch_msg_id -> transmission rows, from
+# carrier-appropriate evidence. SUBMISSION-CLASS rows (pane_submitted /
+# carrier_accepted) occupy the 'open' rung — submission is the strongest fact
+# tmux can yield; a real recipient_acknowledged row lands on the same rung as
+# the tightening case. carrier_queued and unresolved attempts (send_attempted/
+# unknown/duplicate_suppressed with no 'failed' verdict on that attempt_no)
+# read pending_unacknowledged — a retry in flight after a failed first attempt
+# must not report dispatch_failed, while an attempt whose own verdict IS
+# 'failed' must.
+_TX_OPEN = _TX_ACTIVATION   # the SAME activation set — never a second copy
+_TX_UNRESOLVED = "'send_attempted','carrier_queued','unknown','duplicate_suppressed'"
+
+# THE first terminal task event of an assignment, as a correlated scalar
+# subquery over one COLUMN of that row (chunk L fold, #1479). Both the status
+# and the instant are read through this ONE fragment, so they can never name
+# different rows: the selection is byte-identical and `ingest_seq` is unique
+# per event (one ledger row per ingested envelope), which makes the ORDER BY a
+# total order. The fold's finding: `terminal_at` was a separate
+# MIN(occurred_at), so an assignment with two terminal events (a `completed`
+# ingested first, a `superseded` with an EARLIER occurred_at ingested second)
+# showed one event's name over the other's instant. SQLite has no LATERAL, so
+# one subquery cannot yield two columns here; a window-function CTE could, at
+# the cost of a whole-table pass over `events` that the per-assignment
+# partial index (migration 0002) exists to avoid — the §14 read gate.
+def _first_terminal(col: str) -> str:
+    return (f"(SELECT {col} FROM events t WHERE t.kind='task'"
+            f"  AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL})"
+            "  ORDER BY t.ingest_seq LIMIT 1)")
+
+
+# Columns: (assignment_id, status, terminal_at). `terminal_at` is NULL for a
+# live assignment and is the instant of the SAME row `status` names when the
+# task has ended — the card reads "completed 1m ago" rather than a deadline it
+# no longer has.
 TASK_STATUS_SQL = (
     "SELECT a.assignment_id, COALESCE("
-    " (SELECT t.event FROM events t WHERE t.kind='task'"
-    f"  AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL})"
-    "  ORDER BY t.ingest_seq LIMIT 1),"
+    f" {_first_terminal('t.event')},"
+    # supplied_id_not_open is a JOIN anomaly, not a lifecycle state (#1372
+    # review F11) — it must never surface as an assignment's visible status.
     " (SELECT t.event FROM events t WHERE t.kind='task'"
     "  AND t.assignment_id = a.assignment_id"
+    "  AND t.event <> 'supplied_id_not_open'"
     "  ORDER BY t.ingest_seq DESC LIMIT 1),"
     " CASE"
     "  WHEN a.dispatch_msg_id IS NULL THEN 'created_not_sent'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
     "    AND x.msg_id = a.dispatch_msg_id"
-    "    AND x.event='recipient_acknowledged') THEN 'open'"
-    "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "    AND x.msg_id = a.dispatch_msg_id"
-    f"    AND x.event IN ({_TX_SUBMITTED})) THEN 'pending_unacknowledged'"
+    f"    AND x.event IN ({_TX_OPEN})) THEN 'open'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
     "    AND x.msg_id = a.dispatch_msg_id"
     f"    AND x.event IN ({_TX_UNRESOLVED})"
@@ -63,7 +704,9 @@ TASK_STATUS_SQL = (
     "    AND x.msg_id = a.dispatch_msg_id"
     "    AND x.event='failed') THEN 'dispatch_failed'"
     "  ELSE 'created_not_sent'"
-    " END) AS status FROM assignments a"
+    " END) AS status,"
+    f" {_first_terminal('t.occurred_at')} AS terminal_at"
+    " FROM assignments a"
 )
 
 WORKSTREAM_STATUS_SQL = (
@@ -88,6 +731,146 @@ WORKSTREAM_STATUS_SQL = (
     "   ORDER BY e.ingest_seq DESC LIMIT 1), w.occurred_at) < ?"
     "   THEN 'stale'"
     " ELSE 'active' END AS status FROM workstreams w"
+)
+
+# --- Registry lane, the READ half (chunk B; spec §9 lines 143-146) --------
+#
+# THE F11 VALIDATION HALF IS ENFORCED HERE AND ONLY HERE: a tombstone is
+# honored only when a scan_completed declaration with the SAME scan_id and
+# complete=true exists — the join is by scan_id, never by time. The emitter
+# enforces prevention (incomplete enumerations never tombstone); this CTE is
+# the reader's half, shared by all three registry queries so the two halves
+# cannot drift apart per-query. Snapshots are never completion-gated: the
+# hash gate self-heals state, the completion event exists to make ABSENCE
+# trustworthy. `complete` is stored as canonical JSON true/false, which
+# json_extract yields as 1/0 (pinned).
+_F11_COMPLETION_JOIN = (
+    "EXISTS (SELECT 1 FROM events d WHERE d.kind='declaration'"
+    " AND d.event='scan_completed'"
+    " AND json_extract(d.detail,'$.scan_id') = rs.scan_id"
+    " AND json_extract(d.detail,'$.complete') = 1)"
+)
+
+_REG_EFFECTIVE = (
+    "effective AS ("
+    " SELECT rs.*,"
+    "  (rs.tombstone = 0 OR " + _F11_COMPLETION_JOIN + ") AS f11_valid"
+    " FROM registry_snapshots rs)"
+)
+
+# Current state per SCD partition: the latest F11-valid row wins; when that
+# row is a (valid) tombstone the entity is absent from current. An INVALID
+# tombstone is not merely demoted — it is excluded, so the prior snapshot
+# remains current. Ordering is (occurred_at, ingest_seq), the spec's ONE
+# SCD ordering (line 145: first-hand snapshots carry null observed_at, and
+# ingest_seq breaks producer-timestamp ties) — current is simply its tail.
+REG_CURRENT_SQL = (
+    "WITH " + _REG_EFFECTIVE + ", latest AS ("
+    " SELECT e.*, ROW_NUMBER() OVER ("
+    "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
+    "   ORDER BY e.occurred_at DESC, e.ingest_seq DESC) AS rn"
+    " FROM effective e WHERE e.f11_valid = 1)"
+    " SELECT host_uid, entity_type, entity_uid, entity_alias, payload,"
+    " payload_hash, cause, scan_id, vault_rev, occurred_at, ingest_seq"
+    " FROM latest WHERE rn = 1 AND tombstone = 0"
+    " ORDER BY entity_type, entity_alias"
+)
+
+# WRITE-SIDE forms of REG_CURRENT (chunk-B gauntlet, probed SEV-1 + r3):
+# every write-side suppression decision must ask what the READER would
+# answer — "current" spelled a second way is how the two sides disagreed
+# into a permanent false PRESENT (existence-keyed tombstone dedup) and a
+# permanently-stale payload (the hash gate keyed on ledger-latest while
+# the reader is the occurred_at winner; a stale-clock backfill then
+# suppressed every honest rescan). The POINT form returns the current
+# row's payload_hash: row-is-None = effectively deleted; the hash is what
+# the ingest gate compares against. The KEYS form is the emitter's bulk
+# read for tombstone eligibility. Both live HERE so zero Lane-C SQL is
+# assembled anywhere else.
+REG_CURRENT_POINT_SQL = (
+    "SELECT payload_hash FROM (" + REG_CURRENT_SQL + ")"
+    " WHERE host_uid = ? AND entity_type = ? AND entity_uid = ? LIMIT 1"
+)
+
+REG_CURRENT_KEYS_SQL = (
+    "SELECT entity_type, entity_uid FROM (" + REG_CURRENT_SQL + ")"
+    " WHERE host_uid = ?"
+)
+
+# SCD2 windows: each F11-valid row opens at its occurred_at and closes at
+# the partition's next row (NULL = still open). Tombstone rows appear as
+# window-openers of the deleted period — the reader renders them, never
+# filters them, or deletion vanishes from history.
+REG_HISTORY_SQL = (
+    "WITH " + _REG_EFFECTIVE +
+    " SELECT e.host_uid, e.entity_type, e.entity_uid, e.entity_alias,"
+    " e.tombstone, e.payload, e.payload_hash, e.cause, e.scan_id,"
+    " e.occurred_at AS valid_from,"
+    " LEAD(e.occurred_at) OVER ("
+    "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
+    "   ORDER BY e.occurred_at, e.ingest_seq) AS valid_to,"
+    " e.ingest_seq"
+    " FROM effective e WHERE e.f11_valid = 1"
+    " ORDER BY e.entity_type, e.entity_alias, e.occurred_at, e.ingest_seq"
+)
+
+# Consecutive rows in a partition ARE the diff view (spec line 143). This
+# pairs each row with its predecessor; the FIELD-level diff is computed by
+# registry_read.diff_fields at read time — payloads are nested JSON and a
+# json_each diff in SQL would re-implement canonicalization badly.
+# First-in-partition rows are INCLUDED (both prev columns null) and render
+# as first_observed — spec's own derivation name, and a new entity is
+# prime drift signal (chunk-B gauntlet: the old WHERE silently dropped
+# exactly those rows from --changes).
+REG_CHANGES_SQL = (
+    "WITH " + _REG_EFFECTIVE + ", ordered AS ("
+    " SELECT e.*,"
+    "  LAG(e.payload) OVER w AS prev_payload,"
+    "  LAG(e.payload_hash) OVER w AS prev_hash,"
+    "  LAG(e.tombstone) OVER w AS prev_tombstone"
+    " FROM effective e WHERE e.f11_valid = 1"
+    " WINDOW w AS (PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
+    "   ORDER BY e.occurred_at, e.ingest_seq))"
+    " SELECT entity_type, entity_alias, entity_uid, tombstone, payload,"
+    " prev_payload, prev_tombstone, cause, scan_id,"
+    " occurred_at, ingest_seq"
+    " FROM ordered"
+    " ORDER BY ingest_seq DESC"
+)
+
+# Trust: tombstones the F11 join does NOT validate. Nonzero means a scan
+# died between its tombstones and its completion (or emitted incomplete) —
+# the reader is already ignoring them; doctor surfaces that they exist.
+REG_INVALID_TOMBSTONES_SQL = (
+    "SELECT entity_type, entity_alias, scan_id, occurred_at, ingest_seq"
+    " FROM registry_snapshots rs WHERE rs.tombstone = 1"
+    " AND NOT " + _F11_COMPLETION_JOIN +
+    " ORDER BY ingest_seq DESC"
+)
+
+# --- Presence: the recorded half of the derivation (chunk 2) --------------
+#
+# The LATEST bot.heartbeat sample per instance, by ingest_seq (ledger order
+# is authoritative — producer timestamps may arrive skewed, the estate's
+# RTC-less-Pi class). Joined to identity_registry so the row carries the
+# alias the sampler keys on (bot:<fleet>/<name>), and to the ingest_ledger
+# for the sample's ingested_at — the freshness clock the derivation reads
+# to type a quiet recording as STALE rather than trusting an old verdict.
+# Presence itself is NEVER a table (spec §9b: an in-memory derivation over
+# the latest samples plus a live poll); this query is only its recorded
+# input.
+LATEST_HEARTBEAT_SQL = (
+    "WITH latest AS ("
+    " SELECT subject_uid, value, ingest_seq, occurred_at,"
+    "  ROW_NUMBER() OVER (PARTITION BY subject_uid"
+    "    ORDER BY ingest_seq DESC) AS rn"
+    " FROM metric_samples WHERE metric='bot.heartbeat')"
+    " SELECT i.alias AS alias, l.value AS value, g.ingested_at AS ingested_at,"
+    "  l.occurred_at AS occurred_at"
+    " FROM latest l"
+    " JOIN identity_registry i ON i.uid = l.subject_uid"
+    " JOIN ingest_ledger g ON g.ingest_seq = l.ingest_seq"
+    " WHERE l.rn = 1"
 )
 
 RECONCILIATION_SQL = (

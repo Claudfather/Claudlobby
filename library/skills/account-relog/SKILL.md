@@ -37,15 +37,49 @@ Record `email`, `orgName` and `subscriptionType` **now**. This is the only cheap
 ### 2. Establish blast radius — MANDATORY, not optional
 
 ```bash
-grep -rn 'CLAUDE_CONFIG_DIR' "$CLAUDLOBBY_ROOT"/local/*/runtime/bots/*/bot.conf
+# host_bots_dirs resolves root, flat AND nested layouts. Do not re-derive the
+# path shape here — that is the whole defect class (#920). It is sourced in a
+# subshell because lib-common.sh arms `set -euo pipefail` at source time, which
+# must not follow you into this shell. $sources is deliberately UNQUOTED on the
+# grep line: those are globs and must expand. `/dev/null` keeps grep off stdin
+# if the resolver ever returns nothing.
+sources=$(. "$CLAUDLOBBY_ROOT/lib/lib-common.sh" >/dev/null 2>&1; \
+          host_bots_dirs | sed 's:$:/*/bot.conf:')
+
+# A resolver that returned nothing has queried nothing. That is a TOTAL failure,
+# not an empty estate, and it must not come out the far side reading COMPLETE.
+if [ -z "$sources" ]; then
+  relog_rc=2
+else
+  grep -Hn 'CLAUDE_CONFIG_DIR' $sources /dev/null; relog_rc=$?
+fi
+
+# grep exits 2 if ANY source could not be opened — independently of how many
+# real matches it also returned. A partial read therefore looks exactly like a
+# complete one in the output alone, so the status is the only thing that can
+# tell them apart. Capture it HERE, on the bare command, and print the verdict:
+# the next thing you will reach for is a count, a count is a pipe, and a pipe
+# replaces $? with the LAST stage's status — `| wc -l` over a failed read
+# reports 0. Print it and there is nothing left to remember.
+if [ "$relog_rc" -ge 2 ]; then
+  printf 'INCOMPLETE — at least one source could not be read (grep rc=%s).\n' "$relog_rc"
+else
+  printf 'COMPLETE — every source was read (grep rc=%s).\n' "$relog_rc"
+fi
 ```
 
-Read the result carefully — **the line existing is not the same as the setting being active**:
+**Read the verdict line first.** It is the only thing that tells you whether the
+hits above it are the whole picture — a source that was never queried is silent,
+and silence looks identical to a bot that simply does not set the variable. Then
+read the hits, because **the line existing is not the same as the setting being
+active**:
 
 | What you see | What it means |
 |---|---|
-| Every hit is **commented out** (`# CLAUDE_CONFIG_DIR=...`) | Every bot on the host shares **one keychain credential**, across **all fleets**. A relog re-authenticates all of them at once. |
-| A bot sets it to its own path, uncommented | That bot has an isolated credential and is unaffected by a relog of the default. |
+| **`INCOMPLETE`** | **At least one source was never queried, and real hits may sit right above it.** Those hits are a **subset**. The ordinary cause is a `runtime/bots/` that exists but holds no bot — a freshly scaffolded fleet, or one whose last canary was just torn down — which passes every guard in the command and still contributes nothing. **Stop here.** A blast radius derived from a partial read is an undercount delivered with full confidence, which is the single outcome this step exists to prevent. Fix the query before going near Step 3. |
+| **`COMPLETE`**, but no hits at all | **The query resolved and matched nothing.** Any live host has bots, so on a real estate treat this as a failure you have not identified yet rather than as "nothing is configured" — verify by hand that the bot dirs are where you think they are. **Stop here** either way: you have no count and no fleet names, which is exactly what the rest of this step requires you to report. |
+| **`COMPLETE`**, and every hit is **commented out** (`# CLAUDE_CONFIG_DIR=...`) | Every bot on the host shares **one keychain credential**, across **all fleets**. A relog re-authenticates all of them at once. |
+| **`COMPLETE`**, and a bot sets it to its own path, uncommented | That bot has an isolated credential and is unaffected by a relog of the default. |
 
 Do not skip this because you only manage one fleet. The shared case is the default and it is **cross-fleet by construction** — the credential is per *host* (and per OS user), not per fleet. A relog run without this check is a change to bots whose managers do not know it is happening.
 

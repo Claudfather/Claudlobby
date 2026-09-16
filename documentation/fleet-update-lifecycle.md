@@ -129,6 +129,101 @@ assume a composed permission change is inert on a running bot either. The missin
 instrument is a probe run in a **fresh session with the deny present at start**,
 which is the control that separates "not enforced" from "not yet re-read".
 
+**MECHANISM — why a `deny` is honoured in every mode and an `allow` is not.** A
+**bare-name** deny (`Write`, `Bash`) is enforced by **removing the tool from the
+session's toolset**, not by gating a call. Measured on a throwaway bot with
+`deny: ["Bash"]` composed at the project tier *and* bare `Bash` present in the
+user tier: the model answered *"I don't have a shell/Bash tool in this session,
+so I can't run `date`"* and emitted **zero** `Bash` tool calls. That is the same
+shape as the production error a reviewer bot hit reaching for `Write` — *"No such
+tool available: Write. Write is disabled for this session, in subagents as well
+as here."* A removed tool is absent before any mode logic runs, which is why the
+deny holds under `-p` and under `--permission-mode auto` alike; an **allow** is a
+gate, and auto opens it (already recorded above — see the inert `allow`-probe
+bullet; that finding is **not** restated here). It also explains the shape
+asymmetry measured separately on 2026-08-24: a **path-scoped** deny — the rule
+actually measured that day was `Read(//<dir>/**)`, not an `Edit` form — *cannot*
+remove a tool, because it constrains an argument rather than a capability, so it
+must be evaluated per call. That per-call evaluation reaching `Bash` as well as
+the named tool is an **inference here and a measurement elsewhere**: see the
+evidence trail below. **The practical consequence: a bare-name deny
+on one tool does not bind a different tool.** A `Write` deny leaves `Bash`
+untouched, so a heredoc writes freely — nothing is circumvented, because at that
+layer there is no rule to circumvent.
+
+**Pinned, and measured on a throwaway.** `claude 2.1.240`,
+`Linux 6.12.75+rpt-rpi-2712` (aarch64). A disposable project directory and two
+isolated `CLAUDE_CONFIG_DIR`s, auth+trust pre-seeded (without the trust key the
+composed `settings.local.json` is dropped wholesale). **No production bot was
+probed and no real settings file was modified** — `~/.claude/settings.json` was
+copied, never edited, and verified unchanged afterwards at 223 allow entries with
+`deny` absent; the throwaway tree, its credential copies and its tmux server were
+destroyed at the end.
+
+**Evidence trail — an independent later measurement, recorded separately.** The
+probe quoted above was run the morning of 2026-09-01 and its session is gone. A
+fuller permission ladder was run the same afternoon on the ai-platform fleet and
+**does** survive as raw verbatim rows — `2026-09-01-1406-arm-E-grid.psv`, beside
+`2026-08-24-permissions-effectiveness-baseline-970.md`, in that fleet's shared
+planning and knowledge trees. It is not the same probe and does not carry the
+sentence quoted above; it is an independent run that lands on the same mechanism.
+Three of its cells matter here. A bare `Bash` deny returned `NO_TOOL` with the
+verbatim *"No such tool available: Bash. Bash is disabled for this session, in
+subagents as well as here."*, and a bare `Write` deny returned the same shape. A
+path-scoped rule returned a **per-call** refusal instead — *"File is in a
+directory that is denied by your permission settings."* — confirming the
+asymmetry above. And the practical consequence is not inferred there but
+**observed with effect**: under a bare `Write` deny, a `python3` heredoc routed
+through `Bash` wrote the target file successfully.
+
+**Reachability bound on that trail — read it before treating the citation as
+load-bearing.** Those two files are **not present on this Pi** (`claude 2.1.240`,
+`Linux 6.12.75+rpt-rpi-2712`, aarch64): a `local/`-wide search returns zero matches
+for either name, and zero `.psv` files anywhere in that tree. Run twice, by two
+bots independently, each with a positive control proving the search reached the
+named tree. What that licenses is narrow — **the rows are unreachable from here,
+which is not the same as absent.** Other hosts on the estate were not searched, and
+this document cannot tell you which one holds them. A reader elsewhere should
+confirm presence before citing these rows; **no reader should treat this paragraph
+as the sole support for anything above it.** It is not — the two paragraphs below
+reach the same conclusions without it.
+
+**The path-scoped half needs no external file: this document already measured it.**
+The RESOLVED 2026-08-24 table above ran a **control** cell (Read tool on a scratch
+file → allowed) beside its treatment (`Read(//<dir>/**)` → DENIED). Had that deny
+removed the `Read` tool, the control would have failed with it. It did not, so the
+rule was evaluated **per call** — the asymmetry above, from this document's own
+cells, on two bots, with no dependence on the trail.
+
+**A second route needs no file at all, and any session can run it on itself.**
+Compare a session's composed `deny` list against the tools that session actually
+has. Both sides have now been observed on this host at `claude 2.1.240`, in two
+different bot sessions:
+
+| the session's deny for that tool | is the tool in the session? | observed |
+|---|---|---|
+| **bare name** (`Write`, `Edit`) | **absent** — not in the active tool list, and not findable in the deferred pool by exact name | navi, 2026-09-14 |
+| **path-scoped only** (`Edit(//<dir>/**)`) | **present** — declared and usable on paths the rule does not name | branden, 2026-09-14 |
+
+A gate would leave the tool declared with a schema and refuse at call time; in the
+first row there is no schema to find. Same host, same binary, differing only in the
+shape of the rule — which is the asymmetry this section claims, reproduced without
+either cited file. The removal side is corroborated again by an unrelated
+production incident months earlier, where a bot under a bare `Edit` deny hit the
+same error shape quoted above for `Write` (*"No such tool available: Edit. Edit is
+disabled for this session, in subagents as well as here."*) — reported on that
+bot's authority from its own memory, not re-run here. **The second row is presence
+only:** it does not re-measure that a per-call refusal fires, which is what the
+2026-08-24 cells above already show.
+
+**What this does NOT establish.** Whether a bare-name deny also removes the tool
+from *subagents* (the production error string claims it does; not measured here).
+Whether `Bash(cat *)` prefix-matches a heredoc redirect. Whether a bare allow
+entry bypasses hook pattern checks. And **where** the removal is performed — whether the
+toolset is trimmed at session construction, at each request assembly, or somewhere
+else entirely. Nothing in this document establishes that, and this measurement does
+not close it either.
+
 ### Partial result — a different instrument, and what it does *not* answer
 
 The probe above is permission-shaped and inert here. A **file-read** probe is not, and it
@@ -155,7 +250,7 @@ measurement, not by argument.** `-e trace=openat` sees a *fresh* open. A session
 the file once at launch and kept the descriptor could re-read it with `read`/`pread64` and
 produce trace output identical to "never touched again" — and that is live rather than
 theoretical here, because the composer's write is `Path.write_text()`
-(`claudlobby/composer.py:2694`), which truncates and rewrites the **same inode** rather than
+(`claudlobby/composer.py:2717`), which truncates and rewrites the **same inode** rather than
 the tmp-then-rename this codebase uses elsewhere. A cached descriptor would therefore see the
 new content. Verified same-inode behaviour directly: `write_text` twice, inode unchanged.
 
@@ -204,6 +299,16 @@ be *erased*. There is no record: a bot that restarts mid-task loses the message
 silently. And "queued" is a third state, not a synonym for delivered — a send
 queued behind an erroring turn is discarded (#1048), so delivery is conditional
 on the current turn ending cleanly.
+
+It could also arrive **partially**, and for a week on this estate it usually did:
+a payload over 1 KB handed to one `tmux send-keys` overflowed the pane's 1024-byte
+pty input queue, which on macOS FLUSHES rather than drops, so 85 of 180 large
+sends arrived with their head — envelope and task id included — gone, all of them
+recorded `pane_submitted` (#1493). `pane_send_verified` now writes the payload in
+900-byte chunks with a short settle between them, and `lib/send-size-probe.sh`
+measures the result against the recipient's own transcript. The wider point stands
+unchanged and is the reason this paragraph is in a lifecycle doc: `pane_submitted`
+is a **sender-side inference**, not an observation of arrival.
 
 Sender visibility is **manual, instantaneous, and absent by default** — not
 impossible. Polling the recipient's pane at that instant does show it; nothing

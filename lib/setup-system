@@ -218,6 +218,47 @@ _claudlobby_importable() {
     ( cd "$CLAUDLOBBY_ROOT" && python3 -c 'import claudlobby.composer' ) >/dev/null 2>&1
 }
 
+# The [plane-ui] extra (fastapi + uvicorn, two pure-Python wheels).
+# It is part of the DOCUMENTED install since the defaults flip: plane-view is
+# enrolled by default, and `claudlobby plane view` exits 1 without these -- so
+# on every host that followed the README, an enrolled Restart=always service
+# would have crash-looped every 5s forever. The compositor refuses to compose
+# the unit while the extra is absent (an honest failure beats a supervised
+# one), and this is the half that makes the default actually work.
+_plane_ui_importable() {
+    local venv_py="$CLAUDLOBBY_ROOT/.venv/bin/python"
+    if [ -x "$venv_py" ]; then
+        ( cd "$CLAUDLOBBY_ROOT" && "$venv_py" -c 'import fastapi, uvicorn' ) >/dev/null 2>&1
+        return $?
+    fi
+    ( cd "$CLAUDLOBBY_ROOT" && python3 -c 'import fastapi, uvicorn' ) >/dev/null 2>&1
+}
+
+# Add the extra to an install that already has the package -- the upgrade
+# path. Never fatal: the operator plane is equipment, not a prerequisite, and
+# a host without it composes no view unit and says so in the switch table.
+_ensure_plane_ui() {
+    _plane_ui_importable && return 0
+    local venv_py="$CLAUDLOBBY_ROOT/.venv/bin/python"
+    if [ "$DRY_RUN" = 1 ]; then
+        printf 'setup-system: [dry-run] would run: %s -m pip install -e %s[plane-ui]\n' \
+            "$venv_py" "$CLAUDLOBBY_ROOT"
+        return 0
+    fi
+    if [ ! -x "$venv_py" ]; then
+        miss "the [plane-ui] extra is missing and there is no venv to add it to"
+        NEXT_STEPS+=("Install the operator plane extra: python3 -m pip install -e '$CLAUDLOBBY_ROOT[plane-ui]' (plane-view composes no unit without it)")
+        return 0
+    fi
+    log "installing the [plane-ui] extra (operator plane) into ${venv_py%/bin/python}"
+    if "$venv_py" -m pip install -e "$CLAUDLOBBY_ROOT[plane-ui]" --quiet 2>&1 && _plane_ui_importable; then
+        ok "[plane-ui] extra installed (operator plane can run)"
+    else
+        miss "[plane-ui] extra not installed — plane-view will compose no unit"
+        NEXT_STEPS+=("Install it manually: $venv_py -m pip install -e '$CLAUDLOBBY_ROOT[plane-ui]'")
+    fi
+}
+
 phase_packages() {
     log "phase 2/10: package manager + core CLI tools"
     if [ "$_OS" = "Linux" ]; then
@@ -360,12 +401,13 @@ phase_python() {
     if _claudlobby_importable; then
         ok "claudlobby package installed"
         PREREQ_OK+=("claudlobby-pip")
+        _ensure_plane_ui
         return
     fi
 
     log "installing claudlobby package into $venv_dir"
     if [ "$DRY_RUN" = 1 ]; then
-        printf 'setup-system: [dry-run] would run: python3 -m venv %s && %s -m pip install -e %s\n' \
+        printf 'setup-system: [dry-run] would run: python3 -m venv %s && %s -m pip install -e %s[plane-ui]\n' \
             "$venv_dir" "$venv_py" "$CLAUDLOBBY_ROOT"
         # Report the state that ACTUALLY holds right now. Reporting the
         # post-condition of an action dry-run did not take produced a false
@@ -378,10 +420,16 @@ phase_python() {
     fi
 
     [ -x "$venv_py" ] || run python3 -m venv "$venv_dir"
-    "$venv_py" -m pip install -e "$CLAUDLOBBY_ROOT" --quiet 2>&1 || {
+    # [plane-ui] rides the FIRST install, not a follow-up step: plane-view is
+    # enrolled by default and cannot run without it. The bare form is the
+    # fallback so an old pip that cannot parse extras on a path still lands a
+    # working compositor -- _ensure_plane_ui then reports the gap rather than
+    # leaving the host with no claudlobby at all.
+    "$venv_py" -m pip install -e "$CLAUDLOBBY_ROOT[plane-ui]" --quiet 2>&1 \
+        || "$venv_py" -m pip install -e "$CLAUDLOBBY_ROOT" --quiet 2>&1 || {
         miss "pip install claudlobby failed — see output above"
         PREREQ_MISSING+=("claudlobby-pip")
-        NEXT_STEPS+=("Run '$venv_py -m pip install -e $CLAUDLOBBY_ROOT' manually to debug")
+        NEXT_STEPS+=("Run '$venv_py -m pip install -e $CLAUDLOBBY_ROOT[plane-ui]' manually to debug")
         return
     }
 
@@ -389,6 +437,7 @@ phase_python() {
     if _claudlobby_importable; then
         ok "claudlobby package installed"
         PREREQ_OK+=("claudlobby-pip")
+        _ensure_plane_ui
     else
         miss "claudlobby installed but not importable"
         PREREQ_MISSING+=("claudlobby-pip")
@@ -645,6 +694,13 @@ phase_host_jobs() {
         found=1
         base="$(basename "$t" ".$ext")" # claudlobby-<job>
         jobname="${base#claudlobby-}"
+        # No dormancy check here any more: an unarmed host job composes NO
+        # unit (compose-time dormancy, chunk-N fold F7), so a unit present in
+        # this dir is by construction one this host wants enrolled. The
+        # manifest that used to be consulted described units that were
+        # composed-but-skipped, which is a second mechanism to keep in step
+        # with the first. What it cannot see -- a unit an EARLIER release
+        # already installed -- is walked back after this loop.
         local adopt_arg=()
         [ "$ADOPT" = 1 ] && adopt_arg=(--adopt)
         if TIMER_DIR="$host_timers_dir" UNIT_NAME="$base" "$enroller" "$jobname" \
@@ -685,6 +741,16 @@ phase_host_jobs() {
         done
     fi
     [ "$found" = 1 ] || log "no host job units in $host_timers_dir"
+
+    # DORMANCY WALKS BACK (F4). Compose-time dormancy only stops FUTURE
+    # enrollment; a host that ran an earlier installer still has
+    # claudlobby-update-siblings enabled and firing weekly while the switch
+    # table calls it off -- a job that MUTATES OPERATOR SOURCE, running
+    # because of a default nobody can see any more. Every installed
+    # claudlobby-* unit with no composed counterpart is disabled and removed,
+    # out loud. The helper refuses on an empty compose, so a torn generate
+    # cannot tear down a healthy host.
+    walk_back_uncomposed_host_units "$host_timers_dir"
 }
 
 # ---------------------------------------------------------------------------
@@ -705,6 +771,15 @@ phase_report() {
         for step in "${NEXT_STEPS[@]}"; do
             echo "    - $step"
         done
+    fi
+    # The switches table -- the no-silent-switches surface for a HOST run.
+    # One renderer (claudlobby/switches.py), called by both shell setup doors
+    # and by `claudlobby doctor`, so what setup prints and what doctor prints
+    # cannot drift. Non-fatal and non-blocking: an install too old for the
+    # flag, or no importable package, simply prints nothing extra -- a summary
+    # is not worth failing a setup run over.
+    if [ "$DRY_RUN" != 1 ]; then
+        claudlobby_cli doctor --switches 2>/dev/null || true
     fi
     echo
     if [ "$DRY_RUN" = 1 ]; then

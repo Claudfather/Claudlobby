@@ -13,7 +13,7 @@ claudlobby is a **compositor**: a thin Python program that reads `fleet.yaml`, a
 
 ### 1. `library/` — building blocks
 
-Eleven subdirectories, each a flat collection of small files:
+Twelve subdirectories, each a flat collection of small files:
 
 ```
 library/
@@ -27,7 +27,8 @@ library/
 ├── lessons/            tmux-dispatch-shell-expansion.md, … (learned patterns)
 ├── principles/         consolidate-dont-fork.md, … (design principles)
 ├── permissions/        access.json.template (permission templates)
-└── post_actions/       (post-task lifecycle hooks — e.g. pre-stop handoff, daily wrap-up)
+├── post_actions/       (post-task lifecycle hooks — e.g. pre-stop handoff, daily wrap-up)
+└── tools/               tool.yaml + Jinja template per tool, rendered into <bot_dir>/tools/
 ```
 
 **Expertise** files are role scaffolding — what a manager *does*, not what it sounds like. (Voice goes elsewhere — see below.)
@@ -85,6 +86,11 @@ Defaults flow into every bot. Lists (skills, guardrails, protocols) accumulate; 
 
 See [`fleet-yaml-schema.md`](../fleet-yaml-schema.md) for every field.
 
+`fleet.yaml` is the middle of **three config tiers**: package-owned
+[`system.yaml`](../system-yaml-schema.md) governs HOW the platform runs (host
+jobs, per-fleet defaults), `fleet.yaml` governs WHO the bots are, and optional
+[`projects.yaml`](../projects-yaml-schema.md) governs WHAT the work is.
+
 ### 3. `runtime/bots/<name>/` — generated output
 
 For each bot in `fleet.yaml`, `claudlobby generate` writes:
@@ -99,6 +105,8 @@ runtime/bots/<name>/
 │   └── skills/              ← symlinks → library/skills/<skill>
 ├── memory/                  ← bot-owned persistent state
 ├── data/                    ← bot-owned data + scripts
+├── tools/                   ← composited scripts (0755, generated — never hand-edited)
+├── logs/                    ← bot log files
 ├── projects/                ← git checkouts (gitignored)
 ├── <service_prefix>.<name>.service   ← systemd unit (Linux)
 └── <service_prefix>.<name>.plist     ← launchd plist (macOS)
@@ -107,8 +115,8 @@ runtime/bots/<name>/
 #### CLAUDE.md composition order
 
 ```
- 1. Expertise                  library/expertise/<name>.md (concatenated)
- 2. Voice overlay              inserted after H1 (if voice: set)
+ 1. Voice overlay              inserted after H1 (if voice: set)
+ 2. Expertise                  library/expertise/<name>.md (concatenated)
  3. Fleet Mission              from fleet.yaml fleet.mission: field
  4. Mission                    from fleet.yaml bots.<name>.mission: field
  5. Autonomous Runner          "Your Continuous Job" section (if bot.autonomous_runner: set)
@@ -174,10 +182,37 @@ Bots can edit themselves in `runtime/bots/<name>/` during a session. `runtime/bo
 
   1. Bot edits its CLAUDE.md mid-session (e.g., learns a new pattern, codifies a rule)
   2. `claudlobby diff <bot>` shows the drift vs what `generate` would produce
-  3. `claudlobby promote <bot>` (interactive — v1 is manual; v2 will have a picker) moves drifted content back to `library/expertise/<role>.md`, `voices/<voice>.md`, or a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`
-  4. After promotion, `library/` reflects the learned change. Re-running `generate` produces a CLAUDE.md consistent with the new library state.
+  3. `claudlobby promote <bot>` — **v1 is a pointer only, not a mover**: it prints which `library/` file each category of drift belongs in (`library/expertise/<role>.md`, `voices/<voice>.md`, a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`, etc.); no content is copied automatically, and the bot's composed `CLAUDE.md` is not read back — you hand-edit the named file yourself. An interactive picker that performs the move is planned for v2.
+  4. After hand-editing `library/` per the pointer, re-running `generate` produces a CLAUDE.md consistent with the new library state.
 
 This is the foundation for the future ML / self-learning layer: drift becomes training data. When the same drift shows up across multiple bots, that's a signal a guardrail or protocol should exist.
+
+## The observable plane
+
+The four layers above answer "how does a bot get *composed*." A fifth concern sits orthogonal to
+all of them: how does anyone find out what a *running* fleet actually did — which dispatch went
+where, whether it was acknowledged, what a bot is doing right now, what the operator said and what
+came back — after the fact, across restarts, without grepping tmux panes. That is the **observable
+plane** (`claudlobby/plane/`, a subpackage of the compositor): one append-only, typed SQLite
+database per host that the existing `lib/` doors and hooks write into from the side, and that the
+read side — `brief`, the operator plane (`claudlobby plane view`), the fleet-pulse watchdog's
+reader, the dispatch resolver — answers from.
+
+Full reference: [`observable-plane.md`](observable-plane.md) — the ten families and the common
+envelope, identity (aliases vs minted uids), the write spine and its ladder (daemon socket → cold
+CLI → spool), every door and the flag that arms it, the read side (and which doors are NOT
+read-only), the F18 cutover as history (the closure deleted its machinery), migrations and retention.
+
+Two properties matter at this altitude. **The plane ships ON** (chunk N — it was dormant by
+default until then, and a behavior nobody can see is a behavior nobody has): every runtime door
+records, `generate` scans the registry, and the ingest daemon, the view daemon and the sweeps are
+enrolled host jobs. Nothing it does reaches the four categories the defaults rule reserves for
+opt-in. Turning any of it off is one line, named where the operator looks — `claudlobby doctor
+--switches` (`system.yaml`, see
+[`system-yaml-schema.md`](../system-yaml-schema.md#defaults-the-rule)). And
+**nothing in `fleet.yaml` or `runtime/bots/` changes shape because of it** — the plane records what
+the doors already do. The legacy JSONL ledgers are gone: the F18 closure (#1467) removed every
+writer, moved every reader onto the plane, and deleted the transition machinery.
 
 ## Validation
 
@@ -194,7 +229,7 @@ Pass `--strict` to make warnings into errors (CI use).
 
 ## Why Python (not Bash, not Node, not Bun)
 
-The compositor logic has grown to ~10,000 lines of Python — but the *future* of the system is larger still:
+The compositor logic has grown to ~24,000 lines of Python (`claudlobby/`, including the newer `plane/` observable-plane event kernel) — but the *future* of the system is larger still:
 
 - A self-learning layer behind `library/` (embeddings, similarity search for "I need a bot that…", suggested skills based on observed drift)
 - A knowledge graph linking guardrails ↔ incidents that motivated them
