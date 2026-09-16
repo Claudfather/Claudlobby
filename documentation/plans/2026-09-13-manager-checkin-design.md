@@ -676,7 +676,10 @@ nothing composes differently on the estate until the canary has earned it.**
    not perform. From here the canary manager checks in on the beat — **and stays on it through chunks 3
    and 4, so no reading taken after this instant is pre-treatment**; the trigger's
    arming instant is recorded as a second boundary the way chunk 1 records `T0`.
-   Prior art the trigger consumes or retires by name: `lib/sprint-trigger.sh` (the
+   The `dispatch.md` protocol's `project:` field-table row and recipe flag land here
+   too (composed text rides this chunk's restart, never chunk 1's pull — cycle 9).
+   Prior art the trigger consumes or retires by name: the shipped `autonomous-sprint`
+   skill (the same read-mission → pick → dispatch surface; cycle 9), `lib/sprint-trigger.sh` (the
    shipped schedule-driven idle-manager nudge, with its busy-skip gate) and
    `lib/briefing-trigger.sh` (a composed per-(bot,slot) timer firing a slash
    command). Also the `BOT_NAME` residue the
@@ -766,7 +769,10 @@ nothing composes differently on the estate until the canary has earned it.**
       lists and rationales are read by hand beside the verdict, and that reading is
       recorded with it. This pre-registration is the `ab-gating-rollout` protocol's
       rule 1 applied after merge (the effect cannot exist until the doors land) on
-      the one production manager the `canary-rollout` protocol asks for.
+      the one production manager the `canary-rollout` protocol asks for. Rows the
+      operator hand-injects between chunks 1 and 2 land before the window and are
+      NOT dose; whether that interval gets a one-way early look at the arming
+      instant (can stop, never pass) is the chunk-1 plan's fork F6 (cycle 9).
 
 **After the canary, as its evidence allows** (each keeps its label for
 cross-reference):
