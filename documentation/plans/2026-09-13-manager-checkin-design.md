@@ -693,13 +693,20 @@ nothing composes differently on the estate until the canary has earned it.**
    so it is not a baseline) — and, beside the activity deltas, a closure measure: the
    completion rate of `checkin_dispatch`-joined dispatches through chunk 3's outcome
    join, so the verdict is not an activity number the loop's own dispatch volume
-   inflates, grouped by the project's declared tier (the north star's rigor clause;
-   `project_key` is first-class on the work item).
+   inflates, grouped by the project's declared tier — read from `projects.yaml` by the
+   work item's `project_key` at judgment time; the rationale's tier mention is the
+   manager's weighing, not the SSOT (the north star's rigor clause; `project_key` is
+   first-class on the work item).
 
-   **Pre-registered bar (cycle 7, before any beat).** The unit is worker-busy minutes
-   per week on the canary fleet, expressed as a RATIO to its own `T0` reading — this
-   fleet's own pre-treatment figure is ~30 a week (0.3% of ~10,000 observed minutes,
-   measured read-only 2026-09-15), so one 30-minute dispatch doubles it; §1's 5.3%
+   **Pre-registered bar (cycle 7, sharpened cycle 8, before any beat).** The unit is
+   the worker-active RATE (worker-busy minutes / observed minutes) on the canary fleet,
+   expressed as a RATIO to its own `T0` reading — the 28-day pre-window rate the
+   chunk-1 baseline file prints as `worker_active_pct_28d`, never one week's count:
+   this fleet's last three weeks read 280, 112 and 0 worker-busy minutes when measured
+   read-only 2026-09-15, so a one-week denominator can be zero (the weekly series is
+   printed beside the rate as its variance, and the judged window is ≥ 7 days on the
+   same footing). Its 7-day figure was ~30 a week (0.3% of ~10,000 observed minutes),
+   so one 30-minute dispatch doubles it; §1's 5.3%
    is two fleets over 18 bots and is NOT this fleet's baseline. The control fleet
    (the host's other fleet, untreated through chunk 4 by ruling 13) is measured the
    same way against ITS OWN `T0` reading — the two fleets are not on one scale (the
@@ -709,10 +716,18 @@ nothing composes differently on the estate until the canary has earned it.**
    canary's ratio is judged against. The feature is judged **working** when, over
    the burn-in scaled to a week, canary post/`T0` ≥ 2 × control post/`T0` AND at
    least half of the decisions recorded with `action: dispatch` (the denominator is
-   the DECISION rows, never the join rows the judged agent writes) reached a
-   terminal report; **inert** below that; **harmful** at or above it with fewer than
-   half closing (dispatch volume without closure). With no control fleet the verdict
-   is labelled *uncontrolled* and is not a pass.
+   the DECISION rows, never the join rows the judged agent writes) reached
+   `completed` — `blocked` and `failed` are terminal too and count AGAINST, reported
+   beside the rate as the blocked/failed share (cycle-7 B6); **inert** below that;
+   **harmful** at or above it with fewer than half completing (dispatch volume without
+   closure). With no control fleet the verdict is labelled *uncontrolled* and is not a
+   pass. **Absolute floor:** with fewer than 3 `dispatch` decisions over at least 7
+   judged days no verdict but *inert* is reachable — a ratio over two dispatches is
+   noise; a `T0` rate of 0 on either fleet leaves the ratio undefined and the verdict
+   is labelled *no-baseline*, never a pass. **The dose is registered:** the hand-inject
+   cadence until chunk 2 arms the trigger is written into chunk 1's deploy comment
+   (`verdict.txt`), and the number of check-ins fired inside the judged window is
+   reported with the verdict, so an effect is never read without its exposure.
 
 **After the canary, as its evidence allows** (each keeps its label for
 cross-reference):
