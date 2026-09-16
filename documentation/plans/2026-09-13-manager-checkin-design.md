@@ -673,20 +673,21 @@ it, and nothing composes differently on the estate until PR 4.**
    `keepalive.sh:102`'s heartbeat subject and `plane_armed --require-bot`
    (`lib-common.sh:510-516`) still key on `BOT_NAME` where every other alias uses
    `BOT_ID` — with the trigger's harness to prove the presence join still holds.
-   Deploys inert: no fleet arms the job.
-3. **PR 3 — the read door, whole, and the one deploy** — `checkins --summary` and
+   **Ends in the one deploy** (plan: `2026-09-16-manager-checkin-pr2-trigger-protocol.md`):
+   pull to the host; equip the canary leaf manager (ruling 13) with the skill, the
+   protocol and the trigger behind ONE restart (the protocol is read at session start,
+   the skill per use, the job at `setup-fleet`); run the skill's dry run first, so a
+   skill-text defect is caught before the beat fires unattended; the operator arms
+   the job; then read the automated check-ins through the read door for a day — **a
+   look, not a measurement**: do they read the doors, decide one action, record it,
+   and act only through the doors? The first live `dispatch` proves the join clause.
+3. **PR 3 — the read door, whole** — `checkins --summary` and
    `--limit`, SQL-bound `--since` and the `subject_alias` bind, the outcome join
    (dispatch via `checkin_dispatch` to the task's status so far; asks by alias + time
-   window, or a `checkin-ask.sh` door if that proves ambiguous). **Then the deploy**:
-   pull to the host; equip the canary leaf manager (ruling 13) with the skill, the
-   protocol and the trigger behind ONE restart (the rolling-restart posture — the
-   protocol is read at session start, the skill per use, the job at `setup-fleet`);
-   run the skill's dry run first, so a skill-text defect is caught before the beat
-   fires unattended; then read the first automated check-ins through the read door
-   for a day — **a look, not a measurement**: do they read the doors, decide one
-   action, record it, and act only through the doors? The first live `dispatch`
-   proves the join clause. If they look sane, PR 4 the same day.
-4. **PR 4 — the default** — `requires:` linking **with the grant union** (§10), the
+   window, or a `checkin-ask.sh` door if that proves ambiguous). Pulls inert (plan: `2026-09-16-manager-checkin-pr3-read-door-outcome-join.md`);
+   the beat is already running and the read door is how it is looked at. If the
+   check-ins look sane, PR 4 the same day.
+4. **PR 4 — the default** (plan: `2026-09-16-manager-checkin-pr4-default.md`) — `requires:` linking **with the grant union** (§10), the
    `leaf-manager` role (with the cross-fleet direction of §10), the naked-bot gate's
    leaf-manager arm, then the registry line that equips every leaf manager; the
    cadence-retirement edits land estate-wide with a **grep-derived sweep** (`grep -i -E
