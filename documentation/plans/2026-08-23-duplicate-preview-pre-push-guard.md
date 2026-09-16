@@ -70,8 +70,16 @@ worth separating, because the two-independent-workers reading implies a *coordin
 pointing at a commit that had a home).
 
 **Design consequence.** The duplicate ref was a **newly created branch** at a commit that also
-reached an existing branch. A guard scoped to new-branch creation catches exactly the ref that
-should have been held and never evaluates the legitimate push to the PR branch. §3 uses this.
+reached an existing branch, and §3 scopes the guard to new-branch creation on that basis.
+
+**What this does not establish is that the guard would have caught the observed incident.** For
+that, branch A has to already carry the sha *at the moment* branch B is pushed — only then does
+`ls-remote` find a match. The ordering the narrative above fits is the opposite: branch B first,
+branch A 21 seconds later. Under that order the remote is clean when B is pushed, nothing
+matches, and the duplicating event lands on an update to an existing branch — exactly the push
+type the predicate ignores. Which order actually occurred is not recoverable from the API, as
+stated above. So the scope is a cost/coverage choice; the coverage it gives up is carried as a
+named bound in §3.1 rather than settled here.
 
 ### 2.2 The bots do not share one working tree
 
@@ -192,8 +200,8 @@ Evaluated in `pre-push`, which receives one line per ref on stdin:
 
 - `remote_sha` all-zeros → **creating a new remote branch**. This is the only case evaluated.
 - `local_sha` all-zeros → a delete. Ignored.
-- otherwise → an update to an existing branch. Ignored (§2.1: the legitimate half of the
-  observed pair was exactly this).
+- otherwise → an update to an existing branch. Ignored — at the cost of the coverage bound
+  stated first in §3.1.
 
 For each new-branch line:
 
@@ -213,6 +221,20 @@ global `hooksPath` fires on every push the bot ever makes.
 
 ### 3.1 Bounds, stated now rather than discovered later
 
+- **Blind to the reverse ordering — which may be the one that produced the observed incident.**
+  The guard is blind to a collision where the pre-existing branch receives the duplicate second;
+  which direction produced the observed incident is not recoverable from available evidence.
+  Only a new-branch push is evaluated, so a match is found only where some other ref already
+  carried the sha. Where the redundant branch is created *first*, the remote is clean at that
+  moment, the creation is allowed, and the duplicating push is an update to an existing branch,
+  which is never evaluated. **Phase 0 inherits this bound**, and that is the part that bites: it
+  can only ever record collisions where the new branch happens to be created second, so a low
+  count means "this instrument sees one of the two directions", not "collisions are rare" — the
+  silent-undercounting class this spec credits `dispatch-supersede-hint.py` and
+  `selfstart-snapshot.sh` for refusing. Covering the other direction means evaluating every push
+  rather than only creations, which costs an `ls-remote` round trip on every push in every
+  Vercel-connected repo, not only on creations. That trade is named here rather than made by
+  omission; it is not resolved by this spec.
 - **TOCTOU.** `ls-remote` is a point-in-time read. Two pushes closer together than one round
   trip both see a clean remote and both land. The observed pair was 21 seconds apart, well
   outside; a genuinely simultaneous pair is not covered and cannot be by a client-side check.
