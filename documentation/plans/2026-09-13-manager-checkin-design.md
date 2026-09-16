@@ -130,7 +130,10 @@ job"* (`documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md:25,51`).
     repos — and the check-in belongs to leaf managers.** Ruled 2026-09-14 over the
     bounded alternative (the business-data fleet): a richer backlog makes each
     burn-in day more informative, and the loop into the framework repos is contained
-    by the burn-in's initiative grants (§12.4), not by avoiding the fleet. A manager
+    by the declared-project set and each project's closure tier (`projects.yaml`:
+    every project with open work is in scope on every check-in, so the declared
+    portfolio IS the blast radius; `initiative` is origination-only and lands after
+    the canary, so it bounds nothing here — cycle 8), not by avoiding the fleet. A manager
     whose every in-fleet report is itself a manager (a coordinator) is not equipped by
     default — its idle question is a portfolio of portfolios, which is Phase C (§15).
 
@@ -648,24 +651,29 @@ nothing composes differently on the estate until the canary has earned it.**
    `dispatch-task.sh --project` (the well-defined bar; fixes the measured 0/374)
    and `--checkin` (the join row, atomic with the assignment); the `tg-post.sh`
    alias fix; the two severity lines; `claudlobby checkins` (rows, `--last`); the
-   `checkin.md` protocol (additive, no `requires:`, no self-fire clause) and the
    `/checkin` skill with actions `dispatch | ask | nothing` and a per-input degraded
    rule. **After merge and pull** the operator equips the canary leaf manager by
-   hand (`protocols: [checkin]`, `skills: [checkin]`), a dry run proves the skill
+   hand (`skills: [checkin]`), a dry run proves the skill
    text, and **one real hand-fired `/checkin` lands the first row** — the deploy's
    positive control, pasted on the PR (cycle 5: the join id is looked up, not only
    shape-checked, and the control joins on the recorded id). Pre-change baselines (worker-active %,
    manager-active % and fleet-active % from one CTE; the fleet's outbound Telegram
    volume split by carrier — `telegram-bridge`, the reply hook, AND `telegram-tgpost`,
    the door an injected check-in's `ask` posts through — all fleet-scoped,
-   instant-compared) recorded in the PR. The canary manager is restarted after it is
-   equipped (one bot, the rolling-restart posture) so the protocol is in context for
-   the run; that instant is the pre-treatment boundary.
+   instant-compared) recorded in the PR. **No restart in this chunk** (cycle 8): a
+   skill is read per use, and the protocol — the one thing a restart would have
+   bought — lands in chunk 2 with the trigger it governs; the equip instant is the
+   pre-treatment boundary `T0`.
 2. **The trigger** — `manager-checkin.sh`, the fleet job, the `Switch` row, and
    the `validate-bot-change.sh` extension (throwaway manager → idle → `/checkin`
    injected → `checkin_decision` lands). The trigger gates on the composed skill
-   symlink, which by-hand declaration already scopes to the canary manager. From
-   here the canary manager checks in on the beat — **and stays on it through chunks 3
+   symlink, which by-hand declaration already scopes to the canary manager. **The
+   `checkin.md` protocol lands here** (additive, no `requires:`, no self-fire clause;
+   its preamble's precedence sentence quiets the older cadence rules where it
+   composes beside them — cycle 8), and the canary manager is restarted once after it
+   is equipped — one bot, the rolling-restart posture — so the composed protocol is in
+   context; that restart is the composed-carrier rehearsal chunk 1 deliberately does
+   not perform. From here the canary manager checks in on the beat — **and stays on it through chunks 3
    and 4, so no reading taken after this instant is pre-treatment**; the trigger's
    arming instant is recorded as a second boundary the way chunk 1 records `T0`.
    Prior art the trigger consumes or retires by name: `lib/sprint-trigger.sh` (the
@@ -698,36 +706,67 @@ nothing composes differently on the estate until the canary has earned it.**
    manager's weighing, not the SSOT (the north star's rigor clause; `project_key` is
    first-class on the work item).
 
-   **Pre-registered bar (cycle 7, sharpened cycle 8, before any beat).** The unit is
-   the worker-active RATE (worker-busy minutes / observed minutes) on the canary fleet,
-   expressed as a RATIO to its own `T0` reading — the 28-day pre-window rate the
-   chunk-1 baseline file prints as `worker_active_pct_28d`, never one week's count:
-   this fleet's last three weeks read 280, 112 and 0 worker-busy minutes when measured
-   read-only 2026-09-15, so a one-week denominator can be zero (the weekly series is
-   printed beside the rate as its variance, and the judged window is ≥ 7 days on the
-   same footing). Its 7-day figure was ~30 a week (0.3% of ~10,000 observed minutes),
-   so one 30-minute dispatch doubles it; §1's 5.3%
-   is two fleets over 18 bots and is NOT this fleet's baseline. The control fleet
-   (the host's other fleet, untreated through chunk 4 by ruling 13) is measured the
-   same way against ITS OWN `T0` reading — the two fleets are not on one scale (the
-   control ran at ~4× the canary's minutes when both were read), so a raw-minute
-   subtraction would let the control's ordinary drift manufacture either verdict
-   (cycle-6 B3) — and the control's own post/`T0` ratio is the host-wide drift the
-   canary's ratio is judged against. The feature is judged **working** when, over
-   the burn-in scaled to a week, canary post/`T0` ≥ 2 × control post/`T0` AND at
-   least half of the decisions recorded with `action: dispatch` (the denominator is
-   the DECISION rows, never the join rows the judged agent writes) reached
-   `completed` — `blocked` and `failed` are terminal too and count AGAINST, reported
-   beside the rate as the blocked/failed share (cycle-7 B6); **inert** below that;
-   **harmful** at or above it with fewer than half completing (dispatch volume without
-   closure). With no control fleet the verdict is labelled *uncontrolled* and is not a
-   pass. **Absolute floor:** with fewer than 3 `dispatch` decisions over at least 7
-   judged days no verdict but *inert* is reachable — a ratio over two dispatches is
-   noise; a `T0` rate of 0 on either fleet leaves the ratio undefined and the verdict
-   is labelled *no-baseline*, never a pass. **The dose is registered:** the hand-inject
-   cadence until chunk 2 arms the trigger is written into chunk 1's deploy comment
-   (`verdict.txt`), and the number of check-ins fired inside the judged window is
-   reported with the verdict, so an effect is never read without its exposure.
+   **Pre-registered bar (cycle 7; rewritten once in cycle 9, before any beat).**
+   The contrast is the check-in against whatever nudging already fired at each
+   manager at `T0` (chunk 1's baseline records those as counts), judged over a
+   window of at least 7 days that begins at chunk 2's arming instant, against the
+   `T0` readings that are never superseded. Five registered terms:
+
+   1. **Dose (the floor).** At least 3 `dispatch` decisions in the window, and the
+      number of check-ins fired in it (the exposure) reported with the verdict. Below
+      the floor no verdict but *inert* is reachable — a ratio over two dispatches is
+      noise.
+   2. **Closure.** Every `action: dispatch` decision row in the window (the DECISION
+      rows, never the join rows the judged agent writes) is classified through chunk
+      3's outcome join as `completed` · terminal-not-completed (`blocked`/`failed`,
+      which count AGAINST) · **still-open at the boundary** · **unjoined** (no
+      `checkin_dispatch` row, or one with a null `task_id` — an id-less dispatch is
+      shipped deliberately and can never resolve). The last two are COVERAGE:
+      reported, excluded from the denominator (a reader that cannot yet resolve must
+      not return the same thing as one that found a failure — `source_state.py`'s
+      rule). Resolvable = completed + terminal-not-completed; fewer than 3 resolvable
+      → *no-closure-measure*. The closure term passes when completed ≥ half of
+      resolvable.
+   3. **Activity (the headline, reported and gated).** The worker-active RATE
+      (worker-busy minutes / observed minutes; the manager excluded) in the window,
+      as a ratio to each fleet's own `T0` — the 28-day pre-window rate the chunk-1
+      baseline prints as `worker_active_pct_28d`, never one week's count (this
+      fleet's last three weeks read 280, 112 and 0 busy minutes; §1's 5.3% is two
+      fleets over 18 bots and is NOT this fleet's baseline). The two fleets are not
+      on one scale (the control ran at ~4× the canary's minutes when both were read),
+      so raw subtraction is ruled out (cycle-6 B3); the control's own post/`T0` ratio
+      is the host-wide drift. **There is no fixed multiple**: one of the three
+      untreated weeks already sits at 1.99× the pooled rate (280/7195 against
+      392/20086, measured 2026-09-15), so "2×" is reachable by variance alone
+      (cycle-8). Instead the baseline prints `worker_noise_floor_28d` — the largest
+      complete-week rate over the 28-day rate — and the activity term passes when the
+      canary's ratio exceeds BOTH the control's ratio AND that noise floor. Each
+      fleet's weekly series is printed beside its ratio. A `T0` rate of 0 on either
+      fleet leaves the ratio undefined → *no-baseline*. With no control fleet →
+      *uncontrolled*. Neither is a pass.
+   4. **Cost (reported; gated on the harmful side).** The manager-active rate as a
+      ratio to its own `T0`, for both fleets, from the same CTE (cycle-8: the
+      instrument already captured the spend and the bar never read it). A canary
+      whose manager-active ratio rose while its worker-active ratio did not clear the
+      noise floor is *net-negative*: the loop spent manager minutes and bought no
+      worker minutes.
+   5. **Verdicts and what each causes** (cycle-8: a registered metric with an
+      unregistered decision gets re-read after the fact by whoever wants the ladder to
+      continue). *working* = floor met AND closure passes AND activity passes AND not
+      net-negative → 1b/1c/1d proceed and chunk 5 ships the default, including the
+      estate-wide cadence retirement (F3). *inert* = the floor unmet, or activity
+      failing with closure passing → stop after chunk 4; `checkins` stays as the
+      inspect door; the next hypothesis is named in writing before any further chunk.
+      *harmful* = activity passing with closure failing (dispatch volume without
+      closure), or net-negative → un-equip the canary at once and retire the protocol
+      with it; no chunk 5. *no-closure-measure*, *uncontrolled*, *no-baseline* → not a
+      pass and not a stop: extend the window or fix the instrument, never proceed on
+      them. The bar does not settle mission relevance — two check-ins that dispatch
+      busywork and close it score as two that advance the goal; the `considered`
+      lists and rationales are read by hand beside the verdict, and that reading is
+      recorded with it. This pre-registration is the `ab-gating-rollout` protocol's
+      rule 1 applied after merge (the effect cannot exist until the doors land) on
+      the one production manager the `canary-rollout` protocol asks for.
 
 **After the canary, as its evidence allows** (each keeps its label for
 cross-reference):
@@ -835,5 +874,6 @@ fleet-active delta.
 6. ~~Which fleet is the canary~~ **Settled (2026-09-14):** the engineering fleet —
    the one that develops the framework repos. The operator ruled for the richer
    backlog over the bounded blast radius; the loop into the framework is contained by
-   the burn-in's initiative grants (§12.4), and the coordinator question the choice
+   the declared-project set and each project's closure tier (not by `initiative`,
+   which is origination-only and lands after the canary — cycle 8), and the coordinator question the choice
    raised is settled by the `leaf-manager` role (§10).
