@@ -34,6 +34,13 @@ tmux_socket_for_bot() { printf '%s' "fakesock"; }
 check_tmux_session() { return "${STUB_SESSION_RC:-0}"; }
 bot_is_busy() { return "${STUB_BUSY_RC:-1}"; }
 emit_fleet_event() { printf '%s\\n' "$1" >> "$EVENTS_CAPTURE"; }
+# chunk P fold: briefing-trigger.sh now sources these three from lib-common —
+# _read_wire_out (called unconditionally; the real one no-ops on an empty path),
+# and safe_mktemp / _wire_frag (reached only when PLANE_ARMED=1). Stubbed so the
+# stub stays "every helper the script sources," matching the real contract.
+_read_wire_out() { PLANE_WIRE_SHA256=""; PLANE_WIRE_BYTES=""; }
+safe_mktemp() { mktemp; }
+_wire_frag() { :; }
 """
 
 # Stub dispatch.sh: capture <session>\\t<message>, exit with the steered code.

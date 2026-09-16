@@ -1,12 +1,12 @@
-"""Tests for the read-only `claudlobby workstreams` view (workstreams.py)."""
+"""Tests for the read-only `claudlobby workstreams` view (workstreams.py) — the
+plane's rendering of the registry (F18 closure R2b: no file)."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from claudlobby.paths import Paths
-from claudlobby.workstreams import format_list, format_show, load_workstreams
+from claudlobby.workstreams import format_list, format_show
 
 
 def _entry(**kw) -> dict:
@@ -48,48 +48,60 @@ def test_format_show_includes_key_fields():
     assert "waiting on review" in out
 
 
-def test_load_missing_registry_returns_empty(tmp_path: Path):
-    assert load_workstreams(Paths(root=tmp_path, fleet_dir=None)) == {}
+# Deleted with the file (F18 R2b): test_load_missing_registry_returns_empty,
+# test_load_reads_root_mode_registry, test_load_corrupt_registry_returns_empty,
+# TestUnreachableRegistryIsNotAnEmptyOne.test_load_workstreams_itself_is_unchanged —
+# `load_workstreams` and `registry_path` are gone; the registry is the plane's
+# rendering (`plane_workstreams`).
 
 
-def test_load_reads_root_mode_registry(tmp_path: Path):
-    reg = tmp_path / "runtime" / "fleet" / "workstreams.json"
-    reg.parent.mkdir(parents=True)
-    reg.write_text(json.dumps({"updated": "x", "workstreams": {"ws-x": _entry()}}))
-    ws = load_workstreams(Paths(root=tmp_path, fleet_dir=None))
-    assert "ws-x" in ws
+def _seed(root: Path, fleet: str) -> None:
+    """A plane that knows the fleet (one registry row) but holds no workstream."""
+    from claudlobby.plane.emit_api import emit_batch
+    out = emit_batch(root, [{
+        "event_type": "system", "emitter": "test", "fleet": fleet,
+        "payload": {"event": "keepalive_skip", "subject_kind": "actor", "subject": f"bot:{fleet}/alex",
+                    "data": {"source": "test", "legacy_ts": "2026-05-27T10:00:00Z", "data": {}}}}])
+    assert out[0].status == "committed", out
 
 
-def test_load_corrupt_registry_returns_empty(tmp_path: Path):
-    reg = tmp_path / "runtime" / "fleet" / "workstreams.json"
-    reg.parent.mkdir(parents=True)
-    reg.write_text("{not json")
-    assert load_workstreams(Paths(root=tmp_path, fleet_dir=None)) == {}
+def _open_ws(root: Path, fleet: str, wid: str) -> None:
+    from claudlobby.plane.emit_api import emit_batch
+    out = emit_batch(root, [{
+        "event_type": "workstream", "emitter": "workstream-update", "fleet": fleet,
+        "source_ref": f"workstreams:{wid}", "occurred_at": "2026-07-01T00:00:00Z",
+        "payload": {"workstream_id": wid, "title": "X", "opened_by": f"bot:{fleet}/alex",
+                    "owner": f"bot:{fleet}/alex", "goal": "do thing"}}])
+    assert out[0].status == "committed", out
+
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 class TestUnreachableRegistryIsNotAnEmptyOne:
-    """Same class as #1216. ``load_workstreams`` returns {} for an absent registry
-    AND for an empty one, so ``format_list`` printed "No workstreams." either way.
-    A manager reading that cannot tell "this fleet has nothing open" from "the
-    registry was never created, or I resolved the wrong tier".
+    """Same class as #1216, on the plane (F18 R2b): "No workstreams." from a
+    plane that could not be read would tell a manager "this fleet has nothing
+    open" when the truth is "the registry could not be rendered, or I resolved
+    the wrong root". The command REFUSES (rc 3) with the note on stderr.
     """
 
     def _root(self, tmp_path):
         (tmp_path / "library").mkdir(exist_ok=True)
-        (tmp_path / "lib").mkdir(exist_ok=True)
+        if not (tmp_path / "lib").exists():
+            (tmp_path / "lib").symlink_to(REPO / "lib")
         (tmp_path / "fleet.yaml").write_text("fleet:\n  name: test\n  bots: {}\n")
         return tmp_path
 
-    def test_an_absent_registry_exits_nonzero_and_says_so(self, tmp_path, capsys):
+    def test_an_absent_plane_exits_three_and_says_so(self, tmp_path, capsys):
         from claudlobby.__main__ import main
 
         rc = main(["--root", str(self._root(tmp_path)), "workstreams"])
-        out = capsys.readouterr().out
-        assert rc == 1
-        assert "cannot read the workstream registry" in out
-        assert "No workstreams." not in out
+        cap = capsys.readouterr()
+        assert rc == 3
+        assert "UNREACHABLE" in cap.err and "plane" in cap.err
+        assert "No workstreams." not in cap.out
 
-    def test_a_present_but_empty_registry_still_answers_no_workstreams(
+    def test_a_plane_that_holds_the_fleet_but_no_workstream_still_answers_no_workstreams(
         self, tmp_path, capsys
     ):
         """The control. Presence, not emptiness — a fleet that has opened nothing
@@ -97,33 +109,32 @@ class TestUnreachableRegistryIsNotAnEmptyOne:
         from claudlobby.__main__ import main
 
         root = self._root(tmp_path)
-        reg = root / "runtime" / "fleet" / "workstreams.json"
-        reg.parent.mkdir(parents=True)
-        reg.write_text(json.dumps({"workstreams": {}}))
-
+        _seed(root, "test")
         rc = main(["--root", str(root), "workstreams"])
         out = capsys.readouterr().out
         assert rc == 0
         assert "No workstreams." in out
 
-    def test_a_populated_registry_is_unaffected(self, tmp_path, capsys):
+    def test_a_plane_that_never_saw_the_fleet_is_refused_not_empty(self, tmp_path, capsys):
+        from claudlobby.__main__ import main
+
+        root = self._root(tmp_path)
+        _seed(root, "another-fleet")
+        rc = main(["--root", str(root), "workstreams"])
+        cap = capsys.readouterr()
+        assert rc == 3 and "holds no bot of fleet" in cap.err
+        assert "No workstreams." not in cap.out
+
+    def test_a_populated_plane_is_unaffected(self, tmp_path, capsys):
         """Positive control: without it the assertions above would hold on a
         command that had stopped listing anything."""
         from claudlobby.__main__ import main
 
         root = self._root(tmp_path)
-        reg = root / "runtime" / "fleet" / "workstreams.json"
-        reg.parent.mkdir(parents=True)
-        reg.write_text(json.dumps({"workstreams": {"ws-a": _entry(id="ws-a")}}))
-
+        _open_ws(root, "test", "ws-a")
         rc = main(["--root", str(root), "workstreams"])
         out = capsys.readouterr().out
         assert rc == 0
         assert "ws-a" in out
-
-    def test_load_workstreams_itself_is_unchanged(self, tmp_path):
-        """The probe is in the COMMAND, not the loader: brief.py imports
-        load_workstreams and has its own remedy for a missing registry, so the
-        loader keeps returning {} rather than raising."""
-        p = Paths(root=tmp_path)
-        assert load_workstreams(p) == {}
+        rc = main(["--root", str(root), "workstreams", "show", "ws-a"])
+        assert rc == 0 and "owner:    alex" in capsys.readouterr().out

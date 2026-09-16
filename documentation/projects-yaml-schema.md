@@ -1,8 +1,8 @@
 # projects.yaml — schema reference
 
 `projects.yaml` is the third config tier — **WHAT the work is, and what
-"done" requires per project** (`system.yaml` = HOW the platform runs,
-`fleet.yaml` = WHO the bots are). It is optional and sits beside
+"done" requires per project** ([`system.yaml`](system-yaml-schema.md) = HOW
+the platform runs, `fleet.yaml` = WHO the bots are). It is optional and sits beside
 `fleet.yaml`: overlay mode `local/<fleet>/projects.yaml`, root mode
 `<root>/projects.yaml`. Copy `projects.yaml.example` to get started.
 

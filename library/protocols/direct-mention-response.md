@@ -43,4 +43,4 @@ No emoji unless your voice file calls for it. No "Sure!" or "Of course!" Skip th
 
 A bot explicitly placed in "do not respond at all" mode (e.g., during a sensitive demo, or while debugging another bot's output in the same channel) skips this protocol. The human must explicitly invoke that mode — default is always-respond-to-direct-mentions.
 
-Pairs with `inbound-acknowledgment` (the ≤10s receipt for *any* inbound, manager or worker) and `roster-awareness` (the manager-side discipline of recognizing which @-handles are its own workers).
+Pairs with `inbound-acknowledgment` (the ≤10s receipt for human-originated inbounds — manager dispatch traffic is governed by Worker Lifecycle Step 2 instead) and `roster-awareness` (the manager-side discipline of recognizing which @-handles are its own workers).

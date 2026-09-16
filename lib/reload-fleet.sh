@@ -36,6 +36,8 @@ own_tool_path   # timer PATH is minimal, and stale units predate #802 (#805)
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 export CLAUDLOBBY_ROOT
 FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
+# the doors this script runs anchor their fleet events on it (F18 R1)
+[ -z "$FLEET" ] || export CLAUDLOBBY_FLEET="${CLAUDLOBBY_FLEET:-$FLEET}"
 
 BOTS_DIR="$(resolve_bots_dir "$FLEET")"
 mkdir -p "${CLAUDLOBBY_ROOT}/state"

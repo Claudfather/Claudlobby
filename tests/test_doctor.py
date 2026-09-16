@@ -422,3 +422,331 @@ class TestDoctorTimerScriptParity:
         report = run_doctor(fleet, paths)
         fleet_yaml = next(c for c in report.checks if c.name == "fleet-yaml")
         assert fleet_yaml.status != "fail"
+
+
+class TestCheckCredentialsScoping:
+    """#1377 — probe only what the fleet declares, resolved through the cascade.
+
+    The load-bearing assertion in this class is `_curl_with_config` NEVER being
+    called. Reading the report text proves the verdict changed; it does not
+    prove the outbound call stopped, and the outbound call IS the defect. So the
+    transport is monkeypatched with a recorder that fails the test if it fires.
+    """
+
+    @staticmethod
+    def _stage_cascade(paths, monkeypatch):
+        """Stage the REAL runtime resolver and an isolated HOST tier.
+
+        Required by every test in this class that expects a value decision.
+        `Paths.env_resolved` REFUSES rather than falling back when it cannot
+        reach `lib/env-tiers.sh`, so without this the function short-circuits to
+        its resolver-unavailable branch and an absence-assertion passes for the
+        wrong reason — which is exactly what happened while writing these.
+        A stub resolver is not an option: it would certify a cascade the runtime
+        does not have (tests/test_credentials.py makes the same call).
+        """
+        repo = Path(__file__).resolve().parent.parent
+        (paths.root / "lib").mkdir(parents=True, exist_ok=True)
+        for f in ("lib-common.sh", "env-tiers.sh"):
+            (paths.root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
+        fake_home = paths.root.parent / "home"
+        fake_home.mkdir(exist_ok=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+    @staticmethod
+    def _no_network(monkeypatch):
+        """Replace the transport with a tripwire. Returns the call log."""
+        calls: list = []
+
+        def _boom(headers, extra_args):
+            calls.append(extra_args)
+            raise AssertionError(
+                f"check_credentials made an outbound call it should not have: {extra_args}"
+            )
+
+        monkeypatch.setattr("claudlobby.doctor._curl_with_config", _boom)
+        return calls
+
+    def test_ambient_token_for_an_undeclared_integration_is_never_probed(
+        self, doctor_fleet, monkeypatch
+    ):
+        """The #1377 reproduction: the fleet declares github, never railway."""
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        self._stage_cascade(paths, monkeypatch)
+        monkeypatch.setenv("RAILWAY_API_TOKEN", "rw_ambient_never_declared")
+        monkeypatch.delenv("GITHUB_PAT", raising=False)
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+
+        # No call fired (the tripwire would have raised), and the fleet's
+        # verdict no longer mentions a service it does not use.
+        assert "RAILWAY" not in report.checks[0].detail.upper()
+        assert report.checks[0].status != "fail"
+
+    def test_a_declared_var_present_only_in_the_shell_is_named_not_probed(
+        self, doctor_fleet, monkeypatch
+    ):
+        """A bot resolves from the cascade, not the operator's shell.
+
+        Probing the shell value would report a health the fleet does not have.
+        Dropping it silently would hide a state that genuinely confuses people.
+        So it is reported and not probed.
+        """
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        self._stage_cascade(paths, monkeypatch)
+        monkeypatch.setenv("GITHUB_PAT", "ghp_only_in_my_shell")
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        detail = report.checks[0].detail
+        assert "GITHUB_PAT" in detail
+        assert "shell" in detail and "not probed" in detail
+
+    def test_declared_with_a_cascade_value_IS_probed(self, doctor_fleet, monkeypatch):
+        """The positive control.
+
+        Every other test here asserts an absence, and a function that had simply
+        stopped working would pass all of them. This one proves the probe still
+        fires for the case it is supposed to serve.
+        """
+        _, fleet, paths = doctor_fleet
+        monkeypatch.delenv("GITHUB_PAT", raising=False)
+        self._stage_cascade(paths, monkeypatch)
+        (paths.root / ".env").write_text("GITHUB_PAT=ghp_in_the_cascade\n")
+
+        seen: list = []
+
+        class _R:
+            stdout = "200"
+            returncode = 0
+
+        def _fake(headers, extra_args):
+            seen.append((headers, extra_args))
+            return _R()
+
+        monkeypatch.setattr("claudlobby.doctor._curl_with_config", _fake)
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        assert len(seen) == 1, "the declared, resolvable credential was not probed"
+        assert "api.github.com" in " ".join(seen[0][1])
+        assert report.checks[0].status == "pass"
+        assert "probed OK" in report.checks[0].detail
+
+    def test_silence_states_its_scope_rather_than_implying_validity(
+        self, doctor_fleet, monkeypatch
+    ):
+        """Coverage honesty: a pass must not read as "credentials are fine".
+
+        "Nothing was probed" has causes with different remedies, and the old
+        code collapsed all of them into one reassuring line.
+        """
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        self._stage_cascade(paths, monkeypatch)
+        monkeypatch.delenv("GITHUB_PAT", raising=False)
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        detail = report.checks[0].detail
+        # It names the var and points at the check that owns the missing value,
+        # instead of "no credential env vars found to probe".
+        assert "GITHUB_PAT" in detail
+        assert "env-vars" in detail
+        assert "no credential env vars found" not in detail
+
+    def test_a_broken_manifest_warns_rather_than_crashing_doctor(
+        self, doctor_fleet, monkeypatch
+    ):
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        monkeypatch.setattr(
+            "claudlobby.credentials.declared_for_fleet",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        assert report.checks[0].status == "warn"
+
+    def test_an_unreachable_cascade_refuses_rather_than_reading_as_no_value(
+        self, doctor_fleet, monkeypatch
+    ):
+        """`ResolverUnavailable` must not become "declared with no value".
+
+        Those two have opposite remedies — install/repair the resolver, versus
+        go and set a credential — and the runtime raises precisely so the
+        distinction survives. Folding it into an empty mapping would recreate
+        the unreachable-vs-empty defect inside a fix for its sibling. The
+        fixture deliberately does NOT stage lib/env-tiers.sh.
+        """
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        monkeypatch.setenv("GITHUB_PAT", "ghp_whatever")
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        assert report.checks[0].status == "warn"
+        assert "cannot read the .env cascade" in report.checks[0].detail
+        assert "no value" not in report.checks[0].detail
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _declare_railway(root: Path) -> "FleetConfig":  # noqa: F821
+    """Give the fixture fleet the REAL Railway integration doc, and declare it.
+
+    The real doc rather than a stub on purpose: the defect this class guards is
+    `doctor`'s table disagreeing with the declared contract, so a test carrying
+    its own private copy of the contract could never see it.
+    """
+    (root / "library" / "integrations" / "railway.md").write_bytes(
+        (REPO_ROOT / "library" / "integrations" / "railway.md").read_bytes()
+    )
+    (root / "fleet.yaml").write_text(
+        dedent("""\
+        fleet:
+          name: test-fleet
+          service_prefix: com.test
+          bots:
+            worker:
+              expertise: [eng]
+              mcp: [github]
+              integrations: [railway]
+              telegram:
+                handle: w_bot
+    """)
+    )
+    fleet, _md = load_fleet(root / "fleet.yaml")
+    return fleet
+
+
+def _declared_railway_vars() -> set[str]:
+    """The Railway vars the shipped integration contract declares."""
+    import yaml
+
+    text = (REPO_ROOT / "library" / "integrations" / "railway.md").read_text()
+    front = text.split("---", 2)[1]
+    return set(yaml.safe_load(front)["env_contract"])
+
+
+class TestRailwayProbesMatchTheDeclaredContract:
+    """The part that EXECUTES, rather than restating the rule in prose.
+
+    `doctor` probed a retired variable for months because its table was a copy
+    of `creds-check.sh`'s kept in sync by hand. Fixing that once is not enough:
+    the defect came back through a REFACTOR — #1377 rebuilt this block around a
+    declaration-keyed probe registry and carried `RAILWAY_API_TOKEN` forward
+    into it, so a fleet declaring the two live tokens would have had Railway
+    silently drop out of the intersection.
+
+    A comment saying "change one, change both" does not survive that. This does.
+    """
+
+    def test_the_probe_table_names_exactly_the_declared_railway_vars(self):
+        from claudlobby.doctor import _CREDENTIAL_PROBES
+
+        probed = {v for v, (kind, _host) in _CREDENTIAL_PROBES.items() if kind == "railway"}
+        assert probed == _declared_railway_vars(), (
+            "doctor's Railway probes and library/integrations/railway.md have "
+            "diverged. A declared var with no probe drops out of the probe "
+            "intersection; a probe for an undeclared var can never fire."
+        )
+
+    def test_every_probed_railway_var_has_a_scope_matched_query(self):
+        from claudlobby.doctor import _CREDENTIAL_PROBES, _RAILWAY_QUERIES
+
+        probed = {v for v, (kind, _host) in _CREDENTIAL_PROBES.items() if kind == "railway"}
+        assert probed == set(_RAILWAY_QUERIES), (
+            "a Railway var reachable by the probe registry with no entry here "
+            "would raise KeyError mid-diagnostic"
+        )
+
+
+class TestEachRailwayTokenIsProbedWithAQueryItCanAnswer:
+    """ONE PROBE FOR ALL TOKENS IS THE BUG.
+
+    A workspace-scoped token is not bound to an account, so it cannot answer
+    `me` BY CONSTRUCTION. Probing it that way reports a working credential as
+    dead — which is what made this fleet's credential alert fire daily against
+    two working tokens until the operator learned to ignore it.
+    """
+
+    @staticmethod
+    def _recorder(monkeypatch) -> list:
+        calls: list = []
+
+        class _R:
+            stdout = '{"data":{}}\n200'
+            returncode = 0
+
+        def _fake(headers, extra_args):
+            calls.append(extra_args)
+            return _R()
+
+        monkeypatch.setattr("claudlobby.doctor._curl_with_config", _fake)
+        return calls
+
+    @staticmethod
+    def _railway_payloads(calls) -> str:
+        return "\n".join(
+            " ".join(c) for c in calls if any("backboard.railway" in a for a in c)
+        )
+
+    def _run(self, doctor_fleet, monkeypatch, env_line: str) -> str:
+        root, _fleet, paths = doctor_fleet
+        fleet = _declare_railway(root)
+        TestCheckCredentialsScoping._stage_cascade(paths, monkeypatch)
+        for var in _declared_railway_vars():
+            monkeypatch.delenv(var, raising=False)
+        (paths.root / ".env").write_text(env_line)
+        calls = self._recorder(monkeypatch)
+
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, DoctorReport())
+        return self._railway_payloads(calls)
+
+    def test_a_workspace_token_is_probed_with_projects_and_never_with_me(
+        self, doctor_fleet, monkeypatch
+    ):
+        probes = self._run(
+            doctor_fleet, monkeypatch, "RAILWAY_PERSONAL_PROJECT_TOKEN=t\n"
+        )
+        assert "projects" in probes, "the workspace token was not probed at all"
+        assert "me{" not in probes, (
+            "a workspace-scoped token cannot answer `me` by construction; "
+            "probing it that way reports a working credential as dead"
+        )
+
+    def test_an_account_token_is_probed_with_me(self, doctor_fleet, monkeypatch):
+        """The positive control. A test that only ever sees `projects` cannot
+        tell per-token probing from `projects`-for-everything."""
+        probes = self._run(doctor_fleet, monkeypatch, "RAILWAY_PERSONAL_TOKEN=t\n")
+        assert "me{" in probes, "the account token was not probed with `me`"
+
+    def test_both_declared_tokens_get_their_own_probe(self, doctor_fleet, monkeypatch):
+        probes = self._run(
+            doctor_fleet,
+            monkeypatch,
+            "RAILWAY_PERSONAL_TOKEN=t\nRAILWAY_PERSONAL_PROJECT_TOKEN=t2\n",
+        )
+        assert "me{" in probes and "projects" in probes, (
+            "one dead token among several is not `Railway is broken`; each "
+            "declared token gets its own probe"
+        )

@@ -116,7 +116,7 @@ For each issue, sequentially:
 
 1. **Dispatch engineer** via `/dispatch`:
    - Include issue URL, repo, and relevant context from the mission doc
-   - Engineer: acknowledge → branch → implement → test → /simplify → PR → report back
+   - Engineer: engage (first `[BOTREPORT]` row is the ack) → branch → implement → test → /simplify → PR → report back
 
 2. **On engineer completion**: immediately dispatch a reviewer
    - If approved: verify CI green → merge → post to Telegram
@@ -131,8 +131,8 @@ For each issue, sequentially:
    - If it reported `context-degraded`, or shows ~3+ completed rows in
      `claudlobby --fleet "$FLEET_NAME" report-back --bot <b> --status completed
      --since 24h`: restart the bot before the next issue. **Keep `--fleet`** —
-     the ledger is per-fleet, and the flagless form resolves the root tier and
-     answers about a file that does not exist (#1216)
+     the plane's rows are per fleet, and `--fleet` is what scopes the query
+     (#1216)
    - Otherwise: dispatch next issue
 
 **Step 8: Sprint summary**

@@ -30,11 +30,41 @@ TG_STUB = (
 
 
 def read_fleet_events(root):
-    """Concatenated fleet-event JSONL under <root>/state/events (or '')."""
-    events_dir = Path(root) / "state" / "events"
-    if not events_dir.is_dir():
+    """Every fleet event on the plane under <root>, rendered as the legacy
+    JSONL rows (compact, one per line, oldest first) — or '' when the plane
+    was never created. F18 closure R1: the state/events/ file this once
+    concatenated is gone; the rows a door lands (bot-, fleet- or
+    host-anchored) come back in the exact row shape the file had, so an
+    assertion like `'"type":"disk_high"' in read_fleet_events(root)` keeps
+    its meaning."""
+    db = Path(root) / "state" / "plane" / "plane.db"
+    if not db.exists():
         return ""
-    return "".join(f.read_text() for f in sorted(events_dir.iterdir()))
+    from claudlobby.plane.db import connect_ro
+    pr = load_lib_module("plane-readers")
+    conn = connect_ro(db)
+    try:
+        rows = conn.execute(
+            "SELECT e.occurred_at, e.event, e.severity, e.subject_kind, e.subject_alias,"
+            " e.detail, e.detail_truncated, f.alias FROM events e"
+            " LEFT JOIN identity_registry f ON f.uid = e.fleet_uid"
+            " WHERE e.source_ref LIKE 'fleet-events:%' ORDER BY e.ingest_seq").fetchall()
+    finally:
+        conn.close()
+    return "".join(
+        json.dumps(pr.public(pr.legacy_event_row(*row)), separators=(",", ":")) + "\n"
+        for row in rows)
+
+
+def plane_emit_env():
+    """The two keys that make a driven script RECORD into its CLAUDLOBBY_ROOT's
+    plane through the shim's cold-CLI rung (no daemon listens on the socket):
+    merge into a scrubbed/constructed env. A fleet-less script (a host job)
+    lands under the `_host` anchor; a fleet-scoped one needs FLEET_NAME /
+    CLAUDLOBBY_FLEET or a bot dir beside it."""
+    import sys
+    return {"PLANE_EMIT_CLI": str(Path(sys.executable).parent / "claudlobby"),
+            "PLANE_SOCKET": "/tmp/claudlobby-test-no-daemon.sock"}
 
 
 def _scrubbed_env(**overrides):

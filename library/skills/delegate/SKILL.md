@@ -32,7 +32,7 @@ Before dispatching (each bot is on its own server; the socket is its `BOT_SERVIC
 3. If busy, wait or tell the user
 
 After dispatching:
-- Monitor progress periodically via `tmux capture-pane`
+- A tracked (id'd) dispatch pages you via the overdue watchdog — don't poll it. An untracked send (this skill's `dispatch.sh` examples) has no watchdog: capture the worker's pane if nothing comes back — your only net for that class
 - Report outcomes in the Telegram group
 
 ### status <bot>

@@ -38,4 +38,4 @@ A rule needs a unit that bounds size. "Outcome in 1–3 sentences" *is* a count 
 
 **Density, never frequency or routing.** Acks, heartbeats, milestone cadence, wait-point beacons, and channel-routing rules stand unchanged — substantive analysis still goes through the channel (messaging-channel-discipline); it just arrives dense. This protocol governs what a message contains, not whether it is sent.
 
-**Never compress:** blockers, direct answers to direct questions, error output (verbatim), safety-relevant facts, required structured fields.
+**Never compress:** blockers, direct answers to direct questions, error output (verbatim), safety-relevant facts, required structured fields, and any substitution of the instrument or method from what was specified.

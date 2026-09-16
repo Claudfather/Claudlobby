@@ -9,7 +9,9 @@ tags: [knowledge-system, indexing, shared-docs, unadopted]
 
 # INDEX.md Auto-Discovery Convention
 
-> **Status note (added 2026-07, post-ratification audit):** this convention is ratified below and has real consumers wired into the library (`library/protocols/dispatch.md` and `library/skills/precedent-check/SKILL.md` both read `shared/.../INDEX.md`), but it has **zero adoption in this repo**. No `INDEX.md` file exists anywhere in claudlobby (`find . -iname INDEX.md` returns nothing), and no `/index` skill -- the convention's designated sole writer -- exists under `library/skills/` here. A producer may exist in a sibling plugin repo, but that is unverifiable from claudlobby alone. Treat this as an aspirational/orphaned convention within this repo until a producer skill ships here.
+> **Status note (added 2026-07, post-ratification audit; re-verified 2026-08-28):** this convention is ratified below and still has **zero adoption in this repo**. No `INDEX.md` file exists anywhere in claudlobby (`find . -iname INDEX.md` returns nothing), and no `/index` skill -- the convention's designated sole writer -- exists under `library/skills/` here. A producer may exist in a sibling plugin repo, but that is unverifiable from claudlobby alone. Treat this as an aspirational/orphaned convention within this repo until a producer skill ships here.
+>
+> **The "real consumers" detail has partially drifted since 2026-07.** `library/protocols/dispatch.md` still reads `shared/.../INDEX.md` directly. `library/skills/precedent-check/SKILL.md` no longer does — it has been rewritten to read `shared/decisions/` and `shared/planning/active/` directly (or the Claudron vault door on a vault-wired fleet) and contains no `INDEX.md` reference as of this writing. So there is currently **one** library consumer expecting this convention, not two, which makes the zero-adoption finding above even more load-bearing: the one remaining reader has nothing to read.
 
 ## Decision
 

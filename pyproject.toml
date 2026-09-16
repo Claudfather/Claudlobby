@@ -13,10 +13,18 @@ license = { text = "MIT" }
 dependencies = [
     "PyYAML>=6.0,<7",
     "Jinja2>=3.1,<4",
+    "pydantic>=2.5,<3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "tomli; python_version < '3.11'"]
+dev = ["pytest>=7.0", "tomli; python_version < '3.11'",
+       # the plane-ui battery runs in CI; self-extra keeps ONE copy of the
+       # pins (httpx = starlette TestClient engine)
+       "claudlobby[plane-ui]", "httpx>=0.24"]
+# Phase-4 operator plane UI (design walk ruling 2026-08-28): the view daemon.
+# OPTIONAL by §14's degrade rule — the core ledger, doors, and ingest daemon
+# never import these; `claudlobby plane view` refuses helpfully without them.
+plane-ui = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1"]
 # Pinned (F1 lock) — bump policy: documentation/integrations/claudron-integration.md
 vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git@v0.4.0"]
 
@@ -24,7 +32,10 @@ vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git@v0.4.0"]
 claudlobby = "claudlobby.__main__:main"
 
 [tool.setuptools]
-packages = ["claudlobby", "claudlobby.commands"]
+packages = ["claudlobby", "claudlobby.commands", "claudlobby.plane"]
+
+[tool.setuptools.package-data]
+"claudlobby.plane" = ["migrations/*.sql", "ui/*"]
 
 [tool.pytest.ini_options]
 # The framework's suite is exactly tests/. Bare `pytest` from the root otherwise
@@ -36,7 +47,20 @@ testpaths = ["tests"]
 # unrun platform-gated test is nearly as invisible as a trivially-passing one —
 # and "2299 passed, 7 skipped" reads like coverage. The reasons already existed;
 # nothing was printing them.
-addopts = "-rs"
+#
+# -fE is NOT decoration on that: `-r` is STORE, not append, so the bare `-rs`
+# above REPLACED pytest's default `fE` and blanked every failure name from the
+# short-summary block (#1509). A red run printed a wall of SKIPPED and named
+# nothing — the count line still said "N failed", so a reader knew how many and
+# not which, which is the worst pair available. Restoring f and E costs nothing
+# and keeps the skip reasons the -rs was added for.
+#
+# The blast radius is any invocation that does NOT pass its own -r. CI is
+# exactly that (.github/workflows/test.yml runs `pytest -v`), while CLAUDE.md's
+# regression-diff recipe passes `-ra` and was never affected — measured both
+# ways, and pinned by tests/test_pytest_reportchars.py so a future -r edit
+# cannot silently blank the names again.
+addopts = "-rsfE"
 # Registered so `pytest -m vault` selects the vault-mode gate and unknown-marker
 # warnings stay quiet. These tests importorskip/skipif on the [vault] extra, so
 # they SKIP in the default `.[dev]` lane and RUN in the dedicated vault-tests CI

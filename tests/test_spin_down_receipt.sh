@@ -4,10 +4,10 @@
 # durable record of WHO tore the bot down and WHY, in a ledger that survives the
 # bot directory it documents (the --purge case), with absence recorded
 # explicitly rather than left ambiguous. Also pins the rollout contract -- the
-# whole thing stays DORMANT until a fleet arms it, since lib/ is a shared
-# install where a root-pull would otherwise make this live on a destructive
-# door uncanaried -- and that a fault in the receipt can never cost the
-# teardown. Runs hermetically under env -i so the real fleet's units, sockets
+# whole thing is an opt-OUT since chunk N -- the receipt is the one record that
+# outlives a --purge, so it ships on, and only an exact 0 disarms it (loudly,
+# through lib-common's shared switch_is_on gate) -- and that a fault in the
+# receipt can never cost the teardown. Runs hermetically under env -i so the real fleet's units, sockets
 # and state can never be reached. Standalone bash (not pytest-collected); runs
 # under macOS /bin/bash (3.2).
 set -euo pipefail
@@ -22,6 +22,9 @@ assert_eq() {
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
+# The receipt's record is the plane (F18 closure R1); the CLI rung is stood in
+# for by tests/plane_capture_cli.sh, which renders each batch as the legacy row.
+CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
 # Stubs: nothing may reach the host's real systemd or any tmux server.
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/systemctl"
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
@@ -42,18 +45,19 @@ spin_down() {
     env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
         SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
+        PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
         bash "$LIB_DIR/spin-down-bot.sh" "$bdir" "$@" 2>&1 || true
 }
 
-# The LAST teardown row in the fleet ledger. Deliberately reads the fleet
-# ledger (not the bot dir) — that is the property under test.
+# The LAST teardown row the plane received. Deliberately NOT anything under
+# the bot dir — the record surviving the bot is the property under test.
 receipt_row() {
-    grep -h '"type":"bot_teardown_started"' "$ROOT/state/events"/fleet-*.jsonl 2>/dev/null | tail -1
+    grep -h '"type":"bot_teardown_started"' "$CAPTURE" 2>/dev/null | tail -1
 }
 # field <row> <key> — a real JSON parse, so key order in the emitted payload is
 # never load-bearing and an escaped quote in free text cannot truncate a read.
 field() { ROW="$1" K="$2" python3 -c 'import json,os;d=json.loads(os.environ["ROW"]);print(d.get(os.environ["K"], d.get("data",{}).get(os.environ["K"],"")))' 2>/dev/null || true; }
-reset() { rm -rf "$ROOT"; }
+reset() { rm -rf "$ROOT"; : > "$CAPTURE"; }
 
 echo "=== spin-down teardown-receipt contract ==="
 
@@ -98,8 +102,10 @@ assert_eq "receipt outlived the purged bot dir" "bot4" "$(field "$row" bot)"
 # ordering, since the receipt and the legs are logged by the same script.
 reset
 out="$(spin_down bot5)"
+# The script's OWN first line (the plane shim discloses its rung fallbacks on
+# stderr ahead of it under 2>&1; those are not legs).
 assert_eq "receipt is logged before any teardown leg" "yes" \
-    "$(printf '%s\n' "$out" | head -1 | grep -q 'receipt:' && echo yes || echo no)"
+    "$(printf '%s\n' "$out" | grep 'spin-down\[' | head -1 | grep -q 'receipt:' && echo yes || echo no)"
 
 # --- a bot with no bot.conf is already reaped: no phantom receipt ------------
 reset
@@ -108,30 +114,43 @@ env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testus
     bash "$LIB_DIR/spin-down-bot.sh" "$ROOT/local/f1/runtime/bots/ghost" >/dev/null 2>&1 || true
 assert_eq "no receipt for a bot that was never there" "" "$(receipt_row)"
 
-# --- the rollout contract: dormant until a fleet arms it ---------------------
-# lib/ is a SHARED install -- every bot on every fleet reads this same file, so
-# this change cannot be staged per-bot. Default-on would mean a routine
-# root-pull for something unrelated silently activates new behavior on the
-# DESTRUCTIVE teardown door. It must do nothing until a fleet opts in.
+# --- the rollout contract: an opt-OUT since chunk N -------------------------
+# REWRITTEN: this block pinned the OPPOSITE polarity (dormant until a fleet
+# armed it, because lib/ is a shared install and a root-pull must not activate
+# new behavior on a destructive door). Chunk N flipped it and left the pin
+# behind. The argument that moved: the door is no longer new, and the receipt
+# is the part of a destructive teardown an operator most needs -- it is the
+# ONLY record that outlives a --purge. It records, it destroys nothing, and it
+# costs one plane event. What still holds, and is pinned below, is that the
+# off switch is exact, that it is LOUD, and that the record can never cost the
+# teardown.
 reset
-SPINDOWN_RECEIPT_ENABLED="" spin_down bot6 --reason "should not be recorded" >/dev/null
-assert_eq "unarmed fleet writes NO receipt" "" "$(receipt_row)"
-assert_eq "unarmed fleet does not even create the ledger dir" "no" \
-    "$([ -d "$ROOT/state/events" ] && echo yes || echo no)"
-# Dormant means dormant only for the RECORD -- the teardown itself is unchanged,
-# so a dormant fleet is never left with a bot that failed to reap.
-assert_eq "unarmed teardown still reaps supervision" "yes" \
-    "$(SPINDOWN_RECEIPT_ENABLED="" spin_down bot7 | grep -q 'stopped + disabled + removed' && echo yes || echo no)"
+spin_down bot6 --reason "recorded by default" >/dev/null
+assert_eq "a fleet that says nothing STILL gets a receipt" "bot6" \
+    "$(field "$(receipt_row)" bot)"
 
-# Only an explicit "1" arms it -- a stray truthy-looking value must not.
-for v in 0 yes true ""; do
+# Only an exact "0" disarms -- via the shared `switch_is_on` gate, whose
+# polarity is the shell twin of env_tiers.resolves_to: an EMPTY assignment
+# wins at its tier (#1213) and is NOT a 0, so it leaves the door on.
+for v in yes true ""; do
     reset
     SPINDOWN_RECEIPT_ENABLED="$v" spin_down bot8 >/dev/null
-    assert_eq "SPINDOWN_RECEIPT_ENABLED='$v' stays dormant" "" "$(receipt_row)"
+    assert_eq "SPINDOWN_RECEIPT_ENABLED='$v' is not an off switch" "bot8" \
+        "$(field "$(receipt_row)" bot)"
 done
 reset
+SPINDOWN_RECEIPT_ENABLED=0 spin_down bot7 --reason "should not be recorded" >/dev/null
+assert_eq "SPINDOWN_RECEIPT_ENABLED=0 writes NO receipt" "" "$(receipt_row)"
+assert_eq "...and does not even touch the plane" "no" \
+    "$([ -s "$CAPTURE" ] && echo yes || echo no)"
+# ...and it says so. A silent skip is indistinguishable from a broken door,
+# which is the whole reason the defaults rule insists on a loud no-op.
+reset
+assert_eq "...and says so out loud" "yes" \
+    "$(SPINDOWN_RECEIPT_ENABLED=0 spin_down bot7 | grep -q 'spindown-receipt: OFF here' && echo yes || echo no)"
+reset
 SPINDOWN_RECEIPT_ENABLED=1 spin_down bot9 >/dev/null
-assert_eq "SPINDOWN_RECEIPT_ENABLED=1 arms it" "bot9" "$(field "$(receipt_row)" bot)"
+assert_eq "an explicit 1 records too" "bot9" "$(field "$(receipt_row)" bot)"
 
 echo ""
 # --- the record must never cost the teardown --------------------------------
@@ -142,8 +161,12 @@ echo ""
 reset
 printf '#!/bin/bash\nexit 127\n' > "$T/bin/hostname"; chmod +x "$T/bin/hostname"
 out="$(spin_down bot10)"
+# The supervision leg names ITS OWN supervisor, so the assertion has to accept
+# either: the systemd wording alone made this permanently red on macOS, where
+# it is the launchd leg that runs -- a red assertion nobody can make green is
+# where a real regression goes to hide.
 assert_eq "a broken hostname still tears the bot down" "yes" \
-    "$(printf '%s\n' "$out" | grep -q 'stopped + disabled + removed' && echo yes || echo no)"
+    "$(printf '%s\n' "$out" | grep -qE 'stopped \+ disabled \+ removed|booted out \+ plist removed' && echo yes || echo no)"
 assert_eq "and the receipt degrades rather than failing" "unknown" \
     "$(field "$(receipt_row)" actor | cut -d@ -f2)"
 rm -f "$T/bin/hostname"

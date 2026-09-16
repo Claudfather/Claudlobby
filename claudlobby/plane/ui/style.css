@@ -1,0 +1,371 @@
+/* observable plane v1 — story-first. Palette carried from the v0 the operator
+   liked; structure rebuilt around threads. Deliberate single dark look. */
+:root {
+  --bg: #0d1117; --panel: #161b22; --card: #10151c; --edge: #30363d;
+  --ink: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950;
+  --warn: #d29922; --bad: #f85149; --chip: #21262d; --purple: #d2a8ff;
+  --green: #7ee787;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+/* `hidden` must beat any id-selector display rule (specificity) —
+   without this, #focus-overlay/#grid ignore the attribute and the
+   overlay can never be closed (operator-found, 2026-08-30). */
+[hidden] { display: none !important; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 14px/1.45 -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+}
+header {
+  display: flex; gap: 12px; align-items: center; padding: 10px 16px;
+  border-bottom: 1px solid var(--edge); background: var(--panel);
+}
+header h1 { font-size: 15px; font-weight: 600; margin-right: 6px; }
+.spacer { flex: 1; }
+.pill {
+  background: var(--chip); border: 1px solid var(--edge);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px;
+  color: var(--dim); display: inline-flex; gap: 6px; align-items: center;
+}
+.pill b { color: var(--ink); font-weight: 600; }
+.pill.ghost { cursor: pointer; background: none; }
+.pill.ghost[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+.dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+/* an ALIVE (up) pane: green like the roster's live dot. Without this the grid
+   fell through to the red base for every up bot, so an idle-but-healthy fleet
+   read as a wall of alarm; red now means only what it should — a down session. */
+.dot.live { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+main { flex: 1; display: grid; grid-template-columns: 220px 1fr 400px; min-height: 0; }
+main > section { border-right: 1px solid var(--edge); display: flex; flex-direction: column; min-height: 0; }
+main > section:last-child { border-right: 0; }
+#rail-right { display: flex; flex-direction: column; }
+#rail-right > div { display: flex; flex-direction: column; min-height: 0; }
+#rail-attention { flex: 0 1 auto; max-height: 40%; border-bottom: 1px solid var(--edge); }
+#rail-tasks { flex: 1 1 0; }
+#rail-debug { flex: 0 0 30%; border-top: 1px solid var(--edge); }
+h2 {
+  font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--dim); padding: 10px 14px 6px; flex: none;
+}
+h2 .hint { text-transform: none; letter-spacing: 0; }
+.count {
+  background: var(--bad); color: #fff; border-radius: 999px;
+  padding: 0 7px; font-size: 11px; margin-left: 4px;
+}
+.scroll { overflow-y: auto; flex: 1; padding: 0 10px 14px; }
+
+/* fleet rail */
+.actor { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+         border-radius: 6px; font-size: 13px; }
+.actor:hover { background: var(--chip); }
+.actor .dot { width: 8px; height: 8px; background: var(--dim); flex: none; }
+.actor .dot.live { background: var(--ok); }
+.actor small { color: var(--dim); margin-left: auto; font-size: 11px; }
+.actor .prov-badge { color: var(--warn); font-size: 11px; }
+/* item 6 (#1479): under `all` the roster groups by fleet — a small header
+   per group instead of every fleet interleaved by last-seen. Sticky so the
+   fleet a row belongs to is still readable once the rail is scrolled. */
+.rail-head { display: flex; align-items: baseline; gap: 8px;
+             position: sticky; top: 0; z-index: 1; background: var(--bg);
+             padding: 8px 8px 3px; margin-top: 4px;
+             border-bottom: 1px solid var(--edge); }
+.rail-head b { font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+               color: var(--dim); }
+.rail-head small { color: var(--dim); font-size: 11px; margin-left: auto; }
+
+/* channel — threads */
+.thread {
+  background: var(--panel); border: 1px solid var(--edge);
+  border-radius: 10px; margin: 10px 4px; overflow: hidden;
+}
+.thread .t-kicker {
+  font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--dim); padding: 7px 12px 0;
+}
+.thread > .t-head {
+  padding: 8px 12px 6px; border-bottom: 1px solid var(--edge);
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+}
+.t-head .t-title { font-weight: 600; font-size: 13.5px; }
+.t-head .t-meta { color: var(--dim); font-size: 11.5px; margin-left: auto; }
+.t-ladder { display: flex; gap: 6px; padding: 6px 12px 8px; flex-wrap: wrap; }
+.step { font-size: 11px; color: var(--dim); background: var(--chip);
+        border-radius: 999px; padding: 1px 8px; }
+.step.done { color: var(--green); }
+.step.now { color: var(--ink); border: 1px solid var(--accent); }
+.msg { padding: 8px 12px; border-top: 1px solid rgba(48,54,61,.5); }
+.msg .who { font-size: 12.5px; margin-bottom: 3px; display: flex; gap: 6px;
+            align-items: baseline; flex-wrap: wrap; }
+.msg .who b { color: var(--accent); }
+.msg .who .to { color: var(--dim); }
+.msg .who time { color: var(--dim); font-size: 11px; margin-left: auto; }
+.msg .body { white-space: pre-wrap; word-break: break-word; font-size: 13px;
+             color: var(--ink); }
+.msg .body.redacted { color: var(--dim); font-style: italic; }
+.msg .delivery { font-size: 11px; margin-top: 3px; }
+.delivery.ok { color: var(--ok); }
+.delivery.pend { color: var(--warn); }
+.delivery.bad { color: var(--bad); font-weight: 600; }
+.tag { background: var(--chip); border-radius: 4px; padding: 0 6px;
+       font-size: 11px; color: var(--dim); }
+.tag.task_request { color: var(--purple); }
+.tag.report { color: var(--green); }
+.tag.alert { color: var(--bad); }
+.msg details { margin-top: 4px; }
+.msg summary { font-size: 11px; color: var(--dim); cursor: pointer; }
+.msg .machinery { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+                  color: var(--dim); padding: 4px 0 0; }
+
+/* tasks + attention */
+.card {
+  background: var(--panel); border: 1px solid var(--edge); border-radius: 8px;
+  padding: 8px 12px; margin: 8px 4px; font-size: 12.5px;
+}
+.card.attn { border-color: var(--bad); }
+.card .st { float: right; font-size: 11px; padding: 0 7px;
+            border-radius: 999px; border: 1px solid var(--edge);
+            color: var(--dim); }
+.st.s-open { color: var(--ok); border-color: var(--ok); }
+.st.s-pend { color: var(--warn); border-color: var(--warn); }
+.st.s-bad { color: var(--bad); border-color: var(--bad); }
+.st.s-done { color: var(--dim); }
+.card .sub { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+.card b { display: -webkit-box; -webkit-line-clamp: 3;
+          -webkit-box-orient: vertical; overflow: hidden; }
+
+/* debug rail */
+.evt { display: flex; gap: 8px; padding: 3px 6px;
+       font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+       color: var(--dim); border-left: 2px solid var(--edge); margin: 2px 4px; }
+.evt b { color: var(--ink); font-weight: 500; }
+
+/* panel states (§16) */
+.panel-state { text-align: center; padding: 26px 16px; color: var(--dim); }
+.panel-state .label { font-size: 13px; color: var(--ink); }
+.panel-state.st-absent .label, .panel-state.st-idle .label { color: var(--dim); }
+.panel-state.st-unreadable .label, .panel-state.st-disconnected .label { color: var(--bad); }
+.panel-state .detail { font-size: 12px; margin-top: 4px; }
+.panel-state .remedy { font-size: 12px; margin-top: 8px; color: var(--warn); }
+.panel-state .prov { font-size: 11px; margin-top: 8px; }
+
+@media (max-width: 1100px) {
+  main { grid-template-columns: 1fr; overflow-y: auto; }
+  main > section { border-right: 0; border-bottom: 1px solid var(--edge); }
+  body { overflow: auto; height: auto; }
+  /* mobile is triage only (item 7 / §16): put what-needs-me FIRST, then the
+     channel, then the roster — so the attention rail is no longer stranded
+     below the entire channel. The header counts already sit above `main`.
+     `order` applies to these grid items in the single-column stack. */
+  #rail-right   { order: 1; }
+  #rail-channel { order: 2; }
+  #rail-fleet   { order: 3; }
+  /* the desktop sizes (attention 40%, tasks flex:1, debug 30%) are relative to
+     a full-height column that no longer exists once stacked — release them all
+     so each rail takes its natural content height (tasks' flex-basis:0 would
+     otherwise collapse it to nothing, letting the channel ride up over it) */
+  #rail-attention { max-height: none; }
+  #rail-right > div { flex: none; }
+  /* the header's pills wrap rather than overflow, so the counts stay legible */
+  header { flex-wrap: wrap; }
+}
+
+/* cross-fleet mark (U2): a thread whose two fleets differ says so, and
+   its names render fleet-qualified in every room */
+.tag.xfleet { color: var(--purple); border: 1px solid var(--purple);
+              background: none; font-weight: 600; }
+.t-head .tag.xfleet { margin-left: 4px; }
+
+/* the overview strip (U3): one card per fleet + the host, above the panels */
+.overview { display: flex; gap: 8px; padding: 6px 10px 8px; flex-wrap: wrap;
+            border-bottom: 1px solid var(--edge); flex: none; }
+.overview:empty { display: none; }
+.overview .panel-state { padding: 6px 10px; flex: 1; text-align: left; }
+.ov-card { background: var(--panel); border: 1px solid var(--edge);
+           border-radius: 8px; padding: 6px 10px; font-size: 12px;
+           color: var(--dim); min-width: 200px; flex: 1 1 200px; }
+.ov-card.pick { cursor: pointer; }
+.ov-card.pick:hover { border-color: var(--accent); }
+.ov-card.on { border-color: var(--accent); }
+.ov-card .ov-head { display: flex; gap: 8px; align-items: baseline; }
+.ov-card .ov-head b { color: var(--ink); font-size: 13px; }
+.ov-card .ov-head small { margin-left: auto; }
+.ov-card .ov-line { margin-top: 2px; display: flex; gap: 6px; flex-wrap: wrap;
+                    align-items: baseline; }
+.ov-card .ov-bad { color: var(--bad); font-weight: 600; }
+.ov-card .ov-warn { color: var(--warn); }
+.ov-card .ov-ok { color: var(--ok); }
+.ov-card.ov-host { border-style: dashed; flex: 0 1 220px; }
+
+/* view nav + fleet tabs */
+#view-nav { display: flex; gap: 6px; }
+#view-nav .on { color: var(--accent); border-color: var(--accent); }
+#fleet-tabs { margin-left: 10px; text-transform: none; letter-spacing: 0; }
+#fleet-tabs button { margin-right: 4px; }
+
+/* thumbnail grid */
+#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 10px; padding: 10px; align-content: start; }
+.pane-card { background: var(--panel); border: 1px solid var(--edge);
+             border-radius: 8px; overflow: hidden; cursor: pointer; }
+.pane-card:hover { border-color: var(--accent); }
+.pane-card .p-head { display: flex; gap: 8px; align-items: center;
+                     padding: 6px 10px; border-bottom: 1px solid var(--edge);
+                     font-size: 12.5px; }
+.pane-card .p-head small { color: var(--dim); margin-left: auto; }
+
+/* presence verdict badge (the derived working/idle/down word, #1361) */
+.pres { font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  font-weight: 600; letter-spacing: .02em; }
+.pres-working { background: color-mix(in srgb, var(--ok) 22%, transparent);
+  color: var(--ok); }
+.pres-idle { background: color-mix(in srgb, var(--dim) 20%, transparent);
+  color: var(--dim); }
+.pres-down { background: color-mix(in srgb, var(--bad) 22%, transparent);
+  color: var(--bad); }
+.pres-stale, .pres-unknown { background: color-mix(in srgb, var(--warn) 20%,
+  transparent); color: var(--warn); }
+.pres-sampling { color: var(--dim); }
+.presence-strip .pres { margin-left: 4px; }
+.pane-card pre, #focus-pane {
+  margin: 0; padding: 8px 10px; font: 10.5px/1.35 ui-monospace, SFMono-Regular,
+  Menlo, monospace; color: var(--ink); overflow: hidden; white-space: pre-wrap;
+  word-break: break-all; background: #0a0e13; min-height: 150px;
+}
+/* a focused pane captures 44 lines into the SHARED slot — cap the grid tile
+   so one viewer's focus can't grow everyone's card (reviewer finding). */
+.pane-card pre { max-height: 220px; }
+.pane-card.s-down pre { opacity: .35; }
+.pane-card.s-sampling pre { opacity: .55; }
+.pane-card:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pane-card .dead-note { color: var(--bad); font-size: 11px; padding: 0 10px 6px; }
+
+/* focus overlay */
+#focus-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6);
+                 display: flex; align-items: center; justify-content: center;
+                 z-index: 10; }
+#focus-box { width: min(1000px, 92vw); max-height: 88vh; display: flex;
+             flex-direction: column; background: var(--panel);
+             border: 1px solid var(--edge); border-radius: 10px; }
+#focus-head { display: flex; align-items: center; justify-content: space-between;
+              padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+#focus-pane { overflow-y: auto; font-size: 12px; min-height: 300px; }
+
+/* ANSI SGR palette (esc-safe converter output) */
+.a-b { font-weight: 700; }
+.a-30{color:#484f58}.a-31{color:#ff7b72}.a-32{color:#3fb950}.a-33{color:#d29922}
+.a-34{color:#58a6ff}.a-35{color:#bc8cff}.a-36{color:#39c5cf}.a-37{color:#b1bac4}
+.a-90{color:#6e7681}.a-91{color:#ffa198}.a-92{color:#56d364}.a-93{color:#e3b341}
+.a-94{color:#79c0ff}.a-95{color:#d2a8ff}.a-96{color:#56d4dd}.a-97{color:#f0f6fc}
+
+/* search */
+#search { margin-left: auto; background: var(--panel); color: var(--ink);
+          border: 1px solid var(--edge); border-radius: 6px;
+          padding: 4px 10px; font-size: 12.5px; width: 240px; }
+#search:focus { outline: 1px solid var(--accent); }
+/* scoped: a GLOBAL h2 flex rule collapsed the whitespace in
+   every other header ("event stream(raw ledger)") — gauntlet */
+#rail-channel h2 { display: flex; align-items: center; }
+.hit { padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+.hit .snip { font-size: 13px; margin-top: 2px; }
+.hit mark { background: transparent; color: var(--accent); font-weight: 600; }
+.hit small { color: var(--dim); }
+
+/* trust panel */
+.trust-block { padding: 10px 14px; border-bottom: 1px solid var(--edge); }
+.trust-block h3 { font-size: 11px; letter-spacing: .09em;
+                  text-transform: uppercase; color: var(--dim);
+                  margin-bottom: 8px; }
+.trust-row { display: flex; gap: 10px; align-items: baseline;
+             padding: 3px 0; font-size: 13px; }
+.trust-row b { min-width: 180px; font-weight: 500; }
+.trust-row small { color: var(--dim); }
+.trust-num { font-size: 20px; font-weight: 600; margin-right: 6px; }
+.trust-ok { color: var(--ok); } .trust-warn { color: var(--warn); }
+.trust-bad { color: var(--bad); }
+.reason { font: 11.5px ui-monospace, Menlo, monospace; color: var(--dim);
+          padding: 2px 0 2px 12px; word-break: break-all; }
+
+
+/* fleet inventory + equipment (#1405) */
+.inv-head { color: var(--dim); font-size: 12px; margin: 6px 0 10px; }
+.bot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px; margin-bottom: 14px; }
+.bot-card { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  cursor: pointer; background: var(--panel); }
+.bot-card:hover, .bot-card:focus { border-color: var(--ok); outline: none; }
+.bot-card .bc-head { display: flex; justify-content: space-between; gap: 6px; }
+.bot-card .bc-head small, .bot-card .bc-org { color: var(--dim); font-size: 11px; }
+.bot-card .bc-counts { font-size: 12px; margin: 4px 0; }
+.proj-row { display: flex; justify-content: space-between; padding: 3px 0;
+  border-bottom: 1px solid var(--line); }
+.proj-row small, .lib-row small, .lib-group summary small { color: var(--dim); }
+.lib-group { margin: 4px 0; }
+.lib-group summary { cursor: pointer; padding: 3px 0; }
+.lib-row { display: flex; justify-content: space-between; padding: 2px 0 2px 14px;
+  font-size: 12px; }
+.lib-row.unused { color: var(--dim); }
+#equip-detail { border: 1px solid var(--ok); border-radius: 6px; padding: 10px 12px;
+  margin-bottom: 12px; background: var(--panel); }
+.ed-head { display: flex; align-items: center; gap: 8px; }
+.ed-head small { color: var(--dim); }
+.ed-head .ed-close { margin-left: auto; }
+.ed-mission { color: var(--dim); font-size: 12px; margin: 4px 0 8px; }
+.ed-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.ed-cols h4 { margin: 8px 0 4px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--dim); }
+.eq-row { margin: 3px 0; display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
+.eq-row b { min-width: 90px; font-size: 12px; }
+.chip { font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  background: color-mix(in srgb, var(--dim) 18%, transparent); }
+.chg-row { font-size: 12px; padding: 2px 0; }
+.chg-row small { color: var(--dim); margin-right: 6px; }
+.hash-row { display: flex; justify-content: space-between; font-size: 11px; }
+.dim { color: var(--dim); font-size: 12px; }
+@media (max-width: 800px) { .ed-cols { grid-template-columns: 1fr; } }
+
+/* org chart + utilization (Phase 6) */
+.org { margin: 4px 0 10px; }
+.org summary { cursor: pointer; }
+.org-tree, .org-tree ul { list-style: none; padding-left: 16px; margin: 2px 0; }
+.org-tree li { position: relative; padding: 1px 0; font-size: 12px; }
+.org-tree li::before { content: "└ "; color: var(--dim); }
+.org-tree li.cycle { color: var(--warn); }
+.bot-card .bc-util { font-size: 11px; color: var(--dim); }
+
+/* chunk L (#1479): long bodies clamp with a toggle; the card says why it needs you;
+   the header's totals warn.
+   The clamp height is DERIVED from app.js's CLAMP_LINES, which sets
+   --clamp-lines on the root: the number that decides a body is long and the
+   height it is cut to must be one constant, or a body clamps at a height
+   that shows more (or less) than the lines it was judged on. */
+.msg .body.clamp { max-height: calc(var(--clamp-lines) * 1.44em);
+  overflow: hidden; position: relative; }
+.msg .body.clamp::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0;
+  height: 2.5em; background: linear-gradient(to bottom, transparent, var(--panel)); }
+.msg .body.clamp.open { max-height: none; }
+.msg .body.clamp.open::after { display: none; }
+.msg button.more { font-size: 11px; color: var(--accent); background: none; border: 0;
+  padding: 2px 0; cursor: pointer; }
+/* item 6 (#1479), seen live: the remedy was cut at the rail's right edge on
+   a narrow window ("— re-s" then the rest on the next line). The whole line
+   must read, so it wraps and clips nothing of its own — and `--supersedes`,
+   the longest token the rail carries, may break inside itself rather than
+   run past the edge. What clips it there is `body { overflow: hidden }` (the
+   app fills the viewport), NOT the `.scroll` container: `overflow-y: auto`
+   makes the OTHER axis `auto` too, which scrolls rather than clips (fold
+   F8 — the earlier comment named the wrong mechanism). */
+.card .why { color: var(--bad); font-size: 11.5px; margin-top: 3px;
+             white-space: normal; overflow-wrap: anywhere; clear: right; }
+.card .why small { color: var(--dim); }
+/* An outstanding nudge INSIDE its grace (#1481 fold F11): information, not an
+   alarm — same geometry as `.why`, the dim voice rather than the bad one, so
+   the card does not read as a second warning. */
+.card .note { color: var(--dim); font-size: 11.5px; margin-top: 3px;
+              white-space: normal; overflow-wrap: anywhere; clear: right; }
+#fleet-totals b.warn { color: var(--bad); }
+#fleet-totals small { color: var(--dim); }
+#fleet-totals small.warn { color: var(--warn); }
+#fleet-totals .dim { font-size: inherit; }
+.host-facts { color: var(--dim); font-size: 11px; padding: 4px 8px; }

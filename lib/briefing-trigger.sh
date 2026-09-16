@@ -62,11 +62,48 @@ if bot_is_busy "$SOCKET" "$BOT"; then
     defer bot_busy "bot busy"
 fi
 
-if "$LIB_DIR/dispatch.sh" "$BOT" "/briefing $SLOT"; then
+# --- observable-plane record (PR-B T6; the inventory's judgment row: a
+# briefing-class communication carried as a raw slash injection — the door
+# mints it a communication). Always on (PLANE_EMIT_DISABLED=1 is the one silencer); disclosed,
+# never blocking. Intent before the send (F9); the busy defer above means a
+# sent briefing lands in an idle pane, so a clean send is pane_submitted.
+PLANE_ARMED=0
+if plane_armed briefing-trigger; then
+    PLANE_ARMED=1
+fi
+PLANE_MSG_ID=""
+if [ "$PLANE_ARMED" = "1" ]; then
+    PLANE_MSG_ID="$(plane_mint_id msg)"
+    printf '{"events":[{"event_type":"communication","emitter":"briefing-trigger","fleet":"%s","payload":{"msg_id":"%s","sender":"system:briefing-trigger","recipient":"bot:%s/%s","recipient_raw":"%s","message_class":"briefing","body":"/briefing %s"}}]}' \
+        "$(json_escape "$FLEET")" "$PLANE_MSG_ID" \
+        "$(json_escape "$FLEET")" "$(json_escape "$BOT")" \
+        "$(json_escape "$BOT")" "$(json_escape "$SLOT")" | plane_emit_events briefing-trigger || true
+fi
+_plane_transmission() {
+    [ "$PLANE_ARMED" = "1" ] || return 0
+    # fold F1: a submission-class state carries the delivery-JOIN wire proof,
+    # read back from PLANE_WIRE_OUT across the dispatch.sh subprocess boundary.
+    printf '{"events":[%s]}' \
+        "$(plane_tx_event briefing-trigger "$FLEET" tmux "$PLANE_MSG_ID" "$BOT" "$1" "$(_wire_frag "$1")")" \
+        | plane_emit_events briefing-trigger || true
+}
+
+# PLANE_MSG_ID across the process boundary (chunk P, #1501): the briefing is a
+# tracked communication, so bot_tmux_send tags the send and the receiver records
+# delivery. Empty when the plane is unarmed -> no trailer.
+# fold F1: PLANE_WIRE_OUT scratch file so bot_tmux_send (inside dispatch.sh) can
+# hand back the wire proof for the pane_submitted row. Auto-cleaned on EXIT via
+# lib-common's tmpdir trap (the else branch exits before any explicit removal).
+_plane_wire_out=""
+[ "$PLANE_ARMED" = "1" ] && _plane_wire_out=$(safe_mktemp)
+if PLANE_MSG_ID="$PLANE_MSG_ID" PLANE_WIRE_OUT="$_plane_wire_out" "$LIB_DIR/dispatch.sh" "$BOT" "/briefing $SLOT"; then
+    _read_wire_out "$_plane_wire_out"
     echo "$TS DISPATCH $BOT/$SLOT — /briefing $SLOT sent" >> "$LOG"
     emit_fleet_event briefing_dispatched briefing "$(briefing_data ok)" "$BOT_DIR" "$BOT"
+    _plane_transmission "pane_submitted"
 else
     echo "$TS FAIL $BOT/$SLOT — dispatch failed" >> "$LOG"
     emit_fleet_event briefing_failed briefing "$(briefing_data dispatch_failed)" "$BOT_DIR" "$BOT"
+    _plane_transmission "failed"
     exit 1
 fi

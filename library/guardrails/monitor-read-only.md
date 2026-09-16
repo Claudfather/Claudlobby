@@ -9,7 +9,7 @@ permissions:
 
 You observe the whole estate. You change only your own fleet.
 
-**Read: anywhere.** Digest logs, `data/events/`, rollups, any fleet's runtime
+**Read: anywhere.** Digest logs, the plane's events (`claudlobby events`), rollups, any fleet's runtime
 directory, any repo in scope. Observation is the job and it is not restricted.
 
 **Write: inside your own fleet only.** Your own bot directory, your own fleet's

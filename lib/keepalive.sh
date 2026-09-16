@@ -33,31 +33,139 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
 
 LOG="$BOT_DIR/keepalive.log"
 
-# JSONL retention — delete keepalive event files older than this many days.
-# Honors the one fleet-wide retention window (observability.reap_days, composed as
-# OBSERVABILITY_REAP_DAYS into bot.conf, loaded above) so every event writer
-# (keepalive, fleet-pulse, bot-vitals) reaps on the same horizon. An explicit
-# KEEPALIVE_REAP_DAYS still overrides; both fall back to 7.
-KEEPALIVE_REAP_DAYS="${KEEPALIVE_REAP_DAYS:-${OBSERVABILITY_REAP_DAYS:-7}}"
-
-# Emit structured JSONL event for fleet-pulse / claudlobby uptime consumption.
+# Emit a keepalive event: a TRANSITION (RESTART, BRIDGE_HEAL, SKIP, RELOAD) is
+# a FLEET EVENT on the plane through the one door (emit_fleet_event:
+# provenance, alias-anchored), so `claudlobby events` and `uptime` see it; the
+# per-tick verdicts BUSY / IDLE / UNKNOWN ride the heartbeat sample the same
+# tick emits (plane_presence_samples) and are not fleet events. (The
+# keepalive-<day>.jsonl file this once wrote had no reader in the estate —
+# measured, 867 rows/bot/day — and went with the F18 closure.)
 emit_keepalive_event() {
     local ev_state="$1"
     local ev_detail="${2:-}"
-    local events_dir="$BOT_DIR/data/events"
-    mkdir -p "$events_dir"
-    local events_file="$events_dir/keepalive-$(date +%Y-%m-%d).jsonl"
-    local ts
-    ts=$(ts_iso)
-    local detail_json=""
-    if [ -n "$ev_detail" ]; then
-        detail_json=',"detail":"'"$(json_escape "$ev_detail")"'"'
-    fi
-    printf '{"ts":"%s","bot":"%s","type":"keepalive","source":"keepalive","data":{"state":"%s"%s}}\n' \
-        "$ts" "$BOT_NAME" "$ev_state" "$detail_json" >> "$events_file"
+    case "$ev_state" in
+        RESTART)     emit_fleet_event keepalive_restart keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        BRIDGE_HEAL) emit_fleet_event bridge_heal keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        SKIP)        emit_fleet_event keepalive_skip keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        RELOAD)      emit_fleet_event keepalive_reload keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+    esac
+}
 
-    # Reap old keepalive JSONL files beyond retention window.
-    reap_event_files "$events_dir" 'keepalive-*.jsonl' "$KEEPALIVE_REAP_DAYS"
+# ---- plane door: presence's RECORDED half (#1361, harvest item 1) ----------
+# The verdict this tick ALREADY computed, emitted as ONE metric_sample per
+# tick through the shim — the table, contract and metric names shipped in
+# migration 0006 with no emitter until now. Subject is the INSTANCE alias
+# (bot:<fleet>/<name>): identity resolution at ingest lands on the SAME uid
+# the registry keyframes use, so heartbeat samples join equipment/history
+# with no glue. Arming reaches this script as an Environment= line stamped
+# on the keepalive job unit from the fleet tier cascade (the #1383
+# mechanism — a scheduler env is closed, so the fleet-tier .env alone
+# never arrives here). NON-BLOCKING rc-wise AND clock-wise (background
+# emit, pid-guarded); the view sampler keeps rendering pixels and
+# classifies NOTHING — the recorded half lives here, the sibling's
+# two-truths split stays forsworn. The live tick emits bot.heartbeat only
+# (session-up-ness is derivable from heartbeat presence); the dead-session
+# path emits the one fact heartbeat cannot carry, bot.session_up=false,
+# and NO heartbeat — no pane was classified, and a fabricated verdict is
+# the lie this lane exists to kill. The SKIP paths (boot in flight,
+# restart race) deliberately emit nothing — transitional, the next tick
+# records (unpinned, disclosed).
+plane_presence_samples() {
+    local verdict="$1"   # BUSY|IDLE|UNKNOWN, or DOWN (the dead-session fact)
+    # THE arming predicate (lib-common) — a hand-rolled copy here re-forked
+    # what #1384 consolidated, with silent identity skips the ruling calls
+    # drift (r2 gauntlet). plane_armed is if-safe under set -e.
+    if ! plane_armed keepalive --require-fleet --require-bot; then
+        return 0
+    fi
+    # No pileup on a wedged rung (r2 gauntlet, probed): the cold-CLI rung
+    # has no wall-clock bound and keepalive-all sweeps ticks SEQUENTIALLY —
+    # one D-state stall must never wedge the whole fleet's watchdog. The
+    # emit runs in a BACKGROUND subshell, and a tick whose previous emit is
+    # still in flight SKIPS: presence tolerates a gap, the reader types
+    # staleness. rc-wise the tick never depends on the record; disclosures
+    # land in keepalive.log, not the journal.
+    # The claim is honored only while FRESH (2 ticks): kill -0 alone let a
+    # RE-USED pid block a bot indefinitely — proven live within minutes of
+    # deploy (takahashi: pidfile held 1543, occupied by an unrelated
+    # long-lived process; zero heartbeats across every sweep while eight
+    # siblings recorded). A stale claim means wedge-or-reuse and both want
+    # one new emit; pileup stays bounded at ~one background proc per 120s.
+    local pidf="$BOT_DIR/data/.plane-presence.pid" prev
+    prev="$(cat "$pidf" 2>/dev/null || true)"
+    if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null \
+       && marker_age_within "$pidf" $(( ${KEEPALIVE_EMIT_TIMEOUT_S:-110} + 10 )); then
+        return 0
+    fi
+    local fleet_esc subj payload
+    fleet_esc="$(json_escape "$FLEET_NAME")"
+    subj="$(json_escape "bot:$FLEET_NAME/$BOT_NAME")"
+    if [ "$verdict" = "DOWN" ]; then
+        payload='{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.session_up","value":false}'
+    else
+        # Session-up-ness is DERIVABLE from heartbeat presence (r2 volume
+        # fold: a per-tick session_up=true row doubled the lane for a fact
+        # the heartbeat already carries; only the dead path keeps the
+        # explicit false). marker_age_s clamps at 0: an RTC-skewed future
+        # mtime (this estate boots with a stale clock) otherwise records a
+        # huge negative age readers would mis-sort — age has floor
+        # semantics, not signed-delta semantics.
+        local agefrag="" m_epoch age
+        # `|| true` INSIDE the substitution (the #1460 rule): stat_mtime returns
+        # 1 for a bot that has made no tool call yet, and on bash 3.2 that fires
+        # the inherited ERR trap even under an `if` — a phantom script_error per
+        # tick, now a fleet event on the plane (B2 made it visible).
+        m_epoch=$(stat_mtime "$BOT_DIR/data/.last-tool-call" 2>/dev/null || true)
+        if [ -n "$m_epoch" ]; then
+            age=$(( $(date +%s) - m_epoch ))
+            if [ "$age" -lt 0 ]; then age=0; fi
+            agefrag=',"marker_age_s":'"$age"
+        fi
+        payload='{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.heartbeat","value":{"state":"'"$verdict"'"'"$agefrag"'}}'
+    fi
+    # The background emit is WALL-CLOCK BOUNDED (retro round): under a
+    # permanently wedged rung (the estate's documented D-state SD stall)
+    # an unbounded emit made "bounded pileup" a RATE, not a ceiling —
+    # ~720 stuck processes/day. The outer subshell reaps its emit at
+    # KEEPALIVE_EMIT_TIMEOUT_S (portable — macOS has no timeout(1)), so
+    # the in-flight claim self-expires and concurrency ceilings at ~1.
+    # The staleness window derives from the SAME knob (+10s), keeping the
+    # guard and the reaper coupled by construction rather than by twin
+    # constants.
+    local _eto="${KEEPALIVE_EMIT_TIMEOUT_S:-110}"
+    (
+        printf '%s' '{"events":[{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":'"$payload"'}]}' \
+            | plane_emit_events keepalive >>"$LOG" 2>&1 &
+        _w=$!
+        _i=0
+        while kill -0 "$_w" 2>/dev/null && [ "$_i" -lt "$_eto" ]; do
+            sleep 1
+            _i=$((_i + 1))
+        done
+        # kill the TREE, not the pipeline leader: $_w is the backgrounded
+        # FUNCTION subshell, whose real work is grandchildren (plane-emit.sh
+        # -> the cold CLI). A bare kill -9 "$_w" reaped the leader and
+        # ORPHANED the wedged CLI alive — the whole point defeated (found by
+        # observing five survivors after the pin "passed"; the recursive
+        # form is portable where macOS bash 3.2 has no pkill -g / setsid).
+        _kill_tree() {
+            local _p="$1" _c
+            # `|| true` INSIDE the substitution: pgrep exits 1 at every leaf of
+            # every reap (a process with no children is the terminating case,
+            # not a failure), and on bash 3.2 that rc fires the inherited ERR
+            # trap from a for-word substitution even though set -e does NOT
+            # exit there — so every tick of every armed bot logged a phantom
+            # `script_error` ("non-zero exit at line 155", the funcdef line
+            # bash 3.2 reports for in-function failures) while nothing failed.
+            # 87/day fleet-wide, measured 2026-09-02; the alphabetical skew
+            # (damodaran 77) was launchd killing later bots' reapers at sweep
+            # teardown before they could log — suppression, not health.
+            for _c in $(pgrep -P "$_p" 2>/dev/null || true); do _kill_tree "$_c"; done
+            kill -9 "$_p" 2>/dev/null || true
+        }
+        _kill_tree "$_w"
+    ) >/dev/null 2>&1 &
+    printf '%d' $! > "$pidf" 2>/dev/null || true
 }
 
 # send_reload_command <slash-command>
@@ -218,6 +326,7 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         emit_keepalive_event "SKIP" "boot in flight (unit mid-start), not restarting"
         exit 0
     fi
+    plane_presence_samples DOWN
     restart_bot_service "session dead"
     exit 0
 fi
@@ -289,14 +398,12 @@ UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 case "$state" in
     BUSY)
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
-        emit_keepalive_event "BUSY" "active processing"
         rm -f "$UNKNOWN_COUNTER"
         # Clear idle marker — bot is actively working
         rm -f "$BOT_DIR/data/.idle"
         ;;
     IDLE)
         echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
-        emit_keepalive_event "IDLE" "at prompt"
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"
@@ -331,3 +438,4 @@ case "$state" in
         fi
         ;;
 esac
+plane_presence_samples "$state"

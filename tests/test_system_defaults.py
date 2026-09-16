@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from textwrap import dedent
 
@@ -106,11 +107,11 @@ class TestMergeSystemIntoDefaults:
         assert result["hooks"]["PreToolUse"][0]["command"] == "sys.sh"
 
     def test_fleet_overrides_observability(self):
-        system = {"observability": {"pulse_interval": 300, "reap_days": 7}}
+        system = {"observability": {"pulse_interval": 300, "activity_stuck_threshold": 1800}}
         defaults = {"observability": {"pulse_interval": 600}}
         result = _merge_system_into_defaults(system, defaults)
         assert result["observability"]["pulse_interval"] == 600
-        assert result["observability"]["reap_days"] == 7
+        assert result["observability"]["activity_stuck_threshold"] == 1800
 
     def test_fleet_non_hook_keys_win(self):
         system = {"model": "sonnet"}
@@ -219,9 +220,10 @@ class TestLoadFleetSystemDefaults:
         fleet, merged = load_fleet(fleet_path)
         bot = fleet.bots["worker"]
         assert bot.observability.pulse_interval == 300
-        assert bot.observability.reap_days == 7
         assert bot.observability.activity_stuck_threshold == 1800
-        assert bot.observability.dispatch_deadline == 1800
+        # the tier's default is a DAY since chunk M-A (#1481: a deadline by default
+        # so the watchdog and the re-check have a clock); 1800 was the pre-M value
+        assert bot.observability.dispatch_deadline == 86400
 
     def test_fleet_hooks_dedup_with_system(self, tmp_path):
         root = tmp_path / "claudlobby"
@@ -311,7 +313,7 @@ class TestLoadFleetSystemDefaults:
         # Fleet override wins
         assert merged["observability"]["pulse_interval"] == 600
         # System default fills in missing
-        assert merged["observability"]["reap_days"] == 7
+        assert merged["observability"]["activity_stuck_threshold"] == 1800
 
     def test_fleet_config_has_system_defaults(self, tmp_path):
         root = tmp_path / "claudlobby"
@@ -453,6 +455,12 @@ class TestSystemDefaultsFile:
         assert "host" in raw
         d = raw["defaults"]
         assert "hooks" in d
+        # the #1402 telegram-carrier hooks ship in the package defaults —
+        # the composed-render probe was session-only, this pins the entries
+        flat = json.dumps(d["hooks"])
+        assert "plane-telegram-out.sh" in flat
+        assert "plane-telegram-in.sh" in flat
+        assert "mcp__plugin_telegram_telegram__reply" in flat
         assert "observability" in d
         assert "jobs" in d
         assert "fleet-pulse" in d["jobs"]
@@ -711,6 +719,7 @@ _ALL_JOB_NAMES = {
     "reload-fleet",
     "weekly-worker-restart",
     "data-sweep",
+    "task-recheck",
 }
 
 
@@ -1083,6 +1092,10 @@ class TestDormantManifest:
         entries = [
             line for line in manifest.splitlines() if line and not line.startswith("#")
         ]
+        # task-recheck left this list in chunk N — the reaction the target
+        # workflow is for ships enrolled. weekly-worker-restart stays: it
+        # bounces live worker sessions, and long-running context is the thing
+        # this system exists to keep.
         assert entries == ["com.test.weekly-worker-restart"]
         # Composed-but-dormant: the units are still emitted (F4 lock).
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()
@@ -1101,6 +1114,6 @@ class TestDormantManifest:
         entries = [
             line for line in manifest.splitlines() if line and not line.startswith("#")
         ]
-        assert entries == []
+        assert entries == []   # the enrolled one is gone from the list
         # Still composed, of course.
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()

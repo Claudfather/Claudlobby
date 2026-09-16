@@ -79,7 +79,7 @@ Required for MCP servers (most use `npx`). Install via [nvm](https://github.com/
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.5/install.sh | bash
 source ~/.bashrc   # or restart your shell
 
-# Install and switch to the current LTS (floor: Node >=20)
+# Install and switch to the current LTS
 nvm install --lts
 nvm use --lts
 
@@ -224,10 +224,13 @@ Most MCP servers install on-demand via `npx` or `uvx`. Some need pre-installatio
 
 ### Home Assistant MCP
 
+This is an HTTP-type MCP entry (`library/mcp/homeassistant.json`) that connects straight to HA's
+own `/api/mcp/` endpoint — there's no server package to install or keep warm in the npx cache.
+
 ```bash
-# hass-mcp installs via uvx. Needs:
-# 1. HA long-lived access token from HA dashboard → Profile → Security
-# 2. HA must be accessible from Pi (usually http://localhost:8123)
+# Needs:
+# 1. HA long-lived access token from HA dashboard → Profile → Security → HA_TOKEN
+# 2. HA must be accessible from Pi (usually http://localhost:8123) → HA_URL
 ```
 
 ### NPX Cache — Critical Infrastructure
@@ -447,7 +450,7 @@ Two supported patterns on Linux. Pick the one that fits — both produce a worki
 # Compose the fleet first
 claudlobby --fleet <name> generate
 
-# Install cron entries (per-bot keepalive staggered, log rotation, disk monitor, daily creds-check)
+# Install cron entries (per-bot keepalive staggered, log rotation, fleet pulse, daily creds-check)
 lib/install-cron.sh --fleet <name>
 
 # Inspect without writing

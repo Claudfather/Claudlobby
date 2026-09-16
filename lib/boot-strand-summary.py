@@ -545,9 +545,10 @@ def _stratified(rows: list[dict], label: str) -> list[str]:
     into a single line: a change that shifts strands between the two strata
     while holding the total is invisible to the pooled rate."""
     out = []
+    known = [r for r in rows if r.get("retry_fired") is not None]
     for name, grp in (
-        ("retry_fired > 0", [r for r in rows if (r.get("retry_fired") or 0) > 0]),
-        ("retry_fired == 0", [r for r in rows if (r.get("retry_fired") or 0) == 0]),
+        ("retry_fired > 0", [r for r in known if r.get("retry_fired") > 0]),
+        ("retry_fired == 0", [r for r in known if r.get("retry_fired") == 0]),
     ):
         ks, n = _rate(grp)
         out.append(
@@ -571,7 +572,11 @@ def arm_block(rows: list[dict], arm: float | None) -> tuple[list[str], str, int,
     strands = [r for r in rows if r.get("outcome") == "strand"]
     clean = [r for r in rows if r.get("outcome") == "clean"]
     other = [r for r in rows if r.get("outcome") not in ("strand", "clean")]
-    retry_saves = [r for r in clean if r.get("retry_fired", 0) > 0]
+    retry_saves = [r for r in clean if (r.get("retry_fired") or 0) > 0]
+    # A null retry_fired is a boot whose plane could not be read at count time
+    # (F18 closure R2b-2): UNKNOWN, disclosed and kept out of both strata —
+    # never pooled into "the retry did not fire".
+    retry_unknown = [r for r in rows if r.get("retry_fired") is None]
     k, valid = len(strands), len(strands) + len(clean)
 
     out = [f"── arm {label} " + "─" * max(4, 56 - len(label))]
@@ -605,6 +610,11 @@ def arm_block(rows: list[dict], arm: float | None) -> tuple[list[str], str, int,
         )
     else:
         out.append("clean via #837 send_retry: 0 — no boot needed the retry")
+    if retry_unknown:
+        out.append(
+            f"send_retry UNKNOWN on {len(retry_unknown)} boot(s) — the plane could not be read"
+            " when the count was taken; excluded from both retry strata, never read as 0"
+        )
 
     # Mechanism slice (#843 readiness-tracking hypothesis): pane_send_verified
     # cannot retry before the input box exists, so strands should concentrate

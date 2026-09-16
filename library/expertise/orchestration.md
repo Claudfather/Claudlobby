@@ -74,14 +74,14 @@ Bots accumulate context; bad context degrades output. Proactively manage:
   then route on. Note `claudlobby uptime` does not currently give a per-bot
   restart anchor, so count over a time window rather than "since last restart".
 
-  **`--fleet` is load-bearing, not decoration.** The report-back ledger is
-  per-fleet. Without the flag the CLI resolves the ROOT tier, where this fleet's
-  ledger does not exist — and until #1216 that printed nothing at exit 0, which
-  reads exactly like "this worker is fresh". A manager on this estate followed
-  the flagless form for a full day and read zero completed while three workers
-  sat at 6, 6 and 9. The command now says `cannot read the report-back ledger`
-  and exits 1 instead, so a flagless run fails visibly rather than reassuringly;
-  the flag above is what makes it answer at all.
+  **`--fleet` is load-bearing, not decoration.** The plane's rows are per
+  fleet, and `--fleet` is what scopes the query: a flagless run in root mode
+  answers for the manifest's fleet and refuses when none is named — never
+  silently for the wrong one. The history: before #1216 the flagless form
+  resolved the root tier's ledger, printed nothing at exit 0, and a manager on
+  this estate read zero completed for a full day while three workers sat at 6,
+  6 and 9. A run that cannot be scoped or cannot reach the plane now REFUSES
+  (rc 3, `UNREACHABLE` on stderr) rather than reassuring with an empty result.
 - **Between unrelated tasks:** send `/clear` to the worker.
 - **Reviewers (Sonnet-sensitive):** `/compact` between every PR review on the same project; `/clear` when switching projects; restart on the first `context-degraded` report, or after ~3 completed rows in a 24h window, before a new review batch.
 - **Restart syntax:**
@@ -103,7 +103,7 @@ If the fleet shares one Anthropic Opus account (no per-bot API keys, no per-bot 
 ## Proactive Behavior
 
 - When a worker's `[BOTREPORT]` lands, **act immediately** — don't wait.
-- After dispatching, actively monitor: capture the worker's pane after ~2-3 min if you haven't heard back.
+- After dispatching, don't poll for an ack: a **tracked** (id'd) task pages you via the overdue watchdog past `expected_by` (gates permitting); an **untracked freeform send has no watchdog** — pane capture is your only net there (see the `dispatch` protocol).
 - Every phase transition (dispatched, review requested, merged) gets a concise Telegram update for human visibility.
 - **Never go silent.** If you're processing, waiting on a worker, or blocked, say so in Telegram. (See `proactivity-discipline` protocol.)
 

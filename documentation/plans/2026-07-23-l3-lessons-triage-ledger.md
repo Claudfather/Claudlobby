@@ -1,15 +1,25 @@
 ---
 title: "L3 Lessons Triage Ledger — library/lessons/ class verdicts"
 type: plan
-status: draft
+status: completed
 owner: chris
 tags: [ecosystem, claudron, knowledge, vault, migration, boundary, play:ecosystem]
 created: 2026-07-23
-updated: 2026-07-23
+updated: 2026-08-28
 links: ["Claudfather/Claudron L3 plan 06-l3-corpus-return.md", "#509"]
 ---
 
 # L3 Lessons Triage Ledger
+
+> **✅ COMPLETED (2026-08-28 docs audit).** Executed in the same PR that authored this ledger
+> (#683, "L3 — Return the corpus"). Verified against the current tree: `library/lessons/README.md`
+> carries the FROZEN banner and confirms the vault migration; `claudlobby/commands/lessons_migrate.py`'s
+> `REFERENTIAL_LESSONS`/`BEHAVIOR_LESSONS` maps match this ledger's verdicts exactly (22 + 3 = 25
+> notes, all still present on disk as the non-vault fallback); `library/protocols/messaging-channel-discipline.md`
+> exists. Also confirmed as landed, beyond the original consumption epic's planned scope, in EPIC
+> #509's 2026-07-24 closing comment. This ledger's per-note verdicts remain the authoritative
+> record — `tests/test_lessons_migrate.py` keeps the machine mirror in sync with it — so the body
+> below is left as originally written.
 
 The PR-reviewable artifact for L3 ("Return the corpus"). One class verdict per
 `library/lessons/*.md` note, plus inventory rows for the other library
