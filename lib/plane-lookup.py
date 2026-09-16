@@ -157,6 +157,23 @@ def _by_assignment(a) -> int:
     return _with_plane(a.root, fn)
 
 
+def _checkin_id(a) -> int:
+    """`--checkin-id ck_<32hex>`: print the id when a `checkin_decision` system
+    event carries `source_ref = checkin:<id>` (manager check-in spec §7), else
+    nothing plus a stderr note -- the `--task-id` contract: a stamped id is not
+    proof the row exists, the caller says so and carries on. Unreachable = rc 3."""
+    def fn(pr, conn):
+        row = conn.execute(
+            "SELECT 1 FROM events WHERE kind = 'system' AND event = 'checkin_decision'"
+            " AND source_ref = ? LIMIT 1", (f"checkin:{a.checkin_id}",)).fetchone()
+        if row is None:
+            print(f"plane-lookup: no checkin_decision with id {a.checkin_id}", file=sys.stderr)
+            return 0
+        print(a.checkin_id)
+        return 0
+    return _with_plane(a.root, fn)
+
+
 def _escalated(a) -> int:
     """`--escalated --fleet F`: `<assignment_id> <task_id> <by> <occurred_at>
     <question>` per OPEN escalation, oldest first, TAB-separated so a question
@@ -194,6 +211,9 @@ def main(argv=None) -> int:
     ap.add_argument("--any-state", action="store_true",
                     help="--by-assignment: match a CLOSED assignment too (the refusal reads this to"
                     " name the sha key of a row it will not act on)")
+    ap.add_argument("--checkin-id", default=None,
+                    help="print the id when a checkin_decision carries source_ref checkin:<id>, else"
+                    " nothing + a note (dispatch-task.sh --checkin asks before it joins)")
     ap.add_argument("--events", action="store_true",
                     help="print the fleet's events as legacy JSONL rows, oldest first (needs --fleet;"
                     " --since <iso> bounds; --bot / --type filter) — Phase B, the bot-events ledger from the plane")
@@ -218,6 +238,8 @@ def main(argv=None) -> int:
         print("plane-lookup: --root is empty (CLAUDLOBBY_ROOT unset?) — unreachable",
               file=sys.stderr)
         return 3
+    if a.checkin_id:
+        return _checkin_id(a)
     if a.escalated:
         if not a.fleet:
             ap.error("--escalated needs --fleet")
