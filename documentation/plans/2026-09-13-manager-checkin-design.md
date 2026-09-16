@@ -368,7 +368,7 @@ since the F18 closure; `PLANE_EMIT_DISABLED=1` (the harness exemption) is the on
 thing that silences it, and the door says so at rc 3 — for this door the record
 IS the action. Subject = the manager.
 
-`detail` (schema 1 — what one hand-equipped manager can produce in chunk 1; later
+`detail` (schema 1 — what one hand-equipped manager can produce in PR 1; later
 chunks ADD fields and enum values as schema 2, never rewrite):
 
 ```json
@@ -414,9 +414,9 @@ record untrustworthy). `dispatch` → `dispatch-task.sh --checkin <ck_id>` appen
 `checkin_dispatch` system event `{checkin_id, assignment_id, work_item_id, task_id}`
 to the SAME batch as the assignment (the `--supersedes` precedent; the `Assignment`
 payload is strict and cannot carry the id). `propose` → `checkin-propose.sh
---checkin` stamps `checkin_id` into `task_proposed` (chunk 1d). `ask` → the
+--checkin` stamps `checkin_id` into `task_proposed` (the intake feature build). `ask` → the
 manager's Telegram reply, recorded by the outbound hook as a communication from the
-manager's alias; the outcome join (chunk 3) correlates asks to decisions by alias +
+manager's alias; the outcome join (PR 3) correlates asks to decisions by alias +
 time window, and a `checkin-ask.sh` door is added only if that join proves
 ambiguous. This is the `decision` seam the v2 schema reserved for Phase 5
 (`observable-plane-design-v2.md` §4, §7), used for the first time. The trigger's own
@@ -582,7 +582,7 @@ the INSTRUCT-evidence test line) are not needed. The fourth — **a manager arm 
 `naked-bot-observe.py`** — *is* needed, and not as skill machinery: the gate
 composes no manager today (`naked-bot-observation-gate.md:294-296`), so a
 role-scoped default is invisible to `--baseline` until an arm exists. It lands in
-chunk 5 before the overlay is populated (§12).
+PR 4 before the overlay is populated (§12).
 
 **Leaf managers, not every manager.** `ROLE_MANAGER` is true for every member of
 `manager_bots()` — including a coordinator whose reports are themselves managers
@@ -636,146 +636,73 @@ check-in turn is manager activity, and a loop that dispatches nothing must not b
 able to raise the number it is judged by (cycle-3 B8). The same discipline as the
 routing spike: numbers, not vibes.
 
-## 12. Rollout — the ladder the repo mandates (re-sequenced 2026-09-15)
+## 12. Build — one series, one deploy, then the default (re-cut 2026-09-16)
 
 Cycle 1 of `/ironclad` on the first chunk-1 plan (PR #1550) returned 12 blockers,
-six of them the same finding: the draft shipped an estate-wide behaviour change (the
-cadence retirement) and a skill whose main actions its own rules made unreachable,
-while pulling forward mechanisms (equipment linking, the leaf-manager role, the
-intake store) whose only consumers are four chunks away. The ladder below is the
-adversarial, YAGNI re-cut: **each piece lands in the chunk that consumes it, and
-nothing composes differently on the estate until the canary has earned it.**
+six of them the same finding: the draft shipped an estate-wide behaviour change
+while pulling forward mechanisms whose only consumers were four chunks away. The
+five-chunk canary ladder that followed — with a pre-registered bar, a control fleet,
+`T0` readings and a burn-in verdict — was the canary-rollout posture applied to the
+whole loop. On 2026-09-16 the operator ruled it away: *"Do we believe in what we're
+building? Then let's get there."* The loop is built as ONE series of four PRs, each
+through the mechanical gauntlet only (committed-code mutants, the two-leg full-suite
+gate, CI, admin-merge; no review cycles), deployed once, and made the default after
+one day of looking at one manager. **Each piece still lands in the PR that consumes
+it, and nothing composes differently on the estate until PR 4.**
 
-1. **The record and the run** (plan: `2026-09-14-manager-checkin-chunk1-contract.md`,
-   cycle 4) — the schema-1 contract (with the losers list) + `checkin-record.sh`;
-   `dispatch-task.sh --project` (the well-defined bar; fixes the measured 0/374)
-   and `--checkin` (the join row, atomic with the assignment); the `tg-post.sh`
-   alias fix; the two severity lines; `claudlobby checkins` (rows, `--last`); the
-   `/checkin` skill with actions `dispatch | ask | nothing` and a per-input degraded
-   rule. **After merge and pull** the operator equips the canary leaf manager by
-   hand (`skills: [checkin]`), a dry run proves the skill
-   text, and **one real hand-fired `/checkin` lands the first row** — the deploy's
-   positive control, pasted on the PR (cycle 5: the join id is looked up, not only
-   shape-checked, and the control joins on the recorded id). Pre-change baselines (worker-active %,
-   manager-active % and fleet-active % from one CTE; the fleet's outbound Telegram
-   volume split by carrier — `telegram-bridge`, the reply hook, AND `telegram-tgpost`,
-   the door an injected check-in's `ask` posts through — all fleet-scoped,
-   instant-compared) recorded in the PR. **No restart in this chunk** (cycle 8): a
-   skill is read per use, and the protocol — the one thing a restart would have
-   bought — lands in chunk 2 with the trigger it governs; the equip instant is the
-   pre-treatment boundary `T0`.
-2. **The trigger** — `manager-checkin.sh`, the fleet job, the `Switch` row, and
-   the `validate-bot-change.sh` extension (throwaway manager → idle → `/checkin`
-   injected → `checkin_decision` lands). The trigger gates on the composed skill
-   symlink, which by-hand declaration already scopes to the canary manager. **The
-   `checkin.md` protocol lands here** (additive, no `requires:`, no self-fire clause;
-   its preamble's precedence sentence quiets the older cadence rules where it
-   composes beside them — cycle 8), and the canary manager is restarted once after it
-   is equipped — one bot, the rolling-restart posture — so the composed protocol is in
-   context; that restart is the composed-carrier rehearsal chunk 1 deliberately does
-   not perform. From here the canary manager checks in on the beat — **and stays on it through chunks 3
-   and 4, so no reading taken after this instant is pre-treatment**; the trigger's
-   arming instant is recorded as a second boundary the way chunk 1 records `T0`.
-   The `dispatch.md` protocol's `project:` field-table row and recipe flag land here
-   too (composed text rides this chunk's restart, never chunk 1's pull — cycle 9).
-   Prior art the trigger consumes or retires by name: the shipped `autonomous-sprint`
-   skill (the same read-mission → pick → dispatch surface; cycle 9), `lib/sprint-trigger.sh` (the
-   shipped schedule-driven idle-manager nudge, with its busy-skip gate) and
-   `lib/briefing-trigger.sh` (a composed per-(bot,slot) timer firing a slash
-   command). Also the `BOT_NAME` residue the
-   trigger's timer env exposes: `keepalive.sh:102`'s heartbeat subject and
-   `plane_armed --require-bot` (`lib-common.sh:510-516`) still key on `BOT_NAME`
-   where every other alias uses `BOT_ID` — moved here, with the trigger's harness to
-   prove the presence join still holds.
-3. **The read door, whole** — `checkins --summary` and `--limit`, SQL-bound
-   `--since`, the outcome join (dispatch via `checkin_dispatch`; asks by alias +
-   time window, or a `checkin-ask.sh` door if that proves ambiguous), the panel seam.
-4. **Canary — the engineering fleet** (ruling 13). Arm the job on that fleet;
-   the fleet declares `checkin` in its `defaults.protocols`, so every bot in it
-   composes the new protocol, whose preamble governs where it composes beside an
-   older cadence rule (F3, locked 2026-09-15: "retire those and make check-in the
-   beat", in chunk 5). Burn in ≥ 3 days; judge on `checkins --summary` (action
-   distribution, ask-rate, skip reasons, the `considered` lists), the
-   **worker-active delta** (the headline) with the manager-active and fleet-active
-   deltas beside it, **and the outbound-Telegram delta by carrier** (`telegram-bridge`
-   + `telegram-tgpost`) against the chunk-1 baselines **anchored at `T0` and never
-   superseded** — a re-take before arming is a secondary figure, labelled as carrying
-   every check-in fired since `T0` (the manager has been on the beat since chunk 2,
-   so it is not a baseline) — and, beside the activity deltas, a closure measure: the
-   completion rate of `checkin_dispatch`-joined dispatches through chunk 3's outcome
-   join, so the verdict is not an activity number the loop's own dispatch volume
-   inflates, grouped by the project's declared tier — read from `projects.yaml` by the
-   work item's `project_key` at judgment time; the rationale's tier mention is the
-   manager's weighing, not the SSOT (the north star's rigor clause; `project_key` is
-   first-class on the work item).
+1. **PR 1 — the record and the doors and the skill** (plan:
+   `2026-09-14-manager-checkin-chunk1-contract.md`) — the schema-1 contract (with the
+   losers list) + `checkin-record.sh`; `dispatch-task.sh --project` (the well-defined
+   bar; fixes the measured 0/374) and `--checkin` (the join row, atomic with the
+   assignment); the `tg-post.sh` alias fix; the two severity lines; `claudlobby
+   checkins` (rows, `--last`, `--bot`, `--since`, `--raised`, `--json`); the `/checkin`
+   skill with actions `dispatch | ask | nothing` and a per-input degraded rule.
+   **Deploys inert**: no fleet declares the skill; a skill symlink is live the instant
+   it lands (`fleet-update-lifecycle.md:32,45`) but nothing injects it yet.
+2. **PR 2 — the trigger and the protocol** — `manager-checkin.sh`, the fleet job, the
+   `Switch` row, and the `validate-bot-change.sh` extension (throwaway manager → idle →
+   `/checkin` injected → `checkin_decision` lands); the trigger gates on the composed
+   skill symlink. The `checkin.md` protocol (additive, no `requires:`, no self-fire
+   clause; its preamble's precedence sentence quiets the older cadence rules where it
+   composes beside them) and the `dispatch.md` `project:` field-table row and recipe
+   flag. Prior art the trigger consumes or retires by name: the shipped
+   `autonomous-sprint` skill (the same read-mission → pick → dispatch surface),
+   `lib/sprint-trigger.sh` (the schedule-driven idle-manager nudge, with its busy-skip
+   gate) and `lib/briefing-trigger.sh` (a composed per-(bot,slot) timer firing a slash
+   command). Also the `BOT_NAME` residue the trigger's timer env exposes:
+   `keepalive.sh:102`'s heartbeat subject and `plane_armed --require-bot`
+   (`lib-common.sh:510-516`) still key on `BOT_NAME` where every other alias uses
+   `BOT_ID` — with the trigger's harness to prove the presence join still holds.
+   Deploys inert: no fleet arms the job.
+3. **PR 3 — the read door, whole, and the one deploy** — `checkins --summary` and
+   `--limit`, SQL-bound `--since` and the `subject_alias` bind, the outcome join
+   (dispatch via `checkin_dispatch` to the task's status so far; asks by alias + time
+   window, or a `checkin-ask.sh` door if that proves ambiguous). **Then the deploy**:
+   pull to the host; equip the canary leaf manager (ruling 13) with the skill, the
+   protocol and the trigger behind ONE restart (the rolling-restart posture — the
+   protocol is read at session start, the skill per use, the job at `setup-fleet`);
+   run the skill's dry run first, so a skill-text defect is caught before the beat
+   fires unattended; then read the first automated check-ins through the read door
+   for a day — **a look, not a measurement**: do they read the doors, decide one
+   action, record it, and act only through the doors? The first live `dispatch`
+   proves the join clause. If they look sane, PR 4 the same day.
+4. **PR 4 — the default** — `requires:` linking **with the grant union** (§10), the
+   `leaf-manager` role (with the cross-fleet direction of §10), the naked-bot gate's
+   leaf-manager arm, then the registry line that equips every leaf manager; the
+   cadence-retirement edits land estate-wide with a **grep-derived sweep** (`grep -i -E
+   'milestone|beacon|2.3 min|10.15 min|idle silence|never go silent|never licenses
+   silence|cadence and frequency'` over `library/`, case-insensitive — the live text
+   reads `Never go silent`, at `protocols/telegram-routing.md:29`,
+   `expertise/orchestration.md:108`, `protocols/comms-topology.md:74`,
+   `skills/lifecycle/SKILL.md:37`; the in-repo precedent is `a2a2210` followed by
+   `8386263`'s "six more residue sites") and a test that asserts over the grep, not a
+   hand list. The job's polarity is decided in that PR with an opt-out surface (no
+   silent switches). The estate deploy: `generate` every fleet, verify per fleet, a
+   rolling restart of the leaf managers only, then read the first automated check-ins
+   across fleets.
 
-   **Pre-registered bar (cycle 7; rewritten once in cycle 9, before any beat).**
-   The contrast is the check-in against whatever nudging already fired at each
-   manager at `T0` (chunk 1's baseline records those as counts), judged over a
-   window of at least 7 days that begins at chunk 2's arming instant, against the
-   `T0` readings that are never superseded. Five registered terms:
-
-   1. **Dose (the floor).** At least 3 `dispatch` decisions in the window, and the
-      number of check-ins fired in it (the exposure) reported with the verdict. Below
-      the floor no verdict but *inert* is reachable — a ratio over two dispatches is
-      noise.
-   2. **Closure.** Every `action: dispatch` decision row in the window (the DECISION
-      rows, never the join rows the judged agent writes) is classified through chunk
-      3's outcome join as `completed` · terminal-not-completed (`blocked`/`failed`,
-      which count AGAINST) · **still-open at the boundary** · **unjoined** (no
-      `checkin_dispatch` row, or one with a null `task_id` — an id-less dispatch is
-      shipped deliberately and can never resolve). The last two are COVERAGE:
-      reported, excluded from the denominator (a reader that cannot yet resolve must
-      not return the same thing as one that found a failure — `source_state.py`'s
-      rule). Resolvable = completed + terminal-not-completed; fewer than 3 resolvable
-      → *no-closure-measure*. The closure term passes when completed ≥ half of
-      resolvable.
-   3. **Activity (the headline, reported and gated).** The worker-active RATE
-      (worker-busy minutes / observed minutes; the manager excluded) in the window,
-      as a ratio to each fleet's own `T0` — the 28-day pre-window rate the chunk-1
-      baseline prints as `worker_active_pct_28d`, never one week's count (this
-      fleet's last three weeks read 280, 112 and 0 busy minutes; §1's 5.3% is two
-      fleets over 18 bots and is NOT this fleet's baseline). The two fleets are not
-      on one scale (the control ran at ~4× the canary's minutes when both were read),
-      so raw subtraction is ruled out (cycle-6 B3); the control's own post/`T0` ratio
-      is the host-wide drift. **There is no fixed multiple**: one of the three
-      untreated weeks already sits at 1.99× the pooled rate (280/7195 against
-      392/20086, measured 2026-09-15), so "2×" is reachable by variance alone
-      (cycle-8). Instead the baseline prints `worker_noise_floor_28d` — the largest
-      complete-week rate over the 28-day rate — and the activity term passes when the
-      canary's ratio exceeds BOTH the control's ratio AND that noise floor. Each
-      fleet's weekly series is printed beside its ratio. A `T0` rate of 0 on either
-      fleet leaves the ratio undefined → *no-baseline*. With no control fleet →
-      *uncontrolled*. Neither is a pass.
-   4. **Cost (reported; gated on the harmful side).** The manager-active rate as a
-      ratio to its own `T0`, for both fleets, from the same CTE (cycle-8: the
-      instrument already captured the spend and the bar never read it). A canary
-      whose manager-active ratio rose while its worker-active ratio did not clear the
-      noise floor is *net-negative*: the loop spent manager minutes and bought no
-      worker minutes.
-   5. **Verdicts and what each causes** (cycle-8: a registered metric with an
-      unregistered decision gets re-read after the fact by whoever wants the ladder to
-      continue). *working* = floor met AND closure passes AND activity passes AND not
-      net-negative → 1b/1c/1d proceed and chunk 5 ships the default, including the
-      estate-wide cadence retirement (F3). *inert* = the floor unmet, or activity
-      failing with closure passing → stop after chunk 4; `checkins` stays as the
-      inspect door; the next hypothesis is named in writing before any further chunk.
-      *harmful* = activity passing with closure failing (dispatch volume without
-      closure), or net-negative → un-equip the canary at once and retire the protocol
-      with it; no chunk 5. *no-closure-measure*, *uncontrolled*, *no-baseline* → not a
-      pass and not a stop: extend the window or fix the instrument, never proceed on
-      them. The bar does not settle mission relevance — two check-ins that dispatch
-      busywork and close it score as two that advance the goal; the `considered`
-      lists and rationales are read by hand beside the verdict, and that reading is
-      recorded with it. This pre-registration is the `ab-gating-rollout` protocol's
-      rule 1 applied after merge (the effect cannot exist until the doors land) on
-      the one production manager the `canary-rollout` protocol asks for. Rows the
-      operator hand-injects between chunks 1 and 2 land before the window and are
-      NOT dose; whether that interval gets a one-way early look at the arming
-      instant (can stop, never pass) is the chunk-1 plan's fork F6 (cycle 9).
-
-**After the canary, as its evidence allows** (each keeps its label for
-cross-reference):
+**After the loop is live, as feature builds of their own** (each keeps its label for
+cross-reference; none gates on a verdict):
 
 1b. **Focus** (§8c) — `focus_declared`, `lib/focus-declare.sh`, the empirical
    derivation, `claudlobby focus`; the two focus fields join `inputs_seen` as
@@ -788,24 +715,10 @@ cross-reference):
    by the door — a count of `task_proposed` rows per `checkin_id`, never prose),
    `dispatch-task.sh --work-item` (looking the id up, as `--supersedes` does), the
    proposals projection and `checkins --proposals`, the `propose` action.
-5. **Default** — `requires:` linking **with the grant union** (§10), the
-   `leaf-manager` role (with the cross-fleet direction of §10), the naked-bot gate's
-   leaf-manager arm, then the registry line; the cadence-retirement edits land
-   estate-wide with a **grep-derived sweep** (`grep -i -E 'milestone|beacon|2.3 min|10.15
-   min|idle silence|never go silent|never licenses silence|cadence and frequency'` over `library/`, case-insensitive — the live text reads `Never go silent`, and a case-sensitive pattern missed three of the four files named below (cycle-6 R12) — today that set includes
-   `protocols/telegram-routing.md:29`, `expertise/orchestration.md:108`,
-   `protocols/comms-topology.md:74`, `skills/lifecycle/SKILL.md:37`; the in-repo
-   precedent is `a2a2210` followed by `8386263`'s "six more residue sites") and a
-   test that asserts over the grep, not a hand list. The job's polarity stays
-   `OPT_IN` unless the burn-in argues otherwise.
 
-**Sequencing that matters for the canary:** a skill symlink is live the instant it
-lands (no restart, no canary window — `fleet-update-lifecycle.md:32,45`); the protocol
-lands at the next session start; the job at `setup-fleet`. Arm the job last.
-
-Each chunk goes through the standing gauntlet: review lenses, committed-code mutants,
-the two-leg full-suite gate (0 introduced by names *and* counts), CI, admin-merge,
-deploy, live verification, record.
+**Sequencing that matters:** a skill symlink is live the instant it lands (no
+restart — `fleet-update-lifecycle.md:32,45`); the protocol lands at the next session
+start; the job at `setup-fleet`. Arm the job last, behind the restart.
 
 ## 13. Testing
 
@@ -872,7 +785,7 @@ fleet-active delta.
    the delta vs. the previous check-in is the primary signal.
 7. ~~Does `propose` wait for the canary~~ **Settled (2026-09-15):** yes. The canary
    fleet's repos carry thousands of open issues, so the canary measures `dispatch`;
-   `propose` (the intake store, `planning.initiative`, chunk 1d) follows, and its
+   `propose` (the intake store, `planning.initiative`, the intake feature build) follows, and its
    real customers are the operator's thinner-backlog personal-project fleets — "some
    fleets on my personal projects would have less issues on their given domains."
    The canary's `ask`-for-tasks rows on an empty project are the evidence that
