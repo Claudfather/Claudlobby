@@ -3225,6 +3225,57 @@ PLPY
     rm -rf "$PL_ROOT" "$PL_SOCKDIR"
 fi
 
+# ===========================================================================
+# manager check-in chunk 1 -- the record door and the read door, end to end
+# on a real plane. Unit tests pin the contract and the envelopes; what only
+# running the real doors proves is that a decision LANDS as a row the read
+# door can join, through the real shim, under the identity env a manager
+# session carries (BOT_ID, FLEET_NAME), and that "not listed" is a real
+# negative -- the positive control runs FIRST and is gated on a non-empty id,
+# so a failed record or an unreachable read door can never read as a clean
+# answer (an empty grep pattern matches every line).
+# ===========================================================================
+echo ""
+echo "=== validate manager check-in: the decision lands and the read door joins it ==="
+CK_FLEET_H="valckf"
+val_plane_ready "$ROOT" "$CK_FLEET_H"
+ck_decision='{"prev_checkin_id":null,"inputs_seen":{"open_tasks":0,"stalls":0,"unacked":0,"issues_seen":null,"issues_considered":0,"knowledge_hits":0,"considered":[],"unavailable":["gh"]},"delta":{"tasks_opened":0,"tasks_completed":0,"stalls_appeared":0,"stalls_cleared":0,"issues_new":0,"messages_new":null,"held_pending":0},"action":"nothing","project_key":null,"rationale":"harness: nothing worth starting","raise":{"decided":false,"reason":"no delta","held":[]}}'
+ck_id=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckmgr" \
+    PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
+    bash "$VAL_REPO/lib/checkin-record.sh" 2> "$ROOT/ck-record.err" || true)
+printf '%s' "$ck_id" | grep -Eq '^ck_[0-9a-f]{32}$' && r=yes || r=no
+harness_check "checkin: the record door returns a ck_<32hex> id" "$r"
+ck_row=$(val_sql "$ROOT" "SELECT json_extract(detail,'\$.action') || '|' || severity || '|' || subject_alias FROM events WHERE kind='system' AND event='checkin_decision' AND source_ref='checkin:$ck_id'")
+[ -n "$ck_id" ] && [ "$ck_row" = "nothing|notice|bot:$CK_FLEET_H/valckmgr" ] && r=yes || r=no
+harness_check "checkin: ...and the decision LANDED as one actor-anchored notice row (source_ref checkin:<id>, BOT_ID alias)" "$r"
+# A REFUSAL, on purpose: the ERR-trap class fires only when the contract child
+# fails, so a block that feeds the door valid decisions alone can never see it
+# (cycle-5 B2). rc 2, nothing on stdout, and -- the line after -- no script_error
+# row with this door's name under detail.data.script.
+if printf '%s' '{"action":"coffee"}' | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckmgr" \
+    PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
+    bash "$VAL_REPO/lib/checkin-record.sh" > "$ROOT/ck-refuse.out" 2> "$ROOT/ck-refuse.err"; then ck_rc=0; else ck_rc=$?; fi
+[ "$ck_rc" = "2" ] && [ ! -s "$ROOT/ck-refuse.out" ] && r=yes || r=no
+harness_check "checkin: a malformed decision is refused at rc 2 with nothing printed" "$r"
+ck_err=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events WHERE kind='system' AND event='script_error' AND json_extract(detail,'\$.data.script') LIKE 'checkin-record%'")
+[ "$ck_err" = "0" ] && r=yes || r=no
+harness_check "checkin: ...and neither the record nor the refusal fired a script_error row (the ERR-trap class)" "$r"
+ck_other=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckother" \
+    PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
+    bash "$VAL_REPO/lib/checkin-record.sh" 2>> "$ROOT/ck-record.err" || true)
+# The CLI reaches the plane through <root>/lib/dispatch-overdue.py -- linked for
+# THIS scenario and removed after it (the #1481 neighbour rule at :652/:682).
+ln -sfn "$LIB_DIR" "$ROOT/lib"
+CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --json \
+    > "$ROOT/ck-read.out" 2> "$ROOT/ck-read.err" || true
+{ [ -n "$ck_id" ] && grep -q "$ck_id" "$ROOT/ck-read.out"; } && r=yes || r=no
+harness_check "checkin: the read door LISTS the decision (positive control, gated on a non-empty id)" "$r"
+CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --bot valckmgr --last --json \
+    > "$ROOT/ck-read2.out" 2> "$ROOT/ck-read2.err" || true
+rm -f "$ROOT/lib"
+{ [ -n "$ck_id" ] && [ -n "$ck_other" ] && grep -q "$ck_id" "$ROOT/ck-read2.out" && ! grep -q "$ck_other" "$ROOT/ck-read2.out"; } && r=yes || r=no
+harness_check "checkin: ...--bot --last returns THIS manager's newest row and not the other manager's (a real negative)" "$r"
+
 echo ""
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]
