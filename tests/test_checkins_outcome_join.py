@@ -222,3 +222,40 @@ def test_the_join_is_two_queries_not_one_per_row(root):
         assert len(joined) == 12
     finally:
         conn.close()
+
+
+def test_the_text_listing_names_the_dispatch_and_its_status(root, capsys):
+    _decision(root, "mgr", CK1, age_h=1, action="dispatch")
+    wi, asg, msg = _dispatched(root, CK1, task_id="t-shop-1", terminal="completed")
+    assert cmd.cmd_checkins(_Args(root)) == 0
+    out = capsys.readouterr().out
+    assert "t-shop-1" in out and "completed" in out and asg in out
+
+
+def test_the_text_listing_says_when_a_dispatch_decision_joined_nothing(root, capsys):
+    _decision(root, "mgr", CK2, age_h=3, action="dispatch")
+    _decision(root, "mgr", CK3, age_h=2, action="nothing")
+    _decision(root, "mgr", CK4, age_h=1, action="ask",
+              raise_={"decided": True, "reason": "a fork", "held": []})
+    assert cmd.cmd_checkins(_Args(root)) == 0
+    out = capsys.readouterr().out
+    assert out.count("no dispatch joined to this decision") == 1
+
+
+def test_an_id_less_dispatch_renders_as_id_less_not_as_blank(root, capsys):
+    _decision(root, "mgr", CK5, age_h=1, action="dispatch")
+    _dispatched(root, CK5, task_id=None, terminal="completed")
+    assert cmd.cmd_checkins(_Args(root)) == 0
+    out = capsys.readouterr().out
+    assert "→ id-less  completed [completed]" in out
+
+
+def test_the_dispatch_lines_are_inside_the_row_cap(root, capsys):
+    for i in range(12):
+        ck = f"ck_{i:032x}"
+        _decision(root, "mgr", ck, age_h=i + 1, action="dispatch")
+        _dispatched(root, ck, task_id=f"t-{i}", terminal="completed")
+    assert cmd.cmd_checkins(_Args(root)) == 0
+    out = capsys.readouterr().out
+    assert "showing the newest 10 of 12" in out
+    assert out.count("→ t-") == 10

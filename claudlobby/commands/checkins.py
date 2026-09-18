@@ -25,7 +25,6 @@ from ..plane.db import open_ro
 from ..plane.queries import (
     CHECKIN_ROWS_SQL,
     TASK_STATUS_SQL,
-    TERMINAL_TASK_EVENTS,
     checkin_dispatch_rows_sql,
     fleet_range_params,
 )
@@ -205,6 +204,13 @@ def cmd_checkins(args) -> int:
             print("      passed over: " + " · ".join(r["considered"]))
         if r["unavailable"]:
             print("      unavailable: " + ", ".join(r["unavailable"]))
+        for d in r["dispatches"]:
+            tid = d["task_id"] or "id-less"
+            when = f" ({d['terminal_at']})" if d["terminal_at"] else ""
+            print(f"      → {tid}  {d['outcome']} [{d['status'] or 'no assignment row'}]{when}"
+                  f"  {d['assignment_id']}")
+        if not r["dispatches"] and r["action"] == "dispatch":
+            print("      → no dispatch joined to this decision")
     if len(rows) > TEXT_ROW_LIMIT:
         # silent truncation reads as exhaustive coverage (brief.py's rows() rule)
         print(f"  ... showing the newest {TEXT_ROW_LIMIT} of {len(rows)} — full list in --json")
