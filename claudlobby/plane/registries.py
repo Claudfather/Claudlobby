@@ -97,6 +97,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "briefing_deferred": "notice",
     "briefing_dispatched": "notice",
     "briefing_failed": "notice",
+    # manager check-in (spec section 5): the beat fired, or it did not and why.
+    # Ratelimit and unreachable are deliberately NOT rows -- the first is
+    # derivable from checkin_triggered, the second cannot reach the plane.
+    "checkin_triggered": "notice",
+    "checkin_skipped": "notice",
     "audit_selected": "notice",
     "audit_dispatched": "notice",
     "audit_deferred": "notice",
