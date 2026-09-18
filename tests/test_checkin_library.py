@@ -211,3 +211,27 @@ def test_the_cadence_rules_are_untouched_in_this_chunk():
     # chunk 4 retires them with a grep-derived sweep; this chunk composes beside them
     assert "Idle silence is a bug" in (LIB / "protocols" / "proactivity-discipline.md").read_text()
     assert re.search(r"2.3 min", (LIB / "protocols" / "worker-lifecycle.md").read_text())
+
+
+# --- library/protocols/dispatch.md: the project: envelope field (PR2 Task 4) -----
+
+
+def test_the_dispatch_envelope_documents_the_project_field():
+    # chunk 1 shipped `dispatch-task.sh --project KEY`; the composed protocol
+    # text catches up here so a manager reading it sees the field it stamps
+    text = (LIB / "protocols" / "dispatch.md").read_text()
+    row = next((ln for ln in text.splitlines() if "`project:<key>`" in ln), None)
+    assert row, "no `project:<key>` row in the envelope key-value table"
+    flat = _flat(row)
+    assert "`projects.yaml` slug" in flat
+    assert "adds it to the envelope" in flat
+    assert "stamps `project_key`" in flat
+    assert "plane work item" in flat
+
+
+def test_the_tracked_dispatch_recipe_shows_the_project_flag():
+    text = (LIB / "protocols" / "dispatch.md").read_text()
+    line = next((ln for ln in text.splitlines()
+                 if "dispatch-task.sh" in ln and "--workstream <ws-id>" in ln), None)
+    assert line, "tracked-dispatch recipe line not found"
+    assert "--project <key>" in line

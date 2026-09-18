@@ -32,6 +32,7 @@ Manager → worker via the socket-aware `lib/dispatch.sh` helper (each bot runs 
 | `priority:<level>` | `high` / `normal` / `low` | Task priority |
 | `ref:<url>` | Issue or PR URL | Originating issue or context link |
 | `workstream:<ws-id>` | Workstream id | Registry entry this task advances |
+| `project:<key>` | `projects.yaml` slug | The project this work belongs to — the well-defined bar. `dispatch-task.sh --project <key>` adds it to the envelope and stamps `project_key` on the plane work item, so a task can be read back per project. |
 | `task:<task-id>` | `t-<epoch>-<hex4>` | **Task identity** — minted by `dispatch-task.sh`, recorded in the dispatch ledger. The worker MUST echo it in every `[BOTREPORT]` for this task (`report-back.sh --task <id>`): the overdue watchdog joins on it, and an id-less report can never close an id'd dispatch. |
 
 ### Always zone a timestamp
@@ -123,11 +124,11 @@ After dispatch: workers do NOT post a Telegram ack — their first id-carrying `
 
 ## Tracked dispatch & the overdue watchdog
 
-For tasks you want tracked, dispatch via `lib/dispatch-task.sh` instead of raw `send-keys` — and pass at least `--botcommand` (or any envelope flag: `--repo`, `--priority`, `--ref`, `--workstream`) so the send mints a task id:
+For tasks you want tracked, dispatch via `lib/dispatch-task.sh` instead of raw `send-keys` — and pass at least `--botcommand` (or any envelope flag: `--repo`, `--priority`, `--ref`, `--workstream`, `--project`) so the send mints a task id:
 
 ```bash
 $CLAUDLOBBY_ROOT/lib/dispatch-task.sh --botcommand <worker> "<task>"
-$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> <worker> "<task>"
+$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> --project <key> <worker> "<task>"
 ```
 
 ### Sending a peer a message that asks nothing
