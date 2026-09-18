@@ -488,3 +488,106 @@ def test_neither_nonzero_expecting_call_runs_in_a_command_substitution():
     assert "$(python3" not in text
     assert re.search(r"(?m)^\s*if declared_bots_strict\b", text)
     assert re.search(r"(?m)^\s*if python3 .*plane-lookup\.py", text)
+
+
+# ---------------------------------------------------------------------------
+# PR 2 chunk 2 — the composed fleet job (system.yaml defaults.jobs) and its
+# switch row (switches.py). These exercise the PYTHON composer, not the bash
+# trigger above: real load_fleet + compose_fleet_timers against a throwaway
+# fleet.yaml with the real lib/ symlinked in — never a hand-built FleetConfig
+# or a stubbed env_tiers resolver — the test_switches.py `_root` shape, so
+# what these prove is the shipped composer against the shipped system.yaml,
+# not a copy of either.
+# ---------------------------------------------------------------------------
+
+_CHECKIN_FLEET = """\
+fleet:
+  name: checkin-fleet
+  service_prefix: com.checkin
+  bots:
+    lead:
+      expertise: [orchestration]
+"""
+
+
+def _checkin_timers(tmp_path: Path, extra: str = "") -> Path:
+    """Compose a throwaway fleet's timers: real lib/, real load_fleet, real
+    compose_fleet_timers. `extra` is raw YAML appended under `fleet:` at its
+    own 2-space indent, for a `defaults.jobs.manager-checkin.enroll`
+    override (the TestTaskRecheckTimer shape in tests/test_composer.py)."""
+    from claudlobby.composer import compose_fleet_timers
+    from claudlobby.config import load_fleet
+    from claudlobby.paths import Paths
+
+    root = tmp_path / "r"
+    root.mkdir(parents=True, exist_ok=True)
+    if not (root / "lib").exists():
+        (root / "lib").symlink_to(REPO / "lib")
+    (root / "fleet.yaml").write_text(_CHECKIN_FLEET + extra)
+    fleet, merged = load_fleet(root / "fleet.yaml")
+    paths = Paths(root=root, fleet_dir=root)
+    return compose_fleet_timers(fleet, paths, merged)
+
+
+def _dormant_entries(timers_dir: Path) -> list[str]:
+    manifest = timers_dir / "DORMANT"
+    if not manifest.exists():
+        return []
+    return [
+        ln for ln in manifest.read_text().splitlines()
+        if ln and not ln.startswith("#")
+    ]
+
+
+def test_the_job_is_composed_but_dormant_on_a_fleet_that_did_not_ask(tmp_path):
+    timers = _checkin_timers(tmp_path)
+    assert (timers / "com.checkin.manager-checkin.service").is_file()
+    assert (timers / "com.checkin.manager-checkin.timer").is_file()
+    assert "com.checkin.manager-checkin" in _dormant_entries(timers)
+
+
+def test_arming_the_job_takes_it_out_of_the_dormant_manifest(tmp_path):
+    extra = (
+        "  defaults:\n"
+        "    jobs:\n"
+        "      manager-checkin:\n"
+        "        enroll: true\n"
+    )
+    timers = _checkin_timers(tmp_path, extra)
+    service = timers / "com.checkin.manager-checkin.service"
+    assert service.is_file()
+    # Not just present: composed from the REAL system.yaml job (script +
+    # fleet argument), not a fleet-only stub the override happened to create
+    # with no script of its own.
+    assert "lib/manager-checkin.sh checkin-fleet" in service.read_text()
+    assert "com.checkin.manager-checkin" not in _dormant_entries(timers)
+
+
+def test_the_unit_execs_the_trigger_with_the_fleet_as_its_argument(tmp_path):
+    timers = _checkin_timers(tmp_path)
+    service = (timers / "com.checkin.manager-checkin.service").read_text()
+    assert "lib/manager-checkin.sh checkin-fleet" in service
+
+
+def test_the_beat_is_fifteen_minutes(tmp_path):
+    timers = _checkin_timers(tmp_path)
+    timer = (timers / "com.checkin.manager-checkin.timer").read_text()
+    assert "OnBootSec=900" in timer
+    assert "OnUnitActiveSec=900" in timer
+
+
+def test_the_switch_row_is_opt_in_and_states_why():
+    from claudlobby import switches as sw
+
+    s = sw.by_key("manager-checkin")
+    assert s.polarity == sw.OPT_IN
+    assert s.why_opt_in
+    assert "model spend" in s.why_opt_in
+
+
+def test_the_arm_line_is_the_enroll_carrier():
+    from claudlobby import switches as sw
+
+    s = sw.by_key("manager-checkin")
+    assert "defaults.jobs.manager-checkin.enroll: true" in s.arm
+    assert "lib/setup-fleet" in s.arm

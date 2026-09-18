@@ -484,3 +484,23 @@ defaults:
       script: "$CLAUDLOBBY_ROOT/lib/task-recheck.sh"
       interval: 21600
       type: oneshot
+    # PR 2 of the manager check-in build (chunk 2): every 15 min, inject
+    # `/checkin` into an idle, EQUIPPED manager through the beat
+    # (lib/manager-checkin.sh, chunk 1) -- the same reaction task-recheck
+    # triggers on a schedule, but initiative-shaped rather than row-shaped:
+    # nothing needs to be overdue for a manager to check in.
+    #
+    # The per-bot gate is the composed `checkin` skill symlink, not this
+    # job -- a manager nobody equipped is skipped SILENTLY by the beat
+    # itself, so arming this fleet-wide costs nothing on a bot that was
+    # never given the skill. What DOES cost something: the beat INJECTS
+    # INTO A LIVE MANAGER SESSION AND SPENDS A MODEL TURN PER BEAT, on
+    # every equipped manager, every 15 minutes, whether or not there is
+    # anything worth checking in about. That is the reason this ships
+    # dormant -- the spend, not doubt about the behaviour -- and a fleet
+    # opts in with defaults.jobs.manager-checkin.enroll: true.
+    manager-checkin:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/manager-checkin.sh"
+      interval: 900
+      type: oneshot
