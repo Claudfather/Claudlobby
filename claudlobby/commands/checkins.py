@@ -341,8 +341,15 @@ def cmd_checkins(args) -> int:
         return 0
 
     if args.json:
+        # scope/limit disclosed here too -- the same Global Constraint
+        # --summary's --json envelope already honors: --limit is an
+        # operator's explicit bound, applied to BOTH surfaces and stated in
+        # the scope line, so a --json consumer must be able to tell "there
+        # were exactly N rows" from "there were more, cut to N" without
+        # falling back to the text listing
         print(json.dumps({"schema": 1, "fleet": fleet,
                           "since": since.isoformat() if since else None,
+                          "scope": scope, "limit": args.limit,
                           "checkins": rows}, indent=2))
         return 0
     if not rows:

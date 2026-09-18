@@ -74,10 +74,12 @@ def test_rows_are_newest_first_by_occurred_at_scoped_to_fleet_and_bot(root, caps
     _decision(root, "mgr", CK2, age_h=1, prev_checkin_id=CK1, action="dispatch", project_key="shop")
     _decision(root, "other", CK3, age_h=2)        # occurred order CK2 (1h), CK3 (2h), CK1 (5h)
     assert cmd.cmd_checkins(_Args(root, json=True)) == 0
-    rows = _out(capsys)["checkins"]
+    env = _out(capsys)
+    rows = env["checkins"]
     assert [r["checkin_id"] for r in rows] == [CK2, CK3, CK1]
     assert rows[0]["prev_checkin_id"] == CK1 and rows[0]["action"] == "dispatch" and rows[0]["bot"] == "mgr"
     assert rows[0]["raise"] == {"decided": False, "reason": "quiet"}
+    assert env["limit"] is None and "limit" not in env["scope"]      # no --limit given -- neither surface names one
     assert cmd.cmd_checkins(_Args(root, bot="mgr", json=True)) == 0
     assert [r["checkin_id"] for r in _out(capsys)["checkins"]] == [CK2, CK1]
 
@@ -182,6 +184,17 @@ def test_the_bot_filter_binds_in_sql_and_returns_what_python_returned(root, caps
 
     assert sql_filtered == python_filtered == [CK1, CK2]
 
+    # a bind degraded from equality to a prefix/LIKE match would still pass
+    # every assertion above (mgr/other share no prefix) -- mgr2 is a second
+    # manager whose name has mgr AS A PREFIX, so only an exact alias bind
+    # keeps the two apart
+    ck4 = "ck_" + "d" * 32
+    _decision(root, "mgr2", ck4, age_h=1)
+    assert cmd.cmd_checkins(_Args(root, bot="mgr", json=True)) == 0
+    assert [r["checkin_id"] for r in _out(capsys)["checkins"]] == [CK1, CK2]
+    assert cmd.cmd_checkins(_Args(root, bot="mgr2", json=True)) == 0
+    assert [r["checkin_id"] for r in _out(capsys)["checkins"]] == [ck4]
+
 
 def test_the_since_window_binds_in_sql(root, capsys):
     _decision(root, "mgr", CK1, age_h=30)
@@ -210,7 +223,10 @@ def test_limit_caps_both_surfaces(root, capsys):
     for i in range(12):
         _decision(root, "mgr", "ck_" + f"{i:032x}", age_h=i + 1)
     assert cmd.cmd_checkins(_Args(root, limit=3, json=True)) == 0
-    assert len(_out(capsys)["checkins"]) == 3
+    env = _out(capsys)
+    assert len(env["checkins"]) == 3
+    assert env["limit"] == 3                  # --json states the bound it applied, not just the count it left
+    assert "limit 3" in env["scope"]
     assert cmd.cmd_checkins(_Args(root, limit=3)) == 0
     text = capsys.readouterr().out
     assert text.count("surfacing:") == 3
