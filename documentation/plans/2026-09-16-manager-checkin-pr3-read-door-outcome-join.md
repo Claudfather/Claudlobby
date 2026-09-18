@@ -81,7 +81,7 @@ test instead of silently reading as still-running.
   join's one consumer is Python holding an open `open_ro` connection, so building it now ships a second copy
   of the SQL with no caller — the `--supersedes` dead-flag class (`lib/dispatch-supersede-hint.py:4-10`,
   #1032: built, never passed, retired zero rows in a week).
-- An operator-plane card or route (a feature, later; the seam is `collect_checkins`).
+- An operator-plane card or route (a feature, later — #1562; the seam is `collect_checkins`).
 - Anything evaluative: no bar, no closure rate, no verdict, no "healthy"/"inert" label.
 - The default (`requires:`, the `leaf-manager` role) — PR 4. `propose` / sprint / focus — their own chunks.
 - An `ask` outcome join (asks correlate by alias + time window; F4 defers that door until the correlation
