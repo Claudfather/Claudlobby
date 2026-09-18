@@ -18,6 +18,7 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | What's the bot doing right now? | tmux pane | `tmux -L "$(tmux_socket_for_bot runtime/bots/<bot>)" capture-pane -t <bot> -p \| tail -10` |
 | How long has the fleet been up? | Uptime metrics | `claudlobby uptime` |
 | What work completed? | The plane (the report door's task events) | `claudlobby report-back --since 24h` |
+| What did a manager decide at its last check-in, and why? | The plane (the check-in's `checkin_decision` rows) | `claudlobby checkins --bot <b> --last` |
 | Fleet-wide log search | Tail all logs | `lib/tail-fleet.sh --fleet <name> --grep ERROR` |
 | Last pulse snapshot | Pulse summary file | `cat state/pulse/pulse-summary.txt` |
 | Is the observable-plane kernel healthy? | Plane kernel status (db/spool/quarantine) | `claudlobby plane doctor` |

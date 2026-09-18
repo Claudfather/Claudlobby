@@ -62,6 +62,10 @@ printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" > "$URL_C
 # --- observable-plane record (PR-B T6; disclosed, non-blocking) -----------
 # Always on (PLANE_EMIT_DISABLED=1 is the one silencer) when this caller has a
 # bot identity (host timers have no FLEET_NAME/BOT_NAME and skip naturally).
+# The sender alias prefers BOT_ID -- the alias every plane door anchors on --
+# falling back to BOT_NAME for a hand caller (bot-sweep-cron.sh) that sets
+# only that; the plane_armed --require-bot gate below still keys on BOT_NAME,
+# which every session exports beside BOT_ID.
 # Intent BEFORE the send (F9); outcome-typed transmission after — telegram
 # carrier semantics per §7: API ok=true is carrier_accepted (acceptance, not
 # delivery), a rejected/empty response is failed.
@@ -78,7 +82,7 @@ if [ "$PLANE_ARMED" = "1" ]; then
   # printf interpolation: jq owns every escape (the F14 tab class included)
   # by construction. jq stays because it is already this script's hard dep.
   jq -nc --arg fleet "$FLEET_NAME" --arg msg_id "$PLANE_MSG_ID" \
-     --arg sender "bot:$FLEET_NAME/$BOT_NAME" \
+     --arg sender "bot:$FLEET_NAME/${BOT_ID:-$BOT_NAME}" \
      --arg dest "$CHAT_ID" --arg body "$MSG" \
      '{events:[{event_type:"communication",emitter:"tg-post",fleet:$fleet,payload:{msg_id:$msg_id,sender:$sender,recipient_raw:$dest,message_class:"notice",body:$body}}]}' \
     | plane_emit_events tg-post || true

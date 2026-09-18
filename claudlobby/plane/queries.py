@@ -910,3 +910,25 @@ def is_bare_events_scan(plan_detail: str, aliases: frozenset[str]) -> bool:
     # the bench gate targets.
     name = tokens[2] if tokens[1] == "TABLE" and len(tokens) >= 3 else tokens[1]
     return name in aliases and "USING" not in plan_detail
+
+
+# --- the manager check-in (manager check-in spec §7, §11) ---------------------
+# A check-in is ONE system event, `checkin_decision`, actor-anchored on the
+# manager, stamped source_ref checkin:<checkin_id>; the record is its detail
+# (schema 1). Ordered by WHEN IT HAPPENED (`occurred_at`, the clock every other
+# read of this door uses), ingest_seq as the tiebreak -- under the shim's spool
+# rung the two clocks diverge, and "the previous check-in" means the one that
+# happened last, not the one that landed last. The record is parsed ONCE by the
+# reader (plane-readers.py:886-907), never extracted column by column here: a
+# truncated detail is not JSON (detail_truncated=1 IS the parse guard) and the
+# row is still returned -- the door exists to show every decision, and dropping
+# the over-cap ones would hide exactly the records that most need looking at.
+# Binds: fleet, fleet.
+CHECKIN_ROWS_SQL = (
+    "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
+    " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq"
+    " FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'checkin_decision'"
+    f" AND {fleet_alias_range('e.subject_alias')}"
+    f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC"
+)

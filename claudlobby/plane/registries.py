@@ -120,6 +120,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # hook), moved off the retired transcript-digest-<date>.jsonl onto the
     # plane. Informational — the monitor's substrate, never an alert.
     "session_digest": "notice",
+    # manager check-in (spec §7): the decision record, and the join row a
+    # `dispatch-task.sh --checkin` appends to its batch. notice — the record
+    # IS the point; nothing here pages.
+    "checkin_decision": "notice",
+    "checkin_dispatch": "notice",
 }
 
 # ---------------------------------------------------------------------------

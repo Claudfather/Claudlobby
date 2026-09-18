@@ -21,6 +21,7 @@ from .core import (
     cmd_validate,
     cmd_warm_cache,
 )
+from .checkins import cmd_checkins
 from .cron_migrate import cmd_cron_migrate
 from .data_migrate import cmd_data_migrate
 from .env_migrate import cmd_env_migrate
@@ -195,6 +196,16 @@ def register_subparsers(sub) -> None:
     ws_sub.add_parser("list", help="List all workstreams (default)")
     pws_show = ws_sub.add_parser("show", help="Show one workstream by id")
     pws_show.add_argument("id", help="Workstream id (e.g. ws-ship-the-widget)")
+
+    pck = sub.add_parser("checkins", help="The manager check-in's decisions, newest first (plane read)")
+    pck.add_argument("--fleet", dest="checkins_fleet", default=None,
+                     help="fleet whose rows to read (default: the fleet.yaml this root names)")
+    pck.add_argument("--bot", default=None, help="one manager's rows only")
+    pck.add_argument("--since", default="7d", help="window: 24h, 7d, 30m, or an ISO instant (default 7d)")
+    pck.add_argument("--last", action="store_true", help="only the newest row, ignoring --since")
+    pck.add_argument("--raised", action="store_true", help="only the rows that surfaced to the operator (raise.decided) — the ask count")
+    pck.add_argument("--json", action="store_true", help="machine-facing envelope")
+    pck.set_defaults(func=cmd_checkins)
 
     # The task loop's operator door (chunk M-A, #1481). A subcommand group from
     # the start, because M's other verbs land beside `nudge` rather than as

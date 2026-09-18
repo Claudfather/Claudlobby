@@ -1,0 +1,168 @@
+# tests/test_checkin_library.py
+"""The /checkin skill (spec §6) is whole, is coupled to its doors by name and to
+the contract by key, and its grants MATCH the command lines it writes (permissions-model.md:48-52: a space is a word boundary;
+a pipeline is matched per subcommand) and contain no forbidden wildcard
+(claudron-integration.md:29; boundary Invariant 5)."""
+
+import fnmatch
+import importlib.util
+import json
+import re
+import shutil
+from pathlib import Path
+
+from claudlobby.config import load_fleet
+from claudlobby.loader import parse_frontmatter
+from claudlobby.paths import Paths
+from claudlobby.status import BotStatus, format_json
+from tests.conftest import install_real_template
+
+REPO = Path(__file__).resolve().parent.parent
+LIB = REPO / "library"
+SKILL = LIB / "skills" / "checkin" / "SKILL.md"
+
+
+def _flat(text: str) -> str:
+    """Whitespace-collapsed: prose and code spans wrap at ~85 columns, and a
+    needle that straddles a wrap must still be found (cycle-3 B5, R7)."""
+    return " ".join(text.split())
+
+
+DOORS = ["claudlobby checkins --bot $BOT_ID --last --json", "claudlobby checkins --bot $BOT_ID --since 7d --raised --json",
+         "claudlobby brief --bot $BOT_ID --json", "claudlobby status --json", "claudron lookup --limit 5", "gh issue list",
+         'bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<\'EOF\'', 'ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<\'EOF\'', '--checkin "$ck"',
+         'ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" --dry-run <<\'EOF\'', ') && claudlobby checkins --bot $BOT_ID --last --json',
+         "lib/dispatch-task.sh", "--checkin", "--project", "lib/tg-post.sh", "## Projects", "## Fleet Mission",
+         "pane_state", "issues_seen", "DRY-RUN", "checkins[0]", "unavailable"]
+CONTRACT = REPO / "lib" / "checkin-contract.py"
+_spec = importlib.util.spec_from_file_location("checkin_contract", CONTRACT)
+cc = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cc)
+
+
+def test_the_record_template_carries_every_contract_key():
+    # the here-doc is the model's only example of the contract; a dropped key would refuse
+    # every real check-in at rc 2 and the fallback would keep writing stub rows (cycle-8 devex)
+    text = SKILL.read_text()
+    record = re.search(r"```bash\nck=\$\(bash \"\$CLAUDLOBBY_ROOT/lib/checkin-record.sh\" <<'EOF'\n(.*?)\nEOF", text, re.S).group(1)
+    for key in (*cc.INPUTS_COUNTS, *cc.INPUTS_LISTS, *cc.DELTA_COUNTS, "prev_checkin_id", "project_key", "rationale", "decided", "reason", "held"):
+        assert f'"{key}"' in record, f"the RECORD template lost {key}"
+
+
+def test_the_roster_door_still_types_an_unobserved_worker_as_null():
+    # the skill's dispatch gate reads pane_state null as UNOBSERVED; status.py writes
+    # `bs.pane_state or None` over a dataclass default of "" -- pin it (cycle-8 engineering)
+    bots = json.loads(format_json([BotStatus(name="w1")], "f"))["bots"]
+    assert bots[0]["pane_state"] is None and bots[0]["plane_unreachable"] is None
+
+
+def test_the_skill_file_is_whole_and_its_three_bash_blocks_are_closed():
+    # cycle-3 B6: a nested fence in the plan truncated the deliverable at the inner
+    # closer and every test still passed on the stump; pin the tail and the fences
+    # (three blocks since cycle 9: the plain record, the record-and-dispatch call, the dry run)
+    text = SKILL.read_text()
+    assert "## Not in this chunk" in text and "## Rules" in text
+    assert text.count("```") == 6 and len(re.findall(r"```bash\n.*?```", text, re.S)) == 3
+
+
+def test_the_skill_is_coupled_to_its_doors():
+    text = _flat(SKILL.read_text())
+    for d in DOORS:
+        assert d in text, d
+    for action in ("dispatch", "ask", "nothing"):
+        assert f"**{action}**" in text, action
+    assert "RECORD before ACT" in text and "considered" in text and "could not measure" in text
+    assert "follow-up check-in" in text                               # a failed ACT is recorded, never retried blind
+    assert "names the chosen project and its tier" in text            # the rigor bar was weighed, not only what was picked
+    assert "minimal valid `nothing` row" in text                       # the re-record is bounded: a turn never ends without a row
+    assert "UNOBSERVED" in text and "plane_unreachable" in text          # a roster answer with no observation is not an idle worker
+    assert "propose" not in text.split("## Not in this chunk")[0]   # the enum the contract accepts
+    assert "cat <<" not in text                                      # a pipeline is matched per subcommand
+
+
+def test_the_degraded_rule_is_keyed_on_mode_omitted_per_field():
+    # brief's degraded[] is NEVER empty on a real fleet (captured live, cycle 4: a
+    # fleet with a plane carries alerts:labeled #903 and dispatches.orphaned:labeled
+    # #1014 on every call); only mode "omitted" means a field is absent (#1467)
+    rule = _flat(SKILL.read_text().split("## DECIDE")[0])
+    assert "`mode` is `omitted`" in rule and "unavailable" in rule
+    assert "`mode` is `labeled`" in rule and "present" in rule
+    assert "utilization" in rule and "not an input" in rule
+    assert "plane-known" in _flat(SKILL.read_text())
+
+
+# --- the grants match the command lines the skill itself writes --------------------
+
+FORBIDDEN = ("Bash", "Bash(*)", "Bash(bash *)", "Bash(cat *)", "Bash(claudron *)", "Bash(sh *)", "Bash(gh *)", "Bash(claudlobby *)")
+
+
+def _bash_grant_matches(grant: str, command: str) -> bool:
+    """permissions-model.md:48-51 — the pattern inside Bash(...) is a glob over
+    the command line; a trailing ' *' requires a space (a word boundary)."""
+    assert grant.startswith("Bash(") and grant.endswith(")")
+    return fnmatch.fnmatchcase(command, grant[5:-1])
+
+
+def _skill_command_lines() -> list[str]:
+    """Every `bash …`, `claudlobby …`, `claudron …`, `gh …` span — inline code,
+    which MAY wrap across lines — or fenced-bash line of SKILL.md, whitespace
+    collapsed; first pipeline stage only (the skill must not use pipelines)."""
+    text = SKILL.read_text()
+    cmds = re.findall(r"`((?:bash|claudlobby|claudron|gh) [^`]+)`", text)
+    for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+        for line in block.splitlines():
+            for piece in line.split(" && "):                        # a compound command is matched per subcommand
+                piece = re.sub(r"^[a-z_]+=\$\(", "", piece.strip())   # `ck=$(bash …` is the bash subcommand
+                piece = re.sub(r"^\)\s*", "", piece)                    # `) && claudlobby …` closes the substitution
+                if piece.startswith(("bash ", "claudlobby ", "claudron ", "gh ")):
+                    cmds.append(piece)
+    return [_flat(c) for c in cmds]
+
+
+def test_the_skill_grants_cover_its_own_commands_and_nothing_forbidden():
+    fm, _ = parse_frontmatter(SKILL.read_text())
+    grants = fm["tool_grants"]
+    assert not [g for g in grants if g in FORBIDDEN], grants
+    assert "mcp__plugin_telegram_telegram__reply" in grants           # ask posts through the reply tool
+    bash_grants = [g for g in grants if g.startswith("Bash(")]
+    for g in bash_grants:                                              # a CLI grant names ONE literal verb, never a prefix
+        if g.startswith("Bash(claudlobby"):
+            assert re.fullmatch(r"Bash\(claudlobby [a-z][a-z-]+ \*\)", g), g
+    cmds = _skill_command_lines()
+    assert cmds, "no command lines found in the skill"
+    assert any(c.startswith("gh issue list ") for c in cmds)          # the wrapped span IS collected (cycle-3 R7)
+    assert any("--dry-run" in c for c in cmds)                          # the dry run has a runnable invocation
+    assert any(c.startswith('bash "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh"') and '"$ck"' in c for c in cmds)   # the act rides the record call (cycle-7 R1)
+    for block in re.findall(r"```bash\n(.*?)```", SKILL.read_text(), re.S):                                # …and none hides in a fenced block
+        for line in block.splitlines():
+            for piece in line.split(" && "):
+                piece = re.sub(r"^[a-z_]+=\$\(", "", re.sub(r"^\)\s*", "", piece.strip()))
+                assert not re.match(r"(echo|printf|env|cat|export)\b", piece), f"ungranted builtin: {line!r}"
+    for c in cmds:
+        assert any(_bash_grant_matches(g, c) for g in bash_grants), f"ungranted: {c!r}"
+    # necessity: every grant is the ONLY match for some command line, so a grant
+    # widened to a wildcard (which still "covers") shows up as a sibling made idle
+    for g in bash_grants:
+        others = [o for o in bash_grants if o != g]
+        assert any(not any(_bash_grant_matches(o, c) for o in others)
+                   for c in cmds if _bash_grant_matches(g, c)), f"grant {g} covers nothing on its own"
+
+
+def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
+    # restart/SKILL.md declares Bash(*spin-up-bot.sh*) under allowed-tools, a key
+    # the compositor never reads: this is the first star-bounded script grant that
+    # must ride the tool_grants path (loader.iter_skill_grants -> composer._resolve_skill_grants)
+    from claudlobby.composer import _resolve_skill_grants
+    install_real_template(fleet_dir)
+    dst = fleet_dir / "library" / "skills" / "checkin"
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy(SKILL, dst / "SKILL.md")
+    text = (fleet_dir / "fleet.yaml").read_text().replace(
+        "    lead:\n", "    lead:\n      skills: [checkin]\n", 1)
+    (fleet_dir / "fleet.yaml").write_text(text)
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    grants = _resolve_skill_grants(fleet.bots["lead"], Paths(root=fleet_dir, fleet_dir=fleet_dir))
+    for g in ("Bash(*checkin-record.sh*)", "Bash(*dispatch-task.sh*)", "Bash(*tg-post.sh*)",
+              "Bash(claudlobby checkins *)", "Bash(claudlobby status *)"):
+        assert g in grants, grants
+    assert "Bash(claudlobby *)" not in grants

@@ -8,6 +8,12 @@
 #   --repo NAME        Target repo (adds repo:<NAME> to envelope)
 #   --priority LEVEL   Priority level (adds priority:<LEVEL> to envelope)
 #   --ref URL          Reference URL (adds ref:<URL> to envelope)
+#   --project KEY      projects.yaml project (adds project:<KEY> to the envelope and
+#                      project_key to the plane work item -- the well-defined bar)
+#   --checkin ID       The check-in decision this dispatch acts on (ck_<32hex>):
+#                      appends a checkin_dispatch join row to the plane batch, atomic
+#                      with the assignment. Disclosed and ignored on an untracked
+#                      dispatch (a control type mints no assignment to join).
 #   --workstream ID    Workstream this task advances (envelope + plane work item)
 #   --supersedes ID    This dispatch REPLACES an earlier one; the named task id is
 #                      retired rather than left to age out and page. Opt-in, and
@@ -80,6 +86,8 @@ DISPATCH_PRIORITY=""
 DISPATCH_REF=""
 DISPATCH_WORKSTREAM=""
 DISPATCH_SUPERSEDES=""
+DISPATCH_PROJECT=""
+DISPATCH_CHECKIN=""
 FORCE_ENVELOPE=""
 DISPATCH_TYPE="task"
 
@@ -109,12 +117,21 @@ while [ $# -gt 0 ]; do
         --ref)          DISPATCH_REF=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --workstream)   DISPATCH_WORKSTREAM=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --supersedes)   DISPATCH_SUPERSEDES=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --project)      DISPATCH_PROJECT=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --checkin)      DISPATCH_CHECKIN=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --botcommand)   FORCE_ENVELOPE=1; shift ;;
         --type)         DISPATCH_TYPE=$(_flag_val "$1" "${2:-}"); FORCE_ENVELOPE=1; shift 2 ;;
         -*)             echo "dispatch-task: unknown flag '$1'" >&2; exit 1 ;;
         *)              break ;;
     esac
 done
+
+if [ -n "$DISPATCH_PROJECT" ] && ! printf '%s' "$DISPATCH_PROJECT" | grep -Eq '^[a-z][a-z0-9-]*$'; then
+    echo "dispatch-task: --project must be a projects.yaml slug ([a-z][a-z0-9-]*), got '$DISPATCH_PROJECT'" >&2; exit 1
+fi
+if [ -n "$DISPATCH_CHECKIN" ] && ! printf '%s' "$DISPATCH_CHECKIN" | grep -Eq '^ck_[0-9a-f]{32}$'; then
+    echo "dispatch-task: --checkin must be a check-in id (ck_<32hex>), got '$DISPATCH_CHECKIN'" >&2; exit 1
+fi
 
 # REFUSE an unrecognised type rather than falling back to `task`. A fallback is
 # the defect this flag exists to remove, re-created one layer up: `--type quiery`
@@ -350,7 +367,7 @@ _claudron_query_before
 TASK_ID=""
 EXPECTED_BY_JSON=""
 if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] \
-   || [ -n "$DISPATCH_REF" ] || [ -n "$DISPATCH_WORKSTREAM" ]; then
+   || [ -n "$DISPATCH_REF" ] || [ -n "$DISPATCH_WORKSTREAM" ] || [ -n "$DISPATCH_PROJECT" ]; then
     # THE ENVELOPE AND THE TRACKING ARE NOW SEPARATE DECISIONS (#1187). They used
     # to be one: any envelope send minted, so a manager who wanted the fleet
     # message format for a peer note — a finding, a relay, a retraction — got a
@@ -395,6 +412,7 @@ if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORI
     CALLER="${BOT_NAME:-${MANAGER_TMUX:-unknown}}"
     DISPATCH_MSG="[BOTCOMMAND] $CALLER | $DISPATCH_TYPE | $TASK"
     [ -n "$DISPATCH_REPO" ]       && DISPATCH_MSG="$DISPATCH_MSG | repo:$DISPATCH_REPO"
+    [ -n "$DISPATCH_PROJECT" ]    && DISPATCH_MSG="$DISPATCH_MSG | project:$DISPATCH_PROJECT"
     [ -n "$DISPATCH_PRIORITY" ]   && DISPATCH_MSG="$DISPATCH_MSG | priority:$DISPATCH_PRIORITY"
     [ -n "$DISPATCH_REF" ]        && DISPATCH_MSG="$DISPATCH_MSG | ref:$DISPATCH_REF"
     [ -n "$DISPATCH_WORKSTREAM" ] && DISPATCH_MSG="$DISPATCH_MSG | workstream:$DISPATCH_WORKSTREAM"
@@ -661,9 +679,44 @@ _plane_emit_intent() {
     if [ "$DISPATCH_TYPE" = "task" ] && [ -n "$dispatch_ref" ]; then
         emit_triple=1
     fi
-    local link_frag="" ws_frag="" repo_frag="" deadline_frag="" iso_deadline=""
+    local link_frag="" ws_frag="" repo_frag="" proj_frag="" deadline_frag="" iso_deadline="" ck_ev="" ck_tid=""
     if [ -n "$emit_triple" ]; then
         link_frag="\"work_item_id\":\"$PLANE_WI_ID\",\"assignment_id\":\"$PLANE_ASG_ID\","
+    fi
+    # The check-in join (spec §7): the decision row was recorded BEFORE this
+    # dispatch (RECORD before ACT), and the Assignment payload is strict, so
+    # the link is its own system event in the SAME batch -- the supersede
+    # precedent below. Only a tracked dispatch has an assignment to join; an
+    # untracked one says so and drops the flag -- unlike --supersedes, which
+    # STILL rides the untracked path (the retire is its point): there is no
+    # assignment event here to point at. A tracked but id-less send (no
+    # envelope flag) carries task_id null, never "".
+    if [ -n "$DISPATCH_CHECKIN" ]; then
+        if [ -n "$emit_triple" ]; then
+            # The skill captures the id into a variable and dispatches in the SAME
+            # call (record && dispatch), but a hand caller pastes it, so a well-formed
+            # id can still name no decision. Looked up like --supersedes and DISCLOSED,
+            # never refused: a record the shim spooled is legitimately absent from
+            # the db at rc 0, and a refusal would block the ACT on a transport
+            # state. Form D (a top-level if over the command, output to a file):
+            # rc 3 means the plane could not answer at all, and UNREACHABLE must
+            # not be reported as ABSENT -- the source_state rule -- two notes.
+            local _ck_tmp
+            _ck_tmp=$(safe_mktemp)
+            if python3 -S -E "$LIB_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" --checkin-id "$DISPATCH_CHECKIN" > "$_ck_tmp" 2>/dev/null; then
+                if [ ! -s "$_ck_tmp" ]; then
+                    echo "dispatch-task: --checkin $DISPATCH_CHECKIN names no checkin_decision the plane can see (spooled, or mis-copied from the record door?) -- the join is recorded as given; verify with claudlobby checkins --last" >&2
+                fi
+            else
+                echo "dispatch-task: --checkin $DISPATCH_CHECKIN not verified -- the plane could not answer (no CLAUDLOBBY_ROOT, or the db is unreachable); the join is recorded as given" >&2
+            fi
+            rm -f "$_ck_tmp"
+            ck_tid="null"
+            [ -n "$TASK_ID" ] && ck_tid="\"$(json_escape "$TASK_ID")\""
+            ck_ev="{\"event_type\":\"system\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"checkin_dispatch\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"checkin_id\":\"$DISPATCH_CHECKIN\",\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"task_id\":$ck_tid}}}"
+        else
+            echo "dispatch-task: --checkin ignored: a $DISPATCH_TYPE dispatch mints no assignment to join" >&2
+        fi
     fi
     local comm wi_ev asg_ev
     comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
@@ -682,10 +735,11 @@ _plane_emit_intent() {
         case "$DISPATCH_REPO" in
             */*) repo_frag=",\"repo\":\"$(json_escape "$DISPATCH_REPO")\"" ;;
         esac
-        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}}}"
+        [ -n "$DISPATCH_PROJECT" ] && proj_frag=",\"project_key\":\"$(json_escape "$DISPATCH_PROJECT")\""
+        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}${proj_frag}}}"
         asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
         local _batch
-        printf -v _batch '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}"
+        printf -v _batch '{"events":[%s,%s,%s%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}" "${ck_ev:+,$ck_ev}"
         plane_emit_events dispatch-task <<<"$_batch"       # same shell: PLANE_EMIT_LAST_RC reaches the record decision
     else
         # Communication only (a control type, or a raw-text send on a host with
