@@ -926,9 +926,54 @@ def is_bare_events_scan(plan_detail: str, aliases: frozenset[str]) -> bool:
 # Binds: fleet, fleet.
 CHECKIN_ROWS_SQL = (
     "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
-    " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq"
+    " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq,"
+    " e.source_ref AS source_ref"
     " FROM events e"
     " WHERE e.kind = 'system' AND e.event = 'checkin_decision'"
     f" AND {fleet_alias_range('e.subject_alias')}"
     f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC"
 )
+
+
+def _detail_json(col: str) -> str:
+    """A detail column json_extract can always be handed. `SystemEvent.data` is
+    DIAGNOSTIC -- over-cap TRUNCATES at ingest rather than rejecting -- so a detail
+    can be non-JSON, and json_extract over one RAISES `malformed JSON` and takes
+    out the WHOLE query (probed, sqlite 3.53.2). A CASE rather than a second AND
+    term, so it holds by construction and not by trusting the optimizer's order."""
+    return f"CASE WHEN json_valid({col}) THEN {col} ELSE '{{}}' END"
+
+
+def checkin_dispatch_rows_sql(n: int) -> str:
+    """The `checkin_dispatch` join rows for n checkin ids, oldest first.
+
+    `dispatch-task.sh --checkin` appends ONE of these to the SAME batch as the
+    assignment, carrying {checkin_id, assignment_id, work_item_id, task_id}. The
+    DDL forces a system row's assignment_id / work_item_id COLUMNS to NULL
+    (0001_kernel.sql), so the address lives in the detail and the join is a
+    json_extract -- never the column, which is null by construction for this kind.
+    Fleet-scoped on the DISPATCHER's own alias (the decision rows' own predicate):
+    a 32-hex id is unique, but one bot name on two fleets (#526) is the failure it
+    costs nothing to exclude. Served by idx_events_kind_seq / idx_events_fleet_system.
+
+    There is deliberately no `plane-lookup.py --checkin-dispatch` sibling: this
+    query's only consumer is claudlobby/commands/checkins.py, which holds its own
+    read connection. A bash-side copy with no bash caller is the `--supersedes`
+    dead-flag shape (#1032) -- add the mode when a caller exists.
+
+    Binds: fleet, fleet, then one per checkin id.
+    """
+    ph = ",".join("?" * n)
+    d = _detail_json("e.detail")
+    return (
+        f"SELECT json_extract({d}, '$.checkin_id') AS checkin_id,"
+        f" json_extract({d}, '$.assignment_id') AS assignment_id,"
+        f" json_extract({d}, '$.work_item_id') AS work_item_id,"
+        f" json_extract({d}, '$.task_id') AS task_id,"
+        " e.occurred_at AS occurred_at, e.ingest_seq AS ingest_seq"
+        " FROM events e"
+        " WHERE e.kind = 'system' AND e.event = 'checkin_dispatch'"
+        f" AND {fleet_alias_range('e.subject_alias')}"
+        f" AND json_extract({d}, '$.checkin_id') IN ({ph})"
+        f" ORDER BY {_epoch('e.occurred_at')}, e.ingest_seq"
+    )

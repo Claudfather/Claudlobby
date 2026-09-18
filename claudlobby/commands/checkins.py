@@ -22,8 +22,68 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from ..plane.db import open_ro
-from ..plane.queries import CHECKIN_ROWS_SQL, fleet_range_params
+from ..plane.queries import (
+    CHECKIN_ROWS_SQL,
+    TASK_STATUS_SQL,
+    TERMINAL_TASK_EVENTS,
+    checkin_dispatch_rows_sql,
+    fleet_range_params,
+)
 from ._helpers import _resolve_paths, refuse_unreachable
+
+# Raw TASK_STATUS_SQL status -> the bucket a reader acts on. Six, not five: the
+# spec's bar (§12.4) names `blocked`/`failed` as the terminal-not-completed classes
+# that count AGAINST, and `cancelled` / `superseded` / `reassigned` are neither --
+# folding a withdrawal or a re-dispatch into `failed` would score a manager that
+# corrected itself worse than one that did nothing, so they get their own bucket and
+# chunk 4 decides what to do with it. `dispatch_failed` is NOT a task event (it is
+# derived from transmissions): the send never landed, a failure to start. Anything
+# unmapped reads `open` -- bounded by test_every_terminal_task_event_has_a_bucket.
+_OUTCOME = {
+    "completed": "completed",
+    "returned_blocked": "blocked",
+    "failed": "failed",
+    "expired": "failed",
+    "dispatch_failed": "failed",
+    "cancelled": "retired",
+    "superseded": "retired",
+    "reassigned": "retired",
+}
+OUTCOMES = ("completed", "blocked", "failed", "retired", "open", "unjoined")
+
+
+def _outcome_of(status: str | None) -> str:
+    """None = the join row names an assignment the plane does not hold: absence
+    inside a reachable source, reported as `unjoined`, never as `open`."""
+    return _OUTCOME.get(status, "open") if status else "unjoined"
+
+
+def _join_dispatches(conn, fleet: str, refs: list[str]) -> dict[str, list[dict]]:
+    """checkin_id -> its dispatches, resolved to the plane's own status. TWO
+    queries for the whole page, never one per row: the join rows for every id at
+    once, then TASK_STATUS_SQL narrowed by `WHERE a.assignment_id IN (...)` --
+    view.py's own pattern, the shipped constant APPENDED to and never copied."""
+    ids = [r.split("checkin:", 1)[1] for r in refs if r and r.startswith("checkin:")]
+    if not ids:
+        return {}
+    links = list(conn.execute(checkin_dispatch_rows_sql(len(ids)),
+                              (*fleet_range_params(fleet), *ids)))
+    asg = [r["assignment_id"] for r in links if r["assignment_id"]]
+    status: dict[str, tuple] = {}
+    if asg:
+        ph = ",".join("?" * len(asg))
+        status = {r["assignment_id"]: (r["status"], r["terminal_at"])
+                  for r in conn.execute(
+                      TASK_STATUS_SQL + f" WHERE a.assignment_id IN ({ph})", asg)}
+    out: dict[str, list[dict]] = {}
+    for r in links:
+        st, at = status.get(r["assignment_id"], (None, None))
+        out.setdefault(r["checkin_id"], []).append({
+            "assignment_id": r["assignment_id"], "work_item_id": r["work_item_id"],
+            "task_id": r["task_id"], "status": st, "outcome": _outcome_of(st),
+            "terminal_at": at, "occurred_at": r["occurred_at"],
+        })
+    return out
 
 
 def _since(text: str) -> datetime:
@@ -65,6 +125,7 @@ def _row(r) -> dict:
         "rationale": g.get("rationale"),
         "considered": list(seen.get("considered") or []), "unavailable": list(seen.get("unavailable") or []),
         "truncated": truncated, "record": rec,
+        "checkin_ref": r["source_ref"], "dispatches": [],
     }
 
 
@@ -84,6 +145,9 @@ def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | Non
         out.append(row)
         if last:
             break
+    joined = _join_dispatches(conn, fleet, [x["checkin_ref"] for x in out])
+    for row in out:
+        row["dispatches"] = joined.get((row["checkin_ref"] or "").split("checkin:", 1)[-1], [])
     return out
 
 
