@@ -703,13 +703,14 @@ it, and nothing composes differently on the estate until PR 4.**
    across fleets.
 
 **After the loop is live, as feature builds of their own** (each keeps its label for
-cross-reference; none gates on a verdict):
+cross-reference; none gates on a verdict; each is a tracked issue — and the
+operator-plane decisions card of §11 is #1562, the build's smaller follow-ups #1563):
 
-1b. **Focus** (§8c) — `focus_declared`, `lib/focus-declare.sh`, the empirical
+1b. **Focus** (§8c; #1561) — `focus_declared`, `lib/focus-declare.sh`, the empirical
    derivation, `claudlobby focus`; the two focus fields join `inputs_seen` as
    schema 2.
-1c. **Scalpel the sprint** (§6b) — the `sprint` action joins the enum.
-1d. **Intake** (§8, §8b) — gated on the canary's `ask`-for-tasks rows on an empty
+1c. **Scalpel the sprint** (§6b; #1560, after #1559) — the `sprint` action joins the enum.
+1d. **Intake** (§8, §8b; #1559) — gated on the canary's `ask`-for-tasks rows on an empty
    project (question 7, settled): the `planning.initiative` construct with its
    doctor surface (no silent switches — `switches.py:30-36`), `lib/checkin-propose.sh`
    (propose / reject, the well-defined bar as a refusal, the proposal cap enforced

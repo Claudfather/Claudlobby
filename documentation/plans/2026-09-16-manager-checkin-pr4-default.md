@@ -34,7 +34,7 @@ created: 2026-09-16
 
 **In PR 4:** `requires:` frontmatter + `library_requires` + `resolve_effective_skills` with the grant union; `leaf_manager_bots()` + `ROLE_LEAF_MANAGER` + the two validator messages; the `defaults.py` registry line + the compose-time job gate + the opt-out surface; the naked-bot gate's leaf-manager arm, `SCHEMA` bump and new dated baseline; the cadence-retirement edits over the grep-derived sweep with a grep-derived test; `rolling-restart.sh --managers-only`; README counts, CLAUDE.md rows, CHANGELOG, getting-started + fleet-yaml-schema; the gauntlet; the estate deploy.
 
-**Not in PR 4:** anything evaluative (no bar, no verdict, no burn-in metric, no A/B); `propose` / the intake store / `planning.initiative` (chunk 1d); the `sprint` action (1c); `focus_*` (1b); the operator-plane check-in card; `checkins --summary` / `--proposals` (chunk 3's, already landed or still deferred there); any new library file; any change to the decision contract or the record door.
+**Not in PR 4:** anything evaluative (no bar, no verdict, no burn-in metric, no A/B); `propose` / the intake store / `planning.initiative` (chunk 1d; #1559); the `sprint` action (1c; #1560); `focus_*` (1b; #1561); the operator-plane check-in card (#1562); `checkins --summary` / `--proposals` (chunk 3's, already landed or still deferred there); any new library file; any change to the decision contract or the record door.
 
 ## Decision Forks
 
