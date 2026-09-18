@@ -12,6 +12,7 @@
 #   parse_env_file     — restricted .env parser ([export ]KEY=VALUE only)
 #   own_tool_path      — prepend this repo's tool prefixes (timer PATH is minimal)
 #   claudlobby_cli     — run the claudlobby CLI across every install shape
+#   session_cli_path   — shim the venv-only CLI onto a bot session PATH
 #   with_timeout       — run a command under timeout(1) if available, else bare
 #   with_lock          — portable mutex (flock if available, else mkdir spinlock)
 #   setup_log_dir      — mkdir -p for log file's parent directory
@@ -190,6 +191,39 @@ claudlobby_cli() {
             "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" >&2
         return 127
     fi
+}
+
+# session_cli_path
+# A bot SESSION runs under the PATH start-bot.sh exports on the line above, not
+# an activated venv, so on a host whose install keeps the CLI only inside
+# $CLAUDLOBBY_ROOT/.venv/bin/claudlobby (the PEP 668 venv shape
+# getting-started.md documents) a bare `claudlobby` call — exactly what the
+# shipped skill grants name — resolves to nothing inside the session (#1567).
+# Call once, right after start-bot.sh sets PATH: a no-op when `claudlobby`
+# already resolves, so a host with the CLI on a user bin keeps behavior
+# unchanged byte for byte; otherwise symlink ONE name into a host-local shim
+# dir and append that dir to PATH.
+#
+# One name, not the whole .venv/bin: that directory also holds python, pip and
+# pytest, and appending it would send a bare `pip install ...` run in the
+# session into the environment the compositor itself runs in, on a host with
+# no system pip.
+# Appended, never prepended: nothing a session resolves today may change —
+# the same rule own_tool_path above applies to PATH inside a lib/ script.
+#
+# Every step is guarded so a read-only state/ or a failed ln leaves PATH
+# exactly as it was and never fails the boot: install_error_trap arms set -E,
+# and an unguarded nonzero here, even inside a command substitution, would
+# trip it.
+session_cli_path() {
+    command -v claudlobby >/dev/null 2>&1 && return 0
+    local venv_cli="$CLAUDLOBBY_ROOT/.venv/bin/claudlobby"
+    [ -x "$venv_cli" ] || return 0
+    local shim_dir="$CLAUDLOBBY_ROOT/state/bin"
+    mkdir -p "$shim_dir" 2>/dev/null || return 0
+    ln -sfn "$venv_cli" "$shim_dir/claudlobby" 2>/dev/null || return 0
+    PATH="$PATH:$shim_dir"
+    export PATH
 }
 
 # --- Portable external tools ------------------------------------------------
