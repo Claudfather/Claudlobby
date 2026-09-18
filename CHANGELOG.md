@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the switch table could never show an env-less opt-in job as on
+
+- **`claudlobby doctor --switches` (and `setup-fleet`'s closing table) printed `off (opt-in)` plus an arm hint for a job that was armed and enrolled.** A row's state is *enrolled AND its env flag*, and for a row that declares no flag the shipped default stood in for the absent flag — so for an opt-in, `enrolled and False`. Observed on a live fleet: two fleet-armed, launchd-loaded jobs (`weekly-worker-restart`, `manager-checkin`) both read off. A row with no env flag now has one gate, its enrollment; the two-gate rule is unchanged for rows that have a flag. Display only: no door, unit or enrollment changes.
+
 ### Added — manager check-in, chunk 1: the decision record and its doors (#1550)
 
 - **The decision record — `lib/checkin-record.sh` + `lib/checkin-contract.py`.** The write door for a manager check-in decision: mints the `ck_` id through `plane_mint_id`, validates the schema-1 decision record through the new stdlib contract (`normalize()` lists every defect rather than the first; a missing count refuses rather than defaulting to 0; `prev_checkin_id`/`raise.reason` required in both directions), and lands ONE actor-anchored `checkin_decision` system event (`source_ref checkin:<id>`) through `plane_emit_events`. The contract runs as a top-level pipeline into a file, never a command substitution, so a refusal cannot trip `install_error_trap`'s ERR trap into a spurious `script_error` row for a decision the door says it did not record. rc ladder: 0 recorded/dry-validated, 1 usage, 2 contract refused (nothing recorded), 3 the plane did not record or was silenced.
