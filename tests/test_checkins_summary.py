@@ -12,6 +12,7 @@ no threshold, no "healthy"/"unhealthy" wording anywhere here or in cmd_checkins.
 
 from __future__ import annotations
 
+import copy
 import re
 
 from claudlobby.commands import checkins as cmd
@@ -97,6 +98,21 @@ def test_a_non_dispatch_decision_with_no_join_row_is_not_unjoined():
     assert totals["dispatches"] == 0
 
 
+def test_dispatch_statuses_count_the_raw_plane_statuses_and_skip_the_missing_ones():
+    rows = [
+        _r(action="dispatch", dispatches=[
+            {"outcome": "completed", "status": "completed"},
+            {"outcome": "blocked", "status": "returned_blocked"},
+        ]),
+        _r(action="dispatch", dispatches=[
+            {"outcome": "completed", "status": "completed"},
+            {"outcome": "unjoined", "status": None},       # no assignment row -- must not count as a status
+        ]),
+    ]
+    totals = cmd.summarize(rows)["totals"]
+    assert totals["dispatch_statuses"] == {"completed": 2, "returned_blocked": 1}
+
+
 def test_the_groups_are_by_project_key_with_null_last():
     rows = [_r(project_key="shop"), _r(project_key="docs"),
             _r(project_key="shop"), _r(project_key=None)]
@@ -111,6 +127,17 @@ def test_the_group_blocks_have_the_same_shape_as_totals():
     totals_keys = set(result["totals"])
     for group in result["projects"]:
         assert set(group) - {"project_key"} == totals_keys
+
+
+def test_summarize_does_not_mutate_its_rows():
+    rows = [
+        _r(action="nothing", record=None),
+        _r(action="dispatch", project_key="shop",
+           dispatches=[{"outcome": "completed", "status": "completed"}]),
+    ]
+    before = copy.deepcopy(rows)
+    cmd.summarize(rows)
+    assert rows == before
 
 
 # --- cmd_checkins --summary: CLI-level, through the real emit spine ---------

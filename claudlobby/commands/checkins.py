@@ -4,8 +4,9 @@ the decision rows newest-first, plus `--summary` (chunk 3), which rolls the
 window up into FACTS ONLY -- actions, ask rate, considered lengths,
 unavailable frequencies, dispatch outcomes, grouped by project_key -- and
 never a verdict; that judgment is an operator ruling for the whole series, not
-this door's to make. `--limit` and moving `--since`/`--bot` into SQL land in
-chunk 4.
+this door's to make. `--limit`, and the `--since`/`--bot` window, are bound in
+SQL (chunk 4, `checkin_rows_sql` in plane/queries.py) rather than scanned in
+Python.
 
 Two connections, on purpose: `brief.plane_session` is THE reachability door for
 the package (no db / no fleet / a plane that has never seen the fleet all refuse
@@ -27,9 +28,9 @@ from datetime import datetime, timedelta, timezone
 
 from ..plane.db import open_ro
 from ..plane.queries import (
-    CHECKIN_ROWS_SQL,
     TASK_STATUS_SQL,
     checkin_dispatch_rows_sql,
+    checkin_rows_sql,
     fleet_range_params,
 )
 from ._helpers import _resolve_paths, refuse_unreachable
@@ -133,21 +134,41 @@ def _row(r) -> dict:
 
 
 def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | None,
-                     last: bool, raised: bool = False) -> list[dict]:
+                     last: bool, raised: bool = False, limit: int | None = None) -> list[dict]:
     """Newest first by occurred_at. `since` None means no window (--last);
-    `raised` keeps only rows whose raise.decided is true (the ask count)."""
+    `raised` keeps only rows whose raise.decided is true (the ask count).
+
+    The bot filter and the since floor are bound in SQL (checkin_rows_sql,
+    PR 3 chunk 4) rather than scanned here in Python -- the params list below
+    is gated on the SAME three booleans passed to checkin_rows_sql, in the
+    SAME order, so the SQL shape and the bind list cannot drift apart.
+    `limit` is pushed into SQL only when `raised` is False: with `raised`
+    True the SQL read is unbounded and the limit is applied in Python AFTER
+    the raise filter, or `--raised --limit N` would return N rows of which
+    only some raised, not N raised rows. `out` is clamped to `limit` in
+    Python either way, so the two paths cannot disagree."""
+    push_limit = limit is not None and not raised
+    sql = checkin_rows_sql(since=since is not None, bot=bool(bot), limit=push_limit)
+    params: list = list(fleet_range_params(fleet))
+    if bot:
+        # exact and case-sensitive -- fleet_alias_range's own rule, and
+        # byte-equivalent to PR 1's `_bot_of(...) != bot` given the fleet
+        # range above already holds
+        params.append(f"bot:{fleet}/{bot}")
+    if since is not None:
+        params.append(since.isoformat())
+    if push_limit:
+        params.append(limit)
     out: list[dict] = []
-    for r in conn.execute(CHECKIN_ROWS_SQL, fleet_range_params(fleet)):
-        if bot and _bot_of(r["subject_alias"]) != bot:
-            continue
-        if since is not None and datetime.fromisoformat(r["occurred_at"]) < since:
-            continue
+    for r in conn.execute(sql, params):
         row = _row(r)
         if raised and not row["raise"]["decided"]:
             continue
         out.append(row)
         if last:
             break
+    if limit is not None:
+        out = out[:limit]
     joined = _join_dispatches(conn, fleet, [x["checkin_ref"] for x in out])
     for row in out:
         row["dispatches"] = joined.get((row["checkin_ref"] or "").split("checkin:", 1)[-1], [])
@@ -259,6 +280,11 @@ def cmd_checkins(args) -> int:
         print("checkins: no fleet is named (--fleet <name>, or a fleet.yaml naming one)"
               " — the plane's rows are per fleet", file=sys.stderr)
         return 2
+    if args.limit is not None and args.limit <= 0:
+        # 0 is not silently "no rows" -- an operator's explicit bound must
+        # name at least one row or it is a typo, not a request
+        print(f"checkins: --limit must be a positive integer (got {args.limit})", file=sys.stderr)
+        return 2
     if getattr(args, "summary", False):
         # both checked before the plane is opened -- a malformed call (rc 2)
         # never needs a db connection to be recognized as malformed
@@ -266,7 +292,7 @@ def cmd_checkins(args) -> int:
             print("checkins: --summary and --last are exclusive — a summary of one row states"
                   " a window it did not read", file=sys.stderr)
             return 2
-        if getattr(args, "limit", None):
+        if args.limit is not None:
             print("checkins: --summary and --limit are exclusive — a summary over a truncated"
                   " slice states a window it did not read", file=sys.stderr)
             return 2
@@ -284,12 +310,13 @@ def cmd_checkins(args) -> int:
         return refuse_unreachable("checkins", reason or "plane db unreadable")
     try:
         rows = collect_checkins(conn, fleet, since=since, bot=args.bot, last=args.last,
-                                raised=getattr(args, "raised", False))
+                                raised=getattr(args, "raised", False), limit=args.limit)
     finally:
         conn.close()
     scope = f"fleet {fleet}" + (f", bot {args.bot}" if args.bot else "") + \
         (" (newest only)" if args.last else f", last {args.since}") + \
-        (" (asks only)" if getattr(args, "raised", False) else "")
+        (" (asks only)" if getattr(args, "raised", False) else "") + \
+        (f", limit {args.limit}" if args.limit is not None else "")
 
     if getattr(args, "summary", False):
         summary = summarize(rows)

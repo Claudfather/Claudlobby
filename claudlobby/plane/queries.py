@@ -923,16 +923,59 @@ def is_bare_events_scan(plan_detail: str, aliases: frozenset[str]) -> bool:
 # truncated detail is not JSON (detail_truncated=1 IS the parse guard) and the
 # row is still returned -- the door exists to show every decision, and dropping
 # the over-cap ones would hide exactly the records that most need looking at.
-# Binds: fleet, fleet.
-CHECKIN_ROWS_SQL = (
+#
+# SELECT/FROM through the fleet scope -- the two constant WHERE terms and the
+# fleet range, shared by every shape `checkin_rows_sql` produces. Binds so
+# far: fleet, fleet.
+_CHECKIN_ROWS_HEAD = (
     "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
     " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq,"
     " e.source_ref AS source_ref"
     " FROM events e"
     " WHERE e.kind = 'system' AND e.event = 'checkin_decision'"
     f" AND {fleet_alias_range('e.subject_alias')}"
-    f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC"
 )
+
+_CHECKIN_ROWS_ORDER = f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC"
+
+
+def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False) -> str:
+    """The check-in decision rows query (PR 3 chunk 4): the window, the bot
+    filter and --limit bound here rather than pulled whole into Python and
+    filtered there (PR 1's shape) -- a wide --since no longer reads a
+    fleet's entire history off disk to throw most of it away. Every bound is
+    OPT-IN and appended in this fixed order onto `_CHECKIN_ROWS_HEAD`: the
+    alias equality (`bot`), the since floor (`since`), THEN the order
+    clause, THEN `LIMIT` (`limit`) -- `LIMIT` has to trail `ORDER BY`
+    syntactically, the one term here whose position is not free. With every
+    flag False this reproduces PR 1's shipped string byte-for-byte, which is
+    what lets `CHECKIN_ROWS_SQL = checkin_rows_sql()` stay a valid alias for
+    every existing reference (test_the_no_bounds_sql_is_the_pr1_string).
+
+    Binds, in the order a caller must supply them: fleet, fleet [, alias]
+    [, since] [, limit] -- `fleet_alias_range` binds the fleet TWICE, so
+    every optional term is appended AFTER it. `collect_checkins`
+    (commands/checkins.py) gates its params list on the SAME three booleans
+    this function is called with, in the SAME order, so the SQL shape and
+    the bind list cannot drift apart.
+
+    `since` compares as an INSTANT via `_epoch('?')` on both sides, never a
+    lexical `<`: the ledger stores `occurred_at` at the emitter's own
+    isoformat offset, so `-04:00` and `+00:00` rows sit in one column and a
+    lexical compare reads a ten-minutes-old `-04:00` row as hours stale
+    (`_epoch`'s own docstring, above)."""
+    sql = _CHECKIN_ROWS_HEAD
+    if bot:
+        sql += " AND e.subject_alias = ?"
+    if since:
+        sql += f" AND {_epoch('e.occurred_at')} >= {_epoch('?')}"
+    sql += _CHECKIN_ROWS_ORDER
+    if limit:
+        sql += " LIMIT ?"
+    return sql
+
+
+CHECKIN_ROWS_SQL = checkin_rows_sql()
 
 
 def _detail_json(col: str) -> str:
