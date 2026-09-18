@@ -3355,7 +3355,7 @@ done
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
 sleep 3
 
-ck2_n1=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin')
+ck2_n1=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
 [ "$ck2_n1" -ge 1 ] && r=yes || r=no
 harness_check "checkin: the beat injected /checkin into the equipped idle manager pane" "$r"
 
@@ -3369,7 +3369,7 @@ harness_check "checkin: ...and recorded ONE checkin_triggered anchored on the ma
 # door's own stdout (the ck_<32hex> id) interleaved with its stderr fallback
 # breadcrumbs (the harness plane has no daemon, so every emit takes the cold
 # CLI rung, disclosed there by design) -- grep the one line shaped like an id.
-ck2_id=$(grep -Eo '^ck_[0-9a-f]{32}$' "$CK2_DIR/logs/record.out" 2>/dev/null | head -1)
+ck2_id=$(grep -Eo '^ck_[0-9a-f]{32}$' "$CK2_DIR/logs/record.out" 2>/dev/null | head -1 || true)
 ck2_dec=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events WHERE kind='system' AND event='checkin_decision' AND source_ref='checkin:$ck2_id'")
 # The CLI reaches its read door at <root>/lib -- linked for THIS call and
 # removed after it, the #1481 neighbour rule the checkin chunk-1 scenario
@@ -3387,7 +3387,7 @@ harness_check "checkin: ...and the session's answer landed a checkin_decision th
 # the window must add nothing: no new pane text, no new event.
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
 sleep 1
-ck2_n2=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin')
+ck2_n2=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
 ck2_trig2=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_triggered | wc -l)
 { [ "$ck2_n2" -eq "$ck2_n1" ] && [ "$ck2_trig2" -eq 1 ]; } && r=yes || r=no
 harness_check "checkin: a second tick inside the min gap does NOT inject again (the plane read IS the rate limit)" "$r"
@@ -3400,7 +3400,7 @@ harness_check "checkin: a second tick inside the min gap does NOT inject again (
 touch "$CK2_DIR/data/.last-tool-call"
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" --min-gap-s 0 || true
 sleep 1
-ck2_n3=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin')
+ck2_n3=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
 ck2_busy=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_skipped)
 # Compared against ck2_n2 (the count immediately BEFORE this action), never
 # the frozen ck2_n1 -- so a rate-limit regression upstream (which already
@@ -3434,7 +3434,7 @@ CONF
 ln -sfn "$VAL_REPO/library/skills/checkin" "$CK2_DIR2/.claude/skills/checkin"
 CLAUDLOBBY_ROOT="$CK2_ROOT2" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
 sleep 1
-ck2_n4=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin')
+ck2_n4=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
 # Compared against ck2_n3 (the count immediately BEFORE this action), same
 # rolling-baseline reasoning as the busy check above -- each gate proves
 # itself against its own immediately-preceding state, never a frozen one.
