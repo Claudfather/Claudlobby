@@ -37,6 +37,8 @@ class _Args:
         self.last = kw.get("last", False)
         self.raised = kw.get("raised", False)
         self.json = kw.get("json", False)
+        self.summary = kw.get("summary", False)
+        self.limit = kw.get("limit", None)
 
 
 def _ago(**kw) -> str:

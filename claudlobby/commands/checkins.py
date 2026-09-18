@@ -1,7 +1,11 @@
 # claudlobby/commands/checkins.py
-"""`claudlobby checkins` — the check-in's read door (manager check-in spec §11),
-minimal form: the decision rows, newest first. `--summary`, `--limit` and the
-outcome join land in chunk 3.
+"""`claudlobby checkins` — the check-in's read door (manager check-in spec §11):
+the decision rows newest-first, plus `--summary` (chunk 3), which rolls the
+window up into FACTS ONLY -- actions, ask rate, considered lengths,
+unavailable frequencies, dispatch outcomes, grouped by project_key -- and
+never a verdict; that judgment is an operator ruling for the whole series, not
+this door's to make. `--limit` and moving `--since`/`--bot` into SQL land in
+chunk 4.
 
 Two connections, on purpose: `brief.plane_session` is THE reachability door for
 the package (no db / no fleet / a plane that has never seen the fleet all refuse
@@ -150,6 +154,102 @@ def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | Non
     return out
 
 
+def _block(rows: list[dict]) -> dict:
+    """One rollup block -- the shape `summarize` uses for both `totals` and
+    every `project_key` group, through this single definition, so a group can
+    never carry a field the totals lack (test_the_group_blocks_have_the_same_
+    shape_as_totals). FACTS only: a count, a distribution -- no threshold, no
+    verdict, ever."""
+    checkins = len(rows)
+    actions = {"dispatch": 0, "ask": 0, "nothing": 0}
+    no_record = 0
+    raised = 0
+    considered_lengths: list[int] = []
+    unavailable: dict[str, int] = {}
+    dispatches = 0
+    dispatch_outcomes = {k: 0 for k in OUTCOMES}
+    dispatch_statuses: dict[str, int] = {}
+    for r in rows:
+        if r.get("action") in actions:
+            actions[r["action"]] += 1
+        if r.get("record") is None:
+            no_record += 1
+        else:
+            # considered lengths are measured over rows WITH a parsed record
+            # only -- a window of truncated rows must not read as a window of
+            # empty `considered` lists (no_record says how many were excluded)
+            considered_lengths.append(len(r.get("considered") or []))
+        if r.get("raise", {}).get("decided"):
+            raised += 1
+        for tok in r.get("unavailable") or []:
+            unavailable[tok] = unavailable.get(tok, 0) + 1
+        row_dispatches = r.get("dispatches") or []
+        dispatches += len(row_dispatches)
+        for d in row_dispatches:
+            dispatch_outcomes[d["outcome"]] += 1
+            if d.get("status"):
+                dispatch_statuses[d["status"]] = dispatch_statuses.get(d["status"], 0) + 1
+        if r.get("action") == "dispatch" and not row_dispatches:
+            # the one place this door counts something the row list does not
+            # contain: a dispatch decision with no join row at all -- a quiet
+            # ask/nothing row must add nothing here (the negative test)
+            dispatch_outcomes["unjoined"] += 1
+    return {
+        "checkins": checkins,
+        "actions": actions,
+        "raised": raised,
+        "ask_rate": round(raised / checkins, 3) if checkins else 0.0,
+        "no_record": no_record,
+        "considered": {
+            "rows": len(considered_lengths),
+            "empty": sum(1 for n in considered_lengths if n == 0),
+            "min": min(considered_lengths) if considered_lengths else None,
+            "max": max(considered_lengths) if considered_lengths else None,
+            "mean": round(sum(considered_lengths) / len(considered_lengths), 3)
+                if considered_lengths else None,
+        },
+        "unavailable": unavailable,
+        "dispatches": dispatches,
+        "dispatch_outcomes": dispatch_outcomes,
+        "dispatch_statuses": dispatch_statuses,
+    }
+
+
+def summarize(rows: list[dict]) -> dict:
+    """The window rolled up: one `_block` over every row, and one per
+    project_key group through the same helper. A PURE function of the row
+    dicts `collect_checkins` returns -- no db, no clock, no I/O -- so it is
+    unit-testable with hand-built rows and cannot silently acquire a second
+    source. `projects` is a LIST sorted by key with the null group last: a
+    JSON object cannot hold a null key, and mapping it to e.g. "-" would
+    collide with a project legitimately named that."""
+    groups: dict[str | None, list[dict]] = {}
+    for r in rows:
+        groups.setdefault(r.get("project_key"), []).append(r)
+    projects = [{"project_key": k, **_block(groups[k])} for k in sorted(k for k in groups if k is not None)]
+    if None in groups:
+        projects.append({"project_key": None, **_block(groups[None])})
+    return {"totals": _block(rows), "projects": projects}
+
+
+def _format_block(block: dict) -> list[str]:
+    """The text rendering of one `_block` -- shared by the totals line and
+    every project group so the two can never drift apart in shape."""
+    c = block["considered"]
+    return [
+        f"    checkins: {block['checkins']}",
+        f"    actions: dispatch={block['actions']['dispatch']} ask={block['actions']['ask']}"
+        f" nothing={block['actions']['nothing']}",
+        f"    raised: {block['raised']} (ask_rate {block['ask_rate']})",
+        f"    no_record: {block['no_record']}",
+        f"    considered: rows={c['rows']} empty={c['empty']} min={c['min']} max={c['max']} mean={c['mean']}",
+        "    unavailable: " + (", ".join(f"{k}={v}" for k, v in block["unavailable"].items()) or "none"),
+        f"    dispatches: {block['dispatches']}",
+        "    dispatch_outcomes: " + " ".join(f"{k}={v}" for k, v in block["dispatch_outcomes"].items()),
+        "    dispatch_statuses: " + (", ".join(f"{k}={v}" for k, v in block["dispatch_statuses"].items()) or "none"),
+    ]
+
+
 def cmd_checkins(args) -> int:
     paths = _resolve_paths(args)
     from ..brief import TEXT_ROW_LIMIT, plane_session, resolve_fleet_name
@@ -159,6 +259,17 @@ def cmd_checkins(args) -> int:
         print("checkins: no fleet is named (--fleet <name>, or a fleet.yaml naming one)"
               " — the plane's rows are per fleet", file=sys.stderr)
         return 2
+    if getattr(args, "summary", False):
+        # both checked before the plane is opened -- a malformed call (rc 2)
+        # never needs a db connection to be recognized as malformed
+        if args.last:
+            print("checkins: --summary and --last are exclusive — a summary of one row states"
+                  " a window it did not read", file=sys.stderr)
+            return 2
+        if getattr(args, "limit", None):
+            print("checkins: --summary and --limit are exclusive — a summary over a truncated"
+                  " slice states a window it did not read", file=sys.stderr)
+            return 2
     try:
         since = None if args.last else _since(args.since)
     except ValueError as exc:
@@ -176,14 +287,37 @@ def cmd_checkins(args) -> int:
                                 raised=getattr(args, "raised", False))
     finally:
         conn.close()
+    scope = f"fleet {fleet}" + (f", bot {args.bot}" if args.bot else "") + \
+        (" (newest only)" if args.last else f", last {args.since}") + \
+        (" (asks only)" if getattr(args, "raised", False) else "")
+
+    if getattr(args, "summary", False):
+        summary = summarize(rows)
+        if args.json:
+            print(json.dumps({"schema": 1, "fleet": fleet,
+                              "since": since.isoformat() if since else None,
+                              "scope": scope, **summary}, indent=2))
+            return 0
+        print(f"check-ins --summary — {scope}: {summary['totals']['checkins']}")
+        for line in _format_block(summary["totals"]):
+            print(line)
+        projects = summary["projects"]
+        for p in projects[:TEXT_ROW_LIMIT]:
+            key = p["project_key"] if p["project_key"] is not None else "(none)"
+            print(f"  [{key}]")
+            for line in _format_block(p):
+                print(line)
+        if len(projects) > TEXT_ROW_LIMIT:
+            # same disclosure rule as the row listing below: silent truncation
+            # reads as exhaustive coverage (brief.py's rows() rule)
+            print(f"  ... showing {TEXT_ROW_LIMIT} of {len(projects)} project groups — full list in --json")
+        return 0
+
     if args.json:
         print(json.dumps({"schema": 1, "fleet": fleet,
                           "since": since.isoformat() if since else None,
                           "checkins": rows}, indent=2))
         return 0
-    scope = f"fleet {fleet}" + (f", bot {args.bot}" if args.bot else "") + \
-        (" (newest only)" if args.last else f", last {args.since}") + \
-        (" (asks only)" if getattr(args, "raised", False) else "")
     if not rows:
         print(f"no check-ins — {scope}" + ("" if getattr(args, "last", False) else " (--last reads the newest row with no window)"))
         return 0
