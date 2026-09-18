@@ -139,10 +139,12 @@ def normalize(obj, *, checkin_id: str | None = None) -> dict:
     out["project_key"] = pk
     if action == "dispatch" and pk is None:
         bad.append("action dispatch must name project_key")
-    if action == "dispatch" and not out["inputs_seen"]["considered"]:
+    considered_v = out["inputs_seen"]["considered"]
+    considered_is_list = isinstance(considered_v, list)
+    if action == "dispatch" and considered_is_list and not considered_v:
         bad.append("action dispatch needs inputs_seen.considered non-empty (a selector is judged by what it did NOT pick)")
     seen_n = out["inputs_seen"].get("issues_seen")
-    if action == "nothing" and isinstance(seen_n, int) and seen_n > 0 and not out["inputs_seen"]["considered"]:
+    if action == "nothing" and isinstance(seen_n, int) and seen_n > 0 and considered_is_list and not considered_v:
         bad.append("action nothing with issues_seen > 0 needs inputs_seen.considered non-empty (what was there, and why it was passed over)")
 
     rationale = obj.get("rationale")
@@ -168,9 +170,11 @@ def normalize(obj, *, checkin_id: str | None = None) -> dict:
         bad.append("action ask requires raise.decided = true (an ask IS a surfacing)")
     if decided is True and action != "ask":
         bad.append("raise.decided true requires action ask (an ask IS the surfacing; --raised counts on it)")
-    if "mission" in out["inputs_seen"]["unavailable"] and out["inputs_seen"]["issues_considered"] is not None:
+    unav = out["inputs_seen"]["unavailable"]
+    unav = unav if isinstance(unav, list) else []
+    if "mission" in unav and out["inputs_seen"]["issues_considered"] is not None:
         bad.append("issues_considered must be null when mission is unavailable (a count filtered by a mission nobody read is fabricated)")
-    if "checkins" in out["inputs_seen"]["unavailable"] and out.get("prev_checkin_id") is not None:
+    if "checkins" in unav and out.get("prev_checkin_id") is not None:
         bad.append("prev_checkin_id must be null when checkins is unavailable (a previous id nobody read is fabricated)")
 
     if bad:

@@ -220,7 +220,9 @@ def test_dispatch_project_alone_opens_the_envelope_and_stamps_the_work_item(tmp_
 def test_dispatch_refuses_a_non_slug_project(tmp_path):
     libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
     r = _bash(f'"{libdir}/dispatch-task.sh" --project "Not Slug" w1 "x"', env=env)
-    assert r.returncode == 1 and "project" in r.stderr
+    # the literal validation text (dispatch-task.sh:130), not the unknown-flag
+    # catch-all -- "unknown flag '--project'" also contains the substring "project"
+    assert r.returncode == 1 and "must be a projects.yaml slug" in r.stderr
 
 
 def test_dispatch_checkin_appends_the_join_row_to_the_same_batch(tmp_path):
@@ -268,7 +270,9 @@ def test_dispatch_checkin_on_an_untracked_dispatch_is_disclosed_not_dropped(tmp_
 def test_dispatch_refuses_a_malformed_checkin_id(tmp_path):
     libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
     r = _bash(f'"{libdir}/dispatch-task.sh" --checkin nope w1 "x"', env=env)
-    assert r.returncode == 1 and "--checkin" in r.stderr
+    # the literal validation text (dispatch-task.sh:133), not the unknown-flag
+    # catch-all -- "unknown flag '--checkin'" also contains the substring "--checkin"
+    assert r.returncode == 1 and "must be a check-in id" in r.stderr
 
 
 def test_dispatch_checkin_without_a_value_is_rc_1_never_0(tmp_path):

@@ -174,11 +174,28 @@ def test_dispatch_must_record_its_losers():
     ({"raise": {"decided": False, "reason": "r" * 601}}, "raise.reason must be <= 600"),
     ({"raise": {"decided": "yes", "reason": "r"}}, "raise.decided"),
     ({"raise": {"decided": False, "reason": "r", "held": ["h"] * 11}}, "raise.held"),
+    ({"inputs_seen": {**INPUTS, "unavailable": None}}, "inputs_seen.unavailable must be a list"),
+    ({"inputs_seen": {**INPUTS, "unavailable": 5}}, "inputs_seen.unavailable must be a list"),
 ])
 def test_defects_are_listed_by_name(over, needle):
+    # a non-list unavailable (None, 5, ...) must raise ContractError -- pytest.raises(cc.ContractError)
+    # itself fails the test if a TypeError escapes instead, which is the pre-fix behaviour
     with pytest.raises(cc.ContractError) as exc:
         cc.normalize(_decision(**over), checkin_id=CK)
     assert any(needle in r for r in exc.value.reasons), exc.value.reasons
+
+
+def test_a_non_list_considered_reports_only_the_type_defect_not_a_spurious_non_empty_one():
+    # considered: None must not ALSO trip "needs considered non-empty" -- that message
+    # implies the fix is filling the list, when the real defect is the type. The default
+    # fixture (action "nothing", issues_seen=9 > 0) is exactly the branch that pre-fix
+    # paired the type defect with the spurious one.
+    d = _decision()
+    d["inputs_seen"]["considered"] = None
+    with pytest.raises(cc.ContractError) as exc:
+        cc.normalize(d, checkin_id=CK)
+    assert any("inputs_seen.considered must be a list" in r for r in exc.value.reasons), exc.value.reasons
+    assert not any("non-empty" in r for r in exc.value.reasons), exc.value.reasons
 
 
 def test_every_defect_is_reported_not_just_the_first():

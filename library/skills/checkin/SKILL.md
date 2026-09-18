@@ -12,7 +12,6 @@ tool_grants:
   - "Bash(*dispatch-task.sh*)"
   - "Bash(*tg-post.sh*)"
   - "mcp__plugin_telegram_telegram__reply"
-  - "Read"
 ---
 
 # Check-in
