@@ -207,6 +207,15 @@ def test_the_manager_section_fixes_the_post_shape_and_the_one_post_budget():
         assert needle in m, needle
 
 
+def test_the_worker_section_keeps_the_start_ack_off_telegram():
+    # start agrees with worker-lifecycle's "No Telegram ack" (line 87); only
+    # done/blocked are Telegram-eligible, per the checkin/worker-lifecycle ruling
+    _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
+    w = _flat(body.split("## Worker")[1])
+    assert "Start is plane-only" in w
+    assert "Done and blocked" in w and "Telegram where the worker is configured for it" in w
+
+
 def test_the_cadence_rules_are_untouched_in_this_chunk():
     # chunk 4 retires them with a grep-derived sweep; this chunk composes beside them
     assert "Idle silence is a bug" in (LIB / "protocols" / "proactivity-discipline.md").read_text()

@@ -38,8 +38,9 @@ a failure with real cost.
 
 ## Worker
 
-One thin line on start / done / blocked: Telegram where the worker is
-configured for it, plane-only where it is not. No milestone cadence here —
-that stands in `worker-lifecycle`. Detail goes through `report-back.sh` to
-the manager and the plane; every line is a recorded communication
-regardless of carrier.
+Start is plane-only: acknowledged through `report-back.sh` to the manager
+and the plane, never a Telegram post. Done and blocked stay one thin line
+each — Telegram where the worker is configured for it, plane-only where it
+is not. No milestone cadence here — that stands in `worker-lifecycle`.
+Detail goes through `report-back.sh` to the manager and the plane; every
+line is a recorded communication regardless of carrier.
