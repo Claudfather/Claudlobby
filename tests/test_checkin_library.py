@@ -11,6 +11,7 @@ import re
 import shutil
 from pathlib import Path
 
+from claudlobby.composer import compose_claude_md
 from claudlobby.config import load_fleet
 from claudlobby.loader import parse_frontmatter
 from claudlobby.paths import Paths
@@ -166,3 +167,80 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
               "Bash(claudlobby checkins *)", "Bash(claudlobby status *)"):
         assert g in grants, grants
     assert "Bash(claudlobby *)" not in grants
+
+
+# --- library/protocols/checkin.md: the check-in protocol (PR2 Task 3) -------
+
+
+def test_the_protocol_declares_no_requires_and_no_self_fire():
+    text = (LIB / "protocols" / "checkin.md").read_text()
+    fm, body = parse_frontmatter(text)
+    assert fm["title"] == "Check-in" and "requires" not in fm      # equipment linking is chunk 4
+    assert "natural idle point" not in body                        # the trigger owns the beat, with its throttles
+    assert "governs where it composes beside" in _flat(body.split("## Manager")[0])
+
+
+def test_the_protocol_names_the_same_bounded_ask_read_as_the_skill():
+    # without --raised every check-in counts as an ask and the manager falls silent
+    _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
+    assert "claudlobby checkins --bot $BOT_ID --since 7d --raised" in _flat(body)
+
+
+def test_both_sections_compose_for_a_hand_equipped_manager(fleet_dir):
+    install_real_template(fleet_dir)
+    shutil.copy(LIB / "protocols" / "checkin.md", fleet_dir / "library" / "protocols" / "checkin.md")
+    text = (fleet_dir / "fleet.yaml").read_text().replace(
+        "    lead:\n", "    lead:\n      protocols: [checkin]\n", 1)
+    (fleet_dir / "fleet.yaml").write_text(text)
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    md = compose_claude_md(fleet.bots["lead"], fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir))
+    assert "### Manager" in md and "### Worker" in md
+    assert "Silence is the default" in md
+
+
+def test_the_manager_section_fixes_the_post_shape_and_the_one_post_budget():
+    _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
+    m = _flat(body.split("## Manager")[1].split("## Worker")[0])
+    for needle in ("one status line", "one ask", "one pointer",
+                   "At most one post per check-in", "never one per project",
+                   "point to it"):
+        assert needle in m, needle
+
+
+def test_the_worker_section_keeps_the_start_ack_off_telegram():
+    # start agrees with worker-lifecycle's "No Telegram ack" (line 87); only
+    # done/blocked are Telegram-eligible, per the checkin/worker-lifecycle ruling
+    _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
+    w = _flat(body.split("## Worker")[1])
+    assert "Start is plane-only" in w
+    assert "Done and blocked" in w and "Telegram where the worker is configured for it" in w
+
+
+def test_the_cadence_rules_are_untouched_in_this_chunk():
+    # chunk 4 retires them with a grep-derived sweep; this chunk composes beside them
+    assert "Idle silence is a bug" in (LIB / "protocols" / "proactivity-discipline.md").read_text()
+    assert re.search(r"2.3 min", (LIB / "protocols" / "worker-lifecycle.md").read_text())
+
+
+# --- library/protocols/dispatch.md: the project: envelope field (PR2 Task 4) -----
+
+
+def test_the_dispatch_envelope_documents_the_project_field():
+    # chunk 1 shipped `dispatch-task.sh --project KEY`; the composed protocol
+    # text catches up here so a manager reading it sees the field it stamps
+    text = (LIB / "protocols" / "dispatch.md").read_text()
+    row = next((ln for ln in text.splitlines() if "`project:<key>`" in ln), None)
+    assert row, "no `project:<key>` row in the envelope key-value table"
+    flat = _flat(row)
+    assert "`projects.yaml` slug" in flat
+    assert "adds it to the envelope" in flat
+    assert "stamps `project_key`" in flat
+    assert "plane work item" in flat
+
+
+def test_the_tracked_dispatch_recipe_shows_the_project_flag():
+    text = (LIB / "protocols" / "dispatch.md").read_text()
+    line = next((ln for ln in text.splitlines()
+                 if "dispatch-task.sh" in ln and "--workstream <ws-id>" in ln), None)
+    assert line, "tracked-dispatch recipe line not found"
+    assert "--project <key>" in line

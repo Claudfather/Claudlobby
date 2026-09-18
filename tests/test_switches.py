@@ -96,6 +96,9 @@ def test_exactly_the_categories_that_ship_off():
     opt_in = {s.key for s in sw.SWITCHES if s.polarity == sw.OPT_IN}
     assert opt_in == {"update-siblings", "session-digest", "code-audit-sweep",
                       "weekly-worker-restart",
+                      # model spend — same class as code-audit-sweep /
+                      # session-digest, not a new category
+                      "manager-checkin",
                       # no deployment gate — see the docstring
                       "boot-capture", "boot-capture-stamp"}
     for s in sw.SWITCHES:

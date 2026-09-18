@@ -141,6 +141,7 @@ leftover flag without anyone maintaining a list.
 | `boot-capture` | **off** — no deployment gate — lib/ is read on demand per use, so the pull that delivers it is in force on every bot at once and nothing can be staged ahead. Enrollment is the only canary available; flip it on once one host has run it through a real boot | host job | system.yaml enroll | host.jobs.boot-capture.enroll: true in THIS host's system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
+| `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `update-siblings` | **off** — mutates operator source | host job | system.yaml enroll | host.jobs.update-siblings.enroll: true in THIS host's system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
@@ -335,9 +336,12 @@ units — one set per fleet, not one per host. Current roster:
 | `weekly-worker-restart` | `Sun *-*-* 05:00:00` | `false` (enforced — see [Dormancy](#dormancy-enroll-semantics-differ-by-scope)) |
 | `data-sweep` | `Sat *-*-* 07:00:00` (script carries `--purge`) | *(absent — enrolled)* |
 | `task-recheck` | `interval: 21600` (6h) | `false` (enforced) **and** self-gated on `TASK_RECHECK_ENABLED=1` |
+| `manager-checkin` | `interval: 900` (15 min) | `false` (dormant — injects `/checkin` into an idle, equipped manager) |
 
 `task-recheck` carries **two** gates because it is the first fleet job that
-dispatches into a live manager session (#1481): the manifest keeps
+dispatches into a live manager session (#1481; `manager-checkin` is its
+sibling here, chunk 2's own `/checkin` beat — one gate, not two, since it has
+no separate `_ENABLED` self-gate of its own): the manifest keeps
 `setup-fleet` from enrolling the unit, and `lib/task-recheck.sh` no-ops loudly
 unless the fleet's `.env` arms `TASK_RECHECK_ENABLED=1`. Arming that flag also
 composes it onto the unit (`FLEET_JOB_ARMING`, `composer.py`) — a timer unit

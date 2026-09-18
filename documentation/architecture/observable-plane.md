@@ -294,10 +294,10 @@ the walk in `documentation/plans/2026-09-02-plane-cutover-f18-design-walk.md`.
 ## Operations
 
 **Switches — what is on, what is opt-in, how to turn a door off.** Since the
-defaults flip (chunk N) **the whole plane ships ON**, under the estate rule: a
+defaults flip (chunk N) **every plane door ships ON**, under the estate rule: a
 job or door is on by default unless it deletes data, spends money, mutates
-operator source, or sends outbound to people at scale. Nothing the plane does
-is any of those — it records, it reads, and its one DELETE is family-scoped
+operator source, or sends outbound to people at scale. Nothing a plane door
+does is any of those — it records, it reads, and its one DELETE is family-scoped
 metric-sample retention.
 
 <!-- BEGIN GENERATED: switches -->
@@ -305,6 +305,7 @@ metric-sample retention.
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
+| `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in THIS host's system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
 | `plane-expire` | **on** | host job | host/root .env | PLANE_EXPIRE_ENABLED=0 in the host or root .env |
 | `plane-host-probe` | **on** | host job | system.yaml enroll | host.jobs.plane-host-probe.enroll: false in THIS host's system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
@@ -316,7 +317,9 @@ metric-sample retention.
 
 <!-- END GENERATED: switches -->
 
-Nothing plane-scoped is opt-in. `claudlobby plane doctor` prints this table
+Every plane door itself still ships on; the one opt-in row above is a
+spending job that merely reports through the plane, not a plane door
+declining to record. `claudlobby plane doctor` prints this table
 with each row's live state and the tier that set it — for the fleet it was
 given; without a `--fleet` the fleet-scoped rows read `unknown` and say so
 rather than reporting a scope nobody read. `claudlobby doctor --switches`

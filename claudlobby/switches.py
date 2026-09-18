@@ -435,6 +435,18 @@ SWITCHES: tuple[Switch, ...] = (
                    "system exists to keep)",
         what="Sunday restart of worker bots onto the staged Claude Code binary",
     ),
+    Switch(
+        key="manager-checkin",
+        scope=FLEET_JOB,
+        polarity=OPT_IN,
+        carrier=ENROLL_FLEET,
+        job="manager-checkin",
+        plane=True,
+        why_opt_in="model spend — one manager turn per idle beat — and it "
+                   "injects into a live session",
+        what="every 15 min, inject /checkin into an idle manager the compose "
+             "equipped with the checkin skill",
+    ),
 )
 
 #: Flags a shipped door once read and no longer does. A key here gets its own

@@ -720,6 +720,7 @@ _ALL_JOB_NAMES = {
     "weekly-worker-restart",
     "data-sweep",
     "task-recheck",
+    "manager-checkin",
 }
 
 
@@ -1095,11 +1096,17 @@ class TestDormantManifest:
         # task-recheck left this list in chunk N — the reaction the target
         # workflow is for ships enrolled. weekly-worker-restart stays: it
         # bounces live worker sessions, and long-running context is the thing
-        # this system exists to keep.
-        assert entries == ["com.test.weekly-worker-restart"]
+        # this system exists to keep. manager-checkin (PR 2 chunk 2) joins it
+        # for its own reason — model spend per beat, not doubt about the
+        # behaviour. _write_timers_manifest sorts the manifest, so the order
+        # here is alphabetical, not declaration order.
+        assert entries == ["com.test.manager-checkin",
+                           "com.test.weekly-worker-restart"]
         # Composed-but-dormant: the units are still emitted (F4 lock).
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()
         assert (timers_dir / "com.test.weekly-worker-restart.service").is_file()
+        assert (timers_dir / "com.test.manager-checkin.timer").is_file()
+        assert (timers_dir / "com.test.manager-checkin.service").is_file()
 
     def test_fleet_enroll_true_clears_dormant_entry(self, tmp_path):
         merged = _default_merged()
@@ -1114,6 +1121,9 @@ class TestDormantManifest:
         entries = [
             line for line in manifest.splitlines() if line and not line.startswith("#")
         ]
-        assert entries == []   # the enrolled one is gone from the list
+        # weekly-worker-restart is gone from the list; manager-checkin is
+        # untouched here and stays at its own default (enroll: false), so
+        # the list is not empty — only the one job this test armed left it.
+        assert entries == ["com.test.manager-checkin"]
         # Still composed, of course.
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()
