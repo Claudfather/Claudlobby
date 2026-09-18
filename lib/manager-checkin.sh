@@ -34,6 +34,12 @@ if [ -z "$FLEET" ]; then
     printf 'manager-checkin: no fleet named (usage: manager-checkin.sh <fleet> [--min-gap-s N])\n' >&2
     exit 2
 fi
+# Anchor every plane emission on THIS run's fleet, never a bot session's
+# ambient one: emit_fleet_event reads FLEET_NAME/CLAUDLOBBY_FLEET, while the
+# rate-limit read below passes $FLEET on argv -- a hand run from inside a bot
+# session (which exports FLEET_NAME) would otherwise write checkin_triggered
+# rows under one fleet that the read for another fleet can never see.
+export FLEET_NAME="$FLEET" CLAUDLOBBY_FLEET="$FLEET"
 case "$MIN_GAP_S" in ''|*[!0-9]*)
     printf 'manager-checkin: --min-gap-s takes whole seconds, got: %s\n' "$MIN_GAP_S" >&2; exit 2 ;;
 esac
@@ -46,7 +52,7 @@ TS="$(ts_iso)"
 SINCE="$(epoch_to_iso_utc "$(( $(date +%s) - MIN_GAP_S ))")"
 
 ck_skip() {   # <bot_dir> <bot_id> <reason> <log note>
-    echo "$TS SKIP $2 -- $4" >> "$LOG"
+    echo "$TS SKIP $FLEET/$2 -- $4" >> "$LOG"
     emit_fleet_event checkin_skipped manager-checkin \
         "$(printf '{"bot":"%s","reason":"%s"}' "$(json_escape "$2")" "$3")" "$1" "$2"
 }
@@ -56,7 +62,12 @@ ROSTER="$(safe_mktemp)"; BAD="$(safe_mktemp)"; HITS="$(safe_mktemp)"
 # still printed -- a disclosure, never a reason to stop. A substitution would
 # fire the ERR trap and record a critical row for a normal outcome.
 if declared_bots_strict "$BAD" > "$ROSTER"; then :; else
-    [ -s "$BAD" ] && sed 's/^/manager-checkin: roster: /' "$BAD" >&2 || true
+    roster_rc=$?
+    if [ -s "$BAD" ]; then
+        sed 's/^/manager-checkin: roster: /' "$BAD" >&2 || true
+    else
+        printf 'manager-checkin: roster door failed (rc %s), nothing dispatched\n' "$roster_rc" >&2
+    fi
 fi
 
 while IFS="$(printf '\t')" read -r bot bot_fleet bot_dir; do
@@ -81,16 +92,31 @@ while IFS="$(printf '\t')" read -r bot bot_fleet bot_dir; do
             --fleet "$FLEET" --bot "$bot_id" --type checkin_triggered \
             --since "$SINCE" > "$HITS" 2>> "$LOG"; then
         if [ -s "$HITS" ]; then
-            echo "$TS SKIP $bot_id -- checked in within ${MIN_GAP_S}s" >> "$LOG"; continue
+            echo "$TS SKIP $FLEET/$bot_id -- checked in within ${MIN_GAP_S}s" >> "$LOG"; continue
         fi
     else
-        echo "$TS SKIP $bot_id -- plane unreachable, not firing" >> "$LOG"; continue
+        unreachable_msg="$TS SKIP $FLEET/$bot_id -- plane unreachable, not firing"
+        echo "$unreachable_msg" >> "$LOG"
+        echo "$unreachable_msg" >&2
+        continue
     fi
-    if "$LIB_DIR/dispatch.sh" "$bot" "/checkin"; then
-        echo "$TS DISPATCH $bot_id -- /checkin sent" >> "$LOG"
+    if bot_is_busy "$socket" "$bot" "$bot_dir"; then # re-check: the plane read sat between the gate and the send
+        ck_skip "$bot_dir" "$bot_id" busy "mid-turn"; continue
+    fi
+    if "$LIB_DIR/dispatch.sh" "$bot" "/checkin" </dev/null; then
+        echo "$TS DISPATCH $FLEET/$bot_id -- /checkin sent" >> "$LOG"
         emit_fleet_event checkin_triggered manager-checkin \
             "$(printf '{"bot":"%s","min_gap_s":%s}' "$(json_escape "$bot_id")" "$MIN_GAP_S")" \
             "$bot_dir" "$bot_id"
+        # emit_fleet_event RESTORES PLANE_EMIT_LAST_RC to its pre-call value on
+        # return (lib-common.sh: a nested emit must not clobber a caller's own
+        # rc), so PLANE_EMIT_DISABLED is the one signal this door can actually
+        # see -- verified empirically, a genuinely failed emission still reads
+        # PLANE_EMIT_LAST_RC as whatever it was before the call. The rate limit
+        # is a plane read, so a trigger that did not land silently disables it.
+        if [ "${PLANE_EMIT_DISABLED:-0}" = "1" ]; then
+            echo "$TS WARN $FLEET/$bot_id -- trigger not recorded (plane emit disabled); the rate limit will not hold this beat" >> "$LOG"
+        fi
     else
         ck_skip "$bot_dir" "$bot_id" send_failed "dispatch failed"
     fi

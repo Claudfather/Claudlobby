@@ -28,7 +28,7 @@ nothing — it is in the plane. A justified post is fixed in shape: one status
 line, one ask with named options, one pointer (a plane URL or a PR). At most
 one post per check-in — qualifying items across every project coalesce into
 that one message, never one per project; held items wait for the next
-justified post. Never restate a project's rigor — point to it.
+justified post. Never restate a project's tier — point to it.
 
 The rate limit on asking: read `claudlobby checkins --bot $BOT_ID --since 7d
 --raised` first. Two open, unanswered asks this week means the fleet

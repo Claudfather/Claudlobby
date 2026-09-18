@@ -486,7 +486,7 @@ defaults:
       type: oneshot
     # PR 2 of the manager check-in build (chunk 2): every 15 min, inject
     # `/checkin` into an idle, EQUIPPED manager through the beat
-    # (lib/manager-checkin.sh, chunk 1) -- the same reaction task-recheck
+    # (lib/manager-checkin.sh, chunk 2) -- the same reaction task-recheck
     # triggers on a schedule, but initiative-shaped rather than row-shaped:
     # nothing needs to be overdue for a manager to check in.
     #

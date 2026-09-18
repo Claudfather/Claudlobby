@@ -88,10 +88,23 @@ bot_conf_get() {
 
 tmux_socket_for_bot() { printf 'fakesock'; return 0; }
 check_tmux_session() { return "${STUB_SESSION_RC:-0}"; }
-bot_is_busy() { return "${STUB_BUSY_RC:-1}"; }
+
+# bot_is_busy: a plain fixed rc for every existing caller (STUB_BUSY_RC,
+# default 1 = idle). STUB_BUSY_RC_2 additionally steers the SECOND and every
+# later call in the process (via a call-count file), for the gate-vs-send
+# re-check (A4) -- idle at the gate, busy at the send.
+bot_is_busy() {
+    local n
+    n=$(( $(cat "$STUB_BUSY_CALLS" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$STUB_BUSY_CALLS"
+    if [ "$n" -ge 2 ] && [ -n "${STUB_BUSY_RC_2:-}" ]; then
+        return "$STUB_BUSY_RC_2"
+    fi
+    return "${STUB_BUSY_RC:-1}"
+}
 
 emit_fleet_event() {
-    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$2" "${3:-}" "${4:-}" "${5:-}" >> "$EVENTS_CAPTURE"
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$2" "${3:-}" "${4:-}" "${5:-}" "${FLEET_NAME:-}" >> "$EVENTS_CAPTURE"
 }
 
 epoch_to_iso_utc() {
@@ -208,9 +221,12 @@ def _run(
         "STUB_ROSTER_FILE": str(roster_file),
         "STUB_ROSTER_BAD_FILE": str(roster_bad_file),
         "STUB_PLANE_ARGV_CAPTURE": str(tmp_path / "plane_argv_capture"),
+        "STUB_BUSY_CALLS": str(tmp_path / "busy_calls"),
     }
     env.pop("CLAUDLOBBY_FLEET", None)
     env.pop("CHECKIN_MIN_GAP_S", None)
+    env.pop("FLEET_NAME", None)
+    env.pop("PLANE_EMIT_DISABLED", None)
     if env_extra:
         env.update(env_extra)
 
@@ -238,8 +254,8 @@ def _events(tmp_path: Path) -> list[dict]:
         if not line:
             continue
         parts = line.split("\t")
-        parts += [""] * (5 - len(parts))
-        event_type, source, data_json, bot_dir, bot_id = parts[:5]
+        parts += [""] * (6 - len(parts))
+        event_type, source, data_json, bot_dir, bot_id, fleet_name_env = parts[:6]
         data = json.loads(data_json) if data_json else {}
         out.append(
             {
@@ -248,6 +264,7 @@ def _events(tmp_path: Path) -> list[dict]:
                 "data": data,
                 "bot_dir": bot_dir,
                 "bot_id": bot_id,
+                "fleet_name_env": fleet_name_env,
             }
         )
     return out
@@ -303,6 +320,18 @@ def test_the_plane_row_is_anchored_on_BOT_ID_not_the_directory_name(tmp_path):
     assert events[0]["bot_id"] == "lead"
 
 
+def test_the_triggered_row_anchors_on_the_argv_fleet_not_an_ambient_one(tmp_path):
+    rc, _out, err = _run(
+        tmp_path,
+        bots=[{"dir": "mgr", "fleet": "f"}],
+        env_extra={"FLEET_NAME": "otherfleet"},
+    )
+    assert rc == 0, err
+    events = _events(tmp_path)
+    assert [e["type"] for e in events] == ["checkin_triggered"]
+    assert events[0]["fleet_name_env"] == "f"
+
+
 def test_a_worker_is_never_injected_into(tmp_path):
     rc, _out, err = _run(
         tmp_path, bots=[{"dir": "w1", "fleet": "f", "manager": False}]
@@ -355,6 +384,23 @@ def test_a_busy_manager_is_never_injected_into_mid_turn(tmp_path):
     events = _events(tmp_path)
     assert len(events) == 1
     assert events[0]["type"] == "checkin_skipped"
+    assert events[0]["data"]["reason"] == "busy"
+
+
+def test_a_manager_idle_at_the_gate_but_busy_at_the_send_gets_no_dispatch(tmp_path):
+    # A4: the plane rate-limit read sits between the gate check and the send,
+    # so a re-check immediately before dispatch.sh catches a manager that went
+    # busy in that window -- idle on the first bot_is_busy call, busy on the
+    # second.
+    rc, _out, err = _run(
+        tmp_path,
+        bots=[{"dir": "mgr", "fleet": "f"}],
+        env_extra={"STUB_BUSY_RC": "1", "STUB_BUSY_RC_2": "0"},
+    )
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    events = _events(tmp_path)
+    assert [e["type"] for e in events] == ["checkin_skipped"]
     assert events[0]["data"]["reason"] == "busy"
 
 
@@ -421,6 +467,29 @@ def test_an_unreachable_plane_does_not_fire(tmp_path):
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == []
     assert "unreachable" in _log(tmp_path)
+
+
+def test_a_disabled_plane_emit_warns_the_trigger_was_not_recorded(tmp_path):
+    # A2: PLANE_EMIT_DISABLED=1 is the one signal a real emit_fleet_event call
+    # returns 0 without ever recording anything (plane_armed's early return) --
+    # the only failure this door can actually see from outside emit_fleet_event,
+    # since its own PLANE_EMIT_LAST_RC is restored to its pre-call value on
+    # return and so never reflects this call's own outcome.
+    rc, _out, err = _run(
+        tmp_path,
+        bots=[{"dir": "mgr", "fleet": "f"}],
+        env_extra={"PLANE_EMIT_DISABLED": "1"},
+    )
+    assert rc == 0, err
+    log = _log(tmp_path)
+    assert "WARN" in log
+    assert "not recorded" in log
+
+
+def test_a_clean_emit_writes_no_warn(tmp_path):
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}])
+    assert rc == 0, err
+    assert "WARN" not in _log(tmp_path)
 
 
 def test_a_failed_send_records_no_trigger_so_the_next_beat_retries(tmp_path):
