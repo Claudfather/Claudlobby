@@ -254,7 +254,7 @@ val_seed_report() {
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -286,7 +286,7 @@ cleanup() {
     fi
     [ -n "${PL_ROOT:-}" ] && rm -rf "$PL_ROOT" 2>/dev/null
     [ -n "${PL_SOCKDIR:-}" ] && rm -rf "$PL_SOCKDIR" 2>/dev/null
-    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "$TMUX_TMPDIR"
+    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "${CK2_ROOT2:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -3275,6 +3275,174 @@ CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H"
 rm -f "$ROOT/lib"
 { [ -n "$ck_id" ] && [ -n "$ck_other" ] && grep -q "$ck_id" "$ROOT/ck-read2.out" && ! grep -q "$ck_other" "$ROOT/ck-read2.out"; } && r=yes || r=no
 harness_check "checkin: ...--bot --last returns THIS manager's newest row and not the other manager's (a real negative)" "$r"
+
+# ===========================================================================
+# manager check-in chunk 2 -- the whole beat on a real plane: the fleet timer
+# injects /checkin into an idle, equipped manager pane; the session answers
+# it. The harness stubs `claude` with `exec cat` (:42), which cannot run a
+# skill, so the manager pane runs a SCRIPTED RESPONDER standing in for the
+# RECORD step alone: on a line beginning /checkin it feeds one canned
+# decision to the real checkin-record.sh. The responder stands in for the
+# reasoning and for nothing else -- the timer script, the gates, dispatch.sh,
+# pane_send_verified, the record door and the plane are all the real ones.
+# That is the only way to observe timer -> pane -> row end to end without a
+# model, and it is a bound rather than a claim.
+# ===========================================================================
+echo ""
+echo "=== validate manager check-in: the beat injects, gates, and records on a real plane ==="
+CK2_FLEET="valckbeat"
+CK2_BOT="valckmgr2"
+val_plane_ready "$ROOT" "$CK2_FLEET"
+printf 'fleet:\n  name: %s\n  bots:\n    %s:\n      expertise: [orchestration]\n' "$CK2_FLEET" "$CK2_BOT" \
+    > "$ROOT/local/$CK2_FLEET/fleet.yaml"
+CK2_DIR="$ROOT/local/$CK2_FLEET/runtime/bots/$CK2_BOT"
+mkdir -p "$CK2_DIR/data" "$CK2_DIR/logs" "$CK2_DIR/.claude/skills"
+cat > "$CK2_DIR/bot.conf" <<CONF
+BOT_ID=$CK2_BOT
+FLEET_NAME=$CK2_FLEET
+MANAGER_TMUX=$CK2_BOT
+BOT_SERVICE=
+CONF
+# The equip gate: the real symlink shape the composer writes.
+ln -sfn "$VAL_REPO/library/skills/checkin" "$CK2_DIR/.claude/skills/checkin"
+
+# Chunk 1's harness decision, reused verbatim ($ck_decision, above): both list
+# keys present, raise.reason non-empty, prev_checkin_id present -- the
+# contract refuses anything less. Unquoted heredoc: $ROOT / $VAL_REPO /
+# $VAL_CLI / $CK2_DIR expand at write time; \$line does not, so the read loop
+# evaluates it at run time, once per line, for as long as the pane lives.
+printf '%s' "$ck_decision" > "$CK2_DIR/decision.json"
+cat > "$CK2_DIR/responder.sh" <<RESP
+#!/bin/bash
+export CLAUDLOBBY_ROOT="$ROOT"
+export CLAUDLOBBY_FLEET="$CK2_FLEET"
+export FLEET_NAME="$CK2_FLEET"
+export BOT_ID="$CK2_BOT"
+export PLANE_EMIT_CLI="$VAL_CLI"
+export PLANE_SOCKET="$PLANE_SOCKET"
+printf '\n> \n'
+while IFS= read -r line; do
+    case "\$line" in
+        /checkin*)
+            bash "$VAL_REPO/lib/checkin-record.sh" < "$CK2_DIR/decision.json" >> "$CK2_DIR/logs/record.out" 2>&1 || true
+            ;;
+    esac
+    printf '\n> \n'
+done
+RESP
+tmux new-session -d -s "$CK2_BOT" "bash '$CK2_DIR/responder.sh'"
+
+# #860 sibling risk: pane_send_verified resends the WHOLE payload when it
+# classifies the pane as never-drawn (no prompt glyph seen before the send).
+# dispatch.sh never arms PANE_READY_TICKS (only start-bot's cold boot does),
+# so that classification cannot fire on THIS call path in production shape --
+# but the responder is a scripted bash loop standing up cold, not a running
+# bot, so wait for its own first prompt regardless. Belt and suspenders, not
+# a load-bearing assumption either way: the fixed idle-prompt glyph every
+# other fixture in this harness prints (":1108" et al.).
+_ck2_ready=0
+_ck2_t=0
+while [ "$_ck2_t" -lt 50 ]; do
+    if tmux capture-pane -t "$CK2_BOT" -p 2>/dev/null | grep -qE '^> *$'; then
+        _ck2_ready=1; break
+    fi
+    sleep 0.1
+    _ck2_t=$((_ck2_t + 1))
+done
+[ "$_ck2_ready" -eq 1 ] || echo "validate-bot-change: checkin responder pane never drew its prompt (proceeding anyway)" >&2
+
+# --- the beat, clean ---------------------------------------------------------
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
+sleep 3
+
+ck2_n1=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin')
+[ "$ck2_n1" -ge 1 ] && r=yes || r=no
+harness_check "checkin: the beat injected /checkin into the equipped idle manager pane" "$r"
+
+ck2_trig=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_triggered | wc -l)
+[ "$ck2_trig" -eq 1 ] && r=yes || r=no
+harness_check "checkin: ...and recorded ONE checkin_triggered anchored on the manager" "$r"
+
+# The RESPONDER's reaction (reading the pane, running checkin-record.sh) is
+# the one truly async leg -- everything else above already settled
+# synchronously before manager-checkin.sh returned. record.out carries the
+# door's own stdout (the ck_<32hex> id) interleaved with its stderr fallback
+# breadcrumbs (the harness plane has no daemon, so every emit takes the cold
+# CLI rung, disclosed there by design) -- grep the one line shaped like an id.
+ck2_id=$(grep -Eo '^ck_[0-9a-f]{32}$' "$CK2_DIR/logs/record.out" 2>/dev/null | head -1)
+ck2_dec=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events WHERE kind='system' AND event='checkin_decision' AND source_ref='checkin:$ck2_id'")
+# The CLI reaches its read door at <root>/lib -- linked for THIS call and
+# removed after it, the #1481 neighbour rule the checkin chunk-1 scenario
+# above keeps too.
+ln -sfn "$LIB_DIR" "$ROOT/lib"
+CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK2_FLEET" --json \
+    > "$ROOT/ck2-read.out" 2> "$ROOT/ck2-read.err" || true
+rm -f "$ROOT/lib"
+{ [ -n "$ck2_id" ] && [ "${ck2_dec:-0}" -eq 1 ] && grep -q "$ck2_id" "$ROOT/ck2-read.out"; } && r=yes || r=no
+harness_check "checkin: ...and the session's answer landed a checkin_decision the read door lists" "$r"
+
+# --- a second tick, inside the min gap ---------------------------------------
+# No flag: the same default gap as the run above. The plane read IS the rate
+# limit -- there is no timer state file to lose or to lie, so a repeat inside
+# the window must add nothing: no new pane text, no new event.
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
+sleep 1
+ck2_n2=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin')
+ck2_trig2=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_triggered | wc -l)
+{ [ "$ck2_n2" -eq "$ck2_n1" ] && [ "$ck2_trig2" -eq 1 ]; } && r=yes || r=no
+harness_check "checkin: a second tick inside the min gap does NOT inject again (the plane read IS the rate limit)" "$r"
+
+# --- a busy manager -----------------------------------------------------------
+# The marker-first path (rendering-immune) short-circuits ahead of any plane
+# read, so --min-gap-s 0 removes the rate limit as a confound: if busy
+# detection were broken, this tick would dispatch a second time cleanly
+# rather than being masked by the still-open rate-limit window.
+touch "$CK2_DIR/data/.last-tool-call"
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" --min-gap-s 0 || true
+sleep 1
+ck2_n3=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin')
+ck2_busy=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_skipped)
+# Compared against ck2_n2 (the count immediately BEFORE this action), never
+# the frozen ck2_n1 -- so a rate-limit regression upstream (which already
+# fails its OWN check above) cannot cascade into failing this independent
+# gate too. Caught by the negative control: comparing against ck2_n1 here
+# flipped this row to FAIL alongside the second-tick row under the
+# rate-limit-disabled mutant, though busy detection itself was never
+# touched by it.
+{ [ "$ck2_n3" -eq "$ck2_n2" ] && printf '%s' "$ck2_busy" | grep -q '"reason":"busy"'; } && r=yes || r=no
+harness_check "checkin: a BUSY manager is never injected into mid-turn, and the skip is recorded" "$r"
+
+# --- an unreachable plane -----------------------------------------------------
+# A second scratch root: same manifest shape, same bot dir shape, but NO
+# state/plane/plane.db at all. Session identity is the bot dir BASENAME, not
+# the root, so the very same manager session ("$CK2_BOT", above) is still the
+# dispatch target -- "the pane count is unchanged" is the same pane the
+# checks above just used. A money-spending action must fail closed rather
+# than fall through to a blind dispatch when its own rate-limit read cannot
+# be answered.
+CK2_ROOT2="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-ck2.XXXXXX")"
+CK2_DIR2="$CK2_ROOT2/local/$CK2_FLEET/runtime/bots/$CK2_BOT"
+mkdir -p "$CK2_DIR2/.claude/skills"
+printf 'fleet:\n  name: %s\n  bots:\n    %s:\n      expertise: [orchestration]\n' "$CK2_FLEET" "$CK2_BOT" \
+    > "$CK2_ROOT2/local/$CK2_FLEET/fleet.yaml"
+cat > "$CK2_DIR2/bot.conf" <<CONF
+BOT_ID=$CK2_BOT
+FLEET_NAME=$CK2_FLEET
+MANAGER_TMUX=$CK2_BOT
+BOT_SERVICE=
+CONF
+ln -sfn "$VAL_REPO/library/skills/checkin" "$CK2_DIR2/.claude/skills/checkin"
+CLAUDLOBBY_ROOT="$CK2_ROOT2" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
+sleep 1
+ck2_n4=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin')
+# Compared against ck2_n3 (the count immediately BEFORE this action), same
+# rolling-baseline reasoning as the busy check above -- each gate proves
+# itself against its own immediately-preceding state, never a frozen one.
+{ [ "$ck2_n4" -eq "$ck2_n3" ] && grep -q unreachable "$CK2_ROOT2/logs/manager-checkin.log" 2>/dev/null; } && r=yes || r=no
+harness_check "checkin: an unreachable plane does NOT fire (fail closed for a spending action)" "$r"
+
+rm -rf "$CK2_ROOT2"
+command tmux -L "$(vsock "$CK2_BOT")" kill-server 2>/dev/null || true
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
