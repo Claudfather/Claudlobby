@@ -11,6 +11,7 @@ import re
 import shutil
 from pathlib import Path
 
+from claudlobby.composer import compose_claude_md
 from claudlobby.config import load_fleet
 from claudlobby.loader import parse_frontmatter
 from claudlobby.paths import Paths
@@ -166,3 +167,47 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
               "Bash(claudlobby checkins *)", "Bash(claudlobby status *)"):
         assert g in grants, grants
     assert "Bash(claudlobby *)" not in grants
+
+
+# --- library/protocols/checkin.md: the check-in protocol (PR2 Task 3) -------
+
+
+def test_the_protocol_declares_no_requires_and_no_self_fire():
+    text = (LIB / "protocols" / "checkin.md").read_text()
+    fm, body = parse_frontmatter(text)
+    assert fm["title"] == "Check-in" and "requires" not in fm      # equipment linking is chunk 4
+    assert "natural idle point" not in body                        # the trigger owns the beat, with its throttles
+    assert "governs where it composes beside" in _flat(body.split("## Manager")[0])
+
+
+def test_the_protocol_names_the_same_bounded_ask_read_as_the_skill():
+    # without --raised every check-in counts as an ask and the manager falls silent
+    _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
+    assert "claudlobby checkins --bot $BOT_ID --since 7d --raised" in _flat(body)
+
+
+def test_both_sections_compose_for_a_hand_equipped_manager(fleet_dir):
+    install_real_template(fleet_dir)
+    shutil.copy(LIB / "protocols" / "checkin.md", fleet_dir / "library" / "protocols" / "checkin.md")
+    text = (fleet_dir / "fleet.yaml").read_text().replace(
+        "    lead:\n", "    lead:\n      protocols: [checkin]\n", 1)
+    (fleet_dir / "fleet.yaml").write_text(text)
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    md = compose_claude_md(fleet.bots["lead"], fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir))
+    assert "### Manager" in md and "### Worker" in md
+    assert "Silence is the default" in md
+
+
+def test_the_manager_section_fixes_the_post_shape_and_the_one_post_budget():
+    _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
+    m = _flat(body.split("## Manager")[1].split("## Worker")[0])
+    for needle in ("one status line", "one ask", "one pointer",
+                   "At most one post per check-in", "never one per project",
+                   "point to it"):
+        assert needle in m, needle
+
+
+def test_the_cadence_rules_are_untouched_in_this_chunk():
+    # chunk 4 retires them with a grep-derived sweep; this chunk composes beside them
+    assert "Idle silence is a bug" in (LIB / "protocols" / "proactivity-discipline.md").read_text()
+    assert re.search(r"2.3 min", (LIB / "protocols" / "worker-lifecycle.md").read_text())
