@@ -3297,11 +3297,16 @@ printf 'fleet:\n  name: %s\n  bots:\n    %s:\n      expertise: [orchestration]\n
     > "$ROOT/local/$CK2_FLEET/fleet.yaml"
 CK2_DIR="$ROOT/local/$CK2_FLEET/runtime/bots/$CK2_BOT"
 mkdir -p "$CK2_DIR/data" "$CK2_DIR/logs" "$CK2_DIR/.claude/skills"
+# BOT_SERVICE names the socket the session really lives on (this file's tmux
+# wrapper routes -t/-s to -L tmux-<name>), the shape the composer writes. It is
+# NOT left empty: the beat exports FLEET_NAME from its argv, and with a fleet
+# set the shared resolver refuses an empty BOT_SERVICE rather than fall back to
+# a bare socket name -- the beat would then see no session and never inject.
 cat > "$CK2_DIR/bot.conf" <<CONF
 BOT_ID=$CK2_BOT
 FLEET_NAME=$CK2_FLEET
 MANAGER_TMUX=$CK2_BOT
-BOT_SERVICE=
+BOT_SERVICE=$(vsock "$CK2_BOT")
 CONF
 # The equip gate: the real symlink shape the composer writes.
 ln -sfn "$VAL_REPO/library/skills/checkin" "$CK2_DIR/.claude/skills/checkin"
@@ -3429,7 +3434,7 @@ cat > "$CK2_DIR2/bot.conf" <<CONF
 BOT_ID=$CK2_BOT
 FLEET_NAME=$CK2_FLEET
 MANAGER_TMUX=$CK2_BOT
-BOT_SERVICE=
+BOT_SERVICE=$(vsock "$CK2_BOT")
 CONF
 ln -sfn "$VAL_REPO/library/skills/checkin" "$CK2_DIR2/.claude/skills/checkin"
 CLAUDLOBBY_ROOT="$CK2_ROOT2" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
