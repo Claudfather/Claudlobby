@@ -220,6 +220,41 @@ def test_an_opt_in_nobody_armed_reads_as_the_DEFAULT_not_as_config(tmp_path):
     assert _state(rows, "weekly-worker-restart").source == "default"
 
 
+def _resolve_with_jobs(tmp_path, jobs_yaml: str):
+    """The same real resolve(), over a fleet that writes `defaults.jobs`."""
+    root = _root(tmp_path)
+    (root / "fleet.yaml").write_text(
+        dedent(_FLEET) + "  defaults:\n    jobs:\n" + jobs_yaml)
+    fleet, _md = load_fleet(root / "fleet.yaml")
+    return sw.resolve(Paths(root=root, fleet_dir=root), fleet)
+
+
+@pytest.mark.parametrize("key", ["manager-checkin", "weekly-worker-restart"])
+def test_an_opt_in_job_with_no_env_flag_reads_ON_once_its_fleet_enrolls_it(tmp_path, key):
+    """A job row that declares no env flag has ONE gate, the enrollment. The
+    table used to AND the enrollment with the row's shipped default standing in
+    for the absent flag, so an env-less opt-in could never read on: two armed,
+    launchd-loaded jobs on a live fleet both printed `off (opt-in)` beside an
+    arm hint — the operator surface denying a switch that was on."""
+    assert not sw.by_key(key).env, "this pin is about rows with no env flag"
+    rows = _resolve_with_jobs(tmp_path, f"      {key}: {{ enroll: true }}\n")
+    st = _state(rows, key)
+    assert st.on is True and st.label == "on"
+    assert st.source == "fleet defaults.jobs"
+
+
+def test_an_env_less_opt_in_job_nobody_enrolled_still_reads_off(tmp_path):
+    st = _state(_resolve(tmp_path), "manager-checkin")
+    assert st.on is False and st.label == "off (opt-in)" and st.source == "default"
+
+
+def test_an_enrolled_job_whose_own_flag_is_off_still_reads_off(tmp_path):
+    """The two-gate rule survives for rows that HAVE a flag: enrolled by
+    default, silenced by its opt-out flag -> off."""
+    rows = _resolve(tmp_path, "TASK_RECHECK_ENABLED=0\n")
+    assert _state(rows, "task-recheck").on is False
+
+
 def test_an_armed_opt_in_names_what_armed_it(tmp_path):
     rows = _resolve(tmp_path, "SESSION_DIGEST_ENABLED=1\n")
     st = _state(rows, "session-digest")

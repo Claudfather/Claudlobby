@@ -702,7 +702,16 @@ def resolve(
         # unit whose script still no-ops on its own flag, and that combination
         # is precisely what an opt-out flag exists for.
         enroll_ok = True if enrolled is None else enrolled
-        env_ok = sw.default_on if env_on is None else env_on
+        # A row that declares NO env flag has one gate, not two. Standing the
+        # shipped default in for an absent flag made every env-less opt-in job
+        # unshowable as on: `enrolled and default_on` is `enrolled and False`.
+        # Two armed, loaded jobs on a live fleet both printed `off (opt-in)`
+        # beside an arm hint. The default stands in only for a flag that
+        # EXISTS and was not read.
+        if not sw.env and enrolled is not None:
+            env_ok = True
+        else:
+            env_ok = sw.default_on if env_on is None else env_on
         on = enroll_ok and env_ok
 
         # Attribution answers "who decided this", so only something that moved
