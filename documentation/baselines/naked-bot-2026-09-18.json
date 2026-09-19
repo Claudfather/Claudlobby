@@ -1,6 +1,6 @@
 {
   "schema": 3,
-  "ref": "f4a022479383d550d589efa9fd9839c040bdb6c1",
+  "ref": "fa95ea65474b84021bb87352248016ca36a6563c",
   "freshbox": {
     "rc": 0,
     "output": "Fresh-box self-containment audit \u2014 naked-probe (1 bots)\n  OK \u2014 every grant traces to an equipped source; Tier-A settings composed per-bot. Self-contained."
@@ -2598,7 +2598,7 @@
         ".claude/",
         ".claude/settings.local.json",
         ".claude/skills/",
-        ".claude/skills/checkin -> /private$EXPORT/library/skills/checkin",
+        ".claude/skills/checkin -> $EXPORT/library/skills/checkin",
         ".mcp.json",
         "CLAUDE.md",
         "bot.conf",
@@ -2726,7 +2726,7 @@
           "registry_entries": [],
           "composed_instructions": null,
           "composed_artifacts": [
-            ".claude/skills/checkin -> /private$EXPORT/library/skills/checkin"
+            ".claude/skills/checkin -> $EXPORT/library/skills/checkin"
           ],
           "composed_content": null
         },
