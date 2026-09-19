@@ -73,7 +73,10 @@ from pathlib import Path
 #: WITHOUT bumping this let the version guard pass and `diff_reports` then
 #: KeyError'd on the older record — caught in development, and the reason the
 #: field access below is `.get` rather than `[]`.
-SCHEMA = 2
+#: v3 added `Arm.teams` / `Arm.observed_bot` (PR4 chunk 4) — the `shape:
+#: leaf-manager` arm composes a SECOND bot, so a v2 record has no
+#: `observed_bot` to compare against and no arm to compare it with.
+SCHEMA = 3
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -266,6 +269,21 @@ class Arm:
     #: wired rather than on what it switched off, and an inventory that only
     #: varies opt-outs cannot see them (#1172).
     vault_wired: bool = False
+    #: A THIRD fleet-shape axis, after `declared` and `vault_wired`: a `teams:`
+    #: block naming a two-bot fleet (a manager and one in-fleet report that is
+    #: not itself a manager) instead of the one-bot fleet every other arm
+    #: composes. `teams:`/multi-bot fleets were named as open generalisation
+    #: the day `shape:vault-wired` landed ("What the gate does NOT cover") —
+    #: this is that generalisation, scoped to the one shape a role overlay
+    #: needs to become visible at all. `False` for every arm that predates it,
+    #: so their composed fleet stays byte-identical to what it composed before
+    #: this field existed.
+    teams: bool = False
+    #: Which bot's directory this arm observes. Every arm before this one only
+    #: ever composed `nakedbot`, so `observe_arm` could hardcode the literal; a
+    #: `teams` arm composes a SECOND bot (the manager), and the manager — not
+    #: the worker — is the one whose role overlay is under test.
+    observed_bot: str = "nakedbot"
     generate_rc: int = -1
     generate_stderr_tail: str = ""
     sections: dict[str, list[str]] = field(default_factory=dict)
@@ -335,7 +353,7 @@ fleet:
     nakedbot:
       name: nakedbot
       expertise: [probe-minimal]
-{declared}"""
+{declared}{teams}"""
 
 
 def write_probe(root: Path, arm: Arm) -> None:
@@ -356,8 +374,25 @@ def write_probe(root: Path, arm: Arm) -> None:
         # SET; nothing here reads the tree, and pointing at a real vault would
         # make the observation depend on the host's knowledge corpus.
         declared += "      claudron_vault_path: /tmp/naked-probe-vault\n"
+    teams = ""
+    if arm.teams:
+        # A SECOND bot, sibling to `nakedbot` under `bots:` (same 4-space
+        # indent), plus a top-level `teams:` block naming it manager of the
+        # first. Empty string for every arm that does not opt in, so the
+        # `{teams}` slot is inert and every pre-existing arm's fleet.yaml
+        # stays byte-identical (controller ruling).
+        teams = (
+            "    nakedmgr:\n"
+            "      name: nakedmgr\n"
+            "      expertise: [probe-minimal]\n"
+            "\n"
+            "  teams:\n"
+            "    core:\n"
+            "      manager: nakedmgr\n"
+            "      workers: [nakedbot]\n"
+        )
     (overlay / "fleet.yaml").write_text(
-        FLEET_TEMPLATE.format(system_defaults=sd, declared=declared)
+        FLEET_TEMPLATE.format(system_defaults=sd, declared=declared, teams=teams)
     )
 
 
@@ -464,7 +499,7 @@ def observe_arm(root: Path, python: str, arm: Arm, registry) -> Arm:
     """Compose one arm and fill in everything it produced."""
     write_probe(root, arm)
     arm.generate_rc, arm.generate_stderr_tail = run_generate(root, python)
-    bot_dir = root / "local" / "naked-probe" / "runtime" / "bots" / "nakedbot"
+    bot_dir = root / "local" / "naked-probe" / "runtime" / "bots" / arm.observed_bot
     if arm.generate_rc != 0 or not bot_dir.is_dir():
         return arm  # a failed arm records its rc and stays empty, never green
 
@@ -521,6 +556,22 @@ def build_arms(types: list[str]) -> list[Arm]:
     # forms are mutually exclusive, so this arm is also what would catch a gate
     # regression that composed both or neither.
     arms.append(Arm(label="shape:vault-wired", system_defaults=None, vault_wired=True))
+    # A THIRD fleet shape: `teams:` naming a manager (`nakedmgr`) over one
+    # in-fleet report (`nakedbot`) that is not itself a manager — a leaf
+    # manager (`FleetConfig.leaf_manager_bots()`). Exists because a role
+    # overlay (`Disposition.roles`) is the one thing no arm above can see: all
+    # seventeen compose a single non-manager bot, so `REGISTRY["protocols"]
+    # .roles = {"leaf-manager": ("checkin",)}` (Task 3) would certify a fleet
+    # nobody runs until this arm existed. Observes the MANAGER, not the
+    # worker, since the manager is the bot the role overlay actually reaches.
+    arms.append(
+        Arm(
+            label="shape:leaf-manager",
+            system_defaults=None,
+            teams=True,
+            observed_bot="nakedmgr",
+        )
+    )
     return arms
 
 
