@@ -12,6 +12,7 @@
 #   parse_env_file     — restricted .env parser ([export ]KEY=VALUE only)
 #   own_tool_path      — prepend this repo's tool prefixes (timer PATH is minimal)
 #   claudlobby_cli     — run the claudlobby CLI across every install shape
+#   session_cli_path   — shim the venv-only CLI onto a bot session PATH
 #   with_timeout       — run a command under timeout(1) if available, else bare
 #   with_lock          — portable mutex (flock if available, else mkdir spinlock)
 #   setup_log_dir      — mkdir -p for log file's parent directory
@@ -190,6 +191,101 @@ claudlobby_cli() {
             "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" >&2
         return 127
     fi
+}
+
+# session_cli_path
+# A bot SESSION runs under the PATH start-bot.sh exports on the line above, not
+# an activated venv, so on a host whose install keeps the CLI only inside
+# $CLAUDLOBBY_ROOT/.venv/bin/claudlobby (the PEP 668 venv shape
+# getting-started.md documents) a bare `claudlobby` call — exactly what the
+# shipped skill grants name — resolves to nothing inside the session (#1567).
+# Call once, right after start-bot.sh sets PATH: a no-op when `claudlobby`
+# already resolves, so a host with the CLI on a user bin keeps behavior
+# unchanged byte for byte; otherwise symlink ONE name into a host-local shim
+# dir and append that dir to PATH.
+#
+# One name, not the whole .venv/bin: that directory also holds python, pip and
+# pytest, and appending it would send a bare `pip install ...` run in the
+# session into the environment the compositor itself runs in, on a host with
+# no system pip.
+# Appended, never prepended: nothing a session resolves today may change —
+# the same rule own_tool_path above applies to PATH inside a lib/ script.
+#
+# Whether PATH is extended rests on what is ON DISK, never on whether THIS
+# process won the race to create the link. Eighteen bots can source this at
+# once, and a plain ln -sfn ... || return 0 bails a RACE LOSER out before it
+# ever appends PATH, even though a sibling already produced a perfectly usable
+# link one syscall earlier — PATH is set once per session, so that bot has no
+# bare claudlobby for its whole life (measured: 8 of 18 misses on a cold
+# wave). So a fresh link is created with plain ln -s, never -f: on a cold race
+# every process attempts the SAME symlink, exactly one wins, and the rest fail
+# on an already-correct target rather than unlinking a sibling win. -f is
+# reserved for repointing a STALE target (the install moved), the one case
+# that is a real content change rather than a race, and whether one is needed
+# comes ONLY from the readlink already in hand (cur), never a fresh re-check
+# of the path a moment later — a re-check is its own TOCTOU gap, and a cold
+# process that reads cur empty can find something there by the time it
+# re-checks, purely because a faster sibling won in between, misrouting a
+# genuinely cold create into an unneeded replace that then flickers for
+# everyone else racing at the same time. Either way the gate before touching
+# PATH is a direct -x probe of the path on disk, never the exit status of
+# this process own ln call.
+#
+# The bounded settle guards that FINAL probe, not just the replace call that
+# most often needs it: -f is a non-atomic unlink-then-create on some ln
+# builds, so a process with nothing of its own to retry — its own cur already
+# matched, or its own plain ln -s already won outright — can still land its
+# check inside SOME OTHER process concurrently replacing a stale link, and
+# see a transient absence that is gone a moment later. Scoping the settle to
+# only the replacing process own branch measured 2 of 18 misses despite the
+# race-safe ln split above.
+#
+# The loop below acts on ONE -x check per pass, immediately, rather than
+# using that check as a while CONDITION and asking again afterward: an
+# earlier cut did exactly that, and a traced miss showed the gap it opens —
+# the while condition read -x as true (so the loop ran zero iterations) and
+# the very next line, a separate -x check with nothing else in between, read
+# it as false, because another process own concurrent unlink landed in the
+# microseconds between the two reads. Two independent syscalls answering the
+# same question is its own race even when each syscall alone is correct, so
+# every pass below folds the read and the action it decides into one step,
+# and nothing downstream re-asks a question already answered. The bound is
+# seconds, not one: cheap on the common warm path, where the loop never runs
+# at all, and it is boot-time cost traded against a bot going the rest of its
+# session life with no bare claudlobby.
+#
+# Every step is guarded so a read-only state/ or a failed ln leaves PATH
+# exactly as it was and never fails the boot: install_error_trap arms set -E,
+# and an unguarded nonzero here, even inside a command substitution, would
+# trip it. The readlink below routes its failure through an inner || true so
+# the exempt status is decided INSIDE the command substitution, at the point
+# the ERR trap would otherwise fire, rather than on the assignment outside it.
+session_cli_path() {
+    command -v claudlobby >/dev/null 2>&1 && return 0
+    local venv_cli="$CLAUDLOBBY_ROOT/.venv/bin/claudlobby"
+    [ -x "$venv_cli" ] || return 0
+    local shim_dir="$CLAUDLOBBY_ROOT/state/bin"
+    mkdir -p "$shim_dir" 2>/dev/null || return 0
+    local cur=""
+    cur="$(readlink "$shim_dir/claudlobby" 2>/dev/null || true)"
+    if [ "$cur" != "$venv_cli" ]; then
+        if [ -n "$cur" ]; then
+            ln -sfn "$venv_cli" "$shim_dir/claudlobby" 2>/dev/null || true
+        else
+            ln -s "$venv_cli" "$shim_dir/claudlobby" 2>/dev/null || true
+        fi
+    fi
+    local _i=0
+    while :; do
+        if [ -x "$shim_dir/claudlobby" ]; then
+            PATH="$PATH:$shim_dir"
+            export PATH
+            return 0
+        fi
+        _i=$((_i + 1))
+        [ "$_i" -ge 50 ] && return 0
+        sleep 0.1
+    done
 }
 
 # --- Portable external tools ------------------------------------------------

@@ -47,6 +47,7 @@ disown
 # --- end boot-mass mitigation -------------------------------------------------
 
 export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}
+session_cli_path
 export HOME="$HOME"
 
 # 3-tier env sourcing: global -> fleet -> bot (later tiers override)

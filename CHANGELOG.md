@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a bot session could not resolve the bare `claudlobby` CLI on a venv install (#1567)
+
+- **Five shipped skills (`checkin`, `fleet-digest`, `fleet-pulse`, `fleet-status`, `status`) name the CLI bare (`claudlobby checkins …`), and so do their permission grants (`Bash(claudlobby checkins *)`).** `lib/start-bot.sh` sets a session PATH to system dirs, `~/.local/bin`, the bun/npm global bins and Homebrew — never the compositor's own venv, so on a host whose install keeps the CLI only at `$CLAUDLOBBY_ROOT/.venv/bin/claudlobby` the bare command exited 127 inside the session. It was more than a wasted call: the path-form fallback a session found on its own did not match the skill's grant, so outside auto permission mode an unattended beat stalled on a permission prompt. `lib/` scripts were unaffected — they already run the CLI through `claudlobby_cli`. `start-bot.sh` now calls the new `session_cli_path` (`lib/lib-common.sh`) right after it sets PATH: on a venv-only install it symlinks the one `claudlobby` name into a host-local `state/bin` and appends that dir to PATH; a host with the CLI already on PATH is untouched.
+
 ### Fixed — the switch table could never show an env-less opt-in job as on
 
 - **`claudlobby doctor --switches` (and `setup-fleet`'s closing table) printed `off (opt-in)` plus an arm hint for a job that was armed and enrolled.** A row's state is *enrolled AND its env flag*, and for a row that declares no flag the shipped default stood in for the absent flag — so for an opt-in, `enrolled and False`. Observed on a live fleet: two fleet-armed, launchd-loaded jobs (`weekly-worker-restart`, `manager-checkin`) both read off. A row with no env flag now has one gate, its enrollment; the two-gate rule is unchanged for rows that have a flag. Display only: no door, unit or enrollment changes.
