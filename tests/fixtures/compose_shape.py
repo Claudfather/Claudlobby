@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import shutil
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -125,21 +127,26 @@ def _toggled(before: bool):
 
 
 def _manifest(base: Path) -> list[str]:
-    """Sorted ``<relpath>\\t<sha256-or-SYMLINK>`` lines for every file under
+    """Sorted ``<relpath>\\t<sha256-or-target>`` lines for every file under
     *base*. Content hashes rather than paths, so two composes into different
     throwaway roots compare equal when their content does. A directory
     symlink (a skill link) fails the ``is_file()`` probe below and would
-    otherwise be invisible to the manifest entirely — recorded by name only,
-    since none of the three shapes here ever links a skill (no bot declares
-    one and the registry carries no GLOBAL skills default), so there is
-    nothing real to hash."""
+    otherwise be invisible to the manifest entirely — recorded by its actual
+    ``os.readlink`` target (fix round 1, item 5b), not the literal string
+    ``SYMLINK``: recording the same constant for every link makes a link
+    whose TARGET changed (a skill re-pointed at a different library entry,
+    same name) invisible — the path matches, the recorded value never
+    varies, so nothing distinguishes it from an unchanged link. Both arms
+    compose into the same fleet dir against the same library (module
+    docstring), so a target string is exactly as stable across arms as a
+    content hash is."""
     if not base.is_dir():
         return []
     lines: list[str] = []
     for p in sorted(base.rglob("*")):
         rel = p.relative_to(base)
         if p.is_symlink():
-            lines.append(f"{rel}\tSYMLINK")
+            lines.append(f"{rel}\t{os.readlink(p)}")
         elif p.is_file():
             lines.append(f"{rel}\t{hashlib.sha256(p.read_bytes()).hexdigest()}")
     return lines
@@ -171,6 +178,17 @@ def compose_shape(
     respectively (see the module docstring for why the split matters), plus
     the timers dir's raw text content for a caller that needs to read a
     specific file (e.g. the DORMANT manifest) rather than just diff it.
+
+    BETWEEN ARMS, ``runtime/bots`` is removed before composing (fix round 1,
+    item 5a) — both arms compose into the SAME *fleet_dir*, so a file the
+    SECOND arm stops writing would otherwise survive on disk from the FIRST
+    arm and read identical: the byte-identity comparison could only ever see
+    an addition, never a removal. ``runtime/fleet/timers`` is deliberately
+    LEFT ALONE here: the timers-dir test's whole point is that the second
+    arm UNLINKS what the first arm composed (the job-gate prune itself), and
+    clearing it pre-emptively would turn that assertion into a restatement
+    of what this function already did rather than a proof of what the
+    COMPOSER did.
     """
     from claudlobby.composer import compose_fleet, compose_fleet_timers
     from claudlobby.config import load_fleet
@@ -178,6 +196,8 @@ def compose_shape(
 
     fleet_yaml = _write_shape(fleet_dir, shape)
     paths = Paths(root=root, fleet_dir=fleet_dir)
+    if paths.runtime_bots.is_dir():
+        shutil.rmtree(paths.runtime_bots)
     with _toggled(before):
         fleet, merged = load_fleet(fleet_yaml)
         compose_fleet(fleet, paths, log=lambda _m: None)

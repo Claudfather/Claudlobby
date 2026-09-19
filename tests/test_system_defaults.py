@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from textwrap import dedent
 
@@ -1272,6 +1273,40 @@ fleet:
             if p.name != "DORMANT" and not p.name.startswith("com.test.manager-checkin.")
         }
         assert siblings_after == siblings_before
+
+    def test_losing_the_last_leaf_manager_logs_each_pruned_file(
+        self, tmp_path, caplog
+    ):
+        """Fix round 1, item 1: the prune speaks. `_prune_host_units` (the
+        composer's other prune) logs every unlink; this one silently
+        discarded its own return value. One INFO line per removed file,
+        naming the file and WHY (no leaf manager left to receive it)."""
+        root = tmp_path / "claudlobby"
+        self._compose(tmp_path, self._WITH_LEAF_MANAGER, root=root)
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="claudlobby.composer"):
+            self._compose(tmp_path, self._LEAF_MANAGER_WORKER_REMOVED, root=root)
+        pruned = [
+            r.message for r in caplog.records if "manager-checkin" in r.message
+        ]
+        assert len(pruned) == 3, pruned  # .service, .timer, .plist
+        for ext in ("service", "timer", "plist"):
+            assert any(
+                f"com.test.manager-checkin.{ext}" in m for m in pruned
+            ), pruned
+        assert all("no leaf manager" in m for m in pruned), pruned
+
+    def test_a_fleet_that_never_had_the_unit_prunes_silently(
+        self, tmp_path, caplog
+    ):
+        """The other half: nothing to prune, nothing logged — nothing exists
+        for this fleet to have ever composed manager-checkin's units."""
+        with caplog.at_level(logging.INFO, logger="claudlobby.composer"):
+            self._compose(tmp_path, self._NO_LEAF_MANAGER)
+        pruned = [
+            r.message for r in caplog.records if "manager-checkin" in r.message
+        ]
+        assert not pruned, pruned
 
 
 # ---------------------------------------------------------------------------

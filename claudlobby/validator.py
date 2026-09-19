@@ -1590,10 +1590,28 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         return
     from .path_audit import timer_script_findings
 
-    for sf in timer_script_findings(fleet.defaults.get("jobs", {})):
+    jobs = fleet.defaults.get("jobs", {})
+    for sf in timer_script_findings(jobs):
         report.errors.append(
             f"{sf.source} = {sf.value!r} — {sf.reason}: {sf.path} "
             "(anchor the script on $CLAUDLOBBY_ROOT)"
+        )
+
+    # An armed beat on a leafless fleet (fix round 1, item 2, #1569). The
+    # compose-time job gate (composer.LEAF_MANAGER_GATED_JOBS) filters
+    # `manager-checkin` out of `timers` BEFORE anything reads `enroll` — see
+    # compose_fleet_timers — so an operator who arms it
+    # (`defaults.jobs.manager-checkin.enroll: true`) on a fleet with no leaf
+    # manager gets total silence: no unit composes, and nothing said why.
+    # Never an error: the fleet.yaml line is well-formed and would fire the
+    # moment the fleet gained a leaf manager.
+    mc = jobs.get("manager-checkin")
+    if mc is not None and mc.get("enroll", True) and not fleet.leaf_manager_bots():
+        report.warnings.append(
+            "manager-checkin is armed (defaults.jobs.manager-checkin.enroll: "
+            "true) but this fleet has no leaf manager — a manager with at "
+            "least one in-fleet report that is not itself a manager — so no "
+            "unit is composed and nothing will fire."
         )
 
 

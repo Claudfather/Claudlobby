@@ -3978,9 +3978,13 @@ LEAF_MANAGER_GATED_JOBS: frozenset[str] = frozenset({"manager-checkin"})
 
 def _prune_leaf_manager_gated_units(timers_dir: Path, prefix: str) -> list[str]:
     """Remove any previously-composed unit for a job in
-    :data:`LEAF_MANAGER_GATED_JOBS`, glob-bounded to that job's own basename
-    — the same posture as :func:`_reconcile_briefing_units`'s prune half, for
-    a single named job rather than a per-(bot,slot) family.
+    :data:`LEAF_MANAGER_GATED_JOBS` — EXACT-PATH bounded, not glob-bounded:
+    three exact filenames per gated job (``<prefix>.<job>.{service,timer,
+    plist}``), built by name, inside THIS fleet's own timers dir. Stricter
+    than :func:`_reconcile_briefing_units`'s prune half, which globs
+    ``<prefix>.briefing-*`` because a per-(bot,slot) family's basenames
+    cannot be enumerated in advance; a single named job's three extensions
+    always can.
 
     Called whenever the CURRENT fleet has no leaf manager, unconditionally on
     whether anything is composed this run: a fleet that HAD a leaf manager at
@@ -4147,7 +4151,18 @@ def compose_fleet_timers(
         # that lost its last leaf manager must have manager-checkin's units
         # removed even when every OTHER reason to touch this dir is absent
         # this run (e.g. system_defaults.timers: false).
-        _prune_leaf_manager_gated_units(timers_dir, fleet.service_prefix)
+        #
+        # Logged HERE, at the call site, rather than inside the prune helper
+        # itself: the helper only knows WHICH files it removed, never WHY —
+        # that reason belongs to the caller, the one place that already knows
+        # this fleet has no leaf manager. Wording parallel to
+        # `_prune_host_units`'s "pruned dormant host unit %s (armed→unarmed)".
+        for removed in _prune_leaf_manager_gated_units(timers_dir, fleet.service_prefix):
+            _log.info(
+                "pruned leaf-manager-gated unit %s (%s has no leaf manager — "
+                "nothing in it can receive the injection)",
+                removed, fleet.name,
+            )
     if not emit_defaults and not sweep_on and not briefing_on:
         # Nothing to emit — but a prior generate may have left briefing units a
         # now-removed stanza should prune. Reconcile only if the dir exists, and
