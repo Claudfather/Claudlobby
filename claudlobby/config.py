@@ -777,7 +777,7 @@ class FleetConfig:
         for name in managers:
             reports = {w for t in self.teams.values() if t.manager == name for w in t.workers}
             reports |= set((self.bots[name].manages or []) if name in self.bots else [])
-            in_fleet = {r for r in reports if r in self.bots and r != name}
+            in_fleet = {r for r in reports if r in self.bots}
             if in_fleet - managers:
                 leaf.add(name)
         return leaf

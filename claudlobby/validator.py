@@ -1597,7 +1597,7 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
             "(anchor the script on $CLAUDLOBBY_ROOT)"
         )
 
-    # An armed beat on a leafless fleet (fix round 1, item 2, #1569). The
+    # An armed beat on a leafless fleet warns rather than staying silent. The
     # compose-time job gate (composer.LEAF_MANAGER_GATED_JOBS) filters
     # `manager-checkin` out of `timers` BEFORE anything reads `enroll` — see
     # compose_fleet_timers — so an operator who arms it

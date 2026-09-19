@@ -15,13 +15,19 @@ fleet or bot name.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from claudlobby import defaults
-from claudlobby.composer import resolve_effective_protocols
+from claudlobby.composer import compose_bot, resolve_effective_protocols
 from claudlobby.config import BotConfig, FleetConfig, TeamConfig, load_fleet
 from claudlobby.paths import Paths
+from claudlobby.plane.registry_emit import bot_payload
 from claudlobby.validator import validate
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # Fleet-shape factories — pure FleetConfig construction, no disk I/O. The
@@ -77,11 +83,44 @@ def _fleet_empty_team() -> FleetConfig:
 
 
 def _fleet_manages_only_self() -> FleetConfig:
-    """A bot naming only itself in manages: -> not leaf (excluded by r != name)."""
+    """A bot naming only itself in manages: -> not leaf. A self-report is
+    itself a manager (it IS `name`, the loop variable drawn from `managers`),
+    so the trailing `in_fleet - managers` subtraction excludes it whether or
+    not it ever reaches `in_fleet` in the first place."""
     return FleetConfig(
         name="t",
         service_prefix="p",
         bots={"solo": _bot("solo", manages=["solo"])},
+    )
+
+
+def _fleet_manager_via_teams_and_manages() -> FleetConfig:
+    """lead manages team eng (worker-1) via teams: AND separately declares
+    manages: [worker-2] directly -> the two sources union into one manager's
+    in-fleet reports; lead is leaf because at least one of them (either) is
+    not itself a manager."""
+    return FleetConfig(
+        name="t",
+        service_prefix="p",
+        bots={
+            "lead": _bot("lead", manages=["worker-2"]),
+            "worker-1": _bot("worker-1"),
+            "worker-2": _bot("worker-2"),
+        },
+        teams={"eng": TeamConfig(name="eng", manager="lead", workers=["worker-1"])},
+    )
+
+
+def _fleet_team_worker_absent_from_bots() -> FleetConfig:
+    """lead's team names a worker that is not declared in fleet.bots at all
+    (a typo, or a minimal fixture) -> not leaf: the undeclared name is
+    dropped from in_fleet exactly like an unresolvable manages: target is —
+    the teams: branch of the same "in fleet.bots" filter."""
+    return FleetConfig(
+        name="t",
+        service_prefix="p",
+        bots={"lead": _bot("lead")},
+        teams={"eng": TeamConfig(name="eng", manager="lead", workers=["ghost"])},
     )
 
 
@@ -117,6 +156,8 @@ ALL_SHAPES = [
     ("coordinator", lambda: _fleet_coordinator()[0]),
     ("empty_team", _fleet_empty_team),
     ("manages_only_self", _fleet_manages_only_self),
+    ("manager_via_teams_and_manages", _fleet_manager_via_teams_and_manages),
+    ("team_worker_absent_from_bots", _fleet_team_worker_absent_from_bots),
     ("cross_fleet_target_only", _fleet_cross_fleet_target_only),
     (
         "cross_fleet_target_and_in_fleet_worker",
@@ -144,6 +185,18 @@ class TestLeafManagerBots:
     def test_a_bot_that_manages_only_itself_is_not_leaf(self):
         fleet = _fleet_manages_only_self()
         assert fleet.manager_bots() == {"solo"}
+        assert fleet.leaf_manager_bots() == set()
+
+    def test_a_manager_declared_through_both_teams_and_manages_unions_its_reports(
+        self,
+    ):
+        fleet = _fleet_manager_via_teams_and_manages()
+        assert fleet.manager_bots() == {"lead"}
+        assert fleet.leaf_manager_bots() == {"lead"}
+
+    def test_a_team_worker_absent_from_fleet_bots_is_not_leaf(self):
+        fleet = _fleet_team_worker_absent_from_bots()
+        assert fleet.manager_bots() == {"lead"}
         assert fleet.leaf_manager_bots() == set()
 
     def test_a_worker_is_never_leaf(self):
@@ -302,3 +355,81 @@ class TestCheckinValidatorSurface:
         assert any("/checkin" in w and "by hand" in w for w in matches)
         # lead declared no checkin protocol — no warning attributed to it.
         assert not any("lead" in w and "checkin" in w for w in report.warnings)
+
+
+# ---------------------------------------------------------------------------
+# The default must not double a hand-declared protocol (fix wave A group 4,
+# mutant `default-doubles-a-hand-declared-protocol`): a leaf manager that
+# ALSO hand-declares `protocols: [checkin]` and `skills: [checkin]` composes
+# the check-in ONCE, even though the leaf-manager registry default
+# (`REGISTRY["protocols"].roles = {"leaf-manager": ("checkin",)}`) tries to
+# add the very name the bot already declared.
+# ---------------------------------------------------------------------------
+
+
+class TestHandDeclaredCheckinComposesOnce:
+    def test_a_leaf_manager_hand_declaring_checkin_composes_it_once(
+        self, fleet_dir, monkeypatch
+    ):
+        """Removing `and name not in protocol_names` from
+        `resolve_effective_protocols` (composer.py) was verified, empirically,
+        to leave THREE composed artifacts unchanged: `load_library_items_
+        overlay`'s own `seen_paths` dedup still renders the "### Check-in"
+        heading once, `resolve_effective_skills`'s `if required not in skills`
+        guard still yields one linked skill, and `link_skills`'s own `linked`
+        dict still creates one symlink -- each of those three consumers
+        already dedupes its OWN input, independent of this guard. What the
+        mutation actually doubles, confirmed the same way, is the RAW return
+        value of `resolve_effective_protocols` itself (`['report-back',
+        'checkin', 'checkin']`) and everything that reads it WITHOUT its own
+        dedup -- the plane registry keyframe's `equipment.protocols`
+        (`bot_payload`) chief among them, since `sorted()` does not drop
+        duplicates. So this test pins all four: the three composed artifacts
+        the guard's removal turns out NOT to touch (regression coverage for
+        the observable behavior staying correct), plus the registry keyframe,
+        which is the one that actually goes red under that mutation.
+        """
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        _write_checkin_library(fleet_dir)
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "    lead:\n      expertise: [orchestration]\n",
+            "    lead:\n      expertise: [orchestration]\n"
+            "      protocols: [checkin]\n"
+            "      skills: [checkin]\n",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        # The fleet_dir fixture ships a minimal claude.md.j2 stub with no
+        # "## Protocols" section at all; install the real template so the
+        # check-in heading is actually there to count.
+        (fleet_dir / "templates" / "claude.md.j2").write_text(
+            (REPO_ROOT / "templates" / "claude.md.j2").read_text()
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        assert "lead" in fleet.leaf_manager_bots()  # the default applies at all
+        paths = _make_paths(fleet_dir)
+        bot = fleet.bots["lead"]
+
+        # The registry keyframe reads resolve_effective_protocols directly and
+        # applies no dedup of its own (#1405's "effective, not declared" —
+        # sorted() does not drop duplicates) -- the one place this specific
+        # guard's removal is actually observable at a composed artifact.
+        payload = bot_payload(paths, fleet, bot, None)
+        assert payload["equipment"]["protocols"].count("checkin") == 1
+
+        compose_bot(bot, fleet, paths, log=lambda m: None)
+
+        bot_dir = paths.bot_runtime("lead")
+        claude_md = (bot_dir / "CLAUDE.md").read_text()
+        assert claude_md.count("### Check-in") == 1, claude_md
+
+        settings = json.loads(
+            (bot_dir / ".claude" / "settings.local.json").read_text()
+        )
+        allow = settings["permissions"]["allow"]
+        assert allow.count("Skill(checkin)") == 1, allow
+
+        skills_dir = bot_dir / ".claude" / "skills"
+        checkin_links = [p for p in skills_dir.iterdir() if p.name == "checkin"]
+        assert len(checkin_links) == 1, list(skills_dir.iterdir())
