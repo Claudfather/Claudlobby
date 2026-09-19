@@ -443,6 +443,131 @@ def test_scrub_replaces_the_resolved_root_too_so_no_remnant_survives(tmp_path):
     assert nbo.scrub(entry_literal_form, link) == "composed -> $EXPORT/library/skills/checkin"
 
 
+class _StubRoot:
+    """A Path-like stub whose literal/resolved forms reproduce the macOS
+    /var -> /private/var shape PORTABLY -- independent of the host's real
+    tempdir symlink behavior, so this test's outcome does not depend on
+    which platform runs it (`scrub`'s own docstring names the real shape as
+    `/tmp` under `/var`, itself a symlink to `/private/var`)."""
+
+    def __str__(self) -> str:
+        return "/var/x/export"
+
+    def resolve(self) -> Path:
+        return Path("/private/var/x/export")
+
+
+def test_scrub_replaces_the_longer_resolved_form_first_even_as_a_suffix_shape():
+    """Kills the scrub-shortest-first mutant. With candidates tried shortest
+    first, the literal form `/var/x/export` matches and is replaced INSIDE
+    the longer resolved form first (`str.replace` does not care that the
+    match sits inside a longer one), stranding the `/private` prefix
+    (`/private$EXPORT/...`) instead of consuming the whole path. Longest-
+    first — the current, correct order — replaces the resolved form whole in
+    one pass, so nothing survives to half-match afterward."""
+    root = _StubRoot()
+    text = "composed -> /private/var/x/export/library/skills/checkin"
+    out = nbo.scrub(text, root)
+    assert "/private" not in out
+    assert out == "composed -> $EXPORT/library/skills/checkin"
+
+
+# ------------------------------------ the record-wide scrub (fix wave A group 3)
+#
+# scrub() was applied field by field (dir_entries, the generate stderr tail,
+# the freshbox output) and this file was bitten twice in one cycle by a field
+# nobody thought to scrub. `arm.sections` -- and, through it,
+# `composed_instructions` -- was NEVER run through scrub() at all: it happens
+# to hold no root-shaped path in practice (composed CLAUDE.md prose does not
+# print the bot_dir), which is what let the gap stand unnoticed. `build_report`
+# now scrubs the WHOLE assembled tree once, generically, then asserts
+# record-wide that nothing survives -- so the next field that happens to carry
+# an export path is caught by construction, not by someone noticing.
+
+
+def test_scrub_record_walks_the_whole_tree_including_sections_and_content():
+    """The generic backstop: a root-shaped path buried in `sections`,
+    `composed_instructions`, or `composed_content` -- not just the fields
+    `scrub()` is already hand-applied to -- comes back scrubbed."""
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    report = {
+        "arms": [
+            {
+                "label": "baseline",
+                "sections": {"Protocols": [f"{root}/library/protocols/x.md"]},
+                "types": {
+                    "protocols": {
+                        "composed_instructions": [f"see {root}/library/protocols/x.md"],
+                        "composed_content": [f"{root}/library/mcp/github.json"],
+                    }
+                },
+            }
+        ]
+    }
+    scrubbed = nbo.scrub_record(report, root)
+    arm = scrubbed["arms"][0]
+    assert arm["sections"]["Protocols"] == ["$EXPORT/library/protocols/x.md"]
+    assert arm["types"]["protocols"]["composed_instructions"] == [
+        "see $EXPORT/library/protocols/x.md"
+    ]
+    assert arm["types"]["protocols"]["composed_content"] == [
+        "$EXPORT/library/mcp/github.json"
+    ]
+    # Fields with nothing to scrub pass through unchanged.
+    assert scrubbed["arms"][0]["label"] == "baseline"
+
+
+def test_find_unscrubbed_path_names_a_planted_remnant():
+    """The checker names WHERE a remnant survives, dotted/bracketed -- the
+    record-wide assertion's whole point is to say what to go fix, not just
+    that something is wrong."""
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    report = {
+        "arms": [
+            {"label": "baseline", "sections": {"Protocols": ["clean"]}},
+            {"label": "optout:mcp", "sections": {"MCP": [f"{root}/library/mcp/x.json"]}},
+        ]
+    }
+    assert (
+        nbo.find_unscrubbed_path(report, root)
+        == "report.arms[1].sections.MCP[0]"
+    )
+
+
+def test_find_unscrubbed_path_is_none_on_a_clean_tree():
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    report = {"arms": [{"label": "baseline", "sections": {"Protocols": ["clean"]}}]}
+    assert nbo.find_unscrubbed_path(report, root) is None
+
+
+def test_build_report_scrubs_a_real_remnant_and_does_not_raise():
+    """End to end at unit level (no export, no generate): a real Arm carrying
+    a root-shaped remnant in `sections` is cleaned by the real scrub_record
+    before the assertion runs, so build_report returns normally with the
+    field scrubbed."""
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    arm = nbo.Arm(label="baseline", system_defaults=None)
+    arm.sections = {"Protocols": [f"{root}/library/protocols/x.md"]}
+    report = nbo.build_report("deadbeef", [arm], (0, ""), root)
+    assert report["arms"][0]["sections"]["Protocols"] == [
+        "$EXPORT/library/protocols/x.md"
+    ]
+
+
+def test_build_report_refuses_when_a_remnant_survives(monkeypatch):
+    """build_report's own record-wide assertion is real, not decorative: even
+    with scrub_record wired in, if a remnant ever survived it, build_report
+    must refuse rather than emit. Proven by neutering scrub_record so the
+    remnant reaches the assertion unscrubbed, simulating a scrub that missed
+    something -- the exact failure mode this mechanism exists to catch."""
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    arm = nbo.Arm(label="baseline", system_defaults=None)
+    arm.sections = {"Protocols": [f"{root}/library/protocols/x.md"]}
+    monkeypatch.setattr(nbo, "scrub_record", lambda obj, r: obj)
+    with pytest.raises(RuntimeError, match="REFUSING"):
+        nbo.build_report("deadbeef", [arm], (0, ""), root)
+
+
 # ------------------------------------------- the leaf-manager arm (PR4 chunk 4)
 #
 # A role overlay (`Disposition.roles`) is invisible to every arm above — none

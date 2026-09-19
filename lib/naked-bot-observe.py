@@ -452,6 +452,62 @@ def scrub(text: str, root: Path) -> str:
     return text
 
 
+def scrub_record(obj, root: Path):
+    """Recursively scrub every string in a dict/list tree against *root*.
+
+    The generic backstop behind the hand-applied `scrub()` call sites above
+    (`run_generate`'s stderr tail, `run_freshbox`'s output, `observe_arm`'s
+    `dir_entries`): each of those exists because ONE specific field was
+    found, once, to carry this run's export path into a committed record —
+    and this file was bitten TWICE in one cycle that way. `arm.sections`
+    (and, through it, `composed_instructions`) was never run through `scrub`
+    at all; it happened to carry no root-shaped path in practice, which is
+    exactly what let the gap stand unnoticed. Rather than keep auditing
+    fields one at a time as new ones are added, `build_report` walks the
+    WHOLE assembled tree once here, so a string the export path can reach
+    through is scrubbed regardless of which field carries it. The per-field
+    calls stay — existing tests observe `Arm` objects directly, before this
+    function ever runs — and this is the net underneath them, applied once
+    at the point the report is assembled.
+    """
+    if isinstance(obj, str):
+        return scrub(obj, root)
+    if isinstance(obj, dict):
+        return {k: scrub_record(v, root) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [scrub_record(v, root) for v in obj]
+    return obj
+
+
+def find_unscrubbed_path(obj, root: Path, path: str = "report") -> str | None:
+    """The dotted/bracketed field path of the first string in *obj* that
+    still contains the literal or resolved form of *root*, or ``None`` when
+    the whole tree is clean.
+
+    The record-wide assertion behind :func:`scrub_record`: a scrub that
+    silently missed something (a future field, a third path form, an
+    encoding surprise) must refuse the record rather than let a run-specific
+    path reach a committed baseline unnoticed. Names WHERE, not just THAT —
+    the whole point of asserting record-wide is to say what to go fix.
+    """
+    candidates = (str(root), str(root.resolve()))
+    if isinstance(obj, str):
+        return path if any(c in obj for c in candidates) else None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            hit = find_unscrubbed_path(v, root, f"{path}.{k}")
+            if hit:
+                return hit
+        return None
+    if isinstance(obj, list):
+        for i, v in enumerate(obj):
+            hit = find_unscrubbed_path(v, root, f"{path}[{i}]")
+            if hit:
+                return hit
+        return None
+    return None
+
+
 def run_generate(root: Path, python: str) -> tuple[int, str]:
     """``claudlobby --fleet naked-probe generate`` inside the exported tree.
 
@@ -608,9 +664,9 @@ def build_arms(types: list[str]) -> list[Arm]:
 # ---------------------------------------------------------------------- reporting
 
 
-def build_report(sha: str, arms: list[Arm], freshbox: tuple[int, str]) -> dict:
+def build_report(sha: str, arms: list[Arm], freshbox: tuple[int, str], root: Path) -> dict:
     baseline = next(a for a in arms if a.label == "baseline")
-    return {
+    report = {
         "schema": SCHEMA,
         "ref": sha,
         "freshbox": {"rc": freshbox[0], "output": freshbox[1]},
@@ -623,6 +679,18 @@ def build_report(sha: str, arms: list[Arm], freshbox: tuple[int, str]) -> dict:
         ),
         "arms": [asdict(a) for a in arms],
     }
+    # The one place the report is assembled — scrub the WHOLE tree once,
+    # generically, rather than trusting that every field which might carry
+    # this run's export path was hand-scrubbed at its own call site.
+    report = scrub_record(report, root)
+    remnant = find_unscrubbed_path(report, root)
+    if remnant:
+        raise RuntimeError(
+            f"REFUSING TO EMIT: the export path survived scrubbing at "
+            f"{remnant} — a remnant would leak this run's local filesystem "
+            "layout into a committed record."
+        )
+    return report
 
 
 def diff_reports(old: dict, new: dict) -> list[str]:
@@ -777,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
         observe_arm(
             root, sys.executable, Arm(label="baseline", system_defaults=None), registry
         )
-        report = build_report(sha, arms, run_freshbox(root, sys.executable))
+        report = build_report(sha, arms, run_freshbox(root, sys.executable), root)
     finally:
         if not args.keep:
             shutil.rmtree(workdir, ignore_errors=True)
