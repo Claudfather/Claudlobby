@@ -71,7 +71,7 @@ This is the ratified shape, and it has one dependency the fleet has not yet earn
 ## What this does not govern
 
 - **Density** — how compressed any single message is: `token-efficiency`.
-- **Cadence and frequency** — when and how often to post: `proactivity-discipline`, `messaging-channel-discipline`. This protocol never licenses silence.
+- **Cadence and frequency** — when and how often to post: `checkin`, `proactivity-discipline`, `messaging-channel-discipline`.
 - **Escalation thresholds** — what reaches the human at all: role expertise.
 
 **Never compressed, on any channel:** blockers, direct answers to direct questions, error output, safety-relevant facts, and anything explicitly asked for in full.

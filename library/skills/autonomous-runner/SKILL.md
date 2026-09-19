@@ -110,7 +110,7 @@ Score each issue per `picker.score_by`:
 - **`mission_alignment`**: read `PROJECT_MISSION.md` from the target repo's default branch (`gh api repos/<target_repo>/contents/PROJECT_MISSION.md --jq .content | base64 -d`). Score each issue's alignment with the mission's north star + guiding principles. Highest-aligned wins. If `PROJECT_MISSION.md` does not exist, fall back to `recency` and log a warning.
 - **`priority_label`**: prefer issues with `priority:critical` > `priority:high` > `priority:medium` > `priority:low` labels.
 
-If no eligible work item is found, beacon to Telegram "No eligible work for this cadence tick" and EXIT.
+If no eligible work item is found, EXIT silently — the plane holds the fact.
 
 If `autonomous_runner.picker` is NOT configured (e.g., the target skill is `/claudna:audit tech-debt` which doesn't need a specific item), skip Step 3.
 

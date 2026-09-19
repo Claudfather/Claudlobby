@@ -224,10 +224,12 @@ def test_the_worker_section_keeps_the_start_ack_off_telegram():
     assert "Done and blocked" in w and "Telegram where the worker is configured for it" in w
 
 
-def test_the_cadence_rules_are_untouched_in_this_chunk():
-    # chunk 4 retires them with a grep-derived sweep; this chunk composes beside them
-    assert "Idle silence is a bug" in (LIB / "protocols" / "proactivity-discipline.md").read_text()
-    assert re.search(r"2.3 min", (LIB / "protocols" / "worker-lifecycle.md").read_text())
+def test_the_cadence_rules_are_retired_by_this_chunk():
+    # chunk 4 retired them with a grep-derived sweep (tests/test_cadence_retirement.py);
+    # this protocol composes beside whatever a fleet-local library still carries, never
+    # beside these library-wide mandates themselves -- they are gone
+    assert "Idle silence is a bug" not in (LIB / "protocols" / "proactivity-discipline.md").read_text()
+    assert not re.search(r"2.3 min", (LIB / "protocols" / "worker-lifecycle.md").read_text())
 
 
 # --- library/protocols/dispatch.md: the project: envelope field (PR2 Task 4) -----
