@@ -157,9 +157,12 @@ class TestRoleOverlay:
     def test_only_detectable_roles_are_declared(self):
         # The stated bound. A role named here that nothing can DETECT would be
         # silently inert — never unioned in, and nothing would say so. Today
-        # `manager` is the only role the composer can resolve, via
-        # manager_bots(); adding a second needs a predicate first.
-        assert defaults.DETECTABLE_ROLES == frozenset({defaults.ROLE_MANAGER})
+        # `manager` (manager_bots()) and `leaf-manager` (leaf_manager_bots())
+        # are the only roles the composer can resolve; adding a third needs a
+        # predicate first.
+        assert defaults.DETECTABLE_ROLES == frozenset(
+            {defaults.ROLE_MANAGER, defaults.ROLE_LEAF_MANAGER}
+        )
         declared = {r for d in REGISTRY.values() for r in d.roles}
         assert declared <= defaults.DETECTABLE_ROLES, (
             f"role(s) declared that nothing can detect: {sorted(declared - defaults.DETECTABLE_ROLES)}"

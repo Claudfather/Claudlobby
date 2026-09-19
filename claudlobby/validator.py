@@ -587,6 +587,27 @@ def _validate_bots(
                     f"bot '{bot_name}': skill '{skill}' not in any library/skills/ — symlink will be skipped"
                 )
 
+        # Leaf-manager check-in surface (warn, no silent switches — spec §10,
+        # §5 step 1). The `manager-checkin` trigger only ever injects into a
+        # LEAF manager: `bot_is_manager` reads true for a coordinator too, so
+        # that predicate alone cannot tell the two apart at runtime — the
+        # distinction is made at compose time, by `fleet.leaf_manager_bots()`.
+        # A bot that declares the `checkin` protocol without being a leaf
+        # manager is equipped for an injection that will never come; the
+        # skill still links (`/checkin` runs by hand), so this is a warning,
+        # never an error, and it says why.
+        if "checkin" in bot.protocols and bot.bot_id not in fleet.leaf_manager_bots():
+            if bot.bot_id in fleet.manager_bots():
+                why = "a coordinator (every in-fleet report is itself a manager)"
+            else:
+                why = "a worker (not a manager)"
+            report.warnings.append(
+                f"bot '{bot_name}': protocol 'checkin' declared, but this bot is "
+                f"{why} — the manager-checkin trigger will never inject into it. "
+                "The skill still links, so /checkin runs by hand; only the "
+                "automatic injection is withheld."
+            )
+
         # MCP fragment existence (warn). bot.mcp is list[McpEntry]; the file
         # on disk is named after .name regardless of how many instances the
         # entry composes into .mcp.json.

@@ -361,12 +361,15 @@ def available(entry: str, facts: Facts) -> bool:
 # KNOWN BOUND, stated so the next person finds a seam rather than a hardcode
 # (F2, binding).
 #
-# The mechanism below is keyed on role GENERALLY. Today exactly one role is
-# detectable: `manager`, via `FleetConfig.manager_bots()` — which is the only
-# role predicate the composer has. There is no general `role` field on a bot, so
-# "roles" is currently `{manager, not-manager}` however plural the type looks.
+# The mechanism below is keyed on role GENERALLY. Two roles are detectable
+# today: `manager`, via `FleetConfig.manager_bots()`, and `leaf-manager`, via
+# `FleetConfig.leaf_manager_bots()` — a manager at least one of whose in-fleet
+# reports is not itself a manager (spec §10). Both are the only role
+# predicates the composer has. There is no general `role` field on a bot, so
+# a bot's roles are whichever of these predicates say yes, however plural the
+# type looks.
 #
-# TO ADD A SECOND ROLE you need a predicate that can DETECT it, not just a key
+# TO ADD A THIRD ROLE you need a predicate that can DETECT it, not just a key
 # here. A role named in `roles` that nothing can resolve is silently inert — it
 # would never be unioned in, and nothing would say so. Extend detection first,
 # then populate; `resolve()` takes the caller's already-resolved role names
@@ -378,10 +381,11 @@ def available(entry: str, facts: Facts) -> bool:
 # counter-example, where a RESTRICT-tier guardrail (`merge-policy-auto-admin`)
 # is legitimately manager-scoped.
 ROLE_MANAGER = "manager"
+ROLE_LEAF_MANAGER = "leaf-manager"
 
 #: Roles the composer can currently DETECT. Adding a name here without a
 #: predicate that resolves it is the trap the note above describes.
-DETECTABLE_ROLES: frozenset[str] = frozenset({ROLE_MANAGER})
+DETECTABLE_ROLES: frozenset[str] = frozenset({ROLE_MANAGER, ROLE_LEAF_MANAGER})
 
 
 def resolve(entity_type: str, roles: tuple[str, ...] = ()) -> list[str]:

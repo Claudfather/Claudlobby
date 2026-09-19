@@ -1767,7 +1767,8 @@ def resolve_effective_protocols(
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
     if sd.enabled and sd.protocols:
-        roles = (defaults.ROLE_MANAGER,) if is_manager else ()
+        roles = ((defaults.ROLE_MANAGER,) if is_manager else ()) + (
+            (defaults.ROLE_LEAF_MANAGER,) if bot.bot_id in fleet.leaf_manager_bots() else ())
         for name in defaults.resolve("protocols", roles):
             if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
