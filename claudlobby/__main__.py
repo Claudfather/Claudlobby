@@ -23,7 +23,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fleet",
         help="Fleet overlay name (uses local/<fleet>/ for fleet.yaml, library overlay, voices overlay, runtime/). "
-        "If omitted, runs in root mode (fleet.yaml at repo root).",
+        "If omitted, runs in root mode (fleet.yaml at repo root). "
+        "Naming the root manifest's own fleet.name (no overlay) also resolves to root mode.",
     )
     parser.add_argument(
         "--seed",

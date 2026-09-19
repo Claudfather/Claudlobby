@@ -22,7 +22,9 @@ named door and every write through a named door** — never a hand-rolled query,
 never a hand-built plane envelope, never a pipeline. That coupling is what makes
 your reasoning inspectable (the `checkins` read door) and the edges deterministic.
 The fleet is named on every door because a fleet-less call runs the CLI in root
-mode, which an overlay install does not have.
+mode, which an overlay install does not have — and naming it is never a problem
+on a root-mode install either: `--fleet` matching that install's own
+`fleet.name` resolves to root mode too, instead of refusing.
 
 `$BOT_ID`, `$FLEET_NAME` and `$CLAUDLOBBY_ROOT` come from your `bot.conf`; each
 project's key, repos and tier come from the `## Projects` table in your own

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .. import dotenv
 from ..config import load_fleet
-from ..paths import Paths, _find_fleet_dir
+from ..paths import Paths, _find_fleet_dir, _root_manifest_names_fleet
 
 log = logging.getLogger("claudlobby")
 
@@ -33,6 +33,15 @@ def _resolve_paths(args) -> Paths:
             log.error("%s", e)
             sys.exit(1)
         if fleet and fleet_dir is None:
+            if _root_manifest_names_fleet(root, fleet):
+                # --fleet names the root manifest's own fleet, not an
+                # overlay: resolve to root mode instead of refusing.
+                log.info(
+                    "--fleet %s names the root fleet.yaml's own fleet; "
+                    "running in root mode",
+                    fleet,
+                )
+                return Paths(root=root)
             log.error(
                 "fleet overlay not found: %s — run `claudlobby new-fleet %s` to scaffold"
                 " (or remove --fleet to use root mode)",
