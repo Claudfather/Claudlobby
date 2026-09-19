@@ -417,7 +417,7 @@ claudlobby events                      # the fleet's events from the plane (rc 3
 claudlobby workstreams [list|show <id>] # the fleet's workstream registry, from the plane
 claudlobby task nudge <task-id> ["why"] # record a nudge on one open task and ask its manager to act
 claudlobby task recheck --fleet <F>    # ask each manager to act on their stale rows (the task-recheck timer's door; --dry-run)
-claudlobby checkins [--bot B] [--since 7d] [--last] [--raised] [--limit N] [--json]   # the manager check-in's decisions with their dispatch outcomes
+claudlobby checkins [--fleet F] [--bot B] [--since 7d] [--last] [--raised] [--limit N] [--json]   # the manager check-in's decisions with their dispatch outcomes (plane read; --fleet where the root manifest names none)
 claudlobby checkins --summary [--since 14d]                                           # the window rolled up by project: actions, ask rate, dispatch outcomes
 claudlobby brief --bot <name>          # one read door over fleet state for a bot
 claudlobby brief --bot <name> --json   # schema-1 envelope (what other tools consume)

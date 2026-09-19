@@ -201,6 +201,10 @@ def test_another_fleets_join_row_never_attaches(root, capsys):
 
 
 def test_the_join_is_two_queries_not_one_per_row(root):
+    """C1 fix-wave (PR 3 review): the bound is pinned at the CALL SITE, not
+    only on the `_join_dispatches` helper -- moving the helper's call INTO
+    `collect_checkins`'s per-row loop leaves the helper-level assertion below
+    green while this one (the call site) catches it."""
     cks = [f"ck_{i:032x}" for i in range(12)]
     for i, ck in enumerate(cks):
         _decision(root, "mgr", ck, age_h=i + 1, action="dispatch")
@@ -209,16 +213,29 @@ def test_the_join_is_two_queries_not_one_per_row(root):
     assert conn is not None, reason
     try:
         real_execute = conn.execute
-        calls = {"n": 0}
 
         class _Counting:
+            def __init__(self):
+                self.n = 0
+
             def execute(self, *a, **kw):
-                calls["n"] += 1
+                self.n += 1
                 return real_execute(*a, **kw)
 
+        # the requirement: collect_checkins itself must issue exactly three
+        # queries for the whole page -- the rows query, the join-rows query,
+        # and the task-status query -- never one join per row
+        wrapped = _Counting()
+        out = cmd.collect_checkins(wrapped, F, since=None, bot=None, last=False)
+        assert wrapped.n == 3
+        assert len(out) == 12
+        assert all(len(r["dispatches"]) == 1 for r in out)
+
+        # the helper-level assertion PR 3 shipped with, kept alongside
+        wrapped = _Counting()
         refs = [f"checkin:{ck}" for ck in cks]
-        joined = cmd._join_dispatches(_Counting(), F, refs)
-        assert calls["n"] == 2
+        joined = cmd._join_dispatches(wrapped, F, refs)
+        assert wrapped.n == 2
         assert len(joined) == 12
     finally:
         conn.close()

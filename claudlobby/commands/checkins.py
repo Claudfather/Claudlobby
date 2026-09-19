@@ -35,13 +35,13 @@ from ..plane.queries import (
 )
 from ._helpers import _resolve_paths, refuse_unreachable
 
-# Raw TASK_STATUS_SQL status -> the bucket a reader acts on. Six, not five: the
-# spec's bar (§12.4) names `blocked`/`failed` as the terminal-not-completed classes
-# that count AGAINST, and `cancelled` / `superseded` / `reassigned` are neither --
-# folding a withdrawal or a re-dispatch into `failed` would score a manager that
-# corrected itself worse than one that did nothing, so they get their own bucket and
-# chunk 4 decides what to do with it. `dispatch_failed` is NOT a task event (it is
-# derived from transmissions): the send never landed, a failure to start. Anything
+# Raw TASK_STATUS_SQL status -> the bucket a reader acts on: these are
+# reader-facing groupings of the plane's raw task statuses. `cancelled` /
+# `superseded` / `reassigned` get their own `retired` bucket because a
+# withdrawal or a re-dispatch is neither a completion nor a failure. Any
+# arithmetic over these fields is a later, separate concern, and none lives
+# in this door. `dispatch_failed` is NOT a task event (it is derived from
+# transmissions): the send never landed, a failure to start. Anything
 # unmapped reads `open` -- bounded by test_every_terminal_task_event_has_a_bucket.
 _OUTCOME = {
     "completed": "completed",
@@ -266,7 +266,8 @@ def _format_block(block: dict) -> list[str]:
         f"    considered: rows={c['rows']} empty={c['empty']} min={c['min']} max={c['max']} mean={c['mean']}",
         "    unavailable: " + (", ".join(f"{k}={v}" for k, v in block["unavailable"].items()) or "none"),
         f"    dispatches: {block['dispatches']}",
-        "    dispatch_outcomes: " + " ".join(f"{k}={v}" for k, v in block["dispatch_outcomes"].items()),
+        "    dispatch_outcomes: " + " ".join(f"{k}={v}" for k, v in block["dispatch_outcomes"].items())
+        + " (unjoined also counts dispatch decisions that joined nothing, so this can sum to more than dispatches)",
         "    dispatch_statuses: " + (", ".join(f"{k}={v}" for k, v in block["dispatch_statuses"].items()) or "none"),
     ]
 
@@ -285,7 +286,7 @@ def cmd_checkins(args) -> int:
         # name at least one row or it is a typo, not a request
         print(f"checkins: --limit must be a positive integer (got {args.limit})", file=sys.stderr)
         return 2
-    if getattr(args, "summary", False):
+    if args.summary:
         # both checked before the plane is opened -- a malformed call (rc 2)
         # never needs a db connection to be recognized as malformed
         if args.last:
@@ -318,7 +319,7 @@ def cmd_checkins(args) -> int:
         (" (asks only)" if getattr(args, "raised", False) else "") + \
         (f", limit {args.limit}" if args.limit is not None else "")
 
-    if getattr(args, "summary", False):
+    if args.summary:
         summary = summarize(rows)
         if args.json:
             print(json.dumps({"schema": 1, "fleet": fleet,

@@ -12,7 +12,7 @@ import pytest
 
 from claudlobby.commands import checkins as cmd
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.queries import CHECKIN_ROWS_SQL, checkin_rows_sql
+from claudlobby.plane.queries import checkin_rows_sql
 from tests.plane_fixtures import plane_root
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -274,7 +274,21 @@ def test_last_still_ignores_the_window_with_the_sql_bind(root, capsys):
 
 
 def test_the_no_bounds_sql_is_the_pr1_string():
+    """The literal no-bounds string as it stands at HEAD: PR 1's string plus
+    the `e.source_ref AS source_ref` column Task 1 added on top of it (chunk
+    3's own join key) -- not `checkin_rows_sql() == CHECKIN_ROWS_SQL`, which
+    compares the function's output to its OWN definition
+    (`CHECKIN_ROWS_SQL = checkin_rows_sql()`, queries.py) and can never
+    fail."""
     sql = checkin_rows_sql()
-    assert sql == CHECKIN_ROWS_SQL
+    assert sql == (
+        "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
+        " e.detail AS detail, e.detail_truncated AS detail_truncated,"
+        " e.ingest_seq AS ingest_seq, e.source_ref AS source_ref"
+        " FROM events e"
+        " WHERE e.kind = 'system' AND e.event = 'checkin_decision'"
+        " AND (e.subject_alias >= 'bot:' || ? || '/' AND e.subject_alias < 'bot:' || ? || '0')"
+        " ORDER BY CAST(strftime('%s', e.occurred_at) AS INTEGER) DESC, e.ingest_seq DESC"
+    )
     assert "LIMIT" not in sql
     assert sql.count("?") == 2

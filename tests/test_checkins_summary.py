@@ -166,10 +166,16 @@ def test_summary_json_and_text_agree_on_the_counts(root, capsys):
 
     assert f"checkins: {totals['checkins']}" in text
     assert f"raised: {totals['raised']}" in text
-    m = re.search(r"dispatch_outcomes:\s*(.+)", text)
+    # the k=v pairs stop at the trailing asymmetry clause (the "(" below) --
+    # never swallowed into the parsed counts
+    m = re.search(r"dispatch_outcomes:\s*([^(\n]+)", text)
     assert m is not None
     parsed = {k: int(v) for k, v in (pair.split("=") for pair in m.group(1).split())}
     assert parsed == totals["dispatch_outcomes"]
+    # A2: the asymmetry (unjoined counts BOTH a join row naming an unknown
+    # assignment AND a dispatch decision that joined no row) is visible on
+    # the same line a reader meets the counts, not just in a docstring
+    assert "unjoined also counts dispatch decisions that joined nothing" in text
 
 
 def test_summary_over_an_empty_window_answers_at_rc_0(root, capsys):

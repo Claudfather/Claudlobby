@@ -942,8 +942,10 @@ _CHECKIN_ROWS_ORDER = f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq D
 def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False) -> str:
     """The check-in decision rows query (PR 3 chunk 4): the window, the bot
     filter and --limit bound here rather than pulled whole into Python and
-    filtered there (PR 1's shape) -- a wide --since no longer reads a
-    fleet's entire history off disk to throw most of it away. Every bound is
+    filtered there (PR 1's shape) -- a wide --since still shrinks what
+    crosses into Python and the ORDER BY sort's working set, though every
+    fleet row is still read and evaluated (`_epoch(...)` is a function over
+    the column, not sargable). Every bound is
     OPT-IN and appended in this fixed order onto `_CHECKIN_ROWS_HEAD`: the
     alias equality (`bot`), the since floor (`since`), THEN the order
     clause, THEN `LIMIT` (`limit`) -- `LIMIT` has to trail `ORDER BY`
@@ -997,7 +999,8 @@ def checkin_dispatch_rows_sql(n: int) -> str:
     json_extract -- never the column, which is null by construction for this kind.
     Fleet-scoped on the DISPATCHER's own alias (the decision rows' own predicate):
     a 32-hex id is unique, but one bot name on two fleets (#526) is the failure it
-    costs nothing to exclude. Served by idx_events_kind_seq / idx_events_fleet_system.
+    costs nothing to exclude. The join walks the `kind='system'` slice through
+    `idx_events_kind_seq` with the cheap `event =` filter ahead of any `json_extract`.
 
     There is deliberately no `plane-lookup.py --checkin-dispatch` sibling: this
     query's only consumer is claudlobby/commands/checkins.py, which holds its own
