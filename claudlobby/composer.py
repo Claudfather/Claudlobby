@@ -3964,6 +3964,46 @@ def _reconcile_briefing_units(
     return pruned
 
 
+#: Fleet jobs whose composition depends on the fleet having at least one
+#: LEAF MANAGER (PR4 task 3, #1569) — a manager with at least one in-fleet
+#: report that is not itself a manager (`FleetConfig.leaf_manager_bots()`).
+#: `manager-checkin` injects `/checkin` into exactly that role; a fleet with
+#: none can never satisfy the job's own precondition, so it gets no unit for
+#: it at all, not even a dormant one. Keyed by JOB NAME, not by a bool on the
+#: job config, for the same reason `AVAILABILITY_GATES` in defaults.py is
+#: keyed by entry name: a per-fleet flag would exempt every future job added
+#: beside this one, silently.
+LEAF_MANAGER_GATED_JOBS: frozenset[str] = frozenset({"manager-checkin"})
+
+
+def _prune_leaf_manager_gated_units(timers_dir: Path, prefix: str) -> list[str]:
+    """Remove any previously-composed unit for a job in
+    :data:`LEAF_MANAGER_GATED_JOBS`, glob-bounded to that job's own basename
+    — the same posture as :func:`_reconcile_briefing_units`'s prune half, for
+    a single named job rather than a per-(bot,slot) family.
+
+    Called whenever the CURRENT fleet has no leaf manager, unconditionally on
+    whether anything is composed this run: a fleet that HAD a leaf manager at
+    an earlier generate and lost it (the manager was removed, or its last
+    non-manager report was) must not leave `manager-checkin`'s units on disk
+    — that is exactly the shape a later ``enroll: true`` or a setup-fleet run
+    reading a stale-but-present unit would enroll for real, with nobody
+    having armed anything. A no-op when the timers dir does not exist yet
+    (nothing composed, so nothing to prune) or the files are already absent.
+    """
+    if not timers_dir.is_dir():
+        return []
+    pruned: list[str] = []
+    for job in LEAF_MANAGER_GATED_JOBS:
+        base = f"{prefix}.{job}"
+        for ext in ("service", "timer", "plist"):
+            f = timers_dir / f"{base}.{ext}"
+            if f.exists():
+                f.unlink()
+                pruned.append(f.name)
+    return pruned
+
+
 def _write_timers_manifest(
     timers_dir: Path, name: str, header: list[str], units: set[str] | list[str]
 ) -> None:
@@ -4067,6 +4107,15 @@ def compose_fleet_timers(
     reconcile's job-drift audit) skips them. A fleet opts in per job via
     ``defaults.jobs.<name>.enroll: true`` in fleet.yaml.
 
+    A job in :data:`LEAF_MANAGER_GATED_JOBS` (today: ``manager-checkin``) is
+    the one exception to "composed but dormant": a fleet with no LEAF
+    MANAGER (:meth:`FleetConfig.leaf_manager_bots`) gets NO unit for it at
+    all, dormant or otherwise, because such a fleet can never satisfy the
+    job's own precondition. This does not change what any OTHER job
+    composes, and a fleet that had one and lost it (PR4 task 3, #1569) has
+    its stale units pruned on the next generate — see
+    :func:`_prune_leaf_manager_gated_units`.
+
     ``output_dir`` overrides the destination directory (the ``timers/`` subdir is
     written beneath it); it defaults to ``paths.runtime_fleet``. ``diff`` passes a
     temp dir here so it can hand this function the real ``Paths`` — keeping the
@@ -4074,6 +4123,13 @@ def compose_fleet_timers(
     the expected units somewhere other than ``runtime/``.
     """
     timers = merged_defaults.get("jobs", {})
+    has_leaf_manager = bool(fleet.leaf_manager_bots())
+    if not has_leaf_manager:
+        timers = {
+            name: cfg
+            for name, cfg in timers.items()
+            if name not in LEAF_MANAGER_GATED_JOBS
+        }
     sd = fleet.system_defaults
     emit_defaults = bool(sd.enabled and sd.timers and timers)
     sweep_on = fleet.sweep_enabled()
@@ -4086,6 +4142,12 @@ def compose_fleet_timers(
 
     base_dir = output_dir if output_dir is not None else paths.runtime_fleet
     timers_dir = base_dir / "timers"
+    if not has_leaf_manager:
+        # Unconditional on emit_defaults/sweep_on/briefing_on below: a fleet
+        # that lost its last leaf manager must have manager-checkin's units
+        # removed even when every OTHER reason to touch this dir is absent
+        # this run (e.g. system_defaults.timers: false).
+        _prune_leaf_manager_gated_units(timers_dir, fleet.service_prefix)
     if not emit_defaults and not sweep_on and not briefing_on:
         # Nothing to emit — but a prior generate may have left briefing units a
         # now-removed stanza should prune. Reconcile only if the dir exists, and

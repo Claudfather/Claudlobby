@@ -569,13 +569,25 @@ def test_neither_nonzero_expecting_call_runs_in_a_command_substitution():
 # not a copy of either.
 # ---------------------------------------------------------------------------
 
+#: `lead` manages `worker`, so `lead` is a leaf manager
+#: (FleetConfig.leaf_manager_bots()) — PR4 task 3, #1569 gates
+#: `manager-checkin`'s own composition on a fleet having at least one, so a
+#: single-bot fleet (this file's PR2 shape) would compose no unit for these
+#: tests to inspect at all. worker's `expertise:` names no real library file
+#: on purpose — compose_fleet_timers never resolves it.
 _CHECKIN_FLEET = """\
 fleet:
   name: checkin-fleet
   service_prefix: com.checkin
+  teams:
+    eng:
+      manager: lead
+      workers: [worker]
   bots:
     lead:
       expertise: [orchestration]
+    worker:
+      expertise: [software-engineering]
 """
 
 

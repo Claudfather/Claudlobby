@@ -5106,3 +5106,95 @@ class TestTaskRecheckTimer:
         assert others
         for unit in others:
             assert "TASK_RECHECK_ENABLED" not in unit.read_text(), unit.name
+
+
+# ---------------------------------------------------------------------------
+# PR4 task 3 (#1569), Global Constraint: "nothing composes differently on a
+# fleet without a leaf manager." tests/fixtures/compose_shape.py composes
+# three no-leaf-manager shapes twice — task 3's registry line + job gate
+# neutralised ("before"), and the code exactly as committed ("after") — into
+# the SAME scratch fleet_dir per shape, sequentially, so nothing in the
+# composed output can differ merely because a throwaway path changed between
+# the two composes (bot.conf, the systemd/launchd units and CLAUDE.md all
+# embed the fleet dir's absolute path).
+#
+# SCOPE, stated here because it is easy to over-claim: this proves BOT
+# directories are untouched (runtime/bots/**) for a fleet shape that can
+# never hold the role task 3 added. It does NOT claim the timers dir is
+# unchanged — the job gate (task 3 step 4) is a deliberate, separate change
+# that removes manager-checkin's dormant units for exactly these shapes, and
+# the second test below pins that difference precisely rather than ignoring
+# it.
+# ---------------------------------------------------------------------------
+
+
+class TestNoLeafManagerShapesComposeByteIdentically:
+    _SHAPES = ("solo", "worker-only", "coordinator-only")
+
+    def _root(self) -> Path:
+        return Path(__file__).resolve().parent.parent
+
+    def test_no_leaf_manager_shapes_compose_byte_identically(self, tmp_path):
+        """The registry role line (task 3 step 3) is a no-op for a fleet
+        shape that has no leaf manager to apply it to: BOT trees only
+        (runtime/bots/**) — see the class docstring for why the timers dir
+        is explicitly out of scope for THIS assertion."""
+        from tests.fixtures.compose_shape import compose_shape
+
+        root = self._root()
+        for shape in self._SHAPES:
+            fleet_dir = tmp_path / shape
+            before = compose_shape(root, fleet_dir, shape, before=True)
+            after = compose_shape(root, fleet_dir, shape, before=False)
+            assert before["bots"] == after["bots"], (
+                f"{shape}: bot tree differs with vs without the leaf-manager "
+                f"registry line\nonly before: "
+                f"{sorted(set(before['bots']) - set(after['bots']))}\n"
+                f"only after: {sorted(set(after['bots']) - set(before['bots']))}"
+            )
+            assert before["bots"], f"{shape}: empty manifest proves nothing"
+
+    def test_the_only_timers_dir_difference_is_the_gated_job_and_its_dormant_line(
+        self, tmp_path
+    ):
+        """The companion assertion the class docstring promises: the ONE
+        thing task 3 is allowed to change for these shapes is
+        manager-checkin's own three unit files and the DORMANT line naming
+        them — nothing else in the timers dir may move."""
+        from tests.fixtures.compose_shape import compose_shape
+
+        root = self._root()
+        for shape in self._SHAPES:
+            fleet_dir = tmp_path / f"{shape}-timers"
+            before = compose_shape(root, fleet_dir, shape, before=True)
+            after = compose_shape(root, fleet_dir, shape, before=False)
+            tb = {line.split("\t", 1)[0]: line for line in before["timers"]}
+            ta = {line.split("\t", 1)[0]: line for line in after["timers"]}
+
+            only_before = set(tb) - set(ta)
+            only_after = set(ta) - set(tb)
+            assert only_after == set(), f"{shape}: something new appeared: {only_after}"
+            gated = {
+                n for n in only_before if n.startswith("com.") and "manager-checkin." in n
+            }
+            assert only_before == gated, (
+                f"{shape}: unexpected removals beyond manager-checkin's own "
+                f"units: {only_before - gated}"
+            )
+            assert len(gated) == 3, gated  # .service, .timer, .plist
+
+            # Every name present in BOTH runs is either unrelated to the gate
+            # (must be byte-identical) or DORMANT (the one line the gate is
+            # allowed to change, by removing manager-checkin from the list).
+            for name in set(tb) & set(ta):
+                if name == "DORMANT":
+                    continue
+                assert tb[name] == ta[name], f"{shape}: {name} content moved"
+
+            # The ONE content-level change allowed: DORMANT's own text
+            # stops naming manager-checkin (checked on the raw text, not the
+            # hash — the hash comparison above already proves it moved).
+            before_dormant = before["timers_text"]["DORMANT"]
+            after_dormant = after["timers_text"]["DORMANT"]
+            assert "manager-checkin" in before_dormant
+            assert "manager-checkin" not in after_dormant
