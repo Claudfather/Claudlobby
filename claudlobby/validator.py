@@ -565,7 +565,17 @@ def _validate_bots(
         #   name        — skills/name/
         #   dir/name    — skills/dir/name/
         #   dir/        — folder expansion (skills/dir/**)
-        for skill in bot.skills:
+        #
+        # Checked against the EFFECTIVE set (declared plus every requires.skills
+        # entry of the bot's effective protocols, spec §10) — never bot.skills
+        # alone — so a protocol requiring a skill that has since gone missing is
+        # reported here too, not only in the grant loop further down.
+        from .composer import resolve_effective_skills
+
+        effective_skills = resolve_effective_skills(
+            bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+        )
+        for skill in effective_skills:
             if skill.endswith("/"):
                 dir_name = skill.rstrip("/")
                 if not paths.expand_skill_folder(dir_name):
@@ -761,7 +771,7 @@ def _validate_bots(
             report.errors.extend(
                 _inert_path_errors(bot_name, "integration", name, grants)
             )
-        for name, grants in iter_skill_grants(paths, bot.skills):
+        for name, grants in iter_skill_grants(paths, effective_skills):
             report.warnings.extend(
                 _grant_shape_warnings(bot_name, "skill", name, grants, allow_side=True)
             )
@@ -1609,6 +1619,52 @@ def _validate_library_frontmatter(paths: Paths, report: ValidationReport) -> Non
                 )
 
 
+def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
+    """Fail loud on an unresolvable ``requires:`` entry (spec §10).
+
+    v1 scope is protocols -> skills: a protocol's ``requires.skills`` naming a
+    skill absent from the library is an error. Library-wide and scanned ONCE
+    PER FILE — never once per equipping bot — the same "one defect, one error"
+    rule :func:`_validate_env_contracts` states in its docstring
+    (`validator.py:383-396`): the defect is a property of the protocol FILE,
+    so an unequipped protocol with a broken requirement is still caught, and a
+    fleet where several bots equip it gets one message, not several.
+    """
+    from .loader import library_requires
+
+    roots = [paths.base_library, paths.overlay_library]
+    seen: set[Path] = set()
+    for root in roots:
+        if root is None or not root.is_dir():
+            continue
+        protocols_dir = root / "protocols"
+        if not protocols_dir.is_dir():
+            continue
+        for md in sorted(protocols_dir.rglob("*.md")):
+            if md.name.startswith("README"):
+                continue
+            resolved = md.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            requires = library_requires(md)
+            for skill in requires.get("skills", []):
+                if skill.endswith("/"):
+                    resolvable = bool(paths.expand_skill_folder(skill.rstrip("/")))
+                else:
+                    resolvable = paths.find_library_dir("skills", skill) is not None
+                if not resolvable:
+                    try:
+                        rel = md.relative_to(root)
+                    except ValueError:
+                        rel = md
+                    report.errors.append(
+                        f"protocol '{rel}' requires skill '{skill}', which is "
+                        "not in any library/skills/ — the requirement cannot "
+                        "be satisfied"
+                    )
+
+
 # Literal placeholder tokens shipped in fleet.yaml.seed (three of them). Reaching
 # validate() with one still in place means the template was copied but never
 # filled in.
@@ -1738,6 +1794,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
     _validate_library_frontmatter(paths, report)
+    _validate_library_requires(paths, report)
     _validate_env_contracts(paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot

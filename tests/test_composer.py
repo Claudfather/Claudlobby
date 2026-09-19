@@ -1326,18 +1326,12 @@ class TestResolveChannelPermissions:
 
 
 class TestResolveSkillPermissions:
-    """_resolve_skill_permissions generates Skill() patterns from bot.skills."""
+    """_resolve_skill_permissions generates Skill() patterns from a skill list."""
 
     def test_generates_both_patterns_per_skill(self):
         from claudlobby.composer import _resolve_skill_permissions
 
-        bot = BotConfig(
-            bot_id="worker",
-            name="worker",
-            expertise=["eng"],
-            skills=["lifecycle", "prs"],
-        )
-        result = _resolve_skill_permissions(bot)
+        result = _resolve_skill_permissions(["lifecycle", "prs"])
         assert "Skill(lifecycle)" in result
         assert "Skill(lifecycle:*)" in result
         assert "Skill(prs)" in result
@@ -1347,25 +1341,13 @@ class TestResolveSkillPermissions:
     def test_empty_skills_returns_empty(self):
         from claudlobby.composer import _resolve_skill_permissions
 
-        bot = BotConfig(
-            bot_id="worker",
-            name="worker",
-            expertise=["eng"],
-            skills=[],
-        )
-        result = _resolve_skill_permissions(bot)
+        result = _resolve_skill_permissions([])
         assert result == []
 
     def test_single_skill(self):
         from claudlobby.composer import _resolve_skill_permissions
 
-        bot = BotConfig(
-            bot_id="worker",
-            name="worker",
-            expertise=["eng"],
-            skills=["commit"],
-        )
-        result = _resolve_skill_permissions(bot)
+        result = _resolve_skill_permissions(["commit"])
         assert result == ["Skill(commit)", "Skill(commit:*)"]
 
 

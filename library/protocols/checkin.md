@@ -1,6 +1,8 @@
 ---
 title: Check-in
 description: The idle-manager check-in and the thin human edge
+requires:
+  skills: [checkin]
 ---
 
 # Check-in

@@ -66,20 +66,20 @@ class TestResolveSkillGrants:
             root, "dispatch", 'tool_grants:\n  - "Bash(tmux *)"\n  - "mcp__github__*"\n'
         )
         bot = _bot(skills=["dispatch"])
-        assert _resolve_skill_grants(bot, paths) == ["Bash(tmux *)", "mcp__github__*"]
+        assert _resolve_skill_grants(bot.skills, paths) == ["Bash(tmux *)", "mcp__github__*"]
 
     def test_unions_across_skills(self, tmp_path):
         root, paths = _setup(tmp_path)
         _write_skill(root, "a", 'tool_grants:\n  - "Bash(git *)"\n')
         _write_skill(root, "b", 'tool_grants:\n  - "Read"\n')
         bot = _bot(skills=["a", "b"])
-        assert _resolve_skill_grants(bot, paths) == ["Bash(git *)", "Read"]
+        assert _resolve_skill_grants(bot.skills, paths) == ["Bash(git *)", "Read"]
 
     def test_prose_skill_contributes_nothing(self, tmp_path):
         root, paths = _setup(tmp_path)
         _write_skill(root, "plain")
         bot = _bot(skills=["plain"])
-        assert _resolve_skill_grants(bot, paths) == []
+        assert _resolve_skill_grants(bot.skills, paths) == []
 
     def test_folder_expansion_resolves_members(self, tmp_path):
         # ``pack/`` expands to every skill dir beneath it — grants must not be skipped.
@@ -87,13 +87,13 @@ class TestResolveSkillGrants:
         _write_skill(root, "pack/one", 'tool_grants:\n  - "Bash(a *)"\n')
         _write_skill(root, "pack/two", 'tool_grants:\n  - "Bash(b *)"\n')
         bot = _bot(skills=["pack/"])
-        grants = _resolve_skill_grants(bot, paths)
+        grants = _resolve_skill_grants(bot.skills, paths)
         assert "Bash(a *)" in grants and "Bash(b *)" in grants
 
     def test_no_skills(self, tmp_path):
         _, paths = _setup(tmp_path)
         bot = _bot()
-        assert _resolve_skill_grants(bot, paths) == []
+        assert _resolve_skill_grants(bot.skills, paths) == []
 
 
 # ── _resolve_guardrail_permissions — deny-capable permissions:{} ──────

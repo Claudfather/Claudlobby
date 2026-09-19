@@ -39,6 +39,7 @@ from .loader import (
     LibraryItem,
     _demote_headings,
     iter_guardrail_permissions,
+    iter_library_requires,
     iter_skill_grants,
     load_library_items_overlay,
     load_voice,
@@ -1426,11 +1427,17 @@ def compose_launchd_plist(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> s
 # ----------------------------------------------------------------------
 
 
-def link_skills(bot: BotConfig, paths: Paths, log) -> None:
+def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None:
     """Symlink each skill into the bot's runtime .claude/skills/.
 
     Overlay-aware: looks in `local/<fleet>/library/skills/` first, then in
     public `library/skills/`.
+
+    ``skills`` is KEYWORD-ONLY and REQUIRED — never defaulted to ``bot.skills``.
+    Callers must pass the EFFECTIVE set (:func:`resolve_effective_skills`, spec
+    §10): a default here is exactly how the linked set and the granted set
+    (:func:`compose_settings_local`) would silently diverge again, which is the
+    failure this resolver exists to prevent.
 
     Each skill entry can be:
       - `name`       — single skill at `skills/name/`
@@ -1461,7 +1468,7 @@ def link_skills(bot: BotConfig, paths: Paths, log) -> None:
         linked[leaf] = src
         (bot_skills_dir / leaf).symlink_to(src.resolve())
 
-    for skill in bot.skills:
+    for skill in skills:
         if skill.endswith("/"):
             dir_name = skill.rstrip("/")
             collected = paths.expand_skill_folder(dir_name)
@@ -1794,6 +1801,30 @@ def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
         if name not in result:
             result.append(name)
     return result
+
+
+def resolve_effective_skills(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
+) -> list[str]:
+    """The skills a bot is ACTUALLY composed with: declared, plus every
+    ``requires.skills`` entry of its EFFECTIVE protocols (spec §10).
+
+    ONE definition, for the reason ``resolve_effective_protocols`` states two
+    functions up: the compose path, the validator, freshbox and the plane's
+    registry keyframe all call this, so a required skill is linked, GRANTED and
+    recorded as equipment rather than reading "unused" in the inventory (#1405).
+    Declared entries keep their order and come first; a requirement already
+    declared is not duplicated.
+    """
+    skills = list(bot.skills)
+    protocol_names = resolve_effective_protocols(
+        bot, fleet, paths, is_manager=is_manager
+    )
+    for _name, requires in iter_library_requires(paths, "protocols", protocol_names):
+        for required in requires.get("skills", []):
+            if required not in skills:
+                skills.append(required)
+    return skills
 
 
 # ----------------------------------------------------------------------
@@ -2230,20 +2261,23 @@ def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     return tools
 
 
-def _resolve_skill_permissions(bot: BotConfig) -> list[str]:
-    """Auto-derive Skill() permission patterns from bot's skill list.
+def _resolve_skill_permissions(skills: list[str]) -> list[str]:
+    """Auto-derive Skill() permission patterns from a resolved skill list.
 
     Each skill needs both Skill(<name>) and Skill(<name>:*) for full operation.
+    Takes the EFFECTIVE skill list (:func:`resolve_effective_skills`), never
+    ``bot.skills`` directly — a required-but-undeclared skill must be granted
+    exactly like a declared one, or it is linked but not usable (cycle-1 B8).
     """
     patterns: list[str] = []
-    for skill in bot.skills:
+    for skill in skills:
         patterns.append(f"Skill({skill})")
         patterns.append(f"Skill({skill}:*)")
     return patterns
 
 
-def _resolve_skill_grants(bot: BotConfig, paths: Paths) -> list[str]:
-    """Additive ``tool_grants`` declared by the bot's equipped skills (F2/F6).
+def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
+    """Additive ``tool_grants`` declared by the resolved skill list (F2/F6).
 
     :func:`_resolve_skill_permissions` grants only ``Skill(<name>)`` invocation;
     a skill's ``SKILL.md`` separately declares the ``Bash(...)`` / ``mcp__...`` /
@@ -2251,11 +2285,13 @@ def _resolve_skill_grants(bot: BotConfig, paths: Paths) -> list[str]:
     folder entries (``dir/``) expanded to every member — so a skill ships
     self-contained with the tools it needs. Joins integrations on the additive
     ``tool_grants`` path; de-duplication against the allow list happens in
-    :func:`compose_settings_local`.
+    :func:`compose_settings_local`. Takes the EFFECTIVE skill list
+    (:func:`resolve_effective_skills`), never ``bot.skills`` directly — same
+    reason as :func:`_resolve_skill_permissions`.
     """
     return [
         grant
-        for _name, grants in iter_skill_grants(paths, bot.skills)
+        for _name, grants in iter_skill_grants(paths, skills)
         for grant in grants
     ]
 
@@ -2490,13 +2526,20 @@ def compose_settings_local(
     # Layer 4: Channel/plugin tools (auto-derived from config)
     allow_patterns.extend(_resolve_channel_permissions(bot))
 
-    # Layer 5: Skill patterns (auto-derived from bot.skills)
-    allow_patterns.extend(_resolve_skill_permissions(bot))
+    # Layer 5: Skill patterns (auto-derived from the EFFECTIVE skill set —
+    # declared, plus every requires.skills entry of the bot's effective
+    # protocols, spec §10 — computed once and shared with layer 5b so a
+    # required skill is granted exactly like a declared one, never only
+    # linked (cycle-1 B8)).
+    effective_skills = resolve_effective_skills(
+        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+    )
+    allow_patterns.extend(_resolve_skill_permissions(effective_skills))
 
     # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
     # additive path; Skill(<name>) above only grants invocation.
-    _append_unique(allow_patterns, _resolve_skill_grants(bot, paths))
+    _append_unique(allow_patterns, _resolve_skill_grants(effective_skills, paths))
 
     # Layer 5c: Claudron session-loop verb grants (L2) — the NARROW allowlist for
     # the model-initiated CLI calls the loop enables (query wedge, /claudna:capture).
@@ -2785,7 +2828,14 @@ def compose_bot(
     )
 
     _emit = log if log is not None else _log.info
-    link_skills(bot, paths, _emit)
+    link_skills(
+        bot,
+        paths,
+        _emit,
+        skills=resolve_effective_skills(
+            bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+        ),
+    )
     link_mounts(bot, bot_dir, _emit)
     compose_tools(bot, fleet, paths, bot_dir)
 

@@ -328,6 +328,29 @@ def _read_tool_grants(md_path: Path) -> list[str]:
     return list(grants) if isinstance(grants, list) else []
 
 
+def library_requires(md_path: Path) -> dict[str, list[str]]:
+    """Read the generic ``requires.<entity_type>: [names]`` block (spec §10).
+
+    v1 CONSUMER is protocols -> skills, but the schema is deliberately generic
+    so protocols -> guardrails or skills -> mcp follow without a format change.
+    Returns ``{}`` when the file, its frontmatter, or the block is absent, and
+    drops a non-list value rather than raising: a malformed block is
+    ``validate``'s to report (the ``_read_tool_grants`` posture, one door over).
+    """
+    if not md_path.is_file():
+        return {}
+    try:
+        fm, _ = parse_frontmatter(md_path.read_text())
+    except OSError:
+        return {}
+    requires = fm.get("requires")
+    if not isinstance(requires, dict):
+        return {}
+    return {
+        key: list(value) for key, value in requires.items() if isinstance(value, list)
+    }
+
+
 def _read_skill_grants(skill_dir: Path) -> list[str]:
     """Read a skill's ``tool_grants`` from its ``SKILL.md`` marker (never sibling files)."""
     return _read_tool_grants(skill_dir / "SKILL.md")
@@ -376,6 +399,29 @@ def iter_skill_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]
             skill_dir = paths.find_library_dir("skills", entry)
             grants = _read_skill_grants(skill_dir) if skill_dir is not None else []
             out.append((entry, grants))
+    return out
+
+
+def iter_library_requires(
+    paths, kind: str, names: list[str]
+) -> list[tuple[str, dict[str, list[str]]]]:
+    """Resolve ``names`` (entries of ``kind``, e.g. ``"protocols"``) to
+    ``(display_name, requires)`` pairs (spec §10). Mirrors :func:`iter_skill_grants`'s
+    entry-resolution shape, generalized over ``kind``: ``name`` / ``dir/name`` (a
+    single file) and ``dir/`` (folder-expansion — every ``.md`` beneath it). A
+    missing file yields ``{}`` rather than being skipped, so a library-wide scan
+    (the validator) still sees the gap.
+    """
+    out: list[tuple[str, dict[str, list[str]]]] = []
+    for entry in names:
+        if entry.endswith("/"):
+            base = entry.rstrip("/")
+            for rel_key, path in paths.expand_library_folder(kind, base).items():
+                name = f"{base}/{rel_key}" if base else rel_key
+                out.append((name, library_requires(path)))
+        else:
+            path = paths.find_library_file(kind, entry, ".md")
+            out.append((entry, library_requires(path) if path is not None else {}))
     return out
 
 

@@ -162,7 +162,9 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
         "    lead:\n", "    lead:\n      skills: [checkin]\n", 1)
     (fleet_dir / "fleet.yaml").write_text(text)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    grants = _resolve_skill_grants(fleet.bots["lead"], Paths(root=fleet_dir, fleet_dir=fleet_dir))
+    grants = _resolve_skill_grants(
+        fleet.bots["lead"].skills, Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    )
     for g in ("Bash(*checkin-record.sh*)", "Bash(*dispatch-task.sh*)", "Bash(*tg-post.sh*)",
               "Bash(claudlobby checkins *)", "Bash(claudlobby status *)"):
         assert g in grants, grants
@@ -172,10 +174,11 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
 # --- library/protocols/checkin.md: the check-in protocol (PR2 Task 3) -------
 
 
-def test_the_protocol_declares_no_requires_and_no_self_fire():
+def test_the_protocol_requires_its_skill_and_still_has_no_self_fire():
     text = (LIB / "protocols" / "checkin.md").read_text()
     fm, body = parse_frontmatter(text)
-    assert fm["title"] == "Check-in" and "requires" not in fm      # equipment linking is chunk 4
+    # chunk 4: the grant union — the protocol brings its skill along (§10)
+    assert fm["title"] == "Check-in" and fm["requires"] == {"skills": ["checkin"]}
     assert "natural idle point" not in body                        # the trigger owns the beat, with its throttles
     assert "governs where it composes beside" in _flat(body.split("## Manager")[0])
 
