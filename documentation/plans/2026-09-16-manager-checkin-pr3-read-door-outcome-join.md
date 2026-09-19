@@ -86,6 +86,9 @@ test instead of silently reading as still-running.
 - The default (`requires:`, the `leaf-manager` role) — PR 4. `propose` / sprint / focus — their own chunks.
 - An `ask` outcome join (asks correlate by alias + time window; F4 defers that door until the correlation
   proves ambiguous, and nothing here makes it less ambiguous).
+- Two more `--summary` facts the spec's §11 lists: the mean gap between check-ins, and skip reasons
+  (`checkin_skipped` is a different event, so an all-skipped window reads `checkins: 0` here) — tracked
+  on #1563, alongside the operator-plane card #1562.
 
 ## Global Constraints
 

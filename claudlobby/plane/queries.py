@@ -923,12 +923,103 @@ def is_bare_events_scan(plan_detail: str, aliases: frozenset[str]) -> bool:
 # truncated detail is not JSON (detail_truncated=1 IS the parse guard) and the
 # row is still returned -- the door exists to show every decision, and dropping
 # the over-cap ones would hide exactly the records that most need looking at.
-# Binds: fleet, fleet.
-CHECKIN_ROWS_SQL = (
+#
+# SELECT/FROM through the fleet scope -- the two constant WHERE terms and the
+# fleet range, shared by every shape `checkin_rows_sql` produces. Binds so
+# far: fleet, fleet.
+_CHECKIN_ROWS_HEAD = (
     "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
-    " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq"
+    " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq,"
+    " e.source_ref AS source_ref"
     " FROM events e"
     " WHERE e.kind = 'system' AND e.event = 'checkin_decision'"
     f" AND {fleet_alias_range('e.subject_alias')}"
-    f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC"
 )
+
+_CHECKIN_ROWS_ORDER = f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC"
+
+
+def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False) -> str:
+    """The check-in decision rows query (PR 3 chunk 4): the window, the bot
+    filter and --limit bound here rather than pulled whole into Python and
+    filtered there (PR 1's shape) -- a wide --since still shrinks what
+    crosses into Python and the ORDER BY sort's working set, though every
+    fleet row is still read and evaluated (`_epoch(...)` is a function over
+    the column, not sargable). Every bound is
+    OPT-IN and appended in this fixed order onto `_CHECKIN_ROWS_HEAD`: the
+    alias equality (`bot`), the since floor (`since`), THEN the order
+    clause, THEN `LIMIT` (`limit`) -- `LIMIT` has to trail `ORDER BY`
+    syntactically, the one term here whose position is not free. With every
+    flag False this reproduces PR 1's shipped string byte-for-byte, which is
+    what lets `CHECKIN_ROWS_SQL = checkin_rows_sql()` stay a valid alias for
+    every existing reference (test_the_no_bounds_sql_is_the_pr1_string).
+
+    Binds, in the order a caller must supply them: fleet, fleet [, alias]
+    [, since] [, limit] -- `fleet_alias_range` binds the fleet TWICE, so
+    every optional term is appended AFTER it. `collect_checkins`
+    (commands/checkins.py) gates its params list on the SAME three booleans
+    this function is called with, in the SAME order, so the SQL shape and
+    the bind list cannot drift apart.
+
+    `since` compares as an INSTANT via `_epoch('?')` on both sides, never a
+    lexical `<`: the ledger stores `occurred_at` at the emitter's own
+    isoformat offset, so `-04:00` and `+00:00` rows sit in one column and a
+    lexical compare reads a ten-minutes-old `-04:00` row as hours stale
+    (`_epoch`'s own docstring, above)."""
+    sql = _CHECKIN_ROWS_HEAD
+    if bot:
+        sql += " AND e.subject_alias = ?"
+    if since:
+        sql += f" AND {_epoch('e.occurred_at')} >= {_epoch('?')}"
+    sql += _CHECKIN_ROWS_ORDER
+    if limit:
+        sql += " LIMIT ?"
+    return sql
+
+
+CHECKIN_ROWS_SQL = checkin_rows_sql()
+
+
+def _detail_json(col: str) -> str:
+    """A detail column json_extract can always be handed. `SystemEvent.data` is
+    DIAGNOSTIC -- over-cap TRUNCATES at ingest rather than rejecting -- so a detail
+    can be non-JSON, and json_extract over one RAISES `malformed JSON` and takes
+    out the WHOLE query (probed, sqlite 3.53.2). A CASE rather than a second AND
+    term, so it holds by construction and not by trusting the optimizer's order."""
+    return f"CASE WHEN json_valid({col}) THEN {col} ELSE '{{}}' END"
+
+
+def checkin_dispatch_rows_sql(n: int) -> str:
+    """The `checkin_dispatch` join rows for n checkin ids, oldest first.
+
+    `dispatch-task.sh --checkin` appends ONE of these to the SAME batch as the
+    assignment, carrying {checkin_id, assignment_id, work_item_id, task_id}. The
+    DDL forces a system row's assignment_id / work_item_id COLUMNS to NULL
+    (0001_kernel.sql), so the address lives in the detail and the join is a
+    json_extract -- never the column, which is null by construction for this kind.
+    Fleet-scoped on the DISPATCHER's own alias (the decision rows' own predicate):
+    a 32-hex id is unique, but one bot name on two fleets (#526) is the failure it
+    costs nothing to exclude. The join walks the `kind='system'` slice through
+    `idx_events_kind_seq` with the cheap `event =` filter ahead of any `json_extract`.
+
+    There is deliberately no `plane-lookup.py --checkin-dispatch` sibling: this
+    query's only consumer is claudlobby/commands/checkins.py, which holds its own
+    read connection. A bash-side copy with no bash caller is the `--supersedes`
+    dead-flag shape (#1032) -- add the mode when a caller exists.
+
+    Binds: fleet, fleet, then one per checkin id.
+    """
+    ph = ",".join("?" * n)
+    d = _detail_json("e.detail")
+    return (
+        f"SELECT json_extract({d}, '$.checkin_id') AS checkin_id,"
+        f" json_extract({d}, '$.assignment_id') AS assignment_id,"
+        f" json_extract({d}, '$.work_item_id') AS work_item_id,"
+        f" json_extract({d}, '$.task_id') AS task_id,"
+        " e.occurred_at AS occurred_at, e.ingest_seq AS ingest_seq"
+        " FROM events e"
+        " WHERE e.kind = 'system' AND e.event = 'checkin_dispatch'"
+        f" AND {fleet_alias_range('e.subject_alias')}"
+        f" AND json_extract({d}, '$.checkin_id') IN ({ph})"
+        f" ORDER BY {_epoch('e.occurred_at')}, e.ingest_seq"
+    )

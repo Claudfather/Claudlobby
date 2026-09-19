@@ -205,6 +205,11 @@ def register_subparsers(sub) -> None:
     pck.add_argument("--last", action="store_true", help="only the newest row, ignoring --since")
     pck.add_argument("--raised", action="store_true", help="only the rows that surfaced to the operator (raise.decided) — the ask count")
     pck.add_argument("--json", action="store_true", help="machine-facing envelope")
+    pck.add_argument("--summary", action="store_true",
+                     help="roll the window up instead of listing it: actions, ask rate,"
+                          " considered lengths, unavailable inputs, dispatch outcomes — by project")
+    pck.add_argument("--limit", type=int, default=None,
+                     help="at most N rows (applied after every filter; not with --summary)")
     pck.set_defaults(func=cmd_checkins)
 
     # The task loop's operator door (chunk M-A, #1481). A subcommand group from
