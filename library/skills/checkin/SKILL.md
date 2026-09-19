@@ -3,9 +3,9 @@ name: checkin
 description: "The idle-manager check-in: read the SSOT (the plane through checkins, brief and status, Claudron, the mission with each project's tier and repos, the GitHub backlog), decide ONE project and ONE action, record the decision BEFORE acting, and let the surfacing judgment decide whether the operator hears anything at all. Silence is the default."
 argument-hint: "[--dry-run]"
 tool_grants:
-  - "Bash(claudlobby checkins *)"
-  - "Bash(claudlobby brief *)"
-  - "Bash(claudlobby status *)"
+  - "Bash(claudlobby --fleet * checkins *)"
+  - "Bash(claudlobby --fleet * brief *)"
+  - "Bash(claudlobby --fleet * status *)"
   - "Bash(claudron lookup *)"
   - "Bash(gh issue list *)"
   - "Bash(*checkin-record.sh*)"
@@ -21,6 +21,8 @@ the surfacing judgment (DECIDE, below) lets through. **Every read goes through a
 named door and every write through a named door** — never a hand-rolled query,
 never a hand-built plane envelope, never a pipeline. That coupling is what makes
 your reasoning inspectable (the `checkins` read door) and the edges deterministic.
+The fleet is named on every door because a fleet-less call runs the CLI in root
+mode, which an overlay install does not have.
 
 `$BOT_ID`, `$FLEET_NAME` and `$CLAUDLOBBY_ROOT` come from your `bot.conf`; each
 project's key, repos and tier come from the `## Projects` table in your own
@@ -44,34 +46,34 @@ A step that fails is **recorded, never guessed around**: add its name to
 (**could not measure**), never `0` — in `inputs_seen` and in `delta` alike.
 
 0. **The previous check-in, and this week's asks** —
-   `claudlobby checkins --bot $BOT_ID --last --json` (the row is `checkins[0]`;
-   its `record.inputs_seen` is *the state at the last check-in*; keep its
-   `checkin_id` for `prev_checkin_id`; an empty `checkins` → `null`) and
-   `claudlobby checkins --bot $BOT_ID --since 7d --raised --json` (the `checkins[]`
-   rows are the asks already raised this week; count them — `--raised` keeps the
-   read to those rows). rc 3 means
-   the plane is unreachable — record `checkins` as unavailable and `prev_checkin_id`
-   as `null`; the record shows both, so a skipped read never poses as a first one.
-1. **The fleet's present** — `claudlobby brief --bot $BOT_ID --json`: `dispatches`
-   (`open` / `overdue` / `orphaned` / `dispatched`, each row with `escalated`,
-   `nudged`, `last_progress_at`), `workstreams` (`active`, `stalled`),
-   `reports.unacked`, `alerts` (last 24h critical), `mission`. Read `degraded[]`
-   **by mode, for the fields you use**: an entry whose `mode` is `omitted` and whose
-   `field` is `dispatches`, `workstreams`, `reports` or `alerts` (or a dotted child,
-   such as `dispatches.open`) makes that section **unavailable** — never zero. An
-   entry whose `mode` is `labeled` means the field is present and bounded — a real
-   fleet's brief always carries `alerts` labeled, and usually `dispatches.orphaned`
-   — so use the field and note the bound. The standing `utilization` entry (#891)
-   is **not an input** of this skill; ignore it.
-1b. **The roster, and who is idle** — `claudlobby status --json`: `bots[]`, each with
-   `name` (the id the ACT line takes as `<worker>`), `state`, `pane_state` (`BUSY` /
-   `IDLE`), `tmux_alive`, `current_task`, and `plane_unreachable` (non-null when the
-   plane could not be read for that bot). A `null` `pane_state` — with or without
-   `plane_unreachable` set (a fleet with no heartbeats yet) — means the worker is
-   UNOBSERVED, not idle. `dispatch` needs an alive, observed, idle worker; the
-   rationale names the worker and its observed `pane_state`. (This third door exists
-   because `brief` carries no per-bot pane state — it answers what is open, not who
-   is idle; add no fourth.)
+   `claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json` (the row
+   is `checkins[0]`; its `record.inputs_seen` is *the state at the last check-in*;
+   keep its `checkin_id` for `prev_checkin_id`; an empty `checkins` → `null`) and
+   `claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --since 7d --raised
+   --json` (the `checkins[]` rows are the asks already raised this week; count them
+   — `--raised` keeps the read to those rows). rc 3 means the plane is unreachable —
+   record `checkins` as unavailable and `prev_checkin_id` as `null`; the record
+   shows both, so a skipped read never poses as a first one.
+1. **The fleet's present** — `claudlobby --fleet "$FLEET_NAME" brief --bot $BOT_ID
+   --json`: `dispatches` (`open` / `overdue` / `orphaned` / `dispatched`, each row
+   with `escalated`, `nudged`, `last_progress_at`), `workstreams` (`active`,
+   `stalled`), `reports.unacked`, `alerts` (last 24h critical), `mission`. Read
+   `degraded[]` **by mode, for the fields you use**: an entry whose `mode` is
+   `omitted` and whose `field` is `dispatches`, `workstreams`, `reports` or `alerts`
+   (or a dotted child, such as `dispatches.open`) makes that section **unavailable** —
+   never zero. An entry whose `mode` is `labeled` means the field is present and
+   bounded — a real fleet's brief always carries `alerts` labeled, and usually
+   `dispatches.orphaned` — so use the field and note the bound. The standing
+   `utilization` entry (#891) is **not an input** of this skill; ignore it.
+1b. **The roster, and who is idle** — `claudlobby --fleet "$FLEET_NAME" status
+   --json`: `bots[]`, each with `name` (the id the ACT line takes as `<worker>`),
+   `state`, `pane_state` (`BUSY` / `IDLE`), `tmux_alive`, `current_task`, and
+   `plane_unreachable` (non-null when the plane could not be read for that bot). A
+   `null` `pane_state` — with or without `plane_unreachable` set (a fleet with no
+   heartbeats yet) — means the worker is UNOBSERVED, not idle. `dispatch` needs an
+   alive, observed, idle worker; the rationale names the worker and its observed
+   `pane_state`. (This third door exists because `brief` carries no per-bot pane state
+   — it answers what is open, not who is idle; add no fourth.)
 2. **Knowledge** — `claudron lookup --limit 5 <project>` for each project with open
    work. Count the hits (`knowledge_hits`); read what is relevant.
 3. **The goal and each project's rigor** — both are already in your context, no
@@ -184,8 +186,9 @@ The `&&` is RECORD-before-ACT made mechanical: the door prints the `checkin_id` 
 on success, `$ck` carries it into the dispatch in the same call (a shell variable
 does not survive between your tool calls, which is why the two are never split), and
 rc 2 or rc 3 from the door skips the act. If the dispatch door says the plane cannot
-see that id, verify with `claudlobby checkins --bot $BOT_ID --last --json` before
-anything else. rc 2: the decision was refused — every reason is on stderr;
+see that id, verify with `claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID
+--last --json` before anything else. rc 2: the decision was refused — every reason is
+on stderr;
 fix and re-record **once**; if the second attempt is refused too, record the minimal
 valid `nothing` row and stop — minimal means EVERY required key, so it cannot be
 refused a third time: `prev_checkin_id` from step 0 (or `null`), every count `null`,
@@ -211,7 +214,7 @@ any real run relies on it:
 ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" --dry-run <<'EOF'
 { ...the same decision JSON... }
 EOF
-) && claudlobby checkins --bot $BOT_ID --last --json
+) && claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json
 ```
 
 Then print, in your reply and not as a command, the ACT line you would have run.

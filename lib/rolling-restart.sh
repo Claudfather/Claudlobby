@@ -22,6 +22,10 @@
 #   --skip-healthy       skip bots whose Telegram bridge is already up (turns this
 #                        into a fleet-wide "make it so" after a partial outage)
 #   --workers-only       exclude managers (MANAGER_TMUX == BOT_ID)
+#   --managers-only      restart only managers (MANAGER_TMUX == BOT_ID); a
+#                        coordinator is restarted too — one inert extra bot,
+#                        not worked around. Mutually exclusive with
+#                        --workers-only (that pair would skip every bot).
 #   --ceiling <seconds>  per-bot BRIDGE_READY wait ceiling (default 180)
 #   --continue-on-fail   alert + keep going past a stalled bot (default: hard-stop)
 #
@@ -38,6 +42,7 @@ FLEET=""
 ALL=0
 SKIP_HEALTHY=0
 WORKERS_ONLY=0
+MANAGERS_ONLY=0
 CONTINUE_ON_FAIL=0
 CEILING=180
 
@@ -47,14 +52,19 @@ rr_parse_args() {
             --all)             ALL=1; shift ;;
             --skip-healthy)    SKIP_HEALTHY=1; shift ;;
             --workers-only)    WORKERS_ONLY=1; shift ;;
+            --managers-only)   MANAGERS_ONLY=1; shift ;;
             --continue-on-fail) CONTINUE_ON_FAIL=1; shift ;;
             --ceiling)         CEILING="${2:?--ceiling needs a value}"; shift 2 ;;
-            -h|--help)         sed -n '2,30p' "$LIB_DIR/rolling-restart.sh"; exit 0 ;;
+            -h|--help)         sed -n '2,33p' "$LIB_DIR/rolling-restart.sh"; exit 0 ;;
             --*)               echo "rolling-restart: unknown option: $1" >&2; exit 2 ;;
             *)                 FLEET="$1"; shift ;;
         esac
     done
     case "$CEILING" in ''|*[!0-9]*) echo "rolling-restart: --ceiling must be an integer" >&2; exit 2 ;; esac
+    if [ "$WORKERS_ONLY" -eq 1 ] && [ "$MANAGERS_ONLY" -eq 1 ]; then
+        echo "rolling-restart: --workers-only and --managers-only are mutually exclusive (it would skip every bot)" >&2
+        exit 2
+    fi
 }
 
 # List every fleet on the host by name (the dir holding a fleet.yaml), flat OR
@@ -85,7 +95,7 @@ rr_process_fleet() {
     # grows a destructive leg, move it to declared_bots_strict (the loud door).
     declared="$(parse_fleet_bots "$fleet_dir/fleet.yaml")"
 
-    echo "$(ts_iso) FLEET $fleet — rolling restart (ceiling ${CEILING}s, skip_healthy=$SKIP_HEALTHY workers_only=$WORKERS_ONLY)" >> "$LOG"
+    echo "$(ts_iso) FLEET $fleet — rolling restart (ceiling ${CEILING}s, skip_healthy=$SKIP_HEALTHY workers_only=$WORKERS_ONLY managers_only=$MANAGERS_ONLY)" >> "$LOG"
     for bot_dir in "$bots_dir"/*/; do
         [ -d "$bot_dir" ] || continue
         bot_id="$(basename "$bot_dir")"
@@ -93,6 +103,9 @@ rr_process_fleet() {
 
         if [ "$WORKERS_ONLY" -eq 1 ] && bot_is_manager "$bot_dir"; then
             echo "$(ts_iso) SKIP (manager): $bot_id" >> "$LOG"; SKIPPED=$((SKIPPED + 1)); continue
+        fi
+        if [ "$MANAGERS_ONLY" -eq 1 ] && ! bot_is_manager "$bot_dir"; then
+            echo "$(ts_iso) SKIP (worker): $bot_id" >> "$LOG"; SKIPPED=$((SKIPPED + 1)); continue
         fi
         if [ "$SKIP_HEALTHY" -eq 1 ]; then
             state="$(bridge_state "$bot_dir" 2>/dev/null || true)"

@@ -1521,6 +1521,69 @@ class TestValidateGenerateParity:
         assert not any("/opt/rogue/job.sh" in e for e in report.errors)
 
 
+class TestManagerCheckinArmedLeaflessWarning:
+    """Fix round 1, item 2 (PR4 task 3, #1569): the compose-time job gate
+    (composer.LEAF_MANAGER_GATED_JOBS) filters `manager-checkin` out of the
+    timers dict BEFORE anything reads its `enroll` flag, so an operator who
+    arms it (`fleet.defaults.jobs.manager-checkin.enroll: true`) on a fleet
+    with no leaf manager gets total silence: the armed line does nothing,
+    and nothing says so. `validate` reads the SAME source of truth the
+    composer does — `fleet.defaults` (the merged dict `load_fleet` stores on
+    the fleet, the same one `compose_fleet_timers` receives as
+    `merged_defaults`) and `fleet.leaf_manager_bots()` for the predicate —
+    never re-derived, per `_validate_timers`'s own precedent two tests up."""
+
+    def _load(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return fleet, _make_paths(fleet_dir)
+
+    def test_armed_and_leafless_warns_exactly_once_naming_job_and_reason(
+        self, fleet_dir, monkeypatch
+    ):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        fleet.teams = {}  # no team names a manager -> no leaf manager
+        assert fleet.leaf_manager_bots() == set()
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": True},
+        }
+        report = validate(fleet, paths)
+        matches = [w for w in report.warnings if "manager-checkin" in w]
+        assert len(matches) == 1, report.warnings
+        assert "no leaf manager" in matches[0]
+        # names what WOULD make it fire
+        assert "in-fleet report" in matches[0] and "not itself a manager" in matches[0]
+
+    def test_armed_with_a_leaf_manager_stays_silent(self, fleet_dir, monkeypatch):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        assert fleet.leaf_manager_bots() == {"lead"}  # the fleet_dir default shape
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": True},
+        }
+        report = validate(fleet, paths)
+        assert not any(
+            "manager-checkin" in w and "no leaf manager" in w
+            for w in report.warnings
+        ), report.warnings
+
+    def test_unarmed_and_leafless_stays_silent(self, fleet_dir, monkeypatch):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        fleet.teams = {}
+        assert fleet.leaf_manager_bots() == set()
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": False},
+        }
+        report = validate(fleet, paths)
+        assert not any(
+            "manager-checkin" in w and "no leaf manager" in w
+            for w in report.warnings
+        ), report.warnings
+
+
 class TestGitCredentialsWarnings:
     """Per-org git credential routing has two operator-side gaps that both
     compose VALID config and then fail at runtime, so both warn (never fail):

@@ -105,7 +105,7 @@ If the fleet shares one Anthropic Opus account (no per-bot API keys, no per-bot 
 - When a worker's `[BOTREPORT]` lands, **act immediately** — don't wait.
 - After dispatching, don't poll for an ack: a **tracked** (id'd) task pages you via the overdue watchdog past `expected_by` (gates permitting); an **untracked freeform send has no watchdog** — pane capture is your only net there (see the `dispatch` protocol).
 - Every phase transition (dispatched, review requested, merged) gets a concise Telegram update for human visibility.
-- **Never go silent.** If you're processing, waiting on a worker, or blocked, say so in Telegram. (See `proactivity-discipline` protocol.)
+- **Cadence is governed elsewhere, not by a standing mandate here.** See the `checkin` protocol for the beat and `proactivity-discipline` for wait-points.
 
 ## Fleet Health
 

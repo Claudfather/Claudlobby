@@ -36,6 +36,7 @@ from .composer import (
     _resolve_skill_grants,
     _resolve_skill_permissions,
     compose_settings_local,
+    resolve_effective_skills,
 )
 from .config import BotConfig, FleetConfig
 from .paths import Paths
@@ -56,7 +57,7 @@ class Finding:
     detail: str
 
 
-def _sourced_grants(bot: BotConfig, paths: Paths) -> set[str]:
+def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str]:
     """Every allow pattern that traces to an equipped source's contract.
 
     The union of the same per-source resolvers :func:`compose_settings_local`
@@ -64,6 +65,12 @@ def _sourced_grants(bot: BotConfig, paths: Paths) -> set[str]:
     between the composed output and the declared contracts surfaces. Excludes
     the always-injected ``BASE_TOOLS`` floor and the ad-hoc fleet
     ``tools.allow`` override, which are classified separately.
+
+    Skill grants are resolved from the EFFECTIVE skill set
+    (:func:`resolve_effective_skills`, spec §10), never ``bot.skills`` alone —
+    a required-but-undeclared skill's grants must trace here too, or this
+    audit misreads them as ``orphan_grant`` the moment the compositor starts
+    granting what it links.
     """
     expertise_allow, _ = _resolve_expertise_permissions(bot, paths)
     guardrail_allow, _ = _resolve_guardrail_permissions(bot, paths)
@@ -71,8 +78,11 @@ def _sourced_grants(bot: BotConfig, paths: Paths) -> set[str]:
     sourced |= set(_resolve_mcp_permissions(bot, paths))
     sourced |= set(_resolve_integration_grants(bot, paths))
     sourced |= set(_resolve_channel_permissions(bot))
-    sourced |= set(_resolve_skill_permissions(bot))
-    sourced |= set(_resolve_skill_grants(bot, paths))
+    effective_skills = resolve_effective_skills(
+        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+    )
+    sourced |= set(_resolve_skill_permissions(effective_skills))
+    sourced |= set(_resolve_skill_grants(effective_skills, paths))
     return sourced
 
 
@@ -596,7 +606,7 @@ def audit_bot(
     triples = classify_grants(
         allow=perms.get("allow", []),
         deny=perms.get("deny", []),
-        sourced=_sourced_grants(bot, paths),
+        sourced=_sourced_grants(bot, fleet, paths),
         base=set(BASE_TOOLS),
         override=set(bot.tool_permissions.allow),
     )

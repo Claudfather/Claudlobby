@@ -565,7 +565,17 @@ def _validate_bots(
         #   name        — skills/name/
         #   dir/name    — skills/dir/name/
         #   dir/        — folder expansion (skills/dir/**)
-        for skill in bot.skills:
+        #
+        # Checked against the EFFECTIVE set (declared plus every requires.skills
+        # entry of the bot's effective protocols, spec §10) — never bot.skills
+        # alone — so a protocol requiring a skill that has since gone missing is
+        # reported here too, not only in the grant loop further down.
+        from .composer import resolve_effective_skills
+
+        effective_skills = resolve_effective_skills(
+            bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+        )
+        for skill in effective_skills:
             if skill.endswith("/"):
                 dir_name = skill.rstrip("/")
                 if not paths.expand_skill_folder(dir_name):
@@ -576,6 +586,27 @@ def _validate_bots(
                 report.warnings.append(
                     f"bot '{bot_name}': skill '{skill}' not in any library/skills/ — symlink will be skipped"
                 )
+
+        # Leaf-manager check-in surface (warn, no silent switches — spec §10,
+        # §5 step 1). The `manager-checkin` trigger only ever injects into a
+        # LEAF manager: `bot_is_manager` reads true for a coordinator too, so
+        # that predicate alone cannot tell the two apart at runtime — the
+        # distinction is made at compose time, by `fleet.leaf_manager_bots()`.
+        # A bot that declares the `checkin` protocol without being a leaf
+        # manager is equipped for an injection that will never come; the
+        # skill still links (`/checkin` runs by hand), so this is a warning,
+        # never an error, and it says why.
+        if "checkin" in bot.protocols and bot.bot_id not in fleet.leaf_manager_bots():
+            if bot.bot_id in fleet.manager_bots():
+                why = "a coordinator (every in-fleet report is itself a manager)"
+            else:
+                why = "a worker (not a manager)"
+            report.warnings.append(
+                f"bot '{bot_name}': protocol 'checkin' declared, but this bot is "
+                f"{why} — the manager-checkin trigger will never inject into it. "
+                "The skill still links, so /checkin runs by hand; only the "
+                "automatic injection is withheld."
+            )
 
         # MCP fragment existence (warn). bot.mcp is list[McpEntry]; the file
         # on disk is named after .name regardless of how many instances the
@@ -761,7 +792,7 @@ def _validate_bots(
             report.errors.extend(
                 _inert_path_errors(bot_name, "integration", name, grants)
             )
-        for name, grants in iter_skill_grants(paths, bot.skills):
+        for name, grants in iter_skill_grants(paths, effective_skills):
             report.warnings.extend(
                 _grant_shape_warnings(bot_name, "skill", name, grants, allow_side=True)
             )
@@ -1559,10 +1590,28 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         return
     from .path_audit import timer_script_findings
 
-    for sf in timer_script_findings(fleet.defaults.get("jobs", {})):
+    jobs = fleet.defaults.get("jobs", {})
+    for sf in timer_script_findings(jobs):
         report.errors.append(
             f"{sf.source} = {sf.value!r} — {sf.reason}: {sf.path} "
             "(anchor the script on $CLAUDLOBBY_ROOT)"
+        )
+
+    # An armed beat on a leafless fleet (fix round 1, item 2, #1569). The
+    # compose-time job gate (composer.LEAF_MANAGER_GATED_JOBS) filters
+    # `manager-checkin` out of `timers` BEFORE anything reads `enroll` — see
+    # compose_fleet_timers — so an operator who arms it
+    # (`defaults.jobs.manager-checkin.enroll: true`) on a fleet with no leaf
+    # manager gets total silence: no unit composes, and nothing said why.
+    # Never an error: the fleet.yaml line is well-formed and would fire the
+    # moment the fleet gained a leaf manager.
+    mc = jobs.get("manager-checkin")
+    if mc is not None and mc.get("enroll", True) and not fleet.leaf_manager_bots():
+        report.warnings.append(
+            "manager-checkin is armed (defaults.jobs.manager-checkin.enroll: "
+            "true) but this fleet has no leaf manager — a manager with at "
+            "least one in-fleet report that is not itself a manager — so no "
+            "unit is composed and nothing will fire."
         )
 
 
@@ -1607,6 +1656,75 @@ def _validate_library_frontmatter(paths: Paths, report: ValidationReport) -> Non
                 report.errors.append(
                     f"malformed frontmatter in library file '{rel}': {err}"
                 )
+
+
+def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
+    """Fail loud on a malformed or unresolvable ``requires:`` entry (spec §10).
+
+    v1 scope is protocols -> skills: a protocol's ``requires.skills`` naming a
+    skill absent from the library is an error. Library-wide and scanned ONCE
+    PER FILE — never once per equipping bot — the same "one defect, one error"
+    rule :func:`_validate_env_contracts` states in its docstring
+    (`validator.py:383-396`): the defect is a property of the protocol FILE,
+    so an unequipped protocol with a broken requirement is still caught, and a
+    fleet where several bots equip it gets one message, not several.
+
+    Also reports a non-string entry (``requires: {skills: [3]}``) — one error
+    per file, same rule. ``loader.library_requires`` drops a non-string entry
+    rather than raising (the ``_read_tool_grants`` posture), which means the
+    filtered dict this function otherwise reads has already lost the fact that
+    something was dropped; catching it here means reading the RAW frontmatter
+    block again rather than the filtered one, or the drop stays silent.
+    """
+    from .loader import library_requires, parse_frontmatter
+
+    roots = [paths.base_library, paths.overlay_library]
+    seen: set[Path] = set()
+    for root in roots:
+        if root is None or not root.is_dir():
+            continue
+        protocols_dir = root / "protocols"
+        if not protocols_dir.is_dir():
+            continue
+        for md in sorted(protocols_dir.rglob("*.md")):
+            if md.name.startswith("README"):
+                continue
+            resolved = md.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                rel = md.relative_to(root)
+            except ValueError:
+                rel = md
+
+            try:
+                raw_fm, _ = parse_frontmatter(md.read_text(encoding="utf-8"))
+            except OSError:
+                raw_fm = {}
+            raw_requires = raw_fm.get("requires") if isinstance(raw_fm, dict) else None
+            if isinstance(raw_requires, dict) and any(
+                isinstance(v, list) and any(not isinstance(x, str) for x in v)
+                for v in raw_requires.values()
+            ):
+                report.errors.append(
+                    f"protocol '{rel}' requires: block holds a non-string "
+                    "entry — every name in a requires.<kind> list must be a "
+                    "string; the non-string entry was dropped"
+                )
+
+            requires = library_requires(md)
+            for skill in requires.get("skills", []):
+                if skill.endswith("/"):
+                    resolvable = bool(paths.expand_skill_folder(skill.rstrip("/")))
+                else:
+                    resolvable = paths.find_library_dir("skills", skill) is not None
+                if not resolvable:
+                    report.errors.append(
+                        f"protocol '{rel}' requires skill '{skill}', which is "
+                        "not in any library/skills/ — the requirement cannot "
+                        "be satisfied"
+                    )
 
 
 # Literal placeholder tokens shipped in fleet.yaml.seed (three of them). Reaching
@@ -1738,6 +1856,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
     _validate_library_frontmatter(paths, report)
+    _validate_library_requires(paths, report)
     _validate_env_contracts(paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot

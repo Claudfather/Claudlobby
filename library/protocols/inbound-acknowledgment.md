@@ -36,7 +36,7 @@ Patterns:
 If the work takes >30 seconds beyond the ack:
 
 - **At the ~30s mark**: post one line confirming you're still on it. `still on it — <substep>`.
-- **At each major milestone**: brief update. `search done, found 3 candidates — evaluating.`
+- **At each substantive step, while a human is waiting on this turn**: brief update. `search done, found 3 candidates — evaluating.`
 - **When done**: the final result.
 
 For very long tasks (>2 min), every 60s gets a heartbeat. Never go silent for more than 60s mid-task. Silence is the bug.
@@ -55,4 +55,4 @@ Acknowledging closes that loop in 10 seconds. The bot stays trustworthy. The hum
 
 A `UserPromptSubmit` hook can fire a deterministic sub-second receipt before the model has even started thinking — see `lib/telegram-instant-ack.sh` for a reference implementation. The hook handles the fast-ack; this protocol ensures the model's substantive paraphrase + next-step also lands.
 
-This protocol pairs with `direct-mention-response` (worker acks for @-mentions even mid-task) and `proactivity-discipline` (manager wait-point beacons). Same family, different surface area.
+This protocol pairs with `direct-mention-response` (worker acks for @-mentions even mid-task) and `proactivity-discipline` (manager wait-points; idle silence is recorded, not posted). Same family, different surface area.

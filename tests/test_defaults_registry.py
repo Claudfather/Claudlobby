@@ -14,12 +14,18 @@ from the filesystem rather than restating it.
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 import pytest
 
 from claudlobby import config, defaults
+from claudlobby.composer import compose_bot, compose_claude_md
+from claudlobby.config import load_fleet
 from claudlobby.defaults import REGISTRY, TIER_TESTS, Disposition, Tier, resolve
+from claudlobby.paths import Paths
+from tests.conftest import install_real_template
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIBRARY = REPO_ROOT / "library"
@@ -33,6 +39,15 @@ NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE = {
         "#1172 — replaces the hand-scan form on vault-wired bots only. "
         "Vault arm delta named in the PR body; non-vault arm measured "
         "byte-identical."
+    ),
+    "checkin": (
+        "manager-checkin PR 4 chunk 4 — the leaf-manager role overlay on "
+        "`protocols` (defaults.REGISTRY['protocols'].roles). The naked-bot "
+        "gate's leaf-manager arm is Task 4 of PR 4; that task records the "
+        "dated baseline under documentation/baselines naming this entry's "
+        "delta. A single bot can never be a leaf manager, so the gate's "
+        "existing (rootless) naked-probe shape is unaffected — the arm that "
+        "actually exercises this entry is the new one Task 4 adds."
     ),
 }
 
@@ -157,9 +172,12 @@ class TestRoleOverlay:
     def test_only_detectable_roles_are_declared(self):
         # The stated bound. A role named here that nothing can DETECT would be
         # silently inert — never unioned in, and nothing would say so. Today
-        # `manager` is the only role the composer can resolve, via
-        # manager_bots(); adding a second needs a predicate first.
-        assert defaults.DETECTABLE_ROLES == frozenset({defaults.ROLE_MANAGER})
+        # `manager` (manager_bots()) and `leaf-manager` (leaf_manager_bots())
+        # are the only roles the composer can resolve; adding a third needs a
+        # predicate first.
+        assert defaults.DETECTABLE_ROLES == frozenset(
+            {defaults.ROLE_MANAGER, defaults.ROLE_LEAF_MANAGER}
+        )
         declared = {r for d in REGISTRY.values() for r in d.roles}
         assert declared <= defaults.DETECTABLE_ROLES, (
             f"role(s) declared that nothing can detect: {sorted(declared - defaults.DETECTABLE_ROLES)}"
@@ -200,17 +218,30 @@ class TestScopeBoundary:
         # this test exists to force. It is not an escape hatch: the entry still
         # has to carry a named observation-gate delta, and the line records
         # where. `shared-documentation-vault` is the worked example.
+        #
+        # WALKS `d.roles.values()` TOO, not just `d.entries` (PR4 chunk 4). A
+        # role-scoped INSTRUCT default is not a global one, but it is still an
+        # INSTRUCT default: a bot that holds the role receives the instruction
+        # exactly as it would from `entries`, and `resolve()` unions the two
+        # without distinction. Checking only `entries` is how a role-scoped
+        # `checkin` could have landed here already passing, with nothing
+        # short of `lib/naked-bot-observe.py` (which this file does not run)
+        # ever having looked.
         allowed = set(NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE)
         unexplained = {
-            t: tuple(e for e in d.entries if e not in (set(d.grandfathered) | allowed))
+            t: tuple(
+                e
+                for e in (*d.entries, *(n for names in d.roles.values() for n in names))
+                if e not in (set(d.grandfathered) | allowed)
+            )
             for t, d in REGISTRY.items()
             if d.tier is Tier.INSTRUCT
         }
         ungrandfathered = {t: e for t, e in unexplained.items() if e}
         assert not ungrandfathered, (
-            "a NEW INSTRUCT default is present. It cannot be justified by unit "
-            "test: run lib/naked-bot-observe.py --baseline and name the delta. "
-            f"{ungrandfathered}"
+            "a NEW INSTRUCT default is present (global or role-scoped). It "
+            "cannot be justified by unit test: run lib/naked-bot-observe.py "
+            f"--baseline and name the delta. {ungrandfathered}"
         )
 
     def test_every_new_instruct_allowance_names_a_live_entry_and_its_evidence(self):
@@ -219,14 +250,22 @@ class TestScopeBoundary:
         # pre-authorises a future entry that happens to reuse it — a new
         # estate-wide instruction landing green, through the door built to make
         # that impossible.
+        #
+        # "live" now means live in `entries` OR in some `roles` tuple (PR4
+        # chunk 4): a role-scoped default is exactly as live as a global one,
+        # just narrower in WHO receives it, and the allowlist's job is to name
+        # a real entry, not to insist it be an unconditional one.
         entries = {
-            e for d in REGISTRY.values() if d.tier is Tier.INSTRUCT for e in d.entries
+            e
+            for d in REGISTRY.values()
+            if d.tier is Tier.INSTRUCT
+            for e in (*d.entries, *(n for names in d.roles.values() for n in names))
         }
         for name, evidence in NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE.items():
             assert name in entries, (
-                f"{name} is allowed as a new INSTRUCT default but is not an "
-                "INSTRUCT entry — remove it, or it silently pre-authorises the "
-                "next entry to reuse the name"
+                f"{name} is allowed as a new INSTRUCT default but is not a live "
+                "INSTRUCT entry (global or role-scoped) — remove it, or it "
+                "silently pre-authorises the next entry to reuse the name"
             )
             assert evidence.strip(), f"{name}: allowed with no evidence recorded"
 
@@ -296,10 +335,143 @@ class TestScopeBoundary:
         # Asserted for ALL twelve types, not just the one this phase touched: a
         # registry entry naming a file that does not exist fails at compose time
         # on a real fleet, and only for the fleets that did not opt out.
+        #
+        # ALSO resolved with EVERY DETECTABLE ROLE passed at once (PR4 chunk
+        # 4) — `resolve(etype)` alone never asks for a role overlay, so a
+        # role-scoped entry naming a missing file would resolve clean here
+        # while failing on the one real fleet shape that carries the role.
+        # Passing every detectable role together is deliberate, not a
+        # shortcut: `resolve()` unions whatever roles it is given, so the
+        # per-entity-type union of "no role" and "every role" is exactly the
+        # set of names any real bot could ever receive from this registry.
+        all_roles = tuple(defaults.DETECTABLE_ROLES)
         missing = [
             f"{etype}/{entry}"
             for etype in REGISTRY
-            for entry in resolve(etype)
+            for entry in set(resolve(etype)) | set(resolve(etype, all_roles))
             if not (LIBRARY / etype / f"{entry}.md").is_file()
         ]
         assert not missing, f"registered but absent from library/: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# The `checkin` leaf-manager default, end to end (PR4 chunk 4, #1569 task 3).
+# `fleet_dir` (conftest.py) ships lead/worker-1 with lead managing eng —
+# lead is already a leaf manager by that shape alone (test_leaf_manager_role
+# precedent). A `coord` bot is added, managing a team of one (lead), so ONE
+# fleet carries all three roles at once: coord is a coordinator (its only
+# report, lead, is itself a manager — not leaf), lead stays leaf (it still
+# manages eng/worker-1), worker-1 is a plain worker (never a manager). None of
+# the three DECLARES `protocols: [checkin]` — every assertion here is about
+# what the DEFAULT does, not a hand-equipped bot (that is
+# tests/test_checkin_library.py's job).
+# ---------------------------------------------------------------------------
+
+
+def _write_checkin_library(fleet_dir: Path) -> None:
+    """Copy the REAL checkin protocol + skill into the fixture's library, so
+    the default reaches through to genuine content rather than a stand-in —
+    tests/test_checkin_library.py's precedent."""
+    shutil.copy(
+        LIBRARY / "protocols" / "checkin.md",
+        fleet_dir / "library" / "protocols" / "checkin.md",
+    )
+    dst = fleet_dir / "library" / "skills" / "checkin"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(LIBRARY / "skills" / "checkin", dst)
+
+
+def _add_coordinator(fleet_dir: Path) -> None:
+    """Add `coord`, managing a team of one (lead) — the same text-surgery
+    convention as test_leaf_manager_role.py's non-leaf validator fixture,
+    minus the explicit `protocols: [checkin]` declaration that test exists to
+    warn about: here nothing is declared, only defaulted."""
+    text = (fleet_dir / "fleet.yaml").read_text()
+    text = text.replace(
+        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n",
+        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n"
+        "    top:\n      manager: coord\n      workers: [lead]\n",
+    )
+    text = text.replace(
+        "  bots:\n    lead:\n",
+        "  bots:\n    coord:\n      expertise: [orchestration]\n    lead:\n",
+    )
+    (fleet_dir / "fleet.yaml").write_text(text)
+
+
+def _paths(fleet_dir: Path) -> Paths:
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+
+
+class TestLeafManagerCheckinDefault:
+    def test_the_leaf_manager_overlay_composes_the_checkin_protocol(
+        self, fleet_dir, monkeypatch
+    ):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        install_real_template(fleet_dir)
+        _write_checkin_library(fleet_dir)
+        _add_coordinator(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        assert fleet.leaf_manager_bots() == {"lead"}  # coord is a coordinator
+        paths = _paths(fleet_dir)
+
+        lead_md = compose_claude_md(fleet.bots["lead"], fleet, paths)
+        coord_md = compose_claude_md(fleet.bots["coord"], fleet, paths)
+        worker_md = compose_claude_md(fleet.bots["worker-1"], fleet, paths)
+
+        # None of the three DECLARED protocols: [checkin] — this is the
+        # default reaching lead alone.
+        for bot_id in ("lead", "coord", "worker-1"):
+            assert "checkin" not in fleet.bots[bot_id].protocols
+
+        assert "Silence is the default" in lead_md
+        assert "Silence is the default" not in coord_md
+        assert "Silence is the default" not in worker_md
+
+    def test_the_overlay_brings_the_skill_and_its_grants(
+        self, fleet_dir, monkeypatch
+    ):
+        # Task 1's union, reached end to end THROUGH the registry (Task 1's
+        # own tests prove the union mechanism with a hand-declared protocol;
+        # this proves the same union fires when the protocol itself arrives
+        # from a role default rather than a fleet.yaml declaration).
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        install_real_template(fleet_dir)
+        _write_checkin_library(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _paths(fleet_dir)
+        bot = fleet.bots["lead"]
+        assert "checkin" not in bot.skills  # never declared, only defaulted
+
+        compose_bot(bot, fleet, paths, log=lambda m: None)
+
+        link = paths.bot_runtime("lead") / ".claude" / "skills" / "checkin"
+        assert link.is_symlink()
+        settings = json.loads(
+            (paths.bot_runtime("lead") / ".claude" / "settings.local.json").read_text()
+        )
+        allow = settings["permissions"]["allow"]
+        assert "Skill(checkin)" in allow
+        assert "Skill(checkin:*)" in allow
+
+    def test_the_checkin_entry_is_not_grandfathered(self):
+        d = REGISTRY["protocols"]
+        assert "checkin" not in d.grandfathered
+        assert "checkin" in NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE
+        assert NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE["checkin"].strip()
+        # both TestScopeBoundary gates pass on this reason — exercised for
+        # real by the class itself; this pins the two facts they depend on.
+        assert "checkin" in d.roles.get(defaults.ROLE_LEAF_MANAGER, ())
+
+    def test_the_entry_resolves_to_a_library_file(self):
+        # test_every_registered_entry_resolves_to_a_library_file (extended,
+        # above) already walks every role for every registered entry and
+        # would fail if this file went missing — this pins the SPECIFIC fact
+        # so a reader does not have to re-derive it from the sweep, and so a
+        # future change that narrows the sweep's role coverage still has one
+        # targeted witness for this entry.
+        assert "checkin" in resolve("protocols", (defaults.ROLE_LEAF_MANAGER,))
+        assert (LIBRARY / "protocols" / "checkin.md").is_file()

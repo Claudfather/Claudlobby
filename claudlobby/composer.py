@@ -39,6 +39,7 @@ from .loader import (
     LibraryItem,
     _demote_headings,
     iter_guardrail_permissions,
+    iter_library_requires,
     iter_skill_grants,
     load_library_items_overlay,
     load_voice,
@@ -1426,11 +1427,17 @@ def compose_launchd_plist(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> s
 # ----------------------------------------------------------------------
 
 
-def link_skills(bot: BotConfig, paths: Paths, log) -> None:
+def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None:
     """Symlink each skill into the bot's runtime .claude/skills/.
 
     Overlay-aware: looks in `local/<fleet>/library/skills/` first, then in
     public `library/skills/`.
+
+    ``skills`` is KEYWORD-ONLY and REQUIRED — never defaulted to ``bot.skills``.
+    Callers must pass the EFFECTIVE set (:func:`resolve_effective_skills`, spec
+    §10): a default here is exactly how the linked set and the granted set
+    (:func:`compose_settings_local`) would silently diverge again, which is the
+    failure this resolver exists to prevent.
 
     Each skill entry can be:
       - `name`       — single skill at `skills/name/`
@@ -1461,7 +1468,7 @@ def link_skills(bot: BotConfig, paths: Paths, log) -> None:
         linked[leaf] = src
         (bot_skills_dir / leaf).symlink_to(src.resolve())
 
-    for skill in bot.skills:
+    for skill in skills:
         if skill.endswith("/"):
             dir_name = skill.rstrip("/")
             collected = paths.expand_skill_folder(dir_name)
@@ -1760,7 +1767,8 @@ def resolve_effective_protocols(
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
     if sd.enabled and sd.protocols:
-        roles = (defaults.ROLE_MANAGER,) if is_manager else ()
+        roles = ((defaults.ROLE_MANAGER,) if is_manager else ()) + (
+            (defaults.ROLE_LEAF_MANAGER,) if bot.bot_id in fleet.leaf_manager_bots() else ())
         for name in defaults.resolve("protocols", roles):
             if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
@@ -1794,6 +1802,30 @@ def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
         if name not in result:
             result.append(name)
     return result
+
+
+def resolve_effective_skills(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
+) -> list[str]:
+    """The skills a bot is ACTUALLY composed with: declared, plus every
+    ``requires.skills`` entry of its EFFECTIVE protocols (spec §10).
+
+    ONE definition, for the reason ``resolve_effective_protocols`` states two
+    functions up: the compose path, the validator, freshbox and the plane's
+    registry keyframe all call this, so a required skill is linked, GRANTED and
+    recorded as equipment rather than reading "unused" in the inventory (#1405).
+    Declared entries keep their order and come first; a requirement already
+    declared is not duplicated.
+    """
+    skills = list(bot.skills)
+    protocol_names = resolve_effective_protocols(
+        bot, fleet, paths, is_manager=is_manager
+    )
+    for _name, requires in iter_library_requires(paths, "protocols", protocol_names):
+        for required in requires.get("skills", []):
+            if required not in skills:
+                skills.append(required)
+    return skills
 
 
 # ----------------------------------------------------------------------
@@ -2230,20 +2262,23 @@ def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     return tools
 
 
-def _resolve_skill_permissions(bot: BotConfig) -> list[str]:
-    """Auto-derive Skill() permission patterns from bot's skill list.
+def _resolve_skill_permissions(skills: list[str]) -> list[str]:
+    """Auto-derive Skill() permission patterns from a resolved skill list.
 
     Each skill needs both Skill(<name>) and Skill(<name>:*) for full operation.
+    Takes the EFFECTIVE skill list (:func:`resolve_effective_skills`), never
+    ``bot.skills`` directly — a required-but-undeclared skill must be granted
+    exactly like a declared one, or it is linked but not usable (cycle-1 B8).
     """
     patterns: list[str] = []
-    for skill in bot.skills:
+    for skill in skills:
         patterns.append(f"Skill({skill})")
         patterns.append(f"Skill({skill}:*)")
     return patterns
 
 
-def _resolve_skill_grants(bot: BotConfig, paths: Paths) -> list[str]:
-    """Additive ``tool_grants`` declared by the bot's equipped skills (F2/F6).
+def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
+    """Additive ``tool_grants`` declared by the resolved skill list (F2/F6).
 
     :func:`_resolve_skill_permissions` grants only ``Skill(<name>)`` invocation;
     a skill's ``SKILL.md`` separately declares the ``Bash(...)`` / ``mcp__...`` /
@@ -2251,11 +2286,13 @@ def _resolve_skill_grants(bot: BotConfig, paths: Paths) -> list[str]:
     folder entries (``dir/``) expanded to every member — so a skill ships
     self-contained with the tools it needs. Joins integrations on the additive
     ``tool_grants`` path; de-duplication against the allow list happens in
-    :func:`compose_settings_local`.
+    :func:`compose_settings_local`. Takes the EFFECTIVE skill list
+    (:func:`resolve_effective_skills`), never ``bot.skills`` directly — same
+    reason as :func:`_resolve_skill_permissions`.
     """
     return [
         grant
-        for _name, grants in iter_skill_grants(paths, bot.skills)
+        for _name, grants in iter_skill_grants(paths, skills)
         for grant in grants
     ]
 
@@ -2490,13 +2527,20 @@ def compose_settings_local(
     # Layer 4: Channel/plugin tools (auto-derived from config)
     allow_patterns.extend(_resolve_channel_permissions(bot))
 
-    # Layer 5: Skill patterns (auto-derived from bot.skills)
-    allow_patterns.extend(_resolve_skill_permissions(bot))
+    # Layer 5: Skill patterns (auto-derived from the EFFECTIVE skill set —
+    # declared, plus every requires.skills entry of the bot's effective
+    # protocols, spec §10 — computed once and shared with layer 5b so a
+    # required skill is granted exactly like a declared one, never only
+    # linked (cycle-1 B8)).
+    effective_skills = resolve_effective_skills(
+        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+    )
+    allow_patterns.extend(_resolve_skill_permissions(effective_skills))
 
     # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
     # additive path; Skill(<name>) above only grants invocation.
-    _append_unique(allow_patterns, _resolve_skill_grants(bot, paths))
+    _append_unique(allow_patterns, _resolve_skill_grants(effective_skills, paths))
 
     # Layer 5c: Claudron session-loop verb grants (L2) — the NARROW allowlist for
     # the model-initiated CLI calls the loop enables (query wedge, /claudna:capture).
@@ -2785,7 +2829,14 @@ def compose_bot(
     )
 
     _emit = log if log is not None else _log.info
-    link_skills(bot, paths, _emit)
+    link_skills(
+        bot,
+        paths,
+        _emit,
+        skills=resolve_effective_skills(
+            bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+        ),
+    )
     link_mounts(bot, bot_dir, _emit)
     compose_tools(bot, fleet, paths, bot_dir)
 
@@ -3913,6 +3964,50 @@ def _reconcile_briefing_units(
     return pruned
 
 
+#: Fleet jobs whose composition depends on the fleet having at least one
+#: LEAF MANAGER (PR4 task 3, #1569) — a manager with at least one in-fleet
+#: report that is not itself a manager (`FleetConfig.leaf_manager_bots()`).
+#: `manager-checkin` injects `/checkin` into exactly that role; a fleet with
+#: none can never satisfy the job's own precondition, so it gets no unit for
+#: it at all, not even a dormant one. Keyed by JOB NAME, not by a bool on the
+#: job config, for the same reason `AVAILABILITY_GATES` in defaults.py is
+#: keyed by entry name: a per-fleet flag would exempt every future job added
+#: beside this one, silently.
+LEAF_MANAGER_GATED_JOBS: frozenset[str] = frozenset({"manager-checkin"})
+
+
+def _prune_leaf_manager_gated_units(timers_dir: Path, prefix: str) -> list[str]:
+    """Remove any previously-composed unit for a job in
+    :data:`LEAF_MANAGER_GATED_JOBS` — EXACT-PATH bounded, not glob-bounded:
+    three exact filenames per gated job (``<prefix>.<job>.{service,timer,
+    plist}``), built by name, inside THIS fleet's own timers dir. Stricter
+    than :func:`_reconcile_briefing_units`'s prune half, which globs
+    ``<prefix>.briefing-*`` because a per-(bot,slot) family's basenames
+    cannot be enumerated in advance; a single named job's three extensions
+    always can.
+
+    Called whenever the CURRENT fleet has no leaf manager, unconditionally on
+    whether anything is composed this run: a fleet that HAD a leaf manager at
+    an earlier generate and lost it (the manager was removed, or its last
+    non-manager report was) must not leave `manager-checkin`'s units on disk
+    — that is exactly the shape a later ``enroll: true`` or a setup-fleet run
+    reading a stale-but-present unit would enroll for real, with nobody
+    having armed anything. A no-op when the timers dir does not exist yet
+    (nothing composed, so nothing to prune) or the files are already absent.
+    """
+    if not timers_dir.is_dir():
+        return []
+    pruned: list[str] = []
+    for job in LEAF_MANAGER_GATED_JOBS:
+        base = f"{prefix}.{job}"
+        for ext in ("service", "timer", "plist"):
+            f = timers_dir / f"{base}.{ext}"
+            if f.exists():
+                f.unlink()
+                pruned.append(f.name)
+    return pruned
+
+
 def _write_timers_manifest(
     timers_dir: Path, name: str, header: list[str], units: set[str] | list[str]
 ) -> None:
@@ -4016,6 +4111,15 @@ def compose_fleet_timers(
     reconcile's job-drift audit) skips them. A fleet opts in per job via
     ``defaults.jobs.<name>.enroll: true`` in fleet.yaml.
 
+    A job in :data:`LEAF_MANAGER_GATED_JOBS` (today: ``manager-checkin``) is
+    the one exception to "composed but dormant": a fleet with no LEAF
+    MANAGER (:meth:`FleetConfig.leaf_manager_bots`) gets NO unit for it at
+    all, dormant or otherwise, because such a fleet can never satisfy the
+    job's own precondition. This does not change what any OTHER job
+    composes, and a fleet that had one and lost it (PR4 task 3, #1569) has
+    its stale units pruned on the next generate — see
+    :func:`_prune_leaf_manager_gated_units`.
+
     ``output_dir`` overrides the destination directory (the ``timers/`` subdir is
     written beneath it); it defaults to ``paths.runtime_fleet``. ``diff`` passes a
     temp dir here so it can hand this function the real ``Paths`` — keeping the
@@ -4023,6 +4127,13 @@ def compose_fleet_timers(
     the expected units somewhere other than ``runtime/``.
     """
     timers = merged_defaults.get("jobs", {})
+    has_leaf_manager = bool(fleet.leaf_manager_bots())
+    if not has_leaf_manager:
+        timers = {
+            name: cfg
+            for name, cfg in timers.items()
+            if name not in LEAF_MANAGER_GATED_JOBS
+        }
     sd = fleet.system_defaults
     emit_defaults = bool(sd.enabled and sd.timers and timers)
     sweep_on = fleet.sweep_enabled()
@@ -4035,6 +4146,23 @@ def compose_fleet_timers(
 
     base_dir = output_dir if output_dir is not None else paths.runtime_fleet
     timers_dir = base_dir / "timers"
+    if not has_leaf_manager:
+        # Unconditional on emit_defaults/sweep_on/briefing_on below: a fleet
+        # that lost its last leaf manager must have manager-checkin's units
+        # removed even when every OTHER reason to touch this dir is absent
+        # this run (e.g. system_defaults.timers: false).
+        #
+        # Logged HERE, at the call site, rather than inside the prune helper
+        # itself: the helper only knows WHICH files it removed, never WHY —
+        # that reason belongs to the caller, the one place that already knows
+        # this fleet has no leaf manager. Wording parallel to
+        # `_prune_host_units`'s "pruned dormant host unit %s (armed→unarmed)".
+        for removed in _prune_leaf_manager_gated_units(timers_dir, fleet.service_prefix):
+            _log.info(
+                "pruned leaf-manager-gated unit %s (%s has no leaf manager — "
+                "nothing in it can receive the injection)",
+                removed, fleet.name,
+            )
     if not emit_defaults and not sweep_on and not briefing_on:
         # Nothing to emit — but a prior generate may have left briefing units a
         # now-removed stanza should prune. Reconcile only if the dir exists, and

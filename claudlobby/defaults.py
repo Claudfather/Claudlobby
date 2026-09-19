@@ -137,6 +137,17 @@ _UNARGUED = (
     "No default argued yet. Phase 2 decides; empty until it clears the tier test above."
 )
 
+# --- roles (hoisted) ---------------------------------------------------------
+# ROLE_LEAF_MANAGER is declared here, AHEAD OF REGISTRY, because REGISTRY (just
+# below) now references it directly in a role-scoped entry — Python builds a
+# dict literal top-to-bottom at import time, so the name has to exist before
+# that literal runs. See "roles" further down, after REGISTRY, for the full
+# narrative (detection, the third-role bar, DETECTABLE_ROLES, `resolve()`) —
+# nothing about the MEANING of these two names lives here, only the ordering
+# fix.
+ROLE_MANAGER = "manager"
+ROLE_LEAF_MANAGER = "leaf-manager"
+
 #: Every library entity type, with an explicit disposition. A thirteenth type
 #: added to `library/` without an entry here fails `test_defaults_registry.py`.
 REGISTRY: dict[str, Disposition] = {
@@ -162,6 +173,7 @@ REGISTRY: dict[str, Disposition] = {
         entries=("shared-documentation", "shared-documentation-vault"),
         settled=True,
         grandfathered=("shared-documentation",),
+        roles={ROLE_LEAF_MANAGER: ("checkin",)},
         reason=(
             "ONE SLOT, TWO MUTUALLY EXCLUSIVE ENTRIES — how a bot reaches fleet "
             "knowledge, which differs by whether a Claudron vault is wired. "
@@ -233,7 +245,32 @@ REGISTRY: dict[str, Disposition] = {
             "mechanism rather than the mechanism itself, which is why it is "
             "accepted rather than gated — but a reader who changes how a fleet "
             "reaches knowledge must change it in three places, and only two of "
-            "them will fail a test."
+            "them will fail a test.\n\n"
+            "THE LEAF-MANAGER ROLE OVERLAY (`checkin`, PR 4 chunk 4) is NOT a "
+            "third member of the slot family above — `EXCLUSIVE_GROUPS` and "
+            "`AVAILABILITY_GATES` name neither it nor any gate for it. It is a "
+            "role overlay on this SAME disposition (`protocols`), withheld by "
+            "nothing but the opt-out (`system_defaults.protocols: false`), and "
+            "it clears TIER_TESTS[Tier.INSTRUCT] on its own terms — it is NOT "
+            "grandfathered, unlike the two above: it is "
+            "a new instruction and it changes what a leaf manager is told, which "
+            "is the point. 'Every bot would be WORSE at its job without it' — "
+            "without the protocol a leaf manager has no ruled re-engagement beat "
+            "at all, and the older cadence text it composes beside "
+            "(`proactivity-discipline`'s 'Idle silence is a bug') tells it to "
+            "post CONTINUOUSLY; `checkin` is what replaces that with a recorded "
+            "beat and a silence-by-default posture for exactly the bots that "
+            "hold it. 'No bot is made to do something surprising by having it' "
+            "— the overlay reaches ONLY a manager `FleetConfig.leaf_manager_"
+            "bots()` already names (a manager with at least one in-fleet report "
+            "that is not itself a manager — a coordinator whose every report is "
+            "a manager does not qualify), the protocol's own default answer is "
+            "silence ('Silence is the default... A post is the exception the "
+            "judgment must justify'), and the thing that actually spends money "
+            "and touches a live session — the `manager-checkin` trigger firing "
+            "`/checkin` on a schedule — is a separate, OPT-IN switch (F8): this "
+            "entry equips the skill and the instruction for free; the beat that "
+            "fires it is still armed by the operator, fleet by fleet."
         ),
     ),
     "principles": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
@@ -361,12 +398,15 @@ def available(entry: str, facts: Facts) -> bool:
 # KNOWN BOUND, stated so the next person finds a seam rather than a hardcode
 # (F2, binding).
 #
-# The mechanism below is keyed on role GENERALLY. Today exactly one role is
-# detectable: `manager`, via `FleetConfig.manager_bots()` — which is the only
-# role predicate the composer has. There is no general `role` field on a bot, so
-# "roles" is currently `{manager, not-manager}` however plural the type looks.
+# The mechanism below is keyed on role GENERALLY. Two roles are detectable
+# today: `manager`, via `FleetConfig.manager_bots()`, and `leaf-manager`, via
+# `FleetConfig.leaf_manager_bots()` — a manager at least one of whose in-fleet
+# reports is not itself a manager (spec §10). Both are the only role
+# predicates the composer has. There is no general `role` field on a bot, so
+# a bot's roles are whichever of these predicates say yes, however plural the
+# type looks.
 #
-# TO ADD A SECOND ROLE you need a predicate that can DETECT it, not just a key
+# TO ADD A THIRD ROLE you need a predicate that can DETECT it, not just a key
 # here. A role named in `roles` that nothing can resolve is silently inert — it
 # would never be unioned in, and nothing would say so. Extend detection first,
 # then populate; `resolve()` takes the caller's already-resolved role names
@@ -377,11 +417,13 @@ def available(entry: str, facts: Facts) -> bool:
 # overlay is available to ALL THREE tiers, not just INSTRUCT — #1161 is the
 # counter-example, where a RESTRICT-tier guardrail (`merge-policy-auto-admin`)
 # is legitimately manager-scoped.
-ROLE_MANAGER = "manager"
+#
+# ROLE_MANAGER / ROLE_LEAF_MANAGER themselves are declared ABOVE, ahead of
+# REGISTRY — see the note there for why.
 
 #: Roles the composer can currently DETECT. Adding a name here without a
 #: predicate that resolves it is the trap the note above describes.
-DETECTABLE_ROLES: frozenset[str] = frozenset({ROLE_MANAGER})
+DETECTABLE_ROLES: frozenset[str] = frozenset({ROLE_MANAGER, ROLE_LEAF_MANAGER})
 
 
 def resolve(entity_type: str, roles: tuple[str, ...] = ()) -> list[str]:

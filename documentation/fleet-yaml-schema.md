@@ -191,9 +191,13 @@ fleet:
     hooks: true            # merge system.yaml hooks
     timers: true           # merge system.yaml job timers
     observability: true    # merge system.yaml observability defaults
+    guardrails: true       # apply default guardrails (e.g. claudlobby-dev-in-projects)
+    protocols: true        # apply default protocols, including the leaf-manager checkin default
 ```
 
 Omit the field entirely for the common case — everything defaults to `true`. Useful for a fleet that wants to supply its own hooks/observability tuning without the package defaults layered underneath.
+
+`protocols: false` is also how a fleet opts out of the leaf-manager check-in default (see `fleet.teams`, below) — and opting out of the protocol drops the `checkin` skill its `requires:` block links too, unless the bot declares that skill directly.
 
 ### `fleet.defaults`
 
@@ -254,6 +258,8 @@ Host-scoped switches (`plane-daemon`, `plane-view`, `plane-prune`, `plane-expire
 ### `fleet.teams`
 
 Optional grouping. The generator uses team membership to inject a "Fleet You Manage" roster into manager personas.
+
+A manager with at least one in-fleet report that is not itself a manager — a `teams:` worker or a `bots.<name>.manages` entry resolving inside this fleet — is a *leaf manager* (`FleetConfig.leaf_manager_bots()`); a coordinator, whose every in-fleet report is itself a manager, is not, and neither is a worker. A cross-fleet `manages:` target never makes a manager leaf (F5, ruled): only in-fleet reports count, because the trigger that injects `/checkin` runs per fleet. A leaf manager is equipped with the `checkin` protocol by default, and the protocol's `requires:` brings the `checkin` skill and its grants along with it; `system_defaults.protocols: false` is the opt-out, and opting out of the protocol also drops the skill it required unless the bot declares the skill directly. The automatic beat that fires `/checkin` on a schedule is a separate, opt-in switch that stays off until the fleet arms it — `defaults: { jobs: { manager-checkin: { enroll: true } } }` — named in `claudlobby doctor`'s switches table with the line that flips it; a fleet with no leaf manager composes no `manager-checkin` unit at all, and arming the job on one anyway produces a `validate` warning that says why.
 
 ### `fleet.sweep`
 
@@ -343,6 +349,8 @@ One-paragraph charter — why this bot exists, what success looks like. Forces e
 ### `bots.<name>.reports_to` / `bots.<name>.manages`
 
 Org structure fields. `reports_to` names the bot_id of this bot's manager. `manages` lists bot_ids this bot manages. Together they generate an `## Org Structure` section in CLAUDE.md showing the reporting hierarchy. Both are optional — bots without either get no org section.
+
+A manager whose `manages:` (or a `teams:` `workers:` list naming it) includes at least one in-fleet bot that is not itself a manager is a *leaf manager* and is equipped with the `checkin` protocol by default (see `fleet.teams`, above, for the full rule and its opt-out). A `manages:` target outside this fleet never counts toward that test (F5) — only in-fleet reports do, because the trigger that injects `/checkin` runs per fleet.
 
 ### `bots.<name>.scope`
 

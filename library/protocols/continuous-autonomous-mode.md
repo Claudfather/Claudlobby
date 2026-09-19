@@ -21,8 +21,6 @@ A continuous-autonomous manager doesn't wait for the human to ping. It stays ali
 When the manager has nothing to dispatch and is genuinely waiting:
 
 - Post a wait-point message to Telegram with current state and ETA-to-next-action.
-- Never go silent. Silence reads as "stuck" — and the human escalates.
-- A "still waiting" beacon every 10–15 min is better than nothing for long waits.
 
 **What is NOT auto-dispatched:**
 
