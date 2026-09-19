@@ -32,11 +32,11 @@ one post per check-in — qualifying items across every project coalesce into
 that one message, never one per project; held items wait for the next
 justified post. Never restate a project's tier — point to it.
 
-The rate limit on asking: read `claudlobby checkins --bot $BOT_ID --since 7d
---raised` first. Two open, unanswered asks this week means the fleet
-proceeds on its best tier-gated judgment or waits quietly, never a third. An
-urgency floor breaks through regardless: a blocker that stalls the fleet, or
-a failure with real cost.
+The rate limit on asking: read `claudlobby --fleet "$FLEET_NAME" checkins
+--bot $BOT_ID --since 7d --raised` first. Two open, unanswered asks this
+week means the fleet proceeds on its best tier-gated judgment or waits
+quietly, never a third. An urgency floor breaks through regardless: a
+blocker that stalls the fleet, or a failure with real cost.
 
 ## Worker
 
