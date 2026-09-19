@@ -24,7 +24,8 @@ REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "library"
 
 SWEEP = re.compile(r"milestone|beacon|2.3 min|10.15 min|idle silence|never go silent"
-                   r"|never licenses silence|cadence and frequency", re.I)
+                   r"|never licenses silence|cadence and frequency|emit everything",
+                   re.I)
 
 #: library-relative path -> why a hit SURVIVES the retirement. Every other hit must be gone.
 KEEP = {
@@ -123,6 +124,9 @@ RETIRED_PHRASES: dict[str, list[str]] = {
     ],
     "skills/autonomous-runner/SKILL.md": [
         "for this cadence tick",
+    ],
+    "skills/autonomous-sprint/SKILL.md": [
+        "Emit everything to Telegram",
     ],
     "skills/lifecycle/SKILL.md": [
         "Never go silent — report what's happening",

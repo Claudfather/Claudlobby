@@ -49,7 +49,7 @@ Your tool-call activity is observed by the fleet pulse. If your session is alive
 2. ENGAGE      ─── first [BOTREPORT] row is the ack (Step 2)
 3. PLAN        ─── (conditional) subagent if complex
 4. BRANCH      ─── git checkout -b off fresh main
-5. IMPLEMENT   ─── role-specific work, one thin line on start/done/blocked
+5. IMPLEMENT   ─── role-specific work, one thin line on done/blocked
 6. VERIFY      ─── tests, lint, shellcheck
 7. COMMIT + PR ─── push, open PR
 8. COMPLETE    ─── Telegram + [BOTREPORT] completed
@@ -84,7 +84,7 @@ There is **no ack deadline**: what the machinery needs is an id-carrying `[BOTRE
 $CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> progress "Acked: <summary>" --task <id>
 ```
 
-**No Telegram ack.** The group sees your start and outcome posts; a per-dispatch "On it" is noise the machinery cannot join.
+**No Telegram ack.** The group sees your outcome posts; a per-dispatch "On it" is noise the machinery cannot join.
 
 **Echo the task id.** If the `[BOTCOMMAND]` carried a `task:<id>` field, EVERY
 report-back for that task — the early ack row (when you send one), progress
