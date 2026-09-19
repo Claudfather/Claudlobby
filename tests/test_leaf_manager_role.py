@@ -275,10 +275,14 @@ class TestComposerPassesBothRoles:
 
 
 # ---------------------------------------------------------------------------
-# The validator surface — spec §10 / §5 step 1: declaring `checkin` on a bot
-# the trigger will never inject into (a worker, a coordinator) is a WARNING
-# that says why, never an error — the skill still links, /checkin still runs
-# by hand.
+# The validator surface — spec §10 / §5 step 1: declaring `checkin` on a
+# WORKER is a WARNING that says why, never an error — the skill still links,
+# /checkin still runs by hand, and the trigger will never inject into it
+# (`bot_is_manager` is false for a worker). Declaring it on a COORDINATOR
+# gets a DIFFERENT warning: `bot_is_manager` reads true for a coordinator
+# too, so once the skill links (which the declaration itself does) both of
+# the trigger's gates pass, and the beat WILL inject once the fleet arms
+# manager-checkin — the warning says that instead of claiming it never will.
 # ---------------------------------------------------------------------------
 
 
@@ -352,7 +356,12 @@ class TestCheckinValidatorSurface:
         matches = [w for w in report.warnings if "coord" in w and "checkin" in w]
         assert matches, report.warnings
         assert any("coordinator" in w for w in matches)
-        assert any("/checkin" in w and "by hand" in w for w in matches)
+        # Unlike the worker case, this bot's beat WILL fire once armed — the
+        # skill links because it was declared, and bot_is_manager reads true
+        # for a coordinator too, so both of the trigger's gates pass.
+        assert any("leaf-manager default" in w for w in matches)
+        assert any("WILL inject" in w and "manager-checkin" in w for w in matches)
+        assert any("only managers to dispatch to" in w for w in matches)
         # lead declared no checkin protocol — no warning attributed to it.
         assert not any("lead" in w and "checkin" in w for w in report.warnings)
 

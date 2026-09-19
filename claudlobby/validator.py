@@ -588,25 +588,43 @@ def _validate_bots(
                 )
 
         # Leaf-manager check-in surface (warn, no silent switches — spec §10,
-        # §5 step 1). The `manager-checkin` trigger only ever injects into a
-        # LEAF manager: `bot_is_manager` reads true for a coordinator too, so
-        # that predicate alone cannot tell the two apart at runtime — the
-        # distinction is made at compose time, by `fleet.leaf_manager_bots()`.
-        # A bot that declares the `checkin` protocol without being a leaf
-        # manager is equipped for an injection that will never come; the
-        # skill still links (`/checkin` runs by hand), so this is a warning,
-        # never an error, and it says why.
+        # §5 step 1). The `manager-checkin` trigger injects into any idle
+        # MANAGER equipped with the checkin skill: `bot_is_manager` reads
+        # true for a coordinator too, so that gate alone cannot tell a leaf
+        # manager from a coordinator — by DEFAULT only a leaf manager is
+        # equipped (`fleet.leaf_manager_bots()`), but a hand declaration
+        # equips a coordinator just the same, and the beat then injects into
+        # it too. A worker that declares `checkin` gets an injection that
+        # will never come (`bot_is_manager` is false for it); a coordinator
+        # that declares it gets one the DEFAULT withheld but the declaration
+        # itself grants. Both warn, never error, and each says which.
         if "checkin" in bot.protocols and bot.bot_id not in fleet.leaf_manager_bots():
             if bot.bot_id in fleet.manager_bots():
-                why = "a coordinator (every in-fleet report is itself a manager)"
+                # A coordinator is NOT excluded from injection the way a
+                # worker is: `bot_is_manager` reads true for it too, and
+                # declaring the protocol here is what links the skill (the
+                # other gate). Once both pass, the beat WILL inject — this
+                # warning says why the DEFAULT skipped it, never that the
+                # trigger never will.
+                report.warnings.append(
+                    f"bot '{bot_name}': protocol 'checkin' declared, but "
+                    "checkin is a leaf-manager default and this bot is a "
+                    "coordinator (every in-fleet report is itself a "
+                    "manager), so it does not receive it by default. "
+                    "Because it is declared here, the skill links and the "
+                    "beat WILL inject into it once the fleet arms "
+                    "manager-checkin (the trigger selects manager + "
+                    "equipped), and a coordinator's check-in has only "
+                    "managers to dispatch to."
+                )
             else:
-                why = "a worker (not a manager)"
-            report.warnings.append(
-                f"bot '{bot_name}': protocol 'checkin' declared, but this bot is "
-                f"{why} — the manager-checkin trigger will never inject into it. "
-                "The skill still links, so /checkin runs by hand; only the "
-                "automatic injection is withheld."
-            )
+                report.warnings.append(
+                    f"bot '{bot_name}': protocol 'checkin' declared, but "
+                    "this bot is a worker (not a manager) — the "
+                    "manager-checkin trigger will never inject into it. "
+                    "The skill still links, so /checkin runs by hand; only "
+                    "the automatic injection is withheld."
+                )
 
         # MCP fragment existence (warn). bot.mcp is list[McpEntry]; the file
         # on disk is named after .name regardless of how many instances the
@@ -1606,12 +1624,33 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
     # Never an error: the fleet.yaml line is well-formed and would fire the
     # moment the fleet gained a leaf manager.
     mc = jobs.get("manager-checkin")
-    if mc is not None and mc.get("enroll", True) and not fleet.leaf_manager_bots():
+    armed = mc is not None and mc.get("enroll", True)
+    if armed and not fleet.leaf_manager_bots():
         report.warnings.append(
             "manager-checkin is armed (defaults.jobs.manager-checkin.enroll: "
             "true) but this fleet has no leaf manager — a manager with at "
             "least one in-fleet report that is not itself a manager — so no "
             "unit is composed and nothing will fire."
+        )
+
+    # The mirror (fix wave B item 1d): a fleet WITH a leaf manager the
+    # check-in default equipped (system_defaults.protocols) where
+    # manager-checkin was never armed gets total silence too — the composed
+    # CLAUDE.md tells that bot "silence is the default" while nothing ever
+    # triggers a check-in, and nothing here said so. Same jobs dict and
+    # fleet.leaf_manager_bots() as the warning above — these two are each
+    # other's mirror. Suppressed when system_defaults.protocols is off:
+    # nobody was equipped by default, so there is nothing to warn about.
+    leaf_managers = fleet.leaf_manager_bots()
+    if leaf_managers and not armed and sd.protocols:
+        n = len(leaf_managers)
+        report.warnings.append(
+            f"manager-checkin is not armed, but this fleet has {n} leaf "
+            f"manager{'' if n == 1 else 's'} equipped with the check-in by "
+            "default — no beat runs, and a check-in happens only when the "
+            "operator sends /checkin by hand. Arm it with `defaults: { "
+            "jobs: { manager-checkin: { enroll: true } } }` in fleet.yaml, "
+            "then `lib/setup-fleet <fleet>`."
         )
 
 

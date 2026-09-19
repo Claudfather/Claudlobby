@@ -1204,6 +1204,22 @@ fleet:
       expertise: [eng]
 """
 
+    # Same "worker removed" shape as above, plus system_defaults.timers:
+    # false — so compose_fleet_timers's early return (`not emit_defaults and
+    # not sweep_on and not briefing_on`) fires too. No sweep, no briefing
+    # bot declared either: every OTHER reason to touch the timers dir is
+    # off, which is exactly what item 1g needs to isolate the prune block.
+    _NO_LEAF_MANAGER_TIMERS_OFF = """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  system_defaults:
+    timers: false
+  bots:
+    lead:
+      expertise: [eng]
+"""
+
     def _compose(self, tmp_path, fleet_yaml, *, root=None):
         from claudlobby.composer import compose_fleet_timers
 
@@ -1307,6 +1323,29 @@ fleet:
             r.message for r in caplog.records if "manager-checkin" in r.message
         ]
         assert not pruned, pruned
+
+    def test_the_prune_runs_even_when_every_other_reason_to_compose_is_off(
+        self, tmp_path
+    ):
+        """Fix wave B item 1g — the named candidate mutant. The
+        leaf-manager-gated prune (composer.py, `compose_fleet_timers`) sits
+        BEFORE `if not emit_defaults and not sweep_on and not briefing_on:
+        ... return timers_dir` — deliberately, so a fleet that loses its
+        last leaf manager still gets its stale manager-checkin units
+        removed even when every OTHER reason to touch the timers dir is
+        off (system_defaults.timers: false here, plus no sweep and no
+        briefing bot in either shape). Moving the prune block below that
+        early return makes this fail: the return would fire first and the
+        stale units would survive."""
+        root = tmp_path / "claudlobby"
+        timers_dir = self._compose(tmp_path, self._WITH_LEAF_MANAGER, root=root)
+        for ext in ("service", "timer", "plist"):
+            assert (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
+
+        self._compose(tmp_path, self._NO_LEAF_MANAGER_TIMERS_OFF, root=root)
+
+        for ext in ("service", "timer", "plist"):
+            assert not (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
 
 
 # ---------------------------------------------------------------------------

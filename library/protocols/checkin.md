@@ -11,7 +11,9 @@ The manager's own re-engagement cycle: read the fleet's state, decide one
 project and one action, record the decision, and let the surfacing judgment
 decide whether the operator hears anything at all — on a beat, recorded. The
 `manager-checkin` fleet job dispatches `/checkin` into an idle, equipped
-manager, or the operator sends it by hand. **The manager never fires its own
+manager, or the operator sends it by hand. The beat is the `manager-checkin`
+fleet job, armed per fleet; until a fleet arms it, a check-in runs only when
+the operator sends `/checkin` by hand. **The manager never fires its own
 check-in**: the trigger owns the beat and its throttles (the minimum gap
 between beats, the busy/idle gate); self-firing would carry none of them.
 
