@@ -427,8 +427,29 @@ def scrub(text: str, root: Path) -> str:
     beside it) makes two observations of the SAME commit differ, which trains a
     reader to skim past drift in the one artifact whose entire job is to make
     drift visible.
+
+    Replaces BOTH the literal form of *root* and its RESOLVED form
+    (``root.resolve()``), longest candidate first — never just the literal
+    one. A symlink'd tempdir is not a corner case: on macOS ``$TMPDIR`` lives
+    under ``/var``, itself a symlink to ``/private/var``, and
+    ``composer.py``'s ``src.resolve()`` writes every skill symlink's target
+    fully resolved. Where the resolved form CONTAINS the literal one as a
+    substring (exactly the ``/private`` + literal shape above), replacing the
+    literal one first still finds and replaces that embedded substring —
+    ``str.replace`` does not care that the match sits inside a longer one —
+    which strands the extra prefix (``/private$EXPORT/...``) instead of
+    consuming the whole path. Longest-first consumes the longer form in one
+    pass, so nothing survives to be found (or half-found) afterward. Fixed
+    only after a baseline recorded on macOS reported spurious drift when
+    self-checked, since the same commit observed on a host whose tempdir does
+    not resolve through ``/private`` would have recorded the clean form —
+    two observations of the SAME commit must be byte-identical regardless of
+    which host recorded them, not only within one.
     """
-    return text.replace(str(root), "$EXPORT")
+    candidates = sorted({str(root), str(root.resolve())}, key=len, reverse=True)
+    for candidate in candidates:
+        text = text.replace(candidate, "$EXPORT")
+    return text
 
 
 def run_generate(root: Path, python: str) -> tuple[int, str]:

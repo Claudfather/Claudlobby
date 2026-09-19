@@ -418,6 +418,31 @@ def test_scrub_removes_the_run_specific_export_path(tmp_path):
     )
 
 
+def test_scrub_replaces_the_resolved_root_too_so_no_remnant_survives(tmp_path):
+    """`root` reached through a symlink, so `root.resolve() != root` —
+    reproduces the macOS shape (`tempfile.mkdtemp()` under `/var`, resolved by
+    `Path.resolve()` to `/private/var`) PORTABLY, so it bites on Linux CI too.
+    `composer.py`'s `src.resolve()` writes a symlink target using the
+    RESOLVED form, so a captured entry can carry it. Replacing only the
+    literal (unresolved) form leaves the resolved form's extra prefix
+    stranded — `str.replace` matches the literal substring wherever it
+    occurs, including embedded inside the longer resolved path — which is
+    exactly the `/private$EXPORT/...` remnant this fix closes (task 4 fix
+    round 1). A baseline recorded on a host where this bites reports
+    spurious DRIFT on any host where it doesn't, with nothing changed."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert link.resolve() != link  # the shape under test
+
+    entry_resolved_form = f"composed -> {link.resolve()}/library/skills/checkin"
+    entry_literal_form = f"composed -> {link}/library/skills/checkin"
+
+    assert nbo.scrub(entry_resolved_form, link) == "composed -> $EXPORT/library/skills/checkin"
+    assert nbo.scrub(entry_literal_form, link) == "composed -> $EXPORT/library/skills/checkin"
+
+
 # ------------------------------------------- the leaf-manager arm (PR4 chunk 4)
 #
 # A role overlay (`Disposition.roles`) is invisible to every arm above — none
