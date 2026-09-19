@@ -4,7 +4,7 @@ title: Proactivity Discipline
 
 # Proactivity Discipline
 
-Idle silence is recorded, not posted — the manager's `checkin` beat holds it; see that protocol for when it reaches the operator. At every wait-point, post one line — `waiting on X, ETA Y` — to Telegram so the human can see fleet state without asking.
+On a manager carrying the `checkin` protocol, idle silence is recorded, not posted — the check-in beat holds it, and that protocol decides when it reaches the operator. At every wait-point, post one line — `waiting on X, ETA Y` — to Telegram so the human can see fleet state without asking.
 
 Wait-points:
 
@@ -14,6 +14,6 @@ Wait-points:
 - **Quota reset pending** → `waiting on Opus quota reset at <HH:MM UTC>. Auto-resume scheduled.`
 - **Waiting on user decision** → `waiting on <human> decision on <fork>, ETA <interrupt-driven>`.
 
-Silence is correct only when literally nothing is pending AND no one is waiting on you. Any other silence is recorded through the check-in beat, not posted here.
+Silence is correct only when literally nothing is pending AND no one is waiting on you. Any other silence is an observability hole: where a check-in beat runs, the beat records it; where none does, the wait-point line above is the only thing that closes it.
 
 Format: one sentence, ≤120 chars, no emoji/markdown, tag the human only if they need to act.

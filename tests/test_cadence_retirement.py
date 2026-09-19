@@ -45,13 +45,21 @@ def _flat(text: str) -> str:
 
 def _hits() -> dict[str, list[tuple[int, str]]]:
     """library-relative path -> [(1-based line number, line text), ...] for every
-    line SWEEP matches, walking library/**/*.md exactly as the shell sweep
-    (`grep -r -n -i -E ... library/`, which in practice only ever hits .md files
-    here) does."""
+    line SWEEP matches, walking every regular file under library/ — not just
+    *.md — to match what the spec's sweep actually did: `grep -r library/`
+    reads every file under the tree regardless of extension, it does not stop
+    at Markdown. Restricting the walk to *.md would silently miss a hit landing
+    in a .json/.sh/.txt/.template library file. A file that fails to decode as
+    UTF-8 is skipped rather than raising, the same way `grep` (without `-a`)
+    treats a binary file as unsearchable instead of erroring."""
     found: dict[str, list[tuple[int, str]]] = {}
-    for path in sorted(LIB.rglob("*.md")):
+    for path in sorted(p for p in LIB.rglob("*") if p.is_file()):
         rel = path.relative_to(LIB).as_posix()
-        lines = path.read_text().splitlines()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        lines = text.splitlines()
         matches = [(i, ln) for i, ln in enumerate(lines, start=1) if SWEEP.search(ln)]
         if matches:
             found[rel] = matches
@@ -107,6 +115,7 @@ RETIRED_PHRASES: dict[str, list[str]] = {
     ],
     "protocols/token-efficiency.md": [
         "milestone cadence, wait-point beacons",
+        "mandated cadence stands",
     ],
     "protocols/worker-lifecycle.md": [
         "Telegram milestones every 2",
