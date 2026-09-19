@@ -184,3 +184,61 @@ def test_the_launcher_calls_it_right_after_it_sets_path():
     call_idx = next((i for i, ln in enumerate(lines) if ln.strip() == "session_cli_path"), None)
     assert call_idx is not None, "session_cli_path is not called in start-bot.sh"
     assert path_idx < call_idx < tiered_idx, (path_idx, call_idx, tiered_idx)
+
+
+def test_every_concurrent_boot_gets_the_cli_not_just_the_race_winner(tmp_path: Path):
+    """Fix round 1 (#1567) -- 18 REAL concurrent boots, not 18 sequential calls.
+
+    The first cut gated PATH on whether this process's own `ln -sfn` won a
+    filesystem race, so a losing process returned before ever touching PATH
+    even though a sibling had already produced a perfectly usable link one
+    syscall earlier. PATH is set once per session, so a race loser had no
+    bare `claudlobby` for its whole life -- measured 8 of 18 misses on a
+    cold wave. The fix reads the link on disk instead of trusting the exit
+    status of its own `ln` call, so every boot must converge regardless of
+    who wins the race to create it.
+    """
+    root = _venv_root(tmp_path)
+    target = f"{root}/state/bin/claudlobby"
+    driver = (
+        "for i in $(seq 1 18); do "
+        f'( source "{LIB}" >/dev/null 2>&1; set +e; session_cli_path; '
+        f'if [ "$(command -v claudlobby)" = "{target}" ]; then echo OK; else echo MISS; fi ) & '
+        "done; "
+        "wait"
+    )
+    for wave in range(3):
+        result = subprocess.run(
+            ["bash", "-c", driver],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={"CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": SAFE_PATH},
+        )
+        lines = [ln for ln in result.stdout.splitlines() if ln in ("OK", "MISS")]
+        assert len(lines) == 18, (wave, result.stdout, result.stderr)
+        misses = lines.count("MISS")
+        assert misses == 0, (
+            f"wave {wave}: {misses} of 18 concurrent boots did not get the CLI on PATH -- "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+    shim_dir = root / "state" / "bin"
+    assert [p.name for p in shim_dir.iterdir()] == ["claudlobby"]
+
+
+def test_a_stale_link_is_repointed(tmp_path: Path):
+    root = _venv_root(tmp_path)
+    shim_dir = root / "state" / "bin"
+    shim_dir.mkdir(parents=True)
+    stale_target = root / "nonexistent" / "claudlobby"
+    (shim_dir / "claudlobby").symlink_to(stale_target)
+    result = _run(
+        root, SAFE_PATH,
+        'session_cli_path; rc=$?; printf "RC=%s\\n" "$rc"; '
+        'printf "RESOLVED=%s\\n" "$(command -v claudlobby)"',
+    )
+    assert "RC=0" in result.stdout, (result.stdout, result.stderr)
+    assert f"RESOLVED={root}/state/bin/claudlobby" in result.stdout, result.stdout
+    entries = sorted(p.name for p in shim_dir.iterdir())
+    assert entries == ["claudlobby"], entries
+    assert (shim_dir / "claudlobby").resolve() == (root / ".venv" / "bin" / "claudlobby").resolve()
