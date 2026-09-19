@@ -1620,7 +1620,7 @@ def _validate_library_frontmatter(paths: Paths, report: ValidationReport) -> Non
 
 
 def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
-    """Fail loud on an unresolvable ``requires:`` entry (spec §10).
+    """Fail loud on a malformed or unresolvable ``requires:`` entry (spec §10).
 
     v1 scope is protocols -> skills: a protocol's ``requires.skills`` naming a
     skill absent from the library is an error. Library-wide and scanned ONCE
@@ -1629,8 +1629,15 @@ def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
     (`validator.py:383-396`): the defect is a property of the protocol FILE,
     so an unequipped protocol with a broken requirement is still caught, and a
     fleet where several bots equip it gets one message, not several.
+
+    Also reports a non-string entry (``requires: {skills: [3]}``) — one error
+    per file, same rule. ``loader.library_requires`` drops a non-string entry
+    rather than raising (the ``_read_tool_grants`` posture), which means the
+    filtered dict this function otherwise reads has already lost the fact that
+    something was dropped; catching it here means reading the RAW frontmatter
+    block again rather than the filtered one, or the drop stays silent.
     """
-    from .loader import library_requires
+    from .loader import library_requires, parse_frontmatter
 
     roots = [paths.base_library, paths.overlay_library]
     seen: set[Path] = set()
@@ -1647,6 +1654,26 @@ def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
             if resolved in seen:
                 continue
             seen.add(resolved)
+            try:
+                rel = md.relative_to(root)
+            except ValueError:
+                rel = md
+
+            try:
+                raw_fm, _ = parse_frontmatter(md.read_text(encoding="utf-8"))
+            except OSError:
+                raw_fm = {}
+            raw_requires = raw_fm.get("requires") if isinstance(raw_fm, dict) else None
+            if isinstance(raw_requires, dict) and any(
+                isinstance(v, list) and any(not isinstance(x, str) for x in v)
+                for v in raw_requires.values()
+            ):
+                report.errors.append(
+                    f"protocol '{rel}' requires: block holds a non-string "
+                    "entry — every name in a requires.<kind> list must be a "
+                    "string; the non-string entry was dropped"
+                )
+
             requires = library_requires(md)
             for skill in requires.get("skills", []):
                 if skill.endswith("/"):
@@ -1654,10 +1681,6 @@ def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
                 else:
                     resolvable = paths.find_library_dir("skills", skill) is not None
                 if not resolvable:
-                    try:
-                        rel = md.relative_to(root)
-                    except ValueError:
-                        rel = md
                     report.errors.append(
                         f"protocol '{rel}' requires skill '{skill}', which is "
                         "not in any library/skills/ — the requirement cannot "

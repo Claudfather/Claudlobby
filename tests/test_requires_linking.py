@@ -121,6 +121,18 @@ class TestLibraryRequires:
         )
         assert library_requires(p) == {"skills": ["gadget"]}
 
+    def test_non_string_elements_are_dropped_not_raised(self, tmp_path):
+        # review round 1, finding 3: an int/None/nested-list element inside an
+        # otherwise well-formed list must not crash a downstream `.endswith`
+        # (link_skills, _validate_library_requires) — dropped, never raised,
+        # well-formed elements survive.
+        p = self._write(
+            tmp_path,
+            "mixed",
+            "requires:\n  skills: [alpha, 3, null, [nested, list], beta]\n",
+        )
+        assert library_requires(p) == {"skills": ["alpha", "beta"]}
+
 
 class TestIterLibraryRequires:
     def test_resolves_single_entry(self, tmp_path):
@@ -298,6 +310,50 @@ class TestGrantUnion:
         assert "Skill(gadget:*)" in allow
         assert "Bash(gadget-tool *)" in allow  # the skill's own tool_grants entry
 
+    def test_an_opted_out_protocols_skill_is_neither_linked_nor_granted(
+        self, fleet_dir, monkeypatch
+    ):
+        # review round 1, finding 2: the opt-out's POSITIVE direction (the
+        # skill is absent from resolve_effective_skills) is pinned at the
+        # resolver by TestResolveEffectiveSkills.test_opting_out_of_the_
+        # protocol_drops_its_requirement; the OVER-GRANT direction — that an
+        # opted-out requirement never reaches the composed artifact — was not.
+        # This proves it at compose_bot's actual output: neither symlinked nor
+        # granted.
+        _write_protocol(fleet_dir, "needs-gadget", requires_skills=["gadget"])
+        _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
+        # Task 1 does not wire a real role-default protocol (later work, spec
+        # §10); patch the registry for this test only, to prove the GENERIC
+        # opt-out mechanism reaches the composed artifact, not just the
+        # resolver's return value.
+        monkeypatch.setitem(
+            defaults.REGISTRY,
+            "protocols",
+            replace(defaults.REGISTRY["protocols"], entries=("needs-gadget",)),
+        )
+        text = (fleet_dir / "fleet.yaml").read_text().replace(
+            "  accounts:\n",
+            "  system_defaults:\n    protocols: false\n\n  accounts:\n",
+            1,
+        )
+        (fleet_dir / "fleet.yaml").write_text(text)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _paths(fleet_dir)
+        bot = fleet.bots["lead"]
+        assert "needs-gadget" not in bot.protocols  # opted out, never declared either
+
+        compose_bot(bot, fleet, paths, log=lambda m: None)
+        settings = json.loads(
+            (paths.bot_runtime("lead") / ".claude" / "settings.local.json").read_text()
+        )
+        allow = settings["permissions"]["allow"]
+        assert "Skill(gadget)" not in allow
+        assert "Skill(gadget:*)" not in allow
+        assert "Bash(gadget-tool *)" not in allow
+        assert not (
+            paths.bot_runtime("lead") / ".claude" / "skills" / "gadget"
+        ).exists()
+
 
 # ---------------------------------------------------------------------------
 # The unresolvable-requirement error — one defect, one error, library-wide
@@ -327,6 +383,55 @@ def test_an_unresolvable_requirement_is_one_library_wide_error(fleet_dir):
     matches = [e for e in report.errors if "broken-protocol" in e]
     assert len(matches) == 1, matches  # one defect (the file), one error
     assert "nonexistent-skill" in matches[0]
+
+
+def test_an_unresolvable_requirement_errors_even_when_no_bot_equips_it(fleet_dir):
+    # review round 1, finding 4a: the rule is library-wide, so the defect must
+    # still be caught when nothing equips the protocol — the exact case a
+    # per-bot check would silently pass.
+    _write_protocol(fleet_dir, "unequipped-broken", requires_skills=["nonexistent-skill"])
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    paths = _paths(fleet_dir)
+
+    report = validate(fleet, paths)
+
+    matches = [e for e in report.errors if "unequipped-broken" in e]
+    assert len(matches) == 1, matches
+    assert "nonexistent-skill" in matches[0]
+
+
+def test_a_non_string_requires_entry_is_reported_once_per_file(fleet_dir):
+    # review round 1, finding 3: a dropped non-string element must not be
+    # silent — one error per protocol FILE, same "one defect, one error" rule.
+    (fleet_dir / "library" / "protocols" / "mixed-protocol.md").write_text(
+        "---\ntitle: mixed-protocol\nrequires:\n  skills: [3]\n---\n\n"
+        "# mixed-protocol\n\nBody.\n"
+    )
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    paths = _paths(fleet_dir)
+
+    report = validate(fleet, paths)
+
+    matches = [e for e in report.errors if "mixed-protocol" in e]
+    assert len(matches) == 1, matches
+    assert "non-string" in matches[0]
+
+
+def test_two_protocols_requiring_one_skill_yield_it_once(fleet_dir):
+    # review round 1, finding 4b: cross-protocol dedup, not just within one
+    # protocol's own list or against a declared skill.
+    _write_protocol(fleet_dir, "needs-gadget-a", requires_skills=["gadget"])
+    _write_protocol(fleet_dir, "needs-gadget-b", requires_skills=["gadget"])
+    _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
+    _equip(fleet_dir, "lead", protocols=["needs-gadget-a", "needs-gadget-b"])
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    paths = _paths(fleet_dir)
+    bot = fleet.bots["lead"]
+    is_manager = bot.bot_id in fleet.manager_bots()
+
+    result = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
+
+    assert result.count("gadget") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -371,46 +476,44 @@ def test_freshbox_traces_a_required_skills_grants(fleet_dir):
 # ---------------------------------------------------------------------------
 
 
-def test_existing_fleet_composes_unchanged_when_no_protocol_requires_anything(
-    fleet_dir, monkeypatch
-):
-    """No protocol effective on this fleet declares `requires:` (the shared
-    fixture's only protocol is report-back, requires-free). Proves the
-    grant-union change is a no-op here: composing the SAME bot through the
-    real (post-change) resolver and through a stand-in that reproduces the
-    PRE-change behaviour (skills = bot.skills, full stop) must produce
-    byte-identical settings.local.json and an identically-linked skills dir."""
-    _write_skill(fleet_dir, "logger")  # a directly-declared skill, not via requires
-    _equip(fleet_dir, "worker-1", skills=["logger"])
+def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir):
+    """Direct counter to a self-cancelling comparison (review round 1, finding
+    1): a prior version of this test composed the SAME (post-change) code path
+    twice, differing only in whether resolve_effective_skills was the real one
+    or a stand-in returning the identical list on a fixture with no
+    `requires:` — the two arms could never disagree, so the test could not
+    catch a regression anywhere else in compose_settings_local's layering.
+    This pins the FULL composed permissions.allow LITERALLY instead: no
+    protocol in scope declares `requires:` (report-back, the only one this
+    fleet composes by default, does not), so every entry below must trace to
+    the two skills declared directly. `channels: []` suppresses the default
+    Telegram plugin grants so the list stays short and exact."""
+    _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
+    _write_skill(fleet_dir, "widget", tool_grants=["Bash(widget-tool *)"])
+    _equip(fleet_dir, "lead", skills=["gadget", "widget"], channels=[])
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = _paths(fleet_dir)
-    bot = fleet.bots["worker-1"]
+    bot = fleet.bots["lead"]
 
     compose_bot(bot, fleet, paths, log=lambda m: None)
-    after_settings = (
-        paths.bot_runtime("worker-1") / ".claude" / "settings.local.json"
-    ).read_text()
-    after_skills = sorted(
-        p.name for p in (paths.bot_runtime("worker-1") / ".claude" / "skills").iterdir()
+    settings = json.loads(
+        (paths.bot_runtime("lead") / ".claude" / "settings.local.json").read_text()
     )
-
-    import claudlobby.composer as composer_mod
-
-    monkeypatch.setattr(
-        composer_mod,
-        "resolve_effective_skills",
-        lambda bot, fleet, paths, *, is_manager: list(bot.skills),
+    assert settings["permissions"]["allow"] == [
+        "Glob",
+        "Grep",
+        "Read",
+        "Skill(gadget)",
+        "Skill(gadget:*)",
+        "Skill(widget)",
+        "Skill(widget:*)",
+        "Bash(gadget-tool *)",
+        "Bash(widget-tool *)",
+    ]
+    linked = sorted(
+        p.name for p in (paths.bot_runtime("lead") / ".claude" / "skills").iterdir()
     )
-    compose_bot(bot, fleet, paths, log=lambda m: None)
-    pre_change_settings = (
-        paths.bot_runtime("worker-1") / ".claude" / "settings.local.json"
-    ).read_text()
-    pre_change_skills = sorted(
-        p.name for p in (paths.bot_runtime("worker-1") / ".claude" / "skills").iterdir()
-    )
-
-    assert after_settings == pre_change_settings
-    assert after_skills == pre_change_skills
+    assert linked == ["gadget", "widget"]
 
 
 def test_effective_skills_is_a_no_op_when_no_effective_protocol_declares_requires(

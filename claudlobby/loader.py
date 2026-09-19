@@ -336,6 +336,13 @@ def library_requires(md_path: Path) -> dict[str, list[str]]:
     Returns ``{}`` when the file, its frontmatter, or the block is absent, and
     drops a non-list value rather than raising: a malformed block is
     ``validate``'s to report (the ``_read_tool_grants`` posture, one door over).
+
+    A non-string element inside an otherwise-well-formed list (``skills: [3]``)
+    is dropped rather than raising, same posture — ``.endswith``/path lookups
+    downstream (``link_skills``, the validator's own resolvability check)
+    assume a string. The validator's ``_validate_library_requires`` reports a
+    dropped element by re-reading the raw frontmatter itself, since by the
+    time it is filtered out here the fact that something was dropped is gone.
     """
     if not md_path.is_file():
         return {}
@@ -347,7 +354,9 @@ def library_requires(md_path: Path) -> dict[str, list[str]]:
     if not isinstance(requires, dict):
         return {}
     return {
-        key: list(value) for key, value in requires.items() if isinstance(value, list)
+        key: [v for v in value if isinstance(v, str)]
+        for key, value in requires.items()
+        if isinstance(value, list)
     }
 
 
