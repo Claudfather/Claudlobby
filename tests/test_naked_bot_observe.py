@@ -551,3 +551,21 @@ def test_the_arm_records_the_skill_symlink_and_the_grant(leaf_manager_compose):
     assert any("checkin-record.sh" in g for g in leaf_grants)
     baseline_grants = baseline.types["permissions"].composed_content or []
     assert not any("checkin-record.sh" in g for g in baseline_grants)
+
+
+def test_the_recorded_skill_symlink_target_is_scrubbed(leaf_manager_compose):
+    """A skill symlink target is an ABSOLUTE path (`composer.py`'s
+    `src.resolve()`) — no prior arm ever composed one, since nothing defaults
+    or declares a skill, so `dir_entries` was never run through `scrub()`.
+    Two observations of the SAME commit must still be byte-identical (that is
+    the entire point of `scrub`), which fails today: a fresh `--ref` export
+    would record a DIFFERENT `mktemp` path in the symlink target on every run.
+    Composed here against `REPO_ROOT` rather than a fresh export, so the
+    'run-specific' path IS `REPO_ROOT` and scrubbing it is exactly what
+    `scrub(entry, REPO_ROOT)` is for."""
+    _, leaf = leaf_manager_compose
+    leaf_skills = leaf.types["skills"].composed_artifacts
+    checkin_entry = next(s for s in leaf_skills if s.startswith(".claude/skills/checkin"))
+    assert checkin_entry == ".claude/skills/checkin -> $EXPORT/library/skills/checkin", (
+        f"symlink target was not scrubbed: {checkin_entry!r}"
+    )

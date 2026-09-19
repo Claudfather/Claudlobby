@@ -503,7 +503,16 @@ def observe_arm(root: Path, python: str, arm: Arm, registry) -> Arm:
     if arm.generate_rc != 0 or not bot_dir.is_dir():
         return arm  # a failed arm records its rc and stays empty, never green
 
-    arm.dir_entries = inventory_dir(bot_dir)
+    # `scrub`, not raw `inventory_dir`: a skill symlink's target is an ABSOLUTE
+    # path (`composer.py`'s `src.resolve()`), and until the `shape:
+    # leaf-manager` arm no arm ever composed one — `skills` has no registry
+    # default and no prior arm declares a skill directly, so this call site
+    # never needed it before. Without this, two observations of the SAME
+    # commit differ on every run (a fresh `mktemp` export path baked into the
+    # target), which is exactly what `scrub` exists to prevent everywhere else
+    # it is already applied (`run_generate`, `run_freshbox`). Measured via the
+    # self-check this arm's own baseline recording is required to pass clean.
+    arm.dir_entries = [scrub(e, root) for e in inventory_dir(bot_dir)]
     arm.sections = parse_sections((bot_dir / "CLAUDE.md").read_text())
 
     for etype, surface in sorted(SURFACES.items()):
