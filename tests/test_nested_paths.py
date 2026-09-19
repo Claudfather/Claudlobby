@@ -14,11 +14,13 @@ the flat assertions guard against regression.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from claudlobby.__main__ import main
 from claudlobby.commands._helpers import _resolve_paths
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths, _find_fleet_dir
@@ -230,3 +232,135 @@ def test_default_path_surfaces_f5_as_clean_exit(tmp_path: Path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         _resolve_paths(args)
     assert exc.value.code == 1
+
+
+# --- fix wave A group 2: --fleet naming the root manifest's own fleet.name ---
+# resolves to root mode instead of refusing. Every leaf manager's composed
+# check-in doors write `claudlobby --fleet "$FLEET_NAME" <verb>`
+# unconditionally, and a root-mode install (fleet.yaml at the repo root,
+# documentation/getting-started.md's own first path) has no local/<fleet>/
+# overlay for FLEET_NAME to resolve to — so those doors named the root
+# fleet and still refused, before this fallback. Covers both refusal sites:
+# Paths.detect() and the explicit --root twin in commands/_helpers.py.
+
+
+def test_detect_falls_back_to_root_mode_when_fleet_names_root_manifest(
+    tmp_path: Path,
+):
+    """A root install resolves --fleet <the root manifest's own fleet.name>
+    to root mode -- exactly the Paths a bare call gets -- instead of
+    refusing."""
+    root = _make_root(tmp_path)
+    (root / "fleet.yaml").write_text("fleet:\n  name: solo\n")
+
+    paths = Paths.detect(hint=root, fleet="solo")
+
+    assert paths.fleet_dir is None
+    assert paths.fleet_yaml == root / "fleet.yaml"
+    assert paths.root == root.resolve()
+
+
+def test_detect_still_refuses_a_different_fleet_name(tmp_path: Path):
+    """The fallback is name-exact: a --fleet naming neither an overlay NOR
+    the root manifest's own fleet still refuses exactly as before."""
+    root = _make_root(tmp_path)
+    (root / "fleet.yaml").write_text("fleet:\n  name: solo\n")
+
+    with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
+        Paths.detect(hint=root, fleet="other")
+
+
+def test_overlay_wins_when_root_manifest_also_names_the_fleet(tmp_path: Path):
+    """An overlay for NAME still wins over the root-mode fallback even when
+    the root manifest ALSO happens to declare fleet.name == NAME --
+    overlay-first precedence is unchanged."""
+    root = _make_root(tmp_path)
+    (root / "fleet.yaml").write_text("fleet:\n  name: shared\n")
+    overlay = root / "local" / "shared"
+    overlay.mkdir(parents=True)
+    (overlay / "fleet.yaml").write_text("fleet:\n  name: shared\n")
+
+    paths = Paths.detect(hint=root, fleet="shared")
+
+    assert paths.fleet_dir == overlay
+
+
+def test_root_manifest_malformed_yaml_still_refuses(tmp_path: Path):
+    """A root fleet.yaml that fails to parse must never raise a YAML error
+    out of the fallback check -- the existing overlay-not-found refusal
+    stands, never a traceback."""
+    root = _make_root(tmp_path)
+    (root / "fleet.yaml").write_text("fleet: [this is not a mapping\n")
+
+    with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
+        Paths.detect(hint=root, fleet="solo")
+
+
+def test_root_manifest_without_fleet_name_still_refuses(tmp_path: Path):
+    """Valid YAML with no fleet.name (and separately, no top-level fleet:
+    key at all) also answers 'no' rather than raising."""
+    root = _make_root(tmp_path)
+    (root / "fleet.yaml").write_text("fleet:\n  service_prefix: com.test\n")
+
+    with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
+        Paths.detect(hint=root, fleet="solo")
+
+    (root / "fleet.yaml").write_text("not_fleet: true\n")
+
+    with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
+        Paths.detect(hint=root, fleet="solo")
+
+
+def test_detect_root_fallback_logs_an_info_line(tmp_path: Path, caplog):
+    """The fallback is disclosed, not silent -- an INFO line names the fleet
+    and says the call is running in root mode."""
+    root = _make_root(tmp_path)
+    (root / "fleet.yaml").write_text("fleet:\n  name: solo\n")
+
+    with caplog.at_level(logging.INFO):
+        Paths.detect(hint=root, fleet="solo")
+
+    assert "solo" in caplog.text
+    assert "root mode" in caplog.text
+
+
+def test_resolve_paths_root_flag_falls_back_to_root_mode(tmp_path: Path):
+    """The explicit --root twin (_resolve_paths, which never calls
+    Paths.detect) gets the same fallback."""
+    root = _make_root(tmp_path)
+    (root / "fleet.yaml").write_text("fleet:\n  name: solo\n")
+    args = SimpleNamespace(fleet="solo", seed=False, root=str(root))
+
+    paths = _resolve_paths(args)
+
+    assert paths.fleet_dir is None
+    assert paths.fleet_yaml == root / "fleet.yaml"
+
+
+def test_resolve_paths_root_flag_still_refuses_a_different_fleet_name(
+    tmp_path: Path,
+):
+    """The --root twin's refusal is unchanged in exit code and message for a
+    name that is neither an overlay nor the root manifest's own name."""
+    root = _make_root(tmp_path)
+    (root / "fleet.yaml").write_text("fleet:\n  name: solo\n")
+    args = SimpleNamespace(fleet="other", seed=False, root=str(root))
+
+    with pytest.raises(SystemExit) as exc:
+        _resolve_paths(args)
+
+    assert exc.value.code == 1
+
+
+def test_end_to_end_root_flag_own_name_runs_like_bare_call(fleet_dir, monkeypatch):
+    """CLI-level proof: --root <root> --fleet <root's own fleet.name> validate
+    exits exactly like --root <root> validate (no --fleet) -- the fleet_dir
+    fixture is itself a root-mode install (fleet.yaml at its own root, no
+    local/<fleet>/ overlay) named 'test-fleet'."""
+    _prime_tokens(monkeypatch)
+
+    bare_rc = main(["--root", str(fleet_dir), "validate"])
+    named_rc = main(["--root", str(fleet_dir), "--fleet", "test-fleet", "validate"])
+
+    assert bare_rc == 0
+    assert named_rc == 0

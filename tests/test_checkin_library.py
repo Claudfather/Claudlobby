@@ -29,10 +29,12 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-DOORS = ["claudlobby checkins --bot $BOT_ID --last --json", "claudlobby checkins --bot $BOT_ID --since 7d --raised --json",
-         "claudlobby brief --bot $BOT_ID --json", "claudlobby status --json", "claudron lookup --limit 5", "gh issue list",
+DOORS = ['claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json',
+         'claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --since 7d --raised --json',
+         'claudlobby --fleet "$FLEET_NAME" brief --bot $BOT_ID --json',
+         'claudlobby --fleet "$FLEET_NAME" status --json', "claudron lookup --limit 5", "gh issue list",
          'bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<\'EOF\'', 'ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<\'EOF\'', '--checkin "$ck"',
-         'ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" --dry-run <<\'EOF\'', ') && claudlobby checkins --bot $BOT_ID --last --json',
+         'ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" --dry-run <<\'EOF\'', ') && claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json',
          "lib/dispatch-task.sh", "--checkin", "--project", "lib/tg-post.sh", "## Projects", "## Fleet Mission",
          "pane_state", "issues_seen", "DRY-RUN", "checkins[0]", "unavailable"]
 CONTRACT = REPO / "lib" / "checkin-contract.py"
@@ -128,7 +130,7 @@ def test_the_skill_grants_cover_its_own_commands_and_nothing_forbidden():
     bash_grants = [g for g in grants if g.startswith("Bash(")]
     for g in bash_grants:                                              # a CLI grant names ONE literal verb, never a prefix
         if g.startswith("Bash(claudlobby"):
-            assert re.fullmatch(r"Bash\(claudlobby [a-z][a-z-]+ \*\)", g), g
+            assert re.fullmatch(r"Bash\(claudlobby --fleet \* [a-z][a-z-]+ \*\)", g), g
     cmds = _skill_command_lines()
     assert cmds, "no command lines found in the skill"
     assert any(c.startswith("gh issue list ") for c in cmds)          # the wrapped span IS collected (cycle-3 R7)
@@ -162,20 +164,26 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
         "    lead:\n", "    lead:\n      skills: [checkin]\n", 1)
     (fleet_dir / "fleet.yaml").write_text(text)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    grants = _resolve_skill_grants(fleet.bots["lead"], Paths(root=fleet_dir, fleet_dir=fleet_dir))
+    grants = _resolve_skill_grants(
+        fleet.bots["lead"].skills, Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    )
     for g in ("Bash(*checkin-record.sh*)", "Bash(*dispatch-task.sh*)", "Bash(*tg-post.sh*)",
-              "Bash(claudlobby checkins *)", "Bash(claudlobby status *)"):
+              "Bash(claudlobby --fleet * checkins *)", "Bash(claudlobby --fleet * brief *)",
+              "Bash(claudlobby --fleet * status *)"):
         assert g in grants, grants
     assert "Bash(claudlobby *)" not in grants
+    for g in ("Bash(claudlobby checkins *)", "Bash(claudlobby brief *)", "Bash(claudlobby status *)"):
+        assert g not in grants, g
 
 
 # --- library/protocols/checkin.md: the check-in protocol (PR2 Task 3) -------
 
 
-def test_the_protocol_declares_no_requires_and_no_self_fire():
+def test_the_protocol_requires_its_skill_and_still_has_no_self_fire():
     text = (LIB / "protocols" / "checkin.md").read_text()
     fm, body = parse_frontmatter(text)
-    assert fm["title"] == "Check-in" and "requires" not in fm      # equipment linking is chunk 4
+    # chunk 4: the grant union — the protocol brings its skill along (§10)
+    assert fm["title"] == "Check-in" and fm["requires"] == {"skills": ["checkin"]}
     assert "natural idle point" not in body                        # the trigger owns the beat, with its throttles
     assert "governs where it composes beside" in _flat(body.split("## Manager")[0])
 
@@ -183,7 +191,7 @@ def test_the_protocol_declares_no_requires_and_no_self_fire():
 def test_the_protocol_names_the_same_bounded_ask_read_as_the_skill():
     # without --raised every check-in counts as an ask and the manager falls silent
     _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
-    assert "claudlobby checkins --bot $BOT_ID --since 7d --raised" in _flat(body)
+    assert 'claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --since 7d --raised' in _flat(body)
 
 
 def test_both_sections_compose_for_a_hand_equipped_manager(fleet_dir):
@@ -216,10 +224,12 @@ def test_the_worker_section_keeps_the_start_ack_off_telegram():
     assert "Done and blocked" in w and "Telegram where the worker is configured for it" in w
 
 
-def test_the_cadence_rules_are_untouched_in_this_chunk():
-    # chunk 4 retires them with a grep-derived sweep; this chunk composes beside them
-    assert "Idle silence is a bug" in (LIB / "protocols" / "proactivity-discipline.md").read_text()
-    assert re.search(r"2.3 min", (LIB / "protocols" / "worker-lifecycle.md").read_text())
+def test_the_cadence_rules_are_retired_by_this_chunk():
+    # chunk 4 retired them with a grep-derived sweep (tests/test_cadence_retirement.py);
+    # this protocol composes beside whatever a fleet-local library still carries, never
+    # beside these library-wide mandates themselves -- they are gone
+    assert "Idle silence is a bug" not in (LIB / "protocols" / "proactivity-discipline.md").read_text()
+    assert not re.search(r"2.3 min", (LIB / "protocols" / "worker-lifecycle.md").read_text())
 
 
 # --- library/protocols/dispatch.md: the project: envelope field (PR2 Task 4) -----
@@ -244,3 +254,18 @@ def test_the_tracked_dispatch_recipe_shows_the_project_flag():
                  if "dispatch-task.sh" in ln and "--workstream <ws-id>" in ln), None)
     assert line, "tracked-dispatch recipe line not found"
     assert "--project <key>" in line
+
+
+# --- every CLI door names the fleet (PR4 task 5b) ---------------------------
+
+
+def test_no_checkin_door_runs_the_cli_without_a_fleet():
+    # a fleet-less call runs the CLI in root mode, which an overlay install does
+    # not have (#1570) -- a future edit that drops the flag must fail HERE, not
+    # on a running bot
+    bare = re.compile(r"claudlobby\s+(checkins|brief|status)\b")
+    skill_flat = _flat(SKILL.read_text())
+    protocol_flat = _flat((LIB / "protocols" / "checkin.md").read_text())
+    for flat in (skill_flat, protocol_flat):
+        assert not bare.findall(flat), bare.findall(flat)
+    assert skill_flat.count('claudlobby --fleet "$FLEET_NAME" ') >= 6

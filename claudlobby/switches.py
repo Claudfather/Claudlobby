@@ -444,8 +444,10 @@ SWITCHES: tuple[Switch, ...] = (
         plane=True,
         why_opt_in="model spend — one manager turn per idle beat — and it "
                    "injects into a live session",
-        what="every 15 min, inject /checkin into an idle manager the compose "
-             "equipped with the checkin skill",
+        what="every 15 min, inject /checkin into an idle MANAGER equipped "
+             "with the checkin skill — by default every leaf manager (a "
+             "manager with at least one in-fleet report that is not itself "
+             "a manager), plus any manager that declares it",
     ),
 )
 

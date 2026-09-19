@@ -416,3 +416,306 @@ def test_scrub_removes_the_run_specific_export_path(tmp_path):
     assert nbo.scrub(f"composed -> {tmp_path}/local/x", tmp_path) == (
         "composed -> $EXPORT/local/x"
     )
+
+
+def test_scrub_replaces_the_resolved_root_too_so_no_remnant_survives(tmp_path):
+    """`root` reached through a symlink, so `root.resolve() != root` —
+    reproduces the macOS shape (`tempfile.mkdtemp()` under `/var`, resolved by
+    `Path.resolve()` to `/private/var`) PORTABLY, so it bites on Linux CI too.
+    `composer.py`'s `src.resolve()` writes a symlink target using the
+    RESOLVED form, so a captured entry can carry it. Replacing only the
+    literal (unresolved) form leaves the resolved form's extra prefix
+    stranded — `str.replace` matches the literal substring wherever it
+    occurs, including embedded inside the longer resolved path — which is
+    exactly the `/private$EXPORT/...` remnant this fix closes (task 4 fix
+    round 1). A baseline recorded on a host where this bites reports
+    spurious DRIFT on any host where it doesn't, with nothing changed."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert link.resolve() != link  # the shape under test
+
+    entry_resolved_form = f"composed -> {link.resolve()}/library/skills/checkin"
+    entry_literal_form = f"composed -> {link}/library/skills/checkin"
+
+    assert nbo.scrub(entry_resolved_form, link) == "composed -> $EXPORT/library/skills/checkin"
+    assert nbo.scrub(entry_literal_form, link) == "composed -> $EXPORT/library/skills/checkin"
+
+
+class _StubRoot:
+    """A Path-like stub whose literal/resolved forms reproduce the macOS
+    /var -> /private/var shape PORTABLY -- independent of the host's real
+    tempdir symlink behavior, so this test's outcome does not depend on
+    which platform runs it (`scrub`'s own docstring names the real shape as
+    `/tmp` under `/var`, itself a symlink to `/private/var`)."""
+
+    def __str__(self) -> str:
+        return "/var/x/export"
+
+    def resolve(self) -> Path:
+        return Path("/private/var/x/export")
+
+
+def test_scrub_replaces_the_longer_resolved_form_first_even_as_a_suffix_shape():
+    """Kills the scrub-shortest-first mutant. With candidates tried shortest
+    first, the literal form `/var/x/export` matches and is replaced INSIDE
+    the longer resolved form first (`str.replace` does not care that the
+    match sits inside a longer one), stranding the `/private` prefix
+    (`/private$EXPORT/...`) instead of consuming the whole path. Longest-
+    first — the current, correct order — replaces the resolved form whole in
+    one pass, so nothing survives to half-match afterward."""
+    root = _StubRoot()
+    text = "composed -> /private/var/x/export/library/skills/checkin"
+    out = nbo.scrub(text, root)
+    assert "/private" not in out
+    assert out == "composed -> $EXPORT/library/skills/checkin"
+
+
+# ------------------------------------ the record-wide scrub (fix wave A group 3)
+#
+# scrub() was applied field by field (dir_entries, the generate stderr tail,
+# the freshbox output) and this file was bitten twice in one cycle by a field
+# nobody thought to scrub. `arm.sections` -- and, through it,
+# `composed_instructions` -- was NEVER run through scrub() at all: it happens
+# to hold no root-shaped path in practice (composed CLAUDE.md prose does not
+# print the bot_dir), which is what let the gap stand unnoticed. `build_report`
+# now scrubs the WHOLE assembled tree once, generically, then asserts
+# record-wide that nothing survives -- so the next field that happens to carry
+# an export path is caught by construction, not by someone noticing.
+
+
+def test_scrub_record_walks_the_whole_tree_including_sections_and_content():
+    """The generic backstop: a root-shaped path buried in `sections`,
+    `composed_instructions`, or `composed_content` -- not just the fields
+    `scrub()` is already hand-applied to -- comes back scrubbed."""
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    report = {
+        "arms": [
+            {
+                "label": "baseline",
+                "sections": {"Protocols": [f"{root}/library/protocols/x.md"]},
+                "types": {
+                    "protocols": {
+                        "composed_instructions": [f"see {root}/library/protocols/x.md"],
+                        "composed_content": [f"{root}/library/mcp/github.json"],
+                    }
+                },
+            }
+        ]
+    }
+    scrubbed = nbo.scrub_record(report, root)
+    arm = scrubbed["arms"][0]
+    assert arm["sections"]["Protocols"] == ["$EXPORT/library/protocols/x.md"]
+    assert arm["types"]["protocols"]["composed_instructions"] == [
+        "see $EXPORT/library/protocols/x.md"
+    ]
+    assert arm["types"]["protocols"]["composed_content"] == [
+        "$EXPORT/library/mcp/github.json"
+    ]
+    # Fields with nothing to scrub pass through unchanged.
+    assert scrubbed["arms"][0]["label"] == "baseline"
+
+
+def test_find_unscrubbed_path_names_a_planted_remnant():
+    """The checker names WHERE a remnant survives, dotted/bracketed -- the
+    record-wide assertion's whole point is to say what to go fix, not just
+    that something is wrong."""
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    report = {
+        "arms": [
+            {"label": "baseline", "sections": {"Protocols": ["clean"]}},
+            {"label": "optout:mcp", "sections": {"MCP": [f"{root}/library/mcp/x.json"]}},
+        ]
+    }
+    assert (
+        nbo.find_unscrubbed_path(report, root)
+        == "report.arms[1].sections.MCP[0]"
+    )
+
+
+def test_find_unscrubbed_path_is_none_on_a_clean_tree():
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    report = {"arms": [{"label": "baseline", "sections": {"Protocols": ["clean"]}}]}
+    assert nbo.find_unscrubbed_path(report, root) is None
+
+
+def test_build_report_scrubs_a_real_remnant_and_does_not_raise():
+    """End to end at unit level (no export, no generate): a real Arm carrying
+    a root-shaped remnant in `sections` is cleaned by the real scrub_record
+    before the assertion runs, so build_report returns normally with the
+    field scrubbed."""
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    arm = nbo.Arm(label="baseline", system_defaults=None)
+    arm.sections = {"Protocols": [f"{root}/library/protocols/x.md"]}
+    report = nbo.build_report("deadbeef", [arm], (0, ""), root)
+    assert report["arms"][0]["sections"]["Protocols"] == [
+        "$EXPORT/library/protocols/x.md"
+    ]
+
+
+def test_build_report_refuses_when_a_remnant_survives(monkeypatch):
+    """build_report's own record-wide assertion is real, not decorative: even
+    with scrub_record wired in, if a remnant ever survived it, build_report
+    must refuse rather than emit. Proven by neutering scrub_record so the
+    remnant reaches the assertion unscrubbed, simulating a scrub that missed
+    something -- the exact failure mode this mechanism exists to catch."""
+    root = Path("/tmp/naked-bot-observe-XYZ/export")
+    arm = nbo.Arm(label="baseline", system_defaults=None)
+    arm.sections = {"Protocols": [f"{root}/library/protocols/x.md"]}
+    monkeypatch.setattr(nbo, "scrub_record", lambda obj, r: obj)
+    with pytest.raises(RuntimeError, match="REFUSING"):
+        nbo.build_report("deadbeef", [arm], (0, ""), root)
+
+
+# ------------------------------------------- the leaf-manager arm (PR4 chunk 4)
+#
+# A role overlay (`Disposition.roles`) is invisible to every arm above — none
+# of them composes a manager at all (`naked-bot-observation-gate.md`, "One bot,
+# one expertise"). Task 3 landed `REGISTRY["protocols"].roles = {"leaf-manager":
+# ("checkin",)}`; this section gives the gate a fleet shape that can see it.
+
+
+def test_schema_bumped_so_an_old_baseline_refuses_to_compare():
+    """SCHEMA 3 adds `Arm.teams`/`Arm.observed_bot`. A record written under the
+    old schema must refuse rather than half-compare against fields it never
+    had — the same guard `test_diff_reports_refuses_to_compare_across_schema_
+    versions` pins generically, restated here against the REAL old value so a
+    future schema bump that forgets to update this test is itself caught."""
+    assert nbo.SCHEMA == 3
+    old = dict(_report(baseline={"protocols": _t(["A"])}), schema=2)
+    new = _report(baseline={"protocols": _t(["A"])})
+    drift = nbo.diff_reports(old, new)
+    assert len(drift) == 1
+    assert "not comparable" in drift[0]
+
+
+def test_the_other_arms_are_unchanged():
+    """Every pre-existing arm still observes `nakedbot` and composes no
+    `teams:` block. `observed_bot` and `teams` are new fields with defaults
+    precisely so the seventeen arms that existed before this one keep
+    resolving the same bot dir and the same one-bot fleet shape."""
+    arms = nbo.build_arms(sorted(nbo.SURFACES))
+    leaf_arms = [a for a in arms if a.label == "shape:leaf-manager"]
+    assert len(leaf_arms) == 1
+    for arm in arms:
+        if arm.label == "shape:leaf-manager":
+            continue
+        assert arm.observed_bot == "nakedbot"
+        assert arm.teams is False
+
+
+def test_the_leaf_manager_arm_composes_a_manager():
+    """`build_arms` appends a `teams`-shaped arm observing the manager, not
+    the worker — the bot the role overlay actually reaches."""
+    arm = next(
+        a for a in nbo.build_arms(sorted(nbo.SURFACES)) if a.label == "shape:leaf-manager"
+    )
+    assert arm.teams is True
+    assert arm.observed_bot == "nakedmgr"
+
+
+def test_write_probe_adds_a_teams_block_and_a_second_bot_only_when_teams_is_set(tmp_path):
+    """The `{teams}` template slot must be inert for `arm.teams == False` — a
+    slot that always rendered would make every pre-existing arm compose a
+    fleet shape it does not compose today (controller ruling: existing arms
+    stay byte-stable)."""
+    plain_root = tmp_path / "plain"
+    teams_root = tmp_path / "teams"
+    nbo.write_probe(plain_root, nbo.Arm(label="baseline", system_defaults=None))
+    nbo.write_probe(
+        teams_root,
+        nbo.Arm(
+            label="shape:leaf-manager",
+            system_defaults=None,
+            teams=True,
+            observed_bot="nakedmgr",
+        ),
+    )
+    plain_yaml = (plain_root / "local" / "naked-probe" / "fleet.yaml").read_text()
+    teams_yaml = (teams_root / "local" / "naked-probe" / "fleet.yaml").read_text()
+
+    assert "teams:" not in plain_yaml
+    assert "nakedmgr" not in plain_yaml
+
+    assert "teams:" in teams_yaml
+    assert "manager: nakedmgr" in teams_yaml
+    assert "workers: [nakedbot]" in teams_yaml
+    assert "nakedmgr:" in teams_yaml
+    assert "nakedbot:" in teams_yaml  # the in-fleet report is still declared
+
+
+@pytest.fixture(scope="module")
+def leaf_manager_compose():
+    """One real `generate` of the new arm, plus a fresh `baseline` compose to
+    diff it against — the only real composes in this file (everything else
+    above is offline, per the module docstring). Composed directly against
+    THIS checkout (`nbo.REPO_ROOT`), not a `git archive` export of HEAD: these
+    tests exercise the harness's own in-progress code, so an export would
+    compose against whatever was last committed, not what is under test.
+    `local/naked-probe/` is gitignored, so this leaves nothing for git to see.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    import claudlobby.defaults as registry
+
+    baseline = nbo.observe_arm(
+        REPO_ROOT, sys.executable, nbo.Arm(label="baseline", system_defaults=None), registry
+    )
+    leaf = nbo.observe_arm(
+        REPO_ROOT,
+        sys.executable,
+        nbo.Arm(
+            label="shape:leaf-manager",
+            system_defaults=None,
+            teams=True,
+            observed_bot="nakedmgr",
+        ),
+        registry,
+    )
+    return baseline, leaf
+
+
+def test_the_leaf_manager_arm_sees_the_role_overlay(leaf_manager_compose):
+    """The role-scoped default (`REGISTRY["protocols"].roles`) reaches a
+    composed leaf manager's `## Protocols` section and reaches nothing on the
+    baseline arm, which composes no manager at all."""
+    baseline, leaf = leaf_manager_compose
+    assert baseline.generate_rc == 0, baseline.generate_stderr_tail
+    assert leaf.generate_rc == 0, leaf.generate_stderr_tail
+    assert "Check-in" in leaf.types["protocols"].composed_instructions
+    assert "Check-in" not in (baseline.types["protocols"].composed_instructions or [])
+
+
+def test_the_arm_records_the_skill_symlink_and_the_grant(leaf_manager_compose):
+    """`checkin`'s `requires: {skills: [checkin]}` reaches both existing
+    surfaces — no new `Surface` needed: `SURFACES["skills"].artifacts` records
+    the symlink and `SURFACES["permissions"].content_keys` records its
+    `tool_grants` landing in `permissions.allow`."""
+    baseline, leaf = leaf_manager_compose
+    leaf_skills = leaf.types["skills"].composed_artifacts
+    assert any(s.split(" -> ", 1)[0] == ".claude/skills/checkin" for s in leaf_skills)
+    baseline_skills = baseline.types["skills"].composed_artifacts
+    assert not any(s.split(" -> ", 1)[0] == ".claude/skills/checkin" for s in baseline_skills)
+
+    leaf_grants = leaf.types["permissions"].composed_content or []
+    assert any("checkin-record.sh" in g for g in leaf_grants)
+    baseline_grants = baseline.types["permissions"].composed_content or []
+    assert not any("checkin-record.sh" in g for g in baseline_grants)
+
+
+def test_the_recorded_skill_symlink_target_is_scrubbed(leaf_manager_compose):
+    """A skill symlink target is an ABSOLUTE path (`composer.py`'s
+    `src.resolve()`) — no prior arm ever composed one, since nothing defaults
+    or declares a skill, so `dir_entries` was never run through `scrub()`.
+    Two observations of the SAME commit must still be byte-identical (that is
+    the entire point of `scrub`), which fails today: a fresh `--ref` export
+    would record a DIFFERENT `mktemp` path in the symlink target on every run.
+    Composed here against `REPO_ROOT` rather than a fresh export, so the
+    'run-specific' path IS `REPO_ROOT` and scrubbing it is exactly what
+    `scrub(entry, REPO_ROOT)` is for."""
+    _, leaf = leaf_manager_compose
+    leaf_skills = leaf.types["skills"].composed_artifacts
+    checkin_entry = next(s for s in leaf_skills if s.startswith(".claude/skills/checkin"))
+    assert checkin_entry == ".claude/skills/checkin -> $EXPORT/library/skills/checkin", (
+        f"symlink target was not scrubbed: {checkin_entry!r}"
+    )

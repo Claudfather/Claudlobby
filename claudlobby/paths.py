@@ -27,6 +27,7 @@ Vault integration:
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,6 +36,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .env_tiers import EnvTier, Resolution
+
+log = logging.getLogger(__name__)
 
 try:
     from claudron.vault import detect as _claudron_detect
@@ -270,6 +273,41 @@ def _find_fleet_dir(local_dir: Path, fleet: str) -> Path | None:
         # resolves when nothing collides).
         return flat_match
     return None
+
+
+def _root_manifest_names_fleet(root: Path, fleet: str) -> bool:
+    """True when *root*'s own ``fleet.yaml`` declares ``fleet.name == fleet``.
+
+    The shared check behind both `--fleet NAME` refusal sites — ``Paths.detect``
+    and the explicit ``--root`` twin in ``commands/_helpers.py`` — for the case
+    where NAME resolves to no overlay (flat, nested, or vault-hosted) but IS
+    the root manifest's own declared fleet name. That is not a missing fleet:
+    it is root mode, addressed by name instead of by omitting ``--fleet``. A
+    leaf manager's composed check-in doors write
+    ``claudlobby --fleet "$FLEET_NAME" <verb>`` unconditionally, and
+    ``FLEET_NAME`` in a composed ``bot.conf`` is ``fleet.name`` in both overlay
+    and root mode — so on a root-mode install (fleet.yaml at the repo root,
+    documentation/getting-started.md's own first path) those doors named the
+    root fleet and still refused, before this fallback existed.
+
+    Never raises: a missing, unreadable, or malformed root manifest (bad YAML,
+    no top-level ``fleet`` key, no ``name`` field) answers False — same as a
+    manifest naming a different fleet. Every one of those cases leaves the
+    caller's existing refusal standing.
+    """
+    manifest = root / "fleet.yaml"
+    try:
+        import yaml
+
+        doc = yaml.safe_load(manifest.read_text())
+    except Exception:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    fleet_section = doc.get("fleet")
+    if not isinstance(fleet_section, dict):
+        return False
+    return fleet_section.get("name") == fleet
 
 
 @dataclass(frozen=True)
@@ -618,6 +656,15 @@ class Paths:
             if fleet_dir is None:
                 fleet_dir = _find_fleet_dir(root / "local", fleet)
                 if fleet_dir is None:
+                    if _root_manifest_names_fleet(root, fleet):
+                        # --fleet names the root manifest's own fleet, not an
+                        # overlay: resolve to root mode instead of refusing.
+                        log.info(
+                            "--fleet %s names the root fleet.yaml's own fleet; "
+                            "running in root mode",
+                            fleet,
+                        )
+                        return cls(root=root)
                     flat = root / "local" / fleet
                     raise FileNotFoundError(
                         f"Fleet overlay not found: {flat} (run `claudlobby new-fleet {fleet}` to scaffold)"

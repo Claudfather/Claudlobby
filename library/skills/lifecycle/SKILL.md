@@ -34,5 +34,4 @@ Full pipeline orchestrated by the manager bot.
 ## Rules
 
 - Every phase transition gets a Telegram message for visibility
-- Never go silent — report what's happening
 - Mechanical decisions: auto-proceed. Judgment calls: flag human.

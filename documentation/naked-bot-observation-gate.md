@@ -19,16 +19,25 @@ the delta is named in the PR body, not that it is absent.
 
 ## The baselines — diff against the newest, cite the anchor
 
-**Two files, and only ever two: an anchor and a rolling current.**
+**Two files, and only ever two — WITHIN a schema.**
 
 | file | what it is |
 |---|---|
-| `naked-bot-2026-08-11.json` | **The anchor** (`b196936`). Phase 1 merged, zero defaults admitted. Frozen — never overwritten. |
-| `naked-bot-2026-08-12.json` | **The current diff target.** Replaced in place by each admission; its `ref` field says which commit it describes. |
+| `naked-bot-2026-08-11.json` | **The anchor** (`b196936`). Phase 1 merged, zero defaults admitted. Frozen — never overwritten. SCHEMA 2. |
+| `naked-bot-2026-08-12.json` | **Frozen as of the SCHEMA 3 bump** (PR4 chunk 4). Was "replaced in place by each admission" until then; now superseded as the diff target rather than overwritten, because a SCHEMA 3 record cannot replace it in place and stay diffable against what came before. SCHEMA 2. |
+| `naked-bot-2026-09-18.json` | **The current diff target**, and the first SCHEMA 3 record — adds the `shape:leaf-manager` arm (`Arm.teams` / `Arm.observed_bot`). Replaced in place by each admission from here on, exactly like `-08-12` was. |
 
 Diff a new PR against the **current** file; a PR that diffed against the anchor
 would re-report every previously-argued admission as its own delta, and the
 reviewer would have to subtract history by hand to find the change under review.
+
+**A schema bump is the one thing that adds a THIRD file instead of replacing
+the current one in place.** `diff_reports` refuses to compare across schema
+versions rather than half-comparing (a SCHEMA 3 record carries fields — e.g.
+`observed_bot` — a SCHEMA 2 record never had), so overwriting `-08-12` would
+have made the pre-role-overlay state unrecoverable for no reason. The anchor
+and `-08-12` are both SCHEMA 2 and both frozen now; `-09-18` is SCHEMA 3 and is
+the only file future admissions diff against.
 
 **The anchor is kept** because it is the only recorded state in which the
 estate's pre-registry behaviour is legible as a whole, and a claim that has to
@@ -291,16 +300,30 @@ until the probe was added.
   every arm is overlay. A root-mode arm would have shown it. Adding one is
   cheap — the probe writes `fleet.yaml` at the export root instead of under
   `local/`, and drops `--fleet` from both subprocess calls.
-- **One bot, one expertise.** Role overlays (`Disposition.roles`, `manager`) are
-  unexercised — no arm composes a manager. When Phase 2 populates a role overlay,
-  this gate needs a manager arm or it will not see it.
-- **Fleet SHAPE is covered on exactly one axis.** `shape:vault-wired` exists
+- **One bot, one expertise — plus, as of PR4 chunk 4, one manager shape.**
+  `shape:leaf-manager` composes a `teams:` fleet (`nakedmgr` managing
+  `nakedbot`) and observes the manager, closing the gap this bullet used to
+  name: `REGISTRY["protocols"].roles = {"leaf-manager": ("checkin",)}`
+  (chunk 3) is visible to `--baseline` because of it. `nakedmgr` resolves
+  BOTH the `manager` and `leaf-manager` role predicates
+  (`FleetConfig.manager_bots()` and `.leaf_manager_bots()` both name it), but
+  no `Disposition` in the registry defines a `roles={"manager": (...)}` entry
+  yet, so there is nothing for the plain `manager` role to show even though
+  the predicate fires correctly. **A pure coordinator — a manager whose every
+  in-fleet report is itself a manager — stays unexercised**: this arm's
+  manager always has one non-manager report by construction, so a default
+  scoped to distinguish a coordinator from a leaf manager needs its own arm
+  before this gate can see it.
+- **Fleet SHAPE is now covered on two axes.** `shape:vault-wired` exists
   because #1172 lived on an axis every other arm was blind to: the opt-out arms
-  all vary what a fleet switched **off**, and that one varied how it is **wired**.
-  The generalisation is still open — `teams:`, multi-bot fleets, per-bot
-  `accounts`, an overlay `library/` shadowing a shared file are all shapes, and
-  none is composed here. **When a default turns out to depend on a shape, adding
-  the arm is part of the fix**, or the gate keeps certifying a fleet nobody runs.
+  all vary what a fleet switched **off**, and that one varied how it is
+  **wired**. `shape:leaf-manager` (PR4 chunk 4) adds a second: `teams:` naming
+  a two-bot fleet instead of the one-bot fleet every other arm composes. The
+  generalisation is still open beyond those two — multi-bot fleets past a
+  single manager/report pair, per-bot `accounts`, an overlay `library/`
+  shadowing a shared file are all shapes, and none is composed here. **When a
+  default turns out to depend on a shape, adding the arm is part of the fix**,
+  or the gate keeps certifying a fleet nobody runs.
 - **The composed `CLAUDE.md` is compared by SECTION NAME, not by bytes.** A
   default that changes prose *inside* an existing section moves nothing this gate
   records. The byte-level before/after on the default path is a separate
@@ -308,8 +331,10 @@ until the probe was added.
 - **No bot is spun up.** This observes composition only. A default that changes
   runtime behaviour without changing composed output is invisible here; that is
   `validate-bot-change.sh`'s job.
-- **`voices/`, `teams:`, `projects:`, and multi-bot fleets** are all out of scope
-  by construction — the probe declares none of them.
+- **`voices/`, `projects:`, and multi-bot fleets past two** are all out of
+  scope by construction — no arm declares any of them. `teams:` is the one
+  exception, and a narrow one: `shape:leaf-manager` alone declares a
+  (manager, one report) pair; every other arm still declares neither.
 - **Content-level change inside `bot.conf`** is not diffed. `mcp` and
   `permissions` get content probes because their files are always present;
   `bot.conf` does not, and a default landing there would show only if it also
@@ -349,3 +374,14 @@ Bump `SCHEMA` in the harness whenever the record's shape changes. Baselines
 across schema versions refuse to compare rather than half-comparing; adding a
 field without bumping it let the version guard pass and the diff then raise,
 which is why the field access is defensive as well.
+
+**`documentation/baselines/naked-bot-2026-09-18.json` is the first SCHEMA 3
+record** (PR4 chunk 4 — `Arm.teams` / `Arm.observed_bot`, the
+`shape:leaf-manager` arm). It cannot be diffed against either SCHEMA 2 file
+above: `--baseline naked-bot-2026-08-12.json` against it prints exactly one
+line, `schema changed 2 -> 3; baselines across schema versions are not
+comparable`, and exits 1. That refusal is correct and is not something to
+work around — comparing a report to one that lacks fields it has would
+silently under-report drift rather than name it. Diff future admissions
+against the `-09-18` file; the two SCHEMA 2 files stay readable as the
+pre-role-overlay historical record.

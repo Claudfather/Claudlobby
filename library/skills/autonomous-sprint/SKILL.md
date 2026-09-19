@@ -119,7 +119,7 @@ For each issue, sequentially:
    - Engineer: engage (first `[BOTREPORT]` row is the ack) → branch → implement → test → /simplify → PR → report back
 
 2. **On engineer completion**: immediately dispatch a reviewer
-   - If approved: verify CI green → merge → post to Telegram
+   - If approved: verify CI green → merge → record to the plane
    - If changes requested: classify mechanical vs ambiguous
      - Mechanical: auto-dispatch back to engineer (max 3 cycles)
      - Ambiguous: flag the user, pause this issue, move to next
@@ -180,7 +180,7 @@ Reviewer is whichever reviewer bot is idle and least-context-saturated.
 - **Always verify CI green** before any merge
 - **Max 3 review cycles** per issue — flag the user after that
 - **Respect context limits** — restart bots proactively
-- **Emit everything to Telegram** — the user sees every dispatch, every merge, every decision
+- **One plan post, one summary** — the Step 6 plan and the Step 8 summary reach Telegram; per-merge and per-dispatch updates go to the plane
 
 ## Scheduling
 

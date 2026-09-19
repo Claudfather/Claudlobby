@@ -73,7 +73,10 @@ from pathlib import Path
 #: WITHOUT bumping this let the version guard pass and `diff_reports` then
 #: KeyError'd on the older record — caught in development, and the reason the
 #: field access below is `.get` rather than `[]`.
-SCHEMA = 2
+#: v3 added `Arm.teams` / `Arm.observed_bot` (PR4 chunk 4) — the `shape:
+#: leaf-manager` arm composes a SECOND bot, so a v2 record has no
+#: `observed_bot` to compare against and no arm to compare it with.
+SCHEMA = 3
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -266,6 +269,21 @@ class Arm:
     #: wired rather than on what it switched off, and an inventory that only
     #: varies opt-outs cannot see them (#1172).
     vault_wired: bool = False
+    #: A THIRD fleet-shape axis, after `declared` and `vault_wired`: a `teams:`
+    #: block naming a two-bot fleet (a manager and one in-fleet report that is
+    #: not itself a manager) instead of the one-bot fleet every other arm
+    #: composes. `teams:`/multi-bot fleets were named as open generalisation
+    #: the day `shape:vault-wired` landed ("What the gate does NOT cover") —
+    #: this is that generalisation, scoped to the one shape a role overlay
+    #: needs to become visible at all. `False` for every arm that predates it,
+    #: so their composed fleet stays byte-identical to what it composed before
+    #: this field existed.
+    teams: bool = False
+    #: Which bot's directory this arm observes. Every arm before this one only
+    #: ever composed `nakedbot`, so `observe_arm` could hardcode the literal; a
+    #: `teams` arm composes a SECOND bot (the manager), and the manager — not
+    #: the worker — is the one whose role overlay is under test.
+    observed_bot: str = "nakedbot"
     generate_rc: int = -1
     generate_stderr_tail: str = ""
     sections: dict[str, list[str]] = field(default_factory=dict)
@@ -335,7 +353,7 @@ fleet:
     nakedbot:
       name: nakedbot
       expertise: [probe-minimal]
-{declared}"""
+{declared}{teams}"""
 
 
 def write_probe(root: Path, arm: Arm) -> None:
@@ -356,8 +374,25 @@ def write_probe(root: Path, arm: Arm) -> None:
         # SET; nothing here reads the tree, and pointing at a real vault would
         # make the observation depend on the host's knowledge corpus.
         declared += "      claudron_vault_path: /tmp/naked-probe-vault\n"
+    teams = ""
+    if arm.teams:
+        # A SECOND bot, sibling to `nakedbot` under `bots:` (same 4-space
+        # indent), plus a top-level `teams:` block naming it manager of the
+        # first. Empty string for every arm that does not opt in, so the
+        # `{teams}` slot is inert and every pre-existing arm's fleet.yaml
+        # stays byte-identical (controller ruling).
+        teams = (
+            "    nakedmgr:\n"
+            "      name: nakedmgr\n"
+            "      expertise: [probe-minimal]\n"
+            "\n"
+            "  teams:\n"
+            "    core:\n"
+            "      manager: nakedmgr\n"
+            "      workers: [nakedbot]\n"
+        )
     (overlay / "fleet.yaml").write_text(
-        FLEET_TEMPLATE.format(system_defaults=sd, declared=declared)
+        FLEET_TEMPLATE.format(system_defaults=sd, declared=declared, teams=teams)
     )
 
 
@@ -392,8 +427,85 @@ def scrub(text: str, root: Path) -> str:
     beside it) makes two observations of the SAME commit differ, which trains a
     reader to skim past drift in the one artifact whose entire job is to make
     drift visible.
+
+    Replaces BOTH the literal form of *root* and its RESOLVED form
+    (``root.resolve()``), longest candidate first — never just the literal
+    one. A symlink'd tempdir is not a corner case: on macOS ``$TMPDIR`` lives
+    under ``/var``, itself a symlink to ``/private/var``, and
+    ``composer.py``'s ``src.resolve()`` writes every skill symlink's target
+    fully resolved. Where the resolved form CONTAINS the literal one as a
+    substring (exactly the ``/private`` + literal shape above), replacing the
+    literal one first still finds and replaces that embedded substring —
+    ``str.replace`` does not care that the match sits inside a longer one —
+    which strands the extra prefix (``/private$EXPORT/...``) instead of
+    consuming the whole path. Longest-first consumes the longer form in one
+    pass, so nothing survives to be found (or half-found) afterward. Fixed
+    only after a baseline recorded on macOS reported spurious drift when
+    self-checked, since the same commit observed on a host whose tempdir does
+    not resolve through ``/private`` would have recorded the clean form —
+    two observations of the SAME commit must be byte-identical regardless of
+    which host recorded them, not only within one.
     """
-    return text.replace(str(root), "$EXPORT")
+    candidates = sorted({str(root), str(root.resolve())}, key=len, reverse=True)
+    for candidate in candidates:
+        text = text.replace(candidate, "$EXPORT")
+    return text
+
+
+def scrub_record(obj, root: Path):
+    """Recursively scrub every string in a dict/list tree against *root*.
+
+    The generic backstop behind the hand-applied `scrub()` call sites above
+    (`run_generate`'s stderr tail, `run_freshbox`'s output, `observe_arm`'s
+    `dir_entries`): each of those exists because ONE specific field was
+    found, once, to carry this run's export path into a committed record —
+    and this file was bitten TWICE in one cycle that way. `arm.sections`
+    (and, through it, `composed_instructions`) was never run through `scrub`
+    at all; it happened to carry no root-shaped path in practice, which is
+    exactly what let the gap stand unnoticed. Rather than keep auditing
+    fields one at a time as new ones are added, `build_report` walks the
+    WHOLE assembled tree once here, so a string the export path can reach
+    through is scrubbed regardless of which field carries it. The per-field
+    calls stay — existing tests observe `Arm` objects directly, before this
+    function ever runs — and this is the net underneath them, applied once
+    at the point the report is assembled.
+    """
+    if isinstance(obj, str):
+        return scrub(obj, root)
+    if isinstance(obj, dict):
+        return {k: scrub_record(v, root) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [scrub_record(v, root) for v in obj]
+    return obj
+
+
+def find_unscrubbed_path(obj, root: Path, path: str = "report") -> str | None:
+    """The dotted/bracketed field path of the first string in *obj* that
+    still contains the literal or resolved form of *root*, or ``None`` when
+    the whole tree is clean.
+
+    The record-wide assertion behind :func:`scrub_record`: a scrub that
+    silently missed something (a future field, a third path form, an
+    encoding surprise) must refuse the record rather than let a run-specific
+    path reach a committed baseline unnoticed. Names WHERE, not just THAT —
+    the whole point of asserting record-wide is to say what to go fix.
+    """
+    candidates = (str(root), str(root.resolve()))
+    if isinstance(obj, str):
+        return path if any(c in obj for c in candidates) else None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            hit = find_unscrubbed_path(v, root, f"{path}.{k}")
+            if hit:
+                return hit
+        return None
+    if isinstance(obj, list):
+        for i, v in enumerate(obj):
+            hit = find_unscrubbed_path(v, root, f"{path}[{i}]")
+            if hit:
+                return hit
+        return None
+    return None
 
 
 def run_generate(root: Path, python: str) -> tuple[int, str]:
@@ -464,11 +576,20 @@ def observe_arm(root: Path, python: str, arm: Arm, registry) -> Arm:
     """Compose one arm and fill in everything it produced."""
     write_probe(root, arm)
     arm.generate_rc, arm.generate_stderr_tail = run_generate(root, python)
-    bot_dir = root / "local" / "naked-probe" / "runtime" / "bots" / "nakedbot"
+    bot_dir = root / "local" / "naked-probe" / "runtime" / "bots" / arm.observed_bot
     if arm.generate_rc != 0 or not bot_dir.is_dir():
         return arm  # a failed arm records its rc and stays empty, never green
 
-    arm.dir_entries = inventory_dir(bot_dir)
+    # `scrub`, not raw `inventory_dir`: a skill symlink's target is an ABSOLUTE
+    # path (`composer.py`'s `src.resolve()`), and until the `shape:
+    # leaf-manager` arm no arm ever composed one — `skills` has no registry
+    # default and no prior arm declares a skill directly, so this call site
+    # never needed it before. Without this, two observations of the SAME
+    # commit differ on every run (a fresh `mktemp` export path baked into the
+    # target), which is exactly what `scrub` exists to prevent everywhere else
+    # it is already applied (`run_generate`, `run_freshbox`). Measured via the
+    # self-check this arm's own baseline recording is required to pass clean.
+    arm.dir_entries = [scrub(e, root) for e in inventory_dir(bot_dir)]
     arm.sections = parse_sections((bot_dir / "CLAUDE.md").read_text())
 
     for etype, surface in sorted(SURFACES.items()):
@@ -521,15 +642,31 @@ def build_arms(types: list[str]) -> list[Arm]:
     # forms are mutually exclusive, so this arm is also what would catch a gate
     # regression that composed both or neither.
     arms.append(Arm(label="shape:vault-wired", system_defaults=None, vault_wired=True))
+    # A THIRD fleet shape: `teams:` naming a manager (`nakedmgr`) over one
+    # in-fleet report (`nakedbot`) that is not itself a manager — a leaf
+    # manager (`FleetConfig.leaf_manager_bots()`). Exists because a role
+    # overlay (`Disposition.roles`) is the one thing no arm above can see: all
+    # seventeen compose a single non-manager bot, so `REGISTRY["protocols"]
+    # .roles = {"leaf-manager": ("checkin",)}` (Task 3) would certify a fleet
+    # nobody runs until this arm existed. Observes the MANAGER, not the
+    # worker, since the manager is the bot the role overlay actually reaches.
+    arms.append(
+        Arm(
+            label="shape:leaf-manager",
+            system_defaults=None,
+            teams=True,
+            observed_bot="nakedmgr",
+        )
+    )
     return arms
 
 
 # ---------------------------------------------------------------------- reporting
 
 
-def build_report(sha: str, arms: list[Arm], freshbox: tuple[int, str]) -> dict:
+def build_report(sha: str, arms: list[Arm], freshbox: tuple[int, str], root: Path) -> dict:
     baseline = next(a for a in arms if a.label == "baseline")
-    return {
+    report = {
         "schema": SCHEMA,
         "ref": sha,
         "freshbox": {"rc": freshbox[0], "output": freshbox[1]},
@@ -542,6 +679,18 @@ def build_report(sha: str, arms: list[Arm], freshbox: tuple[int, str]) -> dict:
         ),
         "arms": [asdict(a) for a in arms],
     }
+    # The one place the report is assembled — scrub the WHOLE tree once,
+    # generically, rather than trusting that every field which might carry
+    # this run's export path was hand-scrubbed at its own call site.
+    report = scrub_record(report, root)
+    remnant = find_unscrubbed_path(report, root)
+    if remnant:
+        raise RuntimeError(
+            f"REFUSING TO EMIT: the export path survived scrubbing at "
+            f"{remnant} — a remnant would leak this run's local filesystem "
+            "layout into a committed record."
+        )
+    return report
 
 
 def diff_reports(old: dict, new: dict) -> list[str]:
@@ -696,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
         observe_arm(
             root, sys.executable, Arm(label="baseline", system_defaults=None), registry
         )
-        report = build_report(sha, arms, run_freshbox(root, sys.executable))
+        report = build_report(sha, arms, run_freshbox(root, sys.executable), root)
     finally:
         if not args.keep:
             shutil.rmtree(workdir, ignore_errors=True)

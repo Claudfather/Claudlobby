@@ -8,8 +8,11 @@
 #
 # ARMING is enrollment, not a flag: `defaults.jobs.manager-checkin.enroll: true`
 # in fleet.yaml, then generate + lib/setup-fleet. The PER-BOT gate is the
-# composed `checkin` skill symlink -- that is how a worker, a coordinator and an
-# opted-out manager are all excluded, and how an operator un-equips one.
+# composed `checkin` skill symlink -- that excludes a worker and an
+# opted-out manager outright (bot_is_manager is false for the worker; the
+# opted-out manager was never equipped). A coordinator is excluded only by
+# NOT being equipped by default -- one that hand-declares checkin is
+# equipped like any other manager, and this script injects into it too.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

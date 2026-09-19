@@ -1521,6 +1521,157 @@ class TestValidateGenerateParity:
         assert not any("/opt/rogue/job.sh" in e for e in report.errors)
 
 
+class TestManagerCheckinArmedLeaflessWarning:
+    """Fix round 1, item 2 (PR4 task 3, #1569): the compose-time job gate
+    (composer.LEAF_MANAGER_GATED_JOBS) filters `manager-checkin` out of the
+    timers dict BEFORE anything reads its `enroll` flag, so an operator who
+    arms it (`fleet.defaults.jobs.manager-checkin.enroll: true`) on a fleet
+    with no leaf manager gets total silence: the armed line does nothing,
+    and nothing says so. `validate` reads the SAME source of truth the
+    composer does — `fleet.defaults` (the merged dict `load_fleet` stores on
+    the fleet, the same one `compose_fleet_timers` receives as
+    `merged_defaults`) and `fleet.leaf_manager_bots()` for the predicate —
+    never re-derived, per `_validate_timers`'s own precedent two tests up."""
+
+    def _load(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return fleet, _make_paths(fleet_dir)
+
+    def test_armed_and_leafless_warns_exactly_once_naming_job_and_reason(
+        self, fleet_dir, monkeypatch
+    ):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        fleet.teams = {}  # no team names a manager -> no leaf manager
+        assert fleet.leaf_manager_bots() == set()
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": True},
+        }
+        report = validate(fleet, paths)
+        matches = [w for w in report.warnings if "manager-checkin" in w]
+        assert len(matches) == 1, report.warnings
+        assert "no leaf manager" in matches[0]
+        # names what WOULD make it fire
+        assert "in-fleet report" in matches[0] and "not itself a manager" in matches[0]
+
+    def test_armed_with_a_leaf_manager_stays_silent(self, fleet_dir, monkeypatch):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        assert fleet.leaf_manager_bots() == {"lead"}  # the fleet_dir default shape
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": True},
+        }
+        report = validate(fleet, paths)
+        assert not any(
+            "manager-checkin" in w and "no leaf manager" in w
+            for w in report.warnings
+        ), report.warnings
+
+    def test_unarmed_and_leafless_stays_silent(self, fleet_dir, monkeypatch):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        fleet.teams = {}
+        assert fleet.leaf_manager_bots() == set()
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": False},
+        }
+        report = validate(fleet, paths)
+        assert not any(
+            "manager-checkin" in w and "no leaf manager" in w
+            for w in report.warnings
+        ), report.warnings
+
+
+class TestManagerCheckinUnarmedLeafWarning:
+    """Fix wave B item 1d — the mirror of TestManagerCheckinArmedLeaflessWarning
+    above. A leaf manager is equipped with the check-in by default
+    (system_defaults.protocols, PR4 task 3); on a fleet that never armed
+    `manager-checkin` that bot's composed CLAUDE.md says "silence is the
+    default" while nothing ever triggers a check-in — and nothing told the
+    operator. Same source of truth as the warning above (`fleet.defaults
+    ["jobs"]` and `fleet.leaf_manager_bots()`, never re-derived); these two
+    warnings are each other's mirror and live in the same place."""
+
+    def _load(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return fleet, _make_paths(fleet_dir)
+
+    def test_leaf_manager_and_unarmed_warns_once_naming_count_and_arming_line(
+        self, fleet_dir, monkeypatch
+    ):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        assert fleet.leaf_manager_bots() == {"lead"}  # the fleet_dir default shape
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": False},
+        }
+        report = validate(fleet, paths)
+        matches = [
+            w for w in report.warnings
+            if "manager-checkin" in w and "not armed" in w
+        ]
+        assert len(matches) == 1, report.warnings
+        assert "1 leaf manager" in matches[0]
+        assert (
+            "defaults: { jobs: { manager-checkin: { enroll: true } } }"
+            in matches[0]
+        )
+        assert "lib/setup-fleet" in matches[0]
+
+    def test_leaf_manager_and_armed_stays_silent(self, fleet_dir, monkeypatch):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        assert fleet.leaf_manager_bots() == {"lead"}
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": True},
+        }
+        report = validate(fleet, paths)
+        assert not any(
+            "manager-checkin" in w and "not armed" in w
+            for w in report.warnings
+        ), report.warnings
+
+    def test_no_leaf_manager_and_unarmed_stays_silent(self, fleet_dir, monkeypatch):
+        # The OTHER warning's territory (TestManagerCheckinArmedLeaflessWarning)
+        # — this one only ever fires when a leaf manager was actually equipped.
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        fleet.teams = {}
+        assert fleet.leaf_manager_bots() == set()
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": False},
+        }
+        report = validate(fleet, paths)
+        assert not any(
+            "manager-checkin" in w and "not armed" in w
+            for w in report.warnings
+        ), report.warnings
+
+    def test_protocols_opted_out_and_unarmed_stays_silent(
+        self, fleet_dir, monkeypatch
+    ):
+        # protocols: false means nobody was equipped by default -- nothing
+        # for this warning to be about.
+        from claudlobby.config import SystemDefaultsConfig
+
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        assert fleet.leaf_manager_bots() == {"lead"}
+        fleet.system_defaults = SystemDefaultsConfig(protocols=False)
+        fleet.defaults["jobs"] = {
+            **fleet.defaults.get("jobs", {}),
+            "manager-checkin": {"enroll": False},
+        }
+        report = validate(fleet, paths)
+        assert not any(
+            "manager-checkin" in w and "not armed" in w
+            for w in report.warnings
+        ), report.warnings
+
+
 class TestGitCredentialsWarnings:
     """Per-org git credential routing has two operator-side gaps that both
     compose VALID config and then fail at runtime, so both warn (never fail):

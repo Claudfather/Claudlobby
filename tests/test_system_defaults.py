@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from textwrap import dedent
 
@@ -26,6 +27,7 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.paths import Paths
+from tests.conftest import install_real_template
 
 
 def _write_fleet(root: Path, fleet_yaml: str) -> Path:
@@ -898,12 +900,18 @@ class TestJobsComposition:
 
     def test_byte_identical_units_no_override(self, tmp_path):
         # A fleet with NO jobs override composes exactly the system default job
-        # units — same names + content as the pre-Phase-1 fleet_timers.
+        # units — same names + content as the pre-Phase-1 fleet_timers — WITH
+        # ONE EXCEPTION: manager-checkin is leaf-manager-gated (PR4 task 3,
+        # #1569), and _NO_OVERRIDE_FLEET is a single worker with no manager
+        # at all, so it composes no unit for that job. See
+        # TestManagerCheckinJobGate for the gate's own dedicated coverage.
         timers_dir = self._compose(tmp_path, _NO_OVERRIDE_FLEET)
-        for name in _ALL_JOB_NAMES:
+        for name in _ALL_JOB_NAMES - {"manager-checkin"}:
             assert (timers_dir / f"com.test.{name}.service").is_file()
             assert (timers_dir / f"com.test.{name}.timer").is_file()
             assert (timers_dir / f"com.test.{name}.plist").is_file()
+        for ext in ("service", "timer", "plist"):
+            assert not (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
         # keepalive static interval unchanged
         assert "OnBootSec=60" in (timers_dir / "com.test.keepalive.timer").read_text()
         # interval_from resolves end-to-end (observability.pulse_interval = 300)
@@ -1079,12 +1087,29 @@ class TestComposeHostTimers:
 class TestDormantManifest:
     def _compose(self, tmp_path, merged):
         from claudlobby.composer import compose_fleet_timers
+        from claudlobby.config import BotConfig, TeamConfig
 
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
         paths = Paths(root=root, fleet_dir=root)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        # manager-checkin (PR4 task 3, #1569) is leaf-manager-gated: a fleet
+        # with no leaf manager composes no unit for it at all, which would
+        # make this class's dormancy-manifest assertions about that job
+        # vacuous. lead/worker gives the fleet exactly one leaf manager so
+        # manager-checkin keeps demonstrating composed-but-dormant, same as
+        # weekly-worker-restart beside it — this class is about the DORMANT
+        # manifest mechanism, not leaf-manager topology, so the shape is
+        # chosen to keep that mechanism exercised.
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            bots={
+                "lead": BotConfig(bot_id="lead", name="lead", expertise=["orchestration"]),
+                "worker": BotConfig(bot_id="worker", name="worker", expertise=["eng"]),
+            },
+            teams={"eng": TeamConfig(name="eng", manager="lead", workers=["worker"])},
+        )
         return compose_fleet_timers(fleet, paths, merged)
 
     def test_manifest_lists_enroll_false_jobs(self, tmp_path):
@@ -1127,3 +1152,317 @@ class TestDormantManifest:
         assert entries == ["com.test.manager-checkin"]
         # Still composed, of course.
         assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()
+
+
+# ---------------------------------------------------------------------------
+# manager-checkin's compose-time job gate (PR4 task 3, #1569, controller
+# correction 5): the fleet-job emitter skips `manager-checkin` entirely for a
+# fleet with NO leaf manager (`fleet.leaf_manager_bots()` empty) — not even a
+# dormant unit, because such a fleet can never satisfy the job's own
+# precondition (there is no manager for it to ever inject into). A fleet
+# whose leaf manager disappears between generates must not leave a STALE
+# unit on disk that a later `enroll: true` or a naive setup-fleet run would
+# enroll for real.
+# ---------------------------------------------------------------------------
+
+
+class TestManagerCheckinJobGate:
+    _NO_LEAF_MANAGER = """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  bots:
+    worker:
+      expertise: [eng]
+"""
+
+    _WITH_LEAF_MANAGER = """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  teams:
+    eng:
+      manager: lead
+      workers: [worker]
+  bots:
+    lead:
+      expertise: [eng]
+    worker:
+      expertise: [eng]
+"""
+
+    # The "worker removed" fleet, same bot id (`lead`), same fleet name +
+    # service_prefix, no team any more — the exact "remove the worker" shape
+    # correction 5 names, composed into the SAME output dir as
+    # _WITH_LEAF_MANAGER above.
+    _LEAF_MANAGER_WORKER_REMOVED = """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  bots:
+    lead:
+      expertise: [eng]
+"""
+
+    # Same "worker removed" shape as above, plus system_defaults.timers:
+    # false — so compose_fleet_timers's early return (`not emit_defaults and
+    # not sweep_on and not briefing_on`) fires too. No sweep, no briefing
+    # bot declared either: every OTHER reason to touch the timers dir is
+    # off, which is exactly what item 1g needs to isolate the prune block.
+    _NO_LEAF_MANAGER_TIMERS_OFF = """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  system_defaults:
+    timers: false
+  bots:
+    lead:
+      expertise: [eng]
+"""
+
+    def _compose(self, tmp_path, fleet_yaml, *, root=None):
+        from claudlobby.composer import compose_fleet_timers
+
+        root = root if root is not None else tmp_path / "claudlobby"
+        fleet, merged = load_fleet(_write_fleet(root, fleet_yaml))
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_fleet_timers(fleet, paths, merged)
+
+    def test_a_fleet_with_no_leaf_manager_composes_no_manager_checkin_unit(
+        self, tmp_path
+    ):
+        timers_dir = self._compose(tmp_path, self._NO_LEAF_MANAGER)
+        for ext in ("service", "timer", "plist"):
+            assert not (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
+        dormant = (timers_dir / "DORMANT").read_text().splitlines()
+        assert "com.test.manager-checkin" not in dormant
+        # every OTHER default job composes exactly as it always has —
+        # the gate is scoped to manager-checkin alone.
+        assert (timers_dir / "com.test.task-recheck.timer").is_file()
+        assert (timers_dir / "com.test.keepalive.timer").is_file()
+        assert "com.test.weekly-worker-restart" in dormant
+
+    def test_a_fleet_with_a_leaf_manager_composes_it_dormant(self, tmp_path):
+        """Positive control for the test above: the SAME job, the ONLY
+        difference being a fleet shape that has a leaf manager to receive
+        it — composes exactly as it did before this task (dormant, per
+        system.yaml's own enroll: false)."""
+        timers_dir = self._compose(tmp_path, self._WITH_LEAF_MANAGER)
+        for ext in ("service", "timer", "plist"):
+            assert (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
+        assert (
+            "com.test.manager-checkin"
+            in (timers_dir / "DORMANT").read_text().splitlines()
+        )
+
+    def test_losing_the_last_leaf_manager_prunes_the_stale_unit(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        timers_dir = self._compose(tmp_path, self._WITH_LEAF_MANAGER, root=root)
+        for ext in ("service", "timer", "plist"):
+            assert (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
+        assert (
+            "com.test.manager-checkin"
+            in (timers_dir / "DORMANT").read_text().splitlines()
+        )
+        # Every sibling unit's CONTENT before the re-compose, keyed by name —
+        # the gate must not so much as rewrite a byte of another job's unit.
+        siblings_before = {
+            p.name: p.read_text()
+            for p in timers_dir.iterdir()
+            if p.name != "DORMANT" and not p.name.startswith("com.test.manager-checkin.")
+        }
+        assert siblings_before  # sanity: there ARE siblings to compare
+
+        # Re-compose the SAME output dir after removing the worker (lead
+        # keeps its bot id; only its team is gone) — no leaf manager remains.
+        self._compose(tmp_path, self._LEAF_MANAGER_WORKER_REMOVED, root=root)
+
+        for ext in ("service", "timer", "plist"):
+            assert not (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
+        assert (
+            "com.test.manager-checkin"
+            not in (timers_dir / "DORMANT").read_text().splitlines()
+        )
+        siblings_after = {
+            p.name: p.read_text()
+            for p in timers_dir.iterdir()
+            if p.name != "DORMANT" and not p.name.startswith("com.test.manager-checkin.")
+        }
+        assert siblings_after == siblings_before
+
+    def test_losing_the_last_leaf_manager_logs_each_pruned_file(
+        self, tmp_path, caplog
+    ):
+        """Fix round 1, item 1: the prune speaks. `_prune_host_units` (the
+        composer's other prune) logs every unlink; this one silently
+        discarded its own return value. One INFO line per removed file,
+        naming the file and WHY (no leaf manager left to receive it)."""
+        root = tmp_path / "claudlobby"
+        self._compose(tmp_path, self._WITH_LEAF_MANAGER, root=root)
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="claudlobby.composer"):
+            self._compose(tmp_path, self._LEAF_MANAGER_WORKER_REMOVED, root=root)
+        pruned = [
+            r.message for r in caplog.records if "manager-checkin" in r.message
+        ]
+        assert len(pruned) == 3, pruned  # .service, .timer, .plist
+        for ext in ("service", "timer", "plist"):
+            assert any(
+                f"com.test.manager-checkin.{ext}" in m for m in pruned
+            ), pruned
+        assert all("no leaf manager" in m for m in pruned), pruned
+
+    def test_a_fleet_that_never_had_the_unit_prunes_silently(
+        self, tmp_path, caplog
+    ):
+        """The other half: nothing to prune, nothing logged — nothing exists
+        for this fleet to have ever composed manager-checkin's units."""
+        with caplog.at_level(logging.INFO, logger="claudlobby.composer"):
+            self._compose(tmp_path, self._NO_LEAF_MANAGER)
+        pruned = [
+            r.message for r in caplog.records if "manager-checkin" in r.message
+        ]
+        assert not pruned, pruned
+
+    def test_the_prune_runs_even_when_every_other_reason_to_compose_is_off(
+        self, tmp_path
+    ):
+        """Fix wave B item 1g — the named candidate mutant. The
+        leaf-manager-gated prune (composer.py, `compose_fleet_timers`) sits
+        BEFORE `if not emit_defaults and not sweep_on and not briefing_on:
+        ... return timers_dir` — deliberately, so a fleet that loses its
+        last leaf manager still gets its stale manager-checkin units
+        removed even when every OTHER reason to touch the timers dir is
+        off (system_defaults.timers: false here, plus no sweep and no
+        briefing bot in either shape). Moving the prune block below that
+        early return makes this fail: the return would fire first and the
+        stale units would survive."""
+        root = tmp_path / "claudlobby"
+        timers_dir = self._compose(tmp_path, self._WITH_LEAF_MANAGER, root=root)
+        for ext in ("service", "timer", "plist"):
+            assert (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
+
+        self._compose(tmp_path, self._NO_LEAF_MANAGER_TIMERS_OFF, root=root)
+
+        for ext in ("service", "timer", "plist"):
+            assert not (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
+
+
+# ---------------------------------------------------------------------------
+# The opt-out surface (PR4 task 3, #1569, controller correction 7):
+# `fleet.system_defaults.protocols: false` must remove the leaf-manager
+# default AND — through Task 1's requires: union, which is fed by the
+# EFFECTIVE protocol set — the skill it brings and that skill's grants.
+# Asserted at the COMPOSED ARTIFACT (CLAUDE.md, the skill symlink,
+# settings.local.json), never only at the resolver: a resolver-level pass
+# proves the union computes the right list, not that the composer actually
+# withheld the file/symlink/grant it names.
+# ---------------------------------------------------------------------------
+
+
+def _write_checkin_library_for_opt_out_tests(fleet_dir: Path) -> None:
+    """Copy the REAL checkin protocol + skill into the fixture's library —
+    tests/test_checkin_library.py's precedent, repeated here rather than
+    imported: this file's own convention is a local helper per file, not a
+    cross-file shared one (test_leaf_manager_role.py, test_requires_linking.py
+    each keep their own copy too)."""
+    import shutil
+
+    repo = Path(__file__).resolve().parent.parent
+    shutil.copy(
+        repo / "library" / "protocols" / "checkin.md",
+        fleet_dir / "library" / "protocols" / "checkin.md",
+    )
+    dst = fleet_dir / "library" / "skills" / "checkin"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(repo / "library" / "skills" / "checkin", dst)
+
+
+def _add_coordinator_for_opt_out_tests(fleet_dir: Path) -> None:
+    """Add `coord`, managing a team of one (lead) — lead stays a leaf manager
+    (it still manages eng/worker-1); coord is a coordinator, not a leaf."""
+    text = (fleet_dir / "fleet.yaml").read_text()
+    text = text.replace(
+        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n",
+        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n"
+        "    top:\n      manager: coord\n      workers: [lead]\n",
+    )
+    text = text.replace(
+        "  bots:\n    lead:\n",
+        "  bots:\n    coord:\n      expertise: [orchestration]\n    lead:\n",
+    )
+    (fleet_dir / "fleet.yaml").write_text(text)
+
+
+class TestLeafManagerCheckinOptOut:
+    def _checkin_state(self, fleet, paths, bot_id: str) -> dict[str, bool]:
+        """Compose *bot_id* for real and read back the three composed
+        artifacts a leaf manager's check-in equipment touches."""
+        from claudlobby.composer import compose_bot
+
+        compose_bot(fleet.bots[bot_id], fleet, paths, log=lambda m: None)
+        bot_dir = paths.bot_runtime(bot_id)
+        md = (bot_dir / "CLAUDE.md").read_text()
+        link = bot_dir / ".claude" / "skills" / "checkin"
+        settings = json.loads(
+            (bot_dir / ".claude" / "settings.local.json").read_text()
+        )
+        allow = settings["permissions"]["allow"]
+        return {
+            "section": "Silence is the default" in md,
+            "symlink": link.is_symlink(),
+            "grant": "Skill(checkin)" in allow,
+        }
+
+    def test_protocols_false_removes_the_leaf_manager_default(
+        self, fleet_dir, monkeypatch
+    ):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        install_real_template(fleet_dir)
+        _write_checkin_library_for_opt_out_tests(fleet_dir)
+        text = (fleet_dir / "fleet.yaml").read_text().replace(
+            "fleet:\n  name: test-fleet\n",
+            "fleet:\n  name: test-fleet\n  system_defaults:\n    protocols: false\n",
+            1,
+        )
+        (fleet_dir / "fleet.yaml").write_text(text)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        # the opt-out is the ONLY thing that changed — lead is still a leaf
+        # manager; it is simply not EQUIPPED, because the default that would
+        # equip it is switched off fleet-wide.
+        assert "lead" in fleet.leaf_manager_bots()
+
+        got = self._checkin_state(fleet, paths, "lead")
+        assert got == {"section": False, "symlink": False, "grant": False}, got
+
+    def test_the_same_fleet_with_no_opt_out_equips_only_the_leaf_manager(
+        self, fleet_dir, monkeypatch
+    ):
+        """The contrasting positive, in the SAME file as the opt-out it is
+        the baseline for: a leaf manager with no opt-out gets the section,
+        the symlink AND the grant; a coordinator and a worker in the same
+        fleet get none of the three."""
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        install_real_template(fleet_dir)
+        _write_checkin_library_for_opt_out_tests(fleet_dir)
+        _add_coordinator_for_opt_out_tests(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        assert fleet.leaf_manager_bots() == {"lead"}
+
+        lead_got = self._checkin_state(fleet, paths, "lead")
+        assert lead_got == {"section": True, "symlink": True, "grant": True}, lead_got
+
+        coord_got = self._checkin_state(fleet, paths, "coord")
+        assert coord_got == {
+            "section": False, "symlink": False, "grant": False,
+        }, coord_got
+
+        worker_got = self._checkin_state(fleet, paths, "worker-1")
+        assert worker_got == {
+            "section": False, "symlink": False, "grant": False,
+        }, worker_got

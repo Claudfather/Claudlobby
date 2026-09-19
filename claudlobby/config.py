@@ -756,6 +756,32 @@ class FleetConfig:
         from_manages = {name for name, bot in self.bots.items() if bot.manages}
         return from_teams | from_manages
 
+    def leaf_manager_bots(self) -> set[str]:
+        """Managers at least one of whose IN-FLEET reports is not itself a manager.
+
+        The second detectable role (spec §10). ``manager_bots()`` is true for a
+        coordinator too, and the composed ``MANAGER_TMUX`` self-pointer follows the
+        same set, so ``bot_is_manager`` cannot tell the two apart at runtime either
+        — the distinction has to be made at compose time.
+
+        A CROSS-FLEET ``manages:`` target does NOT make a manager leaf (F5, ruled):
+        ``manages:`` exists precisely to express a coordinator whose reports are
+        managers of other fleets, so an unresolvable target is evidence of a
+        coordinator rather than of a worker. Out-of-fleet names are dropped BEFORE
+        the test, never counted as non-managers; for a money-spending default the
+        conservative direction is not to equip. A manager with no in-fleet report
+        at all is likewise not leaf.
+        """
+        managers = self.manager_bots()
+        leaf: set[str] = set()
+        for name in managers:
+            reports = {w for t in self.teams.values() if t.manager == name for w in t.workers}
+            reports |= set((self.bots[name].manages or []) if name in self.bots else [])
+            in_fleet = {r for r in reports if r in self.bots}
+            if in_fleet - managers:
+                leaf.add(name)
+        return leaf
+
     def teams_for_manager(self, bot_name: str) -> list[TeamConfig]:
         return [team for team in self.teams.values() if team.manager == bot_name]
 

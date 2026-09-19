@@ -338,7 +338,7 @@ class TestLinkSkills:
         )
         bot_dir = paths.bot_runtime(bot.bot_id)
         (bot_dir / ".claude" / "skills").mkdir(parents=True)
-        link_skills(bot, paths, logging.getLogger("test").info)
+        link_skills(bot, paths, logging.getLogger("test").info, skills=bot.skills)
         assert (bot_dir / ".claude" / "skills" / "simplify").is_symlink()
 
     def test_skips_missing_skill(self, fleet_dir):
@@ -353,7 +353,7 @@ class TestLinkSkills:
         bot_dir = paths.bot_runtime(bot.bot_id)
         (bot_dir / ".claude" / "skills").mkdir(parents=True)
         # Should not raise
-        link_skills(bot, paths, logging.getLogger("test").info)
+        link_skills(bot, paths, logging.getLogger("test").info, skills=bot.skills)
 
     def test_empty_skills(self, fleet_dir):
         paths = _make_paths(fleet_dir)
@@ -366,7 +366,7 @@ class TestLinkSkills:
         )
         bot_dir = paths.bot_runtime(bot.bot_id)
         (bot_dir / ".claude" / "skills").mkdir(parents=True)
-        link_skills(bot, paths, logging.getLogger("test").info)
+        link_skills(bot, paths, logging.getLogger("test").info, skills=bot.skills)
         # No symlinks created
         assert list((bot_dir / ".claude" / "skills").iterdir()) == []
 

@@ -108,6 +108,24 @@ def test_exactly_the_categories_that_ship_off():
             assert not s.why_opt_in
 
 
+def test_manager_checkin_states_its_money_category():
+    """F8 (a), ruled: the EQUIPMENT (leaf managers get the checkin skill by
+    default, PR4 task 3) is what moved; the JOB stays `OPT_IN` — injecting
+    into a live session every 15 min is a per-beat model spend, the same
+    category weekly-worker-restart's neighbours ship under. This is a
+    narrower, targeted pin beside the general sweep above: it also checks
+    the WORDING task 3 changed, not just the polarity/why_opt_in shape."""
+    row = sw.by_key("manager-checkin")
+    assert row.polarity == sw.OPT_IN
+    assert row.why_opt_in.strip()
+    assert "one manager turn per idle beat" in row.why_opt_in
+    # `what` now NAMES the leaf-manager condition, not just "an idle manager
+    # the compose equipped" — the equipment is no longer something a fleet
+    # had to hand-declare to get.
+    assert "leaf manager" in row.what.lower()
+    assert "in-fleet report" in row.what
+
+
 def test_every_switch_carries_both_directions():
     """A knob you can only turn one way is not a knob. Every row states the arm
     AND the disarm line, because the reader who needs the table is equally

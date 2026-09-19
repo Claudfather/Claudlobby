@@ -34,8 +34,8 @@ A rule needs a unit that bounds size. "Outcome in 1–3 sentences" *is* a count 
 
 **Exempt, as always:** blockers, direct answers to direct questions, error output, safety-relevant facts, and anything explicitly asked for in full.
 - **Dispatch = task + pointers.** Hand workers paths and issue refs, not inlined context walls (the `[fleet memory: title (path)]` pattern, generalized).
-- **Progress posts = one line + pointer.** The mandated cadence stands; make each beat dense.
+- **Progress posts = one line + pointer.** Where a post is due, make it dense.
 
-**Density, never frequency or routing.** Acks, heartbeats, milestone cadence, wait-point beacons, and channel-routing rules stand unchanged — substantive analysis still goes through the channel (messaging-channel-discipline); it just arrives dense. This protocol governs what a message contains, not whether it is sent.
+**Density, never frequency or routing.** Cadence is governed elsewhere (`checkin`, `inbound-acknowledgment`); this protocol still governs density only — substantive analysis still goes through the channel (messaging-channel-discipline); it just arrives dense. This protocol governs what a message contains, not whether it is sent.
 
 **Never compress:** blockers, direct answers to direct questions, error output (verbatim), safety-relevant facts, required structured fields, and any substitution of the instrument or method from what was specified.

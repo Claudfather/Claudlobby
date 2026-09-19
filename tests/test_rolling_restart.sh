@@ -78,6 +78,74 @@ run_rc() { CLAUDLOBBY_ROOT="$T" bash "$LIB_DIR/rolling-restart.sh" "$@" >/dev/nu
 assert_eq "no fleet and no --all → usage error (2)"   "2" "$(run_rc)"
 assert_eq "unknown option → error (2)"                "2" "$(run_rc --bogus)"
 assert_eq "non-integer --ceiling → error (2)"         "2" "$(run_rc flatfleet --ceiling abc)"
+assert_eq "--workers-only + --managers-only → error (2)" "2" \
+    "$(run_rc flatfleet --workers-only --managers-only)"
+
+echo ""
+echo "=== rolling-restart.sh --managers-only — skips workers, restarts the manager ==="
+
+# A fleet of one manager (zzz-manager) and two workers, named so glob order
+# ("$bots_dir"/*/, alphabetical) processes the workers FIRST — proving both
+# are logged as skipped before the manager is ever reached. Hermetic per the
+# suite contract: pre-stop-handoff.sh and spin-up-bot.sh are stubbed onto a
+# private LIB_DIR override, so this never touches a real tmux session,
+# systemd unit, or launchd job.
+MGR_BOTS_DIR="$T/local/mgrfleet/runtime/bots"
+mkdir -p "$MGR_BOTS_DIR/aaa-worker-1" "$MGR_BOTS_DIR/bbb-worker-2" "$MGR_BOTS_DIR/zzz-manager"
+cat > "$T/local/mgrfleet/fleet.yaml" <<'YAML'
+fleet:
+  name: mgrfleet
+  bots:
+    aaa-worker-1:
+      expertise: [eng]
+    bbb-worker-2:
+      expertise: [eng]
+    zzz-manager:
+      expertise: [orchestration]
+YAML
+printf 'BOT_ID=aaa-worker-1\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/aaa-worker-1/bot.conf"
+printf 'BOT_ID=bbb-worker-2\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/bbb-worker-2/bot.conf"
+printf 'BOT_ID=zzz-manager\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/zzz-manager/bot.conf"
+
+STUB_LIB="$T/stub-lib"
+mkdir -p "$STUB_LIB"
+cat > "$STUB_LIB/pre-stop-handoff.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat > "$STUB_LIB/spin-up-bot.sh" <<'SH'
+#!/usr/bin/env bash
+# Hermetic double: a real spin-up would talk to tmux/systemd/launchd. This
+# only satisfies the fence-then-BRIDGE_READY contract wait_bridge_ready reads.
+bot_dir="$1"
+mkdir -p "$bot_dir/logs"
+printf "STUB BRIDGE_READY\n" >> "$bot_dir/logs/startup.log"
+exit 0
+SH
+chmod +x "$STUB_LIB/pre-stop-handoff.sh" "$STUB_LIB/spin-up-bot.sh"
+
+# rr_process_fleet and its lib-common dependents are already in this shell
+# from the source above; drive it directly rather than through rr_main so no
+# real tmux/systemd/launchd call is ever in reach. LIB_DIR is restored right
+# after so the weekly-worker-restart.sh check below still reads the real lib/.
+REAL_LIB_DIR="$LIB_DIR"
+LOG="$T/rolling-restart-managers-only.log"
+RESTARTED=0; SKIPPED=0; FAILED=0
+WORKERS_ONLY=0; MANAGERS_ONLY=1; SKIP_HEALTHY=0; CONTINUE_ON_FAIL=0; CEILING=0
+LIB_DIR="$STUB_LIB"
+rr_process_fleet "mgrfleet" || true
+LIB_DIR="$REAL_LIB_DIR"
+
+assert_eq "--managers-only skips worker aaa-worker-1" "true" \
+    "$(grep -q "SKIP (worker): aaa-worker-1" "$LOG" && echo true || echo false)"
+assert_eq "--managers-only skips worker bbb-worker-2" "true" \
+    "$(grep -q "SKIP (worker): bbb-worker-2" "$LOG" && echo true || echo false)"
+assert_eq "--managers-only restarts the manager zzz-manager" "true" \
+    "$(grep -q "READY: zzz-manager" "$LOG" && echo true || echo false)"
+assert_eq "--managers-only never skips the manager" "false" \
+    "$(grep -q "SKIP (worker): zzz-manager" "$LOG" && echo true || echo false)"
+assert_eq "--managers-only skip count is 2 (both workers)" "2" "$SKIPPED"
+assert_eq "--managers-only restarted count is 1 (the manager)" "1" "$RESTARTED"
 
 echo ""
 echo "=== weekly-worker-restart.sh rides the shared gate ==="
