@@ -104,7 +104,11 @@ def test_the_shim_dir_is_appended_never_prepended(tmp_path: Path):
 
 
 def test_a_host_with_the_cli_already_on_path_is_untouched(tmp_path: Path):
-    root = _bare_root(tmp_path)
+    # A root that HAS a venv CLI: with none, the second guard (no venv CLI ->
+    # return) hides the first, and removing the already-resolves guard passed
+    # this test unnoticed (a surviving mutant found it). Only the guard under
+    # test may be what leaves PATH alone here.
+    root = _venv_root(tmp_path)
     early_bin = tmp_path / "earlybin"
     _stub(early_bin / "claudlobby", "echo EARLY_MARKER")
     original = f"{early_bin}:{SAFE_PATH}"
