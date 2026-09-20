@@ -455,7 +455,7 @@ def register_subparsers(sub) -> None:
 
     pw = sub.add_parser(
         "warm-cache",
-        help="Pre-download npx packages for all MCP servers in fleet",
+        help="Pre-download npx and uvx packages for all MCP servers in fleet",
     )
     pw.add_argument(
         "--dry-run",

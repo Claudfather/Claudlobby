@@ -754,19 +754,84 @@ def cmd_uptime(args) -> int:
     return 0
 
 
-def cmd_warm_cache(args) -> int:
-    """Pre-download npx packages referenced by MCP fragments.
+# The package managers whose caches this can populate, each with the toolchain
+# an operator installs to get it. This gates which fragments are considered;
+# `_warm_prefix` below reads their args. The two must agree, and they fail in
+# OPPOSITE directions: a runtime here with no branch there lands every fragment
+# in `unreadable` and is named out loud, while a branch there with no entry here
+# is skipped SILENTLY by the membership test. Adding a runtime means editing
+# both, and only one of the two mistakes will tell you.
+_WARM_RUNTIMES = {
+    "npx": "install Node.js first",
+    "uvx": "install uv first",
+}
 
-    Scans all MCP fragments used by the fleet and runs `npx -y <pkg> --help`
-    for each unique npx-based package. This ensures ~/.npm/_npx/ is warm
-    before bot startup, avoiding 30-60s cold-download delays on Pi hardware.
+
+def _warm_prefix(command: str, args_list: list[str]) -> tuple[str, list[str]] | None:
+    """Reduce an MCP server's args to (display name, the argv that fetches it).
+
+    The warm command is `<command> <prefix> --help`, so the prefix carries
+    exactly what identifies the download and nothing else. Dropping the
+    server's own flags also keeps unexpanded `${VAR}` placeholders out of the
+    subprocess by construction rather than by a filter.
+
+    Returns None when the args name no package this can identify. That is
+    deliberately not a guess -- warming the wrong token still exits 0, and a
+    server reported as covered while it keeps paying the cold cost is the
+    failure this whole function exists to prevent.
+    """
+    if command == "npx":
+        for i, a in enumerate(args_list):
+            if a == "-y" and i + 1 < len(args_list):
+                return args_list[i + 1], ["-y", args_list[i + 1]]
+        return None
+
+    if command == "uvx":
+        # `uvx --from <spec> <entry>`: the package to fetch and the console
+        # script to run are different tokens and both are needed, because
+        # `uvx --from <spec> --help` prints uv's own help and fetches nothing.
+        # The entry must sit adjacent to the spec; any other arrangement is a
+        # shape this cannot read rather than one it should guess at.
+        for i, a in enumerate(args_list):
+            if a == "--from":
+                if i + 2 < len(args_list) and not args_list[i + 2].startswith("-"):
+                    spec, entry = args_list[i + 1], args_list[i + 2]
+                    return spec, ["--from", spec, entry]
+                return None
+        # `uvx <pkg> [server flags...]`: only the first token is the package.
+        # A leading flag means some other shape -- uv's own value-taking
+        # options (--python, --with) would otherwise have their value read as
+        # a package name.
+        if args_list and not args_list[0].startswith("-"):
+            return args_list[0], [args_list[0]]
+        return None
+
+    return None
+
+
+def cmd_warm_cache(args) -> int:
+    """Pre-download the packages referenced by MCP fragments.
+
+    Scans every MCP fragment the fleet uses and runs each package's own
+    `--help` through the package manager that fetches it -- `npx` for Node
+    servers, `uvx` for Python ones -- so the on-disk caches are warm before bot
+    startup instead of paying the download on first connect.
+
+    A cold fetch on either runtime can exceed Claude Code's 30s MCP connect
+    budget on its own, so a server whose cache is cold loses deterministically
+    rather than only under a boot storm. That is what makes this a warm rather
+    than a nice-to-have.
     """
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet, _md = _load_fleet_or_exit(paths)
 
-    # Collect unique npx packages from all bot MCP configs
-    npx_packages: set[str] = set()
+    # Keyed on (runtime, argv) so a package reached by two bots is warmed once,
+    # and so a pinned spec plus its separate entry point survives the round
+    # trip. A set of bare names cannot represent `--from <spec> <entry>`, which
+    # is the shape two of the three shipped uvx fragments use.
+    targets: dict[tuple[str, tuple[str, ...]], str] = {}
+    unreadable: set[str] = set()
     for bot in fleet.bots.values():
         for entry in bot.mcp:
             frag_path = paths.find_library_file("mcp", entry.name, ".json")
@@ -779,28 +844,48 @@ def cmd_warm_cache(args) -> int:
             for k, v in frag.items():
                 if k.startswith("_") or not isinstance(v, dict):
                     continue
-                if v.get("command") == "npx" and "args" in v:
-                    args_list = v["args"]
-                    # Extract package name: first arg after "-y"
-                    for i, a in enumerate(args_list):
-                        if a == "-y" and i + 1 < len(args_list):
-                            npx_packages.add(args_list[i + 1])
-                            break
+                runtime = v.get("command")
+                if runtime not in _WARM_RUNTIMES or "args" not in v:
+                    continue
+                target = _warm_prefix(runtime, v["args"])
+                if target is None:
+                    unreadable.add(f"{entry.name}:{k}")
+                    continue
+                pkg, prefix = target
+                targets[(runtime, tuple(prefix))] = pkg
 
-    if not npx_packages:
-        log.info("no npx-based MCP packages found in fleet")
+    if unreadable:
+        # Coverage honesty: these servers are NOT warmed and will pay the cold
+        # cost at boot. Named rather than dropped -- the remedy is a fragment
+        # edit, and nothing else on the estate would surface the gap.
+        log.warning(
+            "%d MCP server(s) on a cache-backed runtime name no package this "
+            "can identify — not warmed: %s",
+            len(unreadable),
+            ", ".join(sorted(unreadable)),
+        )
+
+    if not targets:
+        log.info("no npx- or uvx-based MCP packages found in fleet")
         return 0
 
-    log.info("warming npx cache for %d packages:", len(npx_packages))
-    failed = []
-    for pkg in sorted(npx_packages):
-        log.info("  %s", pkg)
+    log.info("warming cache for %d package(s):", len(targets))
+    failed: list[str] = []
+    missing_runtimes: set[str] = set()
+    # Keys are (runtime, prefix), so sorting them is already runtime-major.
+    for (runtime, prefix), pkg in sorted(targets.items()):
+        log.info("  %s (%s)", pkg, runtime)
         if args.dry_run:
             continue
-        # Use --help or a quick-exit to trigger download without running the server
+        if runtime in missing_runtimes:
+            # Already reported below; an absent toolchain is not per-package news.
+            failed.append(pkg)
+            continue
+        # Run the package's own --help: enough to force the download without
+        # starting the server.
         try:
             proc = subprocess.run(
-                ["npx", "-y", pkg, "--help"],
+                [runtime, *prefix, "--help"],
                 capture_output=True,
                 timeout=120,
                 text=True,
@@ -808,8 +893,14 @@ def cmd_warm_cache(args) -> int:
         except subprocess.TimeoutExpired:
             log.warning("  timeout warming %s (120s) — may still have cached", pkg)
         except FileNotFoundError:
-            log.error("npx not found — install Node.js first")
-            return 1
+            # The toolchain is absent, not the package. Record it and carry on:
+            # a bare `return 1` here let one missing toolchain stop the OTHER
+            # ecosystem warming at all, and a fleet mixing npx and uvx must
+            # still warm the half it can. The set also keeps this one
+            # diagnostic from repeating once per package.
+            log.error("%s not found — %s", runtime, _WARM_RUNTIMES[runtime])
+            missing_runtimes.add(runtime)
+            failed.append(pkg)
         except (subprocess.SubprocessError, OSError) as e:
             log.warning("  failed to warm %s: %s", pkg, e)
             failed.append(pkg)
@@ -834,7 +925,7 @@ def cmd_warm_cache(args) -> int:
         log.warning(
             "%d of %d packages failed to warm: %s",
             len(failed),
-            len(npx_packages),
+            len(targets),
             ", ".join(failed),
         )
         # Exit non-zero so a caller cannot read silence as success. Note what

@@ -1,6 +1,7 @@
 """Shared fixtures for claudlobby tests."""
 
 from __future__ import annotations
+import argparse
 import json
 import os
 import stat
@@ -464,3 +465,62 @@ def fleet_dir(tmp_path: Path) -> Path:
     (root / "runtime" / "bots").mkdir(parents=True)
 
     return root
+
+
+def equip_bot_with_mcp(fleet_dir: Path, fragments: dict[str, dict]) -> Path:
+    """Write each MCP fragment into the fleet library and equip the lead bot.
+
+    The replace below is coupled to MINIMAL_FLEET_YAML's indentation, which is
+    why it asserts: a silent no-op leaves the fleet with no MCP servers at all,
+    so the command under test returns early and every assertion downstream reads
+    the empty path instead of the code. Kept here in ONE copy so a change to the
+    template breaks one place, and the failure text says which.
+    """
+    for name, server in fragments.items():
+        (fleet_dir / "library" / "mcp" / f"{name}.json").write_text(
+            json.dumps({name: server})
+        )
+    fy = fleet_dir / "fleet.yaml"
+    before = fy.read_text()
+    after = before.replace(
+        "    lead:\n      expertise: [orchestration]\n",
+        f"    lead:\n      expertise: [orchestration]\n      mcp: [{', '.join(fragments)}]\n",
+    )
+    assert after != before, (
+        "MINIMAL_FLEET_YAML indentation changed — equip_bot_with_mcp no longer equips the bot"
+    )
+    fy.write_text(after)
+    return fleet_dir
+
+
+def warm_cache_args(root: Path, dry_run: bool = False) -> argparse.Namespace:
+    """The argparse namespace cmd_warm_cache reads."""
+    return argparse.Namespace(root=str(root), fleet=None, seed=False, dry_run=dry_run)
+
+
+class SubprocessRecorder:
+    """Stand in for subprocess.run and keep every argv it was handed.
+
+    `missing` names a binary to raise FileNotFoundError for, so a test can model
+    an absent toolchain without touching PATH.
+    """
+
+    def __init__(
+        self, returncode: int = 0, stderr: str = "", missing: str | None = None
+    ):
+        self.calls: list[list[str]] = []
+        self.returncode = returncode
+        self.stderr = stderr
+        self.missing = missing
+
+    def __call__(self, argv, *a, **kw):
+        self.calls.append(list(argv))
+        if self.missing is not None and argv[0] == self.missing:
+            raise FileNotFoundError(2, "No such file or directory", self.missing)
+        return subprocess.CompletedProcess(
+            args=argv, returncode=self.returncode, stdout="", stderr=self.stderr
+        )
+
+    def argv_for(self, runtime: str) -> list[list[str]]:
+        """Every recorded argv whose binary is `runtime`."""
+        return [c for c in self.calls if c and c[0] == runtime]
