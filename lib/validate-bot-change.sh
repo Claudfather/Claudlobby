@@ -163,6 +163,31 @@ val_events() {
 val_sql() { sqlite3 "$1/state/plane/plane.db" "$2" 2>/dev/null || true; }
 # val_iso <epoch>: the instant as the doors stamp it.
 val_iso() { epoch_to_iso_utc "$1"; }
+
+# val_backdate <file> <seconds-ago>: set a file mtime N seconds into the past,
+# portably, creating the file if absent.
+#
+# The spec for #934 cites a `touch -d "25 hours ago"` idiom as already in use in
+# this harness. It is not: grep -c "touch -d" returns 0. That form is GNU-only.
+# The one place this repo does backdate (tests/test_idle_markers.sh) uses
+# `date -v-10M`, which is BSD-only and degrades to `touch -t ""` on Linux.
+# Neither form is portable and this repo targets macOS /bin/bash 3.2 as well.
+#
+# `touch -t CCYYMMDDhhmm.SS` is POSIX, so only the epoch-to-stamp conversion
+# needs a branch: date -d @EPOCH on GNU, date -r EPOCH on BSD. Failing loudly
+# beats returning a wrong mtime, because every caller here is asserting on an
+# age and a silent no-op would make the assertion pass for the wrong reason.
+val_backdate() {
+    local f="${1:?val_backdate: <file> required}"
+    local secs="${2:?val_backdate: <seconds-ago> required}"
+    local target stamp
+    target=$(( $(date +%s) - secs ))
+    stamp=$(date -d "@$target" +%Y%m%d%H%M.%S 2>/dev/null) \
+        || stamp=$(date -r "$target" +%Y%m%d%H%M.%S 2>/dev/null) \
+        || { echo "val_backdate: neither GNU nor BSD date branch worked" >&2; return 1; }
+    [ -e "$f" ] || : > "$f"
+    touch -t "$stamp" "$f"
+}
 # val_plane_ready <root> <fleet>: the plane db exists (a first fleet-level
 # receipt through the real door creates it). A fleet with no manifest gets an
 # EMPTY one (parse_fleet_bots reads an empty bots map exactly like a missing
@@ -3448,6 +3473,145 @@ harness_check "checkin: an unreachable plane does NOT fire (fail closed for a sp
 
 rm -rf "$CK2_ROOT2"
 command tmux -L "$(vsock "$CK2_BOT")" kill-server 2>/dev/null || true
+
+# ===========================================================================
+# #934 S1/S2 — the manufactured all-clear at fleet-pulse Check 5.
+#
+# Both sites share one shape: the strand produces the very condition that
+# suppresses its own alarm. Red-first repros for #933 phase P1; NO fix here.
+#
+#   S1 (fleet-pulse.sh:434, the idle gate)  keepalive re-touches data/.idle on
+#       every 60s tick that classifies a pane IDLE. A stranded bot shows a
+#       prompt glyph, so it classifies IDLE forever, so .idle stays permanently
+#       newer than the frozen .last-tool-call, so `! marker_is_newer` is false
+#       and the check returns without emitting. The bot is 25h silent and the
+#       sweep says nothing.
+#
+#   S2 (fleet-pulse.sh:432, the marker-existence gate)  `if [ -f "$marker" ]`
+#       has NO else branch. A bot that has never executed a tool call has no
+#       marker, so the entire check is skipped -- silently, with no event of
+#       either kind. This is every first-boot bot, which is exactly the
+#       population a boot strand is drawn from.
+#
+# ASSERTION SHAPE, and why the control is not optional. Both repros assert an
+# ABSENCE ("no activity_stuck row"), and an absence assertion passes for free
+# when the fixture never ran: wrong threshold, unreadable bot.conf, the sweep
+# erroring out, the event reader pointed at the wrong fleet. STRANDCTL is the
+# positive control -- identical to STRANDIDLE in every respect except that it
+# has no .idle marker -- and it MUST emit. If the control is silent the two
+# absence results below are worth nothing, and the harness says so rather than
+# reporting two passes.
+#
+# Post-P3 these same three blocks assert a boot_stranded row for STRANDIDLE
+# and STRANDNOMARK, with STRANDCTL unchanged (the zero-regression contract on
+# the worked path).
+# ===========================================================================
+echo ""
+echo "=== validate #934 S1/S2: fleet-pulse Check 5 manufactured all-clear ==="
+
+F3="valstrand"
+F3_BOTS="$ROOT/local/$F3/runtime/bots"
+SIDLE="strandidle"      # S1: stale marker + newer .idle  -> suppressed
+SNOMARK="strandnomark"  # S2: no marker at all            -> check skipped
+SCTL="strandctl"        # control: stale marker, no .idle  -> MUST fire
+mkdir -p "$ROOT/local/$F3" "$F3_BOTS/$SIDLE/data" "$F3_BOTS/$SNOMARK/data" "$F3_BOTS/$SCTL/data"
+
+cat > "$ROOT/local/$F3/fleet.yaml" <<YAML
+fleet:
+  name: $F3
+  bots:
+    $SIDLE:
+      expertise: [software-engineering]
+    $SNOMARK:
+      expertise: [software-engineering]
+    $SCTL:
+      expertise: [software-engineering]
+YAML
+
+# Threshold 60s against a 25h-old marker: the gap is four orders of magnitude
+# past the bar, so nothing here turns on timing precision.
+for b in "$SIDLE" "$SNOMARK" "$SCTL"; do
+    cat > "$F3_BOTS/$b/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=60
+CONF
+done
+
+val_plane_ready "$ROOT" "$F3"
+
+# S1 fixture: marker 25h stale, .idle touched AFTER it (what keepalive does).
+val_backdate "$F3_BOTS/$SIDLE/data/.last-tool-call" 90000
+touch "$F3_BOTS/$SIDLE/data/.idle"
+touch "$F3_BOTS/$SIDLE/data/.spawn"
+
+# S2 fixture: no marker at all. .spawn present and aged past any plausible
+# grace, so "it is simply too early to judge" cannot explain the silence.
+rm -f "$F3_BOTS/$SNOMARK/data/.last-tool-call"
+val_backdate "$F3_BOTS/$SNOMARK/data/.spawn" 90000
+
+# Control fixture: identical to S1 minus the .idle marker.
+val_backdate "$F3_BOTS/$SCTL/data/.last-tool-call" 90000
+rm -f "$F3_BOTS/$SCTL/data/.idle"
+touch "$F3_BOTS/$SCTL/data/.spawn"
+
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F3" "$LIB_DIR/fleet-pulse.sh" "$F3" >/dev/null 2>&1 || true
+
+s_ctl_ev=$(val_events "$ROOT" "$F3" "$SCTL")
+s_idle_ev=$(val_events "$ROOT" "$F3" "$SIDLE")
+s_nomark_ev=$(val_events "$ROOT" "$F3" "$SNOMARK")
+s_mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
+
+# --- the controls run FIRST: every assertion below is void without them -----
+printf '%s' "$s_ctl_ev" | grep -q '"type":"activity_stuck"' && r=yes || r=no
+harness_check "#934 CONTROL: a 25h-stale marker with no .idle DOES emit activity_stuck" "$r"
+_s_ctl_ok="$r"
+
+# A SECOND control, for the push probe specifically. The first version of this
+# block grepped $ROOT/state/pulse for the message copy. That directory holds
+# only empty debounce markers, never the text, so the probe could never match
+# and the absence assertion below passed unconditionally. Inverting the S1
+# fixture caught it: the check stayed green in the arm where a push provably
+# fired. A probe that has never once returned a positive is indistinguishable
+# from one that is wired wrong, so the pane probe carries its own control.
+printf '%s' "$s_mgr_pane" | grep -q "$SCTL activity_stuck" && r=yes || r=no
+harness_check "#934 CONTROL: the control bot [FLEET-PULSE] push DOES reach the manager pane" "$r"
+_s_push_ok="$r"
+
+# --- S1: the idle gate suppresses a 25h silence ----------------------------
+if [ "$_s_ctl_ok" != yes ]; then r=no
+elif printf '%s' "$s_idle_ev" | grep -q '"type":"activity_stuck"'; then r=no
+else r=yes; fi
+harness_check "#934 S1 RED: .idle newer than a 25h-stale marker suppresses activity_stuck (control fired)" "$r"
+
+# The push rides the same branch as the event, so a suppressed event is also a
+# suppressed page. Asserted separately because it is the half a human feels.
+if [ "$_s_push_ok" != yes ]; then r=no
+elif printf '%s' "$s_mgr_pane" | grep -q "$SIDLE activity_stuck"; then r=no
+else r=yes; fi
+harness_check "#934 S1 RED: no [FLEET-PULSE] manager push for the suppressed bot (control pushed)" "$r"
+
+# --- S2: an absent marker skips the check outright -------------------------
+if [ "$_s_ctl_ok" != yes ]; then r=no
+elif printf '%s' "$s_nomark_ev" | grep -qE '"type":"(activity_stuck|boot_stranded)"'; then r=no
+else r=yes; fi
+harness_check "#934 S2 RED: an absent .last-tool-call skips Check 5 with no event of either kind" "$r"
+
+if [ "$_s_ctl_ok" != yes ] || \
+   printf '%s' "$s_idle_ev" | grep -q '"type":"activity_stuck"' || \
+   printf '%s' "$s_nomark_ev" | grep -qE '"type":"(activity_stuck|boot_stranded)"'; then
+    echo "  --- DIAGNOSTIC: #934 S1/S2 fixture state ---"
+    for b in "$SCTL" "$SIDLE" "$SNOMARK"; do
+        echo "    $b:"
+        ls -la --time-style=+%s "$F3_BOTS/$b/data" 2>/dev/null \
+            || ls -lT "$F3_BOTS/$b/data" 2>/dev/null || true
+    done
+    echo "    control events : ${s_ctl_ev:-(none)}"
+    echo "    S1 events      : ${s_idle_ev:-(none)}"
+    echo "    S2 events      : ${s_nomark_ev:-(none)}"
+    echo "    manager pane   : $(printf '%s' "$s_mgr_pane" | grep -c FLEET-PULSE) FLEET-PULSE line(s)"
+fi
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
