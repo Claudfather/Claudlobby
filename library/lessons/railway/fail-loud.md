@@ -11,7 +11,7 @@ Railway auth lives in the `.env` tiers as `RAILWAY_PERSONAL_TOKEN` (ACCOUNT-scop
 Applies to every worker that touches Railway:
 
 - **`No linked project found`** — the current directory isn't in `~/.railway/config.json`. Run the project's `railway-link-fleet.sh` (idempotent; links every fleet checkout). If the script fails, the worker must report blocked — do not let them proceed on a guessed deploy state.
-- **`401 Unauthorized` / `403 Forbidden`** — token rejected. Workers must NOT retry with a different token. Worker escalates via `report-back.sh blocked "railway token rejected (HTTP <code>) — rotation needed"`, and the manager flags the human to regenerate the account token in Railway dashboard → Account Settings → Tokens, then update `.env.shared`.
+- **`401 Unauthorized` / `403 Forbidden`** — token rejected. Workers must NOT retry with a different token. Worker escalates via `report-back.sh <bot-name> blocked "railway token rejected (HTTP <code>) — rotation needed"`, and the manager flags the human to regenerate the account token in Railway dashboard → Account Settings → Tokens, then update `.env.shared`.
 - **Timeout / network error** — one retry, then escalate as `blocked`.
 - **Any other non-200 response** — treat as broken, report verbatim.
 

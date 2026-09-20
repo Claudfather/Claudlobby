@@ -232,7 +232,7 @@ Action values:
 - **`report`**: Post the structured result's `summary` to Telegram via the bot's existing `lib/report-back.sh`:
 
   ```bash
-  <bot-root>/lib/report-back.sh "<summary>"
+  <bot-root>/lib/report-back.sh <bot-name> <status> "<summary>"
   ```
 
   Include the PR URL (if `artifacts.pr_url`) and issue URL (if `artifacts.issue_url`) as links.

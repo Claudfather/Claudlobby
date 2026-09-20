@@ -33,7 +33,7 @@ Manager → worker via the socket-aware `lib/dispatch.sh` helper (each bot runs 
 | `ref:<url>` | Issue or PR URL | Originating issue or context link |
 | `workstream:<ws-id>` | Workstream id | Registry entry this task advances |
 | `project:<key>` | `projects.yaml` slug | The project this work belongs to — the well-defined bar. `dispatch-task.sh --project <key>` adds it to the envelope and stamps `project_key` on the plane work item, so a task can be read back per project. |
-| `task:<task-id>` | `t-<epoch>-<hex4>` | **Task identity** — minted by `dispatch-task.sh`, recorded in the dispatch ledger. The worker MUST echo it in every `[BOTREPORT]` for this task (`report-back.sh --task <id>`): the overdue watchdog joins on it, and an id-less report can never close an id'd dispatch. |
+| `task:<task-id>` | `t-<epoch>-<hex4>` | **Task identity** — minted by `dispatch-task.sh`, recorded in the dispatch ledger. The worker MUST echo it in every `[BOTREPORT]` for this task (pass `--task <id>` to `report-back.sh`): the overdue watchdog joins on it, and an id-less report can never close an id'd dispatch. |
 
 ### Always zone a timestamp
 
