@@ -70,7 +70,7 @@ A frozen dataclass in a new module `claudlobby/boot.py`, computed once per bot a
 | `admission_wait_max_s` | `host.boot.admission_wait_max_s` | `1200` | `BOOT_ADMISSION_WAIT_MAX_S` |
 | `priority` | `fleet.manager_bots()` | managers `0`, workers `1` | `BOOT_PRIORITY` |
 | `mcp_timeout_ms` | `host.boot.mcp_timeout_ms` | `180000` | `MCP_TIMEOUT` (exported; read by Claude Code) |
-| `ready_timeout_s` | `host.boot.ready_timeout_s` (absorbs the existing `RC_READY_TIMEOUT_S` env override, which keeps working) | `90` | `RC_READY_TIMEOUT_S` |
+| `ready_timeout_s` | derived: `max(90, mcp_timeout_ms // 1000 + 20)` — one number, so the readiness ceiling can never be shorter than the MCP startup timeout it waits on (plan fork F3); the existing `RC_READY_TIMEOUT_S` env var stays as a fallback for an un-regenerated `bot.conf` (plan fork F4) | `200` with the default MCP timeout | `RC_READY_TIMEOUT_S` |
 | `plugin_update_once_per_boot` | `host.boot.plugin_update_once_per_boot` | `true` | `BOOT_PLUGIN_UPDATE_ONCE` |
 
 The `host.boot` block is host-scoped like `host.jobs`: an operator's `system.yaml` may override a key; nobody has to. `bot.conf` is already the single carrier both supervisors deliver, and it is read at session start by `start-bot.sh` under `set -a`, so every key reaches both the launcher and the `exec claude` environment with no new plumbing. Each key is rendered exactly once; a conformance test asserts that, and asserts that neither rendered unit contains a sleep, a timeout, or any `BOOT_*` value.
@@ -154,7 +154,7 @@ Both PRs change `lib/` scripts, which the host reads at each bring-up, so a reve
 1. Admission slots, not a ladder (the ladder's number was wrong by ten times and would be guessed again; slots serialize bounces too).
 2. Host-level, in the package `system.yaml`, zero operator configuration; slots derived from the host.
 3. Managers first as ticket priority inside the one gate; no second mechanism.
-4. Defaults: `auto` slots (1 on a four-core host, 2 to 3 on the macOS host), 180 s MCP timeout, 20 minute wait cap.
+4. Defaults: `auto` slots (1 on a four-core host, 2 to 3 on the macOS host), 180 s MCP timeout, a readiness ceiling derived from it (200 s), 20 minute wait cap.
 5. Two PRs as above, mechanical gates only.
 
 ## 12. What not to do
