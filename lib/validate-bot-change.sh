@@ -3699,8 +3699,30 @@ touch "$F4_BOTS/$S3BOT/data/.spawn"
 # export 3,578 lines above it, and this file's own comment at :99-103 warns
 # that a sourced TMUX_TMPDIR pin can yank the scripts under test back into the
 # shared namespace mid-run. One idempotent line removes that dependency.
-command tmux -L "$(vsock "$S3BOT")" kill-server 2>/dev/null || true
-tmux -L "$(vsock "$S3BOT")" new-session -d -s "$S3BOT" 'sleep 600'
+_S3_SOCK="$(vsock "$S3BOT")"
+command tmux -L "$_S3_SOCK" kill-server 2>/dev/null || true
+# kill-server returns BEFORE the server has exited, so a new-session issued
+# straight after can attach to a dying one and fail "server exited
+# unexpectedly" -- which under the armed ERR trap aborts the run exactly as the
+# duplicate would. Measured unguarded: 7 of 15. So retry until it takes;
+# measured with this loop: one retry needed on 8 of 20, ZERO failures.
+#
+# Two shapes were rejected because they only LOOKED like they worked, and both
+# are the class this PR is about. A has-session settle passed 15/15 with its
+# wait counter reading 0 every time -- it was functioning as an accidental
+# sleep, and anyone deleting it as redundant would restore the race. A poll on
+# the socket FILE passed too, but hit its 5s cap on all 15: the socket outlives
+# the server, so the condition never becomes true and the pass is purely the
+# timeout. Both are green for a reason unrelated to their stated mechanism.
+_s3_try=0
+until tmux -L "$_S3_SOCK" new-session -d -s "$S3BOT" 'sleep 600' 2>/dev/null; do
+    _s3_try=$((_s3_try + 1))
+    if [ "$_s3_try" -ge 20 ]; then
+        echo "  DIAGNOSTIC: #934 S3 could not open a session on $_S3_SOCK after $_s3_try tries"
+        break
+    fi
+    sleep 0.2
+done
 sleep 1
 
 s3_out=$(HOME="$S3_HOME" CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/reconcile-fleet.sh" "$F4" 2>&1 || true)
@@ -3730,7 +3752,7 @@ if [ "$_s3_ctl_ok" != yes ] || [ "$r" != yes ]; then
     echo "      spawn  mtime : $(stat_mtime "$F4_BOTS/$S3BOT/data/.spawn" 2>/dev/null || echo n/a)"
 fi
 
-command tmux -L "$(vsock "$S3BOT")" kill-server 2>/dev/null || true
+command tmux -L "$_S3_SOCK" kill-server 2>/dev/null || true
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
