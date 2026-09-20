@@ -10,6 +10,7 @@ import copy
 import functools
 import json
 import logging
+import os
 import platform
 import re
 import shlex
@@ -26,11 +27,13 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from . import defaults, dotenv, tool_resolve
 from . import switches as _switches
+from .boot import BootPolicy, bot_conf_lines, resolve_boot_policy
 from .config import (
     GITHUB_APP_ENV_VARS,
     BotConfig,
     FleetConfig,
     load_fleet,
+    load_host_boot,
     load_host_jobs,
 )
 from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
@@ -811,6 +814,26 @@ def _bot_conf_cascade(paths: Paths, fleet: FleetConfig,
         return {}
 
 
+def _host_cpu_count() -> int | None:
+    """The host's CPU count, as boot-policy admission-slot derivation sees it.
+
+    A named seam (mirrors ``_operator_gitconfig`` above) rather than an
+    inline ``os.cpu_count()`` call in ``compose_bot_conf``, so a test can pin
+    a deterministic count for ``resolve_boot_policy``'s ``auto`` derivation
+    without patching the stdlib ``os`` module for every consumer of it.
+    """
+    return os.cpu_count()
+
+
+def _bot_boot_policy(bot: BotConfig, fleet: FleetConfig) -> BootPolicy:
+    """This bot's BootPolicy (claudlobby.boot, design doc §6.1) — the package
+    ``host.boot`` block plus this host's own CPU count, resolved once here so
+    ``compose_bot_conf`` has a single call site rather than re-reading either."""
+    return resolve_boot_policy(
+        bot, fleet, load_host_boot(), cpu_count=_host_cpu_count()
+    )
+
+
 def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                      *, cascade: dict | None = None) -> str:
     """Render one bot's bot.conf (env exports sourced at startup); returns the file text.
@@ -1261,6 +1284,16 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         lines.append(
             'STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."'
         )
+
+    # Boot policy (design doc 2026-09-20-boot-admission-and-supervision-
+    # consolidation-design.md §6.1) — computed once per bot, rendered here
+    # exactly once; both supervisor units carry none of it.
+    lines.append("")
+    lines.append(
+        "# Boot policy (documentation/plans/2026-09-20-boot-admission-and-"
+        "supervision-consolidation-design.md §6.1)"
+    )
+    lines.extend(bot_conf_lines(_bot_boot_policy(bot, fleet)))
 
     return "\n".join(lines) + "\n"
 
