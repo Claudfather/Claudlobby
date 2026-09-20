@@ -110,12 +110,12 @@ The ratchet: `tests/test_supervisor_ratchet.py` greps `lib/` for direct `systemc
 
 | spec property | systemd idiom | launchd idiom |
 |---|---|---|
-| launcher exits, session survives | `Type=simple` + `RemainAfterExit=yes` + `KillMode=process` | `RunAtLoad` with the launcher as `ProgramArguments`; no `KeepAlive` on the launcher's exit |
-| restart on launcher failure | `Restart=on-failure`, `RestartSec=5` | `KeepAlive` `SuccessfulExit=false`, `ThrottleInterval` |
-| stop tears the session down | `ExecStop` kills the bot's tmux server; `ExecStopPost` removes `.tmux-env` | the plist's stop path does the same through the launcher's stop contract |
-| environment | `Environment=` lines | `EnvironmentVariables` dict |
+| launcher exits, session survives | `Type=simple` + `RemainAfterExit=yes` + `KillMode=process` | `RunAtLoad` with the launcher as `ProgramArguments`; `KeepAlive` keyed on `SuccessfulExit=false`, so a clean launcher exit is not restarted |
+| restart on launcher failure | `Restart=on-failure`, `RestartSec=5` | `KeepAlive` `SuccessfulExit=false` |
+| environment the launcher needs | `Environment=` lines (`CLAUDLOBBY_ROOT`, `TMUX_TMPDIR`) | `EnvironmentVariables` dict with the same two keys plus `PATH` and `HOME`, which a LaunchAgent does not inherit; `tests/test_composer.py::test_launchd_systemd_path_parity` already pins that pair and the round-trip test generalizes it |
+| stop tears the session down | `ExecStop` kills the bot's tmux server; `ExecStopPost` removes `.tmux-env` | launchd has no stop hook: `bootout` only signals the launcher, which has already exited. This is a PROPERTY the plist cannot carry, so the adapter's `svc_disenroll` performs the same teardown (kill the bot's tmux server, remove `.tmux-env`) on launchd, and the round-trip test asserts the spec's stop command appears in the systemd unit AND is what `svc_disenroll` runs on launchd (a contract assertion, since there is no unit text to parse) |
 
-`tests/test_supervision_roundtrip.py` renders both for every bot in a fixture fleet, parses the unit as INI and the plist as XML, maps each back to a spec, and asserts equality. A fact one renderer learns that the other does not is a failing test, which is the property asked for.
+`tests/test_supervision_roundtrip.py` renders both for every bot in a fixture fleet, parses the unit as INI and the plist as XML, maps each back to a spec, and asserts equality. The one property a plist cannot carry (the stop hook) is asserted through the adapter instead, so the equivalence covers OUTCOMES: the same launcher, the same environment keys, the same restart rule, the same teardown, on both supervisors. A fact one renderer learns that the other does not is a failing test, which is the property asked for.
 
 `boot_rung_for` is retired with the stagger; `selfstart-snapshot.sh`'s "not yet due" becomes "a fresh `.boot-queued` marker, or no `.spawn` yet within the admission window", which is truthful on both OSes and needs no arithmetic.
 
