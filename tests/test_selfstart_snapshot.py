@@ -30,7 +30,7 @@ HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 # two #1045-review regressions, the #1043 contamination/typing cases, the #1106
 # refusal-branch cases (8h-8k) and the #1203 lateness bound (case 10). Raise
 # this when cases are added; never lower it to make a red wrapper green.
-MIN_ASSERTIONS = 194   # 2026-09-05: section 11's file-parser spacing cases went with the files (F18 closure R2b-2); the plane cases (12) came in
+MIN_ASSERTIONS = 216   # 2026-09-20: sections 8l/8m/8n came in (22) — the duplicate bots_rescued key axis, end-to-end and at the parser (#1575)
 
 
 @pytest.fixture(scope="module")
