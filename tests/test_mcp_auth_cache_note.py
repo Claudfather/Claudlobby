@@ -210,6 +210,29 @@ def test_every_entry_is_listed_not_only_a_recognised_one(tmp_path):
         "sorted, so two runs of the same cache render identically"
 
 
+def test_the_record_stays_one_line_whatever_the_key_holds(tmp_path):
+    """The one-line shape is a contract, not a style choice.
+
+    Every consumer selects this record with grep -- the harnesses, and an
+    operator reading startup.log. A key carrying a newline would split it in
+    two and leave the second half in the log as an unattributed fragment.
+    """
+    _arm(tmp_path, json.dumps({"plugin:evil\ntelegram:x\tb": {"timestamp": 1789912141541}}))
+    out, rc = _note(tmp_path)
+    assert rc == 0
+    assert out.count("\n") == 0
+    assert "plugin:evil telegram:x b" in out, "collapsed, not dropped"
+
+
+def test_an_absurd_key_is_cut_visibly_rather_than_silently(tmp_path):
+    """A truncation that reads as the whole name is worse than a long line."""
+    _arm(tmp_path, json.dumps({"p" * 500: {"timestamp": 1789912141541}}))
+    out, _ = _note(tmp_path)
+    assert "…(truncated)" in out
+    assert "p" * 200 in out
+    assert "p" * 201 not in out
+
+
 # --- which cache, exactly ----------------------------------------------------
 
 def test_path_defaults_to_the_home_config_dir(tmp_path):

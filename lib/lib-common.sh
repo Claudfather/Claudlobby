@@ -1316,8 +1316,22 @@ def when(value):
         return None
 
 
+def label(key):
+    """The server key, rendered so the record stays ONE line.
+
+    A log line is the contract here: the harnesses select this with grep and so
+    does every operator, and a key carrying a newline would split the record in
+    two -- the second half landing in the log as an unattributed fragment. So
+    whitespace is collapsed rather than trusted. An absurd key is cut with a
+    VISIBLE marker, never silently, because a truncation that reads as a whole
+    name is worse than a long line.
+    """
+    key = " ".join(str(key).split())
+    return key if len(key) <= 200 else key[:200] + "…(truncated)"
+
+
 listed = ", ".join(
-    "%s (recorded %s)" % (k, when(v) or "unknown")
+    "%s (recorded %s)" % (label(k), when(v) or "unknown")
     for k, v in sorted(entries.items())
 )
 try:
