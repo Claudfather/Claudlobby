@@ -3736,6 +3736,106 @@ inject_stamp() {
     return 0
 }
 
+# plugin_ensure <plugin> <claude_bin> <log> <once_flag>
+#
+# Installs `plugin` via `claude plugin install` the moment
+# installed_plugins.json does not yet name it -- unconditionally, on every
+# call, cold start included. That never changes with once_flag: a bot missing
+# a required plugin must always get it. Once installed, `claude plugin
+# update` normally also runs on every call -- once_flag "0", which is how an
+# un-regenerated bot.conf without BOOT_PLUGIN_UPDATE_ONCE reads, so a bot
+# that predates the key keeps the per-start update it has today.
+#
+# once_flag "1" (BOOT_PLUGIN_UPDATE_ONCE from the sourced bot.conf) gates the
+# update to at most once per host boot PER PLUGIN: a stamp file under
+# $CLAUDLOBBY_ROOT/state/boot/, named for both the boot epoch and the plugin
+# -- never one stamp for the whole boot, which would let the first plugin
+# that updated successfully silence every other plugin in the Step 2 loop
+# of start-bot.sh -- written under a shared lock so two callers checking the
+# stamp at once cannot both decide it is missing. A failed update never
+# writes the stamp, so the next call tries again rather than believing a
+# boot that never actually updated.
+#
+# When the gate itself cannot be trusted it falls back to updating every
+# call and says so in the log: the boot epoch unresolvable (resolve_boot_epoch
+# failing -- no uptime/sysctl/proc answer, or the CLAUDLOBBY_BOOT_EPOCH test
+# seam left empty), or the stamp directory unwritable. A clock claudlobby
+# cannot read, or a stamp it cannot write, must not mean the plugin silently
+# never updates again -- and with flock present an unwritable lock path
+# fails the locked section BEFORE the update runs, so without the second
+# guard such a host would update nothing and log nothing.
+#
+# Called once per plugin from the Step 2 loop of start-bot.sh. Never
+# propagates a failure -- a plugin-manager hiccup (network blip, cold
+# marketplace cache) must not abort the boot it is called from -- and is
+# errexit-safe on its own, not only when the caller wraps it in `|| true`:
+# a bare `epoch="$(door)"` whose door returns 1 IS a failing statement under
+# set -e, and the first cut aborted its own suite on exactly the
+# unresolvable-clock case.
+plugin_ensure() {
+    local plugin="${1:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
+    local claude_bin="${2:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
+    local log="${3:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
+    local once_flag="${4:-0}"
+
+    if [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] || \
+       ! grep -q "\"$plugin\"" "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null; then
+        echo "$(ts_iso) PLUGIN installing $plugin (cold start)" >> "$log"
+        with_timeout 30 "$claude_bin" plugin install "$plugin" >> "$log" 2>&1 || true
+        return 0
+    fi
+
+    if [ "$once_flag" != "1" ]; then
+        echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
+        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        return 0
+    fi
+
+    # The `|| true` sits INSIDE the substitution: the door returns 1 when
+    # nothing answers, and an unguarded assignment carries that status out
+    # as a failing statement (errexit) -- see the function comment.
+    local epoch
+    epoch="$(resolve_boot_epoch 2>/dev/null || true)"
+    if [ -z "$epoch" ]; then
+        echo "$(ts_iso) PLUGIN update-once unavailable (boot epoch unresolvable) — updating $plugin" >> "$log"
+        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        return 0
+    fi
+
+    # Per (epoch, plugin), never per boot alone -- see the function comment.
+    local sanitized boot_dir stamp lockfile
+    sanitized="$(printf '%s' "$plugin" | tr -c 'A-Za-z0-9._-' '_')"
+    boot_dir="$CLAUDLOBBY_ROOT/state/boot"
+    stamp="$boot_dir/plugins-updated.$epoch.$sanitized"
+    lockfile="$boot_dir/plugins.lock"
+    if ! mkdir -p "$boot_dir" 2>/dev/null || [ ! -w "$boot_dir" ]; then
+        echo "$(ts_iso) PLUGIN update-once unavailable (state dir unwritable: $boot_dir) — updating $plugin" >> "$log"
+        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        return 0
+    fi
+
+    # Runs under with_lock: in-process behind the mkdir spinlock where flock
+    # is absent (stock macOS), in a forked subshell where it is present
+    # (Linux). It reads the locals above by dynamic scope and reports a
+    # failed update through its return code; both survive the fork.
+    _plugin_update_once_locked() {
+        if [ -e "$stamp" ]; then
+            echo "$(ts_iso) PLUGIN update skipped (already run this boot): $plugin" >> "$log"
+            return 0
+        fi
+        echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
+        if with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1; then
+            touch "$stamp" 2>/dev/null || true
+            return 0
+        fi
+        # A failed update must not stamp the boot as done -- the next call,
+        # this boot or the next start, tries again.
+        return 1
+    }
+    with_lock "$lockfile" _plugin_update_once_locked || true
+    return 0
+}
+
 # fleet_service_prefix <fleet.yaml-path>
 # Emit the fleet's service_prefix (composer default "claudlobby" when unset).
 # Mirrors claudlobby's documented schema — `service_prefix:` at 2-space indent

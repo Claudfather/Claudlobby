@@ -265,16 +265,13 @@ if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ];
         done
     fi
 
-    # Step 2: Install or update each required plugin
+    # Step 2: Install or update each required plugin. plugin_ensure
+    # (lib-common.sh) owns the install-vs-update decision and the
+    # once-per-host-boot update gate: BOOT_PLUGIN_UPDATE_ONCE comes from the
+    # sourced bot.conf, and an un-regenerated one that predates the key reads
+    # as 0 -- todays every-start update behavior.
     for _plugin in $FLEET_PLUGINS_REQUIRED; do
-        if [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] || \
-           ! grep -q "\"$_plugin\"" "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null; then
-            echo "$(ts_iso) PLUGIN installing $_plugin (cold start)" >> "$LOG"
-            with_timeout 30 "$CLAUDE" plugin install "$_plugin" >> "$LOG" 2>&1 || true
-        else
-            echo "$(ts_iso) PLUGIN updating $_plugin" >> "$LOG"
-            with_timeout 30 "$CLAUDE" plugin update "$_plugin" >> "$LOG" 2>&1 || true
-        fi
+        plugin_ensure "$_plugin" "$CLAUDE" "$LOG" "${BOOT_PLUGIN_UPDATE_ONCE:-0}" || true
     done
 fi
 
