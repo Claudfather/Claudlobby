@@ -44,7 +44,7 @@ The follow-up migrations (`setup-fleet`, `reconcile-fleet.sh`, timer installers,
 ```bash
 boot_admission_acquire <bot_dir>   # reads BOOT_* from bot.conf; writes data/.boot-queued and a ticket; loops (2s) until granted; prints granted:<slot> | timeout | unavailable; rc 0 on granted, 0 on timeout/unavailable too (the caller proceeds), never blocks past the cap
 boot_admission_release <bot_dir>   # removes this bot's slot (by recorded pid) and its ticket if any; idempotent
-_boot_admission_reap               # removes tickets/slots whose pid is dead
+_boot_admission_reap               # removes tickets/slots whose pid is dead, and plugin stamps (state/boot/plugins-updated.<epoch>.*) whose epoch is not the current boot's
 ```
 Ticket name: `<priority:1 digit>-<arrival epoch, 19 digits zero-padded ns or s+seq>-<bot-service>`; slot dirs `slots/<n>` with a `pid` file inside; `state/boot/` created with `mkdir -p`; the grant rule: no ticket sorts before ours AND a slot `mkdir` succeeds. Log lines exactly as the spec §6.2 names them; the single event `boot_admission_timeout` through `emit_fleet_event`, and `boot_admission_unavailable` on the unwritable path.
 - [ ] **Step 3:** Verify the suite through `test_sh_suites.py`. Commit: `feat(boot): the admission gate — one priority queue and host-derived slots for every bring-up`.
