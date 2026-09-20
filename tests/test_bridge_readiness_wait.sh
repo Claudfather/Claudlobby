@@ -138,6 +138,94 @@ assert_eq "tmux session gone: prints crashed" "crashed" "$_WBRS_OUT"
 assert_eq "tmux session gone: detected at once, not after the ceiling" "true" \
     "$([ "$((_t1 - _t0))" -lt 3 ] && echo true || echo false)"
 
+# (G), (H), (I): the RTC-less primary host has no real-time clock, so its
+# clock steps FORWARD by the whole downtime once NTP syncs after boot -- a
+# bring-up in flight across that step must not read the step itself as
+# elapsed time. `date` is stubbed as a shell function returning a canned
+# sequence of readings, one per call; the counter lives in a file because a
+# stubbed command run via command substitution forks a subshell each call, so
+# a plain shell variable could not survive between calls (the same reason
+# the bridge_state call-counters above use a file). Each stub is scoped to its
+# own scenario with `unset -f date` right after the call, so the surviving
+# scenarios and any later suite keep reading the real clock for their own
+# wall-time assertions.
+
+# (G) A forward step. The jump lands between two probes while bridge_state is
+# still reporting no_bridge; the step must be folded out of "started" rather
+# than counted as elapsed, so the 4s ceiling is never breached and the loop
+# keeps polling until bridge_state turns up on the very next probe.
+BOT7="$T/bot7"; mkdir -p "$BOT7"
+CNT7="$T/cnt7"; echo 0 > "$CNT7"
+bridge_state() {
+    local n; n=$(cat "$CNT7"); n=$((n + 1)); echo "$n" > "$CNT7"
+    if [ "$n" -le 2 ]; then printf 'no_bridge'; else printf 'up'; fi
+}
+DSEQ7="$T/dseq7"; echo 0 > "$DSEQ7"
+date() {
+    local i v
+    i=$(cat "$DSEQ7")
+    case "$i" in
+        0) v=1000 ;;
+        1) v=1000 ;;
+        *) v=91000 ;;
+    esac
+    echo "$((i + 1))" > "$DSEQ7"
+    printf '%s' "$v"
+}
+call_wait "$BOT7" 4 "" ""
+unset -f date
+assert_eq "forward clock step (+90000): does not time out, returns 0" "0" "$_WBRS_RC"
+assert_eq "forward clock step (+90000): keeps polling to up" "up" "$_WBRS_OUT"
+
+# (H) A backward step (an operator or NTP correcting the clock the other
+# way) must not read as a negative elapsed time and race past the ceiling
+# either -- the same fold-it-out rule applies regardless of sign.
+BOT8="$T/bot8"; mkdir -p "$BOT8"
+CNT8="$T/cnt8"; echo 0 > "$CNT8"
+bridge_state() {
+    local n; n=$(cat "$CNT8"); n=$((n + 1)); echo "$n" > "$CNT8"
+    if [ "$n" -le 2 ]; then printf 'no_bridge'; else printf 'up'; fi
+}
+DSEQ8="$T/dseq8"; echo 0 > "$DSEQ8"
+date() {
+    local i v
+    i=$(cat "$DSEQ8")
+    case "$i" in
+        0) v=91000 ;;
+        1) v=91000 ;;
+        *) v=86000 ;;
+    esac
+    echo "$((i + 1))" > "$DSEQ8"
+    printf '%s' "$v"
+}
+call_wait "$BOT8" 4 "" ""
+unset -f date
+assert_eq "backward clock step (-5000): does not time out, returns 0" "0" "$_WBRS_RC"
+assert_eq "backward clock step (-5000): keeps polling to up" "up" "$_WBRS_OUT"
+
+# (I) A NORMAL, non-jumping advance of about 1s per probe must still time out
+# exactly as before -- the clock-step tolerance must not swallow real elapsed
+# time. bridge_state never resolves, so this only stops via the ceiling, on
+# the third reading (the initial "started" plus two per-probe checks).
+BOT9="$T/bot9"; mkdir -p "$BOT9"
+bridge_state() { printf 'no_bridge'; }
+DSEQ9="$T/dseq9"; echo 0 > "$DSEQ9"
+date() {
+    local i v
+    i=$(cat "$DSEQ9")
+    case "$i" in
+        0) v=1000 ;;
+        1) v=1001 ;;
+        *) v=1002 ;;
+    esac
+    echo "$((i + 1))" > "$DSEQ9"
+    printf '%s' "$v"
+}
+call_wait "$BOT9" 2 "" ""
+unset -f date
+assert_eq "normal 1s/probe advance: still times out on the third reading" "1" "$_WBRS_RC"
+assert_eq "normal 1s/probe advance: prints the last state (no_bridge)" "no_bridge" "$_WBRS_OUT"
+
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1

@@ -1179,6 +1179,14 @@ bridge_fence_write() {
 # against its own start instead of counting laps, so a slow probe shortens how
 # many polls fit in the window, never how long the window actually is.
 #
+# A wall clock can also STEP: a host with no RTC steps its clock forward by
+# the whole downtime once NTP syncs after boot, which a naive elapsed-time
+# check reads as hours passing between two probes and times out at once.
+# Each iteration compares the latest reading against the one before it and
+# folds any gap larger than timeout_s, or negative, into the start time
+# rather than into elapsed, so a step neither times out a live bring-up nor
+# is read as negative elapsed time.
+#
 # Polls bridge_state "$bot_dir" "$pretoken" "$session_pid" every 0.5s (the
 # session-scoped question, #1530 -- see bridge_state's own header) until one
 # of:
@@ -1206,8 +1214,9 @@ wait_bridge_ready_state() {
     local timeout_s="${2:?wait_bridge_ready_state needs a timeout in seconds}"
     local session_pid="${3:-}" pretoken="${4:-}"
     local tmux_session="${5:-}" tmux_socket="${6:-}"
-    local state="" started
+    local state="" started last now delta
     started=$(date +%s)
+    last="$started"
     while :; do
         if [ -n "$tmux_session" ] && ! check_tmux_session "$tmux_session" "$tmux_socket"; then
             printf '%s' "crashed"
@@ -1227,7 +1236,13 @@ wait_bridge_ready_state() {
                 fi
                 ;;
         esac
-        [ "$(( $(date +%s) - started ))" -ge "$timeout_s" ] && { printf '%s' "$state"; return 1; }
+        now=$(date +%s)
+        delta=$((now - last))
+        if [ "$delta" -lt 0 ] || [ "$delta" -gt "$timeout_s" ]; then
+            started=$((started + delta))
+        fi
+        last="$now"
+        [ "$((now - started))" -ge "$timeout_s" ] && { printf '%s' "$state"; return 1; }
         sleep 0.5
     done
 }
