@@ -387,13 +387,39 @@ if [ "$_ready" -eq 0 ]; then
     else
         echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, Telegram poller never reached bridge_state=up, proceeding anyway" >> "$LOG"
     fi
+    # Both TIMEOUT lines above are accurate and tell an operator nothing about
+    # the one cause a restart cannot clear (#1358). When Claude Code has the
+    # channel plugin in its host-global needs-auth cache it does not START the
+    # poller and then fail -- it SKIPS SPAWNING it, so every instrument reads
+    # "poller dead" and none reads "poller never attempted". That cost 35
+    # minutes and four restarts by two operators here on 2026-08-25; another
+    # fleet reports a rolling restart stalling on it on 2026-09-19 (their
+    # report, relayed onto the issue, unverified on this host).
+    #
+    # The distinguishing fact is already on disk at this exact moment, so read
+    # it and say so. A plain file read: no matching, no attribution, no causal
+    # claim -- see mcp_auth_cache_note. Silence here is informative in its own
+    # right, telling the operator this timeout is NOT that signature.
+    _auth_cache_note="$(mcp_auth_cache_note "$BOT_DIR" 2>/dev/null || true)"
+    [ -z "$_auth_cache_note" ] || echo "$(ts_iso) $_auth_cache_note" >> "$LOG"
+    # THREE states, because there are three answers and a boolean carries two.
+    # A cache that could not be READ is not a cache that is CLEAR, and `false`
+    # on the plane reads as measured -- this field is escalation input by the
+    # check's own name, and nothing downstream can recover that it was a guess.
+    # Undetermined rides as JSON null: boot-strand-sampler.sh's precedent, where
+    # a count it cannot read is UNKNOWN and never a 0.
+    case "$_auth_cache_note" in
+        AUTH_CACHE_ARMED*)   _auth_cache_armed=true ;;
+        AUTH_CACHE_UNKNOWN*) _auth_cache_armed=null ;;
+        *)                   _auth_cache_armed=false ;;
+    esac
     # Emit a fleet event so a genuine readiness regression reaches fleet-pulse's
     # escalation instead of just appending to a log. Now gated on bridge ground
     # truth, so this fires only when the poller really never came up — a true
     # positive worth paging, not the #751 string-drift false alarm. A fleet-wide
     # TIMEOUT must page: the #533 outage sat in every startup.log for a week with
     # nothing alerting.
-    emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s}}"
+    emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s},\"auth_cache_armed\":${_auth_cache_armed}}"
 fi
 
 # No sleep here, and no readiness assumption either. The bridge-readiness wait
@@ -494,7 +520,33 @@ _bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" 0 "$
 case "$_bridge_verdict" in
     ready)     echo "$(ts_iso) BRIDGE_READY — Telegram poller up" >> "$LOG" ;;
     expected:no_token) echo "$(ts_iso) BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert" >> "$LOG" ;;
-    missing:*) echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal" >> "$LOG" ;;
+    missing:*)
+        # "keepalive owns heal" is right for every cause of a missing bridge but
+        # one. With the host-global MCP auth cache armed, keepalive restarts the
+        # bot, the restart re-reads the SAME cache, the poller is skipped again,
+        # and the ladder cannot converge -- the restart-immunity in #1358. An
+        # operator reading this line during a stall is being pointed at the one
+        # remedy that provably cannot work, which is worse than saying nothing.
+        #
+        # Reuses the verdict already taken on the TIMEOUT path rather than
+        # re-reading the file: one read per boot, and unset (a bridge that went
+        # missing without a TIMEOUT) correctly means "not established", so the
+        # unqualified line stands.
+        case "${_auth_cache_armed:-false}" in
+            true)
+                echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive CANNOT heal this one: see the AUTH_CACHE_ARMED line above" >> "$LOG"
+                ;;
+            null)
+                # Undetermined is not clear. Promising the keepalive remedy here
+                # would be the same over-claim as auth_cache_armed:false, on the
+                # line an operator reads mid-stall.
+                echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal UNLESS the auth cache is armed, which could NOT be determined: see the AUTH_CACHE_UNKNOWN line above" >> "$LOG"
+                ;;
+            *)
+                echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal" >> "$LOG"
+                ;;
+        esac
+        ;;
     unknown)   echo "$(ts_iso) BRIDGE_UNKNOWN — ownership unprovable; not actionable" >> "$LOG" ;;
     no_handle) : ;; # not a channel bot — nothing to verify
 esac
