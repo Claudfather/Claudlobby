@@ -1168,6 +1168,70 @@ bridge_fence_write() {
     printf '%s' "$token"
 }
 
+# wait_bridge_ready_state <bot_dir> <timeout_s> <session_pid> <pretoken> [tmux_session] [tmux_socket]
+#
+# The bring-up readiness poll start-bot.sh ran inline, extracted so its
+# ceiling is provably wall-clock (#1573). What it replaced counted PROBES, not
+# seconds -- `_rc_iters = timeout_s * 2` assumed every 0.5s-interval probe was
+# free, so a configured "90s" ceiling ran for five minutes once bridge_state
+# itself got slow under real boot load (measured 2026-09-19: POLL_START
+# 18:02:23 to TIMEOUT 18:07:25 against a 90s config). This measures `date +%s`
+# against its own start instead of counting laps, so a slow probe shortens how
+# many polls fit in the window, never how long the window actually is.
+#
+# Polls bridge_state "$bot_dir" "$pretoken" "$session_pid" every 0.5s (the
+# session-scoped question, #1530 -- see bridge_state's own header) until one
+# of:
+#   up | no_handle                                 -> ready: return 0
+#   no_token, and bot_expects_no_token "$bot_dir"   -> ready: return 0 (the
+#                                                       read stays in here so
+#                                                       the caller keeps one
+#                                                       call)
+#   the tmux pair is given and the session is gone  -> "crashed": return 2,
+#                                                       at once, ahead of the
+#                                                       poll
+#   timeout_s wall-clock seconds elapse             -> the LAST state seen:
+#                                                       return 1
+# tmux_session/tmux_socket are optional: a caller with no session to police
+# (this file's own test suite, driving bridge_state's state machine directly)
+# omits them and the crash check is simply skipped.
+#
+# Prints exactly one state on stdout -- up, no_handle, no_token, not_mine,
+# no_bridge, unknown, or crashed -- and nothing else: no timestamps, no log
+# lines. start-bot.sh owns every POLL_START/READY/CRASH/TIMEOUT line and the
+# elapsed-time arithmetic they print; this function only answers "is it
+# ready, and if not, what did bridge_state last say".
+wait_bridge_ready_state() {
+    local bot_dir="${1:?Usage: wait_bridge_ready_state <bot_dir> <timeout_s> <session_pid> <pretoken> [tmux_session] [tmux_socket]}"
+    local timeout_s="${2:?wait_bridge_ready_state needs a timeout in seconds}"
+    local session_pid="${3:-}" pretoken="${4:-}"
+    local tmux_session="${5:-}" tmux_socket="${6:-}"
+    local state="" started
+    started=$(date +%s)
+    while :; do
+        if [ -n "$tmux_session" ] && ! check_tmux_session "$tmux_session" "$tmux_socket"; then
+            printf '%s' "crashed"
+            return 2
+        fi
+        state="$(bridge_state "$bot_dir" "$pretoken" "$session_pid" 2>/dev/null || true)"
+        [ -n "$state" ] || state="unknown"
+        case "$state" in
+            up | no_handle)
+                printf '%s' "$state"
+                return 0
+                ;;
+            no_token)
+                if bot_expects_no_token "$bot_dir"; then
+                    printf '%s' "$state"
+                    return 0
+                fi
+                ;;
+        esac
+        [ "$(( $(date +%s) - started ))" -ge "$timeout_s" ] && { printf '%s' "$state"; return 1; }
+        sleep 0.5
+    done
+}
+
 # wait_bridge_ready <bot_dir> <ceiling_s> <fence_token>
 # Block until a BRIDGE_READY is appended to the bot's startup.log AFTER
 # <fence_token> — the unique marker bridge_fence_write wrote just before the

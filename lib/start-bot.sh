@@ -296,10 +296,8 @@ _rc_timeout_s="${RC_READY_TIMEOUT_S:-90}"
 # start-bot under `set -u` ($(( abc * 2 )) → "abc: unbound variable"), crash-
 # looping the bot. Fail safe to 90s.
 case "$_rc_timeout_s" in ""|*[!0-9]*) _rc_timeout_s=90 ;; esac
-_rc_iters=$(( _rc_timeout_s * 2 ))
 _poll_start=$(date +%s)
 echo "$(ts_iso) POLL_START — waiting for Telegram poller readiness (bridge_state, ceiling ${_rc_timeout_s}s)" >> "$LOG"
-_ready=0
 # Resolve the token ONCE here, not inside every bridge_state poll below: the token
 # is static .env config, so re-sourcing the .env chain each 0.5s iteration (up to
 # ~180x on a cold start) is wasted I/O — costly when bots start in parallel on a
@@ -342,59 +340,60 @@ if [ -z "$_session_pid" ]; then
     # is exactly the failure being fixed, and this line is greppable.
     echo "$(ts_iso) SCOPE_UNRESOLVED — no pane pid for $TMUX_SESSION; readiness falls back to bot-scoped (may accept the outgoing session's poller)" >> "$LOG"
 fi
-for _i in $(seq 1 "$_rc_iters"); do
-    if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
-        echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
-        exit 1
-    fi
-    # Assert ground truth, not a bring-up pane string: a grepped readiness line
-    # drifts across claude builds and silently stops matching, timing out on every
-    # healthy start and firing a false rc_timeout FLEET ALERT (#751). The Telegram
-    # poller writing a live bot.pid — proven by bridge_state == up — confirms Claude
-    # Code initialized far enough to spawn its MCP plugin, and is immune to string
-    # drift (the #710/#741 bridge-truth family). Bots with no channel (no_handle) or
-    # a declared tokenless canary have no poller to await: ready at once, no alert.
-    _bstate="$(bridge_state "$BOT_DIR" "$_pretoken" "$_session_pid" 2>/dev/null || true)"
-    case "$_bstate" in
-        up)
-            _elapsed=$(( $(date +%s) - _poll_start ))
-            echo "$(ts_iso) READY — Telegram poller up after ${_elapsed}s" >> "$LOG"
-            _ready=1
-            break
-            ;;
-        no_handle)
-            echo "$(ts_iso) READY — non-channel bot, no poller to await" >> "$LOG"
-            _ready=1
-            break
-            ;;
-        no_token)
-            if bot_expects_no_token "$BOT_DIR"; then
-                echo "$(ts_iso) READY — declared tokenless canary, no poller to await" >> "$LOG"
-                _ready=1
-                break
-            fi
-            ;;
-    esac
-    sleep 0.5
-done
-if [ "$_ready" -eq 0 ]; then
-    if [ "${_bstate:-}" = "not_mine" ]; then
-        # A live poller exists and belongs to another session -- the #1530 shape
-        # run to its ceiling. Distinct from "no poller came up" because the
-        # remedy differs: this one usually means the outgoing session never
-        # released the slot, not that bring-up failed.
-        echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, a Telegram poller is up but owned by another session (not ours), proceeding anyway" >> "$LOG"
-    else
-        echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, Telegram poller never reached bridge_state=up, proceeding anyway" >> "$LOG"
-    fi
-    # Emit a fleet event so a genuine readiness regression reaches fleet-pulse's
-    # escalation instead of just appending to a log. Now gated on bridge ground
-    # truth, so this fires only when the poller really never came up — a true
-    # positive worth paging, not the #751 string-drift false alarm. A fleet-wide
-    # TIMEOUT must page: the #533 outage sat in every startup.log for a week with
-    # nothing alerting.
-    emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s}}"
+# Assert ground truth, not a bring-up pane string: a grepped readiness line
+# drifts across claude builds and silently stops matching, timing out on every
+# healthy start and firing a false rc_timeout FLEET ALERT (#751). The Telegram
+# poller writing a live bot.pid — proven by bridge_state == up — confirms Claude
+# Code initialized far enough to spawn its MCP plugin, and is immune to string
+# drift (the #710/#741 bridge-truth family). Bots with no channel (no_handle) or
+# a declared tokenless canary have no poller to await: ready at once, no alert.
+#
+# The poll loop itself lives in lib-common.sh (wait_bridge_ready_state, #1573):
+# its ceiling is wall-clock `date +%s`, not a probe count, so a slow probe under
+# load shortens how many polls fit in ${_rc_timeout_s}s rather than silently
+# stretching the ceiling itself (a "90s" wait once ran five minutes this way).
+# It logs nothing and never exits — every line below and the exit on a crashed
+# session are this script's own, exactly as they were when the loop was inline.
+if _bstate="$(wait_bridge_ready_state "$BOT_DIR" "$_rc_timeout_s" "$_session_pid" "$_pretoken" "$TMUX_SESSION" "$TMUX_SOCKET")"; then
+    _wait_rc=0
+else
+    _wait_rc=$?
 fi
+case "$_wait_rc" in
+    0)
+        _elapsed=$(( $(date +%s) - _poll_start ))
+        case "$_bstate" in
+            up) echo "$(ts_iso) READY — Telegram poller up after ${_elapsed}s" >> "$LOG" ;;
+            no_handle) echo "$(ts_iso) READY — non-channel bot, no poller to await" >> "$LOG" ;;
+            no_token) echo "$(ts_iso) READY — declared tokenless canary, no poller to await" >> "$LOG" ;;
+        esac
+        ;;
+    2)
+        # check_tmux_session failed inside the poll -- the session died mid-boot.
+        # start-bot's decision to log + exit, same as when this check ran inline.
+        echo "$(ts_iso) CRASH — tmux session died during startup" >> "$LOG"
+        exit 1
+        ;;
+    *)
+        _elapsed=$(( $(date +%s) - _poll_start ))
+        if [ "$_bstate" = "not_mine" ]; then
+            # A live poller exists and belongs to another session -- the #1530 shape
+            # run to its ceiling. Distinct from "no poller came up" because the
+            # remedy differs: this one usually means the outgoing session never
+            # released the slot, not that bring-up failed.
+            echo "$(ts_iso) TIMEOUT — ${_elapsed}s elapsed (wall clock), a Telegram poller is up but owned by another session (not ours), proceeding anyway" >> "$LOG"
+        else
+            echo "$(ts_iso) TIMEOUT — ${_elapsed}s elapsed (wall clock), last bridge_state=${_bstate}, proceeding anyway" >> "$LOG"
+        fi
+        # Emit a fleet event so a genuine readiness regression reaches fleet-pulse's
+        # escalation instead of just appending to a log. Now gated on bridge ground
+        # truth, so this fires only when the poller really never came up — a true
+        # positive worth paging, not the #751 string-drift false alarm. A fleet-wide
+        # TIMEOUT must page: the #533 outage sat in every startup.log for a week with
+        # nothing alerting.
+        emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s},\"last_state\":\"${_bstate}\"}"
+        ;;
+esac
 
 # No sleep here, and no readiness assumption either. The bridge-readiness wait
 # above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn
