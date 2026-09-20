@@ -1244,9 +1244,11 @@ wait_bridge_ready() {
 #     means; whether THIS spawn consulted THIS entry is left to the operator,
 #     who has the POLL_START line just above it in the same log.
 #
-# Nothing here can fail its caller. Absent, empty, unreadable, malformed and
-# python3-less all print nothing and return 0: this is an ADDITIVE diagnostic on
-# an already-failing path, and it must never be the reason a boot aborts.
+# Nothing here can fail its caller: EVERY path returns 0, because this is an
+# ADDITIVE diagnostic on an already-failing path and must never be the reason a
+# boot aborts. But non-blocking is a claim about AVAILABILITY, not a licence for
+# the diagnostic to stay quiet: a condition it could not EVALUATE is reported as
+# UNKNOWN, never as silence.
 
 # mcp_auth_cache_path [bot_dir]
 # Path to the needs-auth cache the given bot's session consults. Resolves that
@@ -1272,29 +1274,68 @@ mcp_auth_cache_path() {
 }
 
 # mcp_auth_cache_note [bot_dir]
-# ONE line naming every MCP server the cache lists and when each was recorded,
-# or NOTHING at all when the cache is absent, empty or unreadable. Callers print
-# it verbatim directly after their own failure line.
+# ONE line in one of two shapes, or nothing at all:
+#   AUTH_CACHE_ARMED    -- every MCP server the cache lists, and when each was recorded
+#   AUTH_CACHE_UNKNOWN  -- the cache could not be read; its contents are UNDETERMINED
+#   (nothing)           -- the cache WAS read and lists nothing
+# Callers print it verbatim directly after their own failure line.
 #
-# Silence on an empty cache is the point rather than an omission: the line is
-# additive, so an operator who does not see it has learned that this failure is
-# NOT the #1358 signature -- which is itself worth knowing at that moment.
+# Silence is reserved for the case where the cache was actually read and holds
+# nothing. THEN an operator who does not see a line has learned that this failure
+# is NOT the #1358 signature -- which is worth knowing at that moment.
+#
+# Unreadable, python3-less, unparseable and crashed-parser are NOT that. They are
+# "could not look", and reporting them as silence publishes a cannot-look as a
+# nothing-found, in the direction nobody audits. That is source_state.py's rule
+# ("a reader that cannot reach its source must not return the same thing as a
+# reader that found nothing"), and it is the same distinction when() already
+# draws one level down when it says `recorded unknown` rather than dropping a
+# key. A note withheld because the FILE did not parse is that same silence, one
+# level up, on the path that feeds escalation.
 mcp_auth_cache_note() {
-    local f
+    local f out rc
     f="$(mcp_auth_cache_path "${1:-}")"
-    [ -r "$f" ] || return 0
-    command -v python3 >/dev/null 2>&1 || return 0
-    python3 - "$f" <<'PY' 2>/dev/null || true
+    # ABSENT is the only shape that means "nothing armed". Present-but-unreadable
+    # is a different fact with a different remedy, so it must not share absent's
+    # answer.
+    [ -e "$f" ] || return 0
+    if [ ! -r "$f" ]; then
+        printf 'AUTH_CACHE_UNKNOWN — could not read %s: present but not readable. This is NOT evidence the cache is clear.\n' "$f"
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'AUTH_CACHE_UNKNOWN — could not read %s: no python3 to parse it. This is NOT evidence the cache is clear.\n' "$f"
+        return 0
+    fi
+    out="$(python3 - "$f" 2>/dev/null <<'PY'
 import json, os, sys, datetime
 
 path = sys.argv[1]
+
+# Exit 3 = "could not look"; exit 0 with no output = "looked, nothing armed".
+# The caller renders the first as AUTH_CACHE_UNKNOWN and the second as silence.
+# Collapsing the two is the defect this split exists to prevent, so every
+# failure path below picks one DELIBERATELY rather than falling through to 0.
 try:
     with open(path) as fh:
         raw = fh.read()
-    entries = json.loads(raw) if raw.strip() else {}
-    if not isinstance(entries, dict) or not entries:
-        sys.exit(0)
 except Exception:
+    sys.exit(3)
+
+if not raw.strip():
+    sys.exit(0)
+
+try:
+    entries = json.loads(raw)
+except Exception:
+    sys.exit(3)
+
+if not isinstance(entries, dict):
+    # A shape we do not recognise cannot be read as "nothing armed" -- we cannot
+    # tell what it holds, which is the third state and not the empty one.
+    sys.exit(3)
+
+if not entries:
     sys.exit(0)
 
 
@@ -1347,6 +1388,13 @@ print(
     "Remedy: printf '{}' > %s" % (listed, path, mtime, path)
 )
 PY
+    )" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'AUTH_CACHE_UNKNOWN — could not read %s: parser exited %s (unparseable content or a failed interpreter). This is NOT evidence the cache is clear.\n' "$f" "$rc"
+        return 0
+    fi
+    [ -z "$out" ] || printf '%s\n' "$out"
+    return 0
 }
 
 # --- Supervision-unit ownership ----------------------------------------------

@@ -223,6 +223,20 @@ assert_eq "(armed cache) the FAILED line strikes the keepalive remedy" "true" \
 assert_eq "(armed cache) the FAILED line still carries the ceiling it waited" "true" \
     "$(grep -q 'FAILED: acbot — no BRIDGE_READY within' "$T/rr-authcache-armed.log" && echo true || echo false)"
 
+# UNDETERMINED: the third state. Malformed JSON is the realistic trigger -- the
+# cache is host-global and written by Claude Code at arbitrary moments, so a read
+# concurrent with a write lands here. The alert must neither claim ARMED nor go
+# quiet: a cache that could not be read has not ruled anything out.
+ac_run 'not json {{{' "$T/rr-authcache-unknown.log"
+assert_eq "(unreadable cache) AUTH_CACHE_UNKNOWN recorded, not silence" "true" \
+    "$(grep -q 'AUTH_CACHE_UNKNOWN' "$T/rr-authcache-unknown.log" && echo true || echo false)"
+assert_eq "(unreadable cache) it does NOT claim the cache is armed" "false" \
+    "$(grep -q 'auth cache is ARMED' "$T/rr-authcache-unknown.log" && echo true || echo false)"
+assert_eq "(unreadable cache) the FAILED line says an armed cache is not ruled out" "true" \
+    "$(grep -q 'FAILED: acbot .* could NOT be read' "$T/rr-authcache-unknown.log" && echo true || echo false)"
+assert_eq "(unreadable cache) the gate still fails on its ceiling" "true" \
+    "$(grep -q 'FAILED: acbot — no BRIDGE_READY within' "$T/rr-authcache-unknown.log" && echo true || echo false)"
+
 echo ""
 echo "=== weekly-worker-restart.sh rides the shared gate ==="
 assert_eq "weekly restart calls wait_bridge_ready" "true" \

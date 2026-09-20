@@ -93,7 +93,13 @@ def test_armed_cache_is_named_in_full(tmp_path):
     assert out.count("\n") == 0, "one greppable line, never a paragraph"
 
 
-# --- fail-silent, never fail-loud --------------------------------------------
+# --- never fail the caller, and never publish a cannot-look as a nothing-found -
+#
+# These assert NON-FATAL, not SILENT. The two are different claims and only the
+# first is the contract: the helper must never break a boot, but a condition it
+# could not evaluate has to say so. An earlier revision asserted silence here and
+# so certified the collapse -- a cannot-look reported as a nothing-found, which
+# start-bot then promoted to `auth_cache_armed: false` on the plane.
 
 @pytest.mark.parametrize(
     "label,content",
@@ -102,13 +108,10 @@ def test_armed_cache_is_named_in_full(tmp_path):
         ("empty object", "{}"),
         ("zero bytes", ""),
         ("whitespace only", "   \n"),
-        ("malformed json", "not json {{{"),
-        ("json array", "[1,2,3]"),
-        ("json null", "null"),
-        ("json string", '"plugin:telegram:telegram"'),
     ],
 )
-def test_nothing_to_report_is_silent_at_rc_zero(tmp_path, label, content):
+def test_a_cache_that_was_read_and_holds_nothing_is_silent(tmp_path, label, content):
+    """Silence is reserved for a cache actually READ that lists nothing."""
     if content is not None:
         _arm(tmp_path, content)
     out, rc = _note(tmp_path)
@@ -116,7 +119,31 @@ def test_nothing_to_report_is_silent_at_rc_zero(tmp_path, label, content):
     assert rc == 0, f"{label} must not fail its caller (rc={rc})"
 
 
-def test_unreadable_cache_is_silent_rather_than_fatal(tmp_path):
+@pytest.mark.parametrize(
+    "label,content",
+    [
+        ("malformed json", "not json {{{"),
+        ("json array", "[1,2,3]"),
+        ("json null", "null"),
+        ("json string", '"plugin:telegram:telegram"'),
+    ],
+)
+def test_a_cache_that_could_not_be_read_says_unknown(tmp_path, label, content):
+    """A shape we cannot parse is UNDETERMINED, never reported as clear.
+
+    The likeliest trigger is not exotic: the cache is host-global and written by
+    Claude Code at arbitrary moments, so a read concurrent with a write yields
+    invalid JSON. Reporting that as silence tells an operator mid-stall that this
+    is not the #1358 signature, when it may be exactly that.
+    """
+    _arm(tmp_path, content)
+    out, rc = _note(tmp_path)
+    assert out.startswith("AUTH_CACHE_UNKNOWN"), f"{label} must say UNKNOWN, got: {out!r}"
+    assert "NOT evidence the cache is clear" in out, out
+    assert rc == 0, f"{label} must not fail its caller (rc={rc})"
+
+
+def test_unreadable_cache_says_unknown_rather_than_failing_or_lying(tmp_path):
     f = _arm(tmp_path, ARMED)
     f.chmod(0o000)
     try:
@@ -125,11 +152,32 @@ def test_unreadable_cache_is_silent_rather_than_fatal(tmp_path):
         f.chmod(0o644)
     if os.geteuid() == 0:
         pytest.skip("root bypasses the permission bit; the branch is unreachable as root")
-    assert out == ""
+    assert out.startswith("AUTH_CACHE_UNKNOWN"), out
     assert rc == 0
 
 
-def test_a_broken_python3_does_not_fail_the_caller(tmp_path):
+def test_an_absent_cache_is_silent_but_an_unreadable_one_is_not(tmp_path):
+    """The one distinction the whole split exists to hold, asserted directly.
+
+    Without this, a regression that returned 0-and-silent for BOTH would still
+    satisfy every other case in this file.
+    """
+    absent_out, absent_rc = _note(tmp_path)
+    f = _arm(tmp_path, ARMED)
+    f.chmod(0o000)
+    try:
+        unreadable_out, unreadable_rc = _note(tmp_path)
+    finally:
+        f.chmod(0o644)
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses the permission bit; the branch is unreachable as root")
+    assert absent_out == "", absent_out
+    assert unreadable_out.startswith("AUTH_CACHE_UNKNOWN"), unreadable_out
+    assert absent_out != unreadable_out, "absent and unreadable must not share an answer"
+    assert (absent_rc, unreadable_rc) == (0, 0)
+
+
+def test_a_broken_python3_says_unknown_without_failing_the_caller(tmp_path):
     """The parse is a subprocess, so it can fail on a healthy host too.
 
     Emptying PATH cannot isolate this -- lib-common.sh needs `uname` at source
@@ -152,7 +200,8 @@ def test_a_broken_python3_does_not_fail_the_caller(tmp_path):
          "_", str(LIB_COMMON)],
         capture_output=True, text=True, env=env, timeout=20,
     )
-    assert proc.stdout.strip() == "rc=0", proc.stdout
+    assert proc.stdout.startswith("AUTH_CACHE_UNKNOWN"), proc.stdout
+    assert proc.stdout.strip().endswith("rc=0"), proc.stdout
     assert proc.returncode == 0, proc.stderr
 
 

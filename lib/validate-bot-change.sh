@@ -1583,6 +1583,37 @@ _acev="$(val_events "$RB_ROOT" "$FLEET" valrb rc_timeout | tail -1 || true)"
 case "$_acev" in *'"auth_cache_armed":true'*) r=yes ;; *) r=no ;; esac
 harness_check "#1358 rc_timeout event carries auth_cache_armed (escalation sees the cause)" "$r"
 
+# --- #1358: a cache we could NOT read must not answer as a cache that is CLEAR
+# The third state. The first revision of this change collapsed it: six silent
+# conditions, only two of which meant "nothing there", all landing as
+# auth_cache_armed:false on the plane -- a cannot-look published as a
+# nothing-found, in the direction nobody audits.
+#
+# Malformed JSON is the likeliest real trigger rather than an exotic one: the
+# cache is host-global and written by Claude Code at arbitrary moments, so a read
+# concurrent with a write lands exactly here.
+printf 'not json {{{' > "$RB_HOME/.claude/mcp-needs-auth-cache.json"
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authunknown.out" 2>&1 || true
+sleep 1
+_acunk="$(grep 'AUTH_CACHE_UNKNOWN —' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+[ -n "$_acunk" ] && r=yes || r=no
+harness_check "#1358 an unreadable cache -> AUTH_CACHE_UNKNOWN, never silence" "$r"
+case "$_acunk" in *"NOT evidence the cache is clear"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358   ...and the line says so, so it cannot be read as an all-clear" "$r"
+# The plane row is the part that matters: `false` there reads as measured, and
+# nothing downstream can recover that it was never looked up.
+_acev_unk="$(val_events "$RB_ROOT" "$FLEET" valrb rc_timeout | tail -1 || true)"
+case "$_acev_unk" in *'"auth_cache_armed":null'*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 an undetermined cache rides the event as null, never false" "$r"
+_bmunk="$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+case "$_bmunk" in *"could NOT be determined"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 undetermined cache -> BRIDGE_MISSING withholds the keepalive promise" "$r"
+
 if [ "$fail" -gt "$_rc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: RC readiness checks failed ---"
     echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"

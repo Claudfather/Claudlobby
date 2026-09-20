@@ -145,12 +145,21 @@ rr_process_fleet() {
             # is described by the cache its session actually consults.
             auth_note="$(mcp_auth_cache_note "$bot_dir" 2>/dev/null || true)"
             why="no BRIDGE_READY within ${CEILING}s"
-            if [ -n "$auth_note" ]; then
-                echo "$(ts_iso) $auth_note" >> "$LOG"
-                # The alert is a Telegram-bound one-liner, so it carries the
-                # signature and the address of the detail, never the detail.
-                why="$why — host-global MCP auth cache is ARMED, so a restart re-reads it and skips the poller again; keepalive cannot heal this. Detail + remedy: $LOG"
-            fi
+            # The alert is a Telegram-bound one-liner, so it carries the
+            # signature and the address of the detail, never the detail. An
+            # UNDETERMINED cache gets its own wording rather than the armed
+            # claim or silence: a note the helper could not read is not a bot
+            # whose cache is clear.
+            case "$auth_note" in
+                AUTH_CACHE_ARMED*)
+                    echo "$(ts_iso) $auth_note" >> "$LOG"
+                    why="$why — host-global MCP auth cache is ARMED, so a restart re-reads it and skips the poller again; keepalive cannot heal this. Detail + remedy: $LOG"
+                    ;;
+                AUTH_CACHE_UNKNOWN*)
+                    echo "$(ts_iso) $auth_note" >> "$LOG"
+                    why="$why — the host-global MCP auth cache could NOT be read, so an armed cache is not ruled out. Detail: $LOG"
+                    ;;
+            esac
             rr_fail "$fleet" "$bot_id" "$bots_dir" "$why" || return 1
         fi
     done

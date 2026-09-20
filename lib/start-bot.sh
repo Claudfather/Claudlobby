@@ -401,12 +401,18 @@ if [ "$_ready" -eq 0 ]; then
     # claim -- see mcp_auth_cache_note. Silence here is informative in its own
     # right, telling the operator this timeout is NOT that signature.
     _auth_cache_note="$(mcp_auth_cache_note "$BOT_DIR" 2>/dev/null || true)"
-    if [ -n "$_auth_cache_note" ]; then
-        echo "$(ts_iso) $_auth_cache_note" >> "$LOG"
-        _auth_cache_armed=true
-    else
-        _auth_cache_armed=false
-    fi
+    [ -z "$_auth_cache_note" ] || echo "$(ts_iso) $_auth_cache_note" >> "$LOG"
+    # THREE states, because there are three answers and a boolean carries two.
+    # A cache that could not be READ is not a cache that is CLEAR, and `false`
+    # on the plane reads as measured -- this field is escalation input by the
+    # check's own name, and nothing downstream can recover that it was a guess.
+    # Undetermined rides as JSON null: boot-strand-sampler.sh's precedent, where
+    # a count it cannot read is UNKNOWN and never a 0.
+    case "$_auth_cache_note" in
+        AUTH_CACHE_ARMED*)   _auth_cache_armed=true ;;
+        AUTH_CACHE_UNKNOWN*) _auth_cache_armed=null ;;
+        *)                   _auth_cache_armed=false ;;
+    esac
     # Emit a fleet event so a genuine readiness regression reaches fleet-pulse's
     # escalation instead of just appending to a log. Now gated on bridge ground
     # truth, so this fires only when the poller really never came up — a true
@@ -526,11 +532,20 @@ case "$_bridge_verdict" in
         # re-reading the file: one read per boot, and unset (a bridge that went
         # missing without a TIMEOUT) correctly means "not established", so the
         # unqualified line stands.
-        if [ "${_auth_cache_armed:-false}" = true ]; then
-            echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive CANNOT heal this one: see the AUTH_CACHE_ARMED line above" >> "$LOG"
-        else
-            echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal" >> "$LOG"
-        fi
+        case "${_auth_cache_armed:-false}" in
+            true)
+                echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive CANNOT heal this one: see the AUTH_CACHE_ARMED line above" >> "$LOG"
+                ;;
+            null)
+                # Undetermined is not clear. Promising the keepalive remedy here
+                # would be the same over-claim as auth_cache_armed:false, on the
+                # line an operator reads mid-stall.
+                echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal UNLESS the auth cache is armed, which could NOT be determined: see the AUTH_CACHE_UNKNOWN line above" >> "$LOG"
+                ;;
+            *)
+                echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal" >> "$LOG"
+                ;;
+        esac
         ;;
     unknown)   echo "$(ts_iso) BRIDGE_UNKNOWN — ownership unprovable; not actionable" >> "$LOG" ;;
     no_handle) : ;; # not a channel bot — nothing to verify
