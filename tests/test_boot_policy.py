@@ -6,7 +6,12 @@ Covers:
 - an explicit admission_slots override winning over auto
 - ready_timeout_s derived from mcp_timeout_ms (epic fork F3)
 - priority from fleet.manager_bots() (manager 0, worker 1)
-- invalid host.boot values raising ValueError naming the key
+- invalid host.boot values raising ValueError naming the key (negative,
+  non-integer string, bare float, stray bool)
+- admission_slots refusing zero (spec §8: the composer never emits a cap of
+  0) while admission_wait_max_s: 0 stays legal ("never wait")
+- plugin_update_once_per_boot read from an exact spelling set, never by
+  truthiness (a quoted "false" is off); unreadable values refused
 - bot_conf_lines' fixed six-line render, MCP_TIMEOUT the only export
 - load_host_boot() reading the package system.yaml (the loader + the
   package defaults, wired together)
@@ -69,7 +74,7 @@ def test_defaults_dict_matches_the_documented_shape():
 
 @pytest.mark.parametrize(
     "cpu_count,expected",
-    [(2, 1), (4, 1), (8, 2), (12, 3), (64, 4)],
+    [(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (8, 2), (12, 3), (64, 4), (100, 4)],
 )
 def test_derive_slots_clamps_auto(cpu_count, expected):
     assert derive_slots(cpu_count) == expected
@@ -140,11 +145,81 @@ def test_bot_absent_from_fleet_is_a_worker():
 @pytest.mark.parametrize(
     "key", ["admission_slots", "admission_wait_max_s", "mcp_timeout_ms"]
 )
-@pytest.mark.parametrize("bad_value", [-1, "-1", "soon", "12.5", True])
+@pytest.mark.parametrize("bad_value", [-1, "-1", "soon", "12.5", 12.5, True])
 def test_invalid_numeric_values_raise_naming_the_key(key, bad_value):
     fleet = _lead_worker_fleet()
     with pytest.raises(ValueError, match=key):
         resolve_boot_policy(fleet.bots["worker"], fleet, {key: bad_value}, cpu_count=4)
+
+
+# --- admission_slots refuses zero: a cap of 0 can never be taken (spec §8) --------
+
+
+@pytest.mark.parametrize("zero", [0, "0"])
+def test_admission_slots_refuses_zero(zero):
+    """With a cap of 0 no slot can ever be created and every bot queues for
+    the full wait cap; the spec says the composer never emits it."""
+    fleet = _lead_worker_fleet()
+    with pytest.raises(ValueError, match="admission_slots"):
+        resolve_boot_policy(
+            fleet.bots["worker"], fleet, {"admission_slots": zero}, cpu_count=4
+        )
+
+
+def test_admission_wait_max_s_accepts_zero():
+    """A wait cap of 0 is legal -- "never wait" -- so the generic non-negative
+    rule stays for the other numeric keys; only the slot count has a floor of 1."""
+    fleet = _lead_worker_fleet()
+    policy = resolve_boot_policy(
+        fleet.bots["worker"], fleet, {"admission_wait_max_s": 0}, cpu_count=4
+    )
+    assert policy.admission_wait_max_s == 0
+
+
+# --- plugin_update_once_per_boot: validated, never truthiness-coerced -------------
+
+
+@pytest.mark.parametrize(
+    "spelling,expected",
+    [
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("false", False),
+        ("1", True),
+        ("0", False),
+        ("yes", True),
+        ("no", False),
+        (" TRUE ", True),  # case-insensitive, whitespace-stripped
+        ("No", False),
+    ],
+)
+def test_plugin_update_once_per_boot_reads_each_accepted_spelling(spelling, expected):
+    fleet = _lead_worker_fleet()
+    policy = resolve_boot_policy(
+        fleet.bots["worker"], fleet, {"plugin_update_once_per_boot": spelling}
+    )
+    assert policy.plugin_update_once_per_boot is expected
+
+
+def test_quoted_false_is_off_not_truthy():
+    """The review's bug: bool("false") is True in Python, so a quoted "false"
+    read as ON. It must read as off and render as BOOT_PLUGIN_UPDATE_ONCE=0."""
+    fleet = _lead_worker_fleet()
+    policy = resolve_boot_policy(
+        fleet.bots["worker"], fleet, {"plugin_update_once_per_boot": "false"}
+    )
+    assert policy.plugin_update_once_per_boot is False
+    assert bot_conf_lines(policy)[-1] == "BOOT_PLUGIN_UPDATE_ONCE=0"
+
+
+@pytest.mark.parametrize("bad_value", ["maybe", 2, None])
+def test_unreadable_boolean_raises_naming_the_key(bad_value):
+    fleet = _lead_worker_fleet()
+    with pytest.raises(ValueError, match="plugin_update_once_per_boot"):
+        resolve_boot_policy(
+            fleet.bots["worker"], fleet, {"plugin_update_once_per_boot": bad_value}
+        )
 
 
 # --- bot_conf_lines: the six lines, fixed order -----------------------------------

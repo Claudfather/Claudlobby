@@ -68,26 +68,64 @@ def derive_slots(cpu_count: int | None) -> int:
     return max(1, min(4, quarter))
 
 
-def _coerce_nonneg_int(key: str, value: object) -> int:
-    """Parse `value` as a non-negative integer, or raise naming `key`.
+def _coerce_int(
+    key: str, value: object, *, minimum: int, or_literal: str | None = None
+) -> int:
+    """Parse `value` as an integer no smaller than `minimum`, or raise naming `key`.
 
     Accepts a real ``int`` or a string that parses cleanly as one (a
-    ``host.boot`` value may arrive from YAML as either). ``bool`` is
-    rejected even though Python's ``bool`` is an ``int`` subclass -- a
-    stray ``true``/``false`` on a numeric key is a config mistake, not a 1
-    or a 0.
+    ``host.boot`` value may arrive from YAML as either). A bare float is
+    refused rather than truncated, and ``bool`` is refused even though
+    Python's ``bool`` is an ``int`` subclass -- a stray ``true``/``false``
+    or ``12.5`` on a numeric key is a config mistake, not a 1, a 0 or a 12.
+    `or_literal` names a non-numeric spelling the key also accepts (the
+    slot count's ``'auto'``), so the refusal states the whole accepted set.
     """
+    accepted = f"an integer >= {minimum}"
+    if or_literal is not None:
+        accepted = f"{or_literal} or {accepted}"
+    refusal = ValueError(f"host.boot.{key} must be {accepted}, got {value!r}")
     if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise ValueError(f"host.boot.{key} must be a non-negative integer, got {value!r}")
+        raise refusal
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        raise ValueError(
-            f"host.boot.{key} must be a non-negative integer, got {value!r}"
-        ) from None
-    if parsed < 0:
-        raise ValueError(f"host.boot.{key} must be a non-negative integer, got {value!r}")
+        raise refusal from None
+    if parsed < minimum:
+        raise refusal
     return parsed
+
+
+# The spellings `plugin_update_once_per_boot` reads -- the same set the
+# runtime side reads as 1/0 -- compared case-insensitively after stripping.
+_BOOL_SPELLINGS = {
+    "true": True,
+    "1": True,
+    "yes": True,
+    "false": False,
+    "0": False,
+    "no": False,
+}
+
+
+def _coerce_bool(key: str, value: object) -> bool:
+    """Parse `value` as a boolean, or raise naming `key`.
+
+    A real ``bool`` passes through; a string is read from `_BOOL_SPELLINGS`
+    and nothing else is coerced. Truthiness is exactly the wrong tool here:
+    ``bool("false")`` is True in Python, which is how a quoted ``"false"``
+    read as ON before this existed. An int, ``None`` or an unreadable
+    string is a config mistake, not a value.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        spelled = value.strip().lower()
+        if spelled in _BOOL_SPELLINGS:
+            return _BOOL_SPELLINGS[spelled]
+    raise ValueError(
+        f"host.boot.{key} must be a boolean (true/false, 1/0, yes/no), got {value!r}"
+    )
 
 
 def resolve_boot_policy(
@@ -105,24 +143,35 @@ def resolve_boot_policy(
     is the production caller's job) so resolution stays a pure function of
     its arguments and tests never depend on the machine they run on.
     """
+    # The slot count's floor is 1, not 0, and that is its own rule (spec §8):
+    # with a cap of 0 no slot can ever be created, so every bot queues for
+    # the full wait cap -- the composer never emits it. `auto` is already
+    # floored at 1 by derive_slots; an explicit value is floored here.
     slots_raw = host_boot.get("admission_slots", DEFAULTS["admission_slots"])
     if slots_raw == "auto":
         admission_slots = derive_slots(cpu_count)
     else:
-        admission_slots = _coerce_nonneg_int("admission_slots", slots_raw)
+        admission_slots = _coerce_int(
+            "admission_slots", slots_raw, minimum=1, or_literal="'auto'"
+        )
 
-    admission_wait_max_s = _coerce_nonneg_int(
+    # A wait cap of 0 is legal ("never wait"), so these two keep the generic
+    # non-negative rule.
+    admission_wait_max_s = _coerce_int(
         "admission_wait_max_s",
         host_boot.get("admission_wait_max_s", DEFAULTS["admission_wait_max_s"]),
+        minimum=0,
     )
-    mcp_timeout_ms = _coerce_nonneg_int(
+    mcp_timeout_ms = _coerce_int(
         "mcp_timeout_ms",
         host_boot.get("mcp_timeout_ms", DEFAULTS["mcp_timeout_ms"]),
+        minimum=0,
     )
-    plugin_update_once_per_boot = bool(
+    plugin_update_once_per_boot = _coerce_bool(
+        "plugin_update_once_per_boot",
         host_boot.get(
             "plugin_update_once_per_boot", DEFAULTS["plugin_update_once_per_boot"]
-        )
+        ),
     )
 
     priority = 0 if bot.bot_id in fleet.manager_bots() else 1
