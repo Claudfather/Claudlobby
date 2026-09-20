@@ -27,8 +27,16 @@ SHIPPED_MCP = REPO_ROOT / "library" / "mcp"
 g = load_lib_module("mcp-package-grammar")
 
 
-def _equip(fleet_dir: Path, fragments: dict[str, dict]) -> None:
+def _equip(
+    fleet_dir: Path, fragments: dict[str, dict], contracts: dict | None = None
+) -> None:
     """Write fragments into the fleet library and equip the lead bot.
+
+    `contracts` are the `_`-prefixed fragment-level keys that sit beside the
+    server in a real fragment file (`_global_binary`, `_env_contract`).
+    Composition BRANCHES on them, so a fixture that omits one silently takes
+    the short-circuit path — and a test whose subject sits past that branch
+    then passes without ever reaching the code it names.
 
     Asserts the edit landed: a silent no-op leaves the fleet with no MCP
     servers, so the command under test returns early and every assertion
@@ -36,7 +44,7 @@ def _equip(fleet_dir: Path, fragments: dict[str, dict]) -> None:
     """
     for name, server in fragments.items():
         (fleet_dir / "library" / "mcp" / f"{name}.json").write_text(
-            json.dumps({name: server})
+            json.dumps({name: server, **(contracts or {})})
         )
     fy = fleet_dir / "fleet.yaml"
     before = fy.read_text()
@@ -155,15 +163,54 @@ class TestTheBinarySwapStaysNpxOnly:
         from claudlobby.composer import compose_mcp_json
         from tests.conftest import load_test_fleet, make_paths
 
-        _equip(fleet_dir, {"uvxdemo": {"command": "uvx", "args": ["workspace-mcp", "--tools", "gmail"]}})
+        # The swap's precondition is TWO facts, not one: a fragment that
+        # DECLARES a global binary, and that binary resolving on the host.
+        # Without the declaration `resolved_binary` is None and compose
+        # short-circuits before the `== "npx"` check — the comparison under
+        # test here — so the monkeypatch below is inert and this test passes
+        # whatever the gate says.
+        _equip(
+            fleet_dir,
+            {"uvxdemo": {"command": "uvx", "args": ["workspace-mcp", "--tools", "gmail"]}},
+            contracts={"_global_binary": "node"},
+        )
 
-        # Force the swap's precondition: a resolvable global binary.
         monkeypatch.setattr(_shutil, "which", lambda _n: "/usr/bin/node")
         fleet = load_test_fleet(fleet_dir)
         out = compose_mcp_json(fleet.bots["lead"], make_paths(fleet_dir))
         server = out["mcpServers"]["uvxdemo"]
         assert server["command"] == "uvx", "the npx->node swap reached a uvx server"
         assert server["args"] == ["workspace-mcp", "--tools", "gmail"]
+
+    def test_an_npx_server_under_the_same_fixture_is_rewritten(
+        self, fleet_dir: Path, monkeypatch
+    ):
+        """The control the boundary test cannot stand without.
+
+        `command == "uvx"` is satisfied both by a swap that ran and held, and
+        by a swap that never ran at all — so alone it cannot tell an intact
+        boundary from a disarmed fixture. This drives the identical fixture
+        with the one command the swap IS keyed on and requires the rewrite,
+        so a fixture that stops arming the swap fails here instead of going
+        quietly green next door.
+        """
+        import shutil as _shutil
+
+        from claudlobby.composer import compose_mcp_json
+        from tests.conftest import load_test_fleet, make_paths
+
+        _equip(
+            fleet_dir,
+            {"npxdemo": {"command": "npx", "args": ["-y", "demo@1.0", "--flag"]}},
+            contracts={"_global_binary": "node"},
+        )
+
+        monkeypatch.setattr(_shutil, "which", lambda _n: "/usr/bin/node")
+        fleet = load_test_fleet(fleet_dir)
+        out = compose_mcp_json(fleet.bots["lead"], make_paths(fleet_dir))
+        server = out["mcpServers"]["npxdemo"]
+        assert server["command"] == "node", "the swap did not fire — the fixture is disarmed"
+        assert server["args"] == ["/usr/bin/node", "--flag"]
 
 
 class TestTheProbeSeesUvPackages:

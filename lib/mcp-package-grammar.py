@@ -153,7 +153,7 @@ def servers_in(fragment: dict) -> list[tuple[str, dict]]:
     all — latent only because every shipped fragment holds exactly one) and
     `doctor.py`'s fragment walk. Routing those through here widens the
     refusal in `mcp_grammar` from the binary swap to ALL composition, which
-    is a rollout decision rather than a tidy-up, so it is a follow-up.""",
+    is a rollout decision rather than a tidy-up, so it is a follow-up."""
 
     return [
         (k, v) for k, v in fragment.items() if not k.startswith("_") and isinstance(v, dict)
