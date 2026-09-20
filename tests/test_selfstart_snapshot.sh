@@ -812,6 +812,141 @@ assert_eq "a payload after the adopted boundary is RESCUED" \
 assert_eq "a payload before it is still a self-start" \
     "SELF-STARTED" "$(section_of "$OUT24" selfstarter)"
 
+# ---- 8l: DUPLICATE bots_rescued keys UNION — no array wins the race --------
+# Two receipt shapes circulate: fields at top level, and fields nested under
+# `data`. The natural compatibility move is to emit BOTH, and a first-wins
+# reader then silently halves the receipt's own name list. The direction is
+# UNDER-count — a bot that was genuinely rescued loses its only evidence of
+# being touched and scores as a clean self-start, which is the over-credit the
+# receipt mechanism exists to prevent.
+#
+# Asserted as an OUTCOME, deliberately. "the parser returned something" and
+# "RESCUE_STATE is USABLE" both PASS while the defect is live: the dropped name
+# changes no state at all, it changes which SECTION a bot prints under.
+#
+# The row is 8b's receipt with its two names split across the two shapes, so
+# the expected classification is 8b's, unchanged. land_receipt lifts a
+# fixture's top-level keys into data._toplevel LAST, so `rescuedbot` is the
+# array a first-wins reader keeps and `contradictor` is the name it drops.
+#
+# WOULD FAIL IF: row_rescued_names took `head -1` again — contradictor loses
+# its naming, falls through to a boundary compare it predates, and prints as
+# SELF-STARTED. The headline moves 1 -> 2.
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"bots_rescued\":[\"contradictor\"],\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT25="$(run_snapshot "$BOOT")"; RC25=$?
+
+assert_eq "a split-shape receipt still refuses the page" "6" "$RC25"
+assert_eq "the name in the first array is honoured" \
+    "RESCUED" "$(section_of "$OUT25" rescuedbot)"
+assert_eq "the name in the SECOND array is not dropped" \
+    "ADJUDICATE" "$(section_of "$OUT25" contradictor)"
+assert_contains "and it is named as the contradiction it is" \
+    "RECEIPT CONTRADICTS ITSELF" "$OUT25"
+assert_eq "a bot in neither array is untouched by the union" \
+    "SELF-STARTED" "$(section_of "$OUT25" selfstarter)"
+# The under-count, stated as a number. A contaminated page prints no result,
+# but it still prints the provisional split — and that is where the dropped
+# name shows up: contradictor moves out of ADJUDICATE and INTO the self-start
+# tally. Under `head -1` this line reads "2 of 6, 1 carried".
+assert_eq "the dropped name would otherwise be credited as a self-start" \
+    "1 self 1 carried" \
+    "$(printf '%s\n' "$OUT25" | sed -n 's/.*(provisional: \([0-9]*\) of 6, \([0-9]*\) carried.*/\1 self \2 carried/p')"
+
+# ---- 8m: the same array twice is not two rescues (positive control) --------
+# 8l alone is satisfied by concatenating every match, which would also double a
+# receipt that merely repeats itself. The page cannot catch that — the consumer
+# behind N_RESCUE_NAMED applies its own `sort -u` — so the duplicate collapses
+# at the parser or not at all, and 8n measures it there. What is pinned here is
+# that a self-duplicating receipt classifies exactly as the single-array one.
+reset_plane
+land_receipt "{$RECEIPT_BASE,\"bots_rescued\":[\"rescuedbot\",\"contradictor\"],\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\",\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT26="$(run_snapshot "$BOOT")"; RC26=$?
+
+assert_eq "a self-duplicating receipt still rescues the bot after the boundary" \
+    "RESCUED" "$(section_of "$OUT26" rescuedbot)"
+assert_eq "a self-duplicating receipt still contradicts on the bot before it" \
+    "ADJUDICATE" "$(section_of "$OUT26" contradictor)"
+assert_eq "and it manufactures a rescue for nobody else" \
+    "SELF-STARTED" "$(section_of "$OUT26" selfstarter)"
+
+# ---- 8n: row_rescued_names directly — the properties the page cannot show --
+# Three of the four duplicate-key properties are invisible end-to-end, because
+# the consumer sorts and uniques the accumulated file before counting it. They
+# are measured here against the SHIPPED definition, lifted out of the real
+# script rather than restated: a restatement certifies a copy, and would pass
+# while the shipped parser regressed.
+#
+# Output is a SET, not a sequence. `sort -u` normalises order, which both
+# consumers tolerate by construction — N_RESCUE_NAMED is a distinct count and
+# the per-bot test is `grep -qx` membership. The single-array cases below pin
+# the normalised order explicitly so that contract is stated rather than
+# implied; they are set-identical to the pre-fix output, not byte-identical.
+echo "== row_rescued_names, direct =="
+RRN_DEF="$(sed -n '/^row_rescued_names() {/,/^}/p' "$SNAP")"
+# Positive control on the harness itself. An extraction that matched nothing
+# leaves the function undefined, every case below reports empty, and that reads
+# exactly like a parser that legitimately found no names.
+assert_contains "the shipped definition was actually lifted" "bots_rescued" "$RRN_DEF"
+eval "$RRN_DEF"
+assert_eq "and the lifted definition is callable" "function" "$(type -t row_rescued_names)"
+
+# Two readers, and the split is deliberate. `rrn_set` sorts before comparing,
+# so it asserts the CONTRACT (which names came back) and holds under any
+# correct implementation. `rrn_raw` does not, and is used exactly once — to
+# pin the order contract itself, where the implementation IS the claim.
+# Collapsing them would make every set assertion fail on an order change and
+# make the reason for each failure unreadable.
+rrn_set() { row_rescued_names "$1" | sort | tr '\n' ' ' | sed 's/ $//'; }
+rrn_raw() { row_rescued_names "$1" | tr '\n' ' ' | sed 's/ $//'; }
+
+# THE DEFECT. Under a first-wins read this returns "outer1 outer2" and the two
+# inner names are gone with no diagnostic.
+assert_eq "two arrays UNION — every name from both, neither array winning" \
+    "inner1 inner2 outer1 outer2" \
+    "$(rrn_set '{"bots_rescued":["outer1","outer2"],"data":{"bots_rescued":["inner1","inner2"]}}')"
+# The other wrong fix. Concatenating every match unions correctly and also
+# doubles a receipt that merely repeats itself; `head -1` passes this too, so
+# it is a control against that alternative rather than against the defect.
+assert_eq "the SAME array twice yields the list once, not twice" \
+    "dup1 dup2" \
+    "$(rrn_set '{"bots_rescued":["dup1","dup2"],"data":{"bots_rescued":["dup1","dup2"]}}')"
+# No-regression, both circulating shapes. These pass under the defect too, by
+# design: a single-array row has nothing to union and nothing to lose.
+assert_eq "a single TOP-LEVEL array keeps every name" \
+    "alpha zed" "$(rrn_set '{"bots_rescued":["zed","alpha"]}')"
+assert_eq "a single array NESTED under data keeps every name, identically" \
+    "alpha zed" "$(rrn_set '{"data":{"bots_rescued":["zed","alpha"]}}')"
+assert_eq "an empty array names nobody" "" "$(rrn_set '{"data":{"bots_rescued":[]}}')"
+assert_eq "an absent key names nobody" "" "$(rrn_set '{"data":{"actor":"x"}}')"
+# THE SET CONTRACT, pinned once and on purpose. Receipt order is NOT preserved
+# and no caller may read it out of here — both consumers are order-independent
+# by construction (a distinct count, and a `grep -qx` membership test), which
+# is what makes normalising safe.
+assert_eq "the output is sorted — it is a set, not the receipt's sequence" \
+    "alpha zed" "$(rrn_raw '{"bots_rescued":["zed","alpha"]}')"
+
+# The live regression fixture: the two real fleet_rescue receipts written
+# during the 2026-09-20 host reboot, frozen verbatim rather than read from the
+# estate, so this test measures a fixed artifact and not today's state. They
+# carry BOTH circulating shapes (row 1 nests bots_rescued under `data`, row 2
+# puts it at top level) and both use the spaced `": ["` form. The expected
+# lists are the pre-fix parser's own output on these same two rows, measured
+# and sorted: the fix must reproduce them as SETS, adding and losing nothing.
+RRN_REAL="$SCRIPT_DIR/fixtures/rescue-receipts/fleet-2026-09-20-real.jsonl"
+assert_eq "the frozen receipt fixture is present and both rows are there" \
+    "2" "$(grep -c . "$RRN_REAL" 2>/dev/null || echo 0)"
+assert_eq "real receipt 1 (nested under data) is set-unchanged by the union" \
+    "cam craig greg kenny saul todd" "$(rrn_set "$(sed -n '1p' "$RRN_REAL")")"
+assert_eq "real receipt 2 (top level) is set-unchanged by the union" \
+    "alex ari astrid clog navi rajan" "$(rrn_set "$(sed -n '2p' "$RRN_REAL")")"
+# Prose in these rows names bots in passing — receipt 1's note lists seven bots
+# it did NOT touch. None of them may leak into the list: the parser matches the
+# key, and valid JSON escapes any quote inside a value, so a name-list-shaped
+# sentence cannot be read as one.
+assert_absent "a bot named only in the receipt's prose is not a rescued name" \
+    "branden" "$(rrn_set "$(sed -n '1p' "$RRN_REAL")")"
+
 # ── Case 9: the WHOLE boot injection, not merely something startup-shaped ───
 # A boot is TWO sends: a bare `/claudna:session resume --auto` and then
 # `set +H; $STARTUP_PROMPT`. Asserting that something startup-shaped arrived
