@@ -1494,7 +1494,7 @@ printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "
 # asserting an absence in a file this harness does not own. Empty, not unset, is
 # the same thing to the ${VAR:-default} the helper uses, and says so explicitly.
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
-    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR= \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
 sleep 1
@@ -1536,7 +1536,7 @@ printf '{"plugin:telegram:telegram":{"timestamp":1789912141541,"id":"3eaf116ce58
 tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
-    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR= \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authcache.out" 2>&1 || true
 sleep 1
