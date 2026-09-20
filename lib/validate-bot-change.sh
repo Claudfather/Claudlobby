@@ -3680,6 +3680,26 @@ val_backdate "$F4_BOTS/$S3BOT/data/.last-tool-call" 622800  # exactly 7d5h
 touch "$F4_BOTS/$S3BOT/data/.spawn"
 
 # STRANDREC gets a live session; STRANDRECDOWN deliberately gets none.
+#
+# The pre-emptive kill-server is DEFENCE IN DEPTH, not a fix for a live path,
+# and the distinction is recorded so nobody deletes it as redundant or copies
+# the reasoning somewhere it does not hold. An unguarded new-session aborts at
+# rc 1 on a duplicate session under the armed ERR trap, and the sibling
+# harnesses guard against exactly that (boot-strand-sampler.sh, coldstart-
+# harness.sh, rehearse-debounce-recipient.sh, rehearse-env-cascade.sh,
+# ab-comms-eval.sh). Those scripts need it because they share the host socket
+# namespace. THIS file does not: #586 exports a per-run TMUX_TMPDIR at :105, so
+# every socket it opens lives in a fresh mktemp dir and a stale socket from an
+# interrupted prior run is in a different directory entirely. Measured: same
+# socket name, two run-private dirs -> rc 0, no collision; same dir twice ->
+# `duplicate session`, rc 1. All 19 new-session calls in this file are
+# unguarded for that reason.
+#
+# It is here anyway because the safety of this line otherwise rests on an
+# export 3,578 lines above it, and this file's own comment at :99-103 warns
+# that a sourced TMUX_TMPDIR pin can yank the scripts under test back into the
+# shared namespace mid-run. One idempotent line removes that dependency.
+command tmux -L "$(vsock "$S3BOT")" kill-server 2>/dev/null || true
 tmux -L "$(vsock "$S3BOT")" new-session -d -s "$S3BOT" 'sleep 600'
 sleep 1
 
