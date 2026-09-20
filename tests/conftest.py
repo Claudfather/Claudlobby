@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -462,5 +463,14 @@ def fleet_dir(tmp_path: Path) -> Path:
 
     # Runtime dir
     (root / "runtime" / "bots").mkdir(parents=True)
+
+    # The install's stdlib lib/ doors the compositor asks rather than
+    # reimplements. Copied real, never stubbed: `mcp_grammar` REFUSES when it
+    # cannot load the grammar (a fallback would be the second copy it exists to
+    # prevent), so a fixture without this does not test a degraded path — it
+    # tests a broken install.
+    (root / "lib").mkdir(exist_ok=True)
+    _repo = Path(__file__).resolve().parent.parent
+    shutil.copy(_repo / "lib" / "mcp-package-grammar.py", root / "lib" / "mcp-package-grammar.py")
 
     return root
