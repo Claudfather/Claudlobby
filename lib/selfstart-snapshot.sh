@@ -468,11 +468,37 @@ row_field() {
 
 # Names out of data.bots_rescued. The key itself sits inside the captured
 # segment, so it is dropped BY NAME rather than by position.
+#
+# EVERY bots_rescued array in the row contributes — the names UNION, rather
+# than the first array winning. A receipt that satisfies both reader shapes by
+# emitting the field twice (top level AND under `data`) is the natural
+# compatibility move, and reading only the first silently halves its own name
+# list. That drops names in the UNDER-count direction, which scores a bot that
+# was genuinely rescued as a clean self-start — the exact over-credit the
+# receipt mechanism exists to prevent.
+#
+# Deliberately NOT the sibling row_field refusal, and the CALLER is why: the
+# name list is what an ambiguous boundary explicitly falls back TO (NAMES-ONLY,
+# below). A refusing name parser would leave a receipt carrying both an
+# ambiguous boundary and a duplicated key contributing nothing at all — the
+# same under-count by another road. Union errs toward over-exclusion instead:
+# a bot wrongly named is denied a self-start credit, the conservative direction
+# for an instrument whose documented failure mode is over-crediting. Union is
+# also already the semantics ACROSS rows (the caller appends every receipt),
+# so this only makes within-row agree with across-row.
+#
+# The output is a SET, not a sequence: `sort -u` normalises order, and both
+# consumers are order-independent by construction — a set count (N_RESCUE_NAMED)
+# and a `grep -qx` membership test. A future caller that needs receipt order
+# must recover it elsewhere rather than reading it out of here.
+#
+# The duplicate-key axis is orthogonal to the compact-vs-spaced spacing axis
+# the admit pattern and both field parsers share; this moves alone.
 row_rescued_names() {
     printf '%s\n' "$1" \
-        | grep -oE '"bots_rescued"[[:space:]]*:[[:space:]]*\[[^]]*\]' | head -1 \
+        | grep -oE '"bots_rescued"[[:space:]]*:[[:space:]]*\[[^]]*\]' \
         | grep -o '"[^"]*"' | sed 's/^"//; s/"$//' \
-        | grep -v '^bots_rescued$'
+        | grep -v '^bots_rescued$' | sort -u
 }
 
 # Every fleet.yaml on the host, enumerated HERE because the receipt read below
