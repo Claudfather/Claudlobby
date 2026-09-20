@@ -3613,6 +3613,105 @@ if [ "$_s_ctl_ok" != yes ] || \
     echo "    manager pane   : $(printf '%s' "$s_mgr_pane" | grep -c FLEET-PULSE) FLEET-PULSE line(s)"
 fi
 
+# ===========================================================================
+# #934 S3 — reconcile-fleet is structurally blind to a boot strand.
+#
+# reconcile-fleet.sh:78 defines healthy as `has_tmux AND has_unit`. Those are
+# exactly the two facts a stranded bot satisfies: start-bot created the tmux
+# session and the unit is enrolled, and neither says one word about whether the
+# incarnation has ever executed anything. So the verdict is not merely
+# incomplete, it is manufactured BY the failure -- a strand looks like health.
+#
+# Measured on the 2026-09-20 reboot: reconcile called all twelve stranded bots
+# healthy while all 21 tmux servers were alive (#936, 2026-09-20T15:46:53Z).
+# The same reading on 2026-07-30 covered kenny/saul/todd with markers 2d14h,
+# 2d6h and 7d5h older than their own sessions.
+#
+# STRANDREC carries the strand signature -- a marker far older than a .spawn
+# from this incarnation -- and today lands in healthy: anyway. STRANDRECDOWN
+# is the discrimination control: same unit, no session, so it must land in a
+# DIFFERENT bucket. Without it "appears under healthy:" is also satisfied by a
+# reconcile that put every declared bot there.
+#
+# HOME is redirected for the reconcile call. bot_unit_present tests for a unit
+# FILE under $HOME, so unit-presence is fixtured by creating one -- and writing
+# a throwaway unit into a production operator's ~/.config/systemd/user is not
+# something a test gets to do. The isolation is ASSERTED, not assumed: a
+# harness that silently fell back to the real HOME would pass by coincidence.
+#
+# Post-P3: STRANDREC moves to a new `stranded:` bucket and healthy: keeps its
+# single-line shape for the migrate-fleet-to-system.sh consumer (pinned
+# separately and purely in tests/test_migrate_fleet_fileops.sh).
+# ===========================================================================
+echo ""
+echo "=== validate #934 S3: reconcile-fleet calls a stranded bot healthy ==="
+
+F4="valrecon"
+F4_BOTS="$ROOT/local/$F4/runtime/bots"
+S3BOT="strandrec"; S3DOWN="strandrecdown"
+S3_HOME="$ROOT/s3home"
+mkdir -p "$ROOT/local/$F4" "$F4_BOTS/$S3BOT/data" "$F4_BOTS/$S3DOWN/data"
+mkdir -p "$S3_HOME/.config/systemd/user" "$S3_HOME/Library/LaunchAgents"
+
+cat > "$ROOT/local/$F4/fleet.yaml" <<YAML
+fleet:
+  name: $F4
+  bots:
+    $S3BOT:
+      expertise: [software-engineering]
+    $S3DOWN:
+      expertise: [software-engineering]
+YAML
+
+for b in "$S3BOT" "$S3DOWN"; do
+    cat > "$F4_BOTS/$b/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_SERVICE="$(vsock "$b")"
+MANAGER_TMUX="$MGR"
+CONF
+    # Unit present for BOTH, on either platform, inside the redirected HOME.
+    touch "$S3_HOME/.config/systemd/user/$(vsock "$b").service"
+    touch "$S3_HOME/Library/LaunchAgents/$(vsock "$b").plist"
+done
+
+# The strand signature: a marker from a PREVIOUS incarnation (7d5h, the widest
+# gap in the 2026-07-30 field table) against a .spawn from this one.
+val_backdate "$F4_BOTS/$S3BOT/data/.last-tool-call" 623700
+touch "$F4_BOTS/$S3BOT/data/.spawn"
+
+# STRANDREC gets a live session; STRANDRECDOWN deliberately gets none.
+tmux -L "$(vsock "$S3BOT")" new-session -d -s "$S3BOT" 'sleep 600'
+sleep 1
+
+s3_out=$(HOME="$S3_HOME" CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/reconcile-fleet.sh" "$F4" 2>&1 || true)
+s3_healthy=$(printf '%s\n' "$s3_out" | grep 'healthy:' | sed -e 's/.*healthy:[[:space:]]*//' | head -1)
+s3_missing=$(printf '%s\n' "$s3_out" | grep 'missing:'  | sed -e 's/.*missing:[[:space:]]*//'  | head -1)
+
+# --- isolation control: the redirected HOME is what answered ----------------
+if [ -e "$HOME/.config/systemd/user/$(vsock "$S3BOT").service" ] \
+   || [ -e "$HOME/Library/LaunchAgents/$(vsock "$S3BOT").plist" ]; then r=no
+else r=yes; fi
+harness_check "#934 S3 isolation: no throwaway unit was written to the real HOME" "$r"
+
+# --- discrimination control: reconcile is not just filling healthy: ---------
+case " $s3_missing " in *" $S3DOWN "*) r=yes ;; *) r=no ;; esac
+harness_check "#934 S3 CONTROL: a unit-present session-absent bot lands in missing:, not healthy:" "$r"
+_s3_ctl_ok="$r"
+
+# --- S3: the strand is called healthy --------------------------------------
+if [ "$_s3_ctl_ok" != yes ]; then r=no
+else case " $s3_healthy " in *" $S3BOT "*) r=yes ;; *) r=no ;; esac; fi
+harness_check "#934 S3 RED: a bot whose marker predates its .spawn by 7d is listed healthy" "$r"
+
+if [ "$_s3_ctl_ok" != yes ] || [ "$r" != yes ]; then
+    echo "  --- DIAGNOSTIC: #934 S3 reconcile report ---"
+    printf '%s\n' "$s3_out" | sed 's/^/      /'
+    echo "      marker mtime : $(stat_mtime "$F4_BOTS/$S3BOT/data/.last-tool-call" 2>/dev/null || echo n/a)"
+    echo "      spawn  mtime : $(stat_mtime "$F4_BOTS/$S3BOT/data/.spawn" 2>/dev/null || echo n/a)"
+fi
+
+command tmux -L "$(vsock "$S3BOT")" kill-server 2>/dev/null || true
+
 echo ""
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]
