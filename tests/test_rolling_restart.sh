@@ -148,6 +148,82 @@ assert_eq "--managers-only skip count is 2 (both workers)" "2" "$SKIPPED"
 assert_eq "--managers-only restarted count is 1 (the manager)" "1" "$RESTARTED"
 
 echo ""
+echo "=== #1358: a stalled gate must NAME the auth-cache signature, not blame a slow bridge ==="
+# A gate that stalls on the host-global MCP auth cache used to report only its
+# own ceiling, while the advice an operator actually reads here came from
+# start-bot via spin-up-bot (redirected into this same log): "keepalive owns
+# heal". For this one cause that is the remedy that provably cannot work --
+# keepalive restarts, the restart re-reads the same cache, the poller is skipped
+# again. A fleet-wide rolling restart stalled on exactly this on 2026-09-19.
+#
+# Hermetic on the same suite contract as the section above: a STUB spin-up that
+# deliberately writes no BRIDGE_READY, so the gate fails by construction rather
+# than by timing. CLAUDE_CONFIG_DIR is pinned per-bot, which is also the branch
+# this caller needs -- rolling-restart runs at fleet level without the bot env,
+# so it must resolve the cache the BOT consults, not the operator one.
+AC_BOTS_DIR="$T/local/acfleet/runtime/bots"
+AC_CFG="$T/acfleet-cfg"
+mkdir -p "$AC_BOTS_DIR/acbot" "$AC_CFG"
+cat > "$T/local/acfleet/fleet.yaml" <<'YAML'
+fleet:
+  name: acfleet
+  bots:
+    acbot:
+      expertise: [eng]
+YAML
+printf 'BOT_ID=acbot\nMANAGER_TMUX=acmgr\nCLAUDE_CONFIG_DIR="%s"\n' "$AC_CFG" > "$AC_BOTS_DIR/acbot/bot.conf"
+
+AC_STUB="$T/stub-lib-ac"; mkdir -p "$AC_STUB"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$AC_STUB/pre-stop-handoff.sh"
+# Writes NO BRIDGE_READY: the gate must time out. That is the whole scenario.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$AC_STUB/spin-up-bot.sh"
+chmod +x "$AC_STUB/pre-stop-handoff.sh" "$AC_STUB/spin-up-bot.sh"
+
+# rr_fail raises a real fleet alert. CLAUDLOBBY_ROOT is the throwaway $T, so the
+# tg-post.sh it reaches for does not exist and no send is possible; the fake
+# escalation id is belt-and-braces and states the intent (#846 convention).
+export FLEET_PULSE_ESCALATION_CHAT_ID="-100999"
+
+ac_run() {   # $1 = cache content written to the bot CLAUDE_CONFIG_DIR
+    printf '%s' "$1" > "$AC_CFG/mcp-needs-auth-cache.json"
+    LOG="$2"
+    RESTARTED=0; SKIPPED=0; FAILED=0
+    WORKERS_ONLY=0; MANAGERS_ONLY=0; SKIP_HEALTHY=0; CONTINUE_ON_FAIL=1; CEILING=0
+    LIB_DIR="$AC_STUB"
+    rr_process_fleet "acfleet" || true
+    LIB_DIR="$REAL_LIB_DIR"
+}
+
+# NEGATIVE CONTROL FIRST, and it has to be first: the absence asserted here is
+# only worth something once the armed run below proves the line can appear at
+# all. An assertion on a silence never shown to be breakable passes forever.
+ac_run '{}' "$T/rr-authcache-clean.log"
+assert_eq "(clean cache) the gate still fails on its ceiling" "true" \
+    "$(grep -q 'FAILED: acbot — no BRIDGE_READY within' "$T/rr-authcache-clean.log" && echo true || echo false)"
+assert_eq "(clean cache) no AUTH_CACHE_ARMED line" "false" \
+    "$(grep -q 'AUTH_CACHE_ARMED' "$T/rr-authcache-clean.log" && echo true || echo false)"
+assert_eq "(clean cache) the failure does not claim the cache is armed" "false" \
+    "$(grep -q 'auth cache is ARMED' "$T/rr-authcache-clean.log" && echo true || echo false)"
+
+# ARMED: a real recorded entry, copied byte-for-byte from a live armed host
+# cache (2026-09-20T09:49:01-04:00), so the parse meets the shape the defect
+# actually produces rather than one invented to suit it.
+ac_run '{"plugin:telegram:telegram":{"timestamp":1789912141541,"id":"3eaf116ce58465c5"}}' \
+    "$T/rr-authcache-armed.log"
+assert_eq "(armed cache) AUTH_CACHE_ARMED recorded in the rolling-restart log" "true" \
+    "$(grep -q 'AUTH_CACHE_ARMED' "$T/rr-authcache-armed.log" && echo true || echo false)"
+assert_eq "(armed cache) the line names the skipped mcp server" "true" \
+    "$(grep -q 'plugin:telegram:telegram' "$T/rr-authcache-armed.log" && echo true || echo false)"
+assert_eq "(armed cache) it read the BOT config dir, not the operator one" "true" \
+    "$(grep -q "Cache: $AC_CFG/" "$T/rr-authcache-armed.log" && echo true || echo false)"
+assert_eq "(armed cache) the FAILED line names the signature" "true" \
+    "$(grep -q 'FAILED: acbot .* auth cache is ARMED' "$T/rr-authcache-armed.log" && echo true || echo false)"
+assert_eq "(armed cache) the FAILED line strikes the keepalive remedy" "true" \
+    "$(grep -q 'keepalive cannot heal this' "$T/rr-authcache-armed.log" && echo true || echo false)"
+assert_eq "(armed cache) the FAILED line still carries the ceiling it waited" "true" \
+    "$(grep -q 'FAILED: acbot — no BRIDGE_READY within' "$T/rr-authcache-armed.log" && echo true || echo false)"
+
+echo ""
 echo "=== weekly-worker-restart.sh rides the shared gate ==="
 assert_eq "weekly restart calls wait_bridge_ready" "true" \
     "$(grep -q 'wait_bridge_ready' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"

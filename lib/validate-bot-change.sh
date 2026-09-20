@@ -1488,8 +1488,13 @@ tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "2020-01-01T00:00:00Z" \
     > "$RB_DIR/.claude/session.md"
+# CLAUDE_CONFIG_DIR= is load-bearing, not tidiness (#1358): HOME is already
+# pinned, but an operator with that variable exported would send start-bot to
+# their REAL ~/.claude cache, and the #1358 negative control below would then be
+# asserting an absence in a file this harness does not own. Empty, not unset, is
+# the same thing to the ${VAR:-default} the helper uses, and says so explicitly.
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
-    CLAUDE_BIN="$RB_ROOT/bin/claude" \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR= \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
 sleep 1
@@ -1502,6 +1507,81 @@ if [ -n "$_rcev" ]; then
     printf '%s' "$_rcev" | python3 -c "import sys,json; e=json.loads(sys.stdin.readline()); sys.exit(0 if e['type']=='rc_timeout' and e['ts'] else 1)" 2>/dev/null && r=yes || r=no
 else r=no; fi
 harness_check "rc_timeout event is valid JSON with ts+type (fleet-pulse-readable)" "$r"
+
+# --- #1358: a host-global MCP auth-cache skip must be VISIBLE at TIMEOUT ------
+# The TIMEOUT above is accurate and tells an operator nothing. When Claude Code
+# holds the channel plugin in <config>/mcp-needs-auth-cache.json it does not
+# START the poller and fail -- it SKIPS SPAWNING it, so every instrument reads
+# "poller dead" and none reads "poller never attempted". That is restart-immune
+# BY DESIGN: 35 minutes and four restarts by two operators here (2026-08-25),
+# and a stalled fleet-wide rolling restart another fleet reports (2026-09-19,
+# relayed onto #1358, unverified on this host).
+#
+# The run just above is the NEGATIVE CONTROL and its position is deliberate: it
+# timed out with an UNARMED cache, so the absence asserted here is an absence
+# this instrument is demonstrably capable of breaking -- proven by the armed
+# re-run immediately below. A silence never shown to be breakable is worth
+# nothing, and asserting one is how a dead check passes forever.
+grep -q 'AUTH_CACHE_ARMED —' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
+harness_check "#1358 unarmed cache -> no AUTH_CACHE_ARMED line (the silence is the control)" "$r"
+
+# Arm it. HOME is pinned to $RB_HOME for every start-bot call in this scenario,
+# so this exercises the PRODUCTION resolution ($HOME/.claude) rather than a
+# per-bot CLAUDE_CONFIG_DIR override, and cannot reach the operator cache. The
+# payload is a real recorded entry, copied byte-for-byte from a live armed host
+# cache (2026-09-20T09:49:01-04:00) rather than invented, so the parse is
+# exercised against the shape the defect actually produces.
+printf '{"plugin:telegram:telegram":{"timestamp":1789912141541,"id":"3eaf116ce58465c5"}}' \
+    > "$RB_HOME/.claude/mcp-needs-auth-cache.json"
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR= \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authcache.out" 2>&1 || true
+sleep 1
+# Select on "AUTH_CACHE_ARMED —", not the bare token: the BRIDGE_MISSING line
+# below deliberately POINTS at this one by name ("see the AUTH_CACHE_ARMED line
+# above"), so a bare-token `tail -1` picks the pointer instead of the note. That
+# is not hypothetical -- it is what the first run of this block did, and it
+# failed five content assertions while the behaviour under test was entirely
+# correct. The em dash is what the helper emits directly after the token.
+_acline="$(grep 'AUTH_CACHE_ARMED —' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+[ -n "$_acline" ] && r=yes || r=no
+harness_check "#1358 armed cache -> AUTH_CACHE_ARMED recorded at TIMEOUT" "$r"
+# Isolation asserted from the artifact itself, not merely arranged above: a run
+# that silently fell back to the operator cache would otherwise pass here by
+# coincidence on any host that happened to be armed.
+case "$_acline" in *"Cache: $RB_HOME/"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line names the THROWAWAY cache, never the operator's" "$r"
+case "$_acline" in *"plugin:telegram:telegram"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line names the SKIPPED mcp server" "$r"
+# Year only: the entry renders in the harness host local time, and pinning the
+# clock face would make this fail by timezone rather than by defect.
+case "$_acline" in *"recorded 2026-"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line names WHEN the entry was recorded" "$r"
+case "$_acline" in *"NOT evidence about this bot"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line states the cache is not this bot's own credential" "$r"
+case "$_acline" in *"printf '{}' > $RB_HOME/"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line carries the remedy, addressed at the file it read" "$r"
+# The heal advice further down the same boot must not contradict the line above
+# it. "keepalive owns heal" is right for every other cause and precisely wrong
+# for this one, because the restart it prescribes re-reads the same cache.
+_bmline="$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+case "$_bmline" in *"keepalive CANNOT heal this one"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 armed cache -> BRIDGE_MISSING withdraws the keepalive remedy" "$r"
+# ...and the unarmed boot earlier in this same log still carries it, so the
+# withdrawal is conditional rather than a blanket rewrite of the advice.
+case "$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" | head -1)" in
+    *"keepalive owns heal"*) r=yes ;; *) r=no ;;
+esac
+harness_check "#1358 unarmed cache -> BRIDGE_MISSING keeps the normal keepalive remedy" "$r"
+
+# The same read, carried onto the event: an rc_timeout that reaches fleet-pulse
+# escalation should arrive already naming its most likely cause.
+_acev="$(val_events "$RB_ROOT" "$FLEET" valrb rc_timeout | tail -1 || true)"
+case "$_acev" in *'"auth_cache_armed":true'*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 rc_timeout event carries auth_cache_armed (escalation sees the cause)" "$r"
 
 if [ "$fail" -gt "$_rc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: RC readiness checks failed ---"

@@ -81,7 +81,7 @@ rr_list_fleets() {
 # Roll a single fleet. Sets global counters; returns 1 to signal a hard-stop.
 rr_process_fleet() {
     local fleet="$1"
-    local bots_dir fleet_dir declared bot_dir bot_id fence state
+    local bots_dir fleet_dir declared bot_dir bot_id fence state auth_note why
     bots_dir="$(resolve_bots_dir "$fleet")"
     if [ ! -d "$bots_dir" ]; then
         echo "$(ts_iso) SKIP fleet: no bots dir for '$fleet' ($bots_dir)" >> "$LOG"
@@ -127,7 +127,31 @@ rr_process_fleet() {
         if wait_bridge_ready "$bot_dir" "$CEILING" "$fence"; then
             echo "$(ts_iso) READY: $bot_id" >> "$LOG"; RESTARTED=$((RESTARTED + 1))
         else
-            rr_fail "$fleet" "$bot_id" "$bots_dir" "no BRIDGE_READY within ${CEILING}s" || return 1
+            # A stalled gate used to report only its own ceiling, while the most
+            # likely cause was already on disk and unnamed (#1358). Worse, the
+            # advice an operator actually reads here comes from start-bot via
+            # spin-up-bot (redirected into THIS log): "BRIDGE_MISSING ...
+            # keepalive owns heal". For this one cause that is precisely wrong --
+            # keepalive restarts the bot, the restart re-reads the same
+            # host-global cache, the poller is skipped again, and the gate waits
+            # out a BRIDGE_READY that can never arrive. That is what another
+            # fleet reports stalled their fleet-wide restart on 2026-09-19 --
+            # their report, relayed onto #1358, not verified on this host. It is
+            # also the report that widened the trigger past a credential-less
+            # bot, so it is carried as a report rather than flattened into fact.
+            #
+            # So name the signature instead. Same plain file read as start-bot,
+            # scoped to THIS bot dir so a bot pinned to its own CLAUDE_CONFIG_DIR
+            # is described by the cache its session actually consults.
+            auth_note="$(mcp_auth_cache_note "$bot_dir" 2>/dev/null || true)"
+            why="no BRIDGE_READY within ${CEILING}s"
+            if [ -n "$auth_note" ]; then
+                echo "$(ts_iso) $auth_note" >> "$LOG"
+                # The alert is a Telegram-bound one-liner, so it carries the
+                # signature and the address of the detail, never the detail.
+                why="$why — host-global MCP auth cache is ARMED, so a restart re-reads it and skips the poller again; keepalive cannot heal this. Detail + remedy: $LOG"
+            fi
+            rr_fail "$fleet" "$bot_id" "$bots_dir" "$why" || return 1
         fi
     done
     return 0

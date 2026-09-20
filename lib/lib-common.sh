@@ -1205,6 +1205,136 @@ wait_bridge_ready() {
     done
 }
 
+# --- Host-global MCP needs-auth cache (#1358) --------------------------------
+# Claude Code records an MCP server whose auth failed in
+# <config-dir>/mcp-needs-auth-cache.json, then SKIPS SPAWNING that server on
+# every session started afterwards until the entry is evicted. The file is
+# HOST-GLOBAL: any bot on the host can write it and every bot reads it.
+#
+# So one bot disables an MCP estate-wide, and the result is restart-immune BY
+# DESIGN -- a restart re-reads the same cache and skips again.
+#
+# Occurrences, separated by what is FIRST-PARTY here and what is not, because
+# the two carry different weight and the distinction is the first thing lost:
+#   2026-08-25  measured on this host -- 5 bots, 3 fleets, 35 minutes, survived
+#               four restarts by two operators before anyone suspected a SKIP
+#   2026-09-10  measured on this host (#1358 comment 5)
+#   2026-09-19  REPORTED by another fleet and relayed; a fleet-wide rolling
+#               restart stalled on it. NOT verified here -- that host was not
+#               readable from this one, and it is the report that widened the
+#               trigger beyond a credential-less bot, so it matters that it is
+#               carried as a report
+#   2026-09-20  measured on this host, while writing this fix: the cache sat
+#               armed with plugin:telegram:telegram for ~17 minutes and the
+#               first observation below was taken against it
+#
+# Every time, every instrument said "poller dead" and none said "poller never
+# attempted" -- which is the whole cost, and the gap these helpers close.
+#
+# A PLAIN FILE READ and deliberately nothing more:
+#
+#   - NO key matching. Every entry is listed, never only a channel-plugin key we
+#     recognise. That key is a string Claude Code owns (today
+#     plugin:telegram:telegram) and a matcher against it goes SILENT the day it
+#     is renamed -- failing closed on the one path whose entire job is to break
+#     a silence. Same string-drift trap as #751.
+#   - NO attribution. The file is host-global and keeps no history, so which bot
+#     wrote an entry is not recoverable from it. Nothing here guesses.
+#   - NO causal claim. The caller states what is on disk and what a listed entry
+#     means; whether THIS spawn consulted THIS entry is left to the operator,
+#     who has the POLL_START line just above it in the same log.
+#
+# Nothing here can fail its caller. Absent, empty, unreadable, malformed and
+# python3-less all print nothing and return 0: this is an ADDITIVE diagnostic on
+# an already-failing path, and it must never be the reason a boot aborts.
+
+# mcp_auth_cache_path [bot_dir]
+# Path to the needs-auth cache the given bot's session consults. Resolves that
+# bot's OWN composed CLAUDE_CONFIG_DIR first -- a canary or harness bot is
+# pinned to a throwaway config dir, and describing it with the operator cache
+# would name a file its session never reads. Then the ambient env, then the
+# default. With no bot_dir, answers for the calling environment.
+mcp_auth_cache_path() {
+    local bot_dir="${1:-}" cfg=""
+    if [ -n "$bot_dir" ]; then
+        cfg="$(bot_conf_get_path "$bot_dir" CLAUDE_CONFIG_DIR "" 2>/dev/null || true)"
+    fi
+    [ -n "$cfg" ] || cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    # A tilde-prefixed value can only come from a hand-edited bot.conf, which the
+    # composer forbids -- but left unexpanded it names a path that cannot exist,
+    # and this helper would then go SILENT. A silent wrong answer is the exact
+    # failure class the line exists to break, so expand it rather than trust the
+    # contract. Unquoted pattern: shellcheck reads a quoted tilde as a failed
+    # expansion attempt (SC2088), and this is a literal-prefix match on a value
+    # read from a file, never an expansion of our own.
+    case "$cfg" in \~/*) cfg="$HOME/${cfg#\~/}" ;; esac
+    printf '%s/mcp-needs-auth-cache.json' "$cfg"
+}
+
+# mcp_auth_cache_note [bot_dir]
+# ONE line naming every MCP server the cache lists and when each was recorded,
+# or NOTHING at all when the cache is absent, empty or unreadable. Callers print
+# it verbatim directly after their own failure line.
+#
+# Silence on an empty cache is the point rather than an omission: the line is
+# additive, so an operator who does not see it has learned that this failure is
+# NOT the #1358 signature -- which is itself worth knowing at that moment.
+mcp_auth_cache_note() {
+    local f
+    f="$(mcp_auth_cache_path "${1:-}")"
+    [ -r "$f" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$f" <<'PY' 2>/dev/null || true
+import json, os, sys, datetime
+
+path = sys.argv[1]
+try:
+    with open(path) as fh:
+        raw = fh.read()
+    entries = json.loads(raw) if raw.strip() else {}
+    if not isinstance(entries, dict) or not entries:
+        sys.exit(0)
+except Exception:
+    sys.exit(0)
+
+
+def when(value):
+    """Epoch-ms for an entry, whichever shape the cache uses, else None.
+
+    The observed shape is {"timestamp": <epoch-ms>, "id": "..."}; a bare number
+    is accepted too. An unrecognised shape reports `recorded unknown` rather
+    than being dropped -- the KEY is the finding, and a key withheld because its
+    value did not parse is the silence this whole line exists to break.
+    """
+    if isinstance(value, dict):
+        value = value.get("timestamp")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(value / 1000).astimezone().isoformat(timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+listed = ", ".join(
+    "%s (recorded %s)" % (k, when(v) or "unknown")
+    for k, v in sorted(entries.items())
+)
+try:
+    mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).astimezone().isoformat(timespec="seconds")
+except OSError:
+    mtime = "unknown"
+
+print(
+    "AUTH_CACHE_ARMED — a server listed in the host-global MCP auth cache is SKIPPED at spawn, "
+    "not started, and a restart re-reads the same cache and skips again. Listed: %s. "
+    "HOST-GLOBAL — any bot on this host can write it and every bot reads it, so this is NOT "
+    "evidence about this bot's own credential. Cache: %s (mtime %s). "
+    "Remedy: printf '{}' > %s" % (listed, path, mtime, path)
+)
+PY
+}
+
 # --- Supervision-unit ownership ----------------------------------------------
 # Host units carry a FIXED, unprefixed identity (claudlobby-disk-monitor, ...)
 # and live in ONE shared directory per host, because host equipment is
