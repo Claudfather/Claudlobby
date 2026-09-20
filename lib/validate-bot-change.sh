@@ -3676,7 +3676,7 @@ done
 
 # The strand signature: a marker from a PREVIOUS incarnation (7d5h, the widest
 # gap in the 2026-07-30 field table) against a .spawn from this one.
-val_backdate "$F4_BOTS/$S3BOT/data/.last-tool-call" 623700
+val_backdate "$F4_BOTS/$S3BOT/data/.last-tool-call" 622800  # exactly 7d5h
 touch "$F4_BOTS/$S3BOT/data/.spawn"
 
 # STRANDREC gets a live session; STRANDRECDOWN deliberately gets none.
