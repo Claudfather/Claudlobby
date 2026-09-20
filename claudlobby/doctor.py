@@ -165,7 +165,9 @@ def check_mcp_configs(fleet: FleetConfig, paths: Paths, report: DoctorReport) ->
 
 
 def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
-    """Check if npx packages for MCP servers are cached."""
+    """Check that the MCP servers' packages are cached — npx AND uvx, since
+    #1577 taught the probe both runtimes. The rung keeps its `npx-cache` key
+    so an operator's muscle memory and any log grep still work."""
     script = paths.lib / "check-npx-cache.sh"
     if not script.is_file():
         report.add("npx-cache", "warn", "check-npx-cache.sh not found")
@@ -179,7 +181,7 @@ def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
             cwd=str(paths.root),
         )
         if result.returncode == 0:
-            report.add("npx-cache", "pass", "all MCP npx packages cached")
+            report.add("npx-cache", "pass", "all MCP packages cached (npx + uvx)")
         else:
             # Script outputs missing packages on failure
             detail = (

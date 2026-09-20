@@ -46,6 +46,7 @@ from .loader import (
     parse_expertise_file,
 )
 from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
+from .mcp_grammar import grammar
 from .paths import Paths, _iter_fleet_dirs
 
 
@@ -159,14 +160,6 @@ def _build_jinja_env(paths: Paths) -> jinja2.Environment:
 # ----------------------------------------------------------------------
 
 
-def _grammar(paths: Paths):
-    """The shared MCP package grammar. Refuses rather than falling back — a
-    local copy would be consulted exactly when the two had diverged."""
-    from .mcp_grammar import grammar
-
-    return grammar(paths)
-
-
 def _load_mcp_fragment(name: str, paths: Paths) -> dict | None:
     """Load + JSON-parse an MCP fragment by name, or ``None`` if it is absent.
 
@@ -237,7 +230,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
                 # [-y, pkg, ...rest] -> [binary, ...rest]. The split is
                 # `lib/mcp-package-grammar.py`'s: warm-cache wants the package
                 # this discards, so one parse decides the boundary for both.
-                _pkg, rest_args = _grammar(paths).split_npx_args(
+                _pkg, rest_args = grammar(paths).split_npx_args(
                     instance_config.get("args", [])
                 )
                 instance_config["args"] = [resolved_binary] + rest_args

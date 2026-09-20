@@ -1,14 +1,21 @@
 #!/bin/bash
-# check-npx-cache.sh — verify npx cache contains expected MCP packages.
+# check-npx-cache.sh — verify the on-demand package caches hold what the
+# fleet's MCP servers need. Covers BOTH runtimes: npx (~/.npm/_npx) and uvx
+# (uv cache + installed uv tools). The filename still says npx; it is
+# referenced by reload-fleet, reconcile-fleet, doctor.py, two test modules and
+# a composed skill, so the rename is deliberately deferred rather than bundled
+# into #1577 (see that issue).
 #
-# The npx cache (~/.npm/_npx/) is load-bearing infrastructure. Without it,
-# MCP server startup goes from ~1.5s to 30-60s per package (download + install).
-# With 8 bots sharing the same packages, a cold cache on restart causes
+# These caches are load-bearing infrastructure. Without them MCP server
+# startup goes from ~1.5s to a download that can exceed Claude Code's 30s
+# connect budget; with 8 bots sharing packages, a cold cache on restart causes
 # catastrophic IO contention on SD card hardware.
 #
 # Usage: check-npx-cache.sh [--fleet <name>]
-#   Scans fleet's MCP fragments for npx packages and verifies each is cached.
-#   Exit 0 if all cached, exit 1 if any missing (prints missing list).
+#   Scans the fleet MCP fragments for npx- and uvx-fetched packages and
+#   verifies each is resolvable without a download.
+#   Exit 0 all resolvable, 1 some missing (listed), 2 the probe could not
+#   answer (the shared grammar is unreachable) — never 0 for "cannot tell".
 #
 # Designed to be called from reconcile-fleet.sh or as a standalone health check.
 set -euo pipefail
@@ -54,7 +61,16 @@ fi
 # uvx existed -- so a uv MCP server was invisible here, this probe passed, and
 # reload-fleet never invoked the warm that would have fetched it (#1577).
 # Rows are <runtime>\t<display spec>\t<bare name>.
-TARGETS=$(python3 "$LIB_DIR/mcp-package-grammar.py" --probe-targets "${MCP_DIRS[@]}" 2>/dev/null) || TARGETS=""
+# Unreachable is NOT empty. Discarding this failure would collapse "cannot
+# read the grammar" into "the library has no packages", exit 0, and let
+# reload-fleet call debounce_clear -- #1577 rebuilt one layer up, at the seam
+# built to close it. Exit 2 says the probe could not answer (source_state.py
+# rule); reload-fleet treats any nonzero as warm, which is the safe direction.
+if ! TARGETS=$(python3 "$LIB_DIR/mcp-package-grammar.py" --probe-targets "${MCP_DIRS[@]}" 2>&1); then
+    echo "check-npx-cache: cannot reach the package grammar at $LIB_DIR/mcp-package-grammar.py" >&2
+    printf '%s\n' "$TARGETS" >&2
+    exit 2
+fi
 
 if [ -z "$TARGETS" ]; then
     echo "check-npx-cache: no npx- or uvx-based packages found in MCP fragments"
@@ -88,36 +104,47 @@ _resolve_uv_cache() {
     _uv_cache_done=1
     _uv_cache="${UV_CACHE_DIR:-$(uv cache dir 2>/dev/null || true)}"
 }
-_uv_tools=""
+# The INSTALLED TOOLS, asked of uv rather than read off its directory layout
+# -- consume by contract, never by assertion. Resolved only on a cache miss,
+# so the normal state (everything cached) forks uv exactly once.
+_uv_tool_names=""
 _uv_tools_done=0
 _resolve_uv_tools() {
     [ "$_uv_tools_done" -eq 1 ] && return 0
     _uv_tools_done=1
-    _uv_tools="$(uv tool dir 2>/dev/null || true)"
+    _uv_tool_names="$(uv tool list 2>/dev/null | awk '{print $1}' || true)"
 }
 
 # Is a distribution present in uv's cache?
 #
 # THIS IS NOT A TRANSLITERATION OF THE npx PROBE, because uv does not lay its
 # cache out the way npx does -- there is no per-package directory holding an
-# installed tree. What uv keys by name is the DISTRIBUTION it downloaded:
-# <cache>/wheels-v*/pypi/<name>/ (or sdists-v*/pypi/<name>/ for a package that
-# ships no wheel). Measured on uv 0.11.3: all three shipped uvx packages appear
-# there and two never-fetched controls do not.
+# installed tree. What uv keys by name is the DISTRIBUTION it fetched.
+#
+# All THREE roots are checked, and the third was found by measuring rather than
+# by reading: a package built from an sdist lands in built-wheels-v*/pypi/<n>,
+# which wheels-v* does NOT match, and sdists-v*/ on this host holds only
+# editable/ -- so a wheel-only probe would report such a package MISSING
+# forever while uvx runs it, the #852 unsatisfiable warning by another route.
+# Verified on uv 0.11.3: the three shipped uvx packages match wheels-v*, the
+# sdist-built `daff` matches only built-wheels-v*, two never-fetched controls
+# match nothing.
 #
 # The version component is globbed rather than pinned because uv version-stamps
-# these directory names (wheels-v1 and wheels-v6 coexist on this host, as do
+# these names (wheels-v1 and wheels-v6 coexist on this host, as do
 # simple-v9/v20/v21); hardcoding one is a probe that silently stops finding
 # anything after a uv upgrade.
 _uv_cached() {
     local n="$1" d
-    for d in "$_uv_cache"/wheels-v*/pypi/"$n" "$_uv_cache"/sdists-v*/pypi/"$n"; do
+    for d in "$_uv_cache"/wheels-v*/pypi/"$n" \
+             "$_uv_cache"/built-wheels-v*/pypi/"$n" \
+             "$_uv_cache"/sdists-v*/pypi/"$n"; do
         [ -e "$d" ] && return 0
     done
     return 1
 }
 
-while IFS="$(printf '\t')" read -r rt spec bare; do
+while IFS=$'\t' read -r rt spec bare; do
     [ -n "$rt" ] || continue
     TOTAL=$((TOTAL + 1))
     found=0
@@ -126,15 +153,15 @@ while IFS="$(printf '\t')" read -r rt spec bare; do
         # npx caches in content-addressed dirs, so search node_modules for the
         # package dir. Scoped (@org/name) and unscoped lay out differently.
         if [ -d "$NPX_CACHE" ]; then
-            if printf '%s' "$bare" | grep -q "^@"; then
+            case "$bare" in @*)
                 if find "$NPX_CACHE" -path "*node_modules/$bare/package.json" 2>/dev/null | head -1 | grep -q .; then
                     found=1
-                fi
-            else
+                fi ;;
+            *)
                 if find "$NPX_CACHE" -path "*/.bin/$bare" -o -path "*/node_modules/$bare/package.json" 2>/dev/null | head -1 | grep -q .; then
                     found=1
-                fi
-            fi
+                fi ;;
+            esac
         fi
         # The npx cache is not the only place a package can already be
         # resolvable, and cache residency is a proxy for the question the
@@ -153,31 +180,30 @@ while IFS="$(printf '\t')" read -r rt spec bare; do
             fi
         fi
     elif [ "$rt" = "uvx" ]; then
-        # The tool dir is tested FIRST, and NOT because npx has a global state
-        # to mirror. Measured: `uv tool install` also populates the wheel
-        # cache, so uv has no permanently-unsatisfiable state of npm's kind.
-        # It is tested because the cases where it DIVERGES -- a tool installed
-        # from a local path or VCS, or one whose cache entry was later pruned
-        # by `uv cache clean` -- would otherwise report MISSING forever while
-        # `uvx` runs it happily, and no warm could create the entry. That is
-        # the #852 shape, reached by a different route.
-        _resolve_uv_tools
-        if [ -n "$_uv_tools" ] && [ -d "$_uv_tools/$bare" ]; then
-            TOOLED+=("$spec")
+        # Cache first, tool list only on a miss. Measured: `uv tool install`
+        # ALSO populates the wheel cache, so uv has no permanently
+        # unsatisfiable state of npm's kind and the tool door is not the
+        # common case -- checking it first would fork uv on every pass for an
+        # answer the cache almost always gives, which is exactly what the npx
+        # path deliberately avoids 20 lines above. The fallback still EXISTS,
+        # which is what protects the divergent cases (a tool installed from a
+        # path or VCS, or one whose cache entry was pruned); only the order
+        # changed, and a package that is both simply reports as cached.
+        _resolve_uv_cache
+        if [ -n "$_uv_cache" ] && _uv_cached "$bare"; then
             found=1
         fi
         if [ $found -eq 0 ]; then
-            _resolve_uv_cache
-            if [ -n "$_uv_cache" ] && _uv_cached "$bare"; then
+            _resolve_uv_tools
+            if printf '%s\n' "$_uv_tool_names" | grep -qx -- "$bare"; then
+                TOOLED+=("$spec")
                 found=1
             fi
         fi
     fi
 
     [ $found -eq 0 ] && MISSING+=("$rt:$spec")
-done <<EOF
-$TARGETS
-EOF
+done <<< "$TARGETS"
 
 # What this probe still cannot see, stated so a future reader does not mistake
 # a pass for more than it is. Both runtimes: the version is not checked, so a
@@ -199,7 +225,6 @@ _report_extra() {
 _extra_n=$(( ${#GLOBAL[@]} + ${#TOOLED[@]} ))
 if [ ${#MISSING[@]} -eq 0 ]; then
     echo "check-npx-cache: all $TOTAL packages resolvable ✓ ($(( TOTAL - _extra_n )) cached, $_extra_n preinstalled)"
-    echo "  npx cache size: $(du -sh "$NPX_CACHE" 2>/dev/null | cut -f1)"
     _report_extra
     exit 0
 else

@@ -124,27 +124,37 @@ def normalize_pypi_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def package_name(command: str, args: list[str]) -> str | None:
-    """The bare distribution name a CACHE PROBE keys on — version stripped.
+def bare_name(command: str, spec: str) -> str:
+    """Strip a display spec down to the name a CACHE is keyed by.
 
-    Distinct from `warm_prefix`'s display name, which keeps the pin because the
-    warm should fetch exactly what the server runs. A probe cannot be that
-    precise: caches are keyed by name, so this reports "some version of this
-    package is present". That bound is stated wherever it is consumed.
+    Separate from `warm_prefix` because the warm and the probe want different
+    answers: the warm should fetch exactly what the server runs, pin included,
+    while a cache is keyed by name alone. Taking a spec rather than args lets
+    a caller that already holds one avoid parsing twice.
     """
-    target = warm_prefix(command, args)
-    if target is None:
-        return None
-    spec = target[0]
     if command == "npx":
         return _NPM_VERSION_SUFFIX.sub("", spec)
     return normalize_pypi_name(_PYPI_VERSION_SUFFIX.sub("", spec).strip())
 
 
+def package_name(command: str, args: list[str]) -> str | None:
+    """`bare_name` of whatever `warm_prefix` identifies, or None."""
+    target = warm_prefix(command, args)
+    return None if target is None else bare_name(command, target[0])
+
+
 def servers_in(fragment: dict) -> list[tuple[str, dict]]:
     """The real server entries of a fragment — `_`-prefixed keys are contracts
-    (`_env_contract`, `_permissions_contract`), never servers. Three files
-    open-coded this test; it lives here now."""
+    (`_env_contract`, `_permissions_contract`), never servers.
+
+    Consolidated from `warm-cache` and `check-npx-cache.sh`. TWO copies still
+    stand and are named rather than quietly left: `composer.py`'s
+    `compose_mcp_json` (which `break`s at the first server where this returns
+    all — latent only because every shipped fragment holds exactly one) and
+    `doctor.py`'s fragment walk. Routing those through here widens the
+    refusal in `mcp_grammar` from the binary swap to ALL composition, which
+    is a rollout decision rather than a tidy-up, so it is a follow-up.""",
+
     return [
         (k, v) for k, v in fragment.items() if not k.startswith("_") and isinstance(v, dict)
     ]
@@ -173,10 +183,9 @@ def probe_targets(paths: list[str]) -> list[tuple[str, str, str]]:
                 if runtime not in WARM_RUNTIMES or "args" not in server:
                     continue
                 target = warm_prefix(runtime, server["args"])
-                bare = package_name(runtime, server["args"])
-                if target is None or bare is None:
+                if target is None:
                     continue
-                out[(runtime, target[0])] = (runtime, target[0], bare)
+                out[(runtime, target[0])] = (runtime, target[0], bare_name(runtime, target[0]))
     return sorted(out.values())
 
 

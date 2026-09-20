@@ -27,6 +27,27 @@ SHIPPED_MCP = REPO_ROOT / "library" / "mcp"
 g = load_lib_module("mcp-package-grammar")
 
 
+def _equip(fleet_dir: Path, fragments: dict[str, dict]) -> None:
+    """Write fragments into the fleet library and equip the lead bot.
+
+    Asserts the edit landed: a silent no-op leaves the fleet with no MCP
+    servers, so the command under test returns early and every assertion
+    downstream reads the empty path instead of the code.
+    """
+    for name, server in fragments.items():
+        (fleet_dir / "library" / "mcp" / f"{name}.json").write_text(
+            json.dumps({name: server})
+        )
+    fy = fleet_dir / "fleet.yaml"
+    before = fy.read_text()
+    after = before.replace(
+        "    lead:\n      expertise: [orchestration]\n",
+        f"    lead:\n      expertise: [orchestration]\n      mcp: [{', '.join(fragments)}]\n",
+    )
+    assert after != before, "MINIMAL_FLEET_YAML indentation changed — fixture no longer equips"
+    fy.write_text(after)
+
+
 class TestTheGrammarReadsBothRuntimes:
     def test_npx_yields_the_package_after_dash_y(self):
         assert g.warm_prefix("npx", ["-y", "pkg@1.0", "--flag"]) == ("pkg@1.0", ["-y", "pkg@1.0"])
@@ -134,17 +155,7 @@ class TestTheBinarySwapStaysNpxOnly:
         from claudlobby.composer import compose_mcp_json
         from tests.conftest import load_test_fleet, make_paths
 
-        (fleet_dir / "library" / "mcp" / "uvxdemo.json").write_text(
-            json.dumps({"uvxdemo": {"command": "uvx", "args": ["workspace-mcp", "--tools", "gmail"]}})
-        )
-        fy = fleet_dir / "fleet.yaml"
-        before = fy.read_text()
-        after = before.replace(
-            "    lead:\n      expertise: [orchestration]\n",
-            "    lead:\n      expertise: [orchestration]\n      mcp: [uvxdemo]\n",
-        )
-        assert after != before, "fixture no longer equips the bot"
-        fy.write_text(after)
+        _equip(fleet_dir, {"uvxdemo": {"command": "uvx", "args": ["workspace-mcp", "--tools", "gmail"]}})
 
         # Force the swap's precondition: a resolvable global binary.
         monkeypatch.setattr(_shutil, "which", lambda _n: "/usr/bin/node")
@@ -160,32 +171,36 @@ class TestTheProbeSeesUvPackages:
     whose npx packages were cached it passed and the warm never ran."""
 
     def _root(self, tmp_path: Path, servers: dict) -> Path:
+        """The probe resolves the grammar from its OWN dirname, never from
+        $CLAUDLOBBY_ROOT, so this root carries fragments and nothing else."""
         root = tmp_path / "clroot"
         (root / "library" / "mcp").mkdir(parents=True)
-        (root / "lib").mkdir(parents=True)
         for name, server in servers.items():
             (root / "library" / "mcp" / f"{name}.json").write_text(json.dumps({name: server}))
-        # The probe execs the real grammar; copy it rather than stub it.
-        (root / "lib" / "mcp-package-grammar.py").write_text(
-            (REPO_ROOT / "lib" / "mcp-package-grammar.py").read_text()
-        )
         return root
 
-    def _run(self, root: Path, npx_cache: Path, uv_cache: Path, uv_tools: Path, bindir: Path):
-        """`uv cache dir` / `uv tool dir` are shelled, so uv is stubbed on PATH:
-        the probe must be testable on a host with no uv at all."""
-        bindir.mkdir(parents=True, exist_ok=True)
+    def _run(self, tmp_path: Path, root: Path, *, tools: tuple[str, ...] = ()):
+        """Drive the real check-npx-cache.sh against a scoped cache.
+
+        `uv cache dir` and `uv tool list` are shelled, so uv is stubbed: the
+        probe must be testable on a host with no uv at all, and the stub
+        answers the same two questions the real door does.
+        """
+        npx_cache = tmp_path / "npx"
+        uv_cache = tmp_path / "uv"
+        bindir = tmp_path / "bin"
+        for d in (npx_cache, uv_cache, bindir):
+            d.mkdir(exist_ok=True)
         stub = bindir / "uv"
         stub.write_text(
             "#!/bin/bash\n"
             f'[ "$1 $2" = "cache dir" ] && echo "{uv_cache}" && exit 0\n'
-            f'[ "$1 $2" = "tool dir" ] && echo "{uv_tools}" && exit 0\n'
+            f'[ "$1 $2" = "tool list" ] && printf "%s" "{chr(10).join(tools)}" && exit 0\n'
             "exit 1\n"
         )
         stub.chmod(0o755)
         env = constructed_env(CLAUDLOBBY_ROOT=root, NPX_CACHE_DIR=npx_cache)
         env["PATH"] = f"{bindir}:{env.get('PATH', '')}"
-        # The real check-npx-cache.sh, driven against the scoped root.
         return subprocess.run(
             ["bash", str(CHECKER)], capture_output=True, text=True, env=env
         )
@@ -212,10 +227,8 @@ class TestTheProbeSeesUvPackages:
                 "u": {"command": "uvx", "args": ["--from", "cold-pkg==1.0", "cold"]},
             },
         )
-        npx_cache, uv_cache, uv_tools = tmp_path / "npx", tmp_path / "uv", tmp_path / "tools"
-        npx_cache.mkdir(); uv_cache.mkdir(); uv_tools.mkdir()
-        self._cache_npx(npx_cache, "demo-mcp")
-        r = self._run(root, npx_cache, uv_cache, uv_tools, tmp_path / "bin")
+        self._cache_npx(tmp_path / "npx", "demo-mcp")
+        r = self._run(tmp_path, root)
         assert r.returncode == 1, r.stdout + r.stderr
         assert "uvx:cold-pkg==1.0" in r.stdout
         assert "demo-mcp" not in r.stdout.split("MISSING")[1]
@@ -224,10 +237,8 @@ class TestTheProbeSeesUvPackages:
         root = self._root(
             tmp_path, {"u": {"command": "uvx", "args": ["warm-pkg", "--tools", "x"]}}
         )
-        npx_cache, uv_cache, uv_tools = tmp_path / "npx", tmp_path / "uv", tmp_path / "tools"
-        npx_cache.mkdir(); uv_cache.mkdir(); uv_tools.mkdir()
-        self._cache_uv(uv_cache, "warm-pkg")
-        r = self._run(root, npx_cache, uv_cache, uv_tools, tmp_path / "bin")
+        self._cache_uv(tmp_path / "uv", "warm-pkg")
+        r = self._run(tmp_path, root)
         assert r.returncode == 0, r.stdout + r.stderr
 
     def test_the_wheel_dir_version_is_globbed_not_pinned(self, tmp_path: Path):
@@ -236,10 +247,8 @@ class TestTheProbeSeesUvPackages:
         root = self._root(
             tmp_path, {"u": {"command": "uvx", "args": ["warm-pkg"]}}
         )
-        npx_cache, uv_cache, uv_tools = tmp_path / "npx", tmp_path / "uv", tmp_path / "tools"
-        npx_cache.mkdir(); uv_cache.mkdir(); uv_tools.mkdir()
-        (uv_cache / "wheels-v99" / "pypi" / "warm-pkg").mkdir(parents=True)
-        r = self._run(root, npx_cache, uv_cache, uv_tools, tmp_path / "bin")
+        (tmp_path / "uv" / "wheels-v99" / "pypi" / "warm-pkg").mkdir(parents=True)
+        r = self._run(tmp_path, root)
         assert r.returncode == 0, r.stdout + r.stderr
 
     def test_a_uv_tool_install_is_resolvable_and_named(self, tmp_path: Path):
@@ -251,10 +260,7 @@ class TestTheProbeSeesUvPackages:
         root = self._root(
             tmp_path, {"u": {"command": "uvx", "args": ["tooled-pkg"]}}
         )
-        npx_cache, uv_cache, uv_tools = tmp_path / "npx", tmp_path / "uv", tmp_path / "tools"
-        npx_cache.mkdir(); uv_cache.mkdir(); uv_tools.mkdir()
-        (uv_tools / "tooled-pkg").mkdir()
-        r = self._run(root, npx_cache, uv_cache, uv_tools, tmp_path / "bin")
+        r = self._run(tmp_path, root, tools=("tooled-pkg",))
         assert r.returncode == 0, r.stdout + r.stderr
         assert "uv tool install" in r.stdout
 
@@ -262,10 +268,8 @@ class TestTheProbeSeesUvPackages:
         root = self._root(
             tmp_path, {"u": {"command": "uvx", "args": ["--from", "Warm_Pkg==1.0", "w"]}}
         )
-        npx_cache, uv_cache, uv_tools = tmp_path / "npx", tmp_path / "uv", tmp_path / "tools"
-        npx_cache.mkdir(); uv_cache.mkdir(); uv_tools.mkdir()
-        self._cache_uv(uv_cache, "warm-pkg")
-        r = self._run(root, npx_cache, uv_cache, uv_tools, tmp_path / "bin")
+        self._cache_uv(tmp_path / "uv", "warm-pkg")
+        r = self._run(tmp_path, root)
         assert r.returncode == 0, r.stdout + r.stderr
 
     def test_a_host_with_no_uv_at_all_reports_missing_rather_than_crashing(
@@ -274,11 +278,47 @@ class TestTheProbeSeesUvPackages:
         """No uv stub on PATH: the probe must still answer, and must not claim
         a uv package is fine."""
         root = self._root(tmp_path, {"u": {"command": "uvx", "args": ["some-pkg"]}})
-        npx_cache, uv_cache, uv_tools = tmp_path / "npx", tmp_path / "uv", tmp_path / "tools"
-        npx_cache.mkdir(); uv_cache.mkdir(); uv_tools.mkdir()
+        npx_cache = tmp_path / "npx"; npx_cache.mkdir()
         bindir = tmp_path / "emptybin"; bindir.mkdir()
         env = constructed_env(CLAUDLOBBY_ROOT=root, NPX_CACHE_DIR=npx_cache)
         env["PATH"] = f"{bindir}:/usr/bin:/bin"
         r = subprocess.run(["bash", str(CHECKER)], capture_output=True, text=True, env=env)
         assert r.returncode == 1, r.stdout + r.stderr
         assert "uvx:some-pkg" in r.stdout
+
+
+class TestTheRefusalCanActuallyFire:
+    """`mcp_grammar` refuses rather than falling back, and `fleet_dir` now
+    always carries the grammar — so without this the refusal, which is the
+    whole reason that module exists, had no test that could reach it."""
+
+    def test_a_missing_grammar_raises_rather_than_falling_back(self, fleet_dir: Path):
+        from claudlobby.mcp_grammar import GrammarUnavailable, grammar
+        from tests.conftest import make_paths
+
+        (fleet_dir / "lib" / "mcp-package-grammar.py").unlink()
+        paths = make_paths(fleet_dir)
+        try:
+            grammar(paths)
+        except GrammarUnavailable as e:
+            assert "mcp-package-grammar.py" in str(e)
+        else:
+            raise AssertionError("a missing grammar was silently tolerated")
+
+    def test_warm_cache_refuses_rather_than_warming_the_wrong_thing(
+        self, fleet_dir: Path, caplog
+    ):
+        """A fallback grammar would be consulted exactly when the two copies
+        had diverged, so warm-cache exits nonzero instead of guessing."""
+        import logging
+
+        import argparse
+
+        from claudlobby.commands.core import cmd_warm_cache
+
+        _equip(fleet_dir, {"n": {"command": "npx", "args": ["-y", "demo@1.0"]}})
+        (fleet_dir / "lib" / "mcp-package-grammar.py").unlink()
+        args = argparse.Namespace(root=str(fleet_dir), fleet=None, seed=False, dry_run=False)
+        with caplog.at_level(logging.INFO):
+            assert cmd_warm_cache(args) != 0
+        assert "cache warm complete" not in caplog.text
