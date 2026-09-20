@@ -1205,6 +1205,198 @@ wait_bridge_ready() {
     done
 }
 
+# --- Host-global MCP needs-auth cache (#1358) --------------------------------
+# Claude Code records an MCP server whose auth failed in
+# <config-dir>/mcp-needs-auth-cache.json, then SKIPS SPAWNING that server on
+# every session started afterwards until the entry is evicted. The file is
+# HOST-GLOBAL: any bot on the host can write it and every bot reads it.
+#
+# So one bot disables an MCP estate-wide, and the result is restart-immune BY
+# DESIGN -- a restart re-reads the same cache and skips again.
+#
+# Occurrences, separated by what is FIRST-PARTY here and what is not, because
+# the two carry different weight and the distinction is the first thing lost:
+#   2026-08-25  measured on this host -- 5 bots, 3 fleets, 35 minutes, survived
+#               four restarts by two operators before anyone suspected a SKIP
+#   2026-09-10  measured on this host (#1358 comment 5)
+#   2026-09-19  REPORTED by another fleet and relayed; a fleet-wide rolling
+#               restart stalled on it. NOT verified here -- that host was not
+#               readable from this one, and it is the report that widened the
+#               trigger beyond a credential-less bot, so it matters that it is
+#               carried as a report
+#   2026-09-20  measured on this host, while writing this fix: the cache sat
+#               armed with plugin:telegram:telegram for ~17 minutes and the
+#               first observation below was taken against it
+#
+# Every time, every instrument said "poller dead" and none said "poller never
+# attempted" -- which is the whole cost, and the gap these helpers close.
+#
+# A PLAIN FILE READ and deliberately nothing more:
+#
+#   - NO key matching. Every entry is listed, never only a channel-plugin key we
+#     recognise. That key is a string Claude Code owns (today
+#     plugin:telegram:telegram) and a matcher against it goes SILENT the day it
+#     is renamed -- failing closed on the one path whose entire job is to break
+#     a silence. Same string-drift trap as #751.
+#   - NO attribution. The file is host-global and keeps no history, so which bot
+#     wrote an entry is not recoverable from it. Nothing here guesses.
+#   - NO causal claim. The caller states what is on disk and what a listed entry
+#     means; whether THIS spawn consulted THIS entry is left to the operator,
+#     who has the POLL_START line just above it in the same log.
+#
+# Nothing here can fail its caller: EVERY path returns 0, because this is an
+# ADDITIVE diagnostic on an already-failing path and must never be the reason a
+# boot aborts. But non-blocking is a claim about AVAILABILITY, not a licence for
+# the diagnostic to stay quiet: a condition it could not EVALUATE is reported as
+# UNKNOWN, never as silence.
+
+# mcp_auth_cache_path [bot_dir]
+# Path to the needs-auth cache the given bot's session consults. Resolves that
+# bot's OWN composed CLAUDE_CONFIG_DIR first -- a canary or harness bot is
+# pinned to a throwaway config dir, and describing it with the operator cache
+# would name a file its session never reads. Then the ambient env, then the
+# default. With no bot_dir, answers for the calling environment.
+mcp_auth_cache_path() {
+    local bot_dir="${1:-}" cfg=""
+    if [ -n "$bot_dir" ]; then
+        cfg="$(bot_conf_get_path "$bot_dir" CLAUDE_CONFIG_DIR "" 2>/dev/null || true)"
+    fi
+    [ -n "$cfg" ] || cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    # A tilde-prefixed value can only come from a hand-edited bot.conf, which the
+    # composer forbids -- but left unexpanded it names a path that cannot exist,
+    # and this helper would then go SILENT. A silent wrong answer is the exact
+    # failure class the line exists to break, so expand it rather than trust the
+    # contract. Unquoted pattern: shellcheck reads a quoted tilde as a failed
+    # expansion attempt (SC2088), and this is a literal-prefix match on a value
+    # read from a file, never an expansion of our own.
+    case "$cfg" in \~/*) cfg="$HOME/${cfg#\~/}" ;; esac
+    printf '%s/mcp-needs-auth-cache.json' "$cfg"
+}
+
+# mcp_auth_cache_note [bot_dir]
+# ONE line in one of two shapes, or nothing at all:
+#   AUTH_CACHE_ARMED    -- every MCP server the cache lists, and when each was recorded
+#   AUTH_CACHE_UNKNOWN  -- the cache could not be read; its contents are UNDETERMINED
+#   (nothing)           -- the cache WAS read and lists nothing
+# Callers print it verbatim directly after their own failure line.
+#
+# Silence is reserved for the case where the cache was actually read and holds
+# nothing. THEN an operator who does not see a line has learned that this failure
+# is NOT the #1358 signature -- which is worth knowing at that moment.
+#
+# Unreadable, python3-less, unparseable and crashed-parser are NOT that. They are
+# "could not look", and reporting them as silence publishes a cannot-look as a
+# nothing-found, in the direction nobody audits. That is source_state.py's rule
+# ("a reader that cannot reach its source must not return the same thing as a
+# reader that found nothing"), and it is the same distinction when() already
+# draws one level down when it says `recorded unknown` rather than dropping a
+# key. A note withheld because the FILE did not parse is that same silence, one
+# level up, on the path that feeds escalation.
+mcp_auth_cache_note() {
+    local f out rc
+    f="$(mcp_auth_cache_path "${1:-}")"
+    # ABSENT is the only shape that means "nothing armed". Present-but-unreadable
+    # is a different fact with a different remedy, so it must not share absent's
+    # answer.
+    [ -e "$f" ] || return 0
+    if [ ! -r "$f" ]; then
+        printf 'AUTH_CACHE_UNKNOWN — could not read %s: present but not readable. This is NOT evidence the cache is clear.\n' "$f"
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'AUTH_CACHE_UNKNOWN — could not read %s: no python3 to parse it. This is NOT evidence the cache is clear.\n' "$f"
+        return 0
+    fi
+    out="$(python3 - "$f" 2>/dev/null <<'PY'
+import json, os, sys, datetime
+
+path = sys.argv[1]
+
+# Exit 3 = "could not look"; exit 0 with no output = "looked, nothing armed".
+# The caller renders the first as AUTH_CACHE_UNKNOWN and the second as silence.
+# Collapsing the two is the defect this split exists to prevent, so every
+# failure path below picks one DELIBERATELY rather than falling through to 0.
+try:
+    with open(path) as fh:
+        raw = fh.read()
+except Exception:
+    sys.exit(3)
+
+if not raw.strip():
+    sys.exit(0)
+
+try:
+    entries = json.loads(raw)
+except Exception:
+    sys.exit(3)
+
+if not isinstance(entries, dict):
+    # A shape we do not recognise cannot be read as "nothing armed" -- we cannot
+    # tell what it holds, which is the third state and not the empty one.
+    sys.exit(3)
+
+if not entries:
+    sys.exit(0)
+
+
+def when(value):
+    """Epoch-ms for an entry, whichever shape the cache uses, else None.
+
+    The observed shape is {"timestamp": <epoch-ms>, "id": "..."}; a bare number
+    is accepted too. An unrecognised shape reports `recorded unknown` rather
+    than being dropped -- the KEY is the finding, and a key withheld because its
+    value did not parse is the silence this whole line exists to break.
+    """
+    if isinstance(value, dict):
+        value = value.get("timestamp")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(value / 1000).astimezone().isoformat(timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def label(key):
+    """The server key, rendered so the record stays ONE line.
+
+    A log line is the contract here: the harnesses select this with grep and so
+    does every operator, and a key carrying a newline would split the record in
+    two -- the second half landing in the log as an unattributed fragment. So
+    whitespace is collapsed rather than trusted. An absurd key is cut with a
+    VISIBLE marker, never silently, because a truncation that reads as a whole
+    name is worse than a long line.
+    """
+    key = " ".join(str(key).split())
+    return key if len(key) <= 200 else key[:200] + "…(truncated)"
+
+
+listed = ", ".join(
+    "%s (recorded %s)" % (label(k), when(v) or "unknown")
+    for k, v in sorted(entries.items())
+)
+try:
+    mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).astimezone().isoformat(timespec="seconds")
+except OSError:
+    mtime = "unknown"
+
+print(
+    "AUTH_CACHE_ARMED — a server listed in the host-global MCP auth cache is SKIPPED at spawn, "
+    "not started, and a restart re-reads the same cache and skips again. Listed: %s. "
+    "HOST-GLOBAL — any bot on this host can write it and every bot reads it, so this is NOT "
+    "evidence about this bot's own credential. Cache: %s (mtime %s). "
+    "Remedy: printf '{}' > %s" % (listed, path, mtime, path)
+)
+PY
+    )" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'AUTH_CACHE_UNKNOWN — could not read %s: parser exited %s (unparseable content or a failed interpreter). This is NOT evidence the cache is clear.\n' "$f" "$rc"
+        return 0
+    fi
+    [ -z "$out" ] || printf '%s\n' "$out"
+    return 0
+}
+
 # --- Supervision-unit ownership ----------------------------------------------
 # Host units carry a FIXED, unprefixed identity (claudlobby-disk-monitor, ...)
 # and live in ONE shared directory per host, because host equipment is

@@ -765,7 +765,8 @@ def cmd_warm_cache(args) -> int:
 
     A cold fetch on either runtime can exceed Claude Code's 30s MCP connect
     budget on its own, so a server whose cache is cold loses deterministically
-    rather than only under a boot storm.
+    rather than only under a boot storm. That is what makes this a warm rather
+    than a nice-to-have.
 
     Which token of a server's args names its package is NOT decided here: that
     grammar is `lib/mcp-package-grammar.py`, shared with the composer's binary

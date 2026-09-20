@@ -27,7 +27,12 @@ from pathlib import Path
 
 
 from claudlobby.commands.core import cmd_warm_cache
-from tests.conftest import constructed_env
+from tests.conftest import (
+    SubprocessRecorder,
+    constructed_env,
+    equip_bot_with_mcp,
+    warm_cache_args,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHECKER = REPO_ROOT / "lib" / "check-npx-cache.sh"
@@ -35,86 +40,57 @@ CHECKER = REPO_ROOT / "lib" / "check-npx-cache.sh"
 PKG = "demo-mcp@1.2.3"
 
 
-def _fleet_with_npx_pkg(fleet_dir: Path) -> Path:
-    """Equip the fleet's lead bot with an npx-based MCP fragment."""
-    (fleet_dir / "library" / "mcp" / "npxdemo.json").write_text(
-        json.dumps({"npxdemo": {"command": "npx", "args": ["-y", PKG]}})
-    )
-    fy = fleet_dir / "fleet.yaml"
-    before = fy.read_text()
-    after = before.replace(
-        "    lead:\n      expertise: [orchestration]\n",
-        "    lead:\n      expertise: [orchestration]\n      mcp: [npxdemo]\n",
-    )
-    # Assert the edit landed. A silent no-op here leaves the fleet with no npx
-    # packages at all, so warm-cache returns early and every assertion below
-    # reads the empty path instead of the code under test.
-    assert after != before, "fleet.yaml indentation changed — fixture no longer equips the bot"
-    fy.write_text(after)
-    return fleet_dir
-
-
-def _args(root: Path, dry_run: bool = False) -> argparse.Namespace:
-    return argparse.Namespace(root=str(root), fleet=None, seed=False, dry_run=dry_run)
+NPX_FRAGMENT = {"npxdemo": {"command": "npx", "args": ["-y", PKG]}}
 
 
 class TestWarmCacheReadsTheChildStatus:
     """#851. A warm whose child exits non-zero must not be reported as warmed."""
-
-    @staticmethod
-    def _fake_run(returncode: int, stderr: str = ""):
-        def run(*a, **kw):
-            return subprocess.CompletedProcess(
-                args=a[0] if a else [], returncode=returncode, stdout="", stderr=stderr
-            )
-
-        return run
 
     def test_nonzero_child_is_not_reported_as_a_successful_warm(
         self, fleet_dir: Path, monkeypatch, caplog
     ):
         """The bug: exit 1 raises nothing, so the old code fell through to
         'cache warm complete'."""
-        _fleet_with_npx_pkg(fleet_dir)
-        monkeypatch.setattr(subprocess, "run", self._fake_run(1, "ERR_INVALID_URL"))
+        equip_bot_with_mcp(fleet_dir, NPX_FRAGMENT)
+        monkeypatch.setattr(subprocess, "run", SubprocessRecorder(1, "ERR_INVALID_URL"))
         with caplog.at_level(logging.INFO):
-            cmd_warm_cache(_args(fleet_dir))
+            cmd_warm_cache(warm_cache_args(fleet_dir))
         assert "cache warm complete" not in caplog.text
 
     def test_nonzero_child_surfaces_its_status_and_output(
         self, fleet_dir: Path, monkeypatch, caplog
     ):
         """capture_output=True swallowed the diagnostic; it must be reported."""
-        _fleet_with_npx_pkg(fleet_dir)
-        monkeypatch.setattr(subprocess, "run", self._fake_run(1, "ERR_INVALID_URL"))
+        equip_bot_with_mcp(fleet_dir, NPX_FRAGMENT)
+        monkeypatch.setattr(subprocess, "run", SubprocessRecorder(1, "ERR_INVALID_URL"))
         with caplog.at_level(logging.INFO):
-            cmd_warm_cache(_args(fleet_dir))
+            cmd_warm_cache(warm_cache_args(fleet_dir))
         assert PKG in caplog.text
         assert "ERR_INVALID_URL" in caplog.text, "the captured diagnostic was discarded"
 
     def test_a_failed_warm_exits_nonzero(self, fleet_dir: Path, monkeypatch, caplog):
         """`return 0` regardless is what let reload-fleet log a clean warm."""
-        _fleet_with_npx_pkg(fleet_dir)
-        monkeypatch.setattr(subprocess, "run", self._fake_run(1, "boom"))
+        equip_bot_with_mcp(fleet_dir, NPX_FRAGMENT)
+        monkeypatch.setattr(subprocess, "run", SubprocessRecorder(1, "boom"))
         with caplog.at_level(logging.INFO):
-            assert cmd_warm_cache(_args(fleet_dir)) != 0
+            assert cmd_warm_cache(warm_cache_args(fleet_dir)) != 0
 
     def test_successful_warm_still_reports_complete(
         self, fleet_dir: Path, monkeypatch, caplog
     ):
         """Guard: the happy path must keep working."""
-        _fleet_with_npx_pkg(fleet_dir)
-        monkeypatch.setattr(subprocess, "run", self._fake_run(0))
+        equip_bot_with_mcp(fleet_dir, NPX_FRAGMENT)
+        monkeypatch.setattr(subprocess, "run", SubprocessRecorder(0))
         with caplog.at_level(logging.INFO):
-            assert cmd_warm_cache(_args(fleet_dir)) == 0
+            assert cmd_warm_cache(warm_cache_args(fleet_dir)) == 0
         assert "cache warm complete" in caplog.text
 
     def test_dry_run_never_reports_failure(self, fleet_dir: Path, monkeypatch, caplog):
         """Guard: --dry-run runs no child, so it cannot have failures."""
-        _fleet_with_npx_pkg(fleet_dir)
-        monkeypatch.setattr(subprocess, "run", self._fake_run(1, "boom"))
+        equip_bot_with_mcp(fleet_dir, NPX_FRAGMENT)
+        monkeypatch.setattr(subprocess, "run", SubprocessRecorder(1, "boom"))
         with caplog.at_level(logging.INFO):
-            assert cmd_warm_cache(_args(fleet_dir, dry_run=True)) == 0
+            assert cmd_warm_cache(warm_cache_args(fleet_dir, dry_run=True)) == 0
         assert "dry run" in caplog.text
 
 
