@@ -33,6 +33,7 @@ from claudlobby.commands.core import cmd_warm_cache
 from tests.conftest import (
     SubprocessRecorder,
     equip_bot_with_mcp,
+    load_lib_module,
     warm_cache_args,
 )
 
@@ -247,7 +248,10 @@ class TestTheShippedFragmentsAreAllReadable:
     person at the same sitting and cannot surprise you about the real shape."""
 
     def test_every_shipped_uvx_fragment_yields_a_warm_command(self):
-        from claudlobby.commands.core import _warm_prefix
+        # `_warm_prefix` moved out of core.py into the shared grammar when
+        # #1577 consolidated it (bash needs to exec it too). Same function,
+        # new home — the call below is unchanged.
+        _warm_prefix = load_lib_module("mcp-package-grammar").warm_prefix
 
         seen = 0
         for frag in sorted(SHIPPED_MCP.glob("*.json")):
