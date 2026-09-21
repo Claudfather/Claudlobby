@@ -147,7 +147,7 @@ $CLAUDLOBBY_ROOT/lib/dispatch.sh <worker-session> "Implement X in org/repo. Bran
 
 `dispatch.sh` reverse-resolves the worker's private socket from its session name, confirms the session exists on that socket, and sends the text and Enter as two steps (so a rendering TUI can't swallow the keystroke). If the peer can't be reached it logs a `send_miss` event and exits non-zero instead of silently dropping the message.
 
-`lib/dispatch-task.sh` wraps `dispatch.sh` with accountability: it records the dispatch on the plane (a work item + an assignment) with a deadline (`expected_by`) before sending, so the fleet-pulse watchdog can flag the task `overdue_dispatch` if no terminal report arrives in time. Any envelope flag (`--botcommand`, `--repo`, `--priority`, `--ref`, `--workstream`) wraps the task in a `[BOTCOMMAND]` envelope **and mints a `task:<id>`** the worker echoes back (`report-back.sh --task <id>`), so the watchdog joins on identity — prefer `--botcommand` at minimum for anything individually tracked.
+`lib/dispatch-task.sh` wraps `dispatch.sh` with accountability: it records the dispatch on the plane (a work item + an assignment) with a deadline (`expected_by`) before sending, so the fleet-pulse watchdog can flag the task `overdue_dispatch` if no terminal report arrives in time. Any envelope flag (`--botcommand`, `--repo`, `--priority`, `--ref`, `--workstream`) wraps the task in a `[BOTCOMMAND]` envelope **and mints a `task:<id>`** the worker echoes back (`report-back.sh <bot> <status> "<summary>" --task <id>`), so the watchdog joins on identity — prefer `--botcommand` at minimum for anything individually tracked.
 
 ### Report-back: worker → manager
 

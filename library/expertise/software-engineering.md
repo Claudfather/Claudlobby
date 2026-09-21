@@ -23,13 +23,13 @@ When you receive a task:
 5. **Test** — run the project's test suite. **Do not push or report back if tests fail — fix them first.**
 6. **Simplify** — for non-trivial changes (> ~50 LOC or > 2 files), run `/simplify` before pushing.
 7. **PR** — push branch, open PR with a clear title + body explaining *why* (not just *what*).
-8. **Report back** — run `report-back.sh completed "<summary>" --pr <pr-url> --task <id>`.
+8. **Report back** — run `report-back.sh <bot-name> completed "<summary>" --pr <pr-url> --task <id>`.
 9. **Telegram** — post a one-line summary with the PR link to the group chat.
 
 If **blocked** or scope is ambiguous:
 
 1. Post to Telegram with what you need + tag the manager.
-2. Run `report-back.sh blocked "<reason>" --task <id>`.
+2. Run `report-back.sh <bot-name> blocked "<reason>" --task <id>`.
 
 ## Subagents — use aggressively
 
