@@ -48,6 +48,30 @@ _NPM_VERSION_SUFFIX = re.compile(r"@(?:[0-9^~><=*][^/]*|latest|next)$")
 #: PEP 440 version specifier on a PyPI spec: `pkg==1.2.3`, `pkg>=2`, `pkg[extra]`.
 _PYPI_VERSION_SUFFIX = re.compile(r"(\[[^\]]*\])?\s*(===|==|!=|~=|>=|<=|>|<).*$")
 
+# --- pinning is a DIFFERENT question from where-does-the-suffix-begin ---------
+#
+# The two patterns above answer "where does the version part start", which is
+# what `bare_name` needs, and stripping `@latest` there is CORRECT: the cache is
+# keyed by name. They deliberately do NOT answer "is this an EXACT version",
+# because `@latest`, `^2.0.0` and `>=2` all have a version part and none of them
+# pins anything. Sharing one pattern for both conflated the questions and read a
+# floating tag as pinned (vera, PR #1705).
+
+#: An EXACT npm version: full MAJOR.MINOR.PATCH, with optional prerelease and
+#: build metadata. Measured rather than assumed: `npm view cowsay@1 version`
+#: answers **1.6.0**, not 1.0.0, so a PARTIAL version is a range that resolves
+#: to the newest match — only a complete triple pins. `latest` and `next` are
+#: dist-tags (npm's own idiom for "give me current") and pin nothing.
+_NPM_EXACT_VERSION = re.compile(
+    r"@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$"
+)
+
+#: An EXACT PyPI pin: `==` or `===` only. `~=`, `>=`, `<=`, `>`, `<` are ranges;
+#: `!=` is an EXCLUSION, which names the one version NOT to run and so pins
+#: least of all. A trailing `.*` is PEP 440 prefix matching (`==1.2.*` means any
+#: 1.2.x), so it is excluded even though the operator is `==`.
+_PYPI_EXACT_VERSION = re.compile(r"(?:\[[^\]]*\])?\s*={2,3}\s*([^=<>!~,\s*]+)$")
+
 
 def split_npx_args(args: list[str]) -> tuple[str | None, list[str]]:
     """`npx [-y] <pkg> <rest...>` -> (package, rest).
@@ -143,6 +167,107 @@ def package_name(command: str, args: list[str]) -> str | None:
     return None if target is None else bare_name(command, target[0])
 
 
+def is_pinned(command: str, spec: str) -> bool:
+    """Does *spec* name an EXACT version, rather than whatever the registry
+    serves today?
+
+    **Exact, not merely "carries a version part".** `pkg@latest`, `pkg@^2.0.0`
+    and `pkg>=2` all have a version part and none of them pins: each resolves to
+    whatever the registry answers with at boot, which is precisely the risk the
+    unpinned warning describes. An earlier cut keyed this on the same patterns
+    `bare_name` strips with, and so read all three as pinned — the two questions
+    look alike and are not the same one. `bare_name` asks *where does the
+    suffix begin* (and stripping `@latest` is right for a cache key);
+    this asks *is that suffix one version*.
+
+    **Deliberately NOT `bare_name(command, spec) != spec`**, which is the
+    obvious shortcut and is wrong for PyPI: `bare_name` also applies PEP 503
+    normalization, so an unpinned `Google_Analytics_MCP` differs from its bare
+    form and would report as pinned. The npm arm would have passed that test
+    and the uvx arm would not.
+
+    An unpinned spec is not broken; it is unverified. Nothing here says a
+    package is missing — that is a question only the registry can answer.
+    """
+    pattern = _NPM_EXACT_VERSION if command == "npx" else _PYPI_EXACT_VERSION
+    return bool(pattern.search(spec))
+
+
+def declared_packages(
+    paths: list[str],
+) -> list[tuple[str, str, str, str, str, bool, list[str] | None]]:
+    """Every warmable server declaration, KEYED BY THE FRAGMENT THAT MADE IT.
+
+    Rows are (fragment path, server key, runtime, display spec, bare name,
+    pinned, probe argv). `probe_targets` answers "what must the cache hold", so
+    it dedupes to a package set; a reader reporting a finding has to name the
+    FILE an operator would edit, which a deduped set cannot do — two fragments
+    sharing `mcp-remote@0.1.38` are one warm and two declarations.
+
+    Both are the same walk, so this is the walk and `probe_targets` narrows it.
+
+    The argv rides along so a caller never re-reads the fragment to get it: the
+    command a probe runs then provably comes from the same parse as the row it
+    is reported against, rather than from a second read that could disagree.
+    """
+    out: list[tuple[str, str, str, str, str, bool, list[str] | None]] = []
+    for p in paths:
+        path = Path(p)
+        files = sorted(path.glob("*.json")) if path.is_dir() else [path]
+        for frag_path in files:
+            try:
+                frag = json.loads(frag_path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(frag, dict):
+                continue
+            for key, server in servers_in(frag):
+                runtime = server.get("command")
+                if runtime not in WARM_RUNTIMES or "args" not in server:
+                    continue
+                target = warm_prefix(runtime, server["args"])
+                if target is None:
+                    continue
+                spec = target[0]
+                out.append(
+                    (
+                        str(frag_path),
+                        key,
+                        runtime,
+                        spec,
+                        bare_name(runtime, spec),
+                        is_pinned(runtime, spec),
+                        _probe_argv(runtime, target),
+                    )
+                )
+    return sorted(out)
+
+
+def _probe_argv(command: str, target: tuple[str, list[str]]) -> list[str]:
+    """`<command> <warm prefix> --help` — the argv that FETCHES the package.
+
+    One definition because two callers build it: `declared_packages`, which
+    already holds the target, and `warm_argv`, which parses one from args.
+    Typed twice it would be a fork waiting to happen, in the file whose whole
+    thesis is that this grammar has exactly one copy.
+    """
+    return [command, *target[1], "--help"]
+
+
+def warm_argv(command: str, args: list[str]) -> list[str] | None:
+    """The EXACT argv that fetches this server's package, command included.
+
+    `<command> <warm_prefix> --help` is what `warm-cache` runs, so a probe
+    built from this asks the real package manager to resolve the real spec.
+    That matters more than it sounds: every hand-rolled version of this
+    question has instead composed a registry URL from a name it parsed itself,
+    and the second one shipped with a scoped name stripping to the empty
+    string — the registry root answered 200 and a dead fragment read healthy.
+    """
+    target = warm_prefix(command, args)
+    return None if target is None else _probe_argv(command, target)
+
+
 def servers_in(fragment: dict) -> list[tuple[str, dict]]:
     """The real server entries of a fragment — `_`-prefixed keys are contracts
     (`_env_contract`, `_permissions_contract`), never servers.
@@ -168,24 +293,8 @@ def probe_targets(paths: list[str]) -> list[tuple[str, str, str]]:
     spawns this ONCE where it used to spawn `python3` per fragment.
     """
     out: dict[tuple[str, str], tuple[str, str, str]] = {}
-    for p in paths:
-        path = Path(p)
-        files = sorted(path.glob("*.json")) if path.is_dir() else [path]
-        for frag_path in files:
-            try:
-                frag = json.loads(frag_path.read_text())
-            except (OSError, ValueError):
-                continue
-            if not isinstance(frag, dict):
-                continue
-            for _key, server in servers_in(frag):
-                runtime = server.get("command")
-                if runtime not in WARM_RUNTIMES or "args" not in server:
-                    continue
-                target = warm_prefix(runtime, server["args"])
-                if target is None:
-                    continue
-                out[(runtime, target[0])] = (runtime, target[0], bare_name(runtime, target[0]))
+    for _frag, _key, runtime, spec, bare, _pinned, _argv in declared_packages(paths):
+        out[(runtime, spec)] = (runtime, spec, bare)
     return sorted(out.values())
 
 

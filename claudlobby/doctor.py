@@ -159,6 +159,46 @@ def check_mcp_configs(fleet: FleetConfig, paths: Paths, report: DoctorReport) ->
         report.add("mcp-configs", "pass", f"{total} MCP entries resolve")
 
 
+def check_mcp_packages(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """Is each declared MCP package PINNED? (#1058)
+
+    The offline half of the package check, and the half worth a doctor rung:
+    it costs no network call, and on the shared library every declaration found
+    dead so far was an unpinned one. Deliberately does NOT probe the registry —
+    `claudlobby doctor` is run to answer a question quickly, and the network
+    signal is opt-in at compose time where its cost is a considered choice.
+
+    WARN, never fail. An unpinned package is unverified, not broken: measured
+    here, one of the three unpinned declarations on the shared library resolves
+    perfectly well.
+    """
+    from .mcp_grammar import GrammarUnavailable, grammar
+
+    try:
+        gram = grammar(paths)
+    except GrammarUnavailable:
+        report.add("mcp-packages", "warn", "shared package grammar unavailable — not checked")
+        return
+
+    from . import mcp_packages as _mp
+
+    rows = _mp.fleet_declarations(fleet, paths, gram)
+    if not rows:
+        report.add("mcp-packages", "pass", "no npx/uvx MCP packages declared")
+        return
+    unpinned = _mp.pinning_findings(rows)
+    if unpinned:
+        listed = ", ".join(f"{f.fragment}:{f.spec}" for f in unpinned)
+        report.add(
+            "mcp-packages",
+            "warn",
+            f"{len(unpinned)} of {len(rows)} declared packages carry NO VERSION "
+            f"({listed}) — whatever the registry serves at boot is what runs",
+        )
+    else:
+        report.add("mcp-packages", "pass", f"{len(rows)} declared packages are version-pinned")
+
+
 # ----------------------------------------------------------------------
 # Check: npx package cache
 # ----------------------------------------------------------------------
@@ -977,6 +1017,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     check_ignition(fleet, paths, report, doors=doors)
     check_env_vars(fleet, paths, report)
     check_mcp_configs(fleet, paths, report)
+    check_mcp_packages(fleet, paths, report)
     check_npx_cache(paths, report)
     check_services(fleet, paths, report)
     check_credentials(fleet, paths, report)

@@ -106,7 +106,20 @@ def test_exactly_the_categories_that_ship_off():
                       "worker-unassigned",
                       # standing per-session cost pending the #1102 R3
                       # ratification — an unratified spend, not a new category
-                      "boot-brief"}
+                      "boot-brief",
+                      # #1058. A NEW category, argued rather than assumed into
+                      # an existing one: it does nothing from the four cost
+                      # list, and it is not the #1265 arrival category either
+                      # (a compose-time rung has the same arrival story as the
+                      # whole compositor, so claiming it there would make that
+                      # category mean "any compositor change" and stop meaning
+                      # anything). What keeps it off is a DEPENDENCY: it makes
+                      # a compose reach an external network service, so an npm
+                      # outage or a slow resolver would become a slow or failed
+                      # GENERATE for every fleet. The offline half of the same
+                      # check ships on precisely because it takes that
+                      # dependency away.
+                      "mcp-package-probe"}
     for s in sw.SWITCHES:
         if s.polarity == sw.OPT_IN:
             assert s.why_opt_in, f"{s.key} ships off with no stated reason"
@@ -611,6 +624,14 @@ def test_the_validator_namespaces_come_from_the_registry():
         # tell it apart from a fleet's own tooling variable. Registering the
         # switch is what makes this namespace ours to claim.
         "OBSERVABILITY",
+        # mcp-package-probe (#1058). The flag is CLAUDLOBBY_-prefixed rather
+        # than the more readable MCP_PACKAGE_PROBE_ENABLED on purpose: claiming
+        # a namespace means the dead-flag sweep warns about every unregistered
+        # <NS>_..._ENABLED in a fleet .env, and "MCP" is an INDUSTRY term, not
+        # ours — a fleet's own MCP_GATEWAY_ENABLED would have been reported
+        # dead. CLAUDLOBBY_ cannot collide with a fleet's own tooling, which is
+        # the bound this test's docstring exists to hold.
+        "CLAUDLOBBY",
     }
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED
