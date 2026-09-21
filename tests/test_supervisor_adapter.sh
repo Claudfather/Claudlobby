@@ -7,22 +7,27 @@
 # LANG only, plus a throwaway HOME/TMPDIR -- see tests/conftest.py
 # constructed_env). Runs under macOS /bin/bash (3.2) too.
 #
-# Hermetic: fake `systemctl`, `launchctl` and `uname` sit on a prepended PATH
-# and log their argv to a shared file; `uname` is faked (not just $_OS
+# Hermetic: fake `systemctl`, `launchctl`, `uname` and `tmux` sit on a
+# prepended PATH and log their argv to a shared file (tmux gets its own,
+# TMUX_LOG, so a positive check there and a negative check on FAKE_LOG never
+# have to untangle each other's lines); `uname` is faked (not just $_OS
 # reassigned) because svc_enroll forks real child scripts
 # (install-bot-systemd.sh / install-bot.sh) that call detect_os fresh in
 # their own process -- an in-process $_OS override would not reach them, but
 # a faked `uname` on the inherited PATH does, so re-running detect_os after
 # flipping FAKE_UNAME keeps parent and child agreeing about the platform.
-# HOME is redirected so systemd-user-unit / LaunchAgent paths never touch the
-# real host. svc_enroll's own contract test additionally points
-# $_SUPERVISOR_LIB_DIR (supervisor.sh's own sibling-script lookup, deliberately
-# NOT $CLAUDLOBBY_ROOT -- see the comment beside it in lib/supervisor.sh) at a
-# scratch tree holding FAKE install-bot-systemd.sh / install-bot.sh
-# stand-ins, never the real ones: the real install-bot.sh shells out to the
-# absolute, un-fakeable /bin/launchctl bootstrap, and actually bootstrapping
-# a LaunchAgent on the machine running this suite is exactly the kind of
-# real side effect a hermetic test must never risk.
+# `tmux` is faked via TMUX_BIN, exported before lib-common.sh is sourced,
+# since lib-common.sh resolves $_TMUX_BIN once at source time and TMUX_BIN
+# short-circuits that resolution directly rather than depending on PATH
+# search order. HOME is redirected so systemd-user-unit / LaunchAgent paths
+# never touch the real host. svc_enroll's own contract test additionally
+# points $_SUPERVISOR_LIB_DIR (supervisor.sh's own sibling-script lookup,
+# deliberately NOT $CLAUDLOBBY_ROOT -- see the comment beside it in
+# lib/supervisor.sh) at a scratch tree holding FAKE install-bot-systemd.sh /
+# install-bot.sh stand-ins, never the real ones: the real install-bot.sh
+# shells out to the absolute, un-fakeable /bin/launchctl bootstrap, and
+# actually bootstrapping a LaunchAgent on the machine running this suite is
+# exactly the kind of real side effect a hermetic test must never risk.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,6 +51,8 @@ mkdir -p "$HOME/.config/systemd/user" "$HOME/Library/LaunchAgents" "$T/bin"
 
 FAKE_LOG="$T/fake-argv.log"
 export FAKE_LOG
+TMUX_LOG="$T/fake-tmux.log"
+export TMUX_LOG
 
 cat > "$T/bin/uname" <<'EOF'
 #!/bin/bash
@@ -77,8 +84,21 @@ if [ "$1" = "print" ]; then
 fi
 exit "${FAKE_EXIT:-0}"
 EOF
-chmod +x "$T/bin/uname" "$T/bin/systemctl" "$T/bin/launchctl"
+
+# Own log, own file (see the header comment above for why): svc_disenroll's
+# tmux teardown leg is OS-independent and unconditional, so every disenroll
+# scenario below -- Linux, Darwin, and the unrecognized-OS one -- exercises
+# this fake too, and a positive "kill-server was called" check must never be
+# confused with a negative "no supervision binary was called" check on the
+# unrelated FAKE_LOG.
+cat > "$T/bin/tmux" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$TMUX_LOG"
+exit 0
+EOF
+chmod +x "$T/bin/uname" "$T/bin/systemctl" "$T/bin/launchctl" "$T/bin/tmux"
 export PATH="$T/bin:$PATH"
+export TMUX_BIN="$T/bin/tmux"
 
 # shellcheck source=../lib/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
@@ -97,6 +117,7 @@ write_bot_conf() {  # write_bot_conf <bot_dir> <bot_service> <bot_name>
 
 reset_fakes() {
     : > "$FAKE_LOG"
+    : > "$TMUX_LOG"
     unset FAKE_STATE FAKE_EXIT || true
     rm -f "$HOME/.config/systemd/user"/*.service "$HOME/Library/LaunchAgents"/*.plist 2>/dev/null || true
 }
@@ -126,6 +147,18 @@ assert_eq "no fallback plist yet: prints empty" "" "$(svc_unit_name "$BOT2")"
 assert_eq "Darwin fallback: BOT_NAME used once its plist exists" "bravo" "$(svc_unit_name "$BOT2")"
 rm -f "$HOME/Library/LaunchAgents/bravo.plist"
 
+# No bot.conf at all (never written, not merely empty-valued): bot_conf_get's
+# own [ -f ] guard means BOT_SERVICE and BOT_NAME both resolve to their ""
+# default, so svc_unit_name has nothing to fall back to.
+BOT_NOCONF="$T/bots/noconf"
+mkdir -p "$BOT_NOCONF"
+reset_fakes
+set +e
+out="$(svc_unit_name "$BOT_NOCONF")"; rc=$?
+set -e
+assert_eq "no bot.conf: prints nothing" "" "$out"
+assert_eq "no bot.conf: rc 0 (an unresolved label is a valid answer)" "0" "$rc"
+
 echo "=== supervisor.sh contract -- svc_is_registered ==="
 
 reset_fakes
@@ -142,6 +175,17 @@ TOTAL=$((TOTAL+1))
 : > "$HOME/Library/LaunchAgents/svc-alpha.plist"
 if svc_is_registered "$BOT"; then echo "  PASS: registered plist reads true"; PASS=$((PASS+1)); else echo "  FAIL: registered plist read as false"; FAIL=$((FAIL+1)); fi
 TOTAL=$((TOTAL+1))
+
+# Unrecognized OS: rc 1 regardless of a registered plist/unit sitting right
+# there (svc-alpha.plist is still present from the assertion above) -- the
+# case statement's `*) return 1 ;;` is unconditional on files, not merely on
+# an unresolved label.
+as_os SunOS
+set +e
+svc_is_registered "$BOT"; rc=$?
+set -e
+assert_eq "Other OS: svc_is_registered rc 1" "1" "$rc"
+rm -f "$HOME/Library/LaunchAgents/svc-alpha.plist"
 
 echo "=== supervisor.sh contract -- svc_state ==="
 
@@ -187,6 +231,19 @@ out="$(svc_kick "$BOT3")"; rc=$?
 assert_eq "Linux kick (primary): rc 0" "0" "$rc"
 assert_contains "Linux kick (primary): restarts the BOT_SERVICE unit" "restart svc-charlie.service" "$(cat "$FAKE_LOG")"
 assert_contains "Linux kick (primary): description printed for the caller's log" "svc-charlie" "$out"
+rm -f "$HOME/.config/systemd/user/svc-charlie.service"
+
+# Failure propagation (#1573 fix round 1 item 1): a FAILED restart must read
+# as a failure to the caller, never a hardcoded 0 -- the exact bug that made
+# PR B's planned `if svc_kick ...; then ... else start-bot.sh fallback; fi`
+# unreachable on a real restart failure.
+reset_fakes
+: > "$HOME/.config/systemd/user/svc-charlie.service"
+set +e
+out="$(FAKE_EXIT=1 svc_kick "$BOT3")"; rc=$?
+set -e
+assert_eq "Linux kick (primary, systemctl fails): rc propagates (1), not 0" "1" "$rc"
+assert_contains "Linux kick (primary, systemctl fails): still prints its one-line description" "svc-charlie" "$out"
 rm -f "$HOME/.config/systemd/user/svc-charlie.service"
 
 # Pre-rename branch: BOT_SERVICE unit absent, but a BOT_NAME unit exists.
@@ -282,6 +339,7 @@ assert_contains "Linux disenroll: disable --now called" "disable --now svc-echo.
 assert_contains "Linux disenroll: daemon-reload called" "daemon-reload" "$(cat "$FAKE_LOG")"
 assert_contains "Linux disenroll: reset-failed called" "reset-failed svc-echo.service" "$(cat "$FAKE_LOG")"
 assert_eq "Linux disenroll: .tmux-env removed (OS-independent teardown leg)" "false" "$([ -f "$BOT5/.tmux-env" ] && echo true || echo false)"
+assert_contains "Linux disenroll: bot_tmux kill-server called on the resolved socket" "-L svc-echo kill-server" "$(cat "$TMUX_LOG")"
 
 reset_fakes
 as_os Darwin
@@ -292,6 +350,21 @@ assert_eq "Darwin disenroll: plist removed" "false" "$([ -f "$HOME/Library/Launc
 assert_contains "Darwin disenroll: bootout called" "bootout" "$(cat "$FAKE_LOG")"
 assert_contains "Darwin disenroll: names svc-echo" "svc-echo" "$(cat "$FAKE_LOG")"
 assert_eq "Darwin disenroll: .tmux-env removed (OS-independent teardown leg)" "false" "$([ -f "$BOT5/.tmux-env" ] && echo true || echo false)"
+assert_contains "Darwin disenroll: bot_tmux kill-server called on the resolved socket" "-L svc-echo kill-server" "$(cat "$TMUX_LOG")"
+
+# Unrecognized OS: skips the supervision leg entirely (no systemctl/launchctl
+# call at all -- FAKE_LOG stays empty) but still runs the OS-independent tmux
+# teardown (TMUX_LOG shows kill-server) and still removes .tmux-env, rc 0.
+reset_fakes
+as_os SunOS
+: > "$BOT5/.tmux-env"
+set +e
+svc_disenroll "$BOT5"; rc=$?
+set -e
+assert_eq "Other OS: svc_disenroll rc 0" "0" "$rc"
+assert_eq "Other OS: no systemctl/launchctl call (supervision leg skipped)" "" "$(cat "$FAKE_LOG")"
+assert_contains "Other OS: tmux teardown still runs (OS-independent leg)" "-L svc-echo kill-server" "$(cat "$TMUX_LOG")"
+assert_eq "Other OS: .tmux-env still removed" "false" "$([ -f "$BOT5/.tmux-env" ] && echo true || echo false)"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

@@ -1,7 +1,9 @@
 #!/bin/bash
-# lib/supervisor.sh — the supervisor adapter: five verbs, each with a systemd
-# spelling and a launchd spelling, behind the one $_OS switch every lib/
-# script already re-derives for itself (#1573 boot admission, task 6).
+# lib/supervisor.sh — the supervisor adapter: five verbs (svc_is_registered,
+# svc_state, svc_kick, svc_enroll, svc_disenroll), each with a systemd
+# spelling and a launchd spelling, keyed off the shared label resolver
+# svc_unit_name, behind the one $_OS switch every lib/ script already
+# re-derives for itself (#1573 boot admission, task 6).
 #
 # Sourced by lib-common.sh immediately after detect_os runs, so every verb
 # below can read $_OS without re-deriving it. Bodies are MOVED from the code
@@ -51,11 +53,13 @@
 # why): it is this file's own directory, self-derived from ${BASH_SOURCE[0]}
 # exactly once, the same way lib-common.sh derives CLAUDLOBBY_ROOT from its
 # own location rather than trusting an inherited variable. The `:=` form
-# leaves a deliberate seam: tests/test_supervisor_adapter.sh's hermetic
-# svc_enroll cases pre-export this to a scratch dir of stand-in scripts
-# rather than ever forking the real install-bot.sh, whose Darwin leg shells
-# out to the absolute, unfakeable /bin/launchctl bootstrap -- a real call a
-# hermetic test must never risk making.
+# leaves a deliberate seam, and it is honoured in PRODUCTION too, not only in
+# tests: any caller may pre-export _SUPERVISOR_LIB_DIR to redirect which
+# installer svc_enroll executes. tests/test_supervisor_adapter.sh's hermetic
+# svc_enroll cases use that same lever to point at a scratch dir of stand-in
+# scripts rather than ever forking the real install-bot.sh, whose Darwin leg
+# shells out to the absolute, unfakeable /bin/launchctl bootstrap -- a real
+# call a hermetic test must never risk making.
 : "${_SUPERVISOR_LIB_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
 # svc_unit_name <bot_dir>
@@ -112,7 +116,13 @@ svc_is_registered() {
 # point, because systemctl does not promise to emit properties in request
 # order. Darwin has no cheap sub-state query; `launchctl print` exiting
 # nonzero means not loaded at all, and a loaded agent is active only while a
-# `state = running` line is present.
+# `state = running` line is present — matched with a bash `case` pattern,
+# never piped to `grep -q`: `grep -q` exits the instant it finds a match,
+# without draining the rest of stdin, so on a large `launchctl print` output
+# (~120KB, measured) the upstream `printf` can still be writing when `grep`
+# closes its read end, SIGPIPEs, and hands the pipeline a nonzero status
+# under the caller's `pipefail` — inverting a MATCHING "running" verdict to
+# "not running" for exactly the bots whose launchd output is biggest.
 svc_state() {
     local bot_dir="${1:?Usage: svc_state <bot_dir>}"
     local label
@@ -143,11 +153,10 @@ EOF
         Darwin)
             local out
             if out=$(launchctl print "gui/$(id -u)/$label" 2>/dev/null); then
-                if printf '%s' "$out" | grep -q 'state = running'; then
-                    printf 'loaded-active'
-                else
-                    printf 'loaded-inactive'
-                fi
+                case "$out" in
+                    *'state = running'*) printf 'loaded-active' ;;
+                    *)                   printf 'loaded-inactive' ;;
+                esac
             else
                 printf 'not-loaded'
             fi
@@ -163,28 +172,37 @@ EOF
 # The restart ladder moved verbatim from keepalive.sh's restart_bot_service:
 # BOT_SERVICE-named systemd unit, else the pre-rename BOT_NAME.service, else
 # launchd kickstart. Prints one line describing what it did (for the
-# caller's own log — this file owns no log of its own) and returns whatever
-# the restart/kickstart command itself returns. rc 2 when no branch applies
-# — nothing was invoked — so the caller falls back to start-bot.sh exactly as
-# restart_bot_service's own final branch does; that fallback is NOT moved
-# here; it stays the caller's decision (PR B migrates the caller).
+# caller's own log — this file owns no log of its own), THEN PROPAGATES the
+# restart/kickstart command's own exit status — never a hardcoded 0.
+# restart_bot_service propagated this for free (no `return` of its own, so
+# bash returns the last command's status); a bare `return 0` here would
+# silently read a FAILED restart as success inside a caller's
+# `if svc_kick ...`, and PR B's caller (rc 2 -> fall back to start-bot.sh)
+# would never see the failure to fall back from. rc 2 stays reserved for "no
+# branch applies" — nothing was invoked — so the caller falls back to
+# start-bot.sh exactly as restart_bot_service's own final branch does; that
+# fallback is NOT moved here; it stays the caller's decision (PR B migrates
+# the caller).
 svc_kick() {
     local bot_dir="${1:?Usage: svc_kick <bot_dir>}"
-    local bot_service bot_name
+    local bot_service bot_name rc
     bot_service="$(bot_conf_get "$bot_dir" BOT_SERVICE "")"
     bot_name="$(bot_conf_get "$bot_dir" BOT_NAME "")"
     if [ "$_OS" = "Linux" ] && [ -n "$bot_service" ] && [ -f "$HOME/.config/systemd/user/$bot_service.service" ]; then
         printf 'systemctl --user restart %s\n' "$bot_service"
-        systemctl --user restart "$bot_service.service"
-        return 0
+        rc=0
+        systemctl --user restart "$bot_service.service" || rc=$?
+        return "$rc"
     elif [ "$_OS" = "Linux" ] && [ -n "$bot_name" ] && [ -f "$HOME/.config/systemd/user/$bot_name.service" ]; then
         printf 'systemctl --user restart %s (pre-rename)\n' "$bot_name"
-        systemctl --user restart "$bot_name.service"
-        return 0
+        rc=0
+        systemctl --user restart "$bot_name.service" || rc=$?
+        return "$rc"
     elif [ "$_OS" = "Darwin" ] && [ -n "$bot_service" ] && [ -f "$HOME/Library/LaunchAgents/$bot_service.plist" ]; then
         printf 'launchctl kickstart %s\n' "$bot_service"
-        launchctl kickstart -k "gui/$(id -u)/$bot_service"
-        return 0
+        rc=0
+        launchctl kickstart -k "gui/$(id -u)/$bot_service" || rc=$?
+        return "$rc"
     fi
     return 2
 }
@@ -222,7 +240,10 @@ svc_enroll() {
 # unrecognized OS skips the supervision leg (nothing to invoke) but still
 # runs the OS-independent tmux teardown, exactly as spin-down-bot.sh's own
 # `case "$_OS" in ... *) skip ;; esac` falls through to its next leg rather
-# than aborting.
+# than aborting. Resolves BOT_SERVICE only -- no BOT_NAME pre-rename fallback
+# the way svc_unit_name/svc_kick have one -- because spin-down-bot.sh's own
+# reap_supervision never had one either; this is a move, not a gap, and PR B
+# may decide to add one.
 svc_disenroll() {
     local bot_dir="${1:?Usage: svc_disenroll <bot_dir>}"
     local label
