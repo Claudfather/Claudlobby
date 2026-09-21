@@ -199,7 +199,8 @@ LOCK_RETRY_ATTEMPTS = 6
 LOCK_RETRY_BACKOFF_S = 0.15
 
 
-def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
+def emit_batch(root: Path, raw_requests: list[dict], *,
+               conn: sqlite3.Connection | None = None) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
 
@@ -229,24 +230,43 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
         item, c = validate_item(r, modes or {})        # ContractViolation propagates
         captured.append(c)
         items.append(item)
+    # A caller-supplied connection is USED AND NOT CLOSED: its owner holds the
+    # lifecycle and the checkpoint cadence (#1693 arm D). Without one this is
+    # byte-for-byte today's behaviour -- connect, migrate, ingest, close -- which
+    # is what the cold CLI needs, being a fresh process per batch whose close is
+    # necessarily the last-connection close.
+    #
+    # The durability difference rides on the CONNECTION, not on this branch: a
+    # long-lived connection is opened `synchronous=FULL`, so its commits fsync
+    # the WAL and an acknowledgment is durable without any checkpoint. A
+    # per-batch connection stays NORMAL and is made durable by the truncate
+    # checkpoint its close triggers. Both paths acknowledge only after a
+    # commit that is on disk; they differ in which syscall put it there.
+    borrowed = conn is not None
     attempt = 0
     while True:
         try:
-            conn = connect(db_path(root))
+            own = conn if borrowed else connect(db_path(root))
             try:
-                migrate(conn)                               # DowngradeError propagates
+                migrate(own)                                # DowngradeError propagates
                 host = ensure_host_uid(Path(root) / "state")
-                results = ingest_many(conn, items, host_uid=host)
+                results = ingest_many(own, items, host_uid=host)
             finally:
-                try:
-                    conn.close()
-                except sqlite3.Error:
-                    # Post-review fix: a WAL-flush failure on close, AFTER a
-                    # successful commit, must not fall into the spool path —
-                    # that reported committed events as "spooled" and queued a
-                    # redundant replay. A close failure after a FAILED ingest
-                    # changes nothing (that exception already routed).
-                    pass
+                if not borrowed:
+                    try:
+                        own.close()
+                    except sqlite3.Error:
+                        # Post-review fix: a WAL-flush failure on close, AFTER a
+                        # successful commit, must not fall into the spool path —
+                        # that reported committed events as "spooled" and queued a
+                        # redundant replay. A close failure after a FAILED ingest
+                        # changes nothing (that exception already routed).
+                        #
+                        # #1693: on the BORROWED path this swallow is not
+                        # reached, and that is the point -- durability no longer
+                        # rides on the close, so a checkpoint failure is a
+                        # WAL-size event rather than a silent durability hole.
+                        pass
             break
         except (DowngradeError, ContractViolation):
             raise

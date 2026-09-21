@@ -6,6 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+
+### Changed — the ingest daemon holds ONE write connection instead of opening and closing per batch (#1693)
+
+- **What was costing.** `emit_batch` opened and closed the db per batch, and
+  SQLite runs a checkpoint-and-truncate when the LAST connection closes. The
+  daemon is normally the only writer, so **every batch paid a full truncate
+  checkpoint** on SD storage — measured as essentially all of the daemon's
+  service time.
+
+- **`ok: True` is a STRONGER promise now, not a weaker one.** The held
+  connection is opened `synchronous=FULL`, so each commit fsyncs the WAL:
+
+  > `ok: True` means the batch was committed and the WAL was fsync'd before the
+  > reply was sent. An acknowledged row survives host death, not merely daemon
+  > death. Worst-case acknowledged-but-not-durable window: **zero seconds.**
+
+  That is stronger than before. Previously durability rode on the CLOSE, whose
+  failure is swallowed and still reports `committed` — so a checkpoint failure
+  was a silent durability hole. It now rides on the commit, which makes a
+  checkpoint failure a WAL-SIZE event instead. The fix **closes** that narrow
+  path rather than widening it.
+
+  **The promise covers three outcomes, not two transports**: `committed` →
+  durable and queryable; `duplicate` → already recorded; `spooled` → durable on
+  disk and **NOT queryable until a drain**. That third one no longer rides the
+  same success signal: [#1711](https://github.com/Claudfather/Claudlobby/issues/1711)
+  closed across #1715 and #1719, giving `spooled` **exit 6, its own code**. So
+  the three outcomes are distinguishable to a caller and this statement is the
+  whole of what `ok: True` covers, rather than one of three things it might
+  mean. This change additionally **reduces** how often the spooled outcome is
+  reached — there is no longer a per-batch `connect()` to fail into the spool.
+
+- **The trade was not forced, and the weakening option is named rather than
+  quietly skipped.** Measured on the same ext4 SD partition the plane lives on
+  (checked, not assumed — on tmpfs every number would be meaningless), 300
+  single-row commits: today 30.83 ms median / 116.35 ms p95; long-lived +
+  `FULL` + periodic TRUNCATE **10.60 ms / 35.04 ms**. A third option —
+  long-lived + `NORMAL` — is 1500x faster and **not host-death durable**; it was
+  measured, understood and **declined**. It is recorded here so nobody
+  re-derives it later as a discovery. **Bound: those arms are batch size 1.**
+  Real traffic is not, and the per-batch truncate amortises across more rows as
+  batches grow, so the ratio may compress at larger batches. The recommendation
+  does not change — `FULL` fsyncs once per commit regardless of batch size.
+
+- **The cadence triggers on WAL BYTES, and that is a correction the canary
+  forced.** The cadence first proposed was 200 batches, derived from the plane's
+  measured ~767 B/row. That predicts DB growth, not WAL growth: a WAL frame is a
+  PAGE, and one small event dirties pages across the table, the ledger and
+  several indexes — **~45 KB per batch**, measured through the real daemon. At
+  200 batches the WAL would reach ~9 MB, over the 4 MB ceiling the same design
+  proposed. It now checkpoints at **1 MiB of WAL**, with 500 batches and 30 s as
+  backstops, and records `wal_checkpoint`'s own return value so a BUSY
+  checkpoint — a reader holding a snapshot it needed to pass — is counted rather
+  than invisible.
+
+- **The one failure mode this introduces, and its canary.** A connection held
+  for the process's life can go bad underneath itself, and the dangerous half is
+  **silent**: if the db file is replaced, the held handle keeps writing
+  SUCCESSFULLY into the now-unlinked inode — no error, no exception, every
+  subsequent acknowledgment a lie. Nothing that waits for a failure detects it,
+  because there is no failure. So the writer checks **identity**, not health:
+  the `(device, inode)` it opened is compared against the path before each
+  batch, and a mismatch reconnects. Per-batch connect was structurally immune to
+  this; the fix is not, so it is tested both ways — a replaced db reconnects, an
+  untouched one does not (or the detector would reintroduce the cost it removes).
+
+
 ### Fixed — a withheld attribution left no trace a reader could reach (#1711, citation B)
 
 #1706 case 2 withholds `pr_url`/`pr_role` when the task link was a guess, and
