@@ -90,7 +90,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .paths import Paths
+from .paths import Paths, load_lib_module
 from .source_state import (
     SOURCE_ABSENT,
     SOURCE_OK,
@@ -227,7 +227,7 @@ def load_dispatch_doors(paths: Paths):
     section *loudly*. Printing "0 open" because the matcher could not be loaded
     would be the exact failure this door exists to prevent.
     """
-    return load_lib_module(paths, "dispatch-overdue.py")
+    return load_lib_module(paths.lib, "dispatch-overdue.py")
 
 
 def resolve_fleet_name(paths: Paths) -> str | None:
@@ -294,31 +294,7 @@ def plane_conn(paths: Paths, fleet: str | None = None):
     return plane.conn, plane.pr, None
 
 
-_LIB_MODULES: dict[tuple[str, float], object] = {}
-
-
-def load_lib_module(paths: Paths, filename: str):
-    """Import one of the INSTALL's stdlib ``lib/*.py`` scripts as a module,
-    or None when unreadable — ``load_dispatch_doors``'s seam, generalised.
-    Memoized on (path, mtime): a brief once exec'd `plane-readers.py` six
-    times per call (the R2b-1 simplify lens); a re-installed lib/ changes the
-    mtime and is re-read."""
-    import importlib.util
-    src = paths.lib / filename
-    try:
-        key = (str(src), src.stat().st_mtime)
-    except OSError:
-        return None
-    if key in _LIB_MODULES:
-        return _LIB_MODULES[key]
-    try:
-        spec = importlib.util.spec_from_file_location(f"_claudlobby_lib_{src.stem.replace('-', '_')}", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-    except (OSError, SyntaxError, ImportError):
-        return None
-    _LIB_MODULES[key] = mod
-    return mod
+# `load_lib_module` now lives in `paths.py` — three consumers, one loader.
 
 
 # --- the ack (the module's only emission) --------------------------------------

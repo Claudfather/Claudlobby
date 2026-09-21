@@ -463,9 +463,27 @@ setup_log_dir() {
 # The temp directory is created eagerly at source time so safe_mktemp works
 # correctly inside $(...) command substitution (which runs in a subshell --
 # lazy init would set _LC_TMPDIR only in the subshell, orphaning files).
-# Cost is negligible: one mktemp -d + rm -rf on tmpfs per script invocation.
-
-_LC_TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'lib-common')
+# Cost is one mktemp -d + rm -rf per script invocation -- on this estate's
+# primary host /tmp is ext4 on the SD card, not tmpfs, so this is a real disk
+# write/delete, not a free one (#1682). Making the temp root configurable is a
+# separate change and not pursued here.
+#
+# The fallback template needs trailing X's -- GNU coreutils mktemp rejects an
+# X-less template outright ("too few X's in template"); BSD/macOS tolerates
+# it, which is why this went unnoticed (#1682). Both forms accept the X'd
+# template, so this is strictly a widening, not a behavior change for either
+# platform's working case.
+#
+# If BOTH attempts fail (a full or read-only /tmp, a restrictive sandbox, an
+# exhausted inode table), fail LOUD here rather than limp on with an empty
+# _LC_TMPDIR: every caller of safe_mktemp would then fail somewhere else, with
+# nothing connecting that failure back to this one -- #1682's actual defect
+# was that the template bug was silent at the SOURCE, and by the time it
+# surfaced elsewhere, nothing named the helper that had actually failed.
+if ! _LC_TMPDIR=$(mktemp -d 2>/dev/null) && ! _LC_TMPDIR=$(mktemp -d -t 'lib-common.XXXXXXXXXX'); then
+    echo "lib-common.sh: cannot create a scratch directory for _LC_TMPDIR -- safe_mktemp cannot work, and any later failure in this script is a symptom of THIS one, not its own cause" >&2
+    exit 1
+fi
 
 _lc_cleanup() {
     rm -rf "$_LC_TMPDIR" 2>/dev/null || true
@@ -3407,7 +3425,8 @@ avail_ram_mb() {
     else
         # macOS: vm_stat reports pages; multiply by page size (usually 4096).
         local page_size
-        page_size=$(pagesize 2>/dev/null || sysctl -n hw.pagesize 2>/dev/null || echo 4096)
+        # `|| echo sysctl` is the not-sourced degradation, never a resolution rung
+        page_size=$(pagesize 2>/dev/null || "$(sysctl_bin 2>/dev/null || echo sysctl)" -n hw.pagesize 2>/dev/null || echo 4096)
         vm_stat | awk -v ps="$page_size" '
             /Pages free/               { free = $3+0 }
             /Pages inactive/           { inactive = $3+0 }
@@ -3888,6 +3907,43 @@ boot_start_class() {
 # to that question would let the recorder and the snapshot describe the same
 # boot differently with nothing flagging the disagreement.
 
+# sysctl_bin — the sysctl binary, or rc 1. Bare `sysctl` is not on the PATH a
+# launchd unit composes (/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:
+# /usr/bin:/bin — no /usr/sbin), so every launcher and host job on the macOS
+# host silently lost every sysctl read: measured 2026-09-21 on the primary host,
+# where a restarted manager logged "boot epoch unresolvable" while the same
+# call from an ssh shell answered. A second route to the same split, measured
+# while wiring the admission gate: lib/start-bot.sh REBUILDS PATH partway
+# through a boot without /usr/sbin, so a bare `sysctl` resolved BEFORE that
+# rebuild (acquire) and not AFTER it (release) -- one boot, two answers.
+# SYSCTL_BIN is the test seam (TMUX_BIN's shape).
+sysctl_bin() {
+    if [ -n "${SYSCTL_BIN:-}" ]; then printf '%s\n' "$SYSCTL_BIN"; return 0; fi
+    if command -v sysctl >/dev/null 2>&1; then printf '%s\n' "sysctl"; return 0; fi
+    if [ -x /usr/sbin/sysctl ]; then printf '%s\n' "/usr/sbin/sysctl"; return 0; fi
+    return 1
+}
+
+# boot_epoch_from_sysctl — the host boot instant from kern.boottime, epoch
+# seconds; rc 1 if sysctl is absent, silent, or answers something that is not a
+# plausible epoch. ONE parser for the string
+#   { sec = 1789855079, usec = 164678 } Sat Sep 19 17:57:59 2026
+# because there were two: the greedy `.*sec *= *` form captured the USEC
+# field (164678, a 1970 boot) on every macOS host — plane-host-probe.sh had
+# already fixed its own copy of that bug (gauntlet SEV-1) while this one kept
+# it. The first number in the string is sec; anything below 1e9 (2001-09-09)
+# is the usec class or a stub and is refused rather than believed.
+boot_epoch_from_sysctl() {
+    local bin s e
+    bin="$(sysctl_bin 2>/dev/null)" || return 1
+    s="$("$bin" -n kern.boottime 2>/dev/null)" || true
+    [ -n "$s" ] || return 1
+    e="$(printf '%s\n' "$s" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1)"
+    case "$e" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$e" -ge 1000000000 ] || return 1
+    printf '%s\n' "$e"
+}
+
 # resolve_boot_epoch — this host boot instant, epoch seconds. rc 1 if nothing
 # answers. Override with CLAUDLOBBY_BOOT_EPOCH (test seam).
 #
@@ -3900,49 +3956,23 @@ resolve_boot_epoch() {
         printf '%s\n' "$CLAUDLOBBY_BOOT_EPOCH"; return 0
     fi
     local s e
-    s="$(uptime -s 2>/dev/null)"
+    s="$(uptime -s 2>/dev/null)" || true
     if [ -n "$s" ]; then
-        e="$(date -d "$s" +%s 2>/dev/null)"
-        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
+        e="$(date -d "$s" +%s 2>/dev/null)" || true
+        case "$e" in ''|*[!0-9]*) e="" ;; esac
+        if [ -n "$e" ] && [ "$e" -ge 1000000000 ]; then printf '%s\n' "$e"; return 0; fi
     fi
-    # macOS has no `uptime -s`; kern.boottime prints  { sec = 1786..., usec = ... }
-    #
-    # The binary is looked up by ABSOLUTE PATH as well as on PATH, and that is
-    # not defensive padding -- it is the fix for a measured defect. `sysctl`
-    # lives in /usr/sbin on macOS, and lib/start-bot.sh REBUILDS PATH partway
-    # through a boot without /usr/sbin in it. So a bare `sysctl` resolved before
-    # that rebuild and not after, and this function answered a REAL epoch at one
-    # point in a single boot and NOTHING a few lines later -- silently, since
-    # every caller treats an empty epoch as a legitimate degraded state.
-    #
-    # Measured on macOS: the admission gate acquired its slot under
-    # state/boot/<epoch> and released it under state/boot/admission-noepoch, so
-    # every release removed nothing while logging ADMISSION_RELEASED, and a slot
-    # was only ever freed later by the reaper noticing the launcher had exited.
-    # The same split reaches every other epoch-keyed tenant downstream of that
-    # rebuild (the once-per-boot plugin-update stamp, boot-capture).
-    local sysctl_bin
-    for sysctl_bin in sysctl /usr/sbin/sysctl /sbin/sysctl; do
-        s="$("$sysctl_bin" -n kern.boottime 2>/dev/null)" && [ -n "$s" ] && break
-        s=""
-    done
-    if [ -n "$s" ]; then
-        # Anchored, because `.*sec` is GREEDY and the line reads
-        #   { sec = 1789152060, usec = 890487 } Fri Sep 11 14:41:00 2026
-        # -- so the unanchored form backtracked to the LAST `sec *= *<digits>`,
-        # which is inside `usec`, and this function returned the MICROSECONDS as
-        # the boot epoch on every macOS host. Measured: 890487 where the epoch
-        # was 1789152060. `^[^0-9]*` cannot reach `usec`, because doing so would
-        # mean matching the digits of the seconds value.
-        e="$(printf '%s\n' "$s" | sed -n 's/^[^0-9]*sec *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
-        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
-    fi
+    # macOS has no `uptime -s`; kern.boottime through the one parser above.
+    if e="$(boot_epoch_from_sysctl 2>/dev/null)"; then printf '%s\n' "$e"; return 0; fi
     # Linux without uptime(1): /proc/uptime is monotonic seconds since boot.
     if [ -r /proc/uptime ]; then
         local up now
         up="$(cut -d. -f1 < /proc/uptime 2>/dev/null)"
         now="$(date +%s 2>/dev/null)"
-        if [ -n "$up" ] && [ -n "$now" ]; then printf '%s\n' "$((now - up))"; return 0; fi
+        # floored like the other rungs: on an RTC-less host a stale boot clock
+        # makes this rung recompute from the same stale clock, so the floor only
+        # changes WHICH rung answers there, never the answer -- stated, not hidden.
+        if [ -n "$up" ] && [ -n "$now" ] && [ "$((now - up))" -ge 1000000000 ]; then printf '%s\n' "$((now - up))"; return 0; fi
     fi
     return 1
 }

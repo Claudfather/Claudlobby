@@ -9,6 +9,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ..mcp_grammar import GrammarUnavailable, grammar
 from ..composer import compose_bot, compose_fleet
 from ..diff import diff_bot, promote_bot
 from ..source_state import (
@@ -754,61 +755,6 @@ def cmd_uptime(args) -> int:
     return 0
 
 
-# The package managers whose caches this can populate, each with the toolchain
-# an operator installs to get it. This gates which fragments are considered;
-# `_warm_prefix` below reads their args. The two must agree, and they fail in
-# OPPOSITE directions: a runtime here with no branch there lands every fragment
-# in `unreadable` and is named out loud, while a branch there with no entry here
-# is skipped SILENTLY by the membership test. Adding a runtime means editing
-# both, and only one of the two mistakes will tell you.
-_WARM_RUNTIMES = {
-    "npx": "install Node.js first",
-    "uvx": "install uv first",
-}
-
-
-def _warm_prefix(command: str, args_list: list[str]) -> tuple[str, list[str]] | None:
-    """Reduce an MCP server's args to (display name, the argv that fetches it).
-
-    The warm command is `<command> <prefix> --help`, so the prefix carries
-    exactly what identifies the download and nothing else. Dropping the
-    server's own flags also keeps unexpanded `${VAR}` placeholders out of the
-    subprocess by construction rather than by a filter.
-
-    Returns None when the args name no package this can identify. That is
-    deliberately not a guess -- warming the wrong token still exits 0, and a
-    server reported as covered while it keeps paying the cold cost is the
-    failure this whole function exists to prevent.
-    """
-    if command == "npx":
-        for i, a in enumerate(args_list):
-            if a == "-y" and i + 1 < len(args_list):
-                return args_list[i + 1], ["-y", args_list[i + 1]]
-        return None
-
-    if command == "uvx":
-        # `uvx --from <spec> <entry>`: the package to fetch and the console
-        # script to run are different tokens and both are needed, because
-        # `uvx --from <spec> --help` prints uv's own help and fetches nothing.
-        # The entry must sit adjacent to the spec; any other arrangement is a
-        # shape this cannot read rather than one it should guess at.
-        for i, a in enumerate(args_list):
-            if a == "--from":
-                if i + 2 < len(args_list) and not args_list[i + 2].startswith("-"):
-                    spec, entry = args_list[i + 1], args_list[i + 2]
-                    return spec, ["--from", spec, entry]
-                return None
-        # `uvx <pkg> [server flags...]`: only the first token is the package.
-        # A leading flag means some other shape -- uv's own value-taking
-        # options (--python, --with) would otherwise have their value read as
-        # a package name.
-        if args_list and not args_list[0].startswith("-"):
-            return args_list[0], [args_list[0]]
-        return None
-
-    return None
-
-
 def cmd_warm_cache(args) -> int:
     """Pre-download the packages referenced by MCP fragments.
 
@@ -821,10 +767,19 @@ def cmd_warm_cache(args) -> int:
     budget on its own, so a server whose cache is cold loses deterministically
     rather than only under a boot storm. That is what makes this a warm rather
     than a nice-to-have.
+
+    Which token of a server's args names its package is NOT decided here: that
+    grammar is `lib/mcp-package-grammar.py`, shared with the composer's binary
+    swap and with `check-npx-cache.sh`, the probe that gates this command.
     """
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet, _md = _load_fleet_or_exit(paths)
+    try:
+        g = grammar(paths)
+    except GrammarUnavailable as e:
+        log.error("%s", e)
+        return 1
 
     # Keyed on (runtime, argv) so a package reached by two bots is warmed once,
     # and so a pinned spec plus its separate entry point survives the round
@@ -841,13 +796,11 @@ def cmd_warm_cache(args) -> int:
                 frag = _json.loads(frag_path.read_text())
             except _json.JSONDecodeError:
                 continue
-            for k, v in frag.items():
-                if k.startswith("_") or not isinstance(v, dict):
-                    continue
+            for k, v in g.servers_in(frag):
                 runtime = v.get("command")
-                if runtime not in _WARM_RUNTIMES or "args" not in v:
+                if runtime not in g.WARM_RUNTIMES or "args" not in v:
                     continue
-                target = _warm_prefix(runtime, v["args"])
+                target = g.warm_prefix(runtime, v["args"])
                 if target is None:
                     unreadable.add(f"{entry.name}:{k}")
                     continue
@@ -898,7 +851,7 @@ def cmd_warm_cache(args) -> int:
             # ecosystem warming at all, and a fleet mixing npx and uvx must
             # still warm the half it can. The set also keeps this one
             # diagnostic from repeating once per package.
-            log.error("%s not found — %s", runtime, _WARM_RUNTIMES[runtime])
+            log.error("%s not found — %s", runtime, g.WARM_RUNTIMES[runtime])
             missing_runtimes.add(runtime)
             failed.append(pkg)
         except (subprocess.SubprocessError, OSError) as e:

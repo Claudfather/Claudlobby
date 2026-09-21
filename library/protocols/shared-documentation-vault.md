@@ -13,13 +13,34 @@ Your fleet's shared docs live **inside the vault**. Reach them through the Claud
 
 Before starting a task:
 
-1. **Recall first**, with the task context — not a keyword. This is the step that replaces scanning a tree.
+1. **Recall first — with a SHORT query. Two to four keywords, never a sentence.** This is the step that
+   replaces scanning a tree. The brevity is not style: **`recall` ranks correctly on short queries and
+   collapses on prose** (Claudron #143 — score saturates, and the result set becomes a function of the
+   vault rather than of your query). Measured, same door, same subject, only length differing: a
+   three-word query returned the exact note first; a one-sentence description of the *same idea*
+   returned five notes from an unrelated domain. Name the subject, not the situation —
+   `cross-fleet consent`, not `when an incident on one fleet breaks something on another fleet…`.
 2. **Look up** directly when you already know the title or tag you want.
 3. Read only what the results justify. **Cap: never open more than 5 notes before starting work.**
 
 **Recall covers plans, not just knowledge.** An active plan for the same repo or area surfaces through the same query — you do not need a second, manual pass over `planning/active/`. If a returned plan conflicts with your task, flag it to the manager before proceeding.
 
-**A query that returns nothing is a result, not a failure** — but it is worth one differently-worded retry before you conclude the fleet knows nothing. Recall is relevance-ranked, so vocabulary mismatch reads exactly like absence.
+**A query that returns nothing is a result, not a failure** — but retry **SHORTER** before you conclude
+the fleet knows nothing. Recall is relevance-ranked, so vocabulary mismatch reads exactly like absence;
+re-wording at the same length does not help and **re-wording a long query stays broken**, which spends
+the one retry you were willing to spend.
+
+**And a degraded result does not look degraded.** Under #143 what comes back is a topically
+self-consistent cluster from an adjacent domain — it reads exactly like a real relevance-ranked answer,
+which is why it gets accepted instead of retried. Obvious garbage would be safer. **If the results are
+coherent but off-subject, suspect the query shape before concluding the vault is empty**, and confirm a
+negative with a short `lookup` before capturing a new note: two long recalls reading empty is not
+evidence of absence.
+
+> **This section is a MITIGATION, not the fix.** The defect is Claudron #143; this protocol only points
+> people at the door. Written assuming #143 is **unfixed**. If it lands such that prose ranks correctly,
+> revisit both rungs above rather than leaving them to rot — the short-query rule stays harmless, but the
+> reasoning attached to it would no longer be true.
 
 ## Writing Convention
 

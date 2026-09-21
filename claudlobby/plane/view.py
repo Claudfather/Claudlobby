@@ -1094,13 +1094,12 @@ def _plane_readers(root: Path):
     `claudlobby report-back` answer through — so the card counts EXACTLY the
     rows the manager's brief lists (`report_rows` + `unacked_rows`, one rule);
     None when the install carries no readable copy (disclosed on the card)."""
-    from types import SimpleNamespace
-    from ..brief import load_lib_module
+    from ..paths import load_lib_module
     # the plane root's own lib/ (the install on a host), else the package's
     # checkout (an editable install serving a plane under another root)
     for lib in (Path(root) / "lib", Path(__file__).resolve().parents[2] / "lib"):
         if (lib / "plane-readers.py").is_file():
-            return load_lib_module(SimpleNamespace(lib=lib), "plane-readers.py")
+            return load_lib_module(lib, "plane-readers.py")
     return None
 
 

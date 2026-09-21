@@ -94,9 +94,13 @@ fi
 _boot=""; _bsec=""
 if [ -r /proc/stat ]; then
     _bsec="$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null)"
-elif command -v sysctl >/dev/null 2>&1; then
-    _bsec="$(sysctl -n kern.boottime 2>/dev/null \
-        | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p')"
+else
+    # ONE parser (lib-common.sh boot_epoch_from_sysctl): this file had its own
+    # copy of the kern.boottime sed while resolve_boot_epoch kept the greedy
+    # form that captured usec -- the second-copy divergence CLAUDE.md warns
+    # about, found live 2026-09-21. It also resolves sysctl off the launchd
+    # PATH, which lacks /usr/sbin.
+    _bsec="$(boot_epoch_from_sysctl 2>/dev/null || true)"
 fi
 case "$_bsec" in ''|*[!0-9]*) _bsec="" ;; esac
 if [ -n "$_bsec" ]; then

@@ -1657,8 +1657,38 @@ def _fleet_repo_claims(fleet_dir: Path) -> tuple[set[str], bool]:
     return claims, True
 
 
+def _checkin_equipped_leaf_managers(fleet: FleetConfig, paths: Paths) -> list[str]:
+    """The leaf managers this fleet actually composes the check-in onto.
+
+    One definition because TWO rungs need it and they need it for opposite
+    reasons (#1680): `_validate_goal_binding` warns when such a bot exists with
+    no Projects table to dispatch against, and `_validate_ignition` must know
+    whether that warning is firing before it may name it as a co-requisite.
+    Hand-writing the second as `not fleet.projects` shipped an ignition warning
+    pointing at a goal-binding warning that was not in the output — the exact
+    failure the cross-reference exists to prevent, inverted.
+    """
+    from .composer import resolve_effective_protocols  # local: composer imports config, not us
+
+    equipped = []
+    for name in sorted(fleet.leaf_manager_bots()):
+        bot = fleet.bots.get(name)
+        if bot is None:
+            continue
+        try:
+            protocols = resolve_effective_protocols(bot, fleet, paths, is_manager=True)
+        except Exception:  # a compose-time problem is not this rung's to report
+            continue
+        if "checkin" in protocols:
+            equipped.append(name)
+    return equipped
+
+
 def _validate_goal_binding(
-    fleet: FleetConfig, paths: Paths, report: ValidationReport
+    fleet: FleetConfig,
+    paths: Paths,
+    report: ValidationReport,
+    doors: list | None = None,
 ) -> None:
     """The three gaps that let a fleet ship with no goal binding at all.
 
@@ -1666,26 +1696,16 @@ def _validate_goal_binding(
     repo is a legitimate configuration a warning may name and nothing may
     refuse, and a DRAFT header is a fact about intent that only a human can
     resolve.
-    """
-    from .composer import resolve_effective_protocols  # local: composer imports config, not us
 
+    ``doors`` is passed by a caller that has already resolved them — see
+    :func:`ignition.ignition_gap`.
+    """
     # --- an equipped leaf manager with no composable Projects table --------
     if not fleet.projects:
-        managers = fleet.leaf_manager_bots()
-        equipped = []
-        for name in sorted(managers):
-            bot = fleet.bots.get(name)
-            if bot is None:
-                continue
-            try:
-                protocols = resolve_effective_protocols(
-                    bot, fleet, paths, is_manager=True
-                )
-            except Exception:  # a compose-time problem is not this rung's to report
-                continue
-            if "checkin" in protocols:
-                equipped.append(name)
+        equipped = _checkin_equipped_leaf_managers(fleet, paths)
         if equipped:
+            from .ignition import NO_DOOR_CO_REQUISITE, ignition_gap
+
             report.warnings.append(
                 f"bot(s) {', '.join(equipped)} are check-in-equipped but no "
                 f"'## Projects' table can compose: this fleet declares no "
@@ -1694,6 +1714,11 @@ def _validate_goal_binding(
                 f"'dispatch' action needs --project and is unavailable. Give a "
                 f"bot a 'scope: {{org: <org>, repos: [<repo>]}}' block, or "
                 f"declare projects.yaml beside fleet.yaml"
+                + (
+                    NO_DOOR_CO_REQUISITE
+                    if ignition_gap(fleet, paths, doors)
+                    else ""
+                )
             )
 
     # --- a repo claimed by two fleets on one host --------------------------
@@ -1842,7 +1867,12 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
-def _validate_ignition(fleet: FleetConfig, paths: Paths, report: ValidationReport) -> None:
+def _validate_ignition(
+    fleet: FleetConfig,
+    paths: Paths,
+    report: ValidationReport,
+    doors: list | None = None,
+) -> None:
     """The same composite ignition question as doctor's ``check_ignition``,
     at compose time too (#1633) — the same predicate, one warning, beside
     the manager-checkin pair above.
@@ -1860,19 +1890,29 @@ def _validate_ignition(fleet: FleetConfig, paths: Paths, report: ValidationRepor
     Declared state only; an armed-but-unenrolled door is #839/#1040's gap,
     named in the warning's own text rather than answered here.
     """
-    if not fleet.leaf_manager_bots():
-        return
-    from .ignition import ignition_doors
+    from .ignition import ignition_doors, ignition_gap, ignition_warning_tail
 
-    doors = ignition_doors(fleet, paths)
-    if any(d.armed for d in doors):
+    if doors is None and fleet.leaf_manager_bots():
+        doors = ignition_doors(fleet, paths)
+    if not ignition_gap(fleet, paths, doors):
         return
     cheapest = next(d for d in doors if d.name == "briefing.slots")
+    # The co-requisite names `_validate_goal_binding`'s warning, so it must
+    # ask THAT warning's condition and not a look-alike (#1680). At validate()
+    # time the no-projects finding additionally requires a CHECK-IN-EQUIPPED
+    # leaf manager; a plain `not fleet.projects` here shipped an ignition
+    # warning pointing at a goal-binding warning that was not in the output —
+    # measured on a fleet with `system_defaults.protocols: false`.
+    goal_binding_warns = bool(
+        not fleet.projects and _checkin_equipped_leaf_managers(fleet, paths)
+    )
     report.warnings.append(
         "no ignition door is armed on this fleet — nothing gives an idle "
         "bot a turn (declared state; this does not check whether an armed "
-        "door is actually enrolled — see #839/#1040). Cheapest to arm: "
-        + cheapest.arm_line
+        "door is actually enrolled — see #839/#1040)."
+        + ignition_warning_tail(
+            cheapest.arm_line, goal_binding_warns=goal_binding_warns
+        )
     )
 
 
@@ -2111,12 +2151,23 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)
-    _validate_ignition(fleet, paths, report)
+    # Resolved once for both rungs that ask (#1680) — the cascade shells out.
+    # Gated on a leaf manager because neither rung can reach a doors-consuming
+    # branch without one.
+    _ign_doors = None
+    if fleet.leaf_manager_bots():
+        from .ignition import ignition_doors as _ignition_doors
+
+        try:
+            _ign_doors = _ignition_doors(fleet, paths)
+        except Exception:  # noqa: BLE001 — each rung re-raises at its own place
+            _ign_doors = None
+    _validate_ignition(fleet, paths, report, doors=_ign_doors)
     _validate_mission(fleet, paths, report)
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)
     _validate_projects(fleet, paths, report)
-    _validate_goal_binding(fleet, paths, report)
+    _validate_goal_binding(fleet, paths, report, doors=_ign_doors)
     _validate_cross_fleet_collisions(fleet, paths, report)
     _validate_library_frontmatter(paths, report)
     _validate_library_requires(paths, report)

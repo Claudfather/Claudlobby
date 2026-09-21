@@ -28,11 +28,13 @@ import json
 import logging
 import subprocess
 from pathlib import Path
+import pytest
 
 from claudlobby.commands.core import cmd_warm_cache
 from tests.conftest import (
     SubprocessRecorder,
     equip_bot_with_mcp,
+    load_lib_module,
     warm_cache_args,
 )
 
@@ -247,7 +249,10 @@ class TestTheShippedFragmentsAreAllReadable:
     person at the same sitting and cannot surprise you about the real shape."""
 
     def test_every_shipped_uvx_fragment_yields_a_warm_command(self):
-        from claudlobby.commands.core import _warm_prefix
+        # `_warm_prefix` moved out of core.py into the shared grammar when
+        # #1577 consolidated it (bash needs to exec it too). Same function,
+        # new home — the call below is unchanged.
+        _warm_prefix = load_lib_module("mcp-package-grammar").warm_prefix
 
         seen = 0
         for frag in sorted(SHIPPED_MCP.glob("*.json")):
@@ -262,3 +267,13 @@ class TestTheShippedFragmentsAreAllReadable:
         # A negative that asserts nothing is not evidence: if the sweep found no
         # uvx fragments, the loop above passed without testing anything.
         assert seen >= 3, f"expected at least the 3 shipped uvx fragments, found {seen}"
+
+
+@pytest.fixture(autouse=True)
+def _equip_grammar(fleet_dir):
+    """This module drives composition/warm-cache, which load the shared
+    grammar through `mcp_grammar` -- and that door REFUSES rather than
+    falling back, so the real file has to be under the fixture's lib/."""
+    from tests.conftest import equip_grammar
+
+    equip_grammar(fleet_dir)

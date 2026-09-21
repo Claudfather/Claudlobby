@@ -187,6 +187,65 @@ class TestLatestHeartbeats:
             got = _latest_heartbeats(conn, "test-fleet")
         assert set(got) == {"alex"} and got["alex"][1] == "BUSY", (order, got)
 
+    def test_state_and_tmux_cannot_diverge_on_a_case_variant_collision(self, mock_paths):
+        """#1615 review (vera): STATE and TMUX both read heartbeats now, so the
+        PR's whole claim is that they cannot disagree. They could. TMUX picked
+        the newest sample across case-variant aliases (the R2b-1 fix above);
+        the presence path collapsed `{alias.lower(): ...}` and kept whichever
+        `derive_presence`'s `sorted()` visited LAST -- an artifact of ASCII
+        case, not recency. Measured divergence: TMUX=idle (correct) while
+        STATE=working off a 5-minute-stale BUSY sample.
+
+        Same construction as the sibling pin: learn which alias the query
+        yields last, land the OLDER sample under it, so an order-dependent
+        collapse must pick the stale one and a recency-based collapse the live
+        one. Both readers are asserted, because the bug was that they differed.
+
+        SCOPE, because a commit message once claimed more than this test does:
+        it calls `derive_presence` directly and hands it a live list that is
+        ALREADY lower-cased, so it pins the RECORDED half only. The live half
+        is built inside `collect_fleet_status`, and reverting that lowering
+        leaves this test green. `TestCollectFleetStatus::test_a_manifest_case_
+        variant_cannot_diverge_state_from_tmux` is the pin for it.
+        """
+        from claudlobby.plane.emit_api import emit_batch
+        from claudlobby.plane.queries import LATEST_HEARTBEAT_SQL
+        from claudlobby.plane.presence import derive_presence
+        from claudlobby.status import _presence_rows
+        from tests.plane_fixtures import ro
+
+        (mock_paths.root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+
+        def _sample(bot, state, minutes_ago):
+            return {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "test-fleet",
+                    "occurred_at": (now - timedelta(minutes=minutes_ago)).isoformat(),
+                    "payload": {"subject_kind": "bot_instance", "subject": f"bot:test-fleet/{bot}",
+                                "metric": "bot.heartbeat", "value": {"state": state}}}
+
+        emit_batch(mock_paths.root, [_sample("alex", "UNKNOWN", 30), _sample("ALEX", "UNKNOWN", 30)])
+        with ro(mock_paths.root) as conn:
+            order = [r["alias"].split("/")[-1] for r in conn.execute(LATEST_HEARTBEAT_SQL)
+                     if r["alias"].startswith("bot:test-fleet/")]
+        assert sorted(order) == ["ALEX", "alex"], order
+        first, last = order
+        emit_batch(mock_paths.root, [_sample(first, "BUSY", 1), _sample(last, "IDLE", 5)])
+
+        with ro(mock_paths.root) as conn:
+            tmux = _latest_heartbeats(conn, "test-fleet")
+            rows = _presence_rows(conn, "test-fleet")
+
+        # ONE row per bot: derive_presence can no longer emit two Presence
+        # entries that a later case-folding collapse has to choose between.
+        assert len(rows) == 1, rows
+        live = [{"fleet": "test-fleet", "bot": "alex", "status": "up"}]
+        pres = {pz.alias.lower(): pz for pz in derive_presence(rows, live, now=now)}
+        verdict = pres["bot:test-fleet/alex"].presence
+
+        assert tmux["alex"][1] == "BUSY", tmux          # TMUX: newest wins
+        assert verdict == "working", (verdict, rows)    # STATE: the SAME sample
+        assert (verdict == "working") == (tmux["alex"][1] == "BUSY")   # and they agree
+
     def test_newest_sample_wins(self, mock_paths):
         from tests.plane_fixtures import ro
 
@@ -537,6 +596,81 @@ class TestCollectFleetStatus:
         assert bob.last_heartbeat is None and bob.pane_state == "" and bob.busy_pct_24h == 0.0
         assert "plane is unreachable" not in format_table(results, "test-fleet")
 
+    def test_state_comes_from_the_plane_not_the_file(self, mock_fleet, mock_paths):
+        """#1615: STATE and TMUX must answer the SAME question. The file's
+        status is the last REPORT's word, frozen until the next report; the
+        pane verdict is live. Measured on the estate before this fix: 3 of 4
+        rows carried a STATE the pane contradicted, every one of them the
+        direction that gets a working bot injected into."""
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY", "BUSY"])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state",
+                  return_value={"bots": {"alice": {"status": "idle"}}}),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        # the file says idle; the pane says BUSY. The pane wins.
+        assert alice.state == "working", alice.state
+        assert alice.pane_state == "BUSY"
+
+    def test_a_stale_working_in_the_file_does_not_survive_an_idle_pane(self, mock_fleet, mock_paths):
+        """The inverse direction, and the one that makes a finished bot look
+        busy: `ravi` rendered STATE=working off a report while his pane had
+        already gone idle."""
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["IDLE", "IDLE"])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state",
+                  return_value={"bots": {"alice": {"status": "working"}}}),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        assert alice.state == "idle", alice.state
+
+    def test_blocked_is_honoured_only_while_the_pane_is_idle(self, mock_fleet, mock_paths):
+        """`blocked` is NOT a second "idle" -- it is a claim the bot made about
+        ITSELF that no pane verdict can express, so it survives the move to the
+        plane. But a bot that is WORKING is not blocked, which is what kept a
+        stale `blocked` on screen indefinitely (#1615's `tom`)."""
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY", "BUSY"])
+        blocked_file = {"bots": {"alice": {"status": "blocked"}}}
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state", return_value=blocked_file),
+        ):
+            working = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                           if bs.name == "alice")
+        assert working.state == "working", working.state   # busy pane overrides a stale blocked
+
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["IDLE", "IDLE"])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state", return_value=blocked_file),
+        ):
+            idle = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                        if bs.name == "alice")
+        assert idle.state == "blocked", idle.state         # idle pane: the self-report stands
+
+    def test_the_file_is_the_fallback_only_when_the_plane_is_unreachable(self, mock_fleet, mock_paths):
+        """No plane under this root. The file is then all there is, and using
+        it is correct -- what is wrong is preferring it while the plane can
+        answer. Unreachable is disclosed separately (plane_unreachable)."""
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state",
+                  return_value={"bots": {"alice": {"status": "working"}}}),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        assert alice.plane_unreachable
+        assert alice.state == "working", alice.state
+
     def test_systemd_check_queries_bot_service_label(self, mock_fleet, mock_paths):
         """#657: on Linux the SVC check must query the BOT_SERVICE unit
         (com.<fleet>.<bot>.service) the installer names the unit after, not
@@ -568,3 +702,106 @@ class TestCollectFleetStatus:
         assert "alice.service" not in units
         alice = next(bs for bs in results if bs.name == "alice")
         assert alice.service_active is True
+
+    def test_a_manifest_case_variant_cannot_diverge_state_from_tmux(self, mock_paths):
+        """The LIVE half of the presence join, pinned through the door that
+        builds it (#1615 review, PR #1695 follow-up).
+
+        `TestLatestHeartbeats::test_state_and_tmux_cannot_diverge_on_a_case_
+        variant_collision` asserts the same property but hand-builds
+        `live = [{"bot": "alex", ...}]` already lower-cased and calls
+        `derive_presence` directly — so it never reaches the `_live`
+        comprehension in `collect_fleet_status` that does the lowering.
+        Reverting that `b.lower()` leaves it green. The claim was covered on
+        the recorded half only; this is the live half.
+
+        The mechanism it pins: the live aliases are built from the MANIFEST's
+        spelling, while `_presence_rows` lower-cases the recorded ones. Un-
+        lowered, a bot declared `Alex` and recorded `alex` mints TWO verdicts,
+        and the `{alias.lower(): ...}` collapse keeps whichever `sorted()`
+        visited LAST. A mixed-case alias always sorts BEFORE its lower-case
+        twin (ASCII 'A' < 'a'), so the record-only verdict wins and the live
+        half's own `down` is thrown away — STATE=idle beside TMUX=down, the
+        exact divergence #1615 exists to make impossible.
+        """
+        from claudlobby.config import BotConfig, FleetConfig
+
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            bots={"Alex": BotConfig(bot_id="Alex", name="Alex", expertise=["eng"])},
+        )
+        _land_heartbeats(mock_paths.root, "test-fleet", "alex", ["IDLE", "IDLE"])
+
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(False, "dead")),
+            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
+        ):
+            alex = next(bs for bs in collect_fleet_status(fleet, mock_paths)
+                        if bs.name == "Alex")
+
+        # Preconditions, or the assertion below passes on a plane that never
+        # answered: STATE would keep its default and never reach the join.
+        assert not alex.plane_unreachable, alex.plane_unreachable
+        assert alex.last_heartbeat is not None and alex.pane_state == "IDLE", alex
+
+        assert alex.tmux_alive is False
+        assert alex.state == "down", alex.state      # the live half's verdict, kept
+        assert (alex.state == "down") == (not alex.tmux_alive)
+
+    def test_a_uniformly_cased_fleet_name_cannot_diverge_state_from_tmux(self, mock_paths):
+        """The same line's other half: `plane.fleet`, pinned through the same door.
+
+        Construction by vera on review, who falsified my first attempt at this.
+        I built the fleet name MISMATCHED — directory `Test-Fleet`, rows recorded
+        under `test-fleet` — watched `plane_session` refuse before `_live` ran,
+        and concluded the half was unreachable. Two things were wrong with that.
+        The mismatch cannot arise: `composer.py:81,954` exports
+        `FLEET_NAME=fleet.name` VERBATIM, so every bot records under whatever
+        casing `fleet.yaml` carries and the two sides cannot independently
+        disagree. And "unreachable" generalised past what I had shown, which was
+        only that ONE construction refuses.
+
+        What does arise: an operator names the overlay directory and `name:`
+        consistently in some non-lowercase style. Nothing in `config.py`
+        constrains fleet-name casing. Then the plane session SUCCEEDS —
+        both sides agree on `Test-Fleet` — and `_presence_rows` lower-cases the
+        recorded prefix anyway, so it is the LOWERING ITSELF that must bring the
+        live half to meet it. Without it, `bot:Test-Fleet/alex` and
+        `bot:test-fleet/alex` are two verdicts and the collapse keeps the
+        record-only one: STATE=idle beside TMUX=down.
+        """
+        from claudlobby.config import BotConfig, FleetConfig
+        from claudlobby.paths import Paths
+
+        fleet_dir = mock_paths.root / "local" / "Test-Fleet"
+        (fleet_dir / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
+        paths = Paths(root=mock_paths.root, fleet_dir=fleet_dir)
+        fleet = FleetConfig(
+            name="Test-Fleet",
+            service_prefix="com.test",
+            bots={"alex": BotConfig(bot_id="alex", name="alex", expertise=["eng"])},
+        )
+        # SAME casing as the fleet name -- what the composer actually produces.
+        # The bot id is held lower-case so only `plane.fleet`'s case varies:
+        # one conjunct per test, or a single fixture varying both would pass
+        # with either lowering removed.
+        _land_heartbeats(mock_paths.root, "Test-Fleet", "alex", ["IDLE", "IDLE"])
+
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(False, "dead")),
+            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
+        ):
+            alex = next(bs for bs in collect_fleet_status(fleet, paths)
+                        if bs.name == "alex")
+
+        # Preconditions. The first one is the whole difference from the attempt
+        # this replaces: there, the session REFUSED and the join never ran.
+        assert not alex.plane_unreachable, alex.plane_unreachable
+        assert alex.last_heartbeat is not None and alex.pane_state == "IDLE", alex
+
+        assert alex.tmux_alive is False
+        assert alex.state == "down", alex.state
+        assert (alex.state == "down") == (not alex.tmux_alive)

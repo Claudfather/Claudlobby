@@ -6,6 +6,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the goal-binding and ignition rungs answer one question the same way (#1680)
+
+- **A manager-less fleet got a WARN and a PASS about the same thing.**
+  `check_ignition` gated its finding on `fleet.leaf_manager_bots()` and
+  `check_goal_binding` did not, so a fleet with no dispatcher was told both
+  "nothing to dispatch against" and "no idle-turn beat applies". The
+  goal-binding rung adopts the ignition rung's gate: no leaf manager, no
+  dispatcher, nothing to report. It replaces the **no-projects WARN only** — a
+  manager-less fleet that declared projects keeps its PASS, and the
+  repo-collision and DRAFT-manifest warnings still fire there.
+- **Neither warning said the other was a co-requisite.** On a fleet with a leaf
+  manager, no projects and no armed door both fire, and they are not
+  redundant: one says there is nothing to dispatch AT, the other that there is
+  nothing to dispatch WITH. A first-timer who fixes one still sees the other
+  and may reasonably conclude their first fix did not work — and the cheapest
+  wrong response is to undo it. Each warning now names the other, **only when
+  the other is actually firing**, and NAMES it rather than restating its
+  finding: the phrase that identifies a warning is the phrase its readers
+  select on, so a copy inside the other warning makes the two
+  indistinguishable to anything scanning the list.
+- **The condition is the other warning's own, not a look-alike.** `validate`
+  emits the no-projects finding only for a CHECK-IN-EQUIPPED leaf manager,
+  while `doctor` also has a plain line for one the check-in is not composed
+  onto — so the two surfaces ask different questions even though the clause
+  and its placement are shared. Keying the validator's side on
+  `not fleet.projects` alone printed an ignition warning pointing at a
+  goal-binding warning that was not in the output, which is the failure the
+  cross-reference exists to prevent, inverted. `_checkin_equipped_leaf_managers`
+  is now the one definition both rungs there ask.
+- The clause lives with the warning TEXT, in `validator.py` as well as
+  `doctor.py` — the goal-binding line an operator reads in doctor output is the
+  validator's warning rendered verbatim, so pasting the clause on at the doctor
+  level would have left `validate` and `doctor` saying different things about
+  one fleet. `ignition.ignition_warning_tail` owns where it goes: BEFORE
+  `Cheapest to arm:`, never after, because a sentence trailing a
+  copy-pasteable config line gets read as part of the line.
+- **The manager-less tripwire's verdict is a fixture fact, not a host fact.**
+  `run_doctor`'s first rung runs the whole validator, whose plugins check
+  resolves `Path.home()/.claude/plugins/installed_plugins.json` — so on a box
+  that has never installed a plugin the `fleet-yaml` COUNT rung warns about
+  the developer's own machine. A count rung cannot say what it is about, so
+  that host fact is indistinguishable from a real finding and lands in the
+  allowlist as a phantom: green locally, red on a runner. The fixture now
+  pins a fake `HOME` with a manifest DERIVED from the fleet's own required
+  plugins (the `tests/test_validator.py::_fake_installed` convention), so a
+  change to the default plugin set cannot silently reopen it. Fixed at the
+  fixture rather than by adding `fleet-yaml` to the allowlist — the allowlist
+  has to stay a list someone must deliberately edit, which only holds if the
+  fixture is the deterministic boundary.
+- **The two test fixtures ASSERT their wiring is live rather than trusting a
+  guard (#1689).** Both helpers wire the repo's real `lib/` behind
+  `if not (…/"lib").exists()`, and a fixture that created that path as a plain
+  DIRECTORY satisfies the guard while supplying no resolver — the switch
+  cascade then falls back to defaults, `task-recheck` reads ARMED, and every
+  disarmed scenario silently measures the opposite of what it intends
+  (Claudlobby#1588's mechanism). Each helper now asserts
+  `lib/env-tiers.sh` is a file, which tests the proposition instead of using
+  directory existence as a proxy and catches a `lib/` that exists but is the
+  wrong thing. A positive control in each file proves the assertion fires,
+  and a third that a clean build is wired, so no control is vacuous. The
+  wiring itself REPAIRS per entry rather than keying on the directory's
+  existence — `conftest.equip_grammar` plants a one-file `lib/` for the
+  modules needing the package grammar, which makes an existence check answer
+  yes and skip — and per-entry links are used rather than a whole-dir symlink,
+  because fixtures delete files under `lib/` and through a directory symlink
+  those unlinks reach the repo's own copies. Measured on a deliberately
+  degraded arm: 7 of these 13 cases fail loudly and 6 stay silent, and a
+  static reading pass over the same call paths predicted nearly the opposite
+  split — which is why the fixture refuses rather than a reader classifying.
+- `ignition.ignition_gap()` is the one definition of the condition both
+  ignition warnings fire on, and the goal-binding warnings ask it rather than
+  re-deriving it. It tests the cheap conjunct first and takes an optional
+  resolved door list, so `doctor` and `validate` each resolve the switch
+  cascade exactly as many times as they did before this change (measured: 4
+  and 1, unchanged on all four fleet shapes) rather than paying a subprocess
+  to decide not to append a string.
+
 ### Changed — the plane's capture policy ships as `full` (#1631)
 
 - **Message bodies are recorded by default.** `state/plane/capture.json` is
@@ -33,6 +110,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hosts that had configured one. A malformed file still fails LOUD and resolves to no mode — that
   refusal matters more under a `full` default, because a silent fallback would
   now store content an operator opted out of keeping.
+
+### Fixed — `warm-cache` covers uvx, but its only automated caller could not (#1577)
+
+- **Every automated invocation of `warm-cache` comes from `lib/reload-fleet.sh`, which runs it ONLY when `lib/check-npx-cache.sh` fails — and that probe scanned `~/.npm/_npx` and nothing else.** On a fleet whose npx packages were cached the probe passed, reload-fleet called `debounce_clear`, and the uvx servers stayed cold indefinitely. Measured on a scoped library (2 npx cached, 1 uvx cold): `origin/main` saw **2 of 4** packages and reported `all 2 packages resolvable ✓` at rc 0 — gate closed, no warm; the fix sees 4, names the cold one, rc 1 — gate open. A correct fix behind a gate that never opens.
+- **The two halves are coupled, which is why they are one change.** Adding a uv probe to that script meant either re-typing the package grammar a FOURTH time or consolidating it. It now lives once in `lib/mcp-package-grammar.py` — stdlib and standalone, because bash must exec it on a host where the package may not be importable by whatever `python3` is on PATH. The Python consumers reach it through `claudlobby/mcp_grammar.py`, which **refuses rather than falling back** (`env_tiers.py`'s rule): a fallback grammar would BE the fourth copy, consulted exactly when the two had diverged.
+- **The uv states are derived, not transliterated.** uv has no per-package installed tree; what it keys by name is the distribution it fetched. Measured on uv 0.11.3: `wheels-v*/pypi/<name>` for a wheel, **`built-wheels-v*/pypi/<name>` for one built from an sdist** (`sdists-v*` holds only `editable/`, and `wheels-v*` does not match a built package — verified against `daff`), with the version component globbed because uv version-stamps those names (`wheels-v1` and `wheels-v6` coexist here). Also measured: `uv tool install` **also** populates the wheel cache, so uv has no permanently-unsatisfiable state of npm's kind — the tool tier is still consulted, via `uv tool list` rather than a layout assumption, because a tool installed from a path or VCS would otherwise read MISSING forever while `uvx` runs it (#852's shape by another route).
+- **Unreachable is not empty, at the language boundary too.** The first build discarded the grammar's failure into `TARGETS=""` and exited 0 — #1577 rebuilt one layer up, in the seam built to close it. The probe now exits **2** when it cannot answer, distinct from 0 (all resolvable) and 1 (some missing); `reload-fleet` treats any nonzero as warm, the safe direction.
+- **The npx→node binary swap stays npx-only and is pinned by test.** It exists because a global `node` can stand in for `npx`; uvx has no equivalent shape. What it shares with uvx is the arg grammar, which is why that moved out and the `== "npx"` test did not.
+- `du -sh` was walking 93,127 files (1.3 GB) to print a decorative line on the **success** path — the branch `reconcile-fleet` takes every pass: 66s cold, 0.3–1.1s warm, routing nothing. Deleted. The grammar consolidation also replaced one `python3` spawn **per fragment** with one per run: 1118ms → 43ms, measured. Still outstanding and deliberately not bundled: the npx branch `find`s the whole cache per package (2946ms of a 4349ms run).
+- **`doctor`'s npx-cache rung reported a default rather than the state in force.** The probe writes missing packages to stdout but both of its refusals to STDERR only, and the rung read stdout alone — so an incomplete `lib/` install rendered as the routine `packages missing`, sending an operator to `warm-cache` for the one condition `warm-cache` cannot fix. Reproduced with the streams captured apart: exit 2, stdout **0 bytes**, the reason on stderr. The rung now reports what the probe actually said, from whichever stream carried it, and never a fixed string standing in for a cause it was not given. The exit-2 contract itself had **no test** — reverting the whole refusal block to the old fail-open failed nothing in the suite — so it has one now, driving the real script through a real subprocess against a `lib/` with exactly one file missing. Mutated, that probe answers **rc 0** (`no npx- or uvx-based packages found`): the false all-clear that clears `reload-fleet`'s debounce and leaves every package cold.
+- `load_lib_module` moves from `brief.py` to `paths.py` — three consumers now, and a private copy of a loading mechanism is how the next one loads from somewhere else.
 
 ### Fixed — a receipt that named its rescued bots twice had half the names silently dropped (#1575)
 
