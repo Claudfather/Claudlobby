@@ -537,6 +537,81 @@ class TestCollectFleetStatus:
         assert bob.last_heartbeat is None and bob.pane_state == "" and bob.busy_pct_24h == 0.0
         assert "plane is unreachable" not in format_table(results, "test-fleet")
 
+    def test_state_comes_from_the_plane_not_the_file(self, mock_fleet, mock_paths):
+        """#1615: STATE and TMUX must answer the SAME question. The file's
+        status is the last REPORT's word, frozen until the next report; the
+        pane verdict is live. Measured on the estate before this fix: 3 of 4
+        rows carried a STATE the pane contradicted, every one of them the
+        direction that gets a working bot injected into."""
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY", "BUSY"])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state",
+                  return_value={"bots": {"alice": {"status": "idle"}}}),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        # the file says idle; the pane says BUSY. The pane wins.
+        assert alice.state == "working", alice.state
+        assert alice.pane_state == "BUSY"
+
+    def test_a_stale_working_in_the_file_does_not_survive_an_idle_pane(self, mock_fleet, mock_paths):
+        """The inverse direction, and the one that makes a finished bot look
+        busy: `ravi` rendered STATE=working off a report while his pane had
+        already gone idle."""
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["IDLE", "IDLE"])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state",
+                  return_value={"bots": {"alice": {"status": "working"}}}),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        assert alice.state == "idle", alice.state
+
+    def test_blocked_is_honoured_only_while_the_pane_is_idle(self, mock_fleet, mock_paths):
+        """`blocked` is NOT a second "idle" -- it is a claim the bot made about
+        ITSELF that no pane verdict can express, so it survives the move to the
+        plane. But a bot that is WORKING is not blocked, which is what kept a
+        stale `blocked` on screen indefinitely (#1615's `tom`)."""
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY", "BUSY"])
+        blocked_file = {"bots": {"alice": {"status": "blocked"}}}
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state", return_value=blocked_file),
+        ):
+            working = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                           if bs.name == "alice")
+        assert working.state == "working", working.state   # busy pane overrides a stale blocked
+
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["IDLE", "IDLE"])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state", return_value=blocked_file),
+        ):
+            idle = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                        if bs.name == "alice")
+        assert idle.state == "blocked", idle.state         # idle pane: the self-report stands
+
+    def test_the_file_is_the_fallback_only_when_the_plane_is_unreachable(self, mock_fleet, mock_paths):
+        """No plane under this root. The file is then all there is, and using
+        it is correct -- what is wrong is preferring it while the plane can
+        answer. Unreachable is disclosed separately (plane_unreachable)."""
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+            patch("claudlobby.utilization.load_fleet_state",
+                  return_value={"bots": {"alice": {"status": "working"}}}),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        assert alice.plane_unreachable
+        assert alice.state == "working", alice.state
+
     def test_systemd_check_queries_bot_service_label(self, mock_fleet, mock_paths):
         """#657: on Linux the SVC check must query the BOT_SERVICE unit
         (com.<fleet>.<bot>.service) the installer names the unit after, not

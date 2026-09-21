@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import FleetConfig
+from .plane.presence import derive_presence
 from .paths import Paths, tmux_socket_for_bot
 from .uptime import _fmt_duration
 
@@ -201,6 +202,31 @@ def _check_launchd_service(bot_id: str, service_label: str) -> tuple[bool, str]:
         return False, _SVC_UNDETERMINED
 
 
+def _presence_rows(conn, fleet_name: str) -> list[dict]:
+    """The fleet's newest ``bot.heartbeat`` rows in the shape `derive_presence`
+    documents (alias / value / ingested_at), through the SAME
+    ``LATEST_HEARTBEAT_SQL`` the digesting reader below uses.
+
+    Kept as raw rows rather than reusing `_latest_heartbeats`' digest because
+    presence needs the INGEST clock for freshness and the marker age out of the
+    value, both of which that digest drops. One query, two consumers, no second
+    definition of "the newest heartbeat".
+    """
+    from .plane.queries import LATEST_HEARTBEAT_SQL
+    import sqlite3
+    prefix = f"bot:{fleet_name}/".lower()
+    cur = conn.cursor()
+    cur.row_factory = sqlite3.Row
+    out: list[dict] = []
+    for row in cur.execute(LATEST_HEARTBEAT_SQL):
+        alias = str(row["alias"] or "")
+        if not alias.lower().startswith(prefix):
+            continue
+        out.append({"alias": alias, "value": row["value"],
+                    "ingested_at": row["ingested_at"]})
+    return out
+
+
 def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]:
     """``{bot name (lower-cased): (instant, BUSY|IDLE|UNKNOWN)}`` — the plane's
     NEWEST ``bot.heartbeat`` sample per bot, through the presence derivation's
@@ -274,11 +300,23 @@ def collect_fleet_status(
     heartbeats: dict[str, tuple[datetime, str]] = {}
     series: dict[str, list[tuple[datetime, str]]] = {}
     from .brief import plane_session
+    presence: dict = {}
+    plane_fleet = ""
     plane, plane_unreachable = plane_session(paths)      # the overlay's fleet, else the manifest's
     if plane is not None:
         try:
             heartbeats = _latest_heartbeats(plane.conn, plane.fleet)
             series = fleet_heartbeat_series(plane.conn, plane.fleet, now)
+            # #1615: STATE comes from the SAME verdict TMUX does, so one row can
+            # no longer carry two different "idle"s. derive_presence is the one
+            # definition (plane/presence.py); liveness is this command's own
+            # tmux scan, which is its live half.
+            _live = [{"fleet": plane.fleet, "bot": b,
+                      "status": "up" if b in tmux_sessions else "down"}
+                     for b in fleet.bots]
+            presence = {pz.alias.lower(): pz for pz in derive_presence(
+                _presence_rows(plane.conn, plane.fleet), _live, now=now)}
+            plane_fleet = plane.fleet
         except Exception as exc:                 # a schema the reader cannot use: say so, never blank
             plane_unreachable = f"the plane could not answer: {exc}"
         finally:
@@ -291,12 +329,14 @@ def collect_fleet_status(
         bs = BotStatus(name=bot_id)
         bot_dir = paths.bot_runtime(bot_id)
 
-        # fleet-state.json
-        if bot_id in bots_state:
-            entry = bots_state[bot_id]
-            bs.state = entry.get("status", "unknown")
-            bs.current_task = entry.get("current_task")
-            bs.last_completed = entry.get("last_completed")
+        # fleet-state.json: `last_completed` and `current_task` only. STATE is
+        # the plane's now (#1615) -- the file's status is the last REPORT's
+        # word, frozen until the bot's next report, and rendering it beside a
+        # live pane verdict put two different "idle"s in one row.
+        entry = bots_state.get(bot_id, {})
+        bs.current_task = entry.get("current_task")
+        bs.last_completed = entry.get("last_completed")
+        _reported_blocked = entry.get("status") == "blocked"
 
         # tmux
         bs.tmux_alive = bot_id in tmux_sessions
@@ -319,6 +359,21 @@ def collect_fleet_status(
             bs.busy_pct_24h = util.busy_pct_24h
             bs.current_task_age_secs = util.current_task_age_secs
             bs.idle_since = util.idle_since
+        # STATE and TMUX now answer the SAME question from the SAME verdict.
+        # `blocked` is the one exception and is NOT a second "idle": it is a
+        # claim the bot made about ITSELF that no pane verdict can express, so
+        # it is honoured only while presence says idle -- a bot that is working
+        # is not blocked, which is what kept a stale `blocked` on screen
+        # indefinitely (#1615's `tom`). It retires with the file (#1504).
+        _pres = presence.get(f"bot:{plane_fleet}/{bot_id}".lower()) if presence else None
+        if _pres is not None:
+            bs.state = _pres.presence
+            if bs.state == "idle" and _reported_blocked:
+                bs.state = "blocked"
+        elif not plane_unreachable:
+            bs.state = "unknown"
+        else:
+            bs.state = entry.get("status", "unknown")   # plane down: the file is all there is
 
         results.append(bs)
 
@@ -362,8 +417,10 @@ def _state_display(bs: BotStatus) -> str:
         return _green(s)
     if s == "blocked":
         return _yellow(s)
-    if s == "offline":
+    if s == "offline" or s == "down":
         return _red(s)
+    if s == "stale" or s == "sampling":
+        return _yellow(s)      # the record went quiet / not yet polled -- NOT idle
     return s
 
 
