@@ -12,6 +12,12 @@
 # ~6s the old iteration-count loop would have taken (4 probes x 1s + sleeps),
 # let alone the ~5min a loaded host measured against a 90s config.
 #
+# Scenario (J) pins the other half of that ceiling: the clock-step fold must
+# not be able to swallow it. Its threshold used to BE the ceiling, so a probe
+# costing more than the whole ceiling folded every iteration and the loop ran
+# on unbounded (measured against a 1s ceiling: still polling when it was
+# killed at 130s; this scenario returns in 2s).
+#
 # Standalone bash (not pytest-collected on its own; discovered by
 # tests/test_sh_suites.py). Runs under macOS /bin/bash (3.2) — no apostrophes
 # in comments inside $( ) (gate: tests/test_bash_parse.py).
@@ -225,6 +231,28 @@ call_wait "$BOT9" 2 "" ""
 unset -f date
 assert_eq "normal 1s/probe advance: still times out on the third reading" "1" "$_WBRS_RC"
 assert_eq "normal 1s/probe advance: prints the last state (no_bridge)" "no_bridge" "$_WBRS_OUT"
+
+# (J) The costly probe: ONE probe that costs MORE than the whole ceiling. The
+# clock-step fold's threshold used to BE the ceiling, so this shape folded
+# every iteration into "started" and the loop never expired -- measured
+# against a 1s ceiling: still polling when it was killed at 130s, and this
+# same scenario hung this suite outright at the pre-fix lib. It is not
+# hypothetical:
+# lib/validate-bot-change.sh drives the real start-bot.sh with
+# RC_READY_TIMEOUT_S=1, and a probe there costs seconds under load. A ceiling
+# that cannot expire hangs the harness (start-bot.sh never returns, so the
+# `|| true` after it is never reached) and, for PR B, is a gate holder that
+# never releases. The fold threshold is now max(timeout_s, 60), so a 2s probe
+# against a 1s ceiling is ordinary elapsed time and the FIRST check expires.
+BOT10="$T/bot10"; mkdir -p "$BOT10"
+bridge_state() { sleep 2; printf 'no_bridge'; }
+_t0=$(date +%s)
+call_wait "$BOT10" 1 "" ""
+_t1=$(date +%s)
+assert_eq "probe costlier than the ceiling: returns 1 (times out)" "1" "$_WBRS_RC"
+assert_eq "probe costlier than the ceiling: prints the last state (no_bridge)" "no_bridge" "$_WBRS_OUT"
+assert_eq "probe costlier than the ceiling: expires in a few seconds, not never" "true" \
+    "$([ "$((_t1 - _t0))" -lt 10 ] && echo true || echo false)"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

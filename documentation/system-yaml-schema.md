@@ -38,8 +38,9 @@ host:                          # host-global singletons -- one instance per host
       enroll: true | false                         # dormancy -- semantics differ by shape, see below
       unit: service                                # marks a RESIDENT service instead of a timer
 
-  boot:                        # boot admission/readiness policy -- one set per host, see
-    admission_slots: auto | <n>                # "host.boot" below (#1573)
+  boot:                        # boot admission/readiness policy -- one set per
+                               # host; see "host.boot" below (#1573)
+    admission_slots: auto | <n>
     admission_wait_max_s: <seconds>
     mcp_timeout_ms: <milliseconds>
     plugin_update_once_per_boot: true | false

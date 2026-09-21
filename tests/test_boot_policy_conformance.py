@@ -59,8 +59,13 @@ BOOT_KEYS = [
     "BOOT_PLUGIN_UPDATE_ONCE",
 ]
 
-# Only MCP_TIMEOUT is exported (spec §6.1: it is the one key Claude Code
-# itself reads out of the environment; the rest are the launcher's own).
+# Only MCP_TIMEOUT carries an `export` prefix IN THE FILE (spec §6.1: it is
+# the one key Claude Code itself reads out of the environment; the rest are
+# read by the launcher). That is a fact about bot.conf's text, NOT about what
+# reaches the session: lib/start-bot.sh sources bot.conf under `set -a`, so
+# all six land in `exec claude`'s environment as exported variables whatever
+# their prefix. The prefix is what makes MCP_TIMEOUT independent of that
+# sourcing convention.
 EXPORTED_BOOT_KEYS = {"MCP_TIMEOUT"}
 
 FORBIDDEN_UNIT_SUBSTRINGS = ["BOOT_", "MCP_TIMEOUT", "RC_READY_TIMEOUT_S"]

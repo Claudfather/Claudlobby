@@ -371,7 +371,13 @@ case "$_wait_rc" in
     2)
         # check_tmux_session failed inside the poll -- the session died mid-boot.
         # start-bot's decision to log + exit, same as when this check ran inline.
-        echo "$(ts_iso) CRASH — tmux session died during startup" >> "$LOG"
+        # Elapsed computed here exactly as the two sibling branches do: how long
+        # the session survived is the first thing a reader of this line wants.
+        # The pre-extraction version printed a probe COUNT labelled as seconds,
+        # so the figure was dropped rather than carried over; this is the real
+        # wall-clock one.
+        _elapsed=$(( $(date +%s) - _poll_start ))
+        echo "$(ts_iso) CRASH — tmux session died during startup after ${_elapsed}s" >> "$LOG"
         exit 1
         ;;
     *)

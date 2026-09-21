@@ -26,7 +26,11 @@
 #                        coordinator is restarted too — one inert extra bot,
 #                        not worked around. Mutually exclusive with
 #                        --workers-only (that pair would skip every bot).
-#   --ceiling <seconds>  per-bot BRIDGE_READY wait ceiling (default 180)
+#   --ceiling <seconds>  per-bot BRIDGE_READY wait ceiling. Default: DERIVED
+#                        per bot from its own composed RC_READY_TIMEOUT_S plus
+#                        120s (210s on a stock boot policy) -- see
+#                        rr_bot_ceiling. Passing this overrides the derivation
+#                        for every bot in the run.
 #   --continue-on-fail   alert + keep going past a stalled bot (default: hard-stop)
 #
 # Exits non-zero if any bot failed its gate (unless --continue-on-fail and only
@@ -45,6 +49,7 @@ WORKERS_ONLY=0
 MANAGERS_ONLY=0
 CONTINUE_ON_FAIL=0
 CEILING=180
+CEILING_SET=0      # 1 once --ceiling is given: the operator override wins
 
 rr_parse_args() {
     while [ $# -gt 0 ]; do
@@ -54,8 +59,8 @@ rr_parse_args() {
             --workers-only)    WORKERS_ONLY=1; shift ;;
             --managers-only)   MANAGERS_ONLY=1; shift ;;
             --continue-on-fail) CONTINUE_ON_FAIL=1; shift ;;
-            --ceiling)         CEILING="${2:?--ceiling needs a value}"; shift 2 ;;
-            -h|--help)         sed -n '2,33p' "$LIB_DIR/rolling-restart.sh"; exit 0 ;;
+            --ceiling)         CEILING="${2:?--ceiling needs a value}"; CEILING_SET=1; shift 2 ;;
+            -h|--help)         sed -n '2,37p' "$LIB_DIR/rolling-restart.sh"; exit 0 ;;
             --*)               echo "rolling-restart: unknown option: $1" >&2; exit 2 ;;
             *)                 FLEET="$1"; shift ;;
         esac
@@ -78,10 +83,39 @@ rr_list_fleets() {
     done
 }
 
+# rr_bot_ceiling <bot_dir>
+# The per-bot BRIDGE_READY budget, in seconds.
+#
+# F4 coupling: bot.conf is the carrier for the launcher's own readiness
+# ceiling (RC_READY_TIMEOUT_S, composed from host.boot.mcp_timeout_ms), and
+# start-bot.sh writes BRIDGE_READY only AFTER that readiness poll finishes.
+# A driver ceiling SHORTER than the launcher's therefore gives up on a bot
+# that is merely slow and healthy -- it halts the roll and fires a
+# rolling_restart_stalled FLEET ALERT for a bot that comes ready seconds
+# later. The old fixed 180 was already inside that band (the composed
+# ceiling is 200 at this tip) and the band widens with every raise of
+# host.boot.mcp_timeout_ms. Deriving from the bot's own composed value moves
+# this driver automatically when that policy moves.
+#
+# The +120 margin covers what happens between the restart instant (when this
+# window starts) and the launcher's poll: pre-stop-handoff, spin-up, the tmux
+# session spawn, and the poller's own settle after the poll returns.
+# --ceiling still wins: an operator who names a number means it.
+rr_bot_ceiling() {
+    local bot_dir="$1" rc_s
+    if [ "$CEILING_SET" -eq 1 ]; then
+        printf '%s' "$CEILING"
+        return 0
+    fi
+    rc_s="$(bot_conf_get "$bot_dir" RC_READY_TIMEOUT_S 90)"
+    case "$rc_s" in ''|*[!0-9]*) rc_s=90 ;; esac
+    printf '%s' "$((rc_s + 120))"
+}
+
 # Roll a single fleet. Sets global counters; returns 1 to signal a hard-stop.
 rr_process_fleet() {
     local fleet="$1"
-    local bots_dir fleet_dir declared bot_dir bot_id fence state
+    local bots_dir fleet_dir declared bot_dir bot_id fence state ceiling ceiling_desc
     bots_dir="$(resolve_bots_dir "$fleet")"
     if [ ! -d "$bots_dir" ]; then
         echo "$(ts_iso) SKIP fleet: no bots dir for '$fleet' ($bots_dir)" >> "$LOG"
@@ -95,7 +129,12 @@ rr_process_fleet() {
     # grows a destructive leg, move it to declared_bots_strict (the loud door).
     declared="$(parse_fleet_bots "$fleet_dir/fleet.yaml")"
 
-    echo "$(ts_iso) FLEET $fleet — rolling restart (ceiling ${CEILING}s, skip_healthy=$SKIP_HEALTHY workers_only=$WORKERS_ONLY managers_only=$MANAGERS_ONLY)" >> "$LOG"
+    if [ "$CEILING_SET" -eq 1 ]; then
+        ceiling_desc="${CEILING}s (--ceiling)"
+    else
+        ceiling_desc="per-bot RC_READY_TIMEOUT_S+120"
+    fi
+    echo "$(ts_iso) FLEET $fleet — rolling restart (ceiling $ceiling_desc, skip_healthy=$SKIP_HEALTHY workers_only=$WORKERS_ONLY managers_only=$MANAGERS_ONLY)" >> "$LOG"
     for bot_dir in "$bots_dir"/*/; do
         [ -d "$bot_dir" ] || continue
         bot_id="$(basename "$bot_dir")"
@@ -124,10 +163,11 @@ rr_process_fleet() {
             rr_fail "$fleet" "$bot_id" "$bots_dir" "spin-up-bot failed" || return 1
             continue
         fi
-        if wait_bridge_ready "$bot_dir" "$CEILING" "$fence"; then
+        ceiling="$(rr_bot_ceiling "$bot_dir")"
+        if wait_bridge_ready "$bot_dir" "$ceiling" "$fence"; then
             echo "$(ts_iso) READY: $bot_id" >> "$LOG"; RESTARTED=$((RESTARTED + 1))
         else
-            rr_fail "$fleet" "$bot_id" "$bots_dir" "no BRIDGE_READY within ${CEILING}s" || return 1
+            rr_fail "$fleet" "$bot_id" "$bots_dir" "no BRIDGE_READY within ${ceiling}s" || return 1
         fi
     done
     return 0

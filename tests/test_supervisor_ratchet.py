@@ -5,7 +5,7 @@ only shrink from here (#1573 boot admission, task 6).
 lib/supervisor.sh is the one adapter meant to own systemctl/launchctl calls
 from here on. Everywhere else in lib/, a direct call is a call site a later
 PR is supposed to migrate onto the adapter, never a new one to add. Absent a
-fence, "migrate one of the existing 108" and "add a 109th while nobody is
+fence, "migrate one of the existing 109" and "add a 110th while nobody is
 looking, in an unrelated diff" are indistinguishable. This test makes the
 second one fail.
 
@@ -29,7 +29,7 @@ whether the file it sits in is a bash script, or whether that file lives in a
 subdirectory (lib/personal/*.sh existed unwatched the whole time) -- the
 ratchet's question is wider than the parse gate's, so it needs its own scope
 rather than inheriting one built to answer something else. Measured
-identical to the old, narrower scope at this tip regardless (108 calls in 20
+identical to the old, narrower scope at this tip regardless (109 calls in 20
 files either way, because nothing outside those 20 files -- including every
 lib/__pycache__/*.pyc, lib/logs/*.log and lib/personal/*.sh -- happens to
 contain the literal token), so the allowlist itself needs no change; only the
@@ -54,6 +54,18 @@ read as "current count 0" via `.get(name, 0)`. `new` stays gated on `n > 0`:
 with every file now recorded, most of the ~135 scanned files are legitimately
 at 0 and never were allowlisted, and only an actual call (n > 0) in a file
 absent from the allowlist is news.
+
+Counts are OCCURRENCES, not matching lines. The first version incremented
+once per matching line, which is how the allowlist was first measured
+(`grep -c`) and so was self-consistent -- but it made the fence exactly one
+line-edit wide: append a second call to a line that already has one
+(`systemctl --user disable --now X && systemctl --user daemon-reload`) and
+the count does not move. Re-measured per occurrence, the totals move by
+exactly one: 108 -> 109, all of it `lib/reconcile-fleet.sh` 7 -> 8, one real
+line carrying two bare `launchctl` tokens (a `launchctl print` and the
+`(launchctl info unavailable)` fallback string in the same assignment).
+Every other file is unchanged, and the scanned/nonzero file counts (121 / 20)
+are unchanged too.
 """
 
 from __future__ import annotations
@@ -102,8 +114,11 @@ def _current_counts() -> dict[str, int]:
             continue
         n = 0
         for line in path.read_text(errors="ignore").splitlines():
-            if CALL_PATTERN.search(line):
-                n += 1
+            # OCCURRENCES, not matching lines: a second call appended to a
+            # line that already has one (`systemctl --user disable --now X &&
+            # systemctl --user daemon-reload`) left a line-counting fence at
+            # the same number, so the ratchet was exactly one line-edit wide.
+            n += len(CALL_PATTERN.findall(line))
         counts[rel] = n
     return counts
 

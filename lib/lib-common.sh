@@ -77,7 +77,7 @@ detect_os
 # --- Supervisor adapter -------------------------------------------------
 # lib/supervisor.sh: five verbs (svc_is_registered, svc_state, svc_kick,
 # svc_enroll, svc_disenroll — each with a systemd spelling and a launchd
-# spelling), plus svc_unit_name, the shared label resolver they key off.
+# spelling), plus svc_unit_name, the shared label resolver.
 # Sourced here, immediately after detect_os, so every verb can read $_OS
 # without re-deriving it (#1573 boot admission, task 6). No call site
 # migrates onto these verbs in this PR — the file exists, is sourced, and is
@@ -91,7 +91,21 @@ detect_os
 # CLAUDLOBBY_ROOT's own self-detection two paragraphs above is ALSO careful
 # to survive (`${CLAUDLOBBY_ROOT:=...}` only fills it in when unset). A
 # lookup keyed on that variable would break those suites at source time.
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/supervisor.sh"
+#
+# Derived by parameter expansion, NOT `$(cd "$(dirname ...)" && pwd)`: this
+# file is sourced on hot paths (every keepalive tick, every report-back,
+# every hook that sources it), and that idiom forks a subshell per source,
+# unconditionally -- twice, once here and once in the adapter's own default.
+# The dir is derived ONCE, forkless, and handed to the adapter before it is
+# sourced. A relative BASH_SOURCE yields a relative dir, which is all either
+# consumer needs: the `.` below, and svc_enroll exec-ing an installer from
+# the same directory.
+case "${BASH_SOURCE[0]}" in
+    */*) _LIB_COMMON_DIR="${BASH_SOURCE[0]%/*}" ;;
+    *)   _LIB_COMMON_DIR="." ;;
+esac
+_SUPERVISOR_LIB_DIR="${_SUPERVISOR_LIB_DIR:-$_LIB_COMMON_DIR}"
+. "$_LIB_COMMON_DIR/supervisor.sh"
 
 # --- tmux binary resolution -------------------------------------------------
 
@@ -1202,9 +1216,23 @@ bridge_fence_write() {
 # the whole downtime once NTP syncs after boot, which a naive elapsed-time
 # check reads as hours passing between two probes and times out at once.
 # Each iteration compares the latest reading against the one before it and
-# folds any gap larger than timeout_s, or negative, into the start time
-# rather than into elapsed, so a step neither times out a live bring-up nor
-# is read as negative elapsed time.
+# folds a gap larger than the STEP threshold, or negative, into the start
+# time rather than into elapsed, so a step neither times out a live bring-up
+# nor is read as negative elapsed time.
+#
+# That threshold is deliberately NOT the ceiling. It was, and the premise --
+# one 0.5s-interval poll can never legitimately take longer than the whole
+# ceiling -- is false wherever the ceiling is small: lib/validate-bot-change.sh
+# drives the real start-bot.sh with RC_READY_TIMEOUT_S=1, so a probe costing
+# 2s there was read as a clock step on EVERY iteration, folded out of elapsed,
+# and the loop never expired (measured against a 1s ceiling: still polling
+# when it was killed at 130s, having printed nothing). A
+# ceiling that can never expire is a holder that never releases -- the exact
+# property PR B's admission gate rests on. The threshold is max(timeout_s,
+# 60s) instead: 60s still folds the RTC-less host's hour-scale jump (the case
+# the fold exists for) and no 0.5s-interval poll reaches it, while a ceiling
+# ABOVE 60s keeps its old tolerance. A NEGATIVE delta stays folded whatever
+# the threshold -- a backward step is never elapsed time.
 #
 # Polls bridge_state "$bot_dir" "$pretoken" "$session_pid" every 0.5s (the
 # session-scoped question, #1530 -- see bridge_state's own header) until one
@@ -1234,6 +1262,14 @@ wait_bridge_ready_state() {
     local session_pid="${3:-}" pretoken="${4:-}"
     local tmux_session="${5:-}" tmux_socket="${6:-}"
     local state="" started last now delta
+    # The clock-step fold threshold, decoupled from the ceiling (see header):
+    # max(timeout_s, 60). Digits-only guard so a malformed ceiling falls back
+    # to the floor rather than aborting the poll on an arithmetic error.
+    local _step_s=60
+    case "$timeout_s" in
+        ''|*[!0-9]*) : ;;
+        *) if [ "$timeout_s" -gt "$_step_s" ]; then _step_s="$timeout_s"; fi ;;
+    esac
     started=$(date +%s)
     last="$started"
     while :; do
@@ -1257,7 +1293,7 @@ wait_bridge_ready_state() {
         esac
         now=$(date +%s)
         delta=$((now - last))
-        if [ "$delta" -lt 0 ] || [ "$delta" -gt "$timeout_s" ]; then
+        if [ "$delta" -lt 0 ] || [ "$delta" -gt "$_step_s" ]; then
             started=$((started + delta))
         fi
         last="$now"
@@ -3866,7 +3902,15 @@ plugin_ensure() {
         # this boot or the next start, tries again.
         return 1
     }
-    with_lock "$lockfile" _plugin_update_once_locked || true
+    # The one degraded path that used to disclose nothing: with_lock returns
+    # the body's status, so a failure here is either the lock rung itself
+    # (the 200>"$lockfile" redirection, a broken flock) or an update that
+    # failed and deliberately did not stamp. Both leave the plugin
+    # un-updated for this call, and every other fallback above says which
+    # case it hit -- see the function header on a gate that cannot be
+    # trusted having to say so.
+    with_lock "$lockfile" _plugin_update_once_locked \
+        || echo "$(ts_iso) PLUGIN update-once lock/update failed for $plugin — see above" >> "$log"
     return 0
 }
 

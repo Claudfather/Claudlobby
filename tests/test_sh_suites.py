@@ -43,7 +43,17 @@ SH_SUITES = sorted(p.name for p in TESTS_DIR.glob("test_*.sh"))
 # error and run zero assertions. The returncode check below cannot see that
 # (it only sees a nonzero exit, and here there isn't one); this catches it by
 # reading for bash's own diagnostic instead.
-_SYNTAX_ERROR_RE = re.compile(r": line \d+: syntax error near unexpected token")
+#
+# Matched at `syntax error`, NOT at the longer `syntax error near unexpected
+# token`: bash 3.2.57 has TWO wordings for this, and the narrow one missed the
+# likelier accident. MEASURED on the shebang target -- every UNTERMINATED
+# construct (a truncated file, a half-applied edit: an open `if`, an open
+# `case`, an open function body) prints `: line N: syntax error: unexpected
+# end of file`, four of four shapes probed. The mutant that happened to be
+# written when this guard landed was an empty `then`-body, which is one of
+# the few shapes that DOES say "near unexpected token" -- so the guard passed
+# its own demonstration while blind to the wider class its comment claims.
+_SYNTAX_ERROR_RE = re.compile(r": line \d+: syntax error")
 
 
 def test_sh_suites_discovered():

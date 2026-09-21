@@ -1,9 +1,12 @@
 #!/bin/bash
 # lib/supervisor.sh — the supervisor adapter: five verbs (svc_is_registered,
-# svc_state, svc_kick, svc_enroll, svc_disenroll), each with a systemd
-# spelling and a launchd spelling, keyed off the shared label resolver
-# svc_unit_name, behind the one $_OS switch every lib/ script already
-# re-derives for itself (#1573 boot admission, task 6).
+# svc_state, svc_kick, svc_enroll, svc_disenroll) plus svc_unit_name, the
+# shared label resolver, each with a systemd spelling and a launchd
+# spelling, behind the one $_OS switch every lib/ script already
+# re-derives for itself (#1573 boot admission, task 6). Two of the five
+# (svc_is_registered, svc_state) call the resolver; svc_kick and
+# svc_disenroll resolve the label inline, exactly as the code they were
+# moved from did.
 #
 # Sourced by lib-common.sh immediately after detect_os runs, so every verb
 # below can read $_OS without re-deriving it. Bodies are MOVED from the code
@@ -60,10 +63,25 @@
 # scripts rather than ever forking the real install-bot.sh, whose Darwin leg
 # shells out to the absolute, unfakeable /bin/launchctl bootstrap -- a real
 # call a hermetic test must never risk making.
-: "${_SUPERVISOR_LIB_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+#
+# The default is a parameter expansion, not `$(cd "$(dirname ...)" && pwd)`:
+# that idiom forks a subshell on every source, and lib-common.sh (which
+# sources this file on hot paths) already assigns the variable from its own
+# forkless derivation before the source line, so in the normal case this
+# expansion never fires at all. It stays for a DIRECT source of this file.
+case "${_SUPERVISOR_LIB_DIR:-}" in
+    "")
+        case "${BASH_SOURCE[0]}" in
+            */*) _SUPERVISOR_LIB_DIR="${BASH_SOURCE[0]%/*}" ;;
+            *)   _SUPERVISOR_LIB_DIR="." ;;
+        esac
+        ;;
+esac
 
 # svc_unit_name <bot_dir>
-# The shared label resolver every other verb below builds on. BOT_SERVICE is
+# The shared label resolver. svc_is_registered and svc_state build on it;
+# svc_kick and svc_disenroll read BOT_SERVICE inline, as the code they were
+# moved from did, and svc_enroll needs no label at all. BOT_SERVICE is
 # the source of truth; when it is unset (or explicitly empty — bot_conf_get's
 # ${val:-$default} treats both the same), the pre-rename fallback is BOT_NAME,
 # but ONLY while a unit/plist by that bare name is actually installed —
