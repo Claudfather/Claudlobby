@@ -354,7 +354,18 @@ class TestComposeSettingsLocal:
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
-        assert "permissions" not in result
+        # #1633: a bot with no startup_prompt now composes exactly one grant
+        # — the read its own default boot prompt names — so "no tools" no
+        # longer means an absent permissions block, it means this grant plus
+        # the BASE_TOOLS every non-empty allow list carries (inserted at 0,
+        # so they land REVERSED), and nothing else. fleet_dir.name is
+        # "claudlobby" in this fixture, hence --fleet claudlobby.
+        assert result["permissions"]["allow"] == [
+            "Glob",
+            "Grep",
+            "Read",
+            "Bash(claudlobby --fleet claudlobby brief --bot solo)",
+        ]
 
     def test_headless_ux_defaults_emitted(self, tmp_path):
         """The 3 settings.local headless UX keys are always emitted at their defaults."""
@@ -1426,7 +1437,9 @@ class TestChannelSkillInSettingsLocal:
         assert "mcp__plugin_telegram_telegram__reply" in result["permissions"]["allow"]
 
     def test_no_telegram_no_skills_no_permissions(self, tmp_path):
-        """Bot with no telegram, no skills, no explicit tools → no permissions block.
+        """Bot with no telegram, no skills, no explicit tools → only the
+        default boot prompt's own brief grant (#1633; BASE_TOOLS ride along
+        once any allow entry exists).
 
         `channels=[]` is what "no telegram" means; omitting the handle does not,
         since `channels` defaults to the Telegram plugin (#1107).
@@ -1435,7 +1448,14 @@ class TestChannelSkillInSettingsLocal:
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
-        assert "permissions" not in result
+        # BASE_TOOLS insert at 0, so they land REVERSED; fleet_dir.name is
+        # "claudlobby" in this fixture, hence --fleet claudlobby.
+        assert result["permissions"]["allow"] == [
+            "Glob",
+            "Grep",
+            "Read",
+            "Bash(claudlobby --fleet claudlobby brief --bot solo)",
+        ]
 
     def test_explicit_allow_merges_with_auto_derived(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -3307,6 +3327,78 @@ class TestComposeBotConfShellEscaping:
         assert "$(touch /tmp/pwned)" in result.stdout
         assert "`whoami`" in result.stdout
         assert "${IFS}evil" in result.stdout
+
+
+class TestDefaultStartupPromptIgnition:
+    """#1633: a bot with no declared startup_prompt composes a read-then-act
+    default instead of an idle instruction, and gets exactly the Bash grant
+    that default names."""
+
+    def _paths(self, tmp_path, bot_id="worker", overlay=False):
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / bot_id).mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        return Paths(root=root, fleet_dir=root if overlay else None)
+
+    def _bot(self, bot_id="worker", **kw):
+        return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"], **kw)
+
+    def _fleet(self, bot):
+        return FleetConfig(name="t", service_prefix="p", bots={bot.bot_id: bot})
+
+    def _startup_prompt_line(self, conf: str) -> str:
+        return [l for l in conf.splitlines() if l.startswith("STARTUP_PROMPT=")][0]
+
+    def test_default_startup_prompt_names_the_brief_door_and_an_action(self, tmp_path):
+        bot = self._bot()
+        conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path))
+        line = self._startup_prompt_line(conf)
+        assert "claudlobby brief --bot worker" in line
+        assert line != 'STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."'
+        # bot.conf is fully `source`d (load_bot_conf), and json.dumps() does
+        # not shell-escape — a literal backtick here would run as a real
+        # command substitution at every boot, not render as text.
+        assert "`" not in line
+
+    def test_default_startup_prompt_names_the_fleet_flag_in_overlay_mode(self, tmp_path):
+        bot = self._bot()
+        conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path, overlay=True))
+        line = self._startup_prompt_line(conf)
+        assert "claudlobby --fleet claudlobby brief --bot worker" in line
+
+    def test_default_startup_prompt_uses_the_hook_form_when_brief_on_start_is_armed(
+        self, tmp_path
+    ):
+        bot = self._bot(brief_on_start=True)
+        conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path))
+        line = self._startup_prompt_line(conf)
+        assert "brief --bot" not in line
+        assert "fleet-brief you were given at session start" in line
+
+    def test_default_startup_prompt_composes_the_exact_brief_grant_and_no_wildcard(
+        self, tmp_path
+    ):
+        bot = self._bot(channels=[])
+        result = compose_settings_local(bot, self._fleet(bot), self._paths(tmp_path))
+        allow = result["permissions"]["allow"]
+        assert "Bash(claudlobby brief --bot worker)" in allow
+        assert not any(
+            p.startswith("Bash(claudlobby") and "brief" in p and p.endswith("*)")
+            for p in allow
+        )
+
+    def test_brief_grant_absent_when_brief_on_start_is_armed(self, tmp_path):
+        bot = self._bot(channels=[], brief_on_start=True)
+        result = compose_settings_local(bot, self._fleet(bot), self._paths(tmp_path))
+        allow = result.get("permissions", {}).get("allow", [])
+        assert not any("brief --bot" in p for p in allow)
+
+    def test_brief_grant_absent_when_a_custom_startup_prompt_is_set(self, tmp_path):
+        bot = self._bot(channels=[], startup_prompt="Hang tight.")
+        result = compose_settings_local(bot, self._fleet(bot), self._paths(tmp_path))
+        allow = result.get("permissions", {}).get("allow", [])
+        assert not any("brief --bot" in p for p in allow)
 
 
 class TestComposeAutonomousRunner:

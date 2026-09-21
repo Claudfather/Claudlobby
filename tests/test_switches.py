@@ -100,7 +100,13 @@ def test_exactly_the_categories_that_ship_off():
                       # session-digest, not a new category
                       "manager-checkin",
                       # no deployment gate — see the docstring
-                      "boot-capture", "boot-capture-stamp"}
+                      "boot-capture", "boot-capture-stamp",
+                      # pages a human with no rate guard beyond the debounce
+                      # — outbound-to-people-at-scale's risk, not its volume
+                      "worker-unassigned",
+                      # standing per-session cost pending the #1102 R3
+                      # ratification — an unratified spend, not a new category
+                      "boot-brief"}
     for s in sw.SWITCHES:
         if s.polarity == sw.OPT_IN:
             assert s.why_opt_in, f"{s.key} ships off with no stated reason"
@@ -132,7 +138,12 @@ def test_every_switch_carries_both_directions():
     likely to be turning something off."""
     for s in sw.SWITCHES:
         assert s.arm and s.disarm and s.what, s.key
-        assert s.env or s.job or s.scope == sw.FLEET_JOB, s.key
+        # A switch identifies itself one of four ways: an env var, a job
+        # name, a FLEET_JOB's own special-cased state (code-audit-sweep
+        # reads sweep.enabled), or — boot-brief's shape — a per-bot
+        # ENROLL_FLEET `config` key with neither an env var nor a job to
+        # its name.
+        assert s.env or s.job or s.scope == sw.FLEET_JOB or s.config, s.key
 
 
 def test_the_target_workflow_doors_are_the_reaction_chain():
@@ -593,8 +604,14 @@ def test_the_composer_arming_tables_are_derived_not_listed():
 def test_the_validator_namespaces_come_from_the_registry():
     """Derived, so a door deleted tomorrow warns without anyone touching the
     validator — and a fleet's own MYTOOL_ENABLED never does."""
-    assert sw.namespaces() == {"TASK", "PLANE", "SESSION", "SPINDOWN",
-                               "PANE", "BOOT"}
+    assert sw.namespaces() == {
+        "TASK", "PLANE", "SESSION", "SPINDOWN", "PANE", "BOOT",
+        # worker-unassigned (#1633): OBSERVABILITY_UNASSIGNED_CHECK existed
+        # in lib/fleet-pulse.sh unregistered — the dead-flag sweep could not
+        # tell it apart from a fleet's own tooling variable. Registering the
+        # switch is what makes this namespace ours to claim.
+        "OBSERVABILITY",
+    }
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED
 

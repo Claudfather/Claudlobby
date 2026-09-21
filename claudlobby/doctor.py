@@ -777,6 +777,53 @@ def check_switches(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
     report.add("switches", "pass", _sw.summary_line(rows))
 
 
+def check_ignition(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """The composite question #1633 exists for: does ANYTHING give an idle
+    bot on this fleet a turn?
+
+    Five doors can start a bot's own turn, and a reviewed 21-bot host had
+    four of five unarmed with no surface saying so — an operator reading
+    `task-recheck: on` and a validator warning buried in a count concluded
+    the beat ran. This rung answers the composite question directly.
+
+    Reads DECLARED state only (:func:`ignition.ignition_doors`) — whether an
+    armed door is actually ENROLLED is composed-vs-enrolled drift, #839/#1040's
+    door, not this one's; the detail line says so rather than silently
+    claiming a narrower guarantee than "armed" sounds like.
+
+    Never a failure, and a WARN only when idle turns are actually in play —
+    a fleet with no leaf manager has no idle-manager beat to miss in the
+    first place, so it PASSes on that fact alone.
+    """
+    from .ignition import ignition_doors
+
+    doors = ignition_doors(fleet, paths)
+    armed = [d for d in doors if d.armed]
+    if armed:
+        report.add(
+            "ignition",
+            "pass",
+            f"{len(armed)}/{len(doors)} door(s) armed (declared state): "
+            + ", ".join(d.name for d in armed),
+        )
+        return
+    if not fleet.leaf_manager_bots():
+        report.add(
+            "ignition",
+            "pass",
+            "no leaf manager on this fleet — no idle-turn beat applies",
+        )
+        return
+    cheapest = next(d for d in doors if d.name == "briefing.slots")
+    report.add(
+        "ignition",
+        "warn",
+        f"0/{len(doors)} door(s) armed — nothing gives an idle bot a turn "
+        "(declared state; an armed-but-unenrolled door reads differently — "
+        "see #839/#1040). Cheapest to arm: " + cheapest.arm_line,
+    )
+
+
 def check_fleet_validation(
     fleet: FleetConfig, paths: Paths, report: DoctorReport
 ) -> None:
@@ -808,6 +855,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     report = DoctorReport()
     check_fleet_validation(fleet, paths, report)
     check_switches(fleet, paths, report)
+    check_ignition(fleet, paths, report)
     check_env_vars(fleet, paths, report)
     check_mcp_configs(fleet, paths, report)
     check_npx_cache(paths, report)
