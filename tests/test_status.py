@@ -187,6 +187,58 @@ class TestLatestHeartbeats:
             got = _latest_heartbeats(conn, "test-fleet")
         assert set(got) == {"alex"} and got["alex"][1] == "BUSY", (order, got)
 
+    def test_state_and_tmux_cannot_diverge_on_a_case_variant_collision(self, mock_paths):
+        """#1615 review (vera): STATE and TMUX both read heartbeats now, so the
+        PR's whole claim is that they cannot disagree. They could. TMUX picked
+        the newest sample across case-variant aliases (the R2b-1 fix above);
+        the presence path collapsed `{alias.lower(): ...}` and kept whichever
+        `derive_presence`'s `sorted()` visited LAST -- an artifact of ASCII
+        case, not recency. Measured divergence: TMUX=idle (correct) while
+        STATE=working off a 5-minute-stale BUSY sample.
+
+        Same construction as the sibling pin: learn which alias the query
+        yields last, land the OLDER sample under it, so an order-dependent
+        collapse must pick the stale one and a recency-based collapse the live
+        one. Both readers are asserted, because the bug was that they differed.
+        """
+        from claudlobby.plane.emit_api import emit_batch
+        from claudlobby.plane.queries import LATEST_HEARTBEAT_SQL
+        from claudlobby.plane.presence import derive_presence
+        from claudlobby.status import _presence_rows
+        from tests.plane_fixtures import ro
+
+        (mock_paths.root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+
+        def _sample(bot, state, minutes_ago):
+            return {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "test-fleet",
+                    "occurred_at": (now - timedelta(minutes=minutes_ago)).isoformat(),
+                    "payload": {"subject_kind": "bot_instance", "subject": f"bot:test-fleet/{bot}",
+                                "metric": "bot.heartbeat", "value": {"state": state}}}
+
+        emit_batch(mock_paths.root, [_sample("alex", "UNKNOWN", 30), _sample("ALEX", "UNKNOWN", 30)])
+        with ro(mock_paths.root) as conn:
+            order = [r["alias"].split("/")[-1] for r in conn.execute(LATEST_HEARTBEAT_SQL)
+                     if r["alias"].startswith("bot:test-fleet/")]
+        assert sorted(order) == ["ALEX", "alex"], order
+        first, last = order
+        emit_batch(mock_paths.root, [_sample(first, "BUSY", 1), _sample(last, "IDLE", 5)])
+
+        with ro(mock_paths.root) as conn:
+            tmux = _latest_heartbeats(conn, "test-fleet")
+            rows = _presence_rows(conn, "test-fleet")
+
+        # ONE row per bot: derive_presence can no longer emit two Presence
+        # entries that a later case-folding collapse has to choose between.
+        assert len(rows) == 1, rows
+        live = [{"fleet": "test-fleet", "bot": "alex", "status": "up"}]
+        pres = {pz.alias.lower(): pz for pz in derive_presence(rows, live, now=now)}
+        verdict = pres["bot:test-fleet/alex"].presence
+
+        assert tmux["alex"][1] == "BUSY", tmux          # TMUX: newest wins
+        assert verdict == "working", (verdict, rows)    # STATE: the SAME sample
+        assert (verdict == "working") == (tmux["alex"][1] == "BUSY")   # and they agree
+
     def test_newest_sample_wins(self, mock_paths):
         from tests.plane_fixtures import ro
 

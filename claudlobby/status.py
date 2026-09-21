@@ -202,50 +202,78 @@ def _check_launchd_service(bot_id: str, service_label: str) -> tuple[bool, str]:
         return False, _SVC_UNDETERMINED
 
 
-def _presence_rows(conn, fleet_name: str) -> list[dict]:
-    """The fleet's newest ``bot.heartbeat`` rows in the shape `derive_presence`
-    documents (alias / value / ingested_at), through the SAME
-    ``LATEST_HEARTBEAT_SQL`` the digesting reader below uses.
+def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
+    """``{bot name (lower-cased): winning row}`` — the fleet's newest
+    ``bot.heartbeat`` row per bot, with **case-variant alias collision resolved
+    once, here**.
 
-    Kept as raw rows rather than reusing `_latest_heartbeats`' digest because
-    presence needs the INGEST clock for freshness and the marker age out of the
-    value, both of which that digest drops. One query, two consumers, no second
-    definition of "the newest heartbeat".
+    A bot may hold several instances: a `bot:F/ALEX` sample after `bot:F/alex`
+    mints a second, and "last row wins" then lets an OLDER sample overwrite a
+    newer one — which rendered a live BUSY bot IDLE (the R2b-1 adversarial
+    lens). Newest by ``occurred_at`` (its own instant), falling back to
+    ``ingested_at`` for a row without one.
+
+    It exists as ONE function because both STATE and TMUX now read heartbeats,
+    and #1615's whole claim is that they cannot disagree. Two collapse sites
+    with the same intent is exactly how they would: review of this change
+    caught STATE picking by `sorted()` iteration order (an artifact of ASCII
+    case) while TMUX picked by recency, so the two columns diverged under the
+    very collision the sibling path had already been fixed for. One scan, one
+    rule, two projections below — the divergence is now unavailable rather
+    than merely tested against.
     """
     from .plane.queries import LATEST_HEARTBEAT_SQL
     import sqlite3
     prefix = f"bot:{fleet_name}/".lower()
+    best: dict[str, tuple[datetime, dict]] = {}
     cur = conn.cursor()
     cur.row_factory = sqlite3.Row
-    out: list[dict] = []
     for row in cur.execute(LATEST_HEARTBEAT_SQL):
         alias = str(row["alias"] or "")
         if not alias.lower().startswith(prefix):
             continue
-        out.append({"alias": alias, "value": row["value"],
-                    "ingested_at": row["ingested_at"]})
-    return out
+        stamp = row["occurred_at"] or row["ingested_at"]
+        try:
+            ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        key = alias[len(prefix):].lower()
+        if key not in best or ts > best[key][0]:
+            best[key] = (ts, {"alias": alias, "value": row["value"],
+                              "ingested_at": row["ingested_at"],
+                              "occurred_at": row["occurred_at"]})
+    return {k: v[1] for k, v in best.items()}
+
+
+def _presence_rows(conn, fleet_name: str) -> list[dict]:
+    """The collision-resolved rows in the shape `derive_presence` documents.
+
+    One row per bot, so `derive_presence` cannot emit two `Presence` entries
+    that a later case-folding collapse would have to choose between.
+
+    The alias is rewritten to its CASE-FOLDED form, and that is the second
+    half of the same bug: collapsing the heartbeat rows alone is not enough,
+    because `derive_presence` unions the recorded aliases with the LIVE pane
+    aliases, and those are built from the manifest's spelling. A bot recorded
+    as `bot:F/ALEX` and declared as `alex` still minted two verdicts -- the
+    recorded one `working`, the live-only one `unknown` -- and the collapse
+    then picked by `sorted()` order again. Both halves are keyed the same way
+    below, so the union is one entry per bot by construction.
+    """
+    prefix = f"bot:{fleet_name}/".lower()
+    return [dict(row, alias=prefix + key)
+            for key, row in _newest_heartbeat_rows(conn, fleet_name).items()]
 
 
 def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]:
-    """``{bot name (lower-cased): (instant, BUSY|IDLE|UNKNOWN)}`` — the plane's
-    NEWEST ``bot.heartbeat`` sample per bot, through the presence derivation's
-    own query (``LATEST_HEARTBEAT_SQL``: the newest row per INSTANCE by ledger
-    order). A bot may hold several instances — a case-variant alias mints a
-    second — and across them the sample with the newest ``occurred_at`` (its
-    own instant) wins, falling back to ``ingested_at`` for a row without one;
-    "last row wins" once rendered a live BUSY bot IDLE (the R2b-1 adversarial
-    lens). Presence keeps the ingest clock for freshness; this is the pick."""
-    from .plane.queries import LATEST_HEARTBEAT_SQL
-    import sqlite3
-    prefix = f"bot:{fleet_name}/".lower()
+    """``{bot name (lower-cased): (instant, BUSY|IDLE|UNKNOWN)}`` — the digest
+    TMUX reads, projected from `_newest_heartbeat_rows` so it shares the
+    case-variant collision rule with the presence path rather than repeating
+    it. Presence keeps the ingest clock for freshness; this is the pick."""
     out: dict[str, tuple[datetime, str]] = {}
-    cur = conn.cursor()
-    cur.row_factory = sqlite3.Row          # the shared session's connection yields tuples
-    for row in cur.execute(LATEST_HEARTBEAT_SQL):
-        alias = str(row["alias"] or "")
-        if not alias.lower().startswith(prefix):
-            continue
+    for key, row in _newest_heartbeat_rows(conn, fleet_name).items():
         stamp = row["occurred_at"] or row["ingested_at"]
         try:
             ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
@@ -258,12 +286,7 @@ def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]
             state = (json.loads(raw) if isinstance(raw, str) else raw or {}).get("state")
         except (ValueError, AttributeError):
             state = None
-        key = alias[len(prefix):].lower()
-        # NEWEST wins across a bot's case-variant aliases (a `bot:F/ALEX`
-        # sample after `bot:F/alex` mints a second instance; "last row wins"
-        # rendered a live BUSY bot IDLE — the R2b-1 adversarial lens)
-        if key not in out or ts > out[key][0]:
-            out[key] = (ts, state if isinstance(state, str) else "UNKNOWN")
+        out[key] = (ts, state if isinstance(state, str) else "UNKNOWN")
     return out
 
 
@@ -311,7 +334,10 @@ def collect_fleet_status(
             # no longer carry two different "idle"s. derive_presence is the one
             # definition (plane/presence.py); liveness is this command's own
             # tmux scan, which is its live half.
-            _live = [{"fleet": plane.fleet, "bot": b,
+            # case-folded on BOTH halves: derive_presence unions the two
+            # alias sets, so a manifest spelling that differs from the
+            # recorded one mints a second, heartbeat-less verdict.
+            _live = [{"fleet": plane.fleet.lower(), "bot": b.lower(),
                       "status": "up" if b in tmux_sessions else "down"}
                      for b in fleet.bots]
             presence = {pz.alias.lower(): pz for pz in derive_presence(
