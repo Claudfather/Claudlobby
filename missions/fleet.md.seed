@@ -1,0 +1,38 @@
+# Fleet charter — seed
+
+Copy this to `missions/fleet.md` beside your `fleet.yaml`, fill it in, and
+point at it from the manifest:
+
+```yaml
+fleet:
+  mission: >
+    One paragraph. EVERY bot receives this.
+  mission_file: missions/fleet.md   # this file; composed for managers only
+```
+
+`mission:` is the one-paragraph anchor every bot gets. This file is the fuller
+charter, composed into a manager's instructions and read before it picks work.
+`mission_file` requires `mission` — the validator enforces it.
+
+## What this fleet is for
+
+State the outcome, not the activity. "Ship and operate the storefront" is a
+mission; "write Python" is not. A manager weighs candidate work against this
+sentence, so it has to be able to rule something OUT.
+
+## What is in scope
+
+Name the projects and the repos. These should line up with `projects.yaml`
+(or, if you have not written one, with the `scope.repos` your bots declare —
+that is what the derived Projects table is built from).
+
+## What is out of scope
+
+The most useful section, and the one most often left blank. A fleet with no
+stated boundary drifts into whatever arrived most recently.
+
+## How work closes here
+
+Per-project closure bars live in `projects.yaml` as validation tiers. Use this
+section for anything that applies fleet-wide — a release window, an approval
+that is always required, a thing that must never be automated.

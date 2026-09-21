@@ -194,7 +194,12 @@ When you learn something reusable, write to `knowledge/<repo>/`. When a plan com
 
 ## Projects
 
-The fleet serves these projects (projects.yaml). A project's validation tier
+{% if projects_derived -%}
+Derived from each bot's `scope.repos` at tier `review` because this fleet
+declares no `projects.yaml`. Declare one to set a real closure bar per project.
+
+{% endif -%}
+The fleet serves these projects ({{ 'derived from scope.repos' if projects_derived else 'projects.yaml' }}). A project's validation tier
 is what closing work in its repos requires — the tiers are alternatives, not
 levels: auto: green CI · human: explicit operator approval · preview: preview
 link + operator ack · review: reviewer verdict. Never close work without
