@@ -336,7 +336,7 @@ def cmd_plane_doctor(args) -> int:
                 conn.close()
         try:
             _load_capture_config(root)
-            rung(True, "capture config", "valid or absent (default: metadata)")
+            rung(True, "capture config", "valid or absent (default: full — opt out per fleet or host-wide with {\"*\": \"metadata\"})")
         except ContractViolation as exc:
             errors = getattr(exc, "errors", None)
             rung(False, "capture config", str(errors[0] if errors else exc))

@@ -48,10 +48,12 @@ class EmitOutcome:
 class CaptureConfigError(ContractViolation):
     """state/plane/capture.json exists but cannot be trusted — unreadable,
     invalid JSON, or an unknown mode value. An ABSENT file is the documented
-    default ('metadata'); a BROKEN file must fail visibly, because silently
-    falling back to metadata strips content an operator opted into keeping
-    (F23 + the no-silent-switch rule). Routes like ContractViolation: loud,
-    never spooled, CLI exit 2."""
+    default (:data:`DEFAULT_CAPTURE`); a BROKEN file must fail visibly rather
+    than resolving to ANY mode. The direction that bites moved with the default
+    (2026-09-20): under `metadata` a silent fallback stripped content an
+    operator opted INTO keeping; under `full` it would STORE content an
+    operator opted OUT of keeping (F23 + the no-silent-switch rule). Routes
+    like ContractViolation: loud, never spooled, CLI exit 2."""
 
 
 def _load_capture_config(root: Path) -> dict:
@@ -82,10 +84,33 @@ def _load_capture_config(root: Path) -> dict:
     return modes
 
 
+#: The shipped capture policy when nothing is configured. `full` since
+#: 2026-09-20: the channel IS the product, and under `metadata` every message
+#: renders "captured as metadata only (N bytes)" forever — the ledger is
+#: append-only, so a default that strips bodies does not merely hide the words,
+#: it destroys them at the door for every operator who never learned the knob
+#: exists. Measured on the second host: 4,506 events and 233 communications
+#: recorded, not one of them legible, on an install nobody had misconfigured.
+#:
+#: What the default trades: bodies are stored in the host's own SQLite ledger,
+#: read back only by the localhost-bound view. Nothing is transmitted, and the
+#: content is the operator's own agents talking to each other. An operator who
+#: wants shapes without words opts out per fleet or host-wide in
+#: state/plane/capture.json ({"*": "metadata"}). That choice is not folklore:
+#: `claudlobby plane doctor`'s "capture config" rung states the default and the
+#: opt-out, the view's fleet cards render "<mode> capture" on every fleet, and
+#: the trust surface carries the resolved mode per fleet. A broken file still
+#: fails LOUD rather than resolving to either mode (CaptureConfigError) — that
+#: refusal matters more under a `full` default, not less, because a silent
+#: fallback would now STORE content an operator opted out of keeping.
+DEFAULT_CAPTURE = "full"
+
+
 def _capture_mode(modes: dict, fleet: str | None) -> str:
     """Fleet-keyed capture mode from the loaded plane config; default
-    'metadata' (F7/F23). The caller's request never decides this."""
-    return modes.get(fleet or "", modes.get("*", "metadata"))
+    :data:`DEFAULT_CAPTURE` (F7/F23, re-ruled 2026-09-20). The caller's
+    request never decides this."""
+    return modes.get(fleet or "", modes.get("*", DEFAULT_CAPTURE))
 
 
 # Public aliases: the trust surface (view.py) is a second consumer of the

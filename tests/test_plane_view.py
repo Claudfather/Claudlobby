@@ -830,7 +830,12 @@ def test_overview_discloses_a_missing_live_poll_and_a_malformed_policy(tmp_path)
     (tmp_path / "state" / "plane" / "capture.json").write_text("{nope")
     ov = client.get("/api/overview").json()["data"]
     assert ov["capture_config"] == "malformed"
-    assert {r["capture"] for r in ov["fleets"]} == {"metadata"}
+    # The shipped default since 2026-09-20 is `full`, and this line asserts the
+    # DISPLAY falls back to it while `capture_config: malformed` discloses that
+    # the shown modes are defaults, not policy. (The recorder itself writes
+    # nothing at all under a malformed file — CaptureConfigError — so no body is
+    # stored on the strength of this display.)
+    assert {r["capture"] for r in ov["fleets"]} == {"full"}
 
 
 def test_ui_carries_the_overview_strip_and_the_cross_fleet_mark():
@@ -1498,10 +1503,12 @@ def test_a_metadata_capture_drops_the_question_but_never_the_arm(tmp_path):
     than routing this one text around the policy. What must survive is the
     ARM and the person: the card still says a human is waiting and who asked,
     and reads "the question was not recorded" instead of inventing one."""
+    (tmp_path / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "metadata"}')
     _dispatch(tmp_path, "a", expected_by=FUTURE, tx_state="pane_submitted")
     _task_event(tmp_path, "a", "escalated", at="2026-01-01T00:00:00+00:00",
                 question="ship it without the migration?", by="erlich")
-    row = _tasks(tmp_path)["asg_" + ("a" * 32)]   # no capture.json = metadata
+    row = _tasks(tmp_path)["asg_" + ("a" * 32)]   # explicit metadata opt-out
     assert row["attention_reason"] == ["escalated"]
     assert row["attention_by"] == "erlich"
     assert row["attention_question"] is None
