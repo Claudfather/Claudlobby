@@ -52,10 +52,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `lib/env-tiers.sh` is a file, which tests the proposition instead of using
   directory existence as a proxy and catches a `lib/` that exists but is the
   wrong thing. A positive control in each file proves the assertion fires,
-  with a negative control showing the refusal is caused by the dead wiring and
-  not by anything else in the fixture build. Measured on a deliberately
-  degraded arm: 7 of these 13 cases fail loudly and 6 stay silent, so the
-  suite could not otherwise tell "works" from "never ran".
+  and a third that a clean build is wired, so no control is vacuous. The
+  wiring itself REPAIRS per entry rather than keying on the directory's
+  existence — `conftest.equip_grammar` plants a one-file `lib/` for the
+  modules needing the package grammar, which makes an existence check answer
+  yes and skip — and per-entry links are used rather than a whole-dir symlink,
+  because fixtures delete files under `lib/` and through a directory symlink
+  those unlinks reach the repo's own copies. Measured on a deliberately
+  degraded arm: 7 of these 13 cases fail loudly and 6 stay silent, and a
+  static reading pass over the same call paths predicted nearly the opposite
+  split — which is why the fixture refuses rather than a reader classifying.
 - `ignition.ignition_gap()` is the one definition of the condition both
   ignition warnings fire on, and the goal-binding warnings ask it rather than
   re-deriving it. It tests the cheap conjunct first and takes an optional
@@ -91,6 +97,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hosts that had configured one. A malformed file still fails LOUD and resolves to no mode — that
   refusal matters more under a `full` default, because a silent fallback would
   now store content an operator opted out of keeping.
+
+### Fixed — `warm-cache` covers uvx, but its only automated caller could not (#1577)
+
+- **Every automated invocation of `warm-cache` comes from `lib/reload-fleet.sh`, which runs it ONLY when `lib/check-npx-cache.sh` fails — and that probe scanned `~/.npm/_npx` and nothing else.** On a fleet whose npx packages were cached the probe passed, reload-fleet called `debounce_clear`, and the uvx servers stayed cold indefinitely. Measured on a scoped library (2 npx cached, 1 uvx cold): `origin/main` saw **2 of 4** packages and reported `all 2 packages resolvable ✓` at rc 0 — gate closed, no warm; the fix sees 4, names the cold one, rc 1 — gate open. A correct fix behind a gate that never opens.
+- **The two halves are coupled, which is why they are one change.** Adding a uv probe to that script meant either re-typing the package grammar a FOURTH time or consolidating it. It now lives once in `lib/mcp-package-grammar.py` — stdlib and standalone, because bash must exec it on a host where the package may not be importable by whatever `python3` is on PATH. The Python consumers reach it through `claudlobby/mcp_grammar.py`, which **refuses rather than falling back** (`env_tiers.py`'s rule): a fallback grammar would BE the fourth copy, consulted exactly when the two had diverged.
+- **The uv states are derived, not transliterated.** uv has no per-package installed tree; what it keys by name is the distribution it fetched. Measured on uv 0.11.3: `wheels-v*/pypi/<name>` for a wheel, **`built-wheels-v*/pypi/<name>` for one built from an sdist** (`sdists-v*` holds only `editable/`, and `wheels-v*` does not match a built package — verified against `daff`), with the version component globbed because uv version-stamps those names (`wheels-v1` and `wheels-v6` coexist here). Also measured: `uv tool install` **also** populates the wheel cache, so uv has no permanently-unsatisfiable state of npm's kind — the tool tier is still consulted, via `uv tool list` rather than a layout assumption, because a tool installed from a path or VCS would otherwise read MISSING forever while `uvx` runs it (#852's shape by another route).
+- **Unreachable is not empty, at the language boundary too.** The first build discarded the grammar's failure into `TARGETS=""` and exited 0 — #1577 rebuilt one layer up, in the seam built to close it. The probe now exits **2** when it cannot answer, distinct from 0 (all resolvable) and 1 (some missing); `reload-fleet` treats any nonzero as warm, the safe direction.
+- **The npx→node binary swap stays npx-only and is pinned by test.** It exists because a global `node` can stand in for `npx`; uvx has no equivalent shape. What it shares with uvx is the arg grammar, which is why that moved out and the `== "npx"` test did not.
+- `du -sh` was walking 93,127 files (1.3 GB) to print a decorative line on the **success** path — the branch `reconcile-fleet` takes every pass: 66s cold, 0.3–1.1s warm, routing nothing. Deleted. The grammar consolidation also replaced one `python3` spawn **per fragment** with one per run: 1118ms → 43ms, measured. Still outstanding and deliberately not bundled: the npx branch `find`s the whole cache per package (2946ms of a 4349ms run).
+- **`doctor`'s npx-cache rung reported a default rather than the state in force.** The probe writes missing packages to stdout but both of its refusals to STDERR only, and the rung read stdout alone — so an incomplete `lib/` install rendered as the routine `packages missing`, sending an operator to `warm-cache` for the one condition `warm-cache` cannot fix. Reproduced with the streams captured apart: exit 2, stdout **0 bytes**, the reason on stderr. The rung now reports what the probe actually said, from whichever stream carried it, and never a fixed string standing in for a cause it was not given. The exit-2 contract itself had **no test** — reverting the whole refusal block to the old fail-open failed nothing in the suite — so it has one now, driving the real script through a real subprocess against a `lib/` with exactly one file missing. Mutated, that probe answers **rc 0** (`no npx- or uvx-based packages found`): the false all-clear that clears `reload-fleet`'s debounce and leaves every package cold.
+- `load_lib_module` moves from `brief.py` to `paths.py` — three consumers now, and a private copy of a loading mechanism is how the next one loads from somewhere else.
 
 ### Fixed — a receipt that named its rescued bots twice had half the names silently dropped (#1575)
 

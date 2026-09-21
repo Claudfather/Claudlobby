@@ -56,23 +56,30 @@ def _validate_with_real_resolver(
     monkeypatch.setenv("GITHUB_PAT", "ghp_test")
     monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
     monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-    if not (fleet_dir / "lib").exists():
-        (fleet_dir / "lib").symlink_to(REPO / "lib")
-    # ASSERT the wiring is LIVE rather than trusting the guard above (#1689).
-    # The guard skips when `lib` already exists, and a fixture that created it
-    # as a plain DIRECTORY satisfies `.exists()` while supplying no resolver —
-    # so the switch cascade falls back to defaults, task-recheck reads ARMED
-    # (it ships opt-out), `_validate_ignition` returns early, and every
-    # disarmed scenario here silently measures the opposite of what it
-    # intends. That is #1588 verbatim. Testing for the FILE the resolver needs
-    # tests the proposition; testing that a directory exists is the proxy that
-    # failed. A skipped wiring must be loud, because a test that passes with
-    # its wiring dead is exercising a degraded path while believing otherwise.
-    assert (fleet_dir / "lib" / "env-tiers.sh").is_file(), (
-        f"{fleet_dir / 'lib'} exists but does not carry the real lib/ — the "
-        f"switch resolver cannot run, so TASK_RECHECK_ENABLED=0 never lands "
-        f"and task-recheck reads ARMED. Every disarmed case here would "
-        f"measure the wrong state."
+    # Wire whatever is MISSING rather than keying on the directory's existence
+    # (origin/main's fix for the same #1588 class, adopted here). `fleet_dir`
+    # now ships a real `mcp-package-grammar.py`, so `lib/` EXISTS without being
+    # wired, and an existence check skips the wiring silently: the switch
+    # resolver then cannot read its doors, `task-recheck` falls back to ARMED
+    # regardless of `.env`, and `_validate_ignition`'s early return makes every
+    # scenario below pass vacuously.
+    #
+    # Per-entry links, never a whole-dir symlink: fixtures delete files under
+    # `lib/`, and through a directory symlink those unlinks reach the repo's
+    # own copies.
+    lib = fleet_dir / "lib"
+    lib.mkdir(exist_ok=True)
+    for real in (REPO / "lib").iterdir():
+        link = lib / real.name
+        if not link.exists():
+            link.symlink_to(real)
+    # Repairing is not the same as having repaired: assert the wiring is LIVE
+    # (#1689). Testing for the FILE the resolver needs tests the proposition;
+    # testing that a directory exists is the proxy that failed (#1588).
+    assert (lib / "env-tiers.sh").is_file(), (
+        f"{lib} exists but does not carry the real lib/ — the switch resolver "
+        f"cannot run, so TASK_RECHECK_ENABLED=0 never lands and task-recheck "
+        f"reads ARMED. Every disarmed case here would measure the wrong state."
     )
     (fleet_dir / ".env").write_text(env_text)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
@@ -2690,17 +2697,36 @@ class TestTheValidatorFixtureRefusesDeadWiring:
     the assertion guarding it is the one most worth proving fires.
     """
 
-    def test_a_lib_that_is_not_the_real_lib_is_refused(self, fleet_dir, monkeypatch):
-        (fleet_dir / "lib").mkdir()
-        with pytest.raises(AssertionError, match="does not carry the real lib"):
-            _validate_with_real_resolver(fleet_dir, monkeypatch)
-
-    def test_the_refusal_is_caused_by_the_dead_wiring_and_nothing_else(
+    def test_the_shared_fixtures_pre_made_lib_is_REPAIRED_not_skipped(
         self, fleet_dir, monkeypatch
     ):
+        """Armed with the REAL shipped armer rather than a synthetic
+        directory: `conftest.equip_grammar` plants a one-file `lib/` for the
+        modules that need the package grammar, and its own docstring records
+        that thirteen helpers key on `(root / "lib").exists()` — so a partial
+        `lib/` makes that check answer yes, skip, and run the test against
+        doors it cannot read. A module that equips the grammar and then calls
+        this helper is the live pairing, and it must be repaired, not skipped.
+        """
+        from tests.conftest import equip_grammar
+
+        equip_grammar(fleet_dir)
+        assert (fleet_dir / "lib").exists(), "precondition: the armer ran"
+        assert not (fleet_dir / "lib" / "env-tiers.sh").exists(), (
+            "precondition: lib/ must be PARTIAL — that is the case an "
+            "existence-keyed guard gets wrong"
+        )
         report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
         assert (fleet_dir / "lib" / "env-tiers.sh").is_file()
         assert _ignition_warnings(report), (
             "with the wiring live the disarm lands and the ignition warning "
-            "fires — which is what the refusal above protects"
+            "fires — which is what the repair protects"
         )
+
+    def test_the_assertion_FIRES_when_repair_is_impossible(
+        self, fleet_dir, monkeypatch
+    ):
+        (fleet_dir / "lib").mkdir(exist_ok=True)
+        (fleet_dir / "lib" / "env-tiers.sh").mkdir()
+        with pytest.raises(AssertionError, match="does not carry the real lib"):
+            _validate_with_real_resolver(fleet_dir, monkeypatch)

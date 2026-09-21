@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -84,6 +85,31 @@ def _scrubbed_env(**overrides):
     }
     env.update(overrides)
     return env
+
+
+def equip_grammar(root: Path) -> Path:
+    """Put the install's REAL `mcp-package-grammar.py` under ``root/lib/``.
+
+    Opt-in, per test module, rather than a side effect of `fleet_dir`: the
+    grammar is needed by the four modules that drive composition or
+    warm-cache, and planting a one-file `lib/` in all 71 fixtures to serve 4
+    is what made `lib/` EXIST without being WIRED. Thirteen helpers across
+    the suite key on `(root / "lib").exists()` to decide whether to link the
+    real tree; a partial `lib/` makes that check answer yes and skip, and the
+    test then runs against doors it cannot read (#1633's ignition tests, where
+    `task-recheck` fell back to ARMED and every scenario passed vacuously).
+
+    Copied real, never stubbed: `mcp_grammar` REFUSES when it cannot load the
+    grammar — a fallback would be the second copy it exists to prevent — so a
+    module that needs this and omits it FAILS LOUDLY here rather than quietly
+    testing a broken install.
+    """
+    lib = root / "lib"
+    lib.mkdir(exist_ok=True)
+    repo = Path(__file__).resolve().parent.parent
+    dest = lib / "mcp-package-grammar.py"
+    shutil.copy(repo / "lib" / "mcp-package-grammar.py", dest)
+    return dest
 
 
 def constructed_env(**overrides):

@@ -49,6 +49,7 @@ from .loader import (
     parse_expertise_file,
 )
 from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
+from .mcp_grammar import grammar
 from .paths import Paths, _iter_fleet_dirs
 from .supervision import build_supervision_spec, render_launchd_plist, render_systemd_unit
 
@@ -223,19 +224,19 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
             # Use global binary if available (saves ~0.8s npx overhead per server)
             resolved_binary = shutil.which(global_binary) if global_binary else None
             if resolved_binary and instance_config.get("command") == "npx":
+                # DELIBERATELY npx-only, and not an oversight to be tidied up
+                # later: this swap exists because a global `node` binary can
+                # stand in for `npx`, and uvx has no equivalent shape — there
+                # is no already-resolved interpreter path that replaces a uv
+                # tool invocation. What IS shared with uvx is the arg grammar
+                # below, which is why that moved out and this test did not.
                 instance_config["command"] = "node"
-                # Replace npx args ([-y, pkg, ...rest]) with [binary, ...rest]
-                npx_args = instance_config.get("args", [])
-                rest_args = []
-                skip_next = False
-                for a in npx_args:
-                    if a == "-y":
-                        skip_next = True
-                        continue
-                    if skip_next:
-                        skip_next = False
-                        continue
-                    rest_args.append(a)
+                # [-y, pkg, ...rest] -> [binary, ...rest]. The split is
+                # `lib/mcp-package-grammar.py`'s: warm-cache wants the package
+                # this discards, so one parse decides the boundary for both.
+                _pkg, rest_args = grammar(paths).split_npx_args(
+                    instance_config.get("args", [])
+                )
                 instance_config["args"] = [resolved_binary] + rest_args
 
             # Resolve ${VAR} placeholders (instance-scoped vars get prefixed)
