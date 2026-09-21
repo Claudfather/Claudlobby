@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `pr-review-state.py`: the advice named a remedy that had already been used, and sometimes one that cannot work (#1699)
+
+`render()` had **no `--attribute` awareness at all**, so it closed every
+unattributed sequence with `Re-run with --attribute to resolve it.` — including
+runs that had just passed the flag. Worse, for verdicts the plane cannot reach it
+named a remedy that is **impossible**, not merely redundant: the plane holds
+nothing before the F18 clean epoch (#1444), so those rows are unattributable
+forever. The reader does the thing they just did, it fails again, and the
+available inference is *the flag is broken* — which is wrong, and blocks the
+right one. That worsens #1551, which is about this tool going unused: a tool
+whose own output reads as broken does not get adopted.
+
+- **Four states, four strings, none shared** — the issue's explicit requirement,
+  pinned by a test asserting all four are distinct. Attribution *not attempted*
+  keeps the original advice; *attempted* splits on the epoch; *unreachable* says
+  the answer is UNKNOWN, which is not "nobody was attributable"; and an
+  *unreadable epoch* refuses to claim permanence at all — asserting it from an
+  instrument that could not be read is the same over-claim one level up.
+- **The epoch is DERIVED, never pinned.** `plane_epoch()` reads
+  `MIN(occurred_at)` from the plane. A hardcoded 2026-09-20 is correct on exactly
+  one host until someone re-seeds a plane, and then it is confidently wrong with
+  nothing to notice. Deliberately the earliest event and **not** the earliest
+  PR-citing row: a plane whose first citing report lands late would report every
+  earlier verdict as "predates the plane", collapsing the two states this change
+  exists to separate. The bound supports one sound claim in one direction —
+  before it no report can exist; after it, attribution merely found nothing.
+- **Counts, not a boolean, because PRs straddle the epoch.** Measured on the
+  issue's own repro: Claudlobby#1160 carries 5 pre-epoch verdicts and 1 inside,
+  so an all-or-nothing rule reports it as merely unresolved and loses the
+  permanence fact for the 5 that have it. `undated` is carried separately — a
+  verdict whose timestamp will not parse has not been shown to predate anything.
+- **The comparison is parsed, never lexical**, and the divergence is real rather
+  than theoretical. The plane stamps mixed offsets (`MIN(occurred_at)` here is
+  `2026-09-20T13:41:06-04:00`, i.e. `17:41:06Z`) while GitHub hands back `Z`, so
+  a verdict at `15:00Z` is genuinely pre-epoch while sorting lexically *after*
+  the epoch string. Lexical fails in the direction that loses permanence.
+- **One epoch read per run**, not per PR: it is a property of the plane, and
+  re-deriving it per row would let two rows in one run disagree about the boundary.
+
+Behaviour otherwise unchanged; `--json` gains an additive `attribution` object per
+PR (schema 1 top-level keys untouched), so a consumer can tell "attribution ran
+and found nothing" from "it never ran".
+
+**Out of scope, deliberately:** the `pr_role` consumer half, which waits on #1706
+landing. There is no separable "AUTHOR-UNKNOWN interim state" left to build — see
+the PR body.
+
 ### Added — `pr_role`: the field and its writer, so authorship stops being unrecoverable (#1666)
 
 - **What it records, and why nothing else can.** Every bot in a fleet pushes as

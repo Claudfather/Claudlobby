@@ -130,6 +130,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 # --------------------------------------------------------------------------
 # The two sampled regexes. Both are BOUNDED POSITIVELY — see the note below.
@@ -321,6 +322,100 @@ DISAGREEMENT = "IDENTITY-DISAGREEMENT"
 
 RC_OK, RC_ACTIONABLE, RC_USAGE, RC_INCOMPLETE = 0, 1, 2, 3
 
+#: Attribution states (#1699). ``render()`` had NO ``--attribute`` awareness, so it
+#: advised re-running with a flag the invocation had already used — and for rows the
+#: plane cannot reach it named a remedy that CANNOT work, sending the reader to do
+#: the thing they just did and inviting the wrong conclusion ("the flag is broken")
+#: over the right one ("these rows predate the plane; attribution is unavailable
+#: forever"). These four must never share an output string: an attribution never
+#: attempted and one that is impossible need opposite responses from the reader.
+ATTR_NOT_ATTEMPTED = "not-attempted"   # no --attribute; the advice is live and correct
+ATTR_ATTEMPTED = "attempted"           # ran; whether it COULD have worked is the epoch question
+ATTR_UNREACHABLE = "unreachable"       # the plane could not be read — not an empty answer
+
+
+def parse_instant(value: str):
+    """An ISO-8601 instant as an aware UTC ``datetime``, or ``None``.
+
+    Parsed, never compared lexically. The plane stamps mixed forms — measured on
+    this host, ``MIN(occurred_at)`` is ``2026-09-20T13:41:06-04:00`` while other
+    rows carry ``+00:00`` — and GitHub hands back ``...Z``. A string compare of
+    those is right only by accident of the date digits and wrong at the boundary,
+    which is the one place this comparison is load-bearing. A naive stamp is read
+    as UTC rather than refused: the alternative is dropping a real row, and every
+    caller here already treats an unparseable instant as "cannot say".
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def attribution_state(unattributed: list[dict], attribution: dict | None) -> dict:
+    """Classify an unattributed sequence against the plane's epoch. Pure.
+
+    Counts rather than a boolean, because a PR can straddle the epoch and
+    "some of these are impossible" is a different instruction from "all of them
+    are". ``undated`` is carried for the same reason: a verdict whose timestamp
+    will not parse has NOT been shown to predate anything, and folding it into
+    either side would be a claim the data does not support.
+    """
+    info = dict(attribution or {})
+    state = info.get("state", ATTR_NOT_ATTEMPTED)
+    out = {"state": state, "error": info.get("error"), "epoch": info.get("epoch"),
+           "pre_epoch": 0, "undated": 0, "total": len(unattributed)}
+    epoch = parse_instant(out["epoch"] or "")
+    if state != ATTR_ATTEMPTED or epoch is None:
+        return out
+    for event in unattributed:
+        ts = parse_instant(event.get("ts") or "")
+        if ts is None:
+            out["undated"] += 1
+        elif ts < epoch:
+            out["pre_epoch"] += 1
+    return out
+
+
+def attribution_advice(info: dict) -> str:
+    """The one line that tells the reader what to DO. Four states, four strings.
+
+    #1699: the old text was a single unconditional "Re-run with --attribute",
+    emitted even when the flag had just been used, and even for rows no flag can
+    ever reach. The reader does the thing they just did, it fails again, and the
+    available inference is that the flag is broken — which is wrong, and blocks
+    the true one. So the impossible case says STOP and the merely-unresolved case
+    says what would change it.
+    """
+    state, total = info["state"], info["total"]
+    if state == ATTR_NOT_ATTEMPTED:
+        return "Re-run with --attribute to resolve it."
+    if state == ATTR_UNREACHABLE:
+        return (f"--attribute ran but the plane could not be read ({info['error']}); "
+                "whether these are attributable is UNKNOWN, which is not the same as "
+                "'nobody was attributable'.")
+    epoch, pre, undated = info["epoch"], info["pre_epoch"], info["undated"]
+    if not epoch:
+        return ("--attribute ran and resolved nothing here; the plane's epoch could not "
+                f"be read ({info.get('error') or 'reason not reported'}), so whether these "
+                "are permanently unattributable cannot be determined from this run.")
+    tail = f" ({undated} verdict(s) carry no parseable timestamp and are counted in neither)" if undated else ""
+    dated = total - undated
+    if dated and pre == dated:
+        return (f"PERMANENTLY UNATTRIBUTABLE: all {pre} dated verdict(s) here predate the "
+                f"plane's earliest record ({epoch}) — the F18 clean epoch, #1444. No flag "
+                f"resolves these, now or ever; stop looking.{tail}")
+    if pre:
+        return (f"MIXED: {pre} of {dated} dated verdict(s) predate the plane's earliest "
+                f"record ({epoch}) and are permanently unattributable (#1444); the other "
+                f"{dated - pre} verdict(s) are inside the epoch and simply have no citing "
+                f"report.{tail}")
+    return (f"--attribute ran and found no citing report for these {dated} verdict(s), which "
+            f"are INSIDE the plane's epoch ({epoch}) — so this is a missing report, not an "
+            f"impossible one, and a report filed later would resolve it.{tail}")
+
 
 # --------------------------------------------------------------------------
 # Pure parsing — every rule below is offline-testable
@@ -437,7 +532,8 @@ def resolve_per_reviewer(vevents: list[dict]) -> dict[str, dict]:
     return latest
 
 
-def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: bool = False) -> dict:
+def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: bool = False,
+              attribution: dict | None = None) -> dict:
     """The whole verdict for one PR. Pure; ``payload`` is one ``gh pr view`` blob."""
     head = payload.get("headRefOid") or ""
     events = events_from_payload(payload)
@@ -523,6 +619,9 @@ def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: boo
         "unparsed_headers": unparsed,
         "no_recognition": no_recognition,
         "flags": sorted(set(flags)),
+        # #1699. Carried even when UNATTRIBUTED is absent: --json consumers need to
+        # tell "attribution ran and there was nothing to resolve" from "it never ran".
+        "attribution": attribution_state(unattributed, attribution),
     }
 
 
@@ -676,12 +775,7 @@ def ledger_identity_for(repo: str, number: int, plane_root: str, *, module=None)
     """
     try:
         if module is None:
-            import importlib.util
-
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "who-reviewed.py")
-            spec = importlib.util.spec_from_file_location("who_reviewed", path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            module = _load_who_reviewed()
         # (rows, why) — an unreachable plane is a reason, never an empty answer
         rows, why = module.load_plane_rows(plane_root)
         if why is not None:
@@ -697,6 +791,56 @@ def ledger_identity_for(repo: str, number: int, plane_root: str, *, module=None)
         }, None
     except Exception as exc:
         return {}, f"{type(exc).__name__}: {exc}"
+
+
+#: The earliest instant the plane holds ANYTHING. Not the earliest PR-CITING row,
+#: which is the tempting query and the wrong one: a plane whose first citing report
+#: happens to land late would report every earlier verdict as "predates the plane",
+#: collapsing the two states this change exists to separate. This bound supports
+#: exactly one sound claim, in one direction — before it, no report can exist, so
+#: attribution is impossible forever. After it, attribution merely found nothing,
+#: which is a different fact with a different remedy.
+PLANE_EPOCH_SQL = "SELECT MIN(occurred_at) FROM events"
+
+
+def plane_epoch(plane_root: str, *, module=None) -> tuple[str | None, str | None]:
+    """``(epoch, error)`` — the F18 clean-epoch boundary (#1444), read not assumed.
+
+    Derived from the db rather than pinned to the known 2026-09-20 cutover date,
+    because a hardcoded epoch is correct on exactly one host until the day someone
+    re-seeds a plane, and then it is confidently wrong with nothing to notice.
+
+    Fails SOFT but never SILENT, ``ledger_identity_for``'s shape: an unreachable
+    plane returns a reason, and the caller renders "cannot say" rather than
+    "permanently unattributable". Claiming permanence from an instrument that could
+    not be read is the exact over-claim #1699 is about, one level up.
+    """
+    try:
+        if module is None:
+            module = _load_who_reviewed()
+        pr = module._readers()
+        conn = pr.connect(plane_root)
+        try:
+            row = conn.execute(PLANE_EPOCH_SQL).fetchone()
+        finally:
+            conn.close()
+        epoch = row[0] if row else None
+        if not epoch:
+            return None, "the plane holds no events at all"
+        return epoch, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _load_who_reviewed():
+    """The lazy sibling-module import, in ONE place — two callers now."""
+    import importlib.util
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "who-reviewed.py")
+    spec = importlib.util.spec_from_file_location("who_reviewed", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # --------------------------------------------------------------------------
@@ -746,9 +890,11 @@ def render(results: list[dict], canonical: bool) -> str:
             lines.append(
                 f"      {UNATTRIBUTED}: a block and an approve, neither attributable. "
                 "Same reviewer resolving themselves and two reviewers with a live block "
-                "are byte-identical here; the block is kept live as the safe direction. "
-                "Re-run with --attribute to resolve it."
+                "are byte-identical here; the block is kept live as the safe direction."
             )
+            # The advice is its own line and its own function (#1699): four states
+            # that must not share a string, and the old one was unconditional.
+            lines.append(f"      -> {attribution_advice(r['attribution'])}")
         if DISAGREEMENT in r["flags"]:
             lines.append(
                 f"      {DISAGREEMENT}: header and ledger name different reviewers — "
@@ -841,9 +987,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot read PR data: {exc}", file=sys.stderr)
         return RC_USAGE
 
+    # ONE epoch read per run, not per PR: it is a property of the plane, not of any
+    # PR, and re-deriving it per row would multiply the open while letting two rows
+    # in one run disagree about where the boundary is.
+    epoch, epoch_error = (None, None)
+    if args.attribute:
+        epoch, epoch_error = plane_epoch(args.plane_root)
+        if epoch_error:
+            print(f"warning: could not read the plane's epoch ({epoch_error}); "
+                  "unattributable rows cannot be reported as permanent",
+                  file=sys.stderr)
+
     results = []
     for payload in payloads:
         identity = {}
+        attribution = {"state": ATTR_NOT_ATTEMPTED}
         if args.attribute and payload.get("number"):
             identity, attr_error = ledger_identity_for(
                 args.repo, payload["number"], args.plane_root
@@ -855,7 +1013,12 @@ def main(argv: list[str] | None = None) -> int:
                     "UNKNOWN, which is NOT the same as 'nobody was attributable'",
                     file=sys.stderr,
                 )
-        results.append(assess_pr(payload, identity, canonical=args.canonical))
+                attribution = {"state": ATTR_UNREACHABLE, "error": attr_error}
+            else:
+                attribution = {"state": ATTR_ATTEMPTED, "epoch": epoch,
+                               "error": epoch_error}
+        results.append(assess_pr(payload, identity, canonical=args.canonical,
+                                 attribution=attribution))
 
     rc = exit_code_for(results)
     if args.as_json:
