@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -171,3 +172,56 @@ class TestCheckNpxCacheSeesGlobalInstalls:
         r = self._run(root, cache, groot)
         assert "MISSING" not in r.stdout, r.stdout
         assert r.returncode == 0
+
+
+class TestCheckNpxCacheRefusesRatherThanGuessing:
+    """#1577's most novel property — exit 2 for "cannot tell", never 0 — had no
+    test at all: reverting the whole refusal block to the old fail-open
+    (`TARGETS=""` and carry on) failed nothing in the suite.
+
+    0 is the dangerous answer, not 1. `reload-fleet.sh` runs `warm-cache` ONLY
+    when this probe fails, so a 0 it did not earn clears the debounce and
+    leaves every package cold — #1577's original defect, rebuilt one layer up
+    in the seam built to close it.
+    """
+
+    def _partial_install(self, tmp_path: Path) -> Path:
+        """A real `lib/` with exactly one file missing.
+
+        The script resolves the grammar from its OWN dirname, so the condition
+        cannot be made by pointing an env var somewhere else, and the repo's
+        own grammar must not be deleted to make it. Copying the tree and
+        removing one file is also the shape the real failure has: a partial or
+        half-updated install, not a hand-built directory holding two scripts.
+        """
+        root = tmp_path / "clroot"
+        (root / "library" / "mcp").mkdir(parents=True)
+        (root / "library" / "mcp" / "demo.json").write_text(
+            json.dumps({"demo": {"command": "npx", "args": ["-y", PKG]}})
+        )
+        shutil.copytree(REPO_ROOT / "lib", root / "lib")
+        (root / "lib" / "mcp-package-grammar.py").unlink()
+        return root
+
+    def test_an_unreachable_grammar_exits_2_rather_than_reporting_all_clear(
+        self, tmp_path: Path
+    ):
+        root = self._partial_install(tmp_path)
+        r = subprocess.run(
+            ["bash", str(root / "lib" / "check-npx-cache.sh")],
+            capture_output=True,
+            text=True,
+            env=constructed_env(
+                CLAUDLOBBY_ROOT=root, NPX_CACHE_DIR=tmp_path / "_npx"
+            ),
+        )
+        # Assert the REASON, not just the code: this fixture dies at exit 1 if
+        # the sourcing chain ever grows a file the copy does not carry, and a
+        # bare `!= 0` would read that fixture rot as the refusal under test.
+        assert "cannot reach the package grammar" in r.stderr, (
+            f"rc={r.returncode} stdout={r.stdout!r} stderr={r.stderr!r}"
+        )
+        assert r.returncode == 2, (
+            f"rc={r.returncode} — 0 would clear reload-fleet's debounce on a "
+            f"probe that could not answer; stderr={r.stderr!r}"
+        )

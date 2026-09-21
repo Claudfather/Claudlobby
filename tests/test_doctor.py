@@ -19,6 +19,7 @@ from claudlobby.doctor import (
     check_env_vars,
     check_ignition,
     check_mcp_configs,
+    check_npx_cache,
     check_services,
     format_report,
     run_doctor,
@@ -895,3 +896,56 @@ class TestCheckIgnition:
         check = self._check(tmp_path, self._FLEET_NO_DOOR)
         assert "declared" in check.detail.lower()
         assert "839" in check.detail or "1040" in check.detail
+
+
+class TestCheckNpxCacheReportsTheStateInForce:
+    """The rung had no coverage against ANY nonzero exit, and read one stream.
+
+    `check-npx-cache.sh` writes missing packages to stdout but its refusals
+    (exit 2) to stderr, so a stdout-only reader fell through to the hardcoded
+    "packages missing" and reported an incomplete install as a routine
+    run-warm-cache situation — the remedy that cannot fix it.
+    """
+
+    def _stub(self, paths, body: str) -> None:
+        script = paths.lib / "check-npx-cache.sh"
+        script.write_text("#!/bin/bash\n" + body)
+        script.chmod(0o755)
+
+    def test_a_refusal_is_reported_in_the_probes_own_words(self, doctor_fleet):
+        _, _fleet, paths = doctor_fleet
+        self._stub(
+            paths,
+            'echo "check-npx-cache: cannot reach the package grammar at /x/y.py" >&2\n'
+            "exit 2\n",
+        )
+        report = DoctorReport()
+        check_npx_cache(paths, report)
+        detail = report.checks[0].detail
+        assert "cannot reach the package grammar" in detail, detail
+        # The literal is the defect: it names a cause the probe never gave.
+        assert detail != "packages missing"
+
+    def test_missing_packages_still_read_from_stdout(self, doctor_fleet):
+        """The stderr path must not cost the case that already worked."""
+        _, _fleet, paths = doctor_fleet
+        self._stub(
+            paths,
+            'echo "check-npx-cache: 1/4 packages MISSING: uvx:workspace-mcp"\n'
+            "exit 1\n",
+        )
+        report = DoctorReport()
+        check_npx_cache(paths, report)
+        assert "uvx:workspace-mcp" in report.checks[0].detail
+        assert report.checks[0].status == "warn"
+
+    def test_a_silent_failure_is_never_dressed_as_a_known_cause(self, doctor_fleet):
+        """Both streams empty is the case the old default was least entitled to
+        speak for: nothing was measured, so nothing may be claimed."""
+        _, _fleet, paths = doctor_fleet
+        self._stub(paths, "exit 3\n")
+        report = DoctorReport()
+        check_npx_cache(paths, report)
+        detail = report.checks[0].detail
+        assert "exit 3" in detail, detail
+        assert "missing" not in detail.lower(), detail
