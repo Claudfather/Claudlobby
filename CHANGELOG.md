@@ -40,6 +40,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `None`, and the ingest detail drops `None`, so an absent role means the key is
   simply not present rather than stored empty.
 
+- **A report can tell its OWN task leg from a sibling's (#1710).** Two opposite
+  failures of one confusion, both found by vera reviewing this PR, and both
+  predating it for `pr_url`:
+
+  **Case 1 — the silent drop.** The id-less closing loop appends a task event
+  per open id-less row of the reporting bot, and the marker guard asked "does
+  this batch contain ANY task event". Those satisfy it on behalf of UNRELATED
+  rows, so a bot holding any other id-less dispatch suppressed its own marker —
+  the only carrier of the PR fields — and they were stored nowhere, giving a row
+  bit-for-bit identical to "nobody reported". The guard now keys on a variable
+  set where this report's own leg is actually appended, never re-derived from a
+  condition that can drift from it.
+
+  **Case 2 — the silent MIS-attribution, and the worse of the two.** With an
+  unrelated id'd row open, #835 auto-resolves the link and the primary leg fires
+  against that row, carrying the PR fields with it: the review lands on a task
+  it has nothing to do with. The fields now ride the primary leg **only when the
+  caller NAMED the task with `--task`**. An auto-resolved link is a guess, and a
+  guess must not carry an attribution claim. `lib/who-reviewed.py` refuses to
+  tiebreak an ambiguous match on the stated grounds that a wrong attribution is
+  worse than none — none sends a reader to look, wrong makes them act — and this
+  manufactured exactly the attribution that door declines to guess at. The fix
+  turns a wrong attribution into an absent one, which is refusable, the same
+  three-state logic the field rests on. **Absent, but not silent:** the caller is
+  told on stderr that the role was not recorded and why, since a declared role
+  reaching no row is the shape of case 1.
+
+  **Why the tests missed both:** every test of this path started from a pristine
+  plane where the acting bot held no other open dispatch. On this estate that is
+  not a corner case — `lib/dispatch-supersede-hint.py` is built on the
+  measurement that 51% of id'd dispatches go to a bot already holding an open
+  row. There is now a regression test per case, each asserting its precondition
+  so it cannot silently set up the other one.
+
 - **The writer rides BOTH legs.** `report-back.sh --pr-role` stamps the task
   event *and* the `report_status` marker. Riding only the task leg would record
   a role for tracked work and silently drop it for a review posted against work

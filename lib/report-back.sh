@@ -60,6 +60,7 @@ PROGRESS=""
 ARTIFACTS=""
 PR_ROLE=""
 TASK_ID=""
+TASK_NAMED=""
 # Set when a SUPPLIED --task is not in the bot's open set (#1032). Recorded,
 # never acted on: the report still carries the id the caller gave.
 TASK_ANOMALY=""
@@ -99,7 +100,11 @@ while [ $# -gt 0 ]; do
             shift 2 ;;
         --issues)    POSITIONAL_EXTRAS+=("issues:$2"); shift 2 ;;
         --skill)     POSITIONAL_EXTRAS+=("skill:$2"); shift 2 ;;
-        --task)      TASK_ID="$2"; shift 2 ;;
+        # TASK_NAMED is captured HERE, before the auto-resolver below can
+        # overwrite TASK_ID, because afterwards the two are
+        # indistinguishable -- and an attribution may only ride an id the
+        # caller asserted, never one this script guessed.
+        --task)      TASK_ID="$2"; TASK_NAMED=1; shift 2 ;;
         *)           POSITIONAL_EXTRAS+=("$1"); shift ;;
     esac
 done
@@ -258,6 +263,12 @@ _plane_emit_report_intent() {
     # be re-escaped per event across the comm + task + anomaly batch — each
     # json_escape a fork-pipeline on the Pi.
     local safe_msg safe_fleet safe_sender sender_alias link_frag="" pr_url="" ex
+    # Did THIS report's OWN task leg fire? Set where the leg is actually
+    # appended, never re-derived from a condition: the marker guard below
+    # used to ask "does the batch contain any task event", which the
+    # id-less closing loop also satisfies on behalf of UNRELATED rows
+    # (#1710 case 1).
+    local _own_task_leg=0
     safe_msg=$(json_escape "$MESSAGE")
     safe_fleet=$(json_escape "$FLEET_NAME")
     sender_alias="bot:$FLEET_NAME/$BOT"
@@ -291,14 +302,28 @@ _plane_emit_report_intent() {
             progress)  ev="progress" ;;
         esac
         [ -n "$PROGRESS" ] && frag=",\"progress\":$PROGRESS"
-        [ -n "$pr_url" ] && frag="$frag,\"pr_url\":\"$(json_escape "$pr_url")\""
-        # Not json_escaped: the parser above admits only two literals, so
-        # there is nothing to escape, and escaping would imply free text.
-        [ -n "$PR_ROLE" ] && frag="$frag,\"pr_role\":\"$PR_ROLE\""
+        # CASE 2 (#1710): the PR fields ride this leg only when the caller
+        # NAMED the task. When #835 auto-resolved the link, the row is this
+        # bot's newest open dispatch and has nothing to do with the PR being
+        # reported -- attaching here records the review against an unrelated
+        # task. `lib/who-reviewed.py` refuses to tiebreak an ambiguous match on
+        # the stated grounds that a wrong attribution is worse than none (none
+        # sends a reader to look, wrong makes them act), and this would
+        # manufacture exactly the attribution that door declines to guess at.
+        # An auto-resolved link is a guess, and a guess must not carry an
+        # attribution claim. Absent is refusable; wrong is not.
+        if [ -n "$TASK_NAMED" ]; then
+            [ -n "$pr_url" ] && frag="$frag,\"pr_url\":\"$(json_escape "$pr_url")\""
+            # Not json_escaped: the parser above admits only two literals, so
+            # there is nothing to escape, and escaping would imply free text.
+            [ -n "$PR_ROLE" ] && frag="$frag,\"pr_role\":\"$PR_ROLE\""
+        fi
         if [ -n "$ev" ]; then
             events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"$ev\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "$SUMMARY")\"$frag$sess_frag}}"
+            _own_task_leg=1
         fi
         if [ "$TASK_ANOMALY" = "supplied-id-not-open" ]; then
+            _own_task_leg=1
             events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\"$sess_frag}}"
         fi
     fi
@@ -351,14 +376,27 @@ EOF_IDLESS
     [ -n "$PR_ROLE" ] && _pr_frag="$_pr_frag,\"pr_role\":\"$PR_ROLE\""
     # (alias-resolved at ingest), under the same report-back:<msg> ref, never
     # beside a task event (one fact).
-    case ",$events," in
-        *'"event_type":"task"'*) ;;
-        *)
-            case "$STATUS" in
-                completed|failed|blocked|progress)
-                    events="$events,{\"event_type\":\"system\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"report_status\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"status\":\"$STATUS\",\"msg_id\":\"$PLANE_MSG_ID\"${_pr_frag:-}}}}" ;;
-            esac ;;
-    esac
+    # CASE 1 (#1710): scoped to THIS report's own leg. The old test was a
+    # substring match over the whole batch, and the id-less closing loop above
+    # appends a task event per OPEN ID-LESS ROW of this bot -- rows that carry
+    # no PR fields. So a bot holding any other id-less dispatch suppressed its
+    # own marker, and `_pr_frag` (the marker's only carrier) was written
+    # nowhere: a stored row bit-for-bit identical to "nobody reported". The
+    # comment above `_pr_frag` states the invariant the old guard refuted.
+    if [ "$_own_task_leg" -eq 0 ]; then
+        case "$STATUS" in
+            completed|failed|blocked|progress)
+                events="$events,{\"event_type\":\"system\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"report_status\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"status\":\"$STATUS\",\"msg_id\":\"$PLANE_MSG_ID\"${_pr_frag:-}}}}" ;;
+        esac
+    elif [ -n "$_pr_frag" ] && [ -z "$TASK_NAMED" ]; then
+        # The one path where declared PR fields reach no row: the link was
+        # auto-resolved, so they may not ride the task leg (case 2), and the
+        # marker is suppressed because that leg fired. Absent is the RULED
+        # outcome -- it is refusable, which wrong is not -- but absent must not
+        # also be silent, so the caller is told rather than left believing a
+        # role was recorded. Re-run with --task to attribute it.
+        printf "report-back: --pr/--pr-role NOT recorded: this report's task link was auto-resolved (#835), and an attribution may not ride a guessed id. Re-run with --task <id> to record it.\n" >&2
+    fi
     local _batch
     printf -v _batch '{"events":[%s]}' "$events"
     plane_emit_events report-back <<<"$_batch"            # same shell: PLANE_EMIT_LAST_RC reaches the ledger decision
