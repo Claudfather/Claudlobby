@@ -282,10 +282,21 @@ cleanup() {
     for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
+    # The #1573 admission bots run on sockets named after their own dirs, and
+    # live on a SHARED throwaway root rather than the default one, so neither
+    # the loop above nor the rm below reaches them without being told.
+    for _s in adbot1 adbot2 adbot3; do
+        command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
+    done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
     # still-alive ones so a mid-scenario abort never leaks a poller.
     # shellcheck disable=SC2086
     for _p in ${BH_PIDS:-}; do kill -TERM "$_p" 2>/dev/null || true; done
+    # A start-bot.sh backgrounded by the admission scenario can outlive an abort
+    # by its whole readiness window; each one holds an admission slot in the
+    # throwaway root while it does. Trap-owned, same rule as the boot probe.
+    # shellcheck disable=SC2086
+    for _p in ${AD_PIDS:-}; do kill -TERM "$_p" 2>/dev/null || true; done
     # The #1002 boot probe installs a REAL systemd user unit. Torn down from the
     # trap and ONLY the trap, so an abort mid-scenario cannot leave an enabled
     # throwaway unit behind on a production host.
@@ -311,7 +322,7 @@ cleanup() {
     fi
     [ -n "${PL_ROOT:-}" ] && rm -rf "$PL_ROOT" 2>/dev/null
     [ -n "${PL_SOCKDIR:-}" ] && rm -rf "$PL_SOCKDIR" 2>/dev/null
-    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "${CK2_ROOT2:-}" "$TMUX_TMPDIR"
+    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "${CK2_ROOT2:-}" "${AD_ROOT:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -2469,7 +2480,11 @@ BPCONF
     systemctl --user start --no-block "$BP_SVC" >/dev/null 2>&1 || true
 
     bp_state() { systemctl --user show -p ActiveState -p SubState --value "$BP_SVC" 2>/dev/null | paste -sd/ -; }
-    bp_starting() { service_is_starting "$BP_SVC"; }
+    # The bot dir is passed exactly as the two production consumers pass it
+    # (#1573 PR B). This probe has no .boot-queued marker, so every assertion
+    # below still exercises the SubState rung -- which is the point of this
+    # scenario -- while calling the door the way the fleet calls it.
+    bp_starting() { service_is_starting "$BP_SVC" "$BP_DIR"; }
 
     bp_pulse() {
         CLAUDLOBBY_ROOT="$BP_ROOT" CLAUDLOBBY_FLEET="$BP_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
@@ -2541,6 +2556,293 @@ BPCONF
     harness_check "CONTROL: a genuinely dead session on a settled unit still restarts" "$r"
 
 fi
+
+# ===========================================================================
+# #1573 PR B — the boot admission gate, and what a QUEUED bot looks like to
+# every consumer of service_is_starting.
+#
+# Composition cannot prove any of this. What matters is whether a SECOND bot
+# driven through the REAL start-bot.sh actually waits behind the first, whether
+# it carries data/.boot-queued for the whole of that wait, and whether the two
+# consumers that page and restart on an absent session leave it alone while it
+# does. Those are the three things the #304 lock it replaces got wrong.
+#
+# WHAT THIS SCENARIO CANNOT PROVE, stated here rather than left for a green
+# result to imply:
+#   * MCP startup contention -- the stub spawns no MCP servers, so the one
+#     resource the gate rations is absent from the test;
+#   * supervisor behaviour -- nothing here is enrolled with systemd or launchd;
+#   * that MCP_TIMEOUT reaches a live session.
+# Those are for the reboot proof, not for this harness.
+#
+# THE CONTROLLED HOLD, and the one place this departs from the written plan.
+# The plan says to stub bridge_state to answer no_bridge for a chosen number of
+# seconds. It is not stubbed, because the REAL predicate already answers that
+# way for a real reason and a stub would be the weaker instrument: a bot with a
+# TELEGRAM_BOT_HANDLE and no token resolves to no_token, which is NOT a
+# ready-at-once state unless the bot also declares EXPECT_NO_TOKEN -- so
+# wait_bridge_ready_state polls to its ceiling and the first bot's window is
+# exactly RC_READY_TIMEOUT_S, deterministically. What the plan was guarding
+# against is real and is guarded against: the harness's other throwaway bots
+# carry BOT_SERVICE="" and no handle, so bridge_state answers no_handle and
+# returns on its FIRST poll, and a scenario built on those would show a
+# sub-second hold in which "both granted at once" is indistinguishable from a
+# gate that does nothing.
+#
+# BOT_SERVICE is NON-EMPTY here for the same family of reasons, and it is
+# load-bearing: svc_unit_name is what the gate keys a ticket on, and with an
+# empty one boot_admission_acquire answers `unavailable` and proceeds UNGATED
+# (R16). A scenario copied from the harness's usual bot.conf shape would
+# therefore have tested nothing at all while passing.
+#
+# _OS IS NOT FORCED TO Darwin, and the substitute is stronger. The plan asks for
+# it so that a suppression can only have come from the platform-neutral marker
+# rung. Two reasons it is not done here: this harness fakes neither uname nor
+# _OS anywhere (the premise that it already does is false), and faking uname on
+# a Linux host would send stat_mtime down its BSD branch and break the marker
+# read under test. The same discrimination is obtained structurally instead:
+# every bot below names a BOT_SERVICE for a unit that does NOT EXIST, so on
+# Linux the SubState rung reads inactive/dead and refuses, and on Darwin it does
+# not run at all -- leaving the marker as the only thing that can answer 0, on
+# EITHER platform rather than on one.
+# ===========================================================================
+echo ""
+echo "=== validate #1573: the gate serializes bring-up; a queued bot is mid-boot ==="
+
+AD_FLEET="adfleet"
+AD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-ad.XXXXXX")"
+AD_BOTS="$AD_ROOT/local/$AD_FLEET/runtime/bots"
+AD_HOME="$AD_ROOT/home"
+mkdir -p "$AD_HOME/.claude" "$AD_ROOT/bin" "$AD_ROOT/tmp" "$AD_ROOT/lib" "$AD_BOTS"
+printf '{"skipAutoPermissionPrompt":true,"skipDangerousModePermissionPrompt":true}\n' \
+    > "$AD_HOME/.claude/settings.json"
+cat > "$AD_ROOT/bin/claude" <<'ADSTUB'
+#!/bin/bash
+exec cat
+ADSTUB
+chmod +x "$AD_ROOT/bin/claude"
+
+# A stub lib dir under the SHARED root, so keepalive-all.sh -- which resolves
+# its worker as $CLAUDLOBBY_ROOT/lib/keepalive.sh -- reaches the real scripts.
+# lib-common.sh sources supervisor.sh and boot-admission.sh from its own
+# directory, so both siblings must be staged beside it (the #1573 staging rule).
+for _ad_f in keepalive.sh start-bot.sh lib-common.sh supervisor.sh boot-admission.sh \
+             fleet-state-update.sh claude-session-pid.sh; do
+    [ -e "$AD_ROOT/lib/$_ad_f" ] || ln -s "$LIB_DIR/$_ad_f" "$AD_ROOT/lib/$_ad_f"
+done
+val_link_plane_shim "$AD_ROOT/lib"
+
+# ad_conf <name> <priority> <rc_ready_s> -- a composed-looking bot.conf for the
+# shared root. TMUX_SOCKET is pinned to the harness's own tmux-<session>
+# convention so this file's tmux shim and tmux_socket_for_bot resolve the SAME
+# server. RC_READY_TIMEOUT_S is this bot's HOLD: with a handle and no token the
+# readiness poll runs to its ceiling, so the slot is held for exactly that long.
+ad_conf() {
+    # $1 in the `d=` word, not $n: bash expands every word of a command BEFORE
+    # the builtin runs, so a `local` that refers to a name it is itself
+    # declaring reads the OUTER one -- unbound, and fatal under set -u.
+    local n="$1" prio="$2" rc_s="$3" d="$AD_BOTS/$1"
+    mkdir -p "$d/.claude" "$d/logs" "$d/data"
+    cat > "$d/bot.conf" <<ADCONF
+BOT_NAME="$n"
+BOT_ID="$n"
+BOT_LABEL="$n"
+BOT_SERVICE="$n-svc"
+TMUX_SOCKET="$(vsock "$n")"
+MANAGER_TMUX="$MGR"
+FLEET_PLUGINS_REQUIRED=""
+STARTUP_PROMPT="ZZZ_ADMARK"
+TELEGRAM_BOT_HANDLE="$n"
+RC_READY_TIMEOUT_S=$rc_s
+BOOT_PRIORITY=$prio
+BOOT_GRACE_S=600
+ADCONF
+    printf '%s' "$d"
+}
+# 45s is the window every cell below has to run inside, and it is a MARGIN, not
+# a measurement: the consumer ticks, the two plane reads and the sweep take
+# roughly 20s here. A tight window would make this scenario fail on a loaded
+# host and read as a regression in the gate.
+AD_D1="$(ad_conf adbot1 1 45)"
+AD_D2="$(ad_conf adbot2 1 4)"
+AD_D3="$(ad_conf adbot3 1 4)"
+
+# ad_start <bot_dir> <slots> [&] -- the REAL start-bot.sh against the shared root.
+ad_start() {
+    TMPDIR="$AD_ROOT/tmp" CLAUDE_BIN="$AD_ROOT/bin/claude" \
+        HOME="$AD_HOME" PATH="$AD_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$AD_ROOT" \
+        CLAUDLOBBY_FLEET="$AD_FLEET" BOOT_ADMISSION_SLOTS="$2" \
+        BOOT_ADMISSION_POLL_S=0.2 BOOT_ADMISSION_WAIT_MAX_S=60 \
+        "$LIB_DIR/start-bot.sh" "$1" >>"$AD_ROOT/startbot.$(basename "$1").out" 2>&1 || true
+}
+ad_grant_wait_s() {  # seconds the gate recorded this bot waiting, or "" if never granted
+    sed -n 's/.*ADMISSION_GRANTED slot=[0-9]* after \([0-9]*\)s.*/\1/p' \
+        "$1/logs/startup.log" 2>/dev/null | head -1 || true
+}
+ad_marker() { [ -f "$1/data/.boot-queued" ] && echo yes || echo no; }
+
+val_plane_ready "$AD_ROOT" "$AD_FLEET"
+
+# --- Arm the contention: bot 1 boots and holds its slot for its whole 6s
+# readiness window, bot 2 launches into the queue behind it. -----------------
+ad_start "$AD_D1" 1 &
+AD_P1=$!
+AD_PIDS="$AD_P1"
+# Wait for bot 1 to actually hold the slot before bot 2 arrives -- a fixed
+# sleep would make the whole scenario a race on host load.
+for _i in $(seq 1 100); do
+    [ -n "$(ad_grant_wait_s "$AD_D1")" ] && break
+    sleep 0.2
+done
+ad_start "$AD_D2" 1 &
+AD_P2=$!
+AD_PIDS="$AD_PIDS $AD_P2"
+# ...and for bot 2 to be parked in the wait loop. Polled on the gate's OWN
+# ADMISSION_WAIT line, not on the marker: the marker is written BEFORE the wait
+# loop runs its first iteration, and that iteration costs a reap plus two
+# directory scans -- measured at ~2s on a host at load 5. Breaking on the marker
+# alone therefore samples the log before the line can exist, and the assertion
+# below fails for a reason that has nothing to do with the gate.
+ad_waiting() { grep -q 'ADMISSION_WAIT' "$AD_D2/logs/startup.log" 2>/dev/null; }
+for _i in $(seq 1 150); do
+    ad_waiting && break
+    sleep 0.2
+done
+
+[ -n "$(ad_grant_wait_s "$AD_D1")" ] && r=yes || r=no
+harness_check "#1573 the first bot is granted a slot by the real gate" "$r"
+{ [ "$(ad_marker "$AD_D2")" = yes ] && [ -z "$(ad_grant_wait_s "$AD_D2")" ]; } && r=yes || r=no
+harness_check "#1573 the second bot WAITS, carrying data/.boot-queued while it does" "$r"
+ad_waiting && r=yes || r=no
+harness_check "#1573   ...and says so in its own log (ADMISSION_WAIT)" "$r"
+tmux has-session -t adbot2 2>/dev/null && r=no || r=yes
+harness_check "#1573   ...with NO tmux session yet — the absence both consumers must not act on" "$r"
+
+# --- Consumer A: keepalive must not restart a queued bot. -------------------
+AD_KL="$AD_D2/keepalive.log"
+: > "$AD_KL"
+CLAUDLOBBY_ROOT="$AD_ROOT" HOME="$AD_HOME" "$LIB_DIR/keepalive.sh" "$AD_D2" >/dev/null 2>&1 || true
+grep -q 'boot in flight' "$AD_KL" 2>/dev/null && r=yes || r=no
+harness_check "#1573 keepalive SKIPs a QUEUED bot (marker rung, no unit, no session)" "$r"
+grep -q 'RESTART' "$AD_KL" 2>/dev/null && r=no || r=yes
+harness_check "#1573   ...and issued no RESTART for it" "$r"
+
+# --- Consumer B: fleet-pulse must not page for a queued bot. ----------------
+# The blocker's own missing cell: the two consumers have to AGREE about one bot.
+# Both alert types are reachable here — the bot has a BOT_SERVICE naming a unit
+# that does not exist, so service_is_active fails — which is what makes the two
+# absences below mean something.
+ad_pulse() {
+    CLAUDLOBBY_ROOT="$AD_ROOT" CLAUDLOBBY_FLEET="$AD_FLEET" HOME="$AD_HOME" \
+        "$LIB_DIR/fleet-pulse.sh" "$AD_FLEET" >/dev/null 2>&1 || true
+}
+ad_pulse
+AD_EV2="$(val_events "$AD_ROOT" "$AD_FLEET" adbot2)"
+printf '%s' "$AD_EV2" | grep -q '"type":"session_missing"' && r=no || r=yes
+harness_check "#1573 fleet-pulse emits NO session_missing for a queued bot" "$r"
+printf '%s' "$AD_EV2" | grep -q '"type":"service_down"' && r=no || r=yes
+harness_check "#1573   ...and no service_down either (same tick, same non-problem)" "$r"
+
+# --- CONTROL: the same tick, the same tree, a bot that is genuinely absent. --
+# Without this, "fleet-pulse stayed quiet" is indistinguishable from
+# "fleet-pulse is broken here" or "this bot was never scanned".
+AD_EV3="$(val_events "$AD_ROOT" "$AD_FLEET" adbot3)"
+printf '%s' "$AD_EV3" | grep -q '"type":"session_missing"' && r=yes || r=no
+harness_check "#1573 CONTROL: a bot with NO marker and no session DOES page session_missing" "$r"
+printf '%s' "$AD_EV3" | grep -q '"type":"service_down"' && r=yes || r=no
+harness_check "#1573 CONTROL:   ...and service_down — so the two absences above are real" "$r"
+
+# --- The serial sweep, and the bound it has to stay inside. -----------------
+# keepalive-all runs bots ONE AT A TIME and keepalive's restart fallback invokes
+# start-bot.sh SYNCHRONOUSLY, so a queued bot that the watchdog mistakes for a
+# dead one stalls every later bot's tick behind a full queue wait — on a timer
+# that fires every 60s. The bound is that tick interval.
+mkdir -p "$AD_HOME/Library/LaunchAgents" "$AD_HOME/.config/systemd/user"
+for _n in adbot1 adbot2; do
+    : > "$AD_HOME/Library/LaunchAgents/$_n-svc.plist"
+    : > "$AD_HOME/.config/systemd/user/$_n-svc.service"
+done
+AD_T0=$(date +%s)
+CLAUDLOBBY_ROOT="$AD_ROOT" CLAUDLOBBY_FLEET="$AD_FLEET" HOME="$AD_HOME" \
+    "$LIB_DIR/keepalive-all.sh" "$AD_BOTS" >/dev/null 2>&1 || true
+AD_SWEEP=$(( $(date +%s) - AD_T0 ))
+[ "$AD_SWEEP" -lt 60 ] && r=yes || r=no
+harness_check "#1573 a serial sweep with one QUEUED bot finishes inside its 60s tick (took ${AD_SWEEP}s)" "$r"
+
+# The scoped cap that keeps that true when a restart genuinely does happen: a
+# recorder in the worker's place, so what is asserted is that the value REACHES
+# the child, not that a comment says it is exported.
+mv "$AD_ROOT/lib/keepalive.sh" "$AD_ROOT/lib/keepalive.real"
+cat > "$AD_ROOT/lib/keepalive.sh" <<'ADREC'
+#!/bin/bash
+printf '%s %s\n' "$(basename "$1")" "${BOOT_ADMISSION_CALLER_CAP_S:-UNSET}" >> "$AD_CAP_LOG"
+ADREC
+chmod +x "$AD_ROOT/lib/keepalive.sh"
+AD_CAP_LOG="$AD_ROOT/caps.log"; : > "$AD_CAP_LOG"
+AD_CAP_LOG="$AD_CAP_LOG" CLAUDLOBBY_ROOT="$AD_ROOT" CLAUDLOBBY_FLEET="$AD_FLEET" HOME="$AD_HOME" \
+    "$LIB_DIR/keepalive-all.sh" "$AD_BOTS" >/dev/null 2>&1 || true
+rm -f "$AD_ROOT/lib/keepalive.sh"
+mv "$AD_ROOT/lib/keepalive.real" "$AD_ROOT/lib/keepalive.sh"
+# Each bot's own RC_READY_TIMEOUT_S (45 and 4 above) plus the sweep's 60s tick.
+# Two DIFFERENT expected values, deliberately: one would pass against a constant.
+{ grep -qx 'adbot1 105' "$AD_CAP_LOG" && grep -qx 'adbot2 64' "$AD_CAP_LOG"; } 2>/dev/null && r=yes || r=no
+harness_check "#1573 keepalive-all scopes the admission cap PER BOT (RC_READY_TIMEOUT_S + 60)" "$r"
+grep -q 'UNSET' "$AD_CAP_LOG" 2>/dev/null && r=no || r=yes
+harness_check "#1573   ...for every bot it sweeps, never only the first" "$r"
+
+# --- Release: the queue drains and the marker goes with the slot. -----------
+wait "$AD_P1" 2>/dev/null || true
+wait "$AD_P2" 2>/dev/null || true
+AD_W1="$(ad_grant_wait_s "$AD_D1")"
+AD_W2="$(ad_grant_wait_s "$AD_D2")"
+{ [ -n "$AD_W2" ] && [ "$AD_W2" -ge 3 ]; } && r=yes || r=no
+harness_check "#1573 the queued bot is granted once the first releases, after a real wait (${AD_W2:-none}s)" "$r"
+# The first bot's "did not wait" is the ABSENCE of an ADMISSION_WAIT line, not a
+# second on the clock. Measured: a host at load 5 spent 2s inside the gate's
+# FIRST loop -- reap plus two directory scans -- so a `granted after <= 1s` gate
+# fails on load rather than on a regression. The absence is exact: the line is
+# written by the loop that did not grant, so a bot granted on its first pass
+# cannot have one. Both numbers stay in the description for the reader.
+grep -q 'ADMISSION_WAIT' "$AD_D1/logs/startup.log" 2>/dev/null && r=no || r=yes
+harness_check "#1573   ...while the first bot never queued at all (${AD_W1:-none}s vs ${AD_W2:-none}s) — the order, from the grant lines" "$r"
+{ [ "$(ad_marker "$AD_D1")" = no ] && [ "$(ad_marker "$AD_D2")" = no ]; } && r=yes || r=no
+harness_check "#1573 both markers are gone after release — a settled bot is no longer mid-boot" "$r"
+
+# --- POSITIVE CONTROL: two slots, and nothing should wait. ------------------
+# Without it, "contended for the wrong reason" is indistinguishable from
+# "works": a scenario in which the second bot happens to be slow would pass
+# every assertion above against a gate that never granted anything in parallel.
+rm -rf "$AD_ROOT/state/boot"
+for _n in adbot1 adbot2; do
+    command tmux -L "$(vsock "$_n")" kill-server 2>/dev/null || true
+    : > "$AD_BOTS/$_n/logs/startup.log"
+done
+# Same two bots, same shared root, same everything EXCEPT the slot count -- the
+# one variable under test. Re-composed only to shorten both holds: nothing in
+# this phase waits, so a 45s window would buy nothing but run time.
+AD_D1="$(ad_conf adbot1 1 3)"
+AD_D2="$(ad_conf adbot2 1 3)"
+ad_start "$AD_D1" 2 &
+AD_P1B=$!
+ad_start "$AD_D2" 2 &
+AD_P2B=$!
+AD_PIDS="$AD_PIDS $AD_P1B $AD_P2B"
+wait "$AD_P1B" 2>/dev/null || true
+wait "$AD_P2B" 2>/dev/null || true
+AD_W1B="$(ad_grant_wait_s "$AD_D1")"
+AD_W2B="$(ad_grant_wait_s "$AD_D2")"
+{ [ -n "$AD_W1B" ] && [ -n "$AD_W2B" ]; } && r=yes || r=no
+harness_check "#1573 CONTROL: at 2 slots BOTH bots are granted (${AD_W1B:-none}s / ${AD_W2B:-none}s)" "$r"
+# Same reasoning as above: the load-independent statement of "at once" is that
+# NEITHER loop ever reached the wait branch, which is exact where a second on
+# the clock is not.
+{ grep -q 'ADMISSION_WAIT' "$AD_D1/logs/startup.log" ||
+  grep -q 'ADMISSION_WAIT' "$AD_D2/logs/startup.log"; } 2>/dev/null && r=no || r=yes
+harness_check "#1573 CONTROL:   ...and NEITHER queued — no ADMISSION_WAIT in either log" "$r"
+
+for _n in adbot1 adbot2 adbot3; do
+    command tmux -L "$(vsock "$_n")" kill-server 2>/dev/null || true
+done
 
 # ===========================================================================
 # #1019 — the GitHub mention guard. Bots wrote @teammate in PR comments;

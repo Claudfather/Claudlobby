@@ -727,6 +727,140 @@ OUT_V="$(BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=10 bash -c '. "$LIB_DI
 assert_eq "stdout carries the verdict and nothing else" "granted:0" "$OUT_V"
 assert_true "the gate log lines went to \$LOG, not stdout" "$([ -s "$BOT_V/logs/startup.log" ] && echo true || echo false)"
 
+echo "=== (R7b) a QUEUED bot is mid-boot to service_is_starting, under real contention ==="
+
+# The one thing the Python suite cannot reach. tests/test_service_is_starting.py
+# pins the predicate against a HAND-WRITTEN marker and against one real acquire,
+# both in a single process with nothing contending. What is only observable here
+# is the state the whole PR exists for: a bot PARKED IN THE WAIT LOOP behind
+# another bot holding the only slot, asked by the very predicate keepalive and
+# fleet-pulse ask, in a process that is not the one waiting.
+#
+# It is also the only place the marker's WHOLE LIFETIME is visible: queued ->
+# granted -> released, with the predicate consulted at each step. Written this
+# way rather than as three cells because the transitions are what matter -- a
+# marker that never appears and one that never goes away both satisfy any
+# single-instant assertion.
+#
+# _OS is pinned to Darwin for the asks, deliberately: rung 2 is unreachable
+# there, so a rc 0 can ONLY have come from the marker. On Linux the stubless
+# systemctl call for a unit that does not exist would answer inactive/dead and
+# reach the same verdict, but by elimination rather than by proof.
+reset_state
+: > "$GRANT_LOG"
+BOT_H="$(mkbot q-holder svc-q-holder 1)"
+BOT_Q="$(mkbot q-queued svc-q-queued 1)"
+ask_starting() {  # ask_starting <bot_dir> -- prints yes|no, as a consumer would
+    ( _OS="Darwin"; service_is_starting "$(bot_conf_get "$1" BOT_SERVICE "")" "$1" \
+        && echo yes || echo no )
+}
+assert_eq "before either boots, neither is mid-start" "no" "$(ask_starting "$BOT_Q")"
+OUT_H="$T/qh.verdict"; OUT_Q="$T/qq.verdict"
+# The holder keeps its slot for 6s, which is this cell's stand-in for the
+# readiness poll start-bot.sh releases after.
+launch "$BOT_H" 6 "$OUT_H" BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=40
+P_H="$LAUNCH_PID"
+wait_for 10 file_present "$OUT_H" || true
+assert_eq "the holder is granted" "granted:0" "$(cat "$OUT_H" 2>/dev/null || true)"
+assert_eq "a GRANTED bot is still mid-boot (one marker, acquire to release)" "yes" "$(ask_starting "$BOT_H")"
+launch "$BOT_Q" 0 "$OUT_Q" BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=40
+P_Q="$LAUNCH_PID"
+wait_for 10 have_ticket svc-q-queued || true
+assert_eq "the second bot is queued, not granted" "false" "$(exists "$OUT_Q")"
+assert_eq "a QUEUED bot reads as mid-boot -- the whole point of the marker" "yes" "$(ask_starting "$BOT_Q")"
+# And the negative that makes it mean something: a bot that never launched is
+# sitting in the same tree, at the same instant, and reads as NOT starting.
+BOT_N="$(mkbot q-never svc-q-never 1)"
+assert_eq "a bot that never launched reads as NOT starting (same tree, same instant)" "no" "$(ask_starting "$BOT_N")"
+wait "$P_Q" 2>/dev/null || true
+wait "$P_H" 2>/dev/null || true
+assert_eq "the queued bot is granted once the holder releases" "granted:0" "$(cat "$OUT_Q" 2>/dev/null || true)"
+assert_eq "after release the holder is no longer mid-boot" "no" "$(ask_starting "$BOT_H")"
+assert_eq "after release the second bot is no longer mid-boot either" "no" "$(ask_starting "$BOT_Q")"
+assert_eq "no marker survives either bot" "false" \
+    "$([ -e "$BOT_H/data/.boot-queued" ] || [ -e "$BOT_Q/data/.boot-queued" ] && echo true || echo false)"
+
+echo "=== resolve_boot_epoch: the key both doors use must not move mid-boot ==="
+
+# Found by wiring the real call site (task 2) and measured, not reasoned.
+# lib/start-bot.sh REBUILDS PATH partway through a boot, without /usr/sbin --
+# where macOS keeps `sysctl`. So resolve_boot_epoch answered a real epoch at
+# ACQUIRE (before the rebuild) and NOTHING at RELEASE (after it): the gate took
+# a slot under state/boot/<epoch> and released under state/boot/admission-noepoch,
+# so every release removed nothing while still logging ADMISSION_RELEASED, and a
+# slot was only ever freed later by the reaper noticing the launcher had exited.
+# Measured before the fix: the queued bot was granted 6s after the holder
+# released. After it: the same instant.
+#
+# Platform-neutral BY CONSTRUCTION rather than by a macOS guard: the assertion
+# is that the two PATHs AGREE, which is true on Linux for a different reason and
+# false on macOS for the reason above. A guard would have skipped the only host
+# the defect lives on.
+EPOCH_PATH_FULL="$(unset CLAUDLOBBY_BOOT_EPOCH; . "$LIB_DIR/lib-common.sh"; resolve_boot_epoch 2>/dev/null || true)"
+EPOCH_PATH_SB="$(unset CLAUDLOBBY_BOOT_EPOCH; PATH=/usr/local/bin:/usr/bin:/bin; . "$LIB_DIR/lib-common.sh"; resolve_boot_epoch 2>/dev/null || true)"
+assert_true "an epoch resolves at all on this host" "$([ -n "$EPOCH_PATH_FULL" ] && echo true || echo false)"
+assert_eq "the SAME epoch resolves under start-bot own rebuilt PATH" "$EPOCH_PATH_FULL" "$EPOCH_PATH_SB"
+
+# And it is an EPOCH, not some other field of the same line. The macOS source
+# reads `{ sec = 1789152060, usec = 890487 }`, and an unanchored `.*sec` is
+# greedy: it backtracked into `usec` and this function returned the
+# MICROSECONDS as the boot epoch on every macOS host. A stale usec is a small
+# number that collides across boots, which is exactly what R14 -- a prior-epoch
+# tree is stale UNCONDITIONALLY -- must never have to guess about.
+EPOCH_NOW="$(/bin/date +%s)"
+assert_true "the epoch is in the past and inside the last decade (not a usec)" \
+    "$([ -n "$EPOCH_PATH_FULL" ] && [ "$EPOCH_PATH_FULL" -le "$EPOCH_NOW" ] \
+        && [ "$EPOCH_PATH_FULL" -gt "$(( EPOCH_NOW - 315360000 ))" ] && echo true || echo false)"
+
+# The parse itself, against the real macOS line shape, on EITHER platform: an
+# `uptime` that refuses -s (what macOS does) and a `sysctl` that answers the
+# documented shape. Without both stubs a Linux host would answer from
+# `uptime -s` and never reach the branch that carried the defect.
+mkdir -p "$T/epochstub"
+cat > "$T/epochstub/uptime" <<'FAKEUPTIME'
+#!/bin/sh
+echo "uptime: illegal option -- s" >&2
+exit 1
+FAKEUPTIME
+cat > "$T/epochstub/sysctl" <<'FAKESYSCTL'
+#!/bin/sh
+printf '%s\n' "{ sec = 1789152060, usec = 890487 } Fri Sep 11 14:41:00 2026"
+FAKESYSCTL
+chmod +x "$T/epochstub/uptime" "$T/epochstub/sysctl"
+EPOCH_PARSED="$(unset CLAUDLOBBY_BOOT_EPOCH; PATH="$T/epochstub:$PATH"; . "$LIB_DIR/lib-common.sh"; resolve_boot_epoch 2>/dev/null || true)"
+assert_eq "kern.boottime parses to the SEC, never the usec" "1789152060" "$EPOCH_PARSED"
+
+echo "=== the call site in start-bot.sh is the one the fixture stands in for ==="
+
+# The launcher fixture above is a STAND-IN for lib/start-bot.sh, and a stand-in
+# that has drifted from the thing it stands for certifies nothing. These are
+# textual, deliberately: the behavioural proof of the real call site is
+# lib/validate-bot-change.sh, which boots it. What a text check CAN own is that
+# the three lines exist at all and are shaped the way R11 and R17 require.
+SB="$LIB_DIR/start-bot.sh"
+SB_ACQUIRE='_adm="$(boot_admission_acquire "$BOT_DIR")"'
+SB_TRAP='trap '"'"'boot_admission_release "$BOT_DIR"; _lc_cleanup'"'"' EXIT'
+SB_RELEASE='boot_admission_release "$BOT_DIR"'
+
+assert_eq "start-bot.sh acquires, capturing the verdict (R17)" "1" \
+    "$(grep -cF "$SB_ACQUIRE" "$SB" || true)"
+assert_eq "start-bot.sh composes _lc_cleanup into its EXIT trap (R11)" "1" \
+    "$(grep -cF "$SB_TRAP" "$SB" || true)"
+# Exactly ONE top-level EXIT trap, and the assertion above already says which.
+# Any second one would overwrite it -- and a bare `trap ... EXIT` is the R11
+# mutant: it drops lib-commons source-time cleanup and leaks one mktemp -d per
+# bot start, on every bot, on every host, forever.
+assert_eq "start-bot.sh sets exactly one EXIT trap" "1" \
+    "$(grep -cE "^[[:space:]]*trap .* EXIT" "$SB" || true)"
+assert_eq "start-bot.sh releases explicitly, not only from the trap" "1" \
+    "$(grep -cxF "$SB_RELEASE" "$SB" || true)"
+# ORDER, not just presence: a release placed after the two pane sends would hold
+# a slot across the 10-19s TUI-draw wait for no benefit to any waiting bot.
+SB_REL_LN="$(grep -nxF "$SB_RELEASE" "$SB" | head -1 | cut -d: -f1 || true)"
+SB_SEND_LN="$(grep -n 'pane_send_verified "\$TMUX_SOCKET"' "$SB" | head -1 | cut -d: -f1 || true)"
+assert_true "release precedes the first pane_send_verified" \
+    "$([ -n "$SB_REL_LN" ] && [ -n "$SB_SEND_LN" ] && [ "$SB_REL_LN" -lt "$SB_SEND_LN" ] && echo true || echo false)"
+
 echo "=== both emitted event types are registered (#903) ==="
 
 # An event type nothing names is one no reader can filter FOR, and the rows

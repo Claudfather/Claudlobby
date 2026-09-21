@@ -83,30 +83,48 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # restart. The restart proceeds regardless of the handoff outcome.
     "$LIB_DIR/pre-stop-handoff.sh" "$bot_dir" >> "$LOG" 2>&1 || true
 
-    if "$LIB_DIR/spin-up-bot.sh" "$bot_dir" >> "$LOG" 2>&1; then
-        # F4 coupling: bot.conf is the carrier for the launcher's OWN readiness
-        # ceiling (RC_READY_TIMEOUT_S, composed from host.boot.mcp_timeout_ms),
-        # and start-bot.sh writes BRIDGE_READY only AFTER that poll finishes —
-        # so a fixed gate shorter than it alerts bridge_down on a bot that is
-        # merely slow and healthy (the composed ceiling is 200 at this tip; the
-        # old fixed 180 sat inside that band, and the band widens with every
-        # raise of mcp_timeout_ms). Derive from the bot's own composed value plus
-        # the margin for pre-stop-handoff + spin-up + the poller settle, so a
-        # policy change moves this driver too. WEEKLY_RESTART_CEILING stays the
-        # operator override and wins when set.
-        _wr_rc_s="$(bot_conf_get "$bot_dir" RC_READY_TIMEOUT_S 90)"
-        case "$_wr_rc_s" in ''|*[!0-9]*) _wr_rc_s=90 ;; esac
-        # 10# forces base 10 -- the digits guard admits a ZERO-PADDED value and
-        # bare $(( 090 )) is read as octal ("value too great for base"). What
-        # that costs here is worse than an abort, and is MEASURED rather than
-        # reasoned: bash treats an expansion error as a discard of the
-        # enclosing command, so the rest of this iteration AND every remaining
-        # iteration of the per-bot loop are skipped -- yet the script runs on
-        # to its summary line and exits 0. One zero-padded bot would silently
-        # truncate the weekly bounce, leaving every later worker un-restarted
-        # under a "RESTART complete" line, with the shell's diagnostic going
-        # to the journal rather than to this log.
-        _wr_ceiling="${WEEKLY_RESTART_CEILING:-$((10#$_wr_rc_s + 120))}"
+    # F4 coupling: bot.conf is the carrier for the launcher's OWN readiness
+    # ceiling (RC_READY_TIMEOUT_S, composed from host.boot.mcp_timeout_ms),
+    # and start-bot.sh writes BRIDGE_READY only AFTER that poll finishes —
+    # so a fixed gate shorter than it alerts bridge_down on a bot that is
+    # merely slow and healthy (the composed ceiling is 200 at this tip; the
+    # old fixed 180 sat inside that band, and the band widens with every
+    # raise of mcp_timeout_ms). Derive from the bot's own composed value plus
+    # the margin for pre-stop-handoff + spin-up + the poller settle, so a
+    # policy change moves this driver too. WEEKLY_RESTART_CEILING stays the
+    # operator override and wins when set.
+    #
+    # Derived BEFORE the spin-up (it used to sit after it) because it is now
+    # also the admission gate's SCOPED cap for the bring-up this bounce starts
+    # (#1573 PR B). This bounce restarts workers ONE AT A TIME, so it IS the
+    # serializer and a worker must not also pay the host queue's cap: left to
+    # the 1200s default, a worker that is merely QUEUED would outlast this
+    # driver's own ceiling and be alerted as a bridge_down it never had. One
+    # number, both roles, so the ceiling stays true by construction.
+    #
+    # BOUND: spin-up-bot.sh hands the bring-up to the host supervisor on both
+    # supported platforms, and a supervisor-relaunched start-bot.sh inherits the
+    # unit's environment rather than this one; the export covers spin-up-bot's
+    # direct-exec fallback branch and nothing more. lib/-internal call
+    # convention, never composed, never an operator knob, and deliberately NOT
+    # BOOT_ADMISSION_WAIT_MAX_S (F4 locks the composed value as the winner over
+    # the env for that key).
+    _wr_rc_s="$(bot_conf_get "$bot_dir" RC_READY_TIMEOUT_S 90)"
+    case "$_wr_rc_s" in ''|*[!0-9]*) _wr_rc_s=90 ;; esac
+    # 10# forces base 10 -- the digits guard admits a ZERO-PADDED value and
+    # bare $(( 090 )) is read as octal ("value too great for base"). What
+    # that costs here is worse than an abort, and is MEASURED rather than
+    # reasoned: bash treats an expansion error as a discard of the
+    # enclosing command, so the rest of this iteration AND every remaining
+    # iteration of the per-bot loop are skipped -- yet the script runs on
+    # to its summary line and exits 0. One zero-padded bot would silently
+    # truncate the weekly bounce, leaving every later worker un-restarted
+    # under a "RESTART complete" line, with the shell's diagnostic going
+    # to the journal rather than to this log.
+    _wr_ceiling="${WEEKLY_RESTART_CEILING:-$((10#$_wr_rc_s + 120))}"
+
+    if BOOT_ADMISSION_CALLER_CAP_S="$_wr_ceiling" \
+        "$LIB_DIR/spin-up-bot.sh" "$bot_dir" >> "$LOG" 2>&1; then
         # Serialize on the Telegram bridge: wait for THIS worker's poller to come
         # ready before bouncing the next, so an all-workers weekly bounce cannot
         # mass-starve channel init (#688/#689). A gate timeout is logged + alerted

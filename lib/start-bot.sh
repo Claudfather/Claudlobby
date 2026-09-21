@@ -11,6 +11,46 @@ BOT_DIR="${1:?Usage: start-bot.sh /path/to/bot/dir}"
 install_error_trap "$BOT_DIR"
 load_bot_conf "$BOT_DIR"
 
+# --- The boot admission gate (#1573, PR B) -----------------------------------
+# This is where the #304 host-wide boot lock used to sit, and the gate REPLACES
+# it rather than sitting beside it: N host-derived slots instead of one,
+# managers first instead of arrival order, a dispersed wait cap instead of a
+# flat 120s, and a reaper instead of an age-based force-claim. The library is
+# lib/boot-admission.sh; every knob it reads (BOOT_ADMISSION_SLOTS,
+# BOOT_PRIORITY, BOOT_ADMISSION_WAIT_MAX_S, BOOT_HOLD_CEILING_S,
+# RC_READY_TIMEOUT_S) arrives through the load_bot_conf above, which is why the
+# call sits here rather than after the .env tier sourcing further down.
+#
+# That wording avoids naming the tier-sourcing FUNCTION on purpose:
+# tests/test_session_cli_path.py locates it with a substring search over every
+# line of this file, comments included, so a comment that spelled it out moved
+# the marker to line 21 and broke an ordering assertion about line 50.
+#
+# LOG is hoisted to here because the gate writes every line it has to the CALL
+# SITE's log and never assigns LOG itself. The later `LOG=...; setup_log_dir`
+# pairs are now re-statements of the same value, left where they are so each
+# block still reads standalone.
+#
+# The verdict is CAPTURED, never branched on. granted / timeout / unavailable /
+# disabled all proceed identically from here: the library has already logged
+# and evented each one, and a gate that could refuse a boot outright would be
+# the failure it replaces rather than a fix. Capturing it is also the contract
+# (R17) -- the door prints the verdict and nothing else on stdout, so an
+# uncaptured call would leak that word into this script's own stdout, i.e. the
+# journal, on every start.
+#
+# The trap COMPOSES _lc_cleanup rather than replacing it (R11). lib-common
+# installs `trap '_lc_cleanup' EXIT` at source time to remove its own
+# `mktemp -d`; a bare `trap ... EXIT` here would silently drop that and leak one
+# temp dir per bot start, on every bot, on every host, forever. The ERR trap
+# install_error_trap set above is a different trap and is untouched.
+LOG="$BOT_DIR/logs/startup.log"
+setup_log_dir "$LOG"
+# shellcheck disable=SC2034  # captured to keep the verdict off stdout (R17); every verdict proceeds
+_adm="$(boot_admission_acquire "$BOT_DIR")"
+trap 'boot_admission_release "$BOT_DIR"; _lc_cleanup' EXIT
+# --- end boot admission gate -------------------------------------------------
+
 export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}
 session_cli_path
 export HOME="$HOME"
@@ -393,6 +433,24 @@ case "$_wait_rc" in
         emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s},\"last_state\":\"${_bstate}\",\"auth_cache_armed\":${_auth_cache_armed}}"
         ;;
 esac
+
+# --- Release the admission slot (#1573, PR B) --------------------------------
+# The readiness poll has ended -- READY (rc 0) or TIMEOUT (rc *), the two arms
+# that fall through to here. The CRASH arm (rc 2) exited above and its release
+# is the EXIT trap's; so is every `set -e` abort and every signal. Release is
+# idempotent by the library's contract, so the trap firing afterwards is a
+# no-op rather than a second release.
+#
+# Released HERE, before the two pane_send_verified sends below, deliberately:
+# the TUI-draw wait those sends pay is 10-19s and longer under load
+# (lib/boot-strand-sampler.sh t_glyph), it contends for none of the MCP startup
+# capacity the gate rations, and holding a slot across it would inflate the
+# hold ceiling for no benefit to any waiting bot.
+#
+# The .boot-queued marker goes with it, which is the point: from here on this
+# bot has a session, so an absent one really is absent and both consumers of
+# service_is_starting should say so again.
+boot_admission_release "$BOT_DIR"
 
 # No sleep here, and no readiness assumption either. The bridge-readiness wait
 # above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn

@@ -166,11 +166,30 @@ rr_process_fleet() {
 
         echo "$(ts_iso) RESTART: $bot_id" >> "$LOG"
         "$LIB_DIR/pre-stop-handoff.sh" "$bot_dir" >> "$LOG" 2>&1 || true
-        if ! "$LIB_DIR/spin-up-bot.sh" "$bot_dir" >> "$LOG" 2>&1; then
+        # The ceiling is derived BEFORE the spin-up, not after, because it is
+        # now two things: this driver's BRIDGE_READY budget (below) and the
+        # admission gate's SCOPED cap for the bring-up it is about to start
+        # (#1573 PR B). A roll brings bots up ONE AT A TIME, so the roll IS the
+        # serializer and this bot must not also pay the host queue's cap: left
+        # to the 1200s default, a bot that is merely QUEUED would outlast
+        # rr_bot_ceiling and hard-stop the whole roll. Deriving both from the
+        # one number is what keeps rr_bot_ceiling true by construction rather
+        # than by coincidence -- the mechanism fix, where widening this
+        # driver's ceiling would have been the instance fix.
+        #
+        # BOUND: spin-up-bot.sh hands the bring-up to the host supervisor on
+        # both supported platforms, and a supervisor-relaunched start-bot.sh
+        # inherits the unit's environment, not this one. The export therefore
+        # covers spin-up-bot's direct-exec fallback branch and nothing more.
+        # lib/-internal call convention, never composed, never an operator knob,
+        # and deliberately NOT BOOT_ADMISSION_WAIT_MAX_S (F4 locks the composed
+        # value as the winner over the env for that key).
+        ceiling="$(rr_bot_ceiling "$bot_dir")"
+        if ! BOOT_ADMISSION_CALLER_CAP_S="$ceiling" \
+            "$LIB_DIR/spin-up-bot.sh" "$bot_dir" >> "$LOG" 2>&1; then
             rr_fail "$fleet" "$bot_id" "$bots_dir" "spin-up-bot failed" || return 1
             continue
         fi
-        ceiling="$(rr_bot_ceiling "$bot_dir")"
         if wait_bridge_ready "$bot_dir" "$ceiling" "$fence"; then
             echo "$(ts_iso) READY: $bot_id" >> "$LOG"; RESTARTED=$((RESTARTED + 1))
         else

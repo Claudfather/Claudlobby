@@ -1,0 +1,60 @@
+{
+  "_README": [
+    "The checked-in consumer map for lib/ doors whose SIGNATURE or MEANING changed,",
+    "enforced by tests/test_door_consumers.py. Keyed by FILE and CALL COUNT, never by",
+    "line number -- lines move on every edit and a line-keyed map would be stale before",
+    "it was reviewed.",
+    "",
+    "Why this file exists: every unlisted consumer of a changed door is a defect of the",
+    "PLAN, not of a call site. When service_is_starting gained an optional second",
+    "argument (#1573 PR B) the two fleet-pulse call sites were missing from the first",
+    "draft of the plan -- and because the argument is OPTIONAL, nothing would have",
+    "broken loudly: fleet-pulse would simply never gain the marker rung, and on launchd",
+    "a queued bot would page session_missing AND service_down once per tick for its",
+    "whole admission wait. The boundary is greppable, so a test can own it.",
+    "",
+    "A door leaves this file once every consumer has been migrated AND the door's old",
+    "shape is gone, not merely once the PR that changed it has merged."
+  ],
+  "doors": {
+    "service_is_starting": {
+      "definition": "lib/lib-common.sh",
+      "changed_in": "#1573 PR B",
+      "change": "gained an optional [bot_dir] second argument; its first rung reads <bot_dir>/data/.boot-queued on BOTH OSes, ahead of the Linux-only systemd SubState rung. Every runtime consumer must pass a bot dir, and none may sit behind a `[ -n \"$BOT_SERVICE\" ] &&` short-circuit -- the marker rung needs no unit name, and gating on one made it unreachable for exactly the bots that have none.",
+      "consumers": {
+        "lib/fleet-pulse.sh": {
+          "calls": 2,
+          "bot_dir": "required",
+          "why": "the alerting side: the main loop's boot gate (session_missing / service_down) and the summary block's `starting` column. Two verdicts about one bot if they disagree."
+        },
+        "lib/keepalive.sh": {
+          "calls": 1,
+          "bot_dir": "required",
+          "why": "the healing side: the dead-session watchdog's SKIP. Restarting a boot in flight kills the very start that would have created the session (#1002)."
+        },
+        "lib/validate-bot-change.sh": {
+          "calls": 1,
+          "bot_dir": "required",
+          "why": "bp_starting, the #1002 boot-window scenario's probe. Calls the door the way the fleet calls it so the scenario cannot pass against a signature production does not use."
+        },
+        "tests/test_boot_admission.sh": {
+          "calls": 1,
+          "bot_dir": "driver",
+          "why": "the gate's own suite asks the predicate about a bot PARKED IN THE WAIT LOOP behind another bot holding the only slot — the one state no single-process test can reach, and the state the whole PR exists for."
+        },
+        "tests/test_service_is_starting.py": {
+          "calls": 2,
+          "bot_dir": "driver",
+          "why": "the door's own suite drives it directly: once through the stubbed-unit-state harness (with and without a bot dir, on both forced platforms), and once immediately after a REAL boot_admission_acquire, which is what pins the marker format the gate writes against the parse this door does. A driver is exempt from the arity rule BECAUSE varying the arity is what it tests."
+        }
+      }
+    }
+  },
+  "deferred": {
+    "boot_rung_for": {
+      "definition": "lib/lib-common.sh",
+      "planned_change": "#1573 PR C (F11) retires the composed systemd boot stagger; every reader of the rung moves with it.",
+      "note": "Recorded here so PR C adds its row to this map rather than repeating the exercise. NOT enforced yet: the door is unchanged, so a map for it would fence a boundary nothing is moving."
+    }
+  }
+}

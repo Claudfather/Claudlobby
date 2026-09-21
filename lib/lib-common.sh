@@ -3906,9 +3906,35 @@ resolve_boot_epoch() {
         if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
     fi
     # macOS has no `uptime -s`; kern.boottime prints  { sec = 1786..., usec = ... }
-    s="$(sysctl -n kern.boottime 2>/dev/null)"
+    #
+    # The binary is looked up by ABSOLUTE PATH as well as on PATH, and that is
+    # not defensive padding -- it is the fix for a measured defect. `sysctl`
+    # lives in /usr/sbin on macOS, and lib/start-bot.sh REBUILDS PATH partway
+    # through a boot without /usr/sbin in it. So a bare `sysctl` resolved before
+    # that rebuild and not after, and this function answered a REAL epoch at one
+    # point in a single boot and NOTHING a few lines later -- silently, since
+    # every caller treats an empty epoch as a legitimate degraded state.
+    #
+    # Measured on macOS: the admission gate acquired its slot under
+    # state/boot/<epoch> and released it under state/boot/admission-noepoch, so
+    # every release removed nothing while logging ADMISSION_RELEASED, and a slot
+    # was only ever freed later by the reaper noticing the launcher had exited.
+    # The same split reaches every other epoch-keyed tenant downstream of that
+    # rebuild (the once-per-boot plugin-update stamp, boot-capture).
+    local sysctl_bin
+    for sysctl_bin in sysctl /usr/sbin/sysctl /sbin/sysctl; do
+        s="$("$sysctl_bin" -n kern.boottime 2>/dev/null)" && [ -n "$s" ] && break
+        s=""
+    done
     if [ -n "$s" ]; then
-        e="$(printf '%s\n' "$s" | sed -n 's/.*sec *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
+        # Anchored, because `.*sec` is GREEDY and the line reads
+        #   { sec = 1789152060, usec = 890487 } Fri Sep 11 14:41:00 2026
+        # -- so the unanchored form backtracked to the LAST `sec *= *<digits>`,
+        # which is inside `usec`, and this function returned the MICROSECONDS as
+        # the boot epoch on every macOS host. Measured: 890487 where the epoch
+        # was 1789152060. `^[^0-9]*` cannot reach `usec`, because doing so would
+        # mean matching the digits of the seconds value.
+        e="$(printf '%s\n' "$s" | sed -n 's/^[^0-9]*sec *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
         if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
     fi
     # Linux without uptime(1): /proc/uptime is monotonic seconds since boot.
@@ -4204,11 +4230,58 @@ service_is_active() {
 # and it covers the SIGKILL case the old comment could not cover at all.
 _BOOT_GRACE_S_DEFAULT=300
 
-# service_is_starting <bot_service>
+# _boot_grace_for [bot_dir]
+# The window BOTH rungs of service_is_starting age against, resolved ONCE so
+# the marker rung and the SubState rung can never disagree about how long a
+# boot may legitimately take.
+#
+# F4's shape, F15's value: the composed BOOT_GRACE_S in the bot's own bot.conf
+# wins (claudlobby/boot.py derives it as admission_wait_max_s + ready_timeout_s,
+# which is the phase bound PR B actually created), with the pre-#1573
+# KEEPALIVE_BOOT_GRACE_S env override and then _BOOT_GRACE_S_DEFAULT behind it
+# for an un-regenerated bot.conf that predates the key. With NO bot dir the
+# result is byte-identical to the pre-PR-B read, so a caller that names no bot
+# keeps exactly its old window.
+_boot_grace_for() {
+    local bot_dir="${1:-}" g=""
+    [ -n "$bot_dir" ] && g="$(bot_conf_get "$bot_dir" BOOT_GRACE_S "")"
+    case "$g" in "" | *[!0-9]*) g="${KEEPALIVE_BOOT_GRACE_S:-$_BOOT_GRACE_S_DEFAULT}" ;; esac
+    case "$g" in "" | *[!0-9]*) g=$_BOOT_GRACE_S_DEFAULT ;; esac
+    printf '%s' "$g"
+}
+
+# service_is_starting <bot_service> [bot_dir]
 # rc 0 iff the unit is provably MID-START: a boot is in flight, so an absent
 # tmux session is expected and means neither "down" (fleet-pulse) nor "restart
 # me" (keepalive). One predicate, two consumers, so detection and healing can
 # never disagree about whether a bot is booting.
+#
+# TWO RUNGS since #1573 PR B, and the first is PLATFORM-NEUTRAL:
+#
+#   1. <bot_dir>/data/.boot-queued -- the boot-progress marker the admission
+#      gate writes at acquire and removes at release (lib/boot-admission.sh).
+#      Read on BOTH OSes and read FIRST, because it is the only signal a
+#      launchd host has at all: rung 2 returns 1 unconditionally off Linux, so
+#      before this rung existed every macOS bot was invisible to both consumers
+#      for its whole bring-up. The marker is honest about WHOSE boot it
+#      describes -- it names the launcher pid, and a dead launcher stops
+#      suppressing within one reaper poll, which is the #933 manufactured-
+#      all-clear bound carried by LIVENESS rather than by mtime and covers the
+#      SIGKILL case no amount of mtime could.
+#      The bot dir is OPTIONAL and its absence means "nothing to read", not
+#      "not starting": a caller that passes none simply falls through to rung
+#      2 exactly as it did before PR B.
+#
+#   2. The systemd SubState read below -- Linux only, unchanged. It stays
+#      because it covers the one thing the marker cannot: a start that failed
+#      BEFORE start-bot.sh ever ran (a unit in `activating` during
+#      ExecStartPre, or an ExecStart that never reached the gate). In those
+#      windows no launcher has written a marker, so there is nothing to read.
+#
+# $1 is ${1:-}, NOT ${1:?}: an empty service name is a real and common state
+# (nine harness bot.confs and every pre-generate fleet carry BOT_SERVICE=""),
+# and ${1:?} aborts a non-interactive caller outright on it. An empty name
+# simply cannot satisfy rung 2, which is the correct answer, not an error.
 #
 # Linux reads two systemd fields in one show, because the boot spans two states:
 #   activating      → ExecStartPre, i.e. the boot-stagger sleep (3s..N)
@@ -4237,7 +4310,29 @@ _BOOT_GRACE_S_DEFAULT=300
 # unrecognized OS return non-zero — the caller keeps its pre-existing behaviour
 # rather than inheriting a suppression this function cannot justify.
 service_is_starting() {
-    local svc="${1:?Usage: service_is_starting <bot_service>}"
+    local svc="${1:-}"
+    local bot_dir="${2:-}"
+
+    # --- Rung 1: the boot-progress marker, both OSes, first ------------------
+    # LIVENESS PAIRED WITH AGE, never either alone. `kill -0` alone would let a
+    # re-used pid suppress forever (#1425, the remedy this estate already
+    # ships); age alone would let a SIGKILLed launcher suppress for the whole
+    # window. A marker whose pid is dead, or whose age is past the grace, is
+    # simply not read as proof -- and the caller falls through to rung 2 rather
+    # than being told "not starting", so a Linux unit still gets its own answer.
+    if [ -n "$bot_dir" ]; then
+        local _bq="$bot_dir/data/.boot-queued" _bq_pid=""
+        if [ -f "$_bq" ]; then
+            _bq_pid="$(sed -n 's/^pid=//p' "$_bq" 2>/dev/null | head -1 || true)"
+            case "$_bq_pid" in "" | *[!0-9]*) _bq_pid="" ;; esac
+            if [ -n "$_bq_pid" ] && kill -0 "$_bq_pid" 2>/dev/null &&
+                marker_age_within "$_bq" "$(_boot_grace_for "$bot_dir")"; then
+                return 0
+            fi
+        fi
+    fi
+
+    # --- Rung 2: the systemd SubState read, Linux only, unchanged ------------
     [ "$_OS" = "Linux" ] || return 1
 
     local active="" sub="" enter_us="" exec_us="" since_us up_s grace _k _v
@@ -4284,8 +4379,11 @@ EOF
     # exactly the bot that can least afford it. ExecMainStart fires when the spawner
     # actually starts, so the grace stays a statement about start-bot.sh alone.
     case "$since_us" in "" | *[!0-9]*) return 0 ;; esac # unreadable age: trust the state
-    grace="${KEEPALIVE_BOOT_GRACE_S:-$_BOOT_GRACE_S_DEFAULT}"
-    case "$grace" in "" | *[!0-9]*) grace=$_BOOT_GRACE_S_DEFAULT ;; esac
+    # The SAME window rung 1 used (_boot_grace_for): composed BOOT_GRACE_S when
+    # the caller named a bot, the old env knob and default behind it otherwise.
+    # Two private copies of one window is how the marker rung and the SubState
+    # rung come to disagree about the same boot.
+    grace="$(_boot_grace_for "$bot_dir")"
     # Builtin read, no forks; compare in whole seconds so the µs stamp needs no
     # scaling. Truncating both sides costs at most 1s against a 300s cap.
     # `10#` pins base 10 — an all-digit string with a leading zero is octal to

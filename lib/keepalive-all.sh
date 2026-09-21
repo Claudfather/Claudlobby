@@ -94,5 +94,29 @@ for conf in "$BOTS_DIR"/*/bot.conf; do
         fi
     fi
 
-    "$KEEPALIVE" "$bot_dir" || echo "$TS WARN — keepalive.sh failed for $bot_name (exit $?)" >>"$LOG"
+    # The SCOPED admission cap (#1573 PR B). This sweep runs bots ONE AT A TIME,
+    # so the sweep IS already the serializer; if a keepalive tick falls through
+    # to its start-bot.sh fallback for a bot that is merely QUEUED, the whole
+    # queue cap (1200s by default) would be paid inside a watchdog that fires
+    # every 60s, stalling every later bot's tick behind it -- the sweep-abort
+    # class. A serial caller must not also pay the queue's cap.
+    #
+    # Value: the bot's own composed RC_READY_TIMEOUT_S (F4's carrier; 90 is the
+    # floor for an un-regenerated bot.conf) plus 60s, the sweep's own tick
+    # interval -- the slack this driver already budgets between ticks.
+    #
+    # BOUND, stated rather than implied: this reaches start-bot.sh only where
+    # keepalive execs it DIRECTLY (restart_bot_service's fallback branch). Where
+    # the restart goes through the host supervisor, start-bot.sh is relaunched
+    # with the unit's environment and inherits nothing from here. It is a
+    # lib/-internal call convention, never composed and never an operator knob,
+    # and deliberately NOT BOOT_ADMISSION_WAIT_MAX_S (F4 locks the composed
+    # value as the winner over the env for that key).
+    _ka_rc_s=$(bot_conf_get "$bot_dir" RC_READY_TIMEOUT_S 90)
+    case "$_ka_rc_s" in ''|*[!0-9]*) _ka_rc_s=90 ;; esac
+    # 10# pins base 10: the digits guard admits a ZERO-PADDED value and bare
+    # $(( 090 )) is octal, which aborts the arithmetic and takes this bot out of
+    # the sweep under a log line that says nothing about why.
+    BOOT_ADMISSION_CALLER_CAP_S="$((10#$_ka_rc_s + 60))" \
+        "$KEEPALIVE" "$bot_dir" || echo "$TS WARN — keepalive.sh failed for $bot_name (exit $?)" >>"$LOG"
 done

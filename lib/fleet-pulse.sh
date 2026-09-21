@@ -303,8 +303,17 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # this bot is booting. Mid-start is NO VERDICT, not an all-clear: neither
     # emit nor debounce_clear runs, leaving any genuine pre-existing alert state
     # intact to re-fire once the unit settles.
+    #
+    # The BOT DIR is passed and the `[ -n "$BOT_SERVICE" ] &&` short-circuit is
+    # GONE (#1573 PR B). The predicate's first rung is the platform-neutral
+    # data/.boot-queued marker the admission gate writes, and gating the call on
+    # a resolved unit name made that rung unreachable. That matters most on
+    # launchd, where rung 2 returns 1 unconditionally: a queued bot would sit
+    # session-less for its whole admission wait and this tick would page
+    # session_missing AND service_down for it, once per tick per bot — the
+    # #1002 false positive re-emitted from the alerting side.
     _svc_starting=0
-    if [ -n "$BOT_SERVICE" ] && service_is_starting "$BOT_SERVICE"; then
+    if service_is_starting "$BOT_SERVICE" "$bot_dir"; then
         _svc_starting=1
     fi
 
@@ -815,13 +824,19 @@ _summary_tmp=$(safe_mktemp)
         if [ -n "$_s_svc" ] && ! service_is_active "$_s_svc"; then
             _s_svc_status="DOWN"
         fi
-        # Same boot gate as the main loop, for the same reason and by the same
-        # predicate. Without it this run reports two verdicts about one bot: the
-        # loop correctly stays silent for a mid-boot bot while this block prints
-        # SESSION DOWN / SERVICE DOWN to the journal and pulse-summary.txt — the
-        # pre-fix answer, from the file that fixed it. "starting" is its own
-        # column value, never folded into "up": a boot is not health.
-        if [ -n "$_s_svc" ] && service_is_starting "$_s_svc"; then
+        # Same boot gate as the main loop, for the same reason, by the same
+        # predicate and — since #1573 PR B — with the same arguments. Without it
+        # this run reports two verdicts about one bot: the loop correctly stays
+        # silent for a mid-boot bot while this block prints SESSION DOWN /
+        # SERVICE DOWN to the journal and pulse-summary.txt — the pre-fix
+        # answer, from the file that fixed it. "starting" is its own column
+        # value, never folded into "up": a boot is not health.
+        #
+        # The `[ -n "$_s_svc" ] &&` short-circuit is GONE for the same reason it
+        # is gone in the main loop: the marker rung needs no unit name, and a
+        # summary that disagrees with the loop about one bot is the defect this
+        # block was added to close.
+        if service_is_starting "$_s_svc" "$_s_bot_dir"; then
             [ "$_s_session_status" = "DOWN" ] && _s_session_status="starting"
             [ "$_s_svc_status" = "DOWN" ] && _s_svc_status="starting"
         fi

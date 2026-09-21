@@ -25,6 +25,33 @@ BOT_DIR="$(cd "$BOT_DIR" && pwd)"
 load_bot_conf "$BOT_DIR" || exit 1
 install_error_trap "$BOT_DIR"
 
+# The SCOPED admission cap (#1573 PR B). This door brings up ONE bot, and its
+# callers (rolling-restart.sh, weekly-worker-restart.sh, reconcile-fleet.sh, a
+# manager, a human) do so one at a time -- so the caller IS the serializer and
+# this bring-up must not also pay the host queue's cap. Left at the 1200s
+# default, a bot that is merely QUEUED outlasts every driver's own ceiling and
+# gets reported as a failure it never had.
+#
+# Value: the bot's own composed RC_READY_TIMEOUT_S (F4's carrier; 90 is the
+# floor for an un-regenerated bot.conf) plus 60s of bring-up slack -- the same
+# shape lib/keepalive-all.sh uses. ${VAR:-...} rather than an unconditional
+# assignment, so a driver that already derived its own per-bot budget keeps it:
+# that number is the one the driver's own ceiling was computed from.
+#
+# BOUND, stated rather than implied: only the *) branch below execs
+# start-bot.sh in this process tree. On Linux and macOS the bring-up is handed
+# to the host supervisor, which relaunches start-bot.sh with the UNIT's
+# environment and inherits nothing from here. A lib/-internal call convention,
+# never composed, never an operator knob, and deliberately NOT
+# BOOT_ADMISSION_WAIT_MAX_S (F4 locks the composed value as the winner over the
+# env for that key).
+_su_rc_s="${RC_READY_TIMEOUT_S:-90}"
+case "$_su_rc_s" in ''|*[!0-9]*) _su_rc_s=90 ;; esac
+# 10# pins base 10 -- an all-digit value with a leading zero is octal to $(( )),
+# and "value too great for base" would abort a bring-up door under set -e.
+BOOT_ADMISSION_CALLER_CAP_S="${BOOT_ADMISSION_CALLER_CAP_S:-$((10#$_su_rc_s + 60))}"
+export BOOT_ADMISSION_CALLER_CAP_S
+
 case "$_OS" in
 Linux)
     # BOT_SERVICE is the canonical unit name (set by compositor in bot.conf).

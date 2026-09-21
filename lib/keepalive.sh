@@ -315,15 +315,21 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
     # that was still installing plugins, each resetting that work. The loop broke
     # only when host load fell enough for a boot to finish inside 60s.
     #
-    # service_is_starting is the unit's own state, so unlike a session-age test
-    # (there is no session to age) or data/.spawn (touched AFTER session creation
-    # at start-bot.sh:273, so stale through exactly this window) it cannot be
-    # fooled by the absence it is guarding. It is bounded by KEEPALIVE_BOOT_GRACE_S
-    # so a wedged start-bot eventually gets restarted rather than suppressing the
+    # service_is_starting reads the boot's own state, so unlike a session-age
+    # test (there is no session to age) or data/.spawn (touched AFTER session
+    # creation, so stale through exactly this window) it cannot be fooled by the
+    # absence it is guarding. It is bounded by the composed BOOT_GRACE_S so a
+    # wedged start-bot eventually gets restarted rather than suppressing the
     # watchdog forever.
-    if [ -n "${BOT_SERVICE:-}" ] && service_is_starting "$BOT_SERVICE"; then
-        echo "$(ts_iso) SKIP — boot in flight (unit mid-start), not restarting" >> "$LOG"
-        emit_keepalive_event "SKIP" "boot in flight (unit mid-start), not restarting"
+    #
+    # The BOT DIR is passed, and the `[ -n "$BOT_SERVICE" ] &&` short-circuit is
+    # GONE (#1573 PR B). The predicate's first rung is data/.boot-queued, which
+    # is platform-neutral and needs no unit name at all; gating the call on a
+    # resolved service name made that rung unreachable for precisely the bots
+    # with no service name, and on launchd it is the only rung there is.
+    if service_is_starting "${BOT_SERVICE:-}" "$BOT_DIR"; then
+        echo "$(ts_iso) SKIP — boot in flight (mid-start), not restarting" >> "$LOG"
+        emit_keepalive_event "SKIP" "boot in flight (mid-start), not restarting"
         exit 0
     fi
     plane_presence_samples DOWN
