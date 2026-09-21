@@ -200,6 +200,13 @@ class TestLatestHeartbeats:
         yields last, land the OLDER sample under it, so an order-dependent
         collapse must pick the stale one and a recency-based collapse the live
         one. Both readers are asserted, because the bug was that they differed.
+
+        SCOPE, because a commit message once claimed more than this test does:
+        it calls `derive_presence` directly and hands it a live list that is
+        ALREADY lower-cased, so it pins the RECORDED half only. The live half
+        is built inside `collect_fleet_status`, and reverting that lowering
+        leaves this test green. `TestCollectFleetStatus::test_a_manifest_case_
+        variant_cannot_diverge_state_from_tmux` is the pin for it.
         """
         from claudlobby.plane.emit_api import emit_batch
         from claudlobby.plane.queries import LATEST_HEARTBEAT_SQL
@@ -695,3 +702,93 @@ class TestCollectFleetStatus:
         assert "alice.service" not in units
         alice = next(bs for bs in results if bs.name == "alice")
         assert alice.service_active is True
+
+    def test_a_manifest_case_variant_cannot_diverge_state_from_tmux(self, mock_paths):
+        """The LIVE half of the presence join, pinned through the door that
+        builds it (#1615 review, PR #1695 follow-up).
+
+        `TestLatestHeartbeats::test_state_and_tmux_cannot_diverge_on_a_case_
+        variant_collision` asserts the same property but hand-builds
+        `live = [{"bot": "alex", ...}]` already lower-cased and calls
+        `derive_presence` directly — so it never reaches the `_live`
+        comprehension in `collect_fleet_status` that does the lowering.
+        Reverting that `b.lower()` leaves it green. The claim was covered on
+        the recorded half only; this is the live half.
+
+        The mechanism it pins: the live aliases are built from the MANIFEST's
+        spelling, while `_presence_rows` lower-cases the recorded ones. Un-
+        lowered, a bot declared `Alex` and recorded `alex` mints TWO verdicts,
+        and the `{alias.lower(): ...}` collapse keeps whichever `sorted()`
+        visited LAST. A mixed-case alias always sorts BEFORE its lower-case
+        twin (ASCII 'A' < 'a'), so the record-only verdict wins and the live
+        half's own `down` is thrown away — STATE=idle beside TMUX=down, the
+        exact divergence #1615 exists to make impossible.
+        """
+        from claudlobby.config import BotConfig, FleetConfig
+
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            bots={"Alex": BotConfig(bot_id="Alex", name="Alex", expertise=["eng"])},
+        )
+        _land_heartbeats(mock_paths.root, "test-fleet", "alex", ["IDLE", "IDLE"])
+
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(False, "dead")),
+            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
+        ):
+            alex = next(bs for bs in collect_fleet_status(fleet, mock_paths)
+                        if bs.name == "Alex")
+
+        # Preconditions, or the assertion below passes on a plane that never
+        # answered: STATE would keep its default and never reach the join.
+        assert not alex.plane_unreachable, alex.plane_unreachable
+        assert alex.last_heartbeat is not None and alex.pane_state == "IDLE", alex
+
+        assert alex.tmux_alive is False
+        assert alex.state == "down", alex.state      # the live half's verdict, kept
+        assert (alex.state == "down") == (not alex.tmux_alive)
+
+    def test_a_fleet_name_case_variant_never_reaches_the_live_half_at_all(self, mock_paths):
+        """Why the OTHER half of that line is not pinned, recorded rather than
+        claimed.
+
+        `_live` lower-cases two things — the bot (pinned above) and
+        `plane.fleet`. The second cannot be reached through this door: the
+        fleet name comes from the overlay DIRECTORY, and `plane_session`
+        refuses a fleet the plane holds no bot of BEFORE `collect_fleet_status`
+        builds any live alias. So an overlay at `local/Test-Fleet/` against
+        rows recorded under `test-fleet` yields the unreachable note and the
+        join never runs — reverting `plane.fleet.lower()` is green either way,
+        and saying it is covered would be the same defect this commit fixes.
+
+        Pinned as the boundary it is: if that door ever folds case, this test
+        fails and the fleet half becomes reachable — and then it needs a real
+        pin like the one above, not this one.
+        """
+        from claudlobby.config import BotConfig, FleetConfig
+        from claudlobby.paths import Paths
+
+        fleet_dir = mock_paths.root / "local" / "Test-Fleet"
+        (fleet_dir / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
+        paths = Paths(root=mock_paths.root, fleet_dir=fleet_dir)
+        fleet = FleetConfig(
+            name="Test-Fleet",
+            service_prefix="com.test",
+            bots={"alex": BotConfig(bot_id="alex", name="alex", expertise=["eng"])},
+        )
+        _land_heartbeats(mock_paths.root, "test-fleet", "alex", ["IDLE", "IDLE"])
+
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(False, "dead")),
+            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
+        ):
+            alex = next(bs for bs in collect_fleet_status(fleet, paths)
+                        if bs.name == "alex")
+
+        # The rows ARE there under the lower-case fleet — the refusal is the
+        # door's case-sensitivity, not an empty plane.
+        assert "holds no bot of fleet 'Test-Fleet'" in alex.plane_unreachable, alex.plane_unreachable
+        assert alex.state == "unknown" and alex.last_heartbeat is None, alex
