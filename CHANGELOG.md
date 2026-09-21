@@ -6,6 +6,99 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `pr_role`: the field and its writer, so authorship stops being unrecoverable (#1666)
+
+- **What it records, and why nothing else can.** Every bot in a fleet pushes as
+  the same GitHub login, so GitHub cannot answer the one question rung 1 of
+  `merge-policy-auto-admin` asks — *is the reviewer a different bot than the
+  author?* `pr_role: authored | reviewed` records it at the moment it happens.
+
+  **Shipped now rather than after its consumer, because it is not retroactive.**
+  The plane cannot backfill a role nobody wrote down, so every hour without the
+  field is authorship permanently lost. That is also why the field and its
+  writer land together: a field nothing writes accumulates nothing.
+
+- **METADATA, never CONTENT — and registered explicitly.** Content is what a
+  metadata-mode capture strips. A stripped role reads as "no role recorded", a
+  consumer reads that as "not an author", and it merges — the exact defect the
+  field exists to prevent, re-entering through its own remedy. `by` is the
+  precedent and states the same reason.
+
+  `("task", "pr_role")` is entered in `FIELD_POLICY` as `METADATA` rather than
+  simply left out. An unregistered field is absent from the derived
+  `CONTENT_FIELDS` and so survives a metadata capture **by accident**; this one
+  must survive **by rule**, so that a future edit reclassifying it is a visible
+  change rather than an omission. It carries no byte cap, unlike `by`: it is a
+  closed `Literal`, so the contract bounds it absolutely and a cap would be
+  dead code.
+
+- **Absent stays distinguishable from `reviewed`.** 19% of in-epoch PRs have no
+  citing report at all; those rows are unattributable and the eventual consumer
+  must REFUSE for them rather than pass. So the vocabulary has **no `unknown`
+  member** — a writable value meaning "no answer" would convert an absence a
+  consumer can refuse on into a value it might accept — the field defaults to
+  `None`, and the ingest detail drops `None`, so an absent role means the key is
+  simply not present rather than stored empty.
+
+- **A report can tell its OWN task leg from a sibling's (#1710).** Two opposite
+  failures of one confusion, both found by vera reviewing this PR, and both
+  predating it for `pr_url`:
+
+  **Case 1 — the silent drop.** The id-less closing loop appends a task event
+  per open id-less row of the reporting bot, and the marker guard asked "does
+  this batch contain ANY task event". Those satisfy it on behalf of UNRELATED
+  rows, so a bot holding any other id-less dispatch suppressed its own marker —
+  the only carrier of the PR fields — and they were stored nowhere, giving a row
+  bit-for-bit identical to "nobody reported". The guard now keys on a variable
+  set where this report's own leg is actually appended, never re-derived from a
+  condition that can drift from it.
+
+  **Case 2 — the silent MIS-attribution, and the worse of the two.** With an
+  unrelated id'd row open, #835 auto-resolves the link and the primary leg fires
+  against that row, carrying the PR fields with it: the review lands on a task
+  it has nothing to do with. The fields now ride the primary leg **only when the
+  caller NAMED the task with `--task`**. An auto-resolved link is a guess, and a
+  guess must not carry an attribution claim. `lib/who-reviewed.py` refuses to
+  tiebreak an ambiguous match on the stated grounds that a wrong attribution is
+  worse than none — none sends a reader to look, wrong makes them act — and this
+  manufactured exactly the attribution that door declines to guess at. The fix
+  turns a wrong attribution into an absent one, which is refusable, the same
+  three-state logic the field rests on. **Absent, but not silent:** the caller is
+  told on stderr that the role was not recorded and why, since a declared role
+  reaching no row is the shape of case 1.
+
+  **Why the tests missed both:** every test of this path started from a pristine
+  plane where the acting bot held no other open dispatch. On this estate that is
+  not a corner case — `lib/dispatch-supersede-hint.py` is built on the
+  measurement that 51% of id'd dispatches go to a bot already holding an open
+  row. There is now a regression test per case, each asserting its precondition
+  so it cannot silently set up the other one.
+
+- **The writer rides BOTH legs.** `report-back.sh --pr-role` stamps the task
+  event *and* the `report_status` marker. Riding only the task leg would record
+  a role for tracked work and silently drop it for a review posted against work
+  never dispatched with an id — which resolves no task, lands only on the
+  marker, and is the ad-hoc case that leg was added for. That would leave
+  `absent`, the state a consumer must refuse on, for a report that declared a
+  role.
+
+- **Refused rather than recorded wrong**, both at parse time and before anything
+  is sent: an unrecognised role (the consumer is a merge gate, so a value it
+  cannot classify must be a loud caller error), and a role with no `--pr` (the
+  join is through `pr_url`, so such a row could never be read back). The guard
+  runs after the whole parse loop, so the two flags may be given in either
+  order.
+
+- **No migration.** `detail` is JSON and `pr_url` already rides it.
+
+- **This is 2 of 4 pieces, and rung 1 is NOT fixed.** Not built here: the
+  consumer (`pr-review-state.py`, which waits on #1701 — a second branch in that
+  file buys a conflict and two half-reviews) and the emitter at `gh pr create`
+  (clauDNA's `/claudna:ship`, theirs per the ecosystem boundary). Until both
+  land, nothing reads this field. Per-bot GitHub App identities may supersede it
+  for rung 1 specifically; that question is with the operator, and the field was
+  built anyway rather than holding a small certain gain for a large uncertain
+  one.
 ### Added — a compose-time rung that says when an MCP fragment names a package nobody verified (#1058)
 
 - **The defect it instruments.** A fragment composes `npx -y <pkg>`. If `<pkg>`
