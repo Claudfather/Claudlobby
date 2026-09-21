@@ -23,9 +23,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `{"*": "metadata"}` to `state/plane/capture.json` before the next restart.
   Per-fleet opt-out works too, and a named fleet beats `*`.
 - The mode in force is surfaced in three places rather than assumed: the
-  `capture config` rung of `plane doctor` (which now states the default and the
-  opt-out), the `<mode> capture` label on each fleet card, and the trust
-  surface. A malformed file still fails LOUD and resolves to no mode — that
+  `capture config` rung of `plane doctor` (which resolves and prints the mode
+  actually in force — `metadata (host-wide opt-out)`, `full (shipped default)`,
+  or the host mode plus the fleets that differ — through the same
+  `capture_mode` rule the recorder and the view resolve through), the
+  `<mode> capture` label on each fleet card, and the trust surface. The rung
+  previously printed a fixed string naming the *default*, so it was
+  informative only when the setting did not matter and wrong for exactly the
+  hosts that had configured one. A malformed file still fails LOUD and resolves to no mode — that
   refusal matters more under a `full` default, because a silent fallback would
   now store content an operator opted out of keeping.
 
