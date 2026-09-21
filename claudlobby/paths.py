@@ -671,3 +671,45 @@ class Paths:
                     )
 
         return cls(root=root, fleet_dir=fleet_dir, vault_root=vault_root)
+
+
+# --- importing the INSTALL's stdlib lib/*.py doors --------------------------
+
+_LIB_MODULES: dict[tuple[str, float], object] = {}
+
+
+def load_lib_module(lib_dir: Path, filename: str):
+    """Import one of the INSTALL's stdlib ``lib/*.py`` scripts as a module, or
+    None when unreadable.
+
+    Lives here rather than in any one consumer because three of them now exist
+    (``brief``'s dispatch doors, ``mcp_grammar``'s package grammar, and the
+    bash side which execs the same files directly), and a private copy of a
+    loading mechanism is how the *next* consumer ends up loading from somewhere
+    else. Memoized on (path, mtime): a brief once exec'd ``plane-readers.py``
+    six times per call; a re-installed ``lib/`` changes the mtime and is
+    re-read.
+
+    Returning None rather than raising is deliberate and is NOT a fallback —
+    it hands the caller the choice, and the two live callers make opposite
+    ones: ``brief`` degrades one section, ``mcp_grammar`` refuses outright.
+    """
+    import importlib.util
+
+    src = lib_dir / filename
+    try:
+        key = (str(src), src.stat().st_mtime)
+    except OSError:
+        return None
+    if key in _LIB_MODULES:
+        return _LIB_MODULES[key]
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"_claudlobby_lib_{src.stem.replace('-', '_')}", src
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except (OSError, SyntaxError, ImportError):
+        return None
+    _LIB_MODULES[key] = mod
+    return mod

@@ -164,8 +164,42 @@ def check_mcp_configs(fleet: FleetConfig, paths: Paths, report: DoctorReport) ->
 # ----------------------------------------------------------------------
 
 
+def _npx_cache_detail(result: subprocess.CompletedProcess) -> str:
+    """What the probe actually SAID, never a default standing in for it.
+
+    `check-npx-cache.sh` writes its missing-package list to stdout, but both of
+    its refusals — no MCP library, and the shared grammar unreachable — exit 2
+    and write the reason to STDERR ONLY. A stdout-only reader therefore renders
+    an incomplete install as the routine "packages missing", sending an operator
+    to `warm-cache` for a condition `warm-cache` cannot fix: the estate's
+    unreachable-is-not-empty rule (`source_state.py`) inverted inside the rung
+    that reports it.
+
+    The refusal's own words are the detail, because they name the path that is
+    missing; a fixed string could only ever name the class.
+    """
+    out = result.stdout.strip() if result.stdout else ""
+    err = result.stderr.strip() if result.stderr else ""
+    if result.returncode == 2:
+        # A refusal names the path it could not reach, on stderr today. Read
+        # either stream rather than pinning that: what must never happen is
+        # this rung inventing a cause the probe did not give.
+        if err:
+            return err.splitlines()[0]
+        if out:
+            return out.splitlines()[-1]
+        return "probe refused (exit 2) without saying why"
+    if out:
+        return out.splitlines()[-1]
+    if err:
+        return err.splitlines()[0]
+    return f"probe failed (exit {result.returncode}) and said nothing"
+
+
 def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
-    """Check if npx packages for MCP servers are cached."""
+    """Check that the MCP servers' packages are cached — npx AND uvx, since
+    #1577 taught the probe both runtimes. The rung keeps its `npx-cache` key
+    so an operator's muscle memory and any log grep still work."""
     script = paths.lib / "check-npx-cache.sh"
     if not script.is_file():
         report.add("npx-cache", "warn", "check-npx-cache.sh not found")
@@ -179,15 +213,11 @@ def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
             cwd=str(paths.root),
         )
         if result.returncode == 0:
-            report.add("npx-cache", "pass", "all MCP npx packages cached")
+            report.add("npx-cache", "pass", "all MCP packages cached (npx + uvx)")
         else:
-            # Script outputs missing packages on failure
-            detail = (
-                result.stdout.strip().split("\n")[-1]
-                if result.stdout
-                else "packages missing"
-            )
-            report.add("npx-cache", "warn", detail[:200])
+            # Missing packages land on stdout; a refusal (exit 2) lands on
+            # stderr, so the detail cannot be read from one stream alone.
+            report.add("npx-cache", "warn", _npx_cache_detail(result)[:200])
     except (subprocess.TimeoutExpired, OSError) as e:
         report.add("npx-cache", "warn", f"check failed: {e}")
 

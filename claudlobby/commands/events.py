@@ -62,8 +62,9 @@ def collect_plane_events(conn, paths, *, fleet=None, pr=None, bot=None, event_ty
     stamped at ingest, one definition). A plane that cannot answer (no
     identity for the fleet, a db error) raises RuntimeError — the caller's
     refusal."""
-    from ..brief import load_lib_module, resolve_fleet_name
-    pr = pr or load_lib_module(paths, "plane-readers.py")
+    from ..brief import resolve_fleet_name
+    from ..paths import load_lib_module
+    pr = pr or load_lib_module(paths.lib, "plane-readers.py")
     if pr is None:
         raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
     try:
