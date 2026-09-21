@@ -667,3 +667,195 @@ class TestAttributionReadsThePlane:
         as 'no attribution available' — `source_state`'s rule."""
         mapping, err = prs.ledger_identity_for("o/r", 1, str(tmp_path / "nowhere"))
         assert mapping == {} and err and "unreachable" in err
+
+
+# ---------------------------------------------------------------------------
+# #1700 — silence must not score clean.
+#
+# Provenance of every fixture below (all REAL, per this file's rule):
+#   clauDNA#328       "**Blocking — do not merge yet.**"            (vera, 16:03:55Z)
+#   clauDNA#328       "**Merge held by dara — rung 1 …**"           (dara, 18:43:55Z)
+#   Claudlobby#1588   "**1. Blocking: the rung reported a default…**"
+#   Claudlobby#1696   "**RC cleared**, re-anchored to **`ccc594c…`**" (otis)
+#   clauDNA#328       "**[otis] [VERDICT] Approve** — anchored to …" (otis)
+#   Claudlobby#1590   "## **Approve** — pinned to `d4178d8`"
+#   Claudlobby#1588   "one current approval, SHA-anchored to `2a8a66b5`"
+# ---------------------------------------------------------------------------
+
+REAL_BLOCK_HEADER = (
+    "**Blocking — do not merge yet.** This belongs here, not only on #329 where "
+    "it currently lives: whoever merges #328 sees otis's Approve and no blocker "
+    "on this PR itself."
+)
+REAL_MERGE_HELD = "**Merge held by dara — rung 1 is unsatisfied, not the code.**\n\nprose\n"
+REAL_LONG_BLOCK = (
+    "**1. Blocking: the rung reported a default, not the state in force.**\n\nprose\n"
+)
+REAL_REANCHORED = (
+    "**Approve**\n\n**RC cleared**, re-anchored to "
+    "**`ccc594c340627796cdcdd72aa5e4101cd8e5ed58`**.\n"
+)
+REAL_ANCHORED_TO = (
+    "**[otis] [VERDICT] Approve** — anchored to "
+    "**`1fe176d8852394c52efd635f7f07e0a78f1a7fe5`**\n"
+)
+
+
+class TestSilenceDoesNotScoreClean:
+    """#1700 defect 1. Recognition gated every finding, so a miss scored clean.
+
+    Measured before the fix on a 44-PR corpus: 13 PRs exited 0 and 7 of those 13
+    carried events from which NOTHING was recognised. The exit code and the coverage caveat both
+    failed in the same direction on the same input, so nothing contradicted the
+    reassuring reading.
+    """
+
+    #: Real prose from a PR thread; carries no verdict and no decision word, so
+    #: the ONLY thing that can speak about it is the events-without-recognition
+    #: rung. Synthetic-looking because ordinary review chatter is.
+    UNRECOGNISABLE = [
+        ("comments", "t1", "Rebased onto main and pushed; CI is rerunning.\n"),
+        ("comments", "t2", "Thanks, that clarifies it.\n"),
+    ]
+
+    def test_a_pr_with_events_and_no_recognition_does_not_exit_zero(self):
+        """THE regression. Without the rung this returns RC_OK and reads clean."""
+        result = prs.assess_pr(_payload(self.UNRECOGNISABLE))
+        assert result["resolved"] == {}, "precondition: nothing was recognised"
+        assert result["events"] == 2, "precondition: the PR did carry events"
+        # The EXIT CODE is asserted first, deliberately. Assert the new field
+        # first and this test dies on KeyError against the unfixed module —
+        # which proves the field is absent, not that the run scored clean. The
+        # defect being pinned is `0`, so `0` is what the failure must name.
+        assert prs.exit_code_for([result]) != prs.RC_OK, (
+            "a PR with events and zero recognition must not score clean"
+        )
+        assert prs.exit_code_for([result]) == prs.RC_INCOMPLETE
+        assert result["no_recognition"] is True
+        assert prs.NO_RECOGNITION in result["flags"]
+
+    def test_the_coverage_tail_fires_when_recognition_is_zero(self):
+        """The caveat was gated on `anchored < verdicts` — at zero that is 0 < 0."""
+        line = prs.summary_line([prs.assess_pr(_payload(self.UNRECOGNISABLE))])
+        assert "NOT assessed" in line
+        assert "NO recognised verdict" in line
+        assert line.rstrip().endswith("RECOGNISED"), "the caveat must not be truncated away"
+
+    def test_a_pr_with_no_events_at_all_is_still_clean(self):
+        """The control. Presence, not emptiness — nothing said, nothing missed.
+
+        Without this the rung could be 'fixed' by failing on every quiet PR,
+        which would make exit 3 meaningless and retrain readers to ignore it.
+        """
+        result = prs.assess_pr(_payload([]))
+        assert prs.exit_code_for([result]) == prs.RC_OK
+        assert result["flags"] == []
+        assert result["no_recognition"] is False
+
+    def test_the_rung_survives_a_result_dict_that_omits_the_key(self):
+        """`exit_code_for` reads with .get — a missing key must not silently pass."""
+        assert prs.exit_code_for([{"stale": [], "blocking": [], "unanchored": [],
+                                   "unparsed_headers": []}]) == prs.RC_OK
+
+
+class TestDriftChannelIsIndependentOfTheParser:
+    """#1700 defect 1c. The old guard fired 0 times against 3 real misses.
+
+    `VERDICT_SHAPED` keys on the structural families the parser already covers,
+    so it could only report drift INSIDE vocabulary the parser understood. A
+    guard derived from the classifier inherits the classifier's blind spot.
+    """
+
+    @pytest.mark.parametrize("body", [REAL_MERGE_HELD, REAL_LONG_BLOCK])
+    def test_a_decision_outside_the_parsers_families_surfaces(self, body):
+        """Neither is bracket-tagged nor says 'verdict', so only the lexicon sees it."""
+        header = prs.first_bold(body)
+        assert prs.parse_verdict(body) is None, "precondition: the parser cannot classify it"
+        assert not prs.VERDICT_SHAPED.search(header), (
+            "precondition: the OLD channel is blind to this — that is the defect"
+        )
+        result = prs.assess_pr(_payload([("comments", "t1", body)]))
+        assert result["unparsed_headers"] == [header]
+        assert prs.UNPARSED in result["flags"]
+        assert prs.exit_code_for([result]) == prs.RC_INCOMPLETE
+
+    @pytest.mark.parametrize(
+        "header",
+        TestDriftSignalIsNarrow.REAL_NON_VERDICT_HEADERS
+        + ["**Non-blocking observation**", "**Blocked on CI**", "**Merge note**"],
+    )
+    def test_widening_the_channel_did_not_make_it_cry_wolf(self, header):
+        """The control, and the reason the lexicon carries its guards.
+
+        'blocked ON x' is a STATE the PR is in; 'non-blocking' is house style for
+        the opposite verdict. A detector firing on either is the failure that
+        killed the first version of the narrow guard, rebuilt one vocabulary over.
+        """
+        result = prs.assess_pr(_payload([("comments", "t1", header + "\n\nprose\n")]))
+        assert result["unparsed_headers"] == []
+
+
+class TestBlockIsAVerdictToken:
+    """#1700 defect 2. Every verdict miss on the corpus was this family."""
+
+    def test_a_real_blocking_header_is_a_blocking_verdict(self):
+        """Without the token this PR reports `0 blocking` while a block is live."""
+        result = prs.assess_pr(_payload([("comments", "t1", REAL_BLOCK_HEADER)]))
+        assert prs.parse_verdict(REAL_BLOCK_HEADER) == prs.BLOCK
+        assert result["blocking"], "a live block must be reported as blocking"
+        assert prs.exit_code_for([result]) == prs.RC_ACTIONABLE
+
+    @pytest.mark.parametrize(
+        "header", ["**Non-blocking observation**", "**One non-blocking nit**"]
+    )
+    def test_a_non_blocking_note_is_not_a_block(self, header):
+        """House style for the OPPOSITE verdict. The leading span is non-greedy, so
+        without the lookbehinds the parser skips 'non-' and inverts the meaning."""
+        assert prs.parse_verdict(header) is None
+
+    @pytest.mark.parametrize("header", ["**Blocked on CI**", "**Blocked on a decision**"])
+    def test_blocked_on_something_is_a_status_not_a_verdict(self, header):
+        """`\\b` before the lookahead is load-bearing: without it the engine
+        backtracks `(?:ing|ed)?` to empty, matches bare 'Block', and leaves
+        'ed on CI' to the tail — bypassing the guard it sits behind."""
+        assert prs.parse_verdict(header) is None
+
+
+class TestAnchorTaxonomyAdmitsBinding:
+    """#1700 defect 3. BINDING verbs are a third category, not a wider sample.
+
+    The old rule sorted candidates into EXAMINATION (admit) and PRODUCTION
+    (reject). `anchored to` is neither — it names what the verdict is BOUND to —
+    so it fell outside the dichotomy and no correct application of the stated
+    principle would have admitted it.
+    """
+
+    @pytest.mark.parametrize(
+        "body,want",
+        [
+            (REAL_REANCHORED, "ccc594c340627796cdcdd72aa5e4101cd8e5ed58"),
+            (REAL_ANCHORED_TO, "1fe176d8852394c52efd635f7f07e0a78f1a7fe5"),
+            ("## **Approve** — pinned to `d4178d8`", "d4178d8"),
+            ("one current approval, SHA-anchored to `2a8a66b5`", "2a8a66b5"),
+        ],
+    )
+    def test_binding_verbs_are_anchors(self, body, want):
+        assert prs.parse_anchor(body) == want
+
+    @pytest.mark.parametrize(
+        "body",
+        ["Merging at `deadbee1`", "Fixed at `deadbee1`", "Rebased onto `deadbee1`"],
+    )
+    def test_production_verbs_are_still_rejected(self, body):
+        """The control. Widening must not admit the category the rule rejects —
+        those name a commit somebody MADE, and anchoring a verdict to one is the
+        decoy failure with extra steps."""
+        assert prs.parse_anchor(body) is None
+
+    def test_a_binding_anchor_makes_a_verdict_assessable(self):
+        """End to end: the anchor is what moves a verdict off NO-SHA-ANCHOR."""
+        head = "ccc594c340627796cdcdd72aa5e4101cd8e5ed58"
+        result = prs.assess_pr(_payload([("comments", "t1", REAL_REANCHORED)], head=head))
+        assert result["unanchored"] == []
+        assert result["stale"] == []
+        assert prs.NO_SHA_ANCHOR not in result["flags"]
