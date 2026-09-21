@@ -132,12 +132,25 @@ if [ -n "$REAL_DB" ] && [ -e "$REAL_DB" ]; then
     _real_before="$(stat -c %Y "$REAL_DB" 2>/dev/null)"
 fi
 
-# dara §4: a read-only connection is held for the WHOLE soak, because
-# `plane doctor`, `plane view` and `brief` all hold one during normal
-# operation, and SQLite's passive auto-checkpoint may skip while a reader holds
-# a snapshot it needs to pass. If a fix comes to depend on passive
-# checkpointing, a routine read tool sitting in the way is a fleet-operational
-# property, and it gets answered here rather than discovered later.
+# dara §4: a read-only connection is held for the WHOLE soak, because SQLite's
+# passive auto-checkpoint may skip while a reader holds a snapshot it needs to
+# pass. If a fix comes to depend on passive checkpointing, a reader sitting in
+# the way is a fleet-operational property, and it gets answered here rather
+# than discovered later.
+#
+# WHAT THIS DOES AND DOES NOT CLAIM. A long-lived-reader hazard exists in
+# SQLite and this harness reproduces it under DELIBERATE conditions that
+# `plane view`'s actual connection-per-request pattern does NOT trigger. An
+# earlier version of this comment asserted that `plane doctor`, `plane view`
+# and `brief` each hold a connection during normal operation; vera settled the
+# `plane view` half by reading `view.py` and it is WRONG -- every REST route
+# goes through `_envelope()`, which opens a fresh mode=ro connection, runs one
+# handler and closes it in a `finally`, and even the SSE stream calls
+# `_envelope()` afresh on every ~1s tick. Its exposure window is milliseconds,
+# which is what reconciles otis's 26 production truncations without needing any
+# further distinction. `doctor.py` and `brief.py` were NOT checked by either of
+# us, so their connection patterns are unverified in both directions -- named
+# here rather than quietly folded into the plane-view correction.
 if [ "$HOLD_READER" -eq 1 ]; then
 "$PY" - "$CANARY_DB" >>"$WORK/ro.log" 2>&1 <<'ROEOF' &
 import sqlite3, sys, time
@@ -198,36 +211,22 @@ kill ${WAL_PID:+"$WAL_PID"} ${RO_PID:+"$RO_PID"} 2>/dev/null; RO_PID=""
 # --- verdicts ---------------------------------------------------------------
 say ""
 say "--- Check 1: loss witness (client's log vs the ledger, read-only) ---"
-"$PY" - "$CANARY_DB" "$WORK/witness.log" "$WORK/samples.json" <<'VEOF' > "$WORK/verdict.json"
-import json, sqlite3, sys
-db, witness, samples_path = sys.argv[1:4]
-acked = []
-for line in open(witness):
-    p = line.split()
-    if len(p) >= 3 and p[2] == "ok":
-        acked.append(p[1])
-conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-have = {r[0] for r in conn.execute("SELECT event_id FROM ingest_ledger")}
-lost = [e for e in acked if e not in have]
-# Unreadable samples are a REFUSAL, not an empty list. Defaulting to [] made
-# max() return 0 and the WAL section render "0 bytes" -- a number indistinguishable
-# from a genuinely empty WAL, for a file that could not be read at all.
-try:
-    sizes = [w[1] for w in json.load(open(samples_path))["wal"]]
-    sizes_ok = True
-except Exception as exc:
-    sizes, sizes_ok = [], False
-    sizes_err = str(exc)[:120]
-out = {"acked": len(acked), "lost": len(lost), "lost_ids": lost[:10],
-       "wal_readable": sizes_ok,
-       "wal_error": None if sizes_ok else sizes_err,
-       "wal_max": max(sizes) if sizes else None, "wal_min": min(sizes) if sizes else None,
-       "wal_final": sizes[-1] if sizes else None,
-       "wal_collapses_to_zero": sum(1 for i in range(1, len(sizes))
-                                    if sizes[i] == 0 and sizes[i-1] > 0) if sizes_ok else None}
-print(json.dumps(out))
-VEOF
+"$PY" "$SRC/lib/plane-canary-compare.py" --db "$CANARY_DB" \
+    --witness "$WORK/witness.log" --samples "$WORK/samples.json" > "$WORK/verdict.json"
 cat "$WORK/verdict.json"
+# The detector is proven to FIRE before anything it reports is believed. Under
+# per-batch-close `lost == 0` is guaranteed before the harness runs, so the
+# control validates NO FALSE POSITIVES and says nothing about false negatives
+# -- a comparator that always answers "not lost" is byte-identical here. The
+# injection is at the COMPARATOR (a witness with a known acked id against a
+# ledger set minus that id), never a second SIGKILL.
+_fires=$("$PY" -c "import json;print(json.load(open('$WORK/verdict.json'))['comparator_fires'])")
+_fdetail=$("$PY" -c "import json;print(json.load(open('$WORK/verdict.json'))['comparator_detail'])")
+if [ "$_fires" = "True" ]; then
+    ok "Check 1 detector: $_fdetail"
+else
+    bad "Check 1 detector did NOT fire on an injected loss ($_fdetail) — every number below is unproven"
+fi
 LOST=$("$PY" -c "import json;print(json.load(open('$WORK/verdict.json'))['lost'])")
 ACKED=$("$PY" -c "import json;print(json.load(open('$WORK/verdict.json'))['acked'])")
 if [ "$ACKED" -eq 0 ]; then
@@ -290,7 +289,17 @@ if not v['wal_readable']:
 print(f\"  wal max      : {v['wal_max']} bytes\")
 print(f\"  wal final    : {v['wal_final']} bytes\")
 print(f\"  collapses->0 : {v['wal_collapses_to_zero']}  (TRUNCATE checkpoint fingerprint)\")
-"; then ok "Check 2: WAL bound measured"; else bad "Check 2: WAL samples unreadable — no bound measured"; fi
+"; then ok "Check 2: WAL samples measured"; else bad "Check 2: WAL samples unreadable — nothing measured"; fi
+say ""
+say "  INCOMPLETE against unchanged code, deliberately, and in the same sense"
+say "  Check 3 is. This MEASURES the WAL; it does not BOUND it. Neither of the"
+say "  two specified failure shapes is asserted -- never returns to baseline,"
+say "  and crosses a ceiling before returning. The ceiling is not invented here"
+say "  on purpose: the method derives it from an acceptable loss WINDOW times"
+say "  the measured ingest rate, and nobody has set that policy number. Under"
+say "  per-batch-close the cadence is one checkpoint per batch, so there is no"
+say "  interesting bound to assert yet. The fix PR is where the cadence becomes"
+say "  a choice, and that is where the assertion belongs."
 
 say ""
 say "--- Check 3: durability window ---"
@@ -308,6 +317,12 @@ say "  in Check 1 means NO ACKNOWLEDGED EVENT IS LOST WHEN THE DAEMON DIES."
 say "  It is not evidence about power loss, and must not be cited as if it"
 say "  were. Testing that needs a host-level fault (power cut or a VM snapshot"
 say "  discarding the page cache) and is named here as a gap, not guessed past."
+say ""
+say "  BOUND — traffic shape. This control is ONE synthetic client, batch size"
+say "  1, no concurrent load. That is a property of the harness, not a claim"
+say "  about production checkpoint frequency under real mixed batch sizes and"
+say "  21 bots. It does not touch Check 1, which is binary regardless of"
+say "  traffic; it bounds how far the events-per-second figure travels."
 
 # --- the isolation held, asserted after the fact ---------------------------
 say ""
