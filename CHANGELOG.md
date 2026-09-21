@@ -6,6 +6,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the goal-binding and ignition rungs answer one question the same way (#1680)
+
+- **A manager-less fleet got a WARN and a PASS about the same thing.**
+  `check_ignition` gated its finding on `fleet.leaf_manager_bots()` and
+  `check_goal_binding` did not, so a fleet with no dispatcher was told both
+  "nothing to dispatch against" and "no idle-turn beat applies". The
+  goal-binding rung adopts the ignition rung's gate: no leaf manager, no
+  dispatcher, nothing to report. It replaces the **no-projects WARN only** — a
+  manager-less fleet that declared projects keeps its PASS, and the
+  repo-collision and DRAFT-manifest warnings still fire there.
+- **Neither warning said the other was a co-requisite.** On a fleet with a leaf
+  manager, no projects and no armed door both fire, and they are not
+  redundant: one says there is nothing to dispatch AT, the other that there is
+  nothing to dispatch WITH. A first-timer who fixes one still sees the other
+  and may reasonably conclude their first fix did not work — and the cheapest
+  wrong response is to undo it. Each warning now names the other, **only when
+  the other is actually firing**, and NAMES it rather than restating its
+  finding: the phrase that identifies a warning is the phrase its readers
+  select on, so a copy inside the other warning makes the two
+  indistinguishable to anything scanning the list.
+- **The condition is the other warning's own, not a look-alike.** `validate`
+  emits the no-projects finding only for a CHECK-IN-EQUIPPED leaf manager,
+  while `doctor` also has a plain line for one the check-in is not composed
+  onto — so the two surfaces ask different questions even though the clause
+  and its placement are shared. Keying the validator's side on
+  `not fleet.projects` alone printed an ignition warning pointing at a
+  goal-binding warning that was not in the output, which is the failure the
+  cross-reference exists to prevent, inverted. `_checkin_equipped_leaf_managers`
+  is now the one definition both rungs there ask.
+- The clause lives with the warning TEXT, in `validator.py` as well as
+  `doctor.py` — the goal-binding line an operator reads in doctor output is the
+  validator's warning rendered verbatim, so pasting the clause on at the doctor
+  level would have left `validate` and `doctor` saying different things about
+  one fleet. `ignition.ignition_warning_tail` owns where it goes: BEFORE
+  `Cheapest to arm:`, never after, because a sentence trailing a
+  copy-pasteable config line gets read as part of the line.
+- **The manager-less tripwire's verdict is a fixture fact, not a host fact.**
+  `run_doctor`'s first rung runs the whole validator, whose plugins check
+  resolves `Path.home()/.claude/plugins/installed_plugins.json` — so on a box
+  that has never installed a plugin the `fleet-yaml` COUNT rung warns about
+  the developer's own machine. A count rung cannot say what it is about, so
+  that host fact is indistinguishable from a real finding and lands in the
+  allowlist as a phantom: green locally, red on a runner. The fixture now
+  pins a fake `HOME` with a manifest DERIVED from the fleet's own required
+  plugins (the `tests/test_validator.py::_fake_installed` convention), so a
+  change to the default plugin set cannot silently reopen it. Fixed at the
+  fixture rather than by adding `fleet-yaml` to the allowlist — the allowlist
+  has to stay a list someone must deliberately edit, which only holds if the
+  fixture is the deterministic boundary.
+- **The two test fixtures ASSERT their wiring is live rather than trusting a
+  guard (#1689).** Both helpers wire the repo's real `lib/` behind
+  `if not (…/"lib").exists()`, and a fixture that created that path as a plain
+  DIRECTORY satisfies the guard while supplying no resolver — the switch
+  cascade then falls back to defaults, `task-recheck` reads ARMED, and every
+  disarmed scenario silently measures the opposite of what it intends
+  (Claudlobby#1588's mechanism). Each helper now asserts
+  `lib/env-tiers.sh` is a file, which tests the proposition instead of using
+  directory existence as a proxy and catches a `lib/` that exists but is the
+  wrong thing. A positive control in each file proves the assertion fires,
+  and a third that a clean build is wired, so no control is vacuous. The
+  wiring itself REPAIRS per entry rather than keying on the directory's
+  existence — `conftest.equip_grammar` plants a one-file `lib/` for the
+  modules needing the package grammar, which makes an existence check answer
+  yes and skip — and per-entry links are used rather than a whole-dir symlink,
+  because fixtures delete files under `lib/` and through a directory symlink
+  those unlinks reach the repo's own copies. Measured on a deliberately
+  degraded arm: 7 of these 13 cases fail loudly and 6 stay silent, and a
+  static reading pass over the same call paths predicted nearly the opposite
+  split — which is why the fixture refuses rather than a reader classifying.
+- `ignition.ignition_gap()` is the one definition of the condition both
+  ignition warnings fire on, and the goal-binding warnings ask it rather than
+  re-deriving it. It tests the cheap conjunct first and takes an optional
+  resolved door list, so `doctor` and `validate` each resolve the switch
+  cascade exactly as many times as they did before this change (measured: 4
+  and 1, unchanged on all four fleet shapes) rather than paying a subprocess
+  to decide not to append a string.
+
 ### Changed — the plane's capture policy ships as `full` (#1631)
 
 - **Message bodies are recorded by default.** `state/plane/capture.json` is
