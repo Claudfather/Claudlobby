@@ -95,7 +95,9 @@ the tool could not read at all produced an empty flag list, an empty blocking
 list and exit ``0`` — reported identically to a genuinely clean PR. Recognition
 gated every finding, so a miss produced silence and silence scored clean, and
 the worse the miss the cleaner the score. Measured on a 44-PR corpus before the
-fix: 13 PRs exited 0, and **9 of those 13 had zero verdicts recognised.**
+fix: 13 PRs exited 0, and **7 of those 13 carried events from which NOTHING
+was recognised.** (Nine had no verdict recognised, but two of those carried no
+events at all -- legitimately clean, not missed; see the discriminator below.)
 
 The matching defect in the OUTPUT was the coverage caveat, which was gated on
 ``anchored < verdicts`` — at zero recognition, ``0 < 0``, false. The one
@@ -142,7 +144,7 @@ import sys
 #: ``block``/``blocking``/``blocked`` joined the token set in #1700. It is the
 #: plain-English way to say the one verdict this tool exists to keep alive, and
 #: every verdict miss on the 44-PR corpus that day was this family — including a
-#: manager's own ``**Blocking — do not merge yet.**`` on a PR the tool then
+#: reviewer's own ``**Blocking — do not merge yet.**`` on a PR the tool then
 #: reported as ``0 blocking``.
 #:
 #: ``(?!\s+on\b)`` separates the two senses of the word and was found by an

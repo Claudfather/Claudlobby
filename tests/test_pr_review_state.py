@@ -673,7 +673,7 @@ class TestAttributionReadsThePlane:
 # #1700 — silence must not score clean.
 #
 # Provenance of every fixture below (all REAL, per this file's rule):
-#   clauDNA#328       "**Blocking — do not merge yet.**"            (dara, 16:03:55Z)
+#   clauDNA#328       "**Blocking — do not merge yet.**"            (vera, 16:03:55Z)
 #   clauDNA#328       "**Merge held by dara — rung 1 …**"           (dara, 18:43:55Z)
 #   Claudlobby#1588   "**1. Blocking: the rung reported a default…**"
 #   Claudlobby#1696   "**RC cleared**, re-anchored to **`ccc594c…`**" (otis)
@@ -704,8 +704,8 @@ REAL_ANCHORED_TO = (
 class TestSilenceDoesNotScoreClean:
     """#1700 defect 1. Recognition gated every finding, so a miss scored clean.
 
-    Measured before the fix on a 44-PR corpus: 13 PRs exited 0 and 9 of those 13
-    had ZERO verdicts recognised. The exit code and the coverage caveat both
+    Measured before the fix on a 44-PR corpus: 13 PRs exited 0 and 7 of those 13
+    carried events from which NOTHING was recognised. The exit code and the coverage caveat both
     failed in the same direction on the same input, so nothing contradicted the
     reassuring reading.
     """

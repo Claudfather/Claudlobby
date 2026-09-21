@@ -38,7 +38,7 @@ review/comment events, 55 verdict-bearing).
   classifier must be tight because its output is a verdict. Wiring the detector
   to the classifier's vocabulary is the DRY move that produced the 0/3.
 - **`block`/`blocking`/`blocked` is a verdict token.** Every verdict miss on the
-  corpus was this family, including a manager's own
+  corpus was this family, including a reviewer's own
   `**Blocking — do not merge yet.**` on a PR the tool then reported as
   `0 blocking`. Guarded three ways, each found by a real header rather than
   reasoned out: `non-`/`un-` lookbehinds (house style writes "non-blocking
