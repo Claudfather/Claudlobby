@@ -683,9 +683,15 @@ plane_mint_id() {
 # (plane-emit.sh: socket -> cold CLI -> spool). stdout discarded; stderr
 # passes through (the fallback disclosure is the contract); rc never
 # propagates — a door's real action is never blocked by its record.
-# The wrapper SURFACES the result: PLANE_EMIT_LAST_RC is 0 after a recorded
-# emission and the shim rc after a failed one, so a door can say LOUDLY that
-# its action was not recorded — since the F18 closure there is no other record.
+# The wrapper SURFACES the result: PLANE_EMIT_LAST_RC is 0 after a RECORDED
+# emission and the shim rc otherwise, so a door can say LOUDLY that its action
+# was not recorded — since the F18 closure there is no other record.
+# 0 means RECORDED — in the plane, queryable now — and NOT merely "accepted"
+# (#1711). A batch the db was unavailable for is SPOOLED: rc 6, durable on disk
+# and invisible to every reader until a drain. Doors that test `-ne 0` are
+# therefore CORRECT about a spooled batch without changing: it was not
+# recorded. What they cannot yet say is that it was not lost either, which is
+# what rc 6 exists to let a door distinguish when one needs to.
 # Feed it through a here-string (`plane_emit_events door <<<"$batch"`), never a
 # pipeline, wherever the caller needs PLANE_EMIT_LAST_RC afterwards: a pipeline
 # runs the function in a subshell and the result never comes back.
@@ -694,7 +700,13 @@ plane_emit_events() {
     local door="$1" _rc=0
     "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || _rc=$?
     PLANE_EMIT_LAST_RC=$_rc
-    if [ "$_rc" -ne 0 ]; then
+    if [ "$_rc" -eq 6 ]; then
+        # #1711. SPOOLED is not failed and must never be worded as one: the
+        # batch is durable on disk and lands at the next drain. Saying "failed"
+        # for something nothing lost is the dead-signal defect — a door that
+        # cries failure for a non-failure teaches its reader to skip the line.
+        echo "$door: plane SPOOLED this batch (rc=6) — durable on disk, NOT in the plane until a drain; nothing lost, nothing to retry" >&2
+    elif [ "$_rc" -ne 0 ]; then
         echo "$door: plane record failed rc=$_rc (door action unaffected)" >&2
     fi
     return 0
@@ -733,7 +745,9 @@ plane_emit_bounded() {
         wait "$_pid" || _rc=$?
     fi
     PLANE_EMIT_LAST_RC=$_rc
-    if [ "$_rc" -ne 0 ] && [ "$_rc" -ne 143 ]; then
+    if [ "$_rc" -eq 6 ]; then
+        echo "$door: plane SPOOLED this batch (rc=6) — durable on disk, NOT in the plane until a drain; nothing lost, nothing to retry" >&2
+    elif [ "$_rc" -ne 0 ] && [ "$_rc" -ne 143 ]; then
         echo "$door: plane record failed rc=$_rc (door action unaffected)" >&2
     fi
     return 0

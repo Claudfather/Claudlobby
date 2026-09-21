@@ -46,6 +46,13 @@ _SPOOL_NAME_RE = re.compile(r"ev_[0-9a-f]{32}\.json")
 
 
 
+#: #1711. A spooled batch is ACCEPTED and DURABLE but not RECORDED — it is on
+#: disk and invisible to every reader until a drain. It needs a code of its own
+#: because 0 is a lie about it and the failure codes are a lie in the other
+#: direction: nothing was lost and nothing needs retrying.
+RC_SPOOLED = 6
+
+
 def _guarded(label: str, fn) -> int:
     """THE exception-to-exit mapping (one copy). DowngradeError is caught for
     every door — plane status and spool retry run migrate() too, and a newer
@@ -93,7 +100,14 @@ def cmd_emit(args) -> int:
         outcome = emit(root, req)
         print(outcome.event_id)
         if outcome.status == "spooled":
-            print(f"plane: db unavailable — spooled {outcome.detail}", file=sys.stderr)
+            # #1711, same collapse as cmd_emit_batch. Found by the test rather
+            # than by reading: the first patch covered emit-batch alone because
+            # that is the door the shim uses, and `claudlobby emit` is a second
+            # public door with the identical defect.
+            print(f"plane: db unavailable — SPOOLED {outcome.detail} "
+                  f"(durable on disk, NOT in the plane until a drain)",
+                  file=sys.stderr)
+            return RC_SPOOLED
         return 0
 
     return _guarded("emit", run)
@@ -119,7 +133,15 @@ def cmd_emit_batch(args) -> int:
         for o in outcomes:
             print(o.event_id)
         if outcomes and outcomes[0].status == "spooled":
-            print(f"plane: db unavailable — spooled {outcomes[0].detail}", file=sys.stderr)
+            # #1711. Symmetric with lib/plane-socket-client.py: a spooled batch
+            # is durable on disk and ABSENT from the plane, so rc 0 — which the
+            # shim and every door read as "recorded" — asserted something false.
+            # RC_SPOOLED is a verdict: the batch is already written, and the
+            # shim must not replay it down another rung.
+            print(f"plane: db unavailable — SPOOLED {outcomes[0].detail} "
+                  f"(durable on disk, NOT in the plane until a drain)",
+                  file=sys.stderr)
+            return RC_SPOOLED
         return 0
 
     return _guarded("emit-batch", run)

@@ -11,7 +11,11 @@ instead of landing twice under fresh ids (F6 extended to transport retries).
 
 stdin:  {"events": [...]} or a bare JSON array
 stdout: one event_id per line on success (mirrors `claudlobby emit-batch`)
-exit:   0 ok (committed/duplicate/spooled)
+exit:   0 ok (committed/duplicate) — RECORDED, in the plane, queryable now
+        6 spooled (#1711): accepted and durable on disk, NOT in the plane and
+          invisible to every reader until a drain. A verdict, not a fallback
+          trigger — the batch is already written, so replaying it through the
+          cold rung would only spool it a second time.
         2 contract violation / bad request   (verdicts — the shim must NOT
         3 total failure                       fall back on these: the CLI
                                               would only repeat them)
@@ -188,8 +192,16 @@ def main() -> int:
             print(r.get("event_id", ""))
             spooled = spooled or r.get("status") == "spooled"
         if spooled:
-            print("plane-socket-client: db unavailable — daemon spooled the batch",
+            # #1711. The daemon's `ok` is unconditional on outcome kind, so this
+            # is the ONLY place the socket rung can still tell the two apart —
+            # one frame later the caller has an exit code and nothing else.
+            # Returning 0 here asserted "recorded" about a row no reader can
+            # see, which is the one thing the estate's disclosure contract
+            # exists to prevent.
+            print("plane-socket-client: db unavailable — daemon SPOOLED the batch: "
+                  "durable on disk, NOT in the plane until a drain",
                   file=sys.stderr)
+            return 6
         return 0
     code = resp.get("code", "")
     print(f"plane-socket-client: daemon refused [{code}]: {resp.get('error')}",

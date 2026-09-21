@@ -190,4 +190,37 @@ grep -q "daemon not contacted" "$tmpdir/err10" || { echo "FAIL(10): the delibera
 [ "$seen_after" -eq "$seen_before" ] || { echo "FAIL(10): the daemon WAS contacted during a cooldown ($seen_before -> $seen_after) -- the message would be right by accident"; exit 1; }
 rm -f "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
 
+# --- #1711: a SPOOLED batch must not read as RECORDED -----------------------
+# The daemon replies ok:true for a spooled batch (its `ok` is unconditional on
+# outcome kind), so before this the shim exited 0 and every door read
+# "recorded" about a row no reader can see.
+
+# Test 11: spooled -> rc 6, a VERDICT (no fallback), disclosed as spooled
+rm -f "$RECORDER_LOG" "$RECORDER_COPY"
+start_daemon '{"ok": true, "results": [{"event_id": "ev_33333333333333333333333333333333", "status": "spooled"}]}'
+rc=0
+printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" >/dev/null 2>"$tmpdir/err11" || rc=$?
+stop_daemon
+[ "$rc" -eq 6 ] || { echo "FAIL(11): spooled rc=$rc (want 6 — 0 would assert 'recorded' about a row nothing can read)"; cat "$tmpdir/err11"; exit 1; }
+[ ! -e "$RECORDER_LOG" ] || { echo "FAIL(11): replayed a batch that is ALREADY on disk — the cold rung would spool it twice"; exit 1; }
+grep -qi "spooled" "$tmpdir/err11" || { echo "FAIL(11): spool not disclosed"; cat "$tmpdir/err11"; exit 1; }
+grep -qi "fail" "$tmpdir/err11" && { echo "FAIL(11): a spooled batch was worded as a FAILURE — nothing was lost; that is the dead-signal defect"; cat "$tmpdir/err11"; exit 1; }
+
+# Test 12: positive control — committed is STILL 0. Without this a mutation
+# that returns 6 unconditionally passes Test 11 and breaks every door.
+rm -f "$RECORDER_LOG"
+start_daemon '{"ok": true, "results": [{"event_id": "ev_44444444444444444444444444444444", "status": "committed"}]}'
+rc=0
+printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" >/dev/null 2>"$tmpdir/err12" || rc=$?
+stop_daemon
+[ "$rc" -eq 0 ] || { echo "FAIL(12): committed rc=$rc (want 0)"; cat "$tmpdir/err12"; exit 1; }
+
+# Test 13: the COLD rung spools too, and must not be called a failure either
+rm -f "$RECORDER_LOG" "$RECORDER_COPY"
+rc=0
+printf '%s' "$batch" | RECORDER_EXIT=6 PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>"$tmpdir/err13" || rc=$?
+[ "$rc" -eq 6 ] || { echo "FAIL(13): cold-rung spool rc=$rc (want 6)"; cat "$tmpdir/err13"; exit 1; }
+grep -qi "SPOOLED by the cold rung" "$tmpdir/err13" || { echo "FAIL(13): cold-rung spool not distinctly disclosed"; cat "$tmpdir/err13"; exit 1; }
+grep -q "cold CLI rung failed" "$tmpdir/err13" && { echo "FAIL(13): cold-rung spool worded as a failure"; exit 1; }
+
 echo "PASS: all plane-emit shim tests passed"
