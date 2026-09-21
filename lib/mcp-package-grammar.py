@@ -48,6 +48,30 @@ _NPM_VERSION_SUFFIX = re.compile(r"@(?:[0-9^~><=*][^/]*|latest|next)$")
 #: PEP 440 version specifier on a PyPI spec: `pkg==1.2.3`, `pkg>=2`, `pkg[extra]`.
 _PYPI_VERSION_SUFFIX = re.compile(r"(\[[^\]]*\])?\s*(===|==|!=|~=|>=|<=|>|<).*$")
 
+# --- pinning is a DIFFERENT question from where-does-the-suffix-begin ---------
+#
+# The two patterns above answer "where does the version part start", which is
+# what `bare_name` needs, and stripping `@latest` there is CORRECT: the cache is
+# keyed by name. They deliberately do NOT answer "is this an EXACT version",
+# because `@latest`, `^2.0.0` and `>=2` all have a version part and none of them
+# pins anything. Sharing one pattern for both conflated the questions and read a
+# floating tag as pinned (vera, PR #1705).
+
+#: An EXACT npm version: full MAJOR.MINOR.PATCH, with optional prerelease and
+#: build metadata. Measured rather than assumed: `npm view cowsay@1 version`
+#: answers **1.6.0**, not 1.0.0, so a PARTIAL version is a range that resolves
+#: to the newest match — only a complete triple pins. `latest` and `next` are
+#: dist-tags (npm's own idiom for "give me current") and pin nothing.
+_NPM_EXACT_VERSION = re.compile(
+    r"@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$"
+)
+
+#: An EXACT PyPI pin: `==` or `===` only. `~=`, `>=`, `<=`, `>`, `<` are ranges;
+#: `!=` is an EXCLUSION, which names the one version NOT to run and so pins
+#: least of all. A trailing `.*` is PEP 440 prefix matching (`==1.2.*` means any
+#: 1.2.x), so it is excluded even though the operator is `==`.
+_PYPI_EXACT_VERSION = re.compile(r"(?:\[[^\]]*\])?\s*={2,3}\s*([^=<>!~,\s*]+)$")
+
 
 def split_npx_args(args: list[str]) -> tuple[str | None, list[str]]:
     """`npx [-y] <pkg> <rest...>` -> (package, rest).
@@ -144,26 +168,29 @@ def package_name(command: str, args: list[str]) -> str | None:
 
 
 def is_pinned(command: str, spec: str) -> bool:
-    """Does *spec* name a VERSION, rather than whatever the registry serves today?
+    """Does *spec* name an EXACT version, rather than whatever the registry
+    serves today?
 
-    Keyed on the same suffix patterns `bare_name` strips with, so the two can
-    never disagree about where a version begins. That sharing is the point:
-    both questions turn on "is there a version suffix", and the `@` of a scoped
-    npm name is not one.
+    **Exact, not merely "carries a version part".** `pkg@latest`, `pkg@^2.0.0`
+    and `pkg>=2` all have a version part and none of them pins: each resolves to
+    whatever the registry answers with at boot, which is precisely the risk the
+    unpinned warning describes. An earlier cut keyed this on the same patterns
+    `bare_name` strips with, and so read all three as pinned — the two questions
+    look alike and are not the same one. `bare_name` asks *where does the
+    suffix begin* (and stripping `@latest` is right for a cache key);
+    this asks *is that suffix one version*.
 
     **Deliberately NOT `bare_name(command, spec) != spec`**, which is the
     obvious shortcut and is wrong for PyPI: `bare_name` also applies PEP 503
     normalization, so an unpinned `Google_Analytics_MCP` differs from its bare
     form and would report as pinned. The npm arm would have passed that test
-    and the uvx arm would not, which is exactly the kind of half-right
-    predicate a shared grammar exists to prevent.
+    and the uvx arm would not.
 
     An unpinned spec is not broken; it is unverified. Nothing here says a
     package is missing — that is a question only the registry can answer.
     """
-    if command == "npx":
-        return bool(_NPM_VERSION_SUFFIX.search(spec))
-    return bool(_PYPI_VERSION_SUFFIX.search(spec))
+    pattern = _NPM_EXACT_VERSION if command == "npx" else _PYPI_EXACT_VERSION
+    return bool(pattern.search(spec))
 
 
 def declared_packages(
@@ -210,10 +237,21 @@ def declared_packages(
                         spec,
                         bare_name(runtime, spec),
                         is_pinned(runtime, spec),
-                        [runtime, *target[1], "--help"],
+                        _probe_argv(runtime, target),
                     )
                 )
     return sorted(out)
+
+
+def _probe_argv(command: str, target: tuple[str, list[str]]) -> list[str]:
+    """`<command> <warm prefix> --help` — the argv that FETCHES the package.
+
+    One definition because two callers build it: `declared_packages`, which
+    already holds the target, and `warm_argv`, which parses one from args.
+    Typed twice it would be a fork waiting to happen, in the file whose whole
+    thesis is that this grammar has exactly one copy.
+    """
+    return [command, *target[1], "--help"]
 
 
 def warm_argv(command: str, args: list[str]) -> list[str] | None:
@@ -227,7 +265,7 @@ def warm_argv(command: str, args: list[str]) -> list[str] | None:
     string — the registry root answered 200 and a dead fragment read healthy.
     """
     target = warm_prefix(command, args)
-    return None if target is None else [command, *target[1], "--help"]
+    return None if target is None else _probe_argv(command, target)
 
 
 def servers_in(fragment: dict) -> list[tuple[str, dict]]:

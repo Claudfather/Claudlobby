@@ -45,20 +45,46 @@ class TestIsPinned:
     @pytest.mark.parametrize(
         "runtime,spec,pinned",
         [
+            # --- npm: EXACT versions pin ---------------------------------
             ("npx", "docker-mcp@1.0.0", True),
             ("npx", "@notionhq/notion-mcp-server@2.2.1", True),
             ("npx", "mcp-remote@0.1.38", True),
-            ("npx", "pkg@latest", True),
-            ("npx", "pkg@^2.0.0", True),
+            ("npx", "pkg@1.0.0-beta.1", True),          # prerelease
+            ("npx", "pkg@1.0.0+build.5", True),         # build metadata
+            # --- npm: everything that RESOLVES AT BOOT does not ----------
+            # An earlier cut read all of these as pinned, because it reused
+            # the suffix pattern `bare_name` strips with. `@latest` is npm's
+            # own idiom for "give me current" and is behaviourally identical
+            # to the bare name two rows below.
+            ("npx", "pkg@latest", False),
+            ("npx", "pkg@next", False),
+            ("npx", "pkg@^2.0.0", False),
+            ("npx", "pkg@~1.2.3", False),
+            ("npx", "pkg@>=2", False),
+            ("npx", "pkg@*", False),
+            # A PARTIAL version is a range, not a pin. Measured rather than
+            # reasoned: `npm view cowsay@1 version` answers 1.6.0, not 1.0.0.
+            ("npx", "pkg@1.2", False),
+            ("npx", "pkg@1", False),
             ("npx", "printify-mcp", False),
             # The scoped name with NO version: the `@` that is part of the NAME
             # must never read as a version. This is the shape that broke a
             # hand-rolled probe -- it stripped to the empty string, the registry
             # root answered 200, and a dead fragment read healthy.
             ("npx", "@modelcontextprotocol/server-spotify", False),
+            # --- PyPI: only == and === pin -------------------------------
             ("uvx", "google-analytics-mcp==2.8.1", True),
             ("uvx", "mcp-search-console==0.3.2", True),
-            ("uvx", "pkg>=2", True),
+            ("uvx", "pkg===1.0", True),
+            ("uvx", "pkg[extra]==1.0", True),           # an extra beside a pin
+            ("uvx", "pkg>=2", False),
+            ("uvx", "pkg<=3", False),
+            ("uvx", "pkg~=1.0", False),
+            # `!=` is an EXCLUSION -- it names the one version NOT to run, so
+            # it pins least of all, and the operator list read it as a pin.
+            ("uvx", "pkg!=1.0", False),
+            # PEP 440 prefix matching: `==1.2.*` is any 1.2.x, not a version.
+            ("uvx", "pkg==1.2.*", False),
             ("uvx", "workspace-mcp", False),
             # An extra is not a pin.
             ("uvx", "pkg[extra]", False),
@@ -66,6 +92,28 @@ class TestIsPinned:
     )
     def test_classification(self, runtime, spec, pinned):
         assert g.is_pinned(runtime, spec) is pinned
+
+    def test_a_floating_tag_classifies_exactly_like_a_bare_name(self):
+        """The property behind the parametrize block, stated once.
+
+        `pkg@latest` and `pkg` resolve to the SAME thing at boot, so they must
+        classify the same. An earlier cut had them disagree, which is what made
+        the defect invisible: the bare case was covered and correct, and the
+        tag case sat one row away asserting the opposite.
+        """
+        for tag in ("latest", "next", "*"):
+            assert g.is_pinned("npx", f"pkg@{tag}") == g.is_pinned("npx", "pkg")
+
+    def test_bare_name_still_strips_a_floating_tag(self):
+        """`is_pinned` got stricter; `bare_name` must NOT have.
+
+        A cache is keyed by NAME, so stripping `@latest` is correct there --
+        the two functions ask different questions and the fix must not have
+        leaked the stricter answer into the looser one.
+        """
+        assert g.bare_name("npx", "pkg@latest") == "pkg"
+        assert g.bare_name("npx", "pkg@^2.0.0") == "pkg"
+        assert g.bare_name("uvx", "pkg>=2") == "pkg"
 
     def test_pypi_normalization_does_not_read_as_a_version(self):
         """The trap in the obvious shortcut.

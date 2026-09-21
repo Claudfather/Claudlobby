@@ -29,13 +29,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   call, which is why it is the one that ships on by default, in both
   `claudlobby validate` and `claudlobby doctor`.
 
-  `is_pinned` lives in `lib/mcp-package-grammar.py` beside `bare_name`, keyed on
-  the same version-suffix patterns so the two cannot disagree about where a
-  version begins. It is deliberately **not** `bare_name(cmd, spec) != spec`,
-  which is the obvious shortcut and is wrong for PyPI: `bare_name` also applies
-  PEP 503 normalization, so an unpinned `Google_Analytics_MCP` differs from its
-  bare form and would report as pinned. The npm arm passes that shortcut and the
-  uvx arm does not — a half-right predicate, pinned by its own test.
+  `is_pinned` lives in `lib/mcp-package-grammar.py` beside `bare_name`, and
+  **"pinned" means an EXACT version, not merely a version-shaped suffix.**
+  `pkg@latest`, `pkg@^2.0.0`, `pkg>=2` and `pkg==1.2.*` all carry a version part
+  and none of them pins: each resolves to whatever the registry answers at boot,
+  which is precisely the risk the unpinned warning describes.
+
+  The first cut keyed this on the same patterns `bare_name` strips with, and
+  argued that sharing them was the point. It is not: the two questions look
+  alike and are different. `bare_name` asks *where does the suffix begin* — and
+  stripping `@latest` is CORRECT there, because a cache is keyed by name —
+  while this asks *is that suffix one version*. So the pin check has its own
+  predicates and `bare_name` keeps its old ones. npm requires a full
+  `MAJOR.MINOR.PATCH`, measured rather than reasoned: `npm view cowsay@1
+  version` answers **1.6.0**, not 1.0.0, so a partial version is a range that
+  resolves to the newest match. PyPI requires `==` or `===` without a `.*`
+  prefix match; `~=`, `>=` and friends are ranges, and `!=` is an exclusion
+  naming the one version NOT to run.
+
+  It is also deliberately **not** `bare_name(cmd, spec) != spec`, the obvious
+  shortcut, which is wrong for PyPI: `bare_name` applies PEP 503 normalization,
+  so an unpinned `Google_Analytics_MCP` differs from its bare form and would
+  report as pinned — the npm arm passes that shortcut and the uvx arm does not.
+
+  No shipped fragment uses a dist-tag or a range, so the field result is
+  unchanged — 14 declarations, the same 3 unpinned — which is exactly why this
+  was silent. Found in review by vera, who also noted the sharper half: the
+  original tests **asserted the wrong answer** (`pkg@latest` as pinned) rather
+  than omitting it, so the mutation battery could not catch it — mutating an
+  implementation proves the tests are self-consistent, never that their target
+  values are right.
 
 - **Signal 2, RESOLUTION — network, opt-in, bounded, fails open.** Armed with
   `CLAUDLOBBY_MCP_PROBE_ENABLED=1` in the fleet `.env` (registered in

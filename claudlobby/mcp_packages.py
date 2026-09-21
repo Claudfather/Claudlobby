@@ -202,14 +202,6 @@ def resolution_findings(rows: list[tuple]) -> list[Finding]:
     """
     out = []
     for frag, server, runtime, spec, _bare, _pinned, argv in rows:
-        if argv is None:  # the grammar could not read this shape — say so
-            out.append(
-                Finding(
-                    UNCHECKED, Path(frag).name, server, runtime, spec,
-                    "the shared grammar does not recognise this args shape",
-                )
-            )
-            continue
         kind, detail = _probe(argv)
         if kind:
             out.append(Finding(kind, Path(frag).name, server, runtime, spec, detail))
