@@ -26,13 +26,27 @@
 # Per-step failures are collected, not fatal: a re-run converges (idempotent,
 # resumable). Exits non-zero if anything failed.
 #
-# Usage: setup-fleet [<fleet-name>]
+# Usage: setup-fleet [<fleet-name>] [--jobs-only]
 #   With a fleet name: overlay fleet at local/<fleet>/.
 #   Without: root mode (fleet.yaml at $CLAUDLOBBY_ROOT — the seed flow);
 #   reconcile-fleet is overlay-only and is skipped in root mode.
+#   --jobs-only: steps 1 (jobs) and the switches summary only — skips warm
+#   (2), bots (3) and reconcile (4). #1633: this is the mode `reload-fleet.sh`
+#   calls after every `generate`, non-fatally, so a newly-armed job (or a
+#   day-one default-on one) is enrolled the moment it composes rather than
+#   waiting for a human to remember a by-hand setup-fleet run — the gap that
+#   left `task-recheck` composed-on and enrolled nowhere for hours. Never
+#   touches a live session: no cache warm, no bot spin-up, no reconcile.
 set -euo pipefail
 
-FLEET="${1:-}"
+JOBS_ONLY=0
+FLEET=""
+for _arg in "$@"; do
+    case "$_arg" in
+        --jobs-only) JOBS_ONLY=1 ;;
+        *) FLEET="$_arg" ;;
+    esac
+done
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
@@ -351,9 +365,13 @@ print_switches() {
 reconcile_briefing_timers
 enroll_jobs
 migrate_legacy_keepalive
-warm_npx_cache
-spin_up_bots
-reconcile
+if [ "$JOBS_ONLY" -eq 0 ]; then
+    warm_npx_cache
+    spin_up_bots
+    reconcile
+else
+    log "--jobs-only: skipping warm/bots/reconcile (steps 2-4)"
+fi
 print_switches
 
 if [ "$FAILURES" -gt 0 ]; then

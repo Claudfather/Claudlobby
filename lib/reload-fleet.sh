@@ -112,6 +112,16 @@ _reload_critical() {
         _run_step "claude plugin update $_p" claude plugin update "$_p" || return 1
     done
     _run_step "claudlobby generate" claudlobby_cli ${FLEET:+--fleet "$FLEET"} generate || return 1
+    # #1633: enroll whatever this generate just composed, the same day it
+    # arrives — a default-on job (or one an operator just armed) otherwise
+    # sits composed-but-not-enrolled until a human happens to run
+    # `setup-fleet` by hand, which is exactly how `task-recheck` shipped on
+    # and ran nowhere for hours. Non-fatal (log + continue, no `|| return 1`):
+    # a failed enrollment is not a half-reload, and the doctor/validate
+    # `ignition` rung is what catches a persistent one. Touches no live
+    # session — `--jobs-only` skips the cache warm, bot spin-up and
+    # reconcile legs.
+    _run_step "lib/setup-fleet --jobs-only" "$LIB_DIR/setup-fleet" ${FLEET:+"$FLEET"} --jobs-only || true
 }
 
 if ! with_lock "${CLAUDLOBBY_ROOT}/state/reload-fleet.lock" _reload_critical; then
