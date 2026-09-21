@@ -1842,6 +1842,40 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
+def _validate_ignition(fleet: FleetConfig, paths: Paths, report: ValidationReport) -> None:
+    """The same composite ignition question as doctor's ``check_ignition``,
+    at compose time too (#1633) — the same predicate, one warning, beside
+    the manager-checkin pair above.
+
+    Deliberately a SIBLING of :func:`_validate_timers`, not nested inside
+    it: that function returns early when ``not (sd.enabled and sd.timers)``,
+    which is correct for its own two warnings (both are about the
+    ``manager-checkin`` job, which exists only as a ``defaults.jobs`` entry
+    when system-defaults timers compose it) but would be wrong here —
+    ``briefing.slots`` and ``brief.on_start`` are per-bot fleet.yaml fields
+    with nothing to do with system-defaults timers, so a fleet that disabled
+    those timers could still validly have one configured directly, and
+    nesting this check there would silently suppress the warning for it.
+
+    Declared state only; an armed-but-unenrolled door is #839/#1040's gap,
+    named in the warning's own text rather than answered here.
+    """
+    if not fleet.leaf_manager_bots():
+        return
+    from .ignition import ignition_doors
+
+    doors = ignition_doors(fleet, paths)
+    if any(d.armed for d in doors):
+        return
+    cheapest = next(d for d in doors if d.name == "briefing.slots")
+    report.warnings.append(
+        "no ignition door is armed on this fleet — nothing gives an idle "
+        "bot a turn (declared state; this does not check whether an armed "
+        "door is actually enrolled — see #839/#1040). Cheapest to arm: "
+        + cheapest.arm_line
+    )
+
+
 def _validate_library_frontmatter(paths: Paths, report: ValidationReport) -> None:
     """Fail loud on malformed YAML frontmatter in any library ``.md`` file.
 
@@ -2077,6 +2111,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)
+    _validate_ignition(fleet, paths, report)
     _validate_mission(fleet, paths, report)
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)

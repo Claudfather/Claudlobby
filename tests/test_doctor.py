@@ -17,12 +17,15 @@ from claudlobby.doctor import (
     DoctorReport,
     check_claudron,
     check_env_vars,
+    check_ignition,
     check_mcp_configs,
     check_services,
     format_report,
     run_doctor,
 )
 from claudlobby.paths import Paths
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -815,3 +818,78 @@ class TestGoalBindingCheck:
         report = run_doctor(fleet, self._paths(fleet_dir))
         names = [c.name for c in report.checks]
         assert "goal-binding" in names, names
+class TestCheckIgnition:
+    """#1633: does anything give an idle bot on this fleet a turn?
+
+    Uses a real env-tiers resolver (the repo's own lib/, symlinked — the
+    test_switches.py pattern) rather than stubbing it: task-recheck ships
+    opt-out (on by default), so a resolver-unavailable fallback would read it
+    as armed regardless of the scenario under test and every case here would
+    silently collapse to PASS.
+    """
+
+    _FLEET_NO_DOOR = """\
+        fleet:
+          name: ign-fleet
+          service_prefix: com.ign
+          bots:
+            mgr:
+              expertise: [orchestration]
+              manages: [worker]
+            worker:
+              expertise: [software-engineering]
+    """
+
+    _FLEET_BRIEFING_ARMED = """\
+        fleet:
+          name: ign-fleet
+          service_prefix: com.ign
+          bots:
+            mgr:
+              expertise: [orchestration]
+              manages: [worker]
+              briefing:
+                slots:
+                  morning: "*-*-* 08:30:00"
+            worker:
+              expertise: [software-engineering]
+    """
+
+    def _root(self, tmp_path: Path, fleet_yaml: str) -> Path:
+        root = tmp_path / "r"
+        root.mkdir(parents=True, exist_ok=True)
+        if not (root / "lib").exists():
+            (root / "lib").symlink_to(REPO / "lib")
+        (root / "fleet.yaml").write_text(dedent(fleet_yaml))
+        # task-recheck ships opt-out — disarm it so "no door armed" is
+        # actually reachable rather than permanently masked by the default.
+        (root / ".env").write_text("TASK_RECHECK_ENABLED=0\n")
+        return root
+
+    def _check(self, tmp_path, fleet_yaml: str):
+        root = self._root(tmp_path, fleet_yaml)
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        paths = Paths(root=root, fleet_dir=root)
+        report = DoctorReport()
+        check_ignition(fleet, paths, report)
+        assert len(report.checks) == 1
+        return report.checks[0]
+
+    def test_ignition_warns_when_a_leaf_manager_fleet_has_no_armed_door(self, tmp_path):
+        check = self._check(tmp_path, self._FLEET_NO_DOOR)
+        assert check.name == "ignition"
+        assert check.status == "warn"
+        assert "0/" in check.detail
+        assert "briefing.slots" in check.detail
+
+    def test_ignition_passes_and_names_the_armed_door_when_briefing_slots_exist(
+        self, tmp_path
+    ):
+        check = self._check(tmp_path, self._FLEET_BRIEFING_ARMED)
+        assert check.status == "pass"
+        assert "briefing.slots" in check.detail
+
+    def test_ignition_rung_states_it_reads_declared_not_enrolled_state(self, tmp_path):
+        check = self._check(tmp_path, self._FLEET_NO_DOOR)
+        assert "declared" in check.detail.lower()
+        assert "839" in check.detail or "1040" in check.detail

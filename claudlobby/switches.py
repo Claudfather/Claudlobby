@@ -449,6 +449,31 @@ SWITCHES: tuple[Switch, ...] = (
              "manager with at least one in-fleet report that is not itself "
              "a manager), plus any manager that declares it",
     ),
+    Switch(
+        key="worker-unassigned",
+        scope=DOOR,
+        polarity=OPT_IN,
+        carrier=BOT_CONF,
+        env="OBSERVABILITY_UNASSIGNED_CHECK",
+        why_opt_in="pages the manager about the assignment loop and has no "
+                   "rate guard beyond the debounce",
+        what="page the manager when a worker sits idle with nothing "
+             "assigned — the mirror of the overdue-dispatch watchdog, for "
+             "an empty assignment rather than a stale one",
+    ),
+    Switch(
+        key="boot-brief",
+        scope=DOOR,
+        polarity=OPT_IN,
+        carrier=ENROLL_FLEET,
+        config="bots.<bot>.brief.on_start",
+        why_opt_in="standing context per session; rollout operator-held "
+                   "pending ratified cost",
+        what="a SessionStart hook injects the bot's own fleet-brief at "
+             "every boot, so its first turn already has open rows in "
+             "context instead of composing a Bash read into the default "
+             "boot prompt",
+    ),
 )
 
 #: Flags a shipped door once read and no longer does. A key here gets its own

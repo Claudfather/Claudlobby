@@ -233,11 +233,13 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
+| `boot-brief` | **off** — standing context per session; rollout operator-held pending ratified cost | door | fleet.yaml | bots.<bot>.brief.on_start: true in fleet.yaml, then generate + lib/setup-fleet |
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
+| `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
 | `registry-scan` | **on** | generate | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
@@ -844,7 +846,9 @@ All sub-fields except `skill`, `cadence`, and `target_repo` are optional with se
 
 ### `bots.<name>.startup_prompt`
 
-Jinja2-templated string sent to the bot on startup. Available placeholders: `{{ bot_name }}`, `{{ fleet_name }}`, `{{ telegram_group_chat_id }}`, `{{ telegram_handle }}`. Written to `bot.conf` as `STARTUP_PROMPT`. Use to give the bot initial instructions (e.g., "read your CLAUDE.md and idle").
+Jinja2-templated string sent to the bot on startup. Available placeholders: `{{ bot_id }}` (the fleet.yaml key — what `claudlobby brief --bot` takes; `bot_name` is a display name and may differ), `{{ bot_name }}`, `{{ fleet_name }}`, `{{ telegram_group_chat_id }}`, `{{ telegram_handle }}`. Written to `bot.conf` as `STARTUP_PROMPT`.
+
+**Omit this field and a bot composes a read-then-act default instead of an idle instruction** (#1633): read `CLAUDE.md`, run `claudlobby brief --bot <id>` (or, when `brief.on_start` is armed, read the brief already injected at session start), act on what it shows — continue open rows, report anything blocked — then idle and await messages. Set your own `startup_prompt` only when a bot needs something beyond that; do not end a custom prompt in a bare "idle" instruction with no read or action before it, which is the exact defect the default replaced.
 
 ## Auto-derived permissions
 
