@@ -114,7 +114,12 @@ class TestWedgeMarker:
         # failed socket attempt wrote (rc 5 -> new cooldown), which is the
         # correct self-healing behavior.
         assert "wedge cooldown" not in r.stderr
-        assert "daemon unavailable" in r.stderr
+        # #1657/#1690: this is a genuine transport attempt (no daemon, no
+        # cooldown skip), so the shim's contract now names it "transport
+        # failed" -- "daemon unavailable" is the old, pre-split wording and
+        # must not reappear here.
+        assert "transport failed" in r.stderr
+        assert "daemon unavailable" not in r.stderr
         assert int(mark.read_text()) <= int(time.time())
 
     def test_cooldown_passes_client_verdicts_through(self, tmp_path, armed):
