@@ -105,7 +105,7 @@ What to do:
 
 1. **Stop GitHub operations.** One probe is enough. `git fetch` and `git push` count.
 2. **Commit locally on a branch. Do not push.** Nothing is lost — already-pushed work is safe and a local commit survives. What is frozen is *delivery*, not work.
-3. **Report blocked** via `report-back.sh --task <id>`, naming the branch instead of a PR.
+3. **Report blocked** via `report-back.sh <bot-name> blocked "<reason>" --task <id>`, naming the branch instead of a PR.
 4. **Do NOT attempt to re-authenticate.** A bot does not hold the human's credentials, and where the cause is a secret-scanning revocation a naive regenerate can get the replacement revoked too. Escalation is the human's, not yours.
 5. **Carry on with everything else** — local code, tests, analysis, shared docs and vault captures are entirely unaffected.
 

@@ -178,7 +178,9 @@ class TestReloadFleetNpxPreflight:
         root = tmp_path / "root"
         libdir = root / "lib"
         libdir.mkdir(parents=True)
-        for script in ("reload-fleet.sh", "lib-common.sh"):
+        # supervisor.sh is a required sibling: lib-common.sh unconditionally
+        # sources it from its own directory (#1573 task 6).
+        for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh"):
             with open(os.path.join(LIB, script)) as f:
                 content = f.read()
             _write_exec(str(libdir / script), content)
@@ -388,7 +390,9 @@ class TestReloadFailureReasonIsTheRealError:
         root = tmp_path / "root"
         libdir = root / "lib"
         libdir.mkdir(parents=True)
-        for script in ("reload-fleet.sh", "lib-common.sh"):
+        # supervisor.sh is a required sibling: lib-common.sh unconditionally
+        # sources it from its own directory (#1573 task 6).
+        for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh"):
             with open(os.path.join(LIB, script)) as f:
                 _write_exec(str(libdir / script), f.read())
         _write_exec(str(libdir / "check-npx-cache.sh"), "#!/bin/bash\nexit 0\n")

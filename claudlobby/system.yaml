@@ -306,6 +306,36 @@ host:
       interval: 30
       type: oneshot
 
+  # Boot policy (design doc 2026-09-20-boot-admission-and-supervision-
+  # consolidation-design.md §6.1, #1573): the values every bot's boot
+  # sequence needs, computed once from this block and rendered into
+  # bot.conf so both supervisors (systemd and launchd) deliver the same
+  # numbers -- the boot stagger this replaces existed only in the systemd
+  # unit, so a launchd host had none at all. See claudlobby/boot.py for how
+  # these become a BootPolicy. `priority` (decided by fleet topology --
+  # managers first) and `ready_timeout_s` (always derived from
+  # mcp_timeout_ms, epic fork F3: the readiness ceiling can never be
+  # shorter than the MCP startup timeout it waits on) are deliberately
+  # absent here -- neither is a knob a host sets directly.
+  boot:
+    # How many bots may run their MCP-startup phase at once. `auto` derives
+    # clamp(cpu_count // 4, 1, 4) from the host's own CPU count at compose
+    # time; an explicit integer overrides it outright, on any host.
+    admission_slots: auto
+    # Seconds a queued bot waits for an admission slot before giving up and
+    # starting anyway. A gate that could strand a bot forever would be the
+    # failure it replaces, not a fix for it.
+    admission_wait_max_s: 1200
+    # Milliseconds Claude Code gets to start its MCP servers -- rendered as
+    # the exported MCP_TIMEOUT it reads from its own environment. Raising
+    # this also raises ready_timeout_s (F3), so the readiness poll is never
+    # left with less time than the MCP startup phase it waits on.
+    mcp_timeout_ms: 180000
+    # Run `claude plugin update` at most once per host boot rather than
+    # once per bot start: true keeps every bot on the boot's first-resolved
+    # plugin set; false restores the per-start update.
+    plugin_update_once_per_boot: true
+
 defaults:
   hooks:
     PreToolUse:

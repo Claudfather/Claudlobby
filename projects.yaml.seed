@@ -1,0 +1,39 @@
+# projects.yaml.seed — ships with claudlobby. Copy to `projects.yaml` beside
+# your fleet.yaml (root mode: the repo root; overlay mode:
+# local/<fleet>/projects.yaml). This file is committed; `projects.yaml` is not.
+#
+# WHAT THIS FILE IS FOR
+# It is the third config tier: WHAT the work is, and what "done" REQUIRES per
+# project. Your manager's check-in reads it to pick work and to know how that
+# work is allowed to close.
+#
+# YOU DO NOT NEED THIS FILE TO START. When it is absent, claudlobby DERIVES a
+# project per repo your bots declare in `scope.repos`, at tier `review`, and
+# labels the composed table as derived. Write this file when a project's real
+# closure bar is NOT "a reviewer looked at it" — that is the whole reason to
+# declare one. A declared file REPLACES the derivation wholesale (never a
+# merge), so list every project you want, not just the ones you are changing.
+#
+# Full reference: documentation/projects-yaml-schema.md (and
+# projects.yaml.example for a fuller worked set).
+
+projects:
+  # The key is lowercase kebab-case ([a-z][a-z0-9-]*) and becomes the
+  # PROJECT_TIER_<SLUG> / PROJECT_REPOS_<SLUG> env name in every bot.conf.
+  claudlobby:
+    title: claudlobby (the compositor this fleet runs on)
+    repos: [Claudfather/Claudlobby]      # org/repo — the join key, always qualified
+    validation:
+      # The four tiers are ALTERNATIVES, not levels:
+      #   auto    — green CI is enough; the bot closes its own work
+      #   review  — a reviewer verdict is required  (the derived default)
+      #   preview — a preview link plus an operator ack
+      #   human   — the operator closes it, full stop
+      tier: review
+      notes: framework changes get a second pair of eyes before they close
+
+  claudna:
+    title: clauDNA (engineering workflow skills)
+    repos: [Claudfather/clauDNA]
+    validation:
+      tier: review

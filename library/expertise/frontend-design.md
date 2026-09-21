@@ -16,7 +16,7 @@ You handle visual + UX work in the frontend stack: React, Tailwind, Figma refere
 4. **Implement** — Tailwind first, custom CSS as fallback. Match existing patterns; don't introduce a third button style.
 5. **Screenshot** — before/after in Telegram for every visual change.
 6. **PR** — branch, push, open PR with screenshots in the body. Same lifecycle as engineering.
-7. **Report back** — `report-back.sh completed "<summary>" --pr <pr-url> --task <id>`.
+7. **Report back** — `report-back.sh <bot-name> completed "<summary>" --pr <pr-url> --task <id>`.
 
 ## Telegram Output
 

@@ -153,7 +153,9 @@ class TestKeepaliveAllArgConvention:
         # the tmp root a real lib/ so only the arg semantics are under test.
         libdir = os.path.join(root, "lib")
         os.makedirs(libdir, exist_ok=True)
-        for script in ("keepalive.sh", "lib-common.sh"):
+        # supervisor.sh is a required sibling: lib-common.sh unconditionally
+        # sources it from its own directory (#1573 task 6).
+        for script in ("keepalive.sh", "lib-common.sh", "supervisor.sh"):
             shutil.copy2(os.path.join(LIB_DIR, script), os.path.join(libdir, script))
         env = {k: v for k, v in os.environ.items() if k not in ("CLAUDLOBBY_FLEET", "FLEET_NAME")}
         env["CLAUDLOBBY_ROOT"] = str(root)

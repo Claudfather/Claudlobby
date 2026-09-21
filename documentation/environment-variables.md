@@ -94,8 +94,31 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | `OBSERVABILITY_PULSE_INTERVAL` | `bots.<name>.observability.pulse_interval` | Seconds between heartbeat pulses (default: 300) |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | `bots.<name>.observability.activity_stuck_threshold` | Seconds of inactivity before flagged stuck (default: 1800) |
 | `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue. Composed for every bot since #1481; 86400 (24h) when the fleet declares none, `0` = open-ended. SECONDS — 24h is 1440 minutes, and only `--deadline-min` speaks minutes |
-| `RC_READY_TIMEOUT_S` | env override (`start-bot.sh`) | Seconds to wait for the `remote-control is active` readiness string before logging TIMEOUT and emitting the `rc_timeout` event (default: 90). Not composed from fleet.yaml — a raw override for slow hosts and the test harness |
+| `RC_READY_TIMEOUT_S` | composed (`BootPolicy` -> `bot.conf`, derived from `host.boot.mcp_timeout_ms`); env override fallback (`start-bot.sh`) | Seconds `start-bot.sh` waits for the Telegram poller's `bridge_state=up` (session-scoped, #1530) before logging TIMEOUT and emitting the `rc_timeout` event. Derived, not a flat default: `max(90, mcp_timeout_ms // 1000 + 20)` — 200 at the package's default `mcp_timeout_ms` (180000), so the ceiling can never be shorter than the MCP-startup timeout it waits on (F3). `bot.conf` is sourced before `start-bot.sh` reads this variable, so the composed value wins whenever the key is present; the bare `90` fallback fills in only for an un-regenerated `bot.conf` that predates the key (F4) |
 | `KEEPALIVE_BOOT_GRACE_S` | env override (`lib-common.sh` `service_is_starting`) | Seconds a unit may stay mid-start before keepalive stops treating it as booting and restarts it, and fleet-pulse resumes alarming (default: 300). Budgets ONE phase — `ExecStart`, bounded by `RC_READY_TIMEOUT_S` — so the composed boot stagger never eats it. Raise it only on a host where cold starts genuinely exceed it; the cap is what stops a wedged `start-bot.sh` suppressing the watchdog forever (#1002). Not composed from fleet.yaml |
+
+## Boot Admission
+
+Composed from the package `host.boot` block (see
+[`system-yaml-schema.md`](system-yaml-schema.md#hostboot--boot-admission-and-readiness-policy))
+into every bot's `bot.conf` via `BootPolicy` (`claudlobby/boot.py`, #1573).
+None of these are set through `bots.<name>.env` or hand-edited in a bot's
+`bot.conf` — a hand-edit is overwritten on the next `generate`; the source of
+truth is `system.yaml`'s `host.boot` block, host-scoped like `host.jobs`.
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `MCP_TIMEOUT` | composed (`host.boot.mcp_timeout_ms`, default 180000) | Exported to the session — the one `BootPolicy` key Claude Code itself reads out of the environment: its own MCP-server-startup timeout, in milliseconds |
+| `BOOT_ADMISSION_SLOTS` | composed (`host.boot.admission_slots`, default `"auto"` -> `clamp((cpu_count or 1) // 4, 1, 4)`) | How many bots may run their MCP-startup phase at once. Composed into `bot.conf`, not an operator variable; inert until the PR that reads it |
+| `BOOT_ADMISSION_WAIT_MAX_S` | composed (`host.boot.admission_wait_max_s`, default 1200) | Seconds a queued bot waits for an admission slot before giving up. Composed into `bot.conf`, not an operator variable; inert until the PR that reads it |
+| `BOOT_PRIORITY` | composed (derived: 0 = manager, 1 = worker, from `fleet.manager_bots()`; not a `host.boot` key) | Admission-queue priority. Composed into `bot.conf`, not an operator variable; inert until the PR that reads it |
+| `BOOT_PLUGIN_UPDATE_ONCE` | composed (`host.boot.plugin_update_once_per_boot`, default `true` -> `1`) | Read today by `plugin_ensure` (`lib-common.sh`): `1` gates `claude plugin update` to at most once per (boot epoch, plugin) rather than every start; installs are unaffected. `0`, or an un-regenerated `bot.conf` that predates the key, keeps the per-start update |
+
+`BOOT_ADMISSION_SLOTS`, `BOOT_ADMISSION_WAIT_MAX_S` and `BOOT_PRIORITY` are
+the three values PR A's admission gate does not yet exist to consume — they
+compose into every `bot.conf` today so a later PR has one place both
+supervisors already agree on, but nothing reads them back out until that gate
+lands. `MCP_TIMEOUT` and `BOOT_PLUGIN_UPDATE_ONCE` are both live today.
 
 ## Host-Job Alert Routing
 

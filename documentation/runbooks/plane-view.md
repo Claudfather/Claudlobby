@@ -66,11 +66,24 @@ will attribute the §11 reveal act when that lands.
 
 ## Capture policy and the channel
 
-The channel shows message BODIES only for rows recorded under `full`
-capture (`state/plane/capture.json`, e.g. `{"*": "full"}` — the F7/F23
-knob). Rows recorded under the default `metadata` policy render as
-"captured as metadata only (N bytes)" forever — the ledger is append-only;
-flipping capture starts words at the flip, never retroactively.
+The channel shows message BODIES for rows recorded under `full` capture,
+which is the **shipped default** since 2026-09-20 — the channel is the
+product, and under the previous `metadata` default every message rendered
+"captured as metadata only (N bytes)" forever on an install nobody had
+misconfigured.
+
+To keep shapes without words, opt out in `state/plane/capture.json` — host
+wide with `{"*": "metadata"}`, or per fleet with `{"noisy-fleet": "metadata"}`
+(a named fleet beats `*`). The mode in force is visible in three places: the
+`capture config` rung of `claudlobby plane doctor`, the `<mode> capture` label
+on every fleet card, and the trust surface. A malformed file fails LOUD and
+resolves to no mode at all, which matters more under a `full` default than it
+did before: a silent fallback would store content an operator opted out of
+keeping.
+
+Either way the ledger is append-only, so **flipping capture starts words at
+the flip and never retroactively** — and rows already recorded as metadata
+cannot be recovered, because the body was dropped at the door.
 
 Optional `state/plane/channels.json` maps raw carrier addresses to names
 (`{"-100123": "Engineering group"}`) so a Telegram destination never renders

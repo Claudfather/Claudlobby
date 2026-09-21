@@ -78,3 +78,6 @@ projects.yaml
 **/data/events/fleet-*.jsonl
 **/data/.last-tool-call
 **/data/.idle
+
+# fleet charter (the .seed beside it is the committed template)
+missions/*.md

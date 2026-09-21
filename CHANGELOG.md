@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the plane's capture policy ships as `full` (#1631)
+
+- **Message bodies are recorded by default.** `state/plane/capture.json` is
+  still the knob and still defaults when absent, but that default moved from
+  `metadata` to `full`. Under the old default every message in the channel read
+  "captured as metadata only (N bytes)" forever, on an install nobody had
+  misconfigured — measured on a second host that had recorded 4,506 events and
+  233 communications, not one of them legible. The ledger is append-only, so a
+  default that strips bodies does not hide the words, it destroys them at the
+  door.
+- **What it trades, plainly.** Bodies live in the host's own SQLite ledger and
+  are read back only by the localhost-bound view; nothing is transmitted, and
+  the content is the operator's own agents talking to each other. **An
+  upgrading host that wants the old behaviour must say so**: write
+  `{"*": "metadata"}` to `state/plane/capture.json` before the next restart.
+  Per-fleet opt-out works too, and a named fleet beats `*`.
+- The mode in force is surfaced in three places rather than assumed: the
+  `capture config` rung of `plane doctor` (which resolves and prints the mode
+  actually in force — `metadata (host-wide opt-out)`, `full (shipped default)`,
+  or the host mode plus the fleets that differ — through the same
+  `capture_mode` rule the recorder and the view resolve through), the
+  `<mode> capture` label on each fleet card, and the trust surface. The rung
+  previously printed a fixed string naming the *default*, so it was
+  informative only when the setting did not matter and wrong for exactly the
+  hosts that had configured one. A malformed file still fails LOUD and resolves to no mode — that
+  refusal matters more under a `full` default, because a silent fallback would
+  now store content an operator opted out of keeping.
+
 ### Fixed — `warm-cache` covers uvx, but its only automated caller could not (#1577)
 
 - **Every automated invocation of `warm-cache` comes from `lib/reload-fleet.sh`, which runs it ONLY when `lib/check-npx-cache.sh` fails — and that probe scanned `~/.npm/_npx` and nothing else.** On a fleet whose npx packages were cached the probe passed, reload-fleet called `debounce_clear`, and the uvx servers stayed cold indefinitely. Measured on a scoped library (2 npx cached, 1 uvx cold): `origin/main` saw **2 of 4** packages and reported `all 2 packages resolvable ✓` at rc 0 — gate closed, no warm; the fix sees 4, names the cold one, rc 1 — gate open. A correct fix behind a gate that never opens.
@@ -31,6 +59,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Measured, true cold** (isolated empty `UV_CACHE_DIR`, so shared dependencies are cold too; host load 4.7): `uvx workspace-mcp --help` **50.3s**, `uvx --from mcp-search-console==0.3.2 mcp-search-console --help` **42.9s**, against Claude Code's **30s** MCP connect budget. After `warm-cache`: **3.1s** and **1.8s**, and all three shipped uvx packages then resolve with `--offline` while two never-warmed controls fail to — so the warm demonstrably populated the cache rather than merely exiting 0. A cold uvx server loses deterministically; a boot storm is not needed, which refines the contention framing #1497 opens with.
 - **Known gap, filed as #1577 and not addressed here:** `warm-cache`'s only automated caller (`lib/reload-fleet.sh`) is still gated on `lib/check-npx-cache.sh`, which knows nothing of uv. On a fleet whose npx packages are cached the probe exits 0 and uvx is never warmed by the daily path — it is reached by `/setup`, `lib/setup-fleet` and manual runs.
 - The npx invocation is **byte-identical** to before and pinned by test. `tests/conftest.py` gains `equip_bot_with_mcp` / `warm_cache_args` / `SubprocessRecorder`, and `tests/test_npx_cache_probes.py` drops its three forked copies of them.
+
+### Added — boot admission, PR A: the boot policy truth and the supervisor adapter (#1573)
+
+- **`claudlobby/boot.py` — `BootPolicy`, computed once per bot at compose time from a new package `host.boot` block.** `resolve_boot_policy` derives `admission_slots` (`"auto"` → `clamp((cpu_count or 1) // 4, 1, 4)`, or an explicit override), `admission_wait_max_s`, `mcp_timeout_ms`, and `plugin_update_once_per_boot`, plus two values no `host.boot` key controls because they are not configuration: `priority` (0 = manager, 1 = worker, from `fleet.manager_bots()`) and `ready_timeout_s` (derived: `max(90, mcp_timeout_ms // 1000 + 20)`, so the readiness ceiling can never be shorter than the MCP-startup timeout it waits on). Every `host.boot` key has a package default, so a host that declares none still resolves a full policy.
+- **`bot.conf` carries the boot policy, exactly once.** `compose_bot_conf` appends `bot_conf_lines(resolve_boot_policy(...))`'s six lines (`BOOT_ADMISSION_SLOTS`, `BOOT_ADMISSION_WAIT_MAX_S`, `BOOT_PRIORITY`, `export MCP_TIMEOUT`, `RC_READY_TIMEOUT_S`, `BOOT_PLUGIN_UPDATE_ONCE`) to every bot's `bot.conf`; the composed systemd unit and launchd plist carry none of them, so a value computed once at compose time reaches both supervisors identically.
+- **The bring-up readiness poll's ceiling is wall-clock, not a probe count.** Extracted into `wait_bridge_ready_state` (`lib/lib-common.sh`): the old loop counted probes (`_rc_iters = timeout_s * 2`), so a slow `bridge_state` probe under load silently stretched a configured "90s" ceiling to five minutes (measured 2026-09-19); the new loop measures `date +%s` against its own start and folds a clock step (an RTC-less host jumping its clock forward at NTP sync) into the start time rather than reading it as elapsed time. That fold's threshold is `max(timeout_s, 60s)`, deliberately not the ceiling itself: with a small ceiling (the harness drives the real `start-bot.sh` at `RC_READY_TIMEOUT_S=1`) a probe costing more than the whole ceiling was read as a clock step on every iteration and the wait never expired — measured unbounded and killed. `start-bot.sh`'s `TIMEOUT` line now names the last `bridge_state` seen, not just the elapsed seconds, and its `CRASH` line now carries elapsed wall-clock seconds (the pre-extraction line printed a probe count labelled as seconds).
+- **`claude plugin update` runs at most once per (boot epoch, plugin), never on every start.** `plugin_ensure` (`lib/lib-common.sh`) stamps `state/boot/plugins-updated.<epoch>.<plugin>` under a shared lock when `BOOT_PLUGIN_UPDATE_ONCE=1` (the new composed default); installs are unaffected and still run on every cold start. An unresolvable boot epoch or an unwritable state directory falls back to updating on every call, logged, rather than silently never updating again.
+- **`claudlobby/supervision.py` — one `SupervisionSpec` behind both unit renderers.** `build_supervision_spec` is now the only place `compose_systemd_unit`/`compose_launchd_plist` read `bot`/`fleet`/`paths`; `render_systemd_unit` and `render_launchd_plist` are pure functions of the spec. A round-trip test (`tests/test_supervision_roundtrip.py`) parses each rendered unit back into a spec and asserts both equal the spec that built them, so a fact one renderer learns and the other doesn't is a failing test. Output is byte-identical to pre-#1573 for every existing fixture.
+- **`lib/supervisor.sh` — the supervisor adapter: five verbs (`svc_is_registered`, `svc_state`, `svc_kick`, `svc_enroll`, `svc_disenroll`) plus `svc_unit_name`, the shared label resolver, each with a systemd spelling and a launchd spelling behind `$_OS`.** Sourced by `lib-common.sh` right after `detect_os`, which hands it the lib directory it has already derived by parameter expansion — so the adapter costs no extra subshell on a file sourced once per keepalive tick per bot. No call site migrates onto it in this PR — it ships sourced and contract-tested (`tests/test_supervisor_adapter.sh` against fake `systemctl`/`launchctl`) — and `tests/test_supervisor_ratchet.py` fences every other `lib/` file's direct `systemctl`/`launchctl` calls at their current count (109 OCCURRENCES across 20 files, counted per occurrence rather than per matching line so a second call appended to an existing line cannot slip through), so this adapter is the one place that count may grow.
+- **The two restart drivers now derive their `BRIDGE_READY` gate from the bot's own composed readiness ceiling.** `lib/rolling-restart.sh` and `lib/weekly-worker-restart.sh` both waited a fixed 180s, while `start-bot.sh` writes `BRIDGE_READY` only AFTER a readiness poll this PR composes at 200s (`RC_READY_TIMEOUT_S`) — so a healthy bot whose poller came up in the 180–200s band made the driver give up first, halting the roll with a `rolling_restart_stalled` FLEET ALERT (or a `bridge_down` alert on the weekly bounce) for a bot that was merely slow. The band widened with every raise of `host.boot.mcp_timeout_ms`. Each driver now reads `RC_READY_TIMEOUT_S` from the bot's `bot.conf` (F4: `bot.conf` is the carrier) and adds a 120s margin for `pre-stop-handoff` + spin-up + the poller settle, so a policy change moves both drivers with it; `--ceiling` and `WEEKLY_RESTART_CEILING` remain operator overrides that win when set.
 
 ### Fixed — a bot session could not resolve the bare `claudlobby` CLI on a venv install (#1567)
 

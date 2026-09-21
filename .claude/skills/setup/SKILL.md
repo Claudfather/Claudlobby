@@ -214,8 +214,20 @@ If `.env` already exists, read it first and only add/update the keys above. Do n
    - Replace `telegram_group_chat_id: "REPLACE_ME"` with the collected group ID
    - Replace `human_telegram_id: "REPLACE_ME"` with the collected user ID
    - Replace `handle: REPLACE_ME` under the claudfather bot with the bot username (from the getMe response)
-3. Run `claudlobby validate` — explain any warnings to the user
-4. Run `claudlobby generate` — this creates `runtime/bots/claudfather/`
+3. Give the fleet a goal ladder (both optional — say what they are for, then
+   let the user skip either):
+   - Copy `projects.yaml.seed` to `projects.yaml` if it does not exist. Without
+     it claudlobby derives one project per repo in each bot's `scope.repos` at
+     tier `review` and labels the table derived; copy the seed when a project's
+     real closure bar is something other than "a reviewer looked at it".
+   - Copy `missions/fleet.md.seed` to `missions/fleet.md` if the user wants a
+     charter, then add `mission:` (one paragraph, every bot gets it) and
+     `mission_file: missions/fleet.md` to `fleet.yaml`. `mission_file` requires
+     `mission` — the validator enforces that pair.
+4. Run `claudlobby validate` — explain any warnings to the user. The
+   `goal-binding` findings are the ones worth reading aloud: they say whether
+   this fleet can dispatch against a goal at all.
+5. Run `claudlobby generate` — this creates `runtime/bots/claudfather/`
 
 Use `sed` or direct file editing to patch values. Do not rewrite the entire file — preserve comments and formatting.
 

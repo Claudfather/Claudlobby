@@ -26,7 +26,7 @@ CLI = Path(sys.executable).parent / "claudlobby"
 
 DOOR_FILES = (
     "dispatch-task.sh", "report-back.sh", "workstream-update.sh",
-    "lib-common.sh", "plane-emit.sh", "plane-socket-client.py",
+    "lib-common.sh", "supervisor.sh", "plane-emit.sh", "plane-socket-client.py",
     "dispatch-overdue.py", "plane-readers.py", "plane-lookup.py",
     "task-act.sh",
 )

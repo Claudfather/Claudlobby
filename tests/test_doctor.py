@@ -17,12 +17,15 @@ from claudlobby.doctor import (
     DoctorReport,
     check_claudron,
     check_env_vars,
+    check_ignition,
     check_mcp_configs,
     check_services,
     format_report,
     run_doctor,
 )
 from claudlobby.paths import Paths
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -447,7 +450,9 @@ class TestCheckCredentialsScoping:
         """
         repo = Path(__file__).resolve().parent.parent
         (paths.root / "lib").mkdir(parents=True, exist_ok=True)
-        for f in ("lib-common.sh", "env-tiers.sh"):
+        # supervisor.sh is a third required sibling: lib-common.sh unconditionally
+        # sources it from its own directory (#1573 task 6).
+        for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
             (paths.root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
         fake_home = paths.root.parent / "home"
         fake_home.mkdir(exist_ok=True)
@@ -750,3 +755,143 @@ class TestEachRailwayTokenIsProbedWithAQueryItCanAnswer:
             "one dead token among several is not `Railway is broken`; each "
             "declared token gets its own probe"
         )
+
+
+class TestGoalBindingCheck:
+    """Claudfather/Claudlobby#1634 — the goal-binding finding gets its own
+    named rung rather than being one of `fleet-yaml`'s `N warning(s)`. A count
+    is not something an operator can act on, and each of these findings stops
+    the check-in beat from producing work."""
+
+    def _paths(self, fleet_dir: Path) -> Paths:
+        return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+
+    def _scope(self, fleet_dir: Path, org: str, repos: list[str]) -> None:
+        import re as _re
+
+        text = (fleet_dir / "fleet.yaml").read_text()
+        m = _re.search(r"^(\s+)lead:\n(\s+)expertise:.*\n", text, _re.M)
+        inner = m.group(2)
+        block = f"{inner}scope:\n{inner}  org: {org}\n{inner}  repos: [{', '.join(repos)}]\n"
+        (fleet_dir / "fleet.yaml").write_text(text[: m.end()] + block + text[m.end():])
+
+    def test_no_projects_at_all_warns_on_its_own_line(self, fleet_dir):
+        from claudlobby.doctor import check_goal_binding
+
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = DoctorReport()
+        check_goal_binding(fleet, self._paths(fleet_dir), report)
+        assert [c for c in report.checks if c.name == "goal-binding"]
+        check = report.checks[0]
+        assert check.status == "warn"
+        assert "check-in-equipped" in check.detail or "no projects" in check.detail
+
+    def test_derived_projects_pass_and_the_line_says_derived(self, fleet_dir):
+        from claudlobby.doctor import check_goal_binding
+
+        self._scope(fleet_dir, "acme", ["storefront"])
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = DoctorReport()
+        check_goal_binding(fleet, self._paths(fleet_dir), report)
+        check = report.checks[0]
+        assert check.name == "goal-binding"
+        assert check.status == "pass", check.detail
+        assert "derived from scope.repos" in check.detail
+        assert "1 project" in check.detail
+
+    def test_declared_projects_pass_and_the_line_says_projects_yaml(self, fleet_dir):
+        from claudlobby.doctor import check_goal_binding
+
+        (fleet_dir / "projects.yaml").write_text(
+            "projects:\n  shop:\n    title: Shop\n    repos: [acme/storefront]\n"
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = DoctorReport()
+        check_goal_binding(fleet, self._paths(fleet_dir), report)
+        check = report.checks[0]
+        assert check.status == "pass", check.detail
+        assert "projects.yaml" in check.detail
+        assert "derived" not in check.detail
+
+    def test_run_doctor_includes_the_rung(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = run_doctor(fleet, self._paths(fleet_dir))
+        names = [c.name for c in report.checks]
+        assert "goal-binding" in names, names
+class TestCheckIgnition:
+    """#1633: does anything give an idle bot on this fleet a turn?
+
+    Uses a real env-tiers resolver (the repo's own lib/, symlinked — the
+    test_switches.py pattern) rather than stubbing it: task-recheck ships
+    opt-out (on by default), so a resolver-unavailable fallback would read it
+    as armed regardless of the scenario under test and every case here would
+    silently collapse to PASS.
+    """
+
+    _FLEET_NO_DOOR = """\
+        fleet:
+          name: ign-fleet
+          service_prefix: com.ign
+          bots:
+            mgr:
+              expertise: [orchestration]
+              manages: [worker]
+            worker:
+              expertise: [software-engineering]
+    """
+
+    _FLEET_BRIEFING_ARMED = """\
+        fleet:
+          name: ign-fleet
+          service_prefix: com.ign
+          bots:
+            mgr:
+              expertise: [orchestration]
+              manages: [worker]
+              briefing:
+                slots:
+                  morning: "*-*-* 08:30:00"
+            worker:
+              expertise: [software-engineering]
+    """
+
+    def _root(self, tmp_path: Path, fleet_yaml: str) -> Path:
+        root = tmp_path / "r"
+        root.mkdir(parents=True, exist_ok=True)
+        if not (root / "lib").exists():
+            (root / "lib").symlink_to(REPO / "lib")
+        (root / "fleet.yaml").write_text(dedent(fleet_yaml))
+        # task-recheck ships opt-out — disarm it so "no door armed" is
+        # actually reachable rather than permanently masked by the default.
+        (root / ".env").write_text("TASK_RECHECK_ENABLED=0\n")
+        return root
+
+    def _check(self, tmp_path, fleet_yaml: str):
+        root = self._root(tmp_path, fleet_yaml)
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        paths = Paths(root=root, fleet_dir=root)
+        report = DoctorReport()
+        check_ignition(fleet, paths, report)
+        assert len(report.checks) == 1
+        return report.checks[0]
+
+    def test_ignition_warns_when_a_leaf_manager_fleet_has_no_armed_door(self, tmp_path):
+        check = self._check(tmp_path, self._FLEET_NO_DOOR)
+        assert check.name == "ignition"
+        assert check.status == "warn"
+        assert "0/" in check.detail
+        assert "briefing.slots" in check.detail
+
+    def test_ignition_passes_and_names_the_armed_door_when_briefing_slots_exist(
+        self, tmp_path
+    ):
+        check = self._check(tmp_path, self._FLEET_BRIEFING_ARMED)
+        assert check.status == "pass"
+        assert "briefing.slots" in check.detail
+
+    def test_ignition_rung_states_it_reads_declared_not_enrolled_state(self, tmp_path):
+        check = self._check(tmp_path, self._FLEET_NO_DOOR)
+        assert "declared" in check.detail.lower()
+        assert "839" in check.detail or "1040" in check.detail

@@ -1,0 +1,22 @@
+{
+  "lib/coldstart-harness.sh": 5,
+  "lib/fleet-memory-check.sh": 2,
+  "lib/fleet-pulse.sh": 1,
+  "lib/install-bot-systemd.sh": 4,
+  "lib/install-bot.sh": 4,
+  "lib/install-host-service-systemd.sh": 5,
+  "lib/install_fleet_timer.sh": 3,
+  "lib/install_fleet_timer_launchd.sh": 3,
+  "lib/keepalive.sh": 9,
+  "lib/lib-common.sh": 15,
+  "lib/migrate-fleet-to-system.sh": 4,
+  "lib/reconcile-fleet.sh": 8,
+  "lib/rehearse-briefing-timer.sh": 9,
+  "lib/rehearse-env-cascade.sh": 3,
+  "lib/rehearse-keepalive-swap.sh": 6,
+  "lib/setup-fleet": 11,
+  "lib/setup-system": 2,
+  "lib/spin-down-bot.sh": 5,
+  "lib/spin-up-bot.sh": 3,
+  "lib/validate-bot-change.sh": 7
+}

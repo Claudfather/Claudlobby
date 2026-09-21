@@ -20,7 +20,7 @@ plans: `2026-08-2x-observable-plane-phase-*.md`; the cutover walk:
 | Path (under the host root, `CLAUDLOBBY_ROOT`) | What |
 |---|---|
 | `state/plane/plane.db` (+ `-wal`, `-shm`) | the database, WAL mode |
-| `state/plane/capture.json` | per-fleet capture policy: `metadata` (default, bodies stripped) or `full` |
+| `state/plane/capture.json` | per-fleet capture policy: `full` (the shipped default — bodies recorded) or `metadata` (the opt-out — bodies stripped at the door, proof triple kept). A named fleet beats `*`; a malformed file fails loud and resolves to no mode at all |
 | `state/plane/ingest.sock` | the ingest daemon's socket (`claudlobby plane serve`) |
 | `state/plane/spool/` | the filesystem spool — the valve that must not depend on the db it protects |
 

@@ -10,6 +10,7 @@ import copy
 import functools
 import json
 import logging
+import os
 import platform
 import re
 import shlex
@@ -26,11 +27,13 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from . import defaults, dotenv, tool_resolve
 from . import switches as _switches
+from .boot import BootPolicy, bot_conf_lines, resolve_boot_policy
 from .config import (
     GITHUB_APP_ENV_VARS,
     BotConfig,
     FleetConfig,
     load_fleet,
+    load_host_boot,
     load_host_jobs,
 )
 from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
@@ -48,6 +51,7 @@ from .loader import (
 from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
 from .mcp_grammar import grammar
 from .paths import Paths, _iter_fleet_dirs
+from .supervision import build_supervision_spec, render_launchd_plist, render_systemd_unit
 
 
 # ----------------------------------------------------------------------
@@ -812,6 +816,26 @@ def _bot_conf_cascade(paths: Paths, fleet: FleetConfig,
         return {}
 
 
+def _host_cpu_count() -> int | None:
+    """The host's CPU count, as boot-policy admission-slot derivation sees it.
+
+    A named seam (mirrors ``_operator_gitconfig`` above) rather than an
+    inline ``os.cpu_count()`` call in ``compose_bot_conf``, so a test can pin
+    a deterministic count for ``resolve_boot_policy``'s ``auto`` derivation
+    without patching the stdlib ``os`` module for every consumer of it.
+    """
+    return os.cpu_count()
+
+
+def _bot_boot_policy(bot: BotConfig, fleet: FleetConfig) -> BootPolicy:
+    """This bot's BootPolicy (claudlobby.boot, design doc §6.1) — the package
+    ``host.boot`` block plus this host's own CPU count, resolved once here so
+    ``compose_bot_conf`` has a single call site rather than re-reading either."""
+    return resolve_boot_policy(
+        bot, fleet, load_host_boot(), cpu_count=_host_cpu_count()
+    )
+
+
 def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                      *, cascade: dict | None = None) -> str:
     """Render one bot's bot.conf (env exports sourced at startup); returns the file text.
@@ -1060,7 +1084,12 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # working repo's tier locally (there is no "sprint owner" concept).
     if fleet.projects:
         lines.append("")
-        lines.append("# Projects (projects.yaml) — repo -> validation tier")
+        source = (
+            "derived from scope.repos"
+            if fleet.projects_derived
+            else "projects.yaml"
+        )
+        lines.append(f"# Projects ({source}) — repo -> validation tier")
         for key, project in sorted(fleet.projects.items()):
             tier_var = f"PROJECT_TIER_{project.env_slug}"
             if not _SHELL_IDENT_RE.match(tier_var):
@@ -1259,17 +1288,100 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         rendered = _render_startup_prompt(bot.startup_prompt, bot, fleet)
         lines.append(f"STARTUP_PROMPT={json.dumps(rendered)}")
     else:
-        lines.append(
-            'STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."'
-        )
+        # #1633: a bot with no declared prompt used to be told to idle on its
+        # very first turn — every boot spent on a fleet that cannot start its
+        # own turn. The default now names a READ and an ACT instead. Two
+        # forms, because the state can arrive two ways and only one needs a
+        # Bash grant (see compose_settings_local's matching branch, which
+        # composes the exact grant this text names):
+        #   - brief.on_start armed: the bot's own SessionStart hook already
+        #     injected its brief, so the prompt points at what is already in
+        #     context rather than naming a read the bot must run itself.
+        #   - otherwise: name the one `claudlobby brief` read that shows the
+        #     bot its own open rows.
+        # NOTE: no backticks around the command. bot.conf is fully `source`d
+        # (lib/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
+        # json.dumps() does not escape `` ` `` or `$` — a literal backtick
+        # here would run as a real command substitution at every boot,
+        # not render as text.
+        fleet_arg = f" --fleet {paths.fleet_dir.name}" if paths.fleet_dir else ""
+        if _boot_brief_armed(bot):
+            default = (
+                "Welcome back. Read your CLAUDE.md and the fleet-brief you "
+                "were given at session start. If it shows open rows of "
+                "yours, continue them and report; if anything is blocked, "
+                "say so. Otherwise idle and await messages."
+            )
+        else:
+            # ASCII only: json.dumps() escapes non-ASCII as \uXXXX, and bash
+            # does not decode \u escapes in a plain double-quoted string, so
+            # an em-dash here would render to the bot as the literal 6
+            # characters, not the glyph (measured via a real
+            # `claudlobby generate`).
+            default = (
+                "Welcome back. Read your CLAUDE.md, then run: claudlobby"
+                f"{fleet_arg} brief --bot {bot.bot_id} - act on what it "
+                "shows: continue your own open rows, report anything "
+                "blocked, then idle and await messages."
+            )
+        lines.append(f"STARTUP_PROMPT={json.dumps(default)}")
+
+    # Boot policy (design doc 2026-09-20-boot-admission-and-supervision-
+    # consolidation-design.md §6.1) — computed once per bot, rendered here
+    # exactly once; both supervisor units carry none of it.
+    lines.append("")
+    lines.append(
+        "# Boot policy (documentation/plans/2026-09-20-boot-admission-and-"
+        "supervision-consolidation-design.md §6.1)"
+    )
+    lines.extend(bot_conf_lines(_bot_boot_policy(bot, fleet)))
 
     return "\n".join(lines) + "\n"
+
+
+def _boot_brief_armed(bot: BotConfig) -> bool:
+    """Whether this bot's SessionStart hook already injects its own brief.
+
+    A named seam rather than a bare ``bot.brief_on_start`` read at the call
+    site: the default boot prompt only needs to know whether a brief is
+    already in context by the time it acts, and keeping that question here
+    means the prompt logic never has to change if what counts as "armed"
+    ever does.
+    """
+    return bot.brief_on_start
+
+
+def _resolve_default_boot_grant(bot: BotConfig, paths: Paths) -> list[str]:
+    """The exact Bash grant the DEFAULT boot prompt names (#1633), or empty.
+
+    A NAMED resolver — matching every other ``_resolve_*_permissions`` /
+    ``_resolve_*_grants`` function in this module — rather than inline logic
+    in ``compose_settings_local``, because ``freshbox._sourced_grants`` calls
+    each of those independently to re-derive what SHOULD be granted and diff
+    it against what IS. Inline logic here is invisible to that re-derivation:
+    freshbox has no way to know this grant exists, and reports it as an
+    ``orphan_grant`` (fail) — composition emitting a grant nothing produced,
+    by freshbox's own read, when in fact something did (this function; it
+    was just never told). Empty under the same condition
+    ``compose_bot_conf``'s ``else`` branch uses to skip the read-then-act
+    default text: a custom ``startup_prompt`` or an armed ``brief.on_start``
+    hook both name no Bash read for the bot to run itself, so neither grants
+    one.
+    """
+    if bot.startup_prompt or _boot_brief_armed(bot):
+        return []
+    fleet_arg = f" --fleet {paths.fleet_dir.name}" if paths.fleet_dir else ""
+    return [f"Bash(claudlobby{fleet_arg} brief --bot {bot.bot_id})"]
 
 
 def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> str:
     """Render jinja placeholders in startup_prompt against fleet/bot context.
 
     Exposed variables (each is an empty string when not configured):
+      - {{ bot_id }}                  — bot.bot_id (the fleet.yaml key —
+                                         what `claudlobby brief --bot` takes;
+                                         bot_name below is a display name and
+                                         may differ)
       - {{ bot_name }}                — bot.name
       - {{ fleet_name }}              — fleet.name
       - {{ telegram_group_chat_id }}  — fleet.telegram_group_chat_id
@@ -1335,92 +1447,19 @@ def _scheduler_tool_path(root: Path | None = None) -> str:
 def compose_systemd_unit(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, boot_delay_s: int = 0
 ) -> str:
-    bot_dir = paths.bot_runtime(bot.bot_id)
-    bot_service = f"{fleet.service_prefix}.{bot.bot_id}"
-    stagger = f"\nExecStartPre=/bin/sleep {boot_delay_s}" if boot_delay_s > 0 else ""
-    return f"""# Generated by claudlobby — do not hand-edit.
-[Unit]
-Description=claudlobby bot: {bot.name} ({fleet.name})
-After=network-online.target
-
-[Service]
-Type=simple
-# start-bot.sh exits 0 after spawning tmux. Without these two, the default
-# control-group cleanup kills the tmux server we just started. KillMode=process
-# limits the kill to the main process; RemainAfterExit=yes keeps the unit
-# "active" while tmux runs underneath.
-#
-# LOAD-BEARING BEYOND CLEANUP: Type=simple + a spawner ExecStart that exits +
-# RemainAfterExit=yes is what makes SubState a boot-progress signal, and
-# service_is_starting (lib-common.sh) reads it as one:
-#   activating      ExecStartPre — the boot stagger sleep
-#   active/running  start-bot.sh executing; tmux session not up yet
-#   active/exited   steady state — spawner done, tmux running underneath
-# If ExecStart ever execs into a foreground process, or RemainAfterExit is
-# dropped, active/running becomes the STEADY state and keepalive's dead-session
-# watchdog silently stops restarting anything — a failure shaped exactly like a
-# healthy fleet. tests/test_composer.py asserts this triple; do not relax it
-# without reading service_is_starting first.
-RemainAfterExit=yes
-KillMode=process
-WorkingDirectory={bot_dir}{stagger}
-ExecStart={paths.lib}/start-bot.sh {bot_dir}
-# kill-server (not kill-session): this bot owns its tmux server. kill-server
-# tears the whole server down deterministically; kill-session leaves the emptied
-# server orphaned unless tmux's exit-empty default reaps it.
-ExecStop=/bin/sh -c 'tmux -L {bot_service} kill-server 2>/dev/null || true'
-ExecStopPost=/bin/rm -f {bot_dir}/.tmux-env
-# Restart= here only fires on non-zero exit of start-bot.sh — i.e., a config
-# failure before tmux ever spawned. Tmux dying after we've gone "active" is
-# detected by lib/keepalive.sh, NOT by systemd, because exit 0 + RemainAfterExit
-# leaves the unit looking healthy regardless of what tmux is doing.
-Restart=on-failure
-RestartSec=5
-Environment=CLAUDLOBBY_ROOT={paths.root}
-Environment=TMUX_TMPDIR={_TMUX_TMPDIR}
-
-[Install]
-WantedBy=default.target
-"""
+    """Thin wrapper: builds the spec, renders it. See `claudlobby/supervision.py`
+    for the template text and the boundary this and `compose_launchd_plist`
+    share (#1573, design doc §6.6) — every template value must come from the
+    spec, never from `bot`/`fleet`/`paths` directly, which is why those three
+    are read here and nowhere past `build_supervision_spec`."""
+    spec = build_supervision_spec(bot, fleet, paths)
+    return render_systemd_unit(spec, boot_delay_s=boot_delay_s)
 
 
-# NOTE: launchd has no ExecStartPre equivalent for boot stagger.
-# On macOS, fleet boot contention is less of an issue (Mac Mini has
-# more cores/RAM than Pi). If needed, stagger can be added via a
-# BOOT_DELAY env var honored by start-bot.sh itself.
 def compose_launchd_plist(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
-    bot_dir = paths.bot_runtime(bot.bot_id)
-    label = f"{fleet.service_prefix}.{bot.bot_id}"
-    log_dir = paths.lib / "logs"
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated by claudlobby — do not hand-edit. -->
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>{label}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{paths.lib}/start-bot.sh</string>
-        <string>{bot_dir}</string>
-    </array>
-    <key>WorkingDirectory</key><string>{bot_dir}</string>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key><false/>
-    </dict>
-    <key>StandardOutPath</key><string>{log_dir}/{bot.bot_id}.out.log</string>
-    <key>StandardErrorPath</key><string>{log_dir}/{bot.bot_id}.err.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>CLAUDLOBBY_ROOT</key><string>{paths.root}</string>
-        <key>TMUX_TMPDIR</key><string>{_TMUX_TMPDIR}</string>
-        <key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>HOME</key><string>{Path.home()}</string>
-    </dict>
-</dict>
-</plist>
-"""
+    """Thin wrapper: builds the spec, renders it. See `claudlobby/supervision.py`."""
+    spec = build_supervision_spec(bot, fleet, paths)
+    return render_launchd_plist(spec)
 
 
 # ----------------------------------------------------------------------
@@ -1941,6 +1980,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         voice=voice_item,
         teams=teams,
         projects=projects,
+        projects_derived=fleet.projects_derived,
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
@@ -2550,6 +2590,13 @@ def compose_settings_local(
     # neither — a clean, single off-switch for a bot's Claudron loop wiring.
     if _session_loop_enabled(bot):
         _append_unique(allow_patterns, CLAUDRON_LOOP_GRANTS)
+
+    # Layer 5d: the exact read the DEFAULT boot prompt names (#1633). The
+    # bot's own read, no wildcard: reusing the checkin skill's
+    # `Bash(claudlobby --fleet * brief *)` would widen every such bot's
+    # surface to any fleet's brief for any bot. Named resolver (see its own
+    # docstring) so freshbox's independent re-derivation can see it too.
+    _append_unique(allow_patterns, _resolve_default_boot_grant(bot, paths))
 
     # Union-layer write guardrail: with every library-derived layer accumulated
     # (and before the operator's tools.allow escape hatch below), nothing may

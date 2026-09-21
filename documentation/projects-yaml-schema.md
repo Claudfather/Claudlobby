@@ -9,6 +9,38 @@ the platform runs, `fleet.yaml` = WHO the bots are). It is optional and sits bes
 Validated by `claudlobby validate` (bad tiers, empty repos, unknown keys —
 all with did-you-mean suggestions). Composed by `claudlobby generate`.
 
+## It is the override, not the prerequisite
+
+**A fleet without this file still gets a project registry.** When
+`projects.yaml` is absent (or holds no projects), `claudlobby` derives one
+project per repo any bot declares in `scope.repos`, at tier `review`, and
+the composed table says so in a line above it. Everything downstream — the
+`PROJECT_TIER_*` map, `dispatch-task.sh --project`, the manager check-in's
+`dispatch` action — works against a derived registry exactly as it does
+against a declared one.
+
+Three rules govern the derivation, and each exists because the alternative
+breaks a shipped door:
+
+- **A declared file REPLACES the derivation wholesale — never a merge.** A
+  fleet that declared one project and inherited three derived ones would have
+  a closure ladder nobody can read from the manifest. List every project you
+  want, not only the ones you are changing.
+- **Repo names are qualified to `org/repo`.** `scope.repos` is conventionally
+  bare names beside a separate `scope.org`, while `repos:` here is
+  `org/repo` — the same join key in two shapes. The derivation bridges them
+  with `scope.org`, because the composed Repos column is read straight into
+  `gh issue list --repo <owner/name>`. A bot with repos and no `org` keeps the
+  bare value rather than having an owner invented for it.
+- **A slug always starts with a letter.** A repo such as `30-day-abs` would
+  slug to a key that the validator, `lib/checkin-contract.py` and
+  `dispatch-task.sh --project` all reject, so such a key is prefixed (`p-`)
+  rather than emitted broken or silently dropped.
+
+Write this file when a project's real closure bar is **not** `review` — that
+is the whole reason to declare one. `claudlobby doctor`'s `goal-binding` rung
+reports which of the two a fleet is running on.
+
 ## What composition emits
 
 - **Every bot's `bot.conf`** gets the full repo→tier map:

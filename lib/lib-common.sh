@@ -74,6 +74,39 @@ detect_os() {
 # Auto-detect on source
 detect_os
 
+# --- Supervisor adapter -------------------------------------------------
+# lib/supervisor.sh: five verbs (svc_is_registered, svc_state, svc_kick,
+# svc_enroll, svc_disenroll — each with a systemd spelling and a launchd
+# spelling), plus svc_unit_name, the shared label resolver.
+# Sourced here, immediately after detect_os, so every verb can read $_OS
+# without re-deriving it (#1573 boot admission, task 6). No call site
+# migrates onto these verbs in this PR — the file exists, is sourced, and is
+# fenced by tests/test_supervisor_ratchet.py against new direct
+# `systemctl`/`launchctl` calls anywhere else in lib/.
+#
+# Resolved from THIS file's own location, not $CLAUDLOBBY_ROOT: many hermetic
+# tests/*.sh suites export a throwaway CLAUDLOBBY_ROOT (an empty temp dir,
+# with no lib/ under it) before sourcing lib-common.sh, precisely so stamp
+# and lock files never touch a real state/ directory — that is what
+# CLAUDLOBBY_ROOT's own self-detection two paragraphs above is ALSO careful
+# to survive (`${CLAUDLOBBY_ROOT:=...}` only fills it in when unset). A
+# lookup keyed on that variable would break those suites at source time.
+#
+# Derived by parameter expansion, NOT `$(cd "$(dirname ...)" && pwd)`: this
+# file is sourced on hot paths (every keepalive tick, every report-back,
+# every hook that sources it), and that idiom forks a subshell per source,
+# unconditionally -- twice, once here and once in the adapter's own default.
+# The dir is derived ONCE, forkless, and handed to the adapter before it is
+# sourced. A relative BASH_SOURCE yields a relative dir, which is all either
+# consumer needs: the `.` below, and svc_enroll exec-ing an installer from
+# the same directory.
+case "${BASH_SOURCE[0]}" in
+    */*) _LIB_COMMON_DIR="${BASH_SOURCE[0]%/*}" ;;
+    *)   _LIB_COMMON_DIR="." ;;
+esac
+_SUPERVISOR_LIB_DIR="${_SUPERVISOR_LIB_DIR:-$_LIB_COMMON_DIR}"
+. "$_LIB_COMMON_DIR/supervisor.sh"
+
 # --- tmux binary resolution -------------------------------------------------
 
 _TMUX_BIN="${TMUX_BIN:-}"
@@ -1166,6 +1199,107 @@ bridge_fence_write() {
     mkdir -p "$bot_dir/logs" 2>/dev/null || true
     printf '%s %s\n' "$(ts_iso)" "$token" >> "$log" 2>/dev/null || true
     printf '%s' "$token"
+}
+
+# wait_bridge_ready_state <bot_dir> <timeout_s> <session_pid> <pretoken> [tmux_session] [tmux_socket]
+#
+# The bring-up readiness poll start-bot.sh ran inline, extracted so its
+# ceiling is provably wall-clock (#1573). What it replaced counted PROBES, not
+# seconds -- `_rc_iters = timeout_s * 2` assumed every 0.5s-interval probe was
+# free, so a configured "90s" ceiling ran for five minutes once bridge_state
+# itself got slow under real boot load (measured 2026-09-19: POLL_START
+# 18:02:23 to TIMEOUT 18:07:25 against a 90s config). This measures `date +%s`
+# against its own start instead of counting laps, so a slow probe shortens how
+# many polls fit in the window, never how long the window actually is.
+#
+# A wall clock can also STEP: a host with no RTC steps its clock forward by
+# the whole downtime once NTP syncs after boot, which a naive elapsed-time
+# check reads as hours passing between two probes and times out at once.
+# Each iteration compares the latest reading against the one before it and
+# folds a gap larger than the STEP threshold, or negative, into the start
+# time rather than into elapsed, so a step neither times out a live bring-up
+# nor is read as negative elapsed time.
+#
+# That threshold is deliberately NOT the ceiling. It was, and the premise --
+# one 0.5s-interval poll can never legitimately take longer than the whole
+# ceiling -- is false wherever the ceiling is small: lib/validate-bot-change.sh
+# drives the real start-bot.sh with RC_READY_TIMEOUT_S=1, so a probe costing
+# 2s there was read as a clock step on EVERY iteration, folded out of elapsed,
+# and the loop never expired (measured against a 1s ceiling: still polling
+# when it was killed at 130s, having printed nothing). A
+# ceiling that can never expire is a holder that never releases -- the exact
+# property PR B's admission gate rests on. The threshold is max(timeout_s,
+# 60s) instead: 60s still folds the RTC-less host's hour-scale jump (the case
+# the fold exists for) and no 0.5s-interval poll reaches it, while a ceiling
+# ABOVE 60s keeps its old tolerance. A NEGATIVE delta stays folded whatever
+# the threshold -- a backward step is never elapsed time.
+#
+# Polls bridge_state "$bot_dir" "$pretoken" "$session_pid" every 0.5s (the
+# session-scoped question, #1530 -- see bridge_state's own header) until one
+# of:
+#   up | no_handle                                 -> ready: return 0
+#   no_token, and bot_expects_no_token "$bot_dir"   -> ready: return 0 (the
+#                                                       read stays in here so
+#                                                       the caller keeps one
+#                                                       call)
+#   the tmux pair is given and the session is gone  -> "crashed": return 2,
+#                                                       at once, ahead of the
+#                                                       poll
+#   timeout_s wall-clock seconds elapse             -> the LAST state seen:
+#                                                       return 1
+# tmux_session/tmux_socket are optional: a caller with no session to police
+# (this file's own test suite, driving bridge_state's state machine directly)
+# omits them and the crash check is simply skipped.
+#
+# Prints exactly one state on stdout -- up, no_handle, no_token, not_mine,
+# no_bridge, unknown, or crashed -- and nothing else: no timestamps, no log
+# lines. start-bot.sh owns every POLL_START/READY/CRASH/TIMEOUT line and the
+# elapsed-time arithmetic they print; this function only answers "is it
+# ready, and if not, what did bridge_state last say".
+wait_bridge_ready_state() {
+    local bot_dir="${1:?Usage: wait_bridge_ready_state <bot_dir> <timeout_s> <session_pid> <pretoken> [tmux_session] [tmux_socket]}"
+    local timeout_s="${2:?wait_bridge_ready_state needs a timeout in seconds}"
+    local session_pid="${3:-}" pretoken="${4:-}"
+    local tmux_session="${5:-}" tmux_socket="${6:-}"
+    local state="" started last now delta
+    # The clock-step fold threshold, decoupled from the ceiling (see header):
+    # max(timeout_s, 60). Digits-only guard so a malformed ceiling falls back
+    # to the floor rather than aborting the poll on an arithmetic error.
+    local _step_s=60
+    case "$timeout_s" in
+        ''|*[!0-9]*) : ;;
+        *) if [ "$timeout_s" -gt "$_step_s" ]; then _step_s="$timeout_s"; fi ;;
+    esac
+    started=$(date +%s)
+    last="$started"
+    while :; do
+        if [ -n "$tmux_session" ] && ! check_tmux_session "$tmux_session" "$tmux_socket"; then
+            printf '%s' "crashed"
+            return 2
+        fi
+        state="$(bridge_state "$bot_dir" "$pretoken" "$session_pid" 2>/dev/null || true)"
+        [ -n "$state" ] || state="unknown"
+        case "$state" in
+            up | no_handle)
+                printf '%s' "$state"
+                return 0
+                ;;
+            no_token)
+                if bot_expects_no_token "$bot_dir"; then
+                    printf '%s' "$state"
+                    return 0
+                fi
+                ;;
+        esac
+        now=$(date +%s)
+        delta=$((now - last))
+        if [ "$delta" -lt 0 ] || [ "$delta" -gt "$_step_s" ]; then
+            started=$((started + delta))
+        fi
+        last="$now"
+        [ "$((now - started))" -ge "$timeout_s" ] && { printf '%s' "$state"; return 1; }
+        sleep 0.5
+    done
 }
 
 # wait_bridge_ready <bot_dir> <ceiling_s> <fence_token>
@@ -3861,6 +3995,114 @@ inject_stamp() {
     # into `_inject_t0="$(inject_stamp ...)"` under start-bot.sh's `set -e`.
     # A stamp must never be able to cost a boot, so say so once, here, instead
     # of depending on which line happens to be last.
+    return 0
+}
+
+# plugin_ensure <plugin> <claude_bin> <log> <once_flag>
+#
+# Installs `plugin` via `claude plugin install` the moment
+# installed_plugins.json does not yet name it -- unconditionally, on every
+# call, cold start included. That never changes with once_flag: a bot missing
+# a required plugin must always get it. Once installed, `claude plugin
+# update` normally also runs on every call -- once_flag "0", which is how an
+# un-regenerated bot.conf without BOOT_PLUGIN_UPDATE_ONCE reads, so a bot
+# that predates the key keeps the per-start update it has today.
+#
+# once_flag "1" (BOOT_PLUGIN_UPDATE_ONCE from the sourced bot.conf) gates the
+# update to at most once per host boot PER PLUGIN: a stamp file under
+# $CLAUDLOBBY_ROOT/state/boot/, named for both the boot epoch and the plugin
+# -- never one stamp for the whole boot, which would let the first plugin
+# that updated successfully silence every other plugin in the Step 2 loop
+# of start-bot.sh -- written under a shared lock so two callers checking the
+# stamp at once cannot both decide it is missing. A failed update never
+# writes the stamp, so the next call tries again rather than believing a
+# boot that never actually updated.
+#
+# When the gate itself cannot be trusted it falls back to updating every
+# call and says so in the log: the boot epoch unresolvable (resolve_boot_epoch
+# failing -- no uptime/sysctl/proc answer, or the CLAUDLOBBY_BOOT_EPOCH test
+# seam left empty), or the stamp directory unwritable. A clock claudlobby
+# cannot read, or a stamp it cannot write, must not mean the plugin silently
+# never updates again -- and with flock present an unwritable lock path
+# fails the locked section BEFORE the update runs, so without the second
+# guard such a host would update nothing and log nothing.
+#
+# Called once per plugin from the Step 2 loop of start-bot.sh. Never
+# propagates a failure -- a plugin-manager hiccup (network blip, cold
+# marketplace cache) must not abort the boot it is called from -- and is
+# errexit-safe on its own, not only when the caller wraps it in `|| true`:
+# a bare `epoch="$(door)"` whose door returns 1 IS a failing statement under
+# set -e, and the first cut aborted its own suite on exactly the
+# unresolvable-clock case.
+plugin_ensure() {
+    local plugin="${1:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
+    local claude_bin="${2:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
+    local log="${3:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
+    local once_flag="${4:-0}"
+
+    if [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] || \
+       ! grep -q "\"$plugin\"" "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null; then
+        echo "$(ts_iso) PLUGIN installing $plugin (cold start)" >> "$log"
+        with_timeout 30 "$claude_bin" plugin install "$plugin" >> "$log" 2>&1 || true
+        return 0
+    fi
+
+    if [ "$once_flag" != "1" ]; then
+        echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
+        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        return 0
+    fi
+
+    # The `|| true` sits INSIDE the substitution: the door returns 1 when
+    # nothing answers, and an unguarded assignment carries that status out
+    # as a failing statement (errexit) -- see the function comment.
+    local epoch
+    epoch="$(resolve_boot_epoch 2>/dev/null || true)"
+    if [ -z "$epoch" ]; then
+        echo "$(ts_iso) PLUGIN update-once unavailable (boot epoch unresolvable) — updating $plugin" >> "$log"
+        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        return 0
+    fi
+
+    # Per (epoch, plugin), never per boot alone -- see the function comment.
+    local sanitized boot_dir stamp lockfile
+    sanitized="$(printf '%s' "$plugin" | tr -c 'A-Za-z0-9._-' '_')"
+    boot_dir="$CLAUDLOBBY_ROOT/state/boot"
+    stamp="$boot_dir/plugins-updated.$epoch.$sanitized"
+    lockfile="$boot_dir/plugins.lock"
+    if ! mkdir -p "$boot_dir" 2>/dev/null || [ ! -w "$boot_dir" ]; then
+        echo "$(ts_iso) PLUGIN update-once unavailable (state dir unwritable: $boot_dir) — updating $plugin" >> "$log"
+        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        return 0
+    fi
+
+    # Runs under with_lock: in-process behind the mkdir spinlock where flock
+    # is absent (stock macOS), in a forked subshell where it is present
+    # (Linux). It reads the locals above by dynamic scope and reports a
+    # failed update through its return code; both survive the fork.
+    _plugin_update_once_locked() {
+        if [ -e "$stamp" ]; then
+            echo "$(ts_iso) PLUGIN update skipped (already run this boot): $plugin" >> "$log"
+            return 0
+        fi
+        echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
+        if with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1; then
+            touch "$stamp" 2>/dev/null || true
+            return 0
+        fi
+        # A failed update must not stamp the boot as done -- the next call,
+        # this boot or the next start, tries again.
+        return 1
+    }
+    # The one degraded path that used to disclose nothing: with_lock returns
+    # the body's status, so a failure here is either the lock rung itself
+    # (the 200>"$lockfile" redirection, a broken flock) or an update that
+    # failed and deliberately did not stamp. Both leave the plugin
+    # un-updated for this call, and every other fallback above says which
+    # case it hit -- see the function header on a gate that cannot be
+    # trusted having to say so.
+    with_lock "$lockfile" _plugin_update_once_locked \
+        || echo "$(ts_iso) PLUGIN update-once lock/update failed for $plugin — see above" >> "$log"
     return 0
 }
 

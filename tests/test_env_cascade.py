@@ -31,6 +31,11 @@ from claudlobby.paths import Paths
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "lib" / "lib-common.sh"
 RESOLVER = REPO_ROOT / "lib" / "env-tiers.sh"
+# lib-common.sh unconditionally sources supervisor.sh from its own directory
+# (#1573 task 6) -- a real-content copy of lib-common.sh written into a
+# throwaway estate now needs this sibling present too, exactly as it already
+# needs lib-common.sh itself.
+SUPERVISOR = REPO_ROOT / "lib" / "supervisor.sh"
 
 TIERS = ("host", "root", "fleet", "bot")
 
@@ -361,6 +366,7 @@ def test_ambient_env_cannot_redirect_the_answer(estate: Path, monkeypatch) -> No
     paths = Paths(root=estate, fleet_dir=estate / "local" / "acme")
     (estate / "lib" / "env-tiers.sh").write_bytes(RESOLVER.read_bytes())
     (estate / "lib" / "lib-common.sh").write_bytes(LIB.read_bytes())
+    (estate / "lib" / "supervisor.sh").write_bytes(SUPERVISOR.read_bytes())
     tiers = read_tiers(paths, bot_name="solo")
     by_tier = {t.tier: t for t in tiers}
     assert by_tier["fleet"].path == estate / "local" / "acme" / ".env"
@@ -605,7 +611,9 @@ def wired(tmp_path: Path, monkeypatch) -> Path:
     """A root carrying the REAL resolver, in real overlay layout."""
     (tmp_path / "library").mkdir()
     (tmp_path / "lib").mkdir()
-    for f in ("lib-common.sh", "env-tiers.sh"):
+    # supervisor.sh is a third required sibling: lib-common.sh unconditionally
+    # sources it from its own directory (#1573 task 6).
+    for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
         (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "lib" / f).read_bytes())
     fleet_dir = tmp_path / "local" / "acme"
     (fleet_dir / "runtime" / "bots" / "solo").mkdir(parents=True)

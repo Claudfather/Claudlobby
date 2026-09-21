@@ -131,10 +131,14 @@ fleet:
       telegram:
         handle: my_lead_bot
         require_mention: false                # override: manager hears all messages in its group
-      # startup_prompt accepts jinja placeholders against fleet/bot context:
-      #   {{ bot_name }}, {{ fleet_name }}, {{ telegram_group_chat_id }}, {{ telegram_handle }}
+      # Omit startup_prompt entirely and a bot with none composes a
+      # read-then-act default instead of an idle instruction (#1633): read
+      # CLAUDE.md, run `claudlobby brief --bot <id>`, act on what it shows,
+      # then idle. Set your own only when you need something beyond that —
+      # accepts jinja placeholders against fleet/bot context:
+      #   {{ bot_id }}, {{ bot_name }}, {{ fleet_name }}, {{ telegram_group_chat_id }}, {{ telegram_handle }}
       # Use them so identifiers aren't duplicated between fleet.yaml fields.
-      startup_prompt: "Welcome back, {{ bot_name }}. Read your CLAUDE.md. Idle and await messages in chat {{ telegram_group_chat_id }}."
+      startup_prompt: "Welcome back, {{ bot_name }}. Read your CLAUDE.md, then run: claudlobby brief --bot {{ bot_id }} - act on what it shows, then idle and await messages in chat {{ telegram_group_chat_id }}."
 
     eng-1:
       expertise: [software-engineering]

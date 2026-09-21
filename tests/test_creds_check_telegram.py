@@ -102,7 +102,9 @@ def _fleet(
         # Real delivery path: creds-check resolves + exports the delivery
         # token, the real tg-post.sh posts under it, the curl stub records
         # the sendMessage URL (which embeds the token) in send.log.
-        for helper in ("tg-post.sh", "lib-common.sh"):
+        # supervisor.sh is a required sibling: lib-common.sh unconditionally
+        # sources it from its own directory (#1573 task 6).
+        for helper in ("tg-post.sh", "lib-common.sh", "supervisor.sh"):
             shutil.copy(REPO_ROOT / "lib" / helper, root / "lib" / helper)
     else:
         _write_exec(

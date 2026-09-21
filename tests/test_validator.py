@@ -15,6 +15,8 @@ from claudlobby.known_values import _AUTO_ELIGIBLE_RENAMES
 from claudlobby.paths import Paths
 from claudlobby.validator import _grant_wellformed, validate
 
+REPO = Path(__file__).resolve().parent.parent
+
 
 def _make_paths(root: Path) -> Paths:
     return Paths(root=root, fleet_dir=None)
@@ -2224,3 +2226,315 @@ class TestExpertiseGrantValidation:
         self._env(monkeypatch)
         report = self._report(fleet_dir)
         assert not any("expertise '" in w for w in report.warnings), report.warnings
+
+
+class TestGoalBinding:
+    """Claudfather/Claudlobby#1634 — the three gaps that let a fleet ship with
+    no goal binding at all. Every one is a WARNING and none may become an
+    error: two fleets touching one repo is a legitimate configuration a
+    warning may name and nothing may refuse, and a DRAFT header is a fact
+    about intent only a human can resolve."""
+
+    def _load(self, fleet_dir, monkeypatch, *, fleet_dir_path=None):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir_path)
+
+    @staticmethod
+    def _scope(text: str, bot: str, org: str, repos: list[str]) -> str:
+        m = re.search(rf"^(\s+){re.escape(bot)}:\n(\s+)expertise:.*\n", text, re.M)
+        assert m, f"bot {bot!r} not found in the fixture manifest"
+        inner = m.group(2)
+        block = f"{inner}scope:\n{inner}  org: {org}\n{inner}  repos: [{', '.join(repos)}]\n"
+        return text[: m.end()] + block + text[m.end():]
+
+    # --- rung 1: an equipped leaf manager with no composable table ----------
+
+    def test_warns_when_equipped_leaf_manager_has_no_composable_projects_table(
+        self, fleet_dir, monkeypatch
+    ):
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        assert fleet.leaf_manager_bots() == {"lead"}
+        assert fleet.projects == {}, "no projects.yaml and no scope.repos"
+        report = validate(fleet, paths)
+        hits = [w for w in report.warnings if "check-in-equipped" in w]
+        assert len(hits) == 1, report.warnings
+        assert "lead" in hits[0]
+        assert "scope.repos" in hits[0], "must name the derivation that did not fire"
+        assert "projects.yaml" in hits[0], "must name the one line that fixes it"
+        assert not report.has_errors, "a goal-binding gap never blocks generate"
+
+    def test_stays_silent_once_scope_repos_make_the_derivation_fire(
+        self, fleet_dir, monkeypatch
+    ):
+        text = self._scope(
+            (fleet_dir / "fleet.yaml").read_text(), "lead", "acme", ["storefront"]
+        )
+        (fleet_dir / "fleet.yaml").write_text(text)
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        assert fleet.projects_derived and fleet.projects
+        report = validate(fleet, paths)
+        assert not [w for w in report.warnings if "check-in-equipped" in w]
+
+    def test_stays_silent_when_no_leaf_manager_is_equipped(
+        self, fleet_dir, monkeypatch
+    ):
+        from claudlobby.config import SystemDefaultsConfig
+
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        fleet.system_defaults = SystemDefaultsConfig(protocols=False)
+        report = validate(fleet, paths)
+        assert not [w for w in report.warnings if "check-in-equipped" in w]
+
+    # --- rung 2: one repo, two fleets --------------------------------------
+
+    def _sibling(self, root: Path, name: str, body: str) -> Path:
+        d = root / "local" / name
+        d.mkdir(parents=True)
+        (d / "fleet.yaml").write_text(body)
+        return d
+
+    def test_warns_when_two_fleets_claim_one_repo_and_names_both(
+        self, fleet_dir, monkeypatch
+    ):
+        (fleet_dir / "fleet.yaml").write_text(
+            self._scope(
+                (fleet_dir / "fleet.yaml").read_text(), "lead", "acme", ["storefront"]
+            )
+        )
+        # The sibling spells the SAME repo the other way round — bare name plus
+        # a separate `org:`, which is how every real manifest writes scope. If
+        # the two shapes are not normalised the rung is dead code.
+        self._sibling(
+            fleet_dir,
+            "other-fleet",
+            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "      expertise: [x]\n      scope:\n        org: acme\n"
+            "        repos: [storefront]\n",
+        )
+        fleet, paths = self._load(fleet_dir, monkeypatch, fleet_dir_path=fleet_dir)
+        report = validate(fleet, paths)
+        hits = [w for w in report.warnings if "claimed by both" in w]
+        assert len(hits) == 1, report.warnings
+        assert "acme/storefront" in hits[0]
+        assert "other-fleet" in hits[0], "must name the sibling"
+        assert fleet_dir.name in hits[0], "must name this fleet"
+        assert not report.has_errors, "the rung reports the overlap; it must not resolve it"
+
+    def test_a_sibling_declaring_the_repo_in_projects_yaml_also_collides(
+        self, fleet_dir, monkeypatch
+    ):
+        (fleet_dir / "fleet.yaml").write_text(
+            self._scope(
+                (fleet_dir / "fleet.yaml").read_text(), "lead", "acme", ["storefront"]
+            )
+        )
+        sib = self._sibling(
+            fleet_dir, "other-fleet", "fleet:\n  name: other-fleet\n  bots: {}\n"
+        )
+        (sib / "projects.yaml").write_text(
+            "projects:\n  shop:\n    title: Shop\n    repos: [acme/storefront]\n"
+        )
+        fleet, paths = self._load(fleet_dir, monkeypatch, fleet_dir_path=fleet_dir)
+        report = validate(fleet, paths)
+        assert [w for w in report.warnings if "claimed by both" in w], report.warnings
+
+    def test_no_overlap_stays_silent(self, fleet_dir, monkeypatch):
+        (fleet_dir / "fleet.yaml").write_text(
+            self._scope(
+                (fleet_dir / "fleet.yaml").read_text(), "lead", "acme", ["storefront"]
+            )
+        )
+        self._sibling(
+            fleet_dir,
+            "other-fleet",
+            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "      expertise: [x]\n      scope:\n        org: zenith\n"
+            "        repos: [something-else]\n",
+        )
+        fleet, paths = self._load(fleet_dir, monkeypatch, fleet_dir_path=fleet_dir)
+        report = validate(fleet, paths)
+        assert not [w for w in report.warnings if "claimed by both" in w]
+
+    def test_unparseable_sibling_manifest_suppresses_rather_than_claims(
+        self, fleet_dir, monkeypatch
+    ):
+        """Absence of evidence must not license a claim (#1146). The failing-safe
+        direction here is to say nothing about the overlap and say loudly that it
+        was not computed."""
+        (fleet_dir / "fleet.yaml").write_text(
+            self._scope(
+                (fleet_dir / "fleet.yaml").read_text(), "lead", "acme", ["storefront"]
+            )
+        )
+        self._sibling(fleet_dir, "broken-fleet", "fleet:\n  bots: [unclosed\n")
+        fleet, paths = self._load(fleet_dir, monkeypatch, fleet_dir_path=fleet_dir)
+        report = validate(fleet, paths)
+        assert not [w for w in report.warnings if "claimed by both" in w], \
+            "an overlap it could not compute must never be reported as one"
+        disclosed = [w for w in report.warnings if "could not be parsed" in w]
+        assert len(disclosed) == 1, report.warnings
+        assert "broken-fleet" in disclosed[0]
+        assert "unchecked overlap" in disclosed[0], "silence must not read as a clean result"
+
+    def test_a_system_container_is_not_reported_as_an_unreadable_fleet(
+        self, fleet_dir, monkeypatch
+    ):
+        """_iter_fleet_dirs yields depth-1 containers as well as fleets. A dir
+        with no manifest is not a fleet that failed to parse."""
+        (fleet_dir / "fleet.yaml").write_text(
+            self._scope(
+                (fleet_dir / "fleet.yaml").read_text(), "lead", "acme", ["storefront"]
+            )
+        )
+        nested = fleet_dir / "local" / "home" / "other-fleet"
+        nested.mkdir(parents=True)
+        (nested / "fleet.yaml").write_text(
+            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "      expertise: [x]\n      scope:\n        org: acme\n"
+            "        repos: [storefront]\n"
+        )
+        fleet, paths = self._load(fleet_dir, monkeypatch, fleet_dir_path=fleet_dir)
+        report = validate(fleet, paths)
+        assert not [w for w in report.warnings if "could not be parsed" in w], \
+            "the 'home' container has no manifest and is not a fleet"
+        assert [w for w in report.warnings if "claimed by both" in w], \
+            "the NESTED sibling must still be seen"
+
+    # --- rung 3: a DRAFT manifest that has already shipped ------------------
+
+    def test_draft_header_on_a_fleet_with_composed_bots_warns(
+        self, fleet_dir, monkeypatch
+    ):
+        (fleet_dir / "fleet.yaml").write_text(
+            "# Acme fleet\n#\n# DRAFT — not generated, not spun up.\n\n"
+            + (fleet_dir / "fleet.yaml").read_text()
+        )
+        bots = fleet_dir / "runtime" / "bots" / "lead"
+        bots.mkdir(parents=True)
+        (bots / "bot.conf").write_text("export BOT_ID=lead\n")
+        fleet, paths = self._load(fleet_dir, monkeypatch, fleet_dir_path=fleet_dir)
+        report = validate(fleet, paths)
+        hits = [w for w in report.warnings if "DRAFT" in w]
+        assert len(hits) == 1, report.warnings
+        assert "lead" in hits[0], "must name the composed bot"
+        assert not report.has_errors
+
+    def test_draft_header_with_no_composed_bots_stays_silent(
+        self, fleet_dir, monkeypatch
+    ):
+        (fleet_dir / "fleet.yaml").write_text(
+            "# DRAFT — not generated, not spun up.\n\n"
+            + (fleet_dir / "fleet.yaml").read_text()
+        )
+        fleet, paths = self._load(fleet_dir, monkeypatch, fleet_dir_path=fleet_dir)
+        report = validate(fleet, paths)
+        assert not [w for w in report.warnings if "DRAFT" in w], \
+            "a draft that has NOT shipped is just a draft"
+
+    def test_the_word_draft_inside_the_yaml_body_does_not_trip_the_rung(
+        self, fleet_dir, monkeypatch
+    ):
+        """Only the LEADING comment block is the fleet's status header. A bot
+        whose mission mentions a draft is not a draft fleet."""
+        text = (fleet_dir / "fleet.yaml").read_text().replace(
+            "      name: test-fleet", "      name: test-fleet   # DRAFT of a name", 1
+        )
+        (fleet_dir / "fleet.yaml").write_text(text + "\n# DRAFT trailing comment\n")
+        bots = fleet_dir / "runtime" / "bots" / "lead"
+        bots.mkdir(parents=True)
+        (bots / "bot.conf").write_text("export BOT_ID=lead\n")
+        fleet, paths = self._load(fleet_dir, monkeypatch, fleet_dir_path=fleet_dir)
+        report = validate(fleet, paths)
+        assert not [w for w in report.warnings if "DRAFT" in w], report.warnings
+class TestIgnitionValidation:
+    """#1633: the same composite ignition question as doctor's check_ignition,
+    at validate() time too. `fleet_dir`'s `lead`/`worker-1` team already makes
+    `lead` a leaf manager, so these tests need only control which door is
+    armed — but the shared fixture carries no `lib/`, and task-recheck ships
+    opt-out (on by default), so a resolver-unavailable fallback reads it as
+    armed regardless of scenario. Wire the repo's real lib/ (the
+    test_switches.py / test_doctor.py pattern) so "off" is reachable at all.
+    """
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def _report(self, fleet_dir, *, env_text="TASK_RECHECK_ENABLED=0\n"):
+        if not (fleet_dir / "lib").exists():
+            fleet_dir_lib = fleet_dir / "lib"
+            fleet_dir_lib.symlink_to(REPO / "lib")
+        (fleet_dir / ".env").write_text(env_text)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return validate(fleet, _make_paths(fleet_dir)), fleet
+
+    def _ignition_warnings(self, report):
+        return [w for w in report.warnings if "ignition door is armed" in w]
+
+    def test_ignition_warns_when_a_leaf_manager_fleet_has_no_armed_door(
+        self, fleet_dir, monkeypatch
+    ):
+        self._env_patch(monkeypatch)
+        report, _fleet = self._report(fleet_dir)
+        ignition = self._ignition_warnings(report)
+        assert len(ignition) == 1
+        assert "briefing.slots" in ignition[0]
+
+    def test_ignition_passes_and_names_the_armed_door_when_briefing_slots_exist(
+        self, fleet_dir, monkeypatch
+    ):
+        self._env_patch(monkeypatch)
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "    lead:\n      expertise: [orchestration]\n",
+            "    lead:\n      expertise: [orchestration]\n"
+            "      briefing:\n"
+            "        slots:\n"
+            '          morning: "*-*-* 08:30:00"\n',
+        )
+        assert yaml_text != (fleet_dir / "fleet.yaml").read_text(), (
+            "replace() no-opped — the fixture's indentation moved"
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        report, _fleet = self._report(fleet_dir)
+        assert not self._ignition_warnings(report)
+
+    def test_ignition_rung_states_it_reads_declared_not_enrolled_state(
+        self, fleet_dir, monkeypatch
+    ):
+        self._env_patch(monkeypatch)
+        report, _fleet = self._report(fleet_dir)
+        ignition = self._ignition_warnings(report)
+        assert "declared" in ignition[0].lower()
+        assert "839" in ignition[0] or "1040" in ignition[0]
+
+    def test_ignition_warning_is_not_suppressed_by_disabled_system_defaults_timers(
+        self, fleet_dir, monkeypatch
+    ):
+        """_validate_ignition is a SIBLING of _validate_timers, not nested
+        inside it — that function returns early when system-defaults timers
+        are off, which is correct for its own manager-checkin pair (a
+        defaults.jobs entry that timers being off means was never composed)
+        and would be wrong here, since briefing.slots/brief.on_start are
+        per-bot fields with nothing to do with system-defaults timers."""
+        self._env_patch(monkeypatch)
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "  defaults:\n    model: opus\n",
+            "  defaults:\n    model: opus\n"
+            "  system_defaults:\n"
+            "    enabled: false\n",
+        )
+        assert yaml_text != (fleet_dir / "fleet.yaml").read_text(), (
+            "replace() no-opped — the fixture's indentation moved"
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        report, fleet = self._report(fleet_dir)
+        assert not (fleet.system_defaults.enabled and fleet.system_defaults.timers), (
+            "precondition: this fleet must actually have timers disabled, or "
+            "the test proves nothing"
+        )
+        assert self._ignition_warnings(report)
