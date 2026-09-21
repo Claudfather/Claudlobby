@@ -58,6 +58,22 @@ def _validate_with_real_resolver(
     monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
     if not (fleet_dir / "lib").exists():
         (fleet_dir / "lib").symlink_to(REPO / "lib")
+    # ASSERT the wiring is LIVE rather than trusting the guard above (#1689).
+    # The guard skips when `lib` already exists, and a fixture that created it
+    # as a plain DIRECTORY satisfies `.exists()` while supplying no resolver —
+    # so the switch cascade falls back to defaults, task-recheck reads ARMED
+    # (it ships opt-out), `_validate_ignition` returns early, and every
+    # disarmed scenario here silently measures the opposite of what it
+    # intends. That is #1588 verbatim. Testing for the FILE the resolver needs
+    # tests the proposition; testing that a directory exists is the proxy that
+    # failed. A skipped wiring must be loud, because a test that passes with
+    # its wiring dead is exercising a degraded path while believing otherwise.
+    assert (fleet_dir / "lib" / "env-tiers.sh").is_file(), (
+        f"{fleet_dir / 'lib'} exists but does not carry the real lib/ — the "
+        f"switch resolver cannot run, so TASK_RECHECK_ENABLED=0 never lands "
+        f"and task-recheck reads ARMED. Every disarmed case here would "
+        f"measure the wrong state."
+    )
     (fleet_dir / ".env").write_text(env_text)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     return validate(fleet, _make_paths(fleet_dir)), fleet
@@ -2664,3 +2680,27 @@ class TestGoalBindingAndIgnitionNameEachOther:
         ignition = self._ignition(self._report(fleet_dir, monkeypatch))
         assert ignition.index("co-requisite") < ignition.index("Cheapest to arm:")
         assert ignition.rstrip().endswith("generate + lib/setup-fleet"), ignition
+
+
+class TestTheValidatorFixtureRefusesDeadWiring:
+    """#1689 positive control for `_validate_with_real_resolver` — the twin of
+    `test_doctor.py::TestTheFixtureRefusesDeadWiring`.
+
+    This is the site that actually broke on #1588 (`fleet_dir / "lib"`), so
+    the assertion guarding it is the one most worth proving fires.
+    """
+
+    def test_a_lib_that_is_not_the_real_lib_is_refused(self, fleet_dir, monkeypatch):
+        (fleet_dir / "lib").mkdir()
+        with pytest.raises(AssertionError, match="does not carry the real lib"):
+            _validate_with_real_resolver(fleet_dir, monkeypatch)
+
+    def test_the_refusal_is_caused_by_the_dead_wiring_and_nothing_else(
+        self, fleet_dir, monkeypatch
+    ):
+        report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
+        assert (fleet_dir / "lib" / "env-tiers.sh").is_file()
+        assert _ignition_warnings(report), (
+            "with the wiring live the disarm lands and the ignition warning "
+            "fires — which is what the refusal above protects"
+        )

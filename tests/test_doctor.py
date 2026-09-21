@@ -900,6 +900,22 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     (root / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
     if not (root / "lib").exists():
         (root / "lib").symlink_to(REPO / "lib")
+    # ASSERT the wiring is LIVE rather than trusting the guard above (#1689).
+    # The guard skips when `lib` already exists, and a fixture that created it
+    # as a plain DIRECTORY satisfies `.exists()` while supplying no resolver —
+    # so the switch cascade falls back to defaults, task-recheck reads ARMED
+    # (it ships opt-out), `_validate_ignition` returns early, and every
+    # disarmed scenario here silently measures the opposite of what it
+    # intends. That is #1588 verbatim. Testing for the FILE the resolver needs
+    # tests the proposition; testing that a directory exists is the proxy that
+    # failed. A skipped wiring must be loud, because a test that passes with
+    # its wiring dead is exercising a degraded path while believing otherwise.
+    assert (root / "lib" / "env-tiers.sh").is_file(), (
+        f"{root / 'lib'} exists but does not carry the real lib/ — the switch "
+        f"resolver cannot run, so TASK_RECHECK_ENABLED=0 never lands and "
+        f"task-recheck reads ARMED. Every disarmed case here would measure "
+        f"the wrong state."
+    )
     (root / "library" / "expertise" / "orchestration.md").write_text("# Mgr\n")
     (root / "library" / "expertise" / "software-engineering.md").write_text("# Eng\n")
     for name in DEFAULT_GUARDRAILS:
@@ -1172,3 +1188,39 @@ class TestIgnitionGapIsTheRungsOwnPredicate:
         rung_warns = report.checks[0].status == "warn"
         assert rung_warns is (not armed and manager), report.checks[0].detail
         assert ignition_gap(fleet, paths) is rung_warns, report.checks[0].detail
+
+
+class TestTheFixtureRefusesDeadWiring:
+    """#1689 positive control: the live-wiring assertion in `_doctor_root`
+    must actually FIRE. An assertion nobody has watched fail is not a check —
+    it is a comment that raises.
+
+    Reproduces the #1588 mechanism verbatim: a `lib/` that exists as a plain
+    DIRECTORY satisfies the `if not ... .exists()` guard, so the symlink is
+    skipped, the switch resolver cannot run, task-recheck falls back to ARMED,
+    and the disarmed scenarios in this file silently measure the opposite of
+    what they intend.
+
+    Why this class earns its place rather than being a comment: the tests most
+    likely to stay quiet under that degradation are the ones whose scenario
+    never reads what the wiring supplies. On this file that includes
+    `TestRungAgreementOnAManagerLessFleet`, which pins #1680's acceptance
+    criterion and PASSES with the wiring dead, because a manager-less fleet
+    reports both rungs not-applicable whatever the doors say. The suite could
+    not otherwise distinguish "works" from "never ran".
+    """
+
+    def test_a_lib_that_is_not_the_real_lib_is_refused(self, tmp_path):
+        (tmp_path / "r" / "lib").mkdir(parents=True)
+        with pytest.raises(AssertionError, match="does not carry the real lib"):
+            _doctor_root(tmp_path, _fleet_yaml())
+
+    def test_the_refusal_is_caused_by_the_dead_wiring_and_nothing_else(
+        self, tmp_path
+    ):
+        """The negative control on the control: the identical call succeeds
+        when nothing has pre-created `lib/`, so the refusal above is
+        attributable to the dead wiring rather than to anything else in the
+        fixture build."""
+        root = _doctor_root(tmp_path, _fleet_yaml())
+        assert (root / "lib" / "env-tiers.sh").is_file()

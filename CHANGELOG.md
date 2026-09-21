@@ -42,6 +42,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one fleet. `ignition.ignition_warning_tail` owns where it goes: BEFORE
   `Cheapest to arm:`, never after, because a sentence trailing a
   copy-pasteable config line gets read as part of the line.
+- **The two test fixtures ASSERT their wiring is live rather than trusting a
+  guard (#1689).** Both helpers wire the repo's real `lib/` behind
+  `if not (…/"lib").exists()`, and a fixture that created that path as a plain
+  DIRECTORY satisfies the guard while supplying no resolver — the switch
+  cascade then falls back to defaults, `task-recheck` reads ARMED, and every
+  disarmed scenario silently measures the opposite of what it intends
+  (Claudlobby#1588's mechanism). Each helper now asserts
+  `lib/env-tiers.sh` is a file, which tests the proposition instead of using
+  directory existence as a proxy and catches a `lib/` that exists but is the
+  wrong thing. A positive control in each file proves the assertion fires,
+  with a negative control showing the refusal is caused by the dead wiring and
+  not by anything else in the fixture build. Measured on a deliberately
+  degraded arm: 7 of these 13 cases fail loudly and 6 stay silent, so the
+  suite could not otherwise tell "works" from "never ran".
 - `ignition.ignition_gap()` is the one definition of the condition both
   ignition warnings fire on, and the goal-binding warnings ask it rather than
   re-deriving it. It tests the cheap conjunct first and takes an optional
