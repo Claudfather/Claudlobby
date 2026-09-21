@@ -452,9 +452,27 @@ setup_log_dir() {
 # The temp directory is created eagerly at source time so safe_mktemp works
 # correctly inside $(...) command substitution (which runs in a subshell --
 # lazy init would set _LC_TMPDIR only in the subshell, orphaning files).
-# Cost is negligible: one mktemp -d + rm -rf on tmpfs per script invocation.
-
-_LC_TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'lib-common')
+# Cost is one mktemp -d + rm -rf per script invocation -- on this estate's
+# primary host /tmp is ext4 on the SD card, not tmpfs, so this is a real disk
+# write/delete, not a free one (#1682). Making the temp root configurable is a
+# separate change and not pursued here.
+#
+# The fallback template needs trailing X's -- GNU coreutils mktemp rejects an
+# X-less template outright ("too few X's in template"); BSD/macOS tolerates
+# it, which is why this went unnoticed (#1682). Both forms accept the X'd
+# template, so this is strictly a widening, not a behavior change for either
+# platform's working case.
+#
+# If BOTH attempts fail (a full or read-only /tmp, a restrictive sandbox, an
+# exhausted inode table), fail LOUD here rather than limp on with an empty
+# _LC_TMPDIR: every caller of safe_mktemp would then fail somewhere else, with
+# nothing connecting that failure back to this one -- #1682's actual defect
+# was that the template bug was silent at the SOURCE, and by the time it
+# surfaced elsewhere, nothing named the helper that had actually failed.
+if ! _LC_TMPDIR=$(mktemp -d 2>/dev/null) && ! _LC_TMPDIR=$(mktemp -d -t 'lib-common.XXXXXXXXXX'); then
+    echo "lib-common.sh: cannot create a scratch directory for _LC_TMPDIR -- safe_mktemp cannot work, and any later failure in this script is a symptom of THIS one, not its own cause" >&2
+    exit 1
+fi
 
 _lc_cleanup() {
     rm -rf "$_LC_TMPDIR" 2>/dev/null || true
