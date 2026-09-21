@@ -166,18 +166,24 @@ def is_pinned(command: str, spec: str) -> bool:
     return bool(_PYPI_VERSION_SUFFIX.search(spec))
 
 
-def declared_packages(paths: list[str]) -> list[tuple[str, str, str, str, str, bool]]:
+def declared_packages(
+    paths: list[str],
+) -> list[tuple[str, str, str, str, str, bool, list[str] | None]]:
     """Every warmable server declaration, KEYED BY THE FRAGMENT THAT MADE IT.
 
     Rows are (fragment path, server key, runtime, display spec, bare name,
-    pinned). `probe_targets` answers "what must the cache hold", so it dedupes
-    to a package set; a reader reporting a finding has to name the FILE an
-    operator would edit, which a deduped set cannot do — two fragments sharing
-    `mcp-remote@0.1.38` are one warm and two declarations.
+    pinned, probe argv). `probe_targets` answers "what must the cache hold", so
+    it dedupes to a package set; a reader reporting a finding has to name the
+    FILE an operator would edit, which a deduped set cannot do — two fragments
+    sharing `mcp-remote@0.1.38` are one warm and two declarations.
 
     Both are the same walk, so this is the walk and `probe_targets` narrows it.
+
+    The argv rides along so a caller never re-reads the fragment to get it: the
+    command a probe runs then provably comes from the same parse as the row it
+    is reported against, rather than from a second read that could disagree.
     """
-    out: list[tuple[str, str, str, str, str, bool]] = []
+    out: list[tuple[str, str, str, str, str, bool, list[str] | None]] = []
     for p in paths:
         path = Path(p)
         files = sorted(path.glob("*.json")) if path.is_dir() else [path]
@@ -204,6 +210,7 @@ def declared_packages(paths: list[str]) -> list[tuple[str, str, str, str, str, b
                         spec,
                         bare_name(runtime, spec),
                         is_pinned(runtime, spec),
+                        [runtime, *target[1], "--help"],
                     )
                 )
     return sorted(out)
@@ -248,7 +255,7 @@ def probe_targets(paths: list[str]) -> list[tuple[str, str, str]]:
     spawns this ONCE where it used to spawn `python3` per fragment.
     """
     out: dict[tuple[str, str], tuple[str, str, str]] = {}
-    for _frag, _key, runtime, spec, bare, _pinned in declared_packages(paths):
+    for _frag, _key, runtime, spec, bare, _pinned, _argv in declared_packages(paths):
         out[(runtime, spec)] = (runtime, spec, bare)
     return sorted(out.values())
 

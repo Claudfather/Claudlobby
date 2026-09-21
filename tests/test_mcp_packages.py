@@ -215,7 +215,7 @@ class TestAgainstTheShippedLibrary:
     def test_every_shipped_fragment_is_readable_by_the_grammar(self):
         rows = g.declared_packages([str(REPO_ROOT / "library" / "mcp")])
         assert rows, "positive control: the shared library declares packages"
-        for frag, server, runtime, spec, bare, pinned in rows:
+        for frag, server, runtime, spec, bare, pinned, argv in rows:
             assert Path(frag).is_file()
             assert runtime in g.WARM_RUNTIMES
             assert spec and bare

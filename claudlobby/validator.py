@@ -2183,13 +2183,7 @@ def _validate_mcp_packages(
     if not armed:
         return
 
-    fragments: dict[str, dict] = {}
-    for frag_path in {r[0] for r in rows}:
-        try:
-            fragments[frag_path] = json.loads(Path(frag_path).read_text())
-        except (OSError, ValueError):
-            fragments[frag_path] = {}
-    for finding in _mp.resolution_findings(rows, gram, fragments):
+    for finding in _mp.resolution_findings(rows):
         report.warnings.append(finding.message())
 
 

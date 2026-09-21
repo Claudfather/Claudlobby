@@ -137,7 +137,7 @@ def fleet_declarations(fleet: "FleetConfig", paths: "Paths", grammar) -> list[tu
 def pinning_findings(rows: list[tuple]) -> list[Finding]:
     """The offline signal. No network, no subprocess, no conditions."""
     out = []
-    for frag, server, runtime, spec, _bare, pinned in rows:
+    for frag, server, runtime, spec, _bare, pinned, _argv in rows:
         if not pinned:
             out.append(Finding(UNPINNED, Path(frag).name, server, runtime, spec))
     return out
@@ -182,16 +182,15 @@ def _probe(argv: list[str]) -> tuple[str, str]:
     )
 
 
-def resolution_findings(rows: list[tuple], grammar, fragments: dict) -> list[Finding]:
+def resolution_findings(rows: list[tuple]) -> list[Finding]:
     """The network signal. Callers arm it; this function never decides to run.
 
-    `fragments` maps a fragment path to its parsed JSON so the argv comes from
-    the declaration itself rather than being rebuilt from the row.
+    The argv comes from the row, which the grammar built from the same parse
+    that produced the row — never from a second read of the fragment, which
+    could disagree with the declaration the finding names.
     """
     out = []
-    for frag, server, runtime, spec, _bare, _pinned in rows:
-        body = (fragments.get(frag) or {}).get(server) or {}
-        argv = grammar.warm_argv(runtime, body.get("args") or [])
+    for frag, server, runtime, spec, _bare, _pinned, argv in rows:
         if argv is None:  # the grammar could not read this shape — say so
             out.append(
                 Finding(
