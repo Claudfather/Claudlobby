@@ -368,6 +368,18 @@ def attribution_state(unattributed: list[dict], attribution: dict | None) -> dic
     out = {"state": state, "error": info.get("error"), "epoch": info.get("epoch"),
            "pre_epoch": 0, "undated": 0, "total": len(unattributed)}
     epoch = parse_instant(out["epoch"] or "")
+    if out["epoch"] and epoch is None:
+        # #1709 review (vera). Null the FIELD, not just the local. The advice's
+        # guard is `if not epoch`, which catches a falsy epoch and NOT a truthy
+        # one that is not an instant — so an unparseable string sailed past it
+        # into "INSIDE the plane's epoch" and printed itself verbatim as if it
+        # were a boundary. That is the over-claim-from-an-unreliable-instrument
+        # shape this module exists to refuse, reached through a different door.
+        # The reason is recorded too: without it the surviving message says the
+        # epoch "could not be read", which is false here — it was read and did
+        # not parse, and those send a reader to different places.
+        out["error"] = out["error"] or f"epoch is not an instant: {out['epoch']!r}"
+        out["epoch"] = None
     if state != ATTR_ATTEMPTED or epoch is None:
         return out
     for event in unattributed:

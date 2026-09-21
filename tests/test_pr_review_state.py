@@ -1010,6 +1010,37 @@ class TestEpochComparisonIsParsedNotLexical:
         out = _advice(before, {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
         assert "PERMANENTLY UNATTRIBUTABLE" in out
 
+    def test_a_truthy_but_unparseable_epoch_is_not_a_boundary(self):
+        """#1709 review (vera). `if not epoch` catches a FALSY epoch and not a
+        truthy one that is not an instant, so an unparseable string sailed past
+        the guard into "INSIDE the plane's epoch" and printed itself verbatim as
+        though it were a timestamp — the over-claim this module exists to refuse,
+        reached through a different door than the one #1699 named."""
+        out = _advice([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE],
+                      {"state": prs.ATTR_ATTEMPTED,
+                       "epoch": "not-a-valid-timestamp-at-all"})
+        assert "INSIDE the plane's epoch" not in out
+        assert "not-a-valid-timestamp-at-all" not in out.split("(")[0]
+        assert "cannot be determined" in out
+
+    def test_the_epoch_FIELD_is_nulled_not_just_the_local(self):
+        """The fix direction, pinned at the level it was made. Nulling only the
+        local would leave the raw string in the dict for every other consumer —
+        --json included — and the advice guard would still sail past it."""
+        info = prs.attribution_state(
+            [{"ts": PRE_EPOCH_BLOCK}],
+            {"state": prs.ATTR_ATTEMPTED, "epoch": "not-a-valid-timestamp-at-all"})
+        assert info["epoch"] is None
+        assert "not an instant" in info["error"]
+
+    def test_a_real_epoch_is_left_alone_by_that_guard(self):
+        """The positive control: the null must not fire on a good epoch, or the
+        permanence branch becomes unreachable and every row reads as unknown."""
+        info = prs.attribution_state([{"ts": PRE_EPOCH_BLOCK}],
+                                     {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
+        assert info["epoch"] == REAL_EPOCH and info["error"] is None
+        assert info["pre_epoch"] == 1
+
     def test_an_undated_verdict_is_counted_in_neither(self):
         info = prs.attribution_state(
             [{"ts": PRE_EPOCH_BLOCK}, {"ts": "not-a-date"}],

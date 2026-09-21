@@ -44,6 +44,17 @@ whose own output reads as broken does not get adopted.
   the epoch string. Lexical fails in the direction that loses permanence.
 - **One epoch read per run**, not per PR: it is a property of the plane, and
   re-deriving it per row would let two rows in one run disagree about the boundary.
+- **A truthy-but-unparseable epoch is nulled at the field, not just the local**
+  (review, vera). The advice's guard is `if not epoch`, which catches a falsy
+  epoch and not a string that is merely not an instant — such a value sailed
+  past it into "INSIDE the plane's epoch" and printed itself verbatim as though
+  it were a timestamp. **No live path reaches this today**: every writer in
+  `ingest.py` stamps `occurred_at` from `datetime().isoformat()`, so
+  `MIN(occurred_at)` always parses. It is closed anyway because "unreachable
+  because every current writer happens to format it correctly" is a property of
+  the current writers rather than an invariant, it is not enforced at the schema
+  layer, and this module's whole purpose is refusing to over-claim from an
+  instrument it cannot trust.
 
 Behaviour otherwise unchanged; `--json` gains an additive `attribution` object per
 PR (schema 1 top-level keys untouched), so a consumer can tell "attribution ran
