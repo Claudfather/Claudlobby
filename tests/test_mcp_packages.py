@@ -166,6 +166,28 @@ class TestProbeVerdicts:
         assert "uvx" in detail
 
 
+class TestTheFlagHasOneName:
+    def test_the_module_reads_the_flag_the_registry_declares(self):
+        """A switch row that names a different variable from the one the code
+        reads describes a control nobody has: `doctor --switches` would print an
+        arming line that changes nothing. Cheap to pin, and this exact copy-drift
+        is the estate's named recurring defect."""
+        from claudlobby import switches as sw
+
+        assert sw.by_key("mcp-package-probe").env == mp.PROBE_FLAG
+
+    def test_the_namespace_it_claims_is_ours(self):
+        """Claiming a namespace makes the validator's dead-flag sweep warn about
+        every unregistered <NS>_..._ENABLED in a fleet .env, so the prefix must
+        be one no fleet would spell for its own tooling."""
+        from claudlobby import switches as sw
+
+        assert mp.PROBE_FLAG.split("_", 1)[0] == "CLAUDLOBBY"
+        assert "MCP" not in sw.namespaces(), (
+            "MCP is an industry term — claiming it would warn on a fleet's own vars"
+        )
+
+
 class TestFindingMessages:
     def test_unpinned_says_unverified_not_broken(self):
         msg = mp.Finding(mp.UNPINNED, "gws.json", "gws", "uvx", "workspace-mcp").message()

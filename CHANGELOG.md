@@ -38,10 +38,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   uvx arm does not — a half-right predicate, pinned by its own test.
 
 - **Signal 2, RESOLUTION — network, opt-in, bounded, fails open.** Armed with
-  `MCP_PACKAGE_PROBE_ENABLED=1` in the fleet `.env` (registered in
+  `CLAUDLOBBY_MCP_PROBE_ENABLED=1` in the fleet `.env` (registered in
   `switches.py`, so `doctor --switches` names it and the dead-flag sweep claims
   it). Off by default because a generate must stay offline and fast, and a
   registry outage must never be why a fleet cannot compose.
+
+  The flag is `CLAUDLOBBY_`-prefixed rather than the more readable
+  `MCP_PACKAGE_PROBE_ENABLED`: registering a switch claims its NAMESPACE for the
+  dead-flag sweep, which then warns about every unregistered `<NS>_..._ENABLED`
+  in a fleet `.env`. `MCP` is an industry term, not ours — a fleet's own
+  `MCP_GATEWAY_ENABLED` would have been reported dead.
 
   It runs the **EXACT argv the fragment would run**, via a new
   `grammar.warm_argv` — the same `<command> <warm prefix> --help` that
