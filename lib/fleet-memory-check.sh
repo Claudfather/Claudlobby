@@ -59,7 +59,8 @@ total_ram_mb() {
     if [ -f /proc/meminfo ]; then
         awk '/^MemTotal:/ { printf "%d", $2/1024 }' /proc/meminfo
     else
-        sysctl -n hw.memsize 2>/dev/null | awk '{ printf "%d", $1/1048576 }'
+        # `|| echo sysctl` is the not-sourced degradation, never a resolution rung
+        "$(sysctl_bin 2>/dev/null || echo sysctl)" -n hw.memsize 2>/dev/null | awk '{ printf "%d", $1/1048576 }'
     fi
 }
 
