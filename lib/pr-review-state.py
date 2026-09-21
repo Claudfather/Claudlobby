@@ -37,10 +37,20 @@ finds nothing, and concludes nothing is stale must be wrong only when the tool
 actually checked.
 
 **(a) The verdict regex is SAMPLED from live formats, not a spec.** It has
-already drifted once — a fleet adopted ``**[name] [VERDICT] approve**`` in an
-afternoon and every PR read UNPARSED. The runtime guard is verbatim-on-unmatched
-so drift is *visible*; the ``tests/test_pr_review_state.py`` pinning tests are
-what stop the next edit narrowing it silently.
+already drifted twice — a fleet adopted ``**[name] [VERDICT] approve**`` in an
+afternoon and every PR read UNPARSED; then ``**Blocking — do not merge yet.**``
+went unread because ``block`` was not a verdict token (fixed #1700).
+
+The runtime guard is verbatim-on-unmatched so drift is *visible* — **but that
+claim was measured FALSE in its first form and is only true now because there
+are TWO channels.** The original guard keyed on the structural families the
+parser already covered, so it could report drift only inside vocabulary the
+parser understood: on a 44-PR corpus it fired **0 times against 3 real misses**.
+A guard derived from the classifier inherits the classifier's blind spot.
+``DECISION_SHAPED`` is therefore a deliberately WIDER lexicon, maintained apart
+from ``NORM`` and never derived from it — see the note beside it. The
+``tests/test_pr_review_state.py`` pinning tests are what stop the next edit
+narrowing either channel silently.
 
 **(c) One repo per invocation.** No cross-repo sweep.
 
@@ -69,13 +79,35 @@ original failure this estate already had.
 
 EXIT CODES — THE FAILURE DIRECTION IS IN THE CODE, NOT ONLY THE OUTPUT
 -----------------------------------------------------------------------
-``0`` is deliberately hard to earn, because a cheap 0 is the bug::
+``0`` is meant to be hard to earn, because a cheap 0 is the bug::
 
-    0  every verdict parsed, every verdict anchored, none stale, none blocking
+    0  every verdict parsed, every verdict anchored, none stale, none blocking —
+       and no PR that HAD events yielded nothing
     1  ACTIONABLE — a stale verdict, or a live blocking verdict
     2  usage error
     3  INCOMPLETE — the run could not answer for at least one PR (an unparsed
-       verdict header, i.e. vocabulary drift, or an unanchored verdict)
+       verdict header, i.e. vocabulary drift; an unanchored verdict; or a PR
+       carrying comment/review events from which NOTHING was recognised)
+
+**That last rung is #1700 and the sentence above it did not used to be true.**
+Every other rung keys on something the parser had already recognised, so a PR
+the tool could not read at all produced an empty flag list, an empty blocking
+list and exit ``0`` — reported identically to a genuinely clean PR. Recognition
+gated every finding, so a miss produced silence and silence scored clean, and
+the worse the miss the cleaner the score. Measured on a 44-PR corpus before the
+fix: 13 PRs exited 0, and **7 of those 13 carried events from which NOTHING
+was recognised.** (Nine had no verdict recognised, but two of those carried no
+events at all -- legitimately clean, not missed; see the discriminator below.)
+
+The matching defect in the OUTPUT was the coverage caveat, which was gated on
+``anchored < verdicts`` — at zero recognition, ``0 < 0``, false. The one
+sentence written to prevent a false-clean reading was suppressed precisely in
+the total-miss case; its volume tracked how well the run had already gone. It is
+now inverted and fires hardest where recognition is worst (``summary_line``).
+
+A PR with NO events is still legitimately ``0``: nothing was said, so nothing
+was missed. The discriminator is events-without-recognition, not emptiness —
+the same presence-not-emptiness line ``source_state`` draws.
 
 Precedence is 1 over 3: an actionable finding dominates an incomplete one,
 because the reader should act either way and acting is the stronger instruction.
@@ -109,9 +141,39 @@ import sys
 #: one — the matched scope and the rendered bold span diverged, and a comment
 #: *discussing* a verdict parsed AS one. Bound the scope positively (a short,
 #: single-line span) rather than negatively (anything that is not a star).
+#: ``block``/``blocking``/``blocked`` joined the token set in #1700. It is the
+#: plain-English way to say the one verdict this tool exists to keep alive, and
+#: every verdict miss on the 44-PR corpus that day was this family — including a
+#: reviewer's own ``**Blocking — do not merge yet.**`` on a PR the tool then
+#: reported as ``0 blocking``.
+#:
+#: ``(?!\s+on\b)`` separates the two senses of the word and was found by an
+#: EXISTING test rather than reasoned out: "**Status: blocked on a policy
+#: decision, not awaiting a reviewer.**" is a real Claudlobby#1160 header, and
+#: "blocked ON something" is a STATE THE PR IS IN — the author is reporting what
+#: they are waiting for, not rendering a verdict. "Blocking — do not merge yet."
+#: is the author blocking. Without the guard the first reads as REQUEST-CHANGES,
+#: which invents a reviewer objection nobody made.
+#:
+#: The ``non-``/``un-`` lookbehinds are load-bearing, not defensive dressing:
+#: "**Non-blocking observation**" is house style for the OPPOSITE verdict, and
+#: the leading ``[^*\n]{0,40}?`` is non-greedy, so without them it would skip the
+#: prefix and read a non-blocking note AS a block. Pinned by
+#: ``test_a_non_blocking_note_is_not_a_block``.
+#:
+#: The ``{0,40}`` tail is deliberately NOT widened to admit longer headers such
+#: as ``**1. Blocking: the rung reported a default, not the state in force.**``
+#: (52 chars of tail, still missed). Width is what bounds the cross-span match
+#: the positive bounding exists to prevent — ``**a** approve more **b**`` — so
+#: trading it away for coverage would re-open a false-POSITIVE hole to close a
+#: false-negative one. Those headers are caught by the drift channel below
+#: instead, which is the honest place: it says "this is a decision I could not
+#: classify" without risking classifying it wrong.
 VERDICT_HEADER = re.compile(
     r"\*\*[^*\n]{0,40}?(?:verdict:?\s*\]?\s*|\[verdict\]\s*)?"
-    r"(approve|ship it|request[\s-]+changes)\s*[.!:]?\s*[^*\n]{0,40}?\*\*",
+    r"(approve|ship it|request[\s-]+changes"
+    r"|(?<!non-)(?<!non )(?<!un)block(?:ing|ed)?\b(?!\s+on\b))"
+    r"\s*[.!:]?\s*[^*\n]{0,40}?\*\*",
     re.I,
 )
 
@@ -155,14 +217,48 @@ VERDICT_HEADER = re.compile(
 #: scattered few. A systematic miss also hides better than a random one, because
 #: the output stays plausible.
 #:
-#: WHAT IS DELIBERATELY EXCLUDED, and it is a semantic line rather than a
-#: coverage one: ``Merging at <sha>``, ``Fixed at <sha>``, ``Rebased onto <sha>``
-#: all name a commit somebody PRODUCED, not one a reviewer READ. Admitting them
-#: would raise the hit rate and anchor verdicts to the wrong commit — the decoy
-#: failure with extra steps. The stems are verbs of reviewer EXAMINATION only.
+#: THE TAXONOMY IS THE RULE; THE STEM LIST IS ONLY ITS CURRENT SAMPLE. Three
+#: categories, and a phrasing is admitted because of which one it falls into:
+#:
+#:   EXAMINATION — ``reviewed at``, ``verified against``. The reviewer says what
+#:     they READ. Admitted.
+#:   BINDING — ``anchored to``, ``pinned to``, ``SHA-anchored to``. The reviewer
+#:     says what their verdict IS BOUND TO. Admitted, and added #1700.
+#:   PRODUCTION — ``Merging at``, ``Fixed at``, ``Rebased onto``. These name a
+#:     commit somebody MADE, not one a reviewer assessed. REJECTED: admitting
+#:     them would raise the hit rate and anchor verdicts to the wrong commit —
+#:     the decoy failure with extra steps.
+#:
+#: BINDING was missing and its absence was not an oversight in the sample — it
+#: was a hole in the RULE. The old rule sorted candidates into examination
+#: (admit) and production (reject), and ``anchored to`` is neither: it is the
+#: purest possible anchor, and it fell outside the dichotomy entirely. So the
+#: fleet standardised on ``anchored to`` on 2026-09-21 and the matcher could not
+#: grow into the convention by correctly applying its own stated principle —
+#: every verdict using it read NO-SHA-ANCHOR. Measured that day: 5 of 7 real
+#: anchor misses on a 44-PR corpus were binding verbs.
+#:
+#: That is why the categories are written down here rather than only the stems:
+#: the next correct phrasing should be admitted by the PRINCIPLE, and a reader
+#: adding a stem is being asked which of the three it is — a question with an
+#: answer — instead of whether it "looks like" the others.
+#:
+#: STILL MISSED, KNOWN AND MEASURED, because neither is a taxonomy gap and
+#: neither is fixed here (#1700 scope):
+#:   ``Verified `<sha>` ``          — right category, no preposition; the stem
+#:                                    requires one, and dropping that requirement
+#:                                    widens the decoy surface.
+#:   ``verified against `main @ <sha>` `` — right category AND right preposition,
+#:                                    defeated by the ``[^0-9a-f]{0,6}`` gap.
+#: Both are argued in #1700 rather than patched silently here.
 SHA_ANCHOR = re.compile(
-    r"\b(?:re-?)?(?:verification\s+)?(?:review(?:ed)?|verif(?:ied|ication))"
-    r"\s+(?:against|at)[^0-9a-f]{0,6}([0-9a-f]{7,40})\b",
+    r"\b(?:"
+    # EXAMINATION: what the reviewer read.
+    r"(?:re-?)?(?:verification\s+)?(?:review(?:ed)?|verif(?:ied|ication))\s+(?:against|at)"
+    r"|"
+    # BINDING: what the verdict is bound to (#1700).
+    r"(?:re-?)?(?:sha[\s-]*)?(?:anchor(?:ed|ing)?|pinned)\s+(?:to|at|on)"
+    r")[^0-9a-f]{0,6}([0-9a-f]{7,40})\b",
     re.I,
 )
 
@@ -180,7 +276,36 @@ HEADER_IDENTITY = re.compile(r"\*\*\s*\[([a-z0-9][a-z0-9_-]{0,38})\]\s*\[", re.I
 VERDICT_SHAPED = re.compile(r"\*\*[^*\n]*?(?:\[[^\]\n]{1,20}\]\s*\[[^\]\n]{1,20}\]|verdict)",
                             re.I)
 
-NORM = {"approve": "APPROVE", "ship it": "APPROVE", "request changes": "REQUEST-CHANGES"}
+#: THE SECOND DRIFT CHANNEL, AND THE REASON THERE ARE TWO (#1700).
+#:
+#: ``VERDICT_SHAPED`` above keys on the two STRUCTURAL families the parser
+#: already covers, so it can only ever report drift *within* vocabulary the
+#: parser understands. Measured on a 44-PR corpus: it fired **0 times against 3
+#: real verdict misses**. A guard that inherits the classifier's blind spot is
+#: not a guard; it is a second copy of the same assumption.
+#:
+#: So this one is a LEXICON, maintained deliberately WIDER than ``NORM`` and
+#: never derived from it. The asymmetry is the design: a DETECTOR may be loose
+#: because its output is "a human should look", while a CLASSIFIER must be tight
+#: because its output is a verdict. Wiring the detector to the classifier's
+#: vocabulary — the obvious DRY move — is exactly what produced the 0/3.
+#:
+#: Deliberately EXCLUDED to keep it from crying wolf, which is the failure that
+#: killed the first version of the guard above: bare ``merge`` (the selftest's
+#: own ``**Merge note**`` is a non-verdict), and bare ``verdict`` (already
+#: covered structurally). Every addition here costs a false positive somewhere,
+#: so the corpus false-positive count is measured, not assumed — see #1700.
+DECISION_SHAPED = re.compile(
+    r"\b(?:(?<!non-)(?<!non )(?<!un)block(?:ing|ed)?\b(?!\s+on\b)"
+    r"|hold|held|approv(?:e[sd]?|al)|lgtm|ship\s?it"
+    r"|request[\s-]*changes?|reject(?:ed|ing)?|veto|do not merge|merge held"
+    r"|signs?\s*off|signed\s*off|clear(?:ed|ing))\b",
+    re.I,
+)
+
+NORM = {"approve": "APPROVE", "ship it": "APPROVE", "request changes": "REQUEST-CHANGES",
+        "block": "REQUEST-CHANGES", "blocking": "REQUEST-CHANGES",
+        "blocked": "REQUEST-CHANGES"}
 
 APPROVE = "APPROVE"
 BLOCK = "REQUEST-CHANGES"
@@ -190,6 +315,7 @@ COMMIT_STALE = "COMMIT-STALE"
 NO_SHA_ANCHOR = "NO-SHA-ANCHOR"
 OFF_STANDARD = "OFF-STANDARD"
 UNPARSED = "UNPARSED-HEADER"
+NO_RECOGNITION = "NO-RECOGNITION"
 UNATTRIBUTED = "UNATTRIBUTED-SEQUENCE"
 DISAGREEMENT = "IDENTITY-DISAGREEMENT"
 
@@ -337,10 +463,16 @@ def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: boo
     # An unparsed header is vocabulary drift, and it is reported VERBATIM. Only
     # events that carry no verdict AND lead with a bold span are candidates —
     # ordinary prose comments are not failed verdict parses.
+    # TWO channels, unioned. VERDICT_SHAPED catches drift inside a known family;
+    # DECISION_SHAPED catches a decision word in a header the parser could not
+    # classify at all, which is the case the single-channel version could not see
+    # by construction (#1700).
     unparsed = [
         first_bold(e["body"])
         for e in events
-        if parse_verdict(e["body"]) is None and VERDICT_SHAPED.search(first_bold(e["body"]))
+        if parse_verdict(e["body"]) is None
+        and (VERDICT_SHAPED.search(first_bold(e["body"]))
+             or DECISION_SHAPED.search(first_bold(e["body"])))
     ]
 
     # Two or more DISAGREEING verdicts that nobody could attribute. This is the
@@ -365,6 +497,17 @@ def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: boo
         flags.append(NO_SHA_ANCHOR)
     if unparsed:
         flags.append(UNPARSED)
+    # THE SILENCE FLAG (#1700). A PR that HAD events and yielded no verdict at
+    # all was not assessed — and under the old contract that state produced an
+    # empty flag list, an empty blocking list and exit 0, i.e. it was reported
+    # exactly like a genuinely clean PR. Recognition gated every finding, so a
+    # miss produced silence and silence scored clean. `events` is the
+    # discriminator rather than a comment count: a PR nobody has commented on is
+    # legitimately unassessed and says so with `(no parseable verdict)`; a PR
+    # with six comments and no recognised verdict is an instrument failure.
+    no_recognition = bool(events) and not resolved
+    if no_recognition:
+        flags.append(NO_RECOGNITION)
 
     return {
         "number": payload.get("number"),
@@ -378,15 +521,29 @@ def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: boo
         "stale": [{"reviewer": e["reviewer"], "anchor": e["anchor"]} for e in stale],
         "unanchored": [e["reviewer"] for e in unanchored],
         "unparsed_headers": unparsed,
+        "no_recognition": no_recognition,
         "flags": sorted(set(flags)),
     }
 
 
 def exit_code_for(results: list[dict]) -> int:
-    """1 ACTIONABLE beats 3 INCOMPLETE beats 0. See the module docstring."""
+    """1 ACTIONABLE beats 3 INCOMPLETE beats 0. See the module docstring.
+
+    ``no_recognition`` is the #1700 rung and it is the one that makes ``0``
+    genuinely expensive. Before it, exit 0 was not "hard to earn" as the
+    docstring claimed — it was the DEFAULT for a PR the tool could not read,
+    because every other rung keys on something the parser had already
+    recognised. A vocabulary miss therefore scored clean, and the worse the
+    miss, the cleaner the score.
+
+    Read with ``.get`` so a caller assembling a result dict by hand (the tests
+    do) cannot silently lose the rung by omitting the key — the failure would be
+    a green run, which is this rung's own subject.
+    """
     if any(r["stale"] or r["blocking"] for r in results):
         return RC_ACTIONABLE
-    if any(r["unanchored"] or r["unparsed_headers"] for r in results):
+    if any(r["unanchored"] or r["unparsed_headers"] or r.get("no_recognition")
+           for r in results):
         return RC_INCOMPLETE
     return RC_OK
 
@@ -420,10 +577,26 @@ def summary_line(results: list[dict]) -> str:
     ]
     if unparsed:
         parts.append(f"{unparsed} UNPARSED header(s) — vocabulary drift, printed above")
-    tail = ""
+    # THE DISCLOSURE IS INVERTED (#1700). It used to be gated on
+    # `anchored < verdicts`, which at zero recognition is `0 < 0` — false. So the
+    # one sentence written to stop a false-clean reading was SUPPRESSED exactly
+    # in the total-miss case, and the caveat's volume tracked how well the run
+    # had already gone. It now fires hardest where recognition is WORST.
+    clauses = []
+    blind = [r for r in results if r.get("no_recognition")]
+    if blind:
+        blind_events = sum(r["events"] for r in blind)
+        clauses.append(
+            f"{len(blind)} PR(s) carried {blind_events} comment/review event(s) and "
+            "produced NO recognised verdict — those PRs were NOT assessed, and the "
+            "counts above describe only what was RECOGNISED"
+        )
     if anchored < verdicts:
-        tail = (f"  — staleness is UNKNOWABLE for {verdicts - anchored} verdict(s) "
-                "that named no commit; that is not 'clean'")
+        clauses.append(
+            f"staleness is UNKNOWABLE for {verdicts - anchored} verdict(s) whose "
+            "anchor was not recognised; that is not 'clean'"
+        )
+    tail = ("  — " + "; ".join(clauses)) if clauses else ""
     return "SUMMARY: " + ", ".join(parts) + tail
 
 
@@ -558,6 +731,12 @@ def render(results: list[dict], canonical: bool) -> str:
             )
         for header in r["unparsed_headers"]:
             lines.append(f"      {UNPARSED} (verbatim): {header}")
+        if r.get("no_recognition"):
+            lines.append(
+                f"      {NO_RECOGNITION}: {r['events']} event(s) on this PR, none "
+                "recognised as a verdict — this PR was NOT assessed. A blocking "
+                "review may be live and unread; open the comments."
+            )
         if canonical and OFF_STANDARD in r["flags"]:
             lines.append(
                 f"      {OFF_STANDARD}: verdict landed on .comments[]; "

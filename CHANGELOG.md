@@ -6,6 +6,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `pr-review-state.py`: silence must not score clean (#1700)
+
+The tool gates SHA-anchoring, the convention the fleet made default on
+2026-09-21. Audited against its own docstring, three of its load-bearing claims
+were measured false on a 44-PR corpus (22 `Claudlobby` + 22 `clauDNA`, 95
+review/comment events, 55 verdict-bearing).
+
+- **Exit `0` was the MISS DEFAULT, not "hard to earn".** Every rung keyed on
+  something the parser had already recognised, so a PR the tool could not read
+  produced an empty flag list, an empty blocking list and exit `0` — reported
+  identically to a genuinely clean PR. Recognition gated every finding, so a
+  miss produced silence and silence scored clean; the worse the miss, the
+  cleaner the score. Measured before the fix: 13 of 44 PRs exited 0, and **7 of
+  those 13 carried comment/review events from which nothing was recognised**.
+  A new `NO-RECOGNITION` rung moves those off `0`. A PR with NO events stays
+  clean — the discriminator is events-without-recognition, not emptiness, the
+  same presence-not-emptiness line `source_state` draws.
+- **The coverage caveat was suppressed exactly when it was needed.** It was
+  gated on `anchored < verdicts`, which at zero recognition is `0 < 0` — false.
+  The one sentence written to prevent a false-clean reading went silent in the
+  total-miss case, so its volume tracked how well the run had already gone. It
+  is inverted: it now fires hardest where recognition is worst, and names how
+  many PRs went unassessed and on how many events.
+- **The drift guard inherited the classifier's blind spot.** `VERDICT_SHAPED`
+  keys on the two structural families the parser already covers, so it could
+  only report drift *inside* vocabulary the parser understood: it fired **0
+  times against 3 real verdict misses**. `DECISION_SHAPED` is a second channel
+  — a lexicon maintained deliberately WIDER than `NORM` and never derived from
+  it. A detector may be loose because its output is "a human should look"; a
+  classifier must be tight because its output is a verdict. Wiring the detector
+  to the classifier's vocabulary is the DRY move that produced the 0/3.
+- **`block`/`blocking`/`blocked` is a verdict token.** Every verdict miss on the
+  corpus was this family, including a reviewer's own
+  `**Blocking — do not merge yet.**` on a PR the tool then reported as
+  `0 blocking`. Guarded three ways, each found by a real header rather than
+  reasoned out: `non-`/`un-` lookbehinds (house style writes "non-blocking
+  observation" for the OPPOSITE verdict, and the non-greedy leading span would
+  otherwise skip the prefix and invert the meaning), and `\b(?!\s+on\b)` —
+  "blocked ON a policy decision" is a STATE the PR is in, not a verdict, and
+  the `\b` is required because otherwise the engine backtracks the optional
+  suffix to empty, matches bare `Block`, and bypasses the guard it sits behind.
+- **The anchor rule gained its missing category.** The old rule sorted stems
+  into reviewer EXAMINATION (admit) and PRODUCTION — `Merging at`, `Fixed at`
+  (reject). `anchored to` / `pinned to` is neither: it names what a verdict is
+  BOUND to, the purest possible anchor, and fell outside the dichotomy
+  entirely. So the fleet standardised on `anchored to` and the matcher could
+  not grow into the convention by correctly applying its own stated principle.
+  BINDING is now a named third category in the docstring, so the next correct
+  phrasing is admitted by the principle rather than by another patch.
+
+**Corpus re-run after the fix:** 13 PRs exiting `0` → **6**; of the 7
+events-without-recognition PRs, **all 7 now speak**. Anchors recognised
+10/53 → **14/54**; blocking verdicts 12 → **13**; UNPARSED drift headers
+**0 → 3**. Three anchor misses remain and are deliberately NOT patched here,
+each named in the source with its reason: `head is <sha>`, `Verified <sha>`
+(no preposition), and `verified against \`main @ <sha>\`` (right category and
+right preposition, defeated by the `[^0-9a-f]{0,6}` gap). None is a taxonomy
+gap; widening either the preposition requirement or the gap trades a
+false-negative for a false-POSITIVE decoy surface, which is #1700's call to
+make, not this PR's.
+
+**The docstring's own claims were corrected**, not just the code — it asserted
+"a cheap 0 is the bug" and that verbatim-on-unmatched makes drift visible, and
+both were measured false. A fix that leaves the docstring asserting the old
+contract leaves the next reader trusting it.
+
+The PR author field (`#1666`, the no-self-review rung) is explicitly out of
+scope: `PR_FIELDS` never fetches `author`, so that rung has an absent input
+rather than a weak detector, and it needs a new field rather than a changed
+rule.
+
 ### Fixed — `merge-policy-auto-admin` rung 1 stops claiming to be checkable (#1666)
 
 - **The rung said "no self-reviews"; nothing on this estate could tell.** The
