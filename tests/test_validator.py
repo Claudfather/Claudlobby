@@ -2464,9 +2464,24 @@ class TestIgnitionValidation:
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
 
     def _report(self, fleet_dir, *, env_text="TASK_RECHECK_ENABLED=0\n"):
-        if not (fleet_dir / "lib").exists():
-            fleet_dir_lib = fleet_dir / "lib"
-            fleet_dir_lib.symlink_to(REPO / "lib")
+        # Wire whatever is MISSING rather than keying on the directory's
+        # existence. `fleet_dir` now ships a real `mcp-package-grammar.py`,
+        # so `lib/` exists without being wired, and an existence check skips
+        # the wiring silently: the switch resolver then cannot read its
+        # doors, `task-recheck` falls back to ARMED regardless of `.env`,
+        # and `_validate_ignition`'s early return makes every scenario below
+        # pass vacuously -- the warning cannot fire in any of them.
+        #
+        # Per-entry links, never a whole-dir symlink: fixtures delete files
+        # under `lib/` (test_mcp_package_grammar.py, test_brief.py,
+        # test_env_register.py), and through a directory symlink those
+        # unlinks reach the repo's own copies.
+        lib = fleet_dir / "lib"
+        lib.mkdir(exist_ok=True)
+        for real in (REPO / "lib").iterdir():
+            link = lib / real.name
+            if not link.exists():
+                link.symlink_to(real)
         (fleet_dir / ".env").write_text(env_text)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         return validate(fleet, _make_paths(fleet_dir)), fleet
