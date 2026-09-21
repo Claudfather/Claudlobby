@@ -220,6 +220,7 @@ def _family_values(payload, party, entity=None) -> tuple[str, dict]:
                 "progress": payload.progress,
                 "summary": payload.summary,
                 "pr_url": payload.pr_url,
+                "pr_role": payload.pr_role,
                 # the task loop's human acts (chunk M-A, #1481) — the card
                 # reads `question` / `reason` / `by` straight off this detail
                 "reason": payload.reason,

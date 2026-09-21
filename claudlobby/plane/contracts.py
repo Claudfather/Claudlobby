@@ -46,6 +46,19 @@ ATTEMPT_STATES = (
     # A tmux/pane fact (see _CARRIER_ONLY_STATES).
     "received",
 )
+#: Who the reporter was TO THE PR they are citing (#1666). A CLOSED vocabulary
+#: rather than free text, and the closure is the point: the consumer of this
+#: field decides whether a bot may merge, so an unrecognised value must be a
+#: refusal at the door rather than a string nobody can classify later.
+#:
+#: **There is deliberately no "unknown" member.** Absent (None) IS the third
+#: state, and it has to stay distinguishable from `reviewed`: 19% of in-epoch
+#: PRs have no citing report at all, and rung 1 must REFUSE for those rather
+#: than read "no role recorded" as "not an author" and pass. A member spelled
+#: `unknown` would invite a writer to record one, which converts an absence the
+#: consumer can refuse on into a value it might accept.
+PR_ROLES = ("authored", "reviewed")
+
 TASK_EVENTS = (
     # 22 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
     # pre-deletion tuple was 20, mis-stated as 19 — the count error predated the
@@ -382,6 +395,22 @@ class TaskEvent(_Strict):
     def _act_text_byte_cap(cls, v, info):
         return _reject_over_cap("task", info.field_name, v)
     pr_url: Optional[str] = None
+    #: What this bot DID to `pr_url` — the one fact a shared GitHub identity
+    #: destroys (#1666). Every fleet bot pushes as the same login, so GitHub
+    #: cannot answer "is the reviewer a different bot than the author"; it is
+    #: recorded here at the moment it happens or it is not recoverable at all.
+    #:
+    #: METADATA, never CONTENT, and registered as such in `registries` rather
+    #: than left unregistered — an unregistered field survives a metadata
+    #: capture only by accident, and this one must survive BY RULE. A stripped
+    #: role reads as "no role recorded", a consumer reads that as "not an
+    #: author", and that is a false clear: the exact defect this field exists
+    #: to prevent, re-entering through its own remedy. `by` is the precedent
+    #: and states the same reason in its own comment.
+    #:
+    #: The closed vocabulary needs no byte cap: unlike `by`, this is not
+    #: authored text, so pydantic bounds it absolutely and a cap would be dead.
+    pr_role: Optional[Literal[PR_ROLES]] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
 

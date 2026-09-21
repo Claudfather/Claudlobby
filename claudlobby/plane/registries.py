@@ -29,6 +29,18 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     # every attention card. Small, because it is a NAME: the doors already
     # clamp an alias to 64 characters.
     ("task", "by"): {"class": "METADATA", "cap": 128},
+    # `pr_role` is METADATA for the same reason as `by`, and registered
+    # EXPLICITLY rather than left out (#1666): an unregistered field is not in
+    # CONTENT_FIELDS and so survives a metadata capture by ACCIDENT. This one
+    # must survive by RULE, because the failure is silent and passes -- a
+    # stripped role reads as "no role recorded", which a merge gate reads as
+    # "not the author". Stating the class here is what makes a future edit that
+    # reclassified it a visible change rather than an omission.
+    #
+    # No cap, deliberately: it is a closed Literal (contracts.PR_ROLES), not
+    # authored text, so the contract bounds it and a cap would never fire.
+    # SENSITIVE entries below already carry no cap, so the shape is precedented.
+    ("task", "pr_role"): {"class": "METADATA"},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
     ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail
