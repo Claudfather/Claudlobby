@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+import pytest
 
 from tests.conftest import constructed_env, load_lib_module
 
@@ -369,3 +370,13 @@ class TestTheRefusalCanActuallyFire:
         with caplog.at_level(logging.INFO):
             assert cmd_warm_cache(args) != 0
         assert "cache warm complete" not in caplog.text
+
+
+@pytest.fixture(autouse=True)
+def _equip_grammar(fleet_dir):
+    """This module drives composition/warm-cache, which load the shared
+    grammar through `mcp_grammar` -- and that door REFUSES rather than
+    falling back, so the real file has to be under the fixture's lib/."""
+    from tests.conftest import equip_grammar
+
+    equip_grammar(fleet_dir)
