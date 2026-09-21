@@ -381,7 +381,8 @@ class PlaneDaemon:
             # runs the checkpoint cadence. `connection()` performs the identity
             # check before handing it over, so a replaced db is caught BEFORE a
             # batch is written into an unlinked inode rather than after.
-            outcomes = emit_batch(self.root, events, conn=self.writer.connection())
+            outcomes = emit_batch(self.root, events,
+                                  conn_factory=self.writer.connection)
         except ContractViolation as exc:
             errors = getattr(exc, "errors", None)
             self._reply(conn, {"ok": False, "code": "contract_violation",

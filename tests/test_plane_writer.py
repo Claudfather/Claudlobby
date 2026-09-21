@@ -185,3 +185,56 @@ class TestTheCheckpointCadence:
         assert w.checkpoint_busy == (1 if row[0] else 0)
         ro.close()
         w.close()
+
+
+class TestTheConnectionIsOpenedLATE:
+    """The ordering regression, pinned.
+
+    The first build passed a ready-made connection: `emit_batch(root, events,
+    conn=writer.connection())`. That opens the db in the ARGUMENT LIST — before
+    `emit_batch` is entered, and so before the capture-config load and the
+    validation that precede the connect inside it.
+
+    It broke a root whose `state/` is a regular file: `db_path()`'s mkdir
+    raises NotADirectoryError, and evaluating it early turned a typed
+    `contract_violation` (the capture policy is unreadable, which is what fails
+    FIRST there) into an unrouted traceback — a daemon dying where the old code
+    disclosed and served. A factory is called exactly where `connect` used to
+    be, so the order of failures is unchanged.
+    """
+
+    def test_the_factory_is_NOT_called_when_validation_refuses(self, tmp_path):
+        from claudlobby.plane.contracts import ContractViolation
+        from claudlobby.plane.emit_api import emit_batch
+
+        called = []
+
+        def factory():
+            called.append(1)
+            raise AssertionError("the db was opened before the batch was validated")
+
+        with pytest.raises(ContractViolation):
+            emit_batch(tmp_path, [{"event_type": "task", "emitter": "t", "fleet": "f",
+                                   "payload": {"nonsense": True}}],
+                       conn_factory=factory)
+        assert called == [], "validation must refuse before anything opens the db"
+
+    def test_the_factory_IS_called_for_a_valid_batch(self, tmp_path):
+        """The positive control: a test that only ever asserts the factory was
+        NOT called would pass against a build that never calls it at all."""
+        from claudlobby.plane.emit_api import emit_batch
+
+        w = PlaneWriter(tmp_path)
+        calls = []
+
+        def factory():
+            calls.append(1)
+            return w.connection()
+
+        emit_batch(tmp_path, [{"event_type": "system", "emitter": "t", "fleet": "f",
+                               "payload": {"event": "canary_probe",
+                                           "subject_kind": "actor",
+                                           "subject": "bot:f/c", "data": {"n": 1}}}],
+                   conn_factory=factory)
+        assert calls == [1]
+        w.close()

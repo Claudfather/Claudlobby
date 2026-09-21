@@ -200,7 +200,8 @@ LOCK_RETRY_BACKOFF_S = 0.15
 
 
 def emit_batch(root: Path, raw_requests: list[dict], *,
-               conn: sqlite3.Connection | None = None) -> list[EmitOutcome]:
+               conn_factory: "Callable[[], sqlite3.Connection] | None" = None
+               ) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
 
@@ -242,7 +243,16 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
     # per-batch connection stays NORMAL and is made durable by the truncate
     # checkpoint its close triggers. Both paths acknowledge only after a
     # commit that is on disk; they differ in which syscall put it there.
-    borrowed = conn is not None
+    # A FACTORY, never a ready-made connection. Passing the connection itself
+    # makes the caller open the db in the ARGUMENT LIST -- before `emit_batch`
+    # is entered, and therefore before the capture-config load and validation
+    # that precede the connect here. That reordering is not cosmetic: on a root
+    # whose `state/` is a regular file, `db_path()`'s mkdir raises
+    # NotADirectoryError, and evaluating it early turned a typed
+    # `contract_violation` (the capture policy is unreadable, which is what
+    # fails FIRST) into an unrouted traceback. The factory is called exactly
+    # where `connect` used to be, so the order of failures is unchanged.
+    borrowed = conn_factory is not None
     attempt = 0
     while True:
         try:
@@ -267,7 +277,8 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
             # send-size-probe.sh lesson). The cold path already fsyncs at its
             # close-checkpoint, so the commit-time fsync buys durability
             # without adding a syscall the rung was not already paying.
-            own = conn if borrowed else connect(db_path(root), synchronous="FULL")
+            own = conn_factory() if borrowed else connect(db_path(root),
+                                                          synchronous="FULL")
             try:
                 migrate(own)                                # DowngradeError propagates
                 host = ensure_host_uid(Path(root) / "state")
