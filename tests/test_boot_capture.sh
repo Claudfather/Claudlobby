@@ -31,7 +31,8 @@ assert_eq() {
 assert_contains() {
     TOTAL=$((TOTAL + 1)); local d="$1" n="$2" h="$3"
     case "$h" in *"$n"*) echo "  PASS: $d"; PASS=$((PASS + 1)) ;;
-                 *) echo "  FAIL: $d (missing '$n')"; FAIL=$((FAIL + 1)) ;; esac
+                 *) echo "  FAIL: $d (missing '$n')"; echo "    got: $h"
+                    FAIL=$((FAIL + 1)) ;; esac
 }
 assert_absent() {
     TOTAL=$((TOTAL + 1)); local d="$1" n="$2" h="$3"
@@ -200,7 +201,26 @@ assert_contains "armed, a send in flight is on disk as sending" "state=sending" 
 assert_contains "carrying the boot it belongs to" "boot=" "$(cat "$IB/data/.inject" 2>/dev/null)"
 bash -c "export BOOT_CAPTURE_ENABLED=1; . '$LIBC'; t0=\$(inject_stamp '$IB' startup sending); sleep 1; inject_stamp '$IB' startup done 0 \"\$t0\" >/dev/null" 2>/dev/null
 assert_contains "a completed send is stamped done" "state=done" "$(cat "$IB/data/.inject" 2>/dev/null)"
-assert_contains "with its duration" "dur=1" "$(cat "$IB/data/.inject" 2>/dev/null)"
+# #1581: `dur` is `date +%s` arithmetic (lib-common.sh:3659), so it counts
+# second BOUNDARIES CROSSED, not elapsed time. After a `sleep 1` it reads 1
+# when the fractional offset is lucky and 2 when overhead pushes past the next
+# boundary -- the old `dur=1` held only while `overhead < 1 - frac(t0)`, a
+# sub-second margin. Measured on a loaded host: 3 of 70 runs produced `dur=2`,
+# and it reds unrelated PRs (#1576, #1688 -- two review cycles spent tracing a
+# failure with no route to the diff). So assert the PROPERTY the field must
+# satisfy rather than an exact value across a truncation boundary. The upper
+# bound is not decoration: it is what still catches an arithmetic regression
+# that loses its anchor (a `begin` of 0 makes `dur` the raw epoch, ~1.8e9).
+# 60 is ~60x nominal, so the margin goes from under a second to 59 of them; a
+# `sleep 1` that ever takes a minute is pathological and a red there carries
+# information rather than noise.
+_dur_val="$(sed -n 's/.*[[:space:]]dur=\([^[:space:]]*\).*/\1/p' "$IB/data/.inject" 2>/dev/null)"
+case "$_dur_val" in
+    ''|*[!0-9]*) _dur_verdict="not-a-whole-number:'$_dur_val'" ;;
+    *) if [ "$_dur_val" -ge 1 ] && [ "$_dur_val" -le 60 ]; then _dur_verdict="ok"
+       else _dur_verdict="out-of-range:$_dur_val"; fi ;;
+esac
+assert_eq "with its duration (a whole number of seconds, 1..60 after a sleep 1)" "ok" "$_dur_verdict"
 assert_eq "the epoch is returned even when unarmed, so callers do not branch" "1" \
     "$(bash -c ". '$LIBC'; v=\$(inject_stamp '$IB' startup sending); case \"\$v\" in ''|*[!0-9]*) echo 0;; *) echo 1;; esac" 2>/dev/null)"
 

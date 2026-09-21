@@ -35,7 +35,8 @@ assert_contains() {
     TOTAL=$((TOTAL + 1)); local d="$1" needle="$2" hay="$3"
     case "$hay" in
         *"$needle"*) echo "  PASS: $d"; PASS=$((PASS + 1)) ;;
-        *) echo "  FAIL: $d (missing '$needle')"; FAIL=$((FAIL + 1)) ;;
+        *) echo "  FAIL: $d (missing '$needle')"; echo "    got: $hay"
+           FAIL=$((FAIL + 1)) ;;
     esac
 }
 
