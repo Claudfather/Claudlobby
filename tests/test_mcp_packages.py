@@ -278,6 +278,60 @@ class TestTheRungIsAWarningNeverAnError:
         unpinned = [w for w in report.warnings if "NO VERSION" in w]
         assert len(unpinned) == 1 and "ghost.json" in unpinned[0]
 
+    def test_a_fleet_declaring_no_mcp_says_NOTHING_even_with_no_lib(self, tmp_path):
+        """The rung must not announce that a check of nothing did not run.
+
+        Regression: the first build reached for the shared grammar before
+        asking whether the fleet declared anything, so every fleet with no MCP
+        — which is every minimal fixture in this repo — got a "could not load
+        the grammar" warning. It broke four unrelated validator tests, and it
+        broke them in a way worth recording: those tests assert on SUBSTRINGS
+        of the warning list, the warning interpolated an absolute tmp path, and
+        the tmp path is named after the test. So `"observability" in w` matched
+        the PATH rather than any text this module wrote.
+        """
+        from claudlobby.config import BotConfig, FleetConfig
+        from claudlobby import validator
+        from claudlobby.paths import Paths
+
+        # No lib/, no library/ — the grammar cannot load from this root at all.
+        bot = BotConfig(bot_id="alpha", name="alpha", expertise=["x"], mcp=[])
+        fleet = FleetConfig(
+            name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
+        )
+        report = validator.ValidationReport()
+        validator._validate_mcp_packages(fleet, Paths(root=tmp_path), report)
+
+        assert report.warnings == []
+        assert report.errors == []
+
+    def test_the_grammar_warning_carries_no_absolute_path(self, tmp_path):
+        """Declaring MCP with no reachable grammar DOES warn — and the warning
+        must not interpolate a filesystem path (see the regression above)."""
+        from claudlobby.config import BotConfig, FleetConfig, McpEntry
+        from claudlobby import validator
+        from claudlobby.paths import Paths
+
+        mcp_dir = tmp_path / "library" / "mcp"
+        mcp_dir.mkdir(parents=True)
+        (mcp_dir / "ghost.json").write_text(
+            json.dumps({"ghost": {"command": "npx", "args": ["-y", "ghost-pkg"]}})
+        )
+        bot = BotConfig(
+            bot_id="alpha", name="alpha", expertise=["x"], mcp=[McpEntry(name="ghost")]
+        )
+        fleet = FleetConfig(
+            name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
+        )
+        report = validator.ValidationReport()
+        validator._validate_mcp_packages(fleet, Paths(root=tmp_path), report)
+
+        assert len(report.warnings) == 1
+        assert "UNKNOWN" in report.warnings[0]
+        assert str(tmp_path) not in report.warnings[0], (
+            "a path in the message collides with other tests' substring assertions"
+        )
+
     def test_armed_it_probes_and_a_missing_package_is_still_only_a_warning(
         self, tmp_path, monkeypatch
     ):

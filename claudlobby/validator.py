@@ -2155,13 +2155,27 @@ def _validate_mcp_packages(
     from . import mcp_packages as _mp
     from .mcp_grammar import GrammarUnavailable, grammar
 
+    # Is there anything to check at all? Asked BEFORE reaching for the grammar:
+    # a fleet that declares no MCP server has nothing to check, and announcing
+    # that a check of nothing did not run is noise, not disclosure.
+    if not _mp.declared_fragments(fleet, paths):
+        return
+
     try:
         gram = grammar(paths)
-    except GrammarUnavailable as e:
+    except GrammarUnavailable:
         # Disclosed, never silent: this module refuses to carry a second copy
         # of the grammar, so "cannot check" is the honest outcome and saying
-        # nothing would read as "every package is fine".
-        report.warnings.append(f"MCP package check did not run — {e}")
+        # nothing would read as "every package is fine". The exception's own
+        # text is deliberately NOT interpolated — it carries an absolute path,
+        # which makes the warning long and (measured) collides with the
+        # substring assertions other validator tests make against a tmp root
+        # whose name they chose.
+        report.warnings.append(
+            "MCP package check did not run — the shared package grammar "
+            "(lib/mcp-package-grammar.py) could not be loaded from this root, "
+            "so whether the declared packages resolve is UNKNOWN"
+        )
         return
 
     rows = _mp.fleet_declarations(fleet, paths, gram)

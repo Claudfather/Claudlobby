@@ -117,8 +117,14 @@ class Finding:
         return f"{where}: could NOT check whether '{self.spec}' resolves — {self.detail}"
 
 
-def fleet_declarations(fleet: "FleetConfig", paths: "Paths", grammar) -> list[tuple]:
-    """The grammar's rows for the fragments THIS FLEET declares.
+def declared_fragments(fleet: "FleetConfig", paths: "Paths") -> list[str]:
+    """The fragment files THIS FLEET declares — resolved WITHOUT the grammar.
+
+    Separate from `fleet_declarations` so a caller can ask "is there anything
+    here to check?" before reaching for anything that can fail. A fleet that
+    declares no MCP server has nothing to check, and a rung that announced it
+    could not check a thing that does not exist would be noise on every such
+    fleet — including every minimal test fixture in this repo.
 
     Scoped to declared fragments rather than the whole library on purpose: the
     warning exists for the fleet that would actually get the dead server, and a
@@ -131,7 +137,12 @@ def fleet_declarations(fleet: "FleetConfig", paths: "Paths", grammar) -> list[tu
             frag = paths.find_library_file("mcp", entry.name, ".json")
             if frag is not None and str(frag) not in wanted:
                 wanted.append(str(frag))
-    return grammar.declared_packages(sorted(wanted))
+    return sorted(wanted)
+
+
+def fleet_declarations(fleet: "FleetConfig", paths: "Paths", grammar) -> list[tuple]:
+    """The grammar's rows for the fragments this fleet declares."""
+    return grammar.declared_packages(declared_fragments(fleet, paths))
 
 
 def pinning_findings(rows: list[tuple]) -> list[Finding]:
