@@ -124,7 +124,25 @@ case "$rc" in
                          # out verbatim.
 esac
 
-printf 'plane-emit: daemon unavailable (rc=%s) — falling back to cold CLI\n' "$rc" >&2
+# Only rc=5 reaches here, and it means two DISJOINT things depending on which
+# rung produced it (#1657) — the client itself proves this (plane-socket-
+# client.py): the finalize_only branch `return`s 5 unconditionally on a
+# successful write, with no failure path at all; the transport branch
+# returns 5 only from its own except block, printing "transport failed"
+# first. So on skip_socket=1, rc=5 is the client's documented SUCCESS for
+# --finalize-only — the daemon was deliberately never contacted, and calling
+# that "daemon unavailable" is not an inflated failure, it is a wrong one.
+# Measured, 24h journal, one host: 645 of every 719 "daemon unavailable"
+# lines were this branch, not a transport failure (10.3% real, 9.7x
+# inflation) — and the discriminator lived only in the DIFFERENT line
+# printed above this one, invisible to a grep for the error string itself.
+# The two branches below are self-sufficient on their own line for exactly
+# that reason.
+if [ "$skip_socket" = "1" ]; then
+    printf 'plane-emit: cooldown finalize succeeded (rc=%s) — daemon not contacted, replaying cold as planned\n' "$rc" >&2
+else
+    printf 'plane-emit: transport failed (rc=%s) — daemon unavailable, falling back to cold CLI\n' "$rc" >&2
+fi
 if [ -s "$finalized" ]; then
     # --root is global: before the subcommand.
     if [ -n "${PLANE_EMIT_CLI:-}" ]; then

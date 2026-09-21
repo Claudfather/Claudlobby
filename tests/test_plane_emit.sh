@@ -142,4 +142,45 @@ stop_daemon
 [ "$rc" -eq 2 ] || { echo "FAIL(8): verdict rc=$rc (want 2)"; exit 1; }
 [ ! -e "$RECORDER_LOG" ] || { echo "FAIL(8): a contract violation fell back to the cold rung"; exit 1; }
 
+# Test 9 (#1657): a genuine transport failure gets its own, self-sufficient
+# wording naming "transport failed" -- distinct from the cooldown wording in
+# test 10, so a reader (or a grep) can tell the two apart from this ONE line
+# without needing the line printed before it.
+rm -f "$RECORDER_LOG" "$RECORDER_COPY" "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
+out=$(printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" 2>"$tmpdir/err9"); rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL(9): rc=$rc"; cat "$tmpdir/err9"; exit 1; }
+grep -q "transport failed (rc=5) — daemon unavailable" "$tmpdir/err9" || { echo "FAIL(9): breach not distinctly worded"; cat "$tmpdir/err9"; exit 1; }
+grep -q "cooldown finalize" "$tmpdir/err9" && { echo "FAIL(9): breach wrongly used the cooldown wording"; exit 1; }
+
+# Test 10 (#1657, the actual defect): during a wedge cooldown the shim
+# deliberately skips the socket and runs --finalize-only, which the client
+# returns 5 for on SUCCESS (verified directly against plane-socket-client.py:
+# that branch has no failure path at all, unlike the transport branch's own
+# separate `return 5`). Calling this "daemon unavailable" was not an inflated
+# failure, it was a WRONG one -- measured live, 645 of every 719 such lines
+# on one host in 24h were this branch (9.7x inflation), and the discriminator
+# lived only in a DIFFERENT line above it, invisible to a grep for the error
+# string. A REAL daemon is started here (not just an absent socket) so a
+# regression that still touches the socket during cooldown would show up as
+# a connection in seen.jsonl, not just as wrong text.
+rm -f "$RECORDER_LOG" "$RECORDER_COPY"
+start_daemon '{"ok": true, "results": [{"event_id": "ev_22222222222222222222222222222222", "status": "committed"}]}'
+# seen.jsonl is opened "ab" by the fake daemon and accumulates across every
+# start_daemon call in this whole suite, so "empty" is not the right check by
+# test 10 -- a before/after LINE COUNT is what actually proves no NEW
+# connection happened during this specific run.
+seen_before=$(wc -l < "$tmpdir/seen.jsonl" 2>/dev/null || echo 0)
+mkdir -p "$CLAUDLOBBY_ROOT/state/plane"
+date +%s > "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
+out=$(printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" 2>"$tmpdir/err10"); rc=$?
+stop_daemon
+seen_after=$(wc -l < "$tmpdir/seen.jsonl" 2>/dev/null || echo 0)
+[ "$rc" -eq 0 ] || { echo "FAIL(10): rc=$rc"; cat "$tmpdir/err10"; exit 1; }
+grep -q "daemon unavailable" "$tmpdir/err10" && { echo "FAIL(10): a deliberate cooldown finalize was reported as daemon unavailable"; cat "$tmpdir/err10"; exit 1; }
+grep -q "cooldown finalize succeeded" "$tmpdir/err10" || { echo "FAIL(10): cooldown finalize not distinctly disclosed"; cat "$tmpdir/err10"; exit 1; }
+grep -q "daemon not contacted" "$tmpdir/err10" || { echo "FAIL(10): the deliberate-skip framing is missing"; exit 1; }
+[ -e "$RECORDER_LOG" ] || { echo "FAIL(10): the cold rung was never invoked"; exit 1; }
+[ "$seen_after" -eq "$seen_before" ] || { echo "FAIL(10): the daemon WAS contacted during a cooldown ($seen_before -> $seen_after) -- the message would be right by accident"; exit 1; }
+rm -f "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
+
 echo "PASS: all plane-emit shim tests passed"
