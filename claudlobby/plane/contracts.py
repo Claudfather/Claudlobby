@@ -59,6 +59,16 @@ ATTEMPT_STATES = (
 #: consumer can refuse on into a value it might accept.
 PR_ROLES = ("authored", "reviewed")
 
+#: How a report's task link was resolved (#1710). A STRING ENUM rather than a
+#: boolean `auto_resolved`, deliberately: absent must stay distinguishable from
+#: "not auto-resolved", and a boolean collapses those two under any falsy test a
+#: reader is likely to write (`NOT json_extract(...)` is true for both NULL and
+#: 0). Every writer before this field existed emits nothing at all, and that is
+#: a third state meaning "this plane cannot say" — not "named". Same three-state
+#: discipline as PR_ROLES, and for the same reason: the question is how often
+#: the resolver GUESSES, so a guess must never be able to read as a certainty.
+LINK_SOURCES = ("named", "auto-resolved")
+
 TASK_EVENTS = (
     # 22 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
     # pre-deletion tuple was 20, mis-stated as 19 — the count error predated the
@@ -411,6 +421,22 @@ class TaskEvent(_Strict):
     #: The closed vocabulary needs no byte cap: unlike `by`, this is not
     #: authored text, so pydantic bounds it absolutely and a cap would be dead.
     pr_role: Optional[Literal[PR_ROLES]] = None
+    #: Did the reporter NAME this task with `--task`, or did #835's auto-resolve
+    #: pick it? Stamped at write time because it is unrecoverable afterwards:
+    #: both paths produce an identical work_item_id/assignment_id pair, and no
+    #: amount of read-only querying can tell them apart (vera, #1710 — she
+    #: established this by trying).
+    #:
+    #: It answers how often the resolver is GUESSING AT ALL, which is the input
+    #: to whether that auto-resolve should exist. That outlives the question it
+    #: came from: #1706's case-2 fix stops auto-resolved links carrying
+    #: `pr_url`, so the proxy that motivated this dies and the field is still
+    #: the only way to ask.
+    #:
+    #: METADATA, never CONTENT, for the same reason as `pr_role` and registered
+    #: as such: a metadata-mode capture that stripped it would make an absent
+    #: value mean two different things at once, and absent is load-bearing here.
+    link_source: Optional[Literal[LINK_SOURCES]] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
 

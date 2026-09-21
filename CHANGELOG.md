@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+
+### Added — `link_source`: was the task link NAMED or GUESSED? (#1710)
+
+- **The fact is unrecoverable after the fact, so it is stamped at write time.**
+  A `--task <id>` the reporter supplied and a row `--open-task` auto-resolved
+  produce an IDENTICAL `work_item_id`/`assignment_id` pair on the stored event.
+  vera established by measurement — 192 task events, no sampling — that no
+  amount of read-only querying can tell them apart. `"link_source": "named" |
+  "auto-resolved"` rides the task event's `detail`.
+
+- **What it is for is not the question it came from.** It was proposed to ask
+  how many auto-resolved links carry a `pr_url`; #1706's case-2 fix stops them
+  carrying one at all, so that proxy dies and the question becomes unanswerable
+  again by a different route. The durable value is bigger: it answers how often
+  #835's auto-resolve is GUESSING AT ALL, which is the input to deciding whether
+  that heuristic should exist.
+
+- **ONE discriminator, not two.** #1706's case-2 gate already had to decide
+  named-versus-resolved — it is the condition on which an attribution is
+  attached or withheld — so this DERIVES from that same `TASK_NAMED` rather than
+  recomputing it. Two places deciding one fact is how they drift, and here they
+  would drift silently, because both answers look plausible on a stored row. A
+  test pins that `_link_src` is assigned exactly once and derived from
+  `TASK_NAMED`.
+
+- **Three states, and a string enum rather than a boolean.** `named`,
+  `auto-resolved`, and **absent** — a writer predating the field. A boolean
+  `auto_resolved` would collapse absent with false under any falsy test a reader
+  is likely to write (`NOT json_extract(...)` is true for NULL and 0 alike), and
+  the entire point is that a guess must never read as a certainty. Same
+  discipline as `pr_role`, and METADATA for the same reason: a metadata capture
+  that stripped it would make absent mean two different things at once.
+
+- **The id-less closure events are deliberately NOT stamped.** They answer
+  OTHER open rows on the bot's behalf; this report resolved their links by no
+  path at all, so stamping them would be a false provenance claim — and would
+  inflate the very count the field exists to measure.
+
+- **No DB migration; the WIRE contract did change.** `detail` is opaque JSON to
+  SQLite so nothing schema-level moves, but `TaskEvent` is `extra=forbid` and
+  rejects an unknown key before it ever reaches the db. Those are two different
+  layers: the same three-file contract change `pr_role` needed.
+
 ### Fixed — `pr-review-state.py`: the advice named a remedy that had already been used, and sometimes one that cannot work (#1699)
 
 `render()` had **no `--attribute` awareness at all**, so it closed every

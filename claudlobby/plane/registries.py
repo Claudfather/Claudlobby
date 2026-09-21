@@ -41,6 +41,11 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     # authored text, so the contract bounds it and a cap would never fire.
     # SENSITIVE entries below already carry no cap, so the shape is precedented.
     ("task", "pr_role"): {"class": "METADATA"},
+    # Same class and the same reason as pr_role (#1710): provenance, not prose.
+    # A metadata capture that stripped it would collapse "auto-resolved" into
+    # "absent", and absent is a distinct third state meaning the writer predates
+    # the field. Closed Literal, so no cap -- the contract bounds it.
+    ("task", "link_source"): {"class": "METADATA"},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
     ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail
