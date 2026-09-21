@@ -143,6 +143,86 @@ def package_name(command: str, args: list[str]) -> str | None:
     return None if target is None else bare_name(command, target[0])
 
 
+def is_pinned(command: str, spec: str) -> bool:
+    """Does *spec* name a VERSION, rather than whatever the registry serves today?
+
+    Keyed on the same suffix patterns `bare_name` strips with, so the two can
+    never disagree about where a version begins. That sharing is the point:
+    both questions turn on "is there a version suffix", and the `@` of a scoped
+    npm name is not one.
+
+    **Deliberately NOT `bare_name(command, spec) != spec`**, which is the
+    obvious shortcut and is wrong for PyPI: `bare_name` also applies PEP 503
+    normalization, so an unpinned `Google_Analytics_MCP` differs from its bare
+    form and would report as pinned. The npm arm would have passed that test
+    and the uvx arm would not, which is exactly the kind of half-right
+    predicate a shared grammar exists to prevent.
+
+    An unpinned spec is not broken; it is unverified. Nothing here says a
+    package is missing — that is a question only the registry can answer.
+    """
+    if command == "npx":
+        return bool(_NPM_VERSION_SUFFIX.search(spec))
+    return bool(_PYPI_VERSION_SUFFIX.search(spec))
+
+
+def declared_packages(paths: list[str]) -> list[tuple[str, str, str, str, str, bool]]:
+    """Every warmable server declaration, KEYED BY THE FRAGMENT THAT MADE IT.
+
+    Rows are (fragment path, server key, runtime, display spec, bare name,
+    pinned). `probe_targets` answers "what must the cache hold", so it dedupes
+    to a package set; a reader reporting a finding has to name the FILE an
+    operator would edit, which a deduped set cannot do — two fragments sharing
+    `mcp-remote@0.1.38` are one warm and two declarations.
+
+    Both are the same walk, so this is the walk and `probe_targets` narrows it.
+    """
+    out: list[tuple[str, str, str, str, str, bool]] = []
+    for p in paths:
+        path = Path(p)
+        files = sorted(path.glob("*.json")) if path.is_dir() else [path]
+        for frag_path in files:
+            try:
+                frag = json.loads(frag_path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(frag, dict):
+                continue
+            for key, server in servers_in(frag):
+                runtime = server.get("command")
+                if runtime not in WARM_RUNTIMES or "args" not in server:
+                    continue
+                target = warm_prefix(runtime, server["args"])
+                if target is None:
+                    continue
+                spec = target[0]
+                out.append(
+                    (
+                        str(frag_path),
+                        key,
+                        runtime,
+                        spec,
+                        bare_name(runtime, spec),
+                        is_pinned(runtime, spec),
+                    )
+                )
+    return sorted(out)
+
+
+def warm_argv(command: str, args: list[str]) -> list[str] | None:
+    """The EXACT argv that fetches this server's package, command included.
+
+    `<command> <warm_prefix> --help` is what `warm-cache` runs, so a probe
+    built from this asks the real package manager to resolve the real spec.
+    That matters more than it sounds: every hand-rolled version of this
+    question has instead composed a registry URL from a name it parsed itself,
+    and the second one shipped with a scoped name stripping to the empty
+    string — the registry root answered 200 and a dead fragment read healthy.
+    """
+    target = warm_prefix(command, args)
+    return None if target is None else [command, *target[1], "--help"]
+
+
 def servers_in(fragment: dict) -> list[tuple[str, dict]]:
     """The real server entries of a fragment — `_`-prefixed keys are contracts
     (`_env_contract`, `_permissions_contract`), never servers.
@@ -168,24 +248,8 @@ def probe_targets(paths: list[str]) -> list[tuple[str, str, str]]:
     spawns this ONCE where it used to spawn `python3` per fragment.
     """
     out: dict[tuple[str, str], tuple[str, str, str]] = {}
-    for p in paths:
-        path = Path(p)
-        files = sorted(path.glob("*.json")) if path.is_dir() else [path]
-        for frag_path in files:
-            try:
-                frag = json.loads(frag_path.read_text())
-            except (OSError, ValueError):
-                continue
-            if not isinstance(frag, dict):
-                continue
-            for _key, server in servers_in(frag):
-                runtime = server.get("command")
-                if runtime not in WARM_RUNTIMES or "args" not in server:
-                    continue
-                target = warm_prefix(runtime, server["args"])
-                if target is None:
-                    continue
-                out[(runtime, target[0])] = (runtime, target[0], bare_name(runtime, target[0]))
+    for _frag, _key, runtime, spec, bare, _pinned in declared_packages(paths):
+        out[(runtime, spec)] = (runtime, spec, bare)
     return sorted(out.values())
 
 

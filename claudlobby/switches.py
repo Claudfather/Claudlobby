@@ -362,6 +362,21 @@ SWITCHES: tuple[Switch, ...] = (
     ),
     # ---------------- the opt-ins (rendered FIRST) -------------------------
     Switch(
+        key="mcp-package-probe",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=ENV_FLEET,
+        env="CLAUDLOBBY_MCP_PROBE_ENABLED",
+        why_opt_in="reaches the NETWORK on a compose. A generate must stay "
+                   "offline and fast by default, and a registry outage must "
+                   "never be the reason a fleet cannot compose. The offline "
+                   "half of the check (is the package pinned?) is unconditional "
+                   "and needs no flag",
+        what="ask the real package manager whether each MCP fragment's declared "
+             "package resolves, by running the EXACT argv the fragment would "
+             "run — a missing one is a DEAD server that reports nothing (#1058)",
+    ),
+    Switch(
         key="update-siblings",
         scope=HOST_JOB,
         polarity=OPT_IN,
@@ -841,8 +856,9 @@ def format_table(states: list[SwitchState], *, plane_only: bool = False) -> str:
             out.append("")
 
     render(opt_in, "opt-in — ships OFF, arm it yourself",
-           "(the only four reasons a door ships off: it deletes data, spends"
-           " money, mutates operator source, or sends outbound at scale)")
+           "(a door ships off only for a stated reason — most often that it"
+           " deletes data, spends money, mutates operator source, or sends"
+           " outbound at scale; each row states its own below)")
     render(rest, "on by default", "")
     n_off = sum(1 for s in rest if not s.on and not s.unknown)
     n_unknown = sum(1 for s in rows if s.unknown)

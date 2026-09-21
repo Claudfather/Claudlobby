@@ -6,6 +6,81 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a compose-time rung that says when an MCP fragment names a package nobody verified (#1058)
+
+- **The defect it instruments.** A fragment composes `npx -y <pkg>`. If `<pkg>`
+  is not in the registry the server is **dead, not degraded**, and it fails
+  SILENTLY at both layers: an erroring MCP fires `PostToolUseFailure` while
+  `bot-vitals.sh` hooks `PostToolUse`, so no `mcp_error` event is ever produced.
+  Nothing on the host says anything. The fleets exposed are the ones that
+  followed the documentation — the one fleet using the fragment in production
+  carries a local override pointing at a fork, so the shared fragment is
+  exercised nowhere.
+
+  **This is the INSTRUMENT, explicitly not the remedy.** Which fragments survive
+  is an operator decision. Nothing here edits, marks, adds or removes a
+  fragment, and the tests deliberately never assert WHICH shipped fragments are
+  unpinned — that assertion would fail the moment the remedy lands, turning an
+  instrument into a blocker on the decision it exists to inform.
+
+- **Signal 1, PINNING — offline, unconditional, zero network.** Does the
+  declaration name a version? Predictive rather than current: an unpinned
+  declaration is one nobody verified against a real install. It costs no network
+  call, which is why it is the one that ships on by default, in both
+  `claudlobby validate` and `claudlobby doctor`.
+
+  `is_pinned` lives in `lib/mcp-package-grammar.py` beside `bare_name`, keyed on
+  the same version-suffix patterns so the two cannot disagree about where a
+  version begins. It is deliberately **not** `bare_name(cmd, spec) != spec`,
+  which is the obvious shortcut and is wrong for PyPI: `bare_name` also applies
+  PEP 503 normalization, so an unpinned `Google_Analytics_MCP` differs from its
+  bare form and would report as pinned. The npm arm passes that shortcut and the
+  uvx arm does not — a half-right predicate, pinned by its own test.
+
+- **Signal 2, RESOLUTION — network, opt-in, bounded, fails open.** Armed with
+  `MCP_PACKAGE_PROBE_ENABLED=1` in the fleet `.env` (registered in
+  `switches.py`, so `doctor --switches` names it and the dead-flag sweep claims
+  it). Off by default because a generate must stay offline and fast, and a
+  registry outage must never be why a fleet cannot compose.
+
+  It runs the **EXACT argv the fragment would run**, via a new
+  `grammar.warm_argv` — the same `<command> <warm prefix> --help` that
+  `warm-cache` uses. It never composes a registry URL. That is not stylistic:
+  this question has been hand-rolled twice independently, and the second time a
+  scoped name carrying no version stripped to the empty string, the registry
+  root answered 200, and a dead fragment read healthy. npm's own URL for the
+  spotify fragment is
+  `registry.npmjs.org/@modelcontextprotocol%2fserver-spotify`; that
+  percent-encoded slash is exactly what a hand-composed URL gets wrong.
+
+- **Unreachable is not "resolves"** (`source_state.py`'s rule). Only an
+  unambiguous registry not-found signature condemns a declaration. A nonzero
+  exit on its own does NOT — a real package whose `--help` is unsupported exits
+  nonzero too, and a wrong "this package is missing" sends an operator to
+  replace a fragment that was fine. Timeout, absent toolchain, and nonzero
+  without a signature all yield a disclosed `could NOT check`, never a pass.
+
+  That distinction is measured, not theorised: the first live run of this probe
+  had `uvx workspace-mcp --help` exceed 120s on a real host, and the package
+  **exists** (rc=0 at 300s). An rc-or-timeout rule would have condemned it.
+
+- **uvx has no resolution arm, and the absence is load-bearing.** No uv
+  not-found signature has been observed here, so a uvx declaration is reported
+  `could NOT check` by construction and says which runtime and why — inventing a
+  signature would manufacture the confident-wrong verdict the rung exists to
+  prevent. Its pinning is still checked; that signal needs no registry.
+
+- **Everything is a WARNING, never an error**, in both rungs. A dead package
+  does not block a compose.
+
+- **`probe_targets` is now the deduped projection of one shared walk**
+  (`declared_packages`), which additionally carries the fragment path a finding
+  must name — `probe_targets` answers "what must the cache hold" and dedupes,
+  but a reader reporting a finding has to name the FILE an operator would open.
+  Output is byte-identical, so `lib/check-npx-cache.sh`, which parses it, is
+  unaffected.
+
+
 ### Fixed — the goal-binding and ignition rungs answer one question the same way (#1680)
 
 - **A manager-less fleet got a WARN and a PASS about the same thing.**
