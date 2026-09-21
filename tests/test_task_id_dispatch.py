@@ -34,8 +34,22 @@ TASK_ID_RE = re.compile(r"^t-[0-9]+-[0-9a-f]{4}$")
 # The lines the shim itself writes on a daemon-less host (measured in this
 # harness): the socket rung fails and says so, then the cold-CLI rung records.
 # Every other stderr byte on a clean dispatch is a defect.
+#
+# Deliberately TWO distinct "the socket rung failed" shapes as of #1657, not
+# one -- the old single generic line conflated a genuine transport failure
+# with a deliberate wedge-cooldown skip (measured live: the deliberate-skip
+# case was 9.7x more common than the genuine one, and the old line called
+# both "daemon unavailable"). Both can legitimately appear in ONE dispatch's
+# stderr: a door emits twice (intent + outcome), so a breach on the first
+# emission arms the cooldown and the second hits it -- this harness has
+# reproduced exactly that pairing in one run, the same mechanism the 9.7x
+# inflation measurement described on a live host. Neither new line says
+# "daemon unavailable" (review residual, #1657): the transport-failed except
+# block also catches a reachable-but-slow daemon and a reachable-but-garbled
+# reply under the same rc=5, so that clause was provably false for those.
 SHIM_STDERR_RE = re.compile(
-    r"^(plane-emit: (daemon unavailable \(rc=\d+\) — falling back to cold CLI"
+    r"^(plane-emit: (transport failed \(rc=\d+\) — falling back to cold CLI"
+    r"|cooldown finalize succeeded \(rc=\d+\) — daemon not contacted, replaying cold as planned"
     r"|socket in wedge cooldown \(\d+s\) — straight to cold CLI)"
     r"|plane-socket-client: transport failed: .*)$"   # the socket rung's own voice (Linux: ENOENT; macOS: path too long)
 )
