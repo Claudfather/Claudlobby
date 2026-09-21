@@ -750,22 +750,27 @@ class TestCollectFleetStatus:
         assert alex.state == "down", alex.state      # the live half's verdict, kept
         assert (alex.state == "down") == (not alex.tmux_alive)
 
-    def test_a_fleet_name_case_variant_never_reaches_the_live_half_at_all(self, mock_paths):
-        """Why the OTHER half of that line is not pinned, recorded rather than
-        claimed.
+    def test_a_uniformly_cased_fleet_name_cannot_diverge_state_from_tmux(self, mock_paths):
+        """The same line's other half: `plane.fleet`, pinned through the same door.
 
-        `_live` lower-cases two things — the bot (pinned above) and
-        `plane.fleet`. The second cannot be reached through this door: the
-        fleet name comes from the overlay DIRECTORY, and `plane_session`
-        refuses a fleet the plane holds no bot of BEFORE `collect_fleet_status`
-        builds any live alias. So an overlay at `local/Test-Fleet/` against
-        rows recorded under `test-fleet` yields the unreachable note and the
-        join never runs — reverting `plane.fleet.lower()` is green either way,
-        and saying it is covered would be the same defect this commit fixes.
+        Construction by vera on review, who falsified my first attempt at this.
+        I built the fleet name MISMATCHED — directory `Test-Fleet`, rows recorded
+        under `test-fleet` — watched `plane_session` refuse before `_live` ran,
+        and concluded the half was unreachable. Two things were wrong with that.
+        The mismatch cannot arise: `composer.py:81,954` exports
+        `FLEET_NAME=fleet.name` VERBATIM, so every bot records under whatever
+        casing `fleet.yaml` carries and the two sides cannot independently
+        disagree. And "unreachable" generalised past what I had shown, which was
+        only that ONE construction refuses.
 
-        Pinned as the boundary it is: if that door ever folds case, this test
-        fails and the fleet half becomes reachable — and then it needs a real
-        pin like the one above, not this one.
+        What does arise: an operator names the overlay directory and `name:`
+        consistently in some non-lowercase style. Nothing in `config.py`
+        constrains fleet-name casing. Then the plane session SUCCEEDS —
+        both sides agree on `Test-Fleet` — and `_presence_rows` lower-cases the
+        recorded prefix anyway, so it is the LOWERING ITSELF that must bring the
+        live half to meet it. Without it, `bot:Test-Fleet/alex` and
+        `bot:test-fleet/alex` are two verdicts and the collapse keeps the
+        record-only one: STATE=idle beside TMUX=down.
         """
         from claudlobby.config import BotConfig, FleetConfig
         from claudlobby.paths import Paths
@@ -778,7 +783,11 @@ class TestCollectFleetStatus:
             service_prefix="com.test",
             bots={"alex": BotConfig(bot_id="alex", name="alex", expertise=["eng"])},
         )
-        _land_heartbeats(mock_paths.root, "test-fleet", "alex", ["IDLE", "IDLE"])
+        # SAME casing as the fleet name -- what the composer actually produces.
+        # The bot id is held lower-case so only `plane.fleet`'s case varies:
+        # one conjunct per test, or a single fixture varying both would pass
+        # with either lowering removed.
+        _land_heartbeats(mock_paths.root, "Test-Fleet", "alex", ["IDLE", "IDLE"])
 
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value=set()),
@@ -788,7 +797,11 @@ class TestCollectFleetStatus:
             alex = next(bs for bs in collect_fleet_status(fleet, paths)
                         if bs.name == "alex")
 
-        # The rows ARE there under the lower-case fleet — the refusal is the
-        # door's case-sensitivity, not an empty plane.
-        assert "holds no bot of fleet 'Test-Fleet'" in alex.plane_unreachable, alex.plane_unreachable
-        assert alex.state == "unknown" and alex.last_heartbeat is None, alex
+        # Preconditions. The first one is the whole difference from the attempt
+        # this replaces: there, the session REFUSED and the join never ran.
+        assert not alex.plane_unreachable, alex.plane_unreachable
+        assert alex.last_heartbeat is not None and alex.pane_state == "IDLE", alex
+
+        assert alex.tmux_alive is False
+        assert alex.state == "down", alex.state
+        assert (alex.state == "down") == (not alex.tmux_alive)
