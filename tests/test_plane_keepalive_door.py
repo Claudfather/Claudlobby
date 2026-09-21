@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "lib"
 CLI = Path(sys.executable).parent / "claudlobby"
 
-DOOR_FILES = ("keepalive.sh", "lib-common.sh", "plane-emit.sh",
+DOOR_FILES = ("keepalive.sh", "lib-common.sh", "supervisor.sh", "plane-emit.sh",
               "plane-socket-client.py")
 
 

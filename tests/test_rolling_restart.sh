@@ -82,6 +82,58 @@ assert_eq "--workers-only + --managers-only → error (2)" "2" \
     "$(run_rc flatfleet --workers-only --managers-only)"
 
 echo ""
+echo "=== rr_bot_ceiling — the driver ceiling follows the composed one ==="
+# The driver's fixed 180 was SHORTER than the launcher's own composed
+# readiness ceiling (RC_READY_TIMEOUT_S, 200 at this tip), and start-bot.sh
+# writes BRIDGE_READY only AFTER that poll — so a healthy bot whose poller
+# came up in the 180..200 band halted the whole roll with a
+# rolling_restart_stalled FLEET ALERT. The budget is derived per bot from
+# bot.conf (F4: bot.conf is the carrier) plus the margin for
+# pre-stop-handoff + spin-up + the poller settle.
+CEIL_BOT="$T/ceiling-bot"; mkdir -p "$CEIL_BOT"
+printf 'BOT_ID=ceil\nRC_READY_TIMEOUT_S=200\n' > "$CEIL_BOT/bot.conf"
+assert_eq "composed RC_READY_TIMEOUT_S=200 → 320s budget (200 + 120 margin)" \
+    "320" "$(rr_bot_ceiling "$CEIL_BOT")"
+
+# A raise of host.boot.mcp_timeout_ms moves RC_READY_TIMEOUT_S, and the
+# driver must move with it rather than needing its own edit.
+printf 'BOT_ID=ceil\nRC_READY_TIMEOUT_S=320\n' > "$CEIL_BOT/bot.conf"
+assert_eq "a raised composed ceiling moves the driver too (320 → 440)" \
+    "440" "$(rr_bot_ceiling "$CEIL_BOT")"
+
+# No composed key (a bot.conf predating the boot policy): the floor is the
+# same 90s default start-bot.sh itself falls back to, so the two never
+# disagree about what the launcher will wait.
+CEIL_BOT_OLD="$T/ceiling-bot-old"; mkdir -p "$CEIL_BOT_OLD"
+printf 'BOT_ID=old\n' > "$CEIL_BOT_OLD/bot.conf"
+assert_eq "no composed RC_READY_TIMEOUT_S → 210s budget (90 default + 120)" \
+    "210" "$(rr_bot_ceiling "$CEIL_BOT_OLD")"
+
+# A non-numeric value must not abort the roll under set -e — it falls back to
+# the same 90 default rather than into arithmetic.
+printf 'BOT_ID=junk\nRC_READY_TIMEOUT_S=later\n' > "$CEIL_BOT_OLD/bot.conf"
+assert_eq "non-numeric composed value → the 90 default, no arithmetic error" \
+    "210" "$(rr_bot_ceiling "$CEIL_BOT_OLD")"
+
+# A ZERO-PADDED value is ALL DIGITS, so the guard above hands it straight to
+# the arithmetic — where a bare $(( 090 )) is read as OCTAL ("value too great
+# for base", rc 1, empty stdout). rr_process_fleet runs under a caller that
+# suspends errexit, so that would be silent: an empty ceiling, the gate back
+# on wait_bridge_ready's own 180, and an alert reading "within s". 10# forces
+# base 10.
+printf 'BOT_ID=padded\nRC_READY_TIMEOUT_S=090\n' > "$CEIL_BOT_OLD/bot.conf"
+assert_eq "zero-padded composed value reads as decimal, not octal (090 → 210)" \
+    "210" "$(rr_bot_ceiling "$CEIL_BOT_OLD")"
+
+# --ceiling still wins for every bot in the run: an operator who names a
+# number means it.
+_SAVED_CEILING="$CEILING"; _SAVED_CEILING_SET="$CEILING_SET"
+CEILING=45; CEILING_SET=1
+assert_eq "--ceiling overrides the derivation (45 beats a composed 320)" \
+    "45" "$(rr_bot_ceiling "$CEIL_BOT")"
+CEILING="$_SAVED_CEILING"; CEILING_SET="$_SAVED_CEILING_SET"
+
+echo ""
 echo "=== rolling-restart.sh --managers-only — skips workers, restarts the manager ==="
 
 # A fleet of one manager (zzz-manager) and two workers, named so glob order
@@ -131,7 +183,10 @@ chmod +x "$STUB_LIB/pre-stop-handoff.sh" "$STUB_LIB/spin-up-bot.sh"
 REAL_LIB_DIR="$LIB_DIR"
 LOG="$T/rolling-restart-managers-only.log"
 RESTARTED=0; SKIPPED=0; FAILED=0
-WORKERS_ONLY=0; MANAGERS_ONLY=1; SKIP_HEALTHY=0; CONTINUE_ON_FAIL=0; CEILING=0
+# CEILING_SET=1 keeps the 0s budget an OPERATOR override here: without it the
+# per-bot derivation would hand this hermetic run a 210s wait if the stub ever
+# failed to write its BRIDGE_READY.
+WORKERS_ONLY=0; MANAGERS_ONLY=1; SKIP_HEALTHY=0; CONTINUE_ON_FAIL=0; CEILING=0; CEILING_SET=1
 LIB_DIR="$STUB_LIB"
 rr_process_fleet "mgrfleet" || true
 LIB_DIR="$REAL_LIB_DIR"
@@ -241,6 +296,25 @@ echo ""
 echo "=== weekly-worker-restart.sh rides the shared gate ==="
 assert_eq "weekly restart calls wait_bridge_ready" "true" \
     "$(grep -q 'wait_bridge_ready' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
+
+# The same ceiling coupling as rr_bot_ceiling above, pinned by READING the
+# file rather than by driving it: weekly-worker-restart.sh is a top-level
+# script with no source-guard, so a suite cannot source it without running a
+# real fleet bounce, and its LIB_DIR is self-derived (no seam to point at
+# stubs). A text pin is the honest instrument here, and it is narrow: it says
+# the derivation is present and the old fixed default is gone, nothing more.
+assert_eq "weekly restart derives its ceiling from the composed RC_READY_TIMEOUT_S" "true" \
+    "$(grep -q 'bot_conf_get "\$bot_dir" RC_READY_TIMEOUT_S' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
+assert_eq "weekly restart no longer carries a fixed 180s gate default" "false" \
+    "$(grep -q 'WEEKLY_RESTART_CEILING:-180' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
+assert_eq "WEEKLY_RESTART_CEILING remains the operator override" "true" \
+    "$(grep -q 'WEEKLY_RESTART_CEILING:-' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
+# The zero-padded case is worse on this side than on rolling-restart's, and it
+# is why the text pin extends to it: bash discards the enclosing command on an
+# expansion error, so one octal-looking value skips the rest of the per-bot
+# LOOP and the script still exits 0 under a "RESTART complete" line.
+assert_eq "weekly restart forces base 10 on the composed value (10#)" "true" \
+    "$(grep -q '10#\$_wr_rc_s' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

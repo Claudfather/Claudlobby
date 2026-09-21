@@ -25,7 +25,9 @@ def _fleet(tmp_path, *, app_env=None, mint="ok", probe_code="200", pat=None):
     lib = root / "lib"
     lib.mkdir(parents=True)
     (root / "state").mkdir()
-    for helper in ("creds-check.sh", "lib-common.sh"):
+    # supervisor.sh is a required sibling: lib-common.sh unconditionally
+    # sources it from its own directory (#1573 task 6).
+    for helper in ("creds-check.sh", "lib-common.sh", "supervisor.sh"):
         shutil.copy(REPO_ROOT / "lib" / helper, lib / helper)
 
     # Stub mint CLI: prints a token, or fails per `mint`.

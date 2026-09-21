@@ -1885,6 +1885,17 @@ def load_host_jobs() -> dict:
     return (_load_system_defaults().get("host") or {}).get("jobs") or {}
 
 
+def load_host_boot() -> dict:
+    """Return ``host.boot`` from system.yaml (``{}`` when absent).
+
+    Boot policy is host-scoped exactly like ``host.jobs`` above -- one set
+    of admission/timeout values per host, not layered per fleet -- so this
+    mirrors ``load_host_jobs`` rather than flowing through the fleet
+    defaults merge. See ``claudlobby.boot`` for what these values become.
+    """
+    return (_load_system_defaults().get("host") or {}).get("boot") or {}
+
+
 def _shallow_merge(base: dict | None, override: dict | None) -> dict:
     """Shallow dict merge by key -- override wins on collision."""
     return {**(base or {}), **(override or {})}

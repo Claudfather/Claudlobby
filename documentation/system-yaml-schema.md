@@ -38,6 +38,13 @@ host:                          # host-global singletons -- one instance per host
       enroll: true | false                         # dormancy -- semantics differ by shape, see below
       unit: service                                # marks a RESIDENT service instead of a timer
 
+  boot:                        # boot admission/readiness policy -- one set per
+                               # host; see "host.boot" below (#1573)
+    admission_slots: auto | <n>
+    admission_wait_max_s: <seconds>
+    mcp_timeout_ms: <milliseconds>
+    plugin_update_once_per_boot: true | false
+
 defaults:                      # per-fleet defaults -- mirrors fleet.yaml's `defaults:` shape,
                                 # merged UNDER it (system < fleet < bot)
   hooks:                       # same shape as fleet.yaml defaults.hooks / bots.<name>.hooks
@@ -231,6 +238,31 @@ disk cannot reach a unit that is already loaded into systemd/launchd:
 linux:  systemctl --user disable --now claudlobby-plane-daemon.service
 macos:  launchctl bootout gui/$UID/claudlobby-plane-daemon
 ```
+
+### `host.boot` — boot admission and readiness policy
+
+Host-scoped exactly like `host.jobs` above — one set of values per host, not
+layered per fleet (`load_host_boot()`, `claudlobby/config.py`). Read by
+`resolve_boot_policy` (`claudlobby/boot.py`, #1573) into a `BootPolicy`
+computed once per bot at compose time, and rendered into that bot's
+`bot.conf`:
+
+| Key | Default | Meaning | `bot.conf` line |
+|---|---|---|---|
+| `admission_slots` | `"auto"` — derives `clamp((cpu_count or 1) // 4, 1, 4)` from the host's own CPU count (a host that cannot report one is treated as single-core) | How many bots may run their MCP-startup phase at once | `BOOT_ADMISSION_SLOTS=` |
+| `admission_wait_max_s` | `1200` | Seconds a queued bot waits for a slot before giving up | `BOOT_ADMISSION_WAIT_MAX_S=` |
+| `mcp_timeout_ms` | `180000` | Claude Code's own MCP-server-startup timeout, in milliseconds | `export MCP_TIMEOUT=` — the one key of the six Claude Code itself reads out of the environment |
+| `plugin_update_once_per_boot` | `true` | Whether `claude plugin update` runs at most once per (boot epoch, plugin) rather than on every start | `BOOT_PLUGIN_UPDATE_ONCE=` (`1`/`0`) |
+
+Every key above has a package default, so a host that declares no `host.boot`
+block at all (`{}`) still resolves a fully-populated policy — nothing needs
+configuring. `priority` and `ready_timeout_s` are **not** `host.boot` keys:
+`priority` (0 = manager, 1 = worker) comes from the fleet's own manager set
+(`fleet.manager_bots()`), and `ready_timeout_s` is always derived from
+`mcp_timeout_ms` (`max(90, mcp_timeout_ms // 1000 + 20)` — 200s at the
+default above, so the readiness ceiling can never be shorter than the
+MCP-startup timeout it waits on). They become `BOOT_PRIORITY=` and
+`RC_READY_TIMEOUT_S=` respectively.
 
 ## Dormancy: `enroll` semantics differ by scope
 

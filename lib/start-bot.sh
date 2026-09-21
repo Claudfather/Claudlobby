@@ -265,16 +265,13 @@ if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ];
         done
     fi
 
-    # Step 2: Install or update each required plugin
+    # Step 2: Install or update each required plugin. plugin_ensure
+    # (lib-common.sh) owns the install-vs-update decision and the
+    # once-per-host-boot update gate: BOOT_PLUGIN_UPDATE_ONCE comes from the
+    # sourced bot.conf, and an un-regenerated one that predates the key reads
+    # as 0 -- todays every-start update behavior.
     for _plugin in $FLEET_PLUGINS_REQUIRED; do
-        if [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] || \
-           ! grep -q "\"$_plugin\"" "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null; then
-            echo "$(ts_iso) PLUGIN installing $_plugin (cold start)" >> "$LOG"
-            with_timeout 30 "$CLAUDE" plugin install "$_plugin" >> "$LOG" 2>&1 || true
-        else
-            echo "$(ts_iso) PLUGIN updating $_plugin" >> "$LOG"
-            with_timeout 30 "$CLAUDE" plugin update "$_plugin" >> "$LOG" 2>&1 || true
-        fi
+        plugin_ensure "$_plugin" "$CLAUDE" "$LOG" "${BOOT_PLUGIN_UPDATE_ONCE:-0}" || true
     done
 fi
 
@@ -287,7 +284,10 @@ mkdir -p "$BOT_DIR/data" 2>/dev/null || true
 touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
 
 # Wait for initialization with observability. The readiness ceiling is
-# RC_READY_TIMEOUT_S (default 90s, polled every 0.5s) — overridable; see
+# RC_READY_TIMEOUT_S: composed from host.boot into bot.conf since #1573
+# (derived max(90, mcp_timeout_ms // 1000 + 20) -- 200s at package defaults);
+# the 90s literal below is only a fallback for an un-regenerated bot.conf
+# that predates the key (F4). Polled every 0.5s — overridable; see
 # documentation/environment-variables.md.
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"
@@ -296,10 +296,8 @@ _rc_timeout_s="${RC_READY_TIMEOUT_S:-90}"
 # start-bot under `set -u` ($(( abc * 2 )) → "abc: unbound variable"), crash-
 # looping the bot. Fail safe to 90s.
 case "$_rc_timeout_s" in ""|*[!0-9]*) _rc_timeout_s=90 ;; esac
-_rc_iters=$(( _rc_timeout_s * 2 ))
 _poll_start=$(date +%s)
 echo "$(ts_iso) POLL_START — waiting for Telegram poller readiness (bridge_state, ceiling ${_rc_timeout_s}s)" >> "$LOG"
-_ready=0
 # Resolve the token ONCE here, not inside every bridge_state poll below: the token
 # is static .env config, so re-sourcing the .env chain each 0.5s iteration (up to
 # ~180x on a cold start) is wasted I/O — costly when bots start in parallel on a
@@ -342,85 +340,94 @@ if [ -z "$_session_pid" ]; then
     # is exactly the failure being fixed, and this line is greppable.
     echo "$(ts_iso) SCOPE_UNRESOLVED — no pane pid for $TMUX_SESSION; readiness falls back to bot-scoped (may accept the outgoing session's poller)" >> "$LOG"
 fi
-for _i in $(seq 1 "$_rc_iters"); do
-    if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
-        echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
-        exit 1
-    fi
-    # Assert ground truth, not a bring-up pane string: a grepped readiness line
-    # drifts across claude builds and silently stops matching, timing out on every
-    # healthy start and firing a false rc_timeout FLEET ALERT (#751). The Telegram
-    # poller writing a live bot.pid — proven by bridge_state == up — confirms Claude
-    # Code initialized far enough to spawn its MCP plugin, and is immune to string
-    # drift (the #710/#741 bridge-truth family). Bots with no channel (no_handle) or
-    # a declared tokenless canary have no poller to await: ready at once, no alert.
-    _bstate="$(bridge_state "$BOT_DIR" "$_pretoken" "$_session_pid" 2>/dev/null || true)"
-    case "$_bstate" in
-        up)
-            _elapsed=$(( $(date +%s) - _poll_start ))
-            echo "$(ts_iso) READY — Telegram poller up after ${_elapsed}s" >> "$LOG"
-            _ready=1
-            break
-            ;;
-        no_handle)
-            echo "$(ts_iso) READY — non-channel bot, no poller to await" >> "$LOG"
-            _ready=1
-            break
-            ;;
-        no_token)
-            if bot_expects_no_token "$BOT_DIR"; then
-                echo "$(ts_iso) READY — declared tokenless canary, no poller to await" >> "$LOG"
-                _ready=1
-                break
-            fi
-            ;;
-    esac
-    sleep 0.5
-done
-if [ "$_ready" -eq 0 ]; then
-    if [ "${_bstate:-}" = "not_mine" ]; then
-        # A live poller exists and belongs to another session -- the #1530 shape
-        # run to its ceiling. Distinct from "no poller came up" because the
-        # remedy differs: this one usually means the outgoing session never
-        # released the slot, not that bring-up failed.
-        echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, a Telegram poller is up but owned by another session (not ours), proceeding anyway" >> "$LOG"
-    else
-        echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, Telegram poller never reached bridge_state=up, proceeding anyway" >> "$LOG"
-    fi
-    # Both TIMEOUT lines above are accurate and tell an operator nothing about
-    # the one cause a restart cannot clear (#1358). When Claude Code has the
-    # channel plugin in its host-global needs-auth cache it does not START the
-    # poller and then fail -- it SKIPS SPAWNING it, so every instrument reads
-    # "poller dead" and none reads "poller never attempted". That cost 35
-    # minutes and four restarts by two operators here on 2026-08-25; another
-    # fleet reports a rolling restart stalling on it on 2026-09-19 (their
-    # report, relayed onto the issue, unverified on this host).
-    #
-    # The distinguishing fact is already on disk at this exact moment, so read
-    # it and say so. A plain file read: no matching, no attribution, no causal
-    # claim -- see mcp_auth_cache_note. Silence here is informative in its own
-    # right, telling the operator this timeout is NOT that signature.
-    _auth_cache_note="$(mcp_auth_cache_note "$BOT_DIR" 2>/dev/null || true)"
-    [ -z "$_auth_cache_note" ] || echo "$(ts_iso) $_auth_cache_note" >> "$LOG"
-    # THREE states, because there are three answers and a boolean carries two.
-    # A cache that could not be READ is not a cache that is CLEAR, and `false`
-    # on the plane reads as measured -- this field is escalation input by the
-    # check's own name, and nothing downstream can recover that it was a guess.
-    # Undetermined rides as JSON null: boot-strand-sampler.sh's precedent, where
-    # a count it cannot read is UNKNOWN and never a 0.
-    case "$_auth_cache_note" in
-        AUTH_CACHE_ARMED*)   _auth_cache_armed=true ;;
-        AUTH_CACHE_UNKNOWN*) _auth_cache_armed=null ;;
-        *)                   _auth_cache_armed=false ;;
-    esac
-    # Emit a fleet event so a genuine readiness regression reaches fleet-pulse's
-    # escalation instead of just appending to a log. Now gated on bridge ground
-    # truth, so this fires only when the poller really never came up — a true
-    # positive worth paging, not the #751 string-drift false alarm. A fleet-wide
-    # TIMEOUT must page: the #533 outage sat in every startup.log for a week with
-    # nothing alerting.
-    emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s},\"auth_cache_armed\":${_auth_cache_armed}}"
+# Assert ground truth, not a bring-up pane string: a grepped readiness line
+# drifts across claude builds and silently stops matching, timing out on every
+# healthy start and firing a false rc_timeout FLEET ALERT (#751). The Telegram
+# poller writing a live bot.pid — proven by bridge_state == up — confirms Claude
+# Code initialized far enough to spawn its MCP plugin, and is immune to string
+# drift (the #710/#741 bridge-truth family). Bots with no channel (no_handle) or
+# a declared tokenless canary have no poller to await: ready at once, no alert.
+#
+# The poll loop itself lives in lib-common.sh (wait_bridge_ready_state, #1573):
+# its ceiling is wall-clock `date +%s`, not a probe count, so a slow probe under
+# load shortens how many polls fit in ${_rc_timeout_s}s rather than silently
+# stretching the ceiling itself (a "90s" wait once ran five minutes this way).
+# It logs nothing and never exits — every line below and the exit on a crashed
+# session are this script's own, exactly as they were when the loop was inline.
+if _bstate="$(wait_bridge_ready_state "$BOT_DIR" "$_rc_timeout_s" "$_session_pid" "$_pretoken" "$TMUX_SESSION" "$TMUX_SOCKET")"; then
+    _wait_rc=0
+else
+    _wait_rc=$?
 fi
+case "$_wait_rc" in
+    0)
+        _elapsed=$(( $(date +%s) - _poll_start ))
+        case "$_bstate" in
+            up) echo "$(ts_iso) READY — Telegram poller up after ${_elapsed}s" >> "$LOG" ;;
+            no_handle) echo "$(ts_iso) READY — non-channel bot, no poller to await" >> "$LOG" ;;
+            no_token) echo "$(ts_iso) READY — declared tokenless canary, no poller to await" >> "$LOG" ;;
+        esac
+        ;;
+    2)
+        # check_tmux_session failed inside the poll -- the session died mid-boot.
+        # start-bot's decision to log + exit, same as when this check ran inline.
+        # Elapsed computed here exactly as the two sibling branches do: how long
+        # the session survived is the first thing a reader of this line wants.
+        # The pre-extraction version printed a probe COUNT labelled as seconds,
+        # so the figure was dropped rather than carried over; this is the real
+        # wall-clock one.
+        _elapsed=$(( $(date +%s) - _poll_start ))
+        echo "$(ts_iso) CRASH — tmux session died during startup after ${_elapsed}s" >> "$LOG"
+        exit 1
+        ;;
+    *)
+        _elapsed=$(( $(date +%s) - _poll_start ))
+        if [ "$_bstate" = "not_mine" ]; then
+            # A live poller exists and belongs to another session -- the #1530 shape
+            # run to its ceiling. Distinct from "no poller came up" because the
+            # remedy differs: this one usually means the outgoing session never
+            # released the slot, not that bring-up failed.
+            echo "$(ts_iso) TIMEOUT — ${_elapsed}s elapsed (wall clock), a Telegram poller is up but owned by another session (not ours), proceeding anyway" >> "$LOG"
+        else
+            echo "$(ts_iso) TIMEOUT — ${_elapsed}s elapsed (wall clock), last bridge_state=${_bstate}, proceeding anyway" >> "$LOG"
+        fi
+        # Both TIMEOUT lines above are accurate and tell an operator nothing about
+        # the one cause a restart cannot clear (#1358). When Claude Code has the
+        # channel plugin in its host-global needs-auth cache it does not START the
+        # poller and then fail -- it SKIPS SPAWNING it, so every instrument reads
+        # "poller dead" and none reads "poller never attempted". That cost 35
+        # minutes and four restarts by two operators here on 2026-08-25; another
+        # fleet reports a rolling restart stalling on it on 2026-09-19 (their
+        # report, relayed onto the issue, unverified on this host).
+        #
+        # The distinguishing fact is already on disk at this exact moment, so read
+        # it and say so. A plain file read: no matching, no attribution, no causal
+        # claim -- see mcp_auth_cache_note. Silence here is informative in its own
+        # right, telling the operator this timeout is NOT that signature.
+        _auth_cache_note="$(mcp_auth_cache_note "$BOT_DIR" 2>/dev/null || true)"
+        [ -z "$_auth_cache_note" ] || echo "$(ts_iso) $_auth_cache_note" >> "$LOG"
+        # THREE states, because there are three answers and a boolean carries two.
+        # A cache that could not be READ is not a cache that is CLEAR, and `false`
+        # on the plane reads as measured -- this field is escalation input by the
+        # check's own name, and nothing downstream can recover that it was a guess.
+        # Undetermined rides as JSON null: boot-strand-sampler.sh's precedent, where
+        # a count it cannot read is UNKNOWN and never a 0.
+        case "$_auth_cache_note" in
+            AUTH_CACHE_ARMED*)   _auth_cache_armed=true ;;
+            AUTH_CACHE_UNKNOWN*) _auth_cache_armed=null ;;
+            *)                   _auth_cache_armed=false ;;
+        esac
+        # Emit a fleet event so a genuine readiness regression reaches fleet-pulse's
+        # escalation instead of just appending to a log. Now gated on bridge ground
+        # truth, so this fires only when the poller really never came up — a true
+        # positive worth paging, not the #751 string-drift false alarm. A fleet-wide
+        # TIMEOUT must page: the #533 outage sat in every startup.log for a week with
+        # nothing alerting. The event carries BOTH the last bridge state (#1573: the
+        # wall-clock ceiling names what it last saw) and the auth-cache verdict
+        # (#1358: the one cause a restart cannot clear).
+        emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s},\"last_state\":\"${_bstate}\",\"auth_cache_armed\":${_auth_cache_armed}}"
+        ;;
+esac
 
 # No sleep here, and no readiness assumption either. The bridge-readiness wait
 # above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn

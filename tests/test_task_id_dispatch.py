@@ -45,7 +45,7 @@ SHIM_STDERR_RE = re.compile(
 # `2>/dev/null || true` call site, so a harness missing it is a silent no-op
 # rather than an error, which is why it is symlinked rather than left out.
 DOOR_FILES = (
-    "dispatch-task.sh", "report-back.sh", "lib-common.sh",
+    "dispatch-task.sh", "report-back.sh", "lib-common.sh", "supervisor.sh",
     "plane-emit.sh", "plane-socket-client.py", "plane-lookup.py", "plane-readers.py",
     "dispatch-overdue.py", "dispatch-supersede-hint.py",
 )
