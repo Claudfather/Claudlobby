@@ -149,7 +149,14 @@ stop_daemon
 rm -f "$RECORDER_LOG" "$RECORDER_COPY" "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
 out=$(printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" 2>"$tmpdir/err9"); rc=$?
 [ "$rc" -eq 0 ] || { echo "FAIL(9): rc=$rc"; cat "$tmpdir/err9"; exit 1; }
-grep -q "transport failed (rc=5) — daemon unavailable" "$tmpdir/err9" || { echo "FAIL(9): breach not distinctly worded"; cat "$tmpdir/err9"; exit 1; }
+grep -q "transport failed (rc=5) — falling back to cold CLI" "$tmpdir/err9" || { echo "FAIL(9): breach not distinctly worded"; cat "$tmpdir/err9"; exit 1; }
+# "daemon unavailable" is deliberately absent from BOTH branches now (review
+# residual, #1657): the transport-failed except block also catches a
+# reachable-but-slow daemon and a reachable-but-garbled reply under the same
+# rc=5, so "unavailable" is provably false for those, and the genuine-breach
+# mechanism itself is unreproduced -- naming a specific cause here would be
+# the same mistake this fix exists to remove.
+grep -q "daemon unavailable" "$tmpdir/err9" && { echo "FAIL(9): breach line still claims unavailability the transport-failed path cannot support"; exit 1; }
 grep -q "cooldown finalize" "$tmpdir/err9" && { echo "FAIL(9): breach wrongly used the cooldown wording"; exit 1; }
 
 # Test 10 (#1657, the actual defect): during a wedge cooldown the shim

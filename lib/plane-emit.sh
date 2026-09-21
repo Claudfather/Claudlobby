@@ -141,7 +141,17 @@ esac
 if [ "$skip_socket" = "1" ]; then
     printf 'plane-emit: cooldown finalize succeeded (rc=%s) — daemon not contacted, replaying cold as planned\n' "$rc" >&2
 else
-    printf 'plane-emit: transport failed (rc=%s) — daemon unavailable, falling back to cold CLI\n' "$rc" >&2
+    # Deliberately NOT "daemon unavailable" here either (review residual,
+    # #1657): plane-socket-client.py's transport-failed except block catches
+    # connect refusal (genuinely unavailable), a deadline miss (reachable,
+    # too slow — "unavailable" is false), and a garbled reply (reachable,
+    # answered) under the SAME rc=5. Only the first sub-cause makes
+    # "unavailable" true; the genuine-breach mechanism itself is unreproduced
+    # (#1657's own stated bound), so naming a specific cause here would be
+    # exactly the mistake this fix exists to remove, just relocated. State
+    # only what is known: the transport failed and the client already said
+    # why on the line above.
+    printf 'plane-emit: transport failed (rc=%s) — falling back to cold CLI\n' "$rc" >&2
 fi
 if [ -s "$finalized" ]; then
     # --root is global: before the subcommand.
