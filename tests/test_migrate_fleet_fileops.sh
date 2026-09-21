@@ -128,4 +128,31 @@ got="$(_mfs_not_healthy "b1" "$(_report "(none)" "b1" "(none)")")"
     || fail "(v4) an orphan bot is NOT healthy, got '$got'"
 pass "(v4) orphan bot -> not-healthy (orphan != healthy)"
 
+# --- #934 P1: the consumer survives the strand-aware bucket (forward pin) -----
+# #933 Phase B adds a 5th reconcile bucket, `stranded:`. This consumer parses
+# the healthy: line out of that same report, so the new line must not disturb
+# it. Green today and green after -- a regression pin, not a repro.
+#
+# Note for whoever lands the bucket: the reader below greps the SUBSTRING
+# "healthy:" and takes head -1. `stranded:` is safe. A bucket named so that
+# "healthy:" appears inside it -- `unhealthy:` is the obvious one -- would be
+# matched by that grep, and if it sorted first, head -1 would return the wrong
+# line. Pick a name that does not contain the substring.
+_report_stranded() {  # <healthy> <stranded>  (stranded printed AFTER healthy)
+    printf 'Fleet: web\n  healthy:  %s\n  orphan:   (none)\n  missing:  (none)\n  stranded: %s\n  unbound: (none)\n' "$1" "$2"
+}
+_report_stranded_first() {  # <healthy> <stranded>  (stranded printed BEFORE healthy)
+    printf 'Fleet: web\n  stranded: %s\n  healthy:  %s\n  orphan:   (none)\n  missing:  (none)\n  unbound: (none)\n' "$2" "$1"
+}
+
+got="$(_mfs_not_healthy "b1 b2" "$(_report_stranded "b1" "b2")")"
+[ "$got" = "b2" ] \
+    || fail "(v5) a bot in a new stranded: bucket must read not-healthy, got '$got'"
+pass "(v5) stranded: bucket added -> its bot reads not-healthy, healthy: bot does not"
+
+got="$(_mfs_not_healthy "b1 b2" "$(_report_stranded_first "b1" "b2")")"
+[ "$got" = "b2" ] \
+    || fail "(v6) head -1 must still find healthy: when stranded: is printed first, got '$got'"
+pass "(v6) stranded: printed BEFORE healthy: -> head -1 still resolves healthy:"
+
 echo "PASS: all migrate-fleet-to-system file-op + verify-gate tests passed"

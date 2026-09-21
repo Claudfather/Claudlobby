@@ -423,7 +423,7 @@ claudlobby checkins --summary [--since 14d]                                     
 claudlobby brief --bot <name>          # one read door over fleet state for a bot
 claudlobby brief --bot <name> --json   # schema-1 envelope (what other tools consume)
 claudlobby brief --bot <name> --ack    # advance that bot's unacked-report cursor
-claudlobby warm-cache                  # pre-download npx packages for MCP servers
+claudlobby warm-cache                  # pre-download npx + uvx packages for MCP servers
 claudlobby move-bot <bot> --to <fleet> # move a bot between fleets
 
 # Scaffolding

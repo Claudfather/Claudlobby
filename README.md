@@ -135,7 +135,7 @@ claudlobby new-bot               # interactive bot scaffolding
 claudlobby new-skill             # scaffold a new skill directory
 claudlobby new-guardrail         # scaffold a new guardrail file
 claudlobby move-bot <bot> --to <fleet>  # move a bot between fleets
-claudlobby warm-cache            # pre-download npx packages for MCP servers
+claudlobby warm-cache            # pre-download npx + uvx packages for MCP servers
 ```
 
 ## What this repo gives you — and doesn't

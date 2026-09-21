@@ -297,6 +297,32 @@ class TestSetupFleetColdStart:
         assert r.returncode == 1
         assert "claudlobby generate" in r.stdout
 
+    def test_jobs_only_enrolls_timers_and_never_spins_a_bot(self, h):
+        # #1633: the mode `reload-fleet.sh` calls non-fatally after every
+        # generate — an unhealthy bot (which an ordinary run WOULD spin up)
+        # proves --jobs-only actually skips steps 2-4 rather than merely
+        # having nothing to do.
+        f = h.fleet("f1", bots=("b1",), timers=("fleet-pulse",))
+        h.bot(f, "b1", healthy=False)
+        r = h.run(_sf(h), "f1", "--jobs-only")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "--jobs-only: skipping warm/bots/reconcile" in r.stdout
+        log = h.stub_log()
+        assert "systemctl --user enable --now test.prefix.fleet-pulse.timer" in log
+        assert "spin-up-bot.sh" not in log
+        assert "reconcile-fleet.sh" not in log
+        assert "warm-cache" not in log
+
+    def test_jobs_only_flag_can_precede_the_fleet_name(self, h):
+        # Usage: setup-fleet [<fleet-name>] [--jobs-only] — either order.
+        f = h.fleet("f1", bots=("b1",), timers=("fleet-pulse",))
+        h.bot(f, "b1", healthy=False)
+        r = h.run(_sf(h), "--jobs-only", "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        log = h.stub_log()
+        assert "systemctl --user enable --now test.prefix.fleet-pulse.timer" in log
+        assert "spin-up-bot.sh" not in log
+
 
 class TestSetupFleetSkipHealthy:
     def test_healthy_bot_not_bounced(self, h):

@@ -163,6 +163,31 @@ val_events() {
 val_sql() { sqlite3 "$1/state/plane/plane.db" "$2" 2>/dev/null || true; }
 # val_iso <epoch>: the instant as the doors stamp it.
 val_iso() { epoch_to_iso_utc "$1"; }
+
+# val_backdate <file> <seconds-ago>: set a file mtime N seconds into the past,
+# portably, creating the file if absent.
+#
+# The spec for #934 cites a `touch -d "25 hours ago"` idiom as already in use in
+# this harness. It is not: grep -c "touch -d" returns 0. That form is GNU-only.
+# The one place this repo does backdate (tests/test_idle_markers.sh) uses
+# `date -v-10M`, which is BSD-only and degrades to `touch -t ""` on Linux.
+# Neither form is portable and this repo targets macOS /bin/bash 3.2 as well.
+#
+# `touch -t CCYYMMDDhhmm.SS` is POSIX, so only the epoch-to-stamp conversion
+# needs a branch: date -d @EPOCH on GNU, date -r EPOCH on BSD. Failing loudly
+# beats returning a wrong mtime, because every caller here is asserting on an
+# age and a silent no-op would make the assertion pass for the wrong reason.
+val_backdate() {
+    local f="${1:?val_backdate: <file> required}"
+    local secs="${2:?val_backdate: <seconds-ago> required}"
+    local target stamp
+    target=$(( $(date +%s) - secs ))
+    stamp=$(date -d "@$target" +%Y%m%d%H%M.%S 2>/dev/null) \
+        || stamp=$(date -r "$target" +%Y%m%d%H%M.%S 2>/dev/null) \
+        || { echo "val_backdate: neither GNU nor BSD date branch worked" >&2; return 1; }
+    [ -e "$f" ] || : > "$f"
+    touch -t "$stamp" "$f"
+}
 # val_plane_ready <root> <fleet>: the plane db exists (a first fleet-level
 # receipt through the real door creates it). A fleet with no manifest gets an
 # EMPTY one (parse_fleet_bots reads an empty bots map exactly like a missing
@@ -1490,8 +1515,13 @@ tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "2020-01-01T00:00:00Z" \
     > "$RB_DIR/.claude/session.md"
+# CLAUDE_CONFIG_DIR= is load-bearing, not tidiness (#1358): HOME is already
+# pinned, but an operator with that variable exported would send start-bot to
+# their REAL ~/.claude cache, and the #1358 negative control below would then be
+# asserting an absence in a file this harness does not own. Empty, not unset, is
+# the same thing to the ${VAR:-default} the helper uses, and says so explicitly.
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
-    CLAUDE_BIN="$RB_ROOT/bin/claude" \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
 sleep 1
@@ -1504,6 +1534,112 @@ if [ -n "$_rcev" ]; then
     printf '%s' "$_rcev" | python3 -c "import sys,json; e=json.loads(sys.stdin.readline()); sys.exit(0 if e['type']=='rc_timeout' and e['ts'] else 1)" 2>/dev/null && r=yes || r=no
 else r=no; fi
 harness_check "rc_timeout event is valid JSON with ts+type (fleet-pulse-readable)" "$r"
+
+# --- #1358: a host-global MCP auth-cache skip must be VISIBLE at TIMEOUT ------
+# The TIMEOUT above is accurate and tells an operator nothing. When Claude Code
+# holds the channel plugin in <config>/mcp-needs-auth-cache.json it does not
+# START the poller and fail -- it SKIPS SPAWNING it, so every instrument reads
+# "poller dead" and none reads "poller never attempted". That is restart-immune
+# BY DESIGN: 35 minutes and four restarts by two operators here (2026-08-25),
+# and a stalled fleet-wide rolling restart another fleet reports (2026-09-19,
+# relayed onto #1358, unverified on this host).
+#
+# The run just above is the NEGATIVE CONTROL and its position is deliberate: it
+# timed out with an UNARMED cache, so the absence asserted here is an absence
+# this instrument is demonstrably capable of breaking -- proven by the armed
+# re-run immediately below. A silence never shown to be breakable is worth
+# nothing, and asserting one is how a dead check passes forever.
+grep -q 'AUTH_CACHE_ARMED —' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
+harness_check "#1358 unarmed cache -> no AUTH_CACHE_ARMED line (the silence is the control)" "$r"
+
+# Arm it. HOME is pinned to $RB_HOME for every start-bot call in this scenario,
+# so this exercises the PRODUCTION resolution ($HOME/.claude) rather than a
+# per-bot CLAUDE_CONFIG_DIR override, and cannot reach the operator cache. The
+# payload is a real recorded entry, copied byte-for-byte from a live armed host
+# cache (2026-09-20T09:49:01-04:00) rather than invented, so the parse is
+# exercised against the shape the defect actually produces.
+printf '{"plugin:telegram:telegram":{"timestamp":1789912141541,"id":"3eaf116ce58465c5"}}' \
+    > "$RB_HOME/.claude/mcp-needs-auth-cache.json"
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authcache.out" 2>&1 || true
+sleep 1
+# Select on "AUTH_CACHE_ARMED —", not the bare token: the BRIDGE_MISSING line
+# below deliberately POINTS at this one by name ("see the AUTH_CACHE_ARMED line
+# above"), so a bare-token `tail -1` picks the pointer instead of the note. That
+# is not hypothetical -- it is what the first run of this block did, and it
+# failed five content assertions while the behaviour under test was entirely
+# correct. The em dash is what the helper emits directly after the token.
+_acline="$(grep 'AUTH_CACHE_ARMED —' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+[ -n "$_acline" ] && r=yes || r=no
+harness_check "#1358 armed cache -> AUTH_CACHE_ARMED recorded at TIMEOUT" "$r"
+# Isolation asserted from the artifact itself, not merely arranged above: a run
+# that silently fell back to the operator cache would otherwise pass here by
+# coincidence on any host that happened to be armed.
+case "$_acline" in *"Cache: $RB_HOME/"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line names the THROWAWAY cache, never the operator's" "$r"
+case "$_acline" in *"plugin:telegram:telegram"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line names the SKIPPED mcp server" "$r"
+# Year only: the entry renders in the harness host local time, and pinning the
+# clock face would make this fail by timezone rather than by defect.
+case "$_acline" in *"recorded 2026-"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line names WHEN the entry was recorded" "$r"
+case "$_acline" in *"NOT evidence about this bot"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line states the cache is not this bot's own credential" "$r"
+case "$_acline" in *"printf '{}' > $RB_HOME/"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 the line carries the remedy, addressed at the file it read" "$r"
+# The heal advice further down the same boot must not contradict the line above
+# it. "keepalive owns heal" is right for every other cause and precisely wrong
+# for this one, because the restart it prescribes re-reads the same cache.
+_bmline="$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+case "$_bmline" in *"keepalive CANNOT heal this one"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 armed cache -> BRIDGE_MISSING withdraws the keepalive remedy" "$r"
+# ...and the unarmed boot earlier in this same log still carries it, so the
+# withdrawal is conditional rather than a blanket rewrite of the advice.
+case "$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" | head -1)" in
+    *"keepalive owns heal"*) r=yes ;; *) r=no ;;
+esac
+harness_check "#1358 unarmed cache -> BRIDGE_MISSING keeps the normal keepalive remedy" "$r"
+
+# The same read, carried onto the event: an rc_timeout that reaches fleet-pulse
+# escalation should arrive already naming its most likely cause.
+_acev="$(val_events "$RB_ROOT" "$FLEET" valrb rc_timeout | tail -1 || true)"
+case "$_acev" in *'"auth_cache_armed":true'*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 rc_timeout event carries auth_cache_armed (escalation sees the cause)" "$r"
+
+# --- #1358: a cache we could NOT read must not answer as a cache that is CLEAR
+# The third state. The first revision of this change collapsed it: six silent
+# conditions, only two of which meant "nothing there", all landing as
+# auth_cache_armed:false on the plane -- a cannot-look published as a
+# nothing-found, in the direction nobody audits.
+#
+# Malformed JSON is the likeliest real trigger rather than an exotic one: the
+# cache is host-global and written by Claude Code at arbitrary moments, so a read
+# concurrent with a write lands exactly here.
+printf 'not json {{{' > "$RB_HOME/.claude/mcp-needs-auth-cache.json"
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authunknown.out" 2>&1 || true
+sleep 1
+_acunk="$(grep 'AUTH_CACHE_UNKNOWN —' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+[ -n "$_acunk" ] && r=yes || r=no
+harness_check "#1358 an unreadable cache -> AUTH_CACHE_UNKNOWN, never silence" "$r"
+case "$_acunk" in *"NOT evidence the cache is clear"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358   ...and the line says so, so it cannot be read as an all-clear" "$r"
+# The plane row is the part that matters: `false` there reads as measured, and
+# nothing downstream can recover that it was never looked up.
+_acev_unk="$(val_events "$RB_ROOT" "$FLEET" valrb rc_timeout | tail -1 || true)"
+case "$_acev_unk" in *'"auth_cache_armed":null'*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 an undetermined cache rides the event as null, never false" "$r"
+_bmunk="$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+case "$_bmunk" in *"could NOT be determined"*) r=yes ;; *) r=no ;; esac
+harness_check "#1358 undetermined cache -> BRIDGE_MISSING withholds the keepalive promise" "$r"
 
 if [ "$fail" -gt "$_rc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: RC readiness checks failed ---"
@@ -3451,6 +3587,286 @@ harness_check "checkin: an unreachable plane does NOT fire (fail closed for a sp
 
 rm -rf "$CK2_ROOT2"
 command tmux -L "$(vsock "$CK2_BOT")" kill-server 2>/dev/null || true
+
+# ===========================================================================
+# #934 S1/S2 — the manufactured all-clear at fleet-pulse Check 5.
+#
+# Both sites share one shape: the strand produces the very condition that
+# suppresses its own alarm. Red-first repros for #933 phase P1; NO fix here.
+#
+#   S1 (fleet-pulse.sh:434, the idle gate)  keepalive re-touches data/.idle on
+#       every 60s tick that classifies a pane IDLE. A stranded bot shows a
+#       prompt glyph, so it classifies IDLE forever, so .idle stays permanently
+#       newer than the frozen .last-tool-call, so `! marker_is_newer` is false
+#       and the check returns without emitting. The bot is 25h silent and the
+#       sweep says nothing.
+#
+#   S2 (fleet-pulse.sh:432, the marker-existence gate)  `if [ -f "$marker" ]`
+#       has NO else branch. A bot that has never executed a tool call has no
+#       marker, so the entire check is skipped -- silently, with no event of
+#       either kind. This is every first-boot bot, which is exactly the
+#       population a boot strand is drawn from.
+#
+# ASSERTION SHAPE, and why the control is not optional. Both repros assert an
+# ABSENCE ("no activity_stuck row"), and an absence assertion passes for free
+# when the fixture never ran: wrong threshold, unreadable bot.conf, the sweep
+# erroring out, the event reader pointed at the wrong fleet. STRANDCTL is the
+# positive control -- identical to STRANDIDLE in every respect except that it
+# has no .idle marker -- and it MUST emit. If the control is silent the two
+# absence results below are worth nothing, and the harness says so rather than
+# reporting two passes.
+#
+# Post-P3 these same three blocks assert a boot_stranded row for STRANDIDLE
+# and STRANDNOMARK, with STRANDCTL unchanged (the zero-regression contract on
+# the worked path).
+# ===========================================================================
+echo ""
+echo "=== validate #934 S1/S2: fleet-pulse Check 5 manufactured all-clear ==="
+
+F3="valstrand"
+F3_BOTS="$ROOT/local/$F3/runtime/bots"
+SIDLE="strandidle"      # S1: stale marker + newer .idle  -> suppressed
+SNOMARK="strandnomark"  # S2: no marker at all            -> check skipped
+SCTL="strandctl"        # control: stale marker, no .idle  -> MUST fire
+mkdir -p "$ROOT/local/$F3" "$F3_BOTS/$SIDLE/data" "$F3_BOTS/$SNOMARK/data" "$F3_BOTS/$SCTL/data"
+
+cat > "$ROOT/local/$F3/fleet.yaml" <<YAML
+fleet:
+  name: $F3
+  bots:
+    $SIDLE:
+      expertise: [software-engineering]
+    $SNOMARK:
+      expertise: [software-engineering]
+    $SCTL:
+      expertise: [software-engineering]
+YAML
+
+# Threshold 60s against a 25h-old marker: the gap is four orders of magnitude
+# past the bar, so nothing here turns on timing precision.
+for b in "$SIDLE" "$SNOMARK" "$SCTL"; do
+    cat > "$F3_BOTS/$b/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=60
+CONF
+done
+
+val_plane_ready "$ROOT" "$F3"
+
+# S1 fixture: marker 25h stale, .idle touched AFTER it (what keepalive does).
+val_backdate "$F3_BOTS/$SIDLE/data/.last-tool-call" 90000
+touch "$F3_BOTS/$SIDLE/data/.idle"
+touch "$F3_BOTS/$SIDLE/data/.spawn"
+
+# S2 fixture: no marker at all. .spawn present and aged past any plausible
+# grace, so "it is simply too early to judge" cannot explain the silence.
+rm -f "$F3_BOTS/$SNOMARK/data/.last-tool-call"
+val_backdate "$F3_BOTS/$SNOMARK/data/.spawn" 90000
+
+# Control fixture: identical to S1 minus the .idle marker.
+val_backdate "$F3_BOTS/$SCTL/data/.last-tool-call" 90000
+rm -f "$F3_BOTS/$SCTL/data/.idle"
+touch "$F3_BOTS/$SCTL/data/.spawn"
+
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F3" "$LIB_DIR/fleet-pulse.sh" "$F3" >/dev/null 2>&1 || true
+
+s_ctl_ev=$(val_events "$ROOT" "$F3" "$SCTL")
+s_idle_ev=$(val_events "$ROOT" "$F3" "$SIDLE")
+s_nomark_ev=$(val_events "$ROOT" "$F3" "$SNOMARK")
+s_mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
+
+# --- the controls run FIRST: every assertion below is void without them -----
+printf '%s' "$s_ctl_ev" | grep -q '"type":"activity_stuck"' && r=yes || r=no
+harness_check "#934 CONTROL: a 25h-stale marker with no .idle DOES emit activity_stuck" "$r"
+_s_ctl_ok="$r"
+
+# A SECOND control, for the push probe specifically. The first version of this
+# block grepped $ROOT/state/pulse for the message copy. That directory holds
+# only empty debounce markers, never the text, so the probe could never match
+# and the absence assertion below passed unconditionally. Inverting the S1
+# fixture caught it: the check stayed green in the arm where a push provably
+# fired. A probe that has never once returned a positive is indistinguishable
+# from one that is wired wrong, so the pane probe carries its own control.
+printf '%s' "$s_mgr_pane" | grep -q "$SCTL activity_stuck" && r=yes || r=no
+harness_check "#934 CONTROL: the control bot [FLEET-PULSE] push DOES reach the manager pane" "$r"
+_s_push_ok="$r"
+
+# --- S1: the idle gate suppresses a 25h silence ----------------------------
+if [ "$_s_ctl_ok" != yes ]; then r=no
+elif printf '%s' "$s_idle_ev" | grep -q '"type":"activity_stuck"'; then r=no
+else r=yes; fi
+harness_check "#934 S1 RED: .idle newer than a 25h-stale marker suppresses activity_stuck (control fired)" "$r"
+
+# The push rides the same branch as the event, so a suppressed event is also a
+# suppressed page. Asserted separately because it is the half a human feels.
+if [ "$_s_push_ok" != yes ]; then r=no
+elif printf '%s' "$s_mgr_pane" | grep -q "$SIDLE activity_stuck"; then r=no
+else r=yes; fi
+harness_check "#934 S1 RED: no [FLEET-PULSE] manager push for the suppressed bot (control pushed)" "$r"
+
+# --- S2: an absent marker skips the check outright -------------------------
+if [ "$_s_ctl_ok" != yes ]; then r=no
+elif printf '%s' "$s_nomark_ev" | grep -qE '"type":"(activity_stuck|boot_stranded)"'; then r=no
+else r=yes; fi
+harness_check "#934 S2 RED: an absent .last-tool-call skips Check 5 with no event of either kind" "$r"
+
+if [ "$_s_ctl_ok" != yes ] || \
+   printf '%s' "$s_idle_ev" | grep -q '"type":"activity_stuck"' || \
+   printf '%s' "$s_nomark_ev" | grep -qE '"type":"(activity_stuck|boot_stranded)"'; then
+    echo "  --- DIAGNOSTIC: #934 S1/S2 fixture state ---"
+    for b in "$SCTL" "$SIDLE" "$SNOMARK"; do
+        echo "    $b:"
+        ls -la --time-style=+%s "$F3_BOTS/$b/data" 2>/dev/null \
+            || ls -lT "$F3_BOTS/$b/data" 2>/dev/null || true
+    done
+    echo "    control events : ${s_ctl_ev:-(none)}"
+    echo "    S1 events      : ${s_idle_ev:-(none)}"
+    echo "    S2 events      : ${s_nomark_ev:-(none)}"
+    echo "    manager pane   : $(printf '%s' "$s_mgr_pane" | grep -c FLEET-PULSE) FLEET-PULSE line(s)"
+fi
+
+# ===========================================================================
+# #934 S3 — reconcile-fleet is structurally blind to a boot strand.
+#
+# reconcile-fleet.sh:78 defines healthy as `has_tmux AND has_unit`. Those are
+# exactly the two facts a stranded bot satisfies: start-bot created the tmux
+# session and the unit is enrolled, and neither says one word about whether the
+# incarnation has ever executed anything. So the verdict is not merely
+# incomplete, it is manufactured BY the failure -- a strand looks like health.
+#
+# Measured on the 2026-09-20 reboot: reconcile called all twelve stranded bots
+# healthy while all 21 tmux servers were alive (#936, 2026-09-20T15:46:53Z).
+# The same reading on 2026-07-30 covered kenny/saul/todd with markers 2d14h,
+# 2d6h and 7d5h older than their own sessions.
+#
+# STRANDREC carries the strand signature -- a marker far older than a .spawn
+# from this incarnation -- and today lands in healthy: anyway. STRANDRECDOWN
+# is the discrimination control: same unit, no session, so it must land in a
+# DIFFERENT bucket. Without it "appears under healthy:" is also satisfied by a
+# reconcile that put every declared bot there.
+#
+# HOME is redirected for the reconcile call. bot_unit_present tests for a unit
+# FILE under $HOME, so unit-presence is fixtured by creating one -- and writing
+# a throwaway unit into a production operator's ~/.config/systemd/user is not
+# something a test gets to do. The isolation is ASSERTED, not assumed: a
+# harness that silently fell back to the real HOME would pass by coincidence.
+#
+# Post-P3: STRANDREC moves to a new `stranded:` bucket and healthy: keeps its
+# single-line shape for the migrate-fleet-to-system.sh consumer (pinned
+# separately and purely in tests/test_migrate_fleet_fileops.sh).
+# ===========================================================================
+echo ""
+echo "=== validate #934 S3: reconcile-fleet calls a stranded bot healthy ==="
+
+F4="valrecon"
+F4_BOTS="$ROOT/local/$F4/runtime/bots"
+S3BOT="strandrec"; S3DOWN="strandrecdown"
+S3_HOME="$ROOT/s3home"
+mkdir -p "$ROOT/local/$F4" "$F4_BOTS/$S3BOT/data" "$F4_BOTS/$S3DOWN/data"
+mkdir -p "$S3_HOME/.config/systemd/user" "$S3_HOME/Library/LaunchAgents"
+
+cat > "$ROOT/local/$F4/fleet.yaml" <<YAML
+fleet:
+  name: $F4
+  bots:
+    $S3BOT:
+      expertise: [software-engineering]
+    $S3DOWN:
+      expertise: [software-engineering]
+YAML
+
+for b in "$S3BOT" "$S3DOWN"; do
+    cat > "$F4_BOTS/$b/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_SERVICE="$(vsock "$b")"
+MANAGER_TMUX="$MGR"
+CONF
+    # Unit present for BOTH, on either platform, inside the redirected HOME.
+    touch "$S3_HOME/.config/systemd/user/$(vsock "$b").service"
+    touch "$S3_HOME/Library/LaunchAgents/$(vsock "$b").plist"
+done
+
+# The strand signature: a marker from a PREVIOUS incarnation (7d5h, the widest
+# gap in the 2026-07-30 field table) against a .spawn from this one.
+val_backdate "$F4_BOTS/$S3BOT/data/.last-tool-call" 622800  # exactly 7d5h
+touch "$F4_BOTS/$S3BOT/data/.spawn"
+
+# STRANDREC gets a live session; STRANDRECDOWN deliberately gets none.
+#
+# The pre-emptive kill-server is DEFENCE IN DEPTH, not a fix for a live path,
+# and the distinction is recorded so nobody deletes it as redundant or copies
+# the reasoning somewhere it does not hold. An unguarded new-session aborts at
+# rc 1 on a duplicate session under the armed ERR trap, and the sibling
+# harnesses guard against exactly that (boot-strand-sampler.sh, coldstart-
+# harness.sh, rehearse-debounce-recipient.sh, rehearse-env-cascade.sh,
+# ab-comms-eval.sh). Those scripts need it because they share the host socket
+# namespace. THIS file does not: #586 exports a per-run TMUX_TMPDIR at :105, so
+# every socket it opens lives in a fresh mktemp dir and a stale socket from an
+# interrupted prior run is in a different directory entirely. Measured: same
+# socket name, two run-private dirs -> rc 0, no collision; same dir twice ->
+# `duplicate session`, rc 1. All 19 new-session calls in this file are
+# unguarded for that reason.
+#
+# It is here anyway because the safety of this line otherwise rests on an
+# export 3,578 lines above it, and this file's own comment at :99-103 warns
+# that a sourced TMUX_TMPDIR pin can yank the scripts under test back into the
+# shared namespace mid-run. One idempotent line removes that dependency.
+_S3_SOCK="$(vsock "$S3BOT")"
+command tmux -L "$_S3_SOCK" kill-server 2>/dev/null || true
+# kill-server returns BEFORE the server has exited, so a new-session issued
+# straight after can attach to a dying one and fail "server exited
+# unexpectedly" -- which under the armed ERR trap aborts the run exactly as the
+# duplicate would. Measured unguarded: 7 of 15. So retry until it takes;
+# measured with this loop: one retry needed on 8 of 20, ZERO failures.
+#
+# Two shapes were rejected because they only LOOKED like they worked, and both
+# are the class this PR is about. A has-session settle passed 15/15 with its
+# wait counter reading 0 every time -- it was functioning as an accidental
+# sleep, and anyone deleting it as redundant would restore the race. A poll on
+# the socket FILE passed too, but hit its 5s cap on all 15: the socket outlives
+# the server, so the condition never becomes true and the pass is purely the
+# timeout. Both are green for a reason unrelated to their stated mechanism.
+_s3_try=0
+until tmux -L "$_S3_SOCK" new-session -d -s "$S3BOT" 'sleep 600' 2>/dev/null; do
+    _s3_try=$((_s3_try + 1))
+    if [ "$_s3_try" -ge 20 ]; then
+        echo "  DIAGNOSTIC: #934 S3 could not open a session on $_S3_SOCK after $_s3_try tries"
+        break
+    fi
+    sleep 0.2
+done
+sleep 1
+
+s3_out=$(HOME="$S3_HOME" CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/reconcile-fleet.sh" "$F4" 2>&1 || true)
+s3_healthy=$(printf '%s\n' "$s3_out" | grep 'healthy:' | sed -e 's/.*healthy:[[:space:]]*//' | head -1)
+s3_missing=$(printf '%s\n' "$s3_out" | grep 'missing:'  | sed -e 's/.*missing:[[:space:]]*//'  | head -1)
+
+# --- isolation control: the redirected HOME is what answered ----------------
+if [ -e "$HOME/.config/systemd/user/$(vsock "$S3BOT").service" ] \
+   || [ -e "$HOME/Library/LaunchAgents/$(vsock "$S3BOT").plist" ]; then r=no
+else r=yes; fi
+harness_check "#934 S3 isolation: no throwaway unit was written to the real HOME" "$r"
+
+# --- discrimination control: reconcile is not just filling healthy: ---------
+case " $s3_missing " in *" $S3DOWN "*) r=yes ;; *) r=no ;; esac
+harness_check "#934 S3 CONTROL: a unit-present session-absent bot lands in missing:, not healthy:" "$r"
+_s3_ctl_ok="$r"
+
+# --- S3: the strand is called healthy --------------------------------------
+if [ "$_s3_ctl_ok" != yes ]; then r=no
+else case " $s3_healthy " in *" $S3BOT "*) r=yes ;; *) r=no ;; esac; fi
+harness_check "#934 S3 RED: a bot whose marker predates its .spawn by 7d is listed healthy" "$r"
+
+if [ "$_s3_ctl_ok" != yes ] || [ "$r" != yes ]; then
+    echo "  --- DIAGNOSTIC: #934 S3 reconcile report ---"
+    printf '%s\n' "$s3_out" | sed 's/^/      /'
+    echo "      marker mtime : $(stat_mtime "$F4_BOTS/$S3BOT/data/.last-tool-call" 2>/dev/null || echo n/a)"
+    echo "      spawn  mtime : $(stat_mtime "$F4_BOTS/$S3BOT/data/.spawn" 2>/dev/null || echo n/a)"
+fi
+
+command tmux -L "$_S3_SOCK" kill-server 2>/dev/null || true
 
 echo ""
 echo "=== $pass passed, $fail failed ==="

@@ -15,6 +15,8 @@ from claudlobby.known_values import _AUTO_ELIGIBLE_RENAMES
 from claudlobby.paths import Paths
 from claudlobby.validator import _grant_wellformed, validate
 
+REPO = Path(__file__).resolve().parent.parent
+
 
 def _make_paths(root: Path) -> Paths:
     return Paths(root=root, fleet_dir=None)
@@ -2224,3 +2226,95 @@ class TestExpertiseGrantValidation:
         self._env(monkeypatch)
         report = self._report(fleet_dir)
         assert not any("expertise '" in w for w in report.warnings), report.warnings
+
+
+class TestIgnitionValidation:
+    """#1633: the same composite ignition question as doctor's check_ignition,
+    at validate() time too. `fleet_dir`'s `lead`/`worker-1` team already makes
+    `lead` a leaf manager, so these tests need only control which door is
+    armed — but the shared fixture carries no `lib/`, and task-recheck ships
+    opt-out (on by default), so a resolver-unavailable fallback reads it as
+    armed regardless of scenario. Wire the repo's real lib/ (the
+    test_switches.py / test_doctor.py pattern) so "off" is reachable at all.
+    """
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def _report(self, fleet_dir, *, env_text="TASK_RECHECK_ENABLED=0\n"):
+        if not (fleet_dir / "lib").exists():
+            fleet_dir_lib = fleet_dir / "lib"
+            fleet_dir_lib.symlink_to(REPO / "lib")
+        (fleet_dir / ".env").write_text(env_text)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return validate(fleet, _make_paths(fleet_dir)), fleet
+
+    def _ignition_warnings(self, report):
+        return [w for w in report.warnings if "ignition door is armed" in w]
+
+    def test_ignition_warns_when_a_leaf_manager_fleet_has_no_armed_door(
+        self, fleet_dir, monkeypatch
+    ):
+        self._env_patch(monkeypatch)
+        report, _fleet = self._report(fleet_dir)
+        ignition = self._ignition_warnings(report)
+        assert len(ignition) == 1
+        assert "briefing.slots" in ignition[0]
+
+    def test_ignition_passes_and_names_the_armed_door_when_briefing_slots_exist(
+        self, fleet_dir, monkeypatch
+    ):
+        self._env_patch(monkeypatch)
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "    lead:\n      expertise: [orchestration]\n",
+            "    lead:\n      expertise: [orchestration]\n"
+            "      briefing:\n"
+            "        slots:\n"
+            '          morning: "*-*-* 08:30:00"\n',
+        )
+        assert yaml_text != (fleet_dir / "fleet.yaml").read_text(), (
+            "replace() no-opped — the fixture's indentation moved"
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        report, _fleet = self._report(fleet_dir)
+        assert not self._ignition_warnings(report)
+
+    def test_ignition_rung_states_it_reads_declared_not_enrolled_state(
+        self, fleet_dir, monkeypatch
+    ):
+        self._env_patch(monkeypatch)
+        report, _fleet = self._report(fleet_dir)
+        ignition = self._ignition_warnings(report)
+        assert "declared" in ignition[0].lower()
+        assert "839" in ignition[0] or "1040" in ignition[0]
+
+    def test_ignition_warning_is_not_suppressed_by_disabled_system_defaults_timers(
+        self, fleet_dir, monkeypatch
+    ):
+        """_validate_ignition is a SIBLING of _validate_timers, not nested
+        inside it — that function returns early when system-defaults timers
+        are off, which is correct for its own manager-checkin pair (a
+        defaults.jobs entry that timers being off means was never composed)
+        and would be wrong here, since briefing.slots/brief.on_start are
+        per-bot fields with nothing to do with system-defaults timers."""
+        self._env_patch(monkeypatch)
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "  defaults:\n    model: opus\n",
+            "  defaults:\n    model: opus\n"
+            "  system_defaults:\n"
+            "    enabled: false\n",
+        )
+        assert yaml_text != (fleet_dir / "fleet.yaml").read_text(), (
+            "replace() no-opped — the fixture's indentation moved"
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        report, fleet = self._report(fleet_dir)
+        assert not (fleet.system_defaults.enabled and fleet.system_defaults.timers), (
+            "precondition: this fleet must actually have timers disabled, or "
+            "the test proves nothing"
+        )
+        assert self._ignition_warnings(report)
