@@ -284,7 +284,10 @@ mkdir -p "$BOT_DIR/data" 2>/dev/null || true
 touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
 
 # Wait for initialization with observability. The readiness ceiling is
-# RC_READY_TIMEOUT_S (default 90s, polled every 0.5s) — overridable; see
+# RC_READY_TIMEOUT_S: composed from host.boot into bot.conf since #1573
+# (derived max(90, mcp_timeout_ms // 1000 + 20) -- 200s at package defaults);
+# the 90s literal below is only a fallback for an un-regenerated bot.conf
+# that predates the key (F4). Polled every 0.5s — overridable; see
 # documentation/environment-variables.md.
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"
