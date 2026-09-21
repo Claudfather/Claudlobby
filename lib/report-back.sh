@@ -294,6 +294,14 @@ _plane_emit_report_intent() {
         # blocked reports are terminal-shaped on this estate (6/6 measured) ->
         # returned_blocked; the supplied-id anomaly is its own first-class
         # fact (§6b #6) alongside the report token, never instead of it.
+        # DERIVED from the discriminator that already exists (#1710): the
+        # case-2 gate below turns on exactly this fact, so a second variable
+        # deciding it would be two places computing one thing, which is how
+        # they drift. Inside this branch a link EXISTS, so the question is only
+        # which path produced it -- named by the caller, or picked by #835's
+        # auto-resolve. No new lookup: TASK_NAMED was captured at parse time.
+        local _link_src="auto-resolved"
+        [ -n "$TASK_NAMED" ] && _link_src="named"
         local ev="" frag=""
         case "$STATUS" in
             completed) ev="completed" ;;
@@ -302,6 +310,8 @@ _plane_emit_report_intent() {
             progress)  ev="progress" ;;
         esac
         [ -n "$PROGRESS" ] && frag=",\"progress\":$PROGRESS"
+        # Not json_escaped: a closed two-literal vocabulary, same as pr_role.
+        frag="$frag,\"link_source\":\"$_link_src\""
         # CASE 2 (#1710): the PR fields ride this leg only when the caller
         # NAMED the task. When #835 auto-resolved the link, the row is this
         # bot's newest open dispatch and has nothing to do with the PR being
@@ -324,7 +334,7 @@ _plane_emit_report_intent() {
         fi
         if [ "$TASK_ANOMALY" = "supplied-id-not-open" ]; then
             _own_task_leg=1
-            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\"$sess_frag}}"
+            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\",\"link_source\":\"$_link_src\"$sess_frag}}"
         fi
     fi
     # EVERY terminal report — id-less, id'd, or naming an id the plane could
