@@ -361,6 +361,111 @@ def _coerce_project(key: Any, d: Any) -> ProjectConfig:
     )
 
 
+# A derived project key must satisfy every slug gate the estate already
+# ships, or the derivation hands out a key the doors refuse: the validator's
+# _PROJECT_KEY_RE, lib/checkin-contract.py's SLUG_RE and dispatch-task.sh's
+# --project check are three independent copies of ^[a-z][a-z0-9-]*$.
+_DERIVED_SLUG_PREFIX = "p-"
+
+
+def _slugify_repo_part(text: str) -> str:
+    """Lowercase kebab slug that always satisfies ^[a-z][a-z0-9-]*$.
+
+    The leading-letter rule is not cosmetic: a repo named `30-day-abs` slugs
+    to `30-day-abs`, which the validator rejects as a project key and which
+    both `dispatch-task.sh --project` and the check-in contract refuse — so a
+    derivation that emitted it would produce a table whose rows cannot be
+    dispatched. Such a slug is prefixed rather than dropped: losing a declared
+    repo silently is the worse failure of the two.
+    """
+    slug = re.sub(r"[^a-z0-9-]+", "-", text.lower()).strip("-")
+    if not slug:
+        return ""
+    if not slug[0].isalpha():
+        slug = f"{_DERIVED_SLUG_PREFIX}{slug}"
+    return slug
+
+
+def _qualified_repo(repo: str, org: str | None) -> str:
+    """`org/repo` for a bare scope entry; the entry verbatim once it has a `/`.
+
+    scope.repos and projects.yaml `repos:` are the SAME join key read by the
+    same doors, and they are written in two different shapes: every fleet on
+    the reviewed host spells scope as bare names beside a separate `org:`,
+    while every declared projects.yaml spells its repos `org/repo`. The
+    derivation has to bridge that, because the check-in reads the composed
+    Repos column straight into `gh issue list --repo <owner/name>` — a bare
+    name there is not a repo, and it trips the validator's own org/repo
+    format warning on every derived row. A bot with repos and no org keeps
+    the bare value: inventing an owner is the one thing worse than warning.
+    """
+    if "/" in repo or not org:
+        return repo
+    return f"{org}/{repo}"
+
+
+def derive_projects(bots: dict[str, "BotConfig"]) -> dict[str, ProjectConfig]:
+    """One project per repo any bot declares in `scope.repos`, tier `review`.
+
+    The fallback when a fleet ships no projects.yaml. A declared projects.yaml
+    REPLACES this wholesale — never a merge: a half-declared registry is a
+    closure bar nobody can read from the manifest.
+
+    `review` is the tier because it is the only default that requires a second
+    pair of eyes without requiring the operator (known_values.VALID_TIERS).
+    """
+    # repo (qualified) -> the short slug it wants, then collide-aware naming.
+    wanted: dict[str, str] = {}
+    for bot in bots.values():
+        org = bot.scope.org if bot.scope else None
+        for raw in (bot.scope.repos if bot.scope else []):
+            repo = _qualified_repo(raw, org)
+            wanted.setdefault(repo, _slugify_repo_part(repo.split("/")[-1]))
+
+    # Two orgs holding one repo NAME collide on the short slug. Qualify EVERY
+    # member of a colliding group, not just the later one: an asymmetric pair
+    # ('tl-enterprises' and 'other-tl-enterprises') reads as if the first owns
+    # the plain name, which is exactly the ambiguity the qualification exists
+    # to remove.
+    by_short: dict[str, list[str]] = {}
+    for repo, slug in wanted.items():
+        by_short.setdefault(slug, []).append(repo)
+
+    # EVERY repo gets exactly one key. The candidates run most-readable first
+    # and end in a numeric tie-break, because the qualified form of one repo
+    # can be the literal name of another (`acme/storefront` qualifies to
+    # `acme-storefront`, which is also the short slug of `acme/acme-storefront`)
+    # — and a dict write on a colliding key drops a declared repo with nothing
+    # said. An ugly key is visible; a missing row is a silent hole in the
+    # closure ladder, which is the failure this whole function exists to avoid.
+    claims: dict[str, str] = {}
+    for repo in sorted(wanted):
+        short = wanted[repo]
+        qualified = _slugify_repo_part(repo)
+        contested = len(by_short.get(short, ())) > 1
+        candidates = [] if (contested or not short) else [short]
+        if qualified and qualified not in candidates:
+            candidates.append(qualified)
+        key = next((c for c in candidates if c not in claims), None)
+        if key is None:
+            base = qualified or short or _DERIVED_SLUG_PREFIX.rstrip("-")
+            n = 2
+            while f"{base}-{n}" in claims:
+                n += 1
+            key = f"{base}-{n}"
+        claims[key] = repo
+
+    return {
+        slug: ProjectConfig(
+            key=slug,
+            title=repo,
+            repos=[repo],
+            validation=ProjectValidationConfig(tier="review"),
+        )
+        for slug, repo in sorted(claims.items())
+    }
+
+
 def load_projects(projects_yaml: Path) -> dict[str, ProjectConfig]:
     """Parse projects.yaml (sits beside fleet.yaml). Absent file => {}."""
     if not projects_yaml.is_file():
@@ -713,6 +818,11 @@ class FleetConfig:
     sweep: SweepConfig | None = None
     fleet_pulse: FleetPulseConfig | None = None
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
+    # True when `projects` came from derive_projects() rather than a declared
+    # projects.yaml. Composed output says so: a derived tier is the
+    # framework's default, not the operator's declaration, and a reader who
+    # cannot tell them apart cannot know whether the closure bar was chosen.
+    projects_derived: bool = False
     # Fleet-level mission: `mission` is the one-paragraph anchor EVERY bot
     # receives; `mission_file` points at a fuller charter (fleet-relative)
     # composed for managers only; mission_file REQUIRES mission (validator-
@@ -1877,6 +1987,15 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         for bot_name, bot_def in (fleet.get("bots", {}) or {}).items()
     }
 
+    # projects.yaml is the OVERRIDE, not the prerequisite: a fleet that never
+    # wrote one still gets a registry derived from the repos its bots already
+    # declare, so the check-in's `dispatch` action (which needs --project) is
+    # available. Replacement, never a merge — see derive_projects.
+    projects = load_projects(fleet_yaml.parent / "projects.yaml")
+    projects_derived = not projects
+    if projects_derived:
+        projects = derive_projects(bots)
+
     fleet_cfg = FleetConfig(
         name=fleet.get("name", "unnamed-fleet"),
         service_prefix=fleet.get("service_prefix", "claudlobby"),
@@ -1891,7 +2010,8 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
         fleet_pulse=_coerce_fleet_pulse(fleet.get("fleet_pulse")),
-        projects=load_projects(fleet_yaml.parent / "projects.yaml"),
+        projects=projects,
+        projects_derived=projects_derived,
         mission=_shaped(
             "fleet.mission", fleet.get("mission"), str, "mission: one paragraph"
         )

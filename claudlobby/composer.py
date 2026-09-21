@@ -1059,7 +1059,12 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # working repo's tier locally (there is no "sprint owner" concept).
     if fleet.projects:
         lines.append("")
-        lines.append("# Projects (projects.yaml) — repo -> validation tier")
+        source = (
+            "derived from scope.repos"
+            if fleet.projects_derived
+            else "projects.yaml"
+        )
+        lines.append(f"# Projects ({source}) — repo -> validation tier")
         for key, project in sorted(fleet.projects.items()):
             tier_var = f"PROJECT_TIER_{project.env_slug}"
             if not _SHELL_IDENT_RE.match(tier_var):
@@ -2013,6 +2018,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         voice=voice_item,
         teams=teams,
         projects=projects,
+        projects_derived=fleet.projects_derived,
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,

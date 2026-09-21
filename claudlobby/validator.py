@@ -13,6 +13,9 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 log = logging.getLogger(__name__)
 
@@ -21,9 +24,11 @@ from .claudron_compat import CLAUDRON_INTEGRATION_URL
 from .config import (
     _RETIRED_OBSERVABILITY_KEYS,
     _PROJECT_VALIDATION_KEYS,
+    _qualified_repo,
     GITHUB_APP_ENV_VARS,
     FleetConfig,
     is_pos_int,
+    load_projects,
 )
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
@@ -1443,8 +1448,13 @@ def _validate_projects(
                     )
 
     repo_owners: dict[str, str] = {}
+    # A derived registry is validated exactly like a declared one — the tier,
+    # slug and whitespace rules are properties of what composes, not of who
+    # wrote it — but every message says which it is, or it sends the operator
+    # looking for a projects.yaml entry they never wrote.
+    kind = "derived project" if fleet.projects_derived else "project"
     for key, project in fleet.projects.items():
-        label = f"project '{key}'"
+        label = f"{kind} '{key}'"
 
         if not _PROJECT_KEY_RE.match(key):
             report.errors.append(
@@ -1558,6 +1568,184 @@ def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
             f"sweep.schedule '{sweep.schedule}' has no HH:MM time — expected a "
             f"systemd OnCalendar expression like '*-*-* 03:00:00'"
         )
+
+
+def _manifest_leading_comment(fleet_yaml: Path) -> str:
+    """The run of `#` lines at the top of a manifest, before any YAML.
+
+    Read as TEXT rather than through yaml.safe_load, because a comment is
+    exactly what the parser throws away — and the status a fleet writes about
+    itself ("DRAFT", "not spun up") lives nowhere else.
+    """
+    out: list[str] = []
+    try:
+        with fleet_yaml.open() as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    if out:
+                        break
+                    continue
+                if not stripped.startswith("#"):
+                    break
+                out.append(stripped)
+    except OSError:
+        return ""
+    return "\n".join(out)
+
+
+def _fleet_repo_claims(fleet_dir: Path) -> tuple[set[str], bool]:
+    """Every repo a fleet claims, as ``org/repo``, read from its own files.
+
+    The union of its ``projects.yaml`` repos and the ``scope.repos`` of its
+    manifest's ``defaults`` and ``bots`` blocks — the same two sources the
+    derivation bridges, normalised through the same ``_qualified_repo`` so a
+    bare ``scope`` entry and a qualified ``projects.yaml`` entry compare
+    like for like. Without that, the two shapes never collide and the rung
+    is dead code.
+
+    Returns ``(claims, readable)``. ``readable`` is False when the manifest
+    could not be parsed: absence of evidence must not license a claim
+    (#1146), so the caller stays silent and discloses rather than reporting
+    an overlap it could not compute.
+    """
+    claims: set[str] = set()
+    fleet_yaml = fleet_dir / "fleet.yaml"
+    try:
+        doc = yaml.safe_load(fleet_yaml.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return claims, False
+    if not isinstance(doc, dict):
+        return claims, False
+    fleet_block = doc.get("fleet")
+    if not isinstance(fleet_block, dict):
+        return claims, False
+
+    def _harvest(scope: Any) -> None:
+        if not isinstance(scope, dict):
+            return
+        org = scope.get("org")
+        org = org if isinstance(org, str) else None
+        repos = scope.get("repos")
+        if not isinstance(repos, list):
+            return
+        for repo in repos:
+            if isinstance(repo, str) and repo:
+                claims.add(_qualified_repo(repo, org))
+
+    fleet_defaults = fleet_block.get("defaults")
+    if isinstance(fleet_defaults, dict):
+        _harvest(fleet_defaults.get("scope"))
+    bots = fleet_block.get("bots")
+    if isinstance(bots, dict):
+        for bot_def in bots.values():
+            if isinstance(bot_def, dict):
+                _harvest(bot_def.get("scope"))
+
+    # A declared projects.yaml is already org/repo by convention; run it
+    # through the same normaliser anyway so an unqualified entry there is
+    # not silently a different repo from the same name in scope.
+    try:
+        for project in load_projects(fleet_dir / "projects.yaml").values():
+            for repo in project.repos:
+                claims.add(_qualified_repo(repo, None))
+    except (OSError, yaml.YAMLError, ValueError):
+        # A broken projects.yaml is _validate_projects' to report for THIS
+        # fleet and not ours to report for a sibling; the scope half still
+        # stands, so this is a narrowing of evidence, not a loss of it.
+        pass
+    return claims, True
+
+
+def _validate_goal_binding(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport
+) -> None:
+    """The three gaps that let a fleet ship with no goal binding at all.
+
+    Each is a WARNING and none may become an error: two fleets touching one
+    repo is a legitimate configuration a warning may name and nothing may
+    refuse, and a DRAFT header is a fact about intent that only a human can
+    resolve.
+    """
+    from .composer import resolve_effective_protocols  # local: composer imports config, not us
+
+    # --- an equipped leaf manager with no composable Projects table --------
+    if not fleet.projects:
+        managers = fleet.leaf_manager_bots()
+        equipped = []
+        for name in sorted(managers):
+            bot = fleet.bots.get(name)
+            if bot is None:
+                continue
+            try:
+                protocols = resolve_effective_protocols(
+                    bot, fleet, paths, is_manager=True
+                )
+            except Exception:  # a compose-time problem is not this rung's to report
+                continue
+            if "checkin" in protocols:
+                equipped.append(name)
+        if equipped:
+            report.warnings.append(
+                f"bot(s) {', '.join(equipped)} are check-in-equipped but no "
+                f"'## Projects' table can compose: this fleet declares no "
+                f"projects.yaml and no bot declares scope.repos, so the "
+                f"derivation had nothing to derive from — the check-in's "
+                f"'dispatch' action needs --project and is unavailable. Give a "
+                f"bot a 'scope: {{org: <org>, repos: [<repo>]}}' block, or "
+                f"declare projects.yaml beside fleet.yaml"
+            )
+
+    # --- a repo claimed by two fleets on one host --------------------------
+    ours = {repo for p in fleet.projects.values() for repo in p.repos}
+    local_dir = paths.root / "local"
+    current_fleet = paths.fleet_dir.name if paths.fleet_dir else None
+    if ours and local_dir.is_dir():
+        for fleet_dir in _iter_fleet_dirs(local_dir):
+            if fleet_dir.name == current_fleet:
+                continue
+            # PRESENCE, not emptiness (source_state.py's rule): _iter_fleet_dirs
+            # yields SYSTEM CONTAINERS as well as fleets, and a dir with no
+            # manifest is not a fleet that failed to parse — it is not a fleet.
+            # Disclosing it would page the operator about `local/<system>/` on
+            # every run and train them to ignore the real disclosure.
+            if not (fleet_dir / "fleet.yaml").is_file():
+                continue
+            theirs, readable = _fleet_repo_claims(fleet_dir)
+            if not readable:
+                report.warnings.append(
+                    f"fleet '{fleet_dir.name}': manifest could not be parsed, "
+                    f"so its repo claims were NOT compared against this "
+                    f"fleet's — this is an unchecked overlap, not a clean one"
+                )
+                continue
+            for repo in sorted(ours & theirs):
+                report.warnings.append(
+                    f"repo '{repo}' is claimed by both this fleet "
+                    f"('{current_fleet or fleet.name}') and fleet "
+                    f"'{fleet_dir.name}' on this host — decide which fleet "
+                    f"owns it; both managers may otherwise dispatch and close "
+                    f"work in it"
+                )
+
+    # --- a DRAFT manifest that has already shipped -------------------------
+    if paths.fleet_dir:
+        header = _manifest_leading_comment(paths.fleet_yaml)
+        if "DRAFT" in header:
+            bots_dir = paths.fleet_dir / "runtime" / "bots"
+            composed = (
+                [d.name for d in sorted(bots_dir.iterdir())
+                 if d.is_dir() and (d / "bot.conf").is_file()]
+                if bots_dir.is_dir()
+                else []
+            )
+            if composed:
+                report.warnings.append(
+                    f"fleet.yaml's leading comment still says DRAFT, but "
+                    f"{len(composed)} bot(s) are composed ({', '.join(composed)}) "
+                    f"— the manifest describes a fleet that has shipped; drop "
+                    f"the DRAFT header or say what is still undecided"
+                )
 
 
 def _validate_cross_fleet_collisions(
@@ -1928,6 +2116,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)
     _validate_projects(fleet, paths, report)
+    _validate_goal_binding(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
     _validate_library_frontmatter(paths, report)
     _validate_library_requires(paths, report)

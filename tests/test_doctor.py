@@ -755,6 +755,69 @@ class TestEachRailwayTokenIsProbedWithAQueryItCanAnswer:
         )
 
 
+class TestGoalBindingCheck:
+    """Claudfather/Claudlobby#1634 — the goal-binding finding gets its own
+    named rung rather than being one of `fleet-yaml`'s `N warning(s)`. A count
+    is not something an operator can act on, and each of these findings stops
+    the check-in beat from producing work."""
+
+    def _paths(self, fleet_dir: Path) -> Paths:
+        return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+
+    def _scope(self, fleet_dir: Path, org: str, repos: list[str]) -> None:
+        import re as _re
+
+        text = (fleet_dir / "fleet.yaml").read_text()
+        m = _re.search(r"^(\s+)lead:\n(\s+)expertise:.*\n", text, _re.M)
+        inner = m.group(2)
+        block = f"{inner}scope:\n{inner}  org: {org}\n{inner}  repos: [{', '.join(repos)}]\n"
+        (fleet_dir / "fleet.yaml").write_text(text[: m.end()] + block + text[m.end():])
+
+    def test_no_projects_at_all_warns_on_its_own_line(self, fleet_dir):
+        from claudlobby.doctor import check_goal_binding
+
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = DoctorReport()
+        check_goal_binding(fleet, self._paths(fleet_dir), report)
+        assert [c for c in report.checks if c.name == "goal-binding"]
+        check = report.checks[0]
+        assert check.status == "warn"
+        assert "check-in-equipped" in check.detail or "no projects" in check.detail
+
+    def test_derived_projects_pass_and_the_line_says_derived(self, fleet_dir):
+        from claudlobby.doctor import check_goal_binding
+
+        self._scope(fleet_dir, "acme", ["storefront"])
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = DoctorReport()
+        check_goal_binding(fleet, self._paths(fleet_dir), report)
+        check = report.checks[0]
+        assert check.name == "goal-binding"
+        assert check.status == "pass", check.detail
+        assert "derived from scope.repos" in check.detail
+        assert "1 project" in check.detail
+
+    def test_declared_projects_pass_and_the_line_says_projects_yaml(self, fleet_dir):
+        from claudlobby.doctor import check_goal_binding
+
+        (fleet_dir / "projects.yaml").write_text(
+            "projects:\n  shop:\n    title: Shop\n    repos: [acme/storefront]\n"
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = DoctorReport()
+        check_goal_binding(fleet, self._paths(fleet_dir), report)
+        check = report.checks[0]
+        assert check.status == "pass", check.detail
+        assert "projects.yaml" in check.detail
+        assert "derived" not in check.detail
+
+    def test_run_doctor_includes_the_rung(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = run_doctor(fleet, self._paths(fleet_dir))
+        names = [c.name for c in report.checks]
+        assert "goal-binding" in names, names
 class TestCheckIgnition:
     """#1633: does anything give an idle bot on this fleet a turn?
 

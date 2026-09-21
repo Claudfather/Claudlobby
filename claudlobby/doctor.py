@@ -845,6 +845,46 @@ def check_fleet_validation(
         report.add("fleet-yaml", "pass", "fleet.yaml valid")
 
 
+def check_goal_binding(
+    fleet: FleetConfig, paths: Paths, report: DoctorReport
+) -> None:
+    """Whether this fleet is bound to a goal it can actually dispatch against.
+
+    Its own named rung rather than part of `fleet-yaml`'s `N warning(s)`:
+    these three findings each stop the check-in beat from producing work, and
+    a count is not a thing an operator can act on. Calls the validator's
+    helper — one definition, so the two surfaces cannot drift.
+    """
+    from .validator import ValidationReport, _validate_goal_binding
+
+    sub = ValidationReport()
+    _validate_goal_binding(fleet, paths, sub)
+    if sub.warnings:
+        report.add(
+            "goal-binding",
+            "warn",
+            "; ".join(sub.warnings),
+        )
+        return
+
+    if not fleet.projects:
+        report.add(
+            "goal-binding",
+            "warn",
+            "no projects: neither a projects.yaml nor any bot's scope.repos — "
+            "nothing to dispatch against",
+        )
+        return
+
+    source = "derived from scope.repos" if fleet.projects_derived else "projects.yaml"
+    report.add(
+        "goal-binding",
+        "pass",
+        f"{len(fleet.projects)} project(s) ({source})"
+        + ("; fleet mission declared" if fleet.mission else "; no fleet.mission"),
+    )
+
+
 # ----------------------------------------------------------------------
 # Orchestrator
 # ----------------------------------------------------------------------
@@ -854,6 +894,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     """Run all doctor checks and return the report."""
     report = DoctorReport()
     check_fleet_validation(fleet, paths, report)
+    check_goal_binding(fleet, paths, report)
     check_switches(fleet, paths, report)
     check_ignition(fleet, paths, report)
     check_env_vars(fleet, paths, report)

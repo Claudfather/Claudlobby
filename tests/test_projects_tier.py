@@ -5,12 +5,13 @@ Schema + semantics: documentation/projects-yaml-schema.md. Load -> validate
 bot.conf.
 """
 
+import re
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
-from tests.conftest import install_real_template
+from tests.conftest import MINIMAL_FLEET_YAML, install_real_template
 
 from claudlobby.composer import compose_bot_conf, compose_claude_md
 from claudlobby.config import load_fleet
@@ -479,3 +480,285 @@ def test_validation_gate_passes_on_anchored_timer_script(fleet_dir):
     }
     ok = _validation_gate(fleet, _paths(fleet_dir), context="retry")
     assert ok, "an anchored timer script must not block the gate"
+
+
+# --- the derivation: projects.yaml is the OVERRIDE, not the prerequisite ------
+#
+# Claudfather/Claudlobby#1634. Before this, a fleet that never hand-wrote a
+# ~20-line projects.yaml composed no `## Projects` table, and the manager
+# check-in's `dispatch` action — which needs `--project` — was unavailable with
+# nothing warning. The compositor already knows the repos: every bot declares
+# them in `scope.repos`.
+
+def _with_scope(text: str, bot: str, org: str | None, repos: list[str]) -> str:
+    """Insert a `scope:` block under one bot in a manifest.
+
+    Derived from the manifest's own indentation rather than hardcoded: the
+    conftest fleet is dedent()ed, so a literal-indent replace silently matches
+    nothing and the test then asserts against an unscoped fleet (which is how
+    the first version of these tests passed for the wrong reason).
+    """
+    m = re.search(rf"^(\s+){re.escape(bot)}:\n(\s+)expertise:.*\n", text, re.M)
+    assert m, f"bot {bot!r} not found in the fixture manifest"
+    inner = m.group(2)
+    block = f"{inner}scope:\n"
+    if org is not None:
+        block += f"{inner}  org: {org}\n"
+    block += f"{inner}  repos: [{', '.join(repos)}]\n"
+    return text[: m.end()] + block + text[m.end() :]
+
+
+SCOPED_FLEET_YAML = _with_scope(
+    _with_scope(MINIMAL_FLEET_YAML, "lead", "acme", ["storefront", "autopilot"]),
+    "worker-1",
+    "acme",
+    ["storefront"],
+)
+
+
+def _write_fleet(fleet_dir: Path, text: str) -> None:
+    (fleet_dir / "fleet.yaml").write_text(text)
+
+
+def test_projects_derived_from_scope_repos_at_review_tier(fleet_dir):
+    _write_fleet(fleet_dir, SCOPED_FLEET_YAML)
+    fleet = _load(fleet_dir)
+    assert fleet.projects_derived is True
+    assert set(fleet.projects) == {"storefront", "autopilot"}
+    p = fleet.projects["storefront"]
+    assert p.validation.tier == "review", "review is the only default needing a second pair of eyes"
+    # One project per repo, and the repo is deduped across the two bots that
+    # both declare it — not one project per (bot, repo) pair.
+    assert p.repos == ["acme/storefront"]
+
+
+def test_derived_repos_are_qualified_with_scope_org(fleet_dir):
+    """scope.repos is bare names beside `org:`; projects.yaml `repos:` is
+    org/repo. They are the SAME join key in two shapes, and the composed Repos
+    column is read straight into `gh issue list --repo <owner/name>` by the
+    check-in — so a derived row carrying a bare name is not a repo."""
+    _write_fleet(fleet_dir, SCOPED_FLEET_YAML)
+    fleet = _load(fleet_dir)
+    assert [p.repos for p in fleet.projects.values()] == [["acme/autopilot"], ["acme/storefront"]] or all(
+        "/" in r for p in fleet.projects.values() for r in p.repos
+    )
+    for project in fleet.projects.values():
+        for repo in project.repos:
+            assert repo.startswith("acme/"), repo
+
+
+def test_an_already_qualified_scope_entry_is_not_double_qualified(fleet_dir):
+    _write_fleet(
+        fleet_dir,
+        _with_scope(MINIMAL_FLEET_YAML, "lead", "acme", ["other/storefront"]),
+    )
+    fleet = _load(fleet_dir)
+    assert fleet.projects["storefront"].repos in (["other/storefront"], ["acme/storefront"])
+    assert all(r.count("/") == 1 for p in fleet.projects.values() for r in p.repos)
+
+
+def test_a_bot_with_repos_but_no_org_keeps_the_bare_value(fleet_dir):
+    """Inventing an owner is worse than warning: the existing org/repo-format
+    warning then names a real ambiguity instead of a fabricated one."""
+    _write_fleet(
+        fleet_dir,
+        _with_scope(MINIMAL_FLEET_YAML, "lead", None, ["storefront", "autopilot"]),
+    )
+    fleet = _load(fleet_dir)
+    assert fleet.projects["storefront"].repos == ["storefront"]
+    assert fleet.projects["autopilot"].repos == ["autopilot"]
+
+
+def test_declared_projects_yaml_replaces_the_derivation_wholesale(fleet_dir):
+    """Never a merge. A fleet that declared one project and inherited three
+    derived ones would have a closure ladder nobody can read from the manifest."""
+    _write_fleet(fleet_dir, SCOPED_FLEET_YAML)
+    _write_projects(fleet_dir)  # declares acme-shop + post-scheduler only
+    fleet = _load(fleet_dir)
+    assert fleet.projects_derived is False
+    assert set(fleet.projects) == {"acme-shop", "post-scheduler"}
+    assert "storefront" not in fleet.projects, "no half-derived registry"
+    assert "autopilot" not in fleet.projects
+
+
+def test_an_all_comments_projects_yaml_still_falls_through_to_the_derivation(fleet_dir):
+    # load_projects treats a commented-out file as absence; so must the fallback.
+    _write_fleet(fleet_dir, SCOPED_FLEET_YAML)
+    _write_projects(fleet_dir, "# projects:\n#   p:\n#     repos: [a/b]\n")
+    fleet = _load(fleet_dir)
+    assert fleet.projects_derived is True
+    assert set(fleet.projects) == {"storefront", "autopilot"}
+
+
+def test_same_repo_name_in_two_orgs_gets_org_qualified_slugs(fleet_dir):
+    """BOTH members of a colliding group are qualified, not just the later one:
+    an asymmetric pair reads as if the first owns the plain name, which is the
+    ambiguity the qualification exists to remove."""
+    _write_fleet(
+        fleet_dir,
+        _with_scope(
+            _with_scope(MINIMAL_FLEET_YAML, "lead", "acme", ["storefront"]),
+            "worker-1", "zenith", ["storefront"],
+        ),
+    )
+    fleet = _load(fleet_dir)
+    assert set(fleet.projects) == {"acme-storefront", "zenith-storefront"}, fleet.projects
+    assert fleet.projects["acme-storefront"].repos == ["acme/storefront"]
+    assert fleet.projects["zenith-storefront"].repos == ["zenith/storefront"]
+
+
+def test_a_slug_that_would_start_with_a_digit_is_prefixed(fleet_dir):
+    """`30-day-abs` is a real repo on the reviewed host. Its natural slug is
+    rejected by all three shipped slug gates, so the derivation must not emit
+    it — and must not silently drop the repo either."""
+    _write_fleet(
+        fleet_dir, _with_scope(MINIMAL_FLEET_YAML, "lead", "acme", ["30-day-abs"])
+    )
+    fleet = _load(fleet_dir)
+    assert "p-30-day-abs" in fleet.projects
+    assert fleet.projects["p-30-day-abs"].repos == ["acme/30-day-abs"]
+
+
+def test_every_derived_slug_passes_the_three_shipped_slug_gates(fleet_dir):
+    """The validator's _PROJECT_KEY_RE, lib/checkin-contract.py's SLUG_RE and
+    dispatch-task.sh's --project check are three independent copies of one
+    rule. A derived key that any of them refuses is a table row nobody can
+    dispatch — acceptance criterion 3 of #1634.
+
+    BOUND — read this before trusting the third gate. Only TWO of the three are
+    exercised against the derived keys: `_PROJECT_KEY_RE` and the contract's
+    SLUG_RE are compiled and matched here. The shell gate is NOT executed; the
+    `shell_src` assertion is a **drift tripwire** that fails if
+    dispatch-task.sh's rule literal moves, and nothing more. It does not prove a
+    derived slug survives the shell path end to end, and a reader who takes it
+    that way will over-credit this test.
+
+    That end-to-end evidence exists, but it is not here: the door was driven for
+    real (`lib/dispatch-task.sh --project <slug> ...`) with derived slugs passing
+    the gate and the unprefixed control refused by name, recorded in the #1634 PR
+    body. If that path is ever made cheap to exercise in-process, promote it into
+    this test and delete this paragraph."""
+    import re as _re
+
+    from claudlobby.validator import _PROJECT_KEY_RE
+
+    contract_slug = _re.compile(
+        _re.search(
+            r'SLUG_RE = re\.compile\(r"([^"]+)"',
+            (REPO_DIR / "lib" / "checkin-contract.py").read_text(),
+        ).group(1)
+    )
+    shell_src = (REPO_DIR / "lib" / "dispatch-task.sh").read_text()
+    assert "[a-z][a-z0-9-]*" in shell_src, "dispatch-task's --project rule moved"
+
+    _write_fleet(
+        fleet_dir,
+        _with_scope(
+            MINIMAL_FLEET_YAML, "lead", "acme",
+            ["30-day-abs", "Claudlobby", "crog-gg", "really.odd_name"],
+        ),
+    )
+    fleet = _load(fleet_dir)
+    assert fleet.projects, "the derivation produced nothing to check"
+    for key in fleet.projects:
+        assert _PROJECT_KEY_RE.match(key), f"validator would reject derived key {key!r}"
+        assert contract_slug.match(key), f"checkin-contract would reject derived key {key!r}"
+
+
+def test_no_scope_repos_derives_nothing(fleet_dir):
+    """The derivation never invents a repo. A bot that declares none composes
+    no table — and picks up the goal-binding WARN instead."""
+    fleet = _load(fleet_dir)  # MINIMAL_FLEET_YAML declares no scope
+    assert fleet.projects == {}
+    assert fleet.projects_derived is True, "derived-from-nothing, not declared"
+
+
+def test_derived_projects_are_validated_but_labelled_derived(fleet_dir):
+    _write_fleet(
+        fleet_dir,
+        _with_scope(MINIMAL_FLEET_YAML, "lead", None, ["storefront"]),
+    )
+    fleet = _load(fleet_dir)
+    report = validate(fleet, _paths(fleet_dir))
+    hits = [w for w in report.warnings if "does not match <org>/<repo>" in w]
+    assert hits, report.warnings
+    assert all("derived project" in w for w in hits), hits
+
+
+# --- composition ---------------------------------------------------------------
+
+
+def test_derived_table_is_labelled_derived_in_claude_md(fleet_dir):
+    install_real_template(fleet_dir)
+    _write_fleet(fleet_dir, SCOPED_FLEET_YAML)
+    fleet = _load(fleet_dir)
+    md = compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir))
+    assert "## Projects" in md
+    assert "acme/storefront" in md
+    assert "Derived from each bot's `scope.repos`" in md
+    assert "declares no `projects.yaml`" in md
+
+
+def test_a_declared_table_is_not_labelled_derived(fleet_dir):
+    install_real_template(fleet_dir)
+    _write_fleet(fleet_dir, SCOPED_FLEET_YAML)
+    _write_projects(fleet_dir)
+    fleet = _load(fleet_dir)
+    md = compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir))
+    assert "## Projects" in md
+    assert "Derived from each bot's" not in md
+    assert "(projects.yaml)" in md
+
+
+def test_derived_projects_emit_project_tier_lines_in_bot_conf(fleet_dir):
+    _write_fleet(fleet_dir, SCOPED_FLEET_YAML)
+    fleet = _load(fleet_dir)
+    for bot_id in ("lead", "worker-1"):  # manager AND worker
+        conf = compose_bot_conf(fleet.bots[bot_id], fleet, _paths(fleet_dir))
+        assert "export PROJECT_TIER_STOREFRONT=review" in conf
+        assert "export PROJECT_REPOS_STOREFRONT=acme/storefront" in conf
+        assert "# Projects (derived from scope.repos)" in conf
+
+
+def test_declared_bot_conf_block_still_names_projects_yaml(fleet_dir):
+    _write_projects(fleet_dir)
+    fleet = _load(fleet_dir)
+    conf = compose_bot_conf(fleet.bots["lead"], fleet, _paths(fleet_dir))
+    assert "# Projects (projects.yaml)" in conf
+
+
+def test_no_declared_repo_is_ever_dropped_from_the_derivation(fleet_dir):
+    """The qualified form of one repo can be the literal short name of
+    another, so a naive `claims[key] = repo` drops a declared repo with
+    nothing said. Every repo gets exactly one key, and every key is a slug
+    the shipped gates accept — an ugly key is visible, a missing row is a
+    silent hole in the closure ladder."""
+    from claudlobby.validator import _PROJECT_KEY_RE
+
+    _write_fleet(
+        fleet_dir,
+        _with_scope(
+            _with_scope(
+                MINIMAL_FLEET_YAML, "lead", "acme", ["storefront", "acme-storefront"]
+            ),
+            "worker-1", "zenith", ["storefront"],
+        ),
+    )
+    fleet = _load(fleet_dir)
+    declared = {"acme/storefront", "acme/acme-storefront", "zenith/storefront"}
+    derived = {r for p in fleet.projects.values() for r in p.repos}
+    assert derived == declared, f"lost {declared - derived}"
+    assert len(fleet.projects) == len(declared), "two repos share one key"
+    for key in fleet.projects:
+        assert _PROJECT_KEY_RE.match(key), f"unusable derived key {key!r}"
+
+
+def test_a_repo_name_of_pure_punctuation_still_gets_a_usable_key(fleet_dir):
+    from claudlobby.validator import _PROJECT_KEY_RE
+
+    _write_fleet(fleet_dir, _with_scope(MINIMAL_FLEET_YAML, "lead", "acme", ['"---"']))
+    fleet = _load(fleet_dir)
+    assert len(fleet.projects) == 1, fleet.projects
+    (key,) = fleet.projects
+    assert _PROJECT_KEY_RE.match(key), key
+    assert fleet.projects[key].repos == ["acme/---"]
