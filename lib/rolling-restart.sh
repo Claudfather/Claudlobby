@@ -109,7 +109,14 @@ rr_bot_ceiling() {
     fi
     rc_s="$(bot_conf_get "$bot_dir" RC_READY_TIMEOUT_S 90)"
     case "$rc_s" in ''|*[!0-9]*) rc_s=90 ;; esac
-    printf '%s' "$((rc_s + 120))"
+    # 10# forces base 10. The digits guard above admits a ZERO-PADDED value,
+    # and bare $(( 090 )) is read as OCTAL: "value too great for base",
+    # rc 1, nothing on stdout. rr_process_fleet runs under a caller that
+    # suspends errexit, so that failure would be SILENT -- ceiling lands
+    # empty, the gate falls back to wait_bridge_ready's own 180 (the
+    # too-short budget this function exists to replace) and the alert reads
+    # "no BRIDGE_READY within s".
+    printf '%s' "$((10#$rc_s + 120))"
 }
 
 # Roll a single fleet. Sets global counters; returns 1 to signal a hard-stop.

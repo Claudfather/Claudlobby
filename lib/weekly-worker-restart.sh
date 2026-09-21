@@ -96,7 +96,17 @@ for bot_dir in "$BOTS_DIR"/*/; do
         # operator override and wins when set.
         _wr_rc_s="$(bot_conf_get "$bot_dir" RC_READY_TIMEOUT_S 90)"
         case "$_wr_rc_s" in ''|*[!0-9]*) _wr_rc_s=90 ;; esac
-        _wr_ceiling="${WEEKLY_RESTART_CEILING:-$((_wr_rc_s + 120))}"
+        # 10# forces base 10 -- the digits guard admits a ZERO-PADDED value and
+        # bare $(( 090 )) is read as octal ("value too great for base"). What
+        # that costs here is worse than an abort, and is MEASURED rather than
+        # reasoned: bash treats an expansion error as a discard of the
+        # enclosing command, so the rest of this iteration AND every remaining
+        # iteration of the per-bot loop are skipped -- yet the script runs on
+        # to its summary line and exits 0. One zero-padded bot would silently
+        # truncate the weekly bounce, leaving every later worker un-restarted
+        # under a "RESTART complete" line, with the shell's diagnostic going
+        # to the journal rather than to this log.
+        _wr_ceiling="${WEEKLY_RESTART_CEILING:-$((10#$_wr_rc_s + 120))}"
         # Serialize on the Telegram bridge: wait for THIS worker's poller to come
         # ready before bouncing the next, so an all-workers weekly bounce cannot
         # mass-starve channel init (#688/#689). A gate timeout is logged + alerted

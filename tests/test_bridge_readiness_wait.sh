@@ -235,8 +235,7 @@ assert_eq "normal 1s/probe advance: prints the last state (no_bridge)" "no_bridg
 # (J) The costly probe: ONE probe that costs MORE than the whole ceiling. The
 # clock-step fold's threshold used to BE the ceiling, so this shape folded
 # every iteration into "started" and the loop never expired -- measured
-# against a 1s ceiling: still polling when it was killed at 130s, and this
-# same scenario hung this suite outright at the pre-fix lib. It is not
+# against a 1s ceiling: still polling when it was killed at 130s. It is not
 # hypothetical:
 # lib/validate-bot-change.sh drives the real start-bot.sh with
 # RC_READY_TIMEOUT_S=1, and a probe there costs seconds under load. A ceiling
@@ -244,15 +243,69 @@ assert_eq "normal 1s/probe advance: prints the last state (no_bridge)" "no_bridg
 # `|| true` after it is never reached) and, for PR B, is a gate holder that
 # never releases. The fold threshold is now max(timeout_s, 60), so a 2s probe
 # against a 1s ceiling is ordinary elapsed time and the FIRST check expires.
+#
+# THIS ONE SCENARIO IS BOUNDED, and the bound is the point: the regression it
+# pins is an UNBOUNDED loop, so a bare call_wait here would not fail on that
+# regression -- it would hang this suite, then tests/test_sh_suites.py, then
+# CI (measured: killed by hand at 30s), and it is why the committed-code
+# mutant driver cannot carry this mutant at all. The call runs in a
+# background subshell that writes "rc:out" to a file; this shell polls
+# kill -0 for at most 15s, then reaps the subshell and its probe sleep and
+# records a FAIL naming the regression. A test for a hang has to own its own
+# clock -- every other scenario here is self-limiting and needs none.
 BOT10="$T/bot10"; mkdir -p "$BOT10"
 bridge_state() { sleep 2; printf 'no_bridge'; }
+
+# Reap a pid and the children it may have left (the probe sleep sits under a
+# command substitution, so it is a grandchild of the subshell). pgrep is on
+# both platforms; without it the plain kill still ends the subshell and a 2s
+# sleep exits on its own moments later.
+_reap_tree() {
+    local p="$1" c g
+    if command -v pgrep >/dev/null 2>&1; then
+        for c in $(pgrep -P "$p" 2>/dev/null); do
+            for g in $(pgrep -P "$c" 2>/dev/null); do kill "$g" 2>/dev/null || true; done
+            kill "$c" 2>/dev/null || true
+        done
+    fi
+    kill "$p" 2>/dev/null || true
+}
+
+J_RES="$T/j-result"; rm -f "$J_RES"
 _t0=$(date +%s)
-call_wait "$BOT10" 1 "" ""
+(
+    if _o="$(wait_bridge_ready_state "$BOT10" 1 "" "" 2>/dev/null)"; then _r=0; else _r=$?; fi
+    # Written then renamed, so the file this shell polls is never half a
+    # result: it does not exist, or it is the whole answer.
+    printf '%s:%s' "$_r" "$_o" > "$J_RES.tmp" && mv "$J_RES.tmp" "$J_RES"
+) &
+_j_pid=$!
+_j_waited=0
+# Either signal ends the wait: the result landing, or the subshell dying. The
+# VERDICT is the file, never the pid, because kill -0 on a just-finished child
+# is RACY -- measured on bash 3.2.57: a child that has exited still answered
+# kill -0 in 1 of 5 samples taken immediately (0 of 5 after 0.5s), the window
+# before the shell reaps it. A file that exists is an answer that was written;
+# a pid is only a hint about when to stop waiting.
+while kill -0 "$_j_pid" 2>/dev/null && [ ! -s "$J_RES" ]; do
+    if [ "$_j_waited" -ge 30 ]; then break; fi   # 30 x 0.5s = 15s
+    sleep 0.5
+    _j_waited=$((_j_waited + 1))
+done
 _t1=$(date +%s)
-assert_eq "probe costlier than the ceiling: returns 1 (times out)" "1" "$_WBRS_RC"
-assert_eq "probe costlier than the ceiling: prints the last state (no_bridge)" "no_bridge" "$_WBRS_OUT"
-assert_eq "probe costlier than the ceiling: expires in a few seconds, not never" "true" \
-    "$([ "$((_t1 - _t0))" -lt 10 ] && echo true || echo false)"
+if [ -s "$J_RES" ]; then
+    wait "$_j_pid" 2>/dev/null || true
+    _j_out="$(cat "$J_RES")"
+    assert_eq "probe costlier than the ceiling: returns 1 (times out)" "1" "${_j_out%%:*}"
+    assert_eq "probe costlier than the ceiling: prints the last state (no_bridge)" "no_bridge" "${_j_out#*:}"
+    assert_eq "probe costlier than the ceiling: expires in a few seconds, not never" "true" \
+        "$([ "$((_t1 - _t0))" -lt 10 ] && echo true || echo false)"
+else
+    _reap_tree "$_j_pid"
+    wait "$_j_pid" 2>/dev/null || true
+    assert_eq "probe costlier than the ceiling: HUNG past 15 s (the fold threshold is the ceiling again)" \
+        "completed" "HUNG"
+fi
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

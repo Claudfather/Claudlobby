@@ -115,6 +115,16 @@ printf 'BOT_ID=junk\nRC_READY_TIMEOUT_S=later\n' > "$CEIL_BOT_OLD/bot.conf"
 assert_eq "non-numeric composed value → the 90 default, no arithmetic error" \
     "210" "$(rr_bot_ceiling "$CEIL_BOT_OLD")"
 
+# A ZERO-PADDED value is ALL DIGITS, so the guard above hands it straight to
+# the arithmetic — where a bare $(( 090 )) is read as OCTAL ("value too great
+# for base", rc 1, empty stdout). rr_process_fleet runs under a caller that
+# suspends errexit, so that would be silent: an empty ceiling, the gate back
+# on wait_bridge_ready's own 180, and an alert reading "within s". 10# forces
+# base 10.
+printf 'BOT_ID=padded\nRC_READY_TIMEOUT_S=090\n' > "$CEIL_BOT_OLD/bot.conf"
+assert_eq "zero-padded composed value reads as decimal, not octal (090 → 210)" \
+    "210" "$(rr_bot_ceiling "$CEIL_BOT_OLD")"
+
 # --ceiling still wins for every bot in the run: an operator who names a
 # number means it.
 _SAVED_CEILING="$CEILING"; _SAVED_CEILING_SET="$CEILING_SET"
@@ -209,6 +219,12 @@ assert_eq "weekly restart no longer carries a fixed 180s gate default" "false" \
     "$(grep -q 'WEEKLY_RESTART_CEILING:-180' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
 assert_eq "WEEKLY_RESTART_CEILING remains the operator override" "true" \
     "$(grep -q 'WEEKLY_RESTART_CEILING:-' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
+# The zero-padded case is worse on this side than on rolling-restart's, and it
+# is why the text pin extends to it: bash discards the enclosing command on an
+# expansion error, so one octal-looking value skips the rest of the per-bot
+# LOOP and the script still exits 0 under a "RESTART complete" line.
+assert_eq "weekly restart forces base 10 on the composed value (10#)" "true" \
+    "$(grep -q '10#\$_wr_rc_s' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

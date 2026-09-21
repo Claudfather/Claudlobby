@@ -64,8 +64,11 @@ the count does not move. Re-measured per occurrence, the totals move by
 exactly one: 108 -> 109, all of it `lib/reconcile-fleet.sh` 7 -> 8, one real
 line carrying two bare `launchctl` tokens (a `launchctl print` and the
 `(launchctl info unavailable)` fallback string in the same assignment).
-Every other file is unchanged, and the scanned/nonzero file counts (121 / 20)
-are unchanged too.
+Every other file is unchanged, and so is the set of files with a NONZERO
+count: 20. The SCANNED total is not a figure to quote -- it tracks whatever
+untracked files happen to sit under lib/ when the scan runs (a
+`__pycache__`, a `logs/`, a `personal/`), so it is 118 in a clean checkout
+and higher in a working tree that has been run from.
 """
 
 from __future__ import annotations
