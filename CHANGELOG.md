@@ -61,6 +61,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   checkpoint — a reader holding a snapshot it needed to pass — is counted rather
   than invisible.
 
+- **BOTH transports make ONE promise; they do not diverge.** The cold CLI rung
+  opens `FULL` too. Under `NORMAL` its durability would ride on the
+  close-checkpoint's fsync — and that checkpoint's failure is caught and still
+  reported `committed`, so the rung would keep an acknowledged-but-not-durable
+  path the daemon rung no longer has. Which rung an emit takes is arbitrary from
+  the caller's side (the shim falls to the cold one whenever the socket wedges,
+  which on this host is most of the time), so that divergence would be a promise
+  varying by accident — worse than either semantic chosen deliberately.
+  **Measured cost: none.** Interleaved arms, 60 batches each: `NORMAL` 66.34 ms
+  median / 139.83 p95, `FULL` 60.17 / 120.58 — nominally faster, ranges
+  overlapping. A first sequential pass reported +44 ms; that was load drift, and
+  interleaving is what showed it. The cold path already fsyncs at its
+  close-checkpoint, so commit-time fsync buys durability without adding a
+  syscall the rung was not already paying.
+
 - **The one failure mode this introduces, and its canary.** A connection held
   for the process's life can go bad underneath itself, and the dangerous half is
   **silent**: if the db file is replaced, the held handle keeps writing
