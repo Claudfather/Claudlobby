@@ -138,7 +138,12 @@ def _capture_path(root: Path) -> Path:
     return p / "capture.json"
 
 
-def test_f3_broken_capture_config_fails_loud_not_metadata(tmp_path: Path):
+def test_f3_broken_capture_config_fails_loud_never_falls_back(tmp_path: Path):
+    """A broken file must never resolve to ANY mode. The direction that bites
+    moved with the default (2026-09-20): under a metadata default a silent
+    fallback stripped content an operator opted INTO keeping; under a full
+    default it would STORE content an operator opted OUT of keeping. Loud
+    either way is the only answer that is right in both regimes."""
     _capture_path(tmp_path).write_text('{"*": "full"')          # invalid JSON
     with pytest.raises(CaptureConfigError):
         emit(tmp_path, _comm())
@@ -150,12 +155,29 @@ def test_f3_unknown_mode_value_fails_loud(tmp_path: Path):
         emit(tmp_path, _comm())
 
 
-def test_f3_absent_config_still_defaults_metadata(tmp_path: Path):
+def test_f3_absent_config_takes_the_shipped_default_full(tmp_path: Path):
+    """An ABSENT file is the documented default, and since 2026-09-20 that
+    default is `full`: the channel is the product, and a stripped body cannot
+    be recovered from an append-only ledger."""
     emit(tmp_path, _comm())
     conn = connect(db_path(tmp_path))
     row = conn.execute("SELECT body, privacy FROM communications").fetchone()
     conn.close()
+    assert row["privacy"] == "full" and row["body"] is not None
+
+
+def test_f3_star_metadata_is_the_opt_out_and_still_strips(tmp_path: Path):
+    """The opt-out an operator reaches for now. Same door, same proof triple —
+    only the default moved, never the stripping mechanism."""
+    _capture_path(tmp_path).write_text('{"*": "metadata"}')
+    emit(tmp_path, _comm())
+    conn = connect(db_path(tmp_path))
+    row = conn.execute(
+        "SELECT body, body_sha256, body_bytes, privacy FROM communications"
+    ).fetchone()
+    conn.close()
     assert row["privacy"] == "metadata" and row["body"] is None
+    assert row["body_sha256"] and row["body_bytes"] > 0
 
 
 def test_f3_overcap_task_summary_rejects_before_capture_strips_it(tmp_path: Path):

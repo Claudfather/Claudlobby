@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the plane's capture policy ships as `full` (#1631)
+
+- **Message bodies are recorded by default.** `state/plane/capture.json` is
+  still the knob and still defaults when absent, but that default moved from
+  `metadata` to `full`. Under the old default every message in the channel read
+  "captured as metadata only (N bytes)" forever, on an install nobody had
+  misconfigured — measured on a second host that had recorded 4,506 events and
+  233 communications, not one of them legible. The ledger is append-only, so a
+  default that strips bodies does not hide the words, it destroys them at the
+  door.
+- **What it trades, plainly.** Bodies live in the host's own SQLite ledger and
+  are read back only by the localhost-bound view; nothing is transmitted, and
+  the content is the operator's own agents talking to each other. **An
+  upgrading host that wants the old behaviour must say so**: write
+  `{"*": "metadata"}` to `state/plane/capture.json` before the next restart.
+  Per-fleet opt-out works too, and a named fleet beats `*`.
+- The mode in force is surfaced in three places rather than assumed: the
+  `capture config` rung of `plane doctor` (which resolves and prints the mode
+  actually in force — `metadata (host-wide opt-out)`, `full (shipped default)`,
+  or the host mode plus the fleets that differ — through the same
+  `capture_mode` rule the recorder and the view resolve through), the
+  `<mode> capture` label on each fleet card, and the trust surface. The rung
+  previously printed a fixed string naming the *default*, so it was
+  informative only when the setting did not matter and wrong for exactly the
+  hosts that had configured one. A malformed file still fails LOUD and resolves to no mode — that
+  refusal matters more under a `full` default, because a silent fallback would
+  now store content an operator opted out of keeping.
+
 ### Fixed — a receipt that named its rescued bots twice had half the names silently dropped (#1575)
 
 - **`row_rescued_names` in `lib/selfstart-snapshot.sh` took `head -1` over its matches, so a `fleet_rescue` receipt carrying `bots_rescued` more than once contributed only its first array.** Two receipt shapes circulate — fields at top level, and fields nested under `data` — and the natural compatibility move is to emit both, which is exactly the shape that triggers this. The failure direction is UNDER-count: a bot that was genuinely rescued loses its only evidence of being touched, falls through to a boundary comparison it predates, and prints as a clean self-start. That is the over-credit the receipt mechanism exists to prevent, reintroduced through the compatibility fix rather than through a bug. Every array in the row now contributes and the names UNION.

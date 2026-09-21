@@ -19,7 +19,13 @@ from pathlib import Path
 from ._helpers import _load_fleet_or_exit, _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
 from ..plane.db import connect, db_file, db_path, open_ro
-from ..plane.emit_api import emit, emit_batch, _load_capture_config
+from ..plane.emit_api import (
+    emit,
+    emit_batch,
+    _load_capture_config,
+    capture_mode,
+    DEFAULT_CAPTURE,
+)
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION, migrate
@@ -335,8 +341,38 @@ def cmd_plane_doctor(args) -> int:
             finally:
                 conn.close()
         try:
-            _load_capture_config(root)
-            rung(True, "capture config", "valid or absent (default: metadata)")
+            # Report the mode IN FORCE, not the shipped default. Every other
+            # rung here states live state; this one named a constant, so it
+            # was informative exactly when the setting did not matter
+            # (unconfigured) and uninformative exactly when it did. Resolved
+            # through `capture_mode` — the ONE rule the recorder and the view
+            # also resolve through — never re-derived here.
+            modes = _load_capture_config(root)
+            host_mode = capture_mode(modes, None)
+            differing = sorted(
+                f"{fleet}={mode}"
+                for fleet, mode in modes.items()
+                if fleet != "*" and mode != host_mode
+            )
+            if not modes:
+                detail = (
+                    f'{host_mode} (shipped default) — opt out per fleet or '
+                    f'host-wide with {{"*": "metadata"}}'
+                )
+            elif "*" in modes:
+                kind = (
+                    "host-wide opt-out"
+                    if host_mode != DEFAULT_CAPTURE
+                    else "host-wide"
+                )
+                detail = f"{host_mode} ({kind})"
+            else:
+                detail = f"{host_mode} (shipped default)"
+            if differing:
+                detail += (
+                    f" · {len(differing)} fleet(s) differ: {', '.join(differing)}"
+                )
+            rung(True, "capture config", detail)
         except ContractViolation as exc:
             errors = getattr(exc, "errors", None)
             rung(False, "capture config", str(errors[0] if errors else exc))

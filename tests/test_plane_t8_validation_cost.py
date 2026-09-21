@@ -15,6 +15,14 @@ from claudlobby.plane.emit_api import CaptureConfigError, emit
 from claudlobby.plane.ids import mint_work_item_id
 
 
+def _opt_out_metadata(root: Path) -> None:
+    """The explicit `{"*": "metadata"}` opt-out. Since 2026-09-20 the shipped
+    default is `full`, so a test that needs capture to TRANSFORM a request must
+    say so: an unconfigured root no longer strips anything."""
+    (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    (root / "state" / "plane" / "capture.json").write_text('{"*": "metadata"}')
+
+
 def _counting_validate(monkeypatch):
     calls = {"n": 0}
     real = emit_api.validate_request
@@ -72,6 +80,7 @@ def test_metadata_task_without_content_validates_once(tmp_path, monkeypatch):
 
 
 def test_transformed_task_still_validates_twice(tmp_path, monkeypatch):
+    _opt_out_metadata(tmp_path)
     calls = _counting_validate(monkeypatch)
     emit(tmp_path, _task(summary="dropped by metadata mode"))
     assert calls["n"] == 2, "a capture-changed request validates its stored form"
@@ -80,6 +89,23 @@ def test_transformed_task_still_validates_twice(tmp_path, monkeypatch):
         "SELECT detail FROM events WHERE kind='task'").fetchone()[0]
     conn.close()
     assert detail is None or "dropped by" not in detail
+
+
+def test_default_full_task_validates_once_because_capture_changes_nothing(
+    tmp_path, monkeypatch
+):
+    """The shipped default's cost profile (2026-09-20): under `full` a task's
+    authored summary is kept, so capture returns the INPUT OBJECT ITSELF and
+    the second validation pass is skipped — the T8 identity contract paying off
+    on what is now the common path, not the exceptional one."""
+    calls = _counting_validate(monkeypatch)
+    emit(tmp_path, _task(summary="kept by the default"))
+    assert calls["n"] == 1
+    conn = connect(db_path(tmp_path))
+    detail = conn.execute(
+        "SELECT detail FROM events WHERE kind='task'").fetchone()[0]
+    conn.close()
+    assert detail is not None and "kept by the default" in detail
 
 
 # --- the finding-3 semantics the optimization must NOT move -----------------
@@ -104,7 +130,8 @@ def test_broken_capture_config_still_raises_before_any_db(tmp_path):
 
 
 def test_metadata_comm_still_drops_body_with_proof(tmp_path):
-    emit(tmp_path, {**_comm(body="secret"), "fleet": "unarmed"})
+    _opt_out_metadata(tmp_path)
+    emit(tmp_path, {**_comm(body="secret"), "fleet": "opted-out"})
     conn = connect(db_path(tmp_path))
     row = conn.execute(
         "SELECT body, body_sha256, privacy FROM communications").fetchone()

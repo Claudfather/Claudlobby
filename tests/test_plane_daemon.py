@@ -319,10 +319,16 @@ def test_lifecycle_events_recorded(tmp_path: Path):
     assert (subj["subject_kind"], subj["subject_uid"]) == ("host", host)
 
 
-def test_unarmed_root_drops_body_with_proof_triple(tmp_path: Path):
+def test_opted_out_root_drops_body_with_proof_triple(tmp_path: Path):
     """Transport never changes semantics: the daemon path applies the SAME
-    capture policy the CLI applies — no capture.json means metadata mode,
-    body dropped at the door, proof triple retained."""
+    capture policy the CLI applies. Proven on the STRIPPING side, which is the
+    half with a mechanism to get wrong — an explicit `{"*": "metadata"}` opt-out
+    drops the body at the door and retains the proof triple. (The default side
+    is `test_unconfigured_root_keeps_the_body_through_the_daemon` below; since
+    2026-09-20 the shipped default is `full`, so an unconfigured root no longer
+    exercises the stripper at all.)"""
+    (tmp_path / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "metadata"}')
     sdir = _short_sock_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
@@ -344,6 +350,33 @@ def test_unarmed_root_drops_body_with_proof_triple(tmp_path: Path):
         conn.close()
         assert row["body"] is None and row["privacy"] == "metadata"
         assert row["body_sha256"] and row["body_bytes"] > 0
+    finally:
+        daemon.stop()
+        t.join(timeout=10)
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+def test_unconfigured_root_keeps_the_body_through_the_daemon(tmp_path: Path):
+    """The other half of the same property: with no capture.json the daemon
+    stores the body, exactly as the CLI does under the shipped default."""
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
+    t = threading.Thread(
+        target=lambda: daemon.serve(install_signals=False), daemon=True
+    )
+    t.start()
+    for _ in range(200):
+        if sock.exists():
+            break
+        time.sleep(0.02)
+    try:
+        resp = send_batch(sock, [_comm("a", body="secret content")])
+        assert resp["ok"] is True
+        conn = connect(db_path(tmp_path))
+        row = conn.execute("SELECT body, privacy FROM communications").fetchone()
+        conn.close()
+        assert row["privacy"] == "full" and row["body"] == "secret content"
     finally:
         daemon.stop()
         t.join(timeout=10)
