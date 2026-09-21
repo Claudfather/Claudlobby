@@ -25,6 +25,7 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
+import pytest
 
 
 from claudlobby.commands.core import cmd_warm_cache
@@ -225,3 +226,13 @@ class TestCheckNpxCacheRefusesRatherThanGuessing:
             f"rc={r.returncode} — 0 would clear reload-fleet's debounce on a "
             f"probe that could not answer; stderr={r.stderr!r}"
         )
+
+
+@pytest.fixture(autouse=True)
+def _equip_grammar(fleet_dir):
+    """This module drives composition/warm-cache, which load the shared
+    grammar through `mcp_grammar` -- and that door REFUSES rather than
+    falling back, so the real file has to be under the fixture's lib/."""
+    from tests.conftest import equip_grammar
+
+    equip_grammar(fleet_dir)
