@@ -711,3 +711,40 @@ def test_declared_bot_conf_block_still_names_projects_yaml(fleet_dir):
     fleet = _load(fleet_dir)
     conf = compose_bot_conf(fleet.bots["lead"], fleet, _paths(fleet_dir))
     assert "# Projects (projects.yaml)" in conf
+
+
+def test_no_declared_repo_is_ever_dropped_from_the_derivation(fleet_dir):
+    """The qualified form of one repo can be the literal short name of
+    another, so a naive `claims[key] = repo` drops a declared repo with
+    nothing said. Every repo gets exactly one key, and every key is a slug
+    the shipped gates accept — an ugly key is visible, a missing row is a
+    silent hole in the closure ladder."""
+    from claudlobby.validator import _PROJECT_KEY_RE
+
+    _write_fleet(
+        fleet_dir,
+        _with_scope(
+            _with_scope(
+                MINIMAL_FLEET_YAML, "lead", "acme", ["storefront", "acme-storefront"]
+            ),
+            "worker-1", "zenith", ["storefront"],
+        ),
+    )
+    fleet = _load(fleet_dir)
+    declared = {"acme/storefront", "acme/acme-storefront", "zenith/storefront"}
+    derived = {r for p in fleet.projects.values() for r in p.repos}
+    assert derived == declared, f"lost {declared - derived}"
+    assert len(fleet.projects) == len(declared), "two repos share one key"
+    for key in fleet.projects:
+        assert _PROJECT_KEY_RE.match(key), f"unusable derived key {key!r}"
+
+
+def test_a_repo_name_of_pure_punctuation_still_gets_a_usable_key(fleet_dir):
+    from claudlobby.validator import _PROJECT_KEY_RE
+
+    _write_fleet(fleet_dir, _with_scope(MINIMAL_FLEET_YAML, "lead", "acme", ['"---"']))
+    fleet = _load(fleet_dir)
+    assert len(fleet.projects) == 1, fleet.projects
+    (key,) = fleet.projects
+    assert _PROJECT_KEY_RE.match(key), key
+    assert fleet.projects[key].repos == ["acme/---"]

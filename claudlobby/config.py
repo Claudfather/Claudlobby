@@ -427,16 +427,33 @@ def derive_projects(bots: dict[str, "BotConfig"]) -> dict[str, ProjectConfig]:
     # ('tl-enterprises' and 'other-tl-enterprises') reads as if the first owns
     # the plain name, which is exactly the ambiguity the qualification exists
     # to remove.
-    by_slug: dict[str, list[str]] = {}
+    by_short: dict[str, list[str]] = {}
     for repo, slug in wanted.items():
-        by_slug.setdefault(slug, []).append(repo)
+        by_short.setdefault(slug, []).append(repo)
 
+    # EVERY repo gets exactly one key. The candidates run most-readable first
+    # and end in a numeric tie-break, because the qualified form of one repo
+    # can be the literal name of another (`acme/storefront` qualifies to
+    # `acme-storefront`, which is also the short slug of `acme/acme-storefront`)
+    # — and a dict write on a colliding key drops a declared repo with nothing
+    # said. An ugly key is visible; a missing row is a silent hole in the
+    # closure ladder, which is the failure this whole function exists to avoid.
     claims: dict[str, str] = {}
-    for slug, repos in by_slug.items():
-        for repo in repos:
-            key = slug if len(repos) == 1 else _slugify_repo_part(repo)
-            if key:
-                claims[key] = repo
+    for repo in sorted(wanted):
+        short = wanted[repo]
+        qualified = _slugify_repo_part(repo)
+        contested = len(by_short.get(short, ())) > 1
+        candidates = [] if (contested or not short) else [short]
+        if qualified and qualified not in candidates:
+            candidates.append(qualified)
+        key = next((c for c in candidates if c not in claims), None)
+        if key is None:
+            base = qualified or short or _DERIVED_SLUG_PREFIX.rstrip("-")
+            n = 2
+            while f"{base}-{n}" in claims:
+                n += 1
+            key = f"{base}-{n}"
+        claims[key] = repo
 
     return {
         slug: ProjectConfig(
