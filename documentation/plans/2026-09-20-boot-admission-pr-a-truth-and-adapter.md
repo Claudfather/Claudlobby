@@ -1,8 +1,9 @@
 ---
 title: PR A — the boot policy truth, the renderer boundary, the supervisor adapter
 type: plan
-status: draft
-date: 2026-09-20
+status: completed
+created: 2026-09-20
+owner: claudlobby maintainers
 epic: documentation/plans/2026-09-20-boot-admission-plan.md
 spec: documentation/plans/2026-09-20-boot-admission-and-supervision-consolidation-design.md
 issue: "#1573"
