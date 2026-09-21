@@ -859,3 +859,221 @@ class TestAnchorTaxonomyAdmitsBinding:
         assert result["unanchored"] == []
         assert result["stale"] == []
         assert prs.NO_SHA_ANCHOR not in result["flags"]
+
+
+# ---------------------------------------------------------------------------
+# #1699 — render() had no --attribute awareness, so it advised re-running with a
+# flag the invocation had already used, and named that remedy even for rows no
+# flag can ever reach.
+#
+# Provenance. Verdict TEXT is real per this file's rule (REAL_BLOCK /
+# REAL_APPROVE_HEADER, already declared above). The instants below are stated
+# individually because only some are real, and a block that implied all of them
+# were would be the kind of coverage claim this suite exists to refuse:
+#   REAL_EPOCH          measured on this host, SELECT MIN(occurred_at) FROM events
+#                       -> 2026-09-20T13:41:06-04:00. The F18 clean epoch, #1444.
+#   PRE_EPOCH_BLOCK     real, Claudlobby#1160's own first verdict instant
+#   PRE_EPOCH_APPROVE   real, Claudlobby#1160, 67s later
+#   IN_EPOCH_BLOCK      real, Claudlobby#1160's newest verdict
+#   IN_EPOCH_APPROVE    CONSTRUCTED. #1160 carries no second in-epoch verdict, so
+#                       the all-in-epoch arm has no real pair to draw on.
+#   the two 2026-09-20T1[56] instants in the lexical-divergence test are also
+#                       CONSTRUCTED: they must sit between the epoch's lexical and
+#                       itsUTC value, which no real verdict happens to do.
+# ---------------------------------------------------------------------------
+
+REAL_EPOCH = "2026-09-20T13:41:06-04:00"
+PRE_EPOCH_BLOCK = "2026-08-10T19:47:19Z"
+PRE_EPOCH_APPROVE = "2026-08-10T19:48:26Z"
+IN_EPOCH_BLOCK = "2026-09-21T16:40:47Z"
+IN_EPOCH_APPROVE = "2026-09-21T17:10:02Z"
+
+
+def _unattributed(instants):
+    """A payload whose verdicts are a disagreeing, unattributable sequence."""
+    bodies = [REAL_BLOCK, REAL_APPROVE_HEADER]
+    return _payload([("reviews", ts, bodies[i % 2]) for i, ts in enumerate(instants)],
+                    number=1160)
+
+
+def _advice(instants, attribution):
+    r = prs.assess_pr(_unattributed(instants), attribution=attribution)
+    assert prs.UNATTRIBUTED in r["flags"], "fixture did not produce the flag it tests"
+    return prs.attribution_advice(r["attribution"])
+
+
+class TestAttributionAdviceKnowsWhetherAttributionRan:
+
+    def test_advice_stays_live_when_attribution_was_not_attempted(self):
+        out = _advice([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE],
+                      {"state": prs.ATTR_NOT_ATTEMPTED})
+        assert "Re-run with --attribute" in out
+
+    def test_the_repro_attribute_ran_so_the_advice_never_says_rerun(self):
+        """#1699's exact defect: the flag is right there in the command line."""
+        for attribution in (
+            {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH},
+            {"state": prs.ATTR_UNREACHABLE, "error": "no plane db"},
+            {"state": prs.ATTR_ATTEMPTED, "epoch": None, "error": "unreadable"},
+        ):
+            assert "Re-run with --attribute" not in _advice(
+                [PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE], attribution)
+
+    def test_all_pre_epoch_says_permanent_and_names_the_boundary(self):
+        out = _advice([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE],
+                      {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
+        assert "PERMANENTLY UNATTRIBUTABLE" in out
+        assert REAL_EPOCH in out and "#1444" in out
+
+    def test_all_in_epoch_is_a_missing_report_not_an_impossible_one(self):
+        out = _advice([IN_EPOCH_BLOCK, IN_EPOCH_APPROVE],
+                      {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
+        assert "PERMANENTLY" not in out
+        assert "no citing report" in out and "INSIDE the plane's epoch" in out
+
+    def test_a_straddling_pr_names_both_counts(self):
+        """Claudlobby#1160's real shape — and why this counts instead of a bool.
+        An all-or-nothing test reports this PR as merely unresolved and loses the
+        permanence fact for the rows that actually have it."""
+        out = _advice([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE, IN_EPOCH_BLOCK],
+                      {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
+        assert out.startswith("MIXED: 2 of 3")
+        assert "the other 1 verdict(s)" in out
+
+    def test_unreachable_is_not_an_empty_answer(self):
+        out = _advice([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE],
+                      {"state": prs.ATTR_UNREACHABLE, "error": "no plane db at /x"})
+        assert "UNKNOWN" in out and "no plane db at /x" in out
+        assert "PERMANENTLY" not in out
+
+    def test_an_unreadable_epoch_never_claims_permanence(self):
+        """The over-claim #1699 is about, one level up: permanence asserted from an
+        instrument that could not be read."""
+        out = _advice([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE],
+                      {"state": prs.ATTR_ATTEMPTED, "epoch": None, "error": "boom"})
+        assert "PERMANENTLY" not in out and "cannot be determined" in out
+
+    def test_render_actually_uses_the_advice_for_the_state_it_was_given(self):
+        """Drives render(), the DOOR — not attribution_advice() directly.
+
+        The first version of this class asserted only on the helper, so reverting
+        render's call to it left all 16 tests green: the claim ("the advice is
+        state-aware") exceeded what the tests exercised ("the helper computes a
+        state-aware string"). Caught by mutation, not by reading, one day after
+        capturing that exact shape to the vault. Both directions are pinned,
+        because a render() hardcoded to either string passes a one-armed test."""
+        pre = prs.assess_pr(_unattributed([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE]),
+                            attribution={"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
+        out = prs.render([pre], False)
+        assert "PERMANENTLY UNATTRIBUTABLE" in out
+        assert "Re-run with --attribute" not in out
+
+        none = prs.assess_pr(_unattributed([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE]),
+                             attribution={"state": prs.ATTR_NOT_ATTEMPTED})
+        out = prs.render([none], False)
+        assert "Re-run with --attribute" in out
+        assert "PERMANENTLY" not in out
+
+    def test_the_four_states_share_no_string(self):
+        """dara's explicit requirement: an unattempted attribution and an
+        impossible one need opposite responses, so they must not read alike."""
+        pair = [PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE]
+        outs = [
+            _advice(pair, {"state": prs.ATTR_NOT_ATTEMPTED}),
+            _advice(pair, {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH}),
+            _advice([IN_EPOCH_BLOCK, IN_EPOCH_APPROVE],
+                    {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH}),
+            _advice(pair, {"state": prs.ATTR_UNREACHABLE, "error": "e"}),
+        ]
+        assert len(set(outs)) == 4
+
+
+class TestEpochComparisonIsParsedNotLexical:
+
+    def test_mixed_offset_forms_compare_correctly(self):
+        """The plane stamps -04:00 and +00:00; GitHub hands back Z. A lexical
+        compare of those is right only by accident of the date digits."""
+        assert prs.parse_instant("2026-09-20T17:41:06Z") == prs.parse_instant(REAL_EPOCH)
+        assert prs.parse_instant("2026-09-20T17:40:00Z") < prs.parse_instant(REAL_EPOCH)
+
+    def test_lexical_comparison_would_miss_a_genuinely_pre_epoch_verdict(self):
+        """The boundary is the one place this comparison is load-bearing, and the
+        divergence is real rather than theoretical. REAL_EPOCH is stamped
+        -04:00, so it is 17:41:06Z. A verdict at 15:00Z is genuinely BEFORE it —
+        permanently unattributable — while comparing LEXICALLY it sorts after,
+        because '15' > '13'. Lexical therefore fails in the direction that loses
+        the permanence fact, which is the whole point of the flag."""
+        before = ["2026-09-20T15:00:00Z", "2026-09-20T16:30:00Z"]
+        for ts in before:                              # lexically after, and wrongly
+            assert ts > REAL_EPOCH
+            assert prs.parse_instant(ts) < prs.parse_instant(REAL_EPOCH)
+        out = _advice(before, {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
+        assert "PERMANENTLY UNATTRIBUTABLE" in out
+
+    def test_a_truthy_but_unparseable_epoch_is_not_a_boundary(self):
+        """#1709 review (vera). `if not epoch` catches a FALSY epoch and not a
+        truthy one that is not an instant, so an unparseable string sailed past
+        the guard into "INSIDE the plane's epoch" and printed itself verbatim as
+        though it were a timestamp — the over-claim this module exists to refuse,
+        reached through a different door than the one #1699 named."""
+        out = _advice([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE],
+                      {"state": prs.ATTR_ATTEMPTED,
+                       "epoch": "not-a-valid-timestamp-at-all"})
+        assert "INSIDE the plane's epoch" not in out
+        assert "not-a-valid-timestamp-at-all" not in out.split("(")[0]
+        assert "cannot be determined" in out
+
+    def test_the_epoch_FIELD_is_nulled_not_just_the_local(self):
+        """The fix direction, pinned at the level it was made. Nulling only the
+        local would leave the raw string in the dict for every other consumer —
+        --json included — and the advice guard would still sail past it."""
+        info = prs.attribution_state(
+            [{"ts": PRE_EPOCH_BLOCK}],
+            {"state": prs.ATTR_ATTEMPTED, "epoch": "not-a-valid-timestamp-at-all"})
+        assert info["epoch"] is None
+        assert "not an instant" in info["error"]
+
+    def test_a_real_epoch_is_left_alone_by_that_guard(self):
+        """The positive control: the null must not fire on a good epoch, or the
+        permanence branch becomes unreachable and every row reads as unknown."""
+        info = prs.attribution_state([{"ts": PRE_EPOCH_BLOCK}],
+                                     {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
+        assert info["epoch"] == REAL_EPOCH and info["error"] is None
+        assert info["pre_epoch"] == 1
+
+    def test_an_undated_verdict_is_counted_in_neither(self):
+        info = prs.attribution_state(
+            [{"ts": PRE_EPOCH_BLOCK}, {"ts": "not-a-date"}],
+            {"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
+        assert info["pre_epoch"] == 1 and info["undated"] == 1 and info["total"] == 2
+
+
+class TestPlaneEpochIsDerivedNotPinned:
+
+    def test_epoch_comes_from_the_db(self):
+        class _Conn:
+            def execute(self, sql):
+                assert "MIN(occurred_at)" in sql
+                return type("R", (), {"fetchone": lambda s: ("2026-01-02T03:04:05Z",)})()
+            def close(self): pass
+        module = type("M", (), {"_readers": staticmethod(
+            lambda: type("P", (), {"connect": staticmethod(lambda r: _Conn())})())})
+        epoch, err = prs.plane_epoch("/anywhere", module=module)
+        assert epoch == "2026-01-02T03:04:05Z" and err is None
+
+    def test_an_unreachable_plane_is_a_reason_never_an_epoch(self):
+        def _boom():
+            raise RuntimeError("no plane db")
+        module = type("M", (), {"_readers": staticmethod(_boom)})
+        epoch, err = prs.plane_epoch("/anywhere", module=module)
+        assert epoch is None and "no plane db" in err
+
+    def test_an_empty_plane_is_a_reason_never_a_null_epoch(self):
+        class _Conn:
+            def execute(self, sql):
+                return type("R", (), {"fetchone": lambda s: (None,)})()
+            def close(self): pass
+        module = type("M", (), {"_readers": staticmethod(
+            lambda: type("P", (), {"connect": staticmethod(lambda r: _Conn())})())})
+        epoch, err = prs.plane_epoch("/anywhere", module=module)
+        assert epoch is None and "no events" in err
