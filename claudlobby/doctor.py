@@ -959,10 +959,12 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     report = DoctorReport()
     # Resolved ONCE for the three rungs that ask the same question (#1680):
     # ignition_doors goes through the switch cascade, which shells out to
-    # lib/env-tiers.sh. On failure this falls back to None rather than
-    # guarding here — check_ignition then resolves for itself and raises at
-    # the rung it has always raised at, so a broken resolver does not cost
-    # the operator the rungs that would have printed above it.
+    # lib/env-tiers.sh. Falling back to None rather than guarding here keeps
+    # the HOIST itself from becoming a new failure point — where a resolver
+    # failure surfaces is then whatever it is on main. Deliberately not a
+    # claim about WHICH rung that is: on a fleet with a leaf manager
+    # `check_fleet_validation` runs first and re-resolves inside validate(),
+    # so it would land there rather than at `check_ignition`.
     try:
         from .ignition import ignition_doors
 

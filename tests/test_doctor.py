@@ -942,6 +942,37 @@ def _declare_projects(root: Path) -> None:
     )
 
 
+def _pin_plugin_manifest(tmp_path: Path, monkeypatch, fleet) -> None:
+    """Make `Path.home()` a FIXTURE fact rather than a HOST fact.
+
+    `run_doctor`'s first rung runs the whole validator, whose plugins check
+    resolves `Path.home() / ".claude" / "plugins" / "installed_plugins.json"`
+    — so on a box that has never installed a plugin, `fleet-yaml` warns about
+    the developer's own machine. `fleet-yaml` is a COUNT rung: it aggregates
+    every `validate()` warning and cannot say what any of them is about, so
+    that host fact is indistinguishable from a real finding and lands in the
+    allowlist test below as a phantom. Green here, red on a fresh box or a
+    runner — which is the whole failure this file's tripwire exists to catch,
+    turned on the tripwire itself.
+
+    Mirrors `tests/test_validator.py::_fake_installed`, the convention this
+    repo already has for exactly this boundary. The installed set is DERIVED
+    from what the fleet actually requires rather than hardcoded, so a change
+    to the default plugin set cannot silently reopen this.
+    """
+    import json
+
+    fake_home = tmp_path / "fakehome"
+    plugins_dir = fake_home / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    (plugins_dir / "installed_plugins.json").write_text(
+        json.dumps(
+            {"plugins": {name: {"version": "0.0.0"} for name in fleet.plugins.required}}
+        )
+    )
+    monkeypatch.setenv("HOME", str(fake_home))
+
+
 def _doctor_rungs(tmp_path, monkeypatch, fleet_yaml: str, *, projects: bool = False):
     """Run the WHOLE `run_doctor` and return its checks keyed by rung name."""
     root = _doctor_root(tmp_path, fleet_yaml)
@@ -949,6 +980,7 @@ def _doctor_rungs(tmp_path, monkeypatch, fleet_yaml: str, *, projects: bool = Fa
         _declare_projects(root)
     monkeypatch.delenv("FLEET_NAME", raising=False)
     fleet, _md = load_fleet(root / "fleet.yaml")
+    _pin_plugin_manifest(tmp_path, monkeypatch, fleet)
     report = run_doctor(fleet, Paths(root=root, fleet_dir=root))
     return {c.name: c for c in report.checks}
 

@@ -42,6 +42,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one fleet. `ignition.ignition_warning_tail` owns where it goes: BEFORE
   `Cheapest to arm:`, never after, because a sentence trailing a
   copy-pasteable config line gets read as part of the line.
+- **The manager-less tripwire's verdict is a fixture fact, not a host fact.**
+  `run_doctor`'s first rung runs the whole validator, whose plugins check
+  resolves `Path.home()/.claude/plugins/installed_plugins.json` — so on a box
+  that has never installed a plugin the `fleet-yaml` COUNT rung warns about
+  the developer's own machine. A count rung cannot say what it is about, so
+  that host fact is indistinguishable from a real finding and lands in the
+  allowlist as a phantom: green locally, red on a runner. The fixture now
+  pins a fake `HOME` with a manifest DERIVED from the fleet's own required
+  plugins (the `tests/test_validator.py::_fake_installed` convention), so a
+  change to the default plugin set cannot silently reopen it. Fixed at the
+  fixture rather than by adding `fleet-yaml` to the allowlist — the allowlist
+  has to stay a list someone must deliberately edit, which only holds if the
+  fixture is the deterministic boundary.
 - **The two test fixtures ASSERT their wiring is live rather than trusting a
   guard (#1689).** Both helpers wire the repo's real `lib/` behind
   `if not (…/"lib").exists()`, and a fixture that created that path as a plain
