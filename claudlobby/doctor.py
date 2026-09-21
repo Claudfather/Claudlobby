@@ -777,7 +777,12 @@ def check_switches(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
     report.add("switches", "pass", _sw.summary_line(rows))
 
 
-def check_ignition(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+def check_ignition(
+    fleet: FleetConfig,
+    paths: Paths,
+    report: DoctorReport,
+    doors: list | None = None,
+) -> None:
     """The composite question #1633 exists for: does ANYTHING give an idle
     bot on this fleet a turn?
 
@@ -792,12 +797,16 @@ def check_ignition(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
     claiming a narrower guarantee than "armed" sounds like.
 
     Never a failure, and a WARN only when idle turns are actually in play —
-    a fleet with no leaf manager has no idle-manager beat to miss in the
-    first place, so it PASSes on that fact alone.
-    """
-    from .ignition import ignition_doors
+    see :func:`ignition.ignition_gap` for why a manager-less fleet PASSes on
+    that fact alone, and `TestIgnitionGapIsTheRungsOwnPredicate` for the pin
+    that keeps this ladder and that predicate answering alike.
 
-    doors = ignition_doors(fleet, paths)
+    ``doors`` is passed by :func:`run_doctor`, which resolves them once for
+    every rung that asks — see :func:`ignition.ignition_gap`.
+    """
+    from .ignition import ignition_doors, ignition_warning_tail
+
+    doors = ignition_doors(fleet, paths) if doors is None else doors
     armed = [d for d in doors if d.armed]
     if armed:
         report.add(
@@ -820,7 +829,15 @@ def check_ignition(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
         "warn",
         f"0/{len(doors)} door(s) armed — nothing gives an idle bot a turn "
         "(declared state; an armed-but-unenrolled door reads differently — "
-        "see #839/#1040). Cheapest to arm: " + cheapest.arm_line,
+        "see #839/#1040)."
+        # A leaf manager exists on this path, and doctor's goal-binding rung
+        # warns for ANY leaf manager with no projects (its own plain line
+        # covers the bot the check-in is not composed onto), so `not
+        # fleet.projects` is exactly that rung's condition here. `validate`
+        # has no such line and so asks a narrower question — #1680.
+        + ignition_warning_tail(
+            cheapest.arm_line, goal_binding_warns=not fleet.projects
+        ),
     )
 
 
@@ -846,7 +863,10 @@ def check_fleet_validation(
 
 
 def check_goal_binding(
-    fleet: FleetConfig, paths: Paths, report: DoctorReport
+    fleet: FleetConfig,
+    paths: Paths,
+    report: DoctorReport,
+    doors: list | None = None,
 ) -> None:
     """Whether this fleet is bound to a goal it can actually dispatch against.
 
@@ -855,10 +875,11 @@ def check_goal_binding(
     a count is not a thing an operator can act on. Calls the validator's
     helper — one definition, so the two surfaces cannot drift.
     """
+    from .ignition import NO_DOOR_CO_REQUISITE, ignition_gap
     from .validator import ValidationReport, _validate_goal_binding
 
     sub = ValidationReport()
-    _validate_goal_binding(fleet, paths, sub)
+    _validate_goal_binding(fleet, paths, sub, doors=doors)
     if sub.warnings:
         report.add(
             "goal-binding",
@@ -868,12 +889,25 @@ def check_goal_binding(
         return
 
     if not fleet.projects:
-        report.add(
-            "goal-binding",
-            "warn",
+        # The applicability gate adopted from `check_ignition` (#1680) —
+        # rationale beside the conjunct itself, in `ignition.ignition_gap`.
+        # Without it the two rungs printed a WARN and a PASS about one
+        # question, each internally consistent, which is how it survived.
+        if not fleet.leaf_manager_bots():
+            report.add(
+                "goal-binding",
+                "pass",
+                "no leaf manager on this fleet — nothing dispatches, so no "
+                "project registry applies",
+            )
+            return
+        detail = (
             "no projects: neither a projects.yaml nor any bot's scope.repos — "
-            "nothing to dispatch against",
+            "nothing to dispatch against"
         )
+        if ignition_gap(fleet, paths, doors):
+            detail += NO_DOOR_CO_REQUISITE
+        report.add("goal-binding", "warn", detail)
         return
 
     source = "derived from scope.repos" if fleet.projects_derived else "projects.yaml"
@@ -893,10 +927,22 @@ def check_goal_binding(
 def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     """Run all doctor checks and return the report."""
     report = DoctorReport()
+    # Resolved ONCE for the three rungs that ask the same question (#1680):
+    # ignition_doors goes through the switch cascade, which shells out to
+    # lib/env-tiers.sh. On failure this falls back to None rather than
+    # guarding here — check_ignition then resolves for itself and raises at
+    # the rung it has always raised at, so a broken resolver does not cost
+    # the operator the rungs that would have printed above it.
+    try:
+        from .ignition import ignition_doors
+
+        doors = ignition_doors(fleet, paths)
+    except Exception:  # noqa: BLE001 — a health command never crashes early
+        doors = None
     check_fleet_validation(fleet, paths, report)
-    check_goal_binding(fleet, paths, report)
+    check_goal_binding(fleet, paths, report, doors=doors)
     check_switches(fleet, paths, report)
-    check_ignition(fleet, paths, report)
+    check_ignition(fleet, paths, report, doors=doors)
     check_env_vars(fleet, paths, report)
     check_mcp_configs(fleet, paths, report)
     check_npx_cache(paths, report)

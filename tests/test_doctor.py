@@ -820,6 +820,115 @@ class TestGoalBindingCheck:
         report = run_doctor(fleet, self._paths(fleet_dir))
         names = [c.name for c in report.checks]
         assert "goal-binding" in names, names
+# --- shared doctor-fleet scaffolding (#1680) ---------------------------------
+# Module-level functions rather than methods reached by instantiating a sibling
+# test class: three classes below share this scaffold, and cross-class
+# instantiation makes a signature change reach them through call sites nobody
+# greps for. `tests/conftest.py` already houses exactly this pattern as plain
+# functions.
+
+_BRIEFING_SLOT = (
+    "      briefing:\n"
+    "        slots:\n"
+    '          morning: "*-*-* 08:30:00"\n'
+)
+
+#: Drops the leaf-manager role's default `checkin` protocol, which is what
+#: decides WHICH no-projects warning an operator sees.
+_NO_CHECKIN = "  system_defaults:\n    protocols: false\n"
+
+
+def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = True) -> str:
+    """A fleet manifest varying only the three facts #1680's rungs read.
+
+    Written at zero indent: these strings are assembled by concatenation and
+    a dedent-relative literal makes every slot depend on the literal's own
+    leading whitespace.
+    """
+    briefing = _BRIEFING_SLOT if armed else ""
+    if not manager:
+        return (
+            "fleet:\n"
+            "  name: solo-fleet\n"
+            "  service_prefix: com.solo\n"
+            "  bots:\n"
+            "    worker:\n"
+            "      expertise: [software-engineering]\n" + briefing
+        )
+    return (
+        "fleet:\n"
+        "  name: mgr-fleet\n"
+        "  service_prefix: com.mgr\n"
+        + ("" if equipped else _NO_CHECKIN)
+        + "  teams:\n"
+        "    eng:\n"
+        "      manager: lead\n"
+        "      workers: [worker]\n"
+        "  bots:\n"
+        "    lead:\n"
+        "      expertise: [orchestration]\n"
+        "      manages: [worker]\n"
+        + briefing
+        + "    worker:\n"
+        "      expertise: [software-engineering]\n"
+    )
+
+
+def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
+    """A throwaway fleet root complete enough for the WHOLE `run_doctor`.
+
+    Wires the repo's real `lib/` rather than stubbing the resolver: task-recheck
+    ships opt-out (on by default), so a resolver-unavailable fallback reads it
+    as ARMED and every disarmed scenario in this file silently collapses to
+    PASS. The `.env` then disarms it so "no door armed" is reachable at all.
+    """
+    from claudlobby.config import DEFAULT_GUARDRAILS
+
+    root = tmp_path / "r"
+    for kind in (
+        "expertise",
+        "mcp",
+        "integrations",
+        "guardrails",
+        "protocols",
+        "skills",
+        "resources",
+        "lessons",
+    ):
+        (root / "library" / kind).mkdir(parents=True, exist_ok=True)
+    (root / "templates").mkdir(exist_ok=True)
+    (root / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
+    if not (root / "lib").exists():
+        (root / "lib").symlink_to(REPO / "lib")
+    (root / "library" / "expertise" / "orchestration.md").write_text("# Mgr\n")
+    (root / "library" / "expertise" / "software-engineering.md").write_text("# Eng\n")
+    for name in DEFAULT_GUARDRAILS:
+        (root / "library" / "guardrails" / f"{name}.md").write_text(
+            f"---\ntitle: {name}\n---\n\nDefault guardrail.\n"
+        )
+    (root / "templates" / "claude.md.j2").write_text("# {{ bot.name }}\n")
+    (root / "fleet.yaml").write_text(dedent(fleet_yaml))
+    (root / ".env").write_text("TASK_RECHECK_ENABLED=0\n")
+    return root
+
+
+def _declare_projects(root: Path) -> None:
+    (root / "projects.yaml").write_text(
+        "projects:\n  shop:\n    title: Shop\n    repos: [acme/storefront]\n"
+    )
+
+
+def _doctor_rungs(tmp_path, monkeypatch, fleet_yaml: str, *, projects: bool = False):
+    """Run the WHOLE `run_doctor` and return its checks keyed by rung name."""
+    root = _doctor_root(tmp_path, fleet_yaml)
+    if projects:
+        _declare_projects(root)
+    monkeypatch.delenv("FLEET_NAME", raising=False)
+    fleet, _md = load_fleet(root / "fleet.yaml")
+    report = run_doctor(fleet, Paths(root=root, fleet_dir=root))
+    return {c.name: c for c in report.checks}
+
+
 class TestCheckIgnition:
     """#1633: does anything give an idle bot on this fleet a turn?
 
@@ -857,19 +966,8 @@ class TestCheckIgnition:
               expertise: [software-engineering]
     """
 
-    def _root(self, tmp_path: Path, fleet_yaml: str) -> Path:
-        root = tmp_path / "r"
-        root.mkdir(parents=True, exist_ok=True)
-        if not (root / "lib").exists():
-            (root / "lib").symlink_to(REPO / "lib")
-        (root / "fleet.yaml").write_text(dedent(fleet_yaml))
-        # task-recheck ships opt-out — disarm it so "no door armed" is
-        # actually reachable rather than permanently masked by the default.
-        (root / ".env").write_text("TASK_RECHECK_ENABLED=0\n")
-        return root
-
     def _check(self, tmp_path, fleet_yaml: str):
-        root = self._root(tmp_path, fleet_yaml)
+        root = _doctor_root(tmp_path, fleet_yaml)
         fleet, _md = load_fleet(root / "fleet.yaml")
         paths = Paths(root=root, fleet_dir=root)
         report = DoctorReport()
@@ -895,3 +993,182 @@ class TestCheckIgnition:
         check = self._check(tmp_path, self._FLEET_NO_DOOR)
         assert "declared" in check.detail.lower()
         assert "839" in check.detail or "1040" in check.detail
+
+
+
+class TestRungAgreementOnAManagerLessFleet:
+    """#1680: `goal-binding` and `ignition` are two halves of one question —
+    will this fleet ever do any work? — and they were built in parallel
+    without seeing each other. On a fleet with no leaf manager they printed a
+    WARN and a PASS about it: the ignition rung gated on
+    `fleet.leaf_manager_bots()` and the goal-binding rung did not.
+
+    Everything here runs the WHOLE `run_doctor`, never the two checks in
+    isolation. The divergence survived review precisely because each function
+    was internally consistent — what has to be pinned is the report an
+    operator actually reads, so that a rung added later lands inside the
+    test's field of view rather than beside it.
+    """
+
+    def test_both_rungs_pass_and_give_the_same_not_applicable_reason(
+        self, tmp_path, monkeypatch
+    ):
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(manager=False))
+        # Fail closed: a renamed or dropped rung must break this test rather
+        # than make it vacuously true.
+        assert {"goal-binding", "ignition"} <= set(by_name), sorted(by_name)
+        for name in ("goal-binding", "ignition"):
+            assert by_name[name].status == "pass", by_name[name].detail
+            assert "no leaf manager" in by_name[name].detail, by_name[name].detail
+
+    def test_no_new_rung_warns_about_work_this_fleet_cannot_dispatch(
+        self, tmp_path, monkeypatch
+    ):
+        """The tripwire the acceptance criterion asks for.
+
+        A fleet with no leaf manager has no dispatcher, so no rung may report
+        a *work-dispatch* gap on it as a finding. `services` is the one
+        legitimate warning on this fixture — bots exist and are not enrolled,
+        which is true and unrelated. Any OTHER rung warning here is either
+        the #1680 divergence rebuilt or a deliberate new finding; both need a
+        human to look, which is what an allowlist that must be edited buys.
+        """
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(manager=False))
+        warned = {n for n, c in by_name.items() if c.status in ("warn", "fail")}
+        assert warned <= {"services"}, {n: by_name[n].detail for n in warned}
+
+    def test_a_manager_less_fleet_with_projects_still_reports_them(
+        self, tmp_path, monkeypatch
+    ):
+        """The gate replaces the no-projects WARN only. A manager-less fleet
+        that HAS declared projects keeps its informative PASS — the gate is
+        an applicability test, not a mute button."""
+        by_name = _doctor_rungs(
+            tmp_path, monkeypatch, _fleet_yaml(manager=False), projects=True
+        )
+        goal = by_name["goal-binding"]
+        assert goal.status == "pass", goal.detail
+        assert "1 project(s)" in goal.detail
+
+
+class TestCoRequisiteCrossReference:
+    """#1680 finding 2: on a fleet with a leaf manager, no projects and no
+    armed door, BOTH rungs fire and they are not redundant — one says there
+    is nothing to dispatch AT, the other that there is nothing to dispatch
+    WITH. Arming a door on a fleet with no project registry still cannot
+    dispatch, and declaring projects with no door armed still never fires.
+
+    Two warnings is therefore the correct output; what was missing is that
+    neither said so. A first-timer who fixes one still sees the other and may
+    reasonably conclude their first fix did not work — and the cheapest wrong
+    response to that is to undo it.
+    """
+
+    # --- both conditions hold: each names the other -------------------------
+
+    def test_both_warn_and_each_names_the_other_as_a_co_requisite(
+        self, tmp_path, monkeypatch
+    ):
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml())
+        goal, ign = by_name["goal-binding"], by_name["ignition"]
+        assert goal.status == "warn", goal.detail
+        assert ign.status == "warn", ign.detail
+        assert "ignition warning beside this one" in goal.detail, goal.detail
+        assert "goal-binding warning beside this one" in ign.detail, ign.detail
+        assert "co-requisite, not a duplicate" in goal.detail
+        assert "co-requisite, not a duplicate" in ign.detail
+
+    def test_the_cross_reference_reaches_the_un_equipped_manager_wording_too(
+        self, tmp_path, monkeypatch
+    ):
+        """Two different warnings carry the no-projects finding — the
+        validator's check-in-equipped one (which doctor renders verbatim) and
+        doctor's own plain `no projects` line, reached when the leaf manager
+        is NOT check-in-equipped. Both need the clause, or which wording an
+        operator happens to land on decides whether they are told."""
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(equipped=False))
+        goal = by_name["goal-binding"]
+        assert goal.status == "warn", goal.detail
+        assert "no projects: neither a projects.yaml" in goal.detail, goal.detail
+        assert "check-in-equipped" not in goal.detail, (
+            "precondition: this fleet must reach doctor's OWN no-projects "
+            "line, or the test measures the validator's wording twice"
+        )
+        assert "ignition warning beside this one" in goal.detail, goal.detail
+
+    # --- only one condition holds: no clause --------------------------------
+
+    def test_no_clause_on_goal_binding_when_a_door_is_armed(
+        self, tmp_path, monkeypatch
+    ):
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(armed=True))
+        goal, ign = by_name["goal-binding"], by_name["ignition"]
+        assert ign.status == "pass", ign.detail
+        assert goal.status == "warn", goal.detail
+        assert "ignition warning beside this one" not in goal.detail, goal.detail
+
+    def test_no_clause_on_doctor_s_own_no_projects_line_when_a_door_is_armed(
+        self, tmp_path, monkeypatch
+    ):
+        """The sibling of the test above, on the OTHER goal-binding wording.
+        Without it, making doctor's own clause unconditional is a mutation the
+        suite does not catch: the equipped fixture never reaches that line, so
+        every negative was being measured on the validator's text."""
+        by_name = _doctor_rungs(
+            tmp_path, monkeypatch, _fleet_yaml(armed=True, equipped=False)
+        )
+        goal, ign = by_name["goal-binding"], by_name["ignition"]
+        assert ign.status == "pass", ign.detail
+        assert goal.status == "warn", goal.detail
+        assert "no projects: neither a projects.yaml" in goal.detail, goal.detail
+        assert "ignition warning beside this one" not in goal.detail, goal.detail
+
+    def test_no_clause_on_ignition_when_projects_are_declared(
+        self, tmp_path, monkeypatch
+    ):
+        by_name = _doctor_rungs(
+            tmp_path, monkeypatch, _fleet_yaml(), projects=True
+        )
+        goal, ign = by_name["goal-binding"], by_name["ignition"]
+        assert goal.status == "pass", goal.detail
+        assert ign.status == "warn", ign.detail
+        assert "goal-binding warning beside this one" not in ign.detail, ign.detail
+
+    def test_the_ignition_clause_does_not_swallow_the_arm_line(
+        self, tmp_path, monkeypatch
+    ):
+        """The clause is inserted BEFORE `Cheapest to arm:`, not appended
+        after it — a sentence trailing a copy-pasteable config line is the one
+        place it gets read as part of the line. `ignition_warning_tail` owns
+        that order for both surfaces."""
+        detail = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml())["ignition"].detail
+        assert detail.index("co-requisite") < detail.index("Cheapest to arm:")
+        assert detail.rstrip().endswith("generate + lib/setup-fleet"), detail
+
+
+class TestIgnitionGapIsTheRungsOwnPredicate:
+    """`ignition_gap` is what the goal-binding warnings ask before claiming
+    the ignition warning is also speaking. A clause asserting that when it is
+    not speaking is worse than no clause, so the predicate and the rung are
+    pinned equal across the shapes that separate them — otherwise the two
+    drift and the first sign is an operator chasing a warning that is not
+    there."""
+
+    @pytest.mark.parametrize(
+        "armed,manager",
+        [(False, True), (True, True), (False, False), (True, False)],
+    )
+    def test_the_predicate_agrees_with_the_rung(
+        self, tmp_path, monkeypatch, armed, manager
+    ):
+        from claudlobby.ignition import ignition_gap
+
+        root = _doctor_root(tmp_path, _fleet_yaml(manager=manager, armed=armed))
+        monkeypatch.delenv("FLEET_NAME", raising=False)
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        paths = Paths(root=root, fleet_dir=root)
+        report = DoctorReport()
+        check_ignition(fleet, paths, report)
+        rung_warns = report.checks[0].status == "warn"
+        assert rung_warns is (not armed and manager), report.checks[0].detail
+        assert ignition_gap(fleet, paths) is rung_warns, report.checks[0].detail

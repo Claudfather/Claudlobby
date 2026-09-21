@@ -22,6 +22,62 @@ def _make_paths(root: Path) -> Paths:
     return Paths(root=root, fleet_dir=None)
 
 
+def _ignition_warnings(report) -> list[str]:
+    return [w for w in report.warnings if "ignition door is armed" in w]
+
+
+def _goal_binding_warnings(report) -> list[str]:
+    return [w for w in report.warnings if "check-in-equipped" in w]
+
+
+def _arm_briefing(text: str) -> str:
+    """Give the fixture's `lead` a briefing slot — one armed ignition door."""
+    armed = text.replace(
+        "    lead:\n      expertise: [orchestration]\n",
+        "    lead:\n      expertise: [orchestration]\n"
+        "      briefing:\n"
+        "        slots:\n"
+        '          morning: "*-*-* 08:30:00"\n',
+    )
+    assert armed != text, "replace() no-opped — the fixture's indentation moved"
+    return armed
+
+
+def _validate_with_real_resolver(
+    fleet_dir, monkeypatch, *, env_text: str = "TASK_RECHECK_ENABLED=0\n"
+):
+    """`validate()` with the repo's REAL `lib/` wired (#1633/#1680).
+
+    task-recheck ships opt-out, so a resolver-unavailable fallback reads it as
+    ARMED and every disarmed ignition case collapses to silence; the `.env`
+    then disarms it so "no door armed" is reachable at all. Returns
+    ``(report, fleet)``.
+    """
+    monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+    monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+    monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+    if not (fleet_dir / "lib").exists():
+        (fleet_dir / "lib").symlink_to(REPO / "lib")
+    (fleet_dir / ".env").write_text(env_text)
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    return validate(fleet, _make_paths(fleet_dir)), fleet
+
+
+def _with_fleet_key(text: str, block: str) -> str:
+    """Insert a fleet-level mapping key into the shared fixture manifest.
+
+    Anchored on `  teams:` rather than appended after `    model: opus`, which
+    is the idiom this file used to carry: inserting there puts the new key
+    BETWEEN `defaults:` and its own `guardrails:`/`protocols:` entries, so
+    YAML re-parents them onto the new key and `defaults` silently loses them
+    (measured: `defaults -> {'model': 'opus'}`,
+    `system_defaults -> {'enabled': False, 'guardrails': [...], 'protocols': [...]}`).
+    """
+    anchor = "  teams:\n"
+    assert text.count(anchor) == 1, "the fixture manifest's teams: block moved"
+    return text.replace(anchor, block + anchor)
+
+
 class TestValidate:
     def test_valid_fleet_no_errors(self, fleet_dir, monkeypatch):
         monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
@@ -2458,56 +2514,28 @@ class TestIgnitionValidation:
     test_switches.py / test_doctor.py pattern) so "off" is reachable at all.
     """
 
-    def _env_patch(self, monkeypatch):
-        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
-        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
-        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-
-    def _report(self, fleet_dir, *, env_text="TASK_RECHECK_ENABLED=0\n"):
-        if not (fleet_dir / "lib").exists():
-            fleet_dir_lib = fleet_dir / "lib"
-            fleet_dir_lib.symlink_to(REPO / "lib")
-        (fleet_dir / ".env").write_text(env_text)
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        return validate(fleet, _make_paths(fleet_dir)), fleet
-
-    def _ignition_warnings(self, report):
-        return [w for w in report.warnings if "ignition door is armed" in w]
-
     def test_ignition_warns_when_a_leaf_manager_fleet_has_no_armed_door(
         self, fleet_dir, monkeypatch
     ):
-        self._env_patch(monkeypatch)
-        report, _fleet = self._report(fleet_dir)
-        ignition = self._ignition_warnings(report)
+        report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
+        ignition = _ignition_warnings(report)
         assert len(ignition) == 1
         assert "briefing.slots" in ignition[0]
 
     def test_ignition_passes_and_names_the_armed_door_when_briefing_slots_exist(
         self, fleet_dir, monkeypatch
     ):
-        self._env_patch(monkeypatch)
-        yaml_text = (fleet_dir / "fleet.yaml").read_text()
-        yaml_text = yaml_text.replace(
-            "    lead:\n      expertise: [orchestration]\n",
-            "    lead:\n      expertise: [orchestration]\n"
-            "      briefing:\n"
-            "        slots:\n"
-            '          morning: "*-*-* 08:30:00"\n',
+        (fleet_dir / "fleet.yaml").write_text(
+            _arm_briefing((fleet_dir / "fleet.yaml").read_text())
         )
-        assert yaml_text != (fleet_dir / "fleet.yaml").read_text(), (
-            "replace() no-opped — the fixture's indentation moved"
-        )
-        (fleet_dir / "fleet.yaml").write_text(yaml_text)
-        report, _fleet = self._report(fleet_dir)
-        assert not self._ignition_warnings(report)
+        report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
+        assert not _ignition_warnings(report)
 
     def test_ignition_rung_states_it_reads_declared_not_enrolled_state(
         self, fleet_dir, monkeypatch
     ):
-        self._env_patch(monkeypatch)
-        report, _fleet = self._report(fleet_dir)
-        ignition = self._ignition_warnings(report)
+        report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
+        ignition = _ignition_warnings(report)
         assert "declared" in ignition[0].lower()
         assert "839" in ignition[0] or "1040" in ignition[0]
 
@@ -2520,21 +2548,119 @@ class TestIgnitionValidation:
         defaults.jobs entry that timers being off means was never composed)
         and would be wrong here, since briefing.slots/brief.on_start are
         per-bot fields with nothing to do with system-defaults timers."""
-        self._env_patch(monkeypatch)
-        yaml_text = (fleet_dir / "fleet.yaml").read_text()
-        yaml_text = yaml_text.replace(
-            "  defaults:\n    model: opus\n",
-            "  defaults:\n    model: opus\n"
-            "  system_defaults:\n"
-            "    enabled: false\n",
+        (fleet_dir / "fleet.yaml").write_text(
+            _with_fleet_key(
+                (fleet_dir / "fleet.yaml").read_text(),
+                "  system_defaults:\n    enabled: false\n",
+            )
         )
-        assert yaml_text != (fleet_dir / "fleet.yaml").read_text(), (
-            "replace() no-opped — the fixture's indentation moved"
-        )
-        (fleet_dir / "fleet.yaml").write_text(yaml_text)
-        report, fleet = self._report(fleet_dir)
+        report, fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
         assert not (fleet.system_defaults.enabled and fleet.system_defaults.timers), (
             "precondition: this fleet must actually have timers disabled, or "
             "the test proves nothing"
         )
-        assert self._ignition_warnings(report)
+        assert _ignition_warnings(report)
+
+
+class TestGoalBindingAndIgnitionNameEachOther:
+    """#1680 finding 2, at validate() time. Both warnings are emitted here —
+    doctor renders the goal-binding one verbatim — so the clause lives with
+    the text rather than being pasted on by one surface, and `validate` and
+    `doctor` cannot end up telling an operator different things.
+
+    `fleet_dir`'s lead/worker-1 team already makes `lead` a leaf manager and
+    the fixture declares no projects; what varies below is only which of the
+    two conditions is fixed. The repo's real lib/ is wired (the
+    TestIgnitionValidation pattern) because task-recheck ships opt-out and a
+    resolver-unavailable fallback reads it as ARMED, which would collapse
+    every disarmed case here to silence.
+    """
+
+    def _report(self, fleet_dir, monkeypatch):
+        report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
+        return report
+
+    @staticmethod
+    def _goal(report):
+        hits = _goal_binding_warnings(report)
+        assert len(hits) == 1, report.warnings
+        return hits[0]
+
+    @staticmethod
+    def _ignition(report):
+        hits = _ignition_warnings(report)
+        assert len(hits) == 1, report.warnings
+        return hits[0]
+
+    def test_each_warning_names_the_other_when_both_conditions_hold(
+        self, fleet_dir, monkeypatch
+    ):
+        report = self._report(fleet_dir, monkeypatch)
+        assert "ignition warning beside this one" in self._goal(report)
+        assert "goal-binding warning beside this one" in self._ignition(report)
+
+    def test_the_ignition_warning_drops_the_clause_once_projects_are_declared(
+        self, fleet_dir, monkeypatch
+    ):
+        (fleet_dir / "projects.yaml").write_text(
+            "projects:\n  shop:\n    title: Shop\n    repos: [acme/storefront]\n"
+        )
+        report = self._report(fleet_dir, monkeypatch)
+        ignition = self._ignition(report)
+        assert "goal-binding warning beside this one" not in ignition, ignition
+        assert not _goal_binding_warnings(report), (
+            "precondition: declaring projects must silence the goal-binding "
+            "warning, or this measures the wrong fleet shape"
+        )
+
+    def test_the_goal_binding_warning_drops_the_clause_once_a_door_is_armed(
+        self, fleet_dir, monkeypatch
+    ):
+        (fleet_dir / "fleet.yaml").write_text(
+            _arm_briefing((fleet_dir / "fleet.yaml").read_text())
+        )
+        report = self._report(fleet_dir, monkeypatch)
+        goal = self._goal(report)
+        assert "ignition warning beside this one" not in goal, goal
+        assert not _ignition_warnings(report), (
+            "precondition: an armed door must silence the ignition warning, "
+            "or this measures the wrong fleet shape"
+        )
+
+    def test_the_ignition_clause_is_absent_when_no_manager_is_check_in_equipped(
+        self, fleet_dir, monkeypatch
+    ):
+        """The one this suite originally missed, and the reason the condition
+        is a named predicate rather than `not fleet.projects`.
+
+        At validate() time the no-projects finding ALSO requires a
+        check-in-equipped leaf manager. A fleet whose manager is not equipped
+        has no projects and still gets NO goal-binding warning — so an
+        ignition clause keyed on `not fleet.projects` alone sent the operator
+        hunting for a warning that is not in the output. That is the exact
+        failure the cross-reference exists to prevent, inverted.
+
+        Doctor does not have this shape, because `check_goal_binding` carries
+        its own plain no-projects line for precisely this fleet — which is why
+        the doctor-level sibling of this test passed while this one was absent.
+        """
+        (fleet_dir / "fleet.yaml").write_text(
+            _with_fleet_key(
+                (fleet_dir / "fleet.yaml").read_text(),
+                "  system_defaults:\n    protocols: false\n",
+            )
+        )
+        report = self._report(fleet_dir, monkeypatch)
+        assert not _goal_binding_warnings(report), (
+            "precondition: no manager may be check-in-equipped here, or the "
+            "test measures the equipped shape it exists to distinguish from"
+        )
+        ignition = self._ignition(report)
+        assert "goal-binding warning beside this one" not in ignition, ignition
+
+    def test_the_ignition_clause_is_placed_before_the_arm_line(
+        self, fleet_dir, monkeypatch
+    ):
+        ignition = self._ignition(self._report(fleet_dir, monkeypatch))
+        assert ignition.index("co-requisite") < ignition.index("Cheapest to arm:")
+        assert ignition.rstrip().endswith("generate + lib/setup-fleet"), ignition

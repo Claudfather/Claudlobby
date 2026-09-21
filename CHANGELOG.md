@@ -6,6 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the goal-binding and ignition rungs answer one question the same way (#1680)
+
+- **A manager-less fleet got a WARN and a PASS about the same thing.**
+  `check_ignition` gated its finding on `fleet.leaf_manager_bots()` and
+  `check_goal_binding` did not, so a fleet with no dispatcher was told both
+  "nothing to dispatch against" and "no idle-turn beat applies". The
+  goal-binding rung adopts the ignition rung's gate: no leaf manager, no
+  dispatcher, nothing to report. It replaces the **no-projects WARN only** — a
+  manager-less fleet that declared projects keeps its PASS, and the
+  repo-collision and DRAFT-manifest warnings still fire there.
+- **Neither warning said the other was a co-requisite.** On a fleet with a leaf
+  manager, no projects and no armed door both fire, and they are not
+  redundant: one says there is nothing to dispatch AT, the other that there is
+  nothing to dispatch WITH. A first-timer who fixes one still sees the other
+  and may reasonably conclude their first fix did not work — and the cheapest
+  wrong response is to undo it. Each warning now names the other, **only when
+  the other is actually firing**, and NAMES it rather than restating its
+  finding: the phrase that identifies a warning is the phrase its readers
+  select on, so a copy inside the other warning makes the two
+  indistinguishable to anything scanning the list.
+- **The condition is the other warning's own, not a look-alike.** `validate`
+  emits the no-projects finding only for a CHECK-IN-EQUIPPED leaf manager,
+  while `doctor` also has a plain line for one the check-in is not composed
+  onto — so the two surfaces ask different questions even though the clause
+  and its placement are shared. Keying the validator's side on
+  `not fleet.projects` alone printed an ignition warning pointing at a
+  goal-binding warning that was not in the output, which is the failure the
+  cross-reference exists to prevent, inverted. `_checkin_equipped_leaf_managers`
+  is now the one definition both rungs there ask.
+- The clause lives with the warning TEXT, in `validator.py` as well as
+  `doctor.py` — the goal-binding line an operator reads in doctor output is the
+  validator's warning rendered verbatim, so pasting the clause on at the doctor
+  level would have left `validate` and `doctor` saying different things about
+  one fleet. `ignition.ignition_warning_tail` owns where it goes: BEFORE
+  `Cheapest to arm:`, never after, because a sentence trailing a
+  copy-pasteable config line gets read as part of the line.
+- `ignition.ignition_gap()` is the one definition of the condition both
+  ignition warnings fire on, and the goal-binding warnings ask it rather than
+  re-deriving it. It tests the cheap conjunct first and takes an optional
+  resolved door list, so `doctor` and `validate` each resolve the switch
+  cascade exactly as many times as they did before this change (measured: 4
+  and 1, unchanged on all four fleet shapes) rather than paying a subprocess
+  to decide not to append a string.
+
 ### Changed — the plane's capture policy ships as `full` (#1631)
 
 - **Message bodies are recorded by default.** `state/plane/capture.json` is
