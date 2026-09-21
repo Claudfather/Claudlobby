@@ -22,10 +22,14 @@ import subprocess
 from pathlib import Path
 
 LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
-# lib-common.sh unconditionally sources supervisor.sh from its own directory
-# (#1573 task 6) -- the patched copy below needs this sibling staged next to
-# it too, exactly as it already needs lib-common.sh itself.
+# lib-common.sh unconditionally sources supervisor.sh and boot-admission.sh
+# from its own directory (#1573 task 6 and PR B) -- the patched copy below
+# needs both siblings staged next to it, exactly as it already needs
+# lib-common.sh itself.
 SUPERVISOR = Path(__file__).resolve().parent.parent / "lib" / "supervisor.sh"
+BOOT_ADMISSION = (
+    Path(__file__).resolve().parent.parent / "lib" / "boot-admission.sh"
+)
 
 
 def _run(
@@ -69,6 +73,7 @@ def _run(
     patched = tmp_path / "lib-common.sh"
     patched.write_text(LIB_COMMON.read_text().replace("/proc/uptime", str(uptime_file)))
     (tmp_path / "supervisor.sh").write_bytes(SUPERVISOR.read_bytes())
+    (tmp_path / "boot-admission.sh").write_bytes(BOOT_ADMISSION.read_bytes())
 
     env = {
         **os.environ,

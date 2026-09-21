@@ -88,10 +88,12 @@ FAKE_LIB="$MOCK_DIR/lib"
 mkdir -p "$FAKE_LIB"
 ln -s "$MOCK_DIR/dispatch.sh" "$FAKE_LIB/dispatch.sh"
 ln -s "$REPO_DIR/lib/lib-common.sh" "$FAKE_LIB/lib-common.sh"
-# lib-common.sh unconditionally sources supervisor.sh from its own directory
-# (#1573 task 6) -- a fake lib dir standing in for the real one now needs
-# this sibling present too, exactly as it already needs lib-common.sh itself.
+# lib-common.sh unconditionally sources supervisor.sh and boot-admission.sh
+# from its own directory (#1573 task 6 and PR B) -- a fake lib dir standing in
+# for the real one needs both siblings present too, exactly as it already
+# needs lib-common.sh itself.
 ln -s "$REPO_DIR/lib/supervisor.sh" "$FAKE_LIB/supervisor.sh"
+ln -s "$REPO_DIR/lib/boot-admission.sh" "$FAKE_LIB/boot-admission.sh"
 
 # Build a patched copy of dispatch-task.sh that uses our fake LIB_DIR
 PATCHED="$MOCK_DIR/dispatch-task.sh"

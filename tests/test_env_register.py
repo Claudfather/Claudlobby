@@ -38,9 +38,10 @@ def world(tmp_path: Path, monkeypatch):
     for kind in ("mcp", "expertise", "integrations", "skills"):
         (tmp_path / "library" / kind).mkdir(parents=True)
     (tmp_path / "lib").mkdir()
-    # supervisor.sh is a third required sibling: lib-common.sh unconditionally
-    # sources it from its own directory (#1573 task 6).
-    for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
+    # supervisor.sh and boot-admission.sh are required siblings: lib-common.sh
+    # unconditionally sources both from its own directory (#1573 task 6 and
+    # PR B).
+    for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh", "boot-admission.sh"):
         (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "lib" / f).read_bytes())
     (tmp_path / "library" / "expertise" / "x.md").write_text("---\ntitle: x\n---\n# x\n")
     (tmp_path / "library" / "mcp" / "github.json").write_text(

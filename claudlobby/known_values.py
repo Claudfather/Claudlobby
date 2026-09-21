@@ -39,6 +39,32 @@ KNOWN_MODELS: frozenset[str] = frozenset(
 # Claude Code --effort accepts exactly these.
 KNOWN_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "max"})
 
+# ── Boot-path fleet event types ──────────────────────────────────
+# The fleet events lib/boot-admission.sh emits through emit_fleet_event, all
+# with source="start-bot" (#1573, PR B). Registered here because an event type
+# nothing names is one no reader can filter FOR -- and the rows that go missing
+# are exactly the ones a filter cannot return, so the gap is invisible from
+# inside the reader (#903).
+#
+# DELIBERATELY NOT NAMED `FLEET_EVENT_TYPES`. That symbol is #903's own
+# deliverable -- the complete event-type SSOT -- and claudlobby/brief.py keys
+# its standing #903 disclosure on the symbol EXISTING ("so it clears when the
+# SSOT lands and not before"). Defining it here with two of the estate's dozens
+# of event types would retire that disclosure while the defect it discloses is
+# still live: a reader would be told the alert filter is complete when it is
+# not. When #903 ships the real registry, this set folds into it.
+BOOT_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        # A queued bot reached its (dispersed) wait cap and proceeded without a
+        # slot. Payload: queue, slots_held, slots_max, waited_s, priority, rank.
+        "boot_admission_timeout",
+        # The gate could not run at all, or could not key itself on the boot
+        # epoch, and said so rather than proceeding silently. Payload: reason
+        # (state dir unwritable | epoch unresolvable | unit name empty), dir.
+        "boot_admission_unavailable",
+    }
+)
+
 # ── Hook events ──────────────────────────────────────────────────
 # The full authoritative Claude Code hook-event set. Unknown event = silently
 # ignored hook, so this must stay COMPLETE — a missing name false-warns a valid

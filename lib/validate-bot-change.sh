@@ -723,6 +723,7 @@ mkdir -p "$_tesc_lib"
 ln -s "$LIB_DIR/fleet-pulse.sh" "$_tesc_lib/fleet-pulse.sh"
 ln -s "$LIB_DIR/lib-common.sh"  "$_tesc_lib/lib-common.sh"
 ln -s "$LIB_DIR/supervisor.sh"  "$_tesc_lib/supervisor.sh"
+ln -s "$LIB_DIR/boot-admission.sh" "$_tesc_lib/boot-admission.sh"
 val_link_plane_shim "$_tesc_lib"
 _tesc_pages="$ROOT/tesc-pages.log"
 : > "$_tesc_pages"
@@ -1119,6 +1120,7 @@ mkdir -p "$HLIB"
 ln -sf "$LIB_DIR/keepalive.sh" "$HLIB/keepalive.sh"
 ln -sf "$LIB_DIR/lib-common.sh" "$HLIB/lib-common.sh"
 ln -sf "$LIB_DIR/supervisor.sh" "$HLIB/supervisor.sh"
+ln -sf "$LIB_DIR/boot-admission.sh" "$HLIB/boot-admission.sh"
 val_link_plane_shim "$HLIB"
 cat > "$HLIB/start-bot.sh" <<'REC'
 #!/bin/bash
@@ -1413,7 +1415,7 @@ _run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
         > "$RB_DIR/.claude/session.md"
     tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
     sleep 0.3
-    TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 CLAUDE_BIN="$RB_ROOT/bin/claude" \
+    TMPDIR="$RB_ROOT/tmp" CLAUDE_BIN="$RB_ROOT/bin/claude" \
         HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
         "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.$1.out" 2>&1 || true
     sleep 1
@@ -1520,7 +1522,7 @@ printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "
 # their REAL ~/.claude cache, and the #1358 negative control below would then be
 # asserting an absence in a file this harness does not own. Empty, not unset, is
 # the same thing to the ${VAR:-default} the helper uses, and says so explicitly.
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+TMPDIR="$RB_ROOT/tmp" RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
@@ -1562,7 +1564,7 @@ printf '{"plugin:telegram:telegram":{"timestamp":1789912141541,"id":"3eaf116ce58
     > "$RB_HOME/.claude/mcp-needs-auth-cache.json"
 tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+TMPDIR="$RB_ROOT/tmp" RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authcache.out" 2>&1 || true
@@ -1622,7 +1624,7 @@ harness_check "#1358 rc_timeout event carries auth_cache_armed (escalation sees 
 printf 'not json {{{' > "$RB_HOME/.claude/mcp-needs-auth-cache.json"
 tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+TMPDIR="$RB_ROOT/tmp" RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authunknown.out" 2>&1 || true
@@ -1700,7 +1702,7 @@ harness_check "  ...and bot-scoped bridge_state still reads up (the misleading a
 rm -f "$RB_DIR/logs/startup.log"
 tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+TMPDIR="$RB_ROOT/tmp" RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.scope.out" 2>&1 || true
@@ -1740,6 +1742,7 @@ mkdir -p "$_esc_lib"
 ln -s "$LIB_DIR/fleet-pulse.sh" "$_esc_lib/fleet-pulse.sh"
 ln -s "$LIB_DIR/lib-common.sh"  "$_esc_lib/lib-common.sh"
 ln -s "$LIB_DIR/supervisor.sh"  "$_esc_lib/supervisor.sh"
+ln -s "$LIB_DIR/boot-admission.sh" "$_esc_lib/boot-admission.sh"
 val_link_plane_shim "$_esc_lib"
 _esc_pages="$ROOT/esc-pages.log"
 : > "$_esc_pages"
@@ -1833,7 +1836,7 @@ fi
 exec cat
 STUB
 chmod +x "$RB_ROOT/bin/claude"
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=10 CLAUDE_BIN="$RB_ROOT/bin/claude" \
+TMPDIR="$RB_ROOT/tmp" RC_READY_TIMEOUT_S=10 CLAUDE_BIN="$RB_ROOT/bin/claude" \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$MP_DIR" >"$RB_ROOT/startbot.mp.out" 2>&1 || true
 grep -qx 'plugin marketplace add ExampleOrg/example-plugins' "$RB_ROOT/plugin-argv.log" 2>/dev/null && r=yes || r=no
@@ -1866,7 +1869,7 @@ fi
 WR_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-wr.XXXXXX")"
 WR_LIB="$WR_ROOT/lib"
 mkdir -p "$WR_LIB"
-cp "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$LIB_DIR/weekly-worker-restart.sh" "$WR_LIB/"
+cp "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$LIB_DIR/boot-admission.sh" "$LIB_DIR/weekly-worker-restart.sh" "$WR_LIB/"
 val_link_plane_shim "$WR_LIB"
 printf '#!/bin/bash\nexit 0\n' > "$WR_LIB/pre-stop-handoff.sh"
 printf '#!/bin/bash\necho "stub spin-up: $1" >&2\nexit 7\n' > "$WR_LIB/spin-up-bot.sh"
@@ -2965,7 +2968,7 @@ rm -rf "$FS_ROOT"
 # and drives real git credential fill against the real lib/ helper.
 GA_ROOT="$(mktemp -d /tmp/ga-harness.XXXXXX)"
 GA_BIN="$GA_ROOT/bin"; mkdir -p "$GA_BIN" "$GA_ROOT/lib" "$GA_ROOT/home"
-cp "$LIB_DIR/git-credential-github-app" "$LIB_DIR/mint-github-token.sh" "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$GA_ROOT/lib/"
+cp "$LIB_DIR/git-credential-github-app" "$LIB_DIR/mint-github-token.sh" "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$LIB_DIR/boot-admission.sh" "$GA_ROOT/lib/"
 openssl genrsa -out "$GA_ROOT/app-key.pem" 2048 2>/dev/null
 cat > "$GA_BIN/curl" <<'GACURL'
 #!/bin/bash
@@ -3183,7 +3186,7 @@ else
     PL_SOCK="$PL_SOCKDIR/s"
     PL_LIB="$PL_ROOT/lib"
     mkdir -p "$PL_LIB"
-    for _f in dispatch-task.sh lib-common.sh supervisor.sh plane-emit.sh plane-socket-client.py dispatch-supersede-hint.py; do
+    for _f in dispatch-task.sh lib-common.sh supervisor.sh boot-admission.sh plane-emit.sh plane-socket-client.py dispatch-supersede-hint.py; do
         ln -s "$PL_REPO/lib/$_f" "$PL_LIB/$_f"
     done
     printf '#!/bin/bash\nexit 0\n' > "$PL_LIB/dispatch.sh"; chmod +x "$PL_LIB/dispatch.sh"

@@ -3,7 +3,7 @@ carry none of it (#1573, design doc §6.1,
 `.superpowers/sdd/2026-09-20-boot-admission-pr-a-truth-and-adapter/`
 task 2).
 
-`compose_bot_conf` renders each of the six `claudlobby.boot.bot_conf_lines`
+`compose_bot_conf` renders each of the eight `claudlobby.boot.bot_conf_lines`
 keys exactly once with its resolved value, `MCP_TIMEOUT` in the `export`
 form (the one Claude Code itself reads out of the environment); neither
 `compose_systemd_unit` nor `compose_launchd_plist` carries any of it. The
@@ -11,7 +11,12 @@ systemd unit still renders its own `ExecStartPre=/bin/sleep` stagger in this
 PR — retired in a later PR — so that line is deliberately not asserted
 against here, only the `BOOT_`/`MCP_TIMEOUT`/`RC_READY_TIMEOUT_S` shapes.
 
-The six key names are pinned as a literal list here, independent of
+PR B (#1573) adds the last two, `BOOT_HOLD_CEILING_S` and `BOOT_GRACE_S`,
+and changes `BOOT_ADMISSION_SLOTS` to carry `auto` VERBATIM (fork F14) --
+the gate resolves it on the host it runs on, so a fleet composed on one
+machine and delivered to another no longer carries the composer's answer.
+
+The eight key names are pinned as a literal list here, independent of
 `claudlobby.boot`'s own vocabulary, so a rename over there shows up as a
 conformance failure rather than the test quietly following it.
 
@@ -57,6 +62,8 @@ BOOT_KEYS = [
     "MCP_TIMEOUT",
     "RC_READY_TIMEOUT_S",
     "BOOT_PLUGIN_UPDATE_ONCE",
+    "BOOT_HOLD_CEILING_S",
+    "BOOT_GRACE_S",
 ]
 
 # Only MCP_TIMEOUT carries an `export` prefix IN THE FILE (spec §6.1: it is
@@ -115,7 +122,11 @@ def _pin_cpu_count(monkeypatch, count: int) -> None:
 # so the CPU-count pin above still governs its derivation.
 _MOCK_HOST_BOOT = {
     "admission_slots": "auto",
-    "admission_wait_max_s": 777,
+    # Above this 3-bot fixture's own drain at one slot (3 x 263 = 789s), or
+    # F13 refuses it at compose time -- and distinct from the 1200 the
+    # derivation would produce, so the mutant this mock exists to catch (a
+    # composer passing {} instead of load_host_boot()) still shows up.
+    "admission_wait_max_s": 999,
     "mcp_timeout_ms": 123_000,
     "plugin_update_once_per_boot": True,
 }
@@ -149,12 +160,15 @@ class TestBootPolicyInBotConf:
 
     def _expected_values(self, priority: int) -> dict[str, str]:
         return {
-            "BOOT_ADMISSION_SLOTS": "2",  # derive_slots(8), cpu_count pinned below
-            "BOOT_ADMISSION_WAIT_MAX_S": "777",  # _MOCK_HOST_BOOT, not DEFAULTS
+            # F14: the word, not a number -- whatever this host derives.
+            "BOOT_ADMISSION_SLOTS": "auto",
+            "BOOT_ADMISSION_WAIT_MAX_S": "999",  # _MOCK_HOST_BOOT, not derived
             "BOOT_PRIORITY": str(priority),
             "MCP_TIMEOUT": "123000",  # _MOCK_HOST_BOOT, not DEFAULTS
             "RC_READY_TIMEOUT_S": "143",  # max(90, 123000 // 1000 + 20)
             "BOOT_PLUGIN_UPDATE_ONCE": "1",
+            "BOOT_HOLD_CEILING_S": "263",  # 143 + HOLD_CEILING_MARGIN_S
+            "BOOT_GRACE_S": "1142",  # 999 + 143 (F15)
         }
 
     @pytest.mark.parametrize("bot_id,priority", _BOT_IDS_AND_PRIORITY)
@@ -190,18 +204,44 @@ class TestBootPolicyInBotConf:
         assert "export MCP_TIMEOUT=123000" in conf
         assert "\nMCP_TIMEOUT=123000\n" not in conf  # never the bare form
 
-    def test_admission_slots_follows_the_auto_derivation(self, tmp_path, monkeypatch):
-        """A different pinned cpu_count changes BOOT_ADMISSION_SLOTS, proving
-        the composer actually calls through to derive_slots rather than
-        hardcoding a value (claudlobby/boot.py: derive_slots(64) == 4)."""
-        _pin_cpu_count(monkeypatch, 64)
+    @pytest.mark.parametrize("cpu", [4, 64])
+    def test_admission_slots_reaches_bot_conf_as_auto_on_any_host(
+        self, tmp_path, monkeypatch, cpu
+    ):
+        """F14 INVERTED the old contract here, so this says so rather than
+        quietly following it: the composer used to bake derive_slots(cpu) into
+        bot.conf, which meant a fleet composed on one machine and delivered to
+        another carried the composer host's answer. `auto` now reaches the file
+        verbatim and the gate resolves it where it runs -- pinned at two cpu
+        counts, because a value that happened to match on one would not show
+        the difference. tests/test_boot_policy.py keeps the cpu seam itself
+        under test through the DERIVED wait cap, which still consumes it."""
+        _pin_cpu_count(monkeypatch, cpu)
         _mock_host_boot(monkeypatch)
         fleet = _fixture_fleet()
         paths = _fixture_paths(tmp_path)
 
         conf = compose_bot_conf(fleet.bots["lead"], fleet, paths)
 
-        assert _key_line(conf, "BOOT_ADMISSION_SLOTS") == ["BOOT_ADMISSION_SLOTS=4"]
+        assert _key_line(conf, "BOOT_ADMISSION_SLOTS") == ["BOOT_ADMISSION_SLOTS=auto"]
+
+    def test_an_explicit_slot_count_still_renders_the_integer(
+        self, tmp_path, monkeypatch
+    ):
+        """The other half of F14: only `auto` is deferred to the host. A host
+        that names a number means that number, everywhere."""
+        import claudlobby.composer as comp
+
+        _pin_cpu_count(monkeypatch, 64)
+        monkeypatch.setattr(
+            comp, "load_host_boot", lambda: dict(_MOCK_HOST_BOOT, admission_slots=3)
+        )
+        fleet = _fixture_fleet()
+        paths = _fixture_paths(tmp_path)
+
+        conf = compose_bot_conf(fleet.bots["lead"], fleet, paths)
+
+        assert _key_line(conf, "BOOT_ADMISSION_SLOTS") == ["BOOT_ADMISSION_SLOTS=3"]
 
 
 class TestUnitsCarryNoBootPolicy:

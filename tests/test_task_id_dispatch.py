@@ -46,6 +46,7 @@ SHIM_STDERR_RE = re.compile(
 # rather than an error, which is why it is symlinked rather than left out.
 DOOR_FILES = (
     "dispatch-task.sh", "report-back.sh", "lib-common.sh", "supervisor.sh",
+    "boot-admission.sh",
     "plane-emit.sh", "plane-socket-client.py", "plane-lookup.py", "plane-readers.py",
     "dispatch-overdue.py", "dispatch-supersede-hint.py",
 )

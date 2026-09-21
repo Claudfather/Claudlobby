@@ -318,14 +318,22 @@ host:
   # shorter than the MCP startup timeout it waits on) are deliberately
   # absent here -- neither is a knob a host sets directly.
   boot:
-    # How many bots may run their MCP-startup phase at once. `auto` derives
-    # clamp(cpu_count // 4, 1, 4) from the host's own CPU count at compose
-    # time; an explicit integer overrides it outright, on any host.
+    # How many bots may run their MCP-startup phase at once. `auto` is carried
+    # into bot.conf VERBATIM and derived by the admission gate on the host that
+    # runs it -- clamp(cpu_count // 4, 1, 4) -- so a fleet composed on one
+    # machine and delivered to another gets that host own answer, not the
+    # composer one. An explicit integer overrides it outright, on any host.
     admission_slots: auto
-    # Seconds a queued bot waits for an admission slot before giving up and
-    # starting anyway. A gate that could strand a bot forever would be the
-    # failure it replaces, not a fix for it.
-    admission_wait_max_s: 1200
+    # admission_wait_max_s is DELIBERATELY ABSENT. It is the seconds a queued
+    # bot waits for an admission slot before giving up and starting anyway, and
+    # a gate that could strand a bot forever would be the failure it replaces
+    # rather than a fix for it -- but at a flat package default it silently
+    # under-budgeted every host whose drain exceeds it (a four-core host
+    # running 21 bots at one slot drains in 4200s). With no value here the
+    # composer derives max(1200, ceil(bots / slots) x hold_ceiling_s) per
+    # fleet. Set an integer to override outright, or 0 to never wait. An
+    # explicit value SHORTER than the fleet own drain is refused at compose
+    # time, naming both numbers.
     # Milliseconds Claude Code gets to start its MCP servers -- rendered as
     # the exported MCP_TIMEOUT it reads from its own environment. Raising
     # this also raises ready_timeout_s (F3), so the readiness poll is never

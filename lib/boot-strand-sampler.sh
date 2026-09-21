@@ -42,7 +42,7 @@
 #      and a tokenless bridge does not persist as a live process.
 #   2. SERIAL BOOTS. Production strands were observed on one-at-a-time
 #      restarts, which this reproduces; the mass-restart contention path
-#      (BOOT_LOCK held by peers) is not sampled. --load N closes the CPU half
+#      (every admission slot held by peers) is not sampled. --load N closes the CPU half
 #      of that gap and stays pinned — as a RATE AMPLIFIER, which is what makes
 #      a 30-45 min run yield any traced strands at all, NOT because the strand
 #      fails to occur at low load. Read #933's boot-shape table by its strand

@@ -107,6 +107,17 @@ esac
 _SUPERVISOR_LIB_DIR="${_SUPERVISOR_LIB_DIR:-$_LIB_COMMON_DIR}"
 . "$_LIB_COMMON_DIR/supervisor.sh"
 
+# --- Boot admission gate ------------------------------------------------
+# lib/boot-admission.sh: boot_admission_acquire / boot_admission_release /
+# _boot_admission_reap -- N host-derived slots, managers first, a dispersed
+# wait cap and one reaper, REPLACING the #304 host-wide boot lock that used
+# to sit at the top of start-bot.sh (#1573 boot admission, PR B). Sourced
+# here, immediately after supervisor.sh and through the same forkless idiom,
+# because it reads $_OS and svc_unit_name -- the one owner of a bot unit
+# label -- and must have both in scope before its first call. The file
+# defines functions and constants only; nothing runs at source time.
+. "$_LIB_COMMON_DIR/boot-admission.sh"
+
 # --- tmux binary resolution -------------------------------------------------
 
 _TMUX_BIN="${TMUX_BIN:-}"
@@ -4173,12 +4184,24 @@ service_is_active() {
 # back and nothing says so, the manufactured all-clear shape (#933), strictly
 # worse than the false positives this predicate exists to remove.
 #
-# Budgeted against ONE PHASE, not the whole boot, which is why the composed boot
-# stagger cannot eat it (see the age read below): the ExecStart phase is bounded
-# by start-bot.sh's own RC_READY_TIMEOUT_S (90s default), so 300s is >3x headroom
-# and stays correct however long the host ladder grows. Matches the 300s default
-# the bridge grace already uses. Override per-bot with KEEPALIVE_BOOT_GRACE_S
-# (documented in documentation/environment-variables.md).
+# THE PHASE BOUND MOVED IN PR B (#1573) AND THIS NUMBER IS NO LONGER THE ONE TO
+# READ. It used to be budgeted against ONE PHASE: the ExecStart phase was bounded
+# by start-bot.sh's own RC_READY_TIMEOUT_S (90s default), so 300s was >3x
+# headroom. The admission gate moved the host-wide WAIT inside ExecStart, so that
+# phase is now bounded by the admission cap PLUS the readiness ceiling, and a
+# queued bot can legitimately sit there far longer than 300s. The composed
+# BOOT_GRACE_S is that sum, derived once in claudlobby/boot.py
+# (admission_wait_max_s + ready_timeout_s, F15) and rendered into bot.conf.
+#
+# What survives is the value below as the FALLBACK for an un-regenerated bot.conf
+# that predates the key -- exactly the shape F4 locks for RC_READY_TIMEOUT_S --
+# and the KEEPALIVE_BOOT_GRACE_S override.
+#
+# The #933 manufactured-all-clear bound is KEPT, NOT WIDENED, and it is now
+# carried by LIVENESS rather than by time: the .boot-queued marker names its
+# launcher pid, and a dead launcher stops suppressing within one reaper poll
+# (lib/boot-admission.sh). That is a TIGHTER bound than any amount of mtime,
+# and it covers the SIGKILL case the old comment could not cover at all.
 _BOOT_GRACE_S_DEFAULT=300
 
 # service_is_starting <bot_service>

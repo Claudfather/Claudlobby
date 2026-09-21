@@ -147,7 +147,8 @@ def test_record_help_prints_the_whole_header(tmp_path):
 # --- the REAL spine: the row lands in a scratch plane -----------------------------
 
 REAL_DOOR_FILES = ("checkin-record.sh", "checkin-contract.py", "lib-common.sh",
-                   "supervisor.sh", "plane-emit.sh", "plane-socket-client.py")
+                   "supervisor.sh", "boot-admission.sh", "plane-emit.sh",
+                   "plane-socket-client.py")
 
 
 def _real_rig(tmp_path: Path) -> tuple[Path, dict]:

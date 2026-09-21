@@ -23,9 +23,13 @@ on, so raising `mcp_timeout_ms` alone still leaves the poll enough room --
 `RC_READY_TIMEOUT_S`, the existing env var, as the carrier: an
 un-regenerated `bot.conf` still has a value to fall back on.
 
-This module defines the truth and nothing else. Wiring `resolve_boot_policy`
-into the composer, and the admission gate that reads `bot_conf_lines`'
-output back out in `start-bot.sh`, are later tasks.
+PR B adds the two DERIVED keys the admission gate needs (`hold_ceiling_s`,
+`boot_grace_s`), turns `admission_wait_max_s` into a derivation of the fleet's
+own drain when `host.boot` does not name one (fork F13), and stops resolving
+`admission_slots: auto` at compose time (fork F14) -- the gate resolves it on
+the host it runs on, with the same clamp, so a fleet composed on one machine
+and delivered to another gets that host's answer rather than the composer's.
+`lib/boot-admission.sh` is the reader.
 """
 
 from __future__ import annotations
@@ -37,12 +41,19 @@ from .config import BotConfig, FleetConfig
 
 @dataclass(frozen=True)
 class BootPolicy:
-    admission_slots: int
+    # `auto` stays the literal string all the way into bot.conf (fork F14): the
+    # gate derives it on the HOST it runs on, with the same clamp
+    # `derive_slots` applies, so a fleet composed on one machine and delivered
+    # to another resolves to that host's own answer rather than carrying the
+    # composer's. An explicit integer renders as itself.
+    admission_slots: int | str
     admission_wait_max_s: int
     priority: int  # 0 = manager, 1 = worker
     mcp_timeout_ms: int
     ready_timeout_s: int  # derived: max(READY_TIMEOUT_FLOOR_S, mcp_timeout_ms // 1000 + 20)
     plugin_update_once_per_boot: bool
+    hold_ceiling_s: int  # derived: ready_timeout_s + HOLD_CEILING_MARGIN_S
+    boot_grace_s: int  # derived: admission_wait_max_s + ready_timeout_s (F15)
 
 
 # The readiness ceiling's floor (F3/F4). `resolve_boot_policy` never derives
@@ -57,13 +68,42 @@ class BootPolicy:
 READY_TIMEOUT_FLOOR_S = 90
 
 
+# The margin between a bot's readiness ceiling and the admission gate's hold
+# ceiling -- how long a slot may be held before the reaper reclaims it whatever
+# its holder's pid says. NOT a new guess: it is the margin
+# `lib/rolling-restart.sh:86-104` already derives and enumerates
+# ("pre-stop-handoff, spin-up, the tmux session spawn, and the poller's own
+# settle"), so the gate's hold ceiling and the restart drivers' per-bot budget
+# are the same number by construction rather than two derivations of one
+# boot-timing truth. `lib/boot-admission.sh` names READY_TIMEOUT_FLOOR_S + this
+# (90 + 120 = 210) by hand as its un-regenerated-bot.conf fallback, the same way
+# `lib/start-bot.sh` names the readiness floor twice -- bash cannot import a
+# Python constant.
+HOLD_CEILING_MARGIN_S = 120
+
+
+# The floor under the DERIVED admission wait cap (F13). This is the flat value
+# `host.boot.admission_wait_max_s` used to carry as a package default, kept as
+# a FLOOR so the derivation can only ever RAISE the cap above what the estate
+# already ships with -- a small fleet on a fast host must not end up waiting
+# LESS than every fleet did before the derivation existed.
+ADMISSION_WAIT_FLOOR_S = 1200
+
+
 # host.boot keys and their package-tier defaults (claudlobby/system.yaml).
-# `priority` and `ready_timeout_s` are deliberately absent: the first comes
-# from fleet topology (fleet.manager_bots()), the second is always derived
-# (F3) -- neither is a knob a host.boot block can hold.
+# `priority`, `ready_timeout_s`, `hold_ceiling_s` and `boot_grace_s` are
+# deliberately absent: the first comes from fleet topology
+# (fleet.manager_bots()) and the other three are always derived (F3, F15) --
+# none is a knob a host.boot block can hold.
+#
+# `admission_wait_max_s` is absent for a DIFFERENT reason (F13): it has no
+# package-tier constant at all any more. Left at a flat 1200 it silently
+# under-budgeted every host whose drain exceeds it -- a four-core host running
+# 21 bots at one slot drains in 4200s -- so when `host.boot` does not name it,
+# `resolve_boot_policy` derives it from the fleet's own drain. An explicit
+# integer still wins outright, and an explicit 0 still means "never wait".
 DEFAULTS = {
     "admission_slots": "auto",
-    "admission_wait_max_s": 1200,
     "mcp_timeout_ms": 180_000,
     "plugin_update_once_per_boot": True,
 }
@@ -150,10 +190,16 @@ def resolve_boot_policy(
     """Compute one bot's BootPolicy from the package `host.boot` block.
 
     `host_boot` is `{}` when the host declares no overrides, in which case
-    every field but `priority` and `ready_timeout_s` takes its DEFAULTS
-    value. `cpu_count` is injected rather than read here (`os.cpu_count()`
-    is the production caller's job) so resolution stays a pure function of
-    its arguments and tests never depend on the machine they run on.
+    every configurable field takes its DEFAULTS value and every derived one
+    (`priority`, `ready_timeout_s`, `hold_ceiling_s`, `boot_grace_s`, and --
+    since F13 -- `admission_wait_max_s`) is computed. `cpu_count` is injected
+    rather than read here (`os.cpu_count()` is the production caller's job) so
+    resolution stays a pure function of its arguments and tests never depend
+    on the machine they run on.
+
+    Raises `ValueError` when an EXPLICIT `admission_wait_max_s` is shorter
+    than the fleet's own drain -- a cap that cannot outlast the queue it caps
+    is a misconfiguration the composer can see and the operator cannot.
     """
     # The slot count's floor is 1, not 0, and that is its own rule (spec §8):
     # with a cap of 0 no slot can ever be created, so every bot queues for
@@ -161,19 +207,20 @@ def resolve_boot_policy(
     # floored at 1 by derive_slots; an explicit value is floored here.
     slots_raw = host_boot.get("admission_slots", DEFAULTS["admission_slots"])
     if slots_raw == "auto":
-        admission_slots = derive_slots(cpu_count)
+        # F14: `auto` is rendered VERBATIM and resolved by the gate on the host
+        # it runs on. `slots_effective` is only the composer's own estimate,
+        # used for the drain arithmetic below -- never rendered.
+        admission_slots: int | str = "auto"
+        slots_effective = derive_slots(cpu_count)
     else:
         admission_slots = _coerce_int(
             "admission_slots", slots_raw, minimum=1, or_literal="'auto'"
         )
+        slots_effective = admission_slots
 
-    # A wait cap of 0 is legal ("never wait"), so these two keep the generic
-    # non-negative rule.
-    admission_wait_max_s = _coerce_int(
-        "admission_wait_max_s",
-        host_boot.get("admission_wait_max_s", DEFAULTS["admission_wait_max_s"]),
-        minimum=0,
-    )
+    # A timeout of 0 is legal here (it is Claude Code's own MCP_TIMEOUT), so
+    # this keeps the generic non-negative rule rather than the slot count's
+    # floor of 1.
     mcp_timeout_ms = _coerce_int(
         "mcp_timeout_ms",
         host_boot.get("mcp_timeout_ms", DEFAULTS["mcp_timeout_ms"]),
@@ -188,6 +235,46 @@ def resolve_boot_policy(
 
     priority = 0 if bot.bot_id in fleet.manager_bots() else 1
     ready_timeout_s = max(READY_TIMEOUT_FLOOR_S, mcp_timeout_ms // 1000 + 20)
+    hold_ceiling_s = ready_timeout_s + HOLD_CEILING_MARGIN_S
+
+    # F13. The drain is what the cap has to survive: `ceil(bots / slots)` rounds
+    # of a whole hold, where the hold is the WHOLE bring-up -- seeding, the
+    # plugin block, the session spawn and the readiness poll -- i.e. the hold
+    # ceiling, not the readiness ceiling.
+    #
+    # `bots_in_fleet` is a FLOOR on the host's real bot count, not that count:
+    # the composer sees ONE fleet at a time and several fleets share a host, so
+    # a two-fleet host drains slower than this arithmetic says. The per-ticket
+    # dispersion in the gate (`effective_cap = cap + arrival_rank x
+    # (ready_timeout_s / slots)`) is what covers the other fleets' share --
+    # ranks keep climbing across fleets because the queue is host-wide.
+    bots_in_fleet = max(1, len(fleet.bots))
+    fleet_drain_s = -(-bots_in_fleet // max(1, slots_effective)) * hold_ceiling_s
+
+    if "admission_wait_max_s" in host_boot:
+        admission_wait_max_s = _coerce_int(
+            "admission_wait_max_s", host_boot["admission_wait_max_s"], minimum=0
+        )
+        # 0 is the one legal value BELOW the drain: it means "never wait", an
+        # explicit choice to proceed ungated rather than an under-budget.
+        if 0 < admission_wait_max_s < fleet_drain_s:
+            raise ValueError(
+                "host.boot.admission_wait_max_s "
+                f"({admission_wait_max_s}s) is shorter than this fleet's own "
+                f"drain ({fleet_drain_s}s = ceil({bots_in_fleet} bots / "
+                f"{slots_effective} slot(s)) x {hold_ceiling_s}s hold ceiling), "
+                "so every queued bot would time out before its turn came. Raise "
+                "it, raise admission_slots, or set it to 0 to never wait."
+            )
+    else:
+        admission_wait_max_s = max(ADMISSION_WAIT_FLOOR_S, fleet_drain_s)
+
+    # F15. The keepalive/fleet-pulse boot grace has to outlast the phase it
+    # brackets, and PR B moved the host-wide wait INSIDE that phase: a queued
+    # bot is legitimately mid-ExecStart for its whole admission wait and then
+    # its whole readiness poll. Derived from the two values it must agree with
+    # rather than set beside them.
+    boot_grace_s = admission_wait_max_s + ready_timeout_s
 
     return BootPolicy(
         admission_slots=admission_slots,
@@ -196,6 +283,8 @@ def resolve_boot_policy(
         mcp_timeout_ms=mcp_timeout_ms,
         ready_timeout_s=ready_timeout_s,
         plugin_update_once_per_boot=plugin_update_once_per_boot,
+        hold_ceiling_s=hold_ceiling_s,
+        boot_grace_s=boot_grace_s,
     )
 
 
@@ -207,6 +296,16 @@ def bot_conf_lines(policy: BootPolicy) -> list[str]:
     (`start-bot.sh`'s admission gate, readiness poll, and plugin-update-once
     stamp) and stay plain shell assignments, sourced under `set -a` same as
     everything else in `bot.conf` but with no export of their own to shadow.
+
+    `BOOT_ADMISSION_SLOTS` renders `auto` verbatim when that is what the host
+    declared (F14) -- `lib/boot-admission.sh` resolves it with the same clamp
+    `derive_slots` applies and writes the resolved count once per boot, so
+    every waiter on the host agrees.
+
+    `BOOT_HOLD_CEILING_S` and `BOOT_GRACE_S` are the two derived keys PR B
+    adds: the first is the gate's reaper ceiling, the second is the
+    keepalive/fleet-pulse boot grace, whose phase bound moved when the
+    host-wide wait moved inside `ExecStart` (F15).
     """
     return [
         f"BOOT_ADMISSION_SLOTS={policy.admission_slots}",
@@ -215,4 +314,6 @@ def bot_conf_lines(policy: BootPolicy) -> list[str]:
         f"export MCP_TIMEOUT={policy.mcp_timeout_ms}",
         f"RC_READY_TIMEOUT_S={policy.ready_timeout_s}",
         f"BOOT_PLUGIN_UPDATE_ONCE={1 if policy.plugin_update_once_per_boot else 0}",
+        f"BOOT_HOLD_CEILING_S={policy.hold_ceiling_s}",
+        f"BOOT_GRACE_S={policy.boot_grace_s}",
     ]

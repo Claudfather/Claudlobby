@@ -12,17 +12,29 @@ Covers:
   0) while admission_wait_max_s: 0 stays legal ("never wait")
 - plugin_update_once_per_boot read from an exact spelling set, never by
   truthiness (a quoted "false" is off); unreadable values refused
-- bot_conf_lines' fixed six-line render, MCP_TIMEOUT the only export
+- bot_conf_lines' fixed eight-line render, MCP_TIMEOUT the only export
 - load_host_boot() reading the package system.yaml (the loader + the
   package defaults, wired together)
+- PR B (#1573): admission_slots: auto rendered VERBATIM (F14) and the bash
+  gate's own clamp agreeing with derive_slots on the same cpu counts;
+  admission_wait_max_s DERIVED from the fleet's drain when host.boot names
+  none, an explicit value winning, an explicit value SHORTER than the drain
+  refused, an explicit 0 still legal (F13); hold_ceiling_s and boot_grace_s
+  (F15)
 """
 
 from __future__ import annotations
 
 import pytest
 
+import shutil
+import subprocess
+from pathlib import Path
+
 from claudlobby.boot import (
+    ADMISSION_WAIT_FLOOR_S,
     DEFAULTS,
+    HOLD_CEILING_MARGIN_S,
     BootPolicy,
     bot_conf_lines,
     derive_slots,
@@ -51,19 +63,20 @@ def test_defaults_with_empty_host_block():
     fleet = _lead_worker_fleet()
     policy = resolve_boot_policy(fleet.bots["worker"], fleet, {}, cpu_count=8)
     assert policy == BootPolicy(
-        admission_slots=2,  # derive_slots(8)
-        admission_wait_max_s=1200,
+        admission_slots="auto",  # F14: rendered verbatim, resolved on the host
+        admission_wait_max_s=1200,  # max(1200, ceil(2/2) x 320) -- the floor wins
         priority=1,
         mcp_timeout_ms=180_000,
         ready_timeout_s=200,
         plugin_update_once_per_boot=True,
+        hold_ceiling_s=320,  # 200 + 120
+        boot_grace_s=1400,  # 1200 + 200 (R6d)
     )
 
 
 def test_defaults_dict_matches_the_documented_shape():
     assert DEFAULTS == {
         "admission_slots": "auto",
-        "admission_wait_max_s": 1200,
         "mcp_timeout_ms": 180_000,
         "plugin_update_once_per_boot": True,
     }
@@ -210,7 +223,7 @@ def test_quoted_false_is_off_not_truthy():
         fleet.bots["worker"], fleet, {"plugin_update_once_per_boot": "false"}
     )
     assert policy.plugin_update_once_per_boot is False
-    assert bot_conf_lines(policy)[-1] == "BOOT_PLUGIN_UPDATE_ONCE=0"
+    assert "BOOT_PLUGIN_UPDATE_ONCE=0" in bot_conf_lines(policy)
 
 
 @pytest.mark.parametrize("bad_value", ["maybe", 2, None])
@@ -222,7 +235,7 @@ def test_unreadable_boolean_raises_naming_the_key(bad_value):
         )
 
 
-# --- bot_conf_lines: the six lines, fixed order -----------------------------------
+# --- bot_conf_lines: the eight lines, fixed order ---------------------------------
 
 
 def test_bot_conf_lines_fixed_order_and_export():
@@ -233,6 +246,8 @@ def test_bot_conf_lines_fixed_order_and_export():
         mcp_timeout_ms=180_000,
         ready_timeout_s=200,
         plugin_update_once_per_boot=True,
+        hold_ceiling_s=320,
+        boot_grace_s=1400,
     )
     assert bot_conf_lines(policy) == [
         "BOOT_ADMISSION_SLOTS=2",
@@ -241,7 +256,25 @@ def test_bot_conf_lines_fixed_order_and_export():
         "export MCP_TIMEOUT=180000",
         "RC_READY_TIMEOUT_S=200",
         "BOOT_PLUGIN_UPDATE_ONCE=1",
+        "BOOT_HOLD_CEILING_S=320",
+        "BOOT_GRACE_S=1400",
     ]
+
+
+def test_bot_conf_lines_renders_auto_verbatim():
+    """F14: `auto` reaches bot.conf as the word, because the gate resolves it
+    on the host it runs on -- not as whatever the COMPOSER host derived."""
+    policy = BootPolicy(
+        admission_slots="auto",
+        admission_wait_max_s=1200,
+        priority=0,
+        mcp_timeout_ms=180_000,
+        ready_timeout_s=200,
+        plugin_update_once_per_boot=True,
+        hold_ceiling_s=320,
+        boot_grace_s=1400,
+    )
+    assert bot_conf_lines(policy)[0] == "BOOT_ADMISSION_SLOTS=auto"
 
 
 def test_bot_conf_lines_renders_false_flag_as_zero():
@@ -252,8 +285,10 @@ def test_bot_conf_lines_renders_false_flag_as_zero():
         mcp_timeout_ms=180_000,
         ready_timeout_s=200,
         plugin_update_once_per_boot=False,
+        hold_ceiling_s=320,
+        boot_grace_s=1400,
     )
-    assert bot_conf_lines(policy)[-1] == "BOOT_PLUGIN_UPDATE_ONCE=0"
+    assert "BOOT_PLUGIN_UPDATE_ONCE=0" in bot_conf_lines(policy)
 
 
 def test_only_mcp_timeout_line_is_exported():
@@ -269,9 +304,15 @@ def test_only_mcp_timeout_line_is_exported():
 def test_load_host_boot_reads_the_package_defaults():
     host_boot = load_host_boot()
     assert host_boot["admission_slots"] == "auto"
-    assert host_boot["admission_wait_max_s"] == 1200
     assert host_boot["mcp_timeout_ms"] == 180_000
     assert host_boot["plugin_update_once_per_boot"] is True
+
+
+def test_package_system_yaml_declares_no_flat_wait_cap():
+    """F13: the package must NOT name admission_wait_max_s at all, or the
+    derivation below is dead code that no host ever reaches. A key present
+    here and a derivation in boot.py would both look correct in review."""
+    assert "admission_wait_max_s" not in load_host_boot()
 
 
 def test_resolve_boot_policy_against_the_real_package_defaults():
@@ -280,10 +321,186 @@ def test_resolve_boot_policy_against_the_real_package_defaults():
         fleet.bots["worker"], fleet, load_host_boot(), cpu_count=4
     )
     assert policy == BootPolicy(
-        admission_slots=1,  # derive_slots(4)
-        admission_wait_max_s=1200,
+        admission_slots="auto",
+        admission_wait_max_s=1200,  # max(1200, ceil(2/1) x 320) -- the floor wins
         priority=1,
         mcp_timeout_ms=180_000,
         ready_timeout_s=200,
         plugin_update_once_per_boot=True,
+        hold_ceiling_s=320,
+        boot_grace_s=1400,
     )
+
+
+# --- PR B: the two derived keys (F15) ---------------------------------------------
+
+
+def _fleet_of(n: int, managers: int = 1) -> FleetConfig:
+    """A generic n-bot fleet -- no real fleet, bot, host or person identifier
+    anywhere (public repo). Bot ids are b0..b<n-1>; the first `managers` of
+    them are the team managers, which is what BootPolicy.priority reads."""
+    bots = {
+        f"b{i}": BotConfig(bot_id=f"b{i}", name=f"b{i}", expertise=["eng"])
+        for i in range(n)
+    }
+    teams = {
+        f"t{i}": TeamConfig(
+            name=f"t{i}",
+            manager=f"b{i}",
+            workers=[k for k in bots if k != f"b{i}"],
+        )
+        for i in range(managers)
+    }
+    return FleetConfig(
+        name="fixture-fleet", service_prefix="com.fixture", bots=bots, teams=teams
+    )
+
+
+@pytest.mark.parametrize(
+    "mcp_timeout_ms,expected_ready,expected_ceiling",
+    [(180_000, 200, 320), (0, 90, 210), (600_000, 620, 740)],
+)
+def test_hold_ceiling_is_ready_timeout_plus_the_restart_margin(
+    mcp_timeout_ms, expected_ready, expected_ceiling
+):
+    """The margin is lib/rolling-restart.sh's, not a new guess: the gate's hold
+    ceiling and the restart drivers' per-bot budget are the same number by
+    construction."""
+    fleet = _lead_worker_fleet()
+    policy = resolve_boot_policy(
+        fleet.bots["worker"], fleet, {"mcp_timeout_ms": mcp_timeout_ms}, cpu_count=8
+    )
+    assert policy.ready_timeout_s == expected_ready
+    assert policy.hold_ceiling_s == expected_ceiling
+    assert policy.hold_ceiling_s == policy.ready_timeout_s + HOLD_CEILING_MARGIN_S
+
+
+def test_boot_grace_is_the_sum_of_the_two_phases_it_brackets():
+    """F15. PR B moved the host-wide wait INSIDE ExecStart, so the phase the
+    grace brackets is the admission wait PLUS the readiness poll."""
+    fleet = _fleet_of(21)
+    policy = resolve_boot_policy(fleet.bots["b3"], fleet, {}, cpu_count=4)
+    assert policy.boot_grace_s == policy.admission_wait_max_s + policy.ready_timeout_s
+
+
+# --- PR B: the derived wait cap (F13) ---------------------------------------------
+
+
+def test_wait_cap_is_derived_from_the_fleet_drain_when_the_host_names_none():
+    """21 bots, cpu 4 -> derive_slots(4) == 1 slot, hold ceiling 320s:
+    ceil(21/1) x 320 = 6720s, which is what the flat 1200 under-budgeted."""
+    fleet = _fleet_of(21)
+    policy = resolve_boot_policy(fleet.bots["b3"], fleet, {}, cpu_count=4)
+    assert policy.admission_wait_max_s == 6720
+
+
+def test_wait_cap_never_falls_below_the_floor():
+    fleet = _fleet_of(2)
+    policy = resolve_boot_policy(fleet.bots["b1"], fleet, {}, cpu_count=64)
+    assert policy.admission_wait_max_s == ADMISSION_WAIT_FLOOR_S
+
+
+def test_the_derived_cap_follows_the_compose_time_cpu_seam():
+    """`auto` is rendered verbatim, but the composer still needs a slot count
+    for the DRAIN arithmetic -- so a different cpu count must still move the
+    derived cap. Without this the cpu seam would be untested once F14 stopped
+    rendering it (cpu 4 -> 1 slot -> 21 rounds; cpu 64 -> 4 slots -> 6)."""
+    fleet = _fleet_of(21)
+    slow = resolve_boot_policy(fleet.bots["b3"], fleet, {}, cpu_count=4)
+    fast = resolve_boot_policy(fleet.bots["b3"], fleet, {}, cpu_count=64)
+    assert slow.admission_wait_max_s == 21 * 320
+    assert fast.admission_wait_max_s == 6 * 320
+    assert slow.admission_slots == fast.admission_slots == "auto"
+
+
+def test_an_explicit_cap_wins_over_the_derivation():
+    fleet = _fleet_of(21)
+    policy = resolve_boot_policy(
+        fleet.bots["b3"], fleet, {"admission_wait_max_s": 9000}, cpu_count=4
+    )
+    assert policy.admission_wait_max_s == 9000
+
+
+def test_an_explicit_cap_shorter_than_the_drain_is_refused_naming_the_numbers():
+    """A cap that cannot outlast the queue it caps expires every waiter before
+    its turn -- visible to the composer, invisible to the operator."""
+    fleet = _fleet_of(21)
+    with pytest.raises(ValueError) as exc:
+        resolve_boot_policy(
+            fleet.bots["b3"], fleet, {"admission_wait_max_s": 600}, cpu_count=4
+        )
+    message = str(exc.value)
+    assert "admission_wait_max_s" in message
+    assert "600" in message and "6720" in message
+
+
+def test_an_explicit_zero_cap_stays_legal_below_the_drain():
+    """0 is the one legal value below the drain: it means NEVER WAIT, an
+    explicit choice to proceed ungated rather than an under-budget."""
+    fleet = _fleet_of(21)
+    policy = resolve_boot_policy(
+        fleet.bots["b3"], fleet, {"admission_wait_max_s": 0}, cpu_count=4
+    )
+    assert policy.admission_wait_max_s == 0
+    assert policy.boot_grace_s == policy.ready_timeout_s
+
+
+def test_an_explicit_slot_count_is_what_the_drain_is_computed_against():
+    """cpu_count says 1 slot; the explicit 2 must be what the drain divides
+    by, or the derived cap would be budgeted against a queue the host never
+    forms. ceil(21/2) x 320 = 3520, comfortably past the floor, so the
+    assertion can only be satisfied by the explicit value."""
+    fleet = _fleet_of(21)
+    policy = resolve_boot_policy(
+        fleet.bots["b3"], fleet, {"admission_slots": 2}, cpu_count=4
+    )
+    assert policy.admission_slots == 2
+    assert policy.admission_wait_max_s == 11 * 320  # ceil(21/2)
+
+
+# --- F14: the two derivations of `auto` are ONE formula ----------------------------
+
+_BOOT_ADMISSION_SH = (
+    Path(__file__).resolve().parent.parent / "lib" / "boot-admission.sh"
+)
+
+# The same spread tests/test_boot_admission.sh pins the bash side against.
+_CPU_COUNTS = [1, 3, 4, 8, 12, 16, 64]
+
+
+def _bash_derive_slots(cpu: int) -> str:
+    """Run lib/boot-admission.sh's own clamp, in bash, on the shipped file."""
+    bash = shutil.which("bash") or "/bin/bash"
+    proc = subprocess.run(
+        [
+            bash,
+            "-c",
+            f'. "{_BOOT_ADMISSION_SH}"; _boot_admission_derive_slots "$1"',
+            "_",
+            str(cpu),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, f"bash derivation failed: {proc.stderr}"
+    return proc.stdout.strip()
+
+
+@pytest.mark.parametrize("cpu", _CPU_COUNTS)
+def test_the_bash_gate_and_derive_slots_agree_on_auto(cpu):
+    """F14 hands `auto` to the RUNTIME, so two implementations of one clamp now
+    exist -- `claudlobby.boot.derive_slots` for the drain arithmetic and the
+    refusal, and `_boot_admission_derive_slots` for the host that actually
+    resolves it. A pin that only read one of them would not notice the fork;
+    this one runs BOTH."""
+    assert _bash_derive_slots(cpu) == str(derive_slots(cpu))
+
+
+def test_the_bash_gate_floors_an_unreadable_cpu_count_the_same_way():
+    """derive_slots(None) is the conservative single-core floor; the bash side
+    reaches the same case through an empty or non-numeric `getconf` answer."""
+    assert derive_slots(None) == 1
+    assert _bash_derive_slots("") == "1"
+    assert _bash_derive_slots("abc") == "1"
+    assert _bash_derive_slots(0) == "1"

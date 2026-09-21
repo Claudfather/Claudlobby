@@ -11,41 +11,6 @@ BOT_DIR="${1:?Usage: start-bot.sh /path/to/bot/dir}"
 install_error_trap "$BOT_DIR"
 load_bot_conf "$BOT_DIR"
 
-# --- Boot-mass mitigation -----------------------------------------------------
-# When the whole fleet is mass-restarted (e.g. reconcile-fleet --enroll, or
-# systemd restarts triggered by keepalive), all bots race to spawn their channel
-# plugins simultaneously. Observed failure mode: some bots silently fail to bring
-# up their telegram plugin (no bot.pid ever written), so the bot is "alive" in
-# tmux but never sees inbound channel messages.
-#
-# Serialize the first few seconds of each bot's boot with a fleet-wide mkdir
-# lock so plugins come up one-at-a-time. mkdir is atomic on every Unix and
-# requires no external tools (flock may not be available on all hosts).
-# Safe on solo restarts (uncontended → instant).
-BOOT_LOCK_DIR="${TMPDIR:-/tmp}/.claudlobby-fleet-boot.lock"
-BOOT_LOCK_HOLD_S="${BOOT_LOCK_HOLD_S:-8}"
-_bl_waited=0
-while ! mkdir "$BOOT_LOCK_DIR" 2>/dev/null; do
-    # Stale lock cleanup: if lock dir is older than 60s, force-claim
-    if [ -d "$BOOT_LOCK_DIR" ]; then
-        _lock_age=$(($(date +%s) - $(stat -c %Y "$BOOT_LOCK_DIR" 2>/dev/null || stat -f %m "$BOOT_LOCK_DIR" 2>/dev/null || date +%s)))
-        if [ "$_lock_age" -gt 60 ]; then
-            rmdir "$BOOT_LOCK_DIR" 2>/dev/null || true
-            continue
-        fi
-    fi
-    sleep 1
-    _bl_waited=$((_bl_waited + 1))
-    if [ "$_bl_waited" -gt 120 ]; then
-        echo "start-bot.sh: boot lock contended >120s, proceeding without it" >&2
-        break
-    fi
-done
-# Release the lock after BOOT_LOCK_HOLD_S so the next bot can proceed.
-( sleep "$BOOT_LOCK_HOLD_S"; rmdir "$BOOT_LOCK_DIR" 2>/dev/null || true ) &
-disown
-# --- end boot-mass mitigation -------------------------------------------------
-
 export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}
 session_cli_path
 export HOME="$HOME"

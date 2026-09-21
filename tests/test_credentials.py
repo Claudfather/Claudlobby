@@ -62,9 +62,10 @@ def estate(tmp_path: Path, monkeypatch):
     # which is the class of defect the whole change is about.
     repo = Path(__file__).resolve().parent.parent
     (root / "lib").mkdir(parents=True, exist_ok=True)
-    # supervisor.sh is a third required sibling: lib-common.sh unconditionally
-    # sources it from its own directory (#1573 task 6).
-    for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
+    # supervisor.sh and boot-admission.sh are required siblings: lib-common.sh
+    # unconditionally sources both from its own directory (#1573 task 6 and
+    # PR B).
+    for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh", "boot-admission.sh"):
         (root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
     # An isolated HOST tier. Without this the tests would read the developer's
     # own ~/.env — non-hermetic, and on a machine that happens to define one of
