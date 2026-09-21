@@ -2136,6 +2136,71 @@ def _warn_dead_flags(fleet_env: dict, paths: Paths, report: ValidationReport) ->
             )
 
 
+def _validate_mcp_packages(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport
+) -> None:
+    """Does every MCP fragment this fleet declares name a package that exists?
+
+    Two signals, both WARNINGS and never errors — a fleet must not fail to
+    compose because npm is slow, unreachable, or having an outage. See
+    ``mcp_packages`` for why the cheap offline one is the better of the two.
+
+    The network signal is opt-in (``CLAUDLOBBY_MCP_PROBE_ENABLED``) because a
+    generate must stay offline by default. Every state it can end in is
+    disclosed: a probe that could not answer says so rather than passing
+    quietly, and so does a run that could not even determine whether it was
+    armed. `source_state.py`'s rule — unreachable is not "resolves".
+    """
+    from . import env_tiers as _et
+    from . import mcp_packages as _mp
+    from .mcp_grammar import GrammarUnavailable, grammar
+
+    # Is there anything to check at all? Asked BEFORE reaching for the grammar:
+    # a fleet that declares no MCP server has nothing to check, and announcing
+    # that a check of nothing did not run is noise, not disclosure.
+    if not _mp.declared_fragments(fleet, paths):
+        return
+
+    try:
+        gram = grammar(paths)
+    except GrammarUnavailable:
+        # Disclosed, never silent: this module refuses to carry a second copy
+        # of the grammar, so "cannot check" is the honest outcome and saying
+        # nothing would read as "every package is fine". The exception's own
+        # text is deliberately NOT interpolated — it carries an absolute path,
+        # which makes the warning long and (measured) collides with the
+        # substring assertions other validator tests make against a tmp root
+        # whose name they chose.
+        report.warnings.append(
+            "MCP package check did not run — the shared package grammar "
+            "(lib/mcp-package-grammar.py) could not be loaded from this root, "
+            "so whether the declared packages resolve is UNKNOWN"
+        )
+        return
+
+    rows = _mp.fleet_declarations(fleet, paths, gram)
+    if not rows:
+        return
+
+    for finding in _mp.pinning_findings(rows):
+        report.warnings.append(finding.message())
+
+    try:
+        armed = _et.armed(_et.resolve(paths, fleet_name=fleet.name), _mp.PROBE_FLAG)
+    except Exception as e:  # noqa: BLE001 — the cascade shells out and refuses
+        report.warnings.append(
+            f"could not read whether {_mp.PROBE_FLAG} is armed ({e}) — the "
+            "registry check did NOT run; this is not a statement that the "
+            "declared packages resolve"
+        )
+        return
+    if not armed:
+        return
+
+    for finding in _mp.resolution_findings(rows):
+        report.warnings.append(finding.message())
+
+
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
@@ -2172,6 +2237,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_library_frontmatter(paths, report)
     _validate_library_requires(paths, report)
     _validate_env_contracts(paths, report)
+    _validate_mcp_packages(fleet, paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
     if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):
