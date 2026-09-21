@@ -7,7 +7,29 @@ description: Manager auto-merges PRs using --admin after a real peer review verd
 
 The manager auto-merges PRs using `--admin` when ALL of:
 
-1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict, or a `COMMENT` with `**Approve**` verdict line (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews.
+1. **Peer review posted — and attributed BY HAND.** A reviewer has posted an `APPROVE` verdict, or a `COMMENT` with `**Approve**` verdict line (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews.
+
+   **This rung cannot be verified from GitHub, and no shipped door checks it for you.** Read that before the rungs below, because every automated surface on this page reads green on a self-review. The fleet shares one GitHub identity, so every mechanical source of authorship collapses to the same login: the PR `author` field (18 of 18 recent PRs), the commit author and committer (12 of 12 merged commits, resolved from a host-global gitconfig — and rewritten by squash-merge anyway), and the branch name (18 of 18 encode an issue number, never a bot). There is no field to read, so the comparison this rung asks for is `x != x`.
+
+   **So perform it by hand, on every `--admin` merge.** Authorship is recorded in exactly one place on this estate — the prose of the report a bot files when it opens a PR:
+
+   ```bash
+   claudlobby --fleet <fleet> report-back --since 7d --json | grep -E 'pull/<N>([^0-9]|$)'
+   ```
+
+   Read the rows in time order and find the one saying the PR was *opened* — `"clauDNA PR #328 opened: …"`. That bot is the author. If a clearing verdict on the same PR comes from that same bot, **rung 1 is unsatisfied: do not merge**, however green everything else reads. Bound the number or the match is wrong in the silent direction: plain `pull/328` also matches `pull/3281`.
+
+   **The manager's own authorship needs no detector** — it knows what it wrote. The case this manual check exists for is the third-party one: bot A opens, bot A approves, the manager merges. Nothing visible to that manager distinguishes it from a clean peer review.
+
+   **When it cannot answer, this rung REFUSES — it never passes.** Three states are not a pass:
+
+   - **No opening row at all.** Over the 21 PRs created in the current plane epoch, **4 (19%) have no citing report of any kind** — one of them merged. No answer is available at any confidence.
+   - **An empty summary.** Authorship lives in a content-capped field: **17 of 57 PR-citing task events (29%) carry an empty summary**, and a restrictive capture policy strips that prose by design. The one channel this rung depends on is a setting away from returning nothing — and "nothing" reads exactly like "no self-review".
+   - **The author is on another fleet.** `report-back` is fleet-scoped. Measured: the same PR returns 5 rows under `--fleet ai-platform` and **0 under `--fleet crog-eng-team`**. Zero rows from the wrong fleet is indistinguishable from zero rows because nobody reported.
+
+   In all three the honest output is "rung 1 unanswerable — verify by hand or do not merge", never a pass. An *empty* answer is at least distinguishable from a *failed* one: the door prints `0 event(s) matched — read N row(s) from the plane (fleet F)`, and refuses at rc 3 rather than printing an empty table when it cannot reach the plane. So zero-matched-out-of-N means the plane answered and the row is genuinely absent — which is a refusal, not a clear.
+
+   **Do NOT read `lib/pr-review-state.py`'s output as bearing on this rung.** It does not fetch PR authorship and never has — its `PR_FIELDS` is `number,title,reviews,comments,headRefOid`. The name it reports is the *reviewer's* self-reported name parsed out of a verdict header, which is the other operand entirely. A clean `SUMMARY: N live verdict(s), 0 blocking` is a true statement about verdicts and says nothing whatever about who wrote the PR. Measured on a real self-review: it read `2 live verdict(s), 1/2 anchored, 0 stale, 0 blocking` on a PR whose author had cleared their own work.
 2. **CI green — the repo's DECLARED required checks, BY NAME, never by count.** Verify that every check **this repo declares as required** appears in the status rollup by name, and that every one is `SUCCESS`.
 
    **The required set is declared per repo and is deliberately not listed here.** Workflow names are a property of a repository, not of a fleet: one repo's set may be `Lint` / `Test` / `Security Scan` / `Changelog Check` while another's is `api-ci` / `frontend-ci`. A list written into this guardrail would be correct for exactly one repo and silently wrong on every other — hunting for names that do not exist there, and so either blocking every PR on that repo or, worse, being quietly softened by whoever hits it first. **The softening is the real hazard: a guardrail that fires wrongly gets weakened, and the weakening outlives the repo that caused it.**
@@ -28,7 +50,7 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
 Merge command: `gh pr merge <n> --squash --admin --delete-branch`
 
-**Why --admin:** Same-identity fleets share one GitHub PAT. Branch protection's "required approvals" check counts only formal `APPROVE` state, which GitHub blocks for same-identity. `--admin` bypasses the branch protection gate — but the **real gate is the peer review verdict**, not GitHub's checkbox.
+**Why --admin:** Same-identity fleets share one GitHub PAT. Branch protection's "required approvals" check counts only formal `APPROVE` state, which GitHub blocks for same-identity. `--admin` bypasses the branch protection gate — but the **real gate is the peer review verdict**, not GitHub's checkbox. And a verdict is only a gate once rung 1 has attributed it: the same bypass that makes `--admin` necessary is what makes a self-review invisible.
 
 **Why the rungs above carry the whole weight.** There *is* a server-side backstop — it simply does not cover this, and it covers far less than a first look suggests. Measured across **nine** repos of one estate via the repository **rulesets** API (re-measured 2026-08-22):
 
@@ -59,6 +81,7 @@ Of the six that carry a ruleset, **four DECLARE an approval requirement and only
 - Never merge a PR with `Request Changes` verdict outstanding.
 - Never merge a PR where CI is failing — **or where a required workflow is missing from the rollup.** "Not failing" is not "passed": an absent workflow cannot fail.
 - Never merge a PR the manager itself authored without a separate reviewer.
+- Never treat an **unanswerable** rung 1 as a satisfied one. No authorship row is a refusal, not a clear — the same absence is produced by a self-review nobody reported, by a stripped summary, and by querying the wrong fleet.
 
 The manager posts "Merging #NN (--admin, reviewed by <reviewer>)" to Telegram before executing.
 

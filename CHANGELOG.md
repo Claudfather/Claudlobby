@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `merge-policy-auto-admin` rung 1 stops claiming to be checkable (#1666)
+
+- **The rung said "no self-reviews"; nothing on this estate could tell.** The
+  fleet shares one GitHub identity, so every mechanical source of PR authorship
+  collapses to the same login: the `author` field (18 of 18 recent PRs), the
+  commit author and committer (12 of 12 merged commits, resolved from a
+  host-global gitconfig and rewritten by squash-merge anyway), and the branch
+  name (18 of 18 encode an issue number, never a bot). The comparison rung 1
+  asks for is `x != x`. A reader who stopped after rung 1 had no way to know
+  that — the limitation is now stated **at the rung**, not in a footnote.
+- **The rung is not weakened; it is harder to satisfy accidentally.** It stays
+  mandatory and gains a performable manual check — the prose of the report a
+  bot files when it opens a PR is the one place authorship is recorded:
+  `claudlobby --fleet <fleet> report-back --since 7d --json | grep -E 'pull/<N>([^0-9]|$)'`.
+  The match is bounded because plain `pull/328` also matches `pull/3281`.
+- **Three states now REFUSE rather than pass**, each measured: no citing report
+  at all (4 of 21 in-epoch PRs, 19% — one of them merged); an empty summary
+  (17 of 57 PR-citing task events, 29%, in a content-capped field a restrictive
+  capture policy strips by design); and an author on another fleet
+  (`report-back` is fleet-scoped — the same PR returns 5 rows under
+  `--fleet ai-platform` and 0 under `--fleet crog-eng-team`). In all three the
+  absence looks exactly like "no self-review", which is why none of them clears.
+- **`lib/pr-review-state.py`'s clean output does not bear on this rung** and the
+  guardrail now says so. Its `PR_FIELDS` is `number,title,reviews,comments,headRefOid`
+  — no author, and never has been; the name it reports is the *reviewer's*
+  self-reported header name, the other operand. Measured on a real self-review:
+  it read `2 live verdict(s), 1/2 anchored, 0 stale, 0 blocking` on a PR whose
+  author had cleared their own work.
+
 ### Fixed — the goal-binding and ignition rungs answer one question the same way (#1680)
 
 - **A manager-less fleet got a WARN and a PASS about the same thing.**
