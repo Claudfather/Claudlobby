@@ -22,6 +22,10 @@ import subprocess
 from pathlib import Path
 
 LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+# lib-common.sh unconditionally sources supervisor.sh from its own directory
+# (#1573 task 6) -- the patched copy below needs this sibling staged next to
+# it too, exactly as it already needs lib-common.sh itself.
+SUPERVISOR = Path(__file__).resolve().parent.parent / "lib" / "supervisor.sh"
 
 
 def _run(
@@ -64,6 +68,7 @@ def _run(
     uptime_file.write_text(f"{uptime_s} 4096.39\n")
     patched = tmp_path / "lib-common.sh"
     patched.write_text(LIB_COMMON.read_text().replace("/proc/uptime", str(uptime_file)))
+    (tmp_path / "supervisor.sh").write_bytes(SUPERVISOR.read_bytes())
 
     env = {
         **os.environ,

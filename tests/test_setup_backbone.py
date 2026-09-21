@@ -20,10 +20,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
 
 # Copied verbatim into the harness lib/ — these are the scripts under test.
+# supervisor.sh rides along as a required sibling: lib-common.sh unconditionally
+# sources it from its own directory (#1573 task 6).
 REAL_SCRIPTS = [
     "setup-fleet",
     "setup-fleets",
     "lib-common.sh",
+    "supervisor.sh",
     "install_fleet_timer.sh",
 ]
 # Replaced with invocation-logging stubs — their behavior is not under test.

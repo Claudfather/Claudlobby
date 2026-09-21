@@ -447,7 +447,9 @@ class TestCheckCredentialsScoping:
         """
         repo = Path(__file__).resolve().parent.parent
         (paths.root / "lib").mkdir(parents=True, exist_ok=True)
-        for f in ("lib-common.sh", "env-tiers.sh"):
+        # supervisor.sh is a third required sibling: lib-common.sh unconditionally
+        # sources it from its own directory (#1573 task 6).
+        for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
             (paths.root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
         fake_home = paths.root.parent / "home"
         fake_home.mkdir(exist_ok=True)

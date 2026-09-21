@@ -74,6 +74,25 @@ detect_os() {
 # Auto-detect on source
 detect_os
 
+# --- Supervisor adapter -------------------------------------------------
+# lib/supervisor.sh: five verbs (svc_is_registered, svc_state, svc_kick,
+# svc_enroll, svc_disenroll — each with a systemd spelling and a launchd
+# spelling), plus svc_unit_name, the shared label resolver they key off.
+# Sourced here, immediately after detect_os, so every verb can read $_OS
+# without re-deriving it (#1573 boot admission, task 6). No call site
+# migrates onto these verbs in this PR — the file exists, is sourced, and is
+# fenced by tests/test_supervisor_ratchet.py against new direct
+# `systemctl`/`launchctl` calls anywhere else in lib/.
+#
+# Resolved from THIS file's own location, not $CLAUDLOBBY_ROOT: many hermetic
+# tests/*.sh suites export a throwaway CLAUDLOBBY_ROOT (an empty temp dir,
+# with no lib/ under it) before sourcing lib-common.sh, precisely so stamp
+# and lock files never touch a real state/ directory — that is what
+# CLAUDLOBBY_ROOT's own self-detection two paragraphs above is ALSO careful
+# to survive (`${CLAUDLOBBY_ROOT:=...}` only fills it in when unset). A
+# lookup keyed on that variable would break those suites at source time.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/supervisor.sh"
+
 # --- tmux binary resolution -------------------------------------------------
 
 _TMUX_BIN="${TMUX_BIN:-}"
