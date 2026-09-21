@@ -103,6 +103,23 @@ export TMUX_BIN="$T/bin/tmux"
 # shellcheck source=../lib/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
+# A syntax error inside the sourced lib/supervisor.sh DOES abort this whole
+# suite under `set -euo pipefail` above (MEASURED: bash 3.2.57 on macOS) --
+# but this suite's own `trap '...rm -rf "$T"...' EXIT` then runs, and its
+# last command's exit status becomes the process's FINAL reported exit code,
+# silently overwriting that abort's nonzero one back to 0 (final wave item 8,
+# found by an invalid mutant) -- so a direct `bash` invocation of this suite
+# can read as a clean pass despite never running a single assertion. This
+# guard cannot fire for THAT exact failure (the abort happens inside the `.`
+# above, before this line is ever reached); it is defense for the other
+# shape of the same class -- a rename or a partial refactor that leaves
+# sourcing itself clean but a verb undefined. Fail loudly, immediately,
+# naming it, rather than silently running zero of the assertions below
+# against functions that do not exist. tests/test_sh_suites.py's own
+# stdout/stderr syntax-error check is what actually catches the abort case,
+# since it inspects the suite's captured output from OUTSIDE this process.
+type svc_kick svc_disenroll >/dev/null 2>&1 || { echo "FAIL: adapter verbs missing after source"; exit 1; }
+
 as_os() {  # as_os <Linux|Darwin|SunOS> -- flips the fake uname AND re-derives
            # $_OS via the real detect_os, so parent process and any forked
            # child (install-bot*.sh) agree on the platform.
@@ -368,4 +385,9 @@ assert_eq "Other OS: .tmux-env still removed" "false" "$([ -f "$BOT5/.tmux-env" 
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
+# A suite that ran zero assertions and never touched FAIL would otherwise
+# read as a clean pass below (final wave item 8) -- the exact shape a
+# swallowed syntax error upstream produces if the verbs-missing guard above
+# were ever removed or bypassed.
+[ "$TOTAL" -gt 0 ] || { echo "FAIL: zero assertions ran"; exit 1; }
 [ "$FAIL" -eq 0 ] || exit 1

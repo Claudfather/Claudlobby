@@ -286,6 +286,53 @@ class TestFormatSpecificAllowances:
         assert not any(ln.startswith("Environment=HOME=") for ln in unit_lines)
 
 
+class TestLabelMatchesBotService:
+    """`svc_unit_name` and the installers (lib/supervisor.sh,
+    lib/install-bot*.sh) rely on one invariant: the label a rendered unit
+    answers to is the SAME string bot.conf's BOT_SERVICE= names. Before this
+    test nothing pinned the two together -- `build_supervision_spec`'s
+    `label = f"{fleet.service_prefix}.{bot.bot_id}"` and
+    `compose_bot_conf`'s `bot_service = f"{fleet.service_prefix}.{bot.bot_id}"`
+    are two independent f-strings, and a mutant that changes either
+    separator (mutant `spec-label-drifts`, PR A final wave item 6) survives
+    every other test in this file, since those all build a spec directly and
+    never cross-check it against composer.py's own bot.conf output. This
+    goes through the REAL composer entry points -- `compose_bot_conf`,
+    `compose_systemd_unit`, `compose_launchd_plist` -- not
+    `build_supervision_spec` plus a renderer, so a drift between the two
+    call sites cannot hide behind a fixture that only ever exercises one."""
+
+    @pytest.mark.parametrize("bot_id", _BOT_IDS)
+    def test_label_matches_bot_conf_bot_service(self, tmp_path, bot_id):
+        import claudlobby.composer as composer_module
+
+        fleet = _fixture_fleet()
+        paths = _fixture_paths(tmp_path)
+        bot = fleet.bots[bot_id]
+
+        conf = composer_module.compose_bot_conf(bot, fleet, paths)
+        unit = composer_module.compose_systemd_unit(bot, fleet, paths)
+        plist = composer_module.compose_launchd_plist(bot, fleet, paths)
+
+        bot_service_lines = [
+            line for line in conf.splitlines() if line.startswith("BOT_SERVICE=")
+        ]
+        assert len(bot_service_lines) == 1
+        # `_shq` (shlex.quote) leaves an alnum-plus-dot identifier like
+        # "com.fixture.lead" unquoted, so a plain split recovers it verbatim.
+        bot_service = bot_service_lines[0].split("=", 1)[1]
+        assert bot_service == f"{fleet.service_prefix}.{bot.bot_id}"
+
+        parsed_plist = parse_launchd_plist(plist)
+        assert parsed_plist["Label"] == bot_service
+
+        exec_stop_lines = [
+            line for line in unit.splitlines() if line.startswith("ExecStop=")
+        ]
+        assert len(exec_stop_lines) == 1
+        assert f"tmux -L {bot_service} kill-server" in exec_stop_lines[0]
+
+
 class TestRoundtripCatchesADivergence:
     """The probe: a fact one renderer learns that the other does not must be
     a failing test, which is the whole point of pinning the boundary with a
@@ -334,3 +381,56 @@ class TestRoundtripCatchesADivergence:
         assert broken_rebuilt.environment != spec.environment
         with pytest.raises(AssertionError):
             assert broken_rebuilt == spec
+
+    def test_an_added_environment_key_fails_the_round_trip(self, tmp_path, monkeypatch):
+        """Symmetric to the dropped-key case above (parked at task 5): a
+        renderer that EMITS a key the spec never carried is exactly as much
+        a divergence as one that drops a key the spec does carry, and the
+        round trip must catch both the same way -- covering only the
+        drop direction would leave an added fact free to leak into one
+        format and not the other."""
+        fleet = _fixture_fleet()
+        paths = _fixture_paths(tmp_path)
+        spec = build_supervision_spec(fleet.bots["lead"], fleet, paths)
+
+        import claudlobby.supervision as supervision_module
+
+        def _renderer_that_invented_a_key(a_spec: SupervisionSpec) -> str:
+            embellished = replace(
+                a_spec,
+                environment={**a_spec.environment, "INVENTED_KEY": "not-in-spec"},
+            )
+            return render_launchd_plist(embellished)
+
+        monkeypatch.setattr(
+            supervision_module, "render_launchd_plist", _renderer_that_invented_a_key
+        )
+
+        broken_plist = supervision_module.render_launchd_plist(spec)
+        broken_rebuilt = spec_from_launchd(parse_launchd_plist(broken_plist), spec)
+
+        # Shown red the same way: the round trip does not silently agree with
+        # the spec that built it once one side learns a fact the other never had.
+        assert broken_rebuilt != spec
+        assert broken_rebuilt.environment != spec.environment
+        assert "INVENTED_KEY" in broken_rebuilt.environment
+        with pytest.raises(AssertionError):
+            assert broken_rebuilt == spec
+
+
+# ----------------------------------------------------------------------
+# _TMUX_TMPDIR parity (parked at task 5)
+# ----------------------------------------------------------------------
+
+
+def test_tmux_tmpdir_constant_matches_composer():
+    """claudlobby/supervision.py's module docstring: `_TMUX_TMPDIR` is
+    duplicated in claudlobby/composer.py rather than imported, to keep this
+    module a leaf composer.py depends on and never the reverse (importing
+    back from composer.py would be circular, since composer.py imports the
+    renderers from here). A one-line pin so the two copies -- nothing else
+    enforces this -- can never quietly drift apart."""
+    import claudlobby.composer as composer_module
+    import claudlobby.supervision as supervision_module
+
+    assert composer_module._TMUX_TMPDIR == supervision_module._TMUX_TMPDIR

@@ -17,6 +17,7 @@ Linux CI runner. A suite that reaches a real service is a bug in the suite; fix
 the suite, do not drop it from the glob.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,6 +31,19 @@ TESTS_DIR = Path(__file__).resolve().parent
 # Every bash suite in tests/, discovered by glob so the collected set never drifts
 # from what is on disk. Sorted for a stable parametrize order and test-id sequence.
 SH_SUITES = sorted(p.name for p in TESTS_DIR.glob("test_*.sh"))
+
+# bash's exact wording when a SOURCED file fails to parse (final wave item 8).
+# A syntax error inside lib/supervisor.sh (sourced by lib-common.sh, sourced
+# by nearly every suite here) does abort the whole suite under its
+# `set -euo pipefail` -- but MEASURED (bash 3.2.57, macOS): a suite that also
+# sets `trap '...' EXIT` (mktemp-dir cleanup, the common idiom in these
+# suites) has that trap's own last command's exit status become the process's
+# FINAL reported exit code, overwriting the errexit-triggered abort's nonzero
+# one -- so the suite can exit 0 having sourced nothing past the syntax
+# error and run zero assertions. The returncode check below cannot see that
+# (it only sees a nonzero exit, and here there isn't one); this catches it by
+# reading for bash's own diagnostic instead.
+_SYNTAX_ERROR_RE = re.compile(r": line \d+: syntax error near unexpected token")
 
 
 def test_sh_suites_discovered():
@@ -62,3 +76,13 @@ def test_hermetic_bash_suite(suite, tmp_path):
         f"{suite} failed (exit {proc.returncode}):\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
+    # A syntax error in a sourced file can leave a suite at exit 0 having run
+    # zero assertions (final wave item 8) -- the rc check above is blind to
+    # that. Checked on both streams: bash prints the diagnostic to stderr,
+    # but a suite that captures its own sourcing could relay it via stdout.
+    for _stream_name, _stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        assert not _SYNTAX_ERROR_RE.search(_stream), (
+            f"{suite} printed a bash syntax error on {_stream_name} despite "
+            f"exit 0 -- a sourced file likely failed to parse and the suite "
+            f"ran zero assertions:\n{_stream}"
+        )

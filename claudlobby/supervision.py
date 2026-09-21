@@ -63,7 +63,16 @@ RETIRED_IN_PR_B = ("ExecStartPre",)
 @dataclass(frozen=True)
 class SupervisionSpec:
     """Everything either unit renderer needs, and the only thing either may
-    read from."""
+    read from.
+
+    `frozen=True` makes an instance immutable (no field can be reassigned)
+    but NOT hashable: `environment` and `launchd_environment_extra` are
+    `dict` fields, and a dataclass with an unhashable field raises on
+    `hash()` even when frozen -- Python derives `__hash__` from the fields'
+    own hashes, and `dict` has none. Nothing hashes a `SupervisionSpec`
+    today; a caller that needs one in a set or as a dict key will need its
+    own hashable projection rather than relying on this dataclass.
+    """
 
     label: str
     description: str

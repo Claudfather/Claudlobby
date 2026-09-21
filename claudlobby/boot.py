@@ -41,8 +41,20 @@ class BootPolicy:
     admission_wait_max_s: int
     priority: int  # 0 = manager, 1 = worker
     mcp_timeout_ms: int
-    ready_timeout_s: int  # derived: max(90, mcp_timeout_ms // 1000 + 20)
+    ready_timeout_s: int  # derived: max(READY_TIMEOUT_FLOOR_S, mcp_timeout_ms // 1000 + 20)
     plugin_update_once_per_boot: bool
+
+
+# The readiness ceiling's floor (F3/F4). `resolve_boot_policy` never derives
+# `ready_timeout_s` below this, and it is also the literal `lib/start-bot.sh`
+# falls back to when `RC_READY_TIMEOUT_S` is absent or unparseable in an
+# un-regenerated bot.conf that predates the key -- bash cannot import a
+# Python constant, so that file names the same number twice by hand (the
+# `${RC_READY_TIMEOUT_S:-90}` default and the `_rc_timeout_s=90` coercion
+# fallback). `tests/test_boot_policy_conformance.py` reads the shipped script
+# and pins both spellings back to this one name, so the two can never drift
+# without a failing test naming which side moved.
+READY_TIMEOUT_FLOOR_S = 90
 
 
 # host.boot keys and their package-tier defaults (claudlobby/system.yaml).
@@ -175,7 +187,7 @@ def resolve_boot_policy(
     )
 
     priority = 0 if bot.bot_id in fleet.manager_bots() else 1
-    ready_timeout_s = max(90, mcp_timeout_ms // 1000 + 20)
+    ready_timeout_s = max(READY_TIMEOUT_FLOOR_S, mcp_timeout_ms // 1000 + 20)
 
     return BootPolicy(
         admission_slots=admission_slots,

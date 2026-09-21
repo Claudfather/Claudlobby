@@ -14,14 +14,33 @@ against here, only the `BOOT_`/`MCP_TIMEOUT`/`RC_READY_TIMEOUT_S` shapes.
 The six key names are pinned as a literal list here, independent of
 `claudlobby.boot`'s own vocabulary, so a rename over there shows up as a
 conformance failure rather than the test quietly following it.
+
+The value-asserting tests below monkeypatch `claudlobby.composer.load_host_boot`
+(the name the composer binds -- `from .config import load_host_boot` --
+not `claudlobby.config.load_host_boot`) to a FIXED dict rather than reading
+the real package `system.yaml` through it (final wave item 1): this file
+used to call `compose_bot_conf` with no mock at all, so its expected values
+were secretly the package's `host.boot` defaults, and a legitimate change to
+those defaults would fail a composer test that has nothing to do with them.
+`tests/test_boot_policy.py::test_load_host_boot_reads_the_package_defaults`
+stays the one place those real package defaults are asserted. The mocked
+dict also carries values that DIFFER from `claudlobby.boot.DEFAULTS`
+(`admission_wait_max_s`, `mcp_timeout_ms`) rather than merely matching them
+under a different name: an assertion that happens to match what `{}` (no
+host block at all) would ALSO produce cannot tell "the composer consulted
+load_host_boot()" from "the composer silently defaulted" -- final wave item
+5's mutant, `_bot_boot_policy` passing `{}` instead of `load_host_boot()`,
+survives every version of this test that does not carry that distinction.
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
+from claudlobby.boot import READY_TIMEOUT_FLOOR_S
 from claudlobby.composer import (
     compose_bot_conf,
     compose_launchd_plist,
@@ -83,6 +102,33 @@ def _pin_cpu_count(monkeypatch, count: int) -> None:
     monkeypatch.setattr(comp, "_host_cpu_count", lambda: count)
 
 
+# A host.boot block that DIFFERS from claudlobby.boot.DEFAULTS on the two
+# numeric keys (admission_wait_max_s, mcp_timeout_ms) -- deliberately, so a
+# test asserting against it cannot be satisfied by a composer that silently
+# defaulted instead of consulting load_host_boot() (final wave item 5's
+# mutant: `_bot_boot_policy` passing `{}`). `admission_slots` stays `"auto"`
+# so the CPU-count pin above still governs its derivation.
+_MOCK_HOST_BOOT = {
+    "admission_slots": "auto",
+    "admission_wait_max_s": 777,
+    "mcp_timeout_ms": 123_000,
+    "plugin_update_once_per_boot": True,
+}
+
+
+def _mock_host_boot(monkeypatch) -> dict:
+    """Monkeypatches `claudlobby.composer.load_host_boot` -- the name the
+    composer binds, not `claudlobby.config.load_host_boot` -- to
+    `_MOCK_HOST_BOOT`, decoupling this file from the real package
+    `system.yaml` (final wave item 1). Returns the dict so a caller can
+    compute its own expected values from the exact object the composer will
+    see."""
+    import claudlobby.composer as comp
+
+    monkeypatch.setattr(comp, "load_host_boot", lambda: dict(_MOCK_HOST_BOOT))
+    return _MOCK_HOST_BOOT
+
+
 def _key_line(conf: str, key: str) -> list[str]:
     """Every bot.conf line whose key is `key`, matching the exact grep
     `bot_conf_get` (lib/lib-common.sh) uses at runtime: optional `export `,
@@ -99,10 +145,10 @@ class TestBootPolicyInBotConf:
     def _expected_values(self, priority: int) -> dict[str, str]:
         return {
             "BOOT_ADMISSION_SLOTS": "2",  # derive_slots(8), cpu_count pinned below
-            "BOOT_ADMISSION_WAIT_MAX_S": "1200",
+            "BOOT_ADMISSION_WAIT_MAX_S": "777",  # _MOCK_HOST_BOOT, not DEFAULTS
             "BOOT_PRIORITY": str(priority),
-            "MCP_TIMEOUT": "180000",
-            "RC_READY_TIMEOUT_S": "200",
+            "MCP_TIMEOUT": "123000",  # _MOCK_HOST_BOOT, not DEFAULTS
+            "RC_READY_TIMEOUT_S": "143",  # max(90, 123000 // 1000 + 20)
             "BOOT_PLUGIN_UPDATE_ONCE": "1",
         }
 
@@ -111,6 +157,7 @@ class TestBootPolicyInBotConf:
         self, tmp_path, monkeypatch, bot_id, priority
     ):
         _pin_cpu_count(monkeypatch, 8)
+        _mock_host_boot(monkeypatch)
         fleet = _fixture_fleet()
         paths = _fixture_paths(tmp_path)
 
@@ -129,19 +176,21 @@ class TestBootPolicyInBotConf:
         self, tmp_path, monkeypatch, bot_id, _priority
     ):
         _pin_cpu_count(monkeypatch, 8)
+        _mock_host_boot(monkeypatch)
         fleet = _fixture_fleet()
         paths = _fixture_paths(tmp_path)
 
         conf = compose_bot_conf(fleet.bots[bot_id], fleet, paths)
 
-        assert "export MCP_TIMEOUT=180000" in conf
-        assert "\nMCP_TIMEOUT=180000\n" not in conf  # never the bare form
+        assert "export MCP_TIMEOUT=123000" in conf
+        assert "\nMCP_TIMEOUT=123000\n" not in conf  # never the bare form
 
     def test_admission_slots_follows_the_auto_derivation(self, tmp_path, monkeypatch):
         """A different pinned cpu_count changes BOOT_ADMISSION_SLOTS, proving
         the composer actually calls through to derive_slots rather than
         hardcoding a value (claudlobby/boot.py: derive_slots(64) == 4)."""
         _pin_cpu_count(monkeypatch, 64)
+        _mock_host_boot(monkeypatch)
         fleet = _fixture_fleet()
         paths = _fixture_paths(tmp_path)
 
@@ -180,3 +229,35 @@ class TestUnitsCarryNoBootPolicy:
 
         for needle in FORBIDDEN_UNIT_SUBSTRINGS:
             assert needle not in plist, f"{needle!r} leaked into the launchd plist"
+
+
+# lib/start-bot.sh cannot import claudlobby.boot.READY_TIMEOUT_FLOOR_S -- bash
+# has no such door -- so it names the floor literally in two places (final
+# wave item 7): the `${RC_READY_TIMEOUT_S:-N}` default read at startup, and
+# the `_rc_timeout_s=N` fallback a non-numeric/empty override coerces to
+# under `set -u` (F4: an un-regenerated bot.conf that predates the BOOT_*
+# keys still has a value to fall back on). Nothing pinned either literal to
+# the Python constant it must equal -- this reads the real shipped script.
+_START_BOT_SH = Path(__file__).resolve().parent.parent / "lib" / "start-bot.sh"
+
+
+class TestStartBotShReadyTimeoutFloor:
+    def _start_bot_sh_text(self) -> str:
+        assert _START_BOT_SH.is_file(), f"missing script: {_START_BOT_SH}"
+        return _START_BOT_SH.read_text()
+
+    def test_env_var_default_matches_the_floor(self):
+        text = self._start_bot_sh_text()
+        match = re.search(r"RC_READY_TIMEOUT_S:-(\d+)\}", text)
+        assert match, (
+            "could not find ${RC_READY_TIMEOUT_S:-N} in lib/start-bot.sh"
+        )
+        assert int(match.group(1)) == READY_TIMEOUT_FLOOR_S
+
+    def test_coercion_fallback_matches_the_floor(self):
+        text = self._start_bot_sh_text()
+        match = re.search(r"_rc_timeout_s=(\d+)\s*;;", text)
+        assert match, (
+            "could not find the _rc_timeout_s=N coercion fallback in lib/start-bot.sh"
+        )
+        assert int(match.group(1)) == READY_TIMEOUT_FLOOR_S
