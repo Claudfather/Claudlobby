@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a withheld attribution left no trace a reader could reach (#1711, citation B)
+
+#1706 case 2 withholds `pr_url`/`pr_role` when the task link was a guess, and
+that refusal is **right and unchanged**: a wrong attribution is worse than an
+absent one, because absent is refusable and wrong makes a reader act. What was
+wrong is the **channel**. The refusal was announced only on **stderr**, which
+the shim's contract gives no door a way to read — so on the stored row, a
+report that DECLARED an attribution and had it withheld was byte-identical to
+one that declared nothing at all. Those need opposite responses: the first says
+an attribution exists and `--task` recovers it; the second says none exists.
+
+- **`pr_attribution_withheld: "guessed_link"`** on the task event, stamped at
+  the moment the refusal happens. Three states, as `pr_role` and `link_source`:
+  the reason, and **absent** — nothing declared, or a writer predating the
+  field. A string enum rather than a boolean for the same reason `link_source`
+  is one: a falsy test must not collapse absent with "not withheld".
+- **`link_source` does not already cover this.** It records that the link was
+  GUESSED, not that anything was WITHHELD, and most auto-resolved reports
+  declare no PR fields — so `auto-resolved` with no `pr_role` stayed ambiguous
+  between the two states. Pinned by a test that declares nothing on an
+  otherwise identical auto-resolved report and requires the marker absent.
+- **One discriminator, not two.** It is decided in the `else` of the attribution
+  gate itself, off the same `TASK_NAMED` captured at parse time — never a second
+  predicate. Two places deciding one fact is how they drift, and here they would
+  drift silently, because both answers look equally plausible on a stored row.
+  Pinned structurally.
+- **METADATA by rule, not by omission.** A metadata capture that stripped it
+  would make the row read "nothing was withheld", which a consumer reads as "no
+  attribution was ever declared" — the precise false clear the field exists to
+  end, re-entering through its own remedy.
+- The stderr line stays and now says the withholding **is** on the row, so the
+  operator reading it live knows a later reader can see it too.
+
+Citation A (the spooled-batch `rc 0` collapse) landed separately in #1715.
+
+
 ### Fixed — a spooled batch reported success, and success is the only signal a door gets (#1711)
 
 `rc 0` from the shim meant **recorded — in the plane, queryable now**. It was

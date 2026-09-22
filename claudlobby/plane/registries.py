@@ -46,6 +46,11 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     # "absent", and absent is a distinct third state meaning the writer predates
     # the field. Closed Literal, so no cap -- the contract bounds it.
     ("task", "link_source"): {"class": "METADATA"},
+    # Same class, same reason again (#1711 B): a stripped withholding marker
+    # reads as "nothing was withheld", which a consumer reads as "no attribution
+    # was ever declared" -- the precise false clear the field exists to prevent,
+    # re-entering through its own remedy. Closed Literal, so no cap.
+    ("task", "pr_attribution_withheld"): {"class": "METADATA"},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
     ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail
