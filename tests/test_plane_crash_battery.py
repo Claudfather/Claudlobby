@@ -373,7 +373,13 @@ def test_close_failure_after_commit_reports_committed(tmp_path: Path, monkeypatc
             self._inner.close()
             raise sq.OperationalError("disk I/O error")   # retryable class
 
-    monkeypatch.setattr(mod, "connect", lambda p: _CloseBomb(real_connect(p)))
+    # Forwards **kw rather than taking `p` alone: `db.connect` grew a
+    # `synchronous=` kwarg (#1693), and a stub with a narrower signature
+    # than the function it replaces turns a caller's new argument into a
+    # TypeError in a file the change never opens. Pass it through so this
+    # bomb keeps testing the CLOSE it is named for rather than the call.
+    monkeypatch.setattr(mod, "connect",
+                        lambda p, **kw: _CloseBomb(real_connect(p, **kw)))
     out = emit(tmp_path, _mk_request(32))
     assert out.status == "committed"          # not "spooled"
     assert not list((tmp_path / "state" / "plane" / "spool").glob("*.json"))

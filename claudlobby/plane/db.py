@@ -52,7 +52,19 @@ def connect_ro(path: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
     return conn
 
 
-def connect(path: Path) -> sqlite3.Connection:
+def connect(path: Path, *, synchronous: str = "NORMAL") -> sqlite3.Connection:
+    """Open the plane for writing.
+
+    ``synchronous`` is a parameter rather than a constant because the two
+    writers want different answers and for the same underlying reason (#1693).
+    A per-batch caller closes its connection, and the last-connection close runs
+    a TRUNCATE checkpoint that fsyncs anyway, so NORMAL costs it nothing to keep.
+    A LONG-LIVED caller never closes, so nothing else would ever fsync its
+    commits -- it passes FULL, which makes the commit itself sync the WAL and
+    puts durability on the commit instead of on the close. Measured on this
+    estate's SD storage: that is ~2.9x FASTER at the median than today's
+    per-batch truncate, so the guarantee got cheaper rather than dearer.
+    """
     # sqlite creates 0644 by default (probe-confirmed) — pre-create 0600 and
     # re-tighten the WAL/SHM siblings, which are created at their own time.
     if str(path) != ":memory:" and not Path(path).exists():
@@ -66,7 +78,9 @@ def connect(path: Path) -> sqlite3.Connection:
     # retried by emit_batch before anything is spooled.
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
+    if synchronous.upper() not in ("NORMAL", "FULL"):
+        raise ValueError(f"unsupported synchronous={synchronous!r}")
+    conn.execute(f"PRAGMA synchronous = {synchronous.upper()}")
     conn.execute("PRAGMA foreign_keys = ON")
     if str(path) != ":memory:":
         for suffix in ("", "-wal", "-shm"):

@@ -78,6 +78,7 @@ from typing import Optional
 from .contracts import ContractViolation
 from .db import connect, db_file, db_path
 from .emit_api import emit_batch
+from .writer import PlaneWriter
 from .ids import ensure_host_uid
 from .migrations import SCHEMA_USER_VERSION, DowngradeError, migrate
 from .spool import SpoolWriteError, drain
@@ -246,6 +247,12 @@ class PlaneDaemon:
         self._is_default_socket = socket_override is None
         self.sock_path = Path(socket_override) if socket_override else socket_path(self.root)
         self.drain_interval = drain_interval
+        # #1693 arm D: ONE held write connection instead of connect+close per
+        # batch. The per-batch close was running a TRUNCATE checkpoint every
+        # time, which otis measured as essentially all of this daemon's service
+        # time. Held and synchronous=FULL, so the commit fsyncs and the
+        # checkpoint becomes WAL-size management on a cadence.
+        self.writer = PlaneWriter(self.root)
         self._stop = False
         self._listener: Optional[socket.socket] = None
         self._last_drain = 0.0
@@ -369,7 +376,13 @@ class PlaneDaemon:
                                "error": f"expected {{\"events\": [...]}}: {exc}"})
             return
         try:
-            outcomes = emit_batch(self.root, events)
+            # The connection is BORROWED, never closed here: `writer` owns its
+            # lifecycle, reconnects it if the db was replaced underneath, and
+            # runs the checkpoint cadence. `connection()` performs the identity
+            # check before handing it over, so a replaced db is caught BEFORE a
+            # batch is written into an unlinked inode rather than after.
+            outcomes = emit_batch(self.root, events,
+                                  conn_factory=self.writer.connection)
         except ContractViolation as exc:
             errors = getattr(exc, "errors", None)
             self._reply(conn, {"ok": False, "code": "contract_violation",
@@ -394,6 +407,12 @@ class PlaneDaemon:
             traceback.print_exc()
             self._reply(conn, {"ok": False, "code": "internal", "error": str(exc)})
             return
+        # AFTER the commit, BEFORE the reply is composed: the cadence must never
+        # be what a caller waits on for its acknowledgment, and it must never be
+        # able to turn an already-committed batch into a failure. `after_batch`
+        # swallows a checkpoint error for exactly that reason -- the rows it
+        # would have folded in are already fsync'd by the commit.
+        self.writer.after_batch()
         self._reply(conn, {
             "ok": True,
             "results": [
@@ -579,6 +598,13 @@ class PlaneDaemon:
                 # refuses — attempting it only prints a second, confusing
                 # "lifecycle emit failed" line under the one that matters.
                 self._emit_system("daemon_stopping")
+            # Close the held connection LAST, after the stopping receipt has
+            # had its chance to use it, and checkpoint on the way out so the
+            # next start does not inherit a large WAL to replay.
+            try:
+                self.writer.close()
+            except Exception:                              # noqa: BLE001
+                pass
             try:
                 self._listener.close()
             except OSError:
