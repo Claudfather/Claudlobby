@@ -462,7 +462,18 @@ def test_launcher_127_when_nothing_resolves_even_with_user_site_reachable(tmp_pa
     the reason on a host where it doesn't hold -- a host with claudlobby
     reachable through regular site-packages is not this test's regression
     case, and forcing it through anyway only reproduces a slow, uninformative
-    timeout instead of an honest "not applicable here"."""
+    timeout instead of an honest "not applicable here".
+
+    READ THIS BEFORE TRUSTING A GREEN CI RUN ON THIS FILE: this specific
+    test SKIPS on GitHub Actions, by construction -- CI's install (regular
+    site-packages, not user-site) is exactly the shape the paragraph above
+    describes as "not this test's regression case". So "CI green" here does
+    NOT mean this test's own rc==127 assertion ran there; it means the
+    precondition correctly declined to run it. The regression this test
+    exists to catch is exercised on a host shaped like the one #1652 was
+    found on (a user-site editable install), not on CI -- if that ever
+    changes, this test starts asserting instead of skipping, silently and
+    correctly, with no edit needed here."""
     root = tmp_path / "root"
     root.mkdir()
     stub_dir = tmp_path / "stubbin"
