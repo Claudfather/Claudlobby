@@ -44,6 +44,7 @@ SCRIPTS_REACHING_DOOR = {
     "migrate-fleet-to-system", "notify-behind", "orphan-browser-reaper",
     "reload-fleet", "rolling-restart", "start-bot", "update-claude-code",
     "update-siblings", "validate-bot-change", "weekly-worker-restart",
+    "vault-sync",
 }
 
 # Of those, the ones systemd runs with NO fleet TODAY -- the retrofit half.
@@ -59,7 +60,11 @@ ACTIVE_MISROUTING = {
 # correctly; armed as composed -- ExecStart names no fleet -- it misroutes on its
 # first run. Collapsing it into either neighbour loses the fact the fix needs:
 # it is the only member reachable BEFORE it breaks.
-LATENT = {"update-siblings"}
+# vault-sync (#1721) joins update-siblings here, and is if anything safer:
+# `enroll: false` composes NO unit at all (#1385), so nothing systemd runs
+# can misroute it. It is host-scoped by design and resolves through
+# resolve_bots_dir + the declared-wins path, never a lexical first pick.
+LATENT = {"update-siblings", "vault-sync"}
 
 # Pass a fleet, resolve at step 1, and must stay untouched. Over-reaching into
 # this set is the realistic failure mode of a fix aimed at the other one.

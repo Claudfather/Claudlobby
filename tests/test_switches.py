@@ -96,6 +96,10 @@ def test_exactly_the_categories_that_ship_off():
     opt_in = {s.key for s in sw.SWITCHES if s.polarity == sw.OPT_IN}
     assert opt_in == {"update-siblings", "session-digest", "code-audit-sweep",
                       "weekly-worker-restart",
+                      # mutates operator source — update-siblings' OWN
+                      # category, not a new one: armed, vault-sync commits and
+                      # pushes the vault on every host it runs on.
+                      "vault-sync",
                       # model spend — same class as code-audit-sweep /
                       # session-digest, not a new category
                       "manager-checkin",
