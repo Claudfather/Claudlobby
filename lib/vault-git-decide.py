@@ -13,13 +13,19 @@ hook is live the instant `generate` writes it. So every path answers "is this
 git invocation pointed INSIDE the vault" first, and a command that is not
 vault-bound is allowed without ever looking at its verb.
 
-**The effective directory** of a git invocation, in order:
-  1. the argument of ``git -C <path>`` when present,
+**Where a git invocation points**, in order:
+  1. every path named by a scope-setting flag — ``-C``, ``--git-dir``,
+     ``--work-tree`` — and the invocation is vault-bound if ANY of them is,
   2. otherwise the last ``cd <path>`` appearing before that git token,
   3. otherwise the payload's ``cwd``.
 Each candidate resolves through the equivalent of ``realpath -m`` (symlinks
 followed, relative paths resolved against `cwd`, non-existent paths still
 normalised).
+
+Reading only ``-C`` — which is what this guard shipped with — leaves the two
+flags a script reaches for when it walks several repositories without ``cd``-ing
+into each. ``git --git-dir=<vault>/.git checkout <branch>`` then resolved its
+scope from ``cwd``, and was allowed from anywhere else on disk.
 
 **An unresolvable candidate falls back to `cwd` rather than to "allow".** A
 shell variable, a glob or a quoted expression is exactly what an operator
@@ -51,7 +57,37 @@ CONDITIONAL = {
     "commit": ("--amend",),
     "push": ("--force", "-f", "--force-with-lease"),
     "branch": ("-d", "-D", "-m", "-M", "--delete", "--move"),
+    "pull": ("--rebase", "-r"),
 }
+
+#: Verbs refused unless they carry an explicit SAFE flag — the inverse of
+#: :data:`CONDITIONAL`, and the inversion is the whole reason it exists.
+#:
+#: `pull`'s dangerous form is the one with no flag at all. `pull.rebase` turns a
+#: bare `git pull` into a rebase in the vault — the operation denied by name in
+#: :data:`STATE_VERBS` above, reached by a command far more ordinary than the
+#: one that spells it. A deny-list of flags cannot express that; only requiring
+#: the safe spelling can. The vault's stated invariant is that it stays on its
+#: default branch and is ONLY EVER FAST-FORWARDED, so the fast-forward spelling
+#: is the one that passes and every other is refused.
+#:
+#: `pull` is in both tables deliberately. Measured on git 2.39.5:
+#: `git pull --ff-only --rebase` is NOT rejected as a contradiction — git takes
+#: the rebase path and asks which branch to rebase against — so carrying the
+#: safe flag is not on its own evidence that the safe thing will happen.
+NEEDS_SAFE_FLAG = {
+    "pull": ("--ff-only",),
+}
+
+#: Flags that point a git invocation somewhere other than the shell's cwd.
+#: `-C` was the only one this guard read when it first shipped, which left the
+#: two flags a script reaches for when it walks several repositories WITHOUT
+#: `cd`-ing into each — `--git-dir` and `--work-tree` — resolving their scope
+#: from `cwd` and passing the vault check untested. That is accident-shaped,
+#: and accident is the threat model here: the outage began with a bot running
+#: `rebase` in the vault because its instructions were ambiguous, not with
+#: anything trying to evade a check.
+SCOPE_FLAGS = ("-C", "--git-dir", "--work-tree")
 
 
 def _resolve(path: str, cwd: str | None) -> str | None:
@@ -114,6 +150,32 @@ def _inside(path: str, vault: str) -> bool:
     return repo == vault
 
 
+def _scope_targets(args: list[str]) -> list[str]:
+    """Every path one git invocation points at, in the order it names them.
+
+    ALL of them rather than the first, because the verdict below is any-of:
+    each flag in :data:`SCOPE_FLAGS` can independently aim the invocation at a
+    different repository, and a command is vault-bound if any one of them does.
+
+    Both spellings are read — `--git-dir <p>` and `--git-dir=<p>` — since the
+    attached form is the one a script writes.
+    """
+    out: list[str] = []
+    j = 0
+    while j < len(args):
+        a = args[j]
+        if a in SCOPE_FLAGS and j + 1 < len(args):
+            out.append(args[j + 1])
+            j += 2
+            continue
+        for f in SCOPE_FLAGS:
+            if a.startswith(f + "="):
+                out.append(a[len(f) + 1:])
+                break
+        j += 1
+    return out
+
+
 def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
     """Return (verdict, detail). verdict is allow | deny | unresolved."""
     try:
@@ -146,27 +208,29 @@ def _judge_git(tokens: list[str], start: int, vault: str,
     args = tokens[start + 1:]
 
     # --- SCOPE, first and always ------------------------------------------
-    target: str | None = None
-    for j, a in enumerate(args):
-        if a == "-C" and j + 1 < len(args):
-            target = args[j + 1]
-            break
-        if a.startswith("-C="):
-            target = a[3:]
-            break
-    if target is None:
-        target = last_cd
+    targets = _scope_targets(args)
+    if not targets and last_cd is not None:
+        targets = [last_cd]
 
-    resolved: str | None = None
-    if target is not None and not _looks_unresolvable(target):
-        resolved = _resolve(target, cwd)
-    if resolved is None:
-        # Unreadable target, or none given: the invocation runs wherever the
-        # shell already is.
+    # An invocation is vault-bound if ANY of its targets is. Taking only the
+    # first would let a harmless-looking `-C` launder the rest:
+    # `git -C /elsewhere --git-dir=<vault>/.git reset --hard` still moves the
+    # vault's refs.
+    resolved: list[str] = []
+    unreadable = not targets  # none given: it runs wherever the shell already is
+    for t in targets:
+        r = None if _looks_unresolvable(t) else _resolve(t, cwd)
+        if r is None:
+            unreadable = True
+        else:
+            resolved.append(r)
+    if unreadable:
         if cwd is None:
             return "unresolved", "no cwd in payload and an unreadable target"
-        resolved = _resolve(cwd, None)
-    if resolved is None or not _inside(resolved, vault):
+        here = _resolve(cwd, None)
+        if here is not None:
+            resolved.append(here)
+    if not any(_inside(r, vault) for r in resolved):
         return "allow", ""
 
     # --- only now, the verb -----------------------------------------------
@@ -191,6 +255,9 @@ def _judge_git(tokens: list[str], start: int, vault: str,
     for flag in CONDITIONAL.get(verb, ()):
         if flag in rest:
             return "deny", f"{verb} {flag}"
+    safe = NEEDS_SAFE_FLAG.get(verb)
+    if safe is not None and not any(f in rest for f in safe):
+        return "deny", f"{verb} without {safe[0]}"
     return "allow", ""
 
 

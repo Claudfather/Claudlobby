@@ -255,3 +255,116 @@ class TestTheRealHostShape:
     def test_dash_C_into_the_vault_from_a_nested_checkout_is_denied(self, nested):
         vault, checkout, _ = nested
         assert D.decide(f"git -C {vault} rebase", vault, checkout)[0] == "deny"
+
+
+class TestEveryFlagThatPointsTheInvocation:
+    """`-C` was not the only way to aim a git command (review of #1725).
+
+    The guard shipped reading `-C` alone, so the two flags a script reaches for
+    when it walks several repositories WITHOUT `cd`-ing into each resolved
+    their scope from `cwd` and never met the vault check. That is
+    accident-shaped rather than evasion-shaped, which is the threat model here:
+    the outage began with a bot running `rebase` in the vault because its
+    instructions were ambiguous.
+
+    Every deny below has an allow twin differing only in WHERE it points.
+    """
+
+    @pytest.fixture()
+    def nested(self, tmp_path):
+        vault = tmp_path / "vault"
+        (vault / ".git").mkdir(parents=True)
+        outside = tmp_path / "elsewhere" / "repo"
+        (outside / ".git").mkdir(parents=True)
+        return os.path.realpath(vault), os.path.realpath(outside)
+
+    @pytest.mark.parametrize("flag", ["--git-dir", "--work-tree"])
+    @pytest.mark.parametrize("joiner", [" ", "="])
+    def test_a_scope_flag_into_the_vault_is_denied_from_outside_it(
+            self, nested, flag, joiner):
+        vault, outside = nested
+        target = f"{vault}/.git" if flag == "--git-dir" else vault
+        assert D.decide(
+            f"git {flag}{joiner}{target} checkout main", vault, outside
+        )[0] == "deny"
+
+    @pytest.mark.parametrize("flag", ["--git-dir", "--work-tree"])
+    @pytest.mark.parametrize("joiner", [" ", "="])
+    def test_the_same_flag_pointed_elsewhere_is_allowed_from_the_vault(
+            self, nested, flag, joiner):
+        """The twin. A hook that denied this would refuse legitimate work in
+        every bot's own checkout, which is the failure this guard fears most."""
+        vault, outside = nested
+        target = f"{outside}/.git" if flag == "--git-dir" else outside
+        assert D.decide(
+            f"git {flag}{joiner}{target} checkout main", vault, vault
+        )[0] == "allow"
+
+    def test_the_verdict_is_ANY_target_not_the_first_one(self, nested):
+        """A harmless-looking `-C` must not launder the flag beside it:
+        `--git-dir` still moves the vault's refs whatever `-C` says."""
+        vault, outside = nested
+        assert D.decide(
+            f"git -C {outside} --git-dir={vault}/.git reset --hard",
+            vault, outside)[0] == "deny"
+
+    def test_a_linked_worktrees_git_dir_resolves_to_the_vault(self, nested):
+        """`--git-dir` for a linked worktree points inside the vault's own
+        `.git`, so the walk-up lands on the vault and the command is guarded."""
+        vault, outside = nested
+        wt = f"{vault}/.git/worktrees/wt"
+        assert D.decide(f"git --git-dir={wt} reset --hard", vault, outside)[0] == "deny"
+
+
+class TestPullIsOnlyEverAFastForward:
+    """`pull` reached neither table when the guard shipped (review of #1725).
+
+    So `git pull --rebase` was ALLOWED inside the vault while `git rebase` was
+    denied three lines away — the same operation under a more ordinary
+    spelling. A bare `git pull` is the same hole without needing a flag at all:
+    under `pull.rebase` it rebases the vault, which is the twelve-day outage's
+    own mechanism.
+
+    The vault's stated invariant is that it only ever fast-forwards, so the
+    fast-forward spelling passes and nothing else does.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        "git pull",
+        "git pull origin main",
+        "git pull --rebase",
+        "git pull -r",
+        "git pull --ff-only --rebase",
+    ])
+    def test_pull_without_a_fast_forward_guarantee_is_denied_in_the_vault(
+            self, tree, cmd):
+        vault, _ = tree
+        assert D.decide(cmd, vault, vault)[0] == "deny"
+
+    @pytest.mark.parametrize("cmd", [
+        "git pull",
+        "git pull origin main",
+        "git pull --rebase",
+        "git pull -r",
+        "git pull --ff-only --rebase",
+    ])
+    def test_the_same_pull_in_a_projects_checkout_is_allowed(self, tree, cmd):
+        """The twin, and the load-bearing half: `pull --rebase` is ordinary
+        work in a bot's own repository and must stay untouched."""
+        vault, proj = tree
+        assert D.decide(cmd, vault, proj)[0] == "allow"
+
+    def test_pull_ff_only_stays_allowed_in_the_vault(self, tree):
+        """The positive control. The guardrail page names `pull --ff-only` as
+        permitted; a fix that denied it would contradict the page it enforces."""
+        vault, _ = tree
+        assert D.decide("git pull --ff-only", vault, vault)[0] == "allow"
+        assert D.decide("git pull --ff-only origin main", vault, vault)[0] == "allow"
+
+    def test_the_refusal_names_the_missing_flag(self, tree):
+        """The detail reaches the operator inside the hook's deny message and
+        the plane's `vault_guard_denied` event, so it has to say which spelling
+        would have passed."""
+        vault, _ = tree
+        assert D.decide("git pull", vault, vault)[1] == "pull without --ff-only"
+        assert D.decide("git pull --rebase", vault, vault)[1] == "pull --rebase"
