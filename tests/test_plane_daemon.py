@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -269,20 +270,59 @@ def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path):
     )
     t.start()
     try:
+        # WAIT ON THE THING ASSERTED. This polled until the spool file
+        # disappeared, which is the CLAIM: the daemon takes the entry out of
+        # the spool and commits its rows afterwards, so those are two events
+        # and not one. On a machine slow enough to separate them the read
+        # landed in between and the test failed HONESTLY -- the daemon was
+        # right and the predicate did not cover the assertion. CI never
+        # separated them, which is why it looked environment-specific and was
+        # not.
+        #
+        # The ceiling is deliberately unchanged. Widening the wait would have
+        # turned a correct failure into a slow pass and put back exactly the
+        # by-feel poll bound #1602 removed; what moved is the PREDICATE, which
+        # is now the assertion itself. A daemon that claims and never commits
+        # still fails this test, and fails it at the same 10s.
+        # The predicate has to cover EVERY pre-commit state, and there are two
+        # of them -- the daemon creates the schema and then commits into it.
+        # Polling the spool file hid that by reading the db exactly once, late;
+        # reading it in a loop from the start meets a db with no `communications`
+        # table at all. An OperationalError here is "not yet", not a failure:
+        # the only failure is still having nothing to assert at the deadline.
         deadline = time.time() + 10
-        while time.time() < deadline:
-            if not list(spool_dir(tmp_path).glob("*.json")):
+        n = drained = 0
+        while True:
+            try:
+                conn = connect(db_path(tmp_path))
+                try:
+                    n = conn.execute(
+                        "SELECT COUNT(*) FROM communications WHERE event_id = ?",
+                        (eid,),
+                    ).fetchone()[0]
+                    # The REASON, not just the event name. Both the startup
+                    # drain and the interval drain emit
+                    # `spool_drain_completed`, so counting the event proves a
+                    # drain happened and not WHICH -- and this test is named
+                    # for the startup one. Measured: with the startup drain
+                    # deleted outright this test still passed, because
+                    # `_last_drain` starts at 0.0 and `time.monotonic()` is
+                    # uptime-scale, so the first loop pass satisfies ANY
+                    # interval (9999s included) and the interval drain does
+                    # the work instead. A test that passes with its own
+                    # subject removed is not testing its subject.
+                    drained = conn.execute(
+                        "SELECT COUNT(*) FROM events WHERE kind='system'"
+                        " AND event='spool_drain_completed'"
+                        " AND json_extract(detail, '$.reason') = 'startup'"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+            except sqlite3.OperationalError:
+                n = drained = 0          # no db, or no schema yet
+            if (n, drained) == (1, 1) or time.time() >= deadline:
                 break
             time.sleep(0.05)
-        conn = connect(db_path(tmp_path))
-        n = conn.execute(
-            "SELECT COUNT(*) FROM communications WHERE event_id = ?", (eid,)
-        ).fetchone()[0]
-        drained = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE kind='system'"
-            " AND event='spool_drain_completed'"
-        ).fetchone()[0]
-        conn.close()
         assert n == 1, "startup drain must ingest the stranded entry"
         assert drained == 1, "a drain that did work emits its system event"
     finally:
