@@ -723,13 +723,89 @@ plane_kill_tree() {
     kill -9 "$_p" 2>/dev/null || true
 }
 
+# plane_emit_loss <kind> <door> [detail] -- COUNT an emission whose fate the
+# door cannot state. Host-scoped, beside the wedge marker:
+#   $CLAUDLOBBY_ROOT/state/plane/.emit-losses    <epoch>\t<kind>\t<door>\t<detail>
+#
+# WHAT BELONGS HERE IS A RULE, NOT A LIST: an emission whose fate THIS DOOR
+# CANNOT STATE. A reap qualifies — the batch may have committed before the kill
+# and nothing can tell which. That is the only kind wired today.
+#
+# A COOLDOWN DIVERSION DELIBERATELY DOES NOT QUALIFY, and an earlier version of
+# this comment claimed it did (review). Measured: with the marker armed the shim
+# skips the socket, takes the cold rung, and the batch COMMITS — rc 0, one
+# events row, one ledger row. Its fate is stated, so counting it here would be
+# counting a success as a loss, in a file named for losses, which a reader would
+# then take for a loss series.
+#
+# The `kind` field stays because the rule admits other kinds (a spool write that
+# failed has an unstatable fate too) — it is the rule that decides, not this
+# sentence. The diversion RATE is still worth knowing and is a different
+# question: #1657 closes the breaker as measured-and-acceptable, and the rate is
+# observable in the journal for timer callers, which is where that need sits.
+#
+# WHY A FILE AND NOT THE PLANE. What gets counted is precisely the case where
+# the plane could not be reached. Recording it THROUGH the plane would be the
+# instrument depending on its own subject, and would recurse through this very
+# function on the path that is already failing.
+#
+# WHY IT WAS INVISIBLE UNTIL NOW. Both disclosures go to the caller's stderr,
+# which for a TIMER is the journal and for a BOT SESSION is a tmux pane --
+# neither durable nor greppable. Measured: 24h of journal on one host showed 3
+# reaps, and that 3 is a FLOOR from a partial channel rather than a count,
+# because every bot-session reap in the same window left no trace anywhere.
+# `plane doctor` never looked at this either (#1657).
+#
+# APPEND-ONLY with >>, so it needs no lock: one short line per event, and the
+# kernel keeps an O_APPEND write of this size atomic. Rotated by AGE on write
+# (drop rows past 24h) rather than by size, because the question it answers is
+# always "how often lately" -- and rotation failure must never cost the append,
+# so it is best-effort and the append happens FIRST.
+#
+# NEVER fails the caller and never blocks: every path returns 0. This runs
+# inside the reap path of a door whose record has already gone wrong; a counter
+# that could abort it would turn a lost record into a dead watchdog.
+plane_emit_loss() {
+    local kind="$1" door="$2" detail="${3:-}"
+    local dir="${CLAUDLOBBY_ROOT:-}/state/plane" f
+    [ -n "${CLAUDLOBBY_ROOT:-}" ] || return 0
+    f="$dir/.emit-losses"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    # The append first, so a rotation problem cannot cost the record.
+    printf '%s\t%s\t%s\t%s\n' "$(date +%s 2>/dev/null || printf 0)" \
+        "$kind" "$door" "$(printf '%s' "$detail" | tr '\t\n' '  ')" \
+        >>"$f" 2>/dev/null || return 0
+    plane_emit_loss_rotate "$f"
+    return 0
+}
+
+# plane_emit_loss_rotate <file> -- drop rows older than PLANE_LOSS_WINDOW_S
+# (24h). Best-effort and silent: this is hygiene on a counter, not a door.
+# Only rewrites when something would actually be dropped, so the common call
+# costs one awk and no write.
+plane_emit_loss_rotate() {
+    local f="$1" cutoff tmp
+    cutoff=$(( $(date +%s 2>/dev/null || printf 0) - ${PLANE_LOSS_WINDOW_S:-86400} ))
+    [ "$cutoff" -gt 0 ] || return 0
+    awk -F'\t' -v c="$cutoff" '$1 < c { n++ } END { exit(n ? 0 : 1) }' "$f" 2>/dev/null || return 0
+    tmp="$f.$$"
+    awk -F'\t' -v c="$cutoff" '$1 >= c' "$f" >"$tmp" 2>/dev/null \
+        && mv -f "$tmp" "$f" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+    return 0
+}
+
 # plane_emit_bounded <door> <seconds> <batch> -- the batch through the shim,
 # WAITED on for at most the bound, then reaped (whole tree): the shape for a
 # door that must know whether its record landed but must not hold a watchdog
 # tick behind a wedged rung. PLANE_EMIT_LAST_RC = the shim's rc, 143 when
-# reaped -- "not recorded", disclosed; the plane may still hold the row (a
-# kill after the commit), and a retry is never a second row because ingest
-# dedupes on the pre-minted event id.
+# reaped -- and a reap's fate is UNKNOWN, not "not recorded": a kill before the
+# db is a total loss, a kill inside the ingest transaction rolls back, and a
+# kill AFTER the commit leaves the row in the plane. This door cannot tell those
+# apart, so it says so and COUNTS it (plane_emit_loss) rather than asserting the
+# one it cannot know. A retry is never a second row, because ingest dedupes on
+# the pre-minted event id -- which is what makes UNKNOWN actionable instead of
+# merely honest.
 plane_emit_bounded() {
     local door="$1" bound="$2" batch="$3" _pid _rc=0 _deadline
     # WHAT THIS POLLS FOR, because that decides how the granularity may change:
@@ -774,7 +850,16 @@ plane_emit_bounded() {
     if kill -0 "$_pid" 2>/dev/null; then
         plane_kill_tree "$_pid"
         _rc=143
-        echo "$door: plane record reaped at ${bound}s (rung wedged) -- not recorded" >&2
+        # UNKNOWN, not "not recorded". The older wording asserted the one outcome
+        # this door cannot observe, while the contract note above already said
+        # the plane may hold the row -- the code contradicted its own comment,
+        # and an operator reading "not recorded" during an incident would go
+        # looking for a row that is sometimes there. Three outcomes, named.
+        echo "$door: plane record reaped at ${bound}s (rung wedged) -- state UNKNOWN:" \
+             "the batch may have committed before the kill. Re-emitting is safe" \
+             "(ingest dedupes on the pre-minted event id); counted in" \
+             "state/plane/.emit-losses" >&2
+        plane_emit_loss reap "$door" "bound=${bound}s"
     else
         wait "$_pid" || _rc=$?
     fi
