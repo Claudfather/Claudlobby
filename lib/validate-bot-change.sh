@@ -3868,6 +3868,62 @@ fi
 
 command tmux -L "$_S3_SOCK" kill-server 2>/dev/null || true
 
+# ===========================================================================
+# #1720 — the vault git-state guard, driven through the REAL hook
+# ===========================================================================
+# Unit tests prove the decision; only running the hook proves a bot's Bash call
+# actually gets refused. Both halves are asserted because only the pair is
+# evidence: a guard that denied everything would pass the deny case alone, and
+# that failure -- refusing legitimate git work in every bot's projects/
+# checkout -- is the one this design is most afraid of.
+echo ""
+echo "--- #1720: vault git-state guard ---"
+_VG_ROOT="$(mktemp -d)"
+mkdir -p "$_VG_ROOT/vault" "$_VG_ROOT/projects/repo"
+_VG_VAULT="$(realpath -m "$_VG_ROOT/vault")"
+_VG_PROJ="$(realpath -m "$_VG_ROOT/projects/repo")"
+_vg_hook() { # <cwd> <command> -> stdout of the real hook
+    printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$2" \
+      | CLAUDRON_VAULT_PATH="$_VG_VAULT" bash "$LIB_DIR/vault-git-guard.sh" 2>/dev/null
+}
+
+_vg_deny="$(_vg_hook "$_VG_VAULT" "git checkout -b probe")"
+case "$_vg_deny" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1720 DENY: git checkout inside the vault is refused by the hook" "$r"
+
+_vg_allow="$(_vg_hook "$_VG_PROJ" "git checkout -b feature")"
+[ -z "$_vg_allow" ] && r=yes || r=no
+harness_check "#1720 ALLOW: the same command in a projects/ checkout is untouched" "$r"
+
+_vg_ro="$(_vg_hook "$_VG_PROJ" "git -C $_VG_VAULT status")"
+[ -z "$_vg_ro" ] && r=yes || r=no
+harness_check "#1720 ALLOW: a read-only git command in the vault is untouched" "$r"
+
+# THE SHAPE THE UNIT FIXTURES GOT WRONG, and the reason the canary is
+# mandatory rather than ceremonial: on a live host a bot's projects/ checkout
+# nests INSIDE the vault directory (measured at seven segments below it). A
+# prefix-based scope rule refuses git work in every bot's own repo fleet-wide.
+mkdir -p "$_VG_ROOT/vault/.git" "$_VG_ROOT/vault/home/f/bots/b/projects/repo/.git"
+_VG_NESTED="$(realpath -m "$_VG_ROOT/vault/home/f/bots/b/projects/repo")"
+_vg_nested="$(_vg_hook "$_VG_NESTED" "git switch -c feature")"
+[ -z "$_vg_nested" ] && r=yes || r=no
+harness_check "#1720 NESTED: a checkout inside the vault DIR but its own repo is untouched" "$r"
+
+_vg_vault_still="$(_vg_hook "$_VG_VAULT" "git switch -c probe")"
+case "$_vg_vault_still" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1720 NESTED CONTROL: the vault itself is still denied" "$r"
+
+_vg_novault="$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"git reset --hard"}}' "$_VG_VAULT" \
+    | env -u CLAUDRON_VAULT_PATH bash "$LIB_DIR/vault-git-guard.sh" 2>/dev/null)"
+[ -z "$_vg_novault" ] && r=yes || r=no
+harness_check "#1720 NO-VAULT: a bot with no CLAUDRON_VAULT_PATH gets no decision" "$r"
+
+if [ "${_vg_deny:-}" = "" ]; then
+    echo "  --- DIAGNOSTIC: #1720 deny produced no output ---"
+    echo "      vault: $_VG_VAULT"
+fi
+rm -rf "$_VG_ROOT"
+
 echo ""
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

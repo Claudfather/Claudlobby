@@ -6,6 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a composed guard so no bot can rewrite the vault's git state (#1720)
+
+- **The outage this is the mechanism for.** A live host's vault clone was
+  switched to a side branch and stayed there for a month: 59 commits of
+  knowledge accrued off the default branch, **53 of them on no remote**. The
+  hook-driven rebase that finally tried to reconcile them was killed mid-pick
+  and left the tree detached for **twelve days** with the default branch's files
+  checked out — a fleet's mission, charter and project manifest gone from disk —
+  after which a `generate` composed the fleet from the reverted manifest. Prose
+  telling bots not to do that already existed. It is not a mechanism.
+
+- **`lib/vault-git-guard.sh`**, a `PreToolUse` hook on `Bash`, refuses
+  `checkout switch rebase reset merge stash clean worktree cherry-pick revert
+  am` inside the vault, plus `commit --amend`, `push --force`/`-f`/
+  `--force-with-lease` and `branch -d`/`-D`/`-m`. Everything else there —
+  `status log diff add commit fetch pull --ff-only push` — is untouched, as is
+  any `claudron` command.
+
+- **Scope is decided before the verb, and that ordering is the whole safety
+  argument.** The dangerous failure is not missing a rebase in the vault;
+  Claudron's own `sync` refuses a side branch as the belt to these braces. It is
+  refusing legitimate git work in **every bot's `projects/` checkout at once**,
+  because a composed hook is live the instant `generate` writes it and there is
+  **no canary window**. So a command not pointed inside the vault is allowed
+  without its verb ever being read, and every deny test has an allow twin
+  differing only in *where* the command points.
+
+- **The effective directory** is `git -C <path>` if present, else the last
+  `cd <path>` before the git token, else the payload's `cwd`. An **unreadable**
+  target — a variable, a glob — falls back to `cwd` rather than to allow: a
+  variable is what someone reaches for when doing something wide, so the
+  opposite fallback would put the blind spot exactly where the risk is. With no
+  `cwd` and no readable target the command is allowed **and counted**
+  (`vault_guard_unresolved`), never silently.
+
+- **A bot with no `CLAUDRON_VAULT_PATH` gets no decision at all** — there is no
+  vault to protect, and a guard firing there would refuse work it cannot have a
+  reason to refuse. Fails open **loudly** on missing `jq`/`python3` or an
+  unparseable payload: blocking every git command fleet-wide is a worse outage
+  than the hazard.
+
+- **The canary caught a fleet-wide false positive that no unit test could
+  have.** Scope is decided by which git REPOSITORY a path belongs to — not by
+  which directory it sits under. Measured on a live host during this change's
+  canary: every bot's `projects/<repo>` checkout nests **inside** the vault
+  directory, seven segments below it. A prefix test therefore refused
+  `checkout`, `rebase` and `reset` in **every bot's own repository**, fleet-wide
+  — the exact failure this design is most afraid of. Every unit fixture had
+  built vault and projects as *siblings*, a shape the real host does not have,
+  so the suite was green throughout. The rule now resolves the nearest enclosing
+  `.git` and guards only when that is the vault itself; a path under the vault
+  in its own clone is that clone's business, and a path under the vault in no
+  repo at all is the vault's own tree and stays guarded. Pinned by tests that
+  build the real nesting, and controlled: the old prefix rule fails exactly
+  those two.
+
+- Decision logic is `lib/vault-git-decide.py` (standalone stdlib), split out for
+  the reason `mention-rewrite.py` is: the parsing is the hard part and belongs
+  somewhere unit-testable. It matches the denied verb on the **subcommand token
+  alone**, never a substring of the command line — `git log --grep=reset` is a
+  read and stays one.
+
+- `library/guardrails/vault-git-hygiene.md` says what is refused and why, so a
+  denial is not the first a bot hears of the rule, and names the one thing not
+  to do when the vault looks wedged: do not abort, reset or check anything out —
+  report it. An aborted rebase in a live tree is how the twelve days started.
+
+
 ### Fixed — a withheld attribution left no trace a reader could reach (#1711, citation B)
 
 #1706 case 2 withholds `pr_url`/`pr_role` when the task link was a guess, and
