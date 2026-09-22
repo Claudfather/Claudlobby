@@ -199,27 +199,33 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 300
-
-    # vault-sync (#1721) — the SCHEDULED vault door. DORMANT.
+    # The SCHEDULED vault door (#1721). Claudron's sync fires only at session
+    # boundaries, under a 2s hook budget, and reports to a log inside the vault
+    # it is failing to sync -- so when a live host wedged, every sync refused
+    # for twelve days printing success-shaped output and nothing scheduled ever
+    # looked. This job runs the door on a cadence, records EVERY outcome on the
+    # plane so "last successful sync" has a denominator, and pages once on a
+    # state CHANGE (not on a clock: a wedged vault is wedged until someone
+    # fixes it, and paging every 15 minutes is how the channel gets muted).
     #
-    # Claudron's sync fires only at session boundaries, under a 2s hook budget,
-    # and reports to a log inside the vault it is failing to sync. When a host
-    # wedged, every sync refused for twelve days printing success-shaped output
-    # and nothing scheduled ever looked. This job runs the door on a cadence,
-    # records EVERY outcome on the plane (vault.sync_ok) so a missing sync has
-    # a denominator, and pages ONCE on a state change — not on a clock, because
-    # a wedged vault is wedged until someone fixes it and a page every 15
-    # minutes is how the channel gets muted.
-    #
-    # ARMED, IT COMMITS AND PUSHES on every host it runs on. Arm one host,
-    # watch vault.sync_ok for a week, then the second. Uncomment to arm:
-    #
+    # DORMANT. Armed, it COMMITS AND PUSHES on every host it runs on -- the
+    # "mutates operator source" category the defaults rule reserves for opt-in.
+    # Arm it in THAT host's own system.yaml, which host jobs read directly
+    # (fleet.yaml cannot reach them):
     #   host: { jobs: { vault-sync: { enroll: true } } }
+    # then run lib/setup-system. Ship dormant, arm one host, watch
+    # vault.sync_ok for a week, then arm the second.
     #
-    # then run lib/setup-system. It never resolves a conflict: Claudron's sync
-    # does that or refuses, and this job reports.
+    # 15min: the cadence IS the deliverable -- it bounds how long a wedge can
+    # sit unseen, which was twelve days. randomized_delay keeps two hosts off
+    # the same remote at the same instant.
     vault-sync:
       enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/vault-sync.sh"
+      schedule: "*:0/15"
+      type: oneshot
+      persistent: true
+      randomized_delay: 120
     # The observable plane's ingest daemon (unit: service = RESIDENT, no
     # schedule; supervision restarts it). One per host -- the plane db is
     # host-scoped.

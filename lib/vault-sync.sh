@@ -161,7 +161,14 @@ _alert_on_state_change() {
     [ -f "$marker" ] && prev="$(cat "$marker" 2>/dev/null || true)"
     [ "$now" = "$prev" ] && return 0      # unchanged: say nothing
 
-    local bots_dir; bots_dir="$(host_fleet_bots_dirs | head -1)"
+    # resolve_bots_dir, NOT `host_fleet_bots_dirs | head -1`: taking the first
+    # entry is the #1517 defect exactly -- a lexical pick means the recipient is
+    # whichever fleet directory sorts first, a reader nobody chose that a newly
+    # added directory moves silently, and whose loss is undetectable (alerts
+    # stopping looks identical to alerts not firing). The shared resolver plus
+    # _emit_fleet_signal's declared-wins logic (CLAUDLOBBY_ALERT_MANAGER) is the
+    # host-scoped answer, and it says out loud when it had to discover one.
+    local bots_dir; bots_dir="$(resolve_bots_dir "${FLEET:-}" 2>/dev/null || true)"
     if [ "$ok" = "1" ]; then
         # Recovery is worth exactly one line, and only when something was wrong.
         case "$prev" in
