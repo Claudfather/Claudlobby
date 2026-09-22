@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
+
+`plane_emit_bounded` backgrounds the emit shim and polls for its exit. It polled
+with `sleep 1`, and the first `kill -0` runs microseconds after the `&` — long
+before a forked bash can exec and exit — so the body **always** ran at least
+once. The socket rung answers in ~40 ms. Measured on this host, via the new knob
+so both arms run in one process: **1038 ms → 108 ms** per emission, ~930 ms of
+which was pure sleep after the record had already landed.
+
+`emit_fleet_event` is the door's only caller and `bot-vitals.sh` is its hottest
+one, matcher-less on both `PreToolUse` and `PostToolUse`, so that second sat on
+the session's critical path twice per tool call on every bot.
+
+- **The bound is now a wall-clock DEADLINE, not a count of sleeps, and that is
+  the whole care in this change.** `_i -lt bound` with `sleep 1` made the bound's
+  duration and its unit the same number by coincidence. Shortening the poll
+  without converting that shortens the bound with it: measured, the obvious
+  `_max=$((bound*20))` with `_ticks+=20` per iteration **reaps at ~0.5 s**, so a
+  1.9 s cold-rung child — the ordinary cost whenever the socket breaker is armed,
+  which is ~34 % of this estate's day — comes back `rc=143` "not recorded" having
+  succeeded everywhere else. That trades a latency defect for a **recording-loss**
+  defect, which is strictly worse than the floor it removes. A deadline cannot
+  drift that way.
+- **`SECONDS + bound + 1`**: `SECONDS` is integer and a call may start
+  mid-second, so the wait is `[bound, bound+1]` and never less than `bound`.
+  Overshooting costs a reaped-anyway child one extra second; undershooting kills
+  a healthy one.
+- **The degenerate case is deliberately safe.** A `sleep` that rejects fractions
+  falls through `||` to the old one-second behaviour with the bound intact. A
+  `sleep` that fails entirely spins — but still exits at the deadline and still
+  does not reap early (measured), so the worst case is a bounded burst of CPU
+  rather than an emission killed mid-flight.
+- **The fork cost does not scale the way the granularity suggests**, because the
+  loop only iterates while the child is alive: measured 1 sleep at 40 ms
+  (unchanged from `sleep 1`), 4 at 200 ms, 38 at 1.9 s. The common case is free;
+  the extra forks land only on emissions already paying seconds.
+- `PLANE_EMIT_POLL_S` (default `0.05`) is the granularity knob — it makes the
+  change revertible without a code edit and is what lets the before/after be
+  measured in one process.
+
+Two tests, each mutation-proved and each catching a different mutant: the fast
+path must not pay a second (fails when the floor is restored), and a slow but
+SUCCESSFUL child must not be reaped (fails under the tick arithmetic, alongside
+the pre-existing bound test). **The first cut of the fast test was vacuous** — it
+silenced the emit with `PLANE_EMIT_DISABLED=1`, which `plane_armed` checks
+*before* `plane_emit_bounded` is reached, so the loop was never entered and the
+assertion passed at any granularity. Found by mutating the floor back in, not by
+reading it.
+
 ### Added — manifest provenance: what was this fleet composed FROM? (#1722)
 
 `generate` read `fleet.yaml` from a directory other tools rewrite and recorded
