@@ -310,6 +310,43 @@ SWITCHES: tuple[Switch, ...] = (
         what="metric-sample retention: age raw host.*/bot.* samples past 30 "
              "days by ingested_at — family-scoped, the ledger is never touched",
     ),
+    # OFF BY DEFAULT BECAUSE IT DELETES DATA -- and this lane is the one that
+    # could delete a RECORD rather than a sample, which is why it is an
+    # allowlist rather than an age sweep. `lib/selfstart-snapshot.sh`'s boot
+    # gate fails CLOSED on an UNREACHABLE rescue-receipt read (its own exit 7:
+    # "a receipt gate that fails OPEN is the one failure this measurement must
+    # never have") -- but a receipt that was PRUNED is not unreachable, it is
+    # absent, and absent reads as a certain no-receipt. So a wrongly-pruned
+    # type breaks a boot-integrity gate without touching it.
+    #
+    # Measured before shipping rather than derived from cadences: 15,422 system
+    # events on this host's one complete post-cutover day, 98% of them the two
+    # allowlisted types (tool_call 12,963, wip_uncommitted 2,163). Keeping the
+    # set at two costs ~2% of the win and removes most of the risk.
+    Switch(
+        key="plane-prune-system-events",
+        # DOOR, not HOST_JOB, and the distinction is load-bearing: the
+        # `plane-prune` timer is ENROLLED and stays so. This is a second lane
+        # INSIDE that job, gated by its own variable -- keying it to the job
+        # would have claimed the job itself was opt-in, which the registry
+        # correctly refused (`system.yaml host.jobs says enrolled=True while
+        # the registry says default_on=False`).
+        scope=DOOR,
+        polarity=OPT_IN,
+        carrier=ENV_HOST,
+        env="PLANE_PRUNE_SYSTEM_EVENTS_ENABLED",
+        plane=True,
+        what="system-event retention: age an ALLOWLIST of emit-only system "
+             "events (tool_call, wip_uncommitted) past 30 days by "
+             "ingested_at -- the ledger is never touched, and every other "
+             "event type is kept by construction",
+        why_opt_in="deletes data — and unlike the sample lane beside it, this "
+                   "one could delete a RECORD rather than a sample, which is "
+                   "why it is an allowlist: a wrongly-pruned type breaks "
+                   "selfstart-snapshot.sh's boot gate, which fails closed on "
+                   "an unreachable receipt read but reads an ABSENT receipt "
+                   "as a certain no-receipt",
+    ),
     Switch(
         key="registry-scan",
         scope=GENERATE,

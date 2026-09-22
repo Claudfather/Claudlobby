@@ -108,6 +108,14 @@ def test_exactly_the_categories_that_ship_off():
                       # pages a human with no rate guard beyond the debounce
                       # — outbound-to-people-at-scale's risk, not its volume
                       "worker-unassigned",
+                      # DELETES DATA — the original category, and the sharper
+                      # version of it: unlike the sample lane beside it, this
+                      # one could delete a RECORD. `selfstart-snapshot.sh`'s
+                      # boot gate fails closed on an unreachable receipt read
+                      # but reads an ABSENT receipt as a certain no-receipt,
+                      # so a wrongly-pruned type breaks a boot-integrity gate
+                      # without touching it. Hence an allowlist, and hence off.
+                      "plane-prune-system-events",
                       # standing per-session cost pending the #1102 R3
                       # ratification — an unratified spend, not a new category
                       "boot-brief",
