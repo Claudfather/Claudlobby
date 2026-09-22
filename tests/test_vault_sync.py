@@ -70,16 +70,47 @@ def _root(tmp_path: Path, vaults: dict[str, str]) -> Path:
     return root
 
 
-def _run(root: Path, bindir: Path, **env):
+# The identity vars a BOT SESSION exports, which this job must never inherit
+# (review). vault-sync runs as a HOST job: it has no fleet, so `resolve_bots_dir`
+# is supposed to land on the fleet-less root path and the recipient is supposed to
+# come from the declaration. But that resolver's own fallback chain is
+# `${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}`, so a run launched from inside a bot
+# session silently substitutes the CALLING bot's fleet for the shape under test --
+# measured by the reviewer, whose contaminated run anchored the event on their own
+# fleet while the scrubbed run anchored it on the host. A test that inherits them
+# passes by contamination. `lib/rehearse-vault-sync.sh::run_job` scrubs the same
+# five; this is the Python half of one rule.
+_BOT_IDENTITY_VARS = (
+    "FLEET_NAME",
+    "CLAUDLOBBY_FLEET",
+    "BOT_DIR",
+    "BOT_ID",
+    "CLAUDLOBBY_ALERT_MANAGER",
+)
+
+
+def _scrubbed_env(root: Path, bindir: Path, **env) -> dict:
+    """The subprocess env: ambient bot identity REMOVED, then the test's own on top.
+
+    Order is load-bearing — the scrub runs BEFORE `**env`, so a test that sets one
+    of these deliberately (the routing tests set CLAUDLOBBY_ALERT_MANAGER) still
+    wins, while an ambient value from the session running pytest never does.
+    """
     e = dict(os.environ)
+    for var in _BOT_IDENTITY_VARS:
+        e.pop(var, None)
     e.update({
         "CLAUDLOBBY_ROOT": str(root),
         "PATH": f"{bindir}:{e['PATH']}",
         "PLANE_EMIT_DISABLED": "1",      # the ruled harness exemption
         **env,
     })
+    return e
+
+
+def _run(root: Path, bindir: Path, **env):
     return subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True,
-                          env=e, timeout=120)
+                          env=_scrubbed_env(root, bindir, **env), timeout=120)
 
 
 OK = json.dumps({"ok": True, "data": {"detail": "up to date", "ahead": 0,
@@ -231,3 +262,35 @@ class TestItShipsDormant:
         row = next(s for s in sw.SWITCHES if s.key == "vault-sync")
         assert row.polarity == sw.OPT_IN and row.job == "vault-sync"
         assert row.why_opt_in, "an opt-in must NAME what keeps it off"
+
+
+# --- the env scrub is a BEHAVIOUR, so it gets a pin that can fail -------------
+# The contaminants are set BY THE TEST, never read from the ambient environment.
+# A test asserting "FLEET_NAME is absent" against a host that never exported it
+# passes with the scrub deleted -- it would be green on every machine a developer
+# used and blind in CI, which is #1169's exact shape. Setting them here is what
+# makes the assertion capable of failing.
+def test_the_subprocess_env_drops_ambient_bot_identity(monkeypatch, tmp_path):
+    for var in _BOT_IDENTITY_VARS:
+        monkeypatch.setenv(var, f"contaminant-{var.lower()}")
+
+    e = _scrubbed_env(tmp_path / "root", tmp_path / "bin")
+
+    leaked = {v: e[v] for v in _BOT_IDENTITY_VARS if v in e}
+    assert not leaked, (
+        f"a host job inherited the calling session's identity: {leaked}. "
+        "resolve_bots_dir falls back through CLAUDLOBBY_FLEET/FLEET_NAME, so this "
+        "run would exercise the caller's fleet instead of the fleet-less shape."
+    )
+
+
+def test_a_deliberate_override_still_wins_over_the_scrub(monkeypatch, tmp_path):
+    # The scrub must remove AMBIENT identity without disarming a test that sets one
+    # on purpose -- the routing tests declare CLAUDLOBBY_ALERT_MANAGER, and a scrub
+    # applied after **env would silently drop it and quietly stop testing routing.
+    monkeypatch.setenv("CLAUDLOBBY_ALERT_MANAGER", "ambient-should-lose")
+
+    e = _scrubbed_env(tmp_path / "root", tmp_path / "bin",
+                      CLAUDLOBBY_ALERT_MANAGER="declared-should-win")
+
+    assert e["CLAUDLOBBY_ALERT_MANAGER"] == "declared-should-win"

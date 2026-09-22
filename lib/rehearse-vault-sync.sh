@@ -12,9 +12,15 @@
 # first on PATH, and a fake escalation chat id so the page can never reach a
 # real operator. No production fleet, no real vault, no network.
 #
+# Scenario 5 additionally needs tmux, because the routing question can only be
+# answered by observing DELIVERY -- see the long note at that scenario. Without
+# tmux both its arms SKIP loudly and the summary says the run does not cover them.
+#
 #   bash lib/rehearse-vault-sync.sh
 #
-# exit 0 rehearsed clean · 1 an assertion failed · 2 a dependency is missing
+# exit 0 every scenario that RAN held · 1 an assertion failed · 2 a dependency
+# is missing. A skipped arm does not fail the run, so read the summary line: it
+# names the count.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,11 +29,29 @@ REPO="$(cd "$LIB_DIR/.." && pwd)"
 command -v python3 >/dev/null 2>&1 || { echo "rehearse: python3 required" >&2; exit 2; }
 
 WS="$(mktemp -d "${TMPDIR:-/tmp}/rehearse-vault-sync.XXXXXX")"
-cleanup() { [ -n "${REHEARSE_KEEP:-}" ] && { echo "kept: $WS"; return 0; }; rm -rf "$WS"; }
+cleanup() {
+    # Before the tree goes: a server whose socket file we delete underneath it
+    # stays running and unreachable. `if`, not `A && { }` -- under `set -e` a
+    # failed AND-list that is not the last statement of the function aborts the
+    # trap, and this one would abort it on every host WITHOUT tmux, i.e. exactly
+    # where there is nothing to reap and the temp tree would be left behind.
+    if command -v tmux >/dev/null 2>&1; then
+        tmux -L "${DECOY_SOCK:-}" kill-server 2>/dev/null || true
+        tmux -L "${TARGET_SOCK:-}" kill-server 2>/dev/null || true
+    fi
+    if [ -n "${REHEARSE_KEEP:-}" ]; then echo "kept: $WS"; return 0; fi
+    rm -rf "$WS"
+}
 trap cleanup EXIT
 
 ROOT="$WS/root"; BIN="$WS/bin"; VAULT="$WS/vault"
 mkdir -p "$ROOT/state" "$ROOT/lib" "$BIN" "$VAULT"
+
+# Scenario 5 observes DELIVERY, so it needs real manager sessions -- on private
+# sockets under a throwaway TMUX_TMPDIR, so this can neither see nor touch a live
+# fleet's server (the rehearse-debounce-recipient.sh isolation, #846).
+export TMUX_TMPDIR="$WS/tmx"; mkdir -p "$TMUX_TMPDIR"
+DECOY_SOCK="rvsd$$"; TARGET_SOCK="rvst$$"
 
 # TWO fleets, and they must DISAGREE about who the alert goes to -- this is the
 # whole reason the fixture exists in this shape (review). With one fleet, "pick
@@ -43,15 +67,19 @@ DECOY_FLEET="aaa-decoy"; TARGET_FLEET="zzz-target"
 mkdir -p "$ROOT/local/$DECOY_FLEET/runtime/bots/decoy-mgr" \
          "$ROOT/local/$TARGET_FLEET/runtime/bots/target-mgr"
 # Only the DECOY declares MANAGER_TMUX, so plain discovery would choose it.
-printf 'export CLAUDRON_VAULT_PATH="%s"\nexport MANAGER_TMUX="decoy-mgr"\n' "$VAULT" \
-    > "$ROOT/local/$DECOY_FLEET/runtime/bots/decoy-mgr/bot.conf"
-printf 'export CLAUDRON_VAULT_PATH="%s"\nexport MANAGER_TMUX="target-mgr"\n' "$VAULT" \
-    > "$ROOT/local/$TARGET_FLEET/runtime/bots/target-mgr/bot.conf"
+# Each declares its OWN tmux socket, which is what makes the recipient
+# observable: _emit_fleet_signal resolves MANAGER_TMUX_SOCKET from the bot it
+# picked, so WHICH socket receives the nudge is the routing answer itself.
+printf 'export CLAUDRON_VAULT_PATH="%s"\nexport MANAGER_TMUX="decoy-mgr"\nexport MANAGER_TMUX_SOCKET="%s"\n' \
+    "$VAULT" "$DECOY_SOCK" > "$ROOT/local/$DECOY_FLEET/runtime/bots/decoy-mgr/bot.conf"
+printf 'export CLAUDRON_VAULT_PATH="%s"\nexport MANAGER_TMUX="target-mgr"\nexport MANAGER_TMUX_SOCKET="%s"\n' \
+    "$VAULT" "$TARGET_SOCK" > "$ROOT/local/$TARGET_FLEET/runtime/bots/target-mgr/bot.conf"
 
-fails=0
+fails=0 skips=0
 say()  { printf '  %s\n' "$*"; }
 ok()   { printf '  PASS  %s\n' "$*"; }
 bad()  { printf '  FAIL  %s\n' "$*"; fails=$((fails + 1)); }
+skip() { printf '  SKIP  %s\n' "$*"; skips=$((skips + 1)); }
 
 # The engine the job calls. Its envelope is the seam: the job's contract is
 # that it parses this and never the text.
@@ -156,6 +184,24 @@ print("" if v is None else v)
 PY2
 }
 
+# --- the DELIVERY door, for scenario 5 --------------------------------------
+# Fresh sessions per arm rather than clearing between them: `clear-history` only
+# drops scrollback and a `sleep` pane ignores C-l, so a "cleared" pane still
+# shows the previous arm's push and the next count reads as a false positive
+# (rehearse-debounce-recipient.sh hit exactly this).
+mgr_panes_up() {
+    tmux -L "$DECOY_SOCK"  kill-server 2>/dev/null || true
+    tmux -L "$TARGET_SOCK" kill-server 2>/dev/null || true
+    tmux -L "$DECOY_SOCK"  new-session -d -s decoy-mgr  "sleep 300" 2>/dev/null || return 1
+    tmux -L "$TARGET_SOCK" new-session -d -s target-mgr "sleep 300" 2>/dev/null || return 1
+}
+# How many FLEET-ALERT pushes landed in one manager's pane. Anchored on the short
+# prefix, never the whole line: the pane wraps at its width, so the reason text is
+# split across rows and a long-string grep would miss a push that did arrive.
+alerts_in() {   # <socket> <session> -> count
+    tmux -L "$1" capture-pane -t "$2" -p 2>/dev/null | grep -c 'FLEET-ALERT' || true
+}
+
 echo "rehearse-vault-sync: throwaway root at $ROOT"
 
 # --- 1. clean ---------------------------------------------------------------
@@ -213,6 +259,36 @@ ev_ctl="$(plane_events vault_sync)"
 # The #1517 defect is "pick whichever fleet sorts first". With one fleet that is
 # indistinguishable from resolving correctly, so this poses a real choice and
 # then checks which way it went.
+#
+# READ THE DELIVERY DOOR, NOT THE DISCLOSURE EVENT. The first cut of this
+# scenario asked the plane for `alert_recipient_resolved` and went RED against
+# CORRECT code. _disclose_alert_recipient returns 0 on origin=declared -- the
+# #1517 self-clearing property, pinned by tests/test_alert_recipient.sh ("a
+# DECLARED recipient discloses nothing"). A declared recipient is therefore the
+# one path that channel is silent on, and this scenario declares one: it was
+# interrogating the single instrument that cannot answer its question.
+#
+# It could not FAIL honestly either, which is the worse half. The same silencer
+# covers origin=local, so an outcome that ignored the declaration for a local
+# pick prints the identical "no row" -- a scenario whose failure message named
+# the lexical-pick bug while being unable to distinguish it from correct
+# behaviour. A check that fails for the wrong reason is the same defect class as
+# one that cannot fail at all.
+#
+# What CAN answer is where the alert ARRIVED. A real manager session per fleet,
+# each on that fleet's own socket (bot.conf MANAGER_TMUX_SOCKET), makes the
+# resolved recipient observable. That is the instrument
+# tests/test_alert_recipient.sh reaches for at unit level ("the only way to see
+# which manager a correct, silent resolution picked") and that
+# rehearse-debounce-recipient.sh reaches for on real tmux; this is the same
+# method one layer out, through the real job in its own process.
+#
+# TWO ARMS, and arm B is not an extra scenario -- it is arm A's positive
+# control, twice over. A decoy pane reading 0 is equally consistent with
+# "correctly not chosen" and "this pane never receives anything"; arm A's silent
+# plane is equally consistent with "declared, so silent by contract" and
+# "disclosure is broken". Arm B feeds BOTH, in the opposite direction, in the
+# same run -- so arm A's two zeros are choices rather than dead instruments.
 say "scenario 5 — the alert must reach the DECLARED fleet, not the first one"
 first_fleet="$(cd "$ROOT/local" && ls -1 | head -1)"
 if [ "$first_fleet" = "$DECOY_FLEET" ] && [ "$DECOY_FLEET" != "$TARGET_FLEET" ]; then
@@ -221,33 +297,72 @@ else
     bad "THE FIXTURE POSES NO CHOICE — lexically first is '$first_fleet'. Every assertion below would pass under the old lexical-pick bug; fix the fixture before trusting this run."
 fi
 
-rm -f "$ROOT"/state/vault-sync/*.last
-stub_claudron '{"ok": false, "error": "refusing to sync: a rebase is stopped part-way"}' 1
-before_seq="$(plane_seq)"
-run_job "target-mgr"          # declare the TARGET fleet's manager
-
-cands="$(recipient_field candidate_fleets "$before_seq")"
-if [ "${cands:-0}" -ge 2 ]; then
-    ok "the resolver saw $cands candidate fleets — a genuine choice, not a single option"
+if ! command -v tmux >/dev/null 2>&1; then
+    # Said out loud and counted. A silent skip of the one scenario this harness
+    # exists for reads exactly like a scenario that passed.
+    skip "tmux absent — BOTH routing arms were NOT run, so recipient routing is UNVERIFIED by this run"
 else
-    bad "the resolver saw ${cands:-0} candidate fleet(s): with fewer than 2 this harness cannot tell lexical-first from correct resolution"
-fi
+    # --- arm A: a DECLARED recipient wins -----------------------------------
+    rm -f "$ROOT"/state/vault-sync/*.last
+    stub_claudron '{"ok": false, "error": "refusing to sync: a rebase is stopped part-way"}' 1
+    before_seq="$(plane_seq)"
+    if mgr_panes_up; then
+        run_job "target-mgr"          # declare the TARGET fleet's manager
+        a_target="$(alerts_in "$TARGET_SOCK" target-mgr)"
+        a_decoy="$(alerts_in "$DECOY_SOCK" decoy-mgr)"
+        a_origin="$(recipient_field origin "$before_seq")"
+        [ "$a_target" -ge 1 ] \
+            && ok "arm A: the alert reached '$TARGET_FLEET'/target-mgr — the DECLARED recipient" \
+            || bad "arm A: nothing reached target-mgr ($a_target push(es)) — the declaration did not route the alert"
+        [ "$a_decoy" -eq 0 ] \
+            && ok "arm A: and NOT '$DECOY_FLEET'/decoy-mgr, which sorts first" \
+            || bad "arm A: the alert reached decoy-mgr ($a_decoy push(es)) — the lexical-pick shape #1517 is about"
+        [ -z "$a_origin" ] \
+            && ok "arm A: and disclosed nothing — a declared recipient is self-clearing (#1517)" \
+            || bad "arm A: a declared recipient disclosed origin='$a_origin' — the self-clearing property is broken"
+    else
+        bad "arm A: the manager sessions would not start — the routing check DID NOT RUN"
+    fi
 
-origin="$(recipient_field origin "$before_seq")"
-mgr_fleet="$(recipient_field manager_fleet "$before_seq")"
-declared="$(recipient_field declared "$before_seq")"
-if [ -z "$origin" ]; then
-    bad "this scenario produced NO alert_recipient_resolved row — the harness cannot see the decision it is meant to check (an absent answer, not a passing one)"
-elif [ "$mgr_fleet" = "$TARGET_FLEET" ]; then
-    ok "resolved to '$mgr_fleet' (origin=$origin) — the DECLARED fleet, not the lexically first"
-else
-    bad "resolved to '${mgr_fleet:-<none>}' (origin=${origin:-<none>}), want '$TARGET_FLEET'. '$DECOY_FLEET' sorts first, so this is the lexical-pick shape #1517 is about."
+    # --- arm B: nothing declared — the control ------------------------------
+    # Same fixture, one variable flipped: no CLAUDLOBBY_ALERT_MANAGER. Routing
+    # must now fall through to the cross-fleet glob, which is lexical, so the
+    # decoy is the CORRECT answer here. Everything arm A asserted as absent must
+    # be present, and vice versa.
+    rm -f "$ROOT"/state/vault-sync/*.last
+    before_seq="$(plane_seq)"
+    if mgr_panes_up; then
+        run_job                       # nothing declared
+        b_decoy="$(alerts_in "$DECOY_SOCK" decoy-mgr)"
+        b_target="$(alerts_in "$TARGET_SOCK" target-mgr)"
+        b_origin="$(recipient_field origin "$before_seq")"
+        b_fleet="$(recipient_field manager_fleet "$before_seq")"
+        b_cands="$(recipient_field candidate_fleets "$before_seq")"
+        [ "$b_decoy" -ge 1 ] \
+            && ok "arm B: undeclared, the fallback lands on '$DECOY_FLEET' — so the decoy pane DOES receive, and arm A's zero was a choice" \
+            || bad "arm B: the undeclared fallback reached nobody on decoy-mgr ($b_decoy) — arm A's decoy count proves nothing"
+        [ "$b_target" -eq 0 ] \
+            && ok "arm B: and not target-mgr — the two panes discriminate in both directions" \
+            || bad "arm B: the alert reached target-mgr ($b_target) with nothing declared — the panes do not discriminate"
+        [ "$b_origin" = "discovered" ] \
+            && ok "arm B: and SAYS so on the plane — origin=discovered, nobody chose this reader" \
+            || bad "arm B: origin is '${b_origin:-<no row>}', want 'discovered' — the audit trail arm A's silence is measured against is not firing"
+        [ "$b_fleet" = "$DECOY_FLEET" ] \
+            && ok "arm B: naming '$b_fleet' as the accidental recipient" \
+            || bad "arm B: named '${b_fleet:-<none>}', want '$DECOY_FLEET'"
+        [ "${b_cands:-0}" -ge 2 ] \
+            && ok "arm B: out of $b_cands candidate fleets — a genuine choice, not a single option" \
+            || bad "arm B: ${b_cands:-0} candidate fleet(s) — with fewer than 2 nothing here separates lexical-first from correct resolution"
+    else
+        bad "arm B: the manager sessions would not start — arm A's control DID NOT RUN"
+    fi
 fi
-
 echo
+_cov=""
+[ "$skips" -gt 0 ] && _cov=" ($skips check(s) SKIPPED — see the SKIP line(s) above; this run does NOT cover them)"
 if [ "$fails" -eq 0 ]; then
-    echo "rehearse-vault-sync: PASS — all scenarios held"
+    echo "rehearse-vault-sync: PASS — all scenarios that RAN held$_cov"
     exit 0
 fi
-echo "rehearse-vault-sync: FAIL — $fails assertion(s)"
+echo "rehearse-vault-sync: FAIL — $fails assertion(s)$_cov"
 exit 1

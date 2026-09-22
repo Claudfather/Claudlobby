@@ -176,10 +176,18 @@ _alert_on_state_change() {
                      "vault sync recovered for $alias (was ${prev#bad:})" || true ;;
         esac
     else
-        # Emitted DIRECTLY rather than through emit_fleet_event: that door
-        # anchors on FLEET_NAME / CLAUDLOBBY_FLEET and a host job has neither,
-        # so it would disclose and record nothing. `vault` is a first-class
-        # system subject kind, so the event says what it is about.
+        # Emitted DIRECTLY rather than through emit_fleet_event, and the reason
+        # is the SUBJECT, not silence. An earlier version of this comment said
+        # that door "would disclose and record nothing" for a fleet-less host
+        # job -- REFUTED in review, and by lib-common.sh's own third branch
+        # (`_fleet="_host"; _kind=host`, commented "never silence"), which
+        # anchors exactly this case on the hostname. It records fine.
+        # What it cannot do is say WHICH VAULT: anchored on the host, the vault
+        # would survive only inside the free-text reason, so every vault on a
+        # host would land on one subject. `vault` is a first-class system
+        # subject kind, so emitting directly makes the row's subject the thing
+        # the row is about -- and the alert below still records its own
+        # host-anchored rows through that door, delivery failures included.
         printf '{"events":[{"event_type":"system","emitter":"vault-sync","fleet":"_host","payload":{"event":"vault_sync","subject_kind":"vault","subject":"%s","data":{"state":"%s","detail":"%s","ok":false}}}]}' \
             "$(json_escape "$alias")" "$(json_escape "$state")" "$(json_escape "$detail")" \
             | plane_emit_events vault-sync \
