@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — manifest provenance: what was this fleet composed FROM? (#1722)
+
+`generate` read `fleet.yaml` from a directory other tools rewrite and recorded
+nothing about where it came from. When a stopped rebase checked out another
+branch's tree, the manifest reverted on disk, the next `generate` composed the
+fleet from the reverted file, and every surface read healthy. `diff` could not
+have said so: it compares runtime against what `generate` *would* produce, so
+when the inputs move, both sides move together.
+
+- **`<fleet runtime>/composed.json`**, rewritten on every `generate`: the
+  sha256 and presence of each compose input (`fleet.yaml`, `projects.yaml`, the
+  `mission_file` when configured, the package `system.yaml`), the compose
+  instant, and — when the fleet directory is inside a git checkout — branch,
+  commit, dirty, and whether a rebase or merge is in progress. Computed **once
+  per generate**: the git reads are subprocesses.
+- **One stamp in `bot.conf`: `FLEET_MANIFEST_SHA256`.** Content-derived, so it
+  moves exactly when the manifest does — which is exactly when `generate` would
+  rewrite `bot.conf` anyway. Nothing volatile goes there, because `diff`
+  compares that file as exact text and a timestamp would read as permanent
+  drift on every bot on every run.
+- **`generate` warns** when it composes from a checkout that is mid-rebase/merge
+  or off its default branch — the moment the 2026-09-20 compose would have said
+  something. Warning, not failure: the compositor does not own that checkout.
+- **`doctor` gains `manifest-provenance`** — warns when the manifest on disk
+  differs from what the running fleet was composed from, and names the restart,
+  because `bot.conf` and `CLAUDE.md` are read once at session start. Silent on a
+  fleet that was never composed (`check_claudron`'s precedent), warn-level
+  throughout, never fail.
+- **`diff` prints one line first** — `manifest: unchanged since compose (…)` or
+  `manifest: CHANGED`. Without it a diff body cannot say whether the runtime
+  drifted or the inputs moved; they read identically.
+- **A newer `composed.json` schema is reported unread, never interpreted by
+  field name** — "unchanged" read off a misunderstood record is the false clear
+  the record exists to prevent.
+- Absence is a third state throughout: an input that VANISHED is not an input
+  that was edited, and neither is an optional input that was never configured.
+
 
 ### Changed — the ingest daemon holds ONE write connection instead of opening and closing per batch (#1693)
 

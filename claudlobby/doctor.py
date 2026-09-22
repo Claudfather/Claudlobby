@@ -911,6 +911,68 @@ def check_ignition(
     )
 
 
+def check_manifest_provenance(
+    fleet: FleetConfig, paths: Paths, report: DoctorReport
+) -> None:
+    """Did the fleet's manifest move under the running fleet? (#1722)
+
+    `diff` answers "what would generate change now"; nothing answered "did my
+    INPUTS change since the runtime was built". In the outage this comes from, a
+    stopped rebase checked out another branch's tree, the manifest reverted on
+    disk, the next generate composed from the reverted file, and every surface
+    read healthy.
+
+    WARN, never fail, for the same reason `check_claudron` is warn-level: this
+    rung reports the state of a sibling checkout that claudlobby does not own.
+    """
+    from .composer import (
+        MANIFEST_PROVENANCE_SCHEMA,
+        changed_manifest_inputs,
+        manifest_warnings,
+        read_manifest_provenance,
+    )
+
+    # SILENT on a fleet that was never composed, the way check_claudron is
+    # silent for a fleet with no vault-wired bot: there is no runtime whose
+    # inputs could have moved, and "regenerate to record what this runtime was
+    # composed from" is nonsense addressed to a runtime that does not exist.
+    # doctor already has rungs for "you have not generated yet".
+    if not paths.runtime_bots.is_dir() or not any(paths.runtime_bots.iterdir()):
+        return
+
+    prov = read_manifest_provenance(paths)
+    if prov is None:
+        report.add("manifest-provenance", "warn",
+                   "composed by a claudlobby without provenance — run `generate` "
+                   "to record what this runtime was composed from")
+        return
+    if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA:
+        report.add("manifest-provenance", "warn",
+                   f"provenance schema {prov.get('schema')!r} is not the "
+                   f"{MANIFEST_PROVENANCE_SCHEMA} this build reads — not "
+                   "interpreting it; run `generate` to re-record")
+        return
+
+    changed = changed_manifest_inputs(fleet, paths, prov)
+    if changed:
+        report.add("manifest-provenance", "warn",
+                   f"manifest changed since the running fleet was composed "
+                   f"({', '.join(changed)}; composed {prov.get('composed_at')}) — "
+                   "run `generate`, then restart the bots that read it at session "
+                   "start (bot.conf and CLAUDE.md are read once, at startup)")
+        return
+
+    # Compose-time conditions are reported even when nothing has changed since:
+    # a fleet composed FROM a wedged checkout is not made sound by the manifest
+    # sitting still afterwards.
+    for warning in manifest_warnings(prov):
+        report.add("manifest-provenance", "warn", f"at compose time: {warning}")
+        return
+
+    report.add("manifest-provenance", "pass",
+               f"inputs unchanged since compose ({prov.get('composed_at')})")
+
+
 def check_fleet_validation(
     fleet: FleetConfig, paths: Paths, report: DoctorReport
 ) -> None:
@@ -1012,6 +1074,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     except Exception:  # noqa: BLE001 — a health command never crashes early
         doors = None
     check_fleet_validation(fleet, paths, report)
+    check_manifest_provenance(fleet, paths, report)
     check_goal_binding(fleet, paths, report, doors=doors)
     check_switches(fleet, paths, report)
     check_ignition(fleet, paths, report, doors=doors)

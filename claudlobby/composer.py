@@ -7,7 +7,9 @@ template owns all top-level structure.
 
 from __future__ import annotations
 import copy
+import datetime
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -15,6 +17,8 @@ import platform
 import re
 import shlex
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +36,7 @@ from .config import (
     GITHUB_APP_ENV_VARS,
     BotConfig,
     FleetConfig,
+    _resolve_system_yaml,
     load_fleet,
     load_host_boot,
     load_host_jobs,
@@ -952,6 +957,14 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f"export FLEET_NAME={_shq(fleet.name)}")
+    # #1722. The ONE provenance value that may live here, and only because it is
+    # CONTENT-derived: it changes exactly when fleet.yaml changes, which is
+    # exactly when `generate` would legitimately rewrite bot.conf anyway. So
+    # `diff` reporting it is the truth, never phantom drift. Everything volatile
+    # (the compose instant, the commit id, the checkout state) stays in
+    # composed.json, which diff does not compare as text.
+    lines.append(
+        f"export FLEET_MANIFEST_SHA256={_shq(_sha256_file(paths.fleet_yaml) or '')}")
     lines.append(f"export SERVICE_PREFIX={_shq(fleet.service_prefix)}")
     # Pin the tmux tmpdir so `tmux -L <socket>` resolves to the same server in
     # every bot process (start parent, session, watchdog, cross-socket peers) —
@@ -4647,6 +4660,229 @@ def _host_job_switch_env(paths: Paths, flags, cache: dict) -> dict[str, str] | N
     return _switch_env(cascade, flags) or None
 
 
+#: Schema of ``composed.json`` (#1722). Bump when a field's MEANING changes —
+#: a reader that finds a newer schema than it knows must say so rather than
+#: interpret fields by name, because "manifest unchanged" read off a
+#: misunderstood file is the exact false clear this whole record exists to end.
+MANIFEST_PROVENANCE_SCHEMA = 1
+
+#: The default branches a checkout may be on without the compose being flagged.
+#: Asked of the remote first (``origin/HEAD``); this is the fallback for a
+#: checkout with no remote, and it is a LIST because both names are in the wild.
+_DEFAULT_BRANCH_FALLBACKS = ("main", "master")
+
+#: Inputs whose ABSENCE at compose time is itself a fault. `mission_file`
+#: qualifies because it enters the input set only when configured, so an
+#: absent one was declared and is gone. The optional inputs are covered
+#: after the fact by change detection instead.
+_REQUIRED_INPUTS = ("fleet.yaml", "mission_file")
+
+
+def _sha256_file(path: Path) -> str | None:
+    """Hex sha256 of a file's bytes, or None when it is not readable.
+
+    None is a THIRD state and is preserved as one: a missing mission file and a
+    mission file whose content changed must not read alike, since the outage
+    this records began with compose inputs VANISHING from disk rather than
+    being edited.
+    """
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def manifest_inputs(fleet: FleetConfig, paths: Paths) -> dict[str, Path]:
+    """The compose inputs whose CONTENT decides what a bot receives.
+
+    Deliberately not "every file generate opens": ``library/`` is versioned with
+    the compositor and is #1251's question, not this one. These four are the
+    fleet's own declaration, and they live in a tree other tools rewrite.
+    """
+    out: dict[str, Path] = {
+        "fleet.yaml": paths.fleet_yaml,
+        "projects.yaml": paths.projects_yaml,
+    }
+    if fleet.mission_file:
+        out["mission_file"] = paths.fleet_config_dir / fleet.mission_file
+    system_yaml = _resolve_system_yaml(Path(__file__).resolve().parent)
+    if system_yaml is not None:
+        out["system.yaml"] = system_yaml
+    return out
+
+
+def _git(args: list[str], cwd: Path) -> str | None:
+    """One git read. None on ANY failure — not a git checkout, no git binary,
+    a timeout. Every caller treats None as "cannot say", never as a value."""
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), *args],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _git_state(config_dir: Path, inputs: list[Path]) -> dict:
+    """The checkout state of the directory the manifest lives in.
+
+    Only the FLEET config dir's checkout: ``system.yaml`` is package-owned and
+    belongs to a different repository, so its content is hashed above and its
+    git state is deliberately not claimed here.
+    """
+    if _git(["rev-parse", "--is-inside-work-tree"], config_dir) != "true":
+        return {"in_git": False}
+    state: dict = {"in_git": True}
+    branch = _git(["symbolic-ref", "--short", "HEAD"], config_dir)
+    state["branch"] = branch or "detached"
+    state["commit"] = _git(["rev-parse", "--short", "HEAD"], config_dir)
+
+    # The remote's own answer first; the name list is only a fallback, because
+    # a repo whose default branch is neither is not a defect to flag.
+    head_ref = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                    config_dir)
+    default = head_ref.split("/", 1)[1] if head_ref and "/" in head_ref else None
+    state["default_branch"] = default
+    if branch is None:
+        state["on_default_branch"] = False          # detached is never default
+    elif default is not None:
+        state["on_default_branch"] = branch == default
+    else:
+        state["on_default_branch"] = branch in _DEFAULT_BRANCH_FALLBACKS
+
+    # Scoped to the compose inputs: an unrelated dirty file in a big vault tree
+    # is not this fleet's problem, and flagging it would make the rung noise.
+    rel = [str(p) for p in inputs]
+    porcelain = _git(["status", "--porcelain", "--", *rel], config_dir) if rel else ""
+    state["dirty"] = bool(porcelain)
+
+    # A stopped rebase is the condition that started the outage: the tree holds
+    # the OTHER branch's files and every ordinary read looks healthy.
+    git_dir = _git(["rev-parse", "--git-dir"], config_dir)
+    if git_dir:
+        g = Path(git_dir)
+        if not g.is_absolute():
+            g = config_dir / g
+        state["interrupted"] = any(
+            (g / n).exists() for n in ("rebase-merge", "rebase-apply", "MERGE_HEAD"))
+    else:
+        state["interrupted"] = None                 # cannot say
+    return state
+
+
+def manifest_provenance(fleet: FleetConfig, paths: Paths) -> dict:
+    """Where this fleet's manifest came from, at the moment it was composed.
+
+    Computed ONCE per generate (``compose_fleet`` threads nothing from it into
+    bot.conf but the one stable hash): the git reads are subprocesses, and a
+    per-bot call would pay them once per bot for an answer that cannot change
+    mid-run.
+    """
+    inputs = manifest_inputs(fleet, paths)
+    files = {
+        name: {"path": str(path), "sha256": _sha256_file(path),
+               "present": path.is_file()}
+        for name, path in inputs.items()
+    }
+    config_dir = paths.fleet_config_dir
+    in_tree = [p for n, p in inputs.items() if n != "system.yaml"]
+    return {
+        "schema": MANIFEST_PROVENANCE_SCHEMA,
+        "fleet": fleet.name,
+        "composed_at": datetime.datetime.now(datetime.timezone.utc)
+                               .replace(microsecond=0).isoformat(),
+        "files": files,
+        "git": _git_state(config_dir, in_tree),
+    }
+
+
+def manifest_warnings(prov: dict) -> list[str]:
+    """The lines ``generate`` prints and ``doctor`` re-uses. ONE definition, so
+    the two surfaces cannot describe the same condition differently."""
+    git = prov.get("git") or {}
+    out: list[str] = []
+    if git.get("interrupted"):
+        out.append(
+            "composing from a manifest in a checkout that git is mid-operation on "
+            "(rebase or merge in progress) — the files being read may not be the "
+            "ones that were committed")
+    if git.get("in_git") and not git.get("on_default_branch"):
+        out.append(
+            f"composing from a manifest on branch '{git.get('branch')}', which is "
+            f"not the checkout's default branch — the files being read may not be "
+            f"the ones that were committed")
+    # Absence is only a COMPOSE-TIME fault for an input that had to be there:
+    # fleet.yaml always, and mission_file whenever it is configured (it is in
+    # the input set only then). projects.yaml and system.yaml are optional, and
+    # warning on their absence would fire on every fleet that simply has none —
+    # a rung that cries on the common case is one operators learn to skip.
+    #
+    # An optional file that VANISHED after being composed from is a different
+    # question and is caught by `changed_manifest_inputs`: it was recorded
+    # present, so its disappearance reads as a change. That is the outage's own
+    # shape and it stays covered.
+    missing = [n for n, f in (prov.get("files") or {}).items()
+               if not f.get("present") and n in _REQUIRED_INPUTS]
+    if missing:
+        out.append(
+            "required compose input(s) absent from disk: " + ", ".join(sorted(missing)) +
+            " — a manifest file that VANISHED reads to the compositor exactly "
+            "like one that was never configured")
+    return out
+
+
+def write_manifest_provenance(fleet: FleetConfig, paths: Paths) -> dict:
+    """Compute and persist ``<fleet runtime>/composed.json``. Returns the dict.
+
+    Deliberately NOT in ``bot.conf``: ``diff`` compares that file as exact text,
+    so a timestamp or a commit id there would read as permanent drift on every
+    bot on every run. Only the manifest hash — which changes exactly when the
+    manifest does — goes into bot.conf.
+    """
+    prov = manifest_provenance(fleet, paths)
+    paths.runtime.mkdir(parents=True, exist_ok=True)
+    (paths.runtime / "composed.json").write_text(
+        json.dumps(prov, indent=2, sort_keys=True) + "\n")
+    return prov
+
+
+def read_manifest_provenance(paths: Paths) -> dict | None:
+    """The recorded provenance, or None when absent/unreadable. Callers render
+    the absence rather than assuming a fleet composed by an older claudlobby is
+    unchanged."""
+    try:
+        return json.loads((paths.runtime / "composed.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def changed_manifest_inputs(fleet: FleetConfig, paths: Paths,
+                            prov: dict | None = None) -> list[str]:
+    """Input names whose content differs NOW from what the fleet was composed
+    from. Empty when nothing moved; empty ALSO when there is no record, so
+    every caller checks for the record separately — an unknown answer and a
+    clean one must not share a return value."""
+    prov = prov if prov is not None else read_manifest_provenance(paths)
+    if not prov:
+        return []
+    recorded = prov.get("files") or {}
+    now = manifest_inputs(fleet, paths)
+    changed = []
+    for name, path in now.items():
+        was = recorded.get(name)
+        if was is None:
+            changed.append(name)                    # not recorded = new input
+        elif was.get("sha256") != _sha256_file(path):
+            changed.append(name)
+    for name in recorded:
+        if name not in now:
+            changed.append(name)                    # input disappeared entirely
+    return sorted(set(changed))
+
+
 def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
     """Compose every bot in the fleet; returns a dict of bot_id -> bot_dir."""
     paths.runtime_bots.mkdir(parents=True, exist_ok=True)
@@ -4693,5 +4929,15 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
         raise ValueError(f"{len(failures)} bot(s) failed to compose:\n\n{detail}")
 
     scaffold_env_files(fleet, paths, log=log)
+
+    # #1722: record WHERE this compose's inputs came from, once per generate.
+    # Written after the bots so a fleet that failed to compose leaves no record
+    # claiming it was composed from anything.
+    prov = write_manifest_provenance(fleet, paths)
+    for warning in manifest_warnings(prov):
+        _log.warning("%s", warning)
+        print(f"claudlobby: WARNING — {warning}", file=sys.stderr)
+        if log is not None:
+            log(f"WARNING — {warning}")
 
     return out
