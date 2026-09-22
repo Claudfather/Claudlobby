@@ -28,6 +28,47 @@ from .composer import (
 from .config import FleetConfig
 from .paths import Paths
 
+#: The composed.json schema THIS build knows how to read (#1722). A
+#: newer record is reported as unread rather than interpreted by field
+#: name — 'unchanged' read off a misunderstood file is the false clear
+#: the record exists to prevent.
+MANIFEST_PROVENANCE_SCHEMA_EXPECTED = 1
+
+
+def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
+    """One line saying whether the COMPOSE INPUTS moved (#1722).
+
+    A diff that shows changes cannot, on its own, say whether the runtime
+    drifted or the manifest did — today both read identically, and in the
+    outage this comes from it was the manifest that moved, silently, under a
+    running fleet. This line separates them before the diff body.
+    """
+    from .composer import (
+        changed_manifest_inputs,
+        manifest_change_attribution,
+        read_manifest_provenance,
+    )
+
+    prov = read_manifest_provenance(paths)
+    if prov is None:
+        return ("manifest: NO PROVENANCE RECORDED — this runtime was composed by a "
+                "claudlobby that did not stamp its inputs; run `generate` to "
+                "record them. Nothing below distinguishes an input change from "
+                "runtime drift.\n")
+    if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA_EXPECTED:
+        return (f"manifest: provenance schema {prov.get('schema')!r} is not the "
+                f"{MANIFEST_PROVENANCE_SCHEMA_EXPECTED} this build reads — not "
+                "interpreting it. Run `generate` to re-record.\n")
+    changed = changed_manifest_inputs(fleet, paths, prov)
+    if changed:
+        how = manifest_change_attribution(fleet, paths)
+        return ("manifest: CHANGED — " + ", ".join(changed) +
+                " differ(s) from what this runtime was composed from"
+                f" (composed {prov.get('composed_at')}). The inputs moved, not"
+                " just the runtime." + (f" {how.capitalize()}." if how else "")
+                + "\n")
+    return f"manifest: unchanged since compose ({prov.get('composed_at')})\n"
+
 
 def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     bot = fleet.bots.get(bot_name)

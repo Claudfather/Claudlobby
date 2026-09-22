@@ -408,6 +408,78 @@ each one up — the same rule `lib/selfstart-snapshot.sh` already applies, and f
 the same reason: a denominator drawn from directories silently changes when
 something unrelated appears on disk.
 
+## The manifest is a fifth input, and it has its own read-time (#1722)
+
+The carriers above answer "when does a change to `library/` or `lib/` reach a
+bot". A change to the fleet's **manifest** — `fleet.yaml`, `projects.yaml`, the
+mission file — is a different question with the same discriminator: **when is
+the artifact read?**
+
+A manifest is read by `generate`, and only by `generate`. Nothing a bot executes
+opens `fleet.yaml`. So a manifest change reaches a bot in **two** steps, and
+neither happens on its own:
+
+| step | what it does | until it runs |
+|---|---|---|
+| `generate` | re-composes `CLAUDE.md`, `bot.conf`, `.mcp.json` from the new manifest | the runtime still reflects the OLD manifest |
+| restart | the bot re-reads its composed files | a **running** bot still holds the old ones |
+
+That second row is the one that surprises people: `bot.conf` and `CLAUDE.md` are
+read **once, at session start**. A `generate` after a manifest change leaves a
+running fleet composed correctly on disk and still *behaving* from what it read
+at boot.
+
+**Every `generate` now records what it composed from**, in
+`<fleet runtime>/composed.json`: the sha256 of each input, and — when the fleet
+directory is inside a git checkout — the branch, commit, whether the tree is
+dirty, and whether git is mid-rebase or mid-merge. `bot.conf` carries exactly
+one stamp, `FLEET_MANIFEST_SHA256`, and nothing volatile, because `diff`
+compares `bot.conf` as exact text and a timestamp there would read as permanent
+drift on every bot.
+
+Two rungs read that record:
+
+- `claudlobby --fleet <name> doctor` → `manifest-provenance`: **warns** when the
+  manifest on disk differs from what the running fleet was composed from, and
+  names the restart step above.
+- `claudlobby --fleet <name> diff` prints one line first: `manifest: unchanged
+  since compose (<when>)`, or `manifest: CHANGED`. Without it, a diff body
+  cannot say whether the *runtime* drifted or the *inputs* moved — they look
+  identical.
+
+`generate` also warns, loudly, when it composes from a checkout that is
+mid-operation or off its default branch: those are the two states in which the
+files on disk may not be the ones that were committed.
+
+### What this record can and cannot attribute — read this before trusting it
+
+**`composed.json` is a compose-time SNAPSHOT, not an audit trail**, and the
+difference decides which cases it can explain. Its git half describes the
+checkout *at the instant `generate` ran*, and the next `generate` overwrites it
+unconditionally — no history, no append.
+
+So a manifest **reverted by a git state change** is attributable **only while
+that state is still present when `generate` runs**:
+
+| order of events | attributable? |
+|---|---|
+| vault wedges → `generate` runs → operator investigates | **Yes.** The compose is flagged `interrupted` / off-branch, and `doctor` says so afterwards. This is the shape of the outage this exists for — that stopped rebase persisted for twelve days, so every compose in the window is flagged. |
+| vault wedges → operator repairs it (`git rebase --abort` is the reflex) → `generate` runs | **No.** The clean compose records a clean state, overwrites the evidence, and a still-wrong manifest is indistinguishable from a legitimate edit. |
+
+**What still answers after that window** is the change attribution `doctor` and
+`diff` print when the manifest has moved, which asks the tree as it is *now*:
+
+- *"the input is modified in the working tree"* — an uncommitted local edit.
+- *"the input matches its committed state"* — the content arrived **through
+  git**: a commit, a checkout or a branch switch.
+
+It deliberately does **not** claim to separate a commit from a checkout. Nothing
+readable afterwards can, and naming what the answer excludes is what lets a
+reader go and look instead of trusting a word.
+
+A durable per-generate trail would close the second row and is **not** built
+here — tracked as #1732.
+
 ## Mechanism 1 — daily live reload (plugins + skills)
 
 `lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled via `lib/install-reload-fleet-systemd.sh`.
