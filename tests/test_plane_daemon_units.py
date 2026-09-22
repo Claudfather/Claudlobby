@@ -444,7 +444,25 @@ def test_launcher_127_when_nothing_resolves_even_with_user_site_reachable(tmp_pa
     probe itself must find claudlobby unimportable, not because python3 is
     unreachable. `PYTHONNOUSERSITE=1` is what actually defeats the mechanism
     #1652 found live on this host: an editable dev install reachable via
-    user site-packages regardless of PATH, venv, or even HOME being unset."""
+    user site-packages regardless of PATH, venv, or even HOME being unset.
+
+    CI review (dara, live): PYTHONNOUSERSITE=1 is not a universal answer to
+    "can this python3 import claudlobby" -- it disables only the SEPARATE
+    user-site directory. On GitHub Actions, `actions/setup-python` + a bare
+    `pip install -e '.[dev]'` (no --user) lands claudlobby in that
+    interpreter's REGULAR site-packages, which PYTHONNOUSERSITE never
+    touches -- so this test's own launcher call genuinely hung to its 10s
+    ceiling there (caught by CI, not asserted around). Same class of mistake
+    as #1652 itself, one layer down: a host-specific mitigation was written
+    as though it were host-independent. So the premise is now verified
+    directly, with a positive control that fails LOUD and FAST if it's
+    false, rather than assumed and left to the launcher's own timeout to
+    discover it 10 seconds later: probe PYTHONNOUSERSITE against THIS
+    real_python3 before ever invoking the launcher, and skip (not fail) with
+    the reason on a host where it doesn't hold -- a host with claudlobby
+    reachable through regular site-packages is not this test's regression
+    case, and forcing it through anyway only reproduces a slow, uninformative
+    timeout instead of an honest "not applicable here"."""
     root = tmp_path / "root"
     root.mkdir()
     stub_dir = tmp_path / "stubbin"
@@ -455,6 +473,34 @@ def test_launcher_127_when_nothing_resolves_even_with_user_site_reachable(tmp_pa
     real_python3 = _shutil.which("python3")
     if real_python3 is None:
         pytest.skip("no real python3 on this host to prove the regression case with")
+
+    # cwd=root (an empty dir with no claudlobby/ subdirectory), matching the
+    # real launcher's own probe (`cd "$ROOT" && python3 -c "import
+    # claudlobby"`) exactly -- WITHOUT it this probe silently tests a THIRD
+    # thing: Python's own sys.path[0]='' resolves `import claudlobby` against
+    # the CURRENT WORKING DIRECTORY first, and pytest's cwd is a checkout of
+    # THIS repo, which IS a directory containing a claudlobby/ package. Found
+    # live: this probe, run without cwd=, reported "importable" on a host
+    # where PYTHONNOUSERSITE genuinely does defeat the user-site mechanism --
+    # a false positive from the probe having nothing to do with the question
+    # it was written to ask.
+    probe = subprocess.run(
+        [real_python3, "-c", "import claudlobby"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=str(root),
+        env={"PATH": "/usr/bin:/bin", "PYTHONNOUSERSITE": "1"},
+    )
+    if probe.returncode == 0:
+        pytest.skip(
+            "PYTHONNOUSERSITE=1 does not make claudlobby unimportable for "
+            f"{real_python3} on this host -- it is reachable through regular "
+            "site-packages (e.g. a bare `pip install`, no --user), not the "
+            "user-site mechanism this test targets. Not this test's "
+            "regression case here."
+        )
+
     os.symlink(real_python3, stub_dir / "python3")
     r = subprocess.run(
         ["/bin/bash", str(REPO / "lib" / "plane-daemon.sh")],
