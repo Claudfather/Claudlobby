@@ -460,12 +460,48 @@ class TestAnOptionTheGuardDoesNotRecognise:
         assert verdict == "deny"
         assert "does not recognise" in detail
 
-    def test_the_twin_is_the_same_unknown_option_outside_the_vault(self, tree2):
-        """The half that keeps this safe to ship. The refusal is reached only
-        after scope says vault-bound, so no bot's own repository is affected."""
+    def test_this_refusal_is_UNCONDITIONAL_and_has_no_allow_twin(self, tree2):
+        """**This test previously asserted the opposite, and it was wrong.**
+
+        It pinned "refuse only once scope says vault-bound", which sounds like
+        the careful version and is the bug: scope computed before the parser
+        stopped is a statement about a PARTIAL read. Review demonstrated the
+        consequence — the same command allowed or denied depending on which
+        flag came first, because a real `--git-dir` sitting behind an unmodelled
+        flag was never reached (pinned in `test_the_verdict_does_not_depend_on
+        _flag_ORDER`).
+
+        So the refusal is unconditional, and it is the one deny in this file
+        with no allow twin. That is deliberate: a twin would assert that some
+        command this guard could not finish reading is safe, which is the claim
+        this branch exists to stop making. The cost is bounded and measured
+        rather than assumed — every pre-verb flag in the fleet's own scripted
+        git usage is already in `GLOBAL_FLAGS`.
+        """
         vault, proj = tree2
         assert D.decide("git --some-future-flag checkout main",
-                        vault, proj)[0] == "allow"
+                        vault, proj)[0] == "deny"
+        assert D.decide("git --some-future-flag status", vault, proj)[0] == "deny"
+
+    def test_the_verdict_does_not_depend_on_flag_ORDER(self, tree2):
+        """The finding that made the refusal unconditional. Same command, two
+        orderings, and before the fix they disagreed."""
+        vault, proj = tree2
+        first = D.decide(
+            f"git --super-prefix foo/ --git-dir={vault}/.git reset --hard",
+            vault, proj)
+        second = D.decide(
+            f"git --git-dir={vault}/.git --super-prefix foo/ reset --hard",
+            vault, proj)
+        assert first[0] == second[0] == "deny", (first, second)
+
+    def test_a_modelled_flag_outside_the_vault_is_still_the_twin(self, tree2):
+        """The allow twin that DOES hold, and the one that matters for the
+        fleet: a flag the guard understands, pointed at a bot's own checkout,
+        is untouched."""
+        vault, proj = tree2
+        assert D.decide("git --no-pager checkout main", vault, proj)[0] == "allow"
+        assert D.decide(f"git -C {proj} reset --hard", vault, vault)[0] == "allow"
 
     def test_an_unknown_option_hides_the_verb_which_is_why_it_refuses(self, tree2):
         """Not merely unrecognised — UNREADABLE past that point. An unknown
@@ -477,8 +513,10 @@ class TestAnOptionTheGuardDoesNotRecognise:
         vault, proj = tree2
         assert D.decide("git --super-prefix x/ checkout main",
                         vault, vault)[0] == "deny"
+        # the second half of this test asserted `allow` here until the refusal
+        # became unconditional; see the test above for why that was the bug
         assert D.decide("git --super-prefix x/ checkout main",
-                        vault, proj)[0] == "allow"
+                        vault, proj)[0] == "deny"
 
     @pytest.mark.parametrize("cmd", [
         "git --no-pager log",
@@ -499,3 +537,70 @@ class TestAnOptionTheGuardDoesNotRecognise:
         vault, _ = tree2
         assert D.decide("git -c user.name=x checkout main", vault, vault)[0] == "deny"
         assert D.decide("git -c user.name=x status", vault, vault)[0] == "allow"
+
+
+class TestScopeSetThroughTheEnvironment:
+    """Finding nine: a second CHANNEL, not another flag (review of #1725).
+
+    Everything the flag allowlist does is correct and simply does not apply to
+    a caller that exports scope instead of passing it. Measured on git 2.39.5:
+    `GIT_DIR=<vault>/.git git symbolic-ref --short HEAD`, run from outside the
+    vault, answers the VAULT's branch.
+
+    The bound is stated in the module docstring rather than implied: a variable
+    exported by an EARLIER tool call cannot be seen here at all, because the
+    hook is handed one command and no environment.
+    """
+
+    @pytest.fixture()
+    def tree3(self, tmp_path):
+        vault = tmp_path / "vault"
+        proj = tmp_path / "projects" / "repo"
+        vault.mkdir(parents=True)
+        proj.mkdir(parents=True)
+        return os.path.realpath(vault), os.path.realpath(proj)
+
+    @pytest.mark.parametrize("prefix", [
+        "GIT_DIR={gd} git",
+        "export GIT_DIR={gd}; git",
+        "env GIT_DIR={gd} git",
+    ])
+    def test_every_spelling_of_the_assignment_is_seen(self, tree3, prefix):
+        """All three arrive as one `NAME=value` token, which is why one rule
+        covers the lot."""
+        vault, proj = tree3
+        cmd = prefix.format(gd=f"{vault}/.git") + " reset --hard"
+        assert D.decide(cmd, vault, proj)[0] == "deny"
+
+    def test_git_work_tree_is_the_other_axis(self, tree3):
+        vault, proj = tree3
+        assert D.decide(f"GIT_WORK_TREE={vault} git checkout main",
+                        vault, proj)[0] == "deny"
+
+    def test_the_twin_is_the_variable_pointed_elsewhere(self, tree3):
+        vault, proj = tree3
+        assert D.decide(f"GIT_DIR={proj}/.git git reset --hard",
+                        vault, proj)[0] == "allow"
+
+    def test_a_safe_verb_under_a_vault_bound_variable_is_still_allowed(self, tree3):
+        """Scope before verb holds here too — the variable makes it the vault's
+        business, and reading the vault is nobody's problem."""
+        vault, proj = tree3
+        assert D.decide(f"GIT_DIR={vault}/.git git status", vault, proj)[0] == "allow"
+
+    def test_a_flag_beats_the_variable(self, tree3):
+        """git's own precedence, measured:
+        `GIT_DIR=<a> git --git-dir=<b> rev-parse --absolute-git-dir` answers
+        `<b>`. Getting this backwards would deny work on a bot's own repo
+        whenever a stale variable happened to name the vault."""
+        vault, proj = tree3
+        assert D.decide(
+            f"GIT_DIR={vault}/.git git --git-dir={proj}/.git reset --hard",
+            vault, proj)[0] == "allow"
+
+    def test_an_unrelated_assignment_is_not_scope(self, tree3):
+        """Only the two variables git actually honours for scope are read; a
+        command that happens to set something else is ordinary work."""
+        vault, proj = tree3
+        assert D.decide(f"FOO={vault}/.git git reset --hard",
+                        vault, proj)[0] == "allow"

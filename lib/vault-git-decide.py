@@ -27,6 +27,40 @@ flags a script reaches for when it walks several repositories without ``cd``-ing
 into each. ``git --git-dir=<vault>/.git checkout <branch>`` then resolved its
 scope from ``cwd``, and was allowed from anywhere else on disk.
 
+**WHICH CHANNELS THIS GUARD MODELS, and which it does not.** Git's scope can
+be set through several independent channels, and this predicate reads exactly
+two of them. Nine holes have now been found in it; the first eight were all one
+channel's flags, and the ninth was a second channel that argv parsing cannot
+see at all. That is what a scope predicate over another tool's CLI costs, and
+the useful response is to state the bound rather than to keep implying
+coverage:
+
+  MODELLED
+    * the pre-verb flags in ``GLOBAL_FLAGS`` -- ``-C``, ``--git-dir``,
+      ``--work-tree`` aim the invocation; anything outside that table stops the
+      read and refuses.
+    * ``GIT_DIR`` / ``GIT_WORK_TREE`` assigned WITHIN the same command, in any
+      of its spellings (``VAR=x git ...``, ``export VAR=x; git ...``,
+      ``env VAR=x git ...``).
+    * a ``cd`` earlier in the same command, and the payload's ``cwd``.
+
+  NOT MODELLED -- each one is a real way to reach the vault that this returns
+  "allow" for, and none is a hypothetical:
+    * ``GIT_DIR`` exported by an EARLIER tool call. The hook is handed one
+      command and no environment, so this is not a gap to be closed here; it
+      needs a different instrument.
+    * git config that relocates the tree -- ``core.worktree``, and
+      ``safe.directory`` widening what git will touch at all.
+    * an alias, a shell function, a wrapper script, or ``sh -c``: none presents
+      a ``git`` token for the walk in :func:`decide` to find (Claudlobby #1730).
+    * whether a path belongs to the vault's repository is :func:`_inside`'s
+      question, and it has two known wrong answers of its own (#1729).
+
+So the honest claim is that this refuses what it cannot read **of a git command
+line**, not that it cannot be got around. A reader who needs the second
+property needs a different mechanism, and should meet that here rather than
+infer it from the care taken below.
+
 **An unresolvable candidate falls back to `cwd` rather than to "allow".** A
 shell variable, a glob or a quoted expression is exactly what an operator
 reaches for when doing something wide, and treating "I cannot read this" as "it
@@ -118,8 +152,19 @@ GLOBAL_FLAGS = {
 #: The two flags that relocate something, and WHAT each one relocates. They do
 #: not compose the way the obvious reading suggests, which is the whole reason
 #: this is a table rather than a set — see :func:`_judge_git`.
-REPO_FLAGS = ("--git-dir", "-C")      # which repository's refs move
-TREE_FLAGS = ("--work-tree", "-C")    # which files on disk are written
+#: Environment variables git honours exactly as it honours the flags above.
+#: MEASURED: `GIT_DIR=<vault>/.git git symbolic-ref --short HEAD` run from
+#: outside the vault answers the VAULT's branch, and
+#: `GIT_DIR=<a> git --git-dir=<b> rev-parse --absolute-git-dir` answers `<b>`,
+#: so a flag beats the variable. This is a SECOND CHANNEL, not another flag:
+#: everything the allowlist does is correct and simply does not apply to a
+#: caller that exports scope instead of passing it.
+ENV_SCOPE = ("GIT_DIR", "GIT_WORK_TREE")
+
+#: Each axis, in git's own precedence: the flag, then the variable, then
+#: wherever `-C` (or the shell) left us.
+REPO_ORDER = ("--git-dir", "GIT_DIR", "-C")      # which repository's refs move
+TREE_ORDER = ("--work-tree", "GIT_WORK_TREE", "-C")  # which files are written
 
 
 def _parse_git_args(args: list[str]) -> tuple[dict[str, str], str | None,
@@ -227,6 +272,7 @@ def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
         tokens = command.split()
 
     last_cd: str | None = None
+    env: dict[str, str] = {}
     i = 0
     while i < len(tokens):
         tok = tokens[i]
@@ -234,19 +280,52 @@ def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
             last_cd = tokens[i + 1]
             i += 2
             continue
+        # A scope variable, however it was spelled: a bare `GIT_DIR=x git ...`
+        # prefix, `export GIT_DIR=x; git ...`, or `env GIT_DIR=x git ...` all
+        # arrive as this one token shape, so one test covers all three.
+        name, eq, value = tok.partition("=")
+        if eq and name in ENV_SCOPE:
+            env[name] = value
+            i += 1
+            continue
         if tok == "git" or tok.endswith("/git"):
-            verdict, detail = _judge_git(tokens, i, vault, cwd, last_cd)
+            verdict, detail = _judge_git(tokens, i, vault, cwd, last_cd, env)
             if verdict != "allow":
                 return verdict, detail
         i += 1
     return "allow", ""
 
 
-def _judge_git(tokens: list[str], start: int, vault: str,
-               cwd: str | None, last_cd: str | None) -> tuple[str, str]:
+def _judge_git(tokens: list[str], start: int, vault: str, cwd: str | None,
+               last_cd: str | None,
+               env: dict[str, str] | None = None) -> tuple[str, str]:
     """One git invocation: where does it point, and what does it do."""
     args = tokens[start + 1:]
     scope, verb, verb_idx, unrecognised = _parse_git_args(args)
+
+    # AN OPTION THIS GUARD CANNOT READ REFUSES, FULL STOP -- and the word
+    # "unconditional" is the entire fix. This check used to sit AFTER the scope
+    # test, so it only fired once the part that HAD been parsed already said
+    # vault-bound. That is a statement about a partial read, and it made the
+    # verdict depend on flag ORDER: a real `--git-dir` sitting behind an
+    # unmodelled flag was never reached, so the same command allowed or denied
+    # depending on which flag came first. The safety property the allowlist was
+    # adopted for -- an unmodelled flag becomes a refusal rather than a bypass
+    # -- is only true when nothing is consulted before it.
+    #
+    # THIS DENY HAS NO ALLOW TWIN, and that is deliberate rather than an
+    # oversight in a file where every other deny has one. A twin would assert
+    # that some unreadable command is safe, which is the claim this branch
+    # exists to stop making. The cost is bounded and was measured rather than
+    # assumed: every pre-verb flag in this fleet's own scripted git usage is
+    # already in GLOBAL_FLAGS, so nothing real is refused today.
+    if unrecognised is not None:
+        return "deny", f"an option this guard does not recognise ({unrecognised})"
+
+    # A flag beats the variable, which is git's own precedence -- measured:
+    # `GIT_DIR=<a> git --git-dir=<b> rev-parse --absolute-git-dir` answers <b>.
+    for key, value in (env or {}).items():
+        scope.setdefault(key, value)
 
     # --- SCOPE, first and always ------------------------------------------
     # A git invocation aims TWO things independently, and MEASURING them is the
@@ -272,7 +351,7 @@ def _judge_git(tokens: list[str], start: int, vault: str,
                 return scope[f]
         return last_cd  # None here means "wherever the shell already is"
 
-    targets: list[str | None] = [_axis(REPO_FLAGS), _axis(TREE_FLAGS)]
+    targets: list[str | None] = [_axis(REPO_ORDER), _axis(TREE_ORDER)]
 
     resolved: list[str] = []
     unreadable = False
@@ -292,15 +371,6 @@ def _judge_git(tokens: list[str], start: int, vault: str,
             resolved.append(here)
     if not any(_inside(r, vault) for r in resolved):
         return "allow", ""
-
-    # --- an option we do not model, pointed at the vault -------------------
-    # Reached only when the command IS vault-bound, so a bot's own checkout is
-    # untouched however exotic its flags. Here the parse stopped early: the
-    # verb was never found and a later scope flag was never read, so "no
-    # dangerous verb" is a statement about a command this code did not finish
-    # reading. Refusing says so; allowing would be the seventh hole.
-    if unrecognised is not None:
-        return "deny", f"an option this guard does not recognise ({unrecognised})"
 
     # --- only now, the verb -----------------------------------------------
     if verb is None:
