@@ -9,6 +9,13 @@
 #   rung 2  cold `claudlobby emit-batch` (the CLI spools on db failure, which
 #           is rung 3 by construction)
 #
+# EXIT 0 MEANS RECORDED — in the plane, queryable now. It does NOT mean
+# "accepted" (#1711). A batch the db was unavailable for is SPOOLED: durable on
+# disk (fsync'd file AND parent, atomic rename) and invisible to every reader
+# until a drain ingests it. That is exit 6, its own code, because 0 asserted
+# something false about it and a failure code asserts the opposite falsehood —
+# nothing was lost and nothing needs retrying.
+#
 # Idempotent across rungs: lib/plane-socket-client.py mints event_ids into a
 # finalized file BEFORE the first attempt; rung 2 replays that exact file, so
 # a commit whose ack was lost classifies as duplicate, never a second row.
@@ -117,6 +124,12 @@ else
 fi
 case "$rc" in
     0) exit 0 ;;
+    6) exit 6 ;;         # SPOOLED (#1711): accepted, durable on disk, NOT in
+                         # the plane. A verdict for the same reason 2 and 3 are
+                         # — the batch is already written, so the cold rung
+                         # would only spool it a second time. Deliberately NOT
+                         # 0: rc 0 is the one signal every door reads as
+                         # "recorded", and no reader can see a spooled row.
     2|3) exit "$rc" ;;   # verdicts: the CLI would only repeat them. 4 is NOT
                          # listed because the client cannot return it (#1485
                          # maps a stale daemon to 5); a cold-rung downgrade
@@ -164,7 +177,14 @@ if [ -s "$finalized" ]; then
         claudlobby_cli --root "$ROOT" emit-batch --json "$finalized"
     fi
     rc=$?
-    [ "$rc" -ne 0 ] && printf 'plane-emit: cold CLI rung failed rc=%s\n' "$rc" >&2
+    if [ "$rc" -eq 6 ]; then
+        # NOT a failure and must not be worded as one (#1711): the batch is on
+        # disk and lands at the next drain. A door that cries failure for a
+        # non-failure teaches its reader to ignore the line that matters.
+        printf 'plane-emit: SPOOLED by the cold rung — durable on disk, NOT in the plane until a drain\n' >&2
+    elif [ "$rc" -ne 0 ]; then
+        printf 'plane-emit: cold CLI rung failed rc=%s\n' "$rc" >&2
+    fi
     exit "$rc"
 fi
 # The client died before finalizing (bad stdin never lands here — that is a

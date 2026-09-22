@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a spooled batch reported success, and success is the only signal a door gets (#1711)
+
+`rc 0` from the shim meant **recorded — in the plane, queryable now**. It was
+also what a **spooled** batch got: durable on disk, absent from the plane, and
+invisible to every reader until a drain ingests it. Both transports did it, in
+the same shape — a note on stderr, which no door reads, and `return 0`.
+
+The trigger is the condition the disclosure contract was written for: a batch
+spools because the database was unavailable. If it is unavailable and no daemon
+is running, the entry waits for a human while every door believes it recorded.
+
+- **`spooled` is exit 6, its own code.** 0 asserted something false about it;
+  a failure code asserts the opposite falsehood, because nothing was lost and
+  nothing needs retrying. Applied at all four places the distinction still
+  exists: `lib/plane-socket-client.py`, `claudlobby emit-batch`, `claudlobby
+  emit` (a second public door with the identical defect — **found by the test,
+  not by the first reading**), and `lib/plane-emit.sh`.
+- **6 is a VERDICT, not a fallback trigger.** The batch is already written, so
+  replaying it down the cold rung would only spool it a second time. It joins
+  2 and 3 in the passthrough arm and never arms the wedge marker.
+- **It is never worded as a failure.** The shim and both `lib-common.sh`
+  wrappers say SPOOLED and say what it means; a door that cries failure for a
+  non-failure teaches its reader to skip the line that matters.
+- **Doors are unchanged and were swept first.** Thirteen files call the
+  wrappers; **five** branch on `PLANE_EMIT_LAST_RC`, four testing `-ne 0` and
+  one (`workstream-update.sh`) refusing the verb outright. All five are
+  CORRECT about a spooled batch without any edit — it genuinely was not
+  recorded. **No caller captures or inspects the shim's stderr**; one
+  (`keepalive.sh`) redirects it to a log file. That sweep closes a bound the
+  issue carried rather than assumed past.
+- **Both rollout pairings degrade safely.** An OLD door against the NEW shim
+  gets a nonzero rc and reports "not recorded", which is true; a NEW door
+  against an OLD shim never sees 6 and behaves exactly as before.
+
+**`claudlobby brief --ack` already did this correctly** (`commands/core.py`) and
+is the precedent the wording follows: failed, spooled and recorded each get
+their own line, and the spooled one says the reports still read unacked.
+
+Scope: citation **A** only. Citation B (the dropped-attribution disclosure from
+#1706) lives in `lib/report-back.sh`, which #1713 owns.
+
 
 ### Added — `link_source`: was the task link NAMED or GUESSED? (#1710)
 

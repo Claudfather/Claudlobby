@@ -129,3 +129,61 @@ def test_plane_schema_exports_json(tmp_path: Path):
     assert r.returncode == 0
     data = json.loads(r.stdout)
     assert "envelope" in data and "task" in data
+
+
+def test_a_spooled_batch_exits_6_not_0(tmp_path: Path):
+    """#1711. A spooled batch is ACCEPTED and DURABLE but NOT RECORDED — it is
+    on disk and invisible to every reader until a drain. Exit 0 said "recorded"
+    about a row nothing can see, which is the one thing the estate's disclosure
+    contract exists to prevent, and it is the ONLY signal the shim passes on.
+
+    Forced the way the retryable class actually arises: the plane directory is
+    made unwritable, so SQLite cannot open/extend the db and emit_batch takes
+    its spool path rather than raising."""
+    import json as _json
+    import os
+    import stat
+
+    def _intent(n: str) -> str:
+        d = _json.loads(_intent_json())
+        d["payload"]["msg_id"] = "msg_" + n * 32     # distinct: a repeat is a
+        return _json.dumps(d)                        # UNIQUE violation, not a spool
+
+    # First emit creates the db and the directory tree.
+    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+             stdin=_intent("a"))
+    assert r.returncode == 0, r.stderr
+
+    plane_dir = tmp_path / "state" / "plane"
+    db = plane_dir / "plane.db"
+    # The DB FILE read-only, the DIRECTORY still writable: SQLITE_READONLY is in
+    # RETRYABLE_SQLITE_CODES so emit_batch spools, and the spool (which lives
+    # under this same directory) can still be written. Making the directory
+    # unwritable instead does neither — an already-open db keeps taking writes,
+    # and the spool would fail too, which is rc 3 and a different test.
+    originals = {p: stat.S_IMODE(p.stat().st_mode) for p in (db,) if p.exists()}
+    for p in originals:
+        os.chmod(p, 0o444)
+    try:
+        r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+                 stdin=_intent("b"))
+    finally:
+        for p, mode in originals.items():            # or tmp_path cleanup fails
+            os.chmod(p, mode)
+
+    assert r.returncode == 6, (
+        f"spooled batch exited {r.returncode}; 0 asserts 'recorded' about a row "
+        f"no reader can see. stderr={r.stderr}"
+    )
+    assert "SPOOLED" in r.stderr
+    # The batch really is on disk — durable, just not in the plane.
+    assert list((plane_dir / "spool").rglob("*.json")), "nothing was actually spooled"
+
+
+def test_a_committed_batch_still_exits_0(tmp_path: Path):
+    """Positive control for the test above. Without it, a change that returns 6
+    unconditionally passes the spool test and breaks every door on the host."""
+    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+             stdin=_intent_json())
+    assert r.returncode == 0, r.stderr
+    assert "SPOOLED" not in r.stderr
