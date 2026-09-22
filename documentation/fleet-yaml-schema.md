@@ -901,6 +901,26 @@ In addition to CLAUDE.md, the generator produces:
 - **.claude/skills/** — symlinked skill directories
 - **mounts/** — symlinks to external host paths under `<bot-dir>/mounts/<name>`
 
+## Manifest provenance (#1722)
+
+Every `generate` records where this fleet's manifest came from, so a later
+reader can tell whether the inputs moved under a running fleet.
+
+- `<fleet runtime>/composed.json` — one per fleet, rewritten on every
+  `generate`: the sha256 and presence of each compose input (`fleet.yaml`,
+  `projects.yaml`, the `mission_file` when configured, the package
+  `system.yaml`), the compose instant, and the fleet directory's git state
+  (branch, commit, dirty, and whether a rebase or merge is in progress).
+- `bot.conf` carries **one** new export, `FLEET_MANIFEST_SHA256` — the hash of
+  `fleet.yaml`. It is content-derived, so it changes exactly when the manifest
+  changes, which is exactly when `generate` would rewrite `bot.conf` anyway.
+  Nothing volatile is written there: `diff` compares `bot.conf` as exact text,
+  so a timestamp or commit id would read as permanent drift on every bot.
+
+`doctor`'s `manifest-provenance` rung and `diff`'s first line read that record.
+Both are **warn**-level: the rung reports the state of a checkout claudlobby
+does not own.
+
 ## Validation rules
 
 `claudlobby validate` checks:

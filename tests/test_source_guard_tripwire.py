@@ -76,6 +76,21 @@ _BLESSED_RAW_READS = {
     ("composer.py", "int_path.read_text()"),
     ("composer.py", "env_path.read_text()"),
     ("composer.py", "dotenv.read(env_path)"),
+    # composer.py — manifest provenance (#1722). EXEMPT, and narrowly, on the
+    # same grounds as the $HOME/.env walk below: `_sha256_file` consumes ONLY a
+    # hex digest of the bytes. No value read here crosses into a path, a grant,
+    # or composed output — the digest lands in composed.json and as one
+    # bot.conf stamp, neither of which is a source the audit governs. Routing a
+    # hash through audit_bot_sources would assert provenance about a value that
+    # never becomes a path.
+    ("composer.py", "open(path,'rb')"),
+    ("composer.py", "fh.read(65536)"),
+    # composed.json is the compositor's OWN runtime state, written by this same
+    # module — a non-source read, the category the template/prose exemption
+    # above already names. It is read back to answer "did the inputs move",
+    # never to derive a path or a grant.
+    ("composer.py", "(paths.runtime/'composed.json').read_text()"),
+    ("composer.py", "json.loads((paths.runtime/'composed.json').read_text())"),
     # _upstream_env_names walks $HOME/.env, the repo-root .env and the fleet
     # .env, because start-bot.sh sources all three above the bot tier. EXEMPT,
     # narrowly: only the KEYS and the emptiness of each value are consumed, to
