@@ -78,10 +78,35 @@ a conflict
    side-branch clone are Claudron's `sync` to abort or refuse; a stale lock is
    its lock handling. This job reports them.
 
-**You will get exactly one page per state change.** A still-wedged vault on the
-next tick says nothing — the arm is the transition, not a clock, because paging
-every 15 minutes about a still-true condition is how an operator learns to mute
-the channel. Recovery produces exactly one NOTICE.
+**You will get exactly one page per change in whether the sync SUCCEEDED.** A
+still-wedged vault on the next tick says nothing — the arm is the transition, not
+a clock, because paging every 15 minutes about a still-true condition is how an
+operator learns to mute the channel. Recovery produces exactly one NOTICE.
+
+**What does NOT page, stated because an earlier draft of the line above promised
+more than the job delivers.** The debounce marker holds `ok` when the sync
+succeeded and `bad:<health-verdict>` when it did not, so the health verdict is
+part of the compared state *only while the sync is failing*. A verdict that
+changes while the sync keeps succeeding — `clean` → `unknown` because
+`sync --check` stopped answering, and back — therefore pages **zero** times.
+Measured: three ticks across that transition, marker `ok` throughout, no page,
+while a real failure on the next tick paged normally.
+
+It is **recorded, not lost**: every tick writes a `vault.state` sample, so the
+change is on the plane and queryable —
+
+```
+claudlobby --fleet <name> events --type vault_sync --tail 50   # the failures
+```
+
+— and the samples themselves (`vault.state`) carry the verdict per run. If you
+want to know that the health door stopped answering, read the samples; do not
+wait for a page. That gap is deliberate for now rather than overlooked (a verdict
+change with a succeeding sync is a softer signal than a failed sync, and
+`sync --check` does not exist on the shipped engine yet, so today the verdict is
+always `unknown`) — and it is tracked as #1741, so the day the health door ships
+somebody decides whether it deserves a page rather than inheriting this answer
+by accident.
 
 ## Reading the history
 
