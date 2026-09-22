@@ -20,7 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`lib/vault-git-guard.sh`**, a `PreToolUse` hook on `Bash`, refuses
   `checkout switch rebase reset merge stash clean worktree cherry-pick revert
   am` inside the vault, plus `commit --amend`, `push --force`/`-f`/
-  `--force-with-lease` and `branch -d`/`-D`/`-m`. Everything else there —
+  `--force-with-lease`, `branch -d`/`-D`/`-m` and **any `pull` that is not
+  `--ff-only`**. Everything else there —
   `status log diff add commit fetch pull --ff-only push` — is untouched, as is
   any `claudron` command.
 
@@ -33,8 +34,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   without its verb ever being read, and every deny test has an allow twin
   differing only in *where* the command points.
 
-- **The effective directory** is `git -C <path>` if present, else the last
-  `cd <path>` before the git token, else the payload's `cwd`. An **unreadable**
+- **Where a command points** is every path named by a scope-setting flag —
+  `-C`, `--git-dir`, `--work-tree` — and the invocation is vault-bound if
+  **any** of them is, so a harmless-looking `-C` cannot launder the flag
+  beside it. With none of those, the last `cd <path>` before the git token,
+  else the payload's `cwd`. An **unreadable**
   target — a variable, a glob — falls back to `cwd` rather than to allow: a
   variable is what someone reaches for when doing something wide, so the
   opposite fallback would put the blind spot exactly where the risk is. With no
@@ -67,6 +71,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   somewhere unit-testable. It matches the denied verb on the **subcommand token
   alone**, never a substring of the command line — `git log --grep=reset` is a
   read and stays one.
+
+- **Two holes found in review, both on the ALLOW side — the guard permitting
+  the operation it exists to refuse, under a different spelling.** Scope read
+  `-C` alone, so `git --git-dir=<vault>/.git checkout <branch>` resolved from
+  `cwd` and was allowed from anywhere else on disk; `--git-dir` and
+  `--work-tree` are what a script reaches for when it walks several
+  repositories without `cd`-ing into each, which makes the gap accident-shaped
+  rather than evasion-shaped — and accident is this guard's threat model,
+  since the outage began with a bot running `rebase` in the vault because its
+  instructions were ambiguous. Separately, `pull` reached neither table, so
+  `git pull --rebase` was **allowed** inside the vault while `git rebase` was
+  denied three lines away, and a bare `git pull` rebases the vault outright
+  under `pull.rebase` — the outage's own mechanism, reachable with no flag
+  at all. `pull` is now refused unless it carries `--ff-only`, the invariant
+  the clone already had. `--ff-only` is necessary but not sufficient:
+  **measured on git 2.39.5**, `git pull --ff-only --rebase` is *not* rejected
+  as a contradiction — git takes the rebase path — so the dangerous flag is
+  checked first and `pull` appears in both tables.
+
+- **What this guard does NOT cover, named rather than left implicit.** The same
+  review found three residual gaps, each verified against the code and each
+  with **no exposure on any measured fleet**: a worktree of the vault's own
+  repo nested inside the vault reads as a separate repository while sharing
+  the vault's refs, and a vault configured as a subdirectory of its repo root
+  disarms the predicate entirely rather than partially (#1729); an aliased git
+  verb or an aliased `git` binary is not recognised, and nothing reports a
+  guard that has been disarmed (#1730); and `merge --ff-only` is refused while
+  `pull --ff-only` — which contains it — is allowed, which may be the right
+  answer but is currently an unexplained one (#1731). All three need an
+  unusual layout, a misconfiguration or a deliberate rename to reach, which is
+  why they are follow-ups: this guard's threat model is accident, and the two
+  holes fixed above were reachable by an ordinary command.
 
 - `library/guardrails/vault-git-hygiene.md` says what is refused and why, so a
   denial is not the first a bot hears of the rule, and names the one thing not
