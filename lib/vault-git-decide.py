@@ -89,6 +89,10 @@ NEEDS_SAFE_FLAG = {
 #: anything trying to evade a check.
 SCOPE_FLAGS = ("-C", "--git-dir", "--work-tree")
 
+#: The subset of :data:`SCOPE_FLAGS` that replaces the WORKING TREE, and so
+#: takes `cwd` out of the picture. `--git-dir` is absent on purpose.
+WORKTREE_FLAGS = ("-C", "--work-tree")
+
 
 def _resolve(path: str, cwd: str | None) -> str | None:
     """`realpath -m` semantics: normalise whether or not the path exists."""
@@ -150,30 +154,41 @@ def _inside(path: str, vault: str) -> bool:
     return repo == vault
 
 
-def _scope_targets(args: list[str]) -> list[str]:
-    """Every path one git invocation points at, in the order it names them.
+def _scope_targets(args: list[str]) -> tuple[list[str], bool]:
+    """Every path one git invocation points at, and whether it MOVED.
 
-    ALL of them rather than the first, because the verdict below is any-of:
-    each flag in :data:`SCOPE_FLAGS` can independently aim the invocation at a
-    different repository, and a command is vault-bound if any one of them does.
+    Returns ``(targets, redirected)``. ALL targets rather than the first,
+    because the verdict is any-of: each flag can independently aim the
+    invocation at a different repository, and a command is vault-bound if any
+    one of them is.
+
+    ``redirected`` is true only for the flags that replace the WORKING TREE —
+    ``-C`` (git chdirs there before anything else) and ``--work-tree``. It is
+    deliberately false for ``--git-dir``, and that asymmetry is measured rather
+    than reasoned: see :func:`_judge_git`.
 
     Both spellings are read — `--git-dir <p>` and `--git-dir=<p>` — since the
     attached form is the one a script writes.
     """
     out: list[str] = []
+    redirected = False
     j = 0
     while j < len(args):
         a = args[j]
         if a in SCOPE_FLAGS and j + 1 < len(args):
             out.append(args[j + 1])
+            redirected = redirected or a in WORKTREE_FLAGS
             j += 2
             continue
+        matched = False
         for f in SCOPE_FLAGS:
             if a.startswith(f + "="):
                 out.append(a[len(f) + 1:])
+                redirected = redirected or f in WORKTREE_FLAGS
+                matched = True
                 break
         j += 1
-    return out
+    return out, redirected
 
 
 def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
@@ -208,18 +223,30 @@ def _judge_git(tokens: list[str], start: int, vault: str,
     args = tokens[start + 1:]
 
     # --- SCOPE, first and always ------------------------------------------
-    targets = _scope_targets(args)
-    if not targets and last_cd is not None:
-        targets = [last_cd]
-
     # An invocation is vault-bound if ANY of its targets is. Taking only the
-    # first would let a harmless-looking `-C` launder the rest:
+    # first would let a harmless-looking `-C` launder the flag beside it:
     # `git -C /elsewhere --git-dir=<vault>/.git reset --hard` still moves the
     # vault's refs.
+    flag_targets, redirected = _scope_targets(args)
+    targets: list[str | None] = list(flag_targets)
+
+    # WHERE THE SHELL IS STANDING STAYS A TARGET UNLESS SOMETHING REPLACED IT,
+    # and `--git-dir` does not replace it. MEASURED, git 2.39.5: with a
+    # `--git-dir` naming another repository and no `--work-tree`, git treats the
+    # CURRENT DIRECTORY as that repository's working tree —
+    # `git --git-dir=<other>/.git reset --hard` run inside the vault wrote the
+    # other repo's tracked files into the vault's tree. So a scope flag pointing
+    # somewhere else never subtracts the place the command is standing; only
+    # `-C` (git chdirs first) and an explicit `--work-tree` do.
+    if not redirected:
+        targets.append(last_cd)  # may be None: resolved from `cwd` below
+
     resolved: list[str] = []
-    unreadable = not targets  # none given: it runs wherever the shell already is
+    unreadable = False
     for t in targets:
-        r = None if _looks_unresolvable(t) else _resolve(t, cwd)
+        r = None
+        if t is not None and not _looks_unresolvable(t):
+            r = _resolve(t, cwd)
         if r is None:
             unreadable = True
         else:

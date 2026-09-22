@@ -3918,6 +3918,56 @@ _vg_novault="$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"g
 [ -z "$_vg_novault" ] && r=yes || r=no
 harness_check "#1720 NO-VAULT: a bot with no CLAUDRON_VAULT_PATH gets no decision" "$r"
 
+# EVERY FLAG THAT AIMS THE COMMAND, not just -C (review of #1725). The guard
+# shipped reading -C alone, so the two flags a script reaches for when it walks
+# several repositories without cd-ing into each resolved their scope from cwd
+# and never met the vault check. Allow twin included, because denying these
+# wholesale would refuse ordinary multi-repo work in bots projects/ checkouts.
+_vg_gd="$(_vg_hook "$_VG_PROJ" "git --git-dir=$_VG_VAULT/.git checkout main")"
+case "$_vg_gd" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: --git-dir into the vault from outside it is refused" "$r"
+
+_vg_wt="$(_vg_hook "$_VG_PROJ" "git --work-tree $_VG_VAULT reset --hard")"
+case "$_vg_wt" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: --work-tree into the vault from outside it is refused" "$r"
+
+# --git-dir is NOT --work-tree. Measured on git 2.39.5: a --git-dir naming
+# another repo with no --work-tree makes git treat the CURRENT DIRECTORY as
+# that repo working tree -- run inside a vault it wrote the other repo tracked
+# files into the vault tree. So pointing the repo elsewhere must not subtract
+# the place the command is standing, and the allow twin is the same command
+# run from outside.
+_vg_gd_cwd="$(_vg_hook "$_VG_VAULT" "git --git-dir=$_VG_PROJ/.git reset --hard")"
+case "$_vg_gd_cwd" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: --git-dir elsewhere but standing in the vault is refused" "$r"
+
+_vg_gd_out="$(_vg_hook "$_VG_PROJ" "git --git-dir=$_VG_PROJ/.git reset --hard")"
+[ -z "$_vg_gd_out" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same command run from outside the vault is untouched" "$r"
+
+_vg_wt_out="$(_vg_hook "$_VG_VAULT" "git --work-tree=$_VG_PROJ checkout main")"
+[ -z "$_vg_wt_out" ] && r=yes || r=no
+harness_check "#1725 ALLOW: --work-tree elsewhere DOES replace cwd, so it is untouched" "$r"
+
+# PULL IS ONLY EVER A FAST-FORWARD (review of #1725). pull reached neither
+# table, so pull --rebase was ALLOWED in the vault while rebase was denied --
+# the same operation under a more ordinary spelling, and the outage mechanism.
+_vg_pull="$(_vg_hook "$_VG_VAULT" "git pull")"
+case "$_vg_pull" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: a bare git pull in the vault is refused" "$r"
+
+_vg_pullr="$(_vg_hook "$_VG_VAULT" "git pull --rebase")"
+case "$_vg_pullr" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: git pull --rebase in the vault is refused" "$r"
+
+_vg_pullff="$(_vg_hook "$_VG_VAULT" "git pull --ff-only")"
+[ -z "$_vg_pullff" ] && r=yes || r=no
+harness_check "#1725 ALLOW: git pull --ff-only in the vault stays permitted" "$r"
+
+_vg_pullr_proj="$(_vg_hook "$_VG_PROJ" "git pull --rebase")"
+[ -z "$_vg_pullr_proj" ] && r=yes || r=no
+harness_check "#1725 ALLOW: git pull --rebase in a projects/ checkout is untouched" "$r"
+
 if [ "${_vg_deny:-}" = "" ]; then
     echo "  --- DIAGNOSTIC: #1720 deny produced no output ---"
     echo "      vault: $_VG_VAULT"

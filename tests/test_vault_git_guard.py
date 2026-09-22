@@ -288,17 +288,53 @@ class TestEveryFlagThatPointsTheInvocation:
             f"git {flag}{joiner}{target} checkout main", vault, outside
         )[0] == "deny"
 
-    @pytest.mark.parametrize("flag", ["--git-dir", "--work-tree"])
     @pytest.mark.parametrize("joiner", [" ", "="])
-    def test_the_same_flag_pointed_elsewhere_is_allowed_from_the_vault(
-            self, nested, flag, joiner):
-        """The twin. A hook that denied this would refuse legitimate work in
-        every bot's own checkout, which is the failure this guard fears most."""
+    def test_work_tree_pointed_elsewhere_is_allowed_from_the_vault(
+            self, nested, joiner):
+        """The twin. `--work-tree` REPLACES the working tree, so this command
+        cannot touch the vault however the shell got here. A hook that denied
+        it would refuse legitimate work in a bot's own checkout, which is the
+        failure this guard fears most."""
         vault, outside = nested
-        target = f"{outside}/.git" if flag == "--git-dir" else outside
         assert D.decide(
-            f"git {flag}{joiner}{target} checkout main", vault, vault
+            f"git --work-tree{joiner}{outside} checkout main", vault, vault
         )[0] == "allow"
+
+    @pytest.mark.parametrize("joiner", [" ", "="])
+    def test_git_dir_elsewhere_does_NOT_take_cwd_out_of_scope(
+            self, nested, joiner):
+        """`--git-dir` is not `--work-tree`, and the difference is measured.
+
+        On git 2.39.5, a `--git-dir` naming another repository with no
+        `--work-tree` makes git treat the CURRENT DIRECTORY as that
+        repository's working tree: run inside a vault,
+        `git --git-dir=<other>/.git reset --hard` wrote the other repo's
+        tracked files into the vault's tree. So pointing the repo elsewhere
+        must not subtract the place the command is standing.
+        """
+        vault, outside = nested
+        assert D.decide(
+            f"git --git-dir{joiner}{outside}/.git reset --hard", vault, vault
+        )[0] == "deny"
+
+    @pytest.mark.parametrize("joiner", [" ", "="])
+    def test_the_twin_for_that_one_is_the_same_command_run_outside(
+            self, nested, joiner):
+        """Standing outside the vault, the identical command touches nothing
+        of the vault's and stays allowed — so the rule above costs no
+        legitimate work."""
+        vault, outside = nested
+        assert D.decide(
+            f"git --git-dir{joiner}{outside}/.git reset --hard", vault, outside
+        )[0] == "allow"
+
+    def test_an_explicit_work_tree_does_replace_cwd_even_with_git_dir(self, nested):
+        """Both flags given and both pointed away: nothing of the vault's is
+        reachable, so it is allowed even from inside the vault."""
+        vault, outside = nested
+        assert D.decide(
+            f"git --work-tree={outside} --git-dir={outside}/.git reset --hard",
+            vault, vault)[0] == "allow"
 
     def test_the_verdict_is_ANY_target_not_the_first_one(self, nested):
         """A harmless-looking `-C` must not launder the flag beside it:
