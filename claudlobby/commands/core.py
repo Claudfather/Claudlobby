@@ -486,6 +486,28 @@ def cmd_status(args) -> int:
     return 0
 
 
+def _coverage_line(plane, window_s, family=None) -> str:
+    """The coverage statement for an OPEN plane session (#1658).
+
+    Every windowed door in this package routes through here so the wording is
+    written once; the derivation and the wording both live in
+    `lib/plane-readers.py`, beside the plane's other SQL.
+
+    Degrades to a plain note rather than raising: a door must not lose its
+    answer because the sentence describing that answer could not be built. An
+    install whose readers predate `coverage()` says so, which is the same
+    shape `brief` uses for a matcher older than its caller.
+    """
+    try:
+        first, last, rows = plane.pr.coverage(plane.conn, family)
+        return plane.pr.coverage_line(first, last, rows, window_s)
+    except AttributeError:
+        return ("coverage: unknown — the readers installed at this root predate"
+                " the coverage derivation (#1658)")
+    except Exception as exc:                       # pragma: no cover - defensive
+        return f"coverage: unknown — {exc}"
+
+
 def cmd_report_back(args) -> int:
     """Query the fleet's reports on the plane — a human-readable table of bot work events.
 
@@ -528,6 +550,11 @@ def cmd_report_back(args) -> int:
                 )
                 return 1
 
+    # The window the caller actually asked for, in seconds, so the coverage
+    # line compares like with like. None when no --since was given: the answer
+    # then spans whatever exists and there is no window to fall short of.
+    window_s = (now - cutoff).total_seconds() if cutoff else None
+
     # The plane, the only source (F18 R2b): no ledger probe, no retirement
     # fact, no file. An unreachable plane REFUSES (rc 3) with the remedy —
     # never an empty table, which would read as "this worker is fresh"
@@ -538,6 +565,10 @@ def cmd_report_back(args) -> int:
         return refuse_unreachable("report-back", note)
     try:
         rows = plane.pr.report_rows(plane.conn, plane.fleet, since=cutoff.isoformat() if cutoff else None)
+        # #1658: derived INSIDE the session, from the same connection that
+        # served the rows -- a coverage line fetched from a second open could
+        # describe a different plane than the one the numbers came from.
+        cov = _coverage_line(plane, window_s)
     except Exception as exc:
         return refuse_unreachable("report-back", f"the plane cannot answer: {exc}")
     finally:
@@ -554,15 +585,18 @@ def cmd_report_back(args) -> int:
         # "cannot read the plane", which is the whole point: the reader learns
         # the instrument worked and the filter is what excluded everything. Left
         # on stderr under --json so an empty JSONL stream stays empty.
-        print(
-            f"0 event(s) matched — read {total_rows} row(s) from {source}",
-            file=sys.stderr if args.json else sys.stdout,
-        )
+        stream = sys.stderr if args.json else sys.stdout
+        print(f"0 event(s) matched — read {total_rows} row(s) from {source}",
+              file=stream)
+        print(cov, file=stream)
         return 0
 
     if args.json:
         for e in entries:
             print(_json.dumps(e))
+        # stdout is a JSONL stream something parses; the coverage statement
+        # rides stderr for the same reason source_state.py puts a refusal there.
+        print(cov, file=sys.stderr)
         return 0
 
     # Table output
@@ -577,6 +611,7 @@ def cmd_report_back(args) -> int:
         print(f"{ts:<22} {bot:<12} {status:<10} {summary:<50} {pr}")
 
     print(f"\n{len(entries)} event(s)")
+    print(cov)
     return 0
 
 
@@ -740,9 +775,16 @@ def cmd_uptime(args) -> int:
 
     def entries_for(bot_dir):
         return entries_from_plane(plane.pr, plane.conn, plane.fleet, bot_dir.name, since)
+    # #1658: the coverage line is per RENDERED window, not per widest window.
+    # `uptime` reads back to the widest of 24h/7d/30d and then renders one of
+    # them, so a single line derived from `since` above would describe a window
+    # the table is not showing -- the same confusion the line exists to remove.
+    covs: dict[str, str] = {}
     try:
         results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
                                   bot_dirs=bot_dirs, entries_for=entries_for)
+        for w in windows:
+            covs[w] = _coverage_line(plane, WINDOWS[w].total_seconds())
     except (plane.pr.PlaneUnreachable, sqlite3.Error) as exc:
         return refuse_unreachable("uptime", f"the plane could not answer ({exc})")
     finally:
@@ -754,9 +796,13 @@ def cmd_uptime(args) -> int:
 
     if args.json:
         sys.stdout.write(format_json(results) + "\n")
+        # one per window rendered, on stderr so stdout stays parseable JSON
+        for w in windows:
+            print(f"{w}: {covs.get(w, 'coverage: unknown')}", file=sys.stderr)
     else:
         display_window = args.window or "24h"
         sys.stdout.write(format_table(results, window=display_window) + "\n")
+        sys.stdout.write(covs.get(display_window, "coverage: unknown") + "\n")
     return 0
 
 
