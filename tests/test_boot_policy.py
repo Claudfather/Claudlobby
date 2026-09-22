@@ -70,7 +70,7 @@ def test_defaults_with_empty_host_block():
         ready_timeout_s=200,
         plugin_update_once_per_boot=True,
         hold_ceiling_s=320,  # 200 + 120
-        boot_grace_s=1400,  # 1200 + 200 (R6d)
+        boot_grace_s=1520,  # 1200 + 320 (F15: the wait plus the HOLD ceiling)
     )
 
 
@@ -247,7 +247,7 @@ def test_bot_conf_lines_fixed_order_and_export():
         ready_timeout_s=200,
         plugin_update_once_per_boot=True,
         hold_ceiling_s=320,
-        boot_grace_s=1400,
+        boot_grace_s=1520,
     )
     assert bot_conf_lines(policy) == [
         "BOOT_ADMISSION_SLOTS=2",
@@ -257,7 +257,7 @@ def test_bot_conf_lines_fixed_order_and_export():
         "RC_READY_TIMEOUT_S=200",
         "BOOT_PLUGIN_UPDATE_ONCE=1",
         "BOOT_HOLD_CEILING_S=320",
-        "BOOT_GRACE_S=1400",
+        "BOOT_GRACE_S=1520",
     ]
 
 
@@ -272,7 +272,7 @@ def test_bot_conf_lines_renders_auto_verbatim():
         ready_timeout_s=200,
         plugin_update_once_per_boot=True,
         hold_ceiling_s=320,
-        boot_grace_s=1400,
+        boot_grace_s=1520,
     )
     assert bot_conf_lines(policy)[0] == "BOOT_ADMISSION_SLOTS=auto"
 
@@ -286,7 +286,7 @@ def test_bot_conf_lines_renders_false_flag_as_zero():
         ready_timeout_s=200,
         plugin_update_once_per_boot=False,
         hold_ceiling_s=320,
-        boot_grace_s=1400,
+        boot_grace_s=1520,
     )
     assert "BOOT_PLUGIN_UPDATE_ONCE=0" in bot_conf_lines(policy)
 
@@ -328,7 +328,7 @@ def test_resolve_boot_policy_against_the_real_package_defaults():
         ready_timeout_s=200,
         plugin_update_once_per_boot=True,
         hold_ceiling_s=320,
-        boot_grace_s=1400,
+        boot_grace_s=1520,
     )
 
 
@@ -377,10 +377,19 @@ def test_hold_ceiling_is_ready_timeout_plus_the_restart_margin(
 
 def test_boot_grace_is_the_sum_of_the_two_phases_it_brackets():
     """F15. PR B moved the host-wide wait INSIDE ExecStart, so the phase the
-    grace brackets is the admission wait PLUS the readiness poll."""
+    grace brackets is the admission wait PLUS the whole granted bring-up.
+
+    The second term is the HOLD ceiling, not the readiness ceiling: the granted
+    phase is budgeted at `ready_timeout_s + 120` everywhere else in PR B, so
+    summing with the readiness ceiling alone left the grace 120s short of the
+    phase it brackets. Asserted against `hold_ceiling_s` AND against the
+    readiness ceiling it must no longer equal, because the two differ by a
+    constant and an implementation that used the wrong one would still satisfy
+    a single equality written loosely."""
     fleet = _fleet_of(21)
     policy = resolve_boot_policy(fleet.bots["b3"], fleet, {}, cpu_count=4)
-    assert policy.boot_grace_s == policy.admission_wait_max_s + policy.ready_timeout_s
+    assert policy.boot_grace_s == policy.admission_wait_max_s + policy.hold_ceiling_s
+    assert policy.boot_grace_s != policy.admission_wait_max_s + policy.ready_timeout_s
 
 
 # --- PR B: the derived wait cap (F13) ---------------------------------------------
@@ -436,13 +445,21 @@ def test_an_explicit_cap_shorter_than_the_drain_is_refused_naming_the_numbers():
 
 def test_an_explicit_zero_cap_stays_legal_below_the_drain():
     """0 is the one legal value below the drain: it means NEVER WAIT, an
-    explicit choice to proceed ungated rather than an under-budget."""
+    explicit choice to proceed ungated rather than an under-budget.
+
+    `cap: 0` is also where F15's second term is most visible, which is why the
+    grace is the HOLD ceiling here: with no wait at all the grace is exactly the
+    bring-up budget (320s on this fixture), where the readiness ceiling alone
+    would have made it 200s -- 120s short of a boot the estate already budgets
+    at 320, i.e. the watchdog un-suppressing while the bot is still legitimately
+    coming up."""
     fleet = _fleet_of(21)
     policy = resolve_boot_policy(
         fleet.bots["b3"], fleet, {"admission_wait_max_s": 0}, cpu_count=4
     )
     assert policy.admission_wait_max_s == 0
-    assert policy.boot_grace_s == policy.ready_timeout_s
+    assert policy.boot_grace_s == policy.hold_ceiling_s
+    assert policy.boot_grace_s == 320
 
 
 def test_an_explicit_slot_count_is_what_the_drain_is_computed_against():

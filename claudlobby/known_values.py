@@ -60,7 +60,17 @@ BOOT_EVENT_TYPES: frozenset[str] = frozenset(
         "boot_admission_timeout",
         # The gate could not run at all, or could not key itself on the boot
         # epoch, and said so rather than proceeding silently. Payload: reason
-        # (state dir unwritable | epoch unresolvable | unit name empty), dir.
+        # (state dir unwritable | unit name empty | epoch unresolvable --
+        # gating un-keyed), dir.
+        #
+        # NOT EVERY ROW IS AN UNAVAILABLE GATE, and the reason string is what
+        # tells them apart. "epoch unresolvable -- gating un-keyed" is a
+        # DEGRADED gate that queued and granted normally; the other two are a
+        # gate that did not run. The distinction lives in the reason rather
+        # than in a second type because on a host where resolve_boot_epoch
+        # fails, every bot emits this on every boot while the gate works fine,
+        # and a reader filtering on the type alone would read that as a fleet
+        # booting ungated.
         "boot_admission_unavailable",
     }
 )

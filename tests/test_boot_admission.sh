@@ -95,10 +95,15 @@ export PATH="$T/bin:$PATH"
 
 export CLAUDLOBBY_ROOT="$T/root"
 export CLAUDLOBBY_BOOT_EPOCH=1700000000
+# The state tree is keyed on the BOOT ID, not on the epoch: a boot id is immune
+# to the clock steps that move the epoch, and this estate boots with a stale
+# clock every time. CLAUDLOBBY_BOOT_ID is the id seam, CLAUDLOBBY_BOOT_EPOCH's
+# sibling -- both pinned here so the tree path is a constant in this file.
+export CLAUDLOBBY_BOOT_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 export PLANE_EMIT_DISABLED=1
 export BOOT_ADMISSION_POLL_S=0.2
 BOTS="$CLAUDLOBBY_ROOT/runtime/bots"
-STATE="$CLAUDLOBBY_ROOT/state/boot/$CLAUDLOBBY_BOOT_EPOCH"
+STATE="$CLAUDLOBBY_ROOT/state/boot/$CLAUDLOBBY_BOOT_ID"
 mkdir -p "$BOTS"
 
 # shellcheck source=../lib/lib-common.sh
@@ -117,7 +122,17 @@ mkbot() {  # mkbot <name> <service> <priority> -- prints the bot dir
     printf '%s' "$d"
 }
 
-reset_state() { rm -rf "$CLAUDLOBBY_ROOT/state/boot"; mkdir -p "$STATE/tickets" "$STATE/slots"; }
+# The pin is what says WHICH tree is live, and the reaper reads it rather than
+# re-resolving anything -- so a cell that calls _boot_admission_reap directly,
+# with no acquire having run, has to pin first or the reaper correctly answers
+# "I cannot tell which tree is current" and prunes nothing.
+reset_state() {
+    rm -rf "$CLAUDLOBBY_ROOT/state/boot"
+    mkdir -p "$STATE/tickets" "$STATE/slots"
+    _boot_admission_pin "$CLAUDLOBBY_ROOT/state/boot" || true
+}
+pinned_id()    { sed -n 's/^id=//p'    "$CLAUDLOBBY_ROOT/state/boot/.boot-id" 2>/dev/null | head -1 || true; }
+pinned_epoch() { sed -n 's/^epoch=//p' "$CLAUDLOBBY_ROOT/state/boot/.boot-id" 2>/dev/null | head -1 || true; }
 
 # Both of these are called inside $( ), and a background child INHERITS the
 # command substitution pipe as its stdout -- so without the redirect the
@@ -168,6 +183,14 @@ have_ticket() {
         case "${f##*/}" in *-"$1") return 0 ;; esac
     done
     return 1
+}
+ticket_name() {  # ticket_name <unit> -- the queued ticket's basename, or empty
+    local f
+    for f in "$STATE/tickets"/*; do
+        [ -f "$f" ] || continue
+        case "${f##*/}" in *-"$1") printf '%s' "${f##*/}"; return 0 ;; esac
+    done
+    return 0
 }
 file_present() { [ -e "$1" ]; }
 
@@ -223,12 +246,21 @@ launch() {
 echo "=== (g3) a %N-less date still yields a 19-digit sortable stamp (R2) ==="
 
 reset_state
-S_REAL="$(_boot_admission_stamp)"
+# The two stamps have to land in the SAME epoch second or the ordering
+# assertion below is about two different seconds rather than about the FORMAT.
+# Retaken until they do -- measured failing once under the hermetic wrapper at
+# .937 into a second, which is the clock failing, not a regression, and the
+# same exact-pin class as the waited_s cell further down.
+S_REAL=""; S_FAKE=""
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+    S_REAL="$(_boot_admission_stamp)"
+    export FAKE_DATE_NO_NS=1
+    S_FAKE="$(_boot_admission_stamp)"
+    unset FAKE_DATE_NO_NS
+    if [ "${S_REAL:0:10}" = "${S_FAKE:0:10}" ]; then break; fi
+done
 assert_eq "real date: stamp is 19 digits" "19" "${#S_REAL}"
 case "$S_REAL" in ''|*[!0-9]*) assert_eq "real date: stamp is all digits" "yes" "no" ;; *) assert_eq "real date: stamp is all digits" "yes" "yes" ;; esac
-export FAKE_DATE_NO_NS=1
-S_FAKE="$(_boot_admission_stamp)"
-unset FAKE_DATE_NO_NS
 assert_eq "%N-less date: stamp is still 19 digits" "19" "${#S_FAKE}"
 case "$S_FAKE" in ''|*[!0-9]*) assert_eq "%N-less date: stamp is all digits (the N was rejected)" "yes" "no" ;; *) assert_eq "%N-less date: stamp is all digits (the N was rejected)" "yes" "yes" ;; esac
 # R2s load-bearing half: the fallback sorts WITH real ns stamps rather than
@@ -262,6 +294,46 @@ assert_eq "4 slots: dispersion is ready_timeout/slots" "1250" "$(_boot_admission
 # would turn the one setting that promises not to wait into the longest wait.
 assert_eq "cap 0 stays 0 at rank 0" "0" "$(_boot_admission_effective_cap 0 0 200 1)"
 assert_eq "cap 0 stays 0 at rank 20" "0" "$(_boot_admission_effective_cap 0 20 200 1)"
+
+echo "=== the caller cap NARROWS the effective cap; it never widens it ==="
+
+# BOOT_ADMISSION_CALLER_CAP_S exists for the serial restart drivers, which scope
+# the wait PER BOT because they are walking the fleet one at a time -- always a
+# TIGHTENING of the composed policy. It used to REPLACE the effective cap, so
+# the same knob could WIDEN it: a driver exporting 30 against an effective cap
+# of 2 multiplies the wait it was trying to bound, by arithmetic coincidence
+# rather than by anyone's decision.
+reset_state
+BOT_CC="$(mkbot cc-bot svc-cc 1)"
+hold_slot 0 svc-blocking
+_t0="$(/bin/date +%s)"
+OUT_CC="$(BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=2 RC_READY_TIMEOUT_S=1 \
+    BOOT_ADMISSION_CALLER_CAP_S=30 bash -c '. "$LIB_DIR/lib-common.sh"
+             LOG="$1/logs/startup.log"; setup_log_dir "$LOG"
+             boot_admission_acquire "$1"' _ "$BOT_CC")"
+_t1="$(/bin/date +%s)"
+assert_eq "a LARGER caller cap: still a timeout" "timeout" "$OUT_CC"
+assert_true "...and it landed at the COMPOSED cap (2s), not the caller's 30s" \
+    "$([ "$((_t1 - _t0))" -lt 10 ] && echo true || echo false)"
+assert_contains "...and the log names the composed cap it actually used" "cap 2s" \
+    "$(cat "$BOT_CC/logs/startup.log")"
+
+# ...and the narrowing direction, or "narrows" above would also pass against a
+# gate that ignored the caller cap entirely.
+reset_state
+BOT_CC2="$(mkbot cc2-bot svc-cc2 1)"
+hold_slot 0 svc-blocking
+_t0="$(/bin/date +%s)"
+OUT_CC2="$(BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=600 RC_READY_TIMEOUT_S=1 \
+    BOOT_ADMISSION_CALLER_CAP_S=1 bash -c '. "$LIB_DIR/lib-common.sh"
+             LOG="$1/logs/startup.log"; setup_log_dir "$LOG"
+             boot_admission_acquire "$1"' _ "$BOT_CC2")"
+_t1="$(/bin/date +%s)"
+assert_eq "a SMALLER caller cap wins" "timeout" "$OUT_CC2"
+assert_true "...and it bound the wait to its own value, not the composed 600s" \
+    "$([ "$((_t1 - _t0))" -lt 10 ] && echo true || echo false)"
+assert_contains "...and the log names the caller cap it actually used" "cap 1s" \
+    "$(cat "$BOT_CC2/logs/startup.log")"
 
 echo "=== (d2a) the clock-step fold, PR As arithmetic verbatim (R8) ==="
 
@@ -357,13 +429,41 @@ _t1="$(/bin/date +%s)"
 assert_eq "cap 0: verdict is timeout" "timeout" "$OUT_Z0"
 assert_true "cap 0: proceeds immediately (<3s)" "$([ "$((_t1 - _t0))" -lt 3 ] && echo true || echo false)"
 assert_eq "cap 0: boot_admission_timeout emitted exactly once" "1" "$(grep -c 'boot_admission_timeout' "$T/ev-z0.log" || true)"
-assert_contains "cap 0: the event carries the waited_s shape" '"waited_s":0' "$(cat "$T/ev-z0.log")"
+# Extracted and bounded, never pinned exactly -- the same reasoning the cell 18
+# lines up already carries: `waited` is real wall time, and the first loop's
+# reap plus two directory scans can cross a second boundary on a loaded host.
+# A cell that pins 0 fails on load rather than on a regression (measured: 1 run
+# in 6 on the reviewer's host). "Exactly once" and "<3s" carry the real claim.
+_WT0="$(sed -n 's/.*"waited_s":\([0-9][0-9]*\).*/\1/p' "$T/ev-z0.log" | head -1 || true)"
+assert_true "cap 0: the event carries waited_s, and it is <=1s" \
+    "$([ -n "$_WT0" ] && [ "$_WT0" -le 1 ] && echo true || echo false)"
 assert_contains "cap 0: ADMISSION_TIMEOUT logged" "ADMISSION_TIMEOUT" "$(cat "$BOT_Z0/logs/startup.log")"
 
-echo "=== (g2) a prior-epoch tree is stale UNCONDITIONALLY, with no pid read (R14) ==="
+# A TIMEOUT is the single most informative case for revising the cap and the
+# slot formula from the reboot that was supposed to validate them, and it was
+# the one case whose wait never reached metric_samples.
+reset_state
+BOT_TM="$(mkbot tm-bot svc-tm 1)"
+hold_slot 0 svc-other
+TM_LOG="$T/tm-metrics.log"; : > "$TM_LOG"
+PLANE_EMIT_DISABLED= FLEET_NAME=test-fleet BOT_NAME=tm-bot METRIC_LOG="$TM_LOG" \
+BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=0 bash -c '. "$LIB_DIR/lib-common.sh"
+             plane_emit_events() { cat >> "$METRIC_LOG"; return 0; }
+             emit_fleet_event() { return 0; }
+             LOG="$1/logs/startup.log"; setup_log_dir "$LOG"
+             boot_admission_acquire "$1" >/dev/null' _ "$BOT_TM"
+wait_for 5 grep -q 'boot.admission_wait_s' "$TM_LOG" || true
+assert_contains "a TIMEOUT records its wait as boot.admission_wait_s too" \
+    "boot.admission_wait_s" "$(cat "$TM_LOG")"
+
+echo "=== (g2) a prior-BOOT tree is stale UNCONDITIONALLY, with no pid read (R14) ==="
 
 reset_state
-OLD="$CLAUDLOBBY_ROOT/state/boot/1699999999"
+# A tree under a DIFFERENT boot id. The name is id-shaped (hex and dashes), so
+# it is a prune candidate; a name that is not -- `admission-noepoch`,
+# `plugins.lock` -- is not, which is what keeps the reaper away from the other
+# tenants of state/boot.
+OLD="$CLAUDLOBBY_ROOT/state/boot/11111111-2222-3333-4444-555555555555"
 mkdir -p "$OLD/slots/0" "$OLD/tickets"
 # Every signal that would make this slot HELD inside the current epoch: a live
 # pid and an mtime one second old. It must go anyway -- a reboot makes a pid
@@ -377,10 +477,114 @@ printf 'pid=%s\n' "$(live_pid)" > "$OLD/tickets/0-1699999999000000000-svc-old"
 : > "$CLAUDLOBBY_ROOT/state/boot/plugins-updated.1700000000.claudna_Claudfather"
 mkdir -p "$CLAUDLOBBY_ROOT/state/boot/plugins.lock"
 _boot_admission_reap "$BOTS"
-assert_eq "prior-epoch tree removed wholesale" "false" "$(exists "$OLD")"
-assert_eq "current-epoch tree untouched" "true" "$(exists "$STATE/slots")"
+assert_eq "prior-boot tree removed wholesale" "false" "$(exists "$OLD")"
+assert_eq "pinned tree untouched" "true" "$(exists "$STATE/slots")"
 assert_eq "plugin stamp NOT touched (it belongs to plugin_ensure)" "true" "$(exists "$CLAUDLOBBY_ROOT/state/boot/plugins-updated.1700000000.claudna_Claudfather")"
 assert_eq "plugin lock NOT touched" "true" "$(exists "$CLAUDLOBBY_ROOT/state/boot/plugins.lock")"
+
+# (F2) THE PIN ITSELF. The reaper reads it and re-resolves NOTHING, so the
+# question "which tree is live" has exactly one answer per host per boot --
+# which is what R14 ("a different key means a reboot happened") needs in order
+# to be true. Before the pin, _boot_admission_reap re-resolved the epoch on
+# every call while acquire bound the tree path ONCE, so a clock step between
+# the two made a waiter rm -rf the tree it was itself queued in.
+assert_eq "the pin names this host's live boot id" "$CLAUDLOBBY_BOOT_ID" "$(pinned_id)"
+assert_eq "the pin records the epoch AT PIN TIME beside it" "$CLAUDLOBBY_BOOT_EPOCH" "$(pinned_epoch)"
+# CANNOT LOOK is not NOTHING TO PRUNE: with no pin there is no answer to "which
+# tree is live", and a reaper that guessed would delete the live one.
+rm -f "$CLAUDLOBBY_ROOT/state/boot/.boot-id"
+mkdir -p "$OLD/slots/0"
+_boot_admission_reap "$BOTS"
+assert_eq "no pin: the reaper prunes NO tree at all rather than guessing" "true" "$(exists "$OLD")"
+rm -rf "$OLD"
+
+echo "=== (F2) a changed boot id REPLACES the pin; every other tree is stale ==="
+
+reset_state
+hold_slot 0 svc-previous-boot
+printf 'pid=%s\n' "$(live_pid)" > "$STATE/tickets/0-1700000000000000000-svc-previous-boot"
+NEWID="99999999-8888-7777-6666-555555555555"
+BOT_NID="$(mkbot nid-bot svc-nid 1)"
+OUT_NID="$(CLAUDLOBBY_BOOT_ID="$NEWID" BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=10 bash -c '. "$LIB_DIR/lib-common.sh"
+             LOG="$1/logs/startup.log"; setup_log_dir "$LOG"
+             boot_admission_acquire "$1"' _ "$BOT_NID")"
+assert_eq "a new boot id: the waiter is granted in its own tree, not behind the old one" "granted:0" "$OUT_NID"
+assert_eq "the pin now names the new boot id" "$NEWID" "$(pinned_id)"
+assert_eq "the previous boot's tree is stale wholesale -- live pid and all" "false" "$(exists "$STATE")"
+assert_eq "the new tree holds the grant" "true" "$(exists "$CLAUDLOBBY_ROOT/state/boot/$NEWID/slots/0")"
+
+echo "=== (F2) the pin survives a concurrent first write: exactly one winner ==="
+
+reset_state
+rm -f "$CLAUDLOBBY_ROOT/state/boot/.boot-id"
+: > "$T/pin.out"
+for _i in 1 2 3 4 5 6; do
+    ( _boot_admission_pin "$CLAUDLOBBY_ROOT/state/boot" || true
+      printf '%s %s\n' "${_BA_KEY:-}" "${_BA_EPOCH_PIN:-}" >> "$T/pin.out" ) &
+done
+wait
+assert_eq "six concurrent first writers adopt ONE key and ONE epoch" "1" \
+    "$(sort -u "$T/pin.out" | wc -l | tr -d ' ')"
+assert_eq "...and it is this host's live boot id" "$CLAUDLOBBY_BOOT_ID $CLAUDLOBBY_BOOT_EPOCH" \
+    "$(sort -u "$T/pin.out" | head -1)"
+
+echo "=== (F2) a stepped boot EPOCH mid-wait leaves the live tree alone ==="
+
+# resolve_boot_epoch is not stable across a clock step on either OS (uptime -s
+# is now-minus-uptime; kern.boottime is what settimeofday adjusts), and this
+# estate's primary host is RTC-less and steps its clock at every boot -- inside
+# the very window the gate is busiest. Driven through real stubs rather than
+# reasoned about: the epoch MOVES mid-wait and the tree must not.
+mkdir -p "$T/epochstep"
+cat > "$T/epochstep/uptime" <<'FAKEUP'
+#!/bin/sh
+echo "uptime: illegal option -- s" >&2
+exit 1
+FAKEUP
+cat > "$T/epochstep/sysctl" <<'FAKESC'
+#!/bin/sh
+case "${2:-}" in
+    kern.boottime) printf '{ sec = %s, usec = 1 } stub\n' "$(cat "$FAKE_BOOT_SEC")" ;;
+    *) exit 1 ;;
+esac
+FAKESC
+chmod +x "$T/epochstep/uptime" "$T/epochstep/sysctl"
+FAKE_BOOT_SEC="$T/fake-boot-sec"; export FAKE_BOOT_SEC
+printf '1700000000\n' > "$FAKE_BOOT_SEC"
+
+reset_state
+rm -f "$CLAUDLOBBY_ROOT/state/boot/.boot-id"
+BOT_ES="$(mkbot es-bot svc-es 1)"
+# A pid-less slot directory: HELD by the CLAIM GRACE, which is a different
+# window from the hold ceiling, so the blocker survives every reap below for a
+# reason that has nothing to do with what is under test.
+mkdir -p "$STATE/slots/0"
+OUT_ES="$T/es.verdict"
+launch "$BOT_ES" 0 "$OUT_ES" PATH="$T/epochstep:$PATH" CLAUDLOBBY_BOOT_EPOCH= \
+    BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=20 BOOT_ADMISSION_CLAIM_GRACE_S=300
+P_ES="$LAUNCH_PID"
+wait_for 10 have_ticket svc-es || true
+assert_eq "the waiter pinned the epoch it queued under" "1700000000" "$(pinned_epoch)"
+printf '1700003600\n' > "$FAKE_BOOT_SEC"   # NTP lands: the boot epoch moves +3600s
+# A PEER acquiring AFTER the step. Under the defect this is the instant its
+# reaper rm -rf's the live tree out from under the waiter above.
+BOT_EP="$(mkbot ep-bot svc-ep 1)"
+OUT_EP="$T/ep.verdict"
+launch "$BOT_EP" 0 "$OUT_EP" PATH="$T/epochstep:$PATH" CLAUDLOBBY_BOOT_EPOCH= \
+    BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=20 BOOT_ADMISSION_CLAIM_GRACE_S=300
+P_EP="$LAUNCH_PID"
+wait_for 10 have_ticket svc-ep || true
+sleep 1
+assert_eq "the stepped clock did NOT re-key the tree" "1700000000" "$(pinned_epoch)"
+assert_eq "the live tree survives a peer whose clock has stepped" "true" "$(exists "$STATE/tickets")"
+assert_eq "the waiter's own ticket survives it" "true" "$(have_ticket svc-es && echo true || echo false)"
+assert_eq "the waiter's marker survives it" "true" "$(exists "$BOT_ES/data/.boot-queued")"
+rm -rf "$STATE/slots/0"
+wait_for 20 file_present "$OUT_ES" || true
+wait "$P_ES" 2>/dev/null || true
+wait "$P_EP" 2>/dev/null || true
+assert_eq "the waiter is GRANTED when the slot frees, not stranded for its cap" "granted:0" \
+    "$(cat "$OUT_ES" 2>/dev/null || true)"
 
 echo "=== (c) a slot whose recorded pid is DEAD is reclaimed by the next waiter (R6a) ==="
 
@@ -467,6 +671,84 @@ assert_eq "no bots dir: the reaper touches no marker at all" "true" "$(exists "$
 _boot_admission_reap "$T/no-such-bots-dir"
 assert_eq "unreadable bots dir: still touches no marker" "true" "$(exists "$BOT_M1/data/.boot-queued")"
 
+echo "=== (F1) a LIVE queued waiter's ticket and marker outlive the hold ceiling ==="
+
+# THE PHASES ARE DIFFERENT AND SO ARE THEIR HORIZONS. The hold ceiling budgets a
+# GRANT (ready_timeout_s + 120); the WAIT is budgeted by BOOT_ADMISSION_WAIT_MAX_S,
+# which the composer derives as ceil(bots/slots) x hold_ceiling_s -- up to 21x
+# longer on this estate's own 21-bot host. Ageing a queued bot's records against
+# the grant budget therefore deleted them for 95% of its maximum wait: the p0
+# manager stopped counting ahead of a p1 worker after one ceiling (managers-first
+# is the only property the whole ticket subsystem exists for), and the
+# .boot-queued marker vanished mid-queue, re-opening the #1002 livelock window
+# the marker was added to close.
+#
+# The rule is liveness AND FRESHNESS, and the freshness half is what makes it a
+# pair rather than a timer: every waiter RE-WRITES its ticket and its marker on
+# every poll, fork-free, so a record that is both alive and fresh means "alive
+# AND still polling" -- strictly stronger than either half, one constant, and
+# the ceiling stays correctly sized for the unrefreshable granted phase.
+reset_state
+BOT_RF="$(mkbot rf-bot svc-rf 1)"
+BOT_AB="$(mkbot ab-bot svc-ab 1)"
+# A pid-less slot dir blocks the waiter through the CLAIM GRACE, a different
+# window from the ceiling -- so the blocker survives for a reason that has
+# nothing to do with what is under test.
+mkdir -p "$STATE/slots/0"
+OUT_RF="$T/rf.verdict"
+# The cap is the cell's own upper bound on wall clock, not a margin: the
+# launcher runs acquire inside a COMMAND SUBSTITUTION, so a SIGTERM to the
+# launcher is deferred until that subshell returns -- i.e. until the cap
+# expires. 6s is comfortably past the 3s observation window below.
+launch "$BOT_RF" 0 "$OUT_RF" BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=6 \
+    BOOT_HOLD_CEILING_S=1 BOOT_ADMISSION_CLAIM_GRACE_S=300
+P_RF="$LAUNCH_PID"
+wait_for 10 have_ticket svc-rf || true
+# The ABANDONED pair, planted now so both verdicts are read at the same instant
+# off the same reaps: a LIVE pid that is not polling, hence never re-touched.
+printf 'pid=%s\n' "$(live_pid)" > "$STATE/tickets/1-1700000000000000001-svc-abandoned"
+printf 'pid=%s\nepoch=%s\n' "$(live_pid)" "$CLAUDLOBBY_BOOT_EPOCH" > "$BOT_AB/data/.boot-queued"
+sleep 3   # 3x the hold ceiling, with the waiter reaping on every 0.2s poll
+assert_eq "a LIVE waiter's ticket outlives 3x the hold ceiling" "true" "$(have_ticket svc-rf && echo true || echo false)"
+assert_eq "a LIVE launcher's marker outlives 3x the hold ceiling" "true" "$(exists "$BOT_RF/data/.boot-queued")"
+assert_eq "...and it is still QUEUED, not granted" "false" "$(exists "$OUT_RF")"
+# Without these two the pair above would also pass against a reaper that had
+# simply stopped reaping tickets and markers at all.
+assert_eq "an ABANDONED ticket (live pid, never re-touched) is STILL reaped" "false" \
+    "$(have_ticket svc-abandoned && echo true || echo false)"
+assert_eq "an ABANDONED marker (live pid, never re-touched) is STILL reaped" "false" \
+    "$(exists "$BOT_AB/data/.boot-queued")"
+kill "$P_RF" 2>/dev/null || true
+wait "$P_RF" 2>/dev/null || true
+
+echo "=== (F1) managers-first survives the hold ceiling ==="
+
+# Ratified decision 3, and the one the review measured collapsing: one reaper
+# poll past the ceiling and the p0 manager's ticket was gone, so `tickets ahead
+# of the worker` fell from 1 to 0 and the worker took the next free slot.
+reset_state
+: > "$GRANT_LOG"
+mkdir -p "$STATE/slots/0"
+F1W="$(mkbot f1-worker svc-f1-worker 1)"
+F1M="$(mkbot f1-lead svc-f1-lead 0)"
+OUT_F1W="$T/f1w.verdict"; OUT_F1M="$T/f1m.verdict"
+launch "$F1W" 0 "$OUT_F1W" BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=15 \
+    BOOT_HOLD_CEILING_S=1 BOOT_ADMISSION_CLAIM_GRACE_S=300
+P_F1W="$LAUNCH_PID"; wait_for 10 have_ticket svc-f1-worker || true
+launch "$F1M" 0 "$OUT_F1M" BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=15 \
+    BOOT_HOLD_CEILING_S=1 BOOT_ADMISSION_CLAIM_GRACE_S=300
+P_F1M="$LAUNCH_PID"; wait_for 10 have_ticket svc-f1-lead || true
+sleep 3
+assert_eq "the p0 manager's ticket is still on disk past the ceiling" "true" \
+    "$(have_ticket svc-f1-lead && echo true || echo false)"
+assert_eq "the p0 manager still counts AHEAD of the p1 worker" "1" \
+    "$(_boot_admission_count_before "$STATE/tickets" "$(ticket_name svc-f1-worker)")"
+rm -rf "$STATE/slots/0"
+wait "$P_F1M" 2>/dev/null || true
+wait "$P_F1W" 2>/dev/null || true
+assert_eq "the FIRST grant past the ceiling names the manager" "f1-lead" \
+    "$(awk '{print $2}' "$GRANT_LOG" | head -1 || true)"
+
 echo "=== (f) the marker lives from acquire to RELEASE (R7b) ==="
 
 reset_state
@@ -519,6 +801,84 @@ assert_eq "a slow plane emit still returns the verdict" "granted:0" "$OUT_NB"
 assert_true "the command substitution is NOT held open by the background emit (<5s)" \
     "$([ "$((_t1 - _t0))" -lt 5 ] && echo true || echo false)"
 
+# ...and non-blocking is NOT the same claim as bounded. The cell above proves
+# the CALLER is not held; it says nothing about the child, and start-bot.sh
+# exits while that child is alive. Under a permanently wedged rung (this
+# estate's documented D-state SD stall) an unbounded emit made "bounded pileup"
+# a RATE rather than a ceiling -- ~720 stuck processes/day, which is why
+# lib/keepalive.sh's door carries a wall-clock bound and a TREE kill. The tree
+# half is load-bearing: a bare kill of the pipeline leader reaped the leader and
+# ORPHANED the wedged CLI alive.
+reset_state
+BOT_EB="$(mkbot eb-bot svc-eb 1)"
+EMIT_PIDF="$T/emit.pid"; rm -f "$EMIT_PIDF"
+PLANE_EMIT_DISABLED= FLEET_NAME=test-fleet BOT_NAME=eb-bot EMIT_PIDF="$EMIT_PIDF" \
+BOOT_ADMISSION_EMIT_TIMEOUT_S=1 BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=20 \
+bash -c '. "$LIB_DIR/lib-common.sh"
+             plane_emit_events() { sleep 120 & printf "%s\n" "$!" > "$EMIT_PIDF"; wait; }
+             LOG="$1/logs/startup.log"; setup_log_dir "$LOG"
+             boot_admission_acquire "$1" >/dev/null' _ "$BOT_EB"
+wait_for 10 file_present "$EMIT_PIDF" || true
+_EPID="$(cat "$EMIT_PIDF" 2>/dev/null || true)"
+printf '%s\n' "$_EPID" >> "$PIDFILE"
+assert_true "the wedged emit's GRANDCHILD exists to begin with (the control)" \
+    "$([ -n "$_EPID" ] && kill -0 "$_EPID" 2>/dev/null && echo true || echo false)"
+sleep 5
+assert_true "a wedged emit is reaped at its bound, whole TREE, not just the leader" \
+    "$([ -n "$_EPID" ] && kill -0 "$_EPID" 2>/dev/null && echo false || echo true)"
+
+echo "=== a take whose pid write did not land is not reported as a grant (F11) ==="
+
+# mkdir is the mutex and the pid lands immediately after, but a process
+# descheduled past the claim grace between the two has its slot reclaimed under
+# it: all three writes then fail silently and the function still reported a
+# grant -- two holders for one slot. Staged with a `mkdir` that lands the
+# directory UNWRITABLE, which is byte-identical from try_take's side and needs
+# no race to be lost.
+reset_state
+mkdir -p "$T/ttbin"
+cat > "$T/ttbin/mkdir" <<'FAKEMKDIR'
+#!/bin/bash
+/bin/mkdir "$@" || exit $?
+for _a in "$@"; do
+    case "$_a" in */slots/[0-9]*) chmod 500 "$_a" 2>/dev/null || true ;; esac
+done
+exit 0
+FAKEMKDIR
+chmod +x "$T/ttbin/mkdir"
+_TT_FAIL="$(PATH="$T/ttbin:$PATH" bash -c '. "$LIB_DIR/lib-common.sh"
+             _boot_admission_try_take "$1" 2 svc-tt || true' _ "$STATE/slots")"
+assert_eq "a take whose pid write did not land reports NO grant" "" "$_TT_FAIL"
+chmod 700 "$STATE/slots"/[0-9]* 2>/dev/null || true
+# The positive control, or "no grant" above would also pass against a try_take
+# that never grants at all.
+reset_state
+_TT_OK="$(bash -c '. "$LIB_DIR/lib-common.sh"
+             _boot_admission_try_take "$1" 2 svc-tt || true' _ "$STATE/slots")"
+assert_eq "a take whose pid write DID land reports the slot" "0" "$_TT_OK"
+assert_true "...and the pid file is non-empty" "$([ -s "$STATE/slots/0/pid" ] && echo true || echo false)"
+
+echo "=== the holders exclusion matches whole lines, and forks nothing ==="
+
+# Called once per queued ticket per poll per waiter. bash 3.2 backs every
+# here-document with a TEMP FILE, so the pipe-free rewrite that replaced the
+# `printf | grep -q` pipefail trap traded a fork for a file open; a case glob
+# over the newline-delimited list does the same job with neither. The whole-line
+# anchoring is the part that must not regress: a bare *"$needle"* also matches a
+# LONGER unit name that merely contains ours, which would exclude a bot that
+# holds no slot and strand it behind a queue head that cannot move.
+_HOLDERS="$(printf 'svc-a\nsvc-b\nsvc-c')"
+assert_true "a holder matches" "$(_boot_admission_in_list "svc-b" "$_HOLDERS" && echo true || echo false)"
+assert_true "a non-holder does not" "$(_boot_admission_in_list "svc-z" "$_HOLDERS" && echo false || echo true)"
+assert_true "a PREFIX of a holder does not match" \
+    "$(_boot_admission_in_list "svc-b" "$(printf 'svc-a\nsvc-bb')" && echo false || echo true)"
+assert_true "a SUFFIX of a holder does not match" \
+    "$(_boot_admission_in_list "c-b" "$_HOLDERS" && echo false || echo true)"
+assert_true "an empty list matches nothing" "$(_boot_admission_in_list "svc-b" "" && echo false || echo true)"
+assert_true "an empty needle matches nothing" "$(_boot_admission_in_list "" "$_HOLDERS" && echo false || echo true)"
+assert_true "the first line of the list matches" "$(_boot_admission_in_list "svc-a" "$_HOLDERS" && echo true || echo false)"
+assert_true "the last line of the list matches" "$(_boot_admission_in_list "svc-c" "$_HOLDERS" && echo true || echo false)"
+
 echo "=== (e) release removes slot + ticket + marker; the trap does it on exit (R11) ==="
 
 reset_state
@@ -544,6 +904,59 @@ bash -c '. "$LIB_DIR/lib-common.sh"; LOG="$1/logs/startup.log"; boot_admission_r
 _RC_IDEM=$?
 set -e
 assert_eq "release is idempotent (second call rc 0, nothing left to remove)" "0" "$_RC_IDEM"
+
+echo "=== release says WHAT it released, and says so when it released NOTHING ==="
+
+# The log line used to be unconditional, and that is what hid a real defect for
+# the length of a debugging session: every release logged ADMISSION_RELEASED
+# while none of them had found a slot, because acquire and release were
+# resolving DIFFERENT tree paths. A release that cannot distinguish "freed slot
+# 0" from "found nothing" cannot make the next instance of that class loud.
+reset_state
+BOT_RL="$(mkbot rl-bot svc-rl 1)"
+OUT_RL="$(BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=20 bash -c '. "$LIB_DIR/lib-common.sh"
+             LOG="$1/logs/startup.log"; setup_log_dir "$LOG"
+             boot_admission_acquire "$1"' _ "$BOT_RL")"
+assert_eq "granted, so there is something to release" "granted:0" "$OUT_RL"
+: > "$BOT_RL/logs/startup.log"
+bash -c '. "$LIB_DIR/lib-common.sh"; LOG="$1/logs/startup.log"; boot_admission_release "$1"' _ "$BOT_RL"
+assert_contains "a real release NAMES the slot it freed" "ADMISSION_RELEASED slot=0" \
+    "$(cat "$BOT_RL/logs/startup.log")"
+: > "$BOT_RL/logs/startup.log"
+bash -c '. "$LIB_DIR/lib-common.sh"; LOG="$1/logs/startup.log"; boot_admission_release "$1"' _ "$BOT_RL"
+assert_contains "a release that freed NOTHING says so" "ADMISSION_RELEASE_NOOP" \
+    "$(cat "$BOT_RL/logs/startup.log")"
+assert_eq "...and does NOT claim to have released" "0" \
+    "$(grep -c 'ADMISSION_RELEASED' "$BOT_RL/logs/startup.log" || true)"
+
+echo "=== an unresolvable boot epoch is DEGRADED, not unavailable ==="
+
+# The brief contradicted itself here (fall back and keep gating / list it as an
+# `unavailable` reason) and the resolution is to gate anyway and DISCLOSE. The
+# cost of the disclosure wearing the unavailable type is that on a host where
+# resolve_boot_epoch fails, every bot emits it on every boot while the gate
+# works fine -- so the REASON has to read as degraded, or a reader filtering on
+# the type cannot tell it from a gate that did not run at all.
+reset_state
+# The pin goes too: an acquire that finds a pin ADOPTS its epoch and re-resolves
+# nothing, which is the F2 fix working -- so the only way to reach the
+# unresolvable path is to be the bot that does the pinning.
+rm -f "$CLAUDLOBBY_ROOT/state/boot/.boot-id"
+BOT_UE="$(mkbot ue-bot svc-ue 1)"
+mkdir -p "$T/noepoch"
+printf '#!/bin/sh\nexit 1\n' > "$T/noepoch/uptime"
+printf '#!/bin/sh\nexit 1\n' > "$T/noepoch/sysctl"
+chmod +x "$T/noepoch/uptime" "$T/noepoch/sysctl"
+OUT_UE="$(PATH="$T/noepoch:$PATH" CLAUDLOBBY_BOOT_EPOCH= CLAUDLOBBY_BOOT_ID= EVENT_LOG="$T/ev-ue.log" \
+    BOOT_ADMISSION_SLOTS=1 BOOT_ADMISSION_WAIT_MAX_S=10 bash -c '. "$LIB_DIR/lib-common.sh"
+             emit_fleet_event() { printf "%s\t%s\n" "${1:-}" "${3:-}" >> "$EVENT_LOG"; return 0; }
+             LOG="$1/logs/startup.log"; setup_log_dir "$LOG"
+             boot_admission_acquire "$1"' _ "$BOT_UE")"
+assert_eq "an unresolvable epoch still GRANTS -- the gate is degraded, not dead" "granted:0" "$OUT_UE"
+assert_contains "the reason reads as DEGRADED rather than as a gate that did not run" \
+    "epoch unresolvable — gating un-keyed" "$(cat "$T/ev-ue.log" 2>/dev/null || true)"
+assert_contains "the marker says it cannot name its boot, rather than naming a wrong one" \
+    "epoch=unknown" "$(cat "$BOT_UE/data/.boot-queued" 2>/dev/null || true)"
 
 # The R11 POSITIVE CONTROL, run rather than claimed: the same launcher with
 # _lc_cleanup DROPPED from the composed trap leaks its mktemp -d. Without this

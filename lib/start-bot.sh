@@ -19,12 +19,7 @@ load_bot_conf "$BOT_DIR"
 # lib/boot-admission.sh; every knob it reads (BOOT_ADMISSION_SLOTS,
 # BOOT_PRIORITY, BOOT_ADMISSION_WAIT_MAX_S, BOOT_HOLD_CEILING_S,
 # RC_READY_TIMEOUT_S) arrives through the load_bot_conf above, which is why the
-# call sits here rather than after the .env tier sourcing further down.
-#
-# That wording avoids naming the tier-sourcing FUNCTION on purpose:
-# tests/test_session_cli_path.py locates it with a substring search over every
-# line of this file, comments included, so a comment that spelled it out moved
-# the marker to line 21 and broke an ordering assertion about line 50.
+# call sits here rather than after source_env_tiered further down.
 #
 # LOG is hoisted to here because the gate writes every line it has to the CALL
 # SITE's log and never assigns LOG itself. The later `LOG=...; setup_log_dir`

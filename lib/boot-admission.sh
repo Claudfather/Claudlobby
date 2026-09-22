@@ -18,21 +18,39 @@
 #                                       unavailable | disabled on STDOUT ONLY;
 #                                       rc 0 always.
 #   boot_admission_release <bot_dir>  — removes this bot slot, its ticket and
-#                                       its marker; idempotent.
-#   _boot_admission_reap [bots_dir]   — tickets, slots and markers whose holder
-#                                       is dead or past its hold ceiling.
+#                                       its marker; idempotent; logs WHICH slot
+#                                       it freed, or that it freed nothing.
+#   _boot_admission_reap [bots_dir]   — slots whose holder is dead or past the
+#                       [keep_tree]     GRANT budget; tickets and markers whose
+#                                       owner is dead or has stopped polling;
+#                                       trees under any other boot id. Never
+#                                       <keep_tree>, the caller own live tree.
 #
 # THE GATE NEVER BLOCKS INDEFINITELY AND NEVER FAILS CLOSED. Every failure
 # path -- unwritable state dir, unresolvable epoch, empty unit name, cap
 # reached -- proceeds, logs, and where it is a verdict, events. A gate that
 # could strand a bot forever would be the failure it replaces, not a fix.
 #
-# STATE lives under $CLAUDLOBBY_ROOT/state/boot/<boot-epoch>/{tickets,slots},
-# keyed on resolve_boot_epoch exactly as this directory two existing tenants
-# already are (plugins-updated.<epoch>.<plugin>; runtime/_host/boot-capture/
-# <epoch>). A prior-epoch tree is stale UNCONDITIONALLY -- never by reading a
-# pid that a reboot has made meaningless. An unresolvable epoch falls back to
-# the un-keyed path with a log line, as plugin_ensure does.
+# STATE lives under $CLAUDLOBBY_ROOT/state/boot/<boot-id>/{tickets,slots},
+# keyed on a BOOT ID that is PINNED ONCE per boot in state/boot/.boot-id and
+# never re-resolved by a reader -- see "the boot key" below for why the clock
+# cannot be that key. A tree under any OTHER boot id is stale UNCONDITIONALLY,
+# never by reading a pid that a reboot has made meaningless. With no key at all
+# the gate falls back to the un-keyed path with a log line, as plugin_ensure
+# does.
+#
+# TWO HORIZONS, because there are two phases. A SLOT is a GRANT and is aged
+# against BOOT_HOLD_CEILING_S (ready_timeout_s + 120), the budget for the
+# bring-up a holder is doing while it cannot poll. A TICKET and a MARKER belong
+# to a bot that is still WAITING, whose budget is BOOT_ADMISSION_WAIT_MAX_S --
+# by construction up to 21x longer. Ageing those against the grant budget
+# deleted a live waiter's records for most of its wait: managers-first collapsed
+# after one ceiling, and the .boot-queued marker vanished mid-queue, re-opening
+# the #1002 window the marker exists to close. So a waiter RE-WRITES its ticket
+# and its marker on every poll, fork-free, and the same alive-AND-fresh pair
+# then means "alive AND STILL POLLING" for them -- strictly stronger than either
+# half, one constant rather than two, and the ceiling stays correctly sized for
+# the granted phase, which nothing refreshes.
 #
 # TAKE is `mkdir slots/<n>` -- the atomic mutex. `mv` is NOT one: `mv src dst`
 # where dst is an existing directory moves src INSIDE it rather than failing
@@ -41,8 +59,9 @@
 # exactly one racer wins and every loser sees its source already gone. Never
 # rmdir + mkdir.
 #
-# LIVENESS is `kill -0 <pid>` PAIRED WITH marker_age_within on the file that
-# records the pid. kill -0 alone is NOT sufficient: a RE-USED pid blocked a
+# LIVENESS is `kill -0 <pid>` PAIRED WITH the FRESHNESS of the file that
+# records the pid (marker_age_within's arithmetic, inlined so the reaper takes
+# the clock once). kill -0 alone is NOT sufficient: a RE-USED pid blocked a
 # bot indefinitely and was proven live within minutes of deploy (#1425,
 # lib/keepalive.sh:88-99, the remedy this estate already ships). A slot past
 # the hold ceiling is reclaimed regardless of pid state, and a pid-less slot
@@ -86,8 +105,48 @@ _BOOT_ADMISSION_WAIT_MAX_DEFAULT_S=1200
 # derives and enumerates.
 _BOOT_READY_TIMEOUT_DEFAULT_S=90
 _BOOT_HOLD_CEILING_DEFAULT_S=210
+# The wall-clock bound on a backgrounded metric emit, and the same number
+# lib/keepalive.sh bounds its own emit with. See _boot_admission_metric.
+_BOOT_ADMISSION_EMIT_TIMEOUT_DEFAULT_S=110
 
 # --- internals --------------------------------------------------------------
+
+# --- fork-free file reads ---------------------------------------------------
+# These SET GLOBALS rather than printing, and that is the whole point: a command
+# substitution is itself a fork, so a helper that printed its answer would cost
+# exactly what the `sed | head` it replaces cost. The reaper runs at the top of
+# every poll of EVERY waiter, so this is 21 tickets + 21 markers per waiter
+# every BOOT_ADMISSION_POLL_S on a 21-bot host. MEASURED on a 21-ticket /
+# 21-marker / 1-slot queue, counting every exec through a PATH shim: 213 per
+# reap before this (63 sed, 64 head, 43 stat, 43 date) at 360-454 ms, against
+# 44 (43 stat, 1 date) at 127-142 ms after -- three reps each, M-series Mac,
+# spent during precisely the window the gate exists to de-contend.
+_BA_LINE=""
+_BA_PID=""
+_BA_EPOCH=""
+
+# _boot_admission_read_first <file> -> _BA_LINE (empty when absent or empty)
+_boot_admission_read_first() {
+    _BA_LINE=""
+    [ -f "${1:-}" ] || return 0
+    IFS= read -r _BA_LINE < "$1" 2>/dev/null || true
+    return 0
+}
+
+# _boot_admission_read_kv <file> -> _BA_PID, _BA_EPOCH (both empty when absent)
+_boot_admission_read_kv() {
+    local line
+    _BA_PID=""
+    _BA_EPOCH=""
+    [ -f "${1:-}" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            pid=*) _BA_PID="${line#pid=}" ;;
+            epoch=*) _BA_EPOCH="${line#epoch=}" ;;
+        esac
+    done < "$1" 2>/dev/null || true
+    return 0
+}
 
 # Everything the gate says goes to the call sites LOG. Never stdout: the
 # caller captures stdout and a stray line there becomes a verdict (R17).
@@ -176,7 +235,150 @@ _boot_admission_effective_cap() {
     printf '%s' "$(( cap + rank * disp ))"
 }
 
-# The state tree path for an epoch. Creates nothing -- the reaper must be able
+# --- the boot key: one id per boot, pinned once -----------------------------
+#
+# THE TREE IS KEYED ON A BOOT ID, NOT ON THE CLOCK. resolve_boot_epoch is not
+# stable across a clock step on either OS -- the Linux rung is `uptime -s`
+# (now minus uptime), the macOS rung is kern.boottime, which settimeofday
+# adjusts, and the third is literally `date +%s` minus /proc/uptime. This
+# estate's primary host is RTC-less and opens a stale-clock window at EVERY
+# boot, i.e. exactly when the gate is busiest. An epoch-keyed tree therefore
+# moved UNDER a live waiter: acquire bound the path once, the reaper re-resolved
+# it every poll, and the first poll after the step rm -rf'd the tree the waiter
+# was queued in -- stranding it for its whole cap (112 minutes on the 21-bot
+# host, then proceeding ungated: worse than having no gate) and wiping every
+# marker on the host at the same instant.
+#
+# A boot id does not move: kern.bootsessionuuid on Darwin (through sysctl_bin,
+# because a launchd unit's composed PATH has no /usr/sbin and a bare `sysctl`
+# silently answers nothing there), /proc/sys/kernel/random/boot_id on Linux, and
+# resolve_boot_epoch as the LAST rung for a host with neither -- which keeps
+# today's naming on such a host rather than inventing a second scheme for it.
+#
+# It is PINNED, and the pin is what every reader consults: R14's premise ("a
+# different key means a reboot happened") is then true BY CONSTRUCTION rather
+# than by assumption, and the unconditional sweep it licenses is safe again.
+# CLAUDLOBBY_BOOT_ID is the test seam, CLAUDLOBBY_BOOT_EPOCH's sibling.
+_BA_KEY=""
+_BA_EPOCH_PIN=""
+
+# A boot id becomes a PATH COMPONENT, so its shape is validated before it is
+# used as one: hex digits and dashes only -- a UUID from either OS source, or
+# the all-digit epoch fallback -- non-empty, not leading with a dash, bounded in
+# length. A `.` is deliberately outside that set, which is also what keeps
+# `plugins.lock` and the `plugins-updated.<epoch>.<plugin>` stamps out of the
+# reaper's candidate set, and `admission-noepoch` with it.
+_boot_admission_id_ok() {
+    local s="${1:-}"
+    case "$s" in
+        ''|-*|*[!0-9A-Fa-f-]*) return 1 ;;
+    esac
+    [ "${#s}" -le 64 ] || return 1
+    return 0
+}
+
+# This host's live boot id, validated, or empty. /proc is probed by READABILITY
+# rather than by $_OS so a test that forces _OS still gets the real answer.
+_boot_admission_boot_id() {
+    local id="" bin
+    if [ -n "${CLAUDLOBBY_BOOT_ID:-}" ]; then
+        id="$CLAUDLOBBY_BOOT_ID"
+    elif [ -r /proc/sys/kernel/random/boot_id ]; then
+        IFS= read -r id < /proc/sys/kernel/random/boot_id 2>/dev/null || true
+    else
+        bin="$(sysctl_bin 2>/dev/null || true)"
+        if [ -n "$bin" ]; then
+            id="$("$bin" -n kern.bootsessionuuid 2>/dev/null || true)"
+        fi
+    fi
+    if ! _boot_admission_id_ok "$id"; then
+        id="$(resolve_boot_epoch 2>/dev/null || true)"
+        _boot_admission_id_ok "$id" || id=""
+    fi
+    printf '%s' "$id"
+}
+
+# READ-ONLY: the pin as it stands, with NO resolution and NO write. This is the
+# door the reaper and the release use, and the read-only-ness is the fix: a
+# reader that re-resolved anything is the defect the pin exists to close.
+# Sets _BA_KEY and _BA_EPOCH_PIN; both empty when there is no usable pin.
+_boot_admission_read_pin() {
+    local f="${1:-}/.boot-id" line
+    _BA_KEY=""
+    _BA_EPOCH_PIN=""
+    [ -f "$f" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            id=*) _BA_KEY="${line#id=}" ;;
+            epoch=*) _BA_EPOCH_PIN="${line#epoch=}" ;;
+        esac
+    done < "$f" 2>/dev/null || true
+    if ! _boot_admission_id_ok "$_BA_KEY"; then
+        _BA_KEY=""
+        _BA_EPOCH_PIN=""
+        return 0
+    fi
+    case "$_BA_EPOCH_PIN" in ''|*[!0-9]*) _BA_EPOCH_PIN="" ;; esac
+    return 0
+}
+
+# The pin write: a temp name and a `mv` into place -- the slots.max idiom --
+# under with_lock, so concurrent FIRST writers produce ONE pin rather than one
+# each. Reached only when the pin is absent or names a different boot, i.e.
+# once per host per boot, never once per acquire.
+_boot_admission_write_pin() {
+    local root="${1:-}" id="${2:-}" epoch="${3:-}" tmp
+    tmp="$root/.boot-id.$$.tmp"
+    if printf 'id=%s\nepoch=%s\n' "$id" "$epoch" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$root/.boot-id" 2>/dev/null || true
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+    return 0
+}
+
+# The ACQUIRE-time door: resolve the live boot id once, adopt the pin when it
+# names the same boot, REPLACE it when it does not (a reboot happened, and every
+# other tree is stale by construction). Sets _BA_KEY and _BA_EPOCH_PIN.
+_boot_admission_pin() {
+    local root="${1:-}" live prev_wl
+    live="$(_boot_admission_boot_id)"
+    mkdir -p "$root" 2>/dev/null || true
+    _boot_admission_read_pin "$root"
+    if [ -n "$_BA_KEY" ] && [ "$_BA_KEY" = "$live" ]; then
+        return 0
+    fi
+    # TWO BOUNDS ON THE LOCK, because with_lock's mkdir spinlock proceeds
+    # UNLOCKED after its budget rather than failing, and this is a boot path.
+    # (1) An unwritable root can never hold the lock dir, so it would spin the
+    # whole budget for a pin that cannot be written -- measured at 30s on the
+    # unwritable-state-dir cell, i.e. 30s added to every boot on a host with a
+    # misowned state dir, which is the opposite of "never blocks". (2) A stale
+    # lock dir left by a SIGKILL inside the printf+mv would otherwise cost the
+    # full budget on EVERY acquire, so the wait is scoped down for this call and
+    # restored -- explicitly, because whether a prefix assignment survives a
+    # FUNCTION call differs between bash's POSIX and default modes.
+    if [ -w "$root" ]; then
+        prev_wl="${WITH_LOCK_WAIT_S-__unset__}"
+        WITH_LOCK_WAIT_S=5
+        with_lock "$root/.boot-id.lock" _boot_admission_write_pin \
+            "$root" "$live" "$(resolve_boot_epoch 2>/dev/null || true)" >/dev/null 2>&1 || true
+        if [ "$prev_wl" = "__unset__" ]; then unset WITH_LOCK_WAIT_S; else WITH_LOCK_WAIT_S="$prev_wl"; fi
+    fi
+    # RE-READ and adopt whatever landed: that, not the write, is what makes
+    # every waiter on the host agree about which tree is live.
+    _boot_admission_read_pin "$root"
+    if [ -z "$_BA_KEY" ]; then
+        # An unwritable state dir. Keep the live values in memory so the path
+        # below is still honest; _boot_admission_state_dir refuses next and the
+        # verdict is `unavailable`.
+        _BA_KEY="$live"
+        _BA_EPOCH_PIN="$(resolve_boot_epoch 2>/dev/null || true)"
+        case "$_BA_EPOCH_PIN" in ''|*[!0-9]*) _BA_EPOCH_PIN="" ;; esac
+    fi
+    return 0
+}
+
+# The state tree path for a boot key. Creates nothing -- the reaper must be able
 # to ask where the tree is without bringing one into existence.
 _boot_admission_state_path() {
     local e="${1:-}"
@@ -216,35 +418,45 @@ _boot_admission_reclaim() {
     return 1
 }
 
-# The liveness PAIR, for a file whose first line is a bare pid (a slot).
-_boot_admission_slot_alive() {
-    local pidf="${1:-}" ceiling="${2:-}" p
-    p="$(head -1 "$pidf" 2>/dev/null || true)"
+# THE LIVENESS PAIR, with the caller's <pid> and the caller's <now>.
+#
+# `kill -0` alone is NOT sufficient: a RE-USED pid blocked a bot indefinitely
+# and was proven live within minutes of deploy (#1425, lib/keepalive.sh:88-99,
+# the remedy this estate already ships). Freshness is the second half.
+#
+# Since PR B's fix round freshness carries a second meaning for the records a
+# WAITER owns: a queued bot re-writes its ticket and its marker on every poll,
+# so alive-AND-fresh reads as "alive AND STILL POLLING" there, while for a slot
+# -- which nothing refreshes -- it reads as "granted, inside its budget". One
+# predicate, two correct meanings, because the record is written by whoever the
+# horizon is about.
+#
+# <pid> and <now> are PARAMETERS rather than reads so the reaper can take the
+# clock once and the kv read once per file: this is called 43x per reap on a
+# 21-bot host (21 tickets + 21 markers + 1 slot), and the predecessor pair it
+# replaces spent one `date` fork inside marker_age_within on every one of those
+# 43 calls -- 43 of the 213 execs measured above, all of them asking the same
+# clock the same question. A clock step that makes the age negative reads as
+# WITHIN -- the same fail-toward-HELD posture as everywhere else in this file.
+_boot_admission_pid_fresh() {
+    local p="${1:-}" f="${2:-}" ceiling="${3:-}" now="${4:-}" m
     case "$p" in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$p" 2>/dev/null || return 1
-    marker_age_within "$pidf" "$ceiling" || return 1
-    return 0
+    [ -e "$f" ] || return 1
+    m="$(stat_mtime "$f" 2>/dev/null || true)"
+    case "$m" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$(( now - m ))" -le "$ceiling" ]
 }
 
-# The same pair, for a file carrying `pid=<n>` (a ticket, a marker).
-_boot_admission_owner_alive() {
-    local f="${1:-}" ceiling="${2:-}" p
-    p="$(sed -n 's/^pid=//p' "$f" 2>/dev/null | head -1 || true)"
-    case "$p" in ''|*[!0-9]*) return 1 ;; esac
-    kill -0 "$p" 2>/dev/null || return 1
-    marker_age_within "$f" "$ceiling" || return 1
-    return 0
-}
-
-# marker_age_within refuses a directory ([ -f ]), and the pid-less slot case
-# has only a directory to age. Same arithmetic, same fail-toward-HELD posture:
-# a clock step that makes the age negative reads as within.
+# The age half on its own, for the pid-LESS slot directory: there is no pid to
+# pair with, only the claim grace. marker_age_within refuses a directory
+# ([ -f ]), hence the separate arithmetic; <now> is likewise the caller's.
 _boot_admission_age_within() {
-    local p="${1:-}" max="${2:-}" m now
+    local p="${1:-}" max="${2:-}" now="${3:-}" m
     [ -e "$p" ] || return 1
     m="$(stat_mtime "$p" 2>/dev/null || true)"
     case "$m" in ''|*[!0-9]*) return 1 ;; esac
-    now="$(date +%s)"
+    case "$now" in ''|*[!0-9]*) return 1 ;; esac
     [ "$(( now - m ))" -le "$max" ]
 }
 
@@ -268,19 +480,29 @@ _boot_admission_ticket_unit() {
     printf '%s' "${n:$_BOOT_ADMISSION_UNIT_OFFSET}"
 }
 
-# No pipe, deliberately: `printf | grep -q` is a pipefail trap -- grep -q
-# exits on its first match, SIGPIPEs the writer, and under `set -o pipefail`
-# the PIPELINE then reports failure on exactly the case that matched. The
-# holders exclusion is what keeps the queue head moving, so a silently
-# inverted answer here would strand every waiter behind a granted bot.
+# A case glob over the newline-delimited list: no pipe, no fork and no file.
+#
+# No PIPE, because `printf | grep -q` is a pipefail trap -- grep -q exits on its
+# first match, SIGPIPEs the writer, and under `set -o pipefail` the PIPELINE
+# then reports failure on exactly the case that matched. The holders exclusion
+# is what keeps the queue head moving, so a silently inverted answer here would
+# strand every waiter behind a granted bot.
+#
+# No HERE-DOCUMENT either, which the pipe-free rewrite used: bash 3.2 backs
+# every heredoc with a real temp file, and this runs once per queued ticket per
+# poll per waiter. $holders is at most slots_max (1-4) lines, so a glob does the
+# same job with neither.
+#
+# The needle is wrapped in newlines on BOTH sides so the match is whole-line. A
+# bare *"$needle"* also matches a LONGER unit name that merely contains ours,
+# which would exclude from the queue a bot that holds no slot.
 _boot_admission_in_list() {
-    local needle="${1:-}" line
+    local needle="${1:-}" nl='
+'
     [ -n "$needle" ] || return 1
-    while IFS= read -r line; do
-        if [ "$line" = "$needle" ]; then return 0; fi
-    done <<EOF
-${2:-}
-EOF
+    case "$nl${2:-}$nl" in
+        *"$nl$needle$nl"*) return 0 ;;
+    esac
     return 1
 }
 
@@ -291,7 +513,8 @@ _boot_admission_slot_units() {
     for sd in "$d"/[0-9]*; do
         [ -d "$sd" ] || continue
         [ -f "$sd/unit" ] || continue
-        head -1 "$sd/unit" 2>/dev/null || true
+        _boot_admission_read_first "$sd/unit"
+        printf '%s\n' "$_BA_LINE"
     done
     return 0
 }
@@ -354,7 +577,8 @@ _boot_admission_slots_max() {
     f="$state/slots.max"
     case "$raw" in
         auto)
-            v="$(head -1 "$f" 2>/dev/null || true)"
+            _boot_admission_read_first "$f"
+            v="$_BA_LINE"
             case "$v" in ''|*[!0-9]*) v="" ;; esac
             if [ -z "$v" ]; then
                 v="$(_boot_admission_derive_slots "$(_boot_admission_ncpu)")"
@@ -363,8 +587,8 @@ _boot_admission_slots_max() {
                     mv "$tmp" "$f" 2>/dev/null || true
                 fi
                 rm -f "$tmp" 2>/dev/null || true
-                tmp="$(head -1 "$f" 2>/dev/null || true)"
-                case "$tmp" in ''|*[!0-9]*) : ;; *) v="$tmp" ;; esac
+                _boot_admission_read_first "$f"
+                case "$_BA_LINE" in ''|*[!0-9]*) : ;; *) v="$_BA_LINE" ;; esac
             fi
             ;;
         ''|*[!0-9]*) v=$_BOOT_ADMISSION_SLOTS_DEFAULT ;;
@@ -376,6 +600,15 @@ _boot_admission_slots_max() {
 
 # Take the lowest free slot. mkdir is the mutex; the pid lands immediately
 # after, because the claim grace starts at the mkdir.
+#
+# THE PID WRITE IS VERIFIED, because the mkdir succeeding is not the same fact
+# as holding the slot: a process descheduled past the claim grace between the
+# two has its directory reclaimed under it, all three writes then fail silently,
+# and reporting a grant anyway puts TWO holders on one slot. The window is
+# microseconds against a 10s grace and it is R4's documented trade -- but it
+# costs one `[ -s ]` to close, so it is closed. Moving to the next index rather
+# than failing outright is deliberate: the slot we lost may well be free again,
+# and the caller re-enters on its next poll either way.
 _boot_admission_try_take() {
     local d="${1:-}" max="${2:-}" unit="${3:-}" i=0
     while [ "$i" -lt "$max" ]; do
@@ -383,6 +616,7 @@ _boot_admission_try_take() {
             printf '%s\n' "$$" > "$d/$i/pid" 2>/dev/null || true
             printf '%s\n' "$unit" > "$d/$i/unit" 2>/dev/null || true
             printf '%s\n' "$(date +%s)" > "$d/$i/granted_at" 2>/dev/null || true
+            if [ ! -s "$d/$i/pid" ]; then i=$(( i + 1 )); continue; fi
             printf '%s' "$i"
             return 0
         fi
@@ -408,19 +642,41 @@ _boot_admission_event() {
 # the reboot that was supposed to validate them. Without it the proof leaves
 # nothing on disk and the constants stay unfalsifiable. The same door
 # lib/keepalive.sh uses for bot.heartbeat, same instance-alias subject so the
-# samples join registry keyframes with no glue. Non-blocking: the emit runs in
-# a backgrounded subshell whose stdout and stderr are redirected to LOG at
-# fork time, so it can never hold the callers command substitution open.
+# samples join registry keyframes with no glue.
+#
+# NON-BLOCKING AND BOUNDED, which are two different claims and both are needed.
+# Non-blocking: the emit runs in a backgrounded subshell whose stdout and stderr
+# are redirected at fork time, so it can never hold the caller's command
+# substitution open -- start-bot.sh captures the verdict in one, and a child
+# inheriting that pipe would wedge every boot on the host behind a plane emit.
+# Bounded: start-bot.sh then EXITS while the child is still alive, and under a
+# permanently wedged rung (this estate's documented D-state SD stall) an
+# unbounded emit made "bounded pileup" a RATE rather than a ceiling -- ~720
+# stuck processes/day where keepalive measured it. The wait-then-reap below is
+# keepalive.sh:135-171's shape, and the kill is plane_kill_tree rather than a
+# kill of $_w: a bare kill of the pipeline leader reaped the leader and ORPHANED
+# the wedged CLI alive, which is the whole point defeated.
+# $FLEET_NAME/$BOT_NAME are unguarded because plane_armed --require-fleet
+# --require-bot returned 0 on the line above; that is the coupling.
 _boot_admission_metric() {
-    local metric="${1:-}" value="${2:-}" fleet_esc subj payload
+    local metric="${1:-}" value="${2:-}" fleet_esc subj payload eto
     plane_armed boot-admission --require-fleet --require-bot || return 0
     case "$value" in ''|*[!0-9]*) return 0 ;; esac
+    eto="${BOOT_ADMISSION_EMIT_TIMEOUT_S:-$_BOOT_ADMISSION_EMIT_TIMEOUT_DEFAULT_S}"
+    case "$eto" in ''|*[!0-9]*) eto=$_BOOT_ADMISSION_EMIT_TIMEOUT_DEFAULT_S ;; esac
     fleet_esc="$(json_escape "$FLEET_NAME")"
     subj="$(json_escape "bot:$FLEET_NAME/$BOT_NAME")"
     payload='{"events":[{"event_type":"metric_sample","emitter":"start-bot","fleet":"'"$fleet_esc"'","payload":{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"'"$metric"'","value":'"$value"'}}]}'
     (
-        printf '%s' "$payload" | plane_emit_events boot-admission
-    ) >> "${LOG:-/dev/null}" 2>&1 &
+        printf '%s' "$payload" | plane_emit_events boot-admission >> "${LOG:-/dev/null}" 2>&1 &
+        _w=$!
+        _i=0
+        while kill -0 "$_w" 2>/dev/null && [ "$_i" -lt "$eto" ]; do
+            sleep 1
+            _i=$(( _i + 1 ))
+        done
+        plane_kill_tree "$_w"
+    ) >/dev/null 2>&1 &
     return 0
 }
 
@@ -437,34 +693,58 @@ _boot_admission_metric() {
 # <bots_dir> is optional and its absence means CANNOT LOOK, which is not the
 # same answer as NOTHING TO REAP. With no readable bots dir the marker leg is
 # skipped outright rather than run on a guess.
+#
+# <keep_tree> is the caller's OWN acquire-time tree path, and passing it is not
+# belt-and-braces: acquire binds that path ONCE and then polls, so a reaper that
+# could prune it would be deleting the live state of the process running it.
+# The pin makes that nearly impossible; this makes it impossible.
+#
+# IT RE-RESOLVES NOTHING. The pin is read, never recomputed -- see "the boot
+# key" above for the clock step that made a re-resolving reaper delete the tree
+# its own waiter was queued in.
 _boot_admission_reap() {
-    local bots_dir="${1:-}"
-    local epoch root state slots tickets grace ceiling
-    epoch="$(resolve_boot_epoch 2>/dev/null || true)"
+    local bots_dir="${1:-}" keep="${2:-}"
+    local root state slots tickets grace ceiling now cur_key cur_epoch
     root="$CLAUDLOBBY_ROOT/state/boot"
+    # ONCE per reap, not once per file: this was 43 `date` forks per reap on a
+    # 21-bot host, inside marker_age_within, run by every waiter every poll.
+    now="$(date +%s 2>/dev/null || true)"
+    case "$now" in ''|*[!0-9]*) return 0 ;; esac
     grace="${BOOT_ADMISSION_CLAIM_GRACE_S:-$_BOOT_ADMISSION_CLAIM_GRACE_DEFAULT_S}"
     ceiling="${BOOT_HOLD_CEILING_S:-$_BOOT_HOLD_CEILING_DEFAULT_S}"
     case "$grace" in ''|*[!0-9]*) grace=$_BOOT_ADMISSION_CLAIM_GRACE_DEFAULT_S ;; esac
     case "$ceiling" in ''|*[!0-9]*) ceiling=$_BOOT_HOLD_CEILING_DEFAULT_S ;; esac
 
-    # 1. Prior-epoch trees: stale UNCONDITIONALLY. Never by reading a pid a
-    #    reboot has made meaningless (R14).
-    if [ -n "$epoch" ] && [ -d "$root" ]; then
+    _boot_admission_read_pin "$root"
+    cur_key="$_BA_KEY"
+    cur_epoch="$_BA_EPOCH_PIN"
+    # No pin at all means the gate has not run on this host this boot, so there
+    # is no answer to "which tree is live" -- and every leg below is addressed
+    # by that answer. CANNOT LOOK is not NOTHING TO REAP: a reaper that guessed
+    # would prune the live tree of whichever waiter pinned it next
+    # (claudlobby/source_state.py has the rule; #1146 is the direction).
+    [ -n "$cur_key" ] || return 0
+
+    # 1. Trees under any OTHER boot id: stale UNCONDITIONALLY. Never by reading
+    #    a pid a reboot has made meaningless (R14).
+    if [ -d "$root" ]; then
         local d name
         for d in "$root"/*/; do
             [ -d "$d" ] || continue
             name="${d%/}"; name="${name##*/}"
-            case "$name" in ''|*[!0-9]*) continue ;; esac
-            if [ "$name" = "$epoch" ]; then continue; fi
+            _boot_admission_id_ok "$name" || continue
+            if [ "$name" = "$cur_key" ]; then continue; fi
+            if [ -n "$keep" ] && [ "${d%/}" = "${keep%/}" ]; then continue; fi
             rm -rf "$d" 2>/dev/null || true
         done
     fi
 
-    state="$(_boot_admission_state_path "$epoch")"
+    state="$(_boot_admission_state_path "$cur_key")"
     slots="$state/slots"
     tickets="$state/tickets"
 
-    # 2. Slots.
+    # 2. Slots. The GRANT horizon: a holder is doing its bring-up and cannot
+    #    poll, so nothing refreshes these and the hold ceiling is the budget.
     if [ -d "$slots" ]; then
         local sd
         for sd in "$slots"/[0-9]*; do
@@ -472,30 +752,35 @@ _boot_admission_reap() {
             if [ ! -f "$sd/pid" ]; then
                 # The mkdir landed, the pid is not written yet: HELD inside the
                 # claim grace, reapable only past it (R4).
-                if _boot_admission_age_within "$sd" "$grace"; then continue; fi
+                if _boot_admission_age_within "$sd" "$grace" "$now"; then continue; fi
                 _boot_admission_reclaim "$sd" || true
                 continue
             fi
-            if _boot_admission_slot_alive "$sd/pid" "$ceiling"; then continue; fi
+            _boot_admission_read_first "$sd/pid"
+            if _boot_admission_pid_fresh "$_BA_LINE" "$sd/pid" "$ceiling" "$now"; then continue; fi
             _boot_admission_reclaim "$sd" || true
         done
     fi
 
-    # 3. Tickets.
+    # 3. Tickets. The WAIT horizon, carried by the waiter REFRESHING this file
+    #    on every poll -- so alive-and-fresh here means alive and still polling,
+    #    and an abandoned ticket (live pid, nobody polling) still ages out.
     if [ -d "$tickets" ]; then
         local tf
         for tf in "$tickets"/*; do
             [ -f "$tf" ] || continue
-            if _boot_admission_owner_alive "$tf" "$ceiling"; then continue; fi
+            _boot_admission_read_kv "$tf"
+            if _boot_admission_pid_fresh "$_BA_PID" "$tf" "$ceiling" "$now"; then continue; fi
             rm -f "$tf" 2>/dev/null || true
         done
     fi
 
-    # 4. Markers. A marker naming a DEAD launcher stops suppressing within one
-    #    poll rather than for the whole grace window (R7) -- a tighter bound
-    #    than any mtime, and the one the SIGKILL case needs.
+    # 4. Markers. Same refresh, same meaning. A marker naming a DEAD launcher
+    #    stops suppressing within one poll rather than for the whole grace
+    #    window (R7) -- a tighter bound than any mtime, and the one the SIGKILL
+    #    case needs.
     if [ -n "$bots_dir" ] && [ -d "$bots_dir" ]; then
-        local md mepoch
+        local md
         for md in "$bots_dir"/*/data/.boot-queued; do
             [ -f "$md" ] || continue
             # The epoch beside the pid is what tells a boot-queue from a
@@ -503,13 +788,16 @@ _boot_admission_reap() {
             # so after a restart it is not missing -- it is a plausible
             # timestamp describing a DIFFERENT event, and a later reader gets a
             # confident wrong answer rather than an absent one
-            # (lib/boot-capture.sh:19-25, the .spawn lesson verbatim).
-            mepoch="$(sed -n 's/^epoch=//p' "$md" 2>/dev/null | head -1 || true)"
-            if [ -n "$epoch" ] && [ "$mepoch" != "$epoch" ]; then
+            # (lib/boot-capture.sh:19-25, the .spawn lesson verbatim). Both
+            # sides of this comparison now come from the PIN, so the only way
+            # they differ is the reboot it is meant to catch -- before the pin,
+            # a clock step moved one side and wiped every marker on the host.
+            _boot_admission_read_kv "$md"
+            if [ -n "$cur_epoch" ] && [ "$_BA_EPOCH" != "$cur_epoch" ]; then
                 rm -f "$md" 2>/dev/null || true
                 continue
             fi
-            if _boot_admission_owner_alive "$md" "$ceiling"; then continue; fi
+            if _boot_admission_pid_fresh "$_BA_PID" "$md" "$ceiling" "$now"; then continue; fi
             rm -f "$md" 2>/dev/null || true
         done
     fi
@@ -545,14 +833,18 @@ boot_admission_acquire() {
         return 0
     fi
 
-    local epoch
-    epoch="$(resolve_boot_epoch 2>/dev/null || true)"
+    # The boot key and the boot epoch, PINNED once per host per boot and read
+    # from the pin by every other door. Nothing below re-resolves either.
+    local key epoch
+    _boot_admission_pin "$CLAUDLOBBY_ROOT/state/boot"
+    key="$_BA_KEY"
+    epoch="$_BA_EPOCH_PIN"
 
     local state
-    state="$(_boot_admission_state_dir "$epoch" || true)"
+    state="$(_boot_admission_state_dir "$key" || true)"
     if [ -z "$state" ]; then
         local want
-        want="$(_boot_admission_state_path "$epoch")"
+        want="$(_boot_admission_state_path "$key")"
         _boot_admission_log "ADMISSION_UNAVAILABLE (state dir unwritable: $want) — proceeding ungated"
         _boot_admission_event boot_admission_unavailable \
             "$(printf '{"reason":"state dir unwritable","dir":"%s"}' "$(json_escape "$want")")" \
@@ -561,13 +853,19 @@ boot_admission_acquire() {
         return 0
     fi
 
-    # An unresolvable epoch is a DEGRADED gate, not a dead one: it queues on
-    # the un-keyed path exactly as plugin_ensure falls back, and discloses the
-    # fact rather than proceeding silently. The verdict is unaffected.
+    # An unresolvable epoch is a DEGRADED gate, not a dead one: it queues
+    # exactly as plugin_ensure falls back, and DISCLOSES rather than proceeding
+    # silently. The verdict is unaffected, which is why the reason has to read
+    # as degraded -- on a host where resolve_boot_epoch fails, every bot emits
+    # this on every boot while the gate works fine, and a reader filtering on
+    # the type alone cannot tell it from a gate that never ran. "Un-keyed" names
+    # the EPOCH key specifically: the tree may still be keyed by a boot id, but
+    # the marker cannot name its boot and the reaper loses the prior-boot marker
+    # test with it.
     if [ -z "$epoch" ]; then
-        _boot_admission_log "ADMISSION unkeyed (boot epoch unresolvable) — queueing under $state"
+        _boot_admission_log "ADMISSION degraded (boot epoch unresolvable) — still gating under $state, marker cannot name its boot"
         _boot_admission_event boot_admission_unavailable \
-            "$(printf '{"reason":"epoch unresolvable","dir":"%s"}' "$(json_escape "$state")")" \
+            "$(printf '{"reason":"epoch unresolvable — gating un-keyed","dir":"%s"}' "$(json_escape "$state")")" \
             "$bot_dir"
     fi
 
@@ -601,10 +899,21 @@ boot_admission_acquire() {
     # index, and it must not move while we wait.
     rank="$(_boot_admission_count_before "$state/tickets" "$ticket")"
     eff="$(_boot_admission_effective_cap "$cap" "$rank" "$ready" "$slots_max")"
+    # The caller cap NARROWS, never replaces: min(eff, caller_cap). A serial
+    # restart driver scopes the wait PER BOT because it is walking the fleet one
+    # at a time, and that is always a tightening of the composed policy. A
+    # replacement could WIDEN it -- a driver exporting 600 against an effective
+    # cap of 60 would triple the wait it was trying to bound, by arithmetic
+    # coincidence rather than by anyone's decision. A cap of 0 (never wait)
+    # therefore stays 0 whatever a caller passes.
     if [ -n "${BOOT_ADMISSION_CALLER_CAP_S:-}" ]; then
         case "$BOOT_ADMISSION_CALLER_CAP_S" in
             ''|*[!0-9]*) : ;;
-            *) eff="$BOOT_ADMISSION_CALLER_CAP_S" ;;
+            *)
+                if [ "$BOOT_ADMISSION_CALLER_CAP_S" -lt "$eff" ]; then
+                    eff="$BOOT_ADMISSION_CALLER_CAP_S"
+                fi
+                ;;
         esac
     fi
 
@@ -616,7 +925,16 @@ boot_admission_acquire() {
     last="$started"
     waited=0
     while :; do
-        _boot_admission_reap "${bot_dir%/*}"
+        # REFRESH FIRST, before our own reap and before any peer can look. The
+        # ticket NAME is untouched, so the sort key -- and therefore the queue
+        # order and the rank -- cannot move; only the mtime advances. Two
+        # fork-free redirects, and they are what let one ceiling mean "alive and
+        # still polling" for a waiter and "granted inside its budget" for a
+        # holder. Re-writing rather than touching also self-heals: a peer that
+        # deleted either record a moment ago has it back on this poll.
+        printf 'pid=%s\n' "$$" > "$ticket_path" 2>/dev/null || true
+        printf 'pid=%s\nepoch=%s\n' "$$" "${epoch:-unknown}" > "$marker" 2>/dev/null || true
+        _boot_admission_reap "${bot_dir%/*}" "$state"
         holders="$(_boot_admission_slot_units "$state/slots")"
         ahead="$(_boot_admission_count_before "$state/tickets" "$ticket" "$holders")"
         if [ "$ahead" -lt "$slots_max" ]; then
@@ -645,6 +963,11 @@ boot_admission_acquire() {
             # queue immediately rather than one poll later.
             rm -f "$ticket_path" 2>/dev/null || true
             _boot_admission_log "ADMISSION_TIMEOUT after ${waited}s (cap ${eff}s, rank ${rank}) — proceeding without a slot"
+            # Recorded on THIS path too. A timeout is the single most
+            # informative case for revising the cap and the slot formula from
+            # the reboot that was supposed to validate them, and it was the one
+            # case whose wait never reached metric_samples.
+            _boot_admission_metric boot.admission_wait_s "$waited"
             _boot_admission_event boot_admission_timeout \
                 "$(printf '{"queue":%s,"slots_held":%s,"slots_max":%s,"waited_s":%s,"priority":%s,"rank":%s}' \
                     "$(_boot_admission_queue_len "$state/tickets")" \
@@ -658,26 +981,47 @@ boot_admission_acquire() {
     done
 }
 
+# IT SAYS WHAT IT RELEASED, and says so when it released NOTHING.
+#
+# The log line used to be unconditional, and that is exactly what hid a real
+# defect for the length of a debugging session: every release logged
+# ADMISSION_RELEASED while none of them had found a slot, because acquire and
+# release were resolving DIFFERENT tree paths (a PATH rebuild between the two
+# put sysctl out of reach, so one ran keyed and the other un-keyed). A line that
+# cannot distinguish "freed slot 0" from "found nothing" cannot make the next
+# instance of that class loud.
+#
+# The tree comes from the PIN, never from a fresh resolution -- which is the
+# structural half of the same fix: there is now one answer per host per boot to
+# "which tree", so acquire and release cannot disagree about it at all.
+#
+# NOTE for a reader of a healthy startup.log: start-bot.sh releases explicitly
+# and again from its EXIT trap, so a clean boot logs one ADMISSION_RELEASED
+# followed by one ADMISSION_RELEASE_NOOP. The NOOP *after* a RELEASED is that
+# idempotent second call. A NOOP with no RELEASED before it is the defect this
+# line exists to surface.
 boot_admission_release() {
     local bot_dir="${1:?Usage: boot_admission_release <bot_dir>}"
     bot_dir="${bot_dir%/}"
     if [ "${BOOT_ADMISSION_DISABLED:-0}" = "1" ]; then return 0; fi
 
-    local unit epoch state held="" granted_at="" now hold
+    local unit state held="" granted_at="" now hold removed=0 marker
     unit="$(_boot_admission_unit "$bot_dir")"
-    epoch="$(resolve_boot_epoch 2>/dev/null || true)"
-    state="$(_boot_admission_state_path "$epoch")"
+    _boot_admission_read_pin "$CLAUDLOBBY_ROOT/state/boot"
+    state="$(_boot_admission_state_path "$_BA_KEY")"
 
     if [ -n "$unit" ]; then
         if [ -d "$state/slots" ]; then
-            local sd u
+            local sd
             for sd in "$state/slots"/[0-9]*; do
                 [ -d "$sd" ] || continue
-                u="$(head -1 "$sd/unit" 2>/dev/null || true)"
-                if [ "$u" = "$unit" ]; then
+                _boot_admission_read_first "$sd/unit"
+                if [ "$_BA_LINE" = "$unit" ]; then
                     held="${sd##*/}"
-                    granted_at="$(head -1 "$sd/granted_at" 2>/dev/null || true)"
+                    _boot_admission_read_first "$sd/granted_at"
+                    granted_at="$_BA_LINE"
                     _boot_admission_reclaim "$sd" || true
+                    removed=1
                 fi
             done
         fi
@@ -691,12 +1035,17 @@ boot_admission_release() {
                 tname="${tf##*/}"
                 if [ "$(_boot_admission_ticket_unit "$tname")" = "$unit" ]; then
                     rm -f "$tf" 2>/dev/null || true
+                    removed=1
                 fi
             done
         fi
     fi
 
-    rm -f "$(_boot_admission_marker_path "$bot_dir")" 2>/dev/null || true
+    marker="$(_boot_admission_marker_path "$bot_dir")"
+    if [ -e "$marker" ]; then
+        rm -f "$marker" 2>/dev/null || true
+        removed=1
+    fi
 
     if [ -n "$held" ]; then
         case "$granted_at" in
@@ -710,6 +1059,12 @@ boot_admission_release() {
         esac
     fi
 
-    _boot_admission_log "ADMISSION_RELEASED"
+    if [ -n "$held" ]; then
+        _boot_admission_log "ADMISSION_RELEASED slot=$held"
+    elif [ "$removed" -eq 1 ]; then
+        _boot_admission_log "ADMISSION_RELEASED slot=none (ticket/marker only)"
+    else
+        _boot_admission_log "ADMISSION_RELEASE_NOOP (nothing held)"
+    fi
     return 0
 }

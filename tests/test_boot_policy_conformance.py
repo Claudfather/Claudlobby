@@ -168,7 +168,7 @@ class TestBootPolicyInBotConf:
             "RC_READY_TIMEOUT_S": "143",  # max(90, 123000 // 1000 + 20)
             "BOOT_PLUGIN_UPDATE_ONCE": "1",
             "BOOT_HOLD_CEILING_S": "263",  # 143 + HOLD_CEILING_MARGIN_S
-            "BOOT_GRACE_S": "1142",  # 999 + 143 (F15)
+            "BOOT_GRACE_S": "1262",  # 999 + 263 (F15: cap + HOLD ceiling)
         }
 
     @pytest.mark.parametrize("bot_id,priority", _BOT_IDS_AND_PRIORITY)

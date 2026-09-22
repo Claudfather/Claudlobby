@@ -181,13 +181,59 @@ def test_a_read_only_state_dir_never_fails_the_boot(tmp_path: Path):
         state_dir.chmod(0o755)
 
 
+def _code_lines(text: str) -> list[tuple[int, str]]:
+    """``(index, line)`` for every line that is CODE -- comments excluded.
+
+    The finder below locates three shell statements by substring, and it used
+    to search every line of the file, comments included. So a COMMENT in
+    ``start-bot.sh`` that merely *mentioned* ``source_env_tiered`` moved the
+    "tiered" marker to that comment's line number and broke an ordering
+    assertion about a statement forty lines further down: the launcher was
+    correct and the test failed. The instance fix is to reword the comment,
+    which is what happened; this is the MECHANISM fix, because the next comment
+    to name a shell function will be written by someone who has never read this
+    test.
+
+    Skipping ``#``-leading lines is enough for this file: all three needles are
+    statements rather than prose, so a TRAILING comment cannot introduce a
+    false match, and ``start-bot.sh`` has no here-document whose body could
+    contain one. A real shell parser here would be a second implementation of
+    bash to maintain for one assertion.
+    """
+    return [
+        (i, ln)
+        for i, ln in enumerate(text.splitlines())
+        if not ln.lstrip().startswith("#")
+    ]
+
+
 def test_the_launcher_calls_it_right_after_it_sets_path():
-    lines = START_BOT.read_text().splitlines()
-    path_idx = next(i for i, ln in enumerate(lines) if ln.startswith("export PATH="))
-    tiered_idx = next(i for i, ln in enumerate(lines) if "source_env_tiered" in ln)
-    call_idx = next((i for i, ln in enumerate(lines) if ln.strip() == "session_cli_path"), None)
+    code = _code_lines(START_BOT.read_text())
+    path_idx = next(i for i, ln in code if ln.startswith("export PATH="))
+    tiered_idx = next(i for i, ln in code if "source_env_tiered" in ln)
+    call_idx = next((i for i, ln in code if ln.strip() == "session_cli_path"), None)
     assert call_idx is not None, "session_cli_path is not called in start-bot.sh"
     assert path_idx < call_idx < tiered_idx, (path_idx, call_idx, tiered_idx)
+
+
+def test_the_line_finder_is_blind_to_comments():
+    """The mechanism above, pinned: a comment that names a needle must not be
+    found. Without this the fix is invisible -- the launcher passes either way
+    today, and the defect only reappears the next time someone writes a comment
+    that happens to mention a shell function."""
+    text = "\n".join(
+        [
+            "#!/bin/bash",
+            "# a comment that mentions source_env_tiered and session_cli_path",
+            "export PATH=/usr/bin",
+            "session_cli_path",
+            "    # an indented comment naming source_env_tiered too",
+            "source_env_tiered",
+        ]
+    )
+    code = _code_lines(text)
+    assert next(i for i, ln in code if "source_env_tiered" in ln) == 5
+    assert next(i for i, ln in code if ln.strip() == "session_cli_path") == 3
 
 
 def test_every_concurrent_boot_gets_the_cli_not_just_the_race_winner(tmp_path: Path):

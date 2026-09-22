@@ -53,7 +53,7 @@ class BootPolicy:
     ready_timeout_s: int  # derived: max(READY_TIMEOUT_FLOOR_S, mcp_timeout_ms // 1000 + 20)
     plugin_update_once_per_boot: bool
     hold_ceiling_s: int  # derived: ready_timeout_s + HOLD_CEILING_MARGIN_S
-    boot_grace_s: int  # derived: admission_wait_max_s + ready_timeout_s (F15)
+    boot_grace_s: int  # derived: admission_wait_max_s + hold_ceiling_s (F15)
 
 
 # The readiness ceiling's floor (F3/F4). `resolve_boot_policy` never derives
@@ -272,9 +272,22 @@ def resolve_boot_policy(
     # F15. The keepalive/fleet-pulse boot grace has to outlast the phase it
     # brackets, and PR B moved the host-wide wait INSIDE that phase: a queued
     # bot is legitimately mid-ExecStart for its whole admission wait and then
-    # its whole readiness poll. Derived from the two values it must agree with
-    # rather than set beside them.
-    boot_grace_s = admission_wait_max_s + ready_timeout_s
+    # its whole bring-up. Derived from the two values it must agree with rather
+    # than set beside them.
+    #
+    # The second term is the HOLD CEILING, not the readiness ceiling, and that
+    # is this commit's own arithmetic rather than a new guess: the granted phase
+    # is budgeted at `ready_timeout_s + 120` everywhere else here -- that is
+    # what `hold_ceiling_s` IS, and `lib/rolling-restart.sh`'s enumeration of
+    # what the 120s covers (pre-stop-handoff, spin-up, the tmux spawn, the
+    # poller's settle) is exactly the non-readiness part of ExecStart. Summing
+    # the wait with only the readiness ceiling left the grace 120s short of the
+    # phase it brackets: noise at cap 1200, but at `admission_wait_max_s: 0` it
+    # made BOOT_GRACE_S 200 against a bring-up this estate already budgets at
+    # 320, so service_is_starting would stop suppressing ~120s before a
+    # legitimately booting bot finished. (Provisional -- controller, on the
+    # Task 1 review's arithmetic; reversible before merge, under F15's lock.)
+    boot_grace_s = admission_wait_max_s + hold_ceiling_s
 
     return BootPolicy(
         admission_slots=admission_slots,
