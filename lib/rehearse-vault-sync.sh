@@ -66,7 +66,23 @@ DECOY_SOCK="rvsd$$"; TARGET_SOCK="rvst$$"
 DECOY_FLEET="aaa-decoy"; TARGET_FLEET="zzz-target"
 mkdir -p "$ROOT/local/$DECOY_FLEET/runtime/bots/decoy-mgr" \
          "$ROOT/local/$TARGET_FLEET/runtime/bots/target-mgr"
-# Only the DECOY declares MANAGER_TMUX, so plain discovery would choose it.
+# BOTH declare MANAGER_TMUX, and each needs to for a different reason (review --
+# an earlier comment here said only the decoy did, which was true of the
+# one-fleet round-1 shape and is the line most likely to get "fixed" back):
+#   decoy-mgr  is what `first_bot_with_conf_any_fleet` finds when NOTHING is
+#              declared, so it is arm B's expected recipient -- the lexical
+#              fallback needs something to land on.
+#   target-mgr is resolved by `bot_dir_for_id`, but the nudge is addressed to
+#              `bot_conf_get <dir> MANAGER_TMUX`; without it that value is empty
+#              and NOTHING is sent to anyone.
+# Measured on the comment-literal fixture (target-mgr's MANAGER_TMUX removed):
+# arm A's delivery assertion fails, and its OTHER TWO PASS -- "not the decoy"
+# and "disclosed nothing" are both true of an alert that reached nobody. Arm B
+# is untouched and `candidate_fleets` still reads 2, because that count is
+# `host_fleet_bots_dirs | wc -l` -- bots DIRS, not declaring bots. So the
+# harness catches this loudly on one assertion rather than silently, but two
+# thirds of arm A cannot see it, which is the same argument as the note at
+# arm A's third assertion below.
 # Each declares its OWN tmux socket, which is what makes the recipient
 # observable: _emit_fleet_signal resolves MANAGER_TMUX_SOCKET from the bot it
 # picked, so WHICH socket receives the nudge is the routing answer itself.
@@ -317,6 +333,15 @@ else
         [ "$a_decoy" -eq 0 ] \
             && ok "arm A: and NOT '$DECOY_FLEET'/decoy-mgr, which sorts first" \
             || bad "arm A: the alert reached decoy-mgr ($a_decoy push(es)) — the lexical-pick shape #1517 is about"
+        # THIS ONE CANNOT DISCRIMINATE ON ITS OWN, and the review that found it
+        # asked for the observation to stay in the file. Under the #1517 mutant
+        # (scope taken from `host_fleet_bots_dirs | head -1`) no disclosure is
+        # emitted at all, which is indistinguishable from "declared, therefore
+        # silent" -- so this assertion PASSES under the very bug arm A exists to
+        # catch. Arm B's `origin=discovered` is what catches it. The SET
+        # discriminates though this member does not, which is the clearest
+        # argument for arm B existing at all; it is kept because a declared
+        # recipient that suddenly DOES disclose is still a real regression.
         [ -z "$a_origin" ] \
             && ok "arm A: and disclosed nothing — a declared recipient is self-clearing (#1517)" \
             || bad "arm A: a declared recipient disclosed origin='$a_origin' — the self-clearing property is broken"
