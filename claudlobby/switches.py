@@ -377,6 +377,21 @@ SWITCHES: tuple[Switch, ...] = (
              "run — a missing one is a DEAD server that reports nothing (#1058)",
     ),
     Switch(
+        key="vault-sync",
+        scope=HOST_JOB,
+        polarity=OPT_IN,
+        carrier=ENROLL_HOST,
+        job="vault-sync",
+        why_opt_in="commits and pushes the vault on every host it runs on — "
+                   "mutates operator source, and a second host arming it "
+                   "before the first has run a week doubles the blast radius "
+                   "of a bad sync rather than halving the risk",
+        what="every 15min, run Claudron's sync door on each vault this host's "
+             "bots are wired to, record every outcome on the plane "
+             "(vault.sync_ok) so a missing sync has a denominator, and page "
+             "ONCE on a state change",
+    ),
+    Switch(
         key="update-siblings",
         scope=HOST_JOB,
         polarity=OPT_IN,

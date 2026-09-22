@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `vault-sync`: the scheduled door that notices a wedged vault (#1721)
+
+Claudron's sync fires only at session boundaries, under a 2-second hook budget,
+and reports to a log file **inside the vault it is failing to sync**. When a
+host wedged, every sync refused for twelve days, printed success-shaped output,
+and **nothing scheduled ever looked**. The sibling fixes stop the wedge
+happening; this is the job that notices one.
+
+- **`lib/vault-sync.sh`**, composed as a **dormant** host job (`enroll: false`
+  composes no unit at all). Armed, it commits and pushes on every host it runs
+  on — `update-siblings`' own "mutates operator source" category, not a new one.
+- **Discovery is a read, not a declaration.** The vault is already composed into
+  every `bot.conf` as `CLAUDRON_VAULT_PATH`; the job walks what exists and
+  dedupes by real path. A host-level field would be a second copy of that fact,
+  and a second copy is how the two drift.
+- **Every outcome is recorded, both directions** — `vault.sync_ok` per run, so
+  "last successful sync" finally has a denominator — plus `vault.state`,
+  `vault.ahead` / `behind` / `uncommitted`, and one `vault_sync` event on
+  failure. Subject kind `vault`, which the plane already has.
+- **`unknown` is recorded, never invented.** Until Claudron's health door ships,
+  `sync --check` exits 2 (argparse's usage error for an absent flag) and the job
+  records `unknown` **and still syncs** — the verdict is a report, not a gate. A
+  fabricated `clean` is the success-shaped output this program exists to end.
+- **Paging is debounced on STATE CHANGE, deliberately not on a clock.** A wedged
+  vault is wedged until someone fixes it; it is not a burst. One ALERT on the
+  transition, nothing while it stays true, one NOTICE on recovery.
+- **The envelope is parsed, never grepped** — reading the text would inherit the
+  very success-shaped-output bug the job exists to surface.
+- **`lib/rehearse-vault-sync.sh`** drives the real job through clean → wedged →
+  still-wedged → recovered against a **real plane** in a throwaway root, reading
+  back through the plane rather than grepping the job's own log, and carries a
+  positive control: a *changed* failure state must page again, or the debounce
+  is muting rather than debouncing.
+- `documentation/runbooks/vault-sync.md`; a `Switch` row so `doctor` lists the
+  job either way — a door nobody can see is a door nobody has.
+
+
 
 ### Changed — the ingest daemon holds ONE write connection instead of opening and closing per batch (#1693)
 
