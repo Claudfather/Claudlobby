@@ -451,6 +451,35 @@ Two rungs read that record:
 mid-operation or off its default branch: those are the two states in which the
 files on disk may not be the ones that were committed.
 
+### What this record can and cannot attribute — read this before trusting it
+
+**`composed.json` is a compose-time SNAPSHOT, not an audit trail**, and the
+difference decides which cases it can explain. Its git half describes the
+checkout *at the instant `generate` ran*, and the next `generate` overwrites it
+unconditionally — no history, no append.
+
+So a manifest **reverted by a git state change** is attributable **only while
+that state is still present when `generate` runs**:
+
+| order of events | attributable? |
+|---|---|
+| vault wedges → `generate` runs → operator investigates | **Yes.** The compose is flagged `interrupted` / off-branch, and `doctor` says so afterwards. This is the shape of the outage this exists for — that stopped rebase persisted for twelve days, so every compose in the window is flagged. |
+| vault wedges → operator repairs it (`git rebase --abort` is the reflex) → `generate` runs | **No.** The clean compose records a clean state, overwrites the evidence, and a still-wrong manifest is indistinguishable from a legitimate edit. |
+
+**What still answers after that window** is the change attribution `doctor` and
+`diff` print when the manifest has moved, which asks the tree as it is *now*:
+
+- *"the input is modified in the working tree"* — an uncommitted local edit.
+- *"the input matches its committed state"* — the content arrived **through
+  git**: a commit, a checkout or a branch switch.
+
+It deliberately does **not** claim to separate a commit from a checkout. Nothing
+readable afterwards can, and naming what the answer excludes is what lets a
+reader go and look instead of trusting a word.
+
+A durable per-generate trail would close the second row and is **not** built
+here — tracked as #1732.
+
 ## Mechanism 1 — daily live reload (plugins + skills)
 
 `lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled via `lib/install-reload-fleet-systemd.sh`.

@@ -43,7 +43,11 @@ def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
     outage this comes from it was the manifest that moved, silently, under a
     running fleet. This line separates them before the diff body.
     """
-    from .composer import changed_manifest_inputs, read_manifest_provenance
+    from .composer import (
+        changed_manifest_inputs,
+        manifest_change_attribution,
+        read_manifest_provenance,
+    )
 
     prov = read_manifest_provenance(paths)
     if prov is None:
@@ -57,10 +61,12 @@ def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
                 "interpreting it. Run `generate` to re-record.\n")
     changed = changed_manifest_inputs(fleet, paths, prov)
     if changed:
+        how = manifest_change_attribution(fleet, paths)
         return ("manifest: CHANGED — " + ", ".join(changed) +
                 " differ(s) from what this runtime was composed from"
                 f" (composed {prov.get('composed_at')}). The inputs moved, not"
-                " just the runtime.\n")
+                " just the runtime." + (f" {how.capitalize()}." if how else "")
+                + "\n")
     return f"manifest: unchanged since compose ({prov.get('composed_at')})\n"
 
 

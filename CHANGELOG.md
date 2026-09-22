@@ -42,6 +42,21 @@ when the inputs move, both sides move together.
   the record exists to prevent.
 - Absence is a third state throughout: an input that VANISHED is not an input
   that was edited, and neither is an optional input that was never configured.
+- **The bound is stated, because a record that silently stops discriminating is
+  worse than none — a reader will trust it** (review). `composed.json` is a
+  compose-time SNAPSHOT, overwritten by the next `generate`: a git-state revert
+  is attributable only while that state is still present when `generate` runs.
+  That covers the outage this comes from (its stopped rebase persisted for
+  twelve days) and **not** the repair-then-generate order. Written down in
+  `manifest_provenance`'s own docstring and in `fleet-update-lifecycle.md`,
+  where an operator meets it, and pinned by a test in both places.
+- **`dirty` is now load-bearing rather than recorded-and-unread** (review). It
+  had no consumer and no test — the same gap as the one above, smaller.
+  `manifest_change_attribution` asks the tree as it is NOW, so it still answers
+  after the snapshot's window has closed: an uncommitted local edit, or content
+  that arrived through git. It deliberately does not claim to separate a commit
+  from a checkout — nothing readable afterwards can, and naming what the answer
+  excludes is what sends a reader to look instead of trusting a word.
 
 
 ### Changed — the ingest daemon holds ONE write connection instead of opening and closing per batch (#1693)

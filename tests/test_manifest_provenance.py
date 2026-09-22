@@ -28,6 +28,7 @@ from claudlobby.composer import (
 from claudlobby.config import BotConfig, FleetConfig
 from claudlobby.paths import Paths
 
+REPO = Path(__file__).resolve().parent.parent
 FLEET_YAML = "fleet:\n  name: demo\n"
 
 
@@ -304,3 +305,79 @@ class TestTheRungStaysQuietWhereItHasNothingToSay:
         composed', not swallow the case the rung exists for."""
         paths = _paths(tmp_path)           # _paths() creates runtime/bots/worker
         assert self._checks(_fleet(), paths)[-1].status == "warn"
+
+
+class TestDirtyIsLoadBearing:
+    """vera, #1726 review: `dirty` was computed, persisted and read by nothing —
+    a recorded fact nothing consumes and no test pins. It is now the read-time
+    discriminator that survives the compose-time snapshot's bound."""
+
+    def _attr(self, tmp_path, *, in_git=True, edit=False, commit=False):
+        from claudlobby.composer import manifest_change_attribution
+
+        paths = _paths(tmp_path, in_git=in_git)
+        write_manifest_provenance(_fleet(), paths)
+        if edit:
+            paths.fleet_yaml.write_text(FLEET_YAML + "# a later change\n")
+        if commit:
+            _git(["add", "fleet.yaml"], paths.fleet_config_dir)
+            _git(["commit", "-qm", "committed the change"], paths.fleet_config_dir)
+        return manifest_change_attribution(_fleet(), paths)
+
+    def test_an_UNCOMMITTED_edit_is_named_as_one(self, tmp_path):
+        out = self._attr(tmp_path, edit=True)
+        assert "uncommitted" in out and "working tree" in out
+
+    def test_a_COMMITTED_change_says_it_arrived_through_git(self, tmp_path):
+        """The case the compose-time snapshot cannot attribute once the git
+        anomaly is repaired — this is what still answers."""
+        out = self._attr(tmp_path, edit=True, commit=True)
+        assert "arrived through git" in out
+        assert "uncommitted" in out, "it must still NAME what it excluded"
+
+    def test_it_does_not_claim_to_separate_a_commit_from_a_checkout(self, tmp_path):
+        """The bound, pinned. A reader handed a confident word cannot go and
+        look; one told what the answer cannot distinguish can."""
+        out = self._attr(tmp_path, edit=True, commit=True)
+        assert "a commit, a checkout or a branch switch" in out
+
+    def test_not_a_git_checkout_is_NOT_rendered_as_a_fault(self, tmp_path):
+        assert self._attr(tmp_path, in_git=False, edit=True) is None
+
+    def test_the_doctor_rung_carries_the_attribution(self, tmp_path):
+        from claudlobby.doctor import DoctorReport, check_manifest_provenance
+
+        paths = _paths(tmp_path, in_git=True)
+        write_manifest_provenance(_fleet(), paths)
+        paths.fleet_yaml.write_text(FLEET_YAML + "# changed\n")
+        report = DoctorReport()
+        check_manifest_provenance(_fleet(), paths, report)
+        c = report.checks[-1]
+        assert c.status == "warn" and "uncommitted" in c.detail
+
+    def test_the_diff_header_carries_the_attribution(self, tmp_path):
+        from claudlobby.diff import manifest_header
+
+        paths = _paths(tmp_path, in_git=True)
+        write_manifest_provenance(_fleet(), paths)
+        paths.fleet_yaml.write_text(FLEET_YAML + "# changed\n")
+        h = manifest_header(_fleet(), paths)
+        assert "manifest: CHANGED" in h and "uncommitted" in h
+
+
+class TestTheBoundIsWrittenDownWhereAReaderMeetsIt:
+    """vera: 'a recorded fact that silently stops discriminating is worse than
+    no record, because a reader will trust it.' The bound must be stated in the
+    code AND in the operator-facing doc, not only in a review thread."""
+
+    def test_the_code_states_the_snapshot_bound(self):
+        from claudlobby.composer import manifest_provenance
+
+        doc = manifest_provenance.__doc__ or ""
+        assert "SNAPSHOT" in doc and "not an audit trail" in doc
+        assert "repair-then-generate" in doc, "the uncovered ORDER must be named"
+
+    def test_the_lifecycle_doc_states_it_too(self):
+        text = (REPO / "documentation" / "fleet-update-lifecycle.md").read_text()
+        assert "repair" in text.lower() and "snapshot" in text.lower(), (
+            "the operator-facing doc must carry the bound, not just the code")

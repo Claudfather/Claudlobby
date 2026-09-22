@@ -4780,6 +4780,28 @@ def manifest_provenance(fleet: FleetConfig, paths: Paths) -> dict:
     bot.conf but the one stable hash): the git reads are subprocesses, and a
     per-bot call would pay them once per bot for an answer that cannot change
     mid-run.
+
+    **BOUND — this is a compose-time SNAPSHOT, not an audit trail, and the
+    difference decides what it can attribute.** The git half says what the
+    checkout looked like *at the instant generate ran*, and the file is
+    overwritten unconditionally by the next generate: no history, no append.
+
+    So a manifest reverted by a git state change is attributable **only while
+    that state is still present when generate runs**. That covers the case this
+    exists for — the outage it comes from held its stopped rebase continuously
+    for twelve days, so every generate in that window is flagged. It does NOT
+    cover the repair-then-generate order: abort the rebase first, and the next
+    clean generate records a clean compose, overwrites the evidence, and leaves
+    a still-wrong manifest indistinguishable from a legitimate edit.
+
+    What survives that window is ``manifest_change_attribution``, which asks the
+    tree as it is now and can still separate an uncommitted local edit from
+    content that arrived through git. It cannot separate a commit from a
+    checkout; nothing readable afterwards can.
+
+    A durable per-generate trail is a different deliverable and is deliberately
+    not built here (the plane's registry lane already keeps a per-change history
+    of the fleet's composed SHAPE, which is the natural carrier for it) — #1732.
     """
     inputs = manifest_inputs(fleet, paths)
     files = {
@@ -4857,6 +4879,42 @@ def read_manifest_provenance(paths: Paths) -> dict | None:
         return json.loads((paths.runtime / "composed.json").read_text())
     except (OSError, ValueError):
         return None
+
+
+def manifest_change_attribution(fleet: FleetConfig, paths: Paths) -> str | None:
+    """How a CHANGED input arrived, asked NOW rather than at compose time.
+
+    ``composed.json`` is a snapshot: its git state describes the instant the
+    fleet was composed, and a subsequent clean ``generate`` overwrites it. So on
+    its own the record can only attribute a revert while the git anomaly is
+    still present at compose time (see ``manifest_provenance``'s BOUND note).
+    This asks the ONE question that is still answerable afterwards, of the tree
+    as it is when somebody reads it:
+
+    * **uncommitted** — the input differs from its committed state right now, so
+      the change is a local edit somebody has not committed.
+    * **committed** — the input matches its committed state, so the content
+      arrived through git: a commit, a checkout, a branch switch or a revert.
+
+    It DOES NOT separate a committed edit from a checkout; both are "committed"
+    here, and nothing readable afterwards distinguishes them. Saying which of
+    the two it cannot tell apart is the point — a reader who knows the bound can
+    go and look; one who is handed a confident word cannot.
+
+    ``None`` when the fleet directory is not a git checkout, which is not a
+    fault and must not be rendered as one.
+    """
+    inputs = manifest_inputs(fleet, paths)
+    in_tree = [p for n, p in inputs.items() if n != "system.yaml"]
+    state = _git_state(paths.fleet_config_dir, in_tree)
+    if not state.get("in_git"):
+        return None
+    if state.get("dirty"):
+        return ("the input is modified in the working tree — an uncommitted "
+                "local edit")
+    return ("the input matches its committed state — the change arrived through "
+            "git (a commit, a checkout or a branch switch), not an uncommitted "
+            "edit")
 
 
 def changed_manifest_inputs(fleet: FleetConfig, paths: Paths,

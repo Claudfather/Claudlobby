@@ -928,6 +928,7 @@ def check_manifest_provenance(
     from .composer import (
         MANIFEST_PROVENANCE_SCHEMA,
         changed_manifest_inputs,
+        manifest_change_attribution,
         manifest_warnings,
         read_manifest_provenance,
     )
@@ -955,11 +956,15 @@ def check_manifest_provenance(
 
     changed = changed_manifest_inputs(fleet, paths, prov)
     if changed:
+        # HOW it changed, asked of the tree NOW — the compose-time record is a
+        # snapshot and cannot answer this once the git state has been repaired.
+        how = manifest_change_attribution(fleet, paths)
         report.add("manifest-provenance", "warn",
                    f"manifest changed since the running fleet was composed "
-                   f"({', '.join(changed)}; composed {prov.get('composed_at')}) — "
-                   "run `generate`, then restart the bots that read it at session "
-                   "start (bot.conf and CLAUDE.md are read once, at startup)")
+                   f"({', '.join(changed)}; composed {prov.get('composed_at')})"
+                   + (f"; {how}" if how else "") +
+                   " — run `generate`, then restart the bots that read it at "
+                   "session start (bot.conf and CLAUDE.md are read once, at startup)")
         return
 
     # Compose-time conditions are reported even when nothing has changed since:
