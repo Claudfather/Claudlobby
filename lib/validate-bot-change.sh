@@ -3868,6 +3868,208 @@ fi
 
 command tmux -L "$_S3_SOCK" kill-server 2>/dev/null || true
 
+# ===========================================================================
+# #1720 — the vault git-state guard, driven through the REAL hook
+# ===========================================================================
+# Unit tests prove the decision; only running the hook proves a bot's Bash call
+# actually gets refused. Both halves are asserted because only the pair is
+# evidence: a guard that denied everything would pass the deny case alone, and
+# that failure -- refusing legitimate git work in every bot's projects/
+# checkout -- is the one this design is most afraid of.
+echo ""
+echo "--- #1720: vault git-state guard ---"
+_VG_ROOT="$(mktemp -d)"
+mkdir -p "$_VG_ROOT/vault" "$_VG_ROOT/projects/repo"
+_VG_VAULT="$(realpath -m "$_VG_ROOT/vault")"
+_VG_PROJ="$(realpath -m "$_VG_ROOT/projects/repo")"
+_vg_hook() { # <cwd> <command> -> stdout of the real hook
+    printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$2" \
+      | CLAUDRON_VAULT_PATH="$_VG_VAULT" bash "$LIB_DIR/vault-git-guard.sh" 2>/dev/null
+}
+
+_vg_deny="$(_vg_hook "$_VG_VAULT" "git checkout -b probe")"
+case "$_vg_deny" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1720 DENY: git checkout inside the vault is refused by the hook" "$r"
+
+_vg_allow="$(_vg_hook "$_VG_PROJ" "git checkout -b feature")"
+[ -z "$_vg_allow" ] && r=yes || r=no
+harness_check "#1720 ALLOW: the same command in a projects/ checkout is untouched" "$r"
+
+_vg_ro="$(_vg_hook "$_VG_PROJ" "git -C $_VG_VAULT status")"
+[ -z "$_vg_ro" ] && r=yes || r=no
+harness_check "#1720 ALLOW: a read-only git command in the vault is untouched" "$r"
+
+# THE SHAPE THE UNIT FIXTURES GOT WRONG, and the reason the canary is
+# mandatory rather than ceremonial: on a live host a bot's projects/ checkout
+# nests INSIDE the vault directory (measured at seven segments below it). A
+# prefix-based scope rule refuses git work in every bot's own repo fleet-wide.
+mkdir -p "$_VG_ROOT/vault/.git" "$_VG_ROOT/vault/home/f/bots/b/projects/repo/.git"
+_VG_NESTED="$(realpath -m "$_VG_ROOT/vault/home/f/bots/b/projects/repo")"
+_vg_nested="$(_vg_hook "$_VG_NESTED" "git switch -c feature")"
+[ -z "$_vg_nested" ] && r=yes || r=no
+harness_check "#1720 NESTED: a checkout inside the vault DIR but its own repo is untouched" "$r"
+
+_vg_vault_still="$(_vg_hook "$_VG_VAULT" "git switch -c probe")"
+case "$_vg_vault_still" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1720 NESTED CONTROL: the vault itself is still denied" "$r"
+
+_vg_novault="$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"git reset --hard"}}' "$_VG_VAULT" \
+    | env -u CLAUDRON_VAULT_PATH bash "$LIB_DIR/vault-git-guard.sh" 2>/dev/null)"
+[ -z "$_vg_novault" ] && r=yes || r=no
+harness_check "#1720 NO-VAULT: a bot with no CLAUDRON_VAULT_PATH gets no decision" "$r"
+
+# EVERY FLAG THAT AIMS THE COMMAND, not just -C (review of #1725). The guard
+# shipped reading -C alone, so the two flags a script reaches for when it walks
+# several repositories without cd-ing into each resolved their scope from cwd
+# and never met the vault check. Allow twin included, because denying these
+# wholesale would refuse ordinary multi-repo work in bots projects/ checkouts.
+_vg_gd="$(_vg_hook "$_VG_PROJ" "git --git-dir=$_VG_VAULT/.git checkout main")"
+case "$_vg_gd" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: --git-dir into the vault from outside it is refused" "$r"
+
+_vg_wt="$(_vg_hook "$_VG_PROJ" "git --work-tree $_VG_VAULT reset --hard")"
+case "$_vg_wt" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: --work-tree into the vault from outside it is refused" "$r"
+
+# --git-dir is NOT --work-tree. Measured on git 2.39.5: a --git-dir naming
+# another repo with no --work-tree makes git treat the CURRENT DIRECTORY as
+# that repo working tree -- run inside a vault it wrote the other repo tracked
+# files into the vault tree. So pointing the repo elsewhere must not subtract
+# the place the command is standing, and the allow twin is the same command
+# run from outside.
+_vg_gd_cwd="$(_vg_hook "$_VG_VAULT" "git --git-dir=$_VG_PROJ/.git reset --hard")"
+case "$_vg_gd_cwd" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: --git-dir elsewhere but standing in the vault is refused" "$r"
+
+_vg_gd_out="$(_vg_hook "$_VG_PROJ" "git --git-dir=$_VG_PROJ/.git reset --hard")"
+[ -z "$_vg_gd_out" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same command run from outside the vault is untouched" "$r"
+
+# PULL IS ONLY EVER A FAST-FORWARD (review of #1725). pull reached neither
+# table, so pull --rebase was ALLOWED in the vault while rebase was denied --
+# the same operation under a more ordinary spelling, and the outage mechanism.
+_vg_pull="$(_vg_hook "$_VG_VAULT" "git pull")"
+case "$_vg_pull" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: a bare git pull in the vault is refused" "$r"
+
+_vg_pullr="$(_vg_hook "$_VG_VAULT" "git pull --rebase")"
+case "$_vg_pullr" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: git pull --rebase in the vault is refused" "$r"
+
+_vg_pullff="$(_vg_hook "$_VG_VAULT" "git pull --ff-only")"
+[ -z "$_vg_pullff" ] && r=yes || r=no
+harness_check "#1725 ALLOW: git pull --ff-only in the vault stays permitted" "$r"
+
+_vg_pullr_proj="$(_vg_hook "$_VG_PROJ" "git pull --rebase")"
+[ -z "$_vg_pullr_proj" ] && r=yes || r=no
+harness_check "#1725 ALLOW: git pull --rebase in a projects/ checkout is untouched" "$r"
+
+# --work-tree is the MIRROR of --git-dir, not its sibling. It relocates the
+# working tree and NOT the git directory, so a command carrying only
+# --work-tree still acts on the refs of whatever repo cwd is in. Measured on
+# git 2.39.5: run inside a vault it moved THE VAULT OWN HEAD onto a side
+# branch, which is the state that caused the outage this guard exists for.
+_vg_wt_cwd="$(_vg_hook "$_VG_VAULT" "git --work-tree=$_VG_PROJ checkout main")"
+case "$_vg_wt_cwd" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: --work-tree elsewhere but standing in the vault is refused" "$r"
+
+_vg_wt_twin="$(_vg_hook "$_VG_PROJ" "git --work-tree=$_VG_PROJ checkout main")"
+[ -z "$_vg_wt_twin" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same --work-tree command run from outside is untouched" "$r"
+
+_vg_both="$(_vg_hook "$_VG_VAULT" "git --work-tree=$_VG_PROJ --git-dir=$_VG_PROJ/.git checkout main")"
+[ -z "$_vg_both" ] && r=yes || r=no
+harness_check "#1725 ALLOW: BOTH axes aimed away does take cwd out of scope" "$r"
+
+# The inversion: the guard enumerates the pre-verb options it UNDERSTANDS, so
+# an unmodelled flag stops the read instead of slipping past it -- and only
+# for a command that is already vault-bound, which is the allow twin below.
+_vg_unk="$(_vg_hook "$_VG_VAULT" "git --some-future-flag checkout main")"
+case "$_vg_unk" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: an option the guard does not recognise, in the vault" "$r"
+
+# NO ALLOW TWIN, deliberately: the refusal is unconditional, because scope
+# computed before the parser stopped describes a partial read. A twin here
+# would assert that some unreadable command is safe.
+_vg_unk_out="$(_vg_hook "$_VG_PROJ" "git --some-future-flag checkout main")"
+case "$_vg_unk_out" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: an unknown option refuses OUTSIDE the vault too" "$r"
+
+_vg_known="$(_vg_hook "$_VG_VAULT" "git --no-pager log")"
+[ -z "$_vg_known" ] && r=yes || r=no
+harness_check "#1725 ALLOW: a modelled flag with a safe verb still reads in the vault" "$r"
+
+# The unmodelled-flag refusal is UNCONDITIONAL, which is what makes it
+# order-independent: a real --git-dir sitting behind an unmodelled flag is
+# never reached by the parser, so consulting scope first made the same command
+# allow or deny depending on which flag came first.
+_vg_ord="$(_vg_hook "$_VG_PROJ" "git --super-prefix foo/ --git-dir=$_VG_VAULT/.git reset --hard")"
+case "$_vg_ord" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: an unmodelled flag AHEAD of a real --git-dir" "$r"
+
+# Scope set through the ENVIRONMENT is a second channel; the flag allowlist is
+# correct and simply does not apply to a caller that exports instead of passing.
+_vg_env="$(_vg_hook "$_VG_PROJ" "GIT_DIR=$_VG_VAULT/.git git reset --hard")"
+case "$_vg_env" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: GIT_DIR pointed at the vault, from outside it" "$r"
+
+_vg_envwt="$(_vg_hook "$_VG_PROJ" "GIT_WORK_TREE=$_VG_VAULT git checkout main")"
+case "$_vg_envwt" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: GIT_WORK_TREE pointed at the vault, from outside it" "$r"
+
+_vg_envtwin="$(_vg_hook "$_VG_PROJ" "GIT_DIR=$_VG_PROJ/.git git reset --hard")"
+[ -z "$_vg_envtwin" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same variable pointed elsewhere is untouched" "$r"
+
+_vg_envsafe="$(_vg_hook "$_VG_PROJ" "GIT_DIR=$_VG_VAULT/.git git status")"
+[ -z "$_vg_envsafe" ] && r=yes || r=no
+harness_check "#1725 ALLOW: a safe verb under a vault-bound variable still reads" "$r"
+
+# A shell separator needs no space before it, so it rides inside the path:
+# `cd /vault; git ...` tokenises with the semicolon attached, and the guard
+# resolved a directory that is not the vault. The plainest shape there is.
+_vg_sep="$(_vg_hook "$_VG_PROJ" "cd $_VG_VAULT; git reset --hard")"
+case "$_vg_sep" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: cd into the vault with a trailing semicolon" "$r"
+
+_vg_septwin="$(_vg_hook "$_VG_VAULT" "cd $_VG_PROJ; git reset --hard")"
+[ -z "$_vg_septwin" ] && r=yes || r=no
+harness_check "#1725 ALLOW: cd OUT of the vault with the same separator" "$r"
+
+_vg_sepwt="$(_vg_hook "$_VG_PROJ" "export GIT_WORK_TREE=$_VG_VAULT; git checkout main")"
+case "$_vg_sepwt" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: exported GIT_WORK_TREE with a trailing semicolon" "$r"
+
+# SIX SPELLINGS OF ONE CLASS: a metacharacter abutting a word changed the token
+# and there was no git token left to judge. Closing these closes the spellings,
+# NOT the class -- eval, sh -c, a wrapper and a variable holding the path all
+# remain open by construction. The subshell abort is named on its own because
+# it is the operation the guard own refusal message forbids.
+for _c in "cd $_VG_VAULT;git reset --hard" \
+          "cd $_VG_VAULT&&git reset --hard" \
+          "(cd $_VG_VAULT; git reset --hard)" \
+          "(cd $_VG_VAULT && git rebase --abort)" \
+          "cd $_VG_VAULT; (git reset --hard)" \
+          "pushd $_VG_VAULT; git reset --hard"; do
+    _o="$(_vg_hook "$_VG_PROJ" "$_c")"
+    case "$_o" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+    harness_check "#1725 DENY: composition reaching the vault -- ${_c#cd }" "$r"
+done
+
+_vg_comp_twin="$(_vg_hook "$_VG_VAULT" "(cd $_VG_PROJ && git reset --hard)")"
+[ -z "$_vg_comp_twin" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same composition pointed OUT of the vault" "$r"
+
+_vg_comp_safe="$(_vg_hook "$_VG_PROJ" "(cd $_VG_VAULT; git status)")"
+[ -z "$_vg_comp_safe" ] && r=yes || r=no
+harness_check "#1725 ALLOW: a safe verb through composition still reads" "$r"
+
+if [ "${_vg_deny:-}" = "" ]; then
+    echo "  --- DIAGNOSTIC: #1720 deny produced no output ---"
+    echo "      vault: $_VG_VAULT"
+fi
+rm -rf "$_VG_ROOT"
+
 echo ""
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

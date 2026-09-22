@@ -71,6 +71,204 @@ when the inputs move, both sides move together.
   from a checkout — nothing readable afterwards can, and naming what the answer
   excludes is what sends a reader to look instead of trusting a word.
 
+### Added — a composed guard that stops a bot rewriting the vault's git state by accident (#1720)
+
+- **The outage this is the mechanism for.** A live host's vault clone was
+  switched to a side branch and stayed there for a month: 59 commits of
+  knowledge accrued off the default branch, **53 of them on no remote**. The
+  hook-driven rebase that finally tried to reconcile them was killed mid-pick
+  and left the tree detached for **twelve days** with the default branch's files
+  checked out — a fleet's mission, charter and project manifest gone from disk —
+  after which a `generate` composed the fleet from the reverted manifest. Prose
+  telling bots not to do that already existed. It is not a mechanism.
+
+- **`lib/vault-git-guard.sh`**, a `PreToolUse` hook on `Bash`, refuses
+  `checkout switch rebase reset merge stash clean worktree cherry-pick revert
+  am` inside the vault, plus `commit --amend`, `push --force`/`-f`/
+  `--force-with-lease`, `branch -d`/`-D`/`-m` and **any `pull` that is not
+  `--ff-only`**. Everything else there —
+  `status log diff add commit fetch pull --ff-only push` — is untouched, as is
+  any `claudron` command.
+
+- **Scope is decided before the verb, and that ordering is the whole safety
+  argument.** The dangerous failure is not missing a rebase in the vault;
+  Claudron's own `sync` refuses a side branch as the belt to these braces. It is
+  refusing legitimate git work in **every bot's `projects/` checkout at once**,
+  because a composed hook is live the instant `generate` writes it and there is
+  **no canary window**. So a command not pointed inside the vault is allowed
+  without its verb ever being read, and every deny test has an allow twin
+  differing only in *where* the command points.
+
+- **Where a command points** is every path named by a scope-setting flag —
+  `-C`, `--git-dir`, `--work-tree` — and the invocation is vault-bound if
+  **any** of them is, so a harmless-looking `-C` cannot launder the flag
+  beside it. **Scope is two independent axes**, because one flag rarely moves
+  both: which repository's refs move (`--git-dir`, else `-C`, else `cwd`) and
+  which files are written (`--work-tree`, else `-C`, else `cwd`). Where the
+  shell is standing leaves the picture only when **both** have been aimed
+  elsewhere. Both halves are **measured on git 2.39.5** rather than reasoned:
+  `git --git-dir=<other>/.git reset --hard` run inside the vault wrote the
+  other repository's tracked files into the vault's tree, and
+  `git --work-tree=<elsewhere> checkout <branch>` run inside the vault moved
+  **the vault's own HEAD** onto a side branch — the very state that caused the
+  outage, produced by a command the guard was allowing. Otherwise the last
+  `cd <path>` before the git token, else the payload's `cwd`. An **unreadable**
+  target — a variable, a glob — falls back to `cwd` rather than to allow: a
+  variable is what someone reaches for when doing something wide, so the
+  opposite fallback would put the blind spot exactly where the risk is. With no
+  `cwd` and no readable target the command is allowed **and counted**
+  (`vault_guard_unresolved`), never silently.
+
+- **A bot with no `CLAUDRON_VAULT_PATH` gets no decision at all** — there is no
+  vault to protect, and a guard firing there would refuse work it cannot have a
+  reason to refuse. Fails open **loudly** on missing `jq`/`python3` or an
+  unparseable payload: blocking every git command fleet-wide is a worse outage
+  than the hazard.
+
+- **The canary caught a fleet-wide false positive that no unit test could
+  have.** Scope is decided by which git REPOSITORY a path belongs to — not by
+  which directory it sits under. Measured on a live host during this change's
+  canary: every bot's `projects/<repo>` checkout nests **inside** the vault
+  directory, seven segments below it. A prefix test therefore refused
+  `checkout`, `rebase` and `reset` in **every bot's own repository**, fleet-wide
+  — the exact failure this design is most afraid of. Every unit fixture had
+  built vault and projects as *siblings*, a shape the real host does not have,
+  so the suite was green throughout. The rule now resolves the nearest enclosing
+  `.git` and guards only when that is the vault itself; a path under the vault
+  in its own clone is that clone's business, and a path under the vault in no
+  repo at all is the vault's own tree and stays guarded. Pinned by tests that
+  build the real nesting, and controlled: the old prefix rule fails exactly
+  those two.
+
+- Decision logic is `lib/vault-git-decide.py` (standalone stdlib), split out for
+  the reason `mention-rewrite.py` is: the parsing is the hard part and belongs
+  somewhere unit-testable. It matches the denied verb on the **subcommand token
+  alone**, never a substring of the command line — `git log --grep=reset` is a
+  read and stays one.
+
+- **Two holes found in review, both on the ALLOW side — the guard permitting
+  the operation it exists to refuse, under a different spelling.** Scope read
+  `-C` alone, so `git --git-dir=<vault>/.git checkout <branch>` resolved from
+  `cwd` and was allowed from anywhere else on disk; `--git-dir` and
+  `--work-tree` are what a script reaches for when it walks several
+  repositories without `cd`-ing into each, which makes the gap accident-shaped
+  rather than evasion-shaped — and accident is this guard's threat model,
+  since the outage began with a bot running `rebase` in the vault because its
+  instructions were ambiguous. Separately, `pull` reached neither table, so
+  `git pull --rebase` was **allowed** inside the vault while `git rebase` was
+  denied three lines away, and a bare `git pull` rebases the vault outright
+  under `pull.rebase` — the outage's own mechanism, reachable with no flag
+  at all. `pull` is now refused unless it carries `--ff-only`, the invariant
+  the clone already had. `--ff-only` is necessary but not sufficient:
+  **measured on git 2.39.5**, `git pull --ff-only --rebase` is *not* rejected
+  as a contradiction — git takes the rebase path — so the dangerous flag is
+  checked first and `pull` appears in both tables.
+
+- **The model is inverted: the guard enumerates what it UNDERSTANDS.** Six
+  holes reached this predicate — four from the first review, a bare-`pull`
+  form, and `--work-tree` — each a different way to point a command somewhere
+  the guard did not look, and each found by a different method (reading the
+  code, mutating it, running real git). The pattern rather than any one hole
+  is the finding: git's scope flags do not compose the way the obvious reading
+  suggests, so "the ones I thought of" is not a closed set and does not become
+  one by trying harder. `GLOBAL_FLAGS` now lists git's pre-verb options with
+  **each arity measured**, and a flag outside it stops the read instead of
+  slipping past it. Arity is its own hole: the verb is the first non-flag
+  token, so `git --super-prefix x/ checkout main` really runs `checkout`
+  (measured) while a parser assuming zero arity reads `x/`, finds nothing
+  dangerous, and allows it. The refusal is reached **only after scope says
+  vault-bound**, so a bot's own checkout is untouched however exotic its
+  flags, and every new deny has that twin. The table is deliberately minimal:
+  omitting a real flag costs a refusal inside the vault and nothing anywhere
+  else, while including one with the wrong arity re-opens the hole.
+
+- **The refusal is UNCONDITIONAL, and scope can be set without a flag at all.**
+  Two more, both found by review, both live. The unmodelled-flag refusal sat
+  *after* the scope test, so it fired only once the already-parsed part said
+  vault-bound — a statement about a PARTIAL read, and it made the verdict
+  depend on flag ORDER: `git --super-prefix foo/ --git-dir=<vault>/.git reset
+  --hard` allowed while the same flags reversed denied, because a real
+  `--git-dir` behind an unmodelled flag is never reached. The safety property
+  the allowlist was adopted for holds only when nothing is consulted first.
+  **That deny now has no allow twin, deliberately**: a twin would assert that
+  some command the guard could not finish reading is safe. The cost was
+  measured rather than assumed — every pre-verb flag in the fleet's own
+  scripted git usage is already in `GLOBAL_FLAGS`. Separately, `GIT_DIR` and
+  `GIT_WORK_TREE` are a **second channel** rather than a ninth flag: git
+  honours them exactly as it honours the flags (measured: `GIT_DIR=<vault>/.git
+  git symbolic-ref --short HEAD` run from outside answers the VAULT's branch),
+  so assignments made within the command are read in all three spellings, with
+  a flag beating the variable as git itself does.
+
+- **A shell separator attached to a path, and the symmetry audit that found
+  it.** Review pointed out that the not-modelled list named `GIT_DIR` and
+  omitted `GIT_WORK_TREE` — a one-word omission, but **a partial
+  not-modelled list is worse than none**: a reader who sees one half declared
+  unclosable will reasonably infer the other is covered, turning an unknown
+  unknown into a false assurance, which is the exact thing declaring the bound
+  was added to prevent. Both files now name both halves, and the pair is
+  covered symmetrically by parametrised tests plus a meta-test asserting every
+  member of `ENV_SCOPE` has its cases — because this pair has now been handled
+  asymmetrically three times (as flags it was holes 5 and 6).
+
+  **Making the tests symmetric immediately exposed a tenth hole, in the
+  oldest and plainest part of the guard.** `cd /vault; git reset --hard`
+  tokenises as `['cd', '/vault;', …]` — a semicolon needs no space before it,
+  so it rides inside the path; the guard resolved `/vault;`, which is not the
+  vault, and **allowed about the most ordinary command shape there is** (the
+  spaced `&&` form was correctly denied). The asymmetry is precisely why it
+  had stayed invisible: `GIT_DIR=<vault>/.git;` walks UP to the vault, so the
+  enclosing-repo walk hid the same bug on that axis while it went straight
+  through on its twin. Stripped centrally at both capture points, failing
+  toward seeing the vault.
+
+- **The declaration is now a statement of KIND, not a list of channels, and
+  the tokenisation class is fixed.** A fresh review demonstrated six live
+  bypasses through the shipped hook, all one class: `shlex.split` is a word
+  splitter rather than a shell parser, so a metacharacter abutting a word
+  changed the token and defeated the equality tests the guard rests on.
+  `cd <vault>;git reset --hard` produced **no git token at all**. Among them
+  `(cd <vault> && git rebase --abort)` — the operation the guard's own
+  refusal message forbids, and the one that started the twelve days.
+  `_shell_words` splits shell operators off quote-aware (`punctuation_chars`,
+  so a commit message holding `;` or `&&` stays one token), and `pushd` joins
+  `cd`; all six now deny, with twins proving composition OUT of the vault
+  still passes.
+
+  **That closed the spellings, not the class, and the module now says so at
+  the top.** A PreToolUse guard is handed one string; composition is
+  unbounded; no flag table or channel list closes it. The honest claim is
+  that it **catches a direct git invocation naming the vault, and cannot
+  catch git reached through shell composition** — which supports "a bot doing
+  the obvious wrong thing is stopped" and never "a bot cannot wedge the
+  vault". The remaining items are recorded as WITNESSES to that class rather
+  than a list inviting completion.
+
+  **Why it ships anyway, measured rather than argued:** across 702 estate
+  transcripts and 62,651 Bash tool calls, 10,297 ran git, and **at least 87%
+  of the state-changing ones presented a git token this guard can see**
+  (1,287/1,479); of git commands that also changed directory, **98.3%** used
+  a bare `cd`. The direct invocation is the common shape, so a bar against
+  the ordinary accident is worth having even though it is not a fence.
+
+- **What this guard does NOT cover, named rather than left implicit.** The same
+  review found three residual gaps, each verified against the code and each
+  with **no exposure on any measured fleet**: a worktree of the vault's own
+  repo nested inside the vault reads as a separate repository while sharing
+  the vault's refs, and a vault configured as a subdirectory of its repo root
+  disarms the predicate entirely rather than partially (#1729); an aliased git
+  verb or an aliased `git` binary is not recognised, and nothing reports a
+  guard that has been disarmed (#1730); and `merge --ff-only` is refused while
+  `pull --ff-only` — which contains it — is allowed, which may be the right
+  answer but is currently an unexplained one (#1731). All three need an
+  unusual layout, a misconfiguration or a deliberate rename to reach, which is
+  why they are follow-ups: this guard's threat model is accident, and the two
+  holes fixed above were reachable by an ordinary command.
+
+- `library/guardrails/vault-git-hygiene.md` says what is refused and why, so a
+  denial is not the first a bot hears of the rule, and names the one thing not
+  to do when the vault looks wedged: do not abort, reset or check anything out —
+  report it. An aborted rebase in a live tree is how the twelve days started.
 
 ### Changed — the ingest daemon holds ONE write connection instead of opening and closing per batch (#1693)
 

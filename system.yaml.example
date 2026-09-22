@@ -371,6 +371,18 @@ defaults:
       # it is correct, and an instruction cannot catch a correct convention
       # applied mid-prose to the wrong surface. Telegram is untouched.
       - command: "$CLAUDLOBBY_ROOT/lib/gh-mention-guard.sh"
+      # No bot rewrites git STATE inside the vault (#1720). A live host's vault
+      # clone sat on a side branch for a month -- 59 commits of knowledge off
+      # the default branch, 53 on no remote -- and the rebase that tried to
+      # reconcile it was killed mid-pick, leaving the tree detached for twelve
+      # days with a fleet's mission and manifest gone from disk. Prose saying
+      # "do not" existed; it is not a mechanism. SCOPE BEFORE VERB: anything
+      # not pointed inside the vault is allowed without its verb being read,
+      # because a wrong scope rule would refuse legitimate git work in every
+      # bot's projects/ checkout at once. A bot with no CLAUDRON_VAULT_PATH
+      # gets no decision. Matcher-scoped to Bash; fails open, loudly.
+      - command: "$CLAUDLOBBY_ROOT/lib/vault-git-guard.sh"
+        matcher: "Bash"
     PostToolUse:
       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
       # The OUTBOUND Telegram carrier (#1402): the plugin's MCP reply path
