@@ -595,3 +595,41 @@ def test_a_slow_but_SUCCESSFUL_emission_is_not_reaped(tmp_path):
         f"returned in {elapsed:.2f}s without waiting for a 2s child — the door "
         "must WAIT for its emission, or PLANE_EMIT_LAST_RC means nothing.")
     assert not _wedge_alive(slow)
+
+
+def test_a_cooldown_DIVERSION_is_not_counted_as_a_loss(tmp_path):
+    """The decision, pinned — not just the corrected comment (#1657 review).
+
+    An earlier draft of `plane_emit_loss`'s docstring claimed two counted kinds:
+    a reap and a cooldown diversion. Review argued the second should not be
+    counted at all rather than be wired, and measuring settles it: with the
+    wedge marker armed the shim skips the socket, takes the cold rung, and the
+    batch COMMITS. Its fate is stated, so counting it in a file named for losses
+    would record a success as a loss and a reader would take it for a loss
+    series.
+
+    The rule the file actually holds is "an emission whose fate this door cannot
+    state". This pins the rule's boundary at the one case most likely to be
+    re-added, and it fails if someone wires the diversion in.
+    """
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    plane_state = root / "state" / "plane"
+    plane_state.mkdir(parents=True, exist_ok=True)
+    # Arm the breaker so the emit takes the cooldown branch.
+    (plane_state / ".socket-wedged").write_text(str(int(time.time())))
+
+    r = _door(root, f'session_event vitals \'{{"e":"diverted"}}\' "{bot_dir}" w1')
+    assert r.returncode == 0, r.stderr
+    assert "cooldown" in r.stderr, (
+        f"the emit did not take the cooldown branch, so this proves nothing: {r.stderr}")
+
+    # It RECORDED — which is why it is not a loss.
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_event'", 1) == 1, (
+        "a diverted emit must still record via the cold rung — if it does not, "
+        "the premise for excluding it from the loss count is wrong")
+    losses = plane_state / ".emit-losses"
+    assert not losses.exists(), (
+        "a cooldown diversion was counted as a loss. It records via the cold "
+        "rung, so this file would be reporting a success as a loss — see the "
+        "rule in plane_emit_loss's docstring")

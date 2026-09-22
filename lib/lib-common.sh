@@ -727,11 +727,27 @@ plane_kill_tree() {
 # door cannot state. Host-scoped, beside the wedge marker:
 #   $CLAUDLOBBY_ROOT/state/plane/.emit-losses    <epoch>\t<kind>\t<door>\t<detail>
 #
-# WHY A FILE AND NOT THE PLANE. The two events worth counting are exactly the
-# two where the plane is the thing that could not be reached: a reaped emit
-# (rung wedged past the bound) and a cooldown diversion. Recording them THROUGH
-# the plane would be the instrument depending on its own subject, and would
-# recurse through this very function on the path that is already failing.
+# WHAT BELONGS HERE IS A RULE, NOT A LIST: an emission whose fate THIS DOOR
+# CANNOT STATE. A reap qualifies — the batch may have committed before the kill
+# and nothing can tell which. That is the only kind wired today.
+#
+# A COOLDOWN DIVERSION DELIBERATELY DOES NOT QUALIFY, and an earlier version of
+# this comment claimed it did (review). Measured: with the marker armed the shim
+# skips the socket, takes the cold rung, and the batch COMMITS — rc 0, one
+# events row, one ledger row. Its fate is stated, so counting it here would be
+# counting a success as a loss, in a file named for losses, which a reader would
+# then take for a loss series.
+#
+# The `kind` field stays because the rule admits other kinds (a spool write that
+# failed has an unstatable fate too) — it is the rule that decides, not this
+# sentence. The diversion RATE is still worth knowing and is a different
+# question: #1657 closes the breaker as measured-and-acceptable, and the rate is
+# observable in the journal for timer callers, which is where that need sits.
+#
+# WHY A FILE AND NOT THE PLANE. What gets counted is precisely the case where
+# the plane could not be reached. Recording it THROUGH the plane would be the
+# instrument depending on its own subject, and would recurse through this very
+# function on the path that is already failing.
 #
 # WHY IT WAS INVISIBLE UNTIL NOW. Both disclosures go to the caller's stderr,
 # which for a TIMER is the journal and for a BOT SESSION is a tmux pane --
