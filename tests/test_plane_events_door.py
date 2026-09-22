@@ -454,3 +454,75 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     assert "events reader for f is UNREACHABLE" in paged and page not in paged, paged
     summary = (root / "state" / "pulse" / "pulse-summary.txt").read_text()
     assert "unknown (events reader unreachable)" in summary and " none" not in summary
+
+
+# --- #1602: the poll floor, and the bound that must survive removing it -------
+# The wedged-rung test above asserts `2 <= elapsed` on a child that NEVER exits,
+# so it already catches a patch that reaps early. What it cannot see is either
+# half of what #1602 is actually about: that the fast path is FAST, and that a
+# slow-but-SUCCESSFUL child is not killed. Its child never succeeds, so
+# "reaped correctly at the bound" and "reaped a child that would have finished"
+# are the same observation to it.
+
+def test_a_fast_emission_does_not_pay_a_full_second(tmp_path):
+    """#1602's whole deliverable, and nothing asserted it before.
+
+    `plane_emit_bounded` polled with `sleep 1` while the socket rung answers in
+    ~40ms, so the first liveness check landed a full second after the work was
+    done — measured 1038ms for a 41ms child, 96% of it asleep. This door runs
+    twice per tool call on every bot, so that second was on the session's
+    critical path all day.
+
+    Asserts the CEILING only. A floor would pin the poll granularity, which is a
+    knob (`PLANE_EMIT_POLL_S`); what must not come back is the second.
+    """
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    # A REAL but fast rung, deliberately not PLANE_EMIT_DISABLED=1: that gate is
+    # checked by `plane_armed` BEFORE plane_emit_bounded is ever called
+    # (lib-common.sh:1904), so a silenced emission never enters the poll loop and
+    # an assertion on its duration passes at any granularity. The first cut of
+    # this test did exactly that and stayed green with `sleep 1` restored --
+    # caught by mutating the floor back in rather than by reading it.
+    fast = _wedge(tmp_path, 0)          # a cold rung that exits immediately
+    t0 = time.monotonic()
+    r = _door(root, f'session_event vitals \'{{"e":"fast"}}\' "{bot_dir}" w1',
+              PLANE_EMIT_CLI=str(fast))
+    elapsed = time.monotonic() - t0
+    assert r.returncode == 0, r.stderr
+    assert elapsed < 0.90, (
+        f"a no-op emission took {elapsed:.3f}s — the 1s poll floor is back "
+        "(#1602). This door runs twice per tool call on every bot.")
+
+
+def test_a_slow_but_SUCCESSFUL_emission_is_not_reaped(tmp_path):
+    """The bound must be elapsed TIME, not a count of sleeps — the trap that
+    makes this change dangerous rather than easy.
+
+    With `_i -lt bound` and `sleep 1`, the bound's duration and its unit were
+    the same number by coincidence. Converting the poll to 50ms without
+    converting that reaps at a fraction of the bound: measured, the obvious
+    `_max=$((bound*20))` + `_ticks+=20` form kills a 1.9s child at ~0.5s. That
+    is the COLD RUNG's ordinary cost, taken on ~34% of this estate's day
+    whenever the socket breaker is armed — so the "fix" would convert a latency
+    defect into silent recording loss, which is strictly worse than the floor.
+
+    A child slower than the poll but WELL INSIDE the bound must therefore come
+    back rc=0 and unreaped.
+    """
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    slow = _wedge(tmp_path, 2)          # exits on its own, well inside the bound
+    t0 = time.monotonic()
+    r = _door(root, f'session_event vitals \'{{"e":"slow"}}\' "{bot_dir}" w1',
+              PLANE_EMIT_CLI=str(slow), FLEET_EVENT_EMIT_TIMEOUT_S="10")
+    elapsed = time.monotonic() - t0
+    assert r.returncode == 0, r.stderr
+    assert "reaped" not in r.stderr, (
+        f"a 2s child was REAPED under a 10s bound after {elapsed:.2f}s — the "
+        "bound is being counted in poll ticks rather than elapsed seconds, so "
+        "every cold-rung emission would be killed and reported 'not recorded'.")
+    assert elapsed >= 1.8, (
+        f"returned in {elapsed:.2f}s without waiting for a 2s child — the door "
+        "must WAIT for its emission, or PLANE_EMIT_LAST_RC means nothing.")
+    assert not _wedge_alive(slow)

@@ -731,11 +731,45 @@ plane_kill_tree() {
 # kill after the commit), and a retry is never a second row because ingest
 # dedupes on the pre-minted event id.
 plane_emit_bounded() {
-    local door="$1" bound="$2" batch="$3" _pid _i=0 _rc=0
+    local door="$1" bound="$2" batch="$3" _pid _rc=0 _deadline
+    # WHAT THIS POLLS FOR, because that decides how the granularity may change:
+    # the backgrounded shim's EXIT. The wait is bounded so a wedged rung cannot
+    # hold a door for a minute, and on the bound the child is killed and the
+    # emission disclosed as not recorded.
+    #
+    # THE BOUND IS A WALL-CLOCK DEADLINE, NOT A COUNT OF SLEEPS, and that is the
+    # whole care in this change. Before, `_i -lt bound` with `sleep 1` made the
+    # bound a count of assumed-one-second sleeps -- the duration and the unit
+    # were the same number by coincidence. Shortening the poll without
+    # converting that turns a 10s bound into a fraction of one: measured, the
+    # obvious `_max=$((bound*20))` with `_ticks=$((_ticks+20))` per iteration
+    # reaps at ~0.5s, so a 1.9s cold-rung child -- the ordinary cost when the
+    # socket breaker is armed, which is ~34% of the day on this estate -- comes
+    # back rc=143 "not recorded" after succeeding everywhere else. That converts
+    # a latency defect into a RECORDING-LOSS defect, which is strictly worse
+    # than the floor it removes. A deadline cannot drift that way: the bound is
+    # elapsed seconds whatever the poll does.
+    #
+    # `+ 1` because `SECONDS` is integer and the call may start mid-second, so
+    # the wait is [bound, bound+1] and never LESS than bound. Overshooting costs
+    # a reaped-anyway child one extra second; undershooting kills a healthy one.
+    #
+    # DEGENERATE CASE, deliberately safe: if `sleep` rejects fractions the `||`
+    # gives the old one-second behaviour with the bound intact. If sleep fails
+    # ENTIRELY the loop spins -- but it still exits at the deadline and still
+    # does not reap early (measured), so the worst case is a bounded burst of
+    # CPU rather than an emission killed mid-flight.
+    _deadline=$(( SECONDS + bound + 1 ))
     "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
     _pid=$!
-    while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt "$bound" ]; do
-        sleep 1; _i=$((_i + 1))
+    while kill -0 "$_pid" 2>/dev/null && [ "$SECONDS" -lt "$_deadline" ]; do
+        # 50ms: the socket rung answers in ~40ms, so a 1s poll spent ~96% of
+        # every emission asleep after the work was already done (measured:
+        # 1038ms total for a 41ms child). The fork cost does NOT scale with the
+        # granularity the way it looks -- the loop only iterates while the child
+        # is alive, so the common case costs ONE sleep either way (measured:
+        # 1 fork at 40ms, 4 at 200ms, 38 at 1.9s).
+        sleep "${PLANE_EMIT_POLL_S:-0.05}" 2>/dev/null || sleep 1
     done
     if kill -0 "$_pid" 2>/dev/null; then
         plane_kill_tree "$_pid"
