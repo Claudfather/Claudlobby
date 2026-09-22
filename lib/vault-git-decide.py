@@ -79,19 +79,81 @@ NEEDS_SAFE_FLAG = {
     "pull": ("--ff-only",),
 }
 
-#: Flags that point a git invocation somewhere other than the shell's cwd.
-#: `-C` was the only one this guard read when it first shipped, which left the
-#: two flags a script reaches for when it walks several repositories WITHOUT
-#: `cd`-ing into each — `--git-dir` and `--work-tree` — resolving their scope
-#: from `cwd` and passing the vault check untested. That is accident-shaped,
-#: and accident is the threat model here: the outage began with a bot running
-#: `rebase` in the vault because its instructions were ambiguous, not with
-#: anything trying to evade a check.
-SCOPE_FLAGS = ("-C", "--git-dir", "--work-tree")
+#: git's pre-verb global options and how many argv slots each consumes.
+#:
+#: **This table is the guard's model of git's own CLI, and anything outside it
+#: is a refusal rather than a bypass.** The predicate reached six holes by
+#: enumerating what is DANGEROUS and letting everything else through; each hole
+#: was a different way for a command to point somewhere the guard did not look,
+#: and each was found by a different method. Enumerating what is UNDERSTOOD
+#: inverts that: a flag nobody modelled stops the read instead of slipping past
+#: it.
+#:
+#: Arity matters as much as membership. The verb is the first non-flag token,
+#: so a flag whose separated value gets read as a verb makes the guard judge
+#: the WRONG WORD: under the old parser `git --super-prefix x/ checkout main`
+#: was judged on `x/`, found no dangerous verb, and was allowed — while git
+#: itself reads `checkout` there (measured, 2.39.5).
+#:
+#: Every arity below was MEASURED on git 2.39.5 rather than read off the
+#: synopsis, because the synopsis does not settle it: `--git-dir=<path>` is
+#: documented attached and git accepts `--git-dir <path>` too.
+#:
+#: THE TABLE IS DELIBERATELY MINIMAL, and that is the safe direction. Omitting
+#: a real flag costs a refusal inside the vault and nothing anywhere else;
+#: including one with the wrong arity re-opens exactly the hole above. So a
+#: flag earns a row by appearing in commands bots actually write, not by
+#: existing — `--super-prefix` and `--config-env` are both real and both absent.
+GLOBAL_FLAGS = {
+    # value-taking, separated form measured as accepted
+    "-C": 1, "-c": 1, "--git-dir": 1, "--work-tree": 1, "--namespace": 1,
+    # no value
+    "--bare": 0, "--no-replace-objects": 0, "--no-optional-locks": 0,
+    "--literal-pathspecs": 0, "--glob-pathspecs": 0, "--noglob-pathspecs": 0,
+    "--icase-pathspecs": 0, "--exec-path": 0, "--paginate": 0, "-p": 0,
+    "--no-pager": 0, "-P": 0, "--help": 0, "-h": 0, "--version": 0, "-v": 0,
+    "--html-path": 0, "--man-path": 0, "--info-path": 0,
+}
 
-#: The subset of :data:`SCOPE_FLAGS` that replaces the WORKING TREE, and so
-#: takes `cwd` out of the picture. `--git-dir` is absent on purpose.
-WORKTREE_FLAGS = ("-C", "--work-tree")
+#: The two flags that relocate something, and WHAT each one relocates. They do
+#: not compose the way the obvious reading suggests, which is the whole reason
+#: this is a table rather than a set — see :func:`_judge_git`.
+REPO_FLAGS = ("--git-dir", "-C")      # which repository's refs move
+TREE_FLAGS = ("--work-tree", "-C")    # which files on disk are written
+
+
+def _parse_git_args(args: list[str]) -> tuple[dict[str, str], str | None,
+                                              int, str | None]:
+    """``(scope, verb, verb_index, unrecognised)`` for one invocation's argv.
+
+    Walks the pre-verb options using :data:`GLOBAL_FLAGS` arities, so the verb
+    is the first token that is genuinely a subcommand rather than some flag's
+    value. The first token that looks like an option and is not in the table
+    stops the walk and is returned as ``unrecognised`` — from there neither the
+    scope nor the verb can be trusted, and the caller fails closed.
+    """
+    scope: dict[str, str] = {}
+    j = 0
+    while j < len(args):
+        a = args[j]
+        if not a.startswith("-"):
+            return scope, a, j, None
+        name, eq, value = a.partition("=")
+        if eq:
+            if name not in GLOBAL_FLAGS:
+                return scope, None, j, a
+            scope.setdefault(name, value)
+            j += 1
+            continue
+        arity = GLOBAL_FLAGS.get(a)
+        if arity is None:
+            return scope, None, j, a
+        if arity and j + 1 < len(args):
+            scope.setdefault(a, args[j + 1])
+        j += 1 + arity
+    return scope, None, len(args), None
+
+
 
 
 def _resolve(path: str, cwd: str | None) -> str | None:
@@ -154,43 +216,6 @@ def _inside(path: str, vault: str) -> bool:
     return repo == vault
 
 
-def _scope_targets(args: list[str]) -> tuple[list[str], bool]:
-    """Every path one git invocation points at, and whether it MOVED.
-
-    Returns ``(targets, redirected)``. ALL targets rather than the first,
-    because the verdict is any-of: each flag can independently aim the
-    invocation at a different repository, and a command is vault-bound if any
-    one of them is.
-
-    ``redirected`` is true only for the flags that replace the WORKING TREE —
-    ``-C`` (git chdirs there before anything else) and ``--work-tree``. It is
-    deliberately false for ``--git-dir``, and that asymmetry is measured rather
-    than reasoned: see :func:`_judge_git`.
-
-    Both spellings are read — `--git-dir <p>` and `--git-dir=<p>` — since the
-    attached form is the one a script writes.
-    """
-    out: list[str] = []
-    redirected = False
-    j = 0
-    while j < len(args):
-        a = args[j]
-        if a in SCOPE_FLAGS and j + 1 < len(args):
-            out.append(args[j + 1])
-            redirected = redirected or a in WORKTREE_FLAGS
-            j += 2
-            continue
-        matched = False
-        for f in SCOPE_FLAGS:
-            if a.startswith(f + "="):
-                out.append(a[len(f) + 1:])
-                redirected = redirected or f in WORKTREE_FLAGS
-                matched = True
-                break
-        j += 1
-    return out, redirected
-
-
 def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
     """Return (verdict, detail). verdict is allow | deny | unresolved."""
     try:
@@ -221,25 +246,33 @@ def _judge_git(tokens: list[str], start: int, vault: str,
                cwd: str | None, last_cd: str | None) -> tuple[str, str]:
     """One git invocation: where does it point, and what does it do."""
     args = tokens[start + 1:]
+    scope, verb, verb_idx, unrecognised = _parse_git_args(args)
 
     # --- SCOPE, first and always ------------------------------------------
-    # An invocation is vault-bound if ANY of its targets is. Taking only the
-    # first would let a harmless-looking `-C` launder the flag beside it:
-    # `git -C /elsewhere --git-dir=<vault>/.git reset --hard` still moves the
-    # vault's refs.
-    flag_targets, redirected = _scope_targets(args)
-    targets: list[str | None] = list(flag_targets)
+    # A git invocation aims TWO things independently, and MEASURING them is the
+    # only way to get this right — three separate holes came from assuming they
+    # move together:
+    #
+    #   * which repository's refs move  — `--git-dir`, else `-C`, else cwd
+    #   * which files on disk are written — `--work-tree`, else `-C`, else cwd
+    #
+    # `--git-dir` relocates the first and NOT the second: measured on git
+    # 2.39.5, `git --git-dir=<other>/.git reset --hard` run inside the vault
+    # wrote the other repository's tracked files into the vault's tree.
+    # `--work-tree` is the exact mirror and is worse: `git --work-tree=<away>
+    # checkout <branch>` run inside the vault moved THE VAULT'S OWN HEAD onto a
+    # side branch — the state that caused the outage this guard exists for.
+    # Only `-C` moves both, because git chdirs there before anything else.
+    #
+    # So cwd leaves the picture only when BOTH axes have been aimed elsewhere,
+    # and the invocation is vault-bound if EITHER axis lands in the vault.
+    def _axis(flags: tuple[str, ...]) -> str | None:
+        for f in flags:
+            if f in scope:
+                return scope[f]
+        return last_cd  # None here means "wherever the shell already is"
 
-    # WHERE THE SHELL IS STANDING STAYS A TARGET UNLESS SOMETHING REPLACED IT,
-    # and `--git-dir` does not replace it. MEASURED, git 2.39.5: with a
-    # `--git-dir` naming another repository and no `--work-tree`, git treats the
-    # CURRENT DIRECTORY as that repository's working tree —
-    # `git --git-dir=<other>/.git reset --hard` run inside the vault wrote the
-    # other repo's tracked files into the vault's tree. So a scope flag pointing
-    # somewhere else never subtracts the place the command is standing; only
-    # `-C` (git chdirs first) and an explicit `--work-tree` do.
-    if not redirected:
-        targets.append(last_cd)  # may be None: resolved from `cwd` below
+    targets: list[str | None] = [_axis(REPO_FLAGS), _axis(TREE_FLAGS)]
 
     resolved: list[str] = []
     unreadable = False
@@ -260,22 +293,19 @@ def _judge_git(tokens: list[str], start: int, vault: str,
     if not any(_inside(r, vault) for r in resolved):
         return "allow", ""
 
+    # --- an option we do not model, pointed at the vault -------------------
+    # Reached only when the command IS vault-bound, so a bot's own checkout is
+    # untouched however exotic its flags. Here the parse stopped early: the
+    # verb was never found and a later scope flag was never read, so "no
+    # dangerous verb" is a statement about a command this code did not finish
+    # reading. Refusing says so; allowing would be the seventh hole.
+    if unrecognised is not None:
+        return "deny", f"an option this guard does not recognise ({unrecognised})"
+
     # --- only now, the verb -----------------------------------------------
-    verb = None
-    k = 0
-    while k < len(args):
-        a = args[k]
-        if a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
-            k += 2
-            continue
-        if a.startswith("-"):
-            k += 1
-            continue
-        verb = a
-        break
     if verb is None:
         return "allow", ""
-    rest = args[k + 1:]
+    rest = args[verb_idx + 1:]
 
     if verb in STATE_VERBS:
         return "deny", verb

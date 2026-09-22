@@ -289,15 +289,35 @@ class TestEveryFlagThatPointsTheInvocation:
         )[0] == "deny"
 
     @pytest.mark.parametrize("joiner", [" ", "="])
-    def test_work_tree_pointed_elsewhere_is_allowed_from_the_vault(
+    def test_work_tree_elsewhere_does_NOT_take_cwd_out_of_scope(
             self, nested, joiner):
-        """The twin. `--work-tree` REPLACES the working tree, so this command
-        cannot touch the vault however the shell got here. A hook that denied
-        it would refuse legitimate work in a bot's own checkout, which is the
-        failure this guard fears most."""
+        """**This test previously asserted the opposite, and it was wrong.**
+
+        It read `--work-tree` as replacing the whole invocation's target, so it
+        expected `allow`. `--work-tree` relocates the working TREE and not the
+        git directory, which is still discovered from `cwd` — so a command
+        carrying only `--work-tree`, run inside the vault, acts on the VAULT's
+        refs.
+
+        Measured on git 2.39.5 against a real repository: with the vault's HEAD
+        on `main`, `git --work-tree=<elsewhere> checkout other` run from inside
+        the vault printed `Switched to branch 'other'` and left the vault's own
+        HEAD on `other`. That is the side-branch state that caused the outage
+        this guard exists for, produced by a command the guard was allowing.
+        """
         vault, outside = nested
         assert D.decide(
             f"git --work-tree{joiner}{outside} checkout main", vault, vault
+        )[0] == "deny"
+
+    @pytest.mark.parametrize("joiner", [" ", "="])
+    def test_the_twin_for_work_tree_is_the_same_command_run_outside(
+            self, nested, joiner):
+        """Standing outside, nothing of the vault's is reachable — so the rule
+        above costs no legitimate work in a bot's own checkout."""
+        vault, outside = nested
+        assert D.decide(
+            f"git --work-tree{joiner}{outside} checkout main", vault, outside
         )[0] == "allow"
 
     @pytest.mark.parametrize("joiner", [" ", "="])
@@ -328,9 +348,12 @@ class TestEveryFlagThatPointsTheInvocation:
             f"git --git-dir{joiner}{outside}/.git reset --hard", vault, outside
         )[0] == "allow"
 
-    def test_an_explicit_work_tree_does_replace_cwd_even_with_git_dir(self, nested):
-        """Both flags given and both pointed away: nothing of the vault's is
-        reachable, so it is allowed even from inside the vault."""
+    def test_only_BOTH_flags_together_take_cwd_out_of_scope(self, nested):
+        """The two axes are independent, so it takes both to leave the vault.
+
+        Measured: with both pointed away and run from inside the vault, the
+        vault's HEAD stayed on `main` and the other repository's moved. This is
+        the one shape where a scope flag genuinely removes `cwd`."""
         vault, outside = nested
         assert D.decide(
             f"git --work-tree={outside} --git-dir={outside}/.git reset --hard",
@@ -404,3 +427,75 @@ class TestPullIsOnlyEverAFastForward:
         vault, _ = tree
         assert D.decide("git pull", vault, vault)[1] == "pull without --ff-only"
         assert D.decide("git pull --rebase", vault, vault)[1] == "pull --rebase"
+
+
+class TestAnOptionTheGuardDoesNotRecognise:
+    """The predicate reached SIX holes by enumerating what is dangerous.
+
+    Each was a different way to point a command somewhere the guard did not
+    look, and each was found by a different method — reading the code, mutating
+    it, and running real git. The pattern, not any one hole, is the finding:
+    git's scope flags do not compose the way the obvious reading suggests, so
+    "the ones I thought of" is not a closed set and never becomes one.
+
+    So the model is inverted. The guard enumerates the pre-verb options it
+    UNDERSTANDS, with the arity of each, and anything else stops the read. An
+    unmodelled flag becomes a refusal instead of a bypass — but only for a
+    command that is vault-bound, so a bot's own checkout is untouched however
+    exotic its flags.
+    """
+
+    @pytest.fixture()
+    def tree2(self, tmp_path):
+        vault = tmp_path / "vault"
+        proj = tmp_path / "projects" / "repo"
+        vault.mkdir(parents=True)
+        proj.mkdir(parents=True)
+        return os.path.realpath(vault), os.path.realpath(proj)
+
+    def test_an_unknown_option_in_the_vault_is_refused(self, tree2):
+        vault, _ = tree2
+        verdict, detail = D.decide("git --some-future-flag checkout main",
+                                   vault, vault)
+        assert verdict == "deny"
+        assert "does not recognise" in detail
+
+    def test_the_twin_is_the_same_unknown_option_outside_the_vault(self, tree2):
+        """The half that keeps this safe to ship. The refusal is reached only
+        after scope says vault-bound, so no bot's own repository is affected."""
+        vault, proj = tree2
+        assert D.decide("git --some-future-flag checkout main",
+                        vault, proj)[0] == "allow"
+
+    def test_an_unknown_option_hides_the_verb_which_is_why_it_refuses(self, tree2):
+        """Not merely unrecognised — UNREADABLE past that point. An unknown
+        flag may take a separated value, so the token after it may be that
+        value rather than the subcommand; the guard cannot tell. Measured on
+        git 2.39.5, `git --super-prefix x/ checkout main` really does run
+        `checkout`, while a parser assuming zero arity reads `x/` as the verb,
+        finds nothing dangerous, and allows it."""
+        vault, proj = tree2
+        assert D.decide("git --super-prefix x/ checkout main",
+                        vault, vault)[0] == "deny"
+        assert D.decide("git --super-prefix x/ checkout main",
+                        vault, proj)[0] == "allow"
+
+    @pytest.mark.parametrize("cmd", [
+        "git --no-pager log",
+        "git -c core.pager=cat log",
+        "git --literal-pathspecs status",
+        "git --no-optional-locks status",
+        "git -P diff",
+    ])
+    def test_known_options_with_safe_verbs_are_still_untouched(self, tree2, cmd):
+        """The control on the inversion: modelled flags must not start
+        refusing ordinary reads inside the vault."""
+        vault, _ = tree2
+        assert D.decide(cmd, vault, vault)[0] == "allow"
+
+    def test_a_value_taking_option_does_not_hide_the_verb(self, tree2):
+        """`-c` takes a separated value, so a parser that skipped one token
+        would read `user.name=x` as the verb and allow the checkout."""
+        vault, _ = tree2
+        assert D.decide("git -c user.name=x checkout main", vault, vault)[0] == "deny"
+        assert D.decide("git -c user.name=x status", vault, vault)[0] == "allow"
