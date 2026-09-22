@@ -38,6 +38,29 @@ visible rather than merely documented.
 
 **Backout:** `enroll: false` + `lib/setup-system` — the unit disappears.
 
+**Before you arm it, know the one state the rehearsal has never run.** All five
+scenarios in `lib/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits
+2 unconditionally, so **every** scenario runs with `state=unknown` and **none has
+ever seen an rc-0 verdict**. That was harmless while no engine had the flag. It
+stops being harmless the moment the engine carrying `sync --check` is pulled here
+(see the note under *When an ALERT fires*): `state=clean` then becomes what this
+job runs in every day, and it is the single state the end-to-end harness has
+never exercised.
+
+Nothing is known to be wrong on that path, and here is exactly how much is
+known: **one** unit test reaches it —
+`test_a_check_verdict_is_recorded_when_the_engine_has_one` in
+`tests/test_vault_sync.py` — which drives the real script with a real verdict
+envelope and asserts the log records `state=clean`. That is the branch being
+*reached*, not evidence that the plane sample or the paging behave correctly
+under it. (Saying "it is covered by unit tests" would be the same overstatement
+this file just finished removing one paragraph above.) What is missing is the
+end-to-end evidence, and for a dormant job whose case for arming rests on that
+harness, the person arming it should be the one told so rather than a reviewer
+who read the stub. If you arm this after the engine is
+current, read the first few `vault.state` samples yourself and confirm they carry
+the verdict you expect before trusting the quiet.
+
 ## Cadence
 
 Every 15 minutes, with a 120-second randomised delay so two hosts do not hit
@@ -101,12 +124,29 @@ claudlobby --fleet <name> events --type vault_sync --tail 50   # the failures
 
 — and the samples themselves (`vault.state`) carry the verdict per run. If you
 want to know that the health door stopped answering, read the samples; do not
-wait for a page. That gap is deliberate for now rather than overlooked (a verdict
-change with a succeeding sync is a softer signal than a failed sync, and
-`sync --check` does not exist on the shipped engine yet, so today the verdict is
-always `unknown`) — and it is tracked as #1741, so the day the health door ships
-somebody decides whether it deserves a page rather than inheriting this answer
-by accident.
+wait for a page. That gap is deliberate rather than overlooked — a verdict
+change with a succeeding sync is a softer signal than a failed sync — and it is
+tracked as #1741, so whoever meets the decision makes it rather than inheriting
+this answer by accident.
+
+**The verdict is `unknown` until the engine carrying `sync --check` is pulled on
+this host — not "for now".** The flag exists: it landed in Claudron on
+2026-09-22 (PR 162, merge `cd720eb`, `claudron/cli.py`). It reaches a host only
+when that checkout is pulled, which is its own open problem (#1251). So the
+condition is a **pull**, and stating it that way is deliberate: an earlier draft
+of this line said the flag "does not exist yet", which was true when written and
+stops being true with nobody editing the file — the reader then trusts a word
+that has already expired. Measured on this host at the time of writing:
+
+```
+$ claudron sync --check --json
+claudron: error: unrecognized arguments: --check     # rc 2
+```
+
+rc 2 is argparse's usage error, which is exactly what this job records as
+`unknown`. **Check it rather than trusting this paragraph** — run that command
+in the vault. If it answers an envelope, the engine is current here and the
+verdict will be a real one.
 
 ## Reading the history
 
