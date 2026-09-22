@@ -50,6 +50,19 @@ when the inputs move, both sides move together.
   twelve days) and **not** the repair-then-generate order. Written down in
   `manifest_provenance`'s own docstring and in `fleet-update-lifecycle.md`,
   where an operator meets it, and pinned by a test in both places.
+- **And the pin pins the BEHAVIOUR, not the sentence** — review round 2. The
+  first two pins read the docstring and the lifecycle doc for phrases; neither
+  called `write_manifest_provenance` twice nor touched git state, so what they
+  protected was that the prose survives, not that its claim stays true. That is
+  this entry's own finding one layer up: the thing a reader trusts and that
+  silently stopped discriminating was the TEST. `TestTheBoundIsBehavioral`
+  (authored by the reviewer, taken as handed) drives the real sequence — wedge,
+  repair, commit, recompose — and asserts the evidence is genuinely gone.
+  Demonstrated rather than asserted: with the snapshot made sticky (a prior
+  `interrupted` carried forward — the plausible "make it an audit trail" change)
+  and, separately, with attribution returning None on a clean tree, the two
+  prose tests stay GREEN and the behavioural one fails on both. Both pins are
+  kept: one guards the prose from deletion, the other guards the fact.
 - **`dirty` is now load-bearing rather than recorded-and-unread** (review). It
   had no consumer and no test — the same gap as the one above, smaller.
   `manifest_change_attribution` asks the tree as it is NOW, so it still answers

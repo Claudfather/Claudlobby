@@ -381,3 +381,48 @@ class TestTheBoundIsWrittenDownWhereAReaderMeetsIt:
         text = (REPO / "documentation" / "fleet-update-lifecycle.md").read_text()
         assert "repair" in text.lower() and "snapshot" in text.lower(), (
             "the operator-facing doc must carry the bound, not just the code")
+
+
+class TestTheBoundIsBehavioral:
+    """The class above pins WORDS in the docstring and the lifecycle doc. Neither
+    of its tests calls `write_manifest_provenance` twice or touches git state, so
+    what they protect is that the prose does not get deleted -- not that the claim
+    it makes is still true. A change to `_git_state()` or to the overwrite
+    semantics could silently falsify the bound with both of them green.
+
+    That is this round's own finding one layer up: the thing a reader trusts and
+    that silently stopped discriminating is the TEST, not the field. So this drives
+    the actual sequence -- wedge, repair, commit, recompose -- and asserts the
+    evidence is genuinely gone. Authored by the reviewer and taken as handed
+    (fixtures and `Paths` attributes verified against this file first); mutation-
+    proved below rather than merely added, per the standing rule that a pin cited
+    as a gate must be watched going red.
+    """
+
+    def test_repair_then_generate_actually_loses_the_evidence(self, tmp_path):
+        paths = _paths(tmp_path, in_git=True)
+        write_manifest_provenance(_fleet(), paths)
+
+        # The wedge: interrupted, wrong content, uncommitted.
+        (paths.fleet_config_dir / ".git" / "rebase-merge").mkdir()
+        paths.fleet_yaml.write_text(FLEET_YAML + "# reverted content\n")
+        wedged = write_manifest_provenance(_fleet(), paths)
+        assert wedged["git"]["interrupted"] is True
+        assert manifest_warnings(wedged), "must be flagged while the wedge is live"
+
+        # The repair: rebase-merge cleared, the (still wrong) tree committed --
+        # the operator's reflex, and the order the bound names as unattributable.
+        (paths.fleet_config_dir / ".git" / "rebase-merge").rmdir()
+        _git(["add", "fleet.yaml"], paths.fleet_config_dir)
+        _git(["commit", "-qm", "repair"], paths.fleet_config_dir)
+
+        repaired = write_manifest_provenance(_fleet(), paths)
+        assert repaired["git"]["interrupted"] is False
+        assert repaired["git"]["dirty"] is False
+        assert manifest_warnings(repaired) == [], (
+            "the bound: a clean compose after repair must NOT be distinguishable "
+            "from a legitimate edit at the snapshot layer")
+
+        from claudlobby.composer import manifest_change_attribution
+        out = manifest_change_attribution(_fleet(), paths)
+        assert out is not None and "arrived through git" in out
