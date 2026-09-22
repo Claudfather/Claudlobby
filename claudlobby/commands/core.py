@@ -418,6 +418,11 @@ def cmd_diff(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet, merged_defaults = _load_fleet_or_exit(paths)
+    # #1722: the inputs-moved line comes FIRST and exactly once, whether one bot
+    # or the whole fleet is being diffed — it is a fact about the fleet's
+    # manifest, not about any bot.
+    from ..diff import manifest_header
+    sys.stdout.write(manifest_header(fleet, paths))
     if args.bot:
         sys.stdout.write(diff_bot(args.bot, fleet, paths))
     else:
