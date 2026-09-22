@@ -4025,6 +4025,21 @@ _vg_envsafe="$(_vg_hook "$_VG_PROJ" "GIT_DIR=$_VG_VAULT/.git git status")"
 [ -z "$_vg_envsafe" ] && r=yes || r=no
 harness_check "#1725 ALLOW: a safe verb under a vault-bound variable still reads" "$r"
 
+# A shell separator needs no space before it, so it rides inside the path:
+# `cd /vault; git ...` tokenises with the semicolon attached, and the guard
+# resolved a directory that is not the vault. The plainest shape there is.
+_vg_sep="$(_vg_hook "$_VG_PROJ" "cd $_VG_VAULT; git reset --hard")"
+case "$_vg_sep" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: cd into the vault with a trailing semicolon" "$r"
+
+_vg_septwin="$(_vg_hook "$_VG_VAULT" "cd $_VG_PROJ; git reset --hard")"
+[ -z "$_vg_septwin" ] && r=yes || r=no
+harness_check "#1725 ALLOW: cd OUT of the vault with the same separator" "$r"
+
+_vg_sepwt="$(_vg_hook "$_VG_PROJ" "export GIT_WORK_TREE=$_VG_VAULT; git checkout main")"
+case "$_vg_sepwt" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: exported GIT_WORK_TREE with a trailing semicolon" "$r"
+
 if [ "${_vg_deny:-}" = "" ]; then
     echo "  --- DIAGNOSTIC: #1720 deny produced no output ---"
     echo "      vault: $_VG_VAULT"

@@ -42,13 +42,19 @@ coverage:
     * ``GIT_DIR`` / ``GIT_WORK_TREE`` assigned WITHIN the same command, in any
       of its spellings (``VAR=x git ...``, ``export VAR=x; git ...``,
       ``env VAR=x git ...``).
-    * a ``cd`` earlier in the same command, and the payload's ``cwd``.
+    * a ``cd`` earlier in the same command, and the payload's ``cwd`` (with a
+      shell separator stripped off the path -- see :func:`_unseparate`).
 
   NOT MODELLED -- each one is a real way to reach the vault that this returns
   "allow" for, and none is a hypothetical:
-    * ``GIT_DIR`` exported by an EARLIER tool call. The hook is handed one
-      command and no environment, so this is not a gap to be closed here; it
-      needs a different instrument.
+    * ``GIT_DIR`` **or** ``GIT_WORK_TREE`` exported by an EARLIER tool call.
+      The hook is handed one command and no environment, so this is not a gap
+      to be closed here; it needs a different instrument. BOTH are named on
+      purpose: this list is the load-bearing artifact of the whole guard, and
+      a reader who sees one declared unclosable will reasonably infer its twin
+      is covered. A PARTIAL not-modelled list is worse than none, because it
+      turns an unknown unknown into a false assurance -- the exact thing
+      declaring the bound was meant to prevent.
     * git config that relocates the tree -- ``core.worktree``, and
       ``safe.directory`` widening what git will touch at all.
     * an alias, a shell function, a wrapper script, or ``sh -c``: none presents
@@ -153,12 +159,21 @@ GLOBAL_FLAGS = {
 #: not compose the way the obvious reading suggests, which is the whole reason
 #: this is a table rather than a set — see :func:`_judge_git`.
 #: Environment variables git honours exactly as it honours the flags above.
-#: MEASURED: `GIT_DIR=<vault>/.git git symbolic-ref --short HEAD` run from
-#: outside the vault answers the VAULT's branch, and
-#: `GIT_DIR=<a> git --git-dir=<b> rev-parse --absolute-git-dir` answers `<b>`,
-#: so a flag beats the variable. This is a SECOND CHANNEL, not another flag:
-#: everything the allowlist does is correct and simply does not apply to a
-#: caller that exports scope instead of passing it.
+#: A SECOND CHANNEL, not another flag: everything the allowlist does is correct
+#: and simply does not apply to a caller that exports scope instead of passing
+#: it.
+#:
+#: MEASURED ON BOTH HALVES, deliberately, because this pair has been handled
+#: asymmetrically three times now -- as flags it was holes 5 and 6, and as
+#: variables one was modelled and named while its twin was not:
+#:
+#:   * `GIT_DIR=<vault>/.git git symbolic-ref --short HEAD`, run from outside
+#:     the vault, answers the VAULT's branch.
+#:   * `GIT_WORK_TREE=<away> git checkout <branch>`, run from INSIDE the vault,
+#:     moved THE VAULT'S OWN HEAD -- the same harm as its flag twin.
+#:   * a flag beats the variable on each axis:
+#:     `GIT_DIR=<a> git --git-dir=<b> rev-parse --absolute-git-dir` answers
+#:     `<b>`, and `--work-tree` likewise overrides `GIT_WORK_TREE`.
 ENV_SCOPE = ("GIT_DIR", "GIT_WORK_TREE")
 
 #: Each axis, in git's own precedence: the flag, then the variable, then
@@ -210,6 +225,27 @@ def _resolve(path: str, cwd: str | None) -> str | None:
         return os.path.realpath(base)
     except (OSError, ValueError):
         return None
+
+
+def _unseparate(tok: str) -> str:
+    """Strip a shell separator that shlex left attached to a path.
+
+    `cd /vault; git ...` tokenises as `['cd', '/vault;', 'git', ...]` -- the
+    semicolon needs no space before it, so it rides along inside the path and
+    the guard then resolved `/vault;`, which is not the vault. Measured:
+    `cd <vault>; git reset --hard` was ALLOWED, while the spaced `&&` form was
+    correctly denied. That is the most ordinary command shape there is.
+
+    The `export VAR=<vault>; git ...` form has it too. One of those two happened
+    to be caught anyway -- `GIT_DIR=<vault>/.git;` walks UP to the vault, so the
+    walk-up hid the defect on that axis while its twin went through. Which is
+    why this is stripped centrally rather than at whichever call site noticed.
+
+    Stripping fails toward seeing the vault, i.e. toward refusing, so a path
+    genuinely ending in one of these characters costs a refusal rather than a
+    bypass.
+    """
+    return tok.rstrip(";&")
 
 
 def _looks_unresolvable(tok: str) -> bool:
@@ -277,15 +313,16 @@ def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
     while i < len(tokens):
         tok = tokens[i]
         if tok == "cd" and i + 1 < len(tokens):
-            last_cd = tokens[i + 1]
+            last_cd = _unseparate(tokens[i + 1])
             i += 2
             continue
-        # A scope variable, however it was spelled: a bare `GIT_DIR=x git ...`
-        # prefix, `export GIT_DIR=x; git ...`, or `env GIT_DIR=x git ...` all
-        # arrive as this one token shape, so one test covers all three.
+        # EITHER scope variable (`ENV_SCOPE`, both halves), however spelled:
+        # a bare `VAR=x git ...` prefix, `export VAR=x; git ...` and
+        # `env VAR=x git ...` all arrive as this one token shape, so one rule
+        # covers every combination of the two.
         name, eq, value = tok.partition("=")
         if eq and name in ENV_SCOPE:
-            env[name] = value
+            env[name] = _unseparate(value)
             i += 1
             continue
         if tok == "git" or tok.endswith("/git"):

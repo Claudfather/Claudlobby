@@ -135,6 +135,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so assignments made within the command are read in all three spellings, with
   a flag beating the variable as git itself does.
 
+- **A shell separator attached to a path, and the symmetry audit that found
+  it.** Review pointed out that the not-modelled list named `GIT_DIR` and
+  omitted `GIT_WORK_TREE` — a one-word omission, but **a partial
+  not-modelled list is worse than none**: a reader who sees one half declared
+  unclosable will reasonably infer the other is covered, turning an unknown
+  unknown into a false assurance, which is the exact thing declaring the bound
+  was added to prevent. Both files now name both halves, and the pair is
+  covered symmetrically by parametrised tests plus a meta-test asserting every
+  member of `ENV_SCOPE` has its cases — because this pair has now been handled
+  asymmetrically three times (as flags it was holes 5 and 6).
+
+  **Making the tests symmetric immediately exposed a tenth hole, in the
+  oldest and plainest part of the guard.** `cd /vault; git reset --hard`
+  tokenises as `['cd', '/vault;', …]` — a semicolon needs no space before it,
+  so it rides inside the path; the guard resolved `/vault;`, which is not the
+  vault, and **allowed about the most ordinary command shape there is** (the
+  spaced `&&` form was correctly denied). The asymmetry is precisely why it
+  had stayed invisible: `GIT_DIR=<vault>/.git;` walks UP to the vault, so the
+  enclosing-repo walk hid the same bug on that axis while it went straight
+  through on its twin. Stripped centrally at both capture points, failing
+  toward seeing the vault.
+
 - **The module now states WHICH CHANNELS IT MODELS.** Nine holes: the first
   eight were one channel's flags, the ninth a channel argv parsing cannot see.
   That is what a scope predicate over another tool's CLI costs, and naming the

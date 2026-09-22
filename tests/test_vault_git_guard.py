@@ -560,43 +560,71 @@ class TestScopeSetThroughTheEnvironment:
         proj.mkdir(parents=True)
         return os.path.realpath(vault), os.path.realpath(proj)
 
-    @pytest.mark.parametrize("prefix", [
-        "GIT_DIR={gd} git",
-        "export GIT_DIR={gd}; git",
-        "env GIT_DIR={gd} git",
+    # BOTH HALVES OF THE PAIR, EVERY TIME. Before this, `GIT_DIR` had four
+    # tests here and `GIT_WORK_TREE` had one -- the same asymmetry that made
+    # `--git-dir` and `--work-tree` holes five and six as flags. Parametrising
+    # over the pair makes the symmetry structural instead of remembered:
+    # a future variable added to ENV_SCOPE gets every case by adding one row.
+    #
+    # `vault` is what points the variable AT the vault on that axis, `other`
+    # what points it away, and `flag` is the command-line twin that must
+    # override it.
+    PAIR = [
+        ("GIT_DIR", "--git-dir", "{vault}/.git", "{proj}/.git"),
+        ("GIT_WORK_TREE", "--work-tree", "{vault}", "{proj}"),
+    ]
+
+    @pytest.mark.parametrize("var,flag,vault_t,other_t", PAIR)
+    @pytest.mark.parametrize("spelling", [
+        "{var}={t} git", "export {var}={t}; git", "env {var}={t} git",
     ])
-    def test_every_spelling_of_the_assignment_is_seen(self, tree3, prefix):
-        """All three arrive as one `NAME=value` token, which is why one rule
-        covers the lot."""
+    def test_every_spelling_of_either_variable_is_seen(
+            self, tree3, var, flag, vault_t, other_t, spelling):
+        """All three spellings arrive as one `NAME=value` token, which is why
+        one rule covers the lot -- for both variables."""
         vault, proj = tree3
-        cmd = prefix.format(gd=f"{vault}/.git") + " reset --hard"
+        t = vault_t.format(vault=vault, proj=proj)
+        cmd = spelling.format(var=var, t=t) + " checkout main"
         assert D.decide(cmd, vault, proj)[0] == "deny"
 
-    def test_git_work_tree_is_the_other_axis(self, tree3):
+    @pytest.mark.parametrize("var,flag,vault_t,other_t", PAIR)
+    def test_the_twin_is_the_variable_pointed_elsewhere(
+            self, tree3, var, flag, vault_t, other_t):
         vault, proj = tree3
-        assert D.decide(f"GIT_WORK_TREE={vault} git checkout main",
-                        vault, proj)[0] == "deny"
+        t = other_t.format(vault=vault, proj=proj)
+        assert D.decide(f"{var}={t} git reset --hard", vault, proj)[0] == "allow"
 
-    def test_the_twin_is_the_variable_pointed_elsewhere(self, tree3):
+    @pytest.mark.parametrize("var,flag,vault_t,other_t", PAIR)
+    def test_a_flag_beats_the_variable_on_each_axis(
+            self, tree3, var, flag, vault_t, other_t):
+        """git's own precedence, measured on both axes:
+        `GIT_DIR=<a> git --git-dir=<b> rev-parse --absolute-git-dir` answers
+        `<b>`, and `--work-tree` likewise overrides `GIT_WORK_TREE`. Getting
+        it backwards would deny work on a bot's own repo whenever a stale
+        variable happened to name the vault."""
         vault, proj = tree3
-        assert D.decide(f"GIT_DIR={proj}/.git git reset --hard",
+        env_t = vault_t.format(vault=vault, proj=proj)
+        flag_t = other_t.format(vault=vault, proj=proj)
+        assert D.decide(f"{var}={env_t} git {flag}={flag_t} reset --hard",
                         vault, proj)[0] == "allow"
 
-    def test_a_safe_verb_under_a_vault_bound_variable_is_still_allowed(self, tree3):
-        """Scope before verb holds here too — the variable makes it the vault's
-        business, and reading the vault is nobody's problem."""
+    @pytest.mark.parametrize("var,flag,vault_t,other_t", PAIR)
+    def test_a_safe_verb_under_a_vault_bound_variable_is_still_allowed(
+            self, tree3, var, flag, vault_t, other_t):
+        """Scope before verb holds on this channel too -- the variable makes it
+        the vault's business, and reading the vault is nobody's problem."""
         vault, proj = tree3
-        assert D.decide(f"GIT_DIR={vault}/.git git status", vault, proj)[0] == "allow"
+        t = vault_t.format(vault=vault, proj=proj)
+        assert D.decide(f"{var}={t} git status", vault, proj)[0] == "allow"
 
-    def test_a_flag_beats_the_variable(self, tree3):
-        """git's own precedence, measured:
-        `GIT_DIR=<a> git --git-dir=<b> rev-parse --absolute-git-dir` answers
-        `<b>`. Getting this backwards would deny work on a bot's own repo
-        whenever a stale variable happened to name the vault."""
+    def test_the_work_tree_variable_moves_the_vaults_own_HEAD(self, tree3):
+        """Named on its own because it is the harm, not just a mechanism.
+        Measured on git 2.39.5: `GIT_WORK_TREE=<away> git checkout <branch>`
+        run from INSIDE the vault switched the vault's own HEAD onto the other
+        branch -- identical to the `--work-tree` flag that was hole six."""
         vault, proj = tree3
-        assert D.decide(
-            f"GIT_DIR={vault}/.git git --git-dir={proj}/.git reset --hard",
-            vault, proj)[0] == "allow"
+        assert D.decide(f"GIT_WORK_TREE={proj} git checkout other",
+                        vault, vault)[0] == "deny"
 
     def test_an_unrelated_assignment_is_not_scope(self, tree3):
         """Only the two variables git actually honours for scope are read; a
@@ -604,3 +632,64 @@ class TestScopeSetThroughTheEnvironment:
         vault, proj = tree3
         assert D.decide(f"FOO={vault}/.git git reset --hard",
                         vault, proj)[0] == "allow"
+
+    def test_the_pair_is_covered_symmetrically(self):
+        """The meta-check, because this pair has been handled asymmetrically
+        three times: as flags (holes five and six) and as variables (one
+        modelled and named, its twin not). Every member of ENV_SCOPE must
+        appear in PAIR, so adding a variable without its cases fails here."""
+        assert {p[0] for p in self.PAIR} == set(D.ENV_SCOPE)
+
+
+class TestAShellSeparatorAttachedToAPath:
+    """Hole ten, and it was in the oldest, plainest part of the guard.
+
+    `cd /vault; git reset --hard` tokenises as `['cd', '/vault;', ...]` — a
+    semicolon needs no space before it, so it rides inside the path. The guard
+    resolved `/vault;`, which is not the vault, and ALLOWED about the most
+    ordinary command shape there is.
+
+    It surfaced from making the `GIT_DIR`/`GIT_WORK_TREE` tests symmetric, and
+    the asymmetry is exactly why it had been invisible: `GIT_DIR=<vault>/.git;`
+    walks UP to the vault, so the enclosing-repo walk hid the defect on that
+    axis while the same bug went straight through on its twin. One half of a
+    pair passing by accident is what a symmetric test is for.
+    """
+
+    @pytest.fixture()
+    def tree4(self, tmp_path):
+        vault = tmp_path / "vault"
+        proj = tmp_path / "projects" / "repo"
+        vault.mkdir(parents=True)
+        proj.mkdir(parents=True)
+        return os.path.realpath(vault), os.path.realpath(proj)
+
+    @pytest.mark.parametrize("sep", [";", " &&", " ;", "&"])
+    def test_cd_into_the_vault_is_seen_through_any_separator(self, tree4, sep):
+        vault, proj = tree4
+        assert D.decide(f"cd {vault}{sep} git reset --hard",
+                        vault, proj)[0] == "deny"
+
+    @pytest.mark.parametrize("sep", [";", " &&"])
+    def test_the_twin_is_cd_AWAY_from_the_vault(self, tree4, sep):
+        """Standing in the vault and leaving it must stay allowed, or the fix
+        would refuse a bot walking out to its own checkout."""
+        vault, proj = tree4
+        assert D.decide(f"cd {proj}{sep} git reset --hard",
+                        vault, vault)[0] == "allow"
+
+    def test_a_safe_verb_after_the_cd_is_still_allowed(self, tree4):
+        vault, proj = tree4
+        assert D.decide(f"cd {vault}; git status", vault, proj)[0] == "allow"
+
+    @pytest.mark.parametrize("var,target", [
+        ("GIT_DIR", "{vault}/.git"), ("GIT_WORK_TREE", "{vault}"),
+    ])
+    def test_an_exported_variable_is_seen_through_the_separator(
+            self, tree4, var, target):
+        """BOTH halves, because one of them passed by accident before the fix
+        and would have gone on passing."""
+        vault, proj = tree4
+        t = target.format(vault=vault)
+        assert D.decide(f"export {var}={t}; git checkout main",
+                        vault, proj)[0] == "deny"

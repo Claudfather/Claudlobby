@@ -48,8 +48,10 @@ command's reach. Everything else run from inside the vault is the vault's
 business whatever it points at.
 
 **Setting `GIT_DIR` or `GIT_WORK_TREE` is the same as passing the flag.** Git
-honours them identically, so `GIT_DIR=<vault>/.git git reset --hard` is a
-command aimed at the vault however far away you are standing, and it is
+honours them identically. `GIT_DIR=<vault>/.git git reset --hard` is a command
+aimed at the vault however far away you are standing, and `GIT_WORK_TREE=<away>
+git checkout <branch>` run *inside* the vault moves the vault's own HEAD — the
+same pair of traps as the two flags above, through a different door. Both are
 refused like any other. A flag beats the variable, which is git's own rule.
 
 **A flag this guard has not been taught is refused, not waved through.** It
@@ -62,7 +64,8 @@ managed to parse. If you hit it, the flag is probably fine and the guard simply
 has not been taught it: say so rather than working around it.
 
 **What this guard does not see.** It reads a git command line. It cannot see a
-`GIT_DIR` exported by an earlier command, git config that moves the tree
+`GIT_DIR` or `GIT_WORK_TREE` exported by an earlier command, git config that
+moves the tree
 (`core.worktree`, `safe.directory`), or an alias or wrapper that never spells
 `git` at all. The rule above still stands in those cases — the vault's git
 state is not yours to move — there is simply no mechanism catching you. Treat
