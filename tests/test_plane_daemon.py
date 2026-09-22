@@ -552,6 +552,14 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
     root, sock, _ = running
     import claudlobby.plane.daemon as dmod
 
+    # The daemon BINDS (daemon.py:541) before it emits `daemon_started`
+    # (:561), and `_await_bind` waits only for the socket FILE — so this rung's
+    # input may not exist yet when the socket does. Pre-existing window; #1693's
+    # synchronous=FULL widened it from microseconds to reliably losable (~40% of
+    # runs) by adding an fsync to that emit. Wait for the FACT the assertion
+    # depends on rather than for a proxy that precedes it.
+    _await_daemon_started(root)
+
     # the doctor probes the DEFAULT socket path; point the check at ours by
     # exercising the never-armed branch on a fresh root and the serving branch
     # via the daemon's own root only when the default path matches — here the
@@ -625,6 +633,40 @@ def _reap(proc, timeout: float = 20.0) -> tuple[str, str]:
         proc.kill()
         proc._reaped = ("", "")
     return proc._reaped
+
+
+def _await_daemon_started(root: Path, timeout: float = 30.0) -> None:
+    """Block until the `daemon_started` row is READABLE in the plane.
+
+    Not the same event as the socket appearing: the daemon binds first and
+    records afterwards, so a test that reads this rung right after the bind is
+    racing the record. Polls the db the doctor rung itself reads, so the wait
+    ends on exactly the condition the assertion needs.
+    """
+    import sqlite3
+
+    from claudlobby.plane.db import db_file
+    deadline = time.monotonic() + timeout
+    db = db_file(root)
+    while time.monotonic() < deadline:
+        if db.exists():
+            try:
+                conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+                try:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM events WHERE event='daemon_started'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+                if row and row[0]:
+                    return
+            except sqlite3.Error:
+                pass                      # mid-write; try again
+        time.sleep(0.05)
+    raise AssertionError(
+        f"daemon_started never became readable in {timeout}s — the rung under "
+        "test has no input, so a verdict here would be about the wait, not the rung"
+    )
 
 
 def _await_bind(proc, sock: Path, timeout: float = 30.0) -> None:

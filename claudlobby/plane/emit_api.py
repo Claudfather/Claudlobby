@@ -199,7 +199,9 @@ LOCK_RETRY_ATTEMPTS = 6
 LOCK_RETRY_BACKOFF_S = 0.15
 
 
-def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
+def emit_batch(root: Path, raw_requests: list[dict], *,
+               conn_factory: "Callable[[], sqlite3.Connection] | None" = None
+               ) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
 
@@ -229,24 +231,78 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
         item, c = validate_item(r, modes or {})        # ContractViolation propagates
         captured.append(c)
         items.append(item)
+    # A caller-supplied connection is USED AND NOT CLOSED: its owner holds the
+    # lifecycle and the checkpoint cadence (#1693 arm D). Without one this is
+    # byte-for-byte today's behaviour -- connect, migrate, ingest, close -- which
+    # is what the cold CLI needs, being a fresh process per batch whose close is
+    # necessarily the last-connection close.
+    #
+    # The durability difference rides on the CONNECTION, not on this branch: a
+    # long-lived connection is opened `synchronous=FULL`, so its commits fsync
+    # the WAL and an acknowledgment is durable without any checkpoint. A
+    # per-batch connection stays NORMAL and is made durable by the truncate
+    # checkpoint its close triggers. Both paths acknowledge only after a
+    # commit that is on disk; they differ in which syscall put it there.
+    # A FACTORY, never a ready-made connection. Passing the connection itself
+    # makes the caller open the db in the ARGUMENT LIST -- before `emit_batch`
+    # is entered, and therefore before the capture-config load and validation
+    # that precede the connect here. That reordering is not cosmetic: on a root
+    # whose `state/` is a regular file, `db_path()`'s mkdir raises
+    # NotADirectoryError, and evaluating it early turned a typed
+    # `contract_violation` (the capture policy is unreadable, which is what
+    # fails FIRST) into an unrouted traceback. The factory is called exactly
+    # where `connect` used to be, so the order of failures is unchanged.
+    borrowed = conn_factory is not None
     attempt = 0
     while True:
         try:
-            conn = connect(db_path(root))
+            # BOTH paths open synchronous=FULL, so the two transports make ONE
+            # promise (#1693). Under NORMAL the cold rung's durability rides on
+            # the close-checkpoint's fsync -- and that checkpoint's failure is
+            # caught and still reported `committed` just below, so the rung kept
+            # an acknowledged-but-not-durable path the daemon rung no longer
+            # has. Which rung an emit takes is arbitrary from the caller's side
+            # (the shim falls to the cold one whenever the socket wedges, which
+            # on this host is most of the time), so a divergence here is a
+            # promise that varies by accident -- worse than either semantic
+            # chosen deliberately.
+            #
+            # Measured cost of FULL on the cold path: NONE. Interleaved arms
+            # (reps outer, arms inner, so both share the same minutes of host
+            # load) over 60 batches each: NORMAL 66.34ms median / 139.83 p95,
+            # FULL 60.17 / 120.58 -- FULL nominally FASTER, ranges overlapping,
+            # so the honest reading is no measurable difference. A first,
+            # SEQUENTIAL pass had reported +44ms; that was load drift, not a
+            # cost, and the arms had to be interleaved to see it (the
+            # send-size-probe.sh lesson). The cold path already fsyncs at its
+            # close-checkpoint, so the commit-time fsync buys durability
+            # without adding a syscall the rung was not already paying.
+            own = conn_factory() if borrowed else connect(db_path(root),
+                                                          synchronous="FULL")
             try:
-                migrate(conn)                               # DowngradeError propagates
+                migrate(own)                                # DowngradeError propagates
                 host = ensure_host_uid(Path(root) / "state")
-                results = ingest_many(conn, items, host_uid=host)
+                results = ingest_many(own, items, host_uid=host)
             finally:
-                try:
-                    conn.close()
-                except sqlite3.Error:
-                    # Post-review fix: a WAL-flush failure on close, AFTER a
-                    # successful commit, must not fall into the spool path —
-                    # that reported committed events as "spooled" and queued a
-                    # redundant replay. A close failure after a FAILED ingest
-                    # changes nothing (that exception already routed).
-                    pass
+                if not borrowed:
+                    try:
+                        own.close()
+                    except sqlite3.Error:
+                        # Post-review fix: a WAL-flush failure on close, AFTER a
+                        # successful commit, must not fall into the spool path —
+                        # that reported committed events as "spooled" and queued a
+                        # redundant replay. A close failure after a FAILED ingest
+                        # changes nothing (that exception already routed).
+                        #
+                        # #1693: the swallow is now HARMLESS rather than
+                        # merely unreached. Both paths commit under FULL, so the
+                        # rows are already fsync'd before this close runs -- a
+                        # checkpoint failure here is a WAL-size event, not a
+                        # silent durability hole. The swallow stays because its
+                        # original reason stands: a close failure after a
+                        # successful commit must not route into the spool and
+                        # queue a redundant replay.
+                        pass
             break
         except (DowngradeError, ContractViolation):
             raise
