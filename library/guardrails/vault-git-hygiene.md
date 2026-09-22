@@ -32,6 +32,13 @@ business wherever it was typed. So reaching for `--git-dir` to work on several
 repositories at once does not step around this page — it is the ordinary way
 someone arrives here without meaning to.
 
+**And pointing a command elsewhere is not the same as standing elsewhere.**
+`--git-dir` names the repository, not the working tree: with no `--work-tree`,
+git uses **the directory you are in** as the tree. Run from inside the vault,
+`git --git-dir=<other-repo>/.git reset --hard` writes that other repo's files
+into the vault, so it is refused. `-C` and `--work-tree` genuinely do move the
+command, and are allowed.
+
 **Why it is a hook and not just this page.** A vault clone on a side branch is
 the one state where captures look durable in `git log` and exist on no other
 machine. On a live host that state lasted a month: 59 commits of knowledge

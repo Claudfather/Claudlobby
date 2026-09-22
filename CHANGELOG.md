@@ -37,8 +37,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Where a command points** is every path named by a scope-setting flag —
   `-C`, `--git-dir`, `--work-tree` — and the invocation is vault-bound if
   **any** of them is, so a harmless-looking `-C` cannot launder the flag
-  beside it. With none of those, the last `cd <path>` before the git token,
-  else the payload's `cwd`. An **unreadable**
+  beside it. Where the shell is standing stays in scope **unless something
+  replaced it**, and only `-C` (git chdirs there first) and an explicit
+  `--work-tree` do — **measured on git 2.39.5**, a `--git-dir` naming another
+  repository with no `--work-tree` makes git treat the *current directory* as
+  that repository's working tree, so `git --git-dir=<other>/.git reset --hard`
+  run inside the vault writes the other repo's tracked files into it. Failing
+  to model that would have turned an accidentally-correct refusal into a
+  permission. Otherwise the last `cd <path>` before the git token, else the
+  payload's `cwd`. An **unreadable**
   target — a variable, a glob — falls back to `cwd` rather than to allow: a
   variable is what someone reaches for when doing something wide, so the
   opposite fallback would put the blind spot exactly where the risk is. With no
