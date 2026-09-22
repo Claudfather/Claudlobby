@@ -117,6 +117,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   omitting a real flag costs a refusal inside the vault and nothing anywhere
   else, while including one with the wrong arity re-opens the hole.
 
+- **The refusal is UNCONDITIONAL, and scope can be set without a flag at all.**
+  Two more, both found by review, both live. The unmodelled-flag refusal sat
+  *after* the scope test, so it fired only once the already-parsed part said
+  vault-bound — a statement about a PARTIAL read, and it made the verdict
+  depend on flag ORDER: `git --super-prefix foo/ --git-dir=<vault>/.git reset
+  --hard` allowed while the same flags reversed denied, because a real
+  `--git-dir` behind an unmodelled flag is never reached. The safety property
+  the allowlist was adopted for holds only when nothing is consulted first.
+  **That deny now has no allow twin, deliberately**: a twin would assert that
+  some command the guard could not finish reading is safe. The cost was
+  measured rather than assumed — every pre-verb flag in the fleet's own
+  scripted git usage is already in `GLOBAL_FLAGS`. Separately, `GIT_DIR` and
+  `GIT_WORK_TREE` are a **second channel** rather than a ninth flag: git
+  honours them exactly as it honours the flags (measured: `GIT_DIR=<vault>/.git
+  git symbolic-ref --short HEAD` run from outside answers the VAULT's branch),
+  so assignments made within the command are read in all three spellings, with
+  a flag beating the variable as git itself does.
+
+- **The module now states WHICH CHANNELS IT MODELS.** Nine holes: the first
+  eight were one channel's flags, the ninth a channel argv parsing cannot see.
+  That is what a scope predicate over another tool's CLI costs, and naming the
+  bound beats implying coverage. **Modelled:** the `GLOBAL_FLAGS` pre-verb
+  flags, `GIT_DIR`/`GIT_WORK_TREE` set within the command, a `cd`, the
+  payload's `cwd`. **Not modelled, each a real way in:** a variable exported by
+  an earlier tool call (the hook is handed one command and no environment),
+  `core.worktree` and `safe.directory`, aliases and wrappers that present no
+  `git` token (#1730), and `_inside`'s own two known wrong answers (#1729). The
+  honest claim is that it refuses what it cannot read **of a git command
+  line** — not that it cannot be got around.
+
 - **What this guard does NOT cover, named rather than left implicit.** The same
   review found three residual gaps, each verified against the code and each
   with **no exposure on any measured fleet**: a worktree of the vault's own

@@ -47,13 +47,26 @@ Only `-C`, or `--git-dir` and `--work-tree` together, take the vault out of a
 command's reach. Everything else run from inside the vault is the vault's
 business whatever it points at.
 
+**Setting `GIT_DIR` or `GIT_WORK_TREE` is the same as passing the flag.** Git
+honours them identically, so `GIT_DIR=<vault>/.git git reset --hard` is a
+command aimed at the vault however far away you are standing, and it is
+refused like any other. A flag beats the variable, which is git's own rule.
+
 **A flag this guard has not been taught is refused, not waved through.** It
 knows git's pre-verb options and how many words each consumes; anything else
-means it cannot reliably tell which repository is being aimed at or even which
-word is the subcommand, so it stops. This only ever applies to a command
-already pointed at the vault — your own checkouts are untouched however unusual
-their flags. If you hit it, the flag is probably fine and the guard simply does
-not know it yet: say so rather than working around it.
+means it cannot reliably tell which repository is being aimed at, or even which
+word is the subcommand, so it stops rather than guess. **This one refuses
+wherever you are**, unlike every other rule here — once the guard has stopped
+reading, "this is not pointed at the vault" would be a claim about the half it
+managed to parse. If you hit it, the flag is probably fine and the guard simply
+has not been taught it: say so rather than working around it.
+
+**What this guard does not see.** It reads a git command line. It cannot see a
+`GIT_DIR` exported by an earlier command, git config that moves the tree
+(`core.worktree`, `safe.directory`), or an alias or wrapper that never spells
+`git` at all. The rule above still stands in those cases — the vault's git
+state is not yours to move — there is simply no mechanism catching you. Treat
+the page, not the hook, as the thing you are following.
 
 **Why it is a hook and not just this page.** A vault clone on a side branch is
 the one state where captures look durable in `git log` and exist on no other

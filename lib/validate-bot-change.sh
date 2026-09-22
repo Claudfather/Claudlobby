@@ -3988,13 +3988,42 @@ _vg_unk="$(_vg_hook "$_VG_VAULT" "git --some-future-flag checkout main")"
 case "$_vg_unk" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
 harness_check "#1725 DENY: an option the guard does not recognise, in the vault" "$r"
 
+# NO ALLOW TWIN, deliberately: the refusal is unconditional, because scope
+# computed before the parser stopped describes a partial read. A twin here
+# would assert that some unreadable command is safe.
 _vg_unk_out="$(_vg_hook "$_VG_PROJ" "git --some-future-flag checkout main")"
-[ -z "$_vg_unk_out" ] && r=yes || r=no
-harness_check "#1725 ALLOW: the same unknown option outside the vault is untouched" "$r"
+case "$_vg_unk_out" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: an unknown option refuses OUTSIDE the vault too" "$r"
 
 _vg_known="$(_vg_hook "$_VG_VAULT" "git --no-pager log")"
 [ -z "$_vg_known" ] && r=yes || r=no
 harness_check "#1725 ALLOW: a modelled flag with a safe verb still reads in the vault" "$r"
+
+# The unmodelled-flag refusal is UNCONDITIONAL, which is what makes it
+# order-independent: a real --git-dir sitting behind an unmodelled flag is
+# never reached by the parser, so consulting scope first made the same command
+# allow or deny depending on which flag came first.
+_vg_ord="$(_vg_hook "$_VG_PROJ" "git --super-prefix foo/ --git-dir=$_VG_VAULT/.git reset --hard")"
+case "$_vg_ord" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: an unmodelled flag AHEAD of a real --git-dir" "$r"
+
+# Scope set through the ENVIRONMENT is a second channel; the flag allowlist is
+# correct and simply does not apply to a caller that exports instead of passing.
+_vg_env="$(_vg_hook "$_VG_PROJ" "GIT_DIR=$_VG_VAULT/.git git reset --hard")"
+case "$_vg_env" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: GIT_DIR pointed at the vault, from outside it" "$r"
+
+_vg_envwt="$(_vg_hook "$_VG_PROJ" "GIT_WORK_TREE=$_VG_VAULT git checkout main")"
+case "$_vg_envwt" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: GIT_WORK_TREE pointed at the vault, from outside it" "$r"
+
+_vg_envtwin="$(_vg_hook "$_VG_PROJ" "GIT_DIR=$_VG_PROJ/.git git reset --hard")"
+[ -z "$_vg_envtwin" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same variable pointed elsewhere is untouched" "$r"
+
+_vg_envsafe="$(_vg_hook "$_VG_PROJ" "GIT_DIR=$_VG_VAULT/.git git status")"
+[ -z "$_vg_envsafe" ] && r=yes || r=no
+harness_check "#1725 ALLOW: a safe verb under a vault-bound variable still reads" "$r"
 
 if [ "${_vg_deny:-}" = "" ]; then
     echo "  --- DIAGNOSTIC: #1720 deny produced no output ---"
