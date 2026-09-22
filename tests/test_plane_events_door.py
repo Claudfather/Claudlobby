@@ -212,8 +212,77 @@ def test_a_wedged_rung_is_waited_on_only_to_the_bound_and_disclosed(tmp_path):
               PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2")
     elapsed = time.monotonic() - t0
     assert r.returncode == 0 and 2 <= elapsed < 8, (elapsed, r.stderr)
-    assert "reaped at 2s" in r.stderr and "not recorded" in r.stderr, r.stderr
+    assert "reaped at 2s" in r.stderr, r.stderr
+    # `not recorded` DELIBERATELY no longer asserted -- this line used to pin it,
+    # and it was pinning a claim the door cannot make (#1657). The contract note
+    # on plane_emit_bounded already said the plane may hold the row after a kill
+    # past the commit, so the code contradicted its own comment and the test
+    # froze the contradiction. What the door can say is UNKNOWN, plus what to do
+    # about it.
+    assert "state UNKNOWN" in r.stderr, r.stderr
+    assert "Re-emitting is safe" in r.stderr, (
+        "an UNKNOWN with no remedy is a worse disclosure than a wrong one: the "
+        "pre-minted event id is what makes a retry safe, so say it here")
     assert not (bot_dir / "data" / "events").exists()
+    assert not _wedge_alive(w)
+
+
+def test_a_reaped_emit_is_COUNTED_where_a_health_door_can_find_it(tmp_path):
+    """#1657's third defect: a reaped emit's fate was uncounted.
+
+    Both disclosures go to the caller's stderr -- the journal for a timer, a tmux
+    pane for a bot session. Measured on one host: 24h of journal showed 3 reaps,
+    and that 3 is a FLOOR from a partial channel, because every bot-session reap
+    in the same window left no trace anywhere. `plane doctor` printed fourteen
+    green rungs over a live reap.
+
+    So the reap appends one row beside the db, where a health door can read it.
+    """
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    losses = root / "state" / "plane" / ".emit-losses"
+    assert not losses.exists(), "precondition: nothing counted yet"
+
+    w = _wedge(tmp_path, 60)
+    r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
+              PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2")
+    assert r.returncode == 0, r.stderr
+
+    assert losses.exists(), (
+        "a reaped emit left no durable trace -- which is the whole defect: "
+        "stderr is a pane for a bot session and nothing else records it")
+    rows = [l for l in losses.read_text().splitlines() if l.strip()]
+    assert len(rows) == 1, rows
+    fields = rows[0].split("\t")
+    assert len(fields) == 4, fields
+    assert fields[0].isdigit() and int(fields[0]) > 0, "an epoch, so age is derivable"
+    assert fields[1] == "reap", fields
+    assert fields[2] == "emit_fleet_event", "the DOOR, so a reader knows what lost it"
+    assert not _wedge_alive(w)
+
+
+def test_the_loss_counter_ages_rows_out_and_keeps_the_recent_ones(tmp_path):
+    """Rotation is by AGE, not size: the question it answers is always `how often
+    lately`. Asserted both ways in one call, because a rotation that dropped
+    everything would satisfy a stale-rows-gone assertion on its own."""
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    plane_state = root / "state" / "plane"
+    plane_state.mkdir(parents=True, exist_ok=True)
+    losses = plane_state / ".emit-losses"
+    losses.write_text(
+        "1\treap\tancient\tbound=10s\n"                      # epoch 1970 — far outside
+        f"{int(time.time()) - 60}\treap\trecent\tbound=10s\n"  # a minute ago — inside
+    )
+    w = _wedge(tmp_path, 60)
+    _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
+          PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2")
+    text = losses.read_text()
+    assert "ancient" not in text, "a row past the 24h window must age out"
+    assert "recent" in text, (
+        "a row INSIDE the window must survive -- a rotation that truncated "
+        "everything would pass the assertion above on its own")
+    assert "emit_fleet_event" in text, "and the new reap must still be appended"
     assert not _wedge_alive(w)
 
 

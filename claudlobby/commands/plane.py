@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -456,6 +457,56 @@ def cmd_plane_doctor(args) -> int:
                  "UNREADABLE — cannot enumerate (a gap, not a zero)")
         else:
             rung(not sc.quarantined, "quarantine", str(len(sc.quarantined)))
+        # --- the two things this door could not see (#1657) -----------------
+        # Both live beside the db as plain files because both are written on the
+        # path where the PLANE is what could not be reached — recording them
+        # through the plane would make the instrument depend on its subject.
+        #
+        # UNREADABLE IS A FAILING RUNG, NOT A ZERO, matching the spool rungs
+        # directly above: a counter this door cannot enumerate is a gap, and the
+        # whole point of #1657's third defect is that a silent maybe read as a
+        # clean bill. `plane doctor` printed fourteen green rungs over a live
+        # reap and an armed breaker.
+        plane_state = root / "state" / "plane"
+        losses = plane_state / ".emit-losses"
+        if not losses.exists():
+            # Absent is legitimately clean: the file is created on first loss.
+            rung(True, "emit losses", "none recorded")
+        else:
+            try:
+                rows = [r for r in losses.read_text().splitlines() if r.strip()]
+            except OSError as exc:
+                rung(False, "emit losses", f"UNREADABLE — {exc} (a gap, not a zero)")
+                rows = None
+            if rows is not None:
+                reaps = [r for r in rows if "\treap\t" in r]
+                detail = f"{len(reaps)} reaped emit(s) in the last 24h"
+                if reaps:
+                    doors = sorted({r.split("\t")[2] for r in reaps if len(r.split("\t")) > 2})
+                    detail += (f" — doors: {', '.join(doors[:4])}"
+                               f"{' …' if len(doors) > 4 else ''}."
+                               " Each is a batch whose commit is UNDETERMINED:"
+                               " re-emitting is safe (ingest dedupes on the"
+                               " pre-minted event id)")
+                rung(not reaps, "emit losses", detail)
+
+        # The breaker's own state. Not a defect in itself — measured on this
+        # estate it damps (89% of episodes are a single arming) and nothing is
+        # lost, so #1657 closes it as acceptable. But a condition closed as
+        # acceptable still has to be VISIBLE, or the closure is the same
+        # overstatement it was meant to retire: this door never looked at the
+        # marker at all.
+        wedged = plane_state / ".socket-wedged"
+        if not wedged.exists():
+            rung(True, "socket breaker", "not armed")
+        else:
+            try:
+                age = int(time.time() - wedged.stat().st_mtime)
+                rung(True, "socket breaker",
+                     f"ARMED {age}s ago — doors take the cold CLI until it"
+                     " expires. Recorded, not lost; see #1693 for the cause")
+            except OSError as exc:
+                rung(False, "socket breaker", f"UNREADABLE — {exc}")
         # Composed-hash-drift rung (chunk: doctor IOUs — closes the chunk-B
         # disclosure that the --verify capability existed but doctor never
         # surfaced it). Doctor SURFACES the check; it does NOT re-run it.
