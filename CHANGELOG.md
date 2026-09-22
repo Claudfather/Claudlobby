@@ -119,6 +119,94 @@ when the inputs move, both sides move together.
   that arrived through git. It deliberately does not claim to separate a commit
   from a checkout — nothing readable afterwards can, and naming what the answer
   excludes is what sends a reader to look instead of trusting a word.
+### Added — `vault-sync`: the scheduled door that notices a wedged vault (#1721)
+
+Claudron's sync fires only at session boundaries, under a 2-second hook budget,
+and reports to a log file **inside the vault it is failing to sync**. When a
+host wedged, every sync refused for twelve days, printed success-shaped output,
+and **nothing scheduled ever looked**. The sibling fixes stop the wedge
+happening; this is the job that notices one.
+
+- **`lib/vault-sync.sh`**, composed as a **dormant** host job (`enroll: false`
+  composes no unit at all). Armed, it commits and pushes on every host it runs
+  on — `update-siblings`' own "mutates operator source" category, not a new one.
+- **Discovery is a read, not a declaration.** The vault is already composed into
+  every `bot.conf` as `CLAUDRON_VAULT_PATH`; the job walks what exists and
+  dedupes by real path. A host-level field would be a second copy of that fact,
+  and a second copy is how the two drift.
+- **Every outcome is recorded, both directions** — `vault.sync_ok` per run, so
+  "last successful sync" finally has a denominator — plus `vault.state`,
+  `vault.ahead` / `behind` / `uncommitted`, and one `vault_sync` event on
+  failure. Subject kind `vault`, which the plane already has.
+- **`unknown` is recorded, never invented.** Until Claudron's health door ships,
+  `sync --check` exits 2 (argparse's usage error for an absent flag) and the job
+  records `unknown` **and still syncs** — the verdict is a report, not a gate. A
+  fabricated `clean` is the success-shaped output this program exists to end.
+- **Paging is debounced on STATE CHANGE, deliberately not on a clock.** A wedged
+  vault is wedged until someone fixes it; it is not a burst. One ALERT on the
+  transition, nothing while it stays true, one NOTICE on recovery.
+- **The envelope is parsed, never grepped** — reading the text would inherit the
+  very success-shaped-output bug the job exists to surface.
+- **`lib/rehearse-vault-sync.sh`** drives the real job through clean → wedged →
+  still-wedged → recovered against a **real plane** in a throwaway root, reading
+  back through the plane rather than grepping the job's own log, and carries a
+  positive control: a *changed* failure state must page again, or the debounce
+  is muting rather than debouncing.
+- `documentation/runbooks/vault-sync.md`; a `Switch` row so `doctor` lists the
+  job either way — a door nobody can see is a door nobody has.
+- **The routing scenario reads the DELIVERY door, not the disclosure event, and
+  the first cut of it went red against correct code.** Review widened the
+  fixture to two DISAGREEING fleets — `aaa-decoy` sorts first and declares a
+  manager, `zzz-target` is the declared recipient — because with one fleet
+  "pick whichever sorts first" and "resolve correctly" are byte-identical and
+  the harness certified the #1517 bug and its fix alike. But the assertion then
+  asked the plane for `alert_recipient_resolved`, which
+  `_disclose_alert_recipient` **suppresses on `origin=declared`** — the #1517
+  self-clearing property, pinned by `tests/test_alert_recipient.sh` — so it
+  interrogated the one channel that is silent exactly on the path it tested.
+  It could not fail honestly either: the same silencer covers `origin=local`,
+  so an outcome that ignored the declaration for a local pick printed the
+  identical "no row", and the failure message named a lexical-pick bug it could
+  not distinguish from correct behaviour. **A check that fails for the wrong
+  reason is the same defect class as one that cannot fail at all.** What can
+  answer is where the alert ARRIVED: a real manager session per fleet on that
+  fleet's own socket (`MANAGER_TMUX_SOCKET`), which is the instrument
+  `tests/test_alert_recipient.sh` reaches for at unit level ("the only way to
+  see which manager a correct, silent resolution picked") and
+  `rehearse-debounce-recipient.sh` reaches for on real tmux. Two arms, the
+  second being the first's positive control twice over: a decoy pane reading 0
+  is equally consistent with "correctly not chosen" and "this pane never
+  receives anything", and arm A's silent plane is equally consistent with
+  "declared, so silent" and "disclosure is broken", so arm B feeds BOTH in the
+  opposite direction in the same run. Mutation-proved rather than asserted:
+  with the declaration read as empty (the pre-#1517 shape) arm A fails all
+  three of its assertions and arm B stays green.
+- **The four identity vars are scrubbed in BOTH harnesses, which was one ask and
+  landed as half of one.** `resolve_bots_dir` falls back through
+  `${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}`, so a run launched from inside a bot
+  session — how the runbook tells a reviewer to rehearse it — substitutes the
+  CALLING bot's fleet for the fleet-less host-job shape under test; measured in
+  review, contaminated run anchored on the reviewer's fleet, scrubbed run on the
+  host. The shell half shipped first and the Python half did not, so
+  `tests/test_vault_sync.py::_run` kept inheriting everything. Both now go
+  through one rule, and the scrub runs BEFORE the test's own overrides so a
+  deliberately declared recipient still wins. Two pins, each mutation-proved
+  and each failing alone: deleting the scrub reddens one, moving it after the
+  overrides reddens the other. The contaminants are set BY the test rather than
+  read from the environment — asserting their absence against a host that never
+  exported them passes with the scrub deleted, green on every developer machine
+  and blind in CI (#1169's shape).
+- **One claim in the first cut was refuted in review and is corrected at the
+  source, not only in the prose.** `_emit_fleet_signal` does NOT "record
+  nothing" for a fleet-less host job: `emit_fleet_event` has an explicit third
+  branch (`_fleet="_host"`, `_kind=host`, commented "never silence") that
+  anchors exactly this case on the hostname, and the alert's own rows —
+  delivery failures included — land durably. The reason to also emit a
+  dedicated `vault_sync` event is the **subject**: anchored on the host, WHICH
+  VAULT would survive only inside the free-text reason, so every vault on a
+  host would share one subject. The code comment that stated the wrong reason
+  now states the right one and records that it was refuted.
+
 
 ### Added — a composed guard that stops a bot rewriting the vault's git state by accident (#1720)
 
