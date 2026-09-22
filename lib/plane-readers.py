@@ -127,6 +127,91 @@ OPEN_SQL = (
     + _SIBLING_CLOSURE +
     " ORDER BY a.occurred_at, a.ingest_seq"
 )
+#: HOW FAR BACK THE RECORD ACTUALLY GOES (#1658). Every windowed door renders
+#: its answer as if the window were covered; on any host whose plane is younger
+#: than the window -- every fleet in its first month, every fleet after a
+#: cutover -- the number is an artifact of the record's age with nothing on the
+#: surface saying so. Measured on this estate while filing: a `--since 14d` read
+#: returned 325 rows over a record 2.2 DAYS old.
+#:
+#: PER FAMILY, not one global instant, because they genuinely differ: measured
+#: here `system` reaches back 2.35d while `workstream` reaches 1.32d, so a
+#: single number would overstate coverage for some doors and understate it for
+#: others. `family=None` asks about the whole record.
+#:
+#: `ingested_at`, not the events' own `occurred_at`: the question is "how much
+#: did this plane WITNESS", and a backfilled row with an old occurred_at is not
+#: evidence that the window was observed.
+COVERAGE_SQL = (
+    "SELECT MIN(ingested_at), MAX(ingested_at), COUNT(*) FROM ingest_ledger"
+    " WHERE (? IS NULL OR family = ?)"
+)
+
+
+def coverage(conn: sqlite3.Connection, family: Optional[str] = None
+             ) -> tuple[Optional[str], Optional[str], int]:
+    """``(first, last, rows)`` of the plane's record, optionally per family.
+
+    ``(None, None, 0)`` for a plane that holds nothing -- which is a real and
+    legitimate state (a fleet that has not recorded yet) and NOT the same as a
+    plane that cannot be reached. Reachability is the caller's `connect` to
+    answer; this only ever describes a plane it already opened.
+    """
+    row = conn.execute(COVERAGE_SQL, (family, family)).fetchone()
+    if row is None:
+        return None, None, 0
+    return row[0], row[1], row[2] or 0
+
+
+def _span_days(first: Optional[str], last: Optional[str]) -> Optional[float]:
+    a, b = _epoch(first), _epoch(last)
+    if a is None or b is None:
+        return None
+    return max(b - a, 0) / 86400.0
+
+
+def coverage_line(first: Optional[str], last: Optional[str], rows: int,
+                  window_s: Optional[float]) -> str:
+    """The one wording every windowed door prints (#1658).
+
+    **It is printed whether or not the window is covered, and that is the
+    decision rather than an oversight.** A line that appears only when
+    something is wrong makes its ABSENCE carry the all-clear -- and a surface
+    that cannot distinguish "I checked and it is fine" from "I could not see"
+    is the exact defect this exists to close. Stating coverage every time costs
+    one line and makes the denominator visible, which is the standard the rest
+    of this estate is held to.
+
+    It STATES, it does not refuse. A door that refused whenever the window
+    exceeded the record would be useless on a young fleet -- which is every new
+    install -- and would train people to pass `--since` values they know will
+    work, hiding the very fact the line exists to surface. Refusal stays
+    reserved for a plane that cannot be REACHED, which is a different question
+    and already answered at rc 3.
+    """
+    if rows == 0 or first is None:
+        return "coverage: the plane holds no rows for this read yet"
+    span = _span_days(first, last)
+    start = first[:16].replace("T", " ") + "Z"
+    if window_s is None or span is None:
+        return f"coverage: record starts {start} ({rows} row(s))"
+    win_d = window_s / 86400.0
+    if span + 1e-9 >= win_d:
+        return f"coverage: full {_fmt_days(win_d)} window (record starts {start})"
+    pct = 100.0 * span / win_d if win_d else 0.0
+    return (f"coverage: {_fmt_days(span)} of the {_fmt_days(win_d)} window"
+            f" — the record starts {start} ({pct:.0f}%)")
+
+
+def _fmt_days(d: float) -> str:
+    # hours up to and including a day: "full 24h window" is what a caller who
+    # typed --since 24h expects to read back, not "full 1.0d window".
+    if d <= 1.0:
+        h = d * 24
+        return f"{h:.0f}h" if abs(h - round(h)) < 0.05 else f"{h:.1f}h"
+    return f"{d:.1f}d"
+
+
 ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
 # The bot's last sign of life: a linked `progress` task event OR the
 # `report_status` marker an id-less progress report lands on the actor (the

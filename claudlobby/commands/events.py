@@ -122,6 +122,47 @@ def format_event_table(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _events_coverage_line(conn, paths, since) -> str:
+    """#1658. `events` takes `--since` and rendered the answer as if the window
+    were covered; on a plane younger than the window that is an artifact of the
+    record's age. See `plane-readers.coverage_line` for why this states rather
+    than refuses -- refusal here is already reserved for an UNREACHABLE plane
+    (rc 3 above), and under-covered is not unreachable."""
+    try:
+        from ..paths import load_lib_module
+        pr = load_lib_module(paths.lib, "plane-readers.py")
+        window_s = _window_seconds(since)
+        first, last, rows = pr.coverage(conn, None)
+        return pr.coverage_line(first, last, rows, window_s)
+    except AttributeError:
+        return ("coverage: unknown — the readers installed at this root predate"
+                " the coverage derivation (#1658)")
+    except Exception as exc:                       # pragma: no cover - defensive
+        return f"coverage: unknown — {exc}"
+
+
+def _window_seconds(since) -> float | None:
+    """`--since` as seconds, or None when the caller named no window (then the
+    answer spans whatever exists and there is nothing to fall short of)."""
+    if not since:
+        return None
+    raw = str(since).strip()
+    mult = {"h": 3600.0, "d": 86400.0, "m": 60.0}.get(raw[-1:])
+    if mult is not None:
+        try:
+            return float(raw[:-1]) * mult
+        except ValueError:
+            return None
+    try:
+        from datetime import datetime, timezone
+        t = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return max((datetime.now(timezone.utc) - t).total_seconds(), 0.0)
+    except ValueError:
+        return None
+
+
 def cmd_events(args) -> int:
     """CLI entry point for ``claudlobby events``."""
     from ._helpers import _resolve_paths
@@ -140,6 +181,9 @@ def cmd_events(args) -> int:
         events = collect_plane_events(conn, paths, bot=args.bot, event_type=args.type,
                                       source=args.source, critical_only=args.critical,
                                       since=getattr(args, "since", None))
+        # #1658: same connection that served the events, so the line cannot
+        # describe a different plane than the rows above it.
+        cov = _events_coverage_line(conn, paths, getattr(args, "since", None))
     except RuntimeError as exc:
         print(f"claudlobby events: UNREACHABLE — {exc}", file=sys.stderr)
         return 3
@@ -149,8 +193,10 @@ def cmd_events(args) -> int:
     if args.json:
         for ev in events:
             print(json.dumps(ev, separators=(",", ":")))
+        print(cov, file=sys.stderr)      # stdout stays a JSONL stream
     else:
         if args.tail:
             events = events[-args.tail :]
         print(format_event_table(events))
+        print(cov)
     return 0
