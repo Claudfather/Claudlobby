@@ -37,8 +37,9 @@ SERVICE_JOB = {
 
 
 def test_armed_service_composes_service_and_plist_no_timer(tmp_path, monkeypatch):
-    out = _compose(tmp_path, monkeypatch,
-                   {"plane-daemon": {**SERVICE_JOB, "enroll": True}})
+    out = _compose(
+        tmp_path, monkeypatch, {"plane-daemon": {**SERVICE_JOB, "enroll": True}}
+    )
     service = out / "claudlobby-plane-daemon.service"
     plist = out / "claudlobby-plane-daemon.plist"
     assert service.exists() and plist.exists()
@@ -62,8 +63,9 @@ def test_service_relaunches_on_a_NONZERO_exit(tmp_path, monkeypatch):
     relaunch ONLY on a clean exit and strand the daemon on exactly the exit
     this fix introduces — and it is one word away from the correct dictionary
     form, which is reason enough to pin the shape rather than the key."""
-    out = _compose(tmp_path, monkeypatch,
-                   {"plane-daemon": {**SERVICE_JOB, "enroll": True}})
+    out = _compose(
+        tmp_path, monkeypatch, {"plane-daemon": {**SERVICE_JOB, "enroll": True}}
+    )
     body = (out / "claudlobby-plane-daemon.service").read_text()
     assert "Restart=always" in body, "on-success/no would strand the exit"
     # RestartSec keeps a permanent-condition loop under systemd's default
@@ -93,8 +95,9 @@ def test_the_exit_line_lands_somewhere_a_person_can_read(tmp_path, monkeypatch):
     an operator to a file that holds nothing, which is worse than silence."""
     from claudlobby.plane.daemon import DAEMON_LOG_NAME
 
-    out = _compose(tmp_path, monkeypatch,
-                   {"plane-daemon": {**SERVICE_JOB, "enroll": True}})
+    out = _compose(
+        tmp_path, monkeypatch, {"plane-daemon": {**SERVICE_JOB, "enroll": True}}
+    )
     log = tmp_path / "state" / DAEMON_LOG_NAME
     squashed = "".join((out / "claudlobby-plane-daemon.plist").read_text().split())
     assert f"<key>StandardOutPath</key><string>{log}</string>" in squashed
@@ -112,9 +115,12 @@ def test_the_exit_line_lands_somewhere_a_person_can_read(tmp_path, monkeypatch):
 
 
 def test_unarmed_service_composes_nothing(tmp_path, monkeypatch):
-    out = _compose(tmp_path, monkeypatch,
-                   {"plane-daemon": {**SERVICE_JOB, "enroll": False}})
-    leftovers = [p.name for p in out.glob("claudlobby-plane-daemon.*")] if out.exists() else []
+    out = _compose(
+        tmp_path, monkeypatch, {"plane-daemon": {**SERVICE_JOB, "enroll": False}}
+    )
+    leftovers = (
+        [p.name for p in out.glob("claudlobby-plane-daemon.*")] if out.exists() else []
+    )
     assert leftovers == [], f"dormant service leaked units: {leftovers}"
 
 
@@ -122,26 +128,40 @@ def test_enroll_absent_means_dormant_for_services(tmp_path, monkeypatch):
     """Timers default enroll to TRUE; services must default to FALSE — the
     asymmetry is the safety property, so pin it."""
     out = _compose(tmp_path, monkeypatch, {"plane-daemon": dict(SERVICE_JOB)})
-    leftovers = [p.name for p in out.glob("claudlobby-plane-daemon.*")] if out.exists() else []
+    leftovers = (
+        [p.name for p in out.glob("claudlobby-plane-daemon.*")] if out.exists() else []
+    )
     assert leftovers == []
 
 
 def test_service_script_source_guard_applies(tmp_path, monkeypatch):
     with pytest.raises(Exception, match="source"):
-        _compose(tmp_path, monkeypatch, {"plane-daemon": {
-            "unit": "service", "enroll": True,
-            "script": "/etc/passwd",
-        }})
+        _compose(
+            tmp_path,
+            monkeypatch,
+            {
+                "plane-daemon": {
+                    "unit": "service",
+                    "enroll": True,
+                    "script": "/etc/passwd",
+                }
+            },
+        )
 
 
 def test_sibling_timer_jobs_still_compose_around_a_service(tmp_path, monkeypatch):
-    out = _compose(tmp_path, monkeypatch, {
-        "plane-daemon": {**SERVICE_JOB, "enroll": True},
-        "disk-monitor": {
-            "script": "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh",
-            "schedule": "*-*-* 09:00:00", "type": "oneshot",
+    out = _compose(
+        tmp_path,
+        monkeypatch,
+        {
+            "plane-daemon": {**SERVICE_JOB, "enroll": True},
+            "disk-monitor": {
+                "script": "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh",
+                "schedule": "*-*-* 09:00:00",
+                "type": "oneshot",
+            },
         },
-    })
+    )
     assert (out / "claudlobby-disk-monitor.timer").exists()
     assert (out / "claudlobby-plane-daemon.service").exists()
 
@@ -160,23 +180,34 @@ def test_armed_to_unarmed_transition_prunes_the_composed_units(tmp_path, monkeyp
 
 
 def test_prune_only_touches_the_disarmed_service_units(tmp_path, monkeypatch):
-    out = _compose(tmp_path, monkeypatch, {
-        "plane-daemon": {**SERVICE_JOB, "enroll": True},
-        "disk-monitor": {
-            "script": "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh",
-            "schedule": "*-*-* 09:00:00", "type": "oneshot",
+    out = _compose(
+        tmp_path,
+        monkeypatch,
+        {
+            "plane-daemon": {**SERVICE_JOB, "enroll": True},
+            "disk-monitor": {
+                "script": "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh",
+                "schedule": "*-*-* 09:00:00",
+                "type": "oneshot",
+            },
         },
-    })
-    _compose(tmp_path, monkeypatch, {
-        "plane-daemon": {**SERVICE_JOB, "enroll": False},
-        "disk-monitor": {
-            "script": "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh",
-            "schedule": "*-*-* 09:00:00", "type": "oneshot",
+    )
+    _compose(
+        tmp_path,
+        monkeypatch,
+        {
+            "plane-daemon": {**SERVICE_JOB, "enroll": False},
+            "disk-monitor": {
+                "script": "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh",
+                "schedule": "*-*-* 09:00:00",
+                "type": "oneshot",
+            },
         },
-    })
+    )
     assert not (out / "claudlobby-plane-daemon.service").exists()
     assert (out / "claudlobby-disk-monitor.timer").exists(), (
-        "the prune must never reach sibling timer jobs")
+        "the prune must never reach sibling timer jobs"
+    )
 
 
 def test_service_enroller_refuses_foreign_owner_without_adopt(tmp_path):
@@ -197,21 +228,32 @@ def test_service_enroller_refuses_foreign_owner_without_adopt(tmp_path):
             f"Environment=CLAUDLOBBY_ROOT={root}\nExecStart={root}/lib/plane-daemon.sh\n"
         )
 
-    installed = home / ".config" / "systemd" / "user" / "claudlobby-plane-daemon.service"
+    installed = (
+        home / ".config" / "systemd" / "user" / "claudlobby-plane-daemon.service"
+    )
     installed.write_text(composed_unit("/srv/root-A"))
     units_b = tmp_path / "units-b"
     units_b.mkdir()
     (units_b / "claudlobby-plane-daemon.service").write_text(
-        composed_unit("/srv/root-B"))
+        composed_unit("/srv/root-B")
+    )
 
     def run(*extra):
         return subprocess.run(
-            ["bash", str(REPO / "lib" / "install-host-service-systemd.sh"),
-             "plane-daemon", *extra],
-            capture_output=True, text=True,
-            env={"PATH": f"{stub_bin}:/usr/bin:/bin", "HOME": str(home),
-                 "TIMER_DIR": str(units_b),
-                 "UNIT_NAME": "claudlobby-plane-daemon"},
+            [
+                "bash",
+                str(REPO / "lib" / "install-host-service-systemd.sh"),
+                "plane-daemon",
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": f"{stub_bin}:/usr/bin:/bin",
+                "HOME": str(home),
+                "TIMER_DIR": str(units_b),
+                "UNIT_NAME": "claudlobby-plane-daemon",
+            },
         )
 
     refused = run()
@@ -241,7 +283,8 @@ def test_launcher_127_when_python3_cannot_import_claudlobby(tmp_path):
     os.chmod(fake_py, 0o755)
     r = subprocess.run(
         ["/bin/bash", str(REPO / "lib" / "plane-daemon.sh")],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
         env={"PATH": f"{stub_dir}:/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(root)},
     )
     assert r.returncode == 127, (r.returncode, r.stdout, r.stderr)
@@ -269,16 +312,19 @@ def test_launcher_execs_resolved_cli_with_serve_args(tmp_path):
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
     stub = stub_dir / "claudlobby"
-    stub.write_text("#!/bin/bash\necho \"CLI-ARGS:$*\"\n")
+    stub.write_text('#!/bin/bash\necho "CLI-ARGS:$*"\n')
     os.chmod(stub, 0o755)
     root = tmp_path / "root"
     root.mkdir()
     r = subprocess.run(
         ["bash", str(REPO / "lib" / "plane-daemon.sh")],
-        capture_output=True, text=True,
-        env={"PATH": f"{stub_dir}:/usr/bin:/bin",
-             "CLAUDLOBBY_ROOT": str(root),
-             "PLANE_SOCKET": "/tmp/x.sock"},
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{stub_dir}:/usr/bin:/bin",
+            "CLAUDLOBBY_ROOT": str(root),
+            "PLANE_SOCKET": "/tmp/x.sock",
+        },
     )
     assert r.returncode == 0, r.stderr
     # --root is GLOBAL (precedes the subcommand) — the smoke run caught the
@@ -294,7 +340,8 @@ def test_launcher_prefers_the_root_venv(tmp_path):
     os.chmod(venv_cli, 0o755)
     r = subprocess.run(
         ["bash", str(REPO / "lib" / "plane-daemon.sh")],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
         env={"PATH": "/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(root)},
     )
     assert r.returncode == 0, r.stderr
@@ -302,8 +349,40 @@ def test_launcher_prefers_the_root_venv(tmp_path):
 
 
 def test_launcher_127_when_nothing_resolves(tmp_path):
-    """PATH carries bash + coreutils (/bin and a dirname stub) but neither a
-    claudlobby CLI nor python3 (macOS keeps python3 in /usr/bin, excluded)."""
+    """PATH resolves nothing but the one coreutil the launcher itself needs
+    (`dirname`) -- no claudlobby CLI, no python3 at all.
+
+    #1652: this used to ALSO carry `/bin` on the theory that macOS keeps
+    python3 in /usr/bin, so excluding /usr/bin was enough. That is a claim
+    about macOS, not about this test's own premise: on a usrmerge Linux host
+    (Debian/Ubuntu/RPi OS -- not a rare configuration) `/bin` IS `/usr/bin`,
+    so `/bin/python3` resolves there too, `command -v python3` succeeds, and
+    if this account has claudlobby importable via user site-packages (an
+    editable `pip install --user -e .` is exactly what a dev checkout has --
+    confirmed live, and confirmed to survive even a fully EMPTIED environment,
+    since Python's user-site lookup falls back to the UID's own home
+    directory via `pwd` when HOME is unset) the launcher's third rung
+    SUCCEEDS and `exec`s a REAL, long-running `plane serve` daemon in place
+    of this test process. `capture_output=True` then blocks forever waiting
+    for stdout/stderr to close, which a live daemon never does -- the suite
+    hangs, and killing the run leaves the daemon behind (it inherited this
+    process's PID via exec, so nothing besides this process was ever
+    tracking it).
+
+    A test whose premise depends on which real system directories happen NOT
+    to contain python3 is a test about host layout, not about the launcher.
+    So: no real system directory on PATH at all -- only an isolated stub
+    holding the one binary actually needed. `command -v python3` then fails
+    by construction, on any host, regardless of usrmerge or what is
+    pip-installed for the account running it.
+
+    `timeout=` is defense in depth, not the fix: if some OTHER host quirk
+    this reasoning has not anticipated ever makes a rung resolve again, the
+    test fails fast with a clear TimeoutExpired instead of hanging the suite
+    -- and `subprocess.run`'s own documented timeout behavior kills the
+    child (by PID, which `exec` preserves) rather than leaving it running,
+    so a regression can no longer strand a real daemon either.
+    """
     root = tmp_path / "root"
     root.mkdir()
     stub_dir = tmp_path / "stubbin"
@@ -316,8 +395,44 @@ def test_launcher_127_when_nothing_resolves(tmp_path):
     os.symlink(_shutil.which("dirname"), stub_dir / "dirname")
     r = subprocess.run(
         ["/bin/bash", str(REPO / "lib" / "plane-daemon.sh")],
-        capture_output=True, text=True,
-        env={"PATH": f"{stub_dir}:/bin", "CLAUDLOBBY_ROOT": str(root)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={"PATH": str(stub_dir), "CLAUDLOBBY_ROOT": str(root)},
+    )
+    assert r.returncode == 127, (r.returncode, r.stdout, r.stderr)
+    assert "no claudlobby CLI resolvable" in r.stderr
+
+
+def test_launcher_127_when_nothing_resolves_even_with_user_site_reachable(tmp_path):
+    """The regression case, reproduced directly rather than argued: python3
+    genuinely on PATH (a usrmerge-shaped layout, or any host where /bin and
+    /usr/bin overlap) must still fall through to 127 -- because the import
+    probe itself must find claudlobby unimportable, not because python3 is
+    unreachable. `PYTHONNOUSERSITE=1` is what actually defeats the mechanism
+    #1652 found live on this host: an editable dev install reachable via
+    user site-packages regardless of PATH, venv, or even HOME being unset."""
+    root = tmp_path / "root"
+    root.mkdir()
+    stub_dir = tmp_path / "stubbin"
+    stub_dir.mkdir()
+    import shutil as _shutil
+
+    os.symlink(_shutil.which("dirname"), stub_dir / "dirname")
+    real_python3 = _shutil.which("python3")
+    if real_python3 is None:
+        pytest.skip("no real python3 on this host to prove the regression case with")
+    os.symlink(real_python3, stub_dir / "python3")
+    r = subprocess.run(
+        ["/bin/bash", str(REPO / "lib" / "plane-daemon.sh")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            "PATH": str(stub_dir),
+            "CLAUDLOBBY_ROOT": str(root),
+            "PYTHONNOUSERSITE": "1",
+        },
     )
     assert r.returncode == 127, (r.returncode, r.stdout, r.stderr)
     assert "no claudlobby CLI resolvable" in r.stderr
