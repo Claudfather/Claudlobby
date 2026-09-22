@@ -335,6 +335,14 @@ SWITCHES: tuple[Switch, ...] = (
         polarity=OPT_IN,
         carrier=ENV_HOST,
         env="PLANE_PRUNE_SYSTEM_EVENTS_ENABLED",
+        # NAMED EVEN THOUGH THE SCOPE IS DOOR, and the two answer different
+        # questions: `scope` says what KIND of thing the switch governs (a lane
+        # INSIDE an armed job, so the enrolment check must not read it as the
+        # job being opt-in), while `job` says WHICH UNIT must carry the
+        # Environment= stamp. Without it the flag is unreachable from a timer's
+        # closed environment however loudly a tier sets it -- #1383's defect,
+        # walked into here by fixing the enrolment half first.
+        job="plane-prune",
         plane=True,
         what="system-event retention: age an ALLOWLIST of emit-only system "
              "events (tool_call, wip_uncommitted) past 30 days by "
@@ -598,7 +606,12 @@ def jobs_with_env(*scopes: str) -> dict[str, tuple[str, ...]]:
     twice — briefing, then keepalive). The stamp exists FOR THE SCRIPT THAT
     READS THE FLAG, which is why a switch with no ``job`` (the generate-time
     registry scan, the estate silencer) contributes nothing here: no timer
-    script reads it by that name. The silencer reaches units through the
+    script reads it by that name. The converse holds, and is why ``scope``
+    alone must not gate this: a DOOR-scoped switch that NAMES a job is a
+    lane inside that job, and that job's script does read it by that name --
+    filtering it out leaves the flag unreachable from the unit, which is
+    #1383 again with the scope field as the cause instead of a missing row.
+    The silencer reaches units through the
     fleet-job BASELINE stamp instead — every unit, not one job's.
     """
     out: dict[str, tuple[str, ...]] = {}

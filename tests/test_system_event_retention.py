@@ -34,6 +34,10 @@ def _db(rows):
               " ingested_at TEXT)")
     c.execute("CREATE TABLE ingest_ledger (ingest_seq INTEGER PRIMARY KEY,"
               " event_id TEXT, family TEXT, ingested_at TEXT)")
+    # the prune records a watermark so the duplicate verifier can tell a pruned
+    # row from a corrupted one (#1659 review, blocker 1)
+    c.execute("CREATE TABLE prune_watermarks (family TEXT PRIMARY KEY,"
+              " pruned_before TEXT NOT NULL, pruned_at TEXT NOT NULL)")
     for i, (kind, ev, at) in enumerate(rows):
         c.execute("INSERT INTO events VALUES (?,?,?,?)", (f"e{i}", kind, ev, at))
         c.execute("INSERT INTO ingest_ledger (event_id, family, ingested_at)"
@@ -121,3 +125,100 @@ class TestTheHardEdgesItInheritsFromTheSampleLane:
         c = _db([("system", "tool_call", _ago(40))])
         assert prune_system_events(c, days=30, events=frozenset()) == 0
         assert _events(c) == ["tool_call"]
+
+
+class TestAPrunedEventReplaysAsADuplicate:
+    """Blocker 1 of the #1659 review: a pruned event, re-ingested, was REFUSED.
+
+    Retention deletes family rows and (correctly) leaves their ledger rows, so
+    a replay arrives at `_verify_duplicates` with a ledger row and no family
+    row — the state it raised `ledger/family divergence … (integrity, not
+    idempotency)` for. **And the blast radius was the whole batch**: a
+    brand-new, entirely innocent event in the same batch died with it.
+
+    The fix records the prune as a WATERMARK, not a row per pruned event —
+    which would store as much as the prune deleted. The verifier then derives
+    "this absence is explained" from the two facts the prune actually used.
+    """
+
+    def _conn(self):
+        import sqlite3
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.execute("CREATE TABLE ingest_ledger (rowid_ INTEGER, event_id TEXT,"
+                  " family TEXT, ingested_at TEXT)")
+        c.execute("CREATE TABLE prune_watermarks (family TEXT PRIMARY KEY,"
+                  " pruned_before TEXT NOT NULL, pruned_at TEXT NOT NULL)")
+        return c
+
+    def _ledger(self, conn, event_id="e1", family="system", at=None):
+        conn.execute("INSERT INTO ingest_ledger VALUES (1,?,?,?)",
+                     (event_id, family, at or _ago(40)))
+        return conn.execute(
+            "SELECT rowid AS seq, family, ingested_at FROM ingest_ledger"
+            " WHERE event_id = ?", (event_id,)).fetchone()
+
+    def test_a_prune_that_covers_the_row_explains_the_absence(self):
+        from claudlobby.plane.ingest import _explained_by_a_prune
+        c = self._conn()
+        row = self._ledger(c, at=_ago(40))
+        c.execute("INSERT INTO prune_watermarks VALUES ('system', ?, ?)",
+                  (_ago(30), _ago(0)))
+        assert _explained_by_a_prune(c, row) is True
+
+    def test_a_row_INSIDE_the_window_is_still_corruption(self):
+        """The bound that keeps the integrity check honest: a family row
+        missing for an event the prune could not have touched is damage, and
+        must still refuse."""
+        from claudlobby.plane.ingest import _explained_by_a_prune
+        c = self._conn()
+        row = self._ledger(c, at=_ago(5))          # newer than the cutoff
+        c.execute("INSERT INTO prune_watermarks VALUES ('system', ?, ?)",
+                  (_ago(30), _ago(0)))
+        assert _explained_by_a_prune(c, row) is False
+
+    def test_a_DIFFERENT_family_is_not_explained(self):
+        """The watermark is per family, so a pruned `system` cutoff never
+        excuses an absent `task` row."""
+        from claudlobby.plane.ingest import _explained_by_a_prune
+        c = self._conn()
+        row = self._ledger(c, family="task", at=_ago(40))
+        c.execute("INSERT INTO prune_watermarks VALUES ('system', ?, ?)",
+                  (_ago(30), _ago(0)))
+        assert _explained_by_a_prune(c, row) is False
+
+    def test_no_watermark_at_all_is_not_explained(self):
+        """An install that has never pruned cannot have pruned this."""
+        from claudlobby.plane.ingest import _explained_by_a_prune
+        c = self._conn()
+        assert _explained_by_a_prune(c, self._ledger(c)) is False
+
+    def test_a_missing_table_is_not_explained(self):
+        """An install whose migrations predate the lane answers False rather
+        than raising — it cannot have pruned anything."""
+        import sqlite3
+        from claudlobby.plane.ingest import _explained_by_a_prune
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.execute("CREATE TABLE ingest_ledger (rowid_ INTEGER, event_id TEXT,"
+                  " family TEXT, ingested_at TEXT)")
+        row = self._ledger(c)
+        assert _explained_by_a_prune(c, row) is False
+
+    def test_the_prune_records_a_watermark_and_never_walks_it_backwards(self):
+        """A re-run with a shorter window must not re-expose rows an earlier,
+        wider prune already explained."""
+        c = _db([("system", "tool_call", _ago(400)),
+                 ("system", "tool_call", _ago(40))])
+        prune_system_events(c, days=100)
+        wide = c.execute("SELECT pruned_before FROM prune_watermarks").fetchone()[0]
+        prune_system_events(c, days=30)
+        narrow = c.execute("SELECT pruned_before FROM prune_watermarks").fetchone()[0]
+        assert narrow >= wide, (wide, narrow)
+
+    def test_a_prune_that_deleted_nothing_writes_no_watermark(self):
+        """A watermark asserts rows were removed behind it. Writing one for a
+        no-op prune would excuse an absence this lane never caused."""
+        c = _db([("system", "tool_call", _ago(1))])
+        assert prune_system_events(c, days=30) == 0
+        assert c.execute("SELECT COUNT(*) FROM prune_watermarks").fetchone()[0] == 0

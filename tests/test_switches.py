@@ -622,7 +622,14 @@ def test_the_composer_arming_tables_are_derived_not_listed():
     from claudlobby.composer import FLEET_JOB_ARMING, HOST_JOB_ARMING
 
     assert FLEET_JOB_ARMING == sw.jobs_with_env(sw.FLEET_JOB)
-    assert HOST_JOB_ARMING == sw.jobs_with_env(sw.HOST_JOB, sw.HOST_SERVICE)
+    # DOOR is in the host list because a DOOR-scoped switch that NAMES a job
+    # is a lane inside that job, and the job's script reads the flag by name.
+    # Excluding it left `PLANE_PRUNE_SYSTEM_EVENTS_ENABLED` unstampable and so
+    # unreachable from the timer's closed environment (#1383's shape, caught in
+    # review of #1659). The property this test exists for is unchanged: the
+    # table is DERIVED from the registry, never hand-listed.
+    assert HOST_JOB_ARMING == sw.jobs_with_env(
+        sw.HOST_JOB, sw.HOST_SERVICE, sw.DOOR)
     assert set(HOST_JOB_ARMING) == {"plane-expire", "plane-prune"}
 
 

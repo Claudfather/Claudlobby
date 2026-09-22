@@ -4123,7 +4123,7 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
 FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = _switches.jobs_with_env(
     _switches.FLEET_JOB)
 HOST_JOB_ARMING: dict[str, tuple[str, ...]] = _switches.jobs_with_env(
-    _switches.HOST_JOB, _switches.HOST_SERVICE)
+    _switches.HOST_JOB, _switches.HOST_SERVICE, _switches.DOOR)
 
 
 def _switch_env(cascade, flags) -> dict[str, str]:

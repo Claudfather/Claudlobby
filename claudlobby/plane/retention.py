@@ -117,14 +117,42 @@ def prune_system_events(conn, *, now=None, days: int = DEFAULT_RETENTION_DAYS,
             f"not allowlisted for retention: {sorted(unknown)} — add it to "
             "PRUNABLE_SYSTEM_EVENTS with its justification, or keep it"
         )
-    cutoff = _cutoff_iso(now or datetime.now(timezone.utc), days)
+    at = now or datetime.now(timezone.utc)
+    cutoff = _cutoff_iso(at, days)
     marks = ",".join("?" for _ in allow)
     cur = conn.execute(
         f"DELETE FROM events WHERE kind = 'system' AND event IN ({marks})"
         " AND ingested_at < ?",
         (*sorted(allow), cutoff),
     )
-    return cur.rowcount or 0
+    deleted = cur.rowcount or 0
+    # RECORD THE PRUNE so the duplicate verifier can tell a pruned row from a
+    # corrupted one (#1659 review). Without this, replaying a pruned event
+    # reaches `_verify_duplicates` with a ledger row and no family row and is
+    # refused as integrity damage -- taking every other event in that batch
+    # with it.
+    #
+    # A WATERMARK, not a row per pruned event: the latter would store as much
+    # as the prune deleted. The cost is a real and bounded loss of coverage,
+    # stated rather than hidden: for a `system` row older than the watermark,
+    # a genuinely absent family row now classifies as pruned rather than
+    # corrupt. That is strictly tighter than teaching the verifier to accept
+    # any absent family row for a prunable type, which would hold forever and
+    # for new rows too; here it holds only behind a cutoff this lane actually
+    # ran, and only for the family it ran on.
+    #
+    # `MAX` so a re-run with a shorter window cannot walk the watermark
+    # backwards and re-expose rows it already explained.
+    if deleted:
+        conn.execute(
+            "INSERT INTO prune_watermarks (family, pruned_before, pruned_at)"
+            " VALUES ('system', ?, ?)"
+            " ON CONFLICT(family) DO UPDATE SET"
+            "   pruned_before = MAX(pruned_before, excluded.pruned_before),"
+            "   pruned_at = excluded.pruned_at",
+            (cutoff, at.isoformat()),
+        )
+    return deleted
 
 
 def _cutoff_iso(now: datetime, days: int) -> str:
