@@ -38,9 +38,13 @@ visible rather than merely documented.
 
 **Backout:** `enroll: false` + `lib/setup-system` — the unit disappears.
 
-**Before you arm it, know the one state the rehearsal has never run.** All five
-scenarios in `lib/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits
-2 unconditionally, so **every** scenario runs with `state=unknown` and **none has
+**If you arm this once the engine carries `sync --check`, read the first few
+`vault.state` samples yourself and confirm they carry the verdict you expect
+before trusting the quiet.** That is the whole ask; the rest of this block is why.
+
+**The rehearsal has never run the state you will be in.** All five scenarios in
+`lib/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits 2
+unconditionally, so **every** scenario runs with `state=unknown` and **none has
 ever seen an rc-0 verdict**. That was harmless while no engine had the flag. It
 stops being harmless the moment the engine carrying `sync --check` is pulled here
 (see the note under *When an ALERT fires*): `state=clean` then becomes what this
@@ -57,9 +61,7 @@ under it. (Saying "it is covered by unit tests" would be the same overstatement
 this file just finished removing one paragraph above.) What is missing is the
 end-to-end evidence, and for a dormant job whose case for arming rests on that
 harness, the person arming it should be the one told so rather than a reviewer
-who read the stub. If you arm this after the engine is
-current, read the first few `vault.state` samples yourself and confirm they carry
-the verdict you expect before trusting the quiet.
+who read the stub.
 
 ## Cadence
 
