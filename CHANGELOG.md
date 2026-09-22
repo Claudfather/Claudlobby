@@ -37,15 +37,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Where a command points** is every path named by a scope-setting flag —
   `-C`, `--git-dir`, `--work-tree` — and the invocation is vault-bound if
   **any** of them is, so a harmless-looking `-C` cannot launder the flag
-  beside it. Where the shell is standing stays in scope **unless something
-  replaced it**, and only `-C` (git chdirs there first) and an explicit
-  `--work-tree` do — **measured on git 2.39.5**, a `--git-dir` naming another
-  repository with no `--work-tree` makes git treat the *current directory* as
-  that repository's working tree, so `git --git-dir=<other>/.git reset --hard`
-  run inside the vault writes the other repo's tracked files into it. Failing
-  to model that would have turned an accidentally-correct refusal into a
-  permission. Otherwise the last `cd <path>` before the git token, else the
-  payload's `cwd`. An **unreadable**
+  beside it. **Scope is two independent axes**, because one flag rarely moves
+  both: which repository's refs move (`--git-dir`, else `-C`, else `cwd`) and
+  which files are written (`--work-tree`, else `-C`, else `cwd`). Where the
+  shell is standing leaves the picture only when **both** have been aimed
+  elsewhere. Both halves are **measured on git 2.39.5** rather than reasoned:
+  `git --git-dir=<other>/.git reset --hard` run inside the vault wrote the
+  other repository's tracked files into the vault's tree, and
+  `git --work-tree=<elsewhere> checkout <branch>` run inside the vault moved
+  **the vault's own HEAD** onto a side branch — the very state that caused the
+  outage, produced by a command the guard was allowing. Otherwise the last
+  `cd <path>` before the git token, else the payload's `cwd`. An **unreadable**
   target — a variable, a glob — falls back to `cwd` rather than to allow: a
   variable is what someone reaches for when doing something wide, so the
   opposite fallback would put the blind spot exactly where the risk is. With no
@@ -96,6 +98,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   **measured on git 2.39.5**, `git pull --ff-only --rebase` is *not* rejected
   as a contradiction — git takes the rebase path — so the dangerous flag is
   checked first and `pull` appears in both tables.
+
+- **The model is inverted: the guard enumerates what it UNDERSTANDS.** Six
+  holes reached this predicate — four from the first review, a bare-`pull`
+  form, and `--work-tree` — each a different way to point a command somewhere
+  the guard did not look, and each found by a different method (reading the
+  code, mutating it, running real git). The pattern rather than any one hole
+  is the finding: git's scope flags do not compose the way the obvious reading
+  suggests, so "the ones I thought of" is not a closed set and does not become
+  one by trying harder. `GLOBAL_FLAGS` now lists git's pre-verb options with
+  **each arity measured**, and a flag outside it stops the read instead of
+  slipping past it. Arity is its own hole: the verb is the first non-flag
+  token, so `git --super-prefix x/ checkout main` really runs `checkout`
+  (measured) while a parser assuming zero arity reads `x/`, finds nothing
+  dangerous, and allows it. The refusal is reached **only after scope says
+  vault-bound**, so a bot's own checkout is untouched however exotic its
+  flags, and every new deny has that twin. The table is deliberately minimal:
+  omitting a real flag costs a refusal inside the vault and nothing anywhere
+  else, while including one with the wrong arity re-opens the hole.
 
 - **What this guard does NOT cover, named rather than left implicit.** The same
   review found three residual gaps, each verified against the code and each

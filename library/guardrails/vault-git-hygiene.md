@@ -33,11 +33,27 @@ repositories at once does not step around this page — it is the ordinary way
 someone arrives here without meaning to.
 
 **And pointing a command elsewhere is not the same as standing elsewhere.**
-`--git-dir` names the repository, not the working tree: with no `--work-tree`,
-git uses **the directory you are in** as the tree. Run from inside the vault,
-`git --git-dir=<other-repo>/.git reset --hard` writes that other repo's files
-into the vault, so it is refused. `-C` and `--work-tree` genuinely do move the
-command, and are allowed.
+A git command aims two things separately, and one flag rarely moves both:
+
+- **`--git-dir`** names the repository. The working tree is still the directory
+  you are in — so from inside the vault, `git --git-dir=<other>/.git reset
+  --hard` writes that other repo's files *into the vault*.
+- **`--work-tree`** names the working tree. The repository is still the one
+  found from the directory you are in — so from inside the vault,
+  `git --work-tree=<elsewhere> checkout <branch>` moves *the vault's own HEAD*.
+- **`-C`** moves both, because git changes directory before anything else.
+
+Only `-C`, or `--git-dir` and `--work-tree` together, take the vault out of a
+command's reach. Everything else run from inside the vault is the vault's
+business whatever it points at.
+
+**A flag this guard has not been taught is refused, not waved through.** It
+knows git's pre-verb options and how many words each consumes; anything else
+means it cannot reliably tell which repository is being aimed at or even which
+word is the subcommand, so it stops. This only ever applies to a command
+already pointed at the vault — your own checkouts are untouched however unusual
+their flags. If you hit it, the flag is probably fine and the guard simply does
+not know it yet: say so rather than working around it.
 
 **Why it is a hook and not just this page.** A vault clone on a side branch is
 the one state where captures look durable in `git log` and exist on no other

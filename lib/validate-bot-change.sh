@@ -3945,10 +3945,6 @@ _vg_gd_out="$(_vg_hook "$_VG_PROJ" "git --git-dir=$_VG_PROJ/.git reset --hard")"
 [ -z "$_vg_gd_out" ] && r=yes || r=no
 harness_check "#1725 ALLOW: the same command run from outside the vault is untouched" "$r"
 
-_vg_wt_out="$(_vg_hook "$_VG_VAULT" "git --work-tree=$_VG_PROJ checkout main")"
-[ -z "$_vg_wt_out" ] && r=yes || r=no
-harness_check "#1725 ALLOW: --work-tree elsewhere DOES replace cwd, so it is untouched" "$r"
-
 # PULL IS ONLY EVER A FAST-FORWARD (review of #1725). pull reached neither
 # table, so pull --rebase was ALLOWED in the vault while rebase was denied --
 # the same operation under a more ordinary spelling, and the outage mechanism.
@@ -3967,6 +3963,38 @@ harness_check "#1725 ALLOW: git pull --ff-only in the vault stays permitted" "$r
 _vg_pullr_proj="$(_vg_hook "$_VG_PROJ" "git pull --rebase")"
 [ -z "$_vg_pullr_proj" ] && r=yes || r=no
 harness_check "#1725 ALLOW: git pull --rebase in a projects/ checkout is untouched" "$r"
+
+# --work-tree is the MIRROR of --git-dir, not its sibling. It relocates the
+# working tree and NOT the git directory, so a command carrying only
+# --work-tree still acts on the refs of whatever repo cwd is in. Measured on
+# git 2.39.5: run inside a vault it moved THE VAULT OWN HEAD onto a side
+# branch, which is the state that caused the outage this guard exists for.
+_vg_wt_cwd="$(_vg_hook "$_VG_VAULT" "git --work-tree=$_VG_PROJ checkout main")"
+case "$_vg_wt_cwd" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: --work-tree elsewhere but standing in the vault is refused" "$r"
+
+_vg_wt_twin="$(_vg_hook "$_VG_PROJ" "git --work-tree=$_VG_PROJ checkout main")"
+[ -z "$_vg_wt_twin" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same --work-tree command run from outside is untouched" "$r"
+
+_vg_both="$(_vg_hook "$_VG_VAULT" "git --work-tree=$_VG_PROJ --git-dir=$_VG_PROJ/.git checkout main")"
+[ -z "$_vg_both" ] && r=yes || r=no
+harness_check "#1725 ALLOW: BOTH axes aimed away does take cwd out of scope" "$r"
+
+# The inversion: the guard enumerates the pre-verb options it UNDERSTANDS, so
+# an unmodelled flag stops the read instead of slipping past it -- and only
+# for a command that is already vault-bound, which is the allow twin below.
+_vg_unk="$(_vg_hook "$_VG_VAULT" "git --some-future-flag checkout main")"
+case "$_vg_unk" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+harness_check "#1725 DENY: an option the guard does not recognise, in the vault" "$r"
+
+_vg_unk_out="$(_vg_hook "$_VG_PROJ" "git --some-future-flag checkout main")"
+[ -z "$_vg_unk_out" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same unknown option outside the vault is untouched" "$r"
+
+_vg_known="$(_vg_hook "$_VG_VAULT" "git --no-pager log")"
+[ -z "$_vg_known" ] && r=yes || r=no
+harness_check "#1725 ALLOW: a modelled flag with a safe verb still reads in the vault" "$r"
 
 if [ "${_vg_deny:-}" = "" ]; then
     echo "  --- DIAGNOSTIC: #1720 deny produced no output ---"
