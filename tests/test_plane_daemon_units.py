@@ -269,11 +269,23 @@ def test_launcher_127_when_python3_cannot_import_claudlobby(tmp_path):
     """PR-#1345 review F6: on a bare host /bin/python3 exists and cannot
     import claudlobby — `python3 -m claudlobby` then exits 1, masquerading
     as a daemon failure. The launcher must probe the import and fall through
-    to the honest 127."""
+    to the honest 127.
+
+    #1652 review (ravi): this carried `/usr/bin:/bin` alongside the stub, so
+    it was safe on this host only because no real `claudlobby` sits in either
+    -- host layout again, the exact shape #1652 removed from its own sibling.
+    A host with claudlobby installed system-wide resolves the CLI at the
+    launcher's SECOND rung (before this test's fake python3 is ever reached)
+    and hangs identically. No real system directory on PATH closes it, same
+    as the fix this test sits beside.
+    """
     root = tmp_path / "root"
     root.mkdir()
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
+    import shutil as _shutil
+
+    os.symlink(_shutil.which("dirname"), stub_dir / "dirname")
     fake_py = stub_dir / "python3"
     fake_py.write_text(
         "#!/bin/bash\n"
@@ -285,7 +297,8 @@ def test_launcher_127_when_python3_cannot_import_claudlobby(tmp_path):
         ["/bin/bash", str(REPO / "lib" / "plane-daemon.sh")],
         capture_output=True,
         text=True,
-        env={"PATH": f"{stub_dir}:/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(root)},
+        timeout=10,
+        env={"PATH": str(stub_dir), "CLAUDLOBBY_ROOT": str(root)},
     )
     assert r.returncode == 127, (r.returncode, r.stdout, r.stderr)
     assert "MUST NOT EXEC" not in r.stdout
@@ -309,19 +322,27 @@ def test_example_system_yaml_ships_the_daemon_ARMED():
 
 
 def test_launcher_execs_resolved_cli_with_serve_args(tmp_path):
+    """#1652 review (ravi): isolated PATH + timeout=, same as the launcher's
+    other tests -- the stub's fake `claudlobby` wins PATH resolution over
+    anything real further down regardless, but leaving real system
+    directories on PATH is the pattern that bit #1652 once already."""
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
+    import shutil as _shutil
+
+    os.symlink(_shutil.which("dirname"), stub_dir / "dirname")
     stub = stub_dir / "claudlobby"
     stub.write_text('#!/bin/bash\necho "CLI-ARGS:$*"\n')
     os.chmod(stub, 0o755)
     root = tmp_path / "root"
     root.mkdir()
     r = subprocess.run(
-        ["bash", str(REPO / "lib" / "plane-daemon.sh")],
+        ["/bin/bash", str(REPO / "lib" / "plane-daemon.sh")],
         capture_output=True,
         text=True,
+        timeout=10,
         env={
-            "PATH": f"{stub_dir}:/usr/bin:/bin",
+            "PATH": str(stub_dir),
             "CLAUDLOBBY_ROOT": str(root),
             "PLANE_SOCKET": "/tmp/x.sock",
         },
@@ -333,16 +354,28 @@ def test_launcher_execs_resolved_cli_with_serve_args(tmp_path):
 
 
 def test_launcher_prefers_the_root_venv(tmp_path):
+    """#1652 review (ravi): isolated PATH + timeout=, same as the launcher's
+    other tests. Rung 1 (the venv CLI) wins unconditionally here, so nothing
+    on PATH past the stub can change this test's own verdict -- but leaving
+    real system directories on PATH is the pattern #1652 removed elsewhere
+    in this file, and there is no reason this one test should still depend
+    on it."""
     root = tmp_path / "root"
     (root / ".venv" / "bin").mkdir(parents=True)
     venv_cli = root / ".venv" / "bin" / "claudlobby"
     venv_cli.write_text("#!/bin/bash\necho VENV-CLI\n")
     os.chmod(venv_cli, 0o755)
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    import shutil as _shutil
+
+    os.symlink(_shutil.which("dirname"), stub_dir / "dirname")
     r = subprocess.run(
-        ["bash", str(REPO / "lib" / "plane-daemon.sh")],
+        ["/bin/bash", str(REPO / "lib" / "plane-daemon.sh")],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(root)},
+        timeout=10,
+        env={"PATH": str(stub_dir), "CLAUDLOBBY_ROOT": str(root)},
     )
     assert r.returncode == 0, r.stderr
     assert "VENV-CLI" in r.stdout
