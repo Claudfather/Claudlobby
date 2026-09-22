@@ -4040,6 +4040,30 @@ _vg_sepwt="$(_vg_hook "$_VG_PROJ" "export GIT_WORK_TREE=$_VG_VAULT; git checkout
 case "$_vg_sepwt" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
 harness_check "#1725 DENY: exported GIT_WORK_TREE with a trailing semicolon" "$r"
 
+# SIX SPELLINGS OF ONE CLASS: a metacharacter abutting a word changed the token
+# and there was no git token left to judge. Closing these closes the spellings,
+# NOT the class -- eval, sh -c, a wrapper and a variable holding the path all
+# remain open by construction. The subshell abort is named on its own because
+# it is the operation the guard own refusal message forbids.
+for _c in "cd $_VG_VAULT;git reset --hard" \
+          "cd $_VG_VAULT&&git reset --hard" \
+          "(cd $_VG_VAULT; git reset --hard)" \
+          "(cd $_VG_VAULT && git rebase --abort)" \
+          "cd $_VG_VAULT; (git reset --hard)" \
+          "pushd $_VG_VAULT; git reset --hard"; do
+    _o="$(_vg_hook "$_VG_PROJ" "$_c")"
+    case "$_o" in *'"permissionDecision":"deny"'*) r=yes ;; *) r=no ;; esac
+    harness_check "#1725 DENY: composition reaching the vault -- ${_c#cd }" "$r"
+done
+
+_vg_comp_twin="$(_vg_hook "$_VG_VAULT" "(cd $_VG_PROJ && git reset --hard)")"
+[ -z "$_vg_comp_twin" ] && r=yes || r=no
+harness_check "#1725 ALLOW: the same composition pointed OUT of the vault" "$r"
+
+_vg_comp_safe="$(_vg_hook "$_VG_PROJ" "(cd $_VG_VAULT; git status)")"
+[ -z "$_vg_comp_safe" ] && r=yes || r=no
+harness_check "#1725 ALLOW: a safe verb through composition still reads" "$r"
+
 if [ "${_vg_deny:-}" = "" ]; then
     echo "  --- DIAGNOSTIC: #1720 deny produced no output ---"
     echo "      vault: $_VG_VAULT"

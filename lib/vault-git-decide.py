@@ -27,45 +27,62 @@ flags a script reaches for when it walks several repositories without ``cd``-ing
 into each. ``git --git-dir=<vault>/.git checkout <branch>`` then resolved its
 scope from ``cwd``, and was allowed from anywhere else on disk.
 
-**WHICH CHANNELS THIS GUARD MODELS, and which it does not.** Git's scope can
-be set through several independent channels, and this predicate reads exactly
-two of them. Nine holes have now been found in it; the first eight were all one
-channel's flags, and the ninth was a second channel that argv parsing cannot
-see at all. That is what a scope predicate over another tool's CLI costs, and
-the useful response is to state the bound rather than to keep implying
-coverage:
+**WHAT THIS GUARD IS, AND WHAT IT CANNOT BE.** It is a bar against the
+ordinary accident. It is NOT a boundary against composition, and no amount of
+work on this file would make it one.
 
-  MODELLED
-    * the pre-verb flags in ``GLOBAL_FLAGS`` -- ``-C``, ``--git-dir``,
-      ``--work-tree`` aim the invocation; anything outside that table stops the
-      read and refuses.
-    * ``GIT_DIR`` / ``GIT_WORK_TREE`` assigned WITHIN the same command, in any
-      of its spellings (``VAR=x git ...``, ``export VAR=x; git ...``,
-      ``env VAR=x git ...``).
-    * a ``cd`` earlier in the same command, and the payload's ``cwd`` (with a
-      shell separator stripped off the path -- see :func:`_unseparate`).
+**The input model is the ceiling.** A PreToolUse guard is handed one string.
+This one recognises what it cares about by token equality over a tokenised
+command line, and shell composition is unbounded: a subshell, a chained
+directory change, a variable holding the path, `eval`, `sh -c`, a wrapper
+script, an alias. The set of strings that reach the vault is not enumerable
+from that vantage, so **no flag table and no list of channels closes it**. Ten
+of the sixteen findings against this predicate were one channel's flags; the
+rest were other channels entirely. That count measures the PROBLEM, not the
+implementation.
 
-  NOT MODELLED -- each one is a real way to reach the vault that this returns
-  "allow" for, and none is a hypothetical:
-    * ``GIT_DIR`` **or** ``GIT_WORK_TREE`` exported by an EARLIER tool call.
-      The hook is handed one command and no environment, so this is not a gap
-      to be closed here; it needs a different instrument. BOTH are named on
-      purpose: this list is the load-bearing artifact of the whole guard, and
-      a reader who sees one declared unclosable will reasonably infer its twin
-      is covered. A PARTIAL not-modelled list is worse than none, because it
-      turns an unknown unknown into a false assurance -- the exact thing
-      declaring the bound was meant to prevent.
-    * git config that relocates the tree -- ``core.worktree``, and
-      ``safe.directory`` widening what git will touch at all.
-    * an alias, a shell function, a wrapper script, or ``sh -c``: none presents
-      a ``git`` token for the walk in :func:`decide` to find (Claudlobby #1730).
-    * whether a path belongs to the vault's repository is :func:`_inside`'s
-      question, and it has two known wrong answers of its own (#1729).
+So the honest claim, and the only one this design supports:
 
-So the honest claim is that this refuses what it cannot read **of a git command
-line**, not that it cannot be got around. A reader who needs the second
-property needs a different mechanism, and should meet that here rather than
-infer it from the care taken below.
+    it catches a DIRECT git invocation naming the vault.
+    it does not, and cannot, catch git reached through shell composition.
+
+That distinction is load-bearing because the two support different downstream
+claims. The first justifies "a bot doing the obvious wrong thing is stopped".
+Only the second would justify "a bot cannot wedge the vault", and **nothing
+here supports the second**.
+
+**WITNESSES to the class, not a list to be completed.** These are examples of
+how composition defeats it, recorded because each was measured live through the
+shipped hook. Closing any one of them does not shrink the class:
+
+  * a directory change the walk does not recognise, or spelled so its
+    separator swallows the next word (`cd <vault>;git …`, `pushd <vault>; …`,
+    `(cd <vault> && git …)`). The six demonstrated spellings now deny --
+    `_shell_words` splits shell operators off -- and that closed the SPELLINGS,
+    not the class.
+  * `GIT_DIR` **or** `GIT_WORK_TREE` exported by an EARLIER tool call: the hook
+    is handed one command and no environment. Both, because the gap is a
+    property of the class rather than of either variable, and naming one
+    invites the reader to assume the other is covered.
+  * git config that relocates the tree -- ``core.worktree``, ``safe.directory``
+    -- however it is landed, including via ``GIT_CONFIG_*`` or a redirected
+    ``HOME``.
+  * an alias, a shell function, a wrapper script, or ``sh -c``: none presents a
+    ``git`` token for the walk to find (Claudlobby #1730).
+  * whether a path belongs to the vault's repository is :func:`_inside`'s
+    question, and it has two known wrong answers of its own (#1729).
+
+**Why it ships anyway, stated so a reader can disagree with it.** The direct
+invocation is the common shape, and that is measured rather than assumed:
+across 702 estate transcripts and 62,651 Bash tool calls, 10,297 commands ran
+git, and **at least 87% of the state-changing ones presented a git token this
+guard can see** (1,287 of 1,479; the invisible remainder is dominated by
+command substitution, which is overwhelmingly reads). Of git commands that also
+changed directory, 98.3% used a bare ``cd`` token. A guard that catches the
+ordinary shape is worth having even though it is not a fence -- and Claudron's
+own ``sync`` refusing a side branch is the belt to these braces. What would
+overturn that reasoning is evidence that bots compose far more than they invoke
+directly; the measurement above says they do not.
 
 **An unresolvable candidate falls back to `cwd` rather than to "allow".** A
 shell variable, a glob or a quoted expression is exactly what an operator
@@ -227,6 +244,37 @@ def _resolve(path: str, cwd: str | None) -> str | None:
         return None
 
 
+def _shell_words(command: str) -> list[str]:
+    """Tokenise a command line with shell OPERATORS split off as their own
+    tokens, so a metacharacter abutting a word cannot hide the word.
+
+    `shlex.split` is a WORD SPLITTER, not a shell parser: it has no notion of
+    command boundaries, and in shell nearly every metacharacter may abut a
+    word. `cd <vault>;git reset --hard` tokenised as `['cd', '<vault>;git', …]`
+    -- the git token did not exist, so there was nothing to judge, and the
+    guard allowed it. Six spellings of that one class were demonstrated live,
+    including `(cd <vault> && git rebase --abort)`, which is the operation this
+    guard's own refusal message forbids.
+
+    `punctuation_chars=True` is the stdlib's own answer and it is QUOTE-AWARE,
+    which a regex pre-split is not: `git commit -m "a; b && c"` keeps its
+    message as one token rather than being torn into operators.
+
+    This fixes the CLASS where the earlier `_unseparate` fixed one SPELLING --
+    it rstripped `;&` off the end of a token, which does nothing when the
+    separator sits mid-token. It does NOT make the guard a boundary; see the
+    ceiling stated at the top of this module.
+    """
+    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        return list(lex)
+    except ValueError:
+        # Unbalanced quotes: unparseable, so no claim can be made about where
+        # it points. Falls through to the cwd fallback rather than to "allow".
+        return command.split()
+
+
 def _unseparate(tok: str) -> str:
     """Strip a shell separator that shlex left attached to a path.
 
@@ -299,20 +347,16 @@ def _inside(path: str, vault: str) -> bool:
 
 def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
     """Return (verdict, detail). verdict is allow | deny | unresolved."""
-    try:
-        tokens = shlex.split(command, comments=False)
-    except ValueError:
-        # Unbalanced quotes: the command is not parseable, so no claim can be
-        # made about where it points. Treated as unresolvable rather than
-        # allowed outright, so it still falls back to cwd below.
-        tokens = command.split()
+    tokens = _shell_words(command)
 
     last_cd: str | None = None
     env: dict[str, str] = {}
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok == "cd" and i + 1 < len(tokens):
+        # `pushd` changes directory exactly as `cd` does and was not modelled;
+        # `pushd <vault>; git reset --hard` was allowed.
+        if tok in ("cd", "pushd") and i + 1 < len(tokens):
             last_cd = _unseparate(tokens[i + 1])
             i += 2
             continue

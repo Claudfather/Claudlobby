@@ -693,3 +693,77 @@ class TestAShellSeparatorAttachedToAPath:
         t = target.format(vault=vault)
         assert D.decide(f"export {var}={t}; git checkout main",
                         vault, proj)[0] == "deny"
+
+
+class TestShellCompositionSpellings:
+    """Six live bypasses, all one class: the tokeniser vs the shell.
+
+    `shlex.split` is a WORD SPLITTER, not a shell parser, so a metacharacter
+    abutting a word changed the token and defeated the equality tests
+    `decide()` is built on. `cd <vault>;git reset --hard` produced no `git`
+    token at all — nothing to judge, so it was allowed.
+
+    **These close the SPELLINGS, not the class.** The class is stated at the
+    top of `vault-git-decide.py`: this catches a direct git invocation naming
+    the vault, and cannot catch git reached through composition. `eval`,
+    `sh -c`, a wrapper and a variable holding the path all remain open by
+    construction, and no test here should be read as evidence otherwise.
+
+    The one worth naming on its own is `(cd <vault> && git rebase --abort)`:
+    that is the operation the guard's own refusal message forbids, and the one
+    that started the twelve days.
+    """
+
+    @pytest.fixture()
+    def tree5(self, tmp_path):
+        vault = tmp_path / "vault"
+        proj = tmp_path / "projects" / "repo"
+        vault.mkdir(parents=True)
+        proj.mkdir(parents=True)
+        return os.path.realpath(vault), os.path.realpath(proj)
+
+    @pytest.mark.parametrize("tmpl", [
+        "cd {v};git reset --hard",
+        "cd {v}&&git reset --hard",
+        "(cd {v}; git reset --hard)",
+        "(cd {v} && git rebase --abort)",
+        "cd {v}; (git reset --hard)",
+        "pushd {v}; git reset --hard",
+        "cd {v} && git reset --hard",          # the spelling that always denied
+        "cd {v}; git reset --hard",            # hole ten
+    ])
+    def test_composition_reaching_the_vault_is_denied(self, tree5, tmpl):
+        vault, proj = tree5
+        assert D.decide(tmpl.format(v=vault), vault, proj)[0] == "deny"
+
+    @pytest.mark.parametrize("tmpl", [
+        "cd {p};git reset --hard",
+        "(cd {p} && git reset --hard)",
+        "pushd {p}; git reset --hard",
+    ])
+    def test_the_twin_is_the_same_composition_pointed_elsewhere(self, tree5, tmpl):
+        """Standing in the vault and composing a way OUT must stay allowed, or
+        the fix refuses a bot walking to its own checkout."""
+        vault, proj = tree5
+        assert D.decide(tmpl.format(p=proj), vault, vault)[0] == "allow"
+
+    def test_a_safe_verb_through_composition_is_still_allowed(self, tree5):
+        vault, proj = tree5
+        assert D.decide(f"(cd {vault}; git status)", vault, proj)[0] == "allow"
+
+    def test_quoting_survives_the_operator_split(self, tree5):
+        """`punctuation_chars` is quote-aware and a regex pre-split is not: a
+        commit message holding shell operators must stay one token, or the
+        guard starts seeing verbs inside prose."""
+        vault, _ = tree5
+        assert D.decide('git commit -m "a; b && c"', vault, vault)[0] == "allow"
+        assert D.decide('git log --grep="reset; rebase"', vault, vault)[0] == "allow"
+
+    def test_the_abort_the_refusal_message_forbids_is_itself_refused(self, tree5):
+        """The guard's deny text says "do NOT abort or reset it". Until this
+        round, the idiomatic way to run that abort walked straight past."""
+        vault, proj = tree5
+        for cmd in (f"(cd {vault} && git rebase --abort)",
+                    f"cd {vault};git rebase --abort",
+                    f"pushd {vault}; git rebase --abort"):
+            assert D.decide(cmd, vault, proj)[0] == "deny", cmd

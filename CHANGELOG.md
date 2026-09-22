@@ -157,17 +157,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   through on its twin. Stripped centrally at both capture points, failing
   toward seeing the vault.
 
-- **The module now states WHICH CHANNELS IT MODELS.** Nine holes: the first
-  eight were one channel's flags, the ninth a channel argv parsing cannot see.
-  That is what a scope predicate over another tool's CLI costs, and naming the
-  bound beats implying coverage. **Modelled:** the `GLOBAL_FLAGS` pre-verb
-  flags, `GIT_DIR`/`GIT_WORK_TREE` set within the command, a `cd`, the
-  payload's `cwd`. **Not modelled, each a real way in:** a variable exported by
-  an earlier tool call (the hook is handed one command and no environment),
-  `core.worktree` and `safe.directory`, aliases and wrappers that present no
-  `git` token (#1730), and `_inside`'s own two known wrong answers (#1729). The
-  honest claim is that it refuses what it cannot read **of a git command
-  line** — not that it cannot be got around.
+- **The declaration is now a statement of KIND, not a list of channels, and
+  the tokenisation class is fixed.** A fresh review demonstrated six live
+  bypasses through the shipped hook, all one class: `shlex.split` is a word
+  splitter rather than a shell parser, so a metacharacter abutting a word
+  changed the token and defeated the equality tests the guard rests on.
+  `cd <vault>;git reset --hard` produced **no git token at all**. Among them
+  `(cd <vault> && git rebase --abort)` — the operation the guard's own
+  refusal message forbids, and the one that started the twelve days.
+  `_shell_words` splits shell operators off quote-aware (`punctuation_chars`,
+  so a commit message holding `;` or `&&` stays one token), and `pushd` joins
+  `cd`; all six now deny, with twins proving composition OUT of the vault
+  still passes.
+
+  **That closed the spellings, not the class, and the module now says so at
+  the top.** A PreToolUse guard is handed one string; composition is
+  unbounded; no flag table or channel list closes it. The honest claim is
+  that it **catches a direct git invocation naming the vault, and cannot
+  catch git reached through shell composition** — which supports "a bot doing
+  the obvious wrong thing is stopped" and never "a bot cannot wedge the
+  vault". The remaining items are recorded as WITNESSES to that class rather
+  than a list inviting completion.
+
+  **Why it ships anyway, measured rather than argued:** across 702 estate
+  transcripts and 62,651 Bash tool calls, 10,297 ran git, and **at least 87%
+  of the state-changing ones presented a git token this guard can see**
+  (1,287/1,479); of git commands that also changed directory, **98.3%** used
+  a bare `cd`. The direct invocation is the common shape, so a bar against
+  the ordinary accident is worth having even though it is not a fence.
 
 - **What this guard does NOT cover, named rather than left implicit.** The same
   review found three residual gaps, each verified against the code and each

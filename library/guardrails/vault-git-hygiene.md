@@ -63,26 +63,14 @@ reading, "this is not pointed at the vault" would be a claim about the half it
 managed to parse. If you hit it, the flag is probably fine and the guard simply
 has not been taught it: say so rather than working around it.
 
-**What this guard does not see.** It reads a git command line. It cannot see a
-`GIT_DIR` or `GIT_WORK_TREE` exported by an earlier command, git config that
-moves the tree
-(`core.worktree`, `safe.directory`), or an alias or wrapper that never spells
-`git` at all. The rule above still stands in those cases — the vault's git
-state is not yours to move — there is simply no mechanism catching you. Treat
-the page, not the hook, as the thing you are following.
+**What this guard is, and what it is not.** It is a bar against the ordinary
+accident: it catches a git command that names the vault directly. It is **not**
+a fence. It reads one command line, and shell composition is unbounded — a
+subshell, a variable holding the path, `eval`, `sh -c`, a wrapper script, an
+alias. Nor can it see a `GIT_DIR` or `GIT_WORK_TREE` exported by an earlier
+command, or git config that moves the tree.
 
-**Why it is a hook and not just this page.** A vault clone on a side branch is
-the one state where captures look durable in `git log` and exist on no other
-machine. On a live host that state lasted a month: 59 commits of knowledge
-accrued off the default branch, 53 of them never pushed anywhere, and the
-rebase that finally tried to reconcile them was killed mid-pick. The tree sat
-detached for twelve days with the wrong files checked out — a fleet's mission,
-charter and project manifest gone from disk — and a `generate` composed from
-the reverted manifest. Guidance saying "do not" already existed.
-
-**If the vault looks wedged, do not repair it by hand.** Do not abort a rebase,
-reset, or check anything out. Report it. An aborted rebase in a live tree is
-how the twelve days started.
-
-**To move the vault, use `claudron sync`.** It is the only door that is allowed
-to change that clone's state, and it is the one place the safety checks live.
+**So the rule is the thing you are following, not the hook.** Where the hook
+cannot see, the rule still stands: the vault's git state is not yours to move.
+If you find yourself composing a command that would reach it, that is the
+moment the page applies, and there is nothing there to stop you.
