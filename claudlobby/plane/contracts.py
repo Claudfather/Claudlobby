@@ -68,6 +68,11 @@ PR_ROLES = ("authored", "reviewed")
 #: discipline as PR_ROLES, and for the same reason: the question is how often
 #: the resolver GUESSES, so a guess must never be able to read as a certainty.
 LINK_SOURCES = ("named", "auto-resolved")
+#: WHY a declared PR attribution reached no row (#1711 citation B). One member
+#: today; a closed vocabulary rather than a boolean for `link_source`'s reason —
+#: absent is a load-bearing third state (nothing was declared, or the writer
+#: predates the field) and a falsy test must not collapse it with "not withheld".
+PR_WITHHELD_REASONS = ("guessed_link",)
 
 TASK_EVENTS = (
     # 22 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
@@ -437,6 +442,22 @@ class TaskEvent(_Strict):
     #: as such: a metadata-mode capture that stripped it would make an absent
     #: value mean two different things at once, and absent is load-bearing here.
     link_source: Optional[Literal[LINK_SOURCES]] = None
+    #: The reporter DECLARED `--pr`/`--pr-role` and it was refused, because the
+    #: task link was a guess (#1706 case 2). Without this, a row where an
+    #: attribution was declared-and-withheld is byte-identical to one where
+    #: none was ever declared — and those need opposite responses: the first
+    #: says an attribution exists and can be recovered with `--task`, the
+    #: second says none exists at all. `link_source: auto-resolved` does NOT
+    #: close the gap: it says the link was guessed, not that anything was
+    #: withheld, and most auto-resolved reports declare no PR fields.
+    #:
+    #: The disclosure already existed — on stderr, which no door reads (#1711).
+    #: This is the same fact on the row, where a later reader can reach it.
+    #:
+    #: METADATA, never CONTENT, and registered: a metadata capture that
+    #: stripped it would put the row back in the state this field exists to
+    #: end, silently. `pr_role` and `link_source` are the precedent.
+    pr_attribution_withheld: Optional[Literal[PR_WITHHELD_REASONS]] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
 

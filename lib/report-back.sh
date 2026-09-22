@@ -327,6 +327,18 @@ _plane_emit_report_intent() {
             # Not json_escaped: the parser above admits only two literals, so
             # there is nothing to escape, and escaping would imply free text.
             [ -n "$PR_ROLE" ] && frag="$frag,\"pr_role\":\"$PR_ROLE\""
+        elif [ -n "$pr_url" ] || [ -n "$PR_ROLE" ]; then
+            # #1711 citation B. The refusal above is RIGHT and is not changed:
+            # a guessed id must not carry an attribution. What was wrong is
+            # that the refusal was announced only on stderr, so the stored row
+            # could not tell "declared and withheld" from "never declared" --
+            # and those need opposite responses. Stamped here, off the SAME
+            # discriminator the refusal uses (TASK_NAMED, captured at parse
+            # time), never a second one: two places deciding one fact is how
+            # they drift, and here they would drift silently because both
+            # answers look equally plausible on a stored row (#1713's rule).
+            # Closed vocabulary, so nothing to escape -- pr_role's precedent.
+            frag="$frag,\"pr_attribution_withheld\":\"guessed_link\""
         fi
         if [ -n "$ev" ]; then
             events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"$ev\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "$SUMMARY")\"$frag$sess_frag}}"
@@ -405,7 +417,7 @@ EOF_IDLESS
         # outcome -- it is refusable, which wrong is not -- but absent must not
         # also be silent, so the caller is told rather than left believing a
         # role was recorded. Re-run with --task to attribute it.
-        printf "report-back: --pr/--pr-role NOT recorded: this report's task link was auto-resolved (#835), and an attribution may not ride a guessed id. Re-run with --task <id> to record it.\n" >&2
+        printf "report-back: --pr/--pr-role NOT recorded: this report's task link was auto-resolved (#835), and an attribution may not ride a guessed id. The WITHHOLDING is on the row (pr_attribution_withheld=guessed_link), so a later reader can see one was declared; the attribution itself is not. Re-run with --task <id> to record it.\n" >&2
     fi
     local _batch
     printf -v _batch '{"events":[%s]}' "$events"
