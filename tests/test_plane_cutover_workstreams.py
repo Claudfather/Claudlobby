@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from claudlobby.brief import _workstream_section
 from claudlobby.config import load_fleet
 from tests.plane_fixtures import F, REPO, _cli, _env, _scene, _stdlib_readers, ro as _ro
@@ -483,3 +485,92 @@ def test_capture_mode_metadata_warns_and_goal_survives_the_strip(tmp_path):
         reg = pr.workstream_registry(conn, F, lease_days=14)
     e = reg["workstreams"]["ws-stale-one"]
     assert e["next"] == doc["workstreams"]["ws-stale-one"]["next"]  # survived via goal
+
+
+def test_dry_run_against_a_fresh_root_creates_no_plane_db(tmp_path):
+    """#1748 review: --dry-run promises to touch neither the file nor the
+    plane. Against a root with NO plane db at all, the old connect() had
+    the side effect of creating one (measured: a 288 KB migrated file) --
+    the dedup read must be read-only and non-creating."""
+    from tests.plane_fixtures import plane_root, _paths
+
+    root = plane_root(tmp_path)
+    paths = _paths(root)
+    doc, _ = _stale_file()
+    _write_residual(paths, doc)
+    assert not (root / "state" / "plane" / "plane.db").exists()
+
+    r = _cli(root, "import-workstreams", "--dry-run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert '"event_id"' in r.stdout
+
+    assert not (root / "state" / "plane" / "plane.db").exists(), (
+        "a dry run against a plane-less root must not create one"
+    )
+
+
+def test_the_lock_excludes_a_shell_writer_when_flock_is_unavailable(
+    tmp_path, monkeypatch
+):
+    """#1748 review, the one that mattered: with_lock's own fallback (no
+    flock binary -- stock macOS) uses an mkdir spinlock on <lockfile>.d, a
+    DIFFERENT mechanism and path than fcntl.flock on the lockfile itself.
+    The importer must resolve the SAME way the shell does and take
+    whichever mechanism a shell writer on this host would take, or the two
+    do not exclude each other at all.
+
+    BOTH sides must see the restricted PATH, not just the shell subprocess
+    -- the first version of this test only restricted the holder's env and
+    left the pytest process's own PATH (with a real flock on it) in force,
+    so registry_lock took the flock branch while the shell took mkdir: two
+    mechanisms that never contend for anything, a false pass waiting to
+    happen."""
+    import shutil
+    import subprocess as sp
+    import time
+
+    from claudlobby.plane.workstream_import import registry_lock
+
+    real_flock = shutil.which("flock")
+    if real_flock is None:
+        pytest.skip("no flock binary on this runner -- cannot construct the contrast")
+
+    isolated = tmp_path / "no-flock-bin"
+    isolated.mkdir()
+    # Everything the real /usr/bin offers, EXCEPT flock -- robust by
+    # construction (mirrors every OTHER binary the shell writer needs),
+    # not a guess at which specific ones lib-common.sh happens to call.
+    for f in Path("/usr/bin").glob("*"):
+        if f.name == "flock":
+            continue
+        try:
+            (isolated / f.name).symlink_to(f)
+        except OSError:
+            pass
+    assert shutil.which("flock", path=str(isolated)) is None
+    monkeypatch.setenv("PATH", str(isolated))  # THIS process too
+
+    lockfile = tmp_path / "workstreams.lock"
+    lockdir = tmp_path / "workstreams.lock.d"
+    holder = sp.Popen(
+        [
+            "bash",
+            "-c",
+            f'. "{LIB}/lib-common.sh"; with_lock "{lockfile}" '
+            f'bash -c "echo acquired; sleep 1.2; echo released"',
+        ],
+        stdout=sp.PIPE,
+        stderr=sp.STDOUT,
+        text=True,
+        env=dict(os.environ, PATH=str(isolated)),
+    )
+    time.sleep(0.4)
+    assert lockdir.is_dir(), "the shell holder must be using the mkdir fallback by now"
+
+    t0 = time.monotonic()
+    with registry_lock(lockfile, wait_s=5):
+        elapsed = time.monotonic() - t0
+    holder.wait(timeout=5)
+    assert elapsed > 0.5, (
+        f"acquired after only {elapsed:.2f}s -- the shell holder's lock did not exclude this"
+    )

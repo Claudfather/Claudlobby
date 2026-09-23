@@ -216,3 +216,31 @@ def test_empty_file_and_empty_existing_produce_an_empty_plan():
     p = plan({"workstreams": {}}, EMPTY, fleet=FLEET, import_batch="b1", lease_days=14)
     assert isinstance(p, ImportPlan)
     assert p.events == [] and p.skipped == [] and p.warnings == []
+
+
+# --- #1748 review: refs/task_ids dropped, unconditionally, but disclosed ---
+
+
+def test_nonempty_refs_and_task_ids_warn_by_name_and_count():
+    """The plane's Workstream/WorkstreamEvent contract has no field for
+    either, for any row -- ravi's finding, verified: 10 rows on his host
+    carried refs, this importer's field vocabulary read neither. Warn
+    rather than lose silently."""
+    doc = _row(
+        task_ids=["t-1", "t-2"],
+        refs={"issues": ["https://github.com/o/r/issues/1"], "prs": []},
+    )
+    p = plan(doc, EMPTY, fleet=FLEET, import_batch="b1", lease_days=14)
+    assert len(p.warnings) == 1
+    detail = p.warnings[0].detail
+    assert "refs.issues (1)" in detail
+    assert "task_ids (2)" in detail
+    assert "refs.prs" not in detail  # only the non-empty ones are named
+
+
+def test_empty_refs_and_task_ids_stay_silent():
+    """The common real-world case (every row measured on THIS host) --
+    warning on an empty field would train an operator to stop reading."""
+    doc = _row(task_ids=[], refs={"issues": [], "prs": []})
+    p = plan(doc, EMPTY, fleet=FLEET, import_batch="b1", lease_days=14)
+    assert p.warnings == []

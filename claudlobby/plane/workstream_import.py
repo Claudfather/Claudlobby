@@ -59,6 +59,16 @@ but nothing here requires that stability for correctness). `emit_batch`'s
 `_finalize` mints a RANDOM event_id for any envelope that omits one, so an
 envelope that forgot to set `event_id` would defeat dedup on every field
 except this one, silently.
+
+Two fields the file format carries and the import does NOT (#1748 review):
+`refs` (issues/prs) and `task_ids`. Unlike `project_key` — dropped only on a
+case mismatch, and recoverable by fixing the source value — these are
+dropped unconditionally, for every row, because the plane's `Workstream`/
+`WorkstreamEvent` wire contract (`plane/contracts.py`) has no field for
+either. Widening that contract would affect the LIVE writer too and is out
+of scope for a migration tool. `plan()` warns per row when either is
+actually non-empty (most real rows carry neither), naming the count, so the
+loss is visible rather than inferred from an absent mention.
 """
 
 from __future__ import annotations
@@ -85,14 +95,44 @@ LOCK_WAIT_S = 30.0
 
 @contextmanager
 def registry_lock(lock_path: Path, *, wait_s: float = LOCK_WAIT_S):
-    """Exclusive advisory lock on the SAME file `lib/workstream-update.sh`
-    locks (`<fleet runtime>/workstreams.lock`, `_ws_lock`) — `fcntl.flock`
-    on a path interoperates with bash's `flock` binary on the same inode,
-    so this and a live shell writer serialize on one lock, never two. The
-    caller is expected to materialize the existing registry AND emit its
-    plan's events while holding this — see the module docstring's second
-    R1-gauntlet hazard (materialize-before-lock)."""
+    """Exclusive lock on the SAME name `lib/workstream-update.sh` locks
+    (`<fleet runtime>/workstreams.lock`, `_ws_lock`) — but WHICH mechanism
+    depends on the host, and it must match the shell's choice or the two
+    writers do not exclude each other at all (#1748 review).
+
+    `with_lock` (`lib-common.sh`) resolves `flock` via `command -v flock`
+    and, when that is empty, falls back to an mkdir spinlock on a
+    DIFFERENT PATH (`<lockfile>.d`) — `_FLOCK_BIN`'s own comment: "resolved
+    path to flock (empty on stock macOS)". `fcntl.flock` on `lock_path`
+    only interoperates with the shell's FIRST branch: on a host taking the
+    fallback, a real `flock(2)` on a file nothing else opens excludes
+    nothing, silently, on exactly the platform the shell's own comment
+    names. So this resolves `flock` in Python the same way the shell
+    resolves it in bash, and takes whichever mechanism a shell writer on
+    THIS host would take — never both, never a guess.
+
+    One deliberate divergence, disclosed rather than silent: `with_lock`'s
+    own fallback gives up after its budget and runs UNLOCKED ("a waiter
+    that gives up runs unlocked" — measured by the R1 gauntlet as the
+    correct choice for a small jq+mv critical section). This is a one-shot
+    migration into an append-only ledger, where racing an unprotected
+    write is worse than asking the operator to retry, so this raises
+    TimeoutError instead of proceeding — a stricter EXIT, never a looser
+    EXCLUSION.
+
+    The caller is expected to materialize the existing registry AND emit
+    its plan's events while holding this — see the module docstring's
+    second R1-gauntlet hazard (materialize-before-lock)."""
+    import shutil
+
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if shutil.which("flock"):
+        yield from _flock_lock(lock_path, wait_s)
+    else:
+        yield from _mkdir_lock(lock_path, wait_s)
+
+
+def _flock_lock(lock_path: Path, wait_s: float):
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         deadline = time.monotonic() + wait_s
@@ -113,6 +153,36 @@ def registry_lock(lock_path: Path, *, wait_s: float = LOCK_WAIT_S):
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def _mkdir_lock(lock_path: Path, wait_s: float):
+    """The SAME fallback `with_lock` takes when no `flock` binary is on
+    PATH: an atomic `mkdir` on `<lock_path>.d` (POSIX guarantees mkdir is
+    atomic on every filesystem the shell targets) -- same suffix, same
+    parent directory, so a shell writer's spinlock and this one contend
+    for the SAME directory rather than two unrelated ones."""
+    lockdir = Path(f"{lock_path}.d")
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            lockdir.mkdir()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"could not acquire {lockdir} within {wait_s}s"
+                    " -- another workstream-update.sh call may be running"
+                    " (this host has no flock binary, so both writers use"
+                    " the mkdir-spinlock fallback)"
+                ) from None
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            lockdir.rmdir()
+        except OSError:
+            pass
 
 
 #: The four statuses the writer's own vocabulary recognises
@@ -243,6 +313,31 @@ def _row_events(
     # approximation is the row's own owner, falling back to a synthetic
     # import actor only when even that is absent.
     opened_by = owner_alias or f"bot:{fleet}/legacy-import"
+
+    # refs (issues/prs) and task_ids are DROPPED, unconditionally, for every
+    # row (#1748 review) -- unlike project_key, which is dropped only on a
+    # case mismatch, this one is forced by the target schema: the Workstream
+    # /WorkstreamEvent wire contract (contracts.py) has no field for either,
+    # for any row, ever. Widening that contract is a live-writer-affecting
+    # change and out of scope here. Warn only when there is something real
+    # to lose -- most real rows carry empty refs/task_ids, and a warning on
+    # every row would train an operator to stop reading them.
+    refs = row.get("refs") or {}
+    dropped = []
+    if refs.get("issues"):
+        dropped.append(f"refs.issues ({len(refs['issues'])})")
+    if refs.get("prs"):
+        dropped.append(f"refs.prs ({len(refs['prs'])})")
+    if row.get("task_ids"):
+        dropped.append(f"task_ids ({len(row['task_ids'])})")
+    if dropped:
+        warnings.append(
+            RowWarning(
+                wid,
+                f"{', '.join(dropped)} present in the file but dropped --"
+                " the plane's workstream contract has no field for either",
+            )
+        )
 
     events = [
         _envelope(

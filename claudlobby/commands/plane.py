@@ -787,20 +787,25 @@ def cmd_plane_import_workstreams(args) -> int:
     def run() -> int:
         lock_path = paths.fleet_state / "workstreams.lock"
         with registry_lock(lock_path):
-            # No pre-existence check, deliberately unlike prune/expire: for
-            # THOSE doors "no db yet" means nothing to sweep, but for an
-            # import it means nothing to DEDUP AGAINST, which is the
-            # unconditional-import case, not a reason to skip. connect()
-            # creates the db and migrate() the schema exactly as any door's
-            # first-ever emit does; workstream_registry(..., or_empty=True)
-            # answers the empty registry for a fleet the plane holds no
-            # identity for yet, same as the writer's own first `open`.
-            conn = connect(db_file(root))
-            try:
-                migrate(conn)
-                existing = pr.workstream_registry(conn, fleet, lease_days=lease_days, or_empty=True)
-            finally:
-                conn.close()
+            # Read-only, non-creating (#1748 review): the dedup read must
+            # not have the SIDE EFFECT of bringing a plane into existence,
+            # or --dry-run -- which promises to touch neither the file nor
+            # the plane -- leaves a stray db behind against a root that
+            # never had one. open_ro is the same exists-before-connect
+            # probe every read door shares: no plane yet means nothing to
+            # dedup against, which is the unconditional-import case, not a
+            # reason to skip (unlike prune/expire, where no db means
+            # nothing to sweep). The REAL write, when there is one, still
+            # creates the plane exactly as any door's first-ever emit does
+            # -- that happens below, inside emit_batch, never here.
+            ro_conn, _note = open_ro(root)
+            if ro_conn is None:
+                existing = {"workstreams": {}, "archived": []}
+            else:
+                try:
+                    existing = pr.workstream_registry(ro_conn, fleet, lease_days=lease_days, or_empty=True)
+                finally:
+                    ro_conn.close()
 
             batch = batch_id(src.stat().st_mtime)
             the_plan = plan(file_doc, existing, fleet=fleet, import_batch=batch, lease_days=lease_days)
