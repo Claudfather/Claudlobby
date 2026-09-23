@@ -65,7 +65,7 @@ def cmd_doctor(args) -> int:
         print(_sw.format_table(_sw.resolve(paths, fleet)))
         return 0
     fleet, _md = _load_fleet_or_exit(paths)
-    report = run_doctor(fleet, paths)
+    report = run_doctor(fleet, paths, delivery=getattr(args, "delivery", True))
     print(format_report(report))
     return 1 if report.has_failures else 0
 
