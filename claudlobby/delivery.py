@@ -63,11 +63,23 @@ DEFAULT_PR_CAP = 400
 #: this rung must never fail in.
 DEFAULT_CONFIRM_CAP = 12
 
-#: Wall-clock budget per repo. Measured on this estate after batching the ref
-#: read: 4.1 s for a repo with 147 branches and 5 open PRs, 1.5 s for a smaller
-#: one. The budget exists so a slow or large repo cannot silently make `doctor`
-#: unpleasant enough to be skipped -- and a repo that exceeds it is reported
-#: UNCHECKED, never clean, which is the only direction this rung may fail in.
+#: Wall-clock budget for the WHOLE RUN, not per repo (#1745 review). Measured on
+#: this estate after batching the ref read: 4.1 s for a repo with 147 branches and
+#: 5 open PRs, 1.5 s for a smaller one -- so 20 s is roughly five times the worst
+#: single repo observed, and as a run-wide cap it truncates nothing legitimate
+#: today.
+#:
+#: PER-REPO WAS THE DEFECT, NOT THE NUMBER. A per-repo budget has no whole-run
+#: ceiling: it is `budget x repos`, so the cost a human actually waits through
+#: grew with fleet size -- 80 s on a four-repo fleet, worse on a bigger one. The
+#: ceiling is what decides whether someone aliases `--no-delivery` into a shell
+#: profile, and once aliased the UNCHECKED disclosure is never read again, which
+#: makes the opt-out permanent and invisible: the same failure class, one level
+#: up, as the stranded work this rung exists to surface.
+#:
+#: A repo that exceeds it is reported UNCHECKED, never clean, which is the only
+#: direction this rung may fail in. Run-wide, that disclosure has to carry one
+#: more distinction than it used to -- see `DeliveryFindings.checked`.
 DEFAULT_BUDGET_S = 20.0
 
 
@@ -82,13 +94,27 @@ class DeliveryFindings:
     confirmations: int = 0
     pr_cap: int = DEFAULT_PR_CAP
     window_days: int = DEFAULT_WINDOW_DAYS
+    #: False when the whole-run budget was already spent before this repo was
+    #: examined at all. Under a per-repo budget this state could not arise --
+    #: every repo got its own clock, so "ran out" always meant "ran out PARTWAY
+    #: THROUGH this repo" and `unchecked` told the whole story. Run-wide, a repo
+    #: can be reached with nothing left, and that is a different fact from one
+    #: examined and found clean. Collapsing them would report a repo nobody
+    #: looked at as having no undelivered work.
+    checked: bool = True
 
     @property
     def clean(self) -> bool:
-        return not (self.no_pr or self.stale_pr_head)
+        """Examined AND found nothing. A repo the run never reached is not
+        clean -- absence of findings from a check that did not run is the one
+        reading this rung may never produce."""
+        return self.checked and not (self.no_pr or self.stale_pr_head)
 
     def bound_line(self) -> str:
         """The bounds, always, whatever the verdict (#1742)."""
+        if not self.checked:
+            return ("NOT CHECKED -- whole-run budget spent before this repo was "
+                    "examined; no answer either way")
         bits = [f"window {self.window_days}d",
                 f"PR-list cap {self.pr_cap}",
                 f"{self.confirmations} exact confirmation(s)"]
@@ -172,11 +198,31 @@ def check_repo(repo: str, checkout: str, *, default_branch: str = "main",
                window_days: int = DEFAULT_WINDOW_DAYS,
                pr_cap: int = DEFAULT_PR_CAP,
                confirm_cap: int = DEFAULT_CONFIRM_CAP,
-               budget_s: float = DEFAULT_BUDGET_S) -> DeliveryFindings:
+               budget_s: float = DEFAULT_BUDGET_S,
+               deadline: float | None = None) -> DeliveryFindings:
     """Both halves for one repo. Local git where possible, network only where
-    the answer genuinely lives on GitHub."""
+    the answer genuinely lives on GitHub.
+
+    `deadline` is a `time.monotonic()` instant SHARED across every repo in a
+    run, which is how the caller bounds the whole run rather than each repo
+    (#1745 review). Omitted, this repo gets its own `budget_s` clock -- the
+    standalone behaviour, and what every direct caller and test relies on.
+
+    A repo reached with the shared deadline already spent returns immediately
+    with `checked=False` and makes NO network calls: spending the network on a
+    repo that cannot be finished buys nothing, and the honest answer for it is
+    that it was not looked at."""
     import time as _time
-    _deadline = _time.monotonic() + budget_s
+    _deadline = deadline if deadline is not None else _time.monotonic() + budget_s
+    # Only under a SHARED deadline: "reached with nothing left" is a whole-run
+    # state. A standalone caller passing budget_s=0 gave THIS repo a degenerate
+    # clock, which is a different fact and keeps its existing behaviour -- every
+    # branch marked unchecked in the loop below.
+    if deadline is not None and _time.monotonic() > _deadline:
+        f = DeliveryFindings(pr_cap=pr_cap, window_days=window_days, checked=False)
+        f.notes.append(f"{repo}: not checked — whole-run budget spent before "
+                       "reaching it")
+        return f
     f = DeliveryFindings(pr_cap=pr_cap, window_days=window_days)
 
     # --- half 2: an open PR whose head is behind its branch ref --------------
@@ -241,8 +287,8 @@ def check_repo(repo: str, checkout: str, *, default_branch: str = "main",
             f.unchecked.append(branch)
             if not any("budget" in n for n in f.notes):
                 f.notes.append(
-                    f"{repo}: {budget_s:.0f}s budget spent — remaining branches "
-                    "UNCHECKED, not assumed clean")
+                    f"{repo}: time budget spent PART-WAY THROUGH this repo — "
+                    "remaining branches UNCHECKED, not assumed clean")
             continue
         if f.confirmations >= confirm_cap:
             f.unchecked.append(branch)

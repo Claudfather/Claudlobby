@@ -965,18 +965,42 @@ def check_delivery(
                    "no repos in any bot's scope — nothing to reconcile")
         return
 
+    # ONE deadline for the whole run, not one per repo (#1745 review). A
+    # per-repo budget has no run-wide ceiling -- it is budget x repos, so what a
+    # human waits through grew with fleet size, and that ceiling is what gets
+    # `--no-delivery` aliased permanently.
+    import time as _time
+    run_deadline = _time.monotonic() + DEFAULT_BUDGET_S
+
     findings: list[str] = []
     bounds: list[str] = []
+    full = partial = unreached = 0
     for repo, checkout in sorted(repos.items()):
-        f = check_repo(repo, checkout, budget_s=DEFAULT_BUDGET_S)
+        f = check_repo(repo, checkout, deadline=run_deadline)
         for b in f.no_pr:
             findings.append(f"{repo} {b}: ahead of default, NO PR — committed and "
                             "pushed, invisible to every read door")
         for line in f.stale_pr_head:
             findings.append(f"{repo} {line}")
         bounds.append(f"{repo}: {f.bound_line()}")
+        if not f.checked:
+            unreached += 1
+        elif f.unchecked:
+            partial += 1
+        else:
+            full += 1
 
-    detail = "; ".join(bounds)
+    # Run-wide, the budget can stop PART-WAY THROUGH a repo, which a per-repo
+    # clock could not do -- so coverage is stated as three counts rather than
+    # left to be inferred from the per-repo bounds. Leading with it matters when
+    # it is short: "nothing undelivered" over two of four repos is a different
+    # claim from the same words over all four.
+    coverage = f"{full}/{len(repos)} repo(s) fully checked"
+    if partial:
+        coverage += f", {partial} partially"
+    if unreached:
+        coverage += f", {unreached} NOT REACHED (run budget spent)"
+    detail = coverage + " — " + "; ".join(bounds)
     if findings:
         report.add("delivery", "warn",
                    f"{len(findings)} undelivered: " + " | ".join(findings[:4])

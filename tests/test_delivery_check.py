@@ -197,3 +197,65 @@ def test_the_time_budget_fires_and_reports_UNCHECKED_not_clean(checkout, monkeyp
     assert f.unchecked, "the budget did not fire"
     assert any("budget spent" in n for n in f.notes), f.notes
     assert "UNCHECKED" in f.bound_line() and "not a clean answer" in f.bound_line()
+
+
+class TestTheBudgetIsWholeRunNotPerRepo:
+    """#1745 review. A per-repo budget has no run-wide ceiling — it is
+    `budget x repos`, so the wait grew with fleet size and the ceiling is what
+    gets `--no-delivery` aliased permanently.
+
+    Run-wide costs one thing a per-repo clock did not: the budget can now be
+    spent BEFORE a repo is examined at all, which is a different fact from a
+    repo examined and found clean. These pin that the difference survives.
+    """
+
+    def test_a_repo_reached_with_the_shared_deadline_spent_is_NOT_CHECKED(
+            self, checkout, monkeypatch):
+        import time
+        calls: list[tuple] = []
+        _stub(monkeypatch, all_pr_branches=[], exact=0, calls=calls)
+        f = delivery.check_repo("o/r", str(checkout),
+                                deadline=time.monotonic() - 1.0)
+        assert f.checked is False, "a repo the run never reached must say so"
+        assert not any(c[0] == "gh" for c in calls), (
+            "a repo that cannot be finished must not spend network on the "
+            f"attempt: {calls}")
+        assert "not checked" in " ".join(f.notes).lower(), f.notes
+        assert "NOT CHECKED" in f.bound_line(), f.bound_line()
+
+    def test_an_unreached_repo_is_NOT_reported_clean(self, checkout, monkeypatch):
+        """The collapse this field exists to prevent: no findings from a check
+        that never ran reads identically to no findings from one that did."""
+        import time
+        _stub(monkeypatch, all_pr_branches=[], exact=0)
+        f = delivery.check_repo("o/r", str(checkout),
+                                deadline=time.monotonic() - 1.0)
+        assert f.no_pr == [] and f.stale_pr_head == []
+        assert not f.clean, (
+            "a repo nobody looked at reported CLEAN — absence of findings from "
+            "a check that did not run is the one answer this rung may not give")
+
+    def test_a_live_shared_deadline_still_checks_normally(self, checkout,
+                                                          monkeypatch):
+        """Positive control: the not-checked path must not fire whenever a
+        deadline is merely PRESENT, or every repo in a real run goes dark."""
+        import time
+        _stub(monkeypatch, all_pr_branches=[], exact=0)
+        f = delivery.check_repo("o/r", str(checkout),
+                                deadline=time.monotonic() + 60.0)
+        assert f.checked is True
+        assert f.no_pr == ["feat/stranded"], (
+            "the constructed stranded branch was not found with budget to "
+            f"spare: {f}")
+
+    def test_omitting_the_deadline_keeps_the_standalone_clock(self, checkout,
+                                                              monkeypatch):
+        """The standalone path is unchanged: a caller that passes no deadline
+        gets its own budget, and a spent one still reports per-branch UNCHECKED
+        rather than the whole repo as not-reached."""
+        _stub(monkeypatch, all_pr_branches=[], exact=0)
+        f = delivery.check_repo("o/r", str(checkout), budget_s=0.0)
+        assert f.checked is True, (
+            "a degenerate standalone budget must not be reported as a repo the "
+            "run never reached — that is a whole-run state")
+        assert f.unchecked, "the per-branch budget path stopped firing"

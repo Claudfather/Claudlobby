@@ -1279,3 +1279,77 @@ class TestTheFixtureRefusesDeadWiring:
     ):
         root = _doctor_root(tmp_path, _fleet_yaml())
         assert (root / "lib" / "env-tiers.sh").is_file()
+
+
+class TestTheDeliveryCoverageLine:
+    """#1745 review: the budget became WHOLE-RUN, which means it can stop
+    part-way through a repo — a state a per-repo clock could not reach. So the
+    rung now states coverage as three counts rather than leaving it to be
+    inferred, because "nothing undelivered" over two of four repos is a
+    different claim from the same words over all four.
+
+    These pin the AGGREGATION. `check_repo`'s own three states are pinned in
+    tests/test_delivery_check.py; what is asserted here is that the summary
+    reports them rather than averaging them away.
+    """
+
+    @staticmethod
+    def _scoped(fleet, repos):
+        from claudlobby.config import ScopeConfig
+        for bot in fleet.bots.values():
+            bot.scope = ScopeConfig(org="acme", repos=list(repos))
+            return
+        raise AssertionError("fixture has no bots")
+
+    def _run(self, doctor_fleet, monkeypatch, outcomes):
+        """`outcomes` maps repo -> DeliveryFindings the stubbed per-repo check
+        returns, so the aggregation is tested without any network."""
+        from claudlobby import delivery, doctor as doc
+        _, fleet, paths = doctor_fleet
+        self._scoped(fleet, outcomes.keys())
+        monkeypatch.setattr(delivery, "check_repo",
+                            lambda repo, checkout, **kw: outcomes[repo])
+        report = DoctorReport()
+        doc.check_delivery(fleet, paths, report)
+        return [c for c in report.checks if c.name == "delivery"][0]
+
+    def test_all_reached_says_so(self, doctor_fleet, monkeypatch):
+        from claudlobby.delivery import DeliveryFindings
+        c = self._run(doctor_fleet, monkeypatch,
+                      {"acme/a": DeliveryFindings(), "acme/b": DeliveryFindings()})
+        assert "2/2 repo(s) fully checked" in c.detail, c.detail
+        assert "NOT REACHED" not in c.detail, c.detail
+
+    def test_a_repo_the_run_never_reached_is_NAMED_not_averaged_away(
+            self, doctor_fleet, monkeypatch):
+        from claudlobby.delivery import DeliveryFindings
+        c = self._run(doctor_fleet, monkeypatch, {
+            "acme/a": DeliveryFindings(),
+            "acme/b": DeliveryFindings(checked=False),
+        })
+        assert "1/2 repo(s) fully checked" in c.detail, c.detail
+        assert "1 NOT REACHED" in c.detail, (
+            "a repo the run budget never reached vanished from the summary — a "
+            f"reader would take this for full coverage: {c.detail}")
+        assert c.status == "pass", "no findings is still a pass; the bound is what changed"
+
+    def test_a_PARTIALLY_checked_repo_is_named_too(self, doctor_fleet, monkeypatch):
+        """The state per-repo budgeting could not produce: stopped half-way
+        through repo N rather than cleanly between repos."""
+        from claudlobby.delivery import DeliveryFindings
+        half = DeliveryFindings()
+        half.unchecked.append("feat/never-got-to-it")
+        c = self._run(doctor_fleet, monkeypatch,
+                      {"acme/a": DeliveryFindings(), "acme/b": half})
+        assert "1/2 repo(s) fully checked" in c.detail, c.detail
+        assert "1 partially" in c.detail, c.detail
+
+    def test_coverage_leads_the_bounds_so_a_short_run_is_visible_first(
+            self, doctor_fleet, monkeypatch):
+        from claudlobby.delivery import DeliveryFindings
+        c = self._run(doctor_fleet, monkeypatch,
+                      {"acme/a": DeliveryFindings(checked=False)})
+        bounds = c.detail.split("bounds: ", 1)[1]
+        assert bounds.startswith("0/1 repo(s) fully checked"), (
+            "coverage must come before the per-repo detail — it is the part a "
+            f"reader must not scroll past: {bounds}")
