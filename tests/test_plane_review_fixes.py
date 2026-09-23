@@ -526,7 +526,24 @@ def test_f10_0002_applies_against_an_existing_v1_database(tmp_path: Path, monkey
     """The upgrade path, not just the fresh path: a db stamped v1 by 0001
     alone must gain 0002's index from a plain migrate()."""
     files = migrations_mod._migration_files()
-    assert [n for n, _ in files] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    numbers = [n for n, _ in files]
+    # A RULE, NOT A LIST (#1744 review). A hardcoded roster breaks on every
+    # future migration, and its failure says only that nobody updated the
+    # roster — never whether the new migration is CORRECT. So it cries wolf by
+    # construction, and the next reader appends a number without reading it.
+    #
+    # These clauses are true of ANY correct migration set, and are strictly
+    # stronger than the roster was. The third is the defect this very PR hit
+    # end-to-end: 0012 on disk with the constant still 11 makes every emit
+    # raise DowngradeError. A roster cannot see that — it only knows how many
+    # items it was told about — and a rule catches it in CI.
+    assert numbers, "migration discovery returned nothing — the rest of this test would be vacuous"
+    assert numbers == list(range(1, len(numbers) + 1)), (
+        f"migrations must run contiguously from 1 with no gaps: {numbers}")
+    assert numbers[-1] == migrations_mod.SCHEMA_USER_VERSION, (
+        f"newest migration is {numbers[-1]} but SCHEMA_USER_VERSION is "
+        f"{migrations_mod.SCHEMA_USER_VERSION} — a migration landed without its "
+        "constant bump, so every emit would refuse the db as a downgrade")
     conn = connect(db_path(tmp_path))
     monkeypatch.setattr(migrations_mod, "SCHEMA_USER_VERSION", 1)
     monkeypatch.setattr(migrations_mod, "_migration_files", lambda: files[:1])
