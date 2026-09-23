@@ -2,7 +2,8 @@
 
 Before #1754 a manager's `report-back.sh` delivered into the manager's own tmux
 pane, and the plane recorded the communication with `recipient_alias ==
-sender_alias` and closed the task it named. Those rows exist on every fleet
+sender_alias`, and landed the task event it carried (a terminal one closed the
+task; a progress one did not). Those rows exist on every fleet
 that ever had a manager report upward: measured on the two fleets of the
 authoring host at the time of the fix (12 rows, two managers), and reported
 by an external reviewer on two more planes.
@@ -10,7 +11,7 @@ by an external reviewer on two more planes.
 ## Ruling: history stays
 
 The plane is append-only and the rows are true: the door did deliver to the
-sender. They are not rewritten, and the tasks they closed are not reopened —
+sender. They are not rewritten, and the tasks a terminal one closed are not reopened —
 the work they reported is past, and reopening would page every manager on the
 estate about rows nobody can act on. New rows cannot have this shape: the door
 refuses a self-addressed send (rc 4) before it records anything.
@@ -37,7 +38,9 @@ for row in c.execute(q):
 EOF
 ```
 
-Per row, with the task it closed (if any):
+Per row, with the task event it carried (if any) — `e.event` says whether it
+was terminal (`completed`, `failed`, `blocked`) or a `progress` update, which
+closed nothing:
 
 ```sql
 SELECT c.occurred_at, c.sender_alias, c.msg_id, e.event, a.source_ref

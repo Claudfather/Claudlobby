@@ -95,10 +95,11 @@ the plane because the report never left the manager's pane. The declared
 - **History is left as it is, and it is findable.** The plane is append-only
   and every self-addressed row is a truthful record of what the door did
   (delivered to the sender's own pane). Those rows are not rewritten and the
-  tasks they closed are not reopened: the work they reported is past, and a
+  tasks a terminal one closed are not reopened: the work they reported is past, and a
   reopen would page every manager on the estate about stale rows. Measured on
-  the authoring host: 12 such rows across two fleets (7 + 5), 6 of which closed
-  a task; an external reviewer from another fleet reported the same
+  the authoring host: 12 such rows across two fleets (7 + 5), 6 carrying a task
+  event — 4 terminal (`completed`, closed the task), 2 `progress` (closed
+  nothing); an external reviewer from another fleet reported the same
   signature on two further planes (their measurement, not reproducible from
   here). The finder, and the ruling, are in
   `documentation/runbooks/self-addressed-reports.md`.
