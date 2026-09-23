@@ -344,6 +344,28 @@ val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$BOT" t-1-aaaa "$((now - 600))" "$((n
 
 sleep 2  # ensure activity gap > threshold (1s)
 
+# TWO real checkouts for the wip_uncommitted assertions below (#1728). The
+# harness had NO coverage of this event at all, which is part of why it shipped
+# a bare count for so long: nothing end-to-end ever read its payload.
+#   wip-mixed      one tracked modification + one untracked artifact
+#   wip-untracked  untracked ONLY -- the shape that must still be reported,
+#                  because a brand-new source file looks exactly like it
+for _wip_repo in wip-mixed wip-untracked; do
+    _wr="$BOT_DIR/projects/$_wip_repo"
+    mkdir -p "$_wr"
+    git -C "$_wr" init -q -b main >/dev/null 2>&1
+    git -C "$_wr" config user.email harness@example.invalid
+    git -C "$_wr" config user.name harness
+    printf 'original\n' > "$_wr/tracked.md"
+    git -C "$_wr" add -A >/dev/null 2>&1
+    git -C "$_wr" commit -qm seed >/dev/null 2>&1
+done
+printf 'edited\n' > "$BOT_DIR/projects/wip-mixed/tracked.md"
+mkdir -p "$BOT_DIR/projects/wip-mixed/.venv"
+printf 'x\n' > "$BOT_DIR/projects/wip-mixed/.venv/pyvenv.cfg"
+mkdir -p "$BOT_DIR/projects/wip-untracked/node_modules"
+printf 'x\n' > "$BOT_DIR/projects/wip-untracked/node_modules/x.js"
+
 # --- Observe: run the real pulse against the scratch fleet ---
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
 
@@ -363,6 +385,27 @@ printf '%s' "$events_rows" | grep -q '"type":"bridge_down"' && r=yes || r=no
 harness_check "bridge_down event emitted (live session, Telegram poller not delivering)" "$r"
 ls "$EVENTS"/*.jsonl >/dev/null 2>&1 && r=no || r=yes
 harness_check "no legacy event file was written by the sweep (the plane is the only record — F18 R1)" "$r"
+
+# #1728: the row that guards work-in-flight must say WHAT IT SAW. A count cannot
+# separate a mid-edit from a virtualenv, and the composed table tells a manager
+# "Do NOT restart" on it -- so at thousands of firings the rule became
+# unfollowable and two managers independently stopped obeying it.
+_wip_mixed="$(printf '%s\n' "$events_rows" | grep '"type":"wip_uncommitted"' | grep '"repo":"wip-mixed"' | tail -1)"
+_wip_untr="$(printf '%s\n' "$events_rows" | grep '"type":"wip_uncommitted"' | grep '"repo":"wip-untracked"' | tail -1)"
+[ -n "$_wip_mixed" ] && r=yes || r=no
+harness_check "#1728 wip_uncommitted emitted for a dirty checkout" "$r"
+printf '%s' "$_wip_mixed" | grep -q '"dirty_tracked":1' && printf '%s' "$_wip_mixed" | grep -q '"dirty_untracked":1' && r=yes || r=no
+harness_check "#1728   ...with the tracked/untracked SPLIT, not one number" "$r"
+printf '%s' "$_wip_mixed" | grep -q 'tracked\.md' && r=yes || r=no
+harness_check "#1728   ...naming the PATH it saw (the fact, not a proxy)" "$r"
+printf '%s' "$_wip_mixed" | grep -q '"paths_shown":2' && printf '%s' "$_wip_mixed" | grep -q '"paths_total":2' && r=yes || r=no
+harness_check "#1728   ...stating its bound: paths_shown beside paths_total" "$r"
+printf '%s' "$_wip_mixed" | grep -q '"unchanged_for_s":' && r=yes || r=no
+harness_check "#1728   ...and how long that exact status has held" "$r"
+# THE REFUSED FIX, pinned end to end: excluding untracked paths would silence the
+# alert on a brand-new source file, whose loss is unrecoverable.
+[ -n "$_wip_untr" ] && printf '%s' "$_wip_untr" | grep -q '"dirty_tracked":0' && r=yes || r=no
+harness_check "#1728 an UNTRACKED-ONLY checkout is still reported (never filtered)" "$r"
 
 # #460: a never-closing dispatch must age out of the overdue set so fleet-pulse
 # stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI
