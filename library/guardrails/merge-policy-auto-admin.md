@@ -7,7 +7,33 @@ description: Manager auto-merges PRs using --admin after a real peer review verd
 
 The manager auto-merges PRs using `--admin` when ALL of:
 
+0. **RECONCILE THE HEAD BEFORE ANCHORING ANYTHING TO IT — and a mismatch is never a pass.** Read the PR's head and the branch's own ref, and refuse if they differ:
+
+   ```bash
+   REPO=<owner/repo>; N=<n>
+   BR=$(gh pr view "$N" --repo "$REPO" --json headRefName --jq .headRefName)
+   PH=$(gh api "repos/$REPO/pulls/$N" --jq .head.sha)          # full 40-char oid
+   RH=$(gh api "repos/$REPO/git/ref/heads/$BR" --jq .object.sha)
+   [ "$PH" = "$RH" ] || { echo "REFUSE: PR head $PH != branch ref $RH"; exit 1; }
+   ```
+
+   **Why this rung exists, and why the paragraphs below it were not enough.** This page already tells you to anchor your evidence to a head, in several places and at length. That did not help, because **the failure is not an operator forgetting to anchor — it is the anchor being reported stale by the surface the operator is told to read.** No amount of instruction to check the head fixes a head that answers wrongly.
+
+   Measured on this estate: a PR head persisted at an **old** sha across **both** the GraphQL and REST surfaces, two reads each, while the branch ref sat one commit ahead. CI was green **on the old code** and the new commit had no checks at all. So every rung below — review, checks, mergeable — was answering truthfully about a commit that was no longer the branch tip, and would have passed.
+
+   **It does NOT self-resolve on re-query the way `mergeable` does.** Rung 3 below tells you to re-query a lazy `UNKNOWN` until it settles; that instinct is wrong here and applying it wastes the window. A stale head stays stale, so the only safe response is to refuse and re-read after a push has demonstrably landed.
+
+   **A mismatch means you do not yet know what you are merging.** It is not a slow answer to wait out — it is two sources disagreeing about which commit the PR *is*, and there is no rule for picking a winner. Refuse, confirm the push landed (`git ls-remote <remote> refs/heads/$BR` against your local `HEAD`), and start the rungs again.
+
 1. **Peer review posted — and attributed BY HAND.** A reviewer has posted an `APPROVE` verdict, or a `COMMENT` with `**Approve**` verdict line (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews.
+
+   **MULTIPLE VERDICTS RESOLVE PER REVIEWER, NEVER GLOBAL-LATEST.** Each reviewer's own latest verdict stands, and the PR is blocked while **any** reviewer's latest is `REQUEST-CHANGES`.
+
+   Global-latest is the intuitive rule and it is wrong in one specific, silent way: with reviewer A blocking and reviewer B approving later, newest-on-the-PR reports `APPROVE` **over an unresolved block**. It is correct only while a PR has exactly one reviewer — which is why it survives so long on a fleet where that is usually true, and why it fails the first time two people review.
+
+   **This codebase already settled it, so read the rule from the tool rather than from here:** `lib/pr-review-state.py` documents the prototype's global-latest, the reversed-reviewers counterexample, and its own resolution, and `test_reversing_the_reviewers_flips_the_answer` pins it. If this paragraph and that tool ever disagree, the tool is right — it is the thing with a test.
+
+   (That is not in tension with the warning below about not reading the tool for **authorship**. It is authoritative on *which verdicts are live and blocking* and is not an authority on *who wrote the PR* — two different questions, one of which it answers.)
 
    **This rung cannot be verified from GitHub, and no shipped door checks it for you.** Read that before the rungs below, because every automated surface on this page reads green on a self-review. The fleet shares one GitHub identity, so every mechanical source of authorship collapses to the same login: the PR `author` field (18 of 18 recent PRs), the commit author and committer (12 of 12 merged commits, resolved from a host-global gitconfig — and rewritten by squash-merge anyway), and the branch name (18 of 18 encode an issue number, never a bot). There is no field to read, so the comparison this rung asks for is `x != x`.
 
@@ -48,7 +74,25 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
    This rung is deliberately **not** a `mergeStateStatus` test. That field reports `BLOCKED` for the ordinary case of a PR still awaiting its review, so gating on `clean`/`unstable` refuses PRs that are perfectly mergeable.
 
-Merge command: `gh pr merge <n> --squash --admin --delete-branch`
+Merge command — **carrying the same `$PH` rung 0 anchored to**:
+
+```bash
+gh pr merge "$N" --repo "$REPO" --squash --admin --delete-branch --match-head-commit "$PH"
+```
+
+**`--match-head-commit` makes the gate refuse a head that moved under it**, which rung 0 cannot do on its own: rung 0 reconciles at the *start*, and the rungs take time. This closes the window between them.
+
+**Reuse `$PH` — do not re-read the sha, and never abbreviate it.** The flag requires the full 40-character object id and **fails closed** on anything else:
+
+```
+$ gh pr merge <n> --squash --admin --delete-branch --match-head-commit bda6de9
+GraphQL: Variable $input of type MergePullRequestInput! was provided invalid value
+for expectedHeadOid (Could not coerce value "bda6de9" to GitObjectID)
+```
+
+The merge did **not** proceed and the PR stayed `OPEN` — verified on a real merge. That direction is the right one: an abbreviation is *rejected*, never silently coerced or ignored. A flag that quietly no-opped on a malformed value would be worse than no flag, because the gate would report itself protected while protecting nothing — the same "reads green on the wrong thing" family as the stale head itself.
+
+`$PH` from rung 0 is already the full id, so **using one variable for both the anchor and the flag makes the abbreviation mistake unavailable by construction** — which is why this page hands you a variable rather than telling you to be careful.
 
 **Why --admin:** Same-identity fleets share one GitHub PAT. Branch protection's "required approvals" check counts only formal `APPROVE` state, which GitHub blocks for same-identity. `--admin` bypasses the branch protection gate — but the **real gate is the peer review verdict**, not GitHub's checkbox. And a verdict is only a gate once rung 1 has attributed it: the same bypass that makes `--admin` necessary is what makes a self-review invisible.
 

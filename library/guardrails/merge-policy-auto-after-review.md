@@ -7,7 +7,30 @@ description: Manager auto-merges PRs after a peer review verdict + CI green. Doe
 
 The manager auto-merges PRs when ALL of:
 
+0. **RECONCILE THE HEAD BEFORE ANCHORING ANYTHING TO IT — and a mismatch is never a pass.**
+
+   ```bash
+   REPO=<owner/repo>; N=<n>
+   BR=$(gh pr view "$N" --repo "$REPO" --json headRefName --jq .headRefName)
+   PH=$(gh api "repos/$REPO/pulls/$N" --jq .head.sha)          # full 40-char oid
+   RH=$(gh api "repos/$REPO/git/ref/heads/$BR" --jq .object.sha)
+   [ "$PH" = "$RH" ] || { echo "REFUSE: PR head $PH != branch ref $RH"; exit 1; }
+   ```
+
+   **Measured on this estate:** a PR head persisted at an **old** sha across **both** the GraphQL and REST surfaces, two reads each, while the branch ref sat one commit ahead. CI was green **on the old code** and the new commit had no checks at all — so every rung below answered truthfully about a commit that was no longer the branch tip, and would have passed.
+
+   **It does NOT self-resolve on re-query the way `mergeable` does.** Rung 3 tells you to re-query a lazy `UNKNOWN`; that instinct is wrong here and applying it wastes the window. Refuse, confirm the push landed (`git ls-remote <remote> refs/heads/$BR` against your local `HEAD`), and start the rungs again.
+
+   This rung is a **mechanism, not a reminder**: telling an operator to anchor their evidence to a head cannot help when the surface they are told to read reports the head wrongly.
+
 1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict (or `COMMENT` with `**Approve**` verdict line under same-identity fallback).
+
+   **MULTIPLE VERDICTS RESOLVE PER REVIEWER, NEVER GLOBAL-LATEST.** Each reviewer's own latest verdict stands, and the PR is blocked while **any** reviewer's latest is `REQUEST-CHANGES`.
+
+   Global-latest is the intuitive rule and it is wrong in one specific, silent way: with reviewer A blocking and reviewer B approving later, newest-on-the-PR reports `APPROVE` **over an unresolved block**. It is correct only while a PR has exactly one reviewer — which is why it survives so long on a fleet where that is usually true, and why it fails the first time two people review.
+
+   **This codebase already settled it, so read the rule from the tool rather than from here:** `lib/pr-review-state.py` documents the prototype's global-latest, the reversed-reviewers counterexample, and its own resolution, and `test_reversing_the_reviewers_flips_the_answer` pins it. If this paragraph and that tool ever disagree, the tool is right — it is the thing with a test.
+
 2. **CI green — the repo's DECLARED required checks, BY NAME, never by count.** Verify that every check **this repo declares as required** appears in the status rollup by name, and that every one is `SUCCESS`.
 
    **The required set is declared per repo and is deliberately not listed here.** Workflow names are a property of a repository, not of a fleet: one repo's set may be `Lint` / `Test` / `Security Scan` / `Changelog Check` while another's is `api-ci` / `frontend-ci`. A list written into this guardrail would be correct for exactly one repo and silently wrong on every other — hunting for names that do not exist there, and so either blocking every PR on that repo or, worse, being quietly softened by whoever hits it first. **The softening is the real hazard: a guardrail that fires wrongly gets weakened, and the weakening outlives the repo that caused it.**
@@ -30,7 +53,15 @@ The manager auto-merges PRs when ALL of:
 
    This rung is deliberately **not** a `mergeStateStatus` test. That field reports `BLOCKED` for the ordinary case of a PR still awaiting its review, so gating on `clean`/`unstable` refuses PRs that are perfectly mergeable.
 
-Merge command: `gh pr merge <n> --squash --delete-branch`
+Merge command — **carrying the same `$PH` rung 0 anchored to**:
+
+```bash
+gh pr merge "$N" --repo "$REPO" --squash --delete-branch --match-head-commit "$PH"
+```
+
+**This matters more here than under `--admin`, not less.** This policy relies on branch protection to allow the merge, and protection does not check that the head you verified is the head you are merging — measured on this estate, not one ruleset of nine declares `required_status_checks` at all. So the flag is the only thing refusing a head that moved between rung 0 and the merge.
+
+**Reuse `$PH` — never re-read or abbreviate it.** The flag needs the full 40-character oid and **fails closed** on anything else (`Could not coerce value "bda6de9" to GitObjectID`; the merge does not proceed, verified on a real merge). An abbreviation is *rejected*, never silently ignored — which is the right direction, since a flag that quietly no-opped would leave the gate reporting itself protected while protecting nothing. `$PH` from rung 0 is already the full id, so **one variable for both the anchor and the flag makes that mistake unavailable by construction.**
 
 **Not auto-merged:**
 - PRs with `Request Changes` verdict — bounce to engineer first.
