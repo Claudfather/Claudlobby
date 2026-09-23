@@ -324,8 +324,13 @@ def _unseparate(tok: str) -> str:
     finds a verb to judge. Nothing is composed: no subshell, no eval, no
     variable, no wrapper. It is this tokeniser failing on the most ordinary
     multi-line shape this estate writes, for a DIRECT invocation, which is the
-    exact class this guard's own docstring claims to catch. Measured live: 83
-    of 2,223 invocations (lib/vault-git-base-rate.py --breakdown).
+    exact class this guard's own docstring claims to catch. Measured live
+    against the transcript corpus, applying this fix on top of #1760's own
+    residual-mechanism classifier (unmerged; the breakdown instrument does
+    not exist on main): 81 of a 166-command residual were this mechanism
+    before the fix, 0 of 85 after -- every other mechanism bucket unchanged,
+    count for count. Not a percentage: the harness reads its own sessions'
+    transcripts, so a share drifts with each run; the counts do not.
 
     An INDENTED continuation is unaffected and needs no stripping: the
     whitespace after the escaped newline ends the token at the shlex level, so

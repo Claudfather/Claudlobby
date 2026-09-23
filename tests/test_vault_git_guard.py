@@ -816,8 +816,12 @@ class TestTheBackslashContinuationBypass:
     class this guard's docstring claims to catch, in the most ordinary
     multi-line shape this estate writes.
 
-    Measured live: 83 of 2,223 invocations (lib/vault-git-base-rate.py
-    --breakdown) -- small, and the largest slice of what the guard misses.
+    Measured live against the transcript corpus, applying this fix on top of
+    #1760's own residual-mechanism classifier (unmerged; the breakdown
+    instrument does not exist on main): 81 of a 166-command residual were
+    this mechanism before the fix, 0 of 85 after -- every other mechanism
+    bucket unchanged, count for count. Counts, not a percentage: the harness
+    reads its own sessions' transcripts, so a share drifts with each run.
     """
 
     def test_the_UNCONTINUED_form_is_denied(self, tree):
