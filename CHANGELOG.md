@@ -30,6 +30,53 @@ the merge in another bypassed the refusal.
   - The same probe gives the same results on the CLAUDE.md composed from a
     `git archive` export.
 
+### Fixed — a fleet job removed from system.yaml was re-enrolled forever (#1764)
+
+`compose_fleet_timers` only ever WROTE. A job deleted from `system.yaml` left its
+composed `.service`/`.timer`/`.plist` in `runtime/fleet/timers/`, and the setup
+backbone enrolls what it finds there — `lib/setup-fleet`'s job leg is an additive
+glob-enroll that never disables, by design.
+
+Measured on this host: `plane-shadow` went from `system.yaml` at the F18 R2a
+closure (a299272) **together with the `lib/plane-shadow.sh` it execs**, and
+eighteen days later the nightly `reload-fleet` was still re-creating
+`~/Library/LaunchAgents/com.artemis.engineering.plane-shadow.plist` — a unit whose
+script does not exist, exiting 78 (`EX_CONFIG`) every night, sitting beside the
+`.retired-20260922` copy of itself an operator had already walked back by hand.
+The second fleet on the same host held the same stale composed units, one reload
+away from the same resurrection.
+
+- **The prune is DECLARATION-DERIVED, not a hardcoded name list.** The precedent
+  beside it, `_prune_leaf_manager_gated_units`, is exact-path bounded by a
+  frozenset of job names, and copying that shape would have fixed `plane-shadow`
+  and nothing else: the next job deleted from `system.yaml` resurrects the same
+  way, and the issue is about the class. So `_reconcile_fleet_job_units` keeps
+  what this generate composed and prunes every other `<prefix>.*` unit in the
+  directory.
+- **The briefing family is carved out explicitly, and that is the whole care in
+  this change.** A naive "delete every `<prefix>.*` not written this run" eats the
+  per-(bot,slot) briefing units, whose basenames the composer cannot enumerate in
+  advance and whose prune is guarded by its own independent count
+  (`BRIEFING_EXPECTED`). Sweeping them here would route those files past that
+  guard on a count that knows nothing about them — the exact wholesale-delete the
+  briefing guard exists to refuse. They stay owned by `_reconcile_briefing_units`
+  and are skipped by name.
+- **Guard and limit case are the briefing reconciler's, byte for byte**, so the
+  two halves of one directory answer "teardown or torn generate?" the same way:
+  fewer composed than the config declares means an interrupted or buggy run, so
+  the prune is SKIPPED entirely and warned about; `n_expected == 0` is a
+  legitimate full removal and prunes everything.
+- **It also runs on the early-return path** (`system_defaults.timers: false`, no
+  sweep, no briefing). That fleet never reaches the write path again, so without
+  this its job units would sit on disk forever for the setup backbone to keep
+  enrolling — the same bug by a different route.
+
+**Rollout gate: this is a composer change, so it takes effect at the next
+`generate` and reaches nothing before then.** It stops FUTURE enrollment only —
+an ALREADY-INSTALLED unit is walked back by nothing on the fleet side, the way
+`walk_back_uncomposed_host_units` does for host units, so the live agent had to
+be booted out by hand. That gap is real and is not closed here.
+
 ### Fixed — a unit that fails every start read as "boot in flight" forever, so a 23 h outage paged no one (#1769)
 
 On 2026-09-23 a broken `claude` install met an unclean reboot, and every bot on

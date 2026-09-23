@@ -4004,6 +4004,61 @@ def _write_timer_units(
     (timers_dir / f"{service_name}.plist").write_text("\n".join(plist_lines) + "\n")
 
 
+#: The three files one composed unit basename owns. One tuple, because a prune
+#: that deletes two of the three leaves a unit the next reader still finds.
+_UNIT_EXTS: tuple[str, ...] = ("service", "timer", "plist")
+
+
+def _prune_stale_units(
+    timers_dir: Path,
+    stale: set[str],
+    composed: set[str],
+    n_expected: int,
+    family: str,
+) -> list[str]:
+    """Delete each basename in *stale* — unless the compose looks TORN, in which
+    case delete nothing and say so.
+
+    The shared tail of both reconcilers in this file. What differs between the
+    briefing family and the named-job family is only how each derives its own
+    ``stale`` set (a glob it cannot enumerate in advance, versus a directory
+    scan minus that family); the guard and the unlink are one rule, and the two
+    hand-typed copies this replaces had already drifted in their warning text.
+
+    The guard (modeled on ``migrate_legacy_keepalive``'s verify-before-disable):
+    if fewer units composed than the config declares, a bug or an interrupted
+    generate dropped part of the set — SKIP the prune entirely and warn, so a
+    compose shortfall can never wholesale-delete live timers. A legitimate full
+    removal passes ``n_expected == 0`` and prunes everything; the fully-empty
+    composed set is its limit case, not its trigger.
+
+    *family* names the caller in the warning, so an operator reading a skipped
+    prune knows which half of the directory refused.
+    """
+    if not stale:
+        return []
+    if len(composed) < n_expected:
+        _log.warning(
+            "%s reconcile: PARTIAL composed set (%d of %d declared unit(s)) "
+            "— SKIPPING prune of %d existing unit(s) to avoid a compose-shortfall "
+            "wholesale delete; units left untouched (re-run once composition is "
+            "fixed)",
+            family,
+            len(composed),
+            n_expected,
+            len(stale),
+        )
+        return []
+    pruned: list[str] = []
+    for base in sorted(stale):
+        for ext in _UNIT_EXTS:
+            f = timers_dir / f"{base}.{ext}"
+            if f.exists():
+                f.unlink()
+        pruned.append(base)
+    return pruned
+
+
 def _reconcile_briefing_units(
     timers_dir: Path, prefix: str, composed: set[str], n_expected: int
 ) -> list[str]:
@@ -4032,32 +4087,75 @@ def _reconcile_briefing_units(
     if not timers_dir.is_dir():
         return []
     existing = {p.stem for p in timers_dir.glob(f"{prefix}.briefing-*")}
-    stale = existing - composed
-    if not stale:
+    return _prune_stale_units(
+        timers_dir, existing - composed, composed, n_expected, "briefing"
+    )
+
+
+def _reconcile_fleet_job_units(
+    timers_dir: Path, prefix: str, composed: set[str], n_expected: int
+) -> list[str]:
+    """Prune stale ``<prefix>.<job>`` unit files for a job this fleet no longer
+    composes — the named-job half of what :func:`_reconcile_briefing_units`
+    does for the per-(bot,slot) family.
+
+    Until this existed, ``compose_fleet_timers`` only ever WROTE: a job removed
+    from ``system.yaml`` (or a fleet that turned ``system_defaults.timers``
+    off, or dropped ``fleet.sweep``) left its units on disk forever, and the
+    setup backbone enrolls what it finds in this directory. Measured, #1764:
+    ``plane-shadow`` was deleted from ``system.yaml`` at the F18 R2a closure
+    together with the ``lib/plane-shadow.sh`` it execs, and eighteen days later
+    the nightly ``reload-fleet`` was still re-creating its LaunchAgent from the
+    stale composed plist — a unit whose script does not exist, exiting 78
+    (``EX_CONFIG``) every night, sitting beside the ``.retired-*`` copy of
+    itself an operator had already walked back by hand.
+
+    ``composed`` is the set of unit basenames just written this generate;
+    ``n_expected`` is how many the fleet config declares — the config truth a
+    composition bug cannot fake. Guard and limit case are
+    :func:`_reconcile_briefing_units`'s, deliberately, so the two halves of
+    this directory answer "is this a teardown or a torn generate?" the same
+    way: fewer composed than declared means an interrupted or buggy run, so
+    SKIP the prune entirely and warn; ``n_expected == 0`` is a legitimate full
+    removal and prunes everything.
+
+    **The briefing family is carved out explicitly**, and that carve-out is
+    the whole reason this is not a two-line sweep. A naive "delete every
+    ``<prefix>.*`` not written this run" would eat the per-(bot,slot) briefing
+    units, whose basenames the composer cannot enumerate in advance and whose
+    prune is guarded by its OWN independent count (``BRIEFING_EXPECTED``).
+    Letting this function touch them would route those files past that guard
+    using a count that knows nothing about them — the exact wholesale-delete
+    the briefing guard exists to refuse. They are owned by
+    :func:`_reconcile_briefing_units` and skipped here by name.
+
+    **It overlaps :func:`_prune_leaf_manager_gated_units` and that one still
+    stays**, which is a narrower guarantee rather than a forked one. A fleet
+    with no leaf manager has `manager-checkin` filtered out of `timers` before
+    `composed` is built, so on an ORDINARY generate this function removes its
+    units too and the older helper finds nothing left to unlink. The two part
+    on exactly one case: this one refuses to prune anything on a torn compose,
+    while that one runs unconditionally — correctly, because its removal reason
+    (`FleetConfig.leaf_manager_bots()` is empty) is derived from config alone
+    and is unaffected by some OTHER job failing to write. Collapsing them would
+    put a job whose eligibility cannot be torn behind a torn-compose guard.
+
+    Returns the pruned unit basenames.
+    """
+    if not timers_dir.is_dir():
         return []
-    # Partial/degenerate: config declares n_expected (bot,slot) units but fewer
-    # composed — a torn or interrupted compose, not an intended teardown. Refuse
-    # the prune so a shortfall can never wholesale-delete live timers. Empty is
-    # the limit case (0 < n_expected); a real full removal passes n_expected == 0.
-    if len(composed) < n_expected:
-        _log.warning(
-            "briefing reconcile: PARTIAL composed set (%d of %d declared unit(s)) "
-            "— SKIPPING prune of %d existing unit(s) to avoid a compose-shortfall "
-            "wholesale delete; units left untouched (re-run once composition is "
-            "fixed)",
-            len(composed),
-            n_expected,
-            len(stale),
-        )
-        return []
-    pruned: list[str] = []
-    for base in sorted(stale):
-        for ext in ("service", "timer", "plist"):
-            f = timers_dir / f"{base}.{ext}"
-            if f.exists():
-                f.unlink()
-        pruned.append(base)
-    return pruned
+    existing = {
+        f.stem
+        for f in timers_dir.iterdir()
+        if f.is_file()
+        and f.suffix.lstrip(".") in _UNIT_EXTS
+        and f.name.startswith(f"{prefix}.")
+    }
+    briefing = {b for b in existing if b.startswith(f"{prefix}.briefing-")}
+    return _prune_stale_units(
+        timers_dir, existing - composed - briefing, composed, n_expected,
+        "fleet job",
+    )
 
 
 #: Fleet jobs whose composition depends on the fleet having at least one
@@ -4262,10 +4360,21 @@ def compose_fleet_timers(
                 removed, fleet.name,
             )
     if not emit_defaults and not sweep_on and not briefing_on:
-        # Nothing to emit — but a prior generate may have left briefing units a
-        # now-removed stanza should prune. Reconcile only if the dir exists, and
-        # record zero declared units so setup-fleet confirms the teardown is
-        # intended (config truth) rather than a torn compose.
+        # Nothing to emit — but a prior generate may have left units a
+        # now-removed stanza should prune, in EITHER family. Reconcile only if
+        # the dir exists, and record zero declared units so setup-fleet
+        # confirms the teardown is intended (config truth) rather than a torn
+        # compose. The job half runs here too, not only on the write path
+        # below: a fleet that turns `system_defaults.timers` off never reaches
+        # that path again, so its job units would otherwise be stranded on
+        # disk forever for the setup backbone to keep enrolling.
+        for removed in _reconcile_fleet_job_units(
+            timers_dir, fleet.service_prefix, set(), 0
+        ):
+            _log.info(
+                "pruned stale fleet job unit %s (%s composes no fleet timers)",
+                removed, fleet.name,
+            )
         _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0)
         _write_briefing_manifest(timers_dir, set())
         return timers_dir
@@ -4328,6 +4437,11 @@ def compose_fleet_timers(
             exc,
         )
 
+    # Config truth for the job half of the reconcile below: what this fleet
+    # DECLARES, independent of what the write loop managed to produce.
+    n_expected_jobs = (len(timers) if emit_defaults else 0) + (1 if sweep_on else 0)
+    composed_jobs: set[str] = set()
+
     if emit_defaults:
         for name, cfg in timers.items():
             sched = _resolve_timer_schedule(cfg, merged_defaults)
@@ -4352,6 +4466,7 @@ def compose_fleet_timers(
                 ),
                 extra_env=({**job_baseline_env, **job_extra_env.get(name, {})} or None),
             )
+            composed_jobs.add(f"{prefix}.{name}")
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
         ]
@@ -4378,6 +4493,18 @@ def compose_fleet_timers(
             paths,
             telegram_group_chat_id=fleet.telegram_group_chat_id,
             telegram_state_dir=alert_sender,
+        )
+        composed_jobs.add(f"{prefix}.code-audit-sweep")
+
+    # Every named job this fleet still composes is now on disk, so anything
+    # else carrying this prefix — bar the briefing family, which owns its own
+    # guarded prune — is a job the config no longer declares (#1764).
+    for removed in _reconcile_fleet_job_units(
+        timers_dir, prefix, composed_jobs, n_expected_jobs
+    ):
+        _log.info(
+            "pruned stale fleet job unit %s (%s no longer declares it)",
+            removed, fleet.name,
         )
 
     # Equippable briefing (bots.<bot>.briefing) — the first dynamic
