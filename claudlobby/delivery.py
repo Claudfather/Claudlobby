@@ -105,10 +105,21 @@ class DeliveryFindings:
 
     @property
     def clean(self) -> bool:
-        """Examined AND found nothing. A repo the run never reached is not
-        clean -- absence of findings from a check that did not run is the one
-        reading this rung may never produce."""
-        return self.checked and not (self.no_pr or self.stale_pr_head)
+        """FULLY examined and found nothing.
+
+        Three things have to be true, and the second was missing when this
+        property was first written (review): the repo was reached at all, no
+        branch inside it went unchecked, and nothing was found. Absence of
+        findings from a check that did not run -- or did not finish -- is the
+        one reading this rung may never produce.
+
+        The partial case is the one that got away. `checked` was added for the
+        repo the run never reached, and the sibling state it created in the same
+        change -- reached, started, cut off part-way -- was left out, so a repo
+        with a list of branches it never looked at still rendered clean. One hole
+        closed and its twin opened in the same edit."""
+        return self.checked and not (self.no_pr or self.stale_pr_head
+                                     or self.unchecked)
 
     def bound_line(self) -> str:
         """The bounds, always, whatever the verdict (#1742)."""

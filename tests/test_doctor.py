@@ -1331,7 +1331,15 @@ class TestTheDeliveryCoverageLine:
         assert "1 NOT REACHED" in c.detail, (
             "a repo the run budget never reached vanished from the summary — a "
             f"reader would take this for full coverage: {c.detail}")
-        assert c.status == "pass", "no findings is still a pass; the bound is what changed"
+        # INVERTED (review). This previously asserted `pass`, with the reasoning
+        # "no findings is still a pass; the bound is what changed" -- which made
+        # this test CERTIFY the defect: a green suite specifically confirming
+        # that a repo the run never examined may be reported healthy. Deleting it
+        # would have left the behaviour untested; the assertion had to flip.
+        assert c.status == "warn", (
+            "a repo the run never reached was reported as a PASS — a health "
+            f"check that did not look has produced no answer, not a clean one: {c}")
+        assert "not fully checked" in c.detail, c.detail
 
     def test_a_PARTIALLY_checked_repo_is_named_too(self, doctor_fleet, monkeypatch):
         """The state per-repo budgeting could not produce: stopped half-way
@@ -1343,6 +1351,47 @@ class TestTheDeliveryCoverageLine:
                       {"acme/a": DeliveryFindings(), "acme/b": half})
         assert "1/2 repo(s) fully checked" in c.detail, c.detail
         assert "1 partially" in c.detail, c.detail
+
+    def test_a_PARTIALLY_checked_repo_is_NOT_a_pass_either(
+            self, doctor_fleet, monkeypatch):
+        """The sibling state the first fix missed (review). `checked` covered the
+        repo the run never REACHED; a repo reached, started and cut off part-way
+        has `checked=True`, empty finding lists and a list of branches nobody
+        looked at -- and rendered clean. One hole closed, its twin opened in the
+        same edit."""
+        from claudlobby.delivery import DeliveryFindings
+        half = DeliveryFindings()
+        half.unchecked.append("feat/never-got-to-it")
+        assert not half.clean, (
+            "a repo with branches it never examined reported CLEAN — the "
+            "invariant has to hold in the type, not only in the renderer")
+        c = self._run(doctor_fleet, monkeypatch,
+                      {"acme/a": DeliveryFindings(), "acme/b": half})
+        assert c.status == "warn", (
+            f"a partially checked run was reported as a PASS: {c}")
+
+    def test_the_rung_ACTUALLY_CONSULTS_clean(self, doctor_fleet, monkeypatch):
+        """The POSITIVE half of a pair, and it is only half -- stated plainly
+        because the first version of this docstring overclaimed.
+
+        An invariant nothing reads is decoration (review), so the wiring has to
+        be shown. But this test alone cannot show it: neutralising `clean` to
+        True yields `pass`, and so does a rung that never consults `clean` at
+        all. Both produce the same answer, so it discriminates nothing on its
+        own -- verified by mutation, not assumed.
+
+        What establishes the wiring is the PAIR: `clean` False must warn (the
+        two tests above) and `clean` True must pass (this one). Either alone is
+        satisfiable by a rung that ignores the property."""
+        from claudlobby import delivery as D
+        from claudlobby.delivery import DeliveryFindings
+        half = DeliveryFindings()
+        half.unchecked.append("feat/never-got-to-it")
+        monkeypatch.setattr(type(half), "clean", property(lambda self: True))
+        c = self._run(doctor_fleet, monkeypatch, {"acme/b": half})
+        assert c.status == "pass", (
+            "neutralising `clean` did not change the rung's answer, so the rung "
+            f"is not reading it and the stated invariant is decoration: {c}")
 
     def test_coverage_leads_the_bounds_so_a_short_run_is_visible_first(
             self, doctor_fleet, monkeypatch):

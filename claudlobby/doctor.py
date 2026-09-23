@@ -975,6 +975,7 @@ def check_delivery(
     findings: list[str] = []
     bounds: list[str] = []
     full = partial = unreached = 0
+    not_clean: list[str] = []
     for repo, checkout in sorted(repos.items()):
         f = check_repo(repo, checkout, deadline=run_deadline)
         for b in f.no_pr:
@@ -983,6 +984,12 @@ def check_delivery(
         for line in f.stale_pr_head:
             findings.append(f"{repo} {line}")
         bounds.append(f"{repo}: {f.bound_line()}")
+        # THE RUNG CONSULTS `clean` -- it is the stated invariant, so it has to
+        # be the thing that decides, not a property only tests mention. An
+        # invariant nothing reads is decoration, and a correct one nothing reads
+        # protects exactly as much as a wrong one (review).
+        if not f.clean:
+            not_clean.append(repo)
         if not f.checked:
             unreached += 1
         elif f.unchecked:
@@ -1006,6 +1013,20 @@ def check_delivery(
                    f"{len(findings)} undelivered: " + " | ".join(findings[:4])
                    + (f" (+{len(findings) - 4} more)" if len(findings) > 4 else "")
                    + f" — bounds: {detail}")
+    elif not_clean:
+        # NO FINDINGS IS NOT A PASS WHEN COVERAGE WAS SHORT. An earlier version
+        # reported `pass` here on the reasoning that "no findings is still a
+        # pass; the bound is what changed" -- and a test pinned that as correct,
+        # so the suite went green certifying that a repo nobody looked at may be
+        # reported healthy. A health check that did not finish looking has not
+        # produced a clean answer; it has produced no answer, and the two must
+        # not share a status.
+        report.add("delivery", "warn",
+                   f"nothing undelivered IN WHAT WAS CHECKED, but "
+                   f"{len(not_clean)} repo(s) were not fully checked "
+                   f"({', '.join(sorted(not_clean)[:3])}"
+                   + (", …" if len(not_clean) > 3 else "")
+                   + f") — this is not a clean answer for those — bounds: {detail}")
     else:
         report.add("delivery", "pass", f"nothing undelivered — bounds: {detail}")
 
