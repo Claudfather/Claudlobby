@@ -59,7 +59,7 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
 | `service_down` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `session_missing` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
-| `wip_uncommitted` | pulse | Do NOT restart — task is in flight. Check for staleness instead. |
+| `wip_uncommitted` | pulse | Do NOT restart — task is in flight. **Decide on the payload's `paths`, never on `dirty_files`**: a count cannot separate `M lib/foo.py` from `?? .venv/`, and reading it as a count is what made this alert fire forever and get skipped (#1728). `dirty_tracked`/`dirty_untracked` are facts to read, not a filter — an unadded new source file is untracked and is the unrecoverable case. `unchanged_for_s` is a floor measured from the sweep's first sighting; past ~2h on a source path, check for staleness. |
 | `session_event` | vitals | Informational — log awareness of session lifecycle |
 | `audit_selected` | audit | Informational — the rolling sweep picked this repo as stalest. |
 | `audit_dispatched` | audit | Informational — the audit was dispatched into the owner bot's session. |

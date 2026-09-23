@@ -262,6 +262,94 @@ _int_or() {  # _int_or <value> <default>
     esac
 }
 
+# --- wip_uncommitted: the paths ARE the fact, not the count ------------------
+#
+# THIS IS NOT ALERT FATIGUE. It is a COMPOSED INSTRUCTION THAT BECAME
+# UNFOLLOWABLE AND WAS THEREFORE UNFOLLOWED. The decision table says of this
+# event, in these words, "Do NOT restart -- task is in flight". On one fleet it
+# fired 4,689 times, so the rule as written forbids ever restarting a worker at
+# all. Two managers had independently stopped obeying it, neither having decided
+# to. The fix therefore has to make the rule FOLLOWABLE -- which means the row
+# must DISCRIMINATE, not fire less often.
+#
+# MEASURED BEFORE DESIGNING (2026-09-22, this host, two fleets that emit and two
+# that emit none), and measured again independently on both fleets by a second
+# reader who reached the same conclusion:
+#   5,284 rows in the 2.4 days the plane retains (read at --tail 40000, so the
+#   figure is a count and not the ceiling -- a first read of this population at
+#   the door default returned exactly 500 for two different fleets, and
+#   `claudlobby events` discloses no truncation).
+#   95.2% of them -- 5,033 -- from EIGHT (bot,repo) pairs whose dirty_files count
+#   NEVER CHANGED across the whole window. The other 4.8% is the handful of bots
+#   doing real edits, and their counts move.
+#   85.5% of all firings report a SINGLE dirty path (4,001 of 4,683 at one file,
+#   670 at two, 11 at four or more) -- the build-artifact shape.
+#   A live sweep of 108 checkouts: 9 dirty, ALL NINE untracked-only and not one
+#   of them work in flight -- a venv, a nested clone, three bot data dirs,
+#   node_modules, a file named after a shell redirect.
+#
+# THE COUNT CANNOT SEPARATE THOSE. "M lib/foo.py" and "?? .venv/" are both 1, so
+# a manager reading the row has no way to tell the case the rule protects from
+# the case that makes the rule impossible.
+#
+# NOT A FILTER, AND THAT IS THE LOAD-BEARING DECISION. Excluding untracked paths
+# is the obvious fix and it silences the alert in the one case where the work is
+# UNRECOVERABLE: a new file has no copy anywhere until it is added. Measured on
+# the same estate, 40-65% of the last fortnight of commits per repo ADD at least
+# one file, so every one of those passed through an untracked phase.
+# Tracked-versus-untracked is a FACT THE READER NEEDS, never a gate.
+#
+# NOT A DEBOUNCE EITHER, for the same shape of reason. Suppressing an unchanged
+# repeat would cut the 95% at a stroke, and it would also mean a bot paused
+# mid-edit stops appearing in the window a manager queries before restarting it.
+# The noise that remains is a READ-side rollup, which #930 already owns -- this
+# event is the top line of its own measurement (6,750 of the rows it counted) --
+# so every tick still emits and a "--since 10m" question stays truthful.
+_wip_payload() {   # <state_dir> <bot_id> <repo_name> <porcelain-text>
+    local state_dir="$1" bot_id="$2" repo_name="$3" porcelain="$4"
+    local total untracked tracked max key hash_file ts_file cur prev_ts now_epoch
+    local unchanged=0 paths="" line shown=0 tmp
+    total=$(printf '%s\n' "$porcelain" | wc -l | tr -d ' ')
+    untracked=$(printf '%s\n' "$porcelain" | grep -c '^??' || true)
+    tracked=$(( total - untracked ))
+    max="${OBSERVABILITY_WIP_PATHS_MAX:-10}"
+
+    # THE BOUND IS STATED, never implied (#1742 estate-wide): paths_shown beside
+    # paths_total, so a capped list can never read as the whole of the dirt.
+    while IFS= read -r line; do
+        [ "$shown" -lt "$max" ] || break
+        [ -z "$paths" ] || paths="$paths,"
+        paths="$paths\"$(json_escape "$line")\""
+        shown=$(( shown + 1 ))
+    done < <(printf '%s\n' "$porcelain")
+
+    # How long this EXACT state has been true, by the hash+timestamp idiom
+    # check 3 already uses for pane_stuck -- one idiom in this file, not two.
+    # It is a FLOOR and the skill row says so: it measures since this sweep
+    # first saw this state, which on a fresh marker is not when the edit landed.
+    key=$(printf '%s' "${bot_id}.${repo_name}" | tr -c 'A-Za-z0-9._-' '_')
+    hash_file="$state_dir/${key}.wip_hash"
+    ts_file="$state_dir/${key}.wip_ts"
+    cur=$(printf '%s' "$porcelain" | md5sum 2>/dev/null | cut -d' ' -f1 \
+          || printf '%s' "$porcelain" | md5 2>/dev/null || echo nohash)
+    now_epoch=$(date +%s)
+    if [ -f "$hash_file" ] && [ "$(cat "$hash_file" 2>/dev/null || true)" = "$cur" ] \
+       && [ -f "$ts_file" ]; then
+        prev_ts=$(cat "$ts_file" 2>/dev/null || printf '%s' "$now_epoch")
+        unchanged=$(( now_epoch - prev_ts ))
+    else
+        printf '%s' "$now_epoch" > "$ts_file" 2>/dev/null || true
+    fi
+    tmp="$(safe_mktemp)"
+    printf '%s' "$cur" > "$tmp" && mv "$tmp" "$hash_file" 2>/dev/null || true
+
+    # dirty_files is KEPT: it is what the shipped readers and the decision table
+    # already name, and removing it would break them to no purpose.
+    printf '{"repo":"%s","dirty_files":%s,"dirty_tracked":%s,"dirty_untracked":%s,"paths":[%s],"paths_shown":%s,"paths_total":%s,"unchanged_for_s":%s}' \
+        "$(json_escape "$repo_name")" "$total" "$tracked" "$untracked" \
+        "$paths" "$shown" "$total" "$unchanged"
+}
+
 # --- Iterate all bots ---
 for bot_dir in "$BOTS_DIR"/*/; do
     [ -d "$bot_dir" ] || continue
@@ -413,11 +501,15 @@ for bot_dir in "$BOTS_DIR"/*/; do
     if [ -d "$bot_dir/projects" ]; then
         for repo_dir in "$bot_dir/projects"/*/; do
             [ -d "$repo_dir/.git" ] || continue
-            wip=$(git -C "$repo_dir" status --porcelain 2>/dev/null | head -5 || true)
+            # ONE call to git, not two: the old code ran `status` twice and the
+            # first was `head -5`, so the count and the sample could disagree
+            # about a repo that changed between them.
+            wip=$(git -C "$repo_dir" status --porcelain 2>/dev/null || true)
             if [ -n "$wip" ]; then
                 repo_name=$(basename "$repo_dir")
-                file_count=$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-                emit_fleet_event "wip_uncommitted" "pulse" '{"repo":"'"$repo_name"'","dirty_files":'"$file_count"'}' "$bot_dir" "$bot_id"
+                emit_fleet_event "wip_uncommitted" "pulse" \
+                    "$(_wip_payload "$state_dir" "$bot_id" "$repo_name" "$wip")" \
+                    "$bot_dir" "$bot_id"
             fi
         done
     fi
