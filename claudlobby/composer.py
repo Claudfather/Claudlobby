@@ -4015,6 +4015,8 @@ def _prune_stale_units(
     composed: set[str],
     n_expected: int,
     family: str,
+    *,
+    declaration_torn: bool = False,
 ) -> list[str]:
     """Delete each basename in *stale* — unless the compose looks TORN, in which
     case delete nothing and say so.
@@ -4032,10 +4034,32 @@ def _prune_stale_units(
     removal passes ``n_expected == 0`` and prunes everything; the fully-empty
     composed set is its limit case, not its trigger.
 
+    *declaration_torn* is the SECOND reason to refuse, and it lives here rather
+    than in the caller for the reason this function exists at all: a refusal is
+    a guard, a warning and a ``return []``, and a hand-typed second copy of that
+    shape one frame up is exactly the drift the extraction retired. The guard
+    below cannot see this case — ``len(composed)`` and ``n_expected`` both derive
+    from the declared set, so emptying that set makes them agree at zero, which
+    is the signature of a legitimate full removal. Only the caller can know its
+    declaration is torn, so it passes the fact and this function owns the
+    response. The briefing family never sets it (its declared set is the bots'
+    own stanzas, which cannot be torn by an upstream read).
+
     *family* names the caller in the warning, so an operator reading a skipped
     prune knows which half of the directory refused.
     """
     if not stale:
+        return []
+    if declaration_torn:
+        _log.warning(
+            "%s reconcile: the declared set is EMPTY while the fleet still asks "
+            "for these units — a torn declaration, not a teardown. SKIPPING "
+            "prune of %d existing unit(s); a fleet that means to compose none "
+            "says so at the source (system_defaults.timers: false). Check that "
+            "the install's system.yaml is intact.",
+            family,
+            len(stale),
+        )
         return []
     if len(composed) < n_expected:
         _log.warning(
@@ -4093,7 +4117,12 @@ def _reconcile_briefing_units(
 
 
 def _reconcile_fleet_job_units(
-    timers_dir: Path, prefix: str, composed: set[str], n_expected: int
+    timers_dir: Path,
+    prefix: str,
+    composed: set[str],
+    n_expected: int,
+    *,
+    declaration_torn: bool = False,
 ) -> list[str]:
     """Prune stale ``<prefix>.<job>`` unit files for a job this fleet no longer
     composes — the named-job half of what :func:`_reconcile_briefing_units`
@@ -4129,6 +4158,21 @@ def _reconcile_fleet_job_units(
     the briefing guard exists to refuse. They are owned by
     :func:`_reconcile_briefing_units` and skipped here by name.
 
+    **A torn DECLARATION refuses, and the shared guard cannot see that case**
+    (#1765 review). ``len(composed) < n_expected`` compares two numbers that
+    BOTH derive from the merged job set, so it discriminates a torn write loop
+    and is structurally blind to a torn declared COUNT: empty it, and
+    ``n_expected`` is 0, which is the documented signature of a legitimate full
+    removal. Reproduced end to end — a fleet still declaring
+    ``system_defaults.timers`` had every composed job unit deleted, no
+    exception raised anywhere, on BOTH call sites (the reviewer found the
+    early-return one; the write path reaches it too whenever briefing or sweep
+    keeps the function past that branch). So the caller passes
+    ``declaration_torn``, computed from the one fact that does NOT come from
+    the merged set: the fleet's own manifest still asking for these timers. A
+    real teardown says so at the source (``system_defaults: false``, or
+    ``timers: false``), where that flag is False and this is False with it.
+
     **It overlaps :func:`_prune_leaf_manager_gated_units` and that one still
     stays**, which is a narrower guarantee rather than a forked one. A fleet
     with no leaf manager has `manager-checkin` filtered out of `timers` before
@@ -4154,7 +4198,7 @@ def _reconcile_fleet_job_units(
     briefing = {b for b in existing if b.startswith(f"{prefix}.briefing-")}
     return _prune_stale_units(
         timers_dir, existing - composed - briefing, composed, n_expected,
-        "fleet job",
+        "fleet job", declaration_torn=declaration_torn,
     )
 
 
@@ -4340,6 +4384,21 @@ def compose_fleet_timers(
     ]
     briefing_on = bool(briefing_bots)
 
+    # The one fact about the job set that does NOT come from the job set
+    # (#1765 review): this fleet's own manifest still asks for system-default
+    # job timers while the merged set is empty. That is a torn read upstream —
+    # a missing/empty package system.yaml is the measured route — never an
+    # intended teardown, which is spelled `system_defaults: false` (or
+    # `timers: false`) and lands here with `sd.timers` already False.
+    # NB `merged_defaults`, not the local `timers`: that name has already had
+    # LEAF_MANAGER_GATED_JOBS stripped from it above, so on a fleet with no leaf
+    # manager a shrinking job roster could empty it legitimately and make this
+    # misfire — refusing a prune that was owed. The raw merged set is the thing
+    # a torn read empties, and it is immune to that filter.
+    jobs_declaration_torn = (
+        bool(sd.enabled and sd.timers) and not merged_defaults.get("jobs")
+    )
+
     base_dir = output_dir if output_dir is not None else paths.runtime_fleet
     timers_dir = base_dir / "timers"
     if not has_leaf_manager:
@@ -4369,7 +4428,8 @@ def compose_fleet_timers(
         # that path again, so its job units would otherwise be stranded on
         # disk forever for the setup backbone to keep enrolling.
         for removed in _reconcile_fleet_job_units(
-            timers_dir, fleet.service_prefix, set(), 0
+            timers_dir, fleet.service_prefix, set(), 0,
+            declaration_torn=jobs_declaration_torn,
         ):
             _log.info(
                 "pruned stale fleet job unit %s (%s composes no fleet timers)",
@@ -4500,7 +4560,8 @@ def compose_fleet_timers(
     # else carrying this prefix — bar the briefing family, which owns its own
     # guarded prune — is a job the config no longer declares (#1764).
     for removed in _reconcile_fleet_job_units(
-        timers_dir, prefix, composed_jobs, n_expected_jobs
+        timers_dir, prefix, composed_jobs, n_expected_jobs,
+        declaration_torn=jobs_declaration_torn,
     ):
         _log.info(
             "pruned stale fleet job unit %s (%s no longer declares it)",

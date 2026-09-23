@@ -35,6 +35,12 @@ claudlobby = "claudlobby.__main__:main"
 packages = ["claudlobby", "claudlobby.commands", "claudlobby.plane"]
 
 [tool.setuptools.package-data]
+# system.yaml is package-owned data, not operator config: every default job,
+# hook, host job and boot policy is read from it. It was never listed here, so
+# a built wheel shipped WITHOUT it (measured) and a non-editable install read
+# empty system defaults on every generate -- which `_load_system_defaults` now
+# refuses outright rather than passing off as "this fleet wants nothing".
+"claudlobby" = ["system.yaml"]
 "claudlobby.plane" = ["migrations/*.sql", "ui/*"]
 
 [tool.pytest.ini_options]

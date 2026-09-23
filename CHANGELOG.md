@@ -77,6 +77,72 @@ an ALREADY-INSTALLED unit is walked back by nothing on the fleet side, the way
 `walk_back_uncomposed_host_units` does for host units, so the live agent had to
 be booted out by hand. That gap is real and is not closed here.
 
+#### Review round 2 — the prune had to learn that a torn DECLARATION is not a teardown
+
+Review found the shape above could delete, not refuse, on a torn input, and it
+was right. **A missing or empty package-owned `system.yaml` made
+`_load_system_defaults()` return `{}` silently** — no exception, no log — so
+`merged_defaults["jobs"]` went empty for any fleet without fleet-level
+`defaults.jobs` of its own (the common case) while that fleet's own
+`system_defaults.timers` was still `true`. `compose_fleet_timers` read the empty
+set as "this fleet composes no job timers" and the new prune deleted every
+already-composed job unit for it. Reproduced end to end through the real
+`load_fleet` → `compose_fleet_timers` with no exception raised anywhere, on
+**both** call sites — the review found the early-return one; the write path
+reaches it too whenever briefing or sweep keeps the function past that branch.
+
+**The route is live rather than theoretical: a built wheel shipped no
+`system.yaml` at all.** It was never listed in `package-data`, so every
+non-editable install would have hit exactly this state on its first generate.
+That is fixed here too, and pinned.
+
+**The existing guard could not have caught it, which is the instructive part.**
+`len(composed) < n_expected` compares two numbers that both derive from the
+merged job set; empty that set and `n_expected` is `0`, which is the documented
+signature of a legitimate full removal. A guard cannot discriminate a torn input
+using only values derived from that input.
+
+- **Source** — `_load_system_defaults` now REFUSES rather than returning `{}`.
+  This file is package-owned, not operator config: there is no install in which
+  "no system defaults" is a legitimate answer, and everything downstream (jobs,
+  hooks, host jobs, boot policy) was degrading silently, not just timers.
+  Loudness mirrors `_resolve_system_yaml`'s existing `RuntimeError` for the
+  adjacent stale-rename case — the rarer failure was already loud while the
+  likelier one was silent. The LOCATOR keeps returning `None` (one caller
+  legitimately asks "is there one?"); it is the LOADER that must not hand back
+  a void dressed as data. Nothing is cached on refusal, so a repaired install
+  works on the next call.
+- **Door** — the prune takes `declaration_torn`, computed from the one fact that
+  does *not* come from the merged set: the fleet's own manifest still asking for
+  these timers. It is not redundant with the source fix — it holds however the
+  data got torn, including routes not yet known — and a real teardown says so at
+  the source (`system_defaults: false`, or `timers: false`), where the flag is
+  already False and this is False with it. Both spellings are driven as positive
+  controls, because they switch off different fields and a guard reading either
+  one alone would pass one case while deleting nothing in the other.
+  The refusal lives inside `_prune_stale_units` rather than one frame up: a
+  refusal is a guard, a warning and a `return []`, and a second hand-typed copy
+  of that shape is the drift that function was extracted to retire.
+  It also reads the merged job set rather than the local `timers`, which has
+  already had the leaf-manager-gated jobs stripped — swapping the two passes
+  every other test today (only `manager-checkin` is gated, so the filtered set
+  cannot reach empty), and is pinned by a test that builds the roster where it
+  can, because an inert mutant leaves nothing recording why the line is written
+  that way.
+- **Blast radius** — `_load_system_defaults` is now called only when the fleet
+  actually consumes it. Refusing in the loader is right; calling it
+  unconditionally was not: `load_fleet` also backs `status`, `validate` and
+  `diff`, so a fleet that declared `system_defaults: false` — wanting nothing
+  from the file — was failing on it, taking the diagnostic commands down on
+  exactly the broken-install host an operator runs them to diagnose. Verified
+  both ways through the real CLI. The host-scoped readers (`load_host_jobs`,
+  `load_host_boot`) keep asking unconditionally, and that is pinned too: no
+  fleet flag opts a HOST out of its own platform equipment.
+- **A present but unreadable file** gets the same named refusal. The first cut
+  left a bare `path.open()`, so a permissions or YAML-syntax failure was the one
+  torn read that escaped as an unwrapped `OSError` with none of the guidance the
+  other branches give.
+
 ### Fixed — a unit that fails every start read as "boot in flight" forever, so a 23 h outage paged no one (#1769)
 
 On 2026-09-23 a broken `claude` install met an unclean reboot, and every bot on
