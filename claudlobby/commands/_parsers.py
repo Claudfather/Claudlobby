@@ -74,6 +74,13 @@ def register_subparsers(sub) -> None:
         " schema/architecture tables are rendered from the registry, not"
         " hand-kept) so a doc can be regenerated after a switch changes",
     )
+    pdr.add_argument(
+        "--no-delivery", dest="delivery", action="store_false", default=True,
+        help="Skip the delivery rung (#1745), which makes ~3 network calls per "
+             "repo in scope — measured 4.1s on a 147-branch repo, 1.5s on a "
+             "small one. Skipping says so in the report: undelivered work is "
+             "then UNCHECKED, never reported clean.",
+    )
     pdr.set_defaults(func=cmd_doctor)
 
     pcr = sub.add_parser(

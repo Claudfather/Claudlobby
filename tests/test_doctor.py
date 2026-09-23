@@ -1428,3 +1428,126 @@ class TestTheFixtureRefusesDeadWiring:
     ):
         root = _doctor_root(tmp_path, _fleet_yaml())
         assert (root / "lib" / "env-tiers.sh").is_file()
+
+
+class TestTheDeliveryCoverageLine:
+    """#1745 review: the budget became WHOLE-RUN, which means it can stop
+    part-way through a repo — a state a per-repo clock could not reach. So the
+    rung now states coverage as three counts rather than leaving it to be
+    inferred, because "nothing undelivered" over two of four repos is a
+    different claim from the same words over all four.
+
+    These pin the AGGREGATION. `check_repo`'s own three states are pinned in
+    tests/test_delivery_check.py; what is asserted here is that the summary
+    reports them rather than averaging them away.
+    """
+
+    @staticmethod
+    def _scoped(fleet, repos):
+        from claudlobby.config import ScopeConfig
+        for bot in fleet.bots.values():
+            bot.scope = ScopeConfig(org="acme", repos=list(repos))
+            return
+        raise AssertionError("fixture has no bots")
+
+    def _run(self, doctor_fleet, monkeypatch, outcomes):
+        """`outcomes` maps repo -> DeliveryFindings the stubbed per-repo check
+        returns, so the aggregation is tested without any network."""
+        from claudlobby import delivery, doctor as doc
+        _, fleet, paths = doctor_fleet
+        self._scoped(fleet, outcomes.keys())
+        monkeypatch.setattr(delivery, "check_repo",
+                            lambda repo, checkout, **kw: outcomes[repo])
+        report = DoctorReport()
+        doc.check_delivery(fleet, paths, report)
+        return [c for c in report.checks if c.name == "delivery"][0]
+
+    def test_all_reached_says_so(self, doctor_fleet, monkeypatch):
+        from claudlobby.delivery import DeliveryFindings
+        c = self._run(doctor_fleet, monkeypatch,
+                      {"acme/a": DeliveryFindings(), "acme/b": DeliveryFindings()})
+        assert "2/2 repo(s) fully checked" in c.detail, c.detail
+        assert "NOT REACHED" not in c.detail, c.detail
+
+    def test_a_repo_the_run_never_reached_is_NAMED_not_averaged_away(
+            self, doctor_fleet, monkeypatch):
+        from claudlobby.delivery import DeliveryFindings
+        c = self._run(doctor_fleet, monkeypatch, {
+            "acme/a": DeliveryFindings(),
+            "acme/b": DeliveryFindings(checked=False),
+        })
+        assert "1/2 repo(s) fully checked" in c.detail, c.detail
+        assert "1 NOT REACHED" in c.detail, (
+            "a repo the run budget never reached vanished from the summary — a "
+            f"reader would take this for full coverage: {c.detail}")
+        # INVERTED (review). This previously asserted `pass`, with the reasoning
+        # "no findings is still a pass; the bound is what changed" -- which made
+        # this test CERTIFY the defect: a green suite specifically confirming
+        # that a repo the run never examined may be reported healthy. Deleting it
+        # would have left the behaviour untested; the assertion had to flip.
+        assert c.status == "warn", (
+            "a repo the run never reached was reported as a PASS — a health "
+            f"check that did not look has produced no answer, not a clean one: {c}")
+        assert "not fully checked" in c.detail, c.detail
+
+    def test_a_PARTIALLY_checked_repo_is_named_too(self, doctor_fleet, monkeypatch):
+        """The state per-repo budgeting could not produce: stopped half-way
+        through repo N rather than cleanly between repos."""
+        from claudlobby.delivery import DeliveryFindings
+        half = DeliveryFindings()
+        half.unchecked.append("feat/never-got-to-it")
+        c = self._run(doctor_fleet, monkeypatch,
+                      {"acme/a": DeliveryFindings(), "acme/b": half})
+        assert "1/2 repo(s) fully checked" in c.detail, c.detail
+        assert "1 partially" in c.detail, c.detail
+
+    def test_a_PARTIALLY_checked_repo_is_NOT_a_pass_either(
+            self, doctor_fleet, monkeypatch):
+        """The sibling state the first fix missed (review). `checked` covered the
+        repo the run never REACHED; a repo reached, started and cut off part-way
+        has `checked=True`, empty finding lists and a list of branches nobody
+        looked at -- and rendered clean. One hole closed, its twin opened in the
+        same edit."""
+        from claudlobby.delivery import DeliveryFindings
+        half = DeliveryFindings()
+        half.unchecked.append("feat/never-got-to-it")
+        assert not half.clean, (
+            "a repo with branches it never examined reported CLEAN — the "
+            "invariant has to hold in the type, not only in the renderer")
+        c = self._run(doctor_fleet, monkeypatch,
+                      {"acme/a": DeliveryFindings(), "acme/b": half})
+        assert c.status == "warn", (
+            f"a partially checked run was reported as a PASS: {c}")
+
+    def test_the_rung_ACTUALLY_CONSULTS_clean(self, doctor_fleet, monkeypatch):
+        """The POSITIVE half of a pair, and it is only half -- stated plainly
+        because the first version of this docstring overclaimed.
+
+        An invariant nothing reads is decoration (review), so the wiring has to
+        be shown. But this test alone cannot show it: neutralising `clean` to
+        True yields `pass`, and so does a rung that never consults `clean` at
+        all. Both produce the same answer, so it discriminates nothing on its
+        own -- verified by mutation, not assumed.
+
+        What establishes the wiring is the PAIR: `clean` False must warn (the
+        two tests above) and `clean` True must pass (this one). Either alone is
+        satisfiable by a rung that ignores the property."""
+        from claudlobby import delivery as D
+        from claudlobby.delivery import DeliveryFindings
+        half = DeliveryFindings()
+        half.unchecked.append("feat/never-got-to-it")
+        monkeypatch.setattr(type(half), "clean", property(lambda self: True))
+        c = self._run(doctor_fleet, monkeypatch, {"acme/b": half})
+        assert c.status == "pass", (
+            "neutralising `clean` did not change the rung's answer, so the rung "
+            f"is not reading it and the stated invariant is decoration: {c}")
+
+    def test_coverage_leads_the_bounds_so_a_short_run_is_visible_first(
+            self, doctor_fleet, monkeypatch):
+        from claudlobby.delivery import DeliveryFindings
+        c = self._run(doctor_fleet, monkeypatch,
+                      {"acme/a": DeliveryFindings(checked=False)})
+        bounds = c.detail.split("bounds: ", 1)[1]
+        assert bounds.startswith("0/1 repo(s) fully checked"), (
+            "coverage must come before the per-repo detail — it is the part a "
+            f"reader must not scroll past: {bounds}")

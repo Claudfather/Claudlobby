@@ -987,6 +987,126 @@ def check_ignition(
     )
 
 
+def check_delivery(
+    fleet: FleetConfig, paths: Paths, report: DoctorReport, *,
+    run: bool = True,
+) -> None:
+    """Is finished work actually DELIVERED? (#1745)
+
+    Two states where work is 100% done and 0% delivered: a branch ahead of the
+    default branch with no PR, and an open PR whose head is BEHIND its own
+    branch ref. Neither covers the other. The live instances are in #1745 and
+    #1746 respectively.
+
+    WARN, never fail. Like `check_claudron` and `check_manifest_provenance` this
+    reports on repositories claudlobby does not own, and "a branch with no PR"
+    is not automatically wrong — only a human can tell stranded delivery from
+    work legitimately in flight, which is why the rung reports and stops.
+
+    IT STATES ITS BOUNDS WHATEVER THE VERDICT, including when it is clean:
+    silence that could mean "nothing undelivered" or could mean "did not look"
+    is the class this rung exists to close, and reproducing it here would be the
+    defect one level up. When it is not run at all, it says THAT rather than
+    saying nothing.
+    """
+    from .delivery import DEFAULT_BUDGET_S, check_repo
+
+    if not run:
+        report.add("delivery", "skip",
+                   "not run (--no-delivery): undelivered work is UNCHECKED, "
+                   "not clean — re-run without the flag")
+        return
+
+    repos: dict[str, str] = {}
+    for bot in fleet.bots.values():
+        sc = getattr(bot, "scope", None)
+        for repo in (getattr(sc, "repos", None) or []):
+            qualified = repo if "/" in repo else (
+                f"{sc.org}/{repo}" if getattr(sc, "org", None) else repo)
+            if "/" not in qualified:
+                continue
+            # A local checkout makes the branch half local-only; without one the
+            # rung still runs its PR half and says the other did not run.
+            name = qualified.split("/", 1)[1]
+            found = ""
+            for bot_name in fleet.bots:
+                cand = paths.runtime_bots / bot_name / "projects" / name
+                if (cand / ".git").exists():
+                    found = str(cand)
+                    break
+            repos.setdefault(qualified, found)
+
+    if not repos:
+        report.add("delivery", "pass",
+                   "no repos in any bot's scope — nothing to reconcile")
+        return
+
+    # ONE deadline for the whole run, not one per repo (#1745 review). A
+    # per-repo budget has no run-wide ceiling -- it is budget x repos, so what a
+    # human waits through grew with fleet size, and that ceiling is what gets
+    # `--no-delivery` aliased permanently.
+    import time as _time
+    run_deadline = _time.monotonic() + DEFAULT_BUDGET_S
+
+    findings: list[str] = []
+    bounds: list[str] = []
+    full = partial = unreached = 0
+    not_clean: list[str] = []
+    for repo, checkout in sorted(repos.items()):
+        f = check_repo(repo, checkout, deadline=run_deadline)
+        for b in f.no_pr:
+            findings.append(f"{repo} {b}: ahead of default, NO PR — committed and "
+                            "pushed, invisible to every read door")
+        for line in f.stale_pr_head:
+            findings.append(f"{repo} {line}")
+        bounds.append(f"{repo}: {f.bound_line()}")
+        # THE RUNG CONSULTS `clean` -- it is the stated invariant, so it has to
+        # be the thing that decides, not a property only tests mention. An
+        # invariant nothing reads is decoration, and a correct one nothing reads
+        # protects exactly as much as a wrong one (review).
+        if not f.clean:
+            not_clean.append(repo)
+        if not f.checked:
+            unreached += 1
+        elif f.unchecked:
+            partial += 1
+        else:
+            full += 1
+
+    # Run-wide, the budget can stop PART-WAY THROUGH a repo, which a per-repo
+    # clock could not do -- so coverage is stated as three counts rather than
+    # left to be inferred from the per-repo bounds. Leading with it matters when
+    # it is short: "nothing undelivered" over two of four repos is a different
+    # claim from the same words over all four.
+    coverage = f"{full}/{len(repos)} repo(s) fully checked"
+    if partial:
+        coverage += f", {partial} partially"
+    if unreached:
+        coverage += f", {unreached} NOT REACHED (run budget spent)"
+    detail = coverage + " — " + "; ".join(bounds)
+    if findings:
+        report.add("delivery", "warn",
+                   f"{len(findings)} undelivered: " + " | ".join(findings[:4])
+                   + (f" (+{len(findings) - 4} more)" if len(findings) > 4 else "")
+                   + f" — bounds: {detail}")
+    elif not_clean:
+        # NO FINDINGS IS NOT A PASS WHEN COVERAGE WAS SHORT. An earlier version
+        # reported `pass` here on the reasoning that "no findings is still a
+        # pass; the bound is what changed" -- and a test pinned that as correct,
+        # so the suite went green certifying that a repo nobody looked at may be
+        # reported healthy. A health check that did not finish looking has not
+        # produced a clean answer; it has produced no answer, and the two must
+        # not share a status.
+        report.add("delivery", "warn",
+                   f"nothing undelivered IN WHAT WAS CHECKED, but "
+                   f"{len(not_clean)} repo(s) were not fully checked "
+                   f"({', '.join(sorted(not_clean)[:3])}"
+                   + (", …" if len(not_clean) > 3 else "")
+                   + f") — this is not a clean answer for those — bounds: {detail}")
+    else:
+        report.add("delivery", "pass", f"nothing undelivered — bounds: {detail}")
+
+
 def check_manifest_provenance(
     fleet: FleetConfig, paths: Paths, report: DoctorReport
 ) -> None:
@@ -1137,7 +1257,8 @@ def check_goal_binding(
 # ----------------------------------------------------------------------
 
 
-def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
+def run_doctor(fleet: FleetConfig, paths: Paths, *,
+               delivery: bool = True) -> DoctorReport:
     """Run all doctor checks and return the report."""
     report = DoctorReport()
     # Resolved ONCE for the three rungs that ask the same question (#1680):
@@ -1156,6 +1277,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
         doors = None
     check_fleet_validation(fleet, paths, report)
     check_manifest_provenance(fleet, paths, report)
+    check_delivery(fleet, paths, report, run=delivery)
     check_goal_binding(fleet, paths, report, doors=doors)
     check_switches(fleet, paths, report)
     check_ignition(fleet, paths, report, doors=doors)
@@ -1178,13 +1300,23 @@ def format_report(report: DoctorReport) -> str:
             icon = "PASS"
         elif check.status == "warn":
             icon = "WARN"
+        elif check.status == "skip":
+            # A rung an operator deliberately turned off is not a failure, and
+            # rendering it as one (the `else` below) trains people to ignore
+            # FAIL. It is also not a WARN: a routine `--no-delivery` run would
+            # then always warn, which trains the same thing one level down. SKIP
+            # is its own word, counted separately, and the rung's own detail says
+            # what is consequently unchecked (#1745).
+            icon = "SKIP"
         else:
             icon = "FAIL"
         detail = f" — {check.detail}" if check.detail else ""
         lines.append(f"  [{icon}] {check.name}{detail}")
     lines.append("")
     p, w, f = len(report.passed), len(report.warnings), len(report.failures)
-    lines.append(f"  {p} passed, {w} warnings, {f} failures")
+    sk = len([c for c in report.checks if c.status == "skip"])
+    lines.append(f"  {p} passed, {w} warnings, {f} failures"
+                 + (f", {sk} skipped" if sk else ""))
     lines.append("")
     if report.switch_rows:
         from . import switches as _sw
