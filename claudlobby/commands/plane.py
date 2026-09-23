@@ -815,6 +815,129 @@ def cmd_plane_expire(args) -> int:
     return _guarded("plane expire", run)
 
 
+def cmd_plane_import_workstreams(args) -> int:
+    """#1635: one-shot import of a pre-cutover `workstreams.json` into the
+    plane -- the registry's write side moved with the F18 closure, the DATA
+    did not. Pure `plan()` decides what to send (see
+    `plane/workstream_import.py`'s docstring for the two rules it honours
+    and the two R1-gauntlet hazards it reproduces from the shell writer);
+    this command's job is the I/O: read the file, hold the SAME lock the
+    shell writer holds, materialize the current registry inside it, plan,
+    emit, optionally archive the source file on success. `--dry-run` prints
+    the plan and touches neither the file nor the plane."""
+    from ..brief import resolve_fleet_name
+    from ..paths import load_lib_module
+    from ..plane.workstream_import import batch_id, plan, registry_lock
+    from ..source_state import SOURCE_ABSENT, SOURCE_UNREADABLE, probe_source
+
+    paths = _resolve_paths(args)
+    root = paths.root
+    fleet = resolve_fleet_name(paths)
+    if not fleet:
+        print("import-workstreams: no fleet named -- pass --fleet or run from"
+              " a fleet-scoped root", file=sys.stderr)
+        return 2
+    src = Path(args.file) if args.file else (paths.fleet_state / "workstreams.json")
+
+    probe = probe_source(src)
+    if probe.state == SOURCE_ABSENT:
+        print(f"import-workstreams: no residual file at {src} -- nothing to import", file=sys.stderr)
+        return 0
+    if probe.state == SOURCE_UNREADABLE:
+        print(f"import-workstreams: {src} exists but could not be opened -- refusing"
+              " rather than reporting nothing to import", file=sys.stderr)
+        return 3
+
+    try:
+        file_doc = json.loads(src.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"import-workstreams: {src} is present but unreadable: {exc}", file=sys.stderr)
+        return 3
+
+    from ..workstreams import lease_days_env
+    lease_days = lease_days_env()
+
+    pr = load_lib_module(paths.lib, "plane-readers.py")
+    if pr is None:
+        print(f"import-workstreams: lib/plane-readers.py is not readable under {paths.lib}",
+              file=sys.stderr)
+        return 3
+
+    mode = capture_mode(_load_capture_config(root), fleet)
+    if mode != "full":
+        print(f"import-workstreams: this fleet's capture mode is {mode!r} -- the"
+              " imported note/next_step text on progressed/renewed/blocked events"
+              " will be STRIPPED at the door (workstream_event.note,"
+              " workstream_event.next_step are CONTENT fields); the construct's"
+              " goal is not content-classified and survives either way.",
+              file=sys.stderr)
+
+    def run() -> int:
+        lock_path = paths.fleet_state / "workstreams.lock"
+        with registry_lock(lock_path):
+            # Read-only, non-creating (#1748 review): the dedup read must
+            # not have the SIDE EFFECT of bringing a plane into existence,
+            # or --dry-run -- which promises to touch neither the file nor
+            # the plane -- leaves a stray db behind against a root that
+            # never had one. open_ro is the same exists-before-connect
+            # probe every read door shares: no plane yet means nothing to
+            # dedup against, which is the unconditional-import case, not a
+            # reason to skip (unlike prune/expire, where no db means
+            # nothing to sweep). The REAL write, when there is one, still
+            # creates the plane exactly as any door's first-ever emit does
+            # -- that happens below, inside emit_batch, never here.
+            ro_conn, _note = open_ro(root)
+            if ro_conn is None:
+                existing = {"workstreams": {}, "archived": []}
+            else:
+                try:
+                    existing = pr.workstream_registry(ro_conn, fleet, lease_days=lease_days, or_empty=True)
+                finally:
+                    ro_conn.close()
+
+            batch = batch_id(src.stat().st_mtime)
+            the_plan = plan(file_doc, existing, fleet=fleet, import_batch=batch, lease_days=lease_days)
+
+            for w in the_plan.warnings:
+                print(f"import-workstreams: {w.workstream_id}: {w.detail}", file=sys.stderr)
+            for s in the_plan.skipped:
+                print(f"import-workstreams: skipped {s.workstream_id} -- {s.reason}", file=sys.stderr)
+
+            if args.dry_run:
+                for ev in the_plan.events:
+                    print(json.dumps(ev, separators=(",", ":")))
+                print(f"import-workstreams: would emit {len(the_plan.events)} event(s)"
+                      f" for {len(file_doc.get('workstreams', {})) - len(the_plan.skipped)}"
+                      f" row(s), batch {batch}", file=sys.stderr)
+                return 0
+
+            if not the_plan.events:
+                print("import-workstreams: nothing new to import (every row already"
+                      " on the plane, or the file holds none)")
+                return 0
+
+            outcomes = emit_batch(root, the_plan.events)
+            committed = sum(1 for o in outcomes if o.status == "committed")
+            duplicate = sum(1 for o in outcomes if o.status == "duplicate")
+            spooled = [o for o in outcomes if o.status == "spooled"]
+            if spooled:
+                print(f"import-workstreams: {len(spooled)} event(s) SPOOLED -- durable"
+                      " on disk, not yet in the plane; retry with `claudlobby plane"
+                      " spool retry` before archiving the source file", file=sys.stderr)
+                return RC_SPOOLED
+
+            print(f"import-workstreams: {committed} event(s) committed,"
+                  f" {duplicate} already present, batch {batch}")
+
+            if args.archive:
+                dest = src.with_name(f"{src.name}.imported-{batch}")
+                src.rename(dest)
+                print(f"import-workstreams: archived {src.name} -> {dest.name}")
+            return 0
+
+    return _guarded("import-workstreams", run)
+
+
 def cmd_plane_view(args) -> int:
     """Run the Phase-4 operator-plane view daemon in the foreground (same
     supervision posture as serve: systemd/launchd own backgrounding). Binds

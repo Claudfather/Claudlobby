@@ -33,6 +33,7 @@ from .plane import (
     cmd_emit_batch,
     cmd_plane_doctor,
     cmd_plane_expire,
+    cmd_plane_import_workstreams,
     cmd_plane_prune,
     cmd_plane_registry,
     cmd_plane_schema,
@@ -573,6 +574,24 @@ def register_subparsers(sub) -> None:
     pex.add_argument("--dry-run", action="store_true",
                      help="Report the count without emitting")
     pex.set_defaults(func=cmd_plane_expire)
+    piw = psub.add_parser(
+        "import-workstreams",
+        help="#1635: one-shot import of a pre-cutover workstreams.json into"
+        " the plane, with original instants (never the import instant)",
+    )
+    piw.add_argument(
+        "--file", default=None,
+        help="Path to the residual registry file (default: <fleet runtime>/workstreams.json)",
+    )
+    piw.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the full envelope plan and emit nothing",
+    )
+    piw.add_argument(
+        "--archive", action="store_true",
+        help="Rename the source file to <name>.imported-<batch> on success",
+    )
+    piw.set_defaults(func=cmd_plane_import_workstreams)
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")

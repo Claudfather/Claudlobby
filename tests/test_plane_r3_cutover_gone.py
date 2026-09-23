@@ -3,56 +3,111 @@
 The plane is the only source, so there is no flag to read and no rollback
 lever to lose. The two epochs the transition RECORDED stay registered — the
 estate's rows must keep their severity."""
-from __future__ import annotations
 
-import subprocess
-import sys
-from pathlib import Path
+from __future__ import annotations
 
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.plane_fixtures import F, _cli, _scene, ro
-
-CLI = Path(sys.executable).parent / "claudlobby"
 
 
 def test_the_three_doors_are_unknown_subcommands(tmp_path):
     root, _paths, _, _ = _scene(tmp_path)
     for door in ("cutover", "parity", "import"):
         r = _cli(root, door)
-        assert r.returncode == 2 and "invalid choice" in r.stderr, (door, r.returncode, r.stderr[-300:])
-    assert "cutover" not in subprocess.run([str(CLI), "plane", "--help"], capture_output=True,
-                                           text=True).stdout
+        assert r.returncode == 2 and "invalid choice" in r.stderr, (
+            door,
+            r.returncode,
+            r.stderr[-300:],
+        )
+    assert not {"cutover", "parity", "import"} & _plane_subcommand_choices()
+
+
+def _plane_subcommand_choices() -> set[str]:
+    """The parser's OWN registered `plane <subcommand>` names — a rule, not
+    a roster (#1748 review). A substring grep over `plane --help`'s prose
+    breaks the moment anyone writes accurate history about the retired
+    doors (#1635's importer legitimately says "pre-cutover" in its own
+    help string) without the doors having come back; this asks the
+    argparse tree itself, which can only ever disagree by actually
+    registering one of the three names again."""
+    import argparse
+
+    from claudlobby.commands._parsers import register_subparsers
+
+    parser = argparse.ArgumentParser()
+    register_subparsers(parser.add_subparsers(dest="command"))
+    top = [
+        a
+        for a in parser._subparsers._group_actions
+        if isinstance(a, argparse._SubParsersAction)
+    ][0]
+    plane_parser = top.choices["plane"]
+    plane_sub = [
+        a
+        for a in plane_parser._subparsers._group_actions
+        if isinstance(a, argparse._SubParsersAction)
+    ][0]
+    return set(plane_sub.choices)
 
 
 def _old_epochs(root):
     """The rows the transition recorded on an estate, as the deleted door landed them."""
-    out = emit_batch(root, [
-        {"event_type": "system", "emitter": "cutover", "fleet": F,
-         "payload": {"event": "cutover_declared", "subject_kind": "fleet", "subject": F,
-                     "data": {"reader": "open", "forced": None, "shadowed": False}}},
-        {"event_type": "system", "emitter": "cutover", "fleet": F,
-         "payload": {"event": "legacy_write_retired", "subject_kind": "fleet", "subject": F,
-                     "data": {"flags": {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH=0"}}}}])
+    out = emit_batch(
+        root,
+        [
+            {
+                "event_type": "system",
+                "emitter": "cutover",
+                "fleet": F,
+                "payload": {
+                    "event": "cutover_declared",
+                    "subject_kind": "fleet",
+                    "subject": F,
+                    "data": {"reader": "open", "forced": None, "shadowed": False},
+                },
+            },
+            {
+                "event_type": "system",
+                "emitter": "cutover",
+                "fleet": F,
+                "payload": {
+                    "event": "legacy_write_retired",
+                    "subject_kind": "fleet",
+                    "subject": F,
+                    "data": {"flags": {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH=0"}},
+                },
+            },
+        ],
+    )
     assert all(o.status == "committed" for o in out), out
 
 
-def test_the_recorded_epochs_still_classify_and_the_doctor_carries_no_rung_for_them(tmp_path):
+def test_the_recorded_epochs_still_classify_and_the_doctor_carries_no_rung_for_them(
+    tmp_path,
+):
     root, _paths, _, _ = _scene(tmp_path)
     _old_epochs(root)
     (root / "home").mkdir(exist_ok=True)
     with ro(root) as conn:
-        sev = dict(conn.execute("SELECT event, severity FROM events WHERE kind = 'system'"
-                                " AND event IN ('cutover_declared', 'legacy_write_retired')").fetchall())
+        sev = dict(
+            conn.execute(
+                "SELECT event, severity FROM events WHERE kind = 'system'"
+                " AND event IN ('cutover_declared', 'legacy_write_retired')"
+            ).fetchall()
+        )
     assert sev == {"cutover_declared": "notice", "legacy_write_retired": "notice"}
     assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"
     d = _cli(root, "doctor")
-    assert "cutover" not in d.stdout.lower() and "legacy write" not in d.stdout.lower(), d.stdout
+    assert (
+        "cutover" not in d.stdout.lower() and "legacy write" not in d.stdout.lower()
+    ), d.stdout
 
 
 def test_the_retirement_token_is_still_registered():
     """The machinery is gone (R3) but the estate recorded these epochs; the
     names stay registered so those rows keep their severity."""
     from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
+
     assert SYSTEM_EVENT_SEVERITY["legacy_write_retired"] == "notice"
     assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"

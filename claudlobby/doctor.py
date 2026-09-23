@@ -818,6 +818,82 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
 
 
 # ----------------------------------------------------------------------
+# Check: a residual pre-cutover workstream file the plane does not hold (#1635)
+# ----------------------------------------------------------------------
+
+
+def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """A registry file with rows while the plane holds none is the "two
+    stores, one reader" state the F18 closure existed to end. The plane's
+    empty answer for this fleet's workstreams is LEGITIMATE on its own --
+    nothing downstream can raise it from inside that read -- only a
+    comparison against the file can. Outlives the importer
+    (`claudlobby plane import-workstreams`): once every fleet is imported
+    this rung goes quiet, and it is what catches the NEXT stranded file
+    from the next store that moves without its data.
+
+    Silent (no check added) for a fleet with no residual file at all -- the
+    common, healthy, post-import case -- matching `check_claudron`'s own
+    "nothing to diagnose" convention. UNLIKE the absent case, a file that
+    EXISTS but could not be read or parsed is `warn`, never silent: an
+    unreadable residual is not the same fact as no residual, and collapsing
+    the two is exactly the unreachable-vs-empty confusion `source_state.py`
+    exists to prevent one layer over."""
+    from .source_state import SOURCE_OK, SOURCE_UNREADABLE, probe_source
+    from .workstreams import plane_workstreams
+
+    resid = paths.fleet_state / "workstreams.json"          # the writer's old home
+    probe = probe_source(resid)
+    if probe.state != SOURCE_OK:
+        if probe.state == SOURCE_UNREADABLE:
+            report.add(
+                "workstream registry",
+                "warn",
+                f"{resid.name} exists but could not be opened -- cannot tell"
+                " whether it holds rows the plane lacks",
+            )
+        return                                               # SOURCE_ABSENT: nothing to diagnose
+
+    try:
+        file_doc = json.loads(resid.read_text())
+        file_ids = set((file_doc.get("workstreams") or {}))
+    except (OSError, ValueError) as exc:
+        report.add(
+            "workstream registry",
+            "warn",
+            f"{resid.name} is present but not readable as the registry's JSON: {exc}",
+        )
+        return
+
+    entries, note = plane_workstreams(paths)
+    if entries is None:
+        report.add(
+            "workstream registry",
+            "warn",
+            f"{resid.name} is present but the plane could not be read ({note})"
+            " -- cannot tell a residual from an imported row",
+        )
+        return
+
+    missing = sorted(file_ids - set(entries))
+    if missing:
+        report.add(
+            "workstream registry",
+            "fail",
+            f"{len(missing)} row(s) in {resid.name} the plane does not hold"
+            f" ({', '.join(missing[:3])}{', ...' if len(missing) > 3 else ''})"
+            f" -- run `claudlobby --fleet {fleet.name} plane import-workstreams`",
+        )
+    else:
+        report.add(
+            "workstream registry",
+            "pass",
+            f"{resid.name} holds {len(file_ids)} row(s), all present on the plane"
+            " -- safe to --archive if this file is still here",
+        )
+
+
+# ----------------------------------------------------------------------
 # Check: fleet.yaml validates
 # ----------------------------------------------------------------------
 
@@ -1090,6 +1166,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     check_services(fleet, paths, report)
     check_credentials(fleet, paths, report)
     check_claudron(fleet, paths, report)
+    check_workstream_residual(fleet, paths, report)
     return report
 
 

@@ -394,6 +394,155 @@ class TestCheckClaudron:
         assert "not present on this host" in loop.detail
 
 
+class TestCheckWorkstreamResidual:
+    """#1635: a registry file with rows the plane does not hold — the "two
+    stores, one reader" state the F18 closure existed to end."""
+
+    @staticmethod
+    def _fleet_and_paths(tmp_path: Path):
+        from tests.plane_fixtures import F, _paths, plane_root
+
+        root = plane_root(tmp_path)
+        paths = _paths(root)
+        fleet, _md = load_fleet(root / "local" / F / "fleet.yaml")
+        return root, fleet, paths
+
+    def test_silent_when_no_residual_file_exists(self, tmp_path):
+        from claudlobby.doctor import check_workstream_residual
+
+        _root, fleet, paths = self._fleet_and_paths(tmp_path)
+        report = DoctorReport()
+        check_workstream_residual(fleet, paths, report)
+        assert report.checks == []
+
+    def test_fails_while_the_plane_lacks_rows_the_file_has(self, tmp_path):
+        from tests.plane_fixtures import F
+        from claudlobby.doctor import check_workstream_residual
+        from claudlobby.plane.emit_api import emit_batch
+
+        root, fleet, paths = self._fleet_and_paths(tmp_path)
+        # anchor real identity for the fleet -- plane_workstreams refuses a
+        # fleet the plane holds no bot of, same as any other plane door
+        emit_batch(
+            root,
+            [
+                {
+                    "event_type": "system",
+                    "emitter": "test-setup",
+                    "fleet": F,
+                    "occurred_at": "2026-09-01T00:00:00Z",
+                    "payload": {
+                        "event": "heartbeat",
+                        "subject_kind": "actor",
+                        "subject": f"bot:{F}/w1",
+                        "data": {},
+                    },
+                }
+            ],
+        )
+        paths.fleet_state.mkdir(parents=True, exist_ok=True)
+        (paths.fleet_state / "workstreams.json").write_text(
+            json.dumps(
+                {
+                    "updated": "2026-09-01T00:00:00Z",
+                    "workstreams": {
+                        "ws-one": {"id": "ws-one"},
+                        "ws-two": {"id": "ws-two"},
+                    },
+                }
+            )
+        )
+
+        report = DoctorReport()
+        check_workstream_residual(fleet, paths, report)
+        check = [c for c in report.checks if c.name == "workstream registry"][0]
+        assert check.status == "fail"
+        assert "2 row(s)" in check.detail
+        assert "ws-one" in check.detail and "ws-two" in check.detail
+        assert "plane import-workstreams" in check.detail
+
+    def test_passes_once_every_row_is_on_the_plane(self, tmp_path):
+        from tests.plane_fixtures import F
+        from claudlobby.doctor import check_workstream_residual
+        from claudlobby.plane.emit_api import emit_batch
+
+        root, fleet, paths = self._fleet_and_paths(tmp_path)
+        emit_batch(
+            root,
+            [
+                {
+                    "event_type": "workstream",
+                    "emitter": "test-setup",
+                    "fleet": F,
+                    "occurred_at": "2026-08-01T00:00:00Z",
+                    "payload": {
+                        "workstream_id": "ws-one",
+                        "title": "t",
+                        "opened_by": f"bot:{F}/w1",
+                    },
+                }
+            ],
+        )
+        paths.fleet_state.mkdir(parents=True, exist_ok=True)
+        (paths.fleet_state / "workstreams.json").write_text(
+            json.dumps(
+                {
+                    "updated": "2026-08-01T00:00:00Z",
+                    "workstreams": {"ws-one": {"id": "ws-one"}},
+                }
+            )
+        )
+
+        report = DoctorReport()
+        check_workstream_residual(fleet, paths, report)
+        check = [c for c in report.checks if c.name == "workstream registry"][0]
+        assert check.status == "pass"
+        assert "1 row(s)" in check.detail
+
+    def test_unreachable_plane_warns_rather_than_asserting_a_residual(self, tmp_path):
+        """No plane db at all: cannot tell a residual from an imported row —
+        WARN, never FAIL (that would assert a defect this rung cannot see)
+        and never silent (that would be the same collapse one layer over)."""
+        from claudlobby.doctor import check_workstream_residual
+
+        _root, fleet, paths = self._fleet_and_paths(tmp_path)
+        paths.fleet_state.mkdir(parents=True, exist_ok=True)
+        (paths.fleet_state / "workstreams.json").write_text(
+            json.dumps(
+                {
+                    "updated": "2026-08-01T00:00:00Z",
+                    "workstreams": {"ws-one": {"id": "ws-one"}},
+                }
+            )
+        )
+
+        report = DoctorReport()
+        check_workstream_residual(fleet, paths, report)
+        check = [c for c in report.checks if c.name == "workstream registry"][0]
+        assert check.status == "warn"
+        assert "cannot tell a residual from an imported row" in check.detail
+
+    def test_unreadable_residual_file_warns_not_silent(self, tmp_path):
+        """UNLIKE absent, an unreadable file is not nothing to diagnose --
+        collapsing the two would be the unreachable-vs-empty confusion
+        source_state.py exists to prevent, one layer over."""
+        from claudlobby.doctor import check_workstream_residual
+
+        _root, fleet, paths = self._fleet_and_paths(tmp_path)
+        paths.fleet_state.mkdir(parents=True, exist_ok=True)
+        resid = paths.fleet_state / "workstreams.json"
+        resid.write_text("{}")
+        resid.chmod(0o000)
+        try:
+            report = DoctorReport()
+            check_workstream_residual(fleet, paths, report)
+        finally:
+            resid.chmod(0o644)
+        check = [c for c in report.checks if c.name == "workstream registry"][0]
+        assert check.status == "warn"
+        assert "could not be opened" in check.detail
+
+
 class TestDoctorTimerScriptParity:
     """`claudlobby doctor` mirrors `generate` for the L1 deny-by-default timer
     rule: a fleet job whose ``script`` is a foreign absolute fails the rollout
