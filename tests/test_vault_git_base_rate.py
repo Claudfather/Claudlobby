@@ -165,3 +165,123 @@ class TestUnreachableIsNotEmpty:
         (tmp_path / "t.jsonl").write_text("")
         rc = bx.main(["--transcripts", str(tmp_path)])
         assert rc == 3, "no observations is not a 0% base rate"
+
+class TestTheVerbNeedsABoundaryOnBOTHSides:
+    """The seventh defect (#1753), and the mirror image of reading 5.
+
+    Fixing the RIGHT side of the verb left the LEFT side open, so `\b` still
+    matched the `merge` inside `.git/rebase-merge` — which is how everyone
+    probes for a stopped rebase, and was 37 occurrences of one string.
+    Measured: 54 commands, ~30% of the whole residual, and NONE of them
+    visible to the guard, which is the shape of a pure denominator artifact.
+    """
+
+    def test_a_hyphen_BEFORE_the_verb_is_not_the_verb(self, bx):
+        for cmd in ('printf \'%s\' "$(git rev-parse HEAD)" "$([ -d .git/rebase-merge ])"',
+                    'git rev-parse HEAD && ls .git/rebase-apply',
+                    'git config --get pull.rebase',
+                    'git log --oneline; cat .git/rebase-merge/head-name'):
+            assert not bx._is_state_changing(bx._strip_heredocs(cmd)), cmd
+
+    def test_a_FLAG_spelled_like_a_verb_is_not_the_verb(self, bx):
+        """`git commit -am "x"` matched the state verb `am` through the hyphen,
+        and `git pull --rebase` matched the unconditional `rebase`. The second
+        is still counted — by the CONDITIONAL rule, which is where it belongs."""
+        assert not bx._is_state_changing('git commit -am "wip"')
+        assert bx._is_state_changing('git pull --rebase')
+
+    def test_the_left_boundary_does_not_eat_a_real_invocation(self, bx):
+        """The control: the rule must remove artifacts and nothing else."""
+        for cmd in ('git checkout main', 'git cherry-pick abc123',
+                    'git merge topic', 'git worktree add /tmp/x main',
+                    'cd /v && git reset --hard', 'git commit --amend'):
+            assert bx._is_state_changing(bx._strip_heredocs(cmd)), cmd
+
+
+class TestTheResidualBreakdown:
+    """#1753 asked for the residual by mechanism, because the remedy on the
+    table (parse one level into `sh -c`) was sized by intuition.
+
+    Measured on the estate corpus: the `sh -c` form is **0 of 163**, and
+    **50.9%** is a backslash line continuation gluing the newline onto the
+    word so the token is `"\ngit"` — a DIRECT invocation, no composition at
+    all, which the guard's own claim says it catches.
+    """
+
+    def _classify(self, bx, cmd, glued_tok=False):
+        shell = bx._strip_heredocs(cmd)
+        hit = bx._GIT_STATE_RE.search(shell)
+        verb_at = shell.index(hit.group(1), hit.start()) if hit else None
+        if hit is None:
+            for rx in bx._GIT_COND_RES:
+                hit = rx.search(shell)
+                if hit:
+                    break
+        assert hit is not None, f"not in the denominator at all: {cmd!r}"
+        return bx._classify_residual(shell, hit.start(), verb_at, glued_tok)[0]
+
+    def test_the_sh_c_DETECTOR_WORKS_so_a_zero_means_absence(self, bx):
+        """THE LOAD-BEARING TEST. The headline of this measurement is that the
+        wrapper form is 0% of real traffic — and a detector that has never
+        been fed a positive is indistinguishable from a broken one. Feed it
+        one, in every spelling the class claims."""
+        for cmd in ('sh -c "git rebase main"',
+                    'bash -c "git reset --hard"',
+                    "eval 'git checkout main'",
+                    'ssh host "git merge topic"',
+                    'timeout 5 sh -c "git clean -fd"'):
+            assert self._classify(bx, cmd) == "wrapper_quoted_body", cmd
+
+    def test_a_backslash_continuation_is_its_own_class(self, bx):
+        assert self._classify(bx, 'echo a && \\\ngit reset --hard') == (
+            "continuation_glued_token")
+
+    def test_an_INDENTED_continuation_is_not_that_class(self, bx):
+        """The bound, measured live against the guard: an indented continuation
+        DENIES correctly, because the whitespace ends the token. Calling it
+        glued would overstate the finding."""
+        assert self._classify(bx, 'echo a && \\\n    git reset --hard') != (
+            "continuation_glued_token")
+
+    def test_a_continuation_ELSEWHERE_does_not_claim_the_match(self, bx):
+        """The rule is IMMEDIATELY-before, and this is what pins it.
+
+        The first version searched the whole prefix for a continuation, so any
+        command carrying one anywhere scored as glued — inflating this class in
+        the direction that flatters the finding the file had just made. The
+        indented case does not discriminate (its continuation is followed by
+        whitespace, which both rules reject), so it took this shape: a real
+        continuation early, and the matched git reached some other way.
+
+        Mutation-checked: reverting to the loose rule turns THIS test red and
+        nothing else in the file."""
+        cmd = 'echo a && \\\necho "stashes: $(git stash list)"'
+        assert self._classify(bx, cmd) != "continuation_glued_token"
+        assert self._classify(bx, cmd) == "string_data_or_prose"
+
+    def test_our_own_guard_PROBES_are_counted_apart(self, bx):
+        """Folding the estate's own test fixtures into the wrapper class would
+        inflate the blind spot with the tests that measure it."""
+        assert self._classify(bx, 'for c in "cd $V && git reset --hard"; do :; done') == (
+            "harness_command_string")
+
+    def test_every_class_is_named_in_the_partition(self, bx):
+        assert set(bx.RESIDUAL_MECHANISMS) >= {
+            "verb_belongs_to_another_command", "continuation_glued_token",
+            "wrapper_quoted_body", "harness_command_string",
+            "string_data_or_prose", "quoted_introducer_unrecognised",
+            "unclassified"}
+
+    def test_the_breakdown_states_its_own_bound(self, bx):
+        r = {"files": 1, "commands": 1, "git_state_by_text": 1,
+             "git_state_guard_visible": 0, "directness_pct": 0.0,
+             "cd_any": 1, "cd_bare": 1, "bare_cd_pct": 100.0,
+             "tokenizer_failures": 0, "transcripts_root": "/x",
+             "mechanism_overlaps": 3, "glued_crosscheck_disagreements": 1}
+        text = "\n".join(bx._breakdown_bound_lines(r))
+        assert "INDEPENDENT text rules" in text
+        assert "one bucket" in text          # why the guard's parser is not used
+        assert "3 match(es)" in text         # the overlap count, not a boast
+        assert "1 disagreement" in text      # the cross-check, counted
+        assert "never folded" in text        # unclassified is not absorbed
+
