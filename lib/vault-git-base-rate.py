@@ -27,11 +27,18 @@ So the two halves are deliberately asymmetric:
   population the claim is about, and it must be found without the guard's help
   or composed forms vanish from it.
 
-  NUMERATOR -- the guard's OWN tokenizer and verb set (`_shell_words`,
-  `STATE_VERBS`, `CONDITIONAL`, `SAFE_ONLY`), asking whether `git` lands as a
-  command word with a state-changing verb after it. Not a re-implementation:
-  a private copy of a predicate is how the measured thing and the shipped thing
-  quietly diverge.
+  NUMERATOR -- the guard's OWN tokenizer, verb set and flag rules
+  (`_shell_words`, `_parse_git_args`, `STATE_VERBS`, `CONDITIONAL`), asking
+  whether `git` lands as a command word with either an unconditional state
+  verb or a conditional one carrying its OWN dangerous flag -- the same
+  two-step verdict `decide()` itself makes (#1755: the first version checked
+  verb membership alone, flag-blind). The DEFINITION is shared with the
+  denominator's rule (one dangerous-conditional-verb table, `CONDITIONAL`,
+  consulted by both halves); the PARSING is not -- this still walks the
+  guard's own tokenizer, never the denominator's regex, or the asymmetry the
+  whole design rests on collapses. Not a re-implementation: a private copy of
+  a predicate is how the measured thing and the shipped thing quietly
+  diverge.
 
 The gap between them is the answer: commands that ARE state-changing git and
 that the guard cannot see.
@@ -55,7 +62,7 @@ than its claim is how the 42.6% happened:
     distinct command shapes.
 
 WHAT IT READS, AND WHAT THE PR ORIGINALLY CLAIMED. On the estate corpus this
-reports roughly **92% directness** and **88% bare-`cd`**. The #1725 discussion
+reports roughly **90% directness** and **88% bare-`cd`**. The #1725 discussion
 carried 87% and 98.3%. Neither is reproduced -- the first is now EXCEEDED and
 the second is not met -- and this script, not the sentence, is the thing of
 record: re-run it rather than quoting any of these numbers.
@@ -81,11 +88,27 @@ was the harness measuring a different population than the claim:
      simply how everyone scopes a PR. It had been inflating the denominator by
      roughly a ninth and deflating the rate by about ten points. A latent
      denominator defect and a live one look identical until someone counts.
+  6. 90.3% -- the NUMERATOR's conditional check became flag-aware (#1755),
+     matching the denominator's own rule (reading 3) instead of counting bare
+     `branch`/`commit`/`pull`/`push` as guard-visible the same as their
+     dangerous forms. It had been inflating BOTH the 81.8% and the 91.6%
+     readings by about the same ~1.5 points -- which is exactly why the DELTA
+     between them looked sound while the ABSOLUTE stayed wrong, and why a
+     figure was retracted rather than published from either.
 
-That last step corrected a wrong model held while writing this. A substitution,
-an `xargs` stage and a pipeline all leave `git` as a bare token, so the guard
-SEES them; what it cannot see is a quoted body. The blind spot is narrower than
-assumed and sits in a different place.
+That last step, reading 5, corrected a wrong model held while writing this. A
+substitution, an `xargs` stage and a pipeline all leave `git` as a bare token,
+so the guard SEES them; what it cannot see is a quoted body. The blind spot is
+narrower than assumed and sits in a different place.
+
+Five of these six were the DENOMINATOR, hand-written and so scrutinised as
+hand-written code is. The sixth was the NUMERATOR, and it took a second
+reviewer, on a different PR, to catch: importing the guard's real tokenizer
+made this half FEEL verified, when only the tokenizer was -- the flag rule
+layered on top of it (which verb needs which flag to count) was still a
+private, unverified copy of `decide()`'s own branch, the exact thing the
+asymmetric design exists to prevent on the denominator side and had quietly
+never been asked of the numerator.
 """
 from __future__ import annotations
 
@@ -231,9 +254,22 @@ _TOKENIZER_FAILURES: list[str] = []
 def _guard_sees_git_state(guard, command: str) -> bool:
     """Would the guard's OWN parser find a state-changing git invocation here?
 
-    Mirrors how `decide()` walks tokens -- `git` as a command word, then the
-    guard's own flag parser for the verb -- using the guard's constants rather
-    than a second copy of them."""
+    Mirrors how `decide()` walks tokens AND VERDICTS -- `git` as a command
+    word, the guard's own flag parser for the verb, then STATE_VERBS
+    unconditional / CONDITIONAL only WITH its own dangerous flag present in
+    the remaining args, exactly as `decide()` itself branches (#1755: the
+    first version checked verb membership alone, so `git branch -v` counted
+    the same as `git branch -D` -- flag-blind, inflating every reading by
+    about 1.5 points, the sixth denominator/numerator defect and the first on
+    this side).
+
+    The DEFINITION is shared (`guard.STATE_VERBS`, `guard.CONDITIONAL`) --
+    one dangerous-conditional-verb table, consulted by both halves. The
+    PARSING is not: this still walks the guard's OWN `_shell_words` /
+    `_parse_git_args`, never the denominator's regex. Sharing the parser too
+    would make this reading 100% by construction (module docstring) --
+    sharing only the definition is what lets the numerator become
+    flag-aware without collapsing the asymmetry the design rests on."""
     try:
         tokens = guard._shell_words(command)
     except Exception:
@@ -242,13 +278,17 @@ def _guard_sees_git_state(guard, command: str) -> bool:
         # like composition hiding git.
         _TOKENIZER_FAILURES.append(command[:80])
         return False
-    stateful = set(guard.STATE_VERBS) | set(guard.CONDITIONAL) | set(
-        getattr(guard, "SAFE_ONLY", {}) or {})
     for i, tok in enumerate(tokens):
         if guard._unseparate(tok) != "git":
             continue
-        _scope, verb, _vi, _unknown = guard._parse_git_args(tokens[i + 1:])
-        if verb and guard._unseparate(verb) in stateful:
+        _scope, verb, verb_idx, _unknown = guard._parse_git_args(tokens[i + 1:])
+        if not verb:
+            continue
+        v = guard._unseparate(verb)
+        if v in guard.STATE_VERBS:
+            return True
+        rest = tokens[i + 2 + verb_idx:]
+        if any(flag in rest for flag in guard.CONDITIONAL.get(v, ())):
             return True
     return False
 

@@ -109,6 +109,30 @@ class TestTheDefectsThatProducedTheWrongReadings:
         assert bx._is_state_changing('git merge topic')
         assert bx._is_state_changing('git commit --amend')
 
+    def test_the_numerator_is_not_flag_blind_on_conditional_verbs(self, bx):
+        """Reading 6 (#1755): the numerator checked CONDITIONAL verb
+        membership alone, so `git branch -v` counted as guard-visible the
+        same as `git branch -D` -- every safe bare use of a conditional verb
+        inflated the numerator, which inflates the rate. The denominator
+        already got this right (reading 3); the numerator never did."""
+        guard = bx._load_guard(_ROOT / "lib")
+        for safe in ('git branch -v',
+                     'git branch --show-current',
+                     'git commit -m "ordinary"',
+                     'git push origin HEAD',
+                     'git pull'):
+            assert not bx._guard_sees_git_state(guard, safe), safe
+
+    def test_the_same_conditional_verbs_STILL_count_with_their_flag(self, bx):
+        """The other half -- without this the previous test is satisfied by a
+        rule that stopped seeing CONDITIONAL verbs at all."""
+        guard = bx._load_guard(_ROOT / "lib")
+        for dangerous in ('git branch -D old-thing',
+                           'git commit --amend --no-edit',
+                           'git push --force origin main',
+                           'git pull --rebase'):
+            assert bx._guard_sees_git_state(guard, dangerous), dangerous
+
 
 class TestItStatesItsBounds:
     """#1742: a base rate with no denominator description is a number people
