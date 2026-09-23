@@ -55,10 +55,10 @@ than its claim is how the 42.6% happened:
     distinct command shapes.
 
 WHAT IT READS, AND WHAT THE PR ORIGINALLY CLAIMED. On the estate corpus this
-reports roughly **82% directness** and **88% bare-`cd`**. The #1725 discussion
-carried 87% and 98.3%. Those earlier figures are NOT reproduced here and this
-script, not the sentence, is now the thing of record -- re-run it rather than
-quoting either number.
+reports roughly **92% directness** and **88% bare-`cd`**. The #1725 discussion
+carried 87% and 98.3%. Neither is reproduced -- the first is now EXCEEDED and
+the second is not met -- and this script, not the sentence, is the thing of
+record: re-run it rather than quoting any of these numbers.
 
 The difference is not a subtlety and is worth keeping, because every step of it
 was the harness measuring a different population than the claim:
@@ -73,6 +73,14 @@ was the harness measuring a different population than the claim:
      harmless reads.
   4. 81.8% -- `sh -c "..."` bodies added to the denominator, after measuring
      that they are the guard's ACTUAL blind spot.
+  5. 91.6% -- hyphenated plumbing names stopped matching the verb. `\b` sits
+     between `merge` and the `-` of `merge-base`, so the bare boundary matched
+     inside `merge-base`, `merge-tree` and `checkout-index`. Reported by review
+     as a latent defect with "zero current impact"; MEASURED, it was the
+     LARGEST of the five -- 408 occurrences, 352 of them `merge-base`, which is
+     simply how everyone scopes a PR. It had been inflating the denominator by
+     roughly a ninth and deflating the rate by about ten points. A latent
+     denominator defect and a live one look identical until someone counts.
 
 That last step corrected a wrong model held while writing this. A substitution,
 an `xargs` stage and a pipeline all leave `git` as a bare token, so the guard
@@ -134,12 +142,23 @@ _CONDITIONAL_WORDS = {
 _CMD_POS = (r"(?:^|[;&|(){}\n`]|\$\(|&&|\|\||\bxargs\s+(?:-[^\s]+\s+)*"
             r"|\bthen\s+|\bdo\s+|\belse\s+|\bsudo\s+|\btime\s+"
             r"|\b(?:ba|z|da)?sh\s+-c\s*[\"']|\beval\s+[\"']?)\s*")
+#: A HYPHEN AFTER THE VERB MEANS A DIFFERENT COMMAND. `\b` sits between `merge`
+#: and the `-` of `merge-base`, so a bare word boundary matches inside every
+#: hyphenated plumbing name -- `merge-base`, `merge-tree`, `checkout-index` --
+#: none of which change the tree the way the verb alone does. Found by review on
+#: the first two; the third fell out of fixing it as a RULE rather than
+#: denylisting the two that were named. Zero impact on the corpus today, which
+#: is exactly the kind of denominator defect that starts mattering silently.
+#:
+#: `(?![-\w])` rather than `\b`: hyphenated verbs that ARE real state changes
+#: (`cherry-pick`) match as whole alternatives and are unaffected.
+_VERB_END = r"(?![-\w])"
 _GIT_STATE_RE = re.compile(
     _CMD_POS + r"git\b[^\n;|&]{0,200}?\b("
-    + "|".join(re.escape(w) for w in _STATE_WORDS) + r")\b")
+    + "|".join(re.escape(w) for w in _STATE_WORDS) + r")" + _VERB_END)
 _GIT_COND_RES = [
     re.compile(_CMD_POS + r"git\b[^\n;|&]{0,200}?\b" + re.escape(verb)
-               + r"\b[^\n;|&]{0,200}?(?:" + "|".join(flags) + r")")
+               + _VERB_END + r"[^\n;|&]{0,200}?(?:" + "|".join(flags) + r")")
     for verb, flags in _CONDITIONAL_WORDS.items()
 ]
 

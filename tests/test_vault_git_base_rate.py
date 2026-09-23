@@ -86,6 +86,30 @@ class TestTheDefectsThatProducedTheWrongReadings:
         assert bx._is_state_changing('git pull --rebase')
 
 
+    def test_a_HYPHENATED_plumbing_name_is_not_the_verb(self, bx):
+        """Reading 5 (review): `\b` sits between `merge` and the `-` of
+        `merge-base`, so a bare word boundary matched inside every hyphenated
+        plumbing name. None of these change the tree the way the verb alone
+        does, so counting them inflates the denominator exactly as the heredocs
+        and the read-only conditionals did.
+
+        `checkout-index` was not in the reported pair — it fell out of fixing
+        this as a RULE instead of denylisting the two that were named."""
+        for benign in ('git merge-base main HEAD',
+                       'git merge-tree a b c',
+                       'git checkout-index -a',
+                       'git commit-tree $TREE'):
+            assert not bx._is_state_changing(benign), benign
+
+    def test_the_hyphen_rule_does_not_eat_cherry_pick(self, bx):
+        """The other half: a verb that legitimately CONTAINS a hyphen must still
+        match. Without this, the previous test is satisfied by a rule that
+        simply stopped matching hyphens at all."""
+        assert bx._is_state_changing('git cherry-pick abc123')
+        assert bx._is_state_changing('git merge topic')
+        assert bx._is_state_changing('git commit --amend')
+
+
 class TestItStatesItsBounds:
     """#1742: a base rate with no denominator description is a number people
     quote."""
