@@ -259,6 +259,39 @@ class TestTheResidualBreakdown:
         assert self._classify(bx, cmd) != "continuation_glued_token"
         assert self._classify(bx, cmd) == "string_data_or_prose"
 
+    def test_the_GUARDS_TOKENIZER_CANNOT_FLIP_THE_CLASSIFICATION(self, bx):
+        """THE COLLAPSE TRAP, ONE LEVEL DOWN — and review had to find it.
+
+        The first version read `if glued or glued_by_tokenizer`, so the guard's
+        own parser could put a command in this bucket. That contradicts the
+        stated "the independent rule decides", and the bias was
+        ONE-DIRECTIONAL: an `or` can only ever ADD, and it added to the flagship
+        bucket. A small one-sided error on the headline number is worth more
+        than a large symmetric one on a footnote.
+
+        Forced here the way the reviewer forced it: hand the classifier a
+        tokenizer verdict that DISAGREES and assert the classification ignores
+        it. The cross-check may count; it may not decide."""
+        shell = 'echo a; git stash list'
+        hit = bx._GIT_STATE_RE.search(shell)
+        verb_at = shell.index(hit.group(1), hit.start())
+        with_tok = bx._classify_residual(shell, hit.start(), verb_at, True)[0]
+        without = bx._classify_residual(shell, hit.start(), verb_at, False)[0]
+        assert with_tok == without, (
+            "the guard's tokenizer changed the classification — the residual "
+            "breakdown must not consult the parser it is describing")
+        assert with_tok != "continuation_glued_token"
+
+    def test_a_continuation_INSIDE_A_QUOTED_STRING_is_not_a_bypass(self, bx):
+        """The second correction from the same review, and it is the one that
+        moved the number: a backslash-newline inside a quoted string is TEXT,
+        not a shell continuation. Both cross-check disagreements on the corpus
+        were this shape — a continuation inside one of this estate's own probe
+        strings — and the earlier ordering counted them in the flagship bucket.
+        Quoted-first is the conservative reading of a published number."""
+        cmd = "probe 'echo a && \\\ngit reset --hard'"
+        assert self._classify(bx, cmd) != "continuation_glued_token"
+
     def test_our_own_guard_PROBES_are_counted_apart(self, bx):
         """Folding the estate's own test fixtures into the wrapper class would
         inflate the blind spot with the tests that measure it."""

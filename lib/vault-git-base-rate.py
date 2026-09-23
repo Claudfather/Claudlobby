@@ -116,9 +116,9 @@ AND THEN THE BREAKDOWN MOVED IT AGAIN (#1753). The residual is now classified by
 mechanism, and the form the whole discussion was about is not in it:
 
     wrapper_quoted_body  (`sh -c "git rebase main"`)     0   of 163   0.0%
-    continuation_glued_token                            83   of 163  50.9%
+    continuation_glued_token                            81   of 165  ~49%
 
-**Half the residual is a BACKSLASH LINE CONTINUATION.** `... && \` then `git`
+**Half the residual is a BACKSLASH LINE CONTINUATION.** `... && backslash` then `git`
 at column 0: the escaped newline becomes part of the next word, the token is
 "\ngit", and the guard's `_unseparate` -- which strips `;&` -- leaves it
 unequal to "git". Nothing is composed. It is the most ordinary multi-line shape
@@ -130,7 +130,7 @@ measurement should not quietly become a fix.
 
 So the remedy the issue put on the table -- parse one level into a quoted body --
 would have addressed a form that occurs **zero** times in 67,000 Bash calls,
-while the form that occurs 83 times is a one-character-class widening of a
+while the form that occurs 81 times is a one-character-class widening of a
 predicate that already exists. That gap between the intuition and the count is
 the entire argument for measuring first.
 
@@ -140,7 +140,36 @@ so classifying it WITH that parser would return one bucket and explain nothing.
 The classes are independent text rules. The continuation class alone
 cross-checks against the guard's tokenizer -- it is a claim about that
 tokenizer -- and the cross-check only COUNTS disagreements; the independent rule
-decides. Precedence puts an artifact test first, which is conservative about
+decides.
+
+    THAT LAST SENTENCE WAS FALSE WHEN IT WAS FIRST WRITTEN, and review found it
+    (#1760). The code read `if glued or glued_by_tokenizer`, so the guard's
+    parser COULD flip a classification -- the collapse trap one level down, in
+    the one class that mentions the tokenizer. Two things make it worth keeping
+    in the record rather than quietly fixing. The bias was ONE-DIRECTIONAL (an
+    `or` can only add) and it pointed at the FLAGSHIP bucket, which is the worst
+    place for a small one-sided error; and its measured effect was NIL, because
+    every disagreement on the corpus ran the other way (independent yes,
+    tokenizer no), so nothing was in the bucket because of it. A property the
+    text claims and the code does not hold is not rescued by the number
+    happening to agree.
+
+    Investigating it moved the number, though, and by the SECOND correction
+    rather than the first: both disagreements were a continuation inside a
+    QUOTED string -- one of this estate's own probe strings -- and a
+    backslash-newline inside quotes is text, not a shell continuation. Quoting
+    now takes precedence, so 83/50.9% became 81/165 -- a shade under half, and
+    the figure to quote is this one.
+
+    QUOTE THE COUNT WITH ITS DENOMINATOR, NOT THE PERCENTAGE, and the reason is
+    a bound nobody had noticed: this harness reads the transcripts of the
+    sessions that USE it, so the work of measuring enters the corpus it
+    measures. Across three runs in one hour the continuation count held at 81
+    while the residual grew 163 -> 165 and the share moved 49.7% -> 49.1% --
+    entirely from probe commands the measurement itself had just produced
+    (`harness_command_string` 7 -> 9, which is exactly those). The mechanism
+    counts are stable; the shares drift, and they drift toward whatever was
+    recently being investigated. Precedence puts an artifact test first, which is conservative about
 this file's own finding rather than flattering to it, and overlaps are reported
 rather than hidden by the ordering.
 
@@ -435,6 +464,18 @@ def _classify_residual(shell: str, match_start: int, verb_at: int | None,
 
     *overlapped* says an EARLIER-precedence class won over a later one that
     also matched, so the ordering is auditable instead of silent.
+
+    ``glued_by_tokenizer`` IS NOT CONSULTED HERE and is accepted only so the
+    caller can count disagreements against it. An earlier version read
+    ``if glued or glued_by_tokenizer``, which let the GUARD'S parser flip the
+    classification -- review found it, and it is the module docstring's collapse
+    trap one level down: share definitions, never parsing. The bias was also
+    ONE-DIRECTIONAL (an `or` can only ever add) and it pointed at the flagship
+    bucket, which is the worst place for a small one-sided error. Measured on
+    the corpus it moved NOTHING -- every disagreement ran the other way
+    (independent yes, tokenizer no), so no command was in the bucket because of
+    it -- but a property the text claimed and the code did not hold is not
+    rescued by the number happening to agree.
     """
     git_at = shell.find("git", match_start)
     end = verb_at if verb_at is not None else match_start
@@ -460,10 +501,17 @@ def _classify_residual(shell: str, match_start: int, verb_at: int | None,
 
     if any(ch in between for ch in ')("\''):
         return "verb_belongs_to_another_command", bool(glued or quoted_class)
-    if glued or glued_by_tokenizer:
-        return "continuation_glued_token", bool(quoted_class)
+    # A QUOTED match cannot be a live continuation bypass, and this ordering is
+    # the second correction from the same review. A backslash-newline INSIDE a
+    # quoted string is text, not a shell continuation -- the two disagreements
+    # the cross-check found were both this shape (a continuation inside one of
+    # this estate's own probe strings), and the earlier ordering counted them in
+    # the flagship bucket. Quoted-first is the conservative reading of a number
+    # this file is publishing.
     if quoted_class:
-        return quoted_class, False
+        return quoted_class, bool(glued)
+    if glued:
+        return "continuation_glued_token", False
     return "unclassified", False
 
 
@@ -563,6 +611,12 @@ def _bound_lines(r: dict) -> list[str]:
         f"           {r['commands']} Bash command(s) total",
         "WINDOW   : whatever those transcripts retain -- Claude Code prunes them,",
         "           so this is a recent-activity sample, not an all-time census.",
+        "SELF     : this reads the transcripts of the sessions that RUN it, so",
+        "           measuring adds to the corpus measured -- probe commands from a",
+        "           session investigating git land in the next reading. Mechanism",
+        "           COUNTS are stable across runs; the SHARES drift toward",
+        "           whatever was recently being investigated. Quote the count and",
+        "           its denominator, not the percentage.",
         "SKIPPED  : git reached outside a Bash tool call (hooks, timers, units,",
         "           script internals) is INVISIBLE here. Composition is likeliest",
         "           there, so this rate is an UPPER bound on the estate.",
@@ -594,8 +648,9 @@ def _breakdown_bound_lines(r: dict) -> list[str]:
         "           an artifact test FIRST, which is conservative about the",
         f"           continuation finding; {r['mechanism_overlaps']} match(es) also fit a",
         "           later class and are counted under the earlier one.",
-        f"           The continuation class cross-checks against the guard's own",
-        f"           tokenizer: {r['glued_crosscheck_disagreements']} disagreement(s).",
+        f"           The continuation class CROSS-CHECKS against the guard's own",
+        f"           tokenizer and never CONSULTS it: "
+        f"{r['glued_crosscheck_disagreements']} disagreement(s), counted only.",
         "           `unclassified` is printed, never folded into a neighbour.",
     ]
 
