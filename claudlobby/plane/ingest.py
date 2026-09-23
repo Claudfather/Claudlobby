@@ -570,7 +570,8 @@ def _verify_duplicates(conn, prepared, host_uid) -> list[IngestResult]:
     results = []
     for event_id, env, payload in prepared:
         ledger = conn.execute(
-            "SELECT rowid AS seq, family FROM ingest_ledger WHERE event_id = ?",
+            "SELECT rowid AS seq, family, ingested_at FROM ingest_ledger"
+            " WHERE event_id = ?",
             (event_id,),
         ).fetchone()
         if ledger is None:
@@ -599,9 +600,20 @@ def _verify_duplicates(conn, prepared, host_uid) -> list[IngestResult]:
                 f"SELECT ingest_seq FROM {table} WHERE event_id = ?", (event_id,)
             ).fetchone()
         if fam is None:
+            # A PRUNED row is not a corrupted one (#1659). Retention deletes
+            # family rows and leaves their ledger rows, so a replay of a
+            # pruned event arrives here with a ledger row and no family row --
+            # and refusing it lost the whole batch, every innocent event in it
+            # included.
+            if _explained_by_a_prune(conn, ledger):
+                results.append(IngestResult(event_id, None, True))
+                continue
             raise RuntimeError(
                 f"ledger/family divergence for {event_id} — refusing"
-                " duplicate classification (integrity, not idempotency)"
+                " duplicate classification. The plane may be damaged, OR a"
+                " retention lane deleted this family row without recording a"
+                " watermark that covers it; check `prune_watermarks` before"
+                " treating this as corruption"
             )
         if fam["ingest_seq"] != ledger["seq"]:
             raise RuntimeError(
@@ -611,6 +623,31 @@ def _verify_duplicates(conn, prepared, host_uid) -> list[IngestResult]:
             )
         results.append(IngestResult(event_id, None, True))
     return results
+
+
+def _explained_by_a_prune(conn, ledger) -> bool:
+    """Is this absent family row accounted for by a retention prune?
+
+    True only when a watermark exists for the row's OWN family and the row
+    landed strictly before that cutoff — the same two facts the prune used, so
+    the answer is derived from what actually ran rather than from a type list
+    this module would have to keep in step.
+
+    Conservative by construction: no watermark, a different family, or a row
+    at-or-after the cutoff all answer False and the caller refuses. A missing
+    table answers False too (an install whose migrations predate the lane
+    cannot have pruned anything).
+    """
+    try:
+        row = conn.execute(
+            "SELECT pruned_before FROM prune_watermarks WHERE family = ?",
+            (ledger["family"],),
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None or not row["pruned_before"]:
+        return False
+    return str(ledger["ingested_at"]) < str(row["pruned_before"])
 
 
 def ingest(conn, env, payload, *, host_uid) -> IngestResult:

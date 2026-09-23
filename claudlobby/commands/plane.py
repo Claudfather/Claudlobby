@@ -702,7 +702,8 @@ def cmd_plane_prune(args) -> int:
 
     def run() -> int:
         from ..plane.retention import (
-            DEFAULT_RETENTION_DAYS, prune_metric_samples)
+            DEFAULT_RETENTION_DAYS, PRUNABLE_SYSTEM_EVENTS,
+            prune_metric_samples, prune_system_events)
 
         path = db_file(root)
         if not path.exists():
@@ -721,14 +722,50 @@ def cmd_plane_prune(args) -> int:
             migrate(conn)   # DowngradeError -> 4 via the guard
             res = prune_metric_samples(conn, days=days,
                                        dry_run=args.dry_run)
+            # #1659, the SECOND lane, OFF unless this host arms it. Inside this
+            # job rather than beside it because it shares the window and the
+            # connection; gated separately because it deletes a different
+            # thing. Measured before shipping: 15,422 system events in one day
+            # here, 98% of them the two allowlisted types.
+            sys_deleted = None
+            if _switch_on("PLANE_PRUNE_SYSTEM_EVENTS_ENABLED"):
+                if args.dry_run:
+                    marks = ",".join("?" for _ in PRUNABLE_SYSTEM_EVENTS)
+                    sys_deleted = conn.execute(
+                        f"SELECT COUNT(*) FROM events WHERE kind='system'"
+                        f" AND event IN ({marks}) AND ingested_at < ?",
+                        (*sorted(PRUNABLE_SYSTEM_EVENTS), res.cutoff),
+                    ).fetchone()[0]
+                else:
+                    sys_deleted = prune_system_events(conn, days=days)
+                    conn.commit()
         finally:
             conn.close()
         verb = "would delete" if res.dry_run else "deleted"
         print(f"metric_samples: {verb} {res.candidates if res.dry_run else res.deleted}"
               f" rows older than {days}d (cutoff {res.cutoff})")
+        if sys_deleted is None:
+            # Said out loud rather than skipped silently: a disarmed lane and a
+            # lane that found nothing print differently, which is the rule the
+            # rest of this estate is held to.
+            print("system events: lane OFF — arm with"
+                  " PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in this host's .env"
+                  " (it deletes data; see claudlobby doctor --switches)")
+        else:
+            print(f"system events: {verb} {sys_deleted} row(s) older than"
+                  f" {days}d, of {sorted(PRUNABLE_SYSTEM_EVENTS)}"
+                  " — every other event type is kept")
         return 0
 
     return _guarded("plane prune", run)
+
+
+def _switch_on(env_name: str) -> bool:
+    """An opt-in switch is ON only for an exact `1` (the registry's polarity
+    rule): unset, empty, or anything else is OFF. Matching `switch_is_on`'s
+    shell twin, where an empty assignment wins at its tier and is NOT a `1`."""
+    import os
+    return os.environ.get(env_name, "").strip() == "1"
 
 
 def cmd_plane_expire(args) -> int:

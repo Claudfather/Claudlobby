@@ -4,9 +4,23 @@ The one aggressive-retention lane: raw ``metric_samples`` are the 30-day
 incident-join window, and past it they age out. The ruling's hard edges,
 enforced here:
 
-  - **Family-scoped.** Retention DELETEs ``metric_samples`` and NOTHING
-    else. It is the only DELETE the plane performs, and deletion for
-    retention is not mutation of history (spec §10).
+  - **Family-scoped, and there are now TWO lanes (#1659).** This one
+    DELETEs ``metric_samples``. The second DELETEs a NAMED, ALLOWLISTED
+    set of ``system`` events and nothing else — see
+    :data:`PRUNABLE_SYSTEM_EVENTS`. Deletion for retention is not
+    mutation of history (spec §10).
+
+    **The "and NOTHING else" this docstring used to claim was load-bearing
+    for code outside this module**, which is why the second lane is an
+    allowlist rather than an age sweep. ``lib/selfstart-snapshot.sh``
+    reads ``fleet_rescue`` receipts from the plane and its boot gate fails
+    CLOSED on an UNREACHABLE read (exit 7, "a receipt gate that fails OPEN
+    is the one failure this measurement must never have") — but a receipt
+    that was PRUNED is not unreachable, it is absent, and absent is read as
+    a certain no-receipt. A second deletion lane could therefore silently
+    credit a rescued boot as a self-start without touching that gate at
+    all. ``boot-capture`` records land as system events for the same stated
+    reason.
   - **The ledger is NEVER touched.** ``ingest_ledger`` is the ordering
     authority AND the event_id dedupe horizon — its rows outlive every
     family row, so the dedupe window is the ledger's lifetime. A
@@ -49,6 +63,96 @@ class RetentionResult:
     candidates: int        # metric_samples older than the cutoff
     deleted: int           # rows actually removed (0 on dry-run)
     dry_run: bool
+
+
+#: THE ONLY system event types this lane may delete (#1659).
+#:
+#: **An allowlist, and the direction IS the safety property.** Forgetting to
+#: list a type here means it is KEPT; a denylist of protected types would mean
+#: a forgotten type is DELETED. The first failure costs disk, the second costs
+#: a boot-integrity gate — see the module docstring on `fleet_rescue`. So this
+#: set names what may go, and the complement is everything else, proved by
+#: construction rather than by enumerating what was checked.
+#:
+#: **Both entries are emit-only: nothing reads them back from the plane.**
+#: Verified rather than assumed — no query under `claudlobby/` selects either
+#: (`tool_call`'s only other consumers are the severity registry, CLI help
+#: text, and `fleet-pulse.sh`, which reads the `data/.last-tool-call` FILE's
+#: mtime, not a plane row). That is the discriminator between a sample-like
+#: event and one that IS the record: whether a door reads it.
+#:
+#: **And they are 98% of the volume**, measured on the one complete day this
+#: host's post-cutover record holds (2026-09-21): 12,963 `tool_call` and 2,163
+#: `wip_uncommitted` out of 15,422 system events that day. Keeping the set
+#: minimal therefore costs ~2% of the win and removes most of the risk.
+PRUNABLE_SYSTEM_EVENTS = frozenset({
+    "tool_call",        # one per guarded hook invocation (lib/bot-vitals.sh)
+    "wip_uncommitted",  # one per dirty repo per fleet-pulse tick
+})
+
+
+def prune_system_events(conn, *, now=None, days: int = DEFAULT_RETENTION_DAYS,
+                        events: frozenset[str] | None = None) -> int:
+    """Age out the allowlisted system events. Returns rows deleted.
+
+    Same two hard edges as the sample lane and for the same reasons: the
+    ``ingest_ledger`` is NEVER touched (it is the dedupe horizon, and shrinking
+    it would let a replayed old event re-ingest as new), and rows age by
+    ``ingested_at`` rather than ``occurred_at``.
+
+    Because the ledger is untouched, this reclaims the event rows and not their
+    ledger rows — so it bounds the family that grows fastest without changing
+    the dedupe window. That is a deliberate half-measure: the alternative
+    trades a disk bound for a correctness hazard.
+    """
+    allow = PRUNABLE_SYSTEM_EVENTS if events is None else frozenset(events)
+    if not allow:
+        return 0
+    unknown = allow - PRUNABLE_SYSTEM_EVENTS
+    if unknown:
+        # A caller cannot widen the lane by passing a set: the allowlist is the
+        # contract, not a default. Refusing is the only answer that keeps the
+        # complement proof true for every call site.
+        raise ValueError(
+            f"not allowlisted for retention: {sorted(unknown)} — add it to "
+            "PRUNABLE_SYSTEM_EVENTS with its justification, or keep it"
+        )
+    at = now or datetime.now(timezone.utc)
+    cutoff = _cutoff_iso(at, days)
+    marks = ",".join("?" for _ in allow)
+    cur = conn.execute(
+        f"DELETE FROM events WHERE kind = 'system' AND event IN ({marks})"
+        " AND ingested_at < ?",
+        (*sorted(allow), cutoff),
+    )
+    deleted = cur.rowcount or 0
+    # RECORD THE PRUNE so the duplicate verifier can tell a pruned row from a
+    # corrupted one (#1659 review). Without this, replaying a pruned event
+    # reaches `_verify_duplicates` with a ledger row and no family row and is
+    # refused as integrity damage -- taking every other event in that batch
+    # with it.
+    #
+    # A WATERMARK, not a row per pruned event: the latter would store as much
+    # as the prune deleted. The cost is a real and bounded loss of coverage,
+    # stated rather than hidden: for a `system` row older than the watermark,
+    # a genuinely absent family row now classifies as pruned rather than
+    # corrupt. That is strictly tighter than teaching the verifier to accept
+    # any absent family row for a prunable type, which would hold forever and
+    # for new rows too; here it holds only behind a cutoff this lane actually
+    # ran, and only for the family it ran on.
+    #
+    # `MAX` so a re-run with a shorter window cannot walk the watermark
+    # backwards and re-expose rows it already explained.
+    if deleted:
+        conn.execute(
+            "INSERT INTO prune_watermarks (family, pruned_before, pruned_at)"
+            " VALUES ('system', ?, ?)"
+            " ON CONFLICT(family) DO UPDATE SET"
+            "   pruned_before = MAX(pruned_before, excluded.pruned_before),"
+            "   pruned_at = excluded.pruned_at",
+            (cutoff, at.isoformat()),
+        )
+    return deleted
 
 
 def _cutoff_iso(now: datetime, days: int) -> str:
