@@ -27,6 +27,14 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
 1. **Peer review posted — and attributed BY HAND.** A reviewer has posted an `APPROVE` verdict, or a `COMMENT` with `**Approve**` verdict line (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews.
 
+   **MULTIPLE VERDICTS RESOLVE PER REVIEWER, NEVER GLOBAL-LATEST.** Each reviewer's own latest verdict stands, and the PR is blocked while **any** reviewer's latest is `REQUEST-CHANGES`.
+
+   Global-latest is the intuitive rule and it is wrong in one specific, silent way: with reviewer A blocking and reviewer B approving later, newest-on-the-PR reports `APPROVE` **over an unresolved block**. It is correct only while a PR has exactly one reviewer — which is why it survives so long on a fleet where that is usually true, and why it fails the first time two people review.
+
+   **This codebase already settled it, so read the rule from the tool rather than from here:** `lib/pr-review-state.py` documents the prototype's global-latest, the reversed-reviewers counterexample, and its own resolution, and `test_reversing_the_reviewers_flips_the_answer` pins it. If this paragraph and that tool ever disagree, the tool is right — it is the thing with a test.
+
+   (That is not in tension with the warning below about not reading the tool for **authorship**. It is authoritative on *which verdicts are live and blocking* and is not an authority on *who wrote the PR* — two different questions, one of which it answers.)
+
    **This rung cannot be verified from GitHub, and no shipped door checks it for you.** Read that before the rungs below, because every automated surface on this page reads green on a self-review. The fleet shares one GitHub identity, so every mechanical source of authorship collapses to the same login: the PR `author` field (18 of 18 recent PRs), the commit author and committer (12 of 12 merged commits, resolved from a host-global gitconfig — and rewritten by squash-merge anyway), and the branch name (18 of 18 encode an issue number, never a bot). There is no field to read, so the comparison this rung asks for is `x != x`.
 
    **So perform it by hand, on every `--admin` merge.** Authorship is recorded in exactly one place on this estate — the prose of the report a bot files when it opens a PR:
