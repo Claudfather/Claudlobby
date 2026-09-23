@@ -88,7 +88,20 @@ the plane because the report never left the manager's pane. The declared
   declaration wins).
 - `lib/` is read on demand per use: this is in force on every bot the moment it
   merges, with no restart gate. The composed `REPORTS_TO` reaches a bot on the
-  next `generate` + restart (bot.conf is read once at session start).
+  next `generate` + restart — TWO windows, both safe and identical: before
+  `generate` writes the field, and after `generate` but before that bot's next
+  restart (the door reads the session's inherited env, never `bot.conf`
+  itself). `generate` alone changes nothing for a running manager.
+- **History is left as it is, and it is findable.** The plane is append-only
+  and every self-addressed row is a truthful record of what the door did
+  (delivered to the sender's own pane). Those rows are not rewritten and the
+  tasks they closed are not reopened: the work they reported is past, and a
+  reopen would page every manager on the estate about stale rows. Measured on
+  the authoring host: 12 such rows across two fleets (7 + 5), 6 of which closed
+  a task; an external reviewer from another fleet reported the same
+  signature on two further planes (their measurement, not reproducible from
+  here). The finder, and the ruling, are in
+  `documentation/runbooks/self-addressed-reports.md`.
 
 ### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
 

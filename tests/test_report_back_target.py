@@ -131,3 +131,61 @@ def test_an_empty_reports_to_is_absent_not_a_target(tmp_path):
     assert r.returncode == 0, r.stderr
     rows = plane_report_rows(tmp_path)
     assert len(rows) == 1 and rows[0]["recipient_raw"] == "lead", rows
+
+
+# --- fleet-aware: a same bare name in another fleet is a different bot (#526) --
+
+
+def _peer_dir(root: Path, fleet: str, bot: str) -> Path:
+    """A peer's bot dir as the composer lays it out, so bot_dir_for_session
+    (own-fleet fast path, then the cross-fleet glob) can find it; the fleet
+    dir carries a fleet.yaml because resolve_fleet_dir requires one."""
+    fdir = root / "local" / fleet
+    fdir.mkdir(parents=True, exist_ok=True)
+    (fdir / "fleet.yaml").write_text(f"fleet:\n  name: {fleet}\n  bots: {{}}\n")
+    d = fdir / "runtime" / "bots" / bot
+    d.mkdir(parents=True)
+    (d / "bot.conf").write_text(f"BOT_ID={bot}\nFLEET_NAME={fleet}\nBOT_SERVICE=svc.{fleet}.{bot}\n")
+    return d
+
+
+def test_a_same_named_bot_in_another_fleet_is_not_self(tmp_path):
+    """#526: two fleets may each hold a bot named `mgr`. The sender is `mgr` of
+    fleet F; the only `mgr` dir on the host belongs to another fleet, so the
+    target resolves THERE and the recipient alias names that fleet. A bare-
+    name compare would read this as self and refuse; the alias compare does
+    not, and the row records which `mgr` was actually addressed."""
+    _peer_dir(tmp_path, "otherfleet", "mgr")
+    r = _run(tmp_path, "mgr", BOT_ID="mgr", REPORTS_TO="mgr")
+    assert r.returncode == 0, r.stderr
+    rows = plane_report_rows(tmp_path)
+    assert len(rows) == 1, rows
+    assert rows[0]["sender"] == f"bot:{FLEET}/mgr"
+    assert rows[0]["recipient"] == "bot:otherfleet/mgr", rows
+    assert rows[0]["recipient"] != rows[0]["sender"]
+
+
+def test_the_senders_own_fleet_peer_wins_over_a_same_named_bot_elsewhere(tmp_path):
+    """The other direction of #526: `lead` exists in the sender's fleet AND in
+    another. The own-fleet fast path resolves the sender's own `lead`, and the
+    alias carries the sender's fleet -- the report goes where the team wiring
+    says, never to the namesake next door."""
+    _peer_dir(tmp_path, FLEET, "lead")
+    _peer_dir(tmp_path, "otherfleet", "lead")
+    r = _run(tmp_path, "w1", BOT_ID="w1", REPORTS_TO="lead")
+    assert r.returncode == 0, r.stderr
+    rows = plane_report_rows(tmp_path)
+    assert len(rows) == 1 and rows[0]["recipient"] == f"bot:{FLEET}/lead", rows
+
+
+def test_the_self_check_follows_the_resolved_peer_across_fleets(tmp_path):
+    """And the refusal is on the RESOLVED identity: `mgr` of fleet F, whose own
+    dir exists in F, naming `mgr` resolves to itself even though another
+    fleet also has a `mgr` -- refused, because that is the bot it would land
+    on."""
+    _peer_dir(tmp_path, FLEET, "mgr")
+    _peer_dir(tmp_path, "otherfleet", "mgr")
+    r = _run(tmp_path, "mgr", BOT_ID="mgr", MANAGER_TMUX="mgr")
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert plane_report_rows(tmp_path) == []
+
