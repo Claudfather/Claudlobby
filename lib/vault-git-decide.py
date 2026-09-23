@@ -102,10 +102,21 @@ import sys
 #: git subcommands that move HEAD, the index or refs. Matched on the SUBCOMMAND
 #: token alone — never a substring of the whole command line, or `git log
 #: --grep=reset` would be refused.
-STATE_VERBS = frozenset({
-    "checkout", "switch", "rebase", "reset", "merge",
-    "stash", "clean", "worktree", "cherry-pick", "revert", "am",
-})
+STATE_VERBS = frozenset(
+    {
+        "checkout",
+        "switch",
+        "rebase",
+        "reset",
+        "merge",
+        "stash",
+        "clean",
+        "worktree",
+        "cherry-pick",
+        "revert",
+        "am",
+    }
+)
 
 #: Verbs that are safe in general and dangerous only with a flag. Kept separate
 #: because `commit` and `push` are how work normally leaves a bot, and refusing
@@ -163,13 +174,31 @@ NEEDS_SAFE_FLAG = {
 #: existing — `--super-prefix` and `--config-env` are both real and both absent.
 GLOBAL_FLAGS = {
     # value-taking, separated form measured as accepted
-    "-C": 1, "-c": 1, "--git-dir": 1, "--work-tree": 1, "--namespace": 1,
+    "-C": 1,
+    "-c": 1,
+    "--git-dir": 1,
+    "--work-tree": 1,
+    "--namespace": 1,
     # no value
-    "--bare": 0, "--no-replace-objects": 0, "--no-optional-locks": 0,
-    "--literal-pathspecs": 0, "--glob-pathspecs": 0, "--noglob-pathspecs": 0,
-    "--icase-pathspecs": 0, "--exec-path": 0, "--paginate": 0, "-p": 0,
-    "--no-pager": 0, "-P": 0, "--help": 0, "-h": 0, "--version": 0, "-v": 0,
-    "--html-path": 0, "--man-path": 0, "--info-path": 0,
+    "--bare": 0,
+    "--no-replace-objects": 0,
+    "--no-optional-locks": 0,
+    "--literal-pathspecs": 0,
+    "--glob-pathspecs": 0,
+    "--noglob-pathspecs": 0,
+    "--icase-pathspecs": 0,
+    "--exec-path": 0,
+    "--paginate": 0,
+    "-p": 0,
+    "--no-pager": 0,
+    "-P": 0,
+    "--help": 0,
+    "-h": 0,
+    "--version": 0,
+    "-v": 0,
+    "--html-path": 0,
+    "--man-path": 0,
+    "--info-path": 0,
 }
 
 #: The two flags that relocate something, and WHAT each one relocates. They do
@@ -195,12 +224,13 @@ ENV_SCOPE = ("GIT_DIR", "GIT_WORK_TREE")
 
 #: Each axis, in git's own precedence: the flag, then the variable, then
 #: wherever `-C` (or the shell) left us.
-REPO_ORDER = ("--git-dir", "GIT_DIR", "-C")      # which repository's refs move
+REPO_ORDER = ("--git-dir", "GIT_DIR", "-C")  # which repository's refs move
 TREE_ORDER = ("--work-tree", "GIT_WORK_TREE", "-C")  # which files are written
 
 
-def _parse_git_args(args: list[str]) -> tuple[dict[str, str], str | None,
-                                              int, str | None]:
+def _parse_git_args(
+    args: list[str],
+) -> tuple[dict[str, str], str | None, int, str | None]:
     """``(scope, verb, verb_index, unrecognised)`` for one invocation's argv.
 
     Walks the pre-verb options using :data:`GLOBAL_FLAGS` arities, so the verb
@@ -229,8 +259,6 @@ def _parse_git_args(args: list[str]) -> tuple[dict[str, str], str | None,
             scope.setdefault(a, args[j + 1])
         j += 1 + arity
     return scope, None, len(args), None
-
-
 
 
 def _resolve(path: str, cwd: str | None) -> str | None:
@@ -276,7 +304,7 @@ def _shell_words(command: str) -> list[str]:
 
 
 def _unseparate(tok: str) -> str:
-    """Strip a shell separator that shlex left attached to a path.
+    r"""Strip shell syntax that shlex left attached to a token.
 
     `cd /vault; git ...` tokenises as `['cd', '/vault;', 'git', ...]` -- the
     semicolon needs no space before it, so it rides along inside the path and
@@ -289,11 +317,32 @@ def _unseparate(tok: str) -> str:
     walk-up hid the defect on that axis while its twin went through. Which is
     why this is stripped centrally rather than at whichever call site noticed.
 
+    A BACKSLASH LINE CONTINUATION has it too, on the other end (#1759).
+    `... && \` then a newline: shlex does not remove the escaped newline, it
+    GLUES it onto the next word, so `... && \` + newline + `git reset --hard`
+    tokenises with a `"\ngit"` token -- not `"git"` -- and the guard never
+    finds a verb to judge. Nothing is composed: no subshell, no eval, no
+    variable, no wrapper. It is this tokeniser failing on the most ordinary
+    multi-line shape this estate writes, for a DIRECT invocation, which is the
+    exact class this guard's own docstring claims to catch. Measured live
+    against the transcript corpus, applying this fix on top of #1760's own
+    residual-mechanism classifier (unmerged; the breakdown instrument does
+    not exist on main): 81 of a 166-command residual were this mechanism
+    before the fix, 0 of 85 after -- every other mechanism bucket unchanged,
+    count for count. Not a percentage: the harness reads its own sessions'
+    transcripts, so a share drifts with each run; the counts do not.
+
+    An INDENTED continuation is unaffected and needs no stripping: the
+    whitespace after the escaped newline ends the token at the shlex level, so
+    `git` already arrives clean. Only a continuation with nothing between the
+    newline and the next word glues -- which is why this strips leading
+    newlines rather than leading whitespace generally.
+
     Stripping fails toward seeing the vault, i.e. toward refusing, so a path
-    genuinely ending in one of these characters costs a refusal rather than a
-    bypass.
+    genuinely ending in one of these characters, or an argument that happens
+    to begin with a literal newline, costs a refusal rather than a bypass.
     """
-    return tok.rstrip(";&")
+    return tok.rstrip(";&").lstrip("\n")
 
 
 def _looks_unresolvable(tok: str) -> bool:
@@ -369,7 +418,13 @@ def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
             env[name] = _unseparate(value)
             i += 1
             continue
-        if tok == "git" or tok.endswith("/git"):
+        # #1759: a backslash line continuation glues the escaped newline onto
+        # this token (`"\ngit"`), so the raw comparison below never fired --
+        # this must read the UNSEPARATED form, the same rule already applied
+        # to a `cd` argument and an env value, or the strip is real but unused
+        # at the one place a direct invocation is actually recognised.
+        utok = _unseparate(tok)
+        if utok == "git" or utok.endswith("/git"):
             verdict, detail = _judge_git(tokens, i, vault, cwd, last_cd, env)
             if verdict != "allow":
                 return verdict, detail
@@ -377,11 +432,16 @@ def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
     return "allow", ""
 
 
-def _judge_git(tokens: list[str], start: int, vault: str, cwd: str | None,
-               last_cd: str | None,
-               env: dict[str, str] | None = None) -> tuple[str, str]:
+def _judge_git(
+    tokens: list[str],
+    start: int,
+    vault: str,
+    cwd: str | None,
+    last_cd: str | None,
+    env: dict[str, str] | None = None,
+) -> tuple[str, str]:
     """One git invocation: where does it point, and what does it do."""
-    args = tokens[start + 1:]
+    args = tokens[start + 1 :]
     scope, verb, verb_idx, unrecognised = _parse_git_args(args)
 
     # AN OPTION THIS GUARD CANNOT READ REFUSES, FULL STOP -- and the word
@@ -456,7 +516,7 @@ def _judge_git(tokens: list[str], start: int, vault: str, cwd: str | None,
     # --- only now, the verb -----------------------------------------------
     if verb is None:
         return "allow", ""
-    rest = args[verb_idx + 1:]
+    rest = args[verb_idx + 1 :]
 
     if verb in STATE_VERBS:
         return "deny", verb
