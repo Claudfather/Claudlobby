@@ -38,6 +38,9 @@ def _compose_bot(
     chat_id: str = "-100999",
     teams: dict[str, TeamConfig] | None = None,
     env: dict[str, str] | None = None,
+    reports_to: str | None = None,
+    manages: list[str] | None = None,
+    bots: dict[str, BotConfig] | None = None,
 ) -> tuple[Path, str]:
     """Generate bot.conf for a bot and return (bot_dir, conf_text)."""
     root = tmp_path / "claudlobby"
@@ -55,12 +58,17 @@ def _compose_bot(
             token_env=token_env,
         ),
         env=env or {},
+        reports_to=reports_to,
+        manages=manages,
     )
     fleet = FleetConfig(
         name="test-fleet",
         service_prefix="com.test",
         telegram_group_chat_id=chat_id,
         teams=teams or {},
+        # A roster, when given, always holds the composed bot itself: manager-ness
+        # (manages:) is only read for bots the fleet knows about.
+        bots={**bots, bot_id: bot} if bots is not None else {},
     )
     paths = _make_paths(root)
     conf = compose_bot_conf(bot, fleet, paths)
@@ -439,6 +447,81 @@ class TestManagerTmux:
         bot_dir, conf = _compose_bot(tmp_path, teams={})
 
         assert "MANAGER_TMUX" not in conf
+
+
+# ---------------------------------------------------------------------------
+# 4b. REPORTS_TO -- the upward target on its own carrier (#1754)
+# ---------------------------------------------------------------------------
+
+
+def _peer(bot_id: str) -> BotConfig:
+    return BotConfig(
+        bot_id=bot_id, name=bot_id, expertise=["eng"],
+        telegram=TelegramConfig(handle=f"{bot_id}_bot", token_env=f"TG_{bot_id.upper()}"),
+    )
+
+
+class TestReportsTo:
+    """The composer resolves the upward target (reports_to, else the team
+    manager) onto REPORTS_TO, which report-back.sh reads first; the manager
+    marker on MANAGER_TMUX is untouched. The account is in lib/report-back.sh."""
+
+    def test_a_manager_with_reports_to_gets_both_carriers(self, tmp_path):
+        """The live proof case: the marker stays self, the upward target rides
+        beside it -- two carriers, two facts."""
+        bot_dir, _ = _compose_bot(
+            tmp_path, bot_id="mgr", name="mgr", reports_to="cto", manages=["w"],
+            bots={"cto": _peer("cto"), "w": _peer("w")},
+        )
+        env = _source_env_and_dump(_build_tmux_env(bot_dir))
+        assert env.get("MANAGER_TMUX") == "mgr", "the manager marker is unchanged"
+        assert env.get("REPORTS_TO") == "cto"
+        assert env.get("REPORTS_TO_SOCKET") == "com.test.cto", "in-fleet: the socket is composed"
+
+    def test_a_cross_fleet_reports_to_composes_the_name_and_no_socket(self, tmp_path):
+        """A reports_to naming a bot in ANOTHER fleet is a supported, warn-only
+        shape; its socket lives under that fleet's prefix, which this composer
+        cannot know. The name alone is emitted and resolve_peer_socket's
+        reverse lookup finds the socket at run time -- composing
+        com.test.<name> here would be actively wrong."""
+        _, conf = _compose_bot(tmp_path, bot_id="mgr", name="mgr", reports_to="palpatine")
+        assert "export REPORTS_TO=palpatine" in conf
+        assert "REPORTS_TO_SOCKET" not in conf
+
+    def test_a_teams_only_worker_gets_its_team_manager(self, tmp_path):
+        """No reports_to declared: the team manager IS the upward target, so a
+        worker's delivery is the same bot it was before the split."""
+        teams = {"eng": TeamConfig(name="eng", manager="lead", workers=["worker"])}
+        _, conf = _compose_bot(tmp_path, teams=teams, bots={"lead": _peer("lead")})
+        assert "export MANAGER_TMUX=lead" in conf
+        assert "export REPORTS_TO=lead" in conf
+        assert "export REPORTS_TO_SOCKET=com.test.lead" in conf
+
+    def test_a_sub_manager_listed_as_a_team_worker_reports_to_the_team_manager(self, tmp_path):
+        """#475's shape: a bot that manages others AND sits in a team's workers
+        gets the manager marker (self) on MANAGER_TMUX and its team manager on
+        REPORTS_TO -- it reports upward, not to itself."""
+        teams = {"eng": TeamConfig(name="eng", manager="top", workers=["mid"])}
+        bot_dir, _ = _compose_bot(
+            tmp_path, bot_id="mid", name="mid", teams=teams, manages=["w"],
+            bots={"top": _peer("top"), "w": _peer("w")},
+        )
+        env = _source_env_and_dump(_build_tmux_env(bot_dir))
+        assert env.get("MANAGER_TMUX") == "mid", "the marker still wins on MANAGER_TMUX"
+        assert env.get("REPORTS_TO") == "top"
+
+    def test_no_upward_target_composes_nothing(self, tmp_path):
+        """A fleet top -- no reports_to, in no team -- has no upward target and
+        gets no carrier (the door refuses a self-send rather than inventing one)."""
+        _, conf = _compose_bot(tmp_path, bot_id="top", name="top", manages=["w"], bots={"w": _peer("w")})
+        assert "REPORTS_TO" not in conf
+
+    def test_the_value_is_shell_quoted(self, tmp_path):
+        """The carrier goes through _shq like its siblings so a stray character
+        can never execute on source."""
+        bot_dir, _ = _compose_bot(tmp_path, bot_id="mgr", name="mgr", reports_to="a b")
+        env = _source_env_and_dump(_build_tmux_env(bot_dir))
+        assert env.get("REPORTS_TO") == "a b"
 
 
 # ---------------------------------------------------------------------------

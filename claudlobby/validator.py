@@ -1258,10 +1258,20 @@ def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
     """Org structure integrity and team membership checks."""
     # Org structure integrity (warn — bot_ids may reference other fleets)
     for bot_name, bot in fleet.bots.items():
-        if bot.reports_to and bot.reports_to not in fleet.bots:
-            report.warnings.append(
-                f"bot '{bot_name}': reports_to '{bot.reports_to}' not found in fleet.bots"
-            )
+        if bot.reports_to:
+            # reports_to is where report-back.sh DELIVERS (#1754). A self-edge
+            # has no legal reading in any fleet -- the door refuses it at run
+            # time -- so it is an error here, never composed. An unknown name
+            # may be a cross-fleet bot, so that stays a warning.
+            if bot.reports_to == bot_name:
+                report.errors.append(
+                    f"bot '{bot_name}': reports_to names itself -- a report-back "
+                    "can never leave its own pane; name the bot it reports to"
+                )
+            elif bot.reports_to not in fleet.bots:
+                report.warnings.append(
+                    f"bot '{bot_name}': reports_to '{bot.reports_to}' not found in fleet.bots"
+                )
         if bot.manages:
             for managed_id in bot.manages:
                 if managed_id not in fleet.bots:
@@ -1276,9 +1286,19 @@ def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
                 f"team '{team.name}': manager '{team.manager}' is not in fleet.bots"
             )
         for worker in team.workers:
-            if worker not in fleet.bots:
+            w = fleet.bots.get(worker)
+            if w is None:
                 report.warnings.append(
                     f"team '{team.name}': worker '{worker}' is not in fleet.bots"
+                )
+            elif w.reports_to and w.reports_to != team.manager:
+                # The declaration wins over the team wiring (#1754): this
+                # worker reports THERE, and the team manager never hears it.
+                report.warnings.append(
+                    f"bot '{worker}': reports_to '{w.reports_to}' differs from its "
+                    f"team '{team.name}' manager '{team.manager}' -- report-back.sh "
+                    "delivers to reports_to, so the team manager will not receive "
+                    "this bot's reports"
                 )
 
 

@@ -143,7 +143,7 @@ fleet:
     eng-1:
       expertise: [software-engineering]
       mission: "Implement features and fix bugs in fleet repos. Branch + PR. Tests pass before report-back."
-      reports_to: lead                         # bot_id of manager (generates Org Structure section)
+      reports_to: lead                         # bot_id of manager: Org Structure section + where report-back.sh delivers
       telegram:
         handle: my_eng_1_bot
         # token_env + require_mention inherited from defaults

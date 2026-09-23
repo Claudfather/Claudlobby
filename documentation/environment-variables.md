@@ -48,8 +48,10 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | `FLEET_NAME` | `fleet.name` | Fleet identifier |
 | `SERVICE_PREFIX` | `fleet.service_prefix` | Service name prefix for systemd/launchd units |
 | `FLEET_STATE_PATH` | Derived | Path to `fleet-state.json` for atomic state updates |
-| `MANAGER_TMUX` | `teams` config | tmux session name of this bot's manager (if in a team) |
+| `MANAGER_TMUX` | `teams` config | For a worker: the tmux session name of its team's manager. For a manager: **its own id** — the manager MARKER that `bot_is_manager()` keys on (`MANAGER_TMUX == BOT_ID`). It is where `report-back.sh` delivers only as the FALLBACK when no `REPORTS_TO` is composed (#1754) |
 | `MANAGER_TMUX_SOCKET` | Derived | tmux socket (`BOT_SERVICE`) of this bot's manager, or its own socket when this bot is itself a manager. Used for cross-socket sends via `bot_tmux_send()` |
+| `REPORTS_TO` | `bots.<name>.reports_to`, else `teams` config | The upward target — where `report-back.sh` delivers first (#1754): the declared `reports_to`, else the manager of the team this bot is a worker in. Absent for a fleet top (no `reports_to`, in no team), which has NO upward target: a report that would land in its own pane is refused (rc 4, nothing sent, nothing recorded) rather than recorded as delivered |
+| `REPORTS_TO_SOCKET` | Derived | `<service_prefix>.<REPORTS_TO>` — composed only when the target is a bot in THIS fleet. A cross-fleet target gets no composed socket; `resolve_peer_socket` finds it from the session name at run time |
 | `TMUX_TMPDIR` | Pinned constant | tmux's tmpdir (`/tmp`), pinned so every script's `tmux -L <socket>` resolves to the same server — drift here would silently spawn a duplicate server for the same socket name |
 | `FLEET_MISSION_FILE` | `fleet.mission_file` | Absolute path to the fuller fleet charter file — emitted only when both `mission_file` and `mission` are set |
 | `WORKSTREAM_MAX_ACTIVE` | `fleet.workstreams.max_active` | Cap on concurrently active workstreams in the fleet registry (default: 12) |

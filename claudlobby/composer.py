@@ -1268,8 +1268,10 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 
     lines.append("")
 
+    team_manager: str | None = None
     for team in fleet.teams.values():
         if bot.bot_id in team.workers:
+            team_manager = team.manager
             lines.append(f"export MANAGER_TMUX={_shq(team.manager)}")
             # The manager's private tmux socket — mirrors MANAGER_TMUX, mapped to
             # the manager's BOT_SERVICE so report-back / pulse / sprint sends
@@ -1281,6 +1283,22 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     if bot.bot_id in fleet.manager_bots():
         lines.append(f"export MANAGER_TMUX={_shq(bot.bot_id)}  # this bot is a manager")
         lines.append(f"export MANAGER_TMUX_SOCKET={_shq(bot_service)}")
+    # The upward target on its own carrier (#1754): the declared reports_to,
+    # else the team manager. MANAGER_TMUX is the manager MARKER (== BOT_ID,
+    # what bot_is_manager reads) that doubles as a worker's target, so a
+    # manager resolving delivery from it self-delivered; report-back.sh reads
+    # REPORTS_TO first (the rule lives there). A sub-manager listed as a team
+    # worker therefore reports to its team manager, not to itself (#475). The
+    # socket is composed only for an in-fleet target: a cross-fleet reports_to
+    # (legal, warn-only) lives under another service_prefix, which
+    # resolve_peer_socket finds from the bare session name at run time.
+    upward = bot.reports_to or team_manager
+    if upward:
+        lines.append(f"export REPORTS_TO={_shq(upward)}")
+        if upward in fleet.bots:
+            lines.append(
+                f"export REPORTS_TO_SOCKET={_shq(f'{fleet.service_prefix}.{upward}')}"
+            )
 
     # Git credential routing — point git at the composed per-org gitconfig. Only
     # when the bot declares credentials, so fleets that declare none compose

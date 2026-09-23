@@ -38,6 +38,9 @@ def test_validate_bot_change_harness():
     assert "activity_stuck event emitted" in result.stdout
     assert "overdue_dispatch event emitted" in result.stdout
     assert "manager notified" in result.stdout
+    # #1754: a manager's report-back reaches its declared upward target, never
+    # its own pane; the harness_check line names the observation.
+    assert "the [BOTREPORT] landed in the UPWARD target's pane" in result.stdout
     # #591 P1: the bridge-hijack scenario either runs or SKIPs with a printed
     # reason (bun/plugin absent) — it must never silently disappear.
     assert "bridge-hijack" in result.stdout

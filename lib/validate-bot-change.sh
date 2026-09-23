@@ -279,7 +279,7 @@ val_seed_report() {
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}" "${RB1754_MGR:-}" "${RB1754_UP:-}" "${RB1754_W:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -4130,15 +4130,115 @@ fi
 
 command tmux -L "$_S3_SOCK" kill-server 2>/dev/null || true
 
-# ===========================================================================
-# #1720 — the vault git-state guard, driven through the REAL hook
-# ===========================================================================
-# Unit tests prove the decision; only running the hook proves a bot's Bash call
-# actually gets refused. Both halves are asserted because only the pair is
-# evidence: a guard that denied everything would pass the deny case alone, and
-# that failure -- refusing legitimate git work in every bot's projects/
-# checkout -- is the one this design is most afraid of.
 echo ""
+echo "=== validate #1754: a MANAGER's report-back delivers UPWARD, never into its own pane ==="
+# report-back.sh delivers to REPORTS_TO (composed from reports_to, else the
+# team manager) and refuses a self-addressed send; the account is the comment
+# block in that script. Three live panes, one real plane: the manager under
+# test (its marker points at itself, as composed), its upward target (where
+# the report must land) and a worker of that manager (whose path must be
+# unchanged). Each pane is a prompt-drawing read loop (the CK2 responder
+# shape), so what a pane RECEIVED is observable in capture-pane.
+RB1754_FLEET="rb1754"
+RB1754_MGR="rbmgr1754"; RB1754_MGR_SOCK=$(vsock "$RB1754_MGR")
+RB1754_UP="rbup1754";   RB1754_UP_SOCK=$(vsock "$RB1754_UP")
+RB1754_W="rbw1754";     RB1754_W_SOCK=$(vsock "$RB1754_W")
+RB1754_BOTS="$ROOT/local/$RB1754_FLEET/runtime/bots"
+_rb1754_fail0=$fail
+val_plane_ready "$ROOT" "$RB1754_FLEET"
+# rb1754_conf <bot> <socket> [extra export lines...]: bot.conf as the composer
+# writes it, the responder pane beside it.
+rb1754_conf() {
+    local b="$1" sock="$2"; shift 2
+    mkdir -p "$RB1754_BOTS/$b/data" "$RB1754_BOTS/$b/logs"
+    { printf 'BOT_ID=%s\nBOT_NAME=%s\nFLEET_NAME=%s\nBOT_SERVICE=%s\n' "$b" "$b" "$RB1754_FLEET" "$sock"
+      printf '%s\n' "$@"; } > "$RB1754_BOTS/$b/bot.conf"
+    printf '#!/bin/bash\nprintf "\\n> \\n"\nwhile IFS= read -r line; do printf "got: %%s\\n> \\n" "$line"; done\n' \
+        > "$RB1754_BOTS/$b/responder.sh"
+    tmux new-session -d -s "$b" "bash '$RB1754_BOTS/$b/responder.sh'"
+}
+rb1754_conf "$RB1754_MGR" "$RB1754_MGR_SOCK" \
+    "export MANAGER_TMUX=$RB1754_MGR  # this bot is a manager" \
+    "export MANAGER_TMUX_SOCKET=$RB1754_MGR_SOCK" \
+    "export REPORTS_TO=$RB1754_UP" \
+    "export REPORTS_TO_SOCKET=$RB1754_UP_SOCK"
+rb1754_conf "$RB1754_UP" "$RB1754_UP_SOCK"
+rb1754_conf "$RB1754_W" "$RB1754_W_SOCK" \
+    "export MANAGER_TMUX=$RB1754_MGR" \
+    "export MANAGER_TMUX_SOCKET=$RB1754_MGR_SOCK"
+# rb1754_await <session> <pattern>: poll a pane for a line, 5s cap, loud on timeout.
+rb1754_await() {
+    local t=0
+    while [ "$t" -lt 50 ]; do
+        tmux capture-pane -t "$1" -p -S -50 2>/dev/null | grep -qE "$2" && return 0
+        sleep 0.1; t=$((t + 1))
+    done
+    echo "validate-bot-change: #1754 pane $1 never showed '$2' (proceeding anyway)" >&2
+    return 1
+}
+for _b in "$RB1754_MGR" "$RB1754_UP" "$RB1754_W"; do rb1754_await "$_b" '^> *$' || true; done
+# rb1754_send <bot> <summary> <log> [var-to-unset...]: report-back from <bot>
+# with ITS OWN sourced bot.conf as the environment (the shape a session runs
+# in); the named vars are unset AFTER sourcing, so a case can remove a carrier
+# the conf carries.
+rb1754_send() {
+    ( set -a; . "$RB1754_BOTS/$1/bot.conf"; set +a
+      [ $# -gt 3 ] && unset "${@:4}"
+      CLAUDLOBBY_ROOT="$ROOT" BOT_DIR="$RB1754_BOTS/$1" \
+        "$LIB_DIR/report-back.sh" "$1" completed "$2" > "$RB1754_BOTS/$1/logs/$3" 2>&1 )
+}
+
+# The marker predicate is untouched: the manager still reads as a manager with
+# the second carrier beside it (the check-in beat and enrollment key on it).
+bot_is_manager "$RB1754_BOTS/$RB1754_MGR" && r=yes || r=no
+harness_check "#1754 bot_is_manager still reads the manager marker beside REPORTS_TO" "$r"
+bot_is_manager "$RB1754_BOTS/$RB1754_W" && r=no || r=yes
+harness_check "#1754 ...and a worker still reads as a worker" "$r"
+
+# --- the manager reports upward ---------------------------------------------
+rb1754_rc=0; rb1754_send "$RB1754_MGR" "upward report 1754" rb.out || rb1754_rc=$?
+[ "$rb1754_rc" -eq 0 ] && r=yes || r=no
+harness_check "#1754 a manager with reports_to declared: report-back exits 0" "$r"
+rb1754_await "$RB1754_UP" "\[BOTREPORT\] $RB1754_MGR \| completed \| upward report 1754" && r=yes || r=no
+harness_check "#1754 ...the [BOTREPORT] landed in the UPWARD target's pane" "$r"
+tmux capture-pane -t "$RB1754_MGR" -p -S -50 2>/dev/null | grep -q "\[BOTREPORT\] $RB1754_MGR" && r=no || r=yes
+harness_check "#1754 ...and NOT in the manager's own pane (the old behaviour)" "$r"
+rb1754_recip=$(val_sql "$ROOT" "SELECT recipient_alias || ' ' || recipient_raw FROM communications WHERE emitter = 'report-back' AND message_class = 'report' AND sender_alias = 'bot:$RB1754_FLEET/$RB1754_MGR' ORDER BY ingest_seq DESC LIMIT 1")
+[ "$rb1754_recip" = "bot:$RB1754_FLEET/$RB1754_UP $RB1754_UP" ] && r=yes || r=no
+harness_check "#1754 ...the plane's recipient is the upward target, not the sender (got: '${rb1754_recip:-<none>}')" "$r"
+rb1754_tx=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN communications c ON c.msg_id = e.msg_id WHERE e.kind = 'transmission' AND e.event = 'pane_submitted' AND c.sender_alias = 'bot:$RB1754_FLEET/$RB1754_MGR'")
+[ "${rb1754_tx:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#1754 ...with a pane_submitted transmission joined to it (delivery proven, not assumed)" "$r"
+
+# --- the fleet top: no REPORTS_TO, marker points at itself -> REFUSED ---------
+rb1754_rc=0; rb1754_send "$RB1754_MGR" "self report 1754" rb-self.out REPORTS_TO REPORTS_TO_SOCKET || rb1754_rc=$?
+[ "$rb1754_rc" -eq 4 ] && r=yes || r=no
+harness_check "#1754 a manager with NO upward target: report-back REFUSES (rc 4, got $rb1754_rc)" "$r"
+grep -q "REFUSED" "$RB1754_BOTS/$RB1754_MGR/logs/rb-self.out" && grep -q "reports_to" "$RB1754_BOTS/$RB1754_MGR/logs/rb-self.out" && r=yes || r=no
+harness_check "#1754 ...loudly, naming the remedy (reports_to) on stderr" "$r"
+tmux capture-pane -t "$RB1754_MGR" -p -S -50 2>/dev/null | grep -q "self report 1754" && r=no || r=yes
+harness_check "#1754 ...nothing landed in its own pane" "$r"
+rb1754_self_rows=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE emitter = 'report-back' AND body LIKE '%self report 1754%'")
+[ "${rb1754_self_rows:-1}" -eq 0 ] && r=yes || r=no
+harness_check "#1754 ...and nothing was recorded on the plane (no silent green row)" "$r"
+
+# --- a worker is unchanged: teams-only wiring still lands on the manager -----
+rb1754_rc=0; rb1754_send "$RB1754_W" "worker report 1754" rb.out || rb1754_rc=$?
+[ "$rb1754_rc" -eq 0 ] && r=yes || r=no
+harness_check "#1754 a teams-only worker: report-back exits 0 (unchanged)" "$r"
+rb1754_await "$RB1754_MGR" "\[BOTREPORT\] $RB1754_W \| completed \| worker report 1754" && r=yes || r=no
+harness_check "#1754 ...and its [BOTREPORT] landed in the MANAGER's pane, as before" "$r"
+rb1754_wrecip=$(val_sql "$ROOT" "SELECT recipient_raw FROM communications WHERE emitter = 'report-back' AND sender_alias = 'bot:$RB1754_FLEET/$RB1754_W' ORDER BY ingest_seq DESC LIMIT 1")
+[ "$rb1754_wrecip" = "$RB1754_MGR" ] && r=yes || r=no
+harness_check "#1754 ...the plane's recipient is the manager (got: '${rb1754_wrecip:-<none>}')" "$r"
+if [ "$fail" -gt "$_rb1754_fail0" ]; then
+    echo "  --- DIAGNOSTIC: #1754 report-back output ---"
+    sed 's/^/      /' "$RB1754_BOTS/$RB1754_MGR/logs/rb.out" "$RB1754_BOTS/$RB1754_MGR/logs/rb-self.out" "$RB1754_BOTS/$RB1754_W/logs/rb.out" 2>/dev/null | head -40
+fi
+for _b in "$RB1754_MGR" "$RB1754_UP" "$RB1754_W"; do
+    command tmux -L "$(vsock "$_b")" kill-server 2>/dev/null || true
+done
+
 echo "--- #1720: vault git-state guard ---"
 _VG_ROOT="$(mktemp -d)"
 mkdir -p "$_VG_ROOT/vault" "$_VG_ROOT/projects/repo"

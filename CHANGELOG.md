@@ -54,6 +54,42 @@ version is owned separately.
 bot the moment the install is pulled. It deploys with the next deliberate
 rollout rather than on merge.
 
+### Fixed — a manager's report-back delivered into its OWN pane while the plane closed green (#1754, consolidating #475 / #1257 / #1703)
+
+`MANAGER_TMUX` carried two facts: "this bot is a manager" (`MANAGER_TMUX ==
+BOT_ID`, the `bot_is_manager` predicate) and "who this bot reports to". For a
+manager the marker won, and `report-back.sh` resolved delivery from that same
+field — so every upward report a manager sent landed in its own tmux session,
+the plane recorded `recipient == sender`, and the row closed as reported.
+Measured live 2026-09-22: the operator reconstructed a manager's answer from
+the plane because the report never left the manager's pane. The declared
+`reports_to` was rendered into CLAUDE.md prose only; no script could read it.
+
+- **Two carriers, two facts.** The composer resolves the upward target — the
+  declared `reports_to`, else the manager of the team the bot is a worker in —
+  into `bot.conf` as `REPORTS_TO` (and `REPORTS_TO_SOCKET` for an in-fleet
+  target; a cross-fleet target gets the name alone and `resolve_peer_socket`
+  finds its socket at run time). A sub-manager listed as a team worker now
+  reports to its team manager rather than to itself (#475's shape).
+  `MANAGER_TMUX` and `bot_is_manager` are untouched — the check-in beat and
+  `manager-checkin` enrollment keep working.
+- **`report-back.sh` delivers to `REPORTS_TO` first**, `MANAGER_TMUX` only when
+  no `REPORTS_TO` reached the session (a `bot.conf` composed before the field
+  existed). A worker's target is the same bot either way.
+- **A self-addressed report is refused, loudly**: rc 4, the remedy on stderr,
+  nothing sent and nothing recorded — a row that closes on a report nobody
+  received is the defect, not a partial success. The check compares the two
+  aliases the plane stores (sender vs recipient), so it is fleet-aware and a
+  caller driving the door for another bot is never mistaken for self. This is
+  the fleet-top manager's case (no `reports_to`); the door names the fix
+  (declare `reports_to`, cross-fleet allowed, or deliver to the human directly).
+- The validator refuses a `reports_to` naming the bot itself (error) and warns
+  on a team worker whose `reports_to` differs from its team manager (the
+  declaration wins).
+- `lib/` is read on demand per use: this is in force on every bot the moment it
+  merges, with no restart gate. The composed `REPORTS_TO` reaches a bot on the
+  next `generate` + restart (bot.conf is read once at session start).
+
 ### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
 
 `plane_emit_bounded` backgrounds the emit shim and polls for its exit. It polled
