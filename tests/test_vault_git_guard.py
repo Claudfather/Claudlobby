@@ -767,3 +767,106 @@ class TestShellCompositionSpellings:
                     f"cd {vault};git rebase --abort",
                     f"pushd {vault}; git rebase --abort"):
             assert D.decide(cmd, vault, proj)[0] == "deny", cmd
+
+
+class TestTheComposedFormsAreATripwireBeforeTheContinuationFix:
+    """#1759 review: pinned BEFORE the continuation fix touches anything.
+
+    Measured tonight (lib/vault-git-base-rate.py): command substitution,
+    xargs and a pipeline all leave `git` as a bare token, so the guard SEES
+    them -- it is stronger than #1725 credited. A continuation fix that
+    changes tokenisation could silently lose these. This class is the
+    tripwire, not a claim about the fix: it must be green before the fix
+    below is written and stay green after."""
+
+    def test_command_substitution_reaching_the_vault_is_still_denied(self, tree):
+        vault, proj = tree
+        assert (
+            D.decide(
+                f"X=$(cd {vault} && git status); cd {vault} && git checkout main",
+                vault,
+                proj,
+            )[0]
+            == "deny"
+        )
+
+    def test_xargs_reaching_the_vault_is_still_denied(self, tree):
+        vault, proj = tree
+        assert (
+            D.decide(
+                f"cd {vault} && echo x | xargs -I{{}} git reset --hard", vault, proj
+            )[0]
+            == "deny"
+        )
+
+    def test_a_pipeline_reaching_the_vault_is_still_denied(self, tree):
+        vault, proj = tree
+        assert (
+            D.decide(f"cd {vault} && true && git rebase --abort", vault, proj)[0]
+            == "deny"
+        )
+
+
+class TestTheBackslashContinuationBypass:
+    """#1759. `... && \\` then a newline: the escaped newline is not removed,
+    it is GLUED onto the next word, so the token is `"\ngit"` and `_unseparate`
+    -- which strips `;&` off the END of a token -- leaves it unequal to `git`.
+    Nothing is composed here. No subshell, no eval, no variable, no wrapper.
+    It is the guard's own tokeniser failing on a DIRECT invocation, the exact
+    class this guard's docstring claims to catch, in the most ordinary
+    multi-line shape this estate writes.
+
+    Measured live: 83 of 2,223 invocations (lib/vault-git-base-rate.py
+    --breakdown) -- small, and the largest slice of what the guard misses.
+    """
+
+    def test_the_UNCONTINUED_form_is_denied(self, tree):
+        """THE POSITIVE CONTROL. Without this half, a probe that denies
+        nothing would look identical to a fixed guard -- this is what makes
+        the bypass below a bypass rather than a broken probe. Standing IN the
+        vault (cwd) with no redirecting flag: the ordinary case."""
+        vault, proj = tree
+        assert D.decide("echo x && git reset --hard", vault, vault)[0] == "deny"
+
+    def test_the_CONTINUED_form_is_ALSO_denied(self, tree):
+        """THE BYPASS, fixed. Before the fix this allowed -- confirmed live
+        against the shipped decider before writing the fix below."""
+        vault, proj = tree
+        assert D.decide("echo x && \\\ngit reset --hard", vault, vault)[0] == "deny"
+
+    def test_an_INDENTED_continuation_was_never_the_bug(self, tree):
+        """The bound, measured: indentation ends the token at the shlex
+        level, so this denied before the fix too. Not a regression test for
+        the fix -- a boundary marker so the fix is not credited for
+        something it did not do."""
+        vault, proj = tree
+        assert D.decide("echo x && \\\n    git reset --hard", vault, vault)[0] == "deny"
+
+    def test_a_plain_newline_with_no_backslash_was_never_the_bug(self, tree):
+        vault, proj = tree
+        assert D.decide("echo x\ngit reset --hard", vault, vault)[0] == "deny"
+
+    def test_an_explicit_scope_flag_does_not_save_the_continued_form(self, tree):
+        """The glued token hides the VERB, not the scope flag -- an explicit
+        -C does not help if `decide()` never finds a `git` token to read the
+        verb from in the first place. Run from OUTSIDE the vault (proj) on
+        purpose: the -C flag is the ONLY thing that could rescue scope here,
+        and it cannot, because the glue hides the verb before the flag is
+        ever read."""
+        vault, proj = tree
+        assert (
+            D.decide(f"echo x && \\\ngit -C {vault} reset --hard", vault, proj)[0]
+            == "deny"
+        )
+
+    def test_a_double_continuation_is_also_denied(self, tree):
+        """Two stacked continuations glue two newlines onto the token, not
+        one -- the fix must strip all of them, not exactly one."""
+        vault, proj = tree
+        assert D.decide("echo x && \\\n\\\ngit reset --hard", vault, vault)[0] == "deny"
+
+    def test_a_safe_verb_through_a_continuation_is_still_allowed(self, tree):
+        """The fix must not turn every continuation into a refusal -- only a
+        continuation that glues onto a genuinely dangerous verb."""
+        vault, proj = tree
+        assert D.decide("echo x && \\\ngit status", vault, vault)[0] == "allow"
