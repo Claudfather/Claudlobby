@@ -296,6 +296,22 @@ case "$(cat "$T/err.txt")" in *"plane record failed"*) r=yes ;; *) r=no ;; esac
 assert_eq "plane failure is DISCLOSED on stderr, not silent" yes "$r"
 stub_model "'{\"context\":\"c\"}'"
 
+# --- 7c. the staged fleet link is the model binary (#1768) --------------------
+# With no CLAUDE_BIN pin the digest runs the binary the fleet launches: the
+# staged link once an armed update has made one, never a PATH `claude` beside it.
+mkdir -p "$T/root/state/bin" "$T/staged"
+printf '#!/bin/bash\ncat > "%s/prompt-seen-staged.txt"\nprintf "%%s" %s\n' \
+    "$T" "'{\"context\":\"c\"}'" > "$T/staged/claude.exe"
+chmod +x "$T/staged/claude.exe"
+ln -s "$T/staged/claude.exe" "$T/root/state/bin/claude"
+rm -f "$T/prompt-seen-staged.txt"
+row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=4 CLAUDE_BIN=)"
+[ -s "$T/prompt-seen-staged.txt" ] && r=yes || r=no
+assert_eq "no CLAUDE_BIN: the digest runs the staged fleet link" yes "$r"
+[ ! -e "$T/prompt-seen.txt" ] && r=yes || r=no
+assert_eq "... and not the PATH claude beside it" yes "$r"
+rm -f "$T/root/state/bin/claude"
+
 # --- 8. the kill switch: SESSION_DIGEST_ENABLED=0 ----------------------------
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED=0)"
 assert_eq "SESSION_DIGEST_ENABLED=0 records nothing at all" "" "$row"

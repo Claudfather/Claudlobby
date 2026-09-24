@@ -226,6 +226,73 @@ claudlobby_cli() {
     fi
 }
 
+# Where the OPT-IN staged update (#1768, CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1) keeps
+# the fleet's Claude Code: one npm prefix per version, and ONE link the fleet
+# launches. Relative to CLAUDLOBBY_ROOT; update-claude-code.sh is the only
+# writer.
+_FLEET_CLAUDE_LINK_REL="state/bin/claude"
+_FLEET_CLAUDE_VERSIONS_REL="state/claude/versions"
+
+# fleet_claude_bin
+# THE resolution of the claude binary the fleet launches (#1768; the single
+# resolver #1772 asks for). Prints what to exec, in order:
+#   1. CLAUDE_BIN, when set: the explicit pin (the validation harness's seam, or
+#      a host that names its binary);
+#   2. the fleet link $CLAUDLOBBY_ROOT/state/bin/claude, when it resolves to an
+#      executable. Only the staged update creates it, and only after the
+#      version it names RAN and passed the size check, so with the switch off
+#      it does not exist and nothing below changes;
+#   3. otherwise the bare name `claude`, left to the caller's PATH exactly as
+#      before.
+# Returns the LINK, never its target: the kernel resolves it at exec, so a
+# session's executable is the real versioned path, and the next swap cannot
+# pull the file out from under a session that is already running.
+# Never fails. A caller that must know whether the answer resolves asks
+# `command -v` of it, as start-bot.sh already does.
+fleet_claude_bin() {
+    if [ -n "${CLAUDE_BIN:-}" ]; then
+        printf '%s' "$CLAUDE_BIN"
+        return 0
+    fi
+    local link="${CLAUDLOBBY_ROOT:-}/$_FLEET_CLAUDE_LINK_REL"
+    if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -L "$link" ] && [ -x "$link" ]; then
+        printf '%s' "$link"
+        return 0
+    fi
+    printf 'claude'
+}
+
+# atomic_link_swap <link> <target>
+# Point <link> at <target> in ONE rename(2), so a reader at any instant finds
+# the old link or the new one, never neither (#1768: the fleet link every bot
+# launches through). Whether `ln -sfn` does that is the platform ln's choice
+# (GNU coreutils 9.1 renames a temporary, measured by strace; BSD ln is not
+# measured here), and both it and a plain `mv` put the link INSIDE a directory
+# sitting at <link> and exit 0. GNU `mv -T` refuses that, but BSD mv has no -T,
+# so the rename is os.replace: rename(2) on both, and it refuses a directory.
+# On failure <link> is untouched, the temporary is removed, and the reason is
+# on stderr: returns 1.
+atomic_link_swap() {
+    local link="${1:?Usage: atomic_link_swap <link> <target>}"
+    local target="${2:?Usage: atomic_link_swap <link> <target>}"
+    local tmp="$link.swap.$$"
+    rm -f "$tmp"
+    if ! ln -s "$target" "$tmp"; then
+        printf 'atomic_link_swap: could not create %s\n' "$tmp" >&2
+        return 1
+    fi
+    if ! python3 -c '
+import os, sys
+try:
+    os.replace(sys.argv[1], sys.argv[2])
+except OSError as e:
+    sys.exit("atomic_link_swap: %s" % e)
+' "$tmp" "$link"; then
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
 # session_cli_path
 # A bot SESSION runs under the PATH start-bot.sh exports on the line above, not
 # an activated venv, so on a host whose install keeps the CLI only inside

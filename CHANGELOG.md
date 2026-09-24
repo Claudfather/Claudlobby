@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a staged Claude Code update, so a broken install never reaches a bot (#1768; opt-in, off by default)
+
+On 2026-09-23 `npm install -g` exited 0 and left a 500-byte stub where the fleet's
+binary had been. `update-claude-code.sh` installs **in place**, over the one file
+every bot launches and every running session re-executes, so the stub was live
+the moment it landed: no bot could start for 23 hours. #1767 made that loud;
+this makes it impossible, behind a switch.
+
+- **Staged mode** (`CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1` in the host or root
+  `.env`, then `claudlobby host-timers`): each version is installed with
+  `npm --prefix` into its own `state/claude/versions/<v>/`, verified there (it
+  runs and prints a version, and it is above a 10 MB floor, where a real binary
+  is ~226 MB and the stub 500 bytes), and only then is the one fleet link
+  `state/bin/claude` moved, in a single rename, keeping the previous version. A
+  failed staging never moves the link, so the fleet stays on what it ran and the
+  next run tries again. **No step needs sudo.**
+- **One resolver.** `fleet_claude_bin` (lib-common) answers "which claude does
+  this fleet launch" for every consumer: `start-bot.sh` (and `plugin_ensure`
+  through it), `reload-fleet.sh`, `transcript-digest.sh` and the update job's own
+  version check. It returns `CLAUDE_BIN`, else the staged link, else the bare
+  name. With the switch off no link exists, so **merging changes nothing on any
+  host**: every consumer resolves exactly what it did before.
+- **Running sessions keep working across a swap.** A session holds its version's
+  resolved path, so the swap cannot pull a file out from under it. That makes
+  pruning the dangerous step: it never deletes the linked version, the previous
+  one, or any version a live `/proc/*/exe` executes, and on a host with no
+  `/proc` it deletes nothing.
+- **Bounds.** macOS is unmeasured, and there the prune keeps every version. The
+  operator's interactive `/usr/bin/claude` is no longer updated by the job in
+  staged mode; whether it should follow the fleet link is the operator's call.
+
+Tests: `tests/test_update_claude_code_staged.py` (both arms, each half of the
+verification on its own, the rollback, a real process kept across two swaps and
+a prune with its positive control, the lock, the unit stamp) and
+`tests/test_fleet_claude_bin.py` (the resolver, the rename's atomicity measured
+by a polling reader, the consumers). `lib/validate-bot-change.sh` boots the real
+`start-bot.sh` through a staged link. `lib/rehearse-staged-claude-update.sh` runs
+the whole thing with real npm on a throwaway root.
+
 ### Fixed — the merge command block refuses on its own when rung 0 or rung 4 did not run in its call (#1785)
 
 #1783's rung-4 refusal only binds within one shell call, and the Bash tool keeps

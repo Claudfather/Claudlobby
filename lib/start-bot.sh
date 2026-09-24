@@ -203,9 +203,11 @@ fi
 [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && unset TELEGRAM_BOT_TOKEN
 TGTOKEOF
 
-# The launched binary is overridable via CLAUDE_BIN so the validation harness
-# (validate-bot-change.sh) can inject a stub for a hermetic, auth-free start;
-# production leaves it unset and `claude` resolves on PATH inside the session.
+# The launched binary comes from fleet_claude_bin (lib-common): CLAUDE_BIN when
+# set, so the validation harness (validate-bot-change.sh) can inject a stub for
+# a hermetic, auth-free start; else the staged fleet link, once the OPT-IN
+# staged update (#1768) has verified and linked a version; else `claude` on
+# PATH inside the session, as before.
 # The plugin-management calls below honor the same override: the PATH rebuild
 # above discards any harness-prepended stub dir, so this seam is the only way
 # to drive that block hermetically (without it, tests can only skip the block
@@ -215,7 +217,7 @@ TGTOKEOF
 # on that benign nonzero — the pane process exits, the tmux session dies, and a
 # token-less bot lands in a keepalive restart loop. Masked when a prior tmux
 # server already exported the token into the new pane; bites on a fresh server.
-CLAUDE="${CLAUDE_BIN:-claude}"
+CLAUDE="$(fleet_claude_bin)"
 # CLAUDE_FLAGS is composed into every bot.conf; the :- guard keeps a minimal or
 # hand-written conf that omits it from aborting boot under `set -u`.
 CLAUDE_CMD=". '$BOT_ENV_FILE'; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
