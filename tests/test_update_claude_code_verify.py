@@ -23,9 +23,12 @@ Hermetic by construction, because this module FIRES the alert path:
   - tg-post stubbed under a throwaway root (`_signal_root`, shared with
     test_maintenance_jobs; the alert path resolves it through CLAUDLOBBY_ROOT),
     recording what would have been sent;
-  - npm stubbed in $HOME/.local/bin, which the script PREPENDS to PATH, and the
-    fleet PATH pinned at an empty dir, so a regression in CLAUDE_BIN resolution
-    finds no binary and fails closed instead of reaching a real install;
+  - npm and sudo stubbed in $HOME/.local/bin, which the script PREPENDS to
+    PATH, and the PATH it inherits holds NO real `sudo` or `npm` at all
+    (`_path_without`), so a regression in that prepend fails closed (command
+    not found) instead of reaching a real, passwordless `sudo npm install -g`
+    on whatever host runs the suite; the fleet PATH is pinned at an empty dir,
+    so a regression in CLAUDE_BIN resolution finds no binary either;
   - the plane is the throwaway root's own (cold CLI rung, no daemon), read back
     through read_fleet_events.
 """
@@ -33,7 +36,9 @@ Hermetic by construction, because this module FIRES the alert path:
 from __future__ import annotations
 
 import datetime
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -84,12 +89,45 @@ NPM_STUB = (
     'exit "${NPM_RC:-0}"\n'
 )
 
+# Records its argv and runs it WITHOUT elevation: the `npm` it reaches is the
+# stub, because the inherited PATH has no real one (`_path_without`).
+SUDO_STUB = '#!/bin/bash\necho "$*" >> "$SUDO_CALLS"\nexec "$@"\n'
+
+# The whole repair text, as the operator receives it on a non-system install.
+REPAIR = (
+    "to repair, re-run: npm install -g @anthropic-ai/claude-code@latest "
+    "(not the package's install.cjs, which cannot restore a missing platform "
+    "package), then check --version"
+)
+
+
+def _path_without(dest: Path, excluded=("sudo", "npm")) -> str:
+    """The host PATH as one directory of links (first match wins) with no
+    `sudo` and no `npm` in it. The stubs are then the only ones the script can
+    reach, whatever its own PATH prepend does."""
+    dest.mkdir()
+    for d in os.environ["PATH"].split(os.pathsep):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            link, target = dest / name, os.path.join(d, name)
+            if name in excluded or os.path.lexists(link):
+                continue
+            if os.path.isfile(target) and os.access(target, os.X_OK):
+                link.symlink_to(target)
+    for name in excluded:
+        assert shutil.which(name, path=str(dest)) is None, name
+    return str(dest)
+
 
 class Host:
     """A throwaway host: a fleet binary, an npm that swaps it, a captured alert
     channel and the root's own plane."""
 
-    def __init__(self, tmp_path, installed, staged=None, npm_rc=0, npm_sleep=None):
+    def __init__(
+        self, tmp_path, installed=None, staged=None, npm_rc=0, npm_sleep=None,
+        claude_bin=None,
+    ):
         self.tmp = tmp_path
         # A fleet-less host job resolves its alert chat id from a declaring bot;
         # this root declares a fake one and stubs the sender.
@@ -97,12 +135,18 @@ class Host:
         self.home = tmp_path / "home"
         self.capture = tmp_path / "tg-capture"
         self.calls = tmp_path / "npm.calls"
-        self.bin = tmp_path / "fleetbin" / "claude"
+        self.sudo_calls = tmp_path / "sudo.calls"
         (self.home / ".local" / "bin").mkdir(parents=True)
         _write_exec(self.home / ".local" / "bin" / "npm", NPM_STUB)
+        _write_exec(self.home / ".local" / "bin" / "sudo", SUDO_STUB)
+        self.path = _path_without(tmp_path / "hostbin")
         (tmp_path / "empty").mkdir()
-        self.bin.parent.mkdir()
-        _write_exec(self.bin, installed)
+        if claude_bin is None:
+            self.bin = tmp_path / "fleetbin" / "claude"
+            self.bin.parent.mkdir()
+            _write_exec(self.bin, installed)
+        else:
+            self.bin = Path(claude_bin)  # a path the harness never writes to
         self.extra = {"NPM_RC": str(npm_rc)}
         if staged is not None:
             _write_exec(tmp_path / "staged", staged)
@@ -112,6 +156,8 @@ class Host:
 
     def run(self):
         env = constructed_env(
+            PATH=self.path,
+            SUDO_CALLS=self.sudo_calls,
             CLAUDLOBBY_ROOT=self.root,
             HOME=self.home,
             TG_CAPTURE=self.capture,
@@ -171,14 +217,15 @@ def test_positive_control_npm_exit_0_leaving_a_stub_fires_update_failed(
     assert "npm install returned 0 but the staged binary cannot run" in log
     # The operator is told WHY, in the stub's own words.
     assert "exited 1: Error: claude native binary not installed." in log
-    # ... and what to do about it: the install again, never the stub's own
-    # advice (install.cjs cannot restore a missing platform package).
-    assert "to repair, re-run: npm install -g @anthropic-ai/claude-code@latest" in log
+    # ... and what to do about it, whole: the install again, never the stub's
+    # own advice (install.cjs cannot restore a missing platform package).
+    failed = [line for line in log.splitlines() if "UPDATE FAILED" in line]
+    assert failed and failed[0].endswith(REPAIR), failed
     # Two of the alert's three channels are observable here: the plane event
     # and Telegram (no manager is declared, so there is no nudge to reach).
     assert "binary_update_failed" in _event_types(h.events())
     alert = [line for line in h.sent() if "FLEET ALERT [binary_update_failed]" in line]
-    assert alert and "to repair, re-run:" in alert[0], h.sent()
+    assert alert and alert[0].endswith(REPAIR), h.sent()
     # And nothing claims the update worked.
     assert "UPDATE verified" not in log
     assert "version changed" not in log
@@ -302,3 +349,57 @@ def test_each_log_line_is_stamped_when_it_is_written(tmp_path):
     assert h.run().returncode == 0
     log = h.log()
     assert _stamp(log, "UPDATE install finished") > _stamp(log, "UPDATE running"), log
+
+
+# --- the production form, the worst state, and what the version read ignores --
+
+
+def test_a_system_install_updates_through_sudo_and_the_repair_says_so(tmp_path):
+    # A fleet binary under /usr is a root-owned install: the update runs through
+    # sudo, and the repair must name that same command. The /usr path cannot run
+    # (rc 127) and is never written; the sudo stub records its argv.
+    absent = "/usr/bin/claude-absent"
+    assert not os.path.lexists(absent), "precondition: the /usr path must not exist"
+    h = Host(tmp_path, claude_bin=absent)
+    r = h.run()
+    assert r.returncode == 1, r.stderr
+    assert h.sudo_calls.read_text().splitlines() == [
+        "npm install -g @anthropic-ai/claude-code@latest"
+    ]
+    assert "UPDATE running: sudo npm install -g @anthropic-ai/claude-code@latest" in h.log()
+    sudo_repair = REPAIR.replace("re-run: npm", "re-run: sudo npm")
+    alert = [line for line in h.sent() if "FLEET ALERT [binary_update_failed]" in line]
+    assert alert and alert[0].endswith(sudo_repair), h.sent()
+
+
+def test_npm_failing_on_an_unrunnable_binary_raises_both_alerts_with_the_repair(tmp_path):
+    # The worst state: a host that cannot start a bot, and a reinstall that
+    # failed. Nothing is staged, so the binary stays broken.
+    h = Host(tmp_path, installed=broken_stub("stderr"), npm_rc=1)
+    r = h.run()
+    assert r.returncode == 1, r.stderr
+    alert = [line for line in h.sent() if "FLEET ALERT [binary_update_failed]" in line]
+    assert alert, h.sent()
+    assert "npm install returned 1 and the fleet's binary cannot run (" in alert[0]
+    assert alert[0].endswith(REPAIR), alert[0]
+    types = _event_types(h.events())
+    assert "binary_unrunnable" in types and "binary_update_failed" in types, types
+    assert "binary_repaired" not in types
+
+
+def test_a_version_printed_only_on_stderr_is_not_measured(tmp_path):
+    # Only stdout is read for the version, so a semver on stderr (where a
+    # warning would be) never counts as one.
+    staged = '#!/bin/bash\necho "2.1.281 (Claude Code)" >&2\nexit 0\n'
+    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged)
+    r = h.run()
+    assert r.returncode == 1, r.stderr
+    assert "printed no parseable version" in h.log()
+
+
+def test_only_the_first_stdout_line_carries_the_version(tmp_path):
+    staged = '#!/bin/bash\necho "Claude Code"\necho "2.1.281"\nexit 0\n'
+    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged)
+    r = h.run()
+    assert r.returncode == 1, r.stderr
+    assert "printed no parseable version: Claude Code" in h.log()
