@@ -55,6 +55,36 @@ that pointed at the original had already drifted.
   such a keyframe only if its version was unmeasured, because the new key is
   written only then (#1724).
 
+### Changed — a fleet alert goes to a chat together with a sender that is in it, or it is refused (#1771 part B, #1782)
+
+#1782 made `resolve_alert_target` return the alert chat **and its sender** (the
+channel state dir `tg-post` reads the token from) as one pair from one source, or
+refuse with a reason naming what to set. It shipped without an entry; this is
+its entry (#1786).
+
+- **`generate` writes one more line into every fleet's timer units**, systemd and
+  launchd: `TELEGRAM_STATE_DIR`, stamped beside `TELEGRAM_GROUP_CHAT_ID`. It
+  comes from the lexically-first declared channel bot whose own chat is the
+  fleet chat, as an absolute path. If no bot is in the fleet chat, neither line
+  is stamped.
+- **A new key and variable:** `fleet_pulse.escalation_state_dir`, carried as
+  `FLEET_PULSE_ESCALATION_STATE_DIR`. It names the escalation chat's declared
+  sender, with `~` and `$HOME/` expanded at generate time.
+  `FLEET_PULSE_ESCALATION_CHAT_ID` now pairs with nothing else.
+  - **So a host that set the escalation chat without it is now refused, loudly.**
+    Before, it was sent with a guessed token.
+  - `claudlobby validate` warns about it.
+  - fleet-pulse logs a WARNING and raises a debounced `alert_target_refused` (to
+    the plane and the manager's pane, once and then daily), cleared when the
+    pair resolves.
+- **`creds-check` checks the pair daily with `getChat`.** Its refusal notice
+  reaches Telegram through the scanned bot's own chat, never the refused one.
+- **Rollout, in this order.**
+  - The `lib/` half (the resolver, fleet-pulse, creds-check, `tg-post`) is live on
+    every bot the moment the shared install is pulled, with no canary window.
+  - The unit half lands only at the next `generate` plus `lib/setup-fleet` to
+    reinstall the units. That is the stageable half: do one fleet first.
+
 ### Fixed — the overdue reader missed a report made in its own second, so the #835 harness check flaked (#1789)
 
 `dispatch-overdue.py` takes "now" as a whole-second epoch, and `plane-readers.py`
