@@ -654,6 +654,17 @@ main() {
     # print a partial table that reads as a complete one.
     set +e
 
+    # The onboarding version, from the one reader (#1772), before anything is
+    # built. A binary that cannot report one cannot be booted, and probing it
+    # would publish a delivery loss that is really a dead binary: refused, as
+    # the positive control refuses.
+    local ver
+    if ! measure_claude_version "$claude_bin"; then
+        echo "send-size-probe: refusing — $claude_bin cannot run: $CLAUDE_VERSION_WHY" >&2
+        return 3
+    fi
+    ver="$CLAUDE_VERSION"
+
     PROBE_MARKER="sendprobe.$$"
     PROBE_SOCK="sendprobe$$"
     PROBE_BASE=$(mktemp -d "${TMPDIR:-/tmp}/${PROBE_MARKER}.XXXXXX") || {
@@ -685,9 +696,7 @@ main() {
     # box; trust so the workspace is not re-asked for. NO credentials are copied:
     # the probe must not be able to spend, and the record it reads is written
     # before the model is reached.
-    local ver
-    ver=$("$claude_bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    jq -n --arg cwd "$cwd" --arg ver "${ver:-0.0.0}" '{
+    jq -n --arg cwd "$cwd" --arg ver "$ver" '{
         hasCompletedOnboarding: true,
         lastOnboardingVersion: $ver,
         theme: "dark",
@@ -698,7 +707,7 @@ main() {
     }' > "$cfg/.claude.json" || { echo "send-size-probe: could not seed config" >&2; return 3; }
 
     echo "send-size-probe (#1493)"
-    echo "  claude:   $claude_bin ${ver:-unknown}"
+    echo "  claude:   $claude_bin $ver"
     echo "  lib:      $src/lib/lib-common.sh"
     echo "  scratch:  $PROBE_BASE"
     echo "  home:     $home (throwaway)"

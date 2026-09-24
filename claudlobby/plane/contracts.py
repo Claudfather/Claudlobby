@@ -21,6 +21,7 @@ from pydantic import (
     model_validator,
 )
 
+from ..claude_version import VERSION_PATTERN
 from . import SUPPORTED_SCHEMA_VERSIONS
 from .ids import ID_PATTERNS
 
@@ -556,13 +557,26 @@ class WorkstreamEvent(_Strict):
 
 class _HostSystem(_Strict):
     claudlobby_version: str
-    claude_version: str
+    #: The Claude Code version the fleet launches, as lib/claude-version.sh
+    #: measured it (#1772), or None when it could not be measured, and then
+    #: claude_version_unmeasured says why: exactly one of the two is set, and
+    #: never a stand-in string.
+    claude_version: Optional[str] = Field(pattern=f"^{VERSION_PATTERN}$")
+    claude_version_unmeasured: Optional[str] = None
     node_version: Optional[str] = None
     python_version: str
     host_jobs: list[dict] = []
     plugins: list[dict] = []
     emitters: list[dict] = []
     defaults_tier_hash: str
+
+    @model_validator(mode="after")
+    def _a_version_or_the_reason_there_is_none(self):
+        if (self.claude_version is None) == (self.claude_version_unmeasured is None):
+            raise ValueError(
+                "exactly one of claude_version and claude_version_unmeasured is set"
+            )
+        return self
 
 
 class HostPayload(_Strict):

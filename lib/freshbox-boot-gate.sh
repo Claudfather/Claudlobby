@@ -166,7 +166,9 @@ printf '%s\n' "$SENTINEL" > "$BOT_DIR/probe.txt"
 # Shared with boot-strand-sampler.sh via lib-common (seed_claude_auth /
 # seed_claude_auth_and_trust) — the trust-JSON keyset is a Claude Code contract
 # that moves with the binary, and it must be fixed in one place, not per harness.
-seed_claude_auth_and_trust "$CONFIG_DIR" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS"
+# A binary that cannot run is a precondition, never a permissions verdict (#1772).
+seed_claude_auth_and_trust "$CONFIG_DIR" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS" \
+  || { printf 'SKIP: %s cannot run (the reason is above)\n' "$CLAUDE_BIN"; exit 2; }
 
 # skip-flag isolation (rajan/#648): prove NO user-tier settings.json skip-flags
 # exist, so a clean completion below is attributable to the composed
