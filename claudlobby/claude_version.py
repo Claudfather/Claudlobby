@@ -1,20 +1,15 @@
 """The Claude Code version, as the compositor sees it (#1772).
 
 **This module owns no predicate.** It asks ``lib/claude-version.sh``, which is
-``measure_claude_version`` in ``lib-common.sh``: the reader the update job gates
-on, and the one every bash consumer of the version shares. It reports what that
-reader says. A Python copy of "run it, check the exit, parse the first line"
-would be cheaper and is the failure #1772 exists to end: the registry scan kept
-one that recorded the literal ``"unavailable"``, and a stub's error text, as the
-host's version.
+``measure_claude_version`` in ``lib-common.sh``, the one reader every consumer
+of the version shares, and reports what it says. A Python copy of "run it,
+check the exit, parse the first line" would be a second reader to drift from
+the first.
 
 **Could-not-measure is a verdict, never a value.** :class:`Measurement` carries
-either a version or the reason there is none, never both, and nothing here
-invents a stand-in string. Where the door itself cannot be reached, that is one
-more reason the version could not be measured. It is not a failure of the
-caller: the registry scan records it and composes on, and it never falls back
-to reading the binary some other way, since that fallback would BE the second
-copy of the reader.
+a version or the reason there is none, never both. A door that cannot be
+reached is one more such reason: the caller records it and carries on, and
+nothing here falls back to reading the binary another way.
 """
 
 from __future__ import annotations
@@ -32,7 +27,9 @@ if TYPE_CHECKING:
 #: of a ~230 MB binary, which a loaded Raspberry Pi can take seconds over.
 _DOOR_TIMEOUT_S = 30
 
-_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+#: X.Y.Z, the one shape a measured version has (the host contract anchors it).
+VERSION_PATTERN = r"[0-9]+\.[0-9]+\.[0-9]+"
+_VERSION = re.compile(VERSION_PATTERN)
 
 #: The door's own prefix on its refusal, stripped so the reason reads once.
 _REFUSAL_PREFIX = "claude-version: could not measure: "
@@ -50,7 +47,7 @@ class Measurement(NamedTuple):
 
 
 def door_path(paths: Paths) -> Path:
-    return paths.root / "lib" / "claude-version.sh"
+    return paths.lib / "claude-version.sh"
 
 
 def measure(paths: Paths, binary: str | None = None) -> Measurement:

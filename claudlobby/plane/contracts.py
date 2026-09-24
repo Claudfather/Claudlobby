@@ -21,6 +21,7 @@ from pydantic import (
     model_validator,
 )
 
+from ..claude_version import VERSION_PATTERN
 from . import SUPPORTED_SCHEMA_VERSIONS
 from .ids import ID_PATTERNS
 
@@ -558,10 +559,9 @@ class _HostSystem(_Strict):
     claudlobby_version: str
     #: The Claude Code version the fleet launches, as lib/claude-version.sh
     #: measured it (#1772), or None when it could not be measured, and then
-    #: claude_version_unmeasured says why: exactly one of the two is set. Never
-    #: a stand-in string. The registry scan once recorded "unavailable", and a
-    #: stub's own error text, here as the host's version.
-    claude_version: Optional[str] = Field(pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")
+    #: claude_version_unmeasured says why: exactly one of the two is set, and
+    #: never a stand-in string.
+    claude_version: Optional[str] = Field(pattern=f"^{VERSION_PATTERN}$")
     claude_version_unmeasured: Optional[str] = None
     node_version: Optional[str] = None
     python_version: str

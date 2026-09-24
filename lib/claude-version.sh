@@ -19,16 +19,15 @@
 #   reads them.
 # Exit: 0 measured · 3 could not measure (the reason on stderr) · 2 usage.
 set -uo pipefail
+if [ "$#" -gt 1 ]; then
+    printf 'usage: claude-version.sh [<binary>]\n' >&2
+    exit 2
+fi
 LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 # lib-common arms set -e on its caller; this door reports a failure, never dies of one.
 set +e
-
-if [ "$#" -gt 1 ]; then
-    printf 'usage: claude-version.sh [<binary>]\n' >&2
-    exit 2
-fi
 if measure_claude_version "$@"; then
     printf '%s\n' "$CLAUDE_VERSION"
     exit 0

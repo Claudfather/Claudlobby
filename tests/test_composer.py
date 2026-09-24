@@ -4160,8 +4160,8 @@ class TestTimerUnitPath:
     that excludes Homebrew and the per-user npm/bun/.local bins where ``claude``
     and ``claudlobby`` live, so a timer such as reload-fleet's
     ``claude plugin update`` dies with 'command not found' and fires a false
-    ``reload_failed`` alert. The composer mirrors lib/start-bot.sh:49's PATH
-    construction into every emitted timer unit, identically on both platforms
+    ``reload_failed`` alert. The composer mirrors fleet_launch_path (lib-common),
+    the PATH start-bot.sh exports, into every emitted timer unit, identically on both platforms
     (launchd/systemd parity, #708).
     """
 

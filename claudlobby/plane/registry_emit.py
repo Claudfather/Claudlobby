@@ -142,10 +142,7 @@ def host_payload(paths) -> dict:
         ram_mb = int(page / (1024 * 1024))
     except (ValueError, OSError, AttributeError):
         ram_mb = 0
-    # The version the fleet launches, through the runtime's own reader (#1772):
-    # a verdict, never a value. Unmeasured, the version is None and the reason
-    # rides beside it, so a stub's error text or a stand-in string can never
-    # be recorded as the host's claude_version.
+    # The version the fleet launches, from the runtime's own reader (#1772).
     claude = measure_claude_version(paths)
     try:
         clv = subprocess.run(
@@ -173,8 +170,10 @@ def host_payload(paths) -> dict:
         "emitters": [],
         "defaults_tier_hash": _hash_or_none(system_yaml) or "absent",
     }
-    # Only when unmeasured: a measured keyframe keeps the shape a daemon
-    # started before this field accepts, since the contract is extra=forbid.
+    # Only when unmeasured. generate writes with its own contract, but a
+    # keyframe spooled on a busy db is drained by the daemon, and a daemon older
+    # than this field quarantines the key (#1724). A measured keyframe keeps the
+    # shape every daemon accepts.
     if not claude.measured:
         system["claude_version_unmeasured"] = claude.why
     return {

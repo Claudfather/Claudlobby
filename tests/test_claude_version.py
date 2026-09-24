@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from claudlobby.claude_version import VERSION_PATTERN
 from tests.conftest import _write_exec, constructed_env
 from tests.test_update_claude_code_verify import broken_stub, healthy
 
@@ -55,6 +56,10 @@ SHAPES = {
         "printed no parseable version: Warning: slow disk",
     ),
     "runs, prints nothing": ("#!/bin/bash\nexit 0\n", "printed no parseable version"),
+    "a version on stderr only, exit 0": (
+        '#!/bin/bash\necho "2.1.281 (Claude Code)" >&2\nexit 0\n',
+        "printed no parseable version: 2.1.281 (Claude Code)",
+    ),
 }
 
 
@@ -65,29 +70,26 @@ def _stub(tmp_path: Path, name: str, script: str) -> Path:
     return p
 
 
-def _bash(tmp_path: Path, code: str, **env) -> subprocess.CompletedProcess:
-    """Run `code` with the real lib-common sourced, in a constructed env."""
+def _run(tmp_path: Path, argv: list[str], **env) -> subprocess.CompletedProcess:
+    """argv in a constructed env, with a throwaway HOME and CLAUDLOBBY_ROOT."""
     root = tmp_path / "root"
     root.mkdir(exist_ok=True)
     return subprocess.run(
-        ["bash", "-c", f'. "{LIB}/lib-common.sh"; set +e; {code}'],
+        argv,
         capture_output=True,
         text=True,
         timeout=120,
         env=constructed_env(HOME=tmp_path / "home", CLAUDLOBBY_ROOT=root, **env),
     )
+
+
+def _bash(tmp_path: Path, code: str, **env) -> subprocess.CompletedProcess:
+    """Run `code` with the real lib-common sourced."""
+    return _run(tmp_path, ["bash", "-c", f'. "{LIB}/lib-common.sh"; set +e; {code}'], **env)
 
 
 def _door(tmp_path: Path, *args: str, **env) -> subprocess.CompletedProcess:
-    root = tmp_path / "root"
-    root.mkdir(exist_ok=True)
-    return subprocess.run(
-        ["bash", str(DOOR), *args],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=constructed_env(HOME=tmp_path / "home", CLAUDLOBBY_ROOT=root, **env),
-    )
+    return _run(tmp_path, ["bash", str(DOOR), *args], **env)
 
 
 def _bash_verdict(tmp_path: Path, binary: str) -> tuple[str | None, str | None]:
@@ -108,13 +110,20 @@ def _bash_verdict(tmp_path: Path, binary: str) -> tuple[str | None, str | None]:
 def test_the_door_prints_a_version_or_nothing(tmp_path, shape):
     script, verdict = SHAPES[shape]
     r = _door(tmp_path, str(_stub(tmp_path, shape, script)))
-    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", verdict):
+    if re.fullmatch(VERSION_PATTERN, verdict):
         assert (r.returncode, r.stdout) == (0, f"{verdict}\n"), r.stderr
         assert r.stderr == ""
     else:
         # Could not measure: NOTHING on stdout, whatever the binary printed there.
         assert (r.returncode, r.stdout) == (3, ""), (r.stdout, r.stderr)
         assert verdict in r.stderr, r.stderr
+
+
+def test_a_binary_that_hangs_is_could_not_measure_within_the_bound(tmp_path):
+    hangs = _stub(tmp_path, "hangs", "#!/bin/bash\nsleep 30\n")
+    r = _door(tmp_path, str(hangs), CLAUDE_VERSION_TIMEOUT_S="1")
+    assert (r.returncode, r.stdout) == (3, ""), r.stderr
+    assert "did not finish within 1s" in r.stderr, r.stderr
 
 
 def test_the_door_refuses_a_binary_that_is_not_there(tmp_path):
@@ -334,9 +343,11 @@ def test_the_send_size_probe_refuses_before_building_anything(tmp_path):
     assert list(tmp.iterdir()) == [], "the probe built scratch state before refusing"
 
 
-def _eval(tmp_path, *args, **env):
+def _eval(tmp_path, claude: str, *args, **env):
+    """The eval harness, with `claude` on its PATH the one a real cell would run."""
     bindir = tmp_path / "evalbin"
     bindir.mkdir(exist_ok=True)
+    _write_exec(bindir / "claude", claude)
     return subprocess.run(
         ["bash", str(LIB / "ab-comms-eval.sh"), *args],
         capture_output=True,
@@ -347,14 +358,13 @@ def _eval(tmp_path, *args, **env):
             HOME=os.environ["HOME"],
             **env,
         ),
-    ), bindir
+    )
 
 
 def test_a_real_eval_refuses_when_its_claude_cannot_run(tmp_path):
-    _, bindir = _eval(tmp_path, "--help")
-    _write_exec(bindir / "claude", broken_stub("stderr"))
-    r, _ = _eval(
-        tmp_path, "--experiment", "coverage-honesty", "--reps", "1", AB_EVAL_REAL="1"
+    r = _eval(
+        tmp_path, broken_stub("stderr"), "--experiment", "coverage-honesty", "--reps", "1",
+        AB_EVAL_REAL="1",
     )
     assert r.returncode == 1, (r.stdout[-800:], r.stderr[-800:])
     assert "could not be measured" in r.stderr
@@ -365,10 +375,9 @@ def test_a_real_eval_refuses_when_its_claude_cannot_run(tmp_path):
 def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path):
     """A dry run makes no model call, so a runnable claude on PATH is not part of
     its evidence and must not become its pin."""
-    _, bindir = _eval(tmp_path, "--help")
-    _write_exec(bindir / "claude", healthy("2.1.281"))
-    r, _ = _eval(
-        tmp_path, "--dry-run", "--experiment", "coverage-honesty", "--reps", "1"
+    r = _eval(
+        tmp_path, healthy("2.1.281"), "--dry-run", "--experiment", "coverage-honesty",
+        "--reps", "1",
     )
     out = r.stdout + r.stderr
     assert r.returncode == 0, out[-1500:]
@@ -420,7 +429,24 @@ def test_start_bot_and_the_update_job_take_the_launch_path_from_the_one_helper()
     )
     assert spelled == ["lib-common.sh"], spelled
     assert 'PATH="$(fleet_launch_path)"' in (LIB / "start-bot.sh").read_text()
-    assert "$(fleet_launch_path)" in (LIB / "update-claude-code.sh").read_text()
+    assert "fleet_claude_path" in (LIB / "update-claude-code.sh").read_text()
+
+
+def test_the_composer_puts_timers_on_the_same_launch_path():
+    """Composed timer units carry the composer's Python spelling of the order
+    (reload-fleet's `claude plugin update` runs under it), so it is pinned to the
+    bash one byte for byte: a timer and a pane must resolve the same claude."""
+    from claudlobby.composer import _scheduler_tool_path
+
+    r = subprocess.run(
+        ["bash", "-c", f'. "{LIB}/lib-common.sh"; fleet_launch_path'],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=constructed_env(HOME=str(Path.home())),
+    )
+    assert r.returncode == 0, r.stderr
+    assert _scheduler_tool_path() == r.stdout
 
 
 def test_a_bare_name_resolves_on_the_launch_path_not_the_callers(tmp_path):

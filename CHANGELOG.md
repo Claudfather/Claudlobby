@@ -21,7 +21,9 @@ that pointed at the original had already drifted.
 - **One reader.** `measure_claude_version` moved into lib-common. It returns a
   version only when the binary ran and the first line of its stdout carries
   X.Y.Z; otherwise it returns could-not-measure with a reason. Callers branch on
-  its return code. Every reader goes through it: the update job, the eval's pin,
+  its return code. Each `--version` run is bounded (`CLAUDE_VERSION_TIMEOUT_S`,
+  10 s by default), so a binary that hangs is could-not-measure, not a stalled
+  `generate`. Every reader goes through it: the update job, the eval's pin,
   the onboarding seed, the send-size probe and the permissions ladder's record.
 - **A door for Python.** `lib/claude-version.sh` prints the version at exit 0.
   When it cannot measure, it prints nothing on stdout, gives the reason on
@@ -39,17 +41,19 @@ that pointed at the original had already drifted.
   - The send-size probe refuses before building anything.
 - **One launch PATH.** `fleet_launch_path` is the PATH start-bot.sh exports,
   byte for byte. The update job resolves the fleet's claude under it, through
-  `fleet_claude_path` (built on `fleet_claude_bin`), instead of a hand copy.
+  `fleet_claude_path` (built on `fleet_claude_bin`), instead of a hand copy. The
+  composer's Python spelling of the order, which every timer unit carries, is
+  pinned to it byte for byte by a test.
 - **Changed on purpose.**
   - A dry run now always pins `dry-run`, not whatever claude is installed, since
     a dry run runs no binary.
   - The registry records `2.1.281`, not `2.1.281 (Claude Code)`, so each host's
     keyframe changes once, at the next generate.
-- **Deploying it.** The host keyframe carries `claude_version_unmeasured` only
-  when the version cannot be measured. A measured keyframe therefore keeps the
-  shape that a plane daemon started before the pull still accepts. Such a daemon
-  refuses an unmeasured keyframe until it restarts (#1724), so bounce the plane
-  daemon after the pull.
+- **Deploying it: nothing to bounce.** `generate` records keyframes with its own
+  code, not the plane daemon's. The one path through the daemon is a keyframe
+  spooled while the db was busy. A daemon started before this change quarantines
+  such a keyframe only if its version was unmeasured, because the new key is
+  written only then (#1724).
 
 ### Fixed — three jobs stamped every log line with the instant their run started (#1773)
 

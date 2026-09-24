@@ -39,7 +39,7 @@ install_error_trap ""
 # claude resolve identically under systemd, launchd, cron, or a shell.
 # _HOMEBREW (lib-common) covers brew-installed node on macOS.
 # PREPENDS (unlike own_tool_path, which appends): must run the NEWEST npm to do
-# the install, while detecting the binary to UPDATE via _FLEET_PATH below (#635).
+# the install, while detecting the binary to UPDATE via fleet_claude below (#635).
 PATH="$HOME/.local/bin:$HOME/.npm-global/bin${_HOMEBREW:+:$_HOMEBREW/bin}:$PATH"
 export PATH
 
@@ -64,18 +64,10 @@ update_failed() {
 }
 
 # --- Resolve the binary the FLEET launches (not this script's own PATH) ------
-# The update must target the SAME claude that start-bot.sh runs, so it resolves
-# through the same doors start-bot does: fleet_claude_bin (CLAUDE_BIN, else the
-# staged fleet link, #1768) and, for a bare name, fleet_launch_path, the PATH
-# start-bot.sh exports with the SYSTEM dirs first. This script's own PATH (above)
-# prepends the user prefixes so npm/node resolve under a bare timer env, and
-# resolving claude on it updated a shadow copy while the fleet ran another
-# (#635); the PATH above still finds npm/node to RUN the install. The predicate
-# is lib-common's measure_claude_version, the one reader every consumer of the
-# version shares (#1772). CLAUDE_UPDATE_FLEET_PATH lets a test or an unusual
-# host substitute the launch order.
-_FLEET_PATH="${CLAUDE_UPDATE_FLEET_PATH:-$(fleet_launch_path)}"
-fleet_claude() { fleet_claude_path "$_FLEET_PATH"; }
+# Through the resolver start-bot.sh launches with (fleet_claude_path, on the
+# launch PATH), never the PATH above, which puts the user prefixes first (#635).
+# CLAUDE_UPDATE_FLEET_PATH is a test's stand-in for that launch PATH.
+fleet_claude() { fleet_claude_path "${CLAUDE_UPDATE_FLEET_PATH:-}"; }
 
 # --- Measure the fleet's binary BEFORE the install ----------------------------
 _claude_path="$(fleet_claude)"

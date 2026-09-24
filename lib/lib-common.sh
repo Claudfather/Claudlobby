@@ -140,13 +140,13 @@ unset _p
 #   $_HOMEBREW/bin          — Homebrew (macOS node/claude)
 #   $CLAUDLOBBY_ROOT/.venv/bin — repo-local venv (`pip install -e .` inside one)
 #   $HOME/.local/bin        — pip install --user console scripts
-#   $HOME/.bun/bin          — bun global bin (mirrors start-bot.sh:49)
+#   $HOME/.bun/bin          — bun global bin (mirrors fleet_launch_path)
 #   $HOME/.npm-global/bin   — npm global prefix (claude)
 #
 # APPEND, deliberately, not prepend. These are FALLBACKS for an environment that
 # resolves nothing, so whatever PATH the caller already set must keep winning:
 # an operator pinning a binary, a test stubbing one, and the system dirs that
-# start-bot.sh:49 puts FIRST all stay authoritative. Prepending would silently
+# fleet_launch_path puts FIRST all stay authoritative. Prepending would silently
 # re-point reload-fleet at a shadow user copy of claude while the fleet runs the
 # system one — the exact class of bug #635 fixed in update-claude-code.sh.
 #
@@ -334,10 +334,12 @@ fleet_claude_path() {
 # the one the caller will run it from. With no argument it measures the binary
 # the fleet launches (fleet_claude_path). An EMPTY argument is not "no argument":
 # it is a caller whose own resolution found nothing, and it is reported as such.
+# Each run is bounded (CLAUDE_VERSION_TIMEOUT_S, default 10): a binary that hangs
+# is could-not-measure, never a wait that holds a generate or a timer open.
 measure_claude_version() {
     CLAUDE_VERSION=""
     CLAUDE_VERSION_WHY=""
-    local p out first said rc=0 re='[0-9]+\.[0-9]+\.[0-9]+'
+    local p out first said rc=0 re='[0-9]+\.[0-9]+\.[0-9]+' secs="${CLAUDE_VERSION_TIMEOUT_S:-10}"
     if [ "$#" -gt 0 ]; then p="$1"; else p="$(fleet_claude_path)"; fi
     if [ -z "$p" ]; then
         CLAUDE_VERSION_WHY="no claude binary resolved"
@@ -346,16 +348,20 @@ measure_claude_version() {
     # Settled inside the substitution (|| exit) so install_error_trap never sees
     # the failing binary. Unneeded on bash 5.2 (measured: callers are all `if`s,
     # whose ERR suppression reaches in); kept for bash 3.2, unmeasured.
-    out="$("$p" --version 2>/dev/null || exit $?)" || rc=$?
+    out="$(with_timeout "$secs" "$p" --version 2>/dev/null || exit $?)" || rc=$?
     first="${out%%$'\n'*}"
     if [ "$rc" -eq 0 ] && [[ $first =~ $re ]]; then
         CLAUDE_VERSION="${BASH_REMATCH[0]}"
         return 0
     fi
+    if [ "$rc" -eq 124 ] && [ -n "$_TIMEOUT_BIN" ]; then
+        CLAUDE_VERSION_WHY="$p --version did not finish within ${secs}s"
+        return 1
+    fi
     # Could not measure: say why in the binary's own words. stderr is where a
     # binary that cannot run explains itself; the read above discards it so a
     # warning can never be parsed as the version.
-    said="$("$p" --version 2>&1 || true)"
+    said="$(with_timeout "$secs" "$p" --version 2>&1 || true)"
     said="${said%%$'\n'*}"
     if [ "$rc" -ne 0 ]; then
         CLAUDE_VERSION_WHY="$p --version exited $rc"

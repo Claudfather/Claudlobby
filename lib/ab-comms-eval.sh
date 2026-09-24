@@ -279,6 +279,16 @@ _generate_or_die() {
     fi
 }
 
+# _seed_arms <probe> — seed both arms' throwaway config for a real run. The seed
+# refuses a claude that cannot run (#1772), and so does the harness.
+_seed_arms() {
+    local arm
+    for arm in without with; do
+        seed_claude_auth_and_trust "$ROOT/$arm/config" "$ROOT/$arm/runtime/bots/$1" claude "$HOME/.claude/.credentials.json" \
+            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
+    done
+}
+
 cov_setup_variants() {
     local variant sub e name src histfile
     # The WITHOUT variant is the VENDORED fixture, not a live git-show: CI runs
@@ -500,12 +510,7 @@ cov_main() {
     printf 'hashes: without=%s with=%s\n' "${COV_HASH_WITHOUT:0:12}" "${COV_HASH_WITH:0:12}"
     [ "$fail" -eq 0 ] || die "fixture checks failed"
 
-    if [ "$DRY_RUN" != 1 ]; then
-        seed_claude_auth_and_trust "$ROOT/without/config" "$ROOT/without/runtime/bots/cov-probe" claude "$HOME/.claude/.credentials.json" \
-            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
-        seed_claude_auth_and_trust "$ROOT/with/config" "$ROOT/with/runtime/bots/cov-probe" claude "$HOME/.claude/.credentials.json" \
-            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
-    fi
+    [ "$DRY_RUN" = 1 ] || _seed_arms cov-probe
 
     RESULTS="$ROOT/results.jsonl"; : > "$RESULTS"
     for rep in $(seq 1 "$reps"); do
@@ -766,12 +771,7 @@ suc_main() {
     printf 'component hash: %s\n' "${SUC_HASH_WITH:0:12}"
     [ "$fail" -eq 0 ] || die "fixture checks failed"
 
-    if [ "$DRY_RUN" != 1 ]; then
-        seed_claude_auth_and_trust "$ROOT/without/config" "$ROOT/without/runtime/bots/suc-probe" claude "$HOME/.claude/.credentials.json" \
-            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
-        seed_claude_auth_and_trust "$ROOT/with/config" "$ROOT/with/runtime/bots/suc-probe" claude "$HOME/.claude/.credentials.json" \
-            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
-    fi
+    [ "$DRY_RUN" = 1 ] || _seed_arms suc-probe
 
     RESULTS="$ROOT/results.jsonl"; : > "$RESULTS"
     for rep in $(seq 1 "$reps"); do

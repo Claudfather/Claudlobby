@@ -42,8 +42,9 @@ echo "=== #635: targets the binary the FLEET launches, not this script's PATH ==
 # The fleet PATH default orders SYSTEM dirs before the user prefixes — the bug
 # was resolving via this script's npm-first PATH (~/.npm-global) while the fleet
 # runs /usr/bin/claude, so the update maintained a shadow the fleet never ran.
-# (Cheap structural guard; the behavioral ordering proof is (b) below.)
-_fleet_line="$(grep -m1 '_FLEET_PATH=' "$LIB_DIR/update-claude-code.sh")"
+# (Cheap structural guard; the behavioral ordering proof is (b) below.) The order
+# lives in lib-common's fleet_launch_path, which this job and start-bot.sh share.
+_fleet_line="$(grep -A2 '^fleet_launch_path()' "$LIB_DIR/lib-common.sh" | grep -m1 printf)"
 _usr_pos="$(awk -v s="$_fleet_line" 'BEGIN{print index(s, "/usr/bin")}')"
 _npm_pos="$(awk -v s="$_fleet_line" 'BEGIN{print index(s, ".npm-global")}')"
 assert_eq "fleet PATH default orders /usr/bin before ~/.npm-global" "true" \
@@ -74,7 +75,7 @@ _mkclaude "$_T/fakeclaude" "9.9.9"
 _mkclaude "$_T/sysbin/claude" "1.1.1"
 _mkclaude "$_T/userbin/claude" "2.2.2"
 
-# (a) CLAUDE_BIN is honored — the same override start-bot.sh:176 launches with.
+# (a) CLAUDE_BIN is honored — the same override start-bot.sh launches with (fleet_claude_bin).
 #     Replaces the old bare `grep CLAUDE_BIN` decoy, which passed even with the
 #     real check deleted because the word also appears in a comment (finding 2).
 : > "$_T/npm.calls"
