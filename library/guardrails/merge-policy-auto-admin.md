@@ -74,11 +74,26 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
    This rung is deliberately **not** a `mergeStateStatus` test. That field reports `BLOCKED` for the ordinary case of a PR still awaiting its review, so gating on `clean`/`unstable` refuses PRs that are perfectly mergeable.
 
+4. **NO OPEN PR MAY STILL BE BASED ON THE BRANCH THIS MERGE DELETES — retarget each one FIRST.** An open PR whose *base* is this PR's head branch is **closed** by GitHub the moment `--delete-branch` removes that branch: not retargeted, not reported, and its author is not told. Observed: #1779 went `CLOSED` two seconds after #1776 merged, and its author found it twenty minutes later (#1781). So before the merge, move every dependent onto this PR's own base, and keep `--delete-branch` only if none is left:
+
+   ```bash
+   BASE=$(gh pr view "$N" --repo "$REPO" --json baseRefName --jq .baseRefName)
+   STACKED=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number')
+   for M in $STACKED; do gh pr edit "$M" --repo "$REPO" --base "$BASE"; done
+   DELETE=--delete-branch
+   LEFT=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number')
+   [ -z "$LEFT" ] || { DELETE=""; echo "KEEPING $BR: still the base of $LEFT"; }
+   ```
+
+   `$BR` is rung 0's head branch. **The re-list is the check, not the edit's exit code**: a PR that still names `$BR` as its base is exactly what the deletion would close, however the edit reported. A branch kept for a dependent is deleted once that PR has been retargeted or closed. **A retargeted PR needs its new base merged into it after this merge**: a squash lands this PR's commits under a new sha, so the dependent's own copies of them conflict until its author merges the base in — which is why the announcement below names it.
+
 Merge command — **carrying the same `$PH` rung 0 anchored to**:
 
 ```bash
-gh pr merge "$N" --repo "$REPO" --squash --admin --delete-branch --match-head-commit "$PH"
+gh pr merge "$N" --repo "$REPO" --squash --admin $DELETE --match-head-commit "$PH"
 ```
+
+`$DELETE` is rung 4's, unquoted on purpose: a kept branch leaves no argument at all rather than an empty one.
 
 **`--match-head-commit` makes the gate refuse a head that moved under it**, which rung 0 cannot do on its own: rung 0 reconciles at the *start*, and the rungs take time. This closes the window between them.
 
@@ -125,8 +140,9 @@ Of the six that carry a ruleset, **four DECLARE an approval requirement and only
 - Never merge a PR with `Request Changes` verdict outstanding.
 - Never merge a PR where CI is failing — **or where a required workflow is missing from the rollup.** "Not failing" is not "passed": an absent workflow cannot fail.
 - Never merge a PR the manager itself authored without a separate reviewer.
+- Never `--delete-branch` a branch an open PR is still based on (rung 4): the deletion closes that PR silently.
 - Never treat an **unanswerable** rung 1 as a satisfied one. No authorship row is a refusal, not a clear — the same absence is produced by a self-review nobody reported, by a stripped summary, and by querying the wrong fleet.
 
-The manager posts "Merging #NN (--admin, reviewed by <reviewer>)" to Telegram before executing.
+The manager posts "Merging #NN (--admin, reviewed by <reviewer>)" to Telegram before executing, **naming every PR rung 4 retargeted** ("retargeted #M to <base>; merge <base> into it") **and any branch it kept for a dependent** — the stacked PR's author is told nowhere else.
 
 **This guardrail replaces both `merge-policy-human` and `no-merge-admin`.** Do not stack with either.
