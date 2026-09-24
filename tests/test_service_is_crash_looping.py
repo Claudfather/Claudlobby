@@ -40,7 +40,8 @@ def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str, carry: str 
     stub = bindir / "systemctl"
     # Shuffled: NRestarts last, SubState before ActiveState. An unparseable or
     # absent counter is modelled by passing "" (the Key= line with no value).
-    # And it answers ONLY what -p asked for, as systemd does, recording each
+    # And it answers ONLY what -p asked for, as systemd does (whichever spelling
+    # getopt takes: -p X, -pX, --property=X, --property X), recording each
     # call's request in `requested`: a stub that printed every property whatever
     # -p said could not see a call that stopped asking for NRestarts, which on
     # real systemd reads every loop as "no verdict" forever (#1774 review).
@@ -57,7 +58,10 @@ def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str, carry: str 
         'want=""; prev=""\n'
         'for a in "$@"; do\n'
         '  case "$prev" in -p|--property) want="$want $a" ;; esac\n'
-        '  case "$a" in --property=*) want="$want ${a#--property=}" ;; esac\n'
+        '  case "$a" in\n'
+        '    --property=*) want="$want ${a#--property=}" ;;\n'
+        '    -p?*) want="$want ${a#-p}" ;;\n'
+        "  esac\n"
         '  prev="$a"\n'
         "done\n"
         'want=$(printf "%s" "$want" | tr "," " ")\n'
@@ -340,6 +344,44 @@ def test_the_one_show_asks_for_the_counter_by_name(tmp_path):
     _looping(tmp_path, active="activating", sub="start-pre", nrestarts="2")
     requested = (tmp_path / "requested").read_text().split()
     assert "NRestarts" in requested, requested
+
+
+@pytest.mark.parametrize(
+    "argv, keys",
+    [
+        pytest.param(["-p", "NRestarts"], {"NRestarts"}, id="p-separate"),
+        pytest.param(["-pNRestarts"], {"NRestarts"}, id="p-attached"),
+        pytest.param(["-p", "SubState", "-pNRestarts"], {"SubState", "NRestarts"}, id="p-mixed"),
+        pytest.param(["-pNRestarts,SubState"], {"NRestarts", "SubState"}, id="p-attached-comma"),
+        pytest.param(["--property=NRestarts"], {"NRestarts"}, id="property-equals"),
+        pytest.param(["--property", "NRestarts"], {"NRestarts"}, id="property-separate"),
+        pytest.param(["-p", "Bogus"], set(), id="p-unknown"),
+        pytest.param(
+            [],
+            {
+                "NRestarts", "SubState", "ActiveState",
+                "ExecMainStartTimestampMonotonic", "InactiveExitTimestampMonotonic",
+            },
+            id="no-p",
+        ),
+    ],
+)
+def test_the_stub_answers_only_what_each_spelling_of_p_asks(tmp_path, argv, keys):
+    """What real systemd 252 answers for each way of writing -p (measured against a running
+    unit): only what was asked. A stub that read `-pNRestarts` as no -p at all answered every
+    property, and one that dropped it when another -p was separate could not witness a call
+    that still asks for NRestarts, so a refactor to that spelling, which systemd reads the
+    same as the separate one, failed the loop tests."""
+    bindir, _, _ = _scene(
+        tmp_path, active="activating", sub="start-pre", nrestarts="2", carry=None
+    )
+    out = subprocess.run(
+        [str(bindir / "systemctl"), "show", *argv, "svc"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    ).stdout
+    assert {ln.split("=", 1)[0] for ln in out.splitlines()} == keys, out
 
 
 def test_the_starting_gate_is_unchanged_by_the_shared_read(tmp_path):

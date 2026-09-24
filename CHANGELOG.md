@@ -27,6 +27,36 @@ expected absence passed on a plane it could not read.
   that a harness arms (`HARNESS_REFUSALS`, written by `harness_refuse`), and a
   harness that does not arm one behaves exactly as before.
 
+### Changed — a fleet alert goes to a chat together with a sender that is in it, or it is refused (#1771 part B, #1782)
+
+#1782 made `resolve_alert_target` return the alert chat **and its sender** (the
+channel state dir `tg-post` reads the token from) as one pair from one source, or
+refuse with a reason naming what to set. It shipped without an entry; this is
+its entry (#1786).
+
+- **`generate` writes one more line into every fleet's timer units**, systemd and
+  launchd: `TELEGRAM_STATE_DIR`, stamped beside `TELEGRAM_GROUP_CHAT_ID`. It
+  comes from the lexically-first declared channel bot whose own chat is the
+  fleet chat, as an absolute path. If no bot is in the fleet chat, neither line
+  is stamped.
+- **A new key and variable:** `fleet_pulse.escalation_state_dir`, carried as
+  `FLEET_PULSE_ESCALATION_STATE_DIR`. It names the escalation chat's declared
+  sender, with `~` and `$HOME/` expanded at generate time.
+  `FLEET_PULSE_ESCALATION_CHAT_ID` now pairs with nothing else.
+  - **So a host that set the escalation chat without it is now refused, loudly.**
+    Before, it was sent with a guessed token.
+  - `claudlobby validate` warns about it.
+  - fleet-pulse logs a WARNING and raises a debounced `alert_target_refused` (to
+    the plane and the manager's pane, once and then daily), cleared when the
+    pair resolves.
+- **`creds-check` checks the pair daily with `getChat`.** Its refusal notice
+  reaches Telegram through the scanned bot's own chat, never the refused one.
+- **Rollout, in this order.**
+  - The `lib/` half (the resolver, fleet-pulse, creds-check, `tg-post`) is live on
+    every bot the moment the shared install is pulled, with no canary window.
+  - The unit half lands only at the next `generate` plus `lib/setup-fleet` to
+    reinstall the units. That is the stageable half: do one fleet first.
+
 ### Fixed — the overdue reader missed a report made in its own second, so the #835 harness check flaked (#1789)
 
 `dispatch-overdue.py` takes "now" as a whole-second epoch, and `plane-readers.py`
@@ -188,13 +218,16 @@ never binds.
   listed but unregistered type would never page, silently.
 - **Pinned in CI since #1780.** `tests/test_crash_loop_wiring.py` (first drafted
   by vera) drives the real keepalive and fleet-pulse against a stateful
-  `systemctl` stub, at the real uptime and at a simulated 120 s and 30 s. It pins
-  keepalive's skip, its carry and the order of carry and restart, and
-  fleet-pulse's page, its suppression of the session and service pages, and its
-  clearing. Not pinned there: the `crash_loop` event's own keys and page text.
-  Both stubs now answer only what `-p` asks, as systemd does, so a call that
-  stopped asking for `NRestarts` reads as the "no verdict" it would be on a real
-  host.
+  `systemctl` stub. It pins keepalive's skip, its exit status and its plane
+  event; its carry, through either unit name, and the order of carry and
+  restart; and fleet-pulse's page, the `crash_loop` event and its keys, its
+  suppression of the session and service pages, and its clearing, which a
+  `none` or a `starting` read does not do. K2, K3, K6 and the C1 and C2 controls
+  also run at a simulated uptime of 120 s and 30 s; the other tests run at the
+  real one. Not pinned there: the page's text, whose only carrier is a tmux push to
+  the manager, which no scene sets up. Both stubs answer only what `-p` asks,
+  as systemd does and in every spelling of `-p`, so a call that stopped asking
+  for `NRestarts` reads as the "no verdict" it would be on a real host.
 
 **Out of scope:** stopping the loop or changing the start limit (#1769 option
 (a)), which is a policy call. `update-claude-code.sh` accepting `unknown` as a
@@ -202,13 +235,18 @@ version is owned separately.
 
 **Rollout:** a `lib/` change, read on demand per use, so it is live on every
 bot the moment the install is pulled. It deploys with the next deliberate
-rollout rather than on merge. **Restart the plane daemon after the pull.** The
-`crash_loop` severity is stamped at ingest by the RESIDENT daemon, from the
-registry it loaded at start, and there is no schema bump, so nothing makes it
-repair itself: a daemon started before the pull stores `crash_loop` with NULL
-severity, and the escalation, `brief` and `events --critical` never see it (the
-manager push still fires). Rows stored meanwhile stay NULL after the restart
-(measured with real daemons in the #1774 review).
+rollout rather than on merge. **Restart the plane daemon after the pull**
+(commands: "Deploying a migration, or a registry change" in
+`documentation/architecture/observable-plane.md`), and on Linux confirm it
+took: `systemctl --user show -p ActiveEnterTimestamp claudlobby-plane-daemon`
+must read later than the pull. Nothing else shows it, since a `crash_loop` row
+cannot be waited for. The `crash_loop` severity is stamped at ingest by the
+RESIDENT daemon, from the registry it loaded at start, and there is no schema
+bump, so nothing makes it repair itself: a daemon started before the pull
+stores `crash_loop` with NULL severity, and the escalation, `brief` and
+`events --critical` never see it (the manager push still fires). Rows stored
+meanwhile stay NULL after the restart (measured with real daemons in the #1774
+review).
 
 ### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
 
