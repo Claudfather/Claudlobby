@@ -502,7 +502,7 @@ Runnable **on-demand** (not just on the timer) to push a release immediately —
 
 ## Mechanism 2 — weekly lossless worker restart (binary)
 
-`lib/update-claude-code.sh` is **download-only**: it installs the latest `claude` binary daily (`claude-update` job, `04:00`) and does not restart any bot. A failed install raises the same `emit_failure_alert` primitive Mechanism 1 uses.
+`lib/update-claude-code.sh` is **download-only**: it installs the latest `claude` binary daily (`claude-update` job, `04:00`) and does not restart any bot. A failed install raises the same `emit_failure_alert` primitive Mechanism 1 uses — and "failed" is measured on the **staged binary, not on npm**: the install worked only when the binary the fleet launches runs and prints a parseable version, because npm can exit 0 while omitting the platform-native optional dependency and leave a stub that cannot run (#1767). A binary that already cannot run when the job starts raises `binary_unrunnable` before the reinstall and `binary_repaired` if the reinstall fixes it. This is detect-and-alert only: nothing keeps the previous binary, so a failed install still leaves every bot that starts or restarts unable to launch until the host is repaired (#1768).
 
 The binary cannot hot-reload, so it reaches a running bot only via restart. `lib/weekly-worker-restart.sh` (job `weekly-worker-restart`, `schedule: "Sun *-*-* 05:00:00"`) bounces every **worker** bot once a week to pick it up:
 
