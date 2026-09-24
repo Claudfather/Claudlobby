@@ -171,12 +171,14 @@ def test_positive_control_npm_exit_0_leaving_a_stub_fires_update_failed(
     assert "npm install returned 0 but the staged binary cannot run" in log
     # The operator is told WHY, in the stub's own words.
     assert "exited 1: Error: claude native binary not installed." in log
+    # ... and what to do about it: the install again, never the stub's own
+    # advice (install.cjs cannot restore a missing platform package).
+    assert "to repair, re-run: npm install -g @anthropic-ai/claude-code@latest" in log
     # Two of the alert's three channels are observable here: the plane event
     # and Telegram (no manager is declared, so there is no nudge to reach).
     assert "binary_update_failed" in _event_types(h.events())
-    assert any("FLEET ALERT [binary_update_failed]" in line for line in h.sent()), (
-        h.sent()
-    )
+    alert = [line for line in h.sent() if "FLEET ALERT [binary_update_failed]" in line]
+    assert alert and "to repair, re-run:" in alert[0], h.sent()
     # And nothing claims the update worked.
     assert "UPDATE verified" not in log
     assert "version changed" not in log

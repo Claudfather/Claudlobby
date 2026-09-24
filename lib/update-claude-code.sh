@@ -146,6 +146,10 @@ _npm=(npm install -g @anthropic-ai/claude-code@latest)
 if [ -n "$_claude_path" ] && [[ "$_claude_path" == /usr/* ]]; then
     _npm=(sudo "${_npm[@]}")
 fi
+# The repair an unrunnable result needs: the install again. The stub's own advice
+# (the package's install.cjs) exits 0 and repairs nothing when the platform
+# package is absent.
+_repair="to repair, re-run: ${_npm[*]} (not the package's install.cjs, which cannot restore a missing platform package), then check --version"
 log "UPDATE running: ${_npm[*]}"
 npm_rc=0
 "${_npm[@]}" >> "$LOG" 2>&1 || npm_rc=$?
@@ -156,9 +160,9 @@ if measure_claude_version; then
     new_version="$CLAUDE_VERSION"
     [ "$npm_rc" -eq 0 ] || update_failed 1 "npm install returned $npm_rc — the fleet's binary runs $new_version"
 elif [ "$npm_rc" -ne 0 ]; then
-    update_failed 1 "npm install returned $npm_rc and the fleet's binary cannot run ($CLAUDE_VERSION_WHY)"
+    update_failed 1 "npm install returned $npm_rc and the fleet's binary cannot run ($CLAUDE_VERSION_WHY); $_repair"
 else
-    update_failed 1 "npm install returned 0 but the staged binary cannot run ($CLAUDE_VERSION_WHY) — a bot that starts or restarts on this host will not launch until it is repaired"
+    update_failed 1 "npm install returned 0 but the staged binary cannot run ($CLAUDE_VERSION_WHY) — a bot that starts or restarts on this host will not launch until it is repaired; $_repair"
 fi
 log "UPDATE verified: the staged binary ran and reported $new_version"
 
