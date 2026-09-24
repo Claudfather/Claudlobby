@@ -127,10 +127,17 @@ assert_eq "host-scope chat-id comes from the lexically-first fleet (the defect)"
 resolve_alert_target "$T/runtime/bots" fleet
 assert_eq "  and scan_scope=fleet already narrows it (the lever, unused today)" \
     "" "$_alert_chat_id"
-export TELEGRAM_GROUP_CHAT_ID=chat-declared
+# #1771: an env chat-id wins only WITH its sender. Beside TELEGRAM_STATE_DIR it is
+# the pair; alone, with no bot of this bots dir in that chat, it is REFUSED --
+# never paired with a token the scan found elsewhere.
+export TELEGRAM_GROUP_CHAT_ID=chat-declared TELEGRAM_STATE_DIR="$T/sender"
 resolve_alert_target "$T/runtime/bots"
-assert_eq "an env chat-id already wins, so the fallback is only reached unresolved" \
+assert_eq "an env chat-id with its sender wins, so the fallback is only reached unresolved" \
     "chat-declared" "$_alert_chat_id"
+unset TELEGRAM_STATE_DIR
+resolve_alert_target "$T/runtime/bots"
+assert_eq "  and without a sender it is refused, not paired with a scanned token (#1771)" \
+    "refused" "$_alert_target_src"
 unset TELEGRAM_GROUP_CHAT_ID
 
 echo "== INTEGRATION: the public door, not its ingredients =="

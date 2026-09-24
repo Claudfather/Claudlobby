@@ -80,6 +80,7 @@ case "$url" in
   *bot{VALID_TOKEN}/getMe*)    printf '{{"ok":true,"result":{{"username":"bot_one_bot"}}}}' ;;
   *bot{WRONGBOT_TOKEN}/getMe*) printf '{{"ok":true,"result":{{"username":"some_other_bot"}}}}' ;;
   *bot{REVOKED_TOKEN}/getMe*)  printf '{{"ok":false,"error_code":401,"description":"Unauthorized"}}' ;;
+  *bot{VALID_TOKEN}/getChat*)  printf '{{"ok":true,"result":{{"id":-1001234567890}}}}' ;;
   *sendMessage*) echo "$url" >> "$(dirname "$0")/send.log"; printf '{{"ok":true,"result":{{"message_id":1}}}}' ;;
   *) printf '{{"ok":false,"error_code":404,"description":"Not Found"}}' ;;
 esac
@@ -134,6 +135,10 @@ def _fleet(
             if declare_username:
                 conf.append(f'export TELEGRAM_BOT_USERNAME="{handle}"')
             conf.append(f'export TELEGRAM_TOKEN_ENV_NAME="{token_var}"')
+            # The composed shape (#1771): a channel bot's conf carries its chat and
+            # its channel state dir, which is what lets the alert pair resolve.
+            conf.append('export TELEGRAM_GROUP_CHAT_ID="-1001234567890"')
+            conf.append(f'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{handle}"')
         if expect_no_token:
             conf.append("export EXPECT_NO_TOKEN=1")
         (d / "bot.conf").write_text("\n".join(conf) + "\n")
@@ -376,20 +381,11 @@ def test_token_never_on_curl_argv(tmp_path):
         assert tok not in argv, "token leaked onto curl argv"
 
 
-def test_composed_env_alldead_exports_scanned_state_dir(tmp_path):
-    """#572/#588 state-dir gap: creds-check must export the scanned live channel
-    dir as TELEGRAM_STATE_DIR, not just the chat id.
-
-    The exact worst case creds-check exists to alert on. The composed timer env
-    carries the fleet TELEGRAM_GROUP_CHAT_ID but NOT TELEGRAM_STATE_DIR, and
-    every fleet token is dead so resolve_delivery_token exports none — so
-    tg-post cannot short-circuit on TELEGRAM_BOT_TOKEN and must read its
-    delivery token from TELEGRAM_STATE_DIR/.env. resolve_alert_target resolves
-    the live dir by scanning a declaring bot; without the matching export
-    (present for the chat id, missing for the state dir before #588) tg-post
-    falls to its dead default channel and the every-credential-dead alert never
-    reaches the fleet's real channel. This proves creds-check hands the scanned
-    dir to tg-post."""
+def _alldead_scene(tmp_path, bot_chat):
+    """One declared channel bot whose OWN token is revoked (so no live delivery
+    token is exported and tg-post must read the pair's state dir), a composed
+    timer env carrying the fleet chat, and a tg-post stub recording the chat,
+    the state dir and the message creds-check handed it."""
     root = tmp_path / "root"
     (root / "lib").mkdir(parents=True)
     (root / "state").mkdir()
@@ -397,21 +393,15 @@ def test_composed_env_alldead_exports_scanned_state_dir(tmp_path):
     bindir.mkdir()
     _curl_stub(bindir)
     (root / ".env").write_text("")  # no PAT/Railway -> those checks skip
-
-    # One declared channel bot whose OWN token is revoked: resolve_delivery_token
-    # probes and skips it, so no live delivery token is exported (the
-    # all-credentials-dead condition). bot.conf declares both the chat id (so the
-    # fleet scan finds the bot) and the state dir — the value under test, which
-    # the resolver must export so the alert routes to this live channel dir.
     bot = root / "local" / "f" / "runtime" / "bots" / "chanbot"
     bot.mkdir(parents=True)
-    channel = bot / "channel"  # the dir the scan resolves; its path is the assertion
+    channel = bot / "channel"
     (bot / "bot.conf").write_text(
         'export BOT_ID="chanbot"\n'
         'export BOT_SERVICE="com.t.f.chanbot"\n'
         'export TELEGRAM_BOT_HANDLE="chan_bot"\n'
         'export TELEGRAM_TOKEN_ENV_NAME="T_CHAN_TOKEN"\n'
-        'export TELEGRAM_GROUP_CHAT_ID="-100SCANCHAT"\n'
+        f'export TELEGRAM_GROUP_CHAT_ID="{bot_chat}"\n'
         "export TELEGRAM_STATE_DIR="
         '"$CLAUDLOBBY_ROOT/local/f/runtime/bots/chanbot/channel"\n'
     )
@@ -419,13 +409,9 @@ def test_composed_env_alldead_exports_scanned_state_dir(tmp_path):
     (root / "local" / "f" / "fleet.yaml").write_text(
         "fleet:\n  name: f\n  bots:\n    chanbot:\n      expertise: [x]\n"
     )
-
-    # tg-post stub records the chat id + the (expanded) state dir creds-check
-    # exported + the message — the shared fleet-signal observation point.
     _write_exec(root / "lib" / "tg-post.sh", TG_STUB)
     capture = root / "tg-capture.log"
     state = root / "state" / "creds-check-state.json"
-
     env = _scrubbed_env()
     env.update(
         {
@@ -436,43 +422,83 @@ def test_composed_env_alldead_exports_scanned_state_dir(tmp_path):
             "CLAUDLOBBY_CREDS_LOG": str(root / "creds-check.log"),
             "CLAUDLOBBY_CREDS_STATE": str(state),
             "TG_CAPTURE": str(capture),
-            # Composed timer env: fleet chat id present, state dir ABSENT.
+            # Composed timer env as a unit composed before #1771 carries it: the
+            # fleet chat, no state dir beside it.
             "TELEGRAM_GROUP_CHAT_ID": "-100COMPOSEDENV",
             # _scrubbed_env only strips TELEGRAM/CLAUDLOBBY/FLEET, so a host token
             # would leak in and fail the unrelated github/railway/mcp checks
-            # against the curl stub. Empty every var they read (github falls back
-            # through three names) so only the telegram check fires.
+            # against the curl stub. Empty every var they read.
             "GITHUB_PERSONAL_ACCESS_TOKEN": "",
             "GITHUB_TOKEN": "",
             "GITHUB_PAT": "",
-            # BOTH Railway tokens: the check reads each separately now, so
-            # scrubbing one and inheriting the other is the same host-leak
-            # this comment is about, just through the other variable.
             "RAILWAY_PERSONAL_TOKEN": "",
             "RAILWAY_PERSONAL_PROJECT_TOKEN": "",
             "MCP_PROBE_URL": "",
         }
     )
     (tmp_path / "home").mkdir()
-
     _run({"env": env, "state": state})
-
-    # Precondition: all fleet tokens dead -> no delivery token exported, so the
-    # state-dir gap actually bites (tg-post can't short-circuit on a token).
     log = (root / "creds-check.log").read_text()
     assert "alert delivery token resolved" not in log, "a live token would mask the gap"
+    return root, channel, capture, state
 
-    # The other checks skip, so chanbot's revoked-token FAIL is the one alert;
-    # the stub recorded the chat id + the state dir creds-check handed to
-    # tg-post. A dropped export shows here as an empty/default state dir.
+
+def test_composed_env_alldead_exports_the_pairs_state_dir(tmp_path):
+    """#572/#588, under the pair rule (#1771): with every fleet token dead no
+    delivery token is exported, so tg-post must read its token from the pair's
+    state dir. The composed env chat pairs with the bot whose OWN chat it is, and
+    creds-check hands tg-post that bot's channel dir — the chat and its sender
+    from one source. A dropped export shows here as an empty state dir."""
+    root, channel, capture, _ = _alldead_scene(tmp_path, bot_chat="-100COMPOSEDENV")
     assert capture.exists(), "chanbot FAIL must reach tg-post"
     lines = capture.read_text().strip().splitlines()
-    assert len(lines) == 1, f"expected exactly chanbot's FAIL alert, got {lines}"
-    chat_id, state_dir, msg = lines[0].split("|", 2)
-    assert "telegram_f_chanbot FAIL" in msg  # the every-credential-dead scenario
-    assert chat_id == "-100COMPOSEDENV", "composed-env chat id must win"
+    fails = [line for line in lines if "telegram_f_chanbot FAIL" in line]
+    assert len(fails) == 1, lines
+    chat_id, state_dir, _msg = fails[0].split("|", 2)
+    assert chat_id == "-100COMPOSEDENV"
     assert state_dir == str(channel), (
-        f"tg-post received state_dir={state_dir!r}; expected the scanned live "
-        f"channel dir {str(channel)!r}. Empty/default means _alert_state_dir "
-        f"was never exported (the #588 gap)."
+        f"tg-post received state_dir={state_dir!r}; expected the pair's channel "
+        f"dir {str(channel)!r} (the #588 gap)."
     )
+
+
+def test_a_composed_env_chat_no_bot_is_in_is_refused_not_sent(tmp_path):
+    """The #1771 defect, inverted: the composed chat is not the chat of any bot
+    in the fleet. The old resolver paired it with the scanned bot's channel dir
+    and every alert went to a group that bot was not in. Now the pair is
+    REFUSED: nothing goes to the chat with a borrowed sender, and the pair
+    check records the refusal instead."""
+    root, channel, capture, state = _alldead_scene(tmp_path, bot_chat="-100SCANCHAT")
+    lines = capture.read_text().strip().splitlines() if capture.exists() else []
+    for line in lines:
+        chat_id, state_dir, _msg = line.split("|", 2)
+        # Nothing reaches the refused chat...
+        assert chat_id != "-100COMPOSEDENV", f"a send went to the refused chat: {line}"
+        # ...and whatever is sent is ONE bot's own pair, never a mix.
+        if chat_id:
+            assert (chat_id, state_dir) == ("-100SCANCHAT", str(channel)), line
+    # The refusal itself is loud: raised through emit_failure_alert, which reaches
+    # a human on a consistent pair (here the bot's own chat and channel dir).
+    assert any("alert_target_refused" in line for line in lines), lines
+    pair = json.loads(state.read_text())["telegram_alert_pair_f"]
+    assert pair["status"] == "fail", pair
+    assert "alert target REFUSED" in pair["detail"], pair
+
+
+def test_a_live_sender_that_cannot_see_the_chat_fails_the_pair_check(tmp_path):
+    """The #1771 failure itself: the sender's token is LIVE (getMe ok, and its
+    username matches, so no cross-wire), but getChat on the fleet chat fails —
+    the bot is not in it. getMe alone certified exactly this every day for two
+    months; the pair check fails it on the first run. The token and the chat
+    id ride curl's --config file, never its argv."""
+    f = _fleet(
+        tmp_path,
+        roster=[("abot", "some_other_bot", "T_ABOT_TOKEN", WRONGBOT_TOKEN)],
+    )
+    state = _run(f)
+    pair = state["telegram_alert_pair_f"]
+    assert pair["status"] == "fail", pair
+    assert "getChat error_code=404" in pair["detail"], pair
+    argv = (f["bindir"] / "argv.log").read_text()
+    assert WRONGBOT_TOKEN not in argv
+    assert "-1001234567890" not in argv

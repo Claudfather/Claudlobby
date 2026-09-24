@@ -125,6 +125,7 @@ run_job() {
         CLAUDLOBBY_ROOT="$ROOT" PATH="$BIN:$PATH" \
         CLAUDLOBBY_ALERT_MANAGER="${1:-}" \
         FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/tg" \
         TELEGRAM_BOT_TOKEN="" \
         bash "$LIB_DIR/vault-sync.sh" >/dev/null 2>&1 || true
 }

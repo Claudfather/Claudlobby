@@ -63,7 +63,7 @@ push_count ()    { printf '%s' "$(mgr_pane)" | grep -c "\\[FLEET-PULSE\\].*$1" |
 run_pulse () {
     env CLAUDLOBBY_ROOT="$ROOT" TMUX_TMPDIR="$TMUX_TMPDIR" \
         FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
-        TELEGRAM_GROUP_CHAT_ID="" TELEGRAM_STATE_DIR="$ROOT/tg" \
+        TELEGRAM_GROUP_CHAT_ID="" FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/tg" \
         bash "$LIB_DIR/fleet-pulse.sh" "$FLEET" >"$ROOT/pulse.log" 2>&1 || true
 }
 

@@ -62,6 +62,8 @@ def _pulse(root, libdir, *, fleet=F, **extra):
            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
            "TMUX_TMPDIR": str(root / "tmux"),
            "FLEET_PULSE_ESCALATION_CHAT_ID": "-1001234567890",
+           # the escalation chat's declared sender (#1771); without it the page is refused
+           "FLEET_PULSE_ESCALATION_STATE_DIR": str(root / "escalation-sender"),
            # above the number of dead sandbox bots, so the burst detector's own
            # pages cannot be mistaken for this leg's
            "FLEET_PULSE_ESCALATION_THRESHOLD": "9", **extra}
