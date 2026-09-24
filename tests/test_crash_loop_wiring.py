@@ -1,4 +1,4 @@
-"""Wiring tests for keepalive.sh and fleet-pulse.sh around a crash loop (#1769) -- reviewer-supplied.
+"""Wiring tests for keepalive.sh and fleet-pulse.sh around a crash loop (#1769), first drafted by vera in her review of #1774.
 
 The PR's unit tests call the library functions with a one-shot systemctl stub, and its
 real-unit harness never drives a keepalive restart in the middle of a loop. This file
@@ -9,12 +9,20 @@ phase, and it records what data/.restart-carry held at that instant (so ORDER is
 Every scenario is hermetic: temp HOME/root, PLANE_EMIT_DISABLED=1, a stub curl, no network.
 """
 
+import platform
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "lib"
+
+# The scenes drive the systemd branch of the real scripts and read /proc/uptime; on
+# macOS service_is_crash_looping answers "unknown" by design, so they cannot hold.
+pytestmark = pytest.mark.skipif(platform.system() != "Linux", reason="drives the systemd branch")
 
 SYSTEMCTL = r"""#!/bin/bash
 # stateful systemctl stub. State: $UNIT_STATE (KEY=VAL), call log: $UNIT_CALLS
@@ -55,9 +63,25 @@ exit 0
 
 class Scene:
     def __init__(
-        self, tmp, *, active, sub, nr, age_s=2, carry=None, grace=300, marker=False
+        self, tmp, *, active, sub, nr, age_s=2, carry=None, grace=300, marker=False,
+        uptime_s=None,
     ):
         self.tmp = Path(tmp)
+        # uptime_s: run on a host that booted uptime_s seconds ago. The scripts and
+        # the stub age a phase against /proc/uptime, and a runner can be fresher
+        # than any constant a scene picks (vera's review of #1787: K2/K3 failed
+        # under 400 s). So the scripts run from a copy of lib/ whose lib-common.sh
+        # reads a fixture instead, the stub reads the same one, and the real age
+        # arithmetic stays under test (test_service_is_starting.py's approach).
+        self.lib, stub = LIB, SYSTEMCTL
+        if uptime_s is not None:
+            clock = self.tmp / "uptime"
+            clock.write_text(f"{uptime_s:.2f} 480.00\n")
+            self.lib = self.tmp / "lib"
+            shutil.copytree(LIB, self.lib, symlinks=True)
+            common = self.lib / "lib-common.sh"
+            common.write_text(common.read_text().replace("/proc/uptime", str(clock)))
+            stub = SYSTEMCTL.replace("/proc/uptime", str(clock))
         self.home = self.tmp / "home"
         self.root = self.tmp / "root"
         self.bin = self.tmp / "bin"
@@ -75,7 +99,7 @@ class Scene:
         self.state.write_text(f"ACTIVE={active}\nSUB={sub}\nNR={nr}\nAGE_S={age_s}\n")
         self.calls.write_text("")
         for name, body in (
-            ("systemctl", SYSTEMCTL),
+            ("systemctl", stub),
             ("curl", '#!/bin/bash\nprintf "%s" \'{"ok":false}\'\n'),
         ):
             p = self.bin / name
@@ -117,7 +141,7 @@ class Scene:
 
     def keepalive(self):
         r = subprocess.run(
-            ["bash", str(LIB / "keepalive.sh"), str(self.bot)],
+            ["bash", str(self.lib / "keepalive.sh"), str(self.bot)],
             env=self.env(),
             capture_output=True,
             text=True,
@@ -133,7 +157,7 @@ class Scene:
 
     def pulse(self):
         r = subprocess.run(
-            ["bash", str(LIB / "fleet-pulse.sh"), "F"],
+            ["bash", str(self.lib / "fleet-pulse.sh"), "F"],
             env=self.env(),
             capture_output=True,
             text=True,
@@ -166,13 +190,13 @@ def test_K1_a_loop_is_named_and_never_restarted(tmp_path):
     assert s.carry() is None
 
 
-def test_K2_a_restart_that_interrupts_a_streak_records_the_count_BEFORE_it_is_zeroed(
-    tmp_path,
-):
+@pytest.mark.parametrize("uptime_s", [pytest.param(None, id="real-uptime"), pytest.param(120, id="up-120s"), pytest.param(30, id="up-30s")])
+def test_K2_a_restart_that_interrupts_a_streak_records_the_count_BEFORE_it_is_zeroed(tmp_path, uptime_s):
     # A wedged start (phase older than the boot grace) after ONE automatic restart: keepalive
     # restarts it. The count it is about to wipe must be on disk at the instant of the restart.
     s = Scene(
-        tmp_path, active="activating", sub="start-pre", nr=1, age_s=400, grace=300
+        tmp_path, active="activating", sub="start-pre", nr=1, age_s=10, grace=5,
+        uptime_s=uptime_s,
     )
     r, log = s.keepalive()
     assert "RESTART" in log, (log, r.stderr[-400:])
@@ -180,9 +204,11 @@ def test_K2_a_restart_that_interrupts_a_streak_records_the_count_BEFORE_it_is_ze
     assert s.carry() == "1"
 
 
-def test_K3_the_streak_survives_keepalives_own_restart(tmp_path):
+@pytest.mark.parametrize("uptime_s", [pytest.param(None, id="real-uptime"), pytest.param(120, id="up-120s"), pytest.param(30, id="up-30s")])
+def test_K3_the_streak_survives_keepalives_own_restart(tmp_path, uptime_s):
     s = Scene(
-        tmp_path, active="activating", sub="start-pre", nr=1, age_s=400, grace=300
+        tmp_path, active="activating", sub="start-pre", nr=1, age_s=10, grace=5,
+        uptime_s=uptime_s,
     )
     s.keepalive()  # the interrupting restart (NR 1 -> 0, carry=1)
     assert s.restarts() == ["restart carry_before=1 nr_before=1"]
@@ -255,11 +281,12 @@ def test_C2_stub_timestamps_are_sane(tmp_path):
     assert 15e6 < up - ts < 30e6, (up, ts)
 
 
-def test_K6_a_loop_whose_current_attempt_outlived_the_boot_grace_is_still_not_restarted(tmp_path):
+@pytest.mark.parametrize("uptime_s", [pytest.param(None, id="real-uptime"), pytest.param(120, id="up-120s"), pytest.param(30, id="up-30s")])
+def test_K6_a_loop_whose_current_attempt_outlived_the_boot_grace_is_still_not_restarted(tmp_path, uptime_s):
     # keepalive's crash SKIP has to hold ON ITS OWN: the boot gate below it ages only the CURRENT phase, so
     # an attempt older than the grace (a start that hangs, then fails) would otherwise fall through to a
     # restart stacked on systemd's loop.
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=3, age_s=400, grace=300)
+    s = Scene(tmp_path, active="activating", sub="start-pre", nr=3, age_s=10, grace=5, uptime_s=uptime_s)
     r, log = s.keepalive()
     assert "SKIP — crash loop (3 automatic restarts" in log, (log, r.stderr[-400:])
     assert s.restarts() == [], "keepalive stacked a restart on a loop whose current attempt was old"
