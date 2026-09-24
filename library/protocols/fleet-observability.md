@@ -57,6 +57,7 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. |
 | `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal `[BOTREPORT]`. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
+| `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `spin-up-bot.sh` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
 | `service_down` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `session_missing` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. **Decide on the payload's `paths`, never on `dirty_files`**: a count cannot separate `M lib/foo.py` from `?? .venv/`, and reading it as a count is what made this alert fire forever and get skipped (#1728). `dirty_tracked`/`dirty_untracked` are facts to read, not a filter — an unadded new source file is untracked and is the unrecoverable case. `unchanged_for_s` is a floor measured from the sweep's first sighting; past ~2h on a source path, check for staleness. |
@@ -70,7 +71,7 @@ Read bot event logs at these natural decision points — not continuously, not o
 
 ## Active Notifications (push)
 
-Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for high-severity events (`activity_stuck`, `session_missing`, `service_down`), debounced to once per episode:
+Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for high-severity events (`activity_stuck`, `session_missing`, `service_down`, `crash_loop`), debounced to once per episode:
 
 ```
 [FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
@@ -176,7 +177,7 @@ upstream and always size `--tail` explicitly instead of relying on it.
 
 **`--critical` also does not cover every actionable type in the decision table above.** It matches a
 fixed, hand-maintained set (`session_missing`, `service_down`, `activity_stuck`, `script_error`,
-`overdue_dispatch`, `bridge_down`, `reload_failed`, `restart_failed`, `rc_timeout`) that omits
+`overdue_dispatch`, `bridge_down`, `reload_failed`, `restart_failed`, `rc_timeout`, `crash_loop`) that omits
 `pane_stuck`, `wip_uncommitted`, `sweep_repo_unreachable`, and `audit_failed` — all actionable per
 the table above. Same hand-maintained-list gap `brief.py`'s alerts section already discloses
 (#903); this protocol inherits it rather than reintroducing it. Until #903 closes, pair

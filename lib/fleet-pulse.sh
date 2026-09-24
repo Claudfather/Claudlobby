@@ -391,14 +391,43 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # this bot is booting. Mid-start is NO VERDICT, not an all-clear: neither
     # emit nor debounce_clear runs, leaving any genuine pre-existing alert state
     # intact to re-fire once the unit settles.
+    #
+    # A CRASH LOOP is judged first and is NOT a boot in flight (#1769): the
+    # boot gate ages the current phase, and a Restart= loop starts a fresh
+    # phase on every attempt, so on its own it called a unit that failed 2,000
+    # starts "booting" for 23 h and nothing paged. service_is_crash_looping is
+    # the shared fact (keepalive reads it too, and draws a different action).
+    _svc_crashloop=0
+    _svc_loop_verdict=""
+    if [ -n "$BOT_SERVICE" ]; then
+        service_is_crash_looping "$BOT_SERVICE" "$bot_dir" && _svc_crashloop=1
+        _svc_loop_verdict=$CRASH_LOOP_VERDICT
+    fi
     _svc_starting=0
-    if [ -n "$BOT_SERVICE" ] && service_is_starting "$BOT_SERVICE"; then
+    if [ "$_svc_crashloop" -eq 0 ] && [ -n "$BOT_SERVICE" ] && service_is_starting "$BOT_SERVICE"; then
         _svc_starting=1
+    fi
+
+    # --- Check 0: crash loop (#1769) ---
+    # Its own critical type, in the escalation set, rather than an un-suppressed
+    # session_missing + service_down: those read "restart it" / "re-enroll it",
+    # and systemd is already restarting it. The page names where the cause is.
+    # Cleared only when the loop is positively OVER (settled, stopped, given
+    # up); a "none" read (a stop-post between two attempts) is no verdict, and
+    # clearing on it would re-page the manager every time a tick landed there.
+    if [ "$_svc_crashloop" -eq 1 ]; then
+        emit_fleet_event "crash_loop" "pulse" '{"unit":"'"$BOT_SERVICE"'","restarts":'"$CRASH_LOOP_RESTARTS"',"state":"'"$CRASH_LOOP_STATE"'"}' "$bot_dir" "$bot_id"
+        debounce_notify "$state_dir" "$bot_id" "crashloop_alerted" _notify_current_bot \
+            "$bot_id crash_loop — unit '$BOT_SERVICE' has failed its start $CRASH_LOOP_RESTARTS times running (state=$CRASH_LOOP_STATE). systemd is already retrying it, so another restart will not help: the cause is in $bot_dir/logs/startup.log" "$_mgr_token" "$_RENOTIFY_AFTER_S"
+    elif [ "$_svc_loop_verdict" = "over" ]; then
+        debounce_clear "$state_dir" "$bot_id" "crashloop_alerted"
     fi
 
     # --- Check 1: tmux session exists ---
     if [ "$_svc_starting" -eq 1 ]; then
         : # boot in flight — the session is expected to be absent
+    elif [ "$_svc_crashloop" -eq 1 ]; then
+        : # crash loop — Check 0 owns this bot's verdict
     elif [ "$_session_alive" -eq 0 ]; then
         emit_fleet_event "session_missing" "pulse" '{"session":"'"$session_name"'"}' "$bot_dir" "$bot_id"
         debounce_notify "$state_dir" "$bot_id" "session_alerted" _notify_current_bot \
@@ -411,7 +440,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # Liveness via service_is_active (the OS dispatch lives there). The payload
     # state string stays per-OS: systemd exposes ActiveState; launchd print has no
     # cheap sub-state, so a confirmed-down job is labeled not-loaded.
-    if [ -n "$BOT_SERVICE" ] && [ "$_svc_starting" -eq 0 ]; then
+    if [ -n "$BOT_SERVICE" ] && [ "$_svc_starting" -eq 0 ] && [ "$_svc_crashloop" -eq 0 ]; then
         if ! service_is_active "$BOT_SERVICE"; then
             if [ "$_OS" = "Darwin" ]; then
                 state="not-loaded"
@@ -664,8 +693,8 @@ _plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = 
     rm -f "$state_dir/.events-err"
     return 0
 }
-_CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout"
-_CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck rc_timeout"
+_CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout crash_loop"
+_CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck rc_timeout crash_loop"
 _rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")
 
 # --- Fleet-wide escalation: persistent critical events → Telegram -----------
@@ -913,7 +942,13 @@ _summary_tmp=$(safe_mktemp)
         # SESSION DOWN / SERVICE DOWN to the journal and pulse-summary.txt — the
         # pre-fix answer, from the file that fixed it. "starting" is its own
         # column value, never folded into "up": a boot is not health.
-        if [ -n "$_s_svc" ] && service_is_starting "$_s_svc"; then
+        # A crash loop is its own column value too (#1769), judged first for
+        # the main loop's reason: without it this block printed "starting" for
+        # a unit systemd had already restarted two thousand times.
+        if [ -n "$_s_svc" ] && service_is_crash_looping "$_s_svc" "$_s_bot_dir"; then
+            [ "$_s_session_status" = "DOWN" ] && _s_session_status="crash-loop"
+            _s_svc_status="crash-loop"
+        elif [ -n "$_s_svc" ] && service_is_starting "$_s_svc"; then
             [ "$_s_session_status" = "DOWN" ] && _s_session_status="starting"
             [ "$_s_svc_status" = "DOWN" ] && _s_svc_status="starting"
         fi
