@@ -611,7 +611,7 @@ Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_ACTIVITY_STUCK_
 
 ### Fleet-pulse escalation (environment overrides)
 
-`lib/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`) affects multiple bots within a short window.
+`lib/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `crash_loop`, …) affects multiple bots within a short window.
 
 Set these in the fleet-level `fleet_pulse:` block. The composer emits them as `Environment=` lines on the fleet-pulse timer unit, which is the only tier the script can read:
 

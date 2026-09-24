@@ -4389,6 +4389,43 @@ service_is_active() {
 # (documented in documentation/environment-variables.md).
 _BOOT_GRACE_S_DEFAULT=300
 
+# _unit_start_facts <bot_service>
+# The ONE read behind both boot predicates (service_is_starting and
+# service_is_crash_looping, #1769): ActiveState, SubState, the two phase
+# stamps and NRestarts, into _USF_ACTIVE / _USF_SUB / _USF_ENTER_US /
+# _USF_EXEC_US / _USF_NRESTARTS, each empty when absent. Linux only; callers
+# gate on _OS first. Moved here unchanged from service_is_starting so a boot
+# and a loop are judged from one snapshot shape by one parser.
+_unit_start_facts() {
+    local _k _v
+    _USF_ACTIVE="" _USF_SUB="" _USF_ENTER_US="" _USF_EXEC_US="" _USF_NRESTARTS=""
+    # ONE show for all the properties: separate calls could straddle a state
+    # change and compose a state pair that never existed.
+    #
+    # Parsed BY NAME (Key=Value), never by position, and deliberately without
+    # --value: systemctl emits properties in ITS OWN order, not the order they
+    # were requested. Positional reads happen to line up for some property sets
+    # and silently transpose for others — adding a fourth -p here reordered the
+    # output to ExecMainStart / ActiveState / SubState / InactiveExit, so the
+    # state test read a timestamp as the ActiveState and the predicate answered
+    # "not starting" for every unit in every state. Name-keyed parsing cannot
+    # drift that way, and an absent property simply leaves its var empty — the
+    # fifth -p (NRestarts, #1769) was added under exactly that protection.
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+        ActiveState) _USF_ACTIVE=$_v ;;
+        SubState) _USF_SUB=$_v ;;
+        InactiveExitTimestampMonotonic) _USF_ENTER_US=$_v ;;
+        ExecMainStartTimestampMonotonic) _USF_EXEC_US=$_v ;;
+        NRestarts) _USF_NRESTARTS=$_v ;;
+        esac
+    done <<EOF
+$(systemctl --user show -p ActiveState -p SubState \
+    -p InactiveExitTimestampMonotonic -p ExecMainStartTimestampMonotonic \
+    -p NRestarts "$1" 2>/dev/null | tr -d '\r')
+EOF
+}
+
 # service_is_starting <bot_service>
 # rc 0 iff the unit is provably MID-START: a boot is in flight, so an absent
 # tmux session is expected and means neither "down" (fleet-pulse) nor "restart
@@ -4425,30 +4462,9 @@ service_is_starting() {
     local svc="${1:?Usage: service_is_starting <bot_service>}"
     [ "$_OS" = "Linux" ] || return 1
 
-    local active="" sub="" enter_us="" exec_us="" since_us up_s grace _k _v
-    # ONE show for all four properties: separate calls could straddle a state
-    # change and compose a state pair that never existed.
-    #
-    # Parsed BY NAME (Key=Value), never by position, and deliberately without
-    # --value: systemctl emits properties in ITS OWN order, not the order they
-    # were requested. Positional reads happen to line up for some property sets
-    # and silently transpose for others — adding a fourth -p here reordered the
-    # output to ExecMainStart / ActiveState / SubState / InactiveExit, so the
-    # state test read a timestamp as the ActiveState and the predicate answered
-    # "not starting" for every unit in every state. Name-keyed parsing cannot
-    # drift that way, and an absent property simply leaves its var empty.
-    while IFS='=' read -r _k _v; do
-        case "$_k" in
-        ActiveState) active=$_v ;;
-        SubState) sub=$_v ;;
-        InactiveExitTimestampMonotonic) enter_us=$_v ;;
-        ExecMainStartTimestampMonotonic) exec_us=$_v ;;
-        esac
-    done <<EOF
-$(systemctl --user show -p ActiveState -p SubState \
-    -p InactiveExitTimestampMonotonic -p ExecMainStartTimestampMonotonic \
-    "$svc" 2>/dev/null | tr -d '\r')
-EOF
+    local active sub enter_us exec_us since_us up_s grace
+    _unit_start_facts "$svc"
+    active=$_USF_ACTIVE sub=$_USF_SUB enter_us=$_USF_ENTER_US exec_us=$_USF_EXEC_US
 
     case "$active/$sub" in
     activating/*) since_us=$enter_us ;; # ExecStartPre: age from the start attempt
@@ -4479,6 +4495,133 @@ EOF
     read -r up_s _ < /proc/uptime || return 0 # unreadable clock: trust the state
     case "$up_s" in "" | *[!0-9.]*) return 0 ;; esac
     [ "$((10#${up_s%.*} - since_us / 1000000))" -lt "$grace" ]
+}
+
+# How many AUTOMATIC restarts in one start streak end the benefit of the doubt.
+# One retry is what a transient looks like (a boot-lock timeout, a slow plugin
+# fetch) and still reads as a boot. The second is never a boot in flight: it is
+# systemd starting over a start that has already failed twice (#1769).
+_CRASH_LOOP_RESTARTS=2
+# Where keepalive leaves the count its own restart wipes (crash_loop_carry).
+# Under data/ (bot-owned, never regenerated) and not a name data-sweep ages.
+_CRASH_LOOP_CARRY_REL="data/.restart-carry"
+
+# service_is_crash_looping <bot_service> <bot_dir>
+# rc 0 iff the unit is failing its start over and over: it is in a START state
+# (exactly the ones service_is_starting accepts: activating/*, active/running)
+# AND systemd has automatically restarted it at least _CRASH_LOOP_RESTARTS
+# times in this streak.
+#
+# WHY A SEPARATE FACT rather than a tighter service_is_starting (#1769). The
+# starting gate ages the CURRENT PHASE on purpose (#1002): the composed stagger
+# is host-global and grows with every fleet, so it must never eat the start
+# budget. But systemd stamps a fresh phase on EVERY attempt of a Restart= loop
+# (measured on systemd 252: even the RestartSec gap reads
+# activating/auto-restart, under a new InactiveExit stamp), so a unit that fails
+# every start reads "boot in flight" forever and the 300s cap never binds. On
+# 2026-09-23 every bot on one host failed 30,316 starts in 23 h while the
+# watchdogs logged 28,977 "boot in flight" skips and paged no one. A time bound
+# cannot fix that without billing the stagger, so this counts ATTEMPTS, and each
+# consumer decides what a loop means: fleet-pulse pages crash_loop, keepalive
+# still refuses to stack its own restart on top of systemd.
+#
+# COUNTED FROM NRestarts, which is streak-scoped by construction on these units:
+# a manual start or a reboot zeroes it, and a successful boot is TERMINAL
+# (RemainAfterExit=yes holds active/exited until someone restarts it, zeroing
+# it). So whatever NRestarts reads while the unit is STARTING belongs to the
+# current failing streak, and no first-sighting marker is needed to scope it.
+# The one thing that breaks that is keepalive's own restart, which zeroes the
+# counter mid-streak (measured: 3 -> 0); crash_loop_carry records what it wipes
+# and it is added back here.
+#
+# Sets for the caller: CRASH_LOOP_RESTARTS (carry included), CRASH_LOOP_STATE
+# (ActiveState/SubState) and CRASH_LOOP_VERDICT, one of:
+#   looping   rc 0.
+#   starting  a start state below the threshold: a boot, as far as this knows.
+#   over      settled (active/exited), stopped (inactive/*) or given up
+#             (failed/*, which is service_down's): no loop NOW; carry cleared.
+#   none      cannot judge. deactivating/* is both the stop-post between two
+#             failed attempts AND the deliberate stop of a settled unit whose
+#             counter is stale; an unreadable counter is no count. Claims
+#             nothing and erases nothing.
+#   unknown   not Linux. launchd has its own throttle and no cheap counter, so
+#             this never claims a loop there: sound in one direction only, like
+#             service_is_starting.
+service_is_crash_looping() {
+    local svc="${1:?Usage: service_is_crash_looping <bot_service> <bot_dir>}"
+    local carry_file="${2:?Usage: service_is_crash_looping <bot_service> <bot_dir>}/$_CRASH_LOOP_CARRY_REL"
+    local nr carry=0
+    CRASH_LOOP_RESTARTS=0 CRASH_LOOP_STATE="" CRASH_LOOP_VERDICT=unknown
+    [ "$_OS" = "Linux" ] || return 1
+
+    _unit_start_facts "$svc"
+    CRASH_LOOP_STATE="$_USF_ACTIVE/$_USF_SUB"
+    case "$CRASH_LOOP_STATE" in
+    activating/* | active/running) ;;
+    active/exited | inactive/* | failed/*)
+        rm -f "$carry_file" 2>/dev/null || true
+        CRASH_LOOP_VERDICT=over
+        return 1
+        ;;
+    *)
+        CRASH_LOOP_VERDICT=none
+        return 1
+        ;;
+    esac
+
+    nr=$_USF_NRESTARTS
+    case "$nr" in "" | *[!0-9]*)
+        CRASH_LOOP_VERDICT=none
+        return 1
+        ;;
+    esac
+    # `|| true`: a carry written without a trailing newline makes read return 1
+    # at EOF with the value already set, and under the caller's `set -e` that
+    # would end the watchdog at the one moment it matters.
+    if [ -f "$carry_file" ]; then read -r carry _ <"$carry_file" || true; fi
+    case "$carry" in "" | *[!0-9]*) carry=0 ;; esac
+    CRASH_LOOP_RESTARTS=$((10#$nr + 10#$carry))
+    if [ "$CRASH_LOOP_RESTARTS" -ge "$_CRASH_LOOP_RESTARTS" ]; then
+        CRASH_LOOP_VERDICT=looping
+        return 0
+    fi
+    CRASH_LOOP_VERDICT=starting
+    return 1
+}
+
+# crash_loop_carry <bot_service> <bot_dir>
+# Call IMMEDIATELY BEFORE keepalive's own restart of the unit, which zeroes
+# NRestarts: records the count that restart is about to wipe, so the streak
+# service_is_crash_looping counts survives it. Only a restart that INTERRUPTS a
+# start streak carries: a start state (a phase aged past the boot grace) or
+# deactivating/* (between two failed attempts). Restarting a settled, stopped
+# or given-up unit is not part of any streak, so the carry is cleared and a
+# stale counter cannot seed the next boot. Never fails: it must not cost the
+# restart it precedes.
+crash_loop_carry() {
+    local svc="${1:?Usage: crash_loop_carry <bot_service> <bot_dir>}"
+    local carry_file="${2:?Usage: crash_loop_carry <bot_service> <bot_dir>}/$_CRASH_LOOP_CARRY_REL"
+    local nr carry=0
+    [ "$_OS" = "Linux" ] || return 0
+
+    _unit_start_facts "$svc"
+    case "$_USF_ACTIVE/$_USF_SUB" in
+    activating/* | active/running | deactivating/*) ;;
+    *)
+        rm -f "$carry_file" 2>/dev/null || true
+        return 0
+        ;;
+    esac
+    nr=$_USF_NRESTARTS
+    case "$nr" in "" | *[!0-9]* | 0) return 0 ;; esac
+    if [ -f "$carry_file" ]; then read -r carry _ <"$carry_file" || true; fi
+    case "$carry" in "" | *[!0-9]*) carry=0 ;; esac
+    if printf '%s\n' "$((10#$nr + 10#$carry))" >"$carry_file.$$" 2>/dev/null; then
+        mv -f "$carry_file.$$" "$carry_file" 2>/dev/null || rm -f "$carry_file.$$" 2>/dev/null || true
+    else
+        rm -f "$carry_file.$$" 2>/dev/null || true
+    fi
+    return 0
 }
 
 # systemd_user_bus_available
