@@ -123,6 +123,7 @@ def _fleet(
         token: str | None,
         expect_no_token: bool = False,
         declare_username: bool = True,
+        chat: str = "-1001234567890",
     ):
         d = root / "local" / "f" / "runtime" / "bots" / name
         (d / "data").mkdir(parents=True)
@@ -137,7 +138,7 @@ def _fleet(
             conf.append(f'export TELEGRAM_TOKEN_ENV_NAME="{token_var}"')
             # The composed shape (#1771): a channel bot's conf carries its chat and
             # its channel state dir, which is what lets the alert pair resolve.
-            conf.append('export TELEGRAM_GROUP_CHAT_ID="-1001234567890"')
+            conf.append(f'export TELEGRAM_GROUP_CHAT_ID="{chat}"')
             conf.append(f'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{handle}"')
         if expect_no_token:
             conf.append("export EXPECT_NO_TOKEN=1")
@@ -502,3 +503,25 @@ def test_a_live_sender_that_cannot_see_the_chat_fails_the_pair_check(tmp_path):
     argv = (f["bindir"] / "argv.log").read_text()
     assert WRONGBOT_TOKEN not in argv
     assert "-1001234567890" not in argv
+
+
+
+def test_a_live_bot_outside_the_chat_never_carries_its_alert(tmp_path):
+    """#542's skip of a dead sender stays INSIDE the pair (#1771): the first live
+    token belongs to a bot in ANOTHER chat, the only bot in the fleet chat is
+    dead. That live token must not carry the fleet chat's alert — it is the
+    split this issue is about — so no delivery token is exported at all."""
+    f = _fleet(
+        tmp_path,
+        real_tgpost=True,
+        roster=[
+            ("abot", "bot_one_bot", "T_ABOT_TOKEN", VALID_TOKEN, False, True, "-1009999999999"),
+            ("bbot", "b_bot", "T_BBOT_TOKEN", REVOKED_TOKEN),
+        ],
+    )
+    _run(f)
+    log = (f["root"] / "creds-check.log").read_text()
+    assert "alert delivery token resolved" not in log, "an outside bot's token was exported"
+    send_log = f["bindir"] / "send.log"
+    sends = send_log.read_text() if send_log.exists() else ""
+    assert VALID_TOKEN not in sends, "a bot outside the fleet chat carried its alert"
