@@ -531,6 +531,16 @@ def _has_telegram_channel(channels: list[str]) -> bool:
     )
 
 
+def telegram_channel_rel(handle: str) -> str:
+    """A channel bot's Telegram state dir, relative to the home dir: the ONE
+    definition behind its three consumers (#1786), which need it in two forms.
+    ``bot.conf`` exports it as ``$HOME/<this>`` for the shell to expand, and that
+    exact KEY=VALUE is a contract lib-common's poller-ownership check greps for
+    (#976); ``access.json`` and the fleet timer units' alert sender take it
+    absolute, as ``Path.home() / <this>``."""
+    return f".claude/channels/telegram-{handle}"
+
+
 def telegram_handle(bot: BotConfig) -> str | None:
     """This bot's Telegram handle, or None when it is not a channel bot.
 
@@ -580,7 +590,7 @@ def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
         if handle is None:
             continue
         if str(bot.telegram.chat_id or chat) == str(chat):
-            return str(Path.home() / ".claude" / "channels" / f"telegram-{handle}")
+            return str(Path.home() / telegram_channel_rel(handle))
     return None
 
 
@@ -931,7 +941,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         # only one bot per host can then hold a poller. lib-common.sh's ownership
         # check greps the poller's environ for this exact KEY=VALUE, so the
         # export is a contract between compositor and consumer (#976).
-        f'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{tg_handle}"',
+        f'export TELEGRAM_STATE_DIR="$HOME/{telegram_channel_rel(tg_handle)}"',
         "",
         "# Claude Code config dir (multi-account support)",
     ]
@@ -2944,7 +2954,7 @@ def compose_bot(
                     f"  WARNING: bot {bot.bot_id} has invalid telegram handle {handle!r}, skipping access.json"
                 )
         else:
-            channel_dir = Path.home() / ".claude" / "channels" / f"telegram-{handle}"
+            channel_dir = Path.home() / telegram_channel_rel(handle)
             channel_dir.mkdir(parents=True, exist_ok=True)
             access_path = channel_dir / "access.json"
             if access_path.exists():
