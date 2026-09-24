@@ -290,11 +290,20 @@ cleanup() {
     # trap and ONLY the trap, so an abort mid-scenario cannot leave an enabled
     # throwaway unit behind on a production host.
     if [ -n "${BP_SVC:-}" ]; then
-        systemctl --user stop "$BP_SVC" >/dev/null 2>&1 || true
+        # BP_LOOP_SVCS: the #1769 crash-loop + long-stagger probes, started and
+        # stopped on the SAME invocations as the boot probe (fixed-shape unit
+        # names, no spaces). A crash-looping unit left behind would restart
+        # forever, so stopping it here is the load-bearing line.
+        if [ -n "${LB_SAMPLER_PID:-}" ]; then kill "$LB_SAMPLER_PID" 2>/dev/null || true; fi
+        # shellcheck disable=SC2086
+        systemctl --user stop "$BP_SVC" ${BP_LOOP_SVCS:-} >/dev/null 2>&1 || true
         rm -f "$HOME/.config/systemd/user/$BP_SVC.service"
+        for _u in ${BP_LOOP_SVCS:-}; do rm -f "$HOME/.config/systemd/user/$_u.service"; done
         systemctl --user daemon-reload >/dev/null 2>&1 || true
-        systemctl --user reset-failed "$BP_SVC" >/dev/null 2>&1 || true
+        # shellcheck disable=SC2086
+        systemctl --user reset-failed "$BP_SVC" ${BP_LOOP_SVCS:-} >/dev/null 2>&1 || true
         command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
+        for _u in ${BP_LOOP_SVCS:-}; do command tmux -L "$_u" kill-server 2>/dev/null || true; done
     fi
     # The plane leg's daemon is a plain background process (never a unit, so
     # it can never self-boot) — but an abort between its start and its inline
@@ -2500,16 +2509,128 @@ BOT_SERVICE=$BP_SVC
 TMUX_SESSION=$BP_BOT
 BPCONF
 
+    # --- #1769 probes, started beside the boot probe (same fleet, same plane) ---
+    # CL: a launcher that fails EVERY start -- the 2026-09-23 shape, where all
+    #     21 bots failed 30,316 starts in 23 h and read "boot in flight" the
+    #     whole time. StartLimitIntervalSec=0 is deliberate: production cycles
+    #     every 12s+, which the default 5-in-10s limiter can never trip; this
+    #     probe cycles every ~2s and WOULD trip it, landing in failed/failed --
+    #     the "given up" state, not the loop under test. Disabling the limiter
+    #     reproduces production never-trips at test speed.
+    # LB: the NEGATIVE control -- a healthy boot through the 60s stagger the
+    #     composed ladder already reaches on this estate's last rung (#1002).
+    #     A time-based bound would call this a loop; an attempt count must not.
+    CL_SVC="claudlobby-vbc-crashloop-$$"
+    LB_SVC="claudlobby-vbc-longboot-$$"
+    BP_LOOP_SVCS="$CL_SVC $LB_SVC"
+    # Their OWN fleet, never BP_FLEET: the #1002 pulses below walk every bot of
+    # the fleet they are given, and the +8s sample races a spawner that sleeps
+    # 8s. Two more bots there (one emitting crash_loop every pulse) lengthened
+    # each pulse enough to lose that race under load: active/exited where
+    # active/running was the point, then a keepalive restart the section
+    # exists to forbid.
+    CL_FLEET="loopfleet"
+    CL_DIR="$BP_ROOT/local/$CL_FLEET/runtime/bots/crashprobe"
+    LB_DIR="$BP_ROOT/local/$CL_FLEET/runtime/bots/longboot"
+    mkdir -p "$CL_DIR/data" "$LB_DIR/data"
+    cat > "$HOME/.config/systemd/user/$CL_SVC.service" <<CLUNIT
+[Unit]
+Description=claudlobby validate-bot-change crash-loop probe (#1769)
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+RemainAfterExit=yes
+KillMode=process
+Restart=on-failure
+RestartSec=1
+ExecStartPre=/bin/sleep 1
+ExecStart=/bin/false
+CLUNIT
+    cat > "$BP_ROOT/longboot-spawner.sh" <<LBSPAWN
+#!/bin/bash
+tmux -L "$LB_SVC" new-session -d -s longboot 'sleep 600'
+LBSPAWN
+    chmod +x "$BP_ROOT/longboot-spawner.sh"
+    cat > "$HOME/.config/systemd/user/$LB_SVC.service" <<LBUNIT
+[Unit]
+Description=claudlobby validate-bot-change long-stagger boot probe (#1769 negative control)
+[Service]
+Type=simple
+RemainAfterExit=yes
+KillMode=process
+Restart=on-failure
+RestartSec=5
+ExecStartPre=/bin/sleep 60
+ExecStart=$BP_ROOT/longboot-spawner.sh
+LBUNIT
+    printf 'BOT_NAME=crashprobe\nBOT_SERVICE=%s\nTMUX_SESSION=crashprobe\n' "$CL_SVC" > "$CL_DIR/bot.conf"
+    printf 'BOT_NAME=longboot\nBOT_SERVICE=%s\nTMUX_SESSION=longboot\n' "$LB_SVC" > "$LB_DIR/bot.conf"
+
     # The plane setup (five reader declarations through the CLI: seconds) must
     # run BEFORE the unit starts — placed after it, it consumed the 4s
     # ExecStartPre window the first sample exists to observe (CI: "observed
     # active/running" where activating/start-pre was the point).
     val_plane_ready "$BP_ROOT" "$BP_FLEET"
+    val_plane_ready "$BP_ROOT" "$CL_FLEET"
     systemctl --user daemon-reload >/dev/null 2>&1 || true
-    systemctl --user start --no-block "$BP_SVC" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    systemctl --user start --no-block "$BP_SVC" $BP_LOOP_SVCS >/dev/null 2>&1 || true
 
     bp_state() { systemctl --user show -p ActiveState -p SubState --value "$BP_SVC" 2>/dev/null | paste -sd/ -; }
     bp_starting() { service_is_starting "$BP_SVC"; }
+
+    # #1769: the crash probe's FIRST attempt, sampled before it can have failed
+    # twice. The same unit must read "not a loop" here and "a loop" later --
+    # which is what makes the later verdict about the attempt COUNT rather
+    # than about the state (both samples are start states). Read through the
+    # library reader, never a direct unit query of this harness's own.
+    _cl_first_state="" _cl_first_nr="" _cl_first_loop=unsampled
+    for _i in $(seq 1 30); do
+        _unit_start_facts "$CL_SVC"
+        if [ "$_USF_ACTIVE/$_USF_SUB" = "activating/start-pre" ] && [ "$_USF_NRESTARTS" = "0" ]; then
+            _cl_first_state="$_USF_ACTIVE/$_USF_SUB" _cl_first_nr=$_USF_NRESTARTS
+            service_is_crash_looping "$CL_SVC" "$CL_DIR" && _cl_first_loop=yes || _cl_first_loop=no
+            break
+        fi
+        sleep 0.05
+    done
+
+    # #1769 negative control, sampled from its FIRST SECOND in the background:
+    # the scenarios before the assertions take 45-60s on a loaded host, which
+    # is most of the stagger, so sampling only at the end would cover a sliver
+    # of it -- or none, once it settled. One line per sample, until settled
+    # (bounded at 150s): epoch state NRestarts starting? loop?
+    LB_SAMPLES="$BP_ROOT/longboot-samples.txt"
+    cl_pulse() {
+        CLAUDLOBBY_ROOT="$BP_ROOT" CLAUDLOBBY_FLEET="$CL_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
+            "$LIB_DIR/fleet-pulse.sh" "$CL_FLEET" >/dev/null 2>&1 || true
+    }
+    # The loop fleet's ONE pulse runs from this sampler, at >=20s: late enough
+    # that the crash probe has looped (it restarts every ~2s), early enough that
+    # the long boot is still in its 60s stagger -- so one pulse is both the
+    # positive and the negative observation, and the PULSE line records the
+    # state of each at that instant rather than assuming it.
+    (
+        _lb_t0=$(date +%s)
+        _lb_end=$((_lb_t0 + 150))
+        _lb_pulsed=0
+        while [ "$(date +%s)" -lt "$_lb_end" ]; do
+            _unit_start_facts "$LB_SVC"
+            _lb_st="$_USF_ACTIVE/$_USF_SUB"
+            _lb_s=no; service_is_starting "$LB_SVC" && _lb_s=yes
+            _lb_l=no; service_is_crash_looping "$LB_SVC" "$LB_DIR" && _lb_l=yes
+            printf '%s %s %s %s %s\n' "$(date +%s)" "$_lb_st" "${_USF_NRESTARTS:-?}" "$_lb_s" "$_lb_l" >>"$LB_SAMPLES"
+            if [ "$_lb_pulsed" -eq 0 ] && [ $(($(date +%s) - _lb_t0)) -ge 20 ]; then
+                _unit_start_facts "$CL_SVC"
+                printf 'PULSE %s %s %s\n' "$(date +%s)" "$_lb_st" "${_USF_NRESTARTS:-?}" >>"$LB_SAMPLES"
+                cl_pulse
+                _lb_pulsed=1
+            fi
+            [ "$_lb_st" = "active/exited" ] && break
+            sleep 2
+        done
+    ) &
+    LB_SAMPLER_PID=$!
 
     bp_pulse() {
         CLAUDLOBBY_ROOT="$BP_ROOT" CLAUDLOBBY_FLEET="$BP_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
@@ -2579,6 +2700,104 @@ BPCONF
     CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
     grep -q 'RESTART' "$_kl" 2>/dev/null && r=yes || r=no
     harness_check "CONTROL: a genuinely dead session on a settled unit still restarts" "$r"
+
+    # =======================================================================
+    # #1769 — a unit that fails EVERY start is a crash loop, not a boot.
+    # service_is_starting ages the current phase, and a Restart= loop starts a
+    # fresh phase on every attempt, so on its own it read a 23 h outage as
+    # "boot in flight" 28,977 times and paged nobody. These run on REAL units
+    # through the REAL keepalive.sh and fleet-pulse.sh.
+    # =======================================================================
+    echo ""
+    echo "=== validate #1769: a crash loop reads as a loop, and a long boot still reads as a boot ==="
+
+    [ "$_cl_first_loop" = "no" ] && r=yes || r=no
+    harness_check "#1769 first attempt of the failing unit is NOT a loop yet (observed ${_cl_first_state:-unobserved} NRestarts=${_cl_first_nr:-?}, read $_cl_first_loop)" "$r"
+
+    # Positive control. Wait for the loop to be real (>=2 automatic restarts),
+    # then sample a START state -- the states the old gate was suppressing in.
+    _cl_state="" _cl_nr=""
+    for _i in $(seq 1 60); do
+        _unit_start_facts "$CL_SVC"
+        case "$_USF_ACTIVE/$_USF_SUB" in
+        activating/* | active/running)
+            if [ -n "$_USF_NRESTARTS" ] && [ "$_USF_NRESTARTS" -ge 2 ] 2>/dev/null; then
+                _cl_state="$_USF_ACTIVE/$_USF_SUB" _cl_nr=$_USF_NRESTARTS
+                break
+            fi
+            ;;
+        esac
+        sleep 0.25
+    done
+    [ -n "$_cl_state" ] && r=yes || r=no
+    harness_check "#1769 the probe really is failing and being retried by systemd (observed ${_cl_state:-no start state} NRestarts=${_cl_nr:-?})" "$r"
+    service_is_starting "$CL_SVC" && r=yes || r=no
+    harness_check "  ...and the per-phase boot gate STILL reads it as mid-start -- the defect precondition; without it this section proves nothing" "$r"
+    service_is_crash_looping "$CL_SVC" "$CL_DIR" && r=yes || r=no
+    harness_check "  ...and service_is_crash_looping reads it as a loop (verdict ${CRASH_LOOP_VERDICT:-?}, ${CRASH_LOOP_RESTARTS:-?} automatic restarts)" "$r"
+
+    # Consumer: keepalive -- a distinct SKIP, and still no restart of its own.
+    CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$CL_DIR" >/dev/null 2>&1 || true
+    _clkl="$CL_DIR/keepalive.log"
+    grep -q 'SKIP — crash loop' "$_clkl" 2>/dev/null && r=yes || r=no
+    harness_check "keepalive names the crash loop instead of calling it a boot in flight" "$r"
+    grep -q 'RESTART' "$_clkl" 2>/dev/null && r=no || r=yes
+    harness_check "  ...and still stacks no restart of its own on top of systemd" "$r"
+
+    # Consumer: fleet-pulse -- from the loop fleet's one pulse, which the
+    # sampler runs at >=20s (see it above). Read after the sampler is done.
+    wait "$LB_SAMPLER_PID" 2>/dev/null || true
+    _pl_line=$(grep '^PULSE ' "$LB_SAMPLES" 2>/dev/null | head -1)
+    _pl_lbst=$(printf '%s' "$_pl_line" | awk '{print $3}')
+    _pl_clnr=$(printf '%s' "$_pl_line" | awk '{print $4}')
+    case "$_pl_lbst" in activating/* | active/running) _pl_mid=yes ;; *) _pl_mid=no ;; esac
+    [ -n "$_pl_line" ] && [ "$_pl_mid" = yes ] && [ "${_pl_clnr:-0}" -ge 2 ] 2>/dev/null && r=yes || r=no
+    harness_check "#1769 the loop fleet was pulsed with the loop LIVE and the long boot MID-STAGGER (crash probe NRestarts=${_pl_clnr:-?}, long boot ${_pl_lbst:-unpulsed})" "$r"
+    _clev=$(val_events "$BP_ROOT" "$CL_FLEET" "crashprobe")
+    printf '%s' "$_clev" | grep -q '"type":"crash_loop"' && r=yes || r=no
+    harness_check "fleet-pulse emits crash_loop for the looping unit" "$r"
+    printf '%s' "$_clev" | grep -qE '"type":"(service_down|session_missing)"' && r=no || r=yes
+    harness_check "  ...and not service_down / session_missing, whose remedies (restart, re-enroll) are wrong for it" "$r"
+
+    # Negative control: the long boot, from the sampler started beside it.
+    # Every START-state sample must read mid-start and none may read a loop;
+    # its restart counter must never move; the samples must cover the stagger.
+    # The same pulse saw it mid-stagger (the check above says so or fails).
+    _lb_samples=0 _lb_starting=0 _lb_loop=0 _lb_nr_moved=0 _lb_first="" _lb_last="" _lb_settled=no
+    while read -r _t _st _nr _s _l; do
+        [ "$_t" = PULSE ] && continue
+        case "$_st" in
+        activating/* | active/running)
+            _lb_samples=$((_lb_samples + 1))
+            [ -z "$_lb_first" ] && _lb_first=$_t
+            _lb_last=$_t
+            [ "$_nr" = "0" ] || _lb_nr_moved=1
+            [ "$_s" = yes ] && _lb_starting=$((_lb_starting + 1))
+            [ "$_l" = yes ] && _lb_loop=$((_lb_loop + 1))
+            ;;
+        active/exited) _lb_settled=yes ;;
+        esac
+    done <"$LB_SAMPLES"
+    _lb_span=$((${_lb_last:-0} - ${_lb_first:-0}))
+    [ "$_lb_samples" -gt 0 ] && [ "$_lb_loop" -eq 0 ] && r=yes || r=no
+    harness_check "#1769 NEGATIVE CONTROL: a healthy boot through the 60s stagger never reads as a loop ($_lb_loop of $_lb_samples start-state samples over ${_lb_span}s)" "$r"
+    [ "$_lb_samples" -gt 0 ] && [ "$_lb_starting" -eq "$_lb_samples" ] && r=yes || r=no
+    harness_check "  ...and reads mid-start in every one of them ($_lb_starting of $_lb_samples)" "$r"
+    [ "$_lb_span" -ge 50 ] && r=yes || r=no
+    harness_check "  ...and the samples really covered the 60s stagger, not its first seconds (${_lb_span}s)" "$r"
+    [ "$_lb_nr_moved" -eq 0 ] && r=yes || r=no
+    harness_check "  ...and its restart counter never moved (it is one attempt, not a loop)" "$r"
+    [ "$_lb_settled" = yes ] && r=yes || r=no
+    harness_check "  ...and the sampler saw it settle to active/exited" "$r"
+    _lbev=$(val_events "$BP_ROOT" "$CL_FLEET" "longboot")
+    printf '%s' "$_lbev" | grep -q '"type":"crash_loop"' && r=no || r=yes
+    harness_check "  ...and fleet-pulse emitted no crash_loop for it, from the pulse that saw it mid-stagger" "$r"
+    _unit_start_facts "$LB_SVC"
+    [ "$_USF_ACTIVE/$_USF_SUB" = "active/exited" ] && r=yes || r=no
+    harness_check "  ...and it settled to active/exited (observed $_USF_ACTIVE/$_USF_SUB)" "$r"
+    service_is_crash_looping "$LB_SVC" "$LB_DIR" || true
+    [ "${CRASH_LOOP_VERDICT:-}" = "over" ] && r=yes || r=no
+    harness_check "  ...where the fact reports the streak over (verdict ${CRASH_LOOP_VERDICT:-?})" "$r"
 
 fi
 

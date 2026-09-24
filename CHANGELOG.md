@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a unit that fails every start read as "boot in flight" forever, so a 23 h outage paged no one (#1769)
+
+On 2026-09-23 a broken `claude` install met an unclean reboot, and every bot on
+one host failed its start **30,316 times in 23 h**. Both watchdogs called it a
+boot: keepalive logged **28,977** `boot in flight` skips, fleet-pulse raised
+`service_down` **once**, and no escalation was sent or attempted.
+
+The cause was one predicate doing the job it was built for. `service_is_starting`
+ages the **current phase** on purpose (#1002), so the host-global boot stagger
+can never eat the start budget. But systemd stamps a fresh phase on every attempt
+of a `Restart=` loop. Measured on systemd 252, even the `RestartSec` gap reads
+`activating/auto-restart` under a new `InactiveExit` stamp, so the 300 s cap
+never binds.
+
+- **A new shared fact, `service_is_crash_looping`, instead of a tighter
+  `service_is_starting`.** A time bound cannot fix this without billing the
+  stagger (a healthy boot through a 60 s rung would trip it), so the new fact
+  counts **attempts**. It reads a loop when the unit is in a start state and
+  systemd has **automatically restarted it twice** in this streak. One retry
+  still reads as a boot.
+- **It counts from `NRestarts`, which is streak-scoped by construction on these
+  units.** A manual start or a reboot zeroes it, and a successful boot is
+  terminal (`RemainAfterExit=yes`), so whatever it reads while the unit is
+  starting belongs to the current failing streak. No first-sighting marker is
+  needed. The one exception is keepalive's own restart, which zeroes the counter
+  mid-streak (measured: 3 → 0). `crash_loop_carry` records the count that
+  restart wipes, in `data/.restart-carry`.
+- **Each consumer draws its own action from the one fact.** fleet-pulse emits a
+  new **critical `crash_loop`** event, in the escalation set, and pushes a
+  manager note naming `logs/startup.log`. For that bot it does not also emit
+  `session_missing` or `service_down`, whose remedies (re-enroll, restart) are
+  wrong when systemd is already restarting the unit. keepalive logs `SKIP — crash
+  loop` and still never stacks a restart on top of systemd.
+- **Reads through one helper.** `service_is_starting` and the new fact share
+  `_unit_start_facts`, the single `systemctl show` the predicate already made,
+  now with `-p NRestarts`. No new direct call, so the supervisor ratchet holds.
+- **Pinned:** fleet-pulse's two critical-type lists must be registered critical
+  in `SYSTEM_EVENT_SEVERITY`. The escalation read filters on that severity, so a
+  listed but unregistered type would never page, silently.
+
+**Out of scope:** stopping the loop or changing the start limit (#1769 option
+(a)), which is a policy call. `update-claude-code.sh` accepting `unknown` as a
+version is owned separately.
+
+**Rollout:** a `lib/` change, read on demand per use, so it is live on every
+bot the moment the install is pulled. It deploys with the next deliberate
+rollout rather than on merge.
+
 ### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
 
 `plane_emit_bounded` backgrounds the emit shim and polls for its exit. It polled

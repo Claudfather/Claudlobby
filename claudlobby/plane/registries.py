@@ -105,6 +105,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "reload_failed": "critical",
     "restart_failed": "critical",
     "rc_timeout": "critical",
+    # #1769: a unit failing its start over and over, which the per-phase boot
+    # gate had been reading as "boot in flight" forever. Critical so the
+    # escalation read (severity = 'critical') can page it.
+    "crash_loop": "critical",
     "alert_delivery_failed": "notice",
     "dispatch_orphaned": "notice",
     "worker_unassigned": "notice",

@@ -39,6 +39,7 @@ CRITICAL_TYPES = {
     "reload_failed",
     "restart_failed",
     "rc_timeout",
+    "crash_loop",
 }
 
 
