@@ -38,13 +38,21 @@ never binds.
   manager note naming `logs/startup.log`. For that bot it does not also emit
   `session_missing` or `service_down`, whose remedies (re-enroll, restart) are
   wrong when systemd is already restarting the unit. keepalive logs `SKIP — crash
-  loop` and still never stacks a restart on top of systemd.
+  loop` and does not stack a restart on top of systemd's, except in the
+  few-millisecond `deactivating/stop-post` window between two attempts, which
+  reads no verdict (3.1–14.3 ms per attempt on systemd 252, measured in the
+  #1774 review).
 - **Reads through one helper.** `service_is_starting` and the new fact share
   `_unit_start_facts`, the single `systemctl show` the predicate already made,
   now with `-p NRestarts`. No new direct call, so the supervisor ratchet holds.
 - **Pinned:** fleet-pulse's two critical-type lists must be registered critical
   in `SYSTEM_EVENT_SEVERITY`. The escalation read filters on that severity, so a
   listed but unregistered type would never page, silently.
+- **Pinned in CI since #1780.** The consumer wiring: `tests/test_crash_loop_wiring.py`
+  (vera's) drives the real keepalive and fleet-pulse against a stateful
+  `systemctl` stub. And the `NRestarts` request itself: both stubs now answer only
+  what `-p` asks, as systemd does, so a call that stopped asking reads as the
+  "no verdict" it would be on a real host rather than passing unnoticed.
 
 **Out of scope:** stopping the loop or changing the start limit (#1769 option
 (a)), which is a policy call. `update-claude-code.sh` accepting `unknown` as a
@@ -52,7 +60,13 @@ version is owned separately.
 
 **Rollout:** a `lib/` change, read on demand per use, so it is live on every
 bot the moment the install is pulled. It deploys with the next deliberate
-rollout rather than on merge.
+rollout rather than on merge. **Restart the plane daemon after the pull.** The
+`crash_loop` severity is stamped at ingest by the RESIDENT daemon, from the
+registry it loaded at start, and there is no schema bump, so nothing makes it
+repair itself: a daemon started before the pull stores `crash_loop` with NULL
+severity, and the escalation, `brief` and `events --critical` never see it (the
+manager push still fires). Rows stored meanwhile stay NULL after the restart
+(measured with real daemons in the #1774 review).
 
 ### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
 
