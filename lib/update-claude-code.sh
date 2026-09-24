@@ -64,72 +64,18 @@ update_failed() {
 }
 
 # --- Resolve the binary the FLEET launches (not this script's own PATH) ------
-# The update must target the SAME claude that start-bot.sh runs. This script's
-# PATH (above) prepends the user prefixes so npm/node resolve under a bare timer
-# env — but start-bot.sh exports its launch PATH with the SYSTEM dirs FIRST, so
-# the fleet runs e.g. /usr/bin/claude even when ~/.npm-global holds a newer copy.
-# Detecting via this script's PATH updated that shadow user copy and left the
-# fleet's binary stale (#635). Mirror start-bot's ordering for detection +
-# version + the sudo choice; the PATH above still finds npm/node to RUN the
-# install. CLAUDE_BIN and the staged fleet link (#1768) come from
-# fleet_claude_bin, the resolver start-bot.sh launches through; only the PATH
-# fallback's ordering below is still a mirror of start-bot's (#1772).
-# CLAUDE_BIN is the same override start-bot.sh launches with — when the fleet
-# pins its binary explicitly, the updater targets THAT one (SSOT). Absent it,
-# mirror start-bot's launch ordering. CLAUDE_UPDATE_FLEET_PATH lets a test / an
-# unusual host substitute the resolution order.
-_FLEET_PATH="${CLAUDE_UPDATE_FLEET_PATH:-/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:$_HOMEBREW/bin}}"
-fleet_claude() {
-    local c
-    c="$(fleet_claude_bin)"
-    if [ "$c" = claude ]; then
-        PATH="$_FLEET_PATH" command -v claude 2>/dev/null || true
-    else
-        printf '%s' "$c"
-    fi
-}
-
-# --- The one predicate: does the fleet's binary work? ------------------------
-# It RAN (exit 0) and the first line of its stdout carries a parseable X.Y.Z.
-# Sets CLAUDE_VERSION and returns 0; otherwise leaves CLAUDE_VERSION empty, sets
-# CLAUDE_VERSION_WHY and returns 1. There is deliberately NO sentinel value: a
-# could-not-measure rendered as a string gets logged, compared and diffed like a
-# version. Callers branch on the return code, never on the text. This is the
-# rule claudlobby/source_state.py decides for read doors (unreachable is not a
-# value); that module answers whether a PATH can be opened, and a stub that
-# cannot run opens fine. Local until a second consumer needs it (#1772).
-# Measures $1 when given (a staged binary, #1768), else the fleet's binary.
-measure_claude_version() {
-    CLAUDE_VERSION=""
-    CLAUDE_VERSION_WHY=""
-    local p out first said rc=0 re='[0-9]+\.[0-9]+\.[0-9]+'
-    p="${1:-$(fleet_claude)}"
-    if [ -z "$p" ]; then
-        CLAUDE_VERSION_WHY="no claude binary resolved"
-        return 1
-    fi
-    # Settled inside the substitution (|| exit) so install_error_trap never sees
-    # the failing binary. Unneeded on bash 5.2 (measured: callers are all `if`s,
-    # whose ERR suppression reaches in); kept for bash 3.2, unmeasured.
-    out="$("$p" --version 2>/dev/null || exit $?)" || rc=$?
-    first="${out%%$'\n'*}"
-    if [ "$rc" -eq 0 ] && [[ $first =~ $re ]]; then
-        CLAUDE_VERSION="${BASH_REMATCH[0]}"
-        return 0
-    fi
-    # Could not measure: say why in the binary's own words. stderr is where a
-    # binary that cannot run explains itself; the read above discards it so a
-    # warning can never be parsed as the version.
-    said="$("$p" --version 2>&1 || true)"
-    said="${said%%$'\n'*}"
-    if [ "$rc" -ne 0 ]; then
-        CLAUDE_VERSION_WHY="$p --version exited $rc"
-    else
-        CLAUDE_VERSION_WHY="$p --version printed no parseable version"
-    fi
-    CLAUDE_VERSION_WHY="$CLAUDE_VERSION_WHY${said:+: ${said:0:200}}"
-    return 1
-}
+# The update must target the SAME claude that start-bot.sh runs, so it resolves
+# through the same doors start-bot does: fleet_claude_bin (CLAUDE_BIN, else the
+# staged fleet link, #1768) and, for a bare name, fleet_launch_path, the PATH
+# start-bot.sh exports with the SYSTEM dirs first. This script's own PATH (above)
+# prepends the user prefixes so npm/node resolve under a bare timer env, and
+# resolving claude on it updated a shadow copy while the fleet ran another
+# (#635); the PATH above still finds npm/node to RUN the install. The predicate
+# is lib-common's measure_claude_version, the one reader every consumer of the
+# version shares (#1772). CLAUDE_UPDATE_FLEET_PATH lets a test or an unusual
+# host substitute the launch order.
+_FLEET_PATH="${CLAUDE_UPDATE_FLEET_PATH:-$(fleet_launch_path)}"
+fleet_claude() { fleet_claude_path "$_FLEET_PATH"; }
 
 # --- Measure the fleet's binary BEFORE the install ----------------------------
 _claude_path="$(fleet_claude)"
@@ -137,7 +83,7 @@ old_version=""
 old_why=""
 _current="not installed"
 if [ -n "$_claude_path" ]; then
-    if measure_claude_version; then
+    if measure_claude_version "$_claude_path"; then
         old_version="$CLAUDE_VERSION"
         _current="$old_version"
     else
@@ -438,7 +384,7 @@ npm_rc=0
 log "UPDATE install finished (npm exit $npm_rc)"
 
 # --- Verify the STAGED binary: this, not npm's exit status, is the verdict ----
-if measure_claude_version; then
+if measure_claude_version "$(fleet_claude)"; then
     new_version="$CLAUDE_VERSION"
     [ "$npm_rc" -eq 0 ] || update_failed 1 "npm install returned $npm_rc — the fleet's binary runs $new_version"
 elif [ "$npm_rc" -ne 0 ]; then

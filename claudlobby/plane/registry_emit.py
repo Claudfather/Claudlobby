@@ -52,6 +52,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from ..claude_version import measure as measure_claude_version
 from ..claudron_compat import COMPAT_FLOOR
 from ..paths import _iter_fleet_dirs
 from .canonical import CanonicalizationError, canonical_hash
@@ -141,15 +142,11 @@ def host_payload(paths) -> dict:
         ram_mb = int(page / (1024 * 1024))
     except (ValueError, OSError, AttributeError):
         ram_mb = 0
-    claude_bin = shutil.which("claude")
-    claude_version = "unavailable"
-    if claude_bin:
-        try:
-            claude_version = subprocess.run(
-                [claude_bin, "--version"], capture_output=True, text=True,
-                timeout=10).stdout.strip() or "unavailable"
-        except (OSError, subprocess.SubprocessError):
-            pass
+    # The version the fleet launches, through the runtime's own reader (#1772):
+    # a verdict, never a value. Unmeasured, the version is None and the reason
+    # rides beside it, so a stub's error text or a stand-in string can never
+    # be recorded as the host's claude_version.
+    claude = measure_claude_version(paths)
     try:
         clv = subprocess.run(
             ["git", "-C", str(paths.root), "rev-parse", "--short", "HEAD"],
@@ -163,6 +160,23 @@ def host_payload(paths) -> dict:
     declared_fleets = sorted(
         d.name for d in _iter_fleet_dirs(paths.root / "local")
         if (d / "fleet.yaml").is_file())
+    system = {
+        "claudlobby_version": clv or "unknown",
+        "claude_version": claude.version,
+        "python_version": platform.python_version(),
+        # host_jobs/plugins/emitters: the daily PROBE facet owns the
+        # enrolled-state walk (cause=probe); generate records the
+        # install identity only — an empty list here is "not scanned
+        # by this cause", disclosed by the cause column itself.
+        "host_jobs": [],
+        "plugins": [],
+        "emitters": [],
+        "defaults_tier_hash": _hash_or_none(system_yaml) or "absent",
+    }
+    # Only when unmeasured: a measured keyframe keeps the shape a daemon
+    # started before this field accepts, since the contract is extra=forbid.
+    if not claude.measured:
+        system["claude_version_unmeasured"] = claude.why
     return {
         "aliases": {"hostname": platform.node()},
         "os": "darwin" if platform.system() == "Darwin" else "linux",
@@ -170,19 +184,7 @@ def host_payload(paths) -> dict:
         "kernel": platform.release(),
         "ram_total_mb": ram_mb,
         "disk_total_gb": int(disk.total / (1024 ** 3)),
-        "system": {
-            "claudlobby_version": clv or "unknown",
-            "claude_version": claude_version,
-            "python_version": platform.python_version(),
-            # host_jobs/plugins/emitters: the daily PROBE facet owns the
-            # enrolled-state walk (cause=probe); generate records the
-            # install identity only — an empty list here is "not scanned
-            # by this cause", disclosed by the cause column itself.
-            "host_jobs": [],
-            "plugins": [],
-            "emitters": [],
-            "defaults_tier_hash": _hash_or_none(system_yaml) or "absent",
-        },
+        "system": system,
         "declared_fleets": declared_fleets,
         "schema_version": _SCHEMA,
     }

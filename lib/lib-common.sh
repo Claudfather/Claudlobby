@@ -293,6 +293,79 @@ except OSError as e:
     fi
 }
 
+# fleet_launch_path
+# THE PATH a bot session launches under: start-bot.sh exports exactly this, so a
+# bare `claude` in a pane resolves on it. Anything that must find the binary the
+# fleet runs resolves under this and never under its own PATH (#1772). The update
+# job once kept its own copy of this order, and with the user prefixes first it
+# updated a shadow copy while every bot ran another (#635).
+fleet_launch_path() {
+    printf '%s' "/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}"
+}
+
+# fleet_claude_path [<launch_path>]
+# The FILE the fleet's claude resolves to: fleet_claude_bin's answer, with a name
+# that is not a path looked up where a pane looks it up, on fleet_launch_path
+# (<launch_path> substitutes that order, for a test). Empty when nothing
+# resolves. To LAUNCH the fleet's claude use fleet_claude_bin, which keeps the
+# link so the kernel resolves it at exec; to MEASURE it, use this.
+# shellcheck disable=SC2120  # <launch_path> is optional by design (a test's seam);
+# measure_claude_version calls it argless.
+fleet_claude_path() {
+    local c p=""
+    c="$(fleet_claude_bin)"
+    case "$c" in
+        */*) p="$c" ;;
+        # type -P: a PATH search only, where command -v would answer a function's bare name.
+        *) p="$(PATH="${1:-$(fleet_launch_path)}" type -P "$c" 2>/dev/null)" || p="" ;;
+    esac
+    printf '%s' "$p"
+}
+
+# measure_claude_version [<binary>]
+# THE one reader of a Claude Code version (#1767, #1772). It RAN (exit 0) and
+# the first line of its stdout carries a parseable X.Y.Z: sets CLAUDE_VERSION and
+# returns 0. Otherwise it leaves CLAUDE_VERSION empty, sets CLAUDE_VERSION_WHY
+# and returns 1. There is deliberately NO sentinel value: a could-not-measure
+# rendered as a string gets logged, compared, pinned and seeded like a version —
+# "unknown" once compared equal to itself and reported a broken binary as a
+# no-op. Callers branch on the return code, never on the text.
+# <binary> is measured as given, so a bare name resolves on the CALLER's PATH,
+# the one the caller will run it from. With no argument it measures the binary
+# the fleet launches (fleet_claude_path). An EMPTY argument is not "no argument":
+# it is a caller whose own resolution found nothing, and it is reported as such.
+measure_claude_version() {
+    CLAUDE_VERSION=""
+    CLAUDE_VERSION_WHY=""
+    local p out first said rc=0 re='[0-9]+\.[0-9]+\.[0-9]+'
+    if [ "$#" -gt 0 ]; then p="$1"; else p="$(fleet_claude_path)"; fi
+    if [ -z "$p" ]; then
+        CLAUDE_VERSION_WHY="no claude binary resolved"
+        return 1
+    fi
+    # Settled inside the substitution (|| exit) so install_error_trap never sees
+    # the failing binary. Unneeded on bash 5.2 (measured: callers are all `if`s,
+    # whose ERR suppression reaches in); kept for bash 3.2, unmeasured.
+    out="$("$p" --version 2>/dev/null || exit $?)" || rc=$?
+    first="${out%%$'\n'*}"
+    if [ "$rc" -eq 0 ] && [[ $first =~ $re ]]; then
+        CLAUDE_VERSION="${BASH_REMATCH[0]}"
+        return 0
+    fi
+    # Could not measure: say why in the binary's own words. stderr is where a
+    # binary that cannot run explains itself; the read above discards it so a
+    # warning can never be parsed as the version.
+    said="$("$p" --version 2>&1 || true)"
+    said="${said%%$'\n'*}"
+    if [ "$rc" -ne 0 ]; then
+        CLAUDE_VERSION_WHY="$p --version exited $rc"
+    else
+        CLAUDE_VERSION_WHY="$p --version printed no parseable version"
+    fi
+    CLAUDE_VERSION_WHY="$CLAUDE_VERSION_WHY${said:+: ${said:0:200}}"
+    return 1
+}
+
 # session_cli_path
 # A bot SESSION runs under the PATH start-bot.sh exports on the line above, not
 # an activated venv, so on a host whose install keeps the CLI only inside
@@ -5782,13 +5855,22 @@ seed_workspace_trust() {
 # the composed settings.local.json allows are silently ignored, and a fresh dir
 # drops a headless boot into the interactive wizard
 # (documentation/decisions/permissions-model.md; #645 P0-S2).
+# The onboarding version is measured on the binary the harness is about to boot
+# (measure_claude_version, #1772). A binary that cannot report a version cannot
+# be booted either, so the seed REFUSES (rc 3, the reason on stderr) and writes
+# nothing, credentials included. A stand-in version would let the harness go on
+# to boot the binary and record its failure as whatever it is there to measure.
 seed_claude_auth_and_trust() {
     local cfg="${1:?seed_claude_auth_and_trust: <config_dir> required}"
     local cwd="${2:?seed_claude_auth_and_trust: <project_cwd> required}"
-    local claude_bin="${3:-claude}" creds="${4:-$HOME/.claude/.credentials.json}" ver
+    local claude_bin="${3:-claude}" creds="${4:-$HOME/.claude/.credentials.json}"
+    if ! measure_claude_version "$claude_bin"; then
+        printf 'seed_claude_auth_and_trust: refusing to seed for a claude that cannot run: %s\n' \
+            "$CLAUDE_VERSION_WHY" >&2
+        return 3
+    fi
     seed_claude_auth "$cfg" "$creds"
-    ver="$("$claude_bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || true
-    jq -n --arg cwd "$cwd" --arg ver "${ver:-0.0.0}" '{
+    jq -n --arg cwd "$cwd" --arg ver "$CLAUDE_VERSION" '{
         hasCompletedOnboarding: true,
         lastOnboardingVersion: $ver,
         projects: { ($cwd): { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true } }

@@ -293,7 +293,9 @@ elif [ "$(jq -r '.mcpServers|length' "$BOT_DIR/.mcp.json" 2>/dev/null)" = 0 ]; t
 harness_check "composed .mcp.json absent-or-empty (mcp: [])" "$mcp_empty"
 
 # ---- seed auth + trust into the redirected config dir -----------------------
-seed_claude_auth_and_trust "$FAKE_CFG" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS"
+# A binary that cannot run is a precondition, never a cell result (#1772).
+seed_claude_auth_and_trust "$FAKE_CFG" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS" \
+  || { say "FATAL: $CLAUDE_BIN cannot run (the reason is above)"; exit 2; }
 
 # ---- the clauDNA PreToolUse hook must be absent (a confound in every cell) ---
 hook_present=no
@@ -313,7 +315,13 @@ record_preconditions() {  # record_preconditions <cell>
   local cell="$1"
   {
     printf '### preconditions for %s (recorded BEFORE the run)\n' "$cell"
-    printf 'claude --version      : %s\n' "$("$CLAUDE_BIN" --version 2>&1 | head -1)"
+    # The one reader (#1772): the version, or the verdict that there is none,
+    # never the first line of whatever the binary printed.
+    if measure_claude_version "$CLAUDE_BIN"; then
+      printf 'claude --version      : %s\n' "$CLAUDE_VERSION"
+    else
+      printf 'claude --version      : CANNOT RUN (%s)\n' "$CLAUDE_VERSION_WHY"
+    fi
     printf 'loc1 path             : %s\n' "$FAKE_CFG/settings.json"
     printf 'loc1 bytes            : %s\n' "$(cat "$FAKE_CFG/settings.json" 2>&1)"
     printf 'loc1 bare Bash        : %s\n' \

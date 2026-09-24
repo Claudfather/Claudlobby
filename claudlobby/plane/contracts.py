@@ -556,13 +556,27 @@ class WorkstreamEvent(_Strict):
 
 class _HostSystem(_Strict):
     claudlobby_version: str
-    claude_version: str
+    #: The Claude Code version the fleet launches, as lib/claude-version.sh
+    #: measured it (#1772), or None when it could not be measured, and then
+    #: claude_version_unmeasured says why: exactly one of the two is set. Never
+    #: a stand-in string. The registry scan once recorded "unavailable", and a
+    #: stub's own error text, here as the host's version.
+    claude_version: Optional[str] = Field(pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")
+    claude_version_unmeasured: Optional[str] = None
     node_version: Optional[str] = None
     python_version: str
     host_jobs: list[dict] = []
     plugins: list[dict] = []
     emitters: list[dict] = []
     defaults_tier_hash: str
+
+    @model_validator(mode="after")
+    def _a_version_or_the_reason_there_is_none(self):
+        if (self.claude_version is None) == (self.claude_version_unmeasured is None):
+            raise ValueError(
+                "exactly one of claude_version and claude_version_unmeasured is set"
+            )
+        return self
 
 
 class HostPayload(_Strict):

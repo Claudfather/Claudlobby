@@ -183,7 +183,7 @@ def test_a_read_only_state_dir_never_fails_the_boot(tmp_path: Path):
 
 def test_the_launcher_calls_it_right_after_it_sets_path():
     lines = START_BOT.read_text().splitlines()
-    path_idx = next(i for i, ln in enumerate(lines) if ln.startswith("export PATH="))
+    path_idx = next(i for i, ln in enumerate(lines) if ln.startswith("export PATH"))
     tiered_idx = next(i for i, ln in enumerate(lines) if "source_env_tiered" in ln)
     call_idx = next((i for i, ln in enumerate(lines) if ln.strip() == "session_cli_path"), None)
     assert call_idx is not None, "session_cli_path is not called in start-bot.sh"

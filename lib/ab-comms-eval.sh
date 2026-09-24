@@ -501,8 +501,10 @@ cov_main() {
     [ "$fail" -eq 0 ] || die "fixture checks failed"
 
     if [ "$DRY_RUN" != 1 ]; then
-        seed_claude_auth_and_trust "$ROOT/without/config" "$ROOT/without/runtime/bots/cov-probe" claude "$HOME/.claude/.credentials.json"
-        seed_claude_auth_and_trust "$ROOT/with/config" "$ROOT/with/runtime/bots/cov-probe" claude "$HOME/.claude/.credentials.json"
+        seed_claude_auth_and_trust "$ROOT/without/config" "$ROOT/without/runtime/bots/cov-probe" claude "$HOME/.claude/.credentials.json" \
+            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
+        seed_claude_auth_and_trust "$ROOT/with/config" "$ROOT/with/runtime/bots/cov-probe" claude "$HOME/.claude/.credentials.json" \
+            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
     fi
 
     RESULTS="$ROOT/results.jsonl"; : > "$RESULTS"
@@ -765,8 +767,10 @@ suc_main() {
     [ "$fail" -eq 0 ] || die "fixture checks failed"
 
     if [ "$DRY_RUN" != 1 ]; then
-        seed_claude_auth_and_trust "$ROOT/without/config" "$ROOT/without/runtime/bots/suc-probe" claude "$HOME/.claude/.credentials.json"
-        seed_claude_auth_and_trust "$ROOT/with/config" "$ROOT/with/runtime/bots/suc-probe" claude "$HOME/.claude/.credentials.json"
+        seed_claude_auth_and_trust "$ROOT/without/config" "$ROOT/without/runtime/bots/suc-probe" claude "$HOME/.claude/.credentials.json" \
+            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
+        seed_claude_auth_and_trust "$ROOT/with/config" "$ROOT/with/runtime/bots/suc-probe" claude "$HOME/.claude/.credentials.json" \
+            || die "the cells' claude cannot run, so there is nothing to seed (the reason is above)"
     fi
 
     RESULTS="$ROOT/results.jsonl"; : > "$RESULTS"
@@ -804,7 +808,7 @@ compute_verdict() {  # $1 results.jsonl  $2 out.json  $3 reps_now
         --cost-threshold "$COST_THRESHOLD" \
         --reps-now "$3" \
         --reps-max "$REPS_MAX" \
-        --claude-version "${CLAUDE_VER:-unknown}" \
+        --claude-version "$CLAUDE_VER" \
         --proto-hash "${PROTO_HASH:-unknown}" \
         --weights-file "${WEIGHTS_FILE:-}" \
         $ph
@@ -876,8 +880,20 @@ trap cleanup EXIT
 # [4] pass/fail counters (ambient; lib-common harness_check reads them).
 pass=0; fail=0
 
-CLAUDE_VER="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-[ -n "$CLAUDE_VER" ] || CLAUDE_VER="dry-run"
+# The version pin, from the one reader (lib-common measure_claude_version, #1772)
+# on exactly what the real cells run: a bare `claude -p` on this PATH. A real run
+# whose binary cannot report a version refuses here, before any cell, because a
+# verdict pinned to a version nobody measured is worse than no verdict. A dry run
+# makes no model call, so no binary is part of its evidence and its pin says so.
+# Neither mode runs a cell (each experiment prints its opt-in line), so the pin
+# stays unset and set -u stops anything that reaches for it.
+if [ "$DRY_RUN" = 1 ]; then
+    CLAUDE_VER="dry-run"
+elif [ "${AB_EVAL_REAL:-0}" = 1 ]; then
+    measure_claude_version claude \
+        || die "a real run pins the claude version its cells run, and it could not be measured: $CLAUDE_VERSION_WHY"
+    CLAUDE_VER="$CLAUDE_VERSION"
+fi
 
 # Coverage-honesty experiment (#866) dispatches here — cov_main exits.
 if [ "$EXPERIMENT" = "coverage-honesty" ]; then
