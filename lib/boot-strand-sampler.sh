@@ -893,7 +893,10 @@ YAML
     PROBE="set +H; $STARTUP_PROMPT_COMPOSED"
 
     # ── seed the persistent throwaway config dir (warm ≈ a production restart) ─
-    seed_claude_auth_and_trust "$CONFIG_DIR" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS"
+    # A binary that cannot run is a precondition, never a strand: refused (skip),
+    # or every boot would be sampled as one (#1772).
+    seed_claude_auth_and_trust "$CONFIG_DIR" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS" \
+        || { printf 'SKIP: %s cannot run (the reason is above)\n' "$CLAUDE_BIN"; exit 2; }
     # Warm plugin copy from the host cache: production bots restart onto
     # installed plugins, so a cold marketplace clone per boot would sample a
     # different (slower) condition — and versions match production exactly.
