@@ -136,6 +136,8 @@ fleet:
 
 Cosmetic + service-unit naming + default Telegram chat. Bots may override `chat_id` per-bot.
 
+The fleet chat is also where fleet timers' alerts go, and it is stamped into their units **together with its sender** (#1771): the channel state dir of the lexically-first declared channel bot whose own chat IS the fleet chat (a bot that overrides `chat_id` is not in it). When no bot is in the fleet chat, **neither** half is stamped, the runtime uses one bot's own chat and state dir together, and `claudlobby validate` warns — a chat paired with a token that cannot reach it is what silenced one fleet's alerts for two months.
+
 ### `fleet.accounts`
 
 Alternate Claude Code config directories. Useful when some bots authenticate against a different account. Bot stanza references the key (`account: work`); the generator writes `CLAUDE_CONFIG_DIR` into `bot.conf`.
@@ -603,7 +605,7 @@ It is **off by default** because it is the only pulse check whose subject is the
 
 **`unassigned_max_age` is a trade in both directions, and the second one matters here.** Past the cap the check stops reporting a strand *and clears its debounce state*, so the emitted signal becomes indistinguishable from "the strand resolved" — a worker idle longer than the window goes quiet again. That is bounded rather than immediate (roughly 3–4 pushes at the default 6h renotify cadence before it lapses) and it is the same expiry `overdue_dispatch` already applies via `DISPATCH_OVERDUE_MAX_AGE_S`, so it is a deliberate symmetry rather than a gap unique to this check. But a check that exists to close a silent failure does reopen a narrower one at the far end: set `unassigned_max_age: 0` to refuse the trade and keep reporting indefinitely.
 
-**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries a fixed set of `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`, plus any `fleet_pulse:` knobs — see below) and `lib/fleet-pulse.sh` sources no `.env` file, so a fleet-tier `.env` setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
+**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries a fixed set of `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, the fleet chat and its sender as a pair — `TELEGRAM_GROUP_CHAT_ID` + `TELEGRAM_STATE_DIR` — plus any `fleet_pulse:` knobs — see below) and `lib/fleet-pulse.sh` sources no `.env` file, so a fleet-tier `.env` setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
 
 Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`, `OBSERVABILITY_UNASSIGNED_CHECK`, `OBSERVABILITY_UNASSIGNED_THRESHOLD`, `OBSERVABILITY_UNASSIGNED_MAX_AGE`.
 
@@ -618,6 +620,9 @@ fleet_pulse:
   escalation_threshold: 3
   escalation_window: 15
   escalation_chat_id: "-1001234567890"
+  # The escalation chat's SENDER: the channel state dir of a bot that is a
+  # member of that chat. Required with escalation_chat_id (#1771).
+  escalation_state_dir: "~/.claude/channels/telegram-<bot-handle>"
   renotify_after_s: 21600
   rearm_window_s: 0
 ```
@@ -635,7 +640,8 @@ The composed env vars, and what each does:
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `FLEET_PULSE_ESCALATION_CHAT_ID` | _(fallback)_ | Operator override for the fleet-wide alert chat ID, honored by **all** env-less alert paths (fleet-pulse escalation, creds-check, and lib-common `_emit_fleet_signal`) via the shared `resolve_alert_target` resolver. Full precedence: this override → the composed `TELEGRAM_GROUP_CHAT_ID` (baked into every fleet timer unit) → a scan of the fleet's bots for the first non-empty `TELEGRAM_GROUP_CHAT_ID` in bot.conf (bots that omit it are skipped). If none resolves, fleet-pulse escalation is disabled and logs a warning rather than failing silently. |
+| `FLEET_PULSE_ESCALATION_CHAT_ID` | _(unset)_ | Operator override for where fleet-pulse escalations go, read by every env-less alert path through the shared `resolve_alert_target`. That resolver returns the chat **and its sender** (the channel state dir tg-post reads the token from) as ONE pair from ONE source (#1771): this override pairs **only** with `FLEET_PULSE_ESCALATION_STATE_DIR` below, and without it the escalation is **refused** — a WARNING that names the variable, and a debounced `alert_target_refused` alert to the manager's pane and the plane — never sent with a guessed token. With no override, the composed `TELEGRAM_GROUP_CHAT_ID` pairs with the `TELEGRAM_STATE_DIR` stamped beside it (or a bot in this fleet whose own chat it is; none is refused); with neither, one bot's own chat and state dir are used together. |
+| `FLEET_PULSE_ESCALATION_STATE_DIR` | _(unset)_ | From `escalation_state_dir`: the escalation chat's declared sender — the channel state dir of a bot that is a **member** of that chat (`~` and `$HOME/` are expanded at generate time, because a unit does not expand them). An escalation chat is by design nobody's own group chat, so no bot can be matched to it; this is its only partner. `claudlobby validate` warns when the chat is set without it. |
 | `FLEET_PULSE_ESCALATION_THRESHOLD` | `2` | Number of distinct bots that must hit the same critical event within the window to trigger escalation. |
 | `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
 | `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). `0` disables the re-fire. |

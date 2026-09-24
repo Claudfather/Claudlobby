@@ -507,29 +507,132 @@ class TestComposeFleetTimers:
         assert "OnBootSec=300" in timer_text
         assert "OnUnitActiveSec=300" in timer_text
 
-    def test_timer_units_carry_telegram_group_chat_id(self, tmp_path):
-        """Fleet timers must carry the fleet Telegram group so scheduled jobs
-        (e.g. creds-check) can deliver alerts via tg-post from their minimal
-        scheduler env (#542). Both the systemd .service and launchd .plist."""
+    def test_timer_units_carry_the_alert_pair(self, tmp_path, monkeypatch):
+        """Fleet timers carry the fleet Telegram group so scheduled jobs (e.g.
+        creds-check) can deliver alerts via tg-post from their minimal scheduler
+        env (#542) — AND the channel state dir of a bot in that chat, as one
+        pair (#1771): a chat alone left the runtime to take the token from
+        whichever bot a scan found first. Both the .service and the .plist."""
         from claudlobby.composer import compose_fleet_timers
 
-        root = tmp_path / "claudlobby"
-        root.mkdir()
-        (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        paths = self._paths(tmp_path)
         fleet = FleetConfig(
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-1009999999999",
+            bots={"beta": self._channel_bot("beta"), "alpha": self._quiet_bot("alpha")},
         )
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+        sender = str(tmp_path / "home" / ".claude" / "channels" / "telegram-beta_bot")
 
         svc = (timers_dir / "com.test.creds-check.service").read_text()
         assert "Environment=TELEGRAM_GROUP_CHAT_ID=-1009999999999" in svc
+        assert f"Environment=TELEGRAM_STATE_DIR={sender}" in svc
 
         plist = (timers_dir / "com.test.creds-check.plist").read_text()
         assert "<key>TELEGRAM_GROUP_CHAT_ID</key>" in plist
         assert "<string>-1009999999999</string>" in plist
+        assert "<key>TELEGRAM_STATE_DIR</key>" in plist
+        assert f"<string>{sender}</string>" in plist
+
+    def test_the_sender_is_the_first_bot_actually_in_the_fleet_chat(self, tmp_path, monkeypatch):
+        """A bot whose own chat overrides the fleet chat is NOT in the fleet
+        chat, however early it sorts; the next bot that is becomes the sender."""
+        from claudlobby.composer import fleet_alert_sender_state_dir
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-1009999999999",
+            bots={
+                "alpha": self._channel_bot("alpha", chat="-1008888888888"),
+                "gamma": self._channel_bot("gamma"),
+                "beta": self._quiet_bot("beta"),
+            },
+        )
+        assert fleet_alert_sender_state_dir(fleet) == str(
+            tmp_path / "home" / ".claude" / "channels" / "telegram-gamma_bot"
+        )
+
+    def test_no_bot_in_the_fleet_chat_stamps_neither_half(self, tmp_path, monkeypatch):
+        """No declared channel bot is in the fleet chat: stamp NEITHER, so the
+        runtime resolves both halves from one bot instead of pairing the fleet
+        chat with a token that cannot reach it. The validator says so."""
+        from claudlobby.composer import compose_fleet_timers
+        from claudlobby.validator import ValidationReport, _validate_alert_pair
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        paths = self._paths(tmp_path)
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-1009999999999",
+            bots={"alpha": self._channel_bot("alpha", chat="-1008888888888")},
+        )
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+        for unit in ("com.test.creds-check.service", "com.test.creds-check.plist"):
+            text = (timers_dir / unit).read_text()
+            assert "TELEGRAM_GROUP_CHAT_ID" not in text, unit
+            assert "TELEGRAM_STATE_DIR" not in text, unit
+
+        report = ValidationReport()
+        _validate_alert_pair(fleet, report)
+        assert any("no declared channel bot is in the fleet chat" in w for w in report.warnings)
+
+    def test_the_escalation_chat_rides_with_its_declared_partner(self, tmp_path):
+        """fleet_pulse.escalation_state_dir reaches the fleet-pulse unit beside
+        the escalation chat; without it the validator warns that the runtime
+        will REFUSE the escalation, naming the key to set."""
+        from claudlobby.composer import compose_fleet_timers
+        from claudlobby.config import FleetPulseConfig
+        from claudlobby.validator import ValidationReport, _validate_alert_pair
+
+        paths = self._paths(tmp_path)
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            fleet_pulse=FleetPulseConfig(
+                escalation_chat_id="-1007777777777",
+                escalation_state_dir="/escalation/sender",
+            ),
+        )
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+        pulse = (timers_dir / "com.test.fleet-pulse.service").read_text()
+        assert "Environment=FLEET_PULSE_ESCALATION_CHAT_ID=-1007777777777" in pulse
+        assert "Environment=FLEET_PULSE_ESCALATION_STATE_DIR=/escalation/sender" in pulse
+        plist = (timers_dir / "com.test.fleet-pulse.plist").read_text()
+        assert "<key>FLEET_PULSE_ESCALATION_STATE_DIR</key>" in plist
+
+        report = ValidationReport()
+        _validate_alert_pair(fleet, report)
+        assert not any("escalation" in w for w in report.warnings)
+        fleet.fleet_pulse.escalation_state_dir = None
+        _validate_alert_pair(fleet, report)
+        assert any("fleet_pulse.escalation_state_dir" in w and "REFUSED" in w for w in report.warnings)
+
+    @staticmethod
+    def _paths(tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        return Paths(root=root, fleet_dir=root)
+
+    @staticmethod
+    def _channel_bot(bot_id, chat=None):
+        from claudlobby.config import BotConfig, TelegramConfig
+
+        return BotConfig(
+            bot_id=bot_id, name=bot_id, expertise=["eng"],
+            telegram=TelegramConfig(handle=f"{bot_id}_bot", chat_id=chat),
+        )
+
+    @staticmethod
+    def _quiet_bot(bot_id):
+        from claudlobby.config import BotConfig
+
+        return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"], channels=[])
 
     def test_timer_units_omit_chat_id_when_absent(self, tmp_path):
         """No fleet chat id -> no TELEGRAM_GROUP_CHAT_ID env (chat-less fleets,

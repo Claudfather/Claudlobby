@@ -1867,6 +1867,35 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
+def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Warn where a fleet timer's alert chat has no sender to pair with (#1771).
+
+    The runtime resolves (chat, sender) as one pair and REFUSES a chat whose
+    sender it cannot name, so both gaps are loud there — this says so before
+    the first alert rather than at it. Gated like ``_validate_timers``: only a
+    fleet whose timers are emitted has a fleet-timer alert to deliver."""
+    sd = fleet.system_defaults
+    if not (sd.enabled and sd.timers):
+        return
+    from .composer import fleet_alert_sender_state_dir
+
+    if fleet.telegram_group_chat_id and fleet_alert_sender_state_dir(fleet) is None:
+        report.warnings.append(
+            "telegram_group_chat_id: no declared channel bot is in the fleet chat "
+            "(none has it as its own chat), so fleet timers stamp no alert target "
+            "and their alerts go to the first bot's own chat instead (#1771)"
+        )
+    fp = fleet.fleet_pulse
+    if fp is not None and fp.escalation_chat_id and not fp.escalation_state_dir:
+        report.warnings.append(
+            "fleet_pulse.escalation_chat_id is set without "
+            "fleet_pulse.escalation_state_dir: escalation pages will be REFUSED at "
+            "runtime. Set escalation_state_dir (FLEET_PULSE_ESCALATION_STATE_DIR) "
+            "to the channel state dir of a bot that is a member of the escalation "
+            "chat (#1771)"
+        )
+
+
 def _validate_ignition(
     fleet: FleetConfig,
     paths: Paths,
@@ -2216,6 +2245,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)
+    _validate_alert_pair(fleet, report)
     # Resolved once for both rungs that ask (#1680) — the cascade shells out.
     # Gated on a leaf manager because neither rung can reach a doors-consuming
     # branch without one.

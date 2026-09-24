@@ -65,6 +65,9 @@ export PANE_READY_POLL_S=0.05 PANE_RECOVER_TICKS=2 PANE_SEND_SETTLE_S=0
 # Isolation is the default here; that scenario re-exports the same fake id
 # explicitly, which is the shape it should have had from the start.
 export FLEET_PULSE_ESCALATION_CHAT_ID="-100999"
+# ...and its declared sender (#1771): an escalation chat with no partner is
+# refused, so without this no alert in the harness would even be attempted.
+export FLEET_PULSE_ESCALATION_STATE_DIR="/nonexistent/escalation-sender"
 vsock() { printf 'tmux-%s' "$1"; }
 tmux() {
     local i sock=""
@@ -793,6 +796,7 @@ CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$_tesc_fleet" BOT_ID=valtescmgr BOT_NAME=val
 
 _tesc_run() {
     CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$_tesc_fleet" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
         "$_tesc_lib/fleet-pulse.sh" "$_tesc_fleet" >/dev/null 2>&1 || true
 }
 _tesc_run
@@ -1856,6 +1860,7 @@ esc_seed() {  # <fleet> <bot> <emit rc_timeout: yes|no> — seed a sandbox bot, 
 }
 esc_run() {  # <fleet>
     CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$1" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
         "$_esc_lib/fleet-pulse.sh" "$1" >/dev/null 2>&1 || true
 }
 

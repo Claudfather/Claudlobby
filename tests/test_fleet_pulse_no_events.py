@@ -124,7 +124,11 @@ def _script_errors(root: Path) -> str:
     [
         pytest.param({}, id="summary-site"),
         pytest.param(
-            {"FLEET_PULSE_ESCALATION_CHAT_ID": "-1001234567890"}, id="escalation-site"
+            # with its declared sender (#1771), or the escalation is refused and
+            # this parameter would stop reaching the escalation site at all
+            {"FLEET_PULSE_ESCALATION_CHAT_ID": "-1001234567890",
+             "FLEET_PULSE_ESCALATION_STATE_DIR": "/nonexistent/escalation-sender"},
+            id="escalation-site",
         ),
     ],
 )

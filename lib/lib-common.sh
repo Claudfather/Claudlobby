@@ -1101,6 +1101,29 @@ resolve_bot_telegram_token() {
     ) || true
 }
 
+# channel_state_token <state_dir>
+# The Telegram token a channel state dir holds (its .env TELEGRAM_BOT_TOKEN), read
+# through the shared restricted parser, which strips one outer quote pair as
+# start-bot.sh does (the telegram plugin's own loader keeps a value verbatim).
+# THE reader for a channel dir's token -- tg-post's page path and creds-check's
+# pair check both call it, so the path that pages a human and the check that
+# certifies it cannot read the same file differently (#1771, #1608). In a
+# subshell, so none of the file's other keys reach the caller; the parser's
+# skipped-line warnings are dropped because they quote the head of the line,
+# which for a malformed token line is the token; an unreadable file is simply no
+# token, never a failing command the caller's ERR trap would record. Empty
+# output = no token there.
+channel_state_token() {
+    local state_dir="${1:-}"
+    [ -n "$state_dir" ] || return 0
+    (
+        # shellcheck disable=SC2030  # subshell-local by design: never touch the calling env
+        TELEGRAM_BOT_TOKEN=
+        parse_env_file "$state_dir/.env" 2>/dev/null || true
+        printf '%s' "${TELEGRAM_BOT_TOKEN:-}"
+    ) || true
+}
+
 # bot_expects_no_token <bot_dir>
 # True when a bot intentionally runs WITHOUT a Telegram token — a canary or
 # throwaway spun to exercise a boot/reaper path, not a real channel bot. Marked
@@ -5297,20 +5320,27 @@ _emit_fleet_signal() {
     resolve_alert_target "$bots_dir"
     # shellcheck disable=SC2154  # _alert_* are set by resolve_alert_target above
     chat_id="$_alert_chat_id"; state_dir="$_alert_state_dir"
-    local _tg_rc=0 _tg_err=""
+    local _tg_rc=0 _tg_err="" _tg_token=""
+    # The resolved pair names its sender; an ambient token (a bot session's own)
+    # is kept only when the env itself supplied that session's pair, so it can
+    # never re-split a pair the resolver took from a bot (#1771).
+    if [ "$_alert_target_src" = "env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR" ]; then
+        _tg_token="${TELEGRAM_BOT_TOKEN:-}"
+    fi
     if [ -n "$chat_id" ]; then
         # Capture stderr rather than discarding it: tg-post distinguishes no-token
         # (1), no-chat (2) and API-rejected (3), and the body is where a rejected
         # send explains itself. A >/dev/null 2>&1 here threw away the whole
         # diagnosis of an alert that never arrived.
         _tg_err=$(TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
+            TELEGRAM_BOT_TOKEN="$_tg_token" \
             "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" 2>&1) || _tg_rc=$?
     else
         # No resolvable target was ALSO silent: no attempt, no record, nothing to
         # find later. An alert with nowhere to go is a delivery failure, not a
-        # no-op, and three of four fleets are currently in exactly this state.
+        # no-op. A REFUSED pair says why and what to set, which is the detail.
         _tg_rc=2
-        _tg_err="no alert chat-id resolved for this fleet"
+        _tg_err="${_alert_refusal:-no alert chat-id resolved for this fleet}"
     fi
 
     if [ "$_tg_rc" -eq 0 ]; then
@@ -5321,8 +5351,9 @@ _emit_fleet_signal() {
         # 1. Durable record. emit_fleet_event only appends JSONL, so there is no
         #    recursion back into this function.
         emit_fleet_event "alert_delivery_failed" "$ev_source" \
-            "$(printf '{"for_event":"%s","channel":"telegram","exit":%s,"tmux_reached":%s,"detail":"%s"}' \
+            "$(printf '{"for_event":"%s","channel":"telegram","exit":%s,"tmux_reached":%s,"target":"%s","detail":"%s"}' \
                 "$(json_escape "$event_type")" "$_tg_rc" "${_sig_tmux_ok:-0}" \
+                "$(json_escape "${_alert_target_src:-none}")" \
                 "$(json_escape "$(printf '%s' "$_tg_err" | tr '\n' ' ' | cut -c1-300)")")" \
             "" fleet
         # 2. Journal. These callers are systemd/launchd timer jobs, so stderr is
@@ -5515,46 +5546,89 @@ EOF
     printf '%s' "$hit"
 }
 
-# resolve_alert_target [bots_dir]
-# THE single fleet-alert delivery-target resolver. Sets _alert_chat_id and
-# _alert_state_dir (either may be empty) so every env-less fleet-alert path —
-# fleet-pulse escalation, _emit_fleet_signal, and creds-check — resolves the
-# SAME Telegram chat-id from one precedence:
-#   1. FLEET_PULSE_ESCALATION_CHAT_ID  — operator override (route alerts anywhere)
-#   2. TELEGRAM_GROUP_CHAT_ID (env)    — the FLEET-level value the composer bakes
-#      into every fleet timer unit; preferred over the bot.conf scan so a per-bot
-#      chat_id override never hijacks a fleet-wide alert
-#   3. bot.conf scan for TELEGRAM_GROUP_CHAT_ID — for host jobs with no composed
-#      env. scan_scope "any" (default) is cross-fleet (host-scope callers run
-#      fleet-less); "fleet" restricts to <bots_dir> so a fleet-scoped caller
-#      neither pages another fleet's channel nor loses its no-receiver warning.
-# The state dir is resolved INDEPENDENTLY of the chat-id branch: the composed
-# timer env carries the chat-id but NOT TELEGRAM_STATE_DIR, and tg-post reads the
-# delivery token from that dir — so an env-supplied chat-id still scans a
-# declaring bot for its live channel dir, else delivery falls to tg-post's dead
-# default dir. Outputs via globals (bash 3.2 has no namerefs; mirrors detect_os).
+# resolve_alert_target <bots_dir> [fleet|any]
+# THE fleet-alert delivery-target resolver, shared by every env-less alert path
+# (fleet-pulse escalation, _emit_fleet_signal, creds-check). It resolves the chat
+# AND its sender -- the channel state dir tg-post reads the token from -- as ONE
+# pair from ONE source (#1771). A chat taken from the env with a token taken from
+# whichever bot a scan found first is how one fleet's alerts went to a group its
+# bot was not in, for two months, while a token-only check called it healthy.
+#   1. FLEET_PULSE_ESCALATION_CHAT_ID: an operator override that is by design
+#      nobody's own chat, so its only partner is the one declared beside it,
+#      FLEET_PULSE_ESCALATION_STATE_DIR. Missing: REFUSED, naming it.
+#   2. TELEGRAM_GROUP_CHAT_ID from the env (a fleet timer's composed chat):
+#      paired with TELEGRAM_STATE_DIR when that is set beside it, else with a bot
+#      in <bots_dir> -- the caller's own fleet, never a cross-fleet scan -- whose
+#      OWN chat it is. None: REFUSED.
+#   3. No env chat: the first bot the scan finds supplies both. scan_scope "any"
+#      (default) is cross-fleet for host jobs, which run fleet-less; "fleet"
+#      restricts it to <bots_dir>.
+# Sets _alert_chat_id and _alert_state_dir (both empty on a refusal),
+# _alert_target_src (where the pair came from: a label, never a value) and
+# _alert_refusal (empty unless refused: the reason and the fix, no ids). Every
+# caller treats an empty chat as undeliverable, so a refusal is never a send.
+# Outputs via globals (bash 3.2 has no namerefs; mirrors detect_os).
 resolve_alert_target() {
     local bots_dir="${1:-}" scan_scope="${2:-any}" _bot
     _alert_chat_id=""
-    _alert_state_dir="${TELEGRAM_STATE_DIR:-}"
+    _alert_state_dir=""
+    _alert_target_src=""
+    _alert_refusal=""
     if [ -n "${FLEET_PULSE_ESCALATION_CHAT_ID:-}" ]; then
-        _alert_chat_id="$FLEET_PULSE_ESCALATION_CHAT_ID"
-    elif [ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
-        _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
-    fi
-    # Scan a declaring bot when the chat-id is still unresolved, OR to source a
-    # live channel state dir the env did not carry (tg-post's token lives there).
-    if [ -z "$_alert_chat_id" ] || [ -z "$_alert_state_dir" ]; then
-        if [ "$scan_scope" = "fleet" ]; then
-            _bot=$(first_bot_with_conf "$bots_dir" TELEGRAM_GROUP_CHAT_ID 2>/dev/null || true)
+        if [ -n "${FLEET_PULSE_ESCALATION_STATE_DIR:-}" ]; then
+            _alert_chat_id="$FLEET_PULSE_ESCALATION_CHAT_ID"
+            _alert_state_dir="$FLEET_PULSE_ESCALATION_STATE_DIR"
+            _alert_target_src="env:FLEET_PULSE_ESCALATION_CHAT_ID+FLEET_PULSE_ESCALATION_STATE_DIR"
         else
-            _bot=$(first_bot_with_conf_any_fleet "$bots_dir" TELEGRAM_GROUP_CHAT_ID 2>/dev/null || true)
+            _alert_target_src="refused"
+            _alert_refusal="FLEET_PULSE_ESCALATION_CHAT_ID is set but has no declared sender: set FLEET_PULSE_ESCALATION_STATE_DIR (fleet.yaml fleet_pulse.escalation_state_dir) to the channel state dir of a bot that is a member of the escalation chat -- no token is guessed for it"
         fi
-        if [ -n "$_bot" ]; then
-            [ -n "$_alert_chat_id" ] || _alert_chat_id=$(bot_conf_get "$_bot" TELEGRAM_GROUP_CHAT_ID "")
-            [ -n "$_alert_state_dir" ] || _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
-        fi
+        return 0
     fi
+    if [ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
+        if [ -n "${TELEGRAM_STATE_DIR:-}" ]; then
+            _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
+            _alert_state_dir="$TELEGRAM_STATE_DIR"
+            _alert_target_src="env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR"
+            return 0
+        fi
+        _bot=$(_bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" || true)
+        if [ -n "$_bot" ]; then
+            _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
+            _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
+            _alert_target_src="env:TELEGRAM_GROUP_CHAT_ID+bot:$(basename "$_bot")"
+        else
+            _alert_target_src="refused"
+            _alert_refusal="TELEGRAM_GROUP_CHAT_ID from the environment has no sender: no bot in this fleet has it as its own chat, and no TELEGRAM_STATE_DIR was set beside it -- a scanned bot's token is not guessed for it"
+        fi
+        return 0
+    fi
+    if [ "$scan_scope" = "fleet" ]; then
+        _bot=$(first_bot_with_conf "$bots_dir" TELEGRAM_GROUP_CHAT_ID 2>/dev/null || true)
+    else
+        _bot=$(first_bot_with_conf_any_fleet "$bots_dir" TELEGRAM_GROUP_CHAT_ID 2>/dev/null || true)
+    fi
+    if [ -n "$_bot" ]; then
+        _alert_chat_id=$(bot_conf_get "$_bot" TELEGRAM_GROUP_CHAT_ID "")
+        _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
+        _alert_target_src="scan:bot:$(basename "$_bot")"
+    fi
+}
+
+# _bot_with_own_chat <bots_dir> <chat_id>
+# The first bot dir in <bots_dir> (lexical) whose OWN TELEGRAM_GROUP_CHAT_ID is
+# <chat_id> and that declares a channel state dir; prints it, or returns 1.
+_bot_with_own_chat() {
+    local bots_dir="$1" chat="$2" d
+    [ -d "$bots_dir" ] || return 1
+    for d in "$bots_dir"/*/; do
+        [ -f "$d/bot.conf" ] || continue
+        [ "$(bot_conf_get "$d" TELEGRAM_GROUP_CHAT_ID "")" = "$chat" ] || continue
+        [ -n "$(bot_conf_get "$d" TELEGRAM_STATE_DIR "")" ] || continue
+        printf '%s' "${d%/}"
+        return 0
+    done
+    return 1
 }
 
 # bot_is_manager <bot_dir>
