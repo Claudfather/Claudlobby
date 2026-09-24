@@ -18,14 +18,27 @@ expected absence passed on a plane it could not read.
 - **Every plane read goes through the shipped stdlib doors**: SQL through
   `plane-readers.connect` (read-only, schema-probed), and events through
   `plane-lookup.py`, as before. The output keeps the CLI's list mode, so no
-  caller changed how it parses.
-- **A read that cannot run refuses the check it feeds.** The check fails and
-  names the reason on its own line, whatever its verdict would have been. That
-  covers the six `val_events` checks that expect absence, which used to pass.
-  The summary says how many failures were refusals.
+  caller changed how it parses. Every read goes through `val_read`, including
+  the ones that called `dispatch-overdue.py`, `plane-lookup.py`, a
+  `plane-readers.py` snippet or the `checkins` CLI directly and threw their
+  errors away.
+- **A read that cannot run refuses every check after it in its scenario.** Each
+  such check fails and names the reason on its own line, whatever its verdict
+  would have been, so a check that expects absence no longer passes on a plane
+  it cannot read. One read often feeds several checks, so a check that did not
+  need the read is refused too, the safe direction. A refusal no check has
+  reported yet carries into the next scenario, and one never reported fails the
+  run. The summary says how many failures were refusals.
 - **The refusal is a lib-common primitive**: `harness_check` honours a ledger
-  that a harness arms (`HARNESS_REFUSALS`, written by `harness_refuse`), and a
-  harness that does not arm one behaves exactly as before.
+  that a harness arms (`HARNESS_REFUSALS`, written by `harness_refuse`), and
+  `harness_scenario` and `harness_finish` scope it. A harness that does not arm
+  one behaves exactly as before.
+- **An empty read no longer ends the run.** A grep in an assignment exits 1 when
+  it matches nothing, and under `set -e` that ended the run with no summary
+  line. Every such grep is now guarded, and a run that does abort says so, with
+  how many checks ran.
+- **Ratchet tests** hold every plane read to `val_read`, every read to the
+  checks of its own scenario, and every grep in an assignment to a guard.
 
 ### Changed — a fleet alert goes to a chat together with a sender that is in it, or it is refused (#1771 part B, #1782)
 

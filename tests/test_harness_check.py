@@ -82,50 +82,125 @@ def _counts(stdout: str) -> tuple[int, int, int]:
     return tuple(int(part.split("=")[1]) for part in line.split()[1:])
 
 
-def test_refusal_fails_the_next_check_even_one_that_says_yes(tmp_path):
+def _run_armed(tmp_path, body: str) -> tuple[subprocess.CompletedProcess, Path]:
+    """_run_script with a refusal ledger armed; the script must not abort."""
+    ledger = tmp_path / "ledger"
+    ledger.write_text("")
+    r = _run_script(body, HARNESS_REFUSALS=str(ledger))
+    assert r.returncode == 0, r.stderr
+    return r, ledger
+
+
+def test_a_refusal_fails_every_later_check_in_its_scenario(tmp_path):
     # The fail-open direction #1777 found: a check expecting ABSENCE reads an
     # unreadable source as empty and says "yes". Refused, it must FAIL, with
     # the reason on its own line, and the FAIL prefix every counter greps.
-    ledger = tmp_path / "ledger"
-    ledger.write_text("")
-    r = _run_script(
+    # EVERY later check, not the next one: one read often feeds two absence
+    # checks. The second check here may not even read it; it is refused too.
+    r, ledger = _run_armed(
+        tmp_path,
         'harness_refuse "no plane db at /x/plane.db"\n'
         'harness_check "nothing fired" "yes"\n'
-        'harness_check "the next check scores again" "yes"',
-        HARNESS_REFUSALS=str(ledger),
+        'harness_check "and nothing else fired either" "yes"',
+    )
+    assert _counts(r.stdout) == (0, 2, 2)
+    for desc in ("nothing fired", "and nothing else fired either"):
+        assert (f"  FAIL  {desc} — REFUSED, a read before it in this scenario "
+                "could not run: no plane db at /x/plane.db") in r.stdout
+        assert f"  PASS  {desc}" not in r.stdout
+    assert ledger.read_text() == ""   # reported, so no longer pending
+
+
+def test_a_scenario_boundary_ends_a_refusal_a_check_reported(tmp_path):
+    r, _ = _run_armed(
+        tmp_path,
+        'harness_refuse "cannot read A"\n'
+        'harness_check "scenario A" "yes"\n'
+        "harness_scenario\n"
+        'harness_check "scenario B scores again" "yes"',
+    )
+    assert _counts(r.stdout) == (1, 1, 1)
+    assert "  PASS  scenario B scores again" in r.stdout
+
+
+def test_a_refusal_no_check_reported_carries_into_the_next_scenario(tmp_path):
+    # A read in a scenario's setup can run before its header prints. Dropping
+    # it at the boundary would let that scenario's own checks score it, and a
+    # check expecting absence would pass.
+    r, _ = _run_armed(
+        tmp_path,
+        'harness_check "scenario A" "yes"\n'
+        'harness_refuse "setup read of B"\n'
+        "harness_scenario\n"
+        'harness_check "scenario B: nothing fired" "yes"',
+    )
+    assert _counts(r.stdout) == (1, 1, 1)
+    assert ("  FAIL  scenario B: nothing fired — REFUSED, a read before it in "
+            "this scenario could not run: setup read of B") in r.stdout
+
+
+def test_a_boundary_keeps_only_what_no_check_reported(tmp_path):
+    # Reported and unreported refusals in one scenario: the boundary drops the
+    # first and carries the second, and the next scenario names only that one.
+    r, _ = _run_armed(
+        tmp_path,
+        'harness_refuse "read one"\n'
+        'harness_check "A" "yes"\n'
+        'harness_refuse "read two"\n'
+        "harness_scenario\n"
+        'harness_check "B" "yes"',
+    )
+    assert _counts(r.stdout) == (0, 2, 2)
+    b_line = [ln for ln in r.stdout.splitlines() if ln.startswith("  FAIL  B ")][0]
+    assert b_line.endswith("could not run: read two"), b_line
+
+
+def test_finish_fails_the_run_on_a_refusal_no_check_reported(tmp_path):
+    r, _ = _run_armed(
+        tmp_path,
+        'harness_check "last check" "yes"\n'
+        'harness_refuse "a read after it"\n'
+        "harness_finish",
+    )
+    assert _counts(r.stdout) == (1, 1, 1)
+    assert ("  FAIL  a read after the last check could not run — REFUSED: "
+            "a read after it") in r.stdout
+
+
+def test_finish_does_not_count_a_refusal_twice(tmp_path):
+    r, _ = _run_armed(
+        tmp_path, 'harness_refuse "read"\nharness_check "refused" "yes"\nharness_finish'
+    )
+    assert _counts(r.stdout) == (0, 1, 1)
+
+
+def test_unarmed_boundary_and_finish_change_nothing():
+    r = _run_script(
+        'harness_check "a" "yes"\nharness_scenario\nharness_check "b" "no"\nharness_finish',
+        HARNESS_REFUSALS="",
     )
     assert r.returncode == 0, r.stderr
-    assert _counts(r.stdout) == (1, 1, 1)
-    assert ("  FAIL  nothing fired — REFUSED, a read it depends on could not run: "
-            "no plane db at /x/plane.db") in r.stdout
-    assert "  PASS  nothing fired" not in r.stdout
-    assert "  PASS  the next check scores again" in r.stdout   # consumed once
-    assert ledger.read_text() == ""
+    assert _counts(r.stdout) == (1, 1, 0)
+    assert "REFUSED" not in r.stdout
 
 
 def test_refusal_crosses_a_command_substitution(tmp_path):
     # Readers run inside $( ), where the counters cannot be reached: the ledger
     # is a file for exactly this. set -e is armed, as in the harnesses, and
     # the refusal must not abort the caller.
-    ledger = tmp_path / "ledger"
-    ledger.write_text("")
-    r = _run_script(
+    r, _ = _run_armed(
+        tmp_path,
         'set -euo pipefail\n'
         'n=$(harness_refuse "first"; harness_refuse "second"; printf "")\n'
         '[ "${n:-1}" -eq 0 ] && v=yes || v=no\n'
         'harness_check "count is zero" "$v"',
-        HARNESS_REFUSALS=str(ledger),
     )
-    assert r.returncode == 0, r.stderr
     assert _counts(r.stdout) == (0, 1, 1)
     assert "could not run: first; second" in r.stdout
 
 
 def test_a_multi_line_reason_stays_one_ledger_entry(tmp_path):
-    ledger = tmp_path / "ledger"
-    ledger.write_text("")
-    r = _run_script('harness_refuse "line one\nline two\n"', HARNESS_REFUSALS=str(ledger))
-    assert r.returncode == 0, r.stderr
+    _, ledger = _run_armed(tmp_path, 'harness_refuse "line one\nline two\n"')
     assert ledger.read_text() == "line one line two\n"
 
 
