@@ -558,17 +558,21 @@ else
     unset TELEGRAM_GROUP_CHAT_ID TELEGRAM_STATE_DIR
 fi
 
-# resolve_delivery_token echoes the pair's SENDER token, validated live with
-# getMe (empty if none): the declared channel bot whose own state dir IS the
-# pair's, its token resolved through the token SSOT (resolve_bot_telegram_token,
-# which reaches the fleet's real tokens). Never the first live token a scan
-# finds -- that could belong to a bot outside the chat, which is the split that
-# silenced one fleet's alerts for two months while getMe called it healthy.
-# Empty: tg-post reads the pair's own state dir, and a dead or absent sender is
-# what check_alert_pair reports.
+# resolve_delivery_token sets _delivery_token / _delivery_state_dir /
+# _delivery_bot to the first declared channel bot IN the resolved chat (its own
+# TELEGRAM_GROUP_CHAT_ID is that chat) whose token getMe confirms live, the token
+# resolved through the token SSOT (resolve_bot_telegram_token, which reaches the
+# fleet's real tokens). That is #542's skip of a dead sender, kept INSIDE the
+# pair: a live token of a bot outside the chat is the split that silenced one
+# fleet's alerts for two months while getMe called it healthy (#1771). All empty
+# when no bot in the chat has a live token -- tg-post then reads the pair's own
+# state dir, and check_alert_pair reports what is wrong.
 resolve_delivery_token() {
+    _delivery_token=""
+    _delivery_state_dir=""
+    _delivery_bot=""
     local _dir _declared _d _tok _fdir
-    [ -n "${_alert_state_dir:-}" ] || return 0
+    [ -n "${_alert_chat_id:-}" ] || return 0
     _dir="$(resolve_bots_dir "$FLEET_ARG")"
     [ -d "$_dir" ] || return 0
     _fdir="$(resolve_fleet_dir "$FLEET_ARG")" || _fdir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
@@ -576,28 +580,36 @@ resolve_delivery_token() {
     for _d in "$_dir"/*/; do
         [ -f "$_d/bot.conf" ] || continue
         bot_in_fleet "$(basename "$_d")" "$_declared" || continue
-        [ "$(bot_conf_get_path "$_d" TELEGRAM_STATE_DIR "")" = "$_alert_state_dir" ] || continue
+        [ -n "$(bot_conf_get "$_d" TELEGRAM_BOT_HANDLE "")" ] || continue
+        [ "$(bot_conf_get "$_d" TELEGRAM_GROUP_CHAT_ID "")" = "$_alert_chat_id" ] || continue
         _tok="$(resolve_bot_telegram_token "$_d")" || true
-        [ -n "$_tok" ] || return 0
+        [ -n "$_tok" ] || continue
         if [ "$(_telegram_getme "$_tok" | "$JQ" -r '.ok // false' 2>/dev/null)" = "true" ]; then
-            printf '%s' "$_tok"
+            _delivery_token="$_tok"
+            _delivery_state_dir="$(bot_conf_get_path "$_d" TELEGRAM_STATE_DIR "")"
+            _delivery_bot="$(basename "$_d")"
+            return 0
         fi
-        return 0
     done
 }
 
-# The sender's token, exported so record_and_alert's tg-post uses it; skipped
-# when the env already carries this pair's token (a bot session run by hand,
-# whose own env pair it is). Any other ambient token is dropped: it would
-# re-split the pair.
+# The sender's token, exported with ITS state dir so record_and_alert's tg-post
+# sends as that bot; skipped when the env already carries this pair's token (a
+# bot session run by hand, whose own env pair it is). Any other ambient token is
+# dropped: it would re-split the pair.
 # shellcheck disable=SC2154  # set by resolve_alert_target (sourced lib-common)
 if [ "$_alert_target_src" != "env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR" ]; then
     unset TELEGRAM_BOT_TOKEN
 fi
 if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    _dtok="$(resolve_delivery_token)" || true
-    if [ -n "${_dtok:-}" ]; then
-        export TELEGRAM_BOT_TOKEN="$_dtok"
+    resolve_delivery_token
+    if [ -n "$_delivery_token" ]; then
+        export TELEGRAM_BOT_TOKEN="$_delivery_token"
+        if [ -n "$_delivery_state_dir" ]; then
+            export TELEGRAM_STATE_DIR="$_delivery_state_dir"
+            _alert_state_dir="$_delivery_state_dir"
+        fi
+        _alert_target_src="${_alert_target_src}, delivered by bot:${_delivery_bot}"
         # Wording is a tested contract (test_creds_check_telegram.py): this
         # breadcrumb firing iff a token was exported is the only observable
         # that distinguishes a dropped empty-token guard.
