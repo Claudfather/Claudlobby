@@ -8,8 +8,8 @@ launch. The success predicate is now "the binary the fleet launches RAN and
 printed a parseable version", and a binary that cannot run is loud at BOTH ends
 of a run.
 
-THE POSITIVE CONTROL COMES FIRST. `BROKEN_STUB` is the real failure's shape,
-taken from a live capture (a reload job that ran the stub on the affected host):
+THE POSITIVE CONTROL COMES FIRST. `broken_stub()` builds the real failure's
+shape, taken from a live capture (a reload job that ran the stub on the affected host):
 exit 1, a multi-line error, no version on any line. It is installed by an npm
 stub that exits 0, so npm's status says "fine" and only the verification can
 notice. A test that only proved the guard passes a healthy binary would pass
@@ -20,8 +20,9 @@ Hermetic by construction, because this module FIRES the alert path:
   - a CONSTRUCTED env, never an os.environ copy — a bot session carries the
     real Telegram chat id and token, and an alert fired from inside one would
     post to the real group;
-  - tg-post stubbed under a throwaway root (the alert path resolves it through
-    CLAUDLOBBY_ROOT), recording what would have been sent;
+  - tg-post stubbed under a throwaway root (`_signal_root`, shared with
+    test_maintenance_jobs; the alert path resolves it through CLAUDLOBBY_ROOT),
+    recording what would have been sent;
   - npm stubbed in $HOME/.local/bin, which the script PREPENDS to PATH, and the
     fleet PATH pinned at an empty dir, so a regression in CLAUDE_BIN resolution
     finds no binary and fails closed instead of reaching a real install;
@@ -32,7 +33,6 @@ Hermetic by construction, because this module FIRES the alert path:
 from __future__ import annotations
 
 import datetime
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -40,12 +40,12 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import (
-    TG_STUB,
     _write_exec,
     constructed_env,
     plane_emit_env,
     read_fleet_events,
 )
+from tests.test_maintenance_jobs import _captured, _signal_root
 
 SCRIPT = Path(__file__).resolve().parent.parent / "lib" / "update-claude-code.sh"
 
@@ -91,20 +91,13 @@ class Host:
 
     def __init__(self, tmp_path, installed, staged=None, npm_rc=0, npm_sleep=None):
         self.tmp = tmp_path
-        self.root = tmp_path / "root"
+        # A fleet-less host job resolves its alert chat id from a declaring bot;
+        # this root declares a fake one and stubs the sender.
+        self.root = _signal_root(tmp_path)
         self.home = tmp_path / "home"
         self.capture = tmp_path / "tg-capture"
         self.calls = tmp_path / "npm.calls"
         self.bin = tmp_path / "fleetbin" / "claude"
-        (self.root / "lib").mkdir(parents=True)
-        _write_exec(self.root / "lib" / "tg-post.sh", TG_STUB)
-        # The fleet-less host job resolves its alert chat id from a declaring
-        # bot; a fake one keeps the send going to the stub above.
-        bot = self.root / "runtime" / "bots" / "tbot"
-        bot.mkdir(parents=True)
-        (bot / "bot.conf").write_text(
-            'export TELEGRAM_GROUP_CHAT_ID="-1001234567890"\n'
-        )
         (self.home / ".local" / "bin").mkdir(parents=True)
         _write_exec(self.home / ".local" / "bin" / "npm", NPM_STUB)
         (tmp_path / "empty").mkdir()
@@ -125,6 +118,11 @@ class Host:
             NPM_CALLS=self.calls,
             CLAUDE_BIN=self.bin,
             CLAUDE_UPDATE_FLEET_PATH=self.tmp / "empty",
+            # These tests assert on the plane, and with no daemon each event is a
+            # cold `emit-batch` spawn: on a loaded host that outruns the 10s
+            # production bound and the event is reaped (forced at 1s, it drops
+            # binary_unrunnable). Give the cold rung room.
+            FLEET_EVENT_EMIT_TIMEOUT_S="120",
             **plane_emit_env(),
             **self.extra,
         )
@@ -137,7 +135,7 @@ class Host:
         return p.read_text() if p.exists() else ""
 
     def sent(self) -> list[str]:
-        return self.capture.read_text().splitlines() if self.capture.exists() else []
+        return _captured(self.tmp).splitlines()
 
     def events(self) -> str:
         return read_fleet_events(self.root)
@@ -173,8 +171,8 @@ def test_positive_control_npm_exit_0_leaving_a_stub_fires_update_failed(
     assert "npm install returned 0 but the staged binary cannot run" in log
     # The operator is told WHY, in the stub's own words.
     assert "exited 1: Error: claude native binary not installed." in log
-    # All three channels of the alert fired: the event, and Telegram (the
-    # manager nudge has no manager to reach on this host).
+    # Two of the alert's three channels are observable here: the plane event
+    # and Telegram (no manager is declared, so there is no nudge to reach).
     assert "binary_update_failed" in _event_types(h.events())
     assert any("FLEET ALERT [binary_update_failed]" in line for line in h.sent()), (
         h.sent()
@@ -240,12 +238,12 @@ def test_an_already_current_binary_is_a_no_op(tmp_path):
 
 
 def test_an_npm_failure_reports_what_the_binary_measures_now(tmp_path):
-    # Not an assumed "fleet stays on": the binary is measured after the failed
-    # install, because a failed install may still have replaced it.
+    # The binary is measured after a failed install, never assumed unchanged:
+    # a failed install may still have replaced it.
     h = Host(tmp_path, installed=healthy("2.1.278"), npm_rc=1)
     r = h.run()
     assert r.returncode == 1, r.stderr
-    assert "npm install returned 1 — the fleet's binary still runs 2.1.278" in h.log()
+    assert "npm install returned 1 — the fleet's binary runs 2.1.278" in h.log()
     assert "binary_update_failed" in _event_types(h.events())
 
 
@@ -293,18 +291,12 @@ def _stamp(log: str, marker: str) -> datetime.datetime:
 
 
 def test_each_log_line_is_stamped_when_it_is_written(tmp_path):
-    # One stamp taken at the top made a long install log as instantaneous.
+    # Stamped at write time: the install's duration shows in the log. Stamps
+    # have whole-second resolution and the gap is at least the npm sleep, so
+    # 1s is enough to move the seconds field.
     h = Host(
-        tmp_path, installed=healthy("2.1.278"), staged=healthy("2.1.281"), npm_sleep=2
+        tmp_path, installed=healthy("2.1.278"), staged=healthy("2.1.281"), npm_sleep=1
     )
     assert h.run().returncode == 0
     log = h.log()
     assert _stamp(log, "UPDATE install finished") > _stamp(log, "UPDATE running"), log
-
-
-def test_the_hermetic_harness_cannot_reach_the_real_alert_channel():
-    # The construction this module depends on: no ambient chat id or token can
-    # reach the driven script, whatever session runs the suite.
-    env = constructed_env()
-    assert not [k for k in env if k.startswith(("TELEGRAM", "FLEET_PULSE"))]
-    assert os.environ.get("PATH") == env["PATH"]

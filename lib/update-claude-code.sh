@@ -7,22 +7,15 @@
 # or the weekly worker-only bounce (weekly-worker-restart.sh). Retiring the old
 # daily fleet-bounce here is what removes the daily-reset context loss.
 #
-# SUCCESS IS A MEASUREMENT OF THE STAGED BINARY, NOT OF npm. The update worked
-# only when the binary the fleet launches RAN (exit 0) and printed a parseable
-# version. npm can exit 0 while omitting the platform-native optional
-# dependency, which leaves a stub that prints an error and exits 1: every bot
-# that starts or restarts afterwards fails to launch, while the bots already
-# running carry on from the replaced binary and hide it. So:
-#   - a binary that cannot run AFTER the install raises binary_update_failed
-#     (fleet event + manager nudge + Telegram) and the run exits non-zero;
-#   - a binary that already cannot run BEFORE the install raises
-#     binary_unrunnable first — an outage in progress, not a routine starting
-#     state — and a reinstall that repairs it says so (binary_repaired);
-#   - an install that returned non-zero raises binary_update_failed with what
-#     the binary measures NOW, never an assumed "fleet stays on".
-# A merely STALE binary is low-urgency (bounded to <=1 week by the weekly worker
-# restart); an UNRUNNABLE one is the opposite, which is why they are separate
-# signals.
+# SUCCESS IS A MEASUREMENT OF THE STAGED BINARY, NOT OF npm: the binary the
+# fleet launches must RUN (exit 0) and print a parseable version. npm can exit 0
+# while omitting the platform-native optional dependency, leaving a stub that
+# exits 1 — every bot that starts or restarts afterwards fails to launch, while
+# the bots already running hide it. So an UNRUNNABLE binary is a different
+# signal from a STALE one (stale is bounded to <=1 week by the weekly worker
+# restart): it is raised at both ends of a run — binary_unrunnable before the
+# install, binary_update_failed after it — and binary_repaired says when a
+# reinstall fixed it.
 #
 # Usage: update-claude-code.sh [<fleet-name>]
 #   The optional fleet name is recorded with the run; this script restarts no bot.
@@ -48,9 +41,7 @@ LOG_DIR="${CLAUDLOBBY_ROOT}/state"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/claude-update.log"
 
-# Every line is stamped when it is WRITTEN. One stamp taken at the top and
-# reused made a long install log as instantaneous, and how long an install ran
-# is evidence when one goes wrong.
+# Stamped at write time: how long an install ran is evidence when one goes wrong.
 log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
 
 # Loud failure: raise it through the shared emit_failure_alert primitive (fleet
@@ -67,16 +58,17 @@ update_failed() {
 # --- Resolve the binary the FLEET launches (not this script's own PATH) ------
 # The update must target the SAME claude that start-bot.sh runs. This script's
 # PATH (above) prepends the user prefixes so npm/node resolve under a bare timer
-# env — but start-bot.sh:49 launches with the SYSTEM dirs FIRST, so the fleet
-# runs e.g. /usr/bin/claude even when ~/.npm-global holds a newer copy.
+# env — but start-bot.sh exports its launch PATH with the SYSTEM dirs FIRST, so
+# the fleet runs e.g. /usr/bin/claude even when ~/.npm-global holds a newer copy.
 # Detecting via this script's PATH updated that shadow user copy and left the
 # fleet's binary stale (#635). Mirror start-bot's ordering for detection +
 # version + the sudo choice; the PATH above still finds npm/node to RUN the
-# install. (Ordering mirrors start-bot.sh:49 — keep the two in sync.)
-# CLAUDE_BIN is the same override start-bot.sh:176 launches with — when the
-# fleet pins its binary explicitly, the updater targets THAT one (SSOT). Absent
-# it, mirror start-bot.sh:49's launch ordering. CLAUDE_UPDATE_FLEET_PATH lets a
-# test / an unusual host substitute the resolution order.
+# install. (A hand copy of start-bot's launch order — keep the two in sync;
+# one shared resolver is #1772.)
+# CLAUDE_BIN is the same override start-bot.sh launches with — when the fleet
+# pins its binary explicitly, the updater targets THAT one (SSOT). Absent it,
+# mirror start-bot's launch ordering. CLAUDE_UPDATE_FLEET_PATH lets a test / an
+# unusual host substitute the resolution order.
 _FLEET_PATH="${CLAUDE_UPDATE_FLEET_PATH:-/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:$_HOMEBREW/bin}}"
 fleet_claude() {
     if [ -n "${CLAUDE_BIN:-}" ]; then printf '%s' "$CLAUDE_BIN"; return; fi
@@ -88,11 +80,10 @@ fleet_claude() {
 # Sets CLAUDE_VERSION and returns 0; otherwise leaves CLAUDE_VERSION empty, sets
 # CLAUDE_VERSION_WHY and returns 1. There is deliberately NO sentinel value: a
 # could-not-measure rendered as a string gets logged, compared and diffed like a
-# version, and "<old> -> <sentinel>" then reads as a successful update. Callers
-# branch on the return code, never on the text. This is the rule
-# claudlobby/source_state.py decides for read doors (unreachable is not a
-# value), kept local because that module answers whether a PATH can be opened,
-# and a stub that cannot run opens fine.
+# version. Callers branch on the return code, never on the text. This is the
+# rule claudlobby/source_state.py decides for read doors (unreachable is not a
+# value); that module answers whether a PATH can be opened, and a stub that
+# cannot run opens fine. Local until a second consumer needs it (#1772).
 measure_claude_version() {
     CLAUDE_VERSION=""
     CLAUDE_VERSION_WHY=""
@@ -102,9 +93,9 @@ measure_claude_version() {
         CLAUDE_VERSION_WHY="no claude binary resolved"
         return 1
     fi
-    # The exit status is settled INSIDE the substitution (|| exit), at the point
-    # the ERR trap install_error_trap armed would otherwise see a failing binary
-    # — the guard session_cli_path (lib-common) uses, for the same reason.
+    # Settled inside the substitution (|| exit) so install_error_trap never sees
+    # the failing binary. Unneeded on bash 5.2 (measured: callers are all `if`s,
+    # whose ERR suppression reaches in); kept for bash 3.2, unmeasured.
     out="$("$p" --version 2>/dev/null || exit $?)" || rc=$?
     first="${out%%$'\n'*}"
     if [ "$rc" -eq 0 ] && [[ $first =~ $re ]]; then
@@ -129,20 +120,15 @@ measure_claude_version() {
 _claude_path="$(fleet_claude)"
 old_version=""
 old_why=""
+_current="not installed"
 if [ -n "$_claude_path" ]; then
     if measure_claude_version; then
         old_version="$CLAUDE_VERSION"
+        _current="$old_version"
     else
         old_why="$CLAUDE_VERSION_WHY"
+        _current="CANNOT RUN ($old_why)"
     fi
-fi
-
-if [ -n "$old_version" ]; then
-    _current="$old_version"
-elif [ -n "$old_why" ]; then
-    _current="CANNOT RUN ($old_why)"
-else
-    _current="not installed"
 fi
 log "UPDATE starting (current: $_current, target: ${_claude_path:-none}, fleet: ${FLEET:-none})"
 
@@ -166,23 +152,13 @@ npm_rc=0
 log "UPDATE install finished (npm exit $npm_rc)"
 
 # --- Verify the STAGED binary: this, not npm's exit status, is the verdict ----
-new_version=""
-new_why=""
 if measure_claude_version; then
     new_version="$CLAUDE_VERSION"
+    [ "$npm_rc" -eq 0 ] || update_failed 1 "npm install returned $npm_rc — the fleet's binary runs $new_version"
+elif [ "$npm_rc" -ne 0 ]; then
+    update_failed 1 "npm install returned $npm_rc and the fleet's binary cannot run ($CLAUDE_VERSION_WHY)"
 else
-    new_why="$CLAUDE_VERSION_WHY"
-fi
-
-if [ "$npm_rc" -ne 0 ]; then
-    if [ -n "$new_version" ]; then
-        update_failed 1 "npm install returned $npm_rc — the fleet's binary still runs $new_version"
-    else
-        update_failed 1 "npm install returned $npm_rc and the fleet's binary cannot run ($new_why)"
-    fi
-fi
-if [ -z "$new_version" ]; then
-    update_failed 1 "npm install returned 0 but the staged binary cannot run ($new_why) — a bot that starts or restarts on this host will not launch until it is repaired"
+    update_failed 1 "npm install returned 0 but the staged binary cannot run ($CLAUDE_VERSION_WHY) — a bot that starts or restarts on this host will not launch until it is repaired"
 fi
 log "UPDATE verified: the staged binary ran and reported $new_version"
 
@@ -190,18 +166,13 @@ if [ -n "$old_why" ]; then
     log "UPDATE repaired: the binary could not run before the update and now runs $new_version (staged; applied on next restart)"
     emit_fleet_notice "$BOTS_DIR" "binary_repaired" \
         "the fleet's claude binary runs again: $new_version (before this update it could not run: $old_why)"
-    exit 0
-fi
-
-# --- Check if version actually changed ---
-if [ "$old_version" = "$new_version" ]; then
+elif [ "$old_version" = "$new_version" ]; then
     log "UPDATE no-op: already on $new_version"
-    exit 0
+else
+    # Download-only: the new binary is staged in place. Bots pick it up on their
+    # next restart — any natural restart, or the weekly worker-only bounce
+    # (weekly-worker-restart.sh). No fleet bounce here: that daily forced
+    # restart was the daily-reset context loss this role shift removes.
+    log "UPDATE version changed: ${old_version:-not installed} → $new_version (staged; applied on next restart)"
 fi
-
-# Download-only: the new binary is staged in place. Bots pick it up on their
-# next restart — any natural restart, or the weekly worker-only bounce
-# (weekly-worker-restart.sh). No fleet bounce here: that daily forced restart
-# was the daily-reset context loss this role shift removes.
-log "UPDATE version changed: ${old_version:-not installed} → $new_version (staged; applied on next restart)"
 exit 0
