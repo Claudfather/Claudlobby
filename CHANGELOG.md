@@ -197,13 +197,16 @@ never binds.
   listed but unregistered type would never page, silently.
 - **Pinned in CI since #1780.** `tests/test_crash_loop_wiring.py` (first drafted
   by vera) drives the real keepalive and fleet-pulse against a stateful
-  `systemctl` stub, at the real uptime and at a simulated 120 s and 30 s. It pins
-  keepalive's skip, its carry and the order of carry and restart, and
-  fleet-pulse's page, its suppression of the session and service pages, and its
-  clearing. Not pinned there: the `crash_loop` event's own keys and page text.
-  Both stubs now answer only what `-p` asks, as systemd does, so a call that
-  stopped asking for `NRestarts` reads as the "no verdict" it would be on a real
-  host.
+  `systemctl` stub. It pins keepalive's skip, its exit status and its plane
+  event; its carry, through either unit name, and the order of carry and
+  restart; and fleet-pulse's page, the `crash_loop` event and its keys, its
+  suppression of the session and service pages, and its clearing, which a
+  `none` or a `starting` read does not do. K2, K3, K6 and the C1 and C2 controls
+  also run at a simulated uptime of 120 s and 30 s; the other tests run at the
+  real one. Not pinned there: the page's text, whose only carrier is a tmux push to
+  the manager, which no scene sets up. Both stubs answer only what `-p` asks,
+  as systemd does and in every spelling of `-p`, so a call that stopped asking
+  for `NRestarts` reads as the "no verdict" it would be on a real host.
 
 **Out of scope:** stopping the loop or changing the start limit (#1769 option
 (a)), which is a policy call. `update-claude-code.sh` accepting `unknown` as a
@@ -211,13 +214,18 @@ version is owned separately.
 
 **Rollout:** a `lib/` change, read on demand per use, so it is live on every
 bot the moment the install is pulled. It deploys with the next deliberate
-rollout rather than on merge. **Restart the plane daemon after the pull.** The
-`crash_loop` severity is stamped at ingest by the RESIDENT daemon, from the
-registry it loaded at start, and there is no schema bump, so nothing makes it
-repair itself: a daemon started before the pull stores `crash_loop` with NULL
-severity, and the escalation, `brief` and `events --critical` never see it (the
-manager push still fires). Rows stored meanwhile stay NULL after the restart
-(measured with real daemons in the #1774 review).
+rollout rather than on merge. **Restart the plane daemon after the pull**
+(commands: "Deploying a migration, or a registry change" in
+`documentation/architecture/observable-plane.md`), and on Linux confirm it
+took: `systemctl --user show -p ActiveEnterTimestamp claudlobby-plane-daemon`
+must read later than the pull. Nothing else shows it, since a `crash_loop` row
+cannot be waited for. The `crash_loop` severity is stamped at ingest by the
+RESIDENT daemon, from the registry it loaded at start, and there is no schema
+bump, so nothing makes it repair itself: a daemon started before the pull
+stores `crash_loop` with NULL severity, and the escalation, `brief` and
+`events --critical` never see it (the manager push still fires). Rows stored
+meanwhile stay NULL after the restart (measured with real daemons in the #1774
+review).
 
 ### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
 

@@ -138,6 +138,13 @@ launchctl kickstart -k gui/$UID/claudlobby-plane-daemon    # macOS
 systemctl --user restart claudlobby-plane-daemon           # Linux
 ```
 
+Confirm the bounce took (Linux): the timestamp must read later than the pull. A
+new critical type's first row cannot be waited for, so nothing else shows it:
+
+```
+systemctl --user show -p ActiveEnterTimestamp claudlobby-plane-daemon
+```
+
 **Where the loop shows.** Not `plane doctor`: a newer db makes every
 migrating door REFUSE at 4 through `_guarded` *before* a single rung prints,
 so its schema rung is unreachable in exactly this condition. What an operator
