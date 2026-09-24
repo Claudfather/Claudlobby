@@ -165,6 +165,7 @@ FLEET_PULSE_ENV_KEYS: dict[str, str] = {
     "escalation_threshold": "FLEET_PULSE_ESCALATION_THRESHOLD",
     "escalation_window": "FLEET_PULSE_ESCALATION_WINDOW",
     "escalation_chat_id": "FLEET_PULSE_ESCALATION_CHAT_ID",
+    "escalation_state_dir": "FLEET_PULSE_ESCALATION_STATE_DIR",
     "renotify_after_s": "FLEET_PULSE_RENOTIFY_AFTER_S",
     "rearm_window_s": "FLEET_PULSE_REARM_WINDOW_S",
 }
@@ -191,6 +192,13 @@ class FleetPulseConfig:
     escalation_threshold: int | None = None
     escalation_window: int | None = None
     escalation_chat_id: str | None = None
+    # The escalation chat's SENDER: the channel state dir of a bot that is a
+    # member of that chat (#1771). An escalation chat is by design nobody's own
+    # group chat, so no bot can be matched to it; without this partner the
+    # runtime REFUSES the escalation and names this variable, rather than send
+    # with whichever bot's token a scan finds. Absolute once composed — a unit's
+    # Environment= does not expand $HOME, so `~` / `$HOME` are expanded here.
+    escalation_state_dir: str | None = None
     renotify_after_s: int | None = None
     rearm_window_s: int | None = None
 
@@ -1401,10 +1409,17 @@ def _coerce_fleet_pulse(raw: dict | None) -> FleetPulseConfig | None:
         return None if v is None or v == "" else int(v)
 
     chat = raw.get("escalation_chat_id")
+    sender = raw.get("escalation_state_dir")
+    if sender is not None and str(sender) != "":
+        sender = str(sender)
+        if sender.startswith("$HOME/"):
+            sender = str(Path.home() / sender[len("$HOME/"):])
+        sender = str(Path(sender).expanduser())
     return FleetPulseConfig(
         escalation_threshold=_int("escalation_threshold"),
         escalation_window=_int("escalation_window"),
         escalation_chat_id=None if chat is None else str(chat),
+        escalation_state_dir=None if sender in (None, "") else sender,
         renotify_after_s=_int("renotify_after_s"),
         rearm_window_s=_int("rearm_window_s"),
     )

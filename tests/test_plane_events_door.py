@@ -474,6 +474,7 @@ def _pulse(root, libdir, **extra):
     env = _door_env(root, TMUX_TMPDIR=str(root / "tmux"),
                     PATH=os.environ.get("PATH", "/usr/bin:/bin"),
                     FLEET_PULSE_ESCALATION_CHAT_ID="-1001234567890",
+                    FLEET_PULSE_ESCALATION_STATE_DIR=str(root / "escalation-sender"),
                     FLEET_PULSE_ESCALATION_THRESHOLD="2", **extra)
     return subprocess.run(["bash", str(libdir / "fleet-pulse.sh"), F], capture_output=True, text=True,
                           timeout=300, env=env)

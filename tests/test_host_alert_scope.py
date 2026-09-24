@@ -45,6 +45,9 @@ SCRIPTS_REACHING_DOOR = {
     "reload-fleet", "rolling-restart", "start-bot", "update-claude-code",
     "update-siblings", "validate-bot-change", "weekly-worker-restart",
     "vault-sync",
+    # #1771: a REFUSED alert target is raised through emit_failure_alert (a plane
+    # event and the manager's pane, the channels that do not need the target).
+    "fleet-pulse", "creds-check",
 }
 
 # Of those, the ones systemd runs with NO fleet TODAY -- the retrofit half.
@@ -71,6 +74,8 @@ LATENT = {"update-siblings", "vault-sync"}
 CORRECT = {
     "keepalive", "migrate-fleet-to-system", "reload-fleet", "rolling-restart",
     "start-bot", "weekly-worker-restart", "validate-bot-change",
+    # fleet jobs: each takes its fleet positionally and resolves in its own bots dir
+    "fleet-pulse", "creds-check",
 }
 
 def _callers() -> set[str]:

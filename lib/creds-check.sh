@@ -542,25 +542,37 @@ _telegram_getme() {
 }
 
 # ---------------------------------------------------------------------
-# Alert delivery token (#542)
+# Alert target: one (chat, sender) pair, and the sender's own token (#542, #1771)
 # ---------------------------------------------------------------------
-# record_and_alert delivers via tg-post, which needs a valid bot token. A
-# scheduled run carries none in its env, and tg-post's channel-dir fallback is
-# unreliable — a dead or absent default-channel token drops every alert silently
-# while the run still exits 0. resolve_delivery_token echoes the first declared
-# channel bot's token that getMe confirms is live (empty if none), resolved via
-# the token SSOT (resolve_bot_telegram_token, which reaches the fleet's real
-# tokens). Validated so a bot whose own token is dead — exactly what this script
-# exists to catch — cannot become the silent alert channel.
-#
-# NOTE: the chat-id side is now unified — this path, fleet-pulse escalation, and
-# _emit_fleet_signal all resolve the target chat-id via lib-common's
-# resolve_alert_target (#572). The TOKEN side is not yet: this validated resolver
-# + _telegram_getme still live here, while the other two paths lean on tg-post's
-# fragile channel-dir token. Promoting this pair to lib-common and pointing all
-# three at it would give them one validated delivery path (follow-up: #552).
+# record_and_alert delivers via tg-post. The target is resolved FIRST, through
+# the shared resolver, as one pair: the chat and the channel state dir of a bot
+# IN it. Fleet-scoped, so a fleet's creds alert never routes to another fleet's
+# channel. A refused pair exports NOTHING -- not even the unit's own chat -- so
+# no alert goes out on a split pair; check_alert_pair reports the refusal.
+resolve_alert_target "$(resolve_bots_dir "$FLEET_ARG")" fleet
+# shellcheck disable=SC2154  # set by resolve_alert_target (sourced lib-common)
+if [ -n "$_alert_chat_id" ]; then
+    export TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id"
+    export TELEGRAM_STATE_DIR="$_alert_state_dir"
+else
+    unset TELEGRAM_GROUP_CHAT_ID TELEGRAM_STATE_DIR
+fi
+
+# resolve_delivery_token sets _delivery_token / _delivery_state_dir /
+# _delivery_bot to the first declared channel bot IN the resolved chat (its own
+# TELEGRAM_GROUP_CHAT_ID is that chat) whose token getMe confirms live, the token
+# resolved through the token SSOT (resolve_bot_telegram_token, which reaches the
+# fleet's real tokens). That is #542's skip of a dead sender, kept INSIDE the
+# pair: a live token of a bot outside the chat is the split that silenced one
+# fleet's alerts for two months while getMe called it healthy (#1771). All empty
+# when no bot in the chat has a live token -- tg-post then reads the pair's own
+# state dir, and check_alert_pair reports what is wrong.
 resolve_delivery_token() {
+    _delivery_token=""
+    _delivery_state_dir=""
+    _delivery_bot=""
     local _dir _declared _d _tok _fdir
+    [ -n "${_alert_chat_id:-}" ] || return 0
     _dir="$(resolve_bots_dir "$FLEET_ARG")"
     [ -d "$_dir" ] || return 0
     _fdir="$(resolve_fleet_dir "$FLEET_ARG")" || _fdir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
@@ -569,22 +581,35 @@ resolve_delivery_token() {
         [ -f "$_d/bot.conf" ] || continue
         bot_in_fleet "$(basename "$_d")" "$_declared" || continue
         [ -n "$(bot_conf_get "$_d" TELEGRAM_BOT_HANDLE "")" ] || continue
+        [ "$(bot_conf_get "$_d" TELEGRAM_GROUP_CHAT_ID "")" = "$_alert_chat_id" ] || continue
         _tok="$(resolve_bot_telegram_token "$_d")" || true
         [ -n "$_tok" ] || continue
         if [ "$(_telegram_getme "$_tok" | "$JQ" -r '.ok // false' 2>/dev/null)" = "true" ]; then
-            printf '%s' "$_tok"
+            _delivery_token="$_tok"
+            _delivery_state_dir="$(bot_conf_get_path "$_d" TELEGRAM_STATE_DIR "")"
+            _delivery_bot="$(basename "$_d")"
             return 0
         fi
     done
 }
 
-# Resolve a delivery token before the checks run so record_and_alert can deliver;
-# skip when the env already carries one (bot-session callers keep their own). The
-# target chat-id itself is resolved just below.
+# The sender's token, exported with ITS state dir so record_and_alert's tg-post
+# sends as that bot; skipped when the env already carries this pair's token (a
+# bot session run by hand, whose own env pair it is). Any other ambient token is
+# dropped: it would re-split the pair.
+# shellcheck disable=SC2154  # set by resolve_alert_target (sourced lib-common)
+if [ "$_alert_target_src" != "env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR" ]; then
+    unset TELEGRAM_BOT_TOKEN
+fi
 if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    _dtok="$(resolve_delivery_token)" || true
-    if [ -n "${_dtok:-}" ]; then
-        export TELEGRAM_BOT_TOKEN="$_dtok"
+    resolve_delivery_token
+    if [ -n "$_delivery_token" ]; then
+        export TELEGRAM_BOT_TOKEN="$_delivery_token"
+        if [ -n "$_delivery_state_dir" ]; then
+            export TELEGRAM_STATE_DIR="$_delivery_state_dir"
+            _alert_state_dir="$_delivery_state_dir"
+        fi
+        _alert_target_src="${_alert_target_src}, delivered by bot:${_delivery_bot}"
         # Wording is a tested contract (test_creds_check_telegram.py): this
         # breadcrumb firing iff a token was exported is the only observable
         # that distinguishes a dropped empty-token guard.
@@ -592,27 +617,59 @@ if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
     fi
 fi
 
-# Chat id: resolve via the shared fleet-alert resolver so creds-check honors the
-# same override → composed-env → bot.conf-scan precedence as fleet-pulse
-# escalation and _emit_fleet_signal (previously it saw only the composed env,
-# ignoring the FLEET_PULSE_ESCALATION_CHAT_ID override and the scan). Fleet-scoped
-# so one fleet's creds alert never routes to another fleet's channel; the resolver
-# returns the composed env unchanged when that is the source, so tg-post still
-# sees the same chat id in the common case.
-resolve_alert_target "$(resolve_bots_dir "$FLEET_ARG")" fleet
-# shellcheck disable=SC2154  # _alert_chat_id is set by resolve_alert_target (sourced lib-common)
-[ -n "$_alert_chat_id" ] && export TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id"
-# Export the resolved state dir too, else record_and_alert falls to tg-post's
-# dead default channel exactly when the token scan above found nothing — the
-# every-credential-dead case creds-check exists to alert on (see resolve_alert_target).
-# shellcheck disable=SC2154  # _alert_state_dir is set by resolve_alert_target (sourced lib-common)
-[ -n "$_alert_state_dir" ] && export TELEGRAM_STATE_DIR="$_alert_state_dir"
+# _telegram_getchat <token> <chat_id>
+# Echo the Telegram getChat response body (empty on no response). The token AND
+# the chat id ride a curl config file, never argv -- the _telegram_getme contract.
+_telegram_getchat() {
+    local _tok="$1" _chat="$2" _cfg _resp
+    _cfg="$(safe_mktemp)"
+    printf 'url = "https://api.telegram.org/bot%s/getChat"\ndata = "chat_id=%s"\n' "$_tok" "$_chat" > "$_cfg"
+    _resp="$("$CURL" -sS --max-time 10 --config "$_cfg" 2>/dev/null)" || _resp=""
+    rm -f "$_cfg"
+    printf '%s' "$_resp"
+}
+
+# check_alert_pair: can the resolved (chat, sender) pair actually deliver? getMe
+# proves a token is live, not that its bot can see the chat -- a live token of a
+# bot outside the fleet chat is exactly what getMe certified healthy every day
+# for two months (#1771). One getChat per daily tick; only ok / error_code /
+# description and the pair's source label are recorded, never an id or a token.
+# A failure is also raised through emit_failure_alert, because the Telegram leg
+# of record_and_alert is the very pair that just failed.
+check_alert_pair() {
+    local key="telegram_alert_pair${FLEET_ARG:+_${FLEET_ARG}}" token resp okflag errcode desc
+    if [ -n "${_alert_refusal:-}" ]; then
+        record_and_alert "$key" "fail" "alert target REFUSED: ${_alert_refusal}"
+        emit_failure_alert "$(resolve_bots_dir "$FLEET_ARG")" "alert_target_refused" "creds-check: ${_alert_refusal}"
+        return 0
+    fi
+    # No chat declared anywhere: nothing to pair (the per-bot checks still run).
+    [ -n "${_alert_chat_id:-}" ] || return 0
+    token="${TELEGRAM_BOT_TOKEN:-}"
+    [ -n "$token" ] || token="$(channel_state_token "${_alert_state_dir:-}")"
+    if [ -z "$token" ]; then
+        record_and_alert "$key" "fail" "the alert pair's sender holds no token (sender: ${_alert_target_src})"
+        emit_failure_alert "$(resolve_bots_dir "$FLEET_ARG")" "alert_pair_unreachable" "creds-check: the alert pair's sender holds no token (sender: ${_alert_target_src})"
+        return 0
+    fi
+    resp="$(_telegram_getchat "$token" "$_alert_chat_id")"
+    okflag="$(printf '%s' "$resp" | "$JQ" -r '.ok // false' 2>/dev/null)" || okflag="false"
+    if [ "$okflag" = "true" ]; then
+        record_and_alert "$key" "ok" "getChat ok (sender: ${_alert_target_src})"
+        return 0
+    fi
+    errcode="$(printf '%s' "$resp" | "$JQ" -r '.error_code // "none"' 2>/dev/null)" || errcode="none"
+    desc="$(printf '%s' "$resp" | "$JQ" -r '.description // empty' 2>/dev/null | cut -c1-120)" || desc=""
+    record_and_alert "$key" "fail" "getChat error_code=${errcode}${desc:+ ($desc)} (sender: ${_alert_target_src})"
+    emit_failure_alert "$(resolve_bots_dir "$FLEET_ARG")" "alert_pair_unreachable" \
+        "creds-check: the fleet alert chat is not reachable by its sender -- getChat error_code=${errcode}${desc:+ ($desc)} (sender: ${_alert_target_src})"
+}
 
 # ---------------------------------------------------------------------
 # Run all checks
 # ---------------------------------------------------------------------
 
-CHECKS=(check_github_pat check_railway_token check_telegram_tokens)
+CHECKS=(check_github_pat check_railway_token check_telegram_tokens check_alert_pair)
 
 for fn in "${CHECKS[@]}"; do
     "$fn" || log "$fn raised (non-fatal)"

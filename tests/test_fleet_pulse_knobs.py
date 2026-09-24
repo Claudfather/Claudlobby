@@ -156,6 +156,7 @@ class TestEmissionIntoTheUnit:
                 escalation_threshold: 1
                 escalation_window: 2
                 escalation_chat_id: "-100999"
+                escalation_state_dir: "/escalation/sender"
                 renotify_after_s: 3
                 rearm_window_s: 4
             """

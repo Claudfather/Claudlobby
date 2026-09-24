@@ -155,6 +155,7 @@ _READER_PAGE_FAILED=0
 _reader_page() {  # _reader_page <tag> <message>
     local _tag="$1" _rc=0
     TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+        TELEGRAM_BOT_TOKEN="${_ESCALATION_TOKEN:-}" \
         "$LIB_DIR/tg-post.sh" "$2" >/dev/null 2>&1 || _rc=$?
     _READER_PAGE_FAILED=0
     if [ "$_rc" -ne 0 ]; then
@@ -711,11 +712,34 @@ resolve_alert_target "$BOTS_DIR" fleet   # sets _alert_chat_id / _alert_state_di
 _ESCALATION_CHAT_ID="$_alert_chat_id"
 # shellcheck disable=SC2154
 _ESCALATION_STATE_DIR="$_alert_state_dir"
+# The pair names its sender: an ambient token (a hand run inside a bot session)
+# is kept only for that session's own env pair, so it cannot re-split it (#1771).
+_ESCALATION_TOKEN=""
+# shellcheck disable=SC2154
+if [ "$_alert_target_src" = "env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR" ]; then
+    _ESCALATION_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+fi
 
 # No chat ID anywhere means the critical-alert safety net is mute. Say so
 # loudly rather than no-op silently.
 if [ -z "$_ESCALATION_CHAT_ID" ]; then
-    echo "fleet-pulse: WARNING — no escalation Telegram chat ID resolved; critical fleet alerts will NOT be delivered. Set FLEET_PULSE_ESCALATION_CHAT_ID, or ensure at least one bot's bot.conf defines TELEGRAM_GROUP_CHAT_ID." >&2
+    # shellcheck disable=SC2154
+    if [ -n "${_alert_refusal:-}" ]; then
+        echo "fleet-pulse: WARNING — escalation Telegram target REFUSED: ${_alert_refusal}. Critical fleet alerts will NOT be delivered to Telegram." >&2
+    else
+        echo "fleet-pulse: WARNING — no escalation Telegram chat ID resolved; critical fleet alerts will NOT be delivered. Set FLEET_PULSE_ESCALATION_CHAT_ID, or ensure at least one bot's bot.conf defines TELEGRAM_GROUP_CHAT_ID." >&2
+    fi
+fi
+# A REFUSED target is the watchdog's page channel dark by configuration. Raise
+# it through the shared alert primitive — a plane event and the manager's pane,
+# the channels that do not need the refused target — once, then daily while it
+# holds; cleared the moment the pair resolves.
+_target_refused_page() { emit_failure_alert "$BOTS_DIR" "alert_target_refused" "$1"; }
+if [ -n "${_alert_refusal:-}" ]; then
+    debounce_notify "$state_dir" fleet alert_target_refused _target_refused_page \
+        "fleet-pulse escalation for ${fleet}: ${_alert_refusal}" "" 86400 || true
+else
+    debounce_clear "$state_dir" fleet alert_target_refused
 fi
 
 # Phase B twin of _overdue_reader_guard: the events reader that could not be
@@ -806,6 +830,7 @@ _task_escalations() {
         _esc_rc=0
         _esc_err=$(TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
             TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+            TELEGRAM_BOT_TOKEN="${_ESCALATION_TOKEN:-}" \
             "$LIB_DIR/tg-post.sh" "$_msg" 2>&1) || _esc_rc=$?
         if [ "$_esc_rc" -eq 0 ]; then
             printf '%s\n' "$_asg" >> "$_esc_task_seen"
@@ -884,6 +909,7 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                     _esc_rc=0
                     _esc_err=$(TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
                     TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+                    TELEGRAM_BOT_TOKEN="${_ESCALATION_TOKEN:-}" \
                         "$LIB_DIR/tg-post.sh" "$_msg" 2>&1) || _esc_rc=$?
                     if [ "$_esc_rc" -eq 0 ]; then
                         touch "$_esc_marker"

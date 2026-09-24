@@ -46,7 +46,7 @@ chmod +x "$ROOT/lib/tg-post.sh"
 run_check() {
     env -i PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$T" \
         CLAUDLOBBY_ROOT="$ROOT" TGPOST_RC="${TGPOST_RC:-0}" \
-        TELEGRAM_GROUP_CHAT_ID="-1001234567890" \
+        TELEGRAM_GROUP_CHAT_ID="-1001234567890" TELEGRAM_STATE_DIR="$T/sender" \
         THROTTLED="$1" JOURNAL="$2" HOST_HEALTH_BOOT_ID="$3" \
         bash "$LIB_DIR/host-health-check.sh" >/dev/null 2>&1 || true
 }
