@@ -1036,20 +1036,23 @@ resolve_bot_telegram_token() {
 
 # channel_state_token <state_dir>
 # The Telegram token a channel state dir holds (its .env TELEGRAM_BOT_TOKEN), read
-# through the shared restricted parser, which strips one outer quote pair as the
-# plugin does. THE reader for a channel dir's token -- tg-post's page path and
-# creds-check's pair check both call it, so the path that pages a human and the
-# check that certifies it cannot read the same file differently (#1771, #1608).
-# In a subshell, so none of the file's other keys reach the caller; the parser's
+# through the shared restricted parser, which strips one outer quote pair as
+# start-bot.sh does (the telegram plugin's own loader keeps a value verbatim).
+# THE reader for a channel dir's token -- tg-post's page path and creds-check's
+# pair check both call it, so the path that pages a human and the check that
+# certifies it cannot read the same file differently (#1771, #1608). In a
+# subshell, so none of the file's other keys reach the caller; the parser's
 # skipped-line warnings are dropped because they quote the head of the line,
-# which for a malformed token line is the token. Empty output = no token there.
+# which for a malformed token line is the token; an unreadable file is simply no
+# token, never a failing command the caller's ERR trap would record. Empty
+# output = no token there.
 channel_state_token() {
     local state_dir="${1:-}"
     [ -n "$state_dir" ] || return 0
     (
         # shellcheck disable=SC2030  # subshell-local by design: never touch the calling env
         TELEGRAM_BOT_TOKEN=
-        parse_env_file "$state_dir/.env" 2>/dev/null
+        parse_env_file "$state_dir/.env" 2>/dev/null || true
         printf '%s' "${TELEGRAM_BOT_TOKEN:-}"
     ) || true
 }
@@ -5018,8 +5021,10 @@ _disclose_alert_recipient() {
 # FLEET_NAME, so the plane-record skip is announced before the send -- and a
 # record cut to its first 300 characters led with that notice, which a reader
 # took for the cause (#1771). The verdict shapes are tg-post's three failure
-# exits (no token, no chat, rejected); output carrying none keeps its order.
-_TG_POST_VERDICT_RE='^tg-post: (send REJECTED|no TELEGRAM_BOT_TOKEN|TELEGRAM_GROUP_CHAT_ID not set)'
+# exits reachable from here (no token, rejected; the no-chat exit cannot happen,
+# because this path calls tg-post only with a resolved chat); output carrying
+# neither keeps its order.
+_TG_POST_VERDICT_RE='^tg-post: (send REJECTED|no TELEGRAM_BOT_TOKEN)'
 _tg_post_verdict_first() {
     local text="$1" verdict
     verdict=$(printf '%s\n' "$text" | grep -E -m1 "$_TG_POST_VERDICT_RE" || true)

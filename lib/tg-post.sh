@@ -37,11 +37,13 @@ fi
 # Bot sessions already carry the token in the environment (start-bot.sh
 # resolves it via the TELEGRAM_TOKEN_ENV_NAME indirection) — prefer it; the
 # channel-dir .env files are the fallback for env-less callers (host timers).
-# The file is read through lib-common's channel_state_token (the shared parser,
-# which strips one outer quote pair as the plugin does) — a private grep|sed kept
-# the quotes, so a quoted token built a bot"<token>" URL and every timer send was
-# a 404 while the bots themselves worked (#1771). creds-check certifies the same
-# token through the same reader.
+# The file is read through lib-common's channel_state_token: the shared parser,
+# which strips one outer quote pair as start-bot.sh does when it fills a
+# session's token from the tiered .env — a private grep|sed kept the quotes, so a
+# quoted token built a bot"<token>" URL and every timer send was a 404 while the
+# bots themselves worked (#1771). The telegram plugin's own .env loader keeps a
+# value verbatim, so a quoted channel file is still one it could not read.
+# creds-check certifies the same token through the same reader.
 # shellcheck disable=SC2031  # channel_state_token scopes its read to a subshell by design
 TOKEN="${TELEGRAM_BOT_TOKEN:-$(channel_state_token "$STATE_DIR")}"
 if [ -z "$TOKEN" ]; then
@@ -99,7 +101,9 @@ RESP="$(curl -s -X POST --config "$URL_CFG" \
   --data-urlencode "text=${MSG}" \
   -d "disable_web_page_preview=true")" || RESP=""
 
-OK="$(printf '%s' "$RESP" | jq -r '.ok // empty' 2>/dev/null || true)"
+# `.ok // empty` would turn a definitive ok:false into nothing, and the
+# rejection line below would read ok=<none>: keep false as false.
+OK="$(printf '%s' "$RESP" | jq -r 'if type == "object" and has("ok") then (.ok | tostring) else empty end' 2>/dev/null || true)"
 if [ "$OK" = "true" ]; then
   if [ "$PLANE_ARMED" = "1" ]; then
     TG_MSGID="$(printf '%s' "$RESP" | jq -r '.result.message_id // empty' 2>/dev/null || true)"

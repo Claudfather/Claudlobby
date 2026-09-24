@@ -19,6 +19,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import (
     _write_exec,
     constructed_env,
@@ -99,3 +101,43 @@ def test_the_journal_line_leads_with_the_rejection_too(tmp_path):
     ]
     assert journal, r.stderr
     assert "tg-post exit 3 (tg-post: send REJECTED" in journal[0], journal[0]
+
+
+def _failed_row(root):
+    rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
+    failed = [row["data"] for row in rows if row["type"] == "alert_delivery_failed"]
+    assert len(failed) == 1, rows
+    return rows, failed[0]
+
+
+def test_a_missing_token_verdict_leads_past_the_fallback_notice(tmp_path):
+    # The common failure: no .env in the state dir. tg-post first announces its
+    # fall back to the default channel, whose file holds no token either.
+    root, env = _host(tmp_path)
+    (tmp_path / "chan" / ".env").unlink()
+    default = tmp_path / "home" / ".claude" / "channels" / "telegram"
+    default.mkdir(parents=True)
+    (default / ".env").write_text("FOO=bar\n")
+    _fire(root, env)
+    _, data = _failed_row(root)
+    assert data["exit"] == 1, data
+    assert "falling back to the default channel token" in data["detail"], data
+    assert data["detail"].startswith("tg-post: no TELEGRAM_BOT_TOKEN"), data["detail"][:120]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_an_unreadable_token_file_is_a_verdict_not_a_script_error(tmp_path):
+    # The shared parser returns non-zero when it cannot open the file; unguarded
+    # inside tg-post's command substitution that tripped the ERR trap, landing
+    # critical script_error rows for what is simply a missing token.
+    root, env = _host(tmp_path)
+    token_file = tmp_path / "chan" / ".env"
+    token_file.chmod(0)
+    try:
+        _fire(root, env)
+    finally:
+        token_file.chmod(0o600)
+    rows, data = _failed_row(root)
+    assert "script_error" not in [row["type"] for row in rows], rows
+    assert data["exit"] == 1, data
+    assert data["detail"].startswith("tg-post: no TELEGRAM_BOT_TOKEN"), data["detail"][:120]
