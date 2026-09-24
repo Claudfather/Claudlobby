@@ -5733,12 +5733,91 @@ bot_is_manager() {
 # and gate harnesses. Increments the caller's ambient `pass`/`fail` counters
 # (each harness sets `pass=0; fail=0` before its check block); kept ambient by
 # design so the run summary stays in caller scope.
+#
+# A check that comes after a read that could NOT RUN is not scored at all. A
+# harness that arms a refusal ledger (HARNESS_REFUSALS, a file path) has its
+# readers record into it through harness_refuse; from then until the scenario
+# ends (harness_scenario), EVERY check FAILS naming each reason, whatever
+# <yes|no> says, and bumps `refused` too. Scoring it would turn "could not ask"
+# into "asked and found nothing": a check expecting a row fails with no reason
+# given, and a check expecting ABSENCE passes (#1777). Every check, not just
+# the next one, because one read often feeds several checks and the next check
+# need not be one of them; a check that did not need the read is refused too,
+# which is the safe direction. The line keeps the FAIL prefix, so every reader
+# that counts failures counts it. Unarmed, nothing changes.
+#
+# The ledger holds the refusals no check has reported yet. A check moves them
+# into HARNESS_REPORTED, which lives in the caller's shell with the counters.
 harness_check() {
+    if [ -n "${HARNESS_REFUSALS:-}" ]; then
+        if [ -s "$HARNESS_REFUSALS" ]; then
+            _harness_take_refusals
+        fi
+        if [ -n "${HARNESS_REPORTED:-}" ]; then
+            _harness_refused "$1 — REFUSED, a read before it in this scenario could not run: $HARNESS_REPORTED"
+            return 0
+        fi
+    fi
     if [ "$2" = yes ]; then
         pass=$((pass + 1)); printf '  PASS  %s\n' "$1"
     else
         fail=$((fail + 1)); printf '  FAIL  %s\n' "$1"
     fi
+}
+
+# harness_refuse "<reason>" — a read feeding later harness_checks could not
+# run. Appends to the armed ledger, a file, because readers run inside command
+# substitutions, where the counters cannot be reached. Unarmed, the reason goes
+# to stderr so it is still said. Always returns 0: under `set -e` a reader that
+# failed its caller's assignment would abort the run before any summary.
+harness_refuse() {
+    local flat
+    flat=$(printf '%s' "$1" | tr '\n' ' ')
+    if [ -n "${HARNESS_REFUSALS:-}" ]; then
+        printf '%s\n' "${flat% }" >> "$HARNESS_REFUSALS"
+    else
+        printf 'harness: a read could not run: %s\n' "${flat% }" >&2
+    fi
+    return 0
+}
+
+# harness_scenario — the boundary between two scenarios of a harness that arms
+# the ledger. The refusals a check has reported end with their scenario. The
+# ones no check has reported yet stay in the ledger and carry into the next: a
+# read that runs before a scenario's first check is that scenario's setup, and
+# dropping it here would let the scenario's own checks score it. So a boundary
+# may sit anywhere before a scenario's checks, but never between a read and a
+# later check that consumes it.
+harness_scenario() {
+    HARNESS_REPORTED=""
+}
+
+# harness_finish — after a harness's last check, before its summary. A refusal
+# that no check reported (a read after the last check) still fails the run: a
+# read that could not run is never dropped. Unarmed, a no-op.
+harness_finish() {
+    if [ -n "${HARNESS_REFUSALS:-}" ] && [ -s "$HARNESS_REFUSALS" ]; then
+        HARNESS_REPORTED=""
+        _harness_take_refusals
+        _harness_refused "a read after the last check could not run — REFUSED: $HARNESS_REPORTED"
+    fi
+    return 0
+}
+
+# _harness_take_refusals: the ledger's refusals, "; "-joined onto
+# HARNESS_REPORTED, and the ledger emptied. A read loop, so it forks nothing.
+_harness_take_refusals() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        HARNESS_REPORTED="${HARNESS_REPORTED:+$HARNESS_REPORTED; }$line"
+    done < "$HARNESS_REFUSALS"
+    : > "$HARNESS_REFUSALS"
+}
+
+# _harness_refused "<text>": one FAIL, counted as a refusal.
+_harness_refused() {
+    fail=$((fail + 1)); refused=$((${refused:-0} + 1))
+    printf '  FAIL  %s\n' "$1"
 }
 
 # seed_claude_auth <config_dir> <host_creds>

@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the validation harness read an unreadable plane as zero rows (#1777)
+
+`lib/validate-bot-change.sh` read the plane through the `sqlite3` CLI and
+swallowed every failure, so a read that could not run returned the same empty
+answer as a read that found nothing. The fleet's primary Pi has no `sqlite3`,
+and 22 of the harness's checks failed there with no reason given, while CI,
+whose image has the CLI, passed them. The same swallow meant a check that
+expected absence passed on a plane it could not read.
+
+- **Every plane read goes through the shipped stdlib doors**: SQL through
+  `plane-readers.connect` (read-only, schema-probed), and events through
+  `plane-lookup.py`, as before. The output keeps the CLI's list mode, so no
+  caller changed how it parses. Every read goes through `val_read`, including
+  the ones that called `dispatch-overdue.py`, `plane-lookup.py`, a
+  `plane-readers.py` snippet or the `checkins` CLI directly and threw their
+  errors away.
+- **A read that cannot run refuses every check after it in its scenario.** Each
+  such check fails and names the reason on its own line, whatever its verdict
+  would have been, so a check that expects absence no longer passes on a plane
+  it cannot read. One read often feeds several checks, so a check that did not
+  need the read is refused too, the safe direction. A refusal no check has
+  reported yet carries into the next scenario, and one never reported fails the
+  run. The summary says how many failures were refusals.
+- **The refusal is a lib-common primitive**: `harness_check` honours a ledger
+  that a harness arms (`HARNESS_REFUSALS`, written by `harness_refuse`), and
+  `harness_scenario` and `harness_finish` scope it. A harness that does not arm
+  one behaves exactly as before.
+- **An empty read no longer ends the run.** A grep in an assignment exits 1 when
+  it matches nothing, and under `set -e` that ended the run with no summary
+  line. Every such grep is now guarded, and a run that does abort says so, with
+  how many checks ran.
+- **Ratchet tests** hold every plane read to `val_read`, every read to the
+  checks of its own scenario, and every grep in an assignment to a guard.
+
 ### Changed — one reader of the Claude Code version, and one launch PATH (#1772)
 
 Six places read Claude Code's version, and three of them turned "could not
