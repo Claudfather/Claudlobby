@@ -5654,12 +5654,44 @@ bot_is_manager() {
 # and gate harnesses. Increments the caller's ambient `pass`/`fail` counters
 # (each harness sets `pass=0; fail=0` before its check block); kept ambient by
 # design so the run summary stays in caller scope.
+#
+# A check fed by a read that could NOT RUN is not scored at all. A harness that
+# arms a refusal ledger (HARNESS_REFUSALS, a file path) has its readers record
+# into it through harness_refuse; the next check then FAILS naming each reason,
+# whatever <yes|no> says, and bumps `refused` too. Scoring it would turn "could
+# not ask" into "asked and found nothing": a check expecting a row fails with
+# no reason given, and a check expecting ABSENCE passes (#1777). The line keeps
+# the FAIL prefix, so every reader that counts failures counts it. Unarmed,
+# nothing changes.
 harness_check() {
+    if [ -n "${HARNESS_REFUSALS:-}" ] && [ -s "$HARNESS_REFUSALS" ]; then
+        fail=$((fail + 1)); refused=$((${refused:-0} + 1))
+        printf '  FAIL  %s — REFUSED, a read it depends on could not run: %s\n' \
+            "$1" "$(awk 'NR > 1 { printf "; " } { printf "%s", $0 }' "$HARNESS_REFUSALS")"
+        : > "$HARNESS_REFUSALS"
+        return 0
+    fi
     if [ "$2" = yes ]; then
         pass=$((pass + 1)); printf '  PASS  %s\n' "$1"
     else
         fail=$((fail + 1)); printf '  FAIL  %s\n' "$1"
     fi
+}
+
+# harness_refuse "<reason>" — a read feeding the next harness_check could not
+# run. Appends to the armed ledger, a file, because readers run inside command
+# substitutions, where the counters cannot be reached. Unarmed, the reason goes
+# to stderr so it is still said. Always returns 0: under `set -e` a reader that
+# failed its caller's assignment would abort the run before any summary.
+harness_refuse() {
+    local flat
+    flat=$(printf '%s' "$1" | tr '\n' ' ')
+    if [ -n "${HARNESS_REFUSALS:-}" ]; then
+        printf '%s\n' "${flat% }" >> "$HARNESS_REFUSALS"
+    else
+        printf 'harness: a read could not run: %s\n' "${flat% }" >&2
+    fi
+    return 0
 }
 
 # seed_claude_auth <config_dir> <host_creds>

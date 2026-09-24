@@ -147,23 +147,61 @@ export CLAUDLOBBY_ROOT="$ROOT"
 # socket-fallback contract above needs FLEET_NAME unset).
 export CLAUDLOBBY_FLEET="$FLEET"
 
+# Every plane read below goes through the shipped stdlib doors, and a read that
+# cannot run is REFUSED rather than read as empty: its reason lands in the
+# refusal ledger, and the check it feeds fails naming it (harness_check). Empty
+# output from a read that ran means nothing was recorded; from a read that
+# could not run it means nothing at all, and a check expecting ABSENCE would
+# pass on it (#1777). Readers always return 0: `set -e` is armed here.
+HARNESS_REFUSALS="$ROOT/.harness-refusals"
+: > "$HARNESS_REFUSALS"
+VAL_READ_ERR="$ROOT/.harness-read.err"
+# val_read <what> <cmd...>: run one read, stdout passed through; on a non-zero
+# exit, refuse with <what> and the reader's own stderr. VAL_READ_QUIET=1 drops
+# the refusal: a poll's misses are not the read its check scores.
+val_read() {
+    local what="$1" rc=0
+    shift
+    "$@" 2> "$VAL_READ_ERR" || rc=$?
+    if [ "$rc" -ne 0 ] && [ -z "${VAL_READ_QUIET:-}" ]; then
+        harness_refuse "$what (rc $rc): $(head -c 400 "$VAL_READ_ERR")"
+    fi
+    return 0
+}
+
 # val_events <root> <fleet> [bot|fleet|""] [type] [since-iso]: the fleet's
 # events rendered as the legacy JSONL rows, oldest first, from the plane — so
 # every grep this harness ever made on a fleet-<day>.jsonl works unchanged on
 # the output. A bot's own events by name; the fleet-level receipts (the old
-# fleet-anchored plane row) as "fleet"; empty = nothing recorded, unreachable = empty
-# too (the assertion that expected a row then fails, which is the honest
-# reading of an instrument that cannot answer).
+# fleet-anchored plane row) as "fleet"; empty = nothing recorded.
 val_events() {
     local root="$1" fleet="$2" bot="${3:-}" type="${4:-}" since="${5:-}"
     set -- --root "$root" --events --fleet "$fleet"
     [ -n "$bot" ] && set -- "$@" --bot "$bot"
     [ -n "$type" ] && set -- "$@" --type "$type"
     [ -n "$since" ] && set -- "$@" --since "$since"
-    python3 -S -E "$LIB_DIR/plane-lookup.py" "$@" 2>/dev/null || true
+    val_read "events of $fleet${bot:+/$bot}${type:+ ($type)}" \
+        python3 -S -E "$LIB_DIR/plane-lookup.py" "$@"
 }
-# val_sql <root> <sql>: one read of a throwaway root's plane db.
-val_sql() { sqlite3 "$1/state/plane/plane.db" "$2" 2>/dev/null || true; }
+# val_sql <root> <sql>: one read of a throwaway root's plane, through the read
+# door every stdlib reader shares (plane-readers.connect: read-only, the schema
+# probed), never the sqlite3 CLI, which a host need not have. Rows print as the
+# CLI's list mode printed them, columns joined by "|" and NULL as empty, so
+# every caller parses them unchanged.
+VAL_SQL_PY='import importlib.util, sys
+lib, root, sql = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("plane_readers", lib + "/plane-readers.py")
+readers = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(readers)
+try:
+    rows = readers.connect(root).execute(sql).fetchall()
+except Exception as exc:
+    sys.exit("%s: %s" % (type(exc).__name__, exc))
+for row in rows:
+    print("|".join("" if v is None else str(v) for v in row))'
+val_sql() {
+    val_read "plane read" python3 -S -E -c "$VAL_SQL_PY" "$LIB_DIR" "$1" "$2"
+}
 # val_iso <epoch>: the instant as the doors stamp it.
 val_iso() { epoch_to_iso_utc "$1"; }
 
@@ -382,7 +420,7 @@ printf 'x\n' > "$BOT_DIR/projects/wip-untracked/node_modules/x.js"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
 
 # --- Assert ---
-pass=0; fail=0
+pass=0; fail=0; refused=0
 events_rows="$(val_events "$ROOT" "$FLEET" "$BOT")"
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
 
@@ -3507,10 +3545,7 @@ else
             PATH="/usr/bin:/bin" $1 \
             bash "$PL_LIB/dispatch-task.sh" --botcommand w1 "$2" 2> "$PL_ROOT/err"
     }
-    _pl_count() {
-        sqlite3 "$PL_ROOT/state/plane/plane.db" \
-            "SELECT COUNT(*) FROM communications" 2>/dev/null || echo 0
-    }
+    _pl_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM communications"; }
 
     _pl_dispatch "" "leg one: rung 1" >/dev/null && r=yes || r=no
     harness_check "a dispatch with NO plane flag in its environment succeeds with the daemon up (always-on, F18 R1)" "$r"
@@ -3604,15 +3639,17 @@ PLPY
         PATH="/usr/bin:/bin" \
         bash "$PL_LIB/keepalive.sh" "$KAB" >/dev/null 2>&1 || true
     # the emit is BACKGROUNDED (a wedged rung must never stall the
-    # watchdog sweep) — poll briefly for the row instead of racing it
-    _ka_hb=0; _ka_i=0
-    while [ "$_ka_i" -lt 100 ] && [ "$_ka_hb" -lt 1 ]; do
-        _ka_hb=$(sqlite3 "$PL_ROOT/state/plane/plane.db" \
-            "SELECT COUNT(*) FROM metric_samples WHERE metric='bot.heartbeat'" \
-            2>/dev/null || echo 0)
+    # watchdog sweep) — poll briefly for the row instead of racing it. The
+    # poll's misses are not refusals; the read after it is what the check
+    # scores, so a plane that cannot be read refuses there.
+    _ka_sql="SELECT COUNT(*) FROM metric_samples WHERE metric='bot.heartbeat'"
+    _ka_hb=""; _ka_i=0
+    while [ "$_ka_i" -lt 100 ] && [ "${_ka_hb:-0}" -lt 1 ]; do
+        _ka_hb=$(VAL_READ_QUIET=1 val_sql "$PL_ROOT" "$_ka_sql")
         sleep 0.2; _ka_i=$((_ka_i + 1))
     done
-    [ "$_ka_hb" -ge 1 ] && r=yes || r=no
+    _ka_hb=$(val_sql "$PL_ROOT" "$_ka_sql")
+    [ "${_ka_hb:-0}" -ge 1 ] && r=yes || r=no
     harness_check "keepalive tick records the heartbeat sample (no flag needed: always-on)" "$r"
     ls "$KAB/data/events"/*.jsonl >/dev/null 2>&1 && r=no || r=yes
     harness_check "  ...and writes no keepalive-<day>.jsonl (the reader-less file is gone, F18 R1)" "$r"
@@ -3625,13 +3662,19 @@ PLPY
     # -- #1485: the REAL daemon exits for its supervisor to relaunch --------
     # Last in the leg: it leaves the db stamped at a version nothing supports,
     # so nothing after it could open the plane anyway.
-    # The precondition is ASSERTED, never assumed (#1485 fold). Without
-    # sqlite3, or against a locked db, the PRAGMA is a silent no-op: the
-    # daemon then starts HEALTHY and the old bare `wait` blocked forever. A
-    # hang is the worst shape a harness leg has - a check that cannot fail is
-    # not a check, and nothing downstream ever prints the summary line.
-    sqlite3 "$PL_ROOT/state/plane/plane.db" "PRAGMA user_version = 999" >/dev/null 2>&1 || true
-    _pl_uv=$(sqlite3 "$PL_ROOT/state/plane/plane.db" "PRAGMA user_version" 2>/dev/null || echo "")
+    # The precondition is ASSERTED, never assumed (#1485 fold). Against a
+    # locked db the stamp does not land: the daemon then starts HEALTHY and
+    # the old bare `wait` blocked forever. A hang is the worst shape a harness
+    # leg has - a check that cannot fail is not a check, and nothing
+    # downstream ever prints the summary line. The stamp is a WRITE, which the
+    # read door refuses by design, so it goes through stdlib sqlite3 on the
+    # existing file (mode=rw never creates one), and a stamp that cannot land
+    # refuses the precondition check with its reason.
+    val_read "stamping user_version=999" python3 -S -E -c 'import sqlite3, sys
+c = sqlite3.connect("file:%s?mode=rw" % sys.argv[1], uri=True, timeout=5)
+c.execute("PRAGMA user_version = 999")
+c.commit()' "$PL_ROOT/state/plane/plane.db"
+    _pl_uv=$(val_sql "$PL_ROOT" "PRAGMA user_version")
     [ "$_pl_uv" = "999" ] && r=yes || r=no
     harness_check "#1485 the stale-db precondition landed (user_version=999)" "$r"
     if [ "$_pl_uv" = "999" ]; then
@@ -4373,6 +4416,17 @@ if [ "${_vg_deny:-}" = "" ]; then
 fi
 rm -rf "$_VG_ROOT"
 
+# A refusal no check consumed still fails the run: a read that could not run
+# is never dropped on the floor.
+if [ -s "$HARNESS_REFUSALS" ]; then
+    fail=$((fail + 1)); refused=$((refused + 1))
+    printf '  FAIL  a read ran after the last check and could not run: %s\n' \
+        "$(awk 'NR > 1 { printf "; " } { printf "%s", $0 }' "$HARNESS_REFUSALS")"
+fi
+
 echo ""
+if [ "$refused" -gt 0 ]; then
+    echo "=== $refused of the $fail failures were REFUSED: a read they depend on could not run (reasons inline) ==="
+fi
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

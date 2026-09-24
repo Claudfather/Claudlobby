@@ -60,3 +60,80 @@ def test_mixed_checks_discriminate():
     out, passed, failed = _run_harness_check(("a", "yes"), ("b", "no"), ("c", "yes"))
     assert (passed, failed) == (2, 1)
     assert "  PASS  a" in out and "  FAIL  b" in out and "  PASS  c" in out
+
+
+# --- #1777: a check fed by a read that could not run is REFUSED, not scored --
+
+
+def _run_script(body: str, **env: str) -> subprocess.CompletedProcess:
+    """Source lib-common, zero the counters, run <body>, print the counters."""
+    script = (
+        '. "$1"\npass=0; fail=0; refused=0\n' + body
+        + '\nprintf "COUNTS pass=%s fail=%s refused=%s\\n" "$pass" "$fail" "$refused"\n'
+    )
+    return subprocess.run(
+        ["bash", "-c", script, "_", str(LIB_COMMON)],
+        capture_output=True, text=True, env={**os.environ, **env}, timeout=20,
+    )
+
+
+def _counts(stdout: str) -> tuple[int, int, int]:
+    line = [ln for ln in stdout.splitlines() if ln.startswith("COUNTS ")][-1]
+    return tuple(int(part.split("=")[1]) for part in line.split()[1:])
+
+
+def test_refusal_fails_the_next_check_even_one_that_says_yes(tmp_path):
+    # The fail-open direction #1777 found: a check expecting ABSENCE reads an
+    # unreadable source as empty and says "yes". Refused, it must FAIL, with
+    # the reason on its own line, and the FAIL prefix every counter greps.
+    ledger = tmp_path / "ledger"
+    ledger.write_text("")
+    r = _run_script(
+        'harness_refuse "no plane db at /x/plane.db"\n'
+        'harness_check "nothing fired" "yes"\n'
+        'harness_check "the next check scores again" "yes"',
+        HARNESS_REFUSALS=str(ledger),
+    )
+    assert r.returncode == 0, r.stderr
+    assert _counts(r.stdout) == (1, 1, 1)
+    assert ("  FAIL  nothing fired — REFUSED, a read it depends on could not run: "
+            "no plane db at /x/plane.db") in r.stdout
+    assert "  PASS  nothing fired" not in r.stdout
+    assert "  PASS  the next check scores again" in r.stdout   # consumed once
+    assert ledger.read_text() == ""
+
+
+def test_refusal_crosses_a_command_substitution(tmp_path):
+    # Readers run inside $( ), where the counters cannot be reached: the ledger
+    # is a file for exactly this. set -e is armed, as in the harnesses, and
+    # the refusal must not abort the caller.
+    ledger = tmp_path / "ledger"
+    ledger.write_text("")
+    r = _run_script(
+        'set -euo pipefail\n'
+        'n=$(harness_refuse "first"; harness_refuse "second"; printf "")\n'
+        '[ "${n:-1}" -eq 0 ] && v=yes || v=no\n'
+        'harness_check "count is zero" "$v"',
+        HARNESS_REFUSALS=str(ledger),
+    )
+    assert r.returncode == 0, r.stderr
+    assert _counts(r.stdout) == (0, 1, 1)
+    assert "could not run: first; second" in r.stdout
+
+
+def test_a_multi_line_reason_stays_one_ledger_entry(tmp_path):
+    ledger = tmp_path / "ledger"
+    ledger.write_text("")
+    r = _run_script('harness_refuse "line one\nline two\n"', HARNESS_REFUSALS=str(ledger))
+    assert r.returncode == 0, r.stderr
+    assert ledger.read_text() == "line one line two\n"
+
+
+def test_unarmed_the_reason_goes_to_stderr_and_scoring_is_unchanged():
+    # A harness that never arms a ledger keeps today's behaviour exactly.
+    r = _run_script('harness_refuse "cannot read"\nharness_check "ok" "yes"',
+                    HARNESS_REFUSALS="")
+    assert r.returncode == 0, r.stderr
+    assert _counts(r.stdout) == (1, 0, 0)
+    assert "  PASS  ok" in r.stdout
+    assert "harness: a read could not run: cannot read" in r.stderr
