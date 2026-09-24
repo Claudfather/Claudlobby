@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — five compose tests failed on every checkout under a bot's `projects/` (#1794)
+
+`tests/test_naked_bot_observe.py`'s `leaf_manager_compose` fixture (3 tests) and
+`tests/test_composer.py::TestNoLeafManagerShapesComposeByteIdentically` (2 tests)
+composed against the checkout itself. Under a bot's `projects/`, where the
+dev-checkout guardrail puts bot dev work, the checkout sits inside
+`…/runtime/bots/…`. `path_audit` reads that as fleet-owned by shape, so
+`generate` refused. CI checks out elsewhere and never saw it.
+
+- **Both now compose against an export of the working tree**
+  (`tests/fixtures/worktree_export.py`): tracked files, plus untracked files
+  that are not ignored, each copied from disk. Uncommitted edits are still what
+  composes, which a `git archive` of HEAD would not give. The export refuses a
+  destination inside `…/runtime/bots/…`.
+- **The tests no longer write into the checkout that runs them.** At `main` they
+  left `local/naked-probe/`, `runtime/_host/` and `state/` there, including a
+  plane database. They now leave nothing.
+- The naked-bot fixture also runs the harness's own `_assert_compositor`, so a
+  subprocess that imports an installed copy instead of the export fails loudly.
+
+Tests only; no `lib/` or package change. The source of the false positive,
+`path_audit` on a `projects/`-nested root, is #823 and is still open.
+
 ### Changed — a fleet alert goes to a chat together with a sender that is in it, or it is refused (#1771 part B, #1782)
 
 #1782 made `resolve_alert_target` return the alert chat **and its sender** (the
