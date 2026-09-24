@@ -426,16 +426,138 @@ def test_a_root_reached_through_a_symlink_still_protects_a_running_version(tmp_p
         proc.wait()
 
 
-def test_without_proc_the_prune_deletes_nothing_and_says_so(tmp_path):
+# --- the prune FAILS CLOSED (ravi's review of #1784) ---------------------------------
+# Deleting a version a session still runs is the 09-23 break, so the prune may
+# delete ONLY on a complete, successful read of everything it protects: the link,
+# .previous, and the process table. Every arm that fails a read must keep
+# everything and say so loudly, and each is paired with a control that differs in
+# ONE fact and shows the same prune deleting: a keep with no delete beside it
+# would also be what a prune that never deletes produces.
+
+
+def _prunable(h: StagedHost, version: str) -> Path:
+    """A staged version nothing links, records or runs: the one a live prune
+    removes, and so the positive control's subject."""
+    d = h.versions / version
+    (d / EXE_REL).parent.mkdir(parents=True)
+    _write_exec(d / EXE_REL, healthy_big(version))
+    return d
+
+
+@pytest.mark.parametrize("first,second", [
+    ("real", "real"),  # the control: one spelling throughout
+    ("real", "via-symlink"), ("via-symlink", "real"),
+    ("real", "trailing-slash"), ("trailing-slash", "real"),
+])
+def test_a_respelled_root_never_costs_the_linked_or_previous_version(tmp_path, first, second):
+    """Two runs link 2.1.280 then 2.1.281 through one spelling of the root, so the
+    link AND .previous carry it; a no-op run then spells the root the other way.
+    Nothing runs either version (the state right after a swap), so being
+    RECOGNISED is their only protection, and recognition must resolve BOTH sides:
+    each direction is an arm. The composer stamps the resolved root on the unit
+    while lib-common keeps the logical pwd, so a hand run through a symlinked
+    checkout spells it differently."""
+    h = StagedHost(tmp_path)
+    via = tmp_path / "via-link"
+    via.symlink_to(h.root)
+    spell = {"real": h.root, "via-symlink": via, "trailing-slash": f"{h.root}/"}
+    for v in ("2.1.280", "2.1.281"):
+        h.body(v, healthy_big(v))
+        assert h.run(latest=v, CLAUDLOBBY_ROOT=spell[first]).returncode == 0, h.log()
+    stale = _prunable(h, "2.1.270")
+    r = h.run(latest="2.1.281", CLAUDLOBBY_ROOT=spell[second])
+
+    assert r.returncode == 0, h.log()
+    assert "no-op" in h.log(), h.log()
+    assert h.exe("2.1.281").exists(), h.log()  # linked
+    assert h.exe("2.1.280").exists(), h.log()  # previous
+    out = subprocess.run([str(h.link), "--version"], capture_output=True, text=True)
+    assert out.stdout.startswith("2.1.281"), (out, h.log())
+    # The positive control: the same prune, in every arm, is live.
+    assert not stale.exists(), h.log()
+
+
+FAIL_CLOSED = ["absent", "unlistable", "no-readable-process", "reader-crashes",
+               "previous-unreadable"]
+
+
+@pytest.mark.parametrize("arm", ["readable"] + FAIL_CLOSED)
+def test_a_prune_that_cannot_read_its_inputs_deletes_nothing(tmp_path, arm):
+    h = StagedHost(tmp_path)
+    for v in ("2.1.281", "2.1.282"):
+        h.body(v, healthy_big(v))
+        assert h.run(latest=v).returncode == 0, h.log()
+    # Linked 2.1.282, previous 2.1.281; one version a (fake) process runs, and
+    # one nothing links, records or runs.
+    running, stale = _prunable(h, "2.1.260"), _prunable(h, "2.1.270")
+    fake = tmp_path / "fakeproc"
+    (fake / "self").mkdir(parents=True)
+    (fake / "self" / "exe").symlink_to("/bin/bash")
+    if arm != "no-readable-process":
+        (fake / "4242").mkdir()
+        (fake / "4242" / "exe").symlink_to(os.path.realpath(running / EXE_REL))
+    proc = tmp_path / "no-such-proc" if arm == "absent" else fake
+    if arm == "reader-crashes":
+        # Crash the planner (it reads its program from stdin: `python3 -`) and
+        # nothing else. A python3 broken host-wide takes the plane down with it,
+        # since the emit shim finalizes every batch through python3, and then
+        # the log line is the only record left. Should the planner's invocation
+        # ever change, this stops biting and the arm goes RED (the stale version
+        # is deleted), never quietly green.
+        _write_exec(h.home / ".local" / "bin" / "python3",
+                    f'#!/bin/sh\n[ "$1" = - ] && exit 1\nexec {shutil.which("python3")} "$@"\n')
+    previous = h.versions / ".previous"
+    try:
+        if arm == "unlistable":
+            os.chmod(fake, 0o111)  # traversable, so self/exe resolves; not listable
+        if arm == "previous-unreadable":
+            os.chmod(previous, 0)
+        r = h.run(latest="2.1.282", CLAUDE_UPDATE_PROC_DIR=proc)  # a no-op: prune only
+    finally:
+        os.chmod(fake, 0o755)
+        os.chmod(previous, 0o644)
+
+    assert r.returncode == 0, h.log()
+    assert "no-op" in h.log(), h.log()
+    for kept in (running, h.versions / "2.1.281", h.versions / "2.1.282"):
+        assert kept.exists(), (arm, kept.name, h.log())
+    if arm == "readable":
+        # The positive control: this very prune deletes, and asks nobody.
+        assert not stale.exists(), h.log()
+        assert "binary_prune_skipped" not in h.events()
+    else:
+        assert stale.exists(), (arm, h.log())
+        assert "nothing deleted" in h.log(), h.log()
+        assert "binary_prune_skipped" in h.events(), h.events()
+        # Refusing is not an error: no script_error beside the notice.
+        assert "script_error" not in h.events(), h.events()
+
+
+@pytest.mark.parametrize("link_dir", ["writable", "read-only"])
+def test_a_failed_swap_leaves_the_rollback_pointer_as_it_was(tmp_path, link_dir):
     h = StagedHost(tmp_path)
     for v in ("2.1.280", "2.1.281", "2.1.282"):
         h.body(v, healthy_big(v))
-        assert (
-            h.run(latest=v, CLAUDE_UPDATE_PROC_DIR=tmp_path / "no-proc").returncode == 0
-        )
-    # 2.1.280 is prunable by rule, but nothing can say whether it runs.
-    assert h.exe("2.1.280").exists()
-    assert "nothing deleted" in h.log(), h.log()
+    for v in ("2.1.280", "2.1.281"):
+        assert h.run(latest=v).returncode == 0, h.log()
+    previous = h.versions / ".previous"
+    assert previous.read_text().strip() == str(h.exe("2.1.280"))
+    try:
+        if link_dir == "read-only":
+            os.chmod(h.link.parent, 0o555)  # the swap cannot create its temporary
+        r = h.run(latest="2.1.282")
+    finally:
+        os.chmod(h.link.parent, 0o755)
+
+    if link_dir == "writable":
+        # The control: a swap that lands moves the pointer to what it replaced.
+        assert r.returncode == 0, h.log()
+        assert previous.read_text().strip() == str(h.exe("2.1.281"))
+    else:
+        assert r.returncode == 1, h.log()
+        assert _target(h.link) == str(h.exe("2.1.281")), h.log()
+        assert previous.read_text().strip() == str(h.exe("2.1.280")), h.log()
+        assert "binary_update_failed" in h.events()
 
 
 # --- the switch --------------------------------------------------------------------

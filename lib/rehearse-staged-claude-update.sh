@@ -155,7 +155,13 @@ PY
 show_log() {
     sed -n "${1},\$p" "$ROOT/state/claude-update.log" 2>/dev/null | sed 's/^/      /'
 }
-log_lines() { wc -l < "$ROOT/state/claude-update.log" 2>/dev/null | tr -d ' ' || echo 0; }
+log_lines() {  # the job's log does not exist before its first run
+    if [ -f "$ROOT/state/claude-update.log" ]; then
+        wc -l < "$ROOT/state/claude-update.log" | tr -d ' '
+    else
+        echo 0
+    fi
+}
 
 echo "rehearse-staged-claude-update (#1768)"
 echo "  versions: A=$VA  B=$VB  C=$VC (stub arm, --ignore-scripts)"

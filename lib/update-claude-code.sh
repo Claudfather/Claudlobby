@@ -202,53 +202,113 @@ verify_staged() {
     fi
 }
 
-# running_exes: the executable of every process whose table entry is readable,
-# one per line. These are RESOLVED paths, the same ones a session re-executes.
-running_exes() {
-    python3 -c '
-import os, sys
-root = sys.argv[1]
-for pid in os.listdir(root):
-    if pid.isdigit():
-        try:
-            print(os.readlink(os.path.join(root, pid, "exe")))
-        except OSError:
-            pass
-' "$_PROC_DIR" 2>/dev/null || true
+# prune_plan: decide, for every staged version, "keep <name> <why>" or
+# "delete <name>" -- or refuse to decide. It exits 3, having printed nothing a
+# caller may act on, when ANY input it protects cannot be read: the process
+# table (absent, unlistable, or showing no process whose executable it can
+# read), the fleet link, .previous, or the versions dir itself. #1146's rule:
+# an answer that could not be read never licenses a delete, and here the delete
+# is the 2026-09-23 break (a session whose binary vanished). Every path is
+# compared RESOLVED on both sides: the table holds the kernel's canonical
+# paths, and CLAUDLOBBY_ROOT may be spelled through a symlink or with a
+# trailing slash, so a raw string test fails to recognise the linked version.
+prune_plan() {
+    python3 - "$_PROC_DIR" "$_STAGED_VERSIONS" "$_STAGED_LINK" <<'PY'
+import os
+import sys
+
+proc, vroot, link = sys.argv[1:4]
+
+
+def refuse(why):
+    sys.stderr.write("prune: %s\n" % why)
+    sys.exit(3)
+
+
+try:
+    pids = [p for p in os.listdir(proc) if p.isdigit()]
+except OSError as e:
+    refuse("cannot list the process table at %s (%s)" % (proc, e))
+running = []
+for pid in pids:
+    try:
+        running.append(os.readlink(os.path.join(proc, pid, "exe")))
+    except OSError:
+        # Exited since the listing, a kernel thread, or another user's process.
+        continue
+# The positive control: a real table always shows this job's own processes, so
+# a table showing none is not telling the truth about what is NOT running.
+if not running:
+    refuse("the process table at %s shows no process whose executable can be read"
+           % proc)
+
+protected = []
+try:
+    protected.append(os.path.realpath(os.readlink(link)))
+except FileNotFoundError:
+    pass
+except OSError as e:
+    refuse("cannot read the fleet link %s (%s)" % (link, e))
+try:
+    with open(os.path.join(vroot, ".previous")) as f:
+        previous = f.read().strip()
+    if previous:
+        protected.append(os.path.realpath(previous))
+except FileNotFoundError:
+    pass
+except OSError as e:
+    refuse("cannot read %s (%s)" % (os.path.join(vroot, ".previous"), e))
+
+try:
+    names = sorted(os.listdir(vroot))
+except OSError as e:
+    refuse("cannot list %s (%s)" % (vroot, e))
+for name in names:
+    d = os.path.join(vroot, name)
+    if name.startswith(".") or os.path.islink(d) or not os.path.isdir(d):
+        continue
+    here = os.path.realpath(d) + os.sep
+    if any(p.startswith(here) for p in protected):
+        print("keep %s linked-or-previous" % name)
+    elif any(e.startswith(here) for e in running):
+        print("keep %s running" % name)
+    else:
+        print("delete %s" % name)
+PY
+}
+
+# prune_refused <why>: keep everything, and say so where the operator looks.
+prune_refused() {
+    log "UPDATE prune REFUSED: $1; nothing deleted, every staged version kept"
+    emit_fleet_notice "$BOTS_DIR" "binary_prune_skipped" \
+        "the staged claude prune refused to run ($1). Nothing was deleted; staged versions (~230 MB each) accumulate until it can read everything it protects again"
 }
 
 # prune_versions: keep the linked version, the previous one, and every version a
-# live process executes from; delete the rest. Deleting a version a session still
-# runs breaks it exactly the way 09-23 did, so with no process table to read
-# nothing is deleted, and the log says so.
+# live process executes from; delete the rest, and only on a plan made from a
+# complete read (prune_plan). With no process table at all it deletes nothing.
 prune_versions() {
-    local cur prev d real running nl=$'\n'
+    local plan="$_STAGED_VERSIONS/.prune-plan" verdict name why
     if [ ! -e "$_PROC_DIR/self/exe" ]; then
-        log "UPDATE prune skipped: no process table at $_PROC_DIR, so which versions are running cannot be read; nothing deleted"
+        prune_refused "no process table at $_PROC_DIR, so which versions are running cannot be read"
         return 0
     fi
-    cur="$(readlink "$_STAGED_LINK" 2>/dev/null || true)"
-    prev="$(cat "$_STAGED_VERSIONS/.previous" 2>/dev/null || true)"
-    running="$nl$(running_exes)$nl"
-    for d in "$_STAGED_VERSIONS"/*/; do
-        d="${d%/}"
-        [ -d "$d" ] || continue
-        case "$cur" in "$d"/*) continue ;; esac
-        case "$prev" in "$d"/*) continue ;; esac
-        # The table holds canonical paths, so compare against one: a root reached
-        # through a symlink would otherwise match nothing and delete a live version.
-        real="$(cd -P "$d" 2>/dev/null && pwd -P || true)"
-        if [ -z "$real" ]; then
-            log "UPDATE prune: kept ${d##*/}, its real path could not be read"
-            continue
-        fi
-        case "$running" in *"$nl$real/"*)
-            log "UPDATE prune: kept ${d##*/}, a running process executes from it"
-            continue
-            ;;
+    # A top-level `if` into a file, never a command substitution: the refusal is
+    # a non-zero exit, and install_error_trap fires inside a substitution
+    # whatever surrounds it, which would turn a correct refusal into a
+    # script_error alert. The path is fixed because the run holds the lock.
+    if ! prune_plan >"$plan" 2>>"$LOG"; then
+        rm -f "$plan"
+        prune_refused "it could not read everything it protects (the log line above says what)"
+        return 0
+    fi
+    while read -r verdict name why; do
+        case "$verdict" in
+            delete) rm -rf "${_STAGED_VERSIONS:?}/$name" && log "UPDATE prune: removed $name" ;;
+            keep) [ "$why" = running ] && log "UPDATE prune: kept $name, a running process executes from it" ;;
         esac
-        rm -rf "$d" && log "UPDATE prune: removed ${d##*/}"
-    done
+    done <"$plan"
+    rm -f "$plan"
 }
 
 # staged_update: the whole staged run. Runs under the lock (below), in a
@@ -297,13 +357,28 @@ staged_update() {
         update_failed 1 "$target at $vdir cannot run ($STAGED_WHY) — the fleet link was NOT moved; remove $vdir to restage it"
     fi
     new_version="$CLAUDE_VERSION"
-    if ! atomic_link_swap "$_STAGED_LINK" "$exe" 2>>"$LOG"; then
-        update_failed 1 "the link swap failed ($_STAGED_LINK -> $exe); the fleet link was NOT moved and the fleet still launches $was"
+    # The rollback is the version the fleet launched before this one, recorded
+    # BEFORE the swap: a crash between the two then costs the pointer to the
+    # version before last, never to the one the fleet is leaving. A swap that
+    # fails puts the old pointer back. Re-linking the version already linked must
+    # not record it as its own rollback.
+    local prev_file="$_STAGED_VERSIONS/.previous" prev_before="" had_prev=0
+    if [ -f "$prev_file" ]; then
+        had_prev=1
+        prev_before="$(cat "$prev_file" 2>/dev/null || true)"
     fi
-    # The rollback is the version the fleet launched before this one. Re-linking
-    # the version already linked must not overwrite it with itself.
     if [ -n "$cur" ] && ! [ "$cur" -ef "$exe" ]; then
-        printf '%s\n' "$cur" >"$_STAGED_VERSIONS/.previous"
+        if ! printf '%s\n' "$cur" >"$prev_file"; then
+            update_failed 1 "could not record the rollback pointer $prev_file; the fleet link was NOT moved and the fleet still launches $was"
+        fi
+    fi
+    if ! atomic_link_swap "$_STAGED_LINK" "$exe" 2>>"$LOG"; then
+        if [ "$had_prev" = 1 ]; then
+            printf '%s\n' "$prev_before" >"$prev_file" || true
+        else
+            rm -f "$prev_file"
+        fi
+        update_failed 1 "the link swap failed ($_STAGED_LINK -> $exe); the fleet link was NOT moved and the fleet still launches $was"
     fi
     log "UPDATE linked (staged): the fleet link now runs $new_version (previous: $was); each bot picks it up at its next restart"
     if [ -n "$old_why" ]; then
