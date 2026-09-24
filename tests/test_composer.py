@@ -5220,24 +5220,36 @@ class TestTaskRecheckTimer:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def working_tree_export(tmp_path_factory) -> Path:
+    """The root the class below composes against: an export of the working
+    tree, not the checkout itself. Under a bot's `projects/` the checkout sits
+    inside `…/runtime/bots/…`, which `path_audit` reads as fleet-owned by
+    shape, so every compose here refused (#1794). The export keeps uncommitted
+    edits (`tests/fixtures/worktree_export.py`), so the `library/` being
+    composed is still the tree under test."""
+    from tests.fixtures.worktree_export import export_working_tree
+
+    return export_working_tree(
+        Path(__file__).resolve().parent.parent,
+        tmp_path_factory.mktemp("compose-shape") / "export",
+    )
+
+
 class TestNoLeafManagerShapesComposeByteIdentically:
     _SHAPES = ("solo", "worker-only", "coordinator-only")
 
-    def _root(self) -> Path:
-        return Path(__file__).resolve().parent.parent
-
-    def test_no_leaf_manager_shapes_compose_byte_identically(self, tmp_path):
+    def test_no_leaf_manager_shapes_compose_byte_identically(self, tmp_path, working_tree_export):
         """The registry role line (task 3 step 3) is a no-op for a fleet
         shape that has no leaf manager to apply it to: BOT trees only
         (runtime/bots/**) — see the class docstring for why the timers dir
         is explicitly out of scope for THIS assertion."""
         from tests.fixtures.compose_shape import compose_shape
 
-        root = self._root()
         for shape in self._SHAPES:
             fleet_dir = tmp_path / shape
-            before = compose_shape(root, fleet_dir, shape, before=True)
-            after = compose_shape(root, fleet_dir, shape, before=False)
+            before = compose_shape(working_tree_export, fleet_dir, shape, before=True)
+            after = compose_shape(working_tree_export, fleet_dir, shape, before=False)
             assert before["bots"] == after["bots"], (
                 f"{shape}: bot tree differs with vs without the leaf-manager "
                 f"registry line\nonly before: "
@@ -5247,7 +5259,7 @@ class TestNoLeafManagerShapesComposeByteIdentically:
             assert before["bots"], f"{shape}: empty manifest proves nothing"
 
     def test_the_only_timers_dir_difference_is_the_gated_job_and_its_dormant_line(
-        self, tmp_path
+        self, tmp_path, working_tree_export
     ):
         """The companion assertion the class docstring promises: the ONE
         thing task 3 is allowed to change for these shapes is
@@ -5255,11 +5267,10 @@ class TestNoLeafManagerShapesComposeByteIdentically:
         them — nothing else in the timers dir may move."""
         from tests.fixtures.compose_shape import compose_shape
 
-        root = self._root()
         for shape in self._SHAPES:
             fleet_dir = tmp_path / f"{shape}-timers"
-            before = compose_shape(root, fleet_dir, shape, before=True)
-            after = compose_shape(root, fleet_dir, shape, before=False)
+            before = compose_shape(working_tree_export, fleet_dir, shape, before=True)
+            after = compose_shape(working_tree_export, fleet_dir, shape, before=False)
             tb = {line.split("\t", 1)[0]: line for line in before["timers"]}
             ta = {line.split("\t", 1)[0]: line for line in after["timers"]}
 
