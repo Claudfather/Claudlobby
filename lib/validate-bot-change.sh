@@ -147,23 +147,121 @@ export CLAUDLOBBY_ROOT="$ROOT"
 # socket-fallback contract above needs FLEET_NAME unset).
 export CLAUDLOBBY_FLEET="$FLEET"
 
+# Every plane read below goes through the shipped stdlib doors, and a read that
+# cannot run is REFUSED rather than read as empty: its reason lands in the
+# refusal ledger, and every check after it in its scenario fails naming it
+# (harness_check). Empty output from a read that ran means nothing was
+# recorded; from a read that could not run it means nothing at all, and a check
+# expecting ABSENCE would pass on it (#1777). So every plane read goes through
+# val_read, directly or through a reader below, and no read is consumed past
+# the next val_scenario (both ratcheted in tests/test_validate_harness_reads.py).
+# Readers always return 0: `set -e` is armed here.
+HARNESS_REFUSALS="$ROOT/.harness-refusals"
+: > "$HARNESS_REFUSALS"
+VAL_READ_ERR="$ROOT/.harness-read.err"
+# val_read <what> <cmd...>: run one read, stdout passed through; on a non-zero
+# exit, refuse with <what> and the end of the reader's own stderr, where a
+# traceback keeps its exception. VAL_READ_QUIET=1 drops the refusal. A caller
+# that checks the reader's stderr itself points VAL_READ_ERR at its own file.
+val_read() {
+    local what="$1" rc=0
+    shift
+    "$@" 2> "$VAL_READ_ERR" || rc=$?
+    if [ "$rc" -ne 0 ] && [ -z "${VAL_READ_QUIET:-}" ]; then
+        harness_refuse "$what (rc $rc): $(tail -c 400 "$VAL_READ_ERR")"
+    fi
+    return 0
+}
+# val_poll <tries> <pause> <read...>: repeat a read quietly until it prints a
+# count of at least 1, for a row that lands in the background. Its misses are
+# not refusals; when the tries run out, one more read is the one scored.
+val_poll() {
+    local tries="$1" pause="$2" got i=0
+    shift 2
+    while [ "$i" -lt "$tries" ]; do
+        got=$(VAL_READ_QUIET=1 "$@")
+        if [ "${got:-0}" -ge 1 ] 2>/dev/null; then
+            printf '%s\n' "$got"
+            return 0
+        fi
+        sleep "$pause"
+        i=$((i + 1))
+    done
+    "$@"
+}
+# val_probe <cmd...>: a call whose refusal IS the answer (a door called the
+# wrong way on purpose), so nothing is recorded. Sets PROBE_RC and PROBE_OUT,
+# and leaves its stderr in $VAL_READ_ERR.
+val_probe() {
+    PROBE_RC=0
+    PROBE_OUT=$("$@" 2> "$VAL_READ_ERR") || PROBE_RC=$?
+}
+# val_scenario "<title>": a scenario's header, and its boundary for the refusal
+# ledger (harness_scenario). A refusal ends with the scenario whose checks
+# reported it, so every check that consumes a read comes before the next
+# val_scenario: a section that goes on reading an earlier scenario's rows is
+# part of that scenario and prints a plain header.
+val_scenario() {
+    harness_scenario
+    echo ""
+    echo "=== $1 ==="
+}
+# val_diag <read...>: a DIAGNOSTIC read (val_events, val_sql), dumped after a
+# check failed and scored by no check. It prints the rows, indented, then what
+# the reader said on stderr, which is why it could not run if it could not. It
+# records no refusal: nothing is scored on it, and a refusal no check reports
+# carries into the next scenario, onto checks that never read it.
+val_diag() {
+    VAL_READ_QUIET=1 "$@" | sed 's/^/    /'
+    sed 's/^/    [stderr] /' "$VAL_READ_ERR" 2>/dev/null || true
+}
+
 # val_events <root> <fleet> [bot|fleet|""] [type] [since-iso]: the fleet's
 # events rendered as the legacy JSONL rows, oldest first, from the plane — so
 # every grep this harness ever made on a fleet-<day>.jsonl works unchanged on
 # the output. A bot's own events by name; the fleet-level receipts (the old
-# fleet-anchored plane row) as "fleet"; empty = nothing recorded, unreachable = empty
-# too (the assertion that expected a row then fails, which is the honest
-# reading of an instrument that cannot answer).
+# fleet-anchored plane row) as "fleet"; empty = nothing recorded.
 val_events() {
     local root="$1" fleet="$2" bot="${3:-}" type="${4:-}" since="${5:-}"
     set -- --root "$root" --events --fleet "$fleet"
     [ -n "$bot" ] && set -- "$@" --bot "$bot"
     [ -n "$type" ] && set -- "$@" --type "$type"
     [ -n "$since" ] && set -- "$@" --since "$since"
-    python3 -S -E "$LIB_DIR/plane-lookup.py" "$@" 2>/dev/null || true
+    val_read "events of $fleet${bot:+/$bot}${type:+ ($type)}" \
+        python3 -S -E "$LIB_DIR/plane-lookup.py" "$@"
 }
-# val_sql <root> <sql>: one read of a throwaway root's plane db.
-val_sql() { sqlite3 "$1/state/plane/plane.db" "$2" 2>/dev/null || true; }
+# The harness programs open a throwaway root's plane the way every stdlib
+# reader does (plane-readers.connect: read-only, the schema probed), never
+# through the sqlite3 CLI, which a host need not have. read(query) runs one
+# query on it; a failure exits nonzero with one line naming it, never a
+# stand-in answer. Argv: <lib dir> <root> <query args...>.
+VAL_PLANE_PY='import importlib.util, sys
+spec = importlib.util.spec_from_file_location("plane_readers", sys.argv[1] + "/plane-readers.py")
+readers = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(readers)
+def read(query):
+    try:
+        return query(readers.connect(sys.argv[2]))
+    except Exception as exc:
+        sys.exit("%s: %s" % (type(exc).__name__, exc))
+'
+# val_restarts <root> <fleet> <bot>: the RESTARTs in a bot's keepalive
+# entries, through plane-readers.keepalive_entries, the reader `claudlobby
+# uptime` consumes.
+VAL_RESTARTS_PY="$VAL_PLANE_PY"'print(read(lambda conn: sum(
+    1 for _, state in readers.keepalive_entries(conn, sys.argv[3], sys.argv[4], None)
+    if state == "RESTART")))'
+val_restarts() {
+    val_read "keepalive entries of $2/$3" python3 -S -E -c "$VAL_RESTARTS_PY" "$LIB_DIR" "$1" "$2" "$3"
+}
+# val_sql <root> <sql>: one read of a throwaway root's plane. Rows print as the
+# sqlite3 CLI's list mode printed them, columns joined by "|" and NULL as
+# empty, so every caller parses them unchanged.
+VAL_SQL_PY="$VAL_PLANE_PY"'for row in read(lambda conn: conn.execute(sys.argv[3]).fetchall()):
+    print("|".join("" if v is None else str(v) for v in row))'
+val_sql() {
+    val_read "plane read" python3 -S -E -c "$VAL_SQL_PY" "$LIB_DIR" "$1" "$2"
+}
 # val_iso <epoch>: the instant as the doors stamp it.
 val_iso() { epoch_to_iso_utc "$1"; }
 
@@ -252,8 +350,8 @@ val_seed_report() {
     msg="msg_$(sha256_hex32 "rmsg:$fleet:$bot:$tid:$at:$status")"
     iso="$(val_iso "$at")"; ref="report-back:$msg"; safe_summary="$(json_escape "$summary")"
     if [ -n "$tid" ]; then
-        ids=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$root" --task-id "$tid" \
-            --assignee "bot:$fleet/$bot" 2>/dev/null || true)
+        ids=$(val_read "task-id lookup of $tid" python3 -S -E "$LIB_DIR/plane-lookup.py" \
+            --root "$root" --task-id "$tid" --assignee "bot:$fleet/$bot")
         if [ -n "$ids" ]; then
             wi=${ids%% *}; ids=${ids#* }; asg=${ids%% *}
             link="\"work_item_id\":\"$wi\",\"assignment_id\":\"$asg\","
@@ -281,6 +379,14 @@ val_seed_report() {
 }
 
 cleanup() {
+    local rc=$?
+    # set -e ends the run at a failed command, before the summary line, and the
+    # ERR trap records that on the plane alone, which may be what could not be
+    # read. So the output says it, and how far the run got.
+    if [ -z "${VAL_SUMMARY_PRINTED:-}" ]; then
+        printf '=== ABORTED (rc %s) after %s checks, before the summary: the command after the last line above failed ===\n' \
+            "$rc" "$((${pass:-0} + ${fail:-0}))"
+    fi
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
     for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
@@ -382,11 +488,11 @@ printf 'x\n' > "$BOT_DIR/projects/wip-untracked/node_modules/x.js"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
 
 # --- Assert ---
-pass=0; fail=0
+pass=0; fail=0; refused=0
+val_scenario "validate-bot-change: observe the trust-loop behaviors"
 events_rows="$(val_events "$ROOT" "$FLEET" "$BOT")"
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
 
-echo "=== validate-bot-change: observe the trust-loop behaviors ==="
 printf '%s' "$events_rows" | grep -q '"type":"activity_stuck"' && r=yes || r=no
 harness_check "activity_stuck event emitted (animated-but-hung worker)" "$r"
 printf '%s' "$events_rows" | grep -q '"type":"overdue_dispatch"' && r=yes || r=no
@@ -402,8 +508,10 @@ harness_check "no legacy event file was written by the sweep (the plane is the o
 # separate a mid-edit from a virtualenv, and the composed table tells a manager
 # "Do NOT restart" on it -- so at thousands of firings the rule became
 # unfollowable and two managers independently stopped obeying it.
-_wip_mixed="$(printf '%s\n' "$events_rows" | grep '"type":"wip_uncommitted"' | grep '"repo":"wip-mixed"' | tail -1)"
-_wip_untr="$(printf '%s\n' "$events_rows" | grep '"type":"wip_uncommitted"' | grep '"repo":"wip-untracked"' | tail -1)"
+# `|| true` on every grep in an assignment (ratcheted): with nothing to match,
+# grep exits 1, and under pipefail and set -e a bare assignment ends the run.
+_wip_mixed="$(printf '%s\n' "$events_rows" | grep '"type":"wip_uncommitted"' | grep '"repo":"wip-mixed"' | tail -1 || true)"
+_wip_untr="$(printf '%s\n' "$events_rows" | grep '"type":"wip_uncommitted"' | grep '"repo":"wip-untracked"' | tail -1 || true)"
 [ -n "$_wip_mixed" ] && r=yes || r=no
 harness_check "#1728 wip_uncommitted emitted for a dirty checkout" "$r"
 printf '%s' "$_wip_mixed" | grep -q '"dirty_tracked":1' && printf '%s' "$_wip_mixed" | grep -q '"dirty_untracked":1' && r=yes || r=no
@@ -427,8 +535,8 @@ harness_check "#1728 an UNTRACKED-ONLY checkout is still reported (never filtere
 VAL_REPORT_LEDGER="$ROOT/local/$FLEET/runtime/report-back.jsonl"
 VAL_DISPATCH_LOG="$ROOT/state/dispatch-log.jsonl"
 val_seed_dispatch "$ROOT" "$FLEET" "$MGR" valaged t-aged-0000 "$((now - 90000))" "$((now - 89400))" "x"
-aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
-    --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c "^valaged " || true)
+aged_out=$(val_read "overdue --all" python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
+    --fleet "$FLEET" --root "$ROOT" | grep -c "^valaged " || true)
 [ "${aged_out:-1}" -eq 0 ] && r=yes || r=no
 harness_check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
 
@@ -438,6 +546,8 @@ harness_check "overdue_dispatch expires past max age (#460 — no re-emit for a 
 # id made it through the pipeline: into the emitted overdue event, and into
 # the manager nudge with the self-heal echo instruction. (Join-matrix unit
 # semantics live in tests/test_dispatch_overdue.py — not re-run here.)
+# A plain header, not val_scenario: these checks read the first scenario's
+# events_rows, so they belong to its refusal scope.
 echo ""
 echo "=== validate task-id end-to-end (P4: event + nudge carry the id) ==="
 printf '%s' "$events_rows" | grep '"type":"overdue_dispatch"' | grep -q '"task_id":"t-1-aaaa"' && r=yes || r=no
@@ -452,8 +562,7 @@ harness_check "manager nudge names the open id (for the manager to act on)" "$r"
 # what only running the code can prove is that the id actually lands in the
 # ledger and that the pulse actually stops emitting.
 # ===========================================================================
-echo ""
-echo "=== validate #835: an id-less report closes its dispatch; a respawn orphan goes quiet ==="
+val_scenario "validate #835: an id-less report closes its dispatch; a respawn orphan goes quiet"
 
 # --- Half 1: report-back.sh with NO --task must resolve the open dispatch. ---
 T835_BOT="valrb835"
@@ -480,8 +589,8 @@ t835_closed=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a 
 harness_check "#835 report-back without --task lands its task event on the resolved dispatch (the plane's stamped id)" "$r"
 
 # The join is unchanged — so the row closing is proof the id is the RIGHT one.
-t835_left=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
-    --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c "^$T835_BOT " || true)
+t835_left=$(val_read "overdue --all" python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
+    --fleet "$FLEET" --root "$ROOT" | grep -c "^$T835_BOT " || true)
 [ "${t835_left:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#835 the resolved id actually closes the dispatch (watchdog join untouched)" "$r"
 
@@ -518,8 +627,8 @@ or_overdue=$(val_events "$ROOT" "$FLEET" "$OR_BOT" overdue_dispatch | grep -c 't
 [ "${or_overdue:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#835 respawn orphan emits NO overdue_dispatch from the real pulse" "$r"
 
-or_listed=$(python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$(date +%s)" \
-    --bots-dir "$ROOT/local/$FLEET/runtime/bots" --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-835-0002' || true)
+or_listed=$(val_read "overdue --orphans" python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$(date +%s)" \
+    --bots-dir "$ROOT/local/$FLEET/runtime/bots" --fleet "$FLEET" --root "$ROOT" | grep -c 't-835-0002' || true)
 [ "${or_listed:-0}" -ge 1 ] && r=yes || r=no
 harness_check "#835 the orphan is still listable (evidence kept, not reaped away)" "$r"
 
@@ -552,8 +661,7 @@ harness_check "#835 a second sweep does NOT re-record the same orphan (latch hol
 # capture in tests/test_task_loop_doors.py; a harness that flipped the
 # capture policy mid-run would be testing the policy, not the door.
 # ===========================================================================
-echo ""
-echo "=== validate #1481: withdraw closes a row, escalate keeps it open ==="
+val_scenario "validate #1481: withdraw closes a row, escalate keeps it open"
 
 # NO bot directory for the worker, deliberately. Every door under test here
 # reads the PLANE (the acts, the matcher, the escalated read) and none needs
@@ -579,8 +687,8 @@ ta_by=$(val_sql "$ROOT" "SELECT json_extract(e.detail, '\$.by') FROM events e JO
 [ "$ta_by" = "$MGR" ] && r=yes || r=no
 harness_check "#1481   ...stamped with WHO withdrew it (the manager, by name)" "$r"
 
-ta_open=$(python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
-    --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-1481-0001' || true)
+ta_open=$(val_read "open rows of $TA_BOT" python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
+    --fleet "$FLEET" --root "$ROOT" | grep -c 't-1481-0001' || true)
 [ "${ta_open:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#1481 the withdrawn row leaves the matcher OPEN set (the watchdog stops chasing it)" "$r"
 
@@ -602,18 +710,18 @@ CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
     "$LIB_DIR/task-act.sh" escalate t-1481-0003 "do we ship without the migration" \
     > "$ROOT/ta-esc.out" 2> "$ROOT/ta-esc.err" || true
 
-ta_esc_open=$(python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
-    --fleet "$FLEET" --root "$ROOT" 2>/dev/null | grep -c 't-1481-0003' || true)
+ta_esc_open=$(val_read "open rows of $TA_BOT" python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
+    --fleet "$FLEET" --root "$ROOT" | grep -c 't-1481-0003' || true)
 [ "${ta_esc_open:-0}" -ge 1 ] && r=yes || r=no
 harness_check "#1481 an escalated task stays OPEN (non-terminal by ruling: the work survives the human)" "$r"
 
-ta_esc=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
-    --fleet "$FLEET" 2>/dev/null | grep -c 't-1481-0003' || true)
+ta_esc_rows=$(val_read "escalations of $FLEET" python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
+    --fleet "$FLEET")
+ta_esc=$(printf '%s\n' "$ta_esc_rows" | grep -c 't-1481-0003' || true)
 [ "${ta_esc:-0}" -eq 1 ] && r=yes || r=no
 harness_check "#1481 plane-lookup --escalated lists it (the only read that can see a non-terminal raise)" "$r"
 
-ta_esc_by=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
-    --fleet "$FLEET" 2>/dev/null | grep 't-1481-0003' | cut -f3 || true)
+ta_esc_by=$(printf '%s\n' "$ta_esc_rows" | grep 't-1481-0003' | cut -f3 || true)
 [ "$ta_esc_by" = "$MGR" ] && r=yes || r=no
 harness_check "#1481   ...naming who asked, which no capture mode strips" "$r"
 
@@ -630,8 +738,8 @@ harness_check "#1481   ...naming who asked, which no capture mode strips" "$r"
 CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="valnomgr1481" \
     "$LIB_DIR/report-back.sh" "$TA_BOT" progress "on it" --progress 30 \
     --task t-1481-0003 >/dev/null 2>&1 || true
-ta_esc_after=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
-    --fleet "$FLEET" 2>/dev/null | grep -c 't-1481-0003' || true)
+ta_esc_after=$(val_read "escalations of $FLEET" python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
+    --fleet "$FLEET" | grep -c 't-1481-0003' || true)
 [ "${ta_esc_after:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#1481 a later report CLEARS the escalation (no second door, nothing to reconcile)" "$r"
 
@@ -711,8 +819,7 @@ harness_check "#1481   ...carrying the four verbs the manager may answer with" "
 # of view, and a directory under the fleet bots dir makes fleet-pulse
 # health-check a bot that does not exist.
 # ===========================================================================
-echo ""
-echo "=== validate #1481: the re-check reaches a manager, once per window ==="
+val_scenario "validate #1481: the re-check reaches a manager, once per window"
 
 TR_MGR="valrc1481"
 TR_BOT="valrcbot1481"
@@ -765,8 +872,7 @@ tr_ask2=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE source_ref 
 harness_check "#1481 a second run inside the repeat window asks NOTHING (the stamp is the debounce)" "$r"
 command tmux -L "$(vsock "$TR_MGR")" kill-server 2>/dev/null || true
 
-echo ""
-echo "=== validate #1481: fleet-pulse pages each escalation ONCE ==="
+val_scenario "validate #1481: fleet-pulse pages each escalation ONCE"
 # The real sweep, from a stub lib dir whose tg-post.sh RECORDS the page instead
 # of sending it (scenario 2c pattern) -- so the assertion is the alert an
 # operator would actually have received. Its own sandbox fleet, because the
@@ -853,8 +959,7 @@ fi
 # has to reach a human WITHOUT reaching that pipe. This path had no runtime
 # coverage at all before #1187.
 # ===========================================================================
-echo ""
-echo "=== validate #1187: --open refuses a mis-ordered call and states its scope ==="
+val_scenario "validate #1187: --open refuses a mis-ordered call and states its scope"
 
 T1187_BOT="val1187"
 T1187_DIR="$ROOT/local/$FLEET/runtime/bots/$T1187_BOT"
@@ -869,41 +974,35 @@ val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$T1187_BOT" t-1187-0001 "$((now - 600
 
 # THE defect: --all's grammar passed to --open. Three positionals, so the arity
 # check passes and a ledger path is read as the bot name.
-t1187_wrong_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" 2>/dev/null || true)
-t1187_wrong_rc=0
-python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" >/dev/null 2>&1 || t1187_wrong_rc=$?
-[ "$t1187_wrong_rc" -eq 2 ] && [ -z "$t1187_wrong_out" ] && r=yes || r=no
+val_probe python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now"
+[ "$PROBE_RC" -eq 2 ] && [ -z "$PROBE_OUT" ] && r=yes || r=no
 harness_check "#1187 mis-ordered --open is REFUSED (rc 2), not a silent empty result" "$r"
 
 # The refusal has to name the remedy: the operator error is not knowing the two
 # grammars differ, so "invalid argument" alone would leave them stuck.
-python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" 2>"$ROOT/t1187.err" >/dev/null || true
-grep -q "expects <bot_id> first" "$ROOT/t1187.err" && r=yes || r=no
+grep -q "expects <bot_id> first" "$VAL_READ_ERR" && r=yes || r=no
 harness_check "#1187   ...and names the grammar split, not merely that it refused" "$r"
 
 # Wrong COUNT was already loud before this change. Pinned so the shape gate is
 # never mistaken for the thing that made misuse loud -- measuring THIS shape is
 # what makes the real defect read as unreproducible.
-t1187_arity_rc=0
-python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$t835_dispatch" "$VAL_REPORT_LEDGER" >/dev/null 2>&1 || t1187_arity_rc=$?
-[ "$t1187_arity_rc" -eq 2 ] && r=yes || r=no
+val_probe python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER"
+[ "$PROBE_RC" -eq 2 ] && r=yes || r=no
 harness_check "#1187 wrong ARITY was already loud and stays loud (the gate is about SHAPE)" "$r"
 
 # STDOUT must stay rows-only. This is the assertion that protects report-back.
-t1187_stdout=$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$T1187_BOT" --fleet "$FLEET" --root "$ROOT" 2>/dev/null || true)
+t1187_stdout=$(val_read "open rows of $T1187_BOT" python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$T1187_BOT" --fleet "$FLEET" --root "$ROOT")
 printf '%s' "$t1187_stdout" | grep -q 't-1187-0001' \
     && ! printf '%s' "$t1187_stdout" | grep -q -- '--open:' && r=yes || r=no
 harness_check "#1187 --open STDOUT is rows only (no scope header for awk to eat)" "$r"
 
 # ...and the scope reaches a human, on stderr, even with ZERO rows -- the case
 # the shape gate cannot reach (a typo, or another fleet's bot under #526).
-python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "nosuchbot-1187" --fleet "$FLEET" --root "$ROOT" 2>"$ROOT/t1187b.err" >/dev/null || true
+VAL_READ_ERR="$ROOT/t1187b.err" val_read "open rows of nosuchbot-1187" \
+    python3 "$LIB_DIR/dispatch-overdue.py" --open "nosuchbot-1187" --fleet "$FLEET" --root "$ROOT" >/dev/null
 grep -q "nosuchbot-1187" "$ROOT/t1187b.err" && grep -q "0 open" "$ROOT/t1187b.err" && r=yes || r=no
 harness_check "#1187 an EMPTY result names the bot it filtered on (cannot read as nothing-exists)" "$r"
 
@@ -932,8 +1031,7 @@ harness_check "#1187 report-back with NOTHING open raises no false supplied-id a
 # earlier row stays open forever. Any check keyed on open-dispatch-exists breaks
 # on it in one of two directions.
 # ===========================================================================
-echo ""
-echo "=== validate #1024: reported-but-never-re-dispatched (mirror watchdog) ==="
+val_scenario "validate #1024: reported-but-never-re-dispatched (mirror watchdog)"
 
 ua_iso() { python3 -c "import datetime,sys;print(datetime.datetime.fromtimestamp(int(sys.argv[1]),datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1"; }
 
@@ -1017,8 +1115,7 @@ harness_check "#1024 the manager is actually pushed the strand via [FLEET-PULSE]
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.
 # Stubs claude/claudlobby on PATH so this needs no Claude auth or real fleet.
 # ===========================================================================
-echo ""
-echo "=== validate reload-fleet (Mechanism 1: daily live reload) ==="
+val_scenario "validate reload-fleet (Mechanism 1: daily live reload)"
 
 STUB_BIN="$ROOT/stubbin"
 mkdir -p "$STUB_BIN"
@@ -1050,8 +1147,7 @@ harness_check "reload-fleet does not half-reload (no marker when download fails)
 # ===========================================================================
 # F2(b) consolidated activation — keepalive performs the live reload at idle.
 # ===========================================================================
-echo ""
-echo "=== validate keepalive reload consumer (idle-gated activation) ==="
+val_scenario "validate keepalive reload consumer (idle-gated activation)"
 
 IBOT_DIR="$ROOT/local/$FLEET/runtime/bots/$IBOT"
 mkdir -p "$IBOT_DIR/data"
@@ -1135,8 +1231,7 @@ harness_check "keepalive marker path: .idle marker not set (fleet-pulse stays co
 # CAVEAT: this exercises the heal MACHINERY on a deterministically-dark bridge.
 # Recovery from genuine upstream nondeterministic non-spawn is measured by the
 # production bounce→recovery telemetry that gates Tier-2 rollout (F6b), not here.
-echo ""
-echo "=== validate bridge heal (#453 Phase 5: keepalive respawns a dark poller) ==="
+val_scenario "validate bridge heal (#453 Phase 5: keepalive respawns a dark poller)"
 HBOT="valheal"
 HDIR="$ROOT/local/$FLEET/runtime/bots/$HBOT"
 HSTATE="$ROOT/ch/telegram-$HBOT"   # TELEGRAM_STATE_DIR — no bot.pid ⇒ bridge_state=no_bridge
@@ -1236,8 +1331,7 @@ harness_check "heal never bounces on no_token (a bounce cannot conjure a missing
 # no_token); the ONLY difference is the marker, so any divergence below IS the
 # exemption. Drive the REAL bringup + down-state deciders (the exact functions
 # that choose to alert), so the fix is OBSERVED end-to-end — not just composed.
-echo ""
-echo "=== validate no_token canary exemption (#608: EXPECT_NO_TOKEN gates the alert) ==="
+val_scenario "validate no_token canary exemption (#608: EXPECT_NO_TOKEN gates the alert)"
 NTBOTS="$ROOT/local/$FLEET/runtime/bots"
 NTC="$NTBOTS/valcanary"   # EXPECT_NO_TOKEN=1 → exempt throwaway
 NTR="$NTBOTS/valreal"     # no marker → real bot, a missing token is a fault
@@ -1292,8 +1386,7 @@ harness_check "#608 real bot IS actionably down (no_token) for fleet-pulse" "$r"
 # fixture (valheal: no bot.pid -> no_bridge) and drive the REAL
 # bridge_bringup_verify in both gate states — the verify reads the gate from the
 # env, so one fixture serves both. Assert the emitted alert text tracks reality.
-echo ""
-echo "=== validate bridge_down heal-honesty (OBSERVABILITY_BRIDGE_HEAL gates the wording) ==="
+val_scenario "validate bridge_down heal-honesty (OBSERVABILITY_BRIDGE_HEAL gates the wording)"
 _heal_conf 0 y   # token present, dark poller -> no_bridge (gate in bot.conf is inert here; verify reads the env)
 
 # Sanity: token resolves + poller absent classifies no_bridge (not no_token/no_handle).
@@ -1325,8 +1418,7 @@ harness_check "gate-on alert states keepalive will bounce to recover" "$r"
 # one refactor from silently drifting out of uptime.py's _LOG_LINE_RE. Drive the
 # real path (a session-less bot, via the HLIB recorder stub so nothing truly
 # restarts) and assert the REAL parser extracts a RESTART from the emitted log.
-echo ""
-echo "=== validate dead-session RESTART line (#579: keepalive emitter ⇄ uptime parser) ==="
+val_scenario "validate dead-session RESTART line (#579: keepalive emitter ⇄ uptime parser)"
 DBOT="valdead"
 DDIR="$ROOT/local/$FLEET/runtime/bots/$DBOT"
 mkdir -p "$DDIR/data"
@@ -1354,22 +1446,7 @@ harness_check "keepalive dead-session path emits a RESTART … session dead log 
 # uptime` reads the plane's keepalive entries — the RESTART is the
 # keepalive_restart fleet event the real tick landed. The tick's emission is
 # detached (the cold CLI lands it in the background), so poll, bounded.
-dead_restarts=0
-for _i in $(seq 1 40); do
-    dead_restarts=$(python3 - "$LIB_DIR" "$ROOT" "$FLEET" "$DBOT" <<'PY' 2>/dev/null || echo 0
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("pr", sys.argv[1] + "/plane-readers.py")
-pr = importlib.util.module_from_spec(spec); spec.loader.exec_module(pr)
-try:
-    conn = pr.connect(sys.argv[2])
-except Exception:
-    print(0); sys.exit(0)
-print(sum(1 for _, s in pr.keepalive_entries(conn, sys.argv[3], sys.argv[4], None) if s == "RESTART"))
-PY
-)
-    [ "${dead_restarts:-0}" -ge 1 ] && break
-    sleep 0.5
-done
+dead_restarts=$(val_poll 40 0.5 val_restarts "$ROOT" "$FLEET" "$DBOT")
 [ "${dead_restarts:-0}" -ge 1 ] && r=yes || r=no
 harness_check "the plane's keepalive entries yield the RESTART the real tick landed (#579, F18 R2b)" "$r"
 
@@ -1476,8 +1553,7 @@ _run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
     tmux capture-pane -t "$RB_SESSION" -p 2>/dev/null || true
 }
 
-echo ""
-echo "=== validate-bot-change: lossless restart (resume on start, age-gated) ==="
+val_scenario "validate-bot-change: lossless restart (resume on start, age-gated)"
 _lossless_fail_before=$fail
 pane_fresh="$(_run_startbot fresh)"
 printf '%s' "$pane_fresh" | grep -q '/claudna:session resume' && r=yes || r=no
@@ -1537,8 +1613,7 @@ fi
 # (plugin_ensure is handed start-bot's resolved binary) must both go through it.
 # start-bot rebuilds PATH, so no harness stub dir can stand in for the link: the
 # link's stub announces itself in the pane and logs its plugin calls.
-echo ""
-echo "=== validate-bot-change: staged fleet link launched (#1768) ==="
+val_scenario "validate-bot-change: staged fleet link launched (#1768)"
 RB_STAGED="$RB_ROOT/staged/claude.exe"
 mkdir -p "$RB_ROOT/staged" "$RB_ROOT/state/bin"
 cat > "$RB_STAGED" <<STUB
@@ -1580,8 +1655,7 @@ tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 # and, for #751, that a ready bot no longer FALSELY fires). RC_READY_TIMEOUT_S=1
 # keeps the negative run fast — the 90s default is untestable in a harness (poll 2
 # is a single check now, so there is no second timeout to shorten).
-echo ""
-echo "=== validate-bot-change: readiness alerting (#533 items 3-4, #751) ==="
+val_scenario "validate-bot-change: readiness alerting (#533 items 3-4, #751)"
 _rc_fail_before=$fail
 grep -q 'READY —' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
 harness_check "bridge_state ready (no_handle bot) -> READY recorded in startup.log" "$r"
@@ -1736,7 +1810,7 @@ harness_check "#1358 undetermined cache -> BRIDGE_MISSING withholds the keepaliv
 if [ "$fail" -gt "$_rc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: RC readiness checks failed ---"
     echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
-    echo "  [events]"; val_events "$RB_ROOT" "$FLEET" valrb | sed 's/^/    /'; echo "    (end of plane events)"
+    echo "  [events]"; val_diag val_events "$RB_ROOT" "$FLEET" valrb; echo "    (end of plane events)"
     echo "  [start-bot timeout stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.timeout.out" 2>/dev/null || echo "    (none)"
 fi
 
@@ -1756,8 +1830,7 @@ fi
 # server.ts -- because a poller forked directly under `claude` would skip the shim
 # walk. Its bins live in a SEPARATE dir: $RB_ROOT/bin/claude is start-bot's own stub
 # and must not be replaced.
-echo ""
-echo "=== validate-bot-change: session-scoped readiness (#1530) ==="
+val_scenario "validate-bot-change: session-scoped readiness (#1530)"
 _scope_fail_before=$fail
 _SC_BIN="$RB_ROOT/scopebin"
 mkdir -p "$_SC_BIN"
@@ -1823,8 +1896,7 @@ fi
 # (below threshold) must stay silent. 2b + 2c together cover #533 items 3-4 end-to-end: emit
 # then escalate. The incidental service_down / session_missing pages are the sandbox bots
 # having no live session; the assertions target the rc_timeout line.
-echo ""
-echo "=== validate-bot-change: RC readiness ESCALATION page (#533 items 3-4) ==="
+val_scenario "validate-bot-change: RC readiness ESCALATION page (#533 items 3-4)"
 _esc_fail_before=$fail
 _esc_fleet="valesc"
 _esc_lib="$ROOT/esclib"
@@ -1897,8 +1969,7 @@ fi
 # silently lands on the wrong plugin), verify + log valmarket, and for
 # valmarketbad log PLUGIN ERROR + emit a plugin_marketplace_failed fleet
 # event — loud, but never startup-blocking.
-echo ""
-echo "=== validate-bot-change: marketplace registration (#596: positional + verified + loud) ==="
+val_scenario "validate-bot-change: marketplace registration (#596: positional + verified + loud)"
 _mp_fail_before=$fail
 MP_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valmp"
 mkdir -p "$MP_DIR/.claude" "$MP_DIR/logs"
@@ -1949,13 +2020,14 @@ if [ "$fail" -gt "$_mp_fail_before" ]; then
     echo "  --- DIAGNOSTIC: marketplace registration checks failed ---"
     echo "  [plugin argv]"; sed 's/^/    /' "$RB_ROOT/plugin-argv.log" 2>/dev/null || echo "    (none)"
     echo "  [valmp startup.log]"; sed 's/^/    /' "$MP_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
-    echo "  [valmp events]"; val_events "$RB_ROOT" "$FLEET" valmp | sed 's/^/    /'; echo "    (end of plane events)"
+    echo "  [valmp events]"; val_diag val_events "$RB_ROOT" "$FLEET" valmp; echo "    (end of plane events)"
 fi
 
 # === Scenario 3: weekly worker-only restart — manager skip + loud failure ===
 # Run weekly-worker-restart.sh from a stub lib dir (stub spin-up-bot FAILS, so
 # the loud emit_failure_alert path is exercised too). The manager (MANAGER_TMUX==BOT_ID)
 # must be skipped; the worker must be processed.
+val_scenario "validate-bot-change: weekly worker-only restart"
 WR_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-wr.XXXXXX")"
 WR_LIB="$WR_ROOT/lib"
 mkdir -p "$WR_LIB"
@@ -1972,8 +2044,6 @@ CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/nul
 wr_log="$WR_ROOT/state/weekly-worker-restart.log"
 wr_events="$(val_events "$WR_ROOT" "$FLEET" fleet restart_failed || true)"
 
-echo ""
-echo "=== validate-bot-change: weekly worker-only restart ==="
 grep -q 'skip (manager): wmgr' "$wr_log" 2>/dev/null && r=yes || r=no
 harness_check "weekly restart SKIPS the manager (MANAGER_TMUX==BOT_ID)" "$r"
 grep -q 'worker: wworker' "$wr_log" 2>/dev/null && r=yes || r=no
@@ -1984,8 +2054,7 @@ printf '%s' "$wr_events" | grep -q '"type":"restart_failed"' && r=yes || r=no
 harness_check "worker restart failure raises a restart_failed alert (shared emit_failure_alert)" "$r"
 
 # === Scenario 4: daily bounce retired from update-claude-code.sh (static) ===
-echo ""
-echo "=== validate-bot-change: daily bounce retired (download-only) ==="
+val_scenario "validate-bot-change: daily bounce retired (download-only)"
 grep -Eq 'BOUNCE|spin-up-bot\.sh' "$LIB_DIR/update-claude-code.sh" && r=no || r=yes
 harness_check "update-claude-code.sh no longer bounces the fleet" "$r"
 grep -q 'npm install -g @anthropic-ai/claude-code@latest' "$LIB_DIR/update-claude-code.sh" && r=yes || r=no
@@ -2001,8 +2070,7 @@ harness_check "update-claude-code.sh still downloads the binary daily" "$r"
 #   (2) pane_stuck must honor the .idle marker like activity_stuck does: a bot
 #       parked at an idle prompt has a stable pane — that is idle, not stuck.
 # ===========================================================================
-echo ""
-echo "=== validate #415: fleet.yaml discovery filter + pane_stuck idle-guard ==="
+val_scenario "validate #415: fleet.yaml discovery filter + pane_stuck idle-guard"
 
 F2="valf415"
 F2_BOTS="$ROOT/local/$F2/runtime/bots"
@@ -2044,18 +2112,20 @@ _now415=$(date +%s); printf '%s' "$((_now415 - 400))" > "$ROOT/state/pulse/$IDLE
 # Run 2: IDLEK pane unchanged + elapsed 400 would trip pane_stuck — idle-guard must suppress.
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
 
+# Each read sits right before its own check. A refusal holds for the rest of
+# the scenario, so a check that comes before a read that could not run is
+# still scored on its own read.
 keep_ev=$(val_events "$ROOT" "$F2" "$KEEP")
-orph_ev=$(val_events "$ROOT" "$F2" "$ORPH")
-idlek_ev=$(val_events "$ROOT" "$F2" "$IDLEK")
-
 printf '%s' "$keep_ev" | grep -q '"type":"session_missing"' && r=yes || r=no
 harness_check "#415 declared bot is still health-checked (session_missing fired for $KEEP)" "$r"
 
+orph_ev=$(val_events "$ROOT" "$F2" "$ORPH")
 if [ -z "$orph_ev" ]; then r=yes
 elif printf '%s' "$orph_ev" | grep -qE '"type":"(session_missing|service_down|pane_stuck)"'; then r=no
 else r=yes; fi
 harness_check "#415 undeclared orphan dir emits ZERO pulse events (filtered via fleet.yaml)" "$r"
 
+idlek_ev=$(val_events "$ROOT" "$F2" "$IDLEK")
 printf '%s' "$idlek_ev" | grep -q '"type":"pane_stuck"' && r=no || r=yes
 harness_check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard)" "$r"
 
@@ -2068,8 +2138,7 @@ harness_check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard
 #       (mid-tool-call) or an "esc to interrupt" pane (active turn / waiting on a
 #       subagent) is busy, not stuck.
 # ===========================================================================
-echo ""
-echo "=== validate #611 summary socket + pane_stuck busy-guard (this PR) ==="
+val_scenario "validate #611 summary socket + pane_stuck busy-guard (this PR)"
 
 # (a) #611 repro: TMUX_SOCKET points at the live server, BOT_SERVICE is a
 #     DIFFERENT string. The shadow tmux() puts the session on tmux-valsock.
@@ -2147,8 +2216,7 @@ harness_check "#611 summary service=ok (not false DOWN) for a BOT_SERVICE-less b
 # valmgr + valbot are up on DISTINCT private servers (tmux-valmgr/tmux-valbot),
 # so a single server's death can no longer drop the whole fleet at once.
 # ===========================================================================
-echo ""
-echo "=== validate #414: per-bot socket isolation (blast radius + send-miss) ==="
+val_scenario "validate #414: per-bot socket isolation (blast radius + send-miss)"
 
 command tmux -L "$(vsock "$MGR")" has-session -t "$MGR" 2>/dev/null && r=yes || r=no
 harness_check "#414 precondition: manager is up on its own private server" "$r"
@@ -2195,8 +2263,7 @@ harness_check "#414 send-miss: a cross-socket send to a dead target is logged, n
 # When the plugin learns to defer to a live holder (#591 Phases 3/4), the
 # anchor probe below FAILS loudly — flip this scenario's expectations to
 # "defer occurs" in the same change that adopts the fixed plugin.
-echo ""
-echo "=== validate bridge-hijack mechanism (#591 Phase 1: last-writer-wins reap) ==="
+val_scenario "validate bridge-hijack mechanism (#591 Phase 1: last-writer-wins reap)"
 
 # Newest installed plugin version, never a pinned one (#591 P1 step 2). The
 # cache root honors CLAUDE_CONFIG_DIR — multi-account bots keep their plugin
@@ -2321,8 +2388,7 @@ fi
 # This proves the bash supervision layer resolves + health-checks a NESTED bot
 # end-to-end, WITHOUT disturbing the flat path (the byte-identical invariant).
 # ===========================================================================
-echo ""
-echo "=== validate #602 P2: nested-fleet resolution + supervision ==="
+val_scenario "validate #602 P2: nested-fleet resolution + supervision"
 
 NSYS="valsys"; NF="valnest"; NBOT="valnestbot"
 NF_DIR="$ROOT/local/$NSYS/$NF"
@@ -2381,8 +2447,7 @@ harness_check "#602 fleet-pulse health-checks a bot in a NESTED fleet (session_m
 # reconcile prune, incl. the launchd .plist prune) is the sibling
 # lib/rehearse-briefing-timer.sh (real systemd timer, ~2 min, run separately).
 # ===========================================================================
-echo ""
-echo "=== validate-bot-change: equippable briefing trigger (#627 P6) ==="
+val_scenario "validate-bot-change: equippable briefing trigger (#627 P6)"
 
 BRIEF="valbrief"; BRIEFBUSY="valbriefbusy"; SINK="valsink"
 BRIEF_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEF"
@@ -2503,8 +2568,7 @@ harness_check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (
 # "starting" always — permanently disabling the watchdog while every surface
 # reads healthy — would pass every other assertion here.
 # ===========================================================================
-echo ""
-echo "=== validate #1002: the boot window is not down, and not a restart trigger ==="
+val_scenario "validate #1002: the boot window is not down, and not a restart trigger"
 
 # Gated: needs a real systemd --user bus. macOS and CI containers without a
 # user manager skip rather than fail — a harness that cannot run the mechanism
@@ -2749,8 +2813,7 @@ LBUNIT
     # "boot in flight" 28,977 times and paged nobody. These run on REAL units
     # through the REAL keepalive.sh and fleet-pulse.sh.
     # =======================================================================
-    echo ""
-    echo "=== validate #1769: a crash loop reads as a loop, and a long boot still reads as a boot ==="
+    val_scenario "validate #1769: a crash loop reads as a loop, and a long boot still reads as a boot"
 
     [ "$_cl_first_loop" = "no" ] && r=yes || r=no
     harness_check "#1769 first attempt of the failing unit is NOT a loop yet (observed ${_cl_first_state:-unobserved} NRestarts=${_cl_first_nr:-?}, read $_cl_first_loop)" "$r"
@@ -2788,7 +2851,7 @@ LBUNIT
     # Consumer: fleet-pulse -- from the loop fleet's one pulse, which the
     # sampler runs at >=20s (see it above). Read after the sampler is done.
     wait "$LB_SAMPLER_PID" 2>/dev/null || true
-    _pl_line=$(grep '^PULSE ' "$LB_SAMPLES" 2>/dev/null | head -1)
+    _pl_line=$(grep '^PULSE ' "$LB_SAMPLES" 2>/dev/null | head -1 || true)
     _pl_lbst=$(printf '%s' "$_pl_line" | awk '{print $3}')
     _pl_clnr=$(printf '%s' "$_pl_line" | awk '{print $4}')
     case "$_pl_lbst" in activating/* | active/running) _pl_mid=yes ;; *) _pl_mid=no ;; esac
@@ -2849,8 +2912,7 @@ fi
 # real gh invocation is actually rewritten before it runs, and whether Telegram
 # is genuinely left alone.
 # ===========================================================================
-echo ""
-echo "=== validate #1019: GitHub mention guard rewrites, and spares Telegram ==="
+val_scenario "validate #1019: GitHub mention guard rewrites, and spares Telegram"
 
 GM_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-gm.XXXXXX")"
 mkdir -p "$GM_ROOT/runtime/_host"
@@ -2977,8 +3039,7 @@ rm -rf "$GM_ROOT"
 # Fixture: throwaway repos with controlled remotes, an "org" that matches
 # the fake claudlobby root, and one that does not.
 # ===========================================================================
-echo ""
-echo "=== validate #1009: sibling currency — reports, pulls, and refuses to pull ==="
+val_scenario "validate #1009: sibling currency — reports, pulls, and refuses to pull"
 
 SC_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-sc.XXXXXX")"
 SC_FLEET="scfleet"
@@ -3189,8 +3250,7 @@ sc_run update-siblings.sh
 harness_check "  ...and DOES fast-forward once a newer release is cut" "$r"
 
 
-echo ""
-echo "=== validate #892: an audit verb with no --enroll must not write ==="
+val_scenario "validate #892: an audit verb with no --enroll must not write"
 # state/fleet-state.json is ONE host-shared file, while prune builds its keep-list
 # from a SINGLE fleet manifest — so every bot outside the invoking fleet WAS
 # undeclared by construction and was deleted on a perfect parse. That fired at
@@ -3315,7 +3375,7 @@ ga_env() {
 grep -q "harness-app\[bot\]" "$GA_CFG" && r=yes || r=no
 harness_check "app gitconfig composes with the App identity" "$r"
 
-ga_fill="$(printf 'protocol=https\nhost=github.com\npath=AnyOrg/x.git\n\n' | ga_env git credential fill 2>/dev/null | grep '^password=')"
+ga_fill="$(printf 'protocol=https\nhost=github.com\npath=AnyOrg/x.git\n\n' | ga_env git credential fill 2>/dev/null | grep '^password=' || true)"
 [ "$ga_fill" = "password=ghs_HARNESSMINT" ] && r=yes || r=no
 harness_check "real git fill mints a real openssl-signed token via the REAL helper" "$r"
 
@@ -3324,7 +3384,7 @@ harness_check "  ...and the composed file itself carries no token" "$r"
 
 printf 'protocol=https\nhost=github.com\npath=AnyOrg/x.git\nusername=x-access-token\npassword=ghs_HARNESSMINT\n\n' | ga_env git credential approve 2>/dev/null
 rm -f "$GA_BIN/curl"
-ga_fill2="$(printf 'protocol=https\nhost=github.com\npath=AnyOrg/x.git\n\n' | ga_env git credential fill 2>/dev/null | grep '^password=')"
+ga_fill2="$(printf 'protocol=https\nhost=github.com\npath=AnyOrg/x.git\n\n' | ga_env git credential fill 2>/dev/null | grep '^password=' || true)"
 [ "$ga_fill2" = "password=ghs_HARNESSMINT" ] && r=yes || r=no
 harness_check "cache answers after approve with NO curl on the host (mint amortized)" "$r"
 ga_env git credential-cache exit 2>/dev/null || true
@@ -3507,10 +3567,7 @@ else
             PATH="/usr/bin:/bin" $1 \
             bash "$PL_LIB/dispatch-task.sh" --botcommand w1 "$2" 2> "$PL_ROOT/err"
     }
-    _pl_count() {
-        sqlite3 "$PL_ROOT/state/plane/plane.db" \
-            "SELECT COUNT(*) FROM communications" 2>/dev/null || echo 0
-    }
+    _pl_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM communications"; }
 
     _pl_dispatch "" "leg one: rung 1" >/dev/null && r=yes || r=no
     harness_check "a dispatch with NO plane flag in its environment succeeds with the daemon up (always-on, F18 R1)" "$r"
@@ -3604,15 +3661,9 @@ PLPY
         PATH="/usr/bin:/bin" \
         bash "$PL_LIB/keepalive.sh" "$KAB" >/dev/null 2>&1 || true
     # the emit is BACKGROUNDED (a wedged rung must never stall the
-    # watchdog sweep) — poll briefly for the row instead of racing it
-    _ka_hb=0; _ka_i=0
-    while [ "$_ka_i" -lt 100 ] && [ "$_ka_hb" -lt 1 ]; do
-        _ka_hb=$(sqlite3 "$PL_ROOT/state/plane/plane.db" \
-            "SELECT COUNT(*) FROM metric_samples WHERE metric='bot.heartbeat'" \
-            2>/dev/null || echo 0)
-        sleep 0.2; _ka_i=$((_ka_i + 1))
-    done
-    [ "$_ka_hb" -ge 1 ] && r=yes || r=no
+    # watchdog sweep) — poll briefly for the row instead of racing it.
+    _ka_hb=$(val_poll 100 0.2 val_sql "$PL_ROOT" "SELECT COUNT(*) FROM metric_samples WHERE metric='bot.heartbeat'")
+    [ "${_ka_hb:-0}" -ge 1 ] && r=yes || r=no
     harness_check "keepalive tick records the heartbeat sample (no flag needed: always-on)" "$r"
     ls "$KAB/data/events"/*.jsonl >/dev/null 2>&1 && r=no || r=yes
     harness_check "  ...and writes no keepalive-<day>.jsonl (the reader-less file is gone, F18 R1)" "$r"
@@ -3625,13 +3676,19 @@ PLPY
     # -- #1485: the REAL daemon exits for its supervisor to relaunch --------
     # Last in the leg: it leaves the db stamped at a version nothing supports,
     # so nothing after it could open the plane anyway.
-    # The precondition is ASSERTED, never assumed (#1485 fold). Without
-    # sqlite3, or against a locked db, the PRAGMA is a silent no-op: the
-    # daemon then starts HEALTHY and the old bare `wait` blocked forever. A
-    # hang is the worst shape a harness leg has - a check that cannot fail is
-    # not a check, and nothing downstream ever prints the summary line.
-    sqlite3 "$PL_ROOT/state/plane/plane.db" "PRAGMA user_version = 999" >/dev/null 2>&1 || true
-    _pl_uv=$(sqlite3 "$PL_ROOT/state/plane/plane.db" "PRAGMA user_version" 2>/dev/null || echo "")
+    # The precondition is ASSERTED, never assumed (#1485 fold). Against a
+    # locked db the stamp does not land: the daemon then starts HEALTHY and
+    # the old bare `wait` blocked forever. A hang is the worst shape a harness
+    # leg has - a check that cannot fail is not a check, and nothing
+    # downstream ever prints the summary line. The stamp is a WRITE, which the
+    # read door refuses by design, so it goes through stdlib sqlite3 on the
+    # existing file (mode=rw never creates one), and a stamp that cannot land
+    # refuses the precondition check with its reason.
+    val_read "stamping user_version=999" python3 -S -E -c 'import sqlite3, sys
+c = sqlite3.connect("file:%s?mode=rw" % sys.argv[1], uri=True, timeout=5)
+c.execute("PRAGMA user_version = 999")
+c.commit()' "$PL_ROOT/state/plane/plane.db"
+    _pl_uv=$(val_sql "$PL_ROOT" "PRAGMA user_version")
     [ "$_pl_uv" = "999" ] && r=yes || r=no
     harness_check "#1485 the stale-db precondition landed (user_version=999)" "$r"
     if [ "$_pl_uv" = "999" ]; then
@@ -3677,8 +3734,7 @@ fi
 # so a failed record or an unreachable read door can never read as a clean
 # answer (an empty grep pattern matches every line).
 # ===========================================================================
-echo ""
-echo "=== validate manager check-in: the decision lands and the read door joins it ==="
+val_scenario "validate manager check-in: the decision lands and the read door joins it"
 CK_FLEET_H="valckf"
 val_plane_ready "$ROOT" "$CK_FLEET_H"
 ck_decision='{"prev_checkin_id":null,"inputs_seen":{"open_tasks":0,"stalls":0,"unacked":0,"issues_seen":null,"issues_considered":0,"knowledge_hits":0,"considered":[],"unavailable":["gh"]},"delta":{"tasks_opened":0,"tasks_completed":0,"stalls_appeared":0,"stalls_cleared":0,"issues_new":0,"messages_new":null,"held_pending":0},"action":"nothing","project_key":null,"rationale":"harness: nothing worth starting","raise":{"decided":false,"reason":"no delta","held":[]}}'
@@ -3708,12 +3764,12 @@ ck_other=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="
 # The CLI reaches the plane through <root>/lib/dispatch-overdue.py -- linked for
 # THIS scenario and removed after it (the #1481 neighbour rule at :652/:682).
 ln -sfn "$LIB_DIR" "$ROOT/lib"
-CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --json \
-    > "$ROOT/ck-read.out" 2> "$ROOT/ck-read.err" || true
+CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK_FLEET_H" \
+    "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --json > "$ROOT/ck-read.out"
 { [ -n "$ck_id" ] && grep -q "$ck_id" "$ROOT/ck-read.out"; } && r=yes || r=no
 harness_check "checkin: the read door LISTS the decision (positive control, gated on a non-empty id)" "$r"
-CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --bot valckmgr --last --json \
-    > "$ROOT/ck-read2.out" 2> "$ROOT/ck-read2.err" || true
+CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK_FLEET_H/valckmgr --last" \
+    "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --bot valckmgr --last --json > "$ROOT/ck-read2.out"
 rm -f "$ROOT/lib"
 { [ -n "$ck_id" ] && [ -n "$ck_other" ] && grep -q "$ck_id" "$ROOT/ck-read2.out" && ! grep -q "$ck_other" "$ROOT/ck-read2.out"; } && r=yes || r=no
 harness_check "checkin: ...--bot --last returns THIS manager's newest row and not the other manager's (a real negative)" "$r"
@@ -3730,8 +3786,7 @@ harness_check "checkin: ...--bot --last returns THIS manager's newest row and no
 # That is the only way to observe timer -> pane -> row end to end without a
 # model, and it is a bound rather than a claim.
 # ===========================================================================
-echo ""
-echo "=== validate manager check-in: the beat injects, gates, and records on a real plane ==="
+val_scenario "validate manager check-in: the beat injects, gates, and records on a real plane"
 CK2_FLEET="valckbeat"
 CK2_BOT="valckmgr2"
 val_plane_ready "$ROOT" "$CK2_FLEET"
@@ -3822,8 +3877,8 @@ ck2_dec=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events WHERE kind='system' AND e
 # removed after it, the #1481 neighbour rule the checkin chunk-1 scenario
 # above keeps too.
 ln -sfn "$LIB_DIR" "$ROOT/lib"
-CLAUDLOBBY_ROOT="$ROOT" "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK2_FLEET" --json \
-    > "$ROOT/ck2-read.out" 2> "$ROOT/ck2-read.err" || true
+CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK2_FLEET" \
+    "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK2_FLEET" --json > "$ROOT/ck2-read.out"
 rm -f "$ROOT/lib"
 { [ -n "$ck2_id" ] && [ "${ck2_dec:-0}" -eq 1 ] && grep -q "$ck2_id" "$ROOT/ck2-read.out"; } && r=yes || r=no
 harness_check "checkin: ...and the session's answer landed a checkin_decision the read door lists" "$r"
@@ -3923,8 +3978,7 @@ command tmux -L "$(vsock "$CK2_BOT")" kill-server 2>/dev/null || true
 # and STRANDNOMARK, with STRANDCTL unchanged (the zero-regression contract on
 # the worked path).
 # ===========================================================================
-echo ""
-echo "=== validate #934 S1/S2: fleet-pulse Check 5 manufactured all-clear ==="
+val_scenario "validate #934 S1/S2: fleet-pulse Check 5 manufactured all-clear"
 
 F3="valstrand"
 F3_BOTS="$ROOT/local/$F3/runtime/bots"
@@ -4060,8 +4114,7 @@ fi
 # single-line shape for the migrate-fleet-to-system.sh consumer (pinned
 # separately and purely in tests/test_migrate_fleet_fileops.sh).
 # ===========================================================================
-echo ""
-echo "=== validate #934 S3: reconcile-fleet calls a stranded bot healthy ==="
+val_scenario "validate #934 S3: reconcile-fleet calls a stranded bot healthy"
 
 F4="valrecon"
 F4_BOTS="$ROOT/local/$F4/runtime/bots"
@@ -4143,8 +4196,8 @@ done
 sleep 1
 
 s3_out=$(HOME="$S3_HOME" CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/reconcile-fleet.sh" "$F4" 2>&1 || true)
-s3_healthy=$(printf '%s\n' "$s3_out" | grep 'healthy:' | sed -e 's/.*healthy:[[:space:]]*//' | head -1)
-s3_missing=$(printf '%s\n' "$s3_out" | grep 'missing:'  | sed -e 's/.*missing:[[:space:]]*//'  | head -1)
+s3_healthy=$(printf '%s\n' "$s3_out" | grep 'healthy:' | sed -e 's/.*healthy:[[:space:]]*//' | head -1 || true)
+s3_missing=$(printf '%s\n' "$s3_out" | grep 'missing:'  | sed -e 's/.*missing:[[:space:]]*//'  | head -1 || true)
 
 # --- isolation control: the redirected HOME is what answered ----------------
 if [ -e "$HOME/.config/systemd/user/$(vsock "$S3BOT").service" ] \
@@ -4373,6 +4426,14 @@ if [ "${_vg_deny:-}" = "" ]; then
 fi
 rm -rf "$_VG_ROOT"
 
+# A refusal no check reported still fails the run: a read that could not run
+# is never dropped on the floor.
+harness_finish
+
 echo ""
+if [ "$refused" -gt 0 ]; then
+    echo "=== $refused of the $fail failures were REFUSED: a read before them in their scenario could not run (reasons inline) ==="
+fi
 echo "=== $pass passed, $fail failed ==="
+VAL_SUMMARY_PRINTED=1
 [ "$fail" -eq 0 ]
