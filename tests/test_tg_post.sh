@@ -79,8 +79,8 @@ echo "=== #1771: the channel-file token is read through the shared parser ==="
 # Env-less callers (host timers) read the token from the channel dir's .env. A
 # private grep|sed kept a quoted value's quotes, so tg-post built
 # bot"<token>" and Telegram answered 404 on every timer send, while the bots
-# worked (the plugin strips the quotes). These are the positive control that
-# fails on that reader.
+# worked (start-bot.sh fills a session's token through the shared parser). These
+# are the positive control that fails on that reader.
 run_tg_file() {  # $1=the channel .env token line  $2=env token (optional) → the url line built
     rm -rf "$T/chan" "$T/url" "$T/url.leak"; mkdir -p "$T/chan" "$T/home"
     printf '%s\nTG_LEAK_PROBE=leaked\n' "$1" > "$T/chan/.env"
@@ -99,6 +99,17 @@ assert_eq "an env token still wins over the file" 'url = "https://api.telegram.o
     "$(run_tg_file 'TELEGRAM_BOT_TOKEN="123:ABC"' '999:ENV')"
 run_tg_file 'TELEGRAM_BOT_TOKEN="123:ABC"' >/dev/null
 assert_eq "the channel file's other keys never reach tg-post's env" "unset" "$(cat "$T/url.leak" 2>/dev/null || echo '<none>')"
+# The parser warns about a line it rejects by quoting the line's head; for a
+# token line that is the token, and tg-post's stderr lands in
+# alert_delivery_failed.detail and the journal.
+rm -rf "$T/chan"; mkdir -p "$T/chan"
+printf 'TELEGRAM_BOT_TOKEN="123:ABC";\n' > "$T/chan/.env"
+env -u TELEGRAM_BOT_TOKEN PATH="$T/bin:$PATH" HOME="$T/home" TELEGRAM_STATE_DIR="$T/chan" \
+    TELEGRAM_GROUP_CHAT_ID=-100999 bash "$LIB_DIR/tg-post.sh" hello >/dev/null 2>"$T/err" || true
+assert_eq "a rejected token line never quotes the token on stderr" "false" "$(grep -q '123:ABC' "$T/err" && echo true || echo false)"
+# A rejected send states ok=false, not ok=<none>: that line now leads the record.
+rc="$(run_tg '{"ok":false,"error_code":404,"description":"Not Found"}')"
+assert_eq "a rejection reads ok=false" "true" "$(grep -q 'ok=false; error: Not Found' "$T/err" && echo true || echo false)"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

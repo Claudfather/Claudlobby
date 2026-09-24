@@ -38,14 +38,17 @@ fi
 # resolves it via the TELEGRAM_TOKEN_ENV_NAME indirection) — prefer it; the
 # channel-dir .env files are the fallback for env-less callers (host timers).
 # The file is read through the shared restricted parser, which strips one outer
-# quote pair as the plugin does — a private grep|sed kept the quotes, so a
-# quoted token built a bot"<token>" URL and every timer send was a 404 while the
-# bots themselves worked (#1771). Parsed in a subshell so none of the file's
-# other keys reach this env; the parser's skipped-line warnings are dropped
-# because they quote the head of the line, which for a malformed token line is
-# the token.
+# quote pair as start-bot.sh does when it fills a session's token from the
+# tiered .env — a private grep|sed kept the quotes, so a quoted token built a
+# bot"<token>" URL and every timer send was a 404 while the bots themselves
+# worked (#1771). The telegram plugin's own .env loader keeps a value verbatim,
+# so a quoted channel file is still one it could not read. Parsed in a subshell
+# so none of the file's other keys reach this env; the parser's skipped-line
+# warnings are dropped because they quote the head of the line, which for a
+# malformed token line is the token; and its failure on an unreadable file is a
+# missing token (the verdict below), never a script_error.
 # shellcheck disable=SC2030,SC2031  # subshell-local by design: never touch this env
-TOKEN="${TELEGRAM_BOT_TOKEN:-$(TELEGRAM_BOT_TOKEN=; parse_env_file "$STATE_DIR/.env" 2>/dev/null; printf '%s' "${TELEGRAM_BOT_TOKEN:-}")}"
+TOKEN="${TELEGRAM_BOT_TOKEN:-$(TELEGRAM_BOT_TOKEN=; parse_env_file "$STATE_DIR/.env" 2>/dev/null || true; printf '%s' "${TELEGRAM_BOT_TOKEN:-}")}"
 if [ -z "$TOKEN" ]; then
   echo "tg-post: no TELEGRAM_BOT_TOKEN in $STATE_DIR/.env" >&2
   exit 1
@@ -101,7 +104,9 @@ RESP="$(curl -s -X POST --config "$URL_CFG" \
   --data-urlencode "text=${MSG}" \
   -d "disable_web_page_preview=true")" || RESP=""
 
-OK="$(printf '%s' "$RESP" | jq -r '.ok // empty' 2>/dev/null || true)"
+# `.ok // empty` would turn a definitive ok:false into nothing, and the
+# rejection line below would read ok=<none>: keep false as false.
+OK="$(printf '%s' "$RESP" | jq -r 'if type == "object" and has("ok") then (.ok | tostring) else empty end' 2>/dev/null || true)"
 if [ "$OK" = "true" ]; then
   if [ "$PLANE_ARMED" = "1" ]; then
     TG_MSGID="$(printf '%s' "$RESP" | jq -r '.result.message_id // empty' 2>/dev/null || true)"

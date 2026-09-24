@@ -4998,8 +4998,10 @@ _disclose_alert_recipient() {
 # FLEET_NAME, so the plane-record skip is announced before the send -- and a
 # record cut to its first 300 characters led with that notice, which a reader
 # took for the cause (#1771). The verdict shapes are tg-post's three failure
-# exits (no token, no chat, rejected); output carrying none keeps its order.
-_TG_POST_VERDICT_RE='^tg-post: (send REJECTED|no TELEGRAM_BOT_TOKEN|TELEGRAM_GROUP_CHAT_ID not set)'
+# exits reachable from here (no token, rejected; the no-chat exit cannot happen,
+# because this path calls tg-post only with a resolved chat); output carrying
+# neither keeps its order.
+_TG_POST_VERDICT_RE='^tg-post: (send REJECTED|no TELEGRAM_BOT_TOKEN)'
 _tg_post_verdict_first() {
     local text="$1" verdict
     verdict=$(printf '%s\n' "$text" | grep -E -m1 "$_TG_POST_VERDICT_RE" || true)
