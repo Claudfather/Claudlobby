@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the validation harness read an unreadable plane as zero rows (#1777)
+
+`lib/validate-bot-change.sh` read the plane through the `sqlite3` CLI and
+swallowed every failure, so a read that could not run returned the same empty
+answer as a read that found nothing. The fleet's primary Pi has no `sqlite3`,
+and 22 of the harness's checks failed there with no reason given, while CI,
+whose image has the CLI, passed them. The same swallow meant a check that
+expected absence passed on a plane it could not read.
+
+- **Every plane read goes through the shipped stdlib doors**: SQL through
+  `plane-readers.connect` (read-only, schema-probed), and events through
+  `plane-lookup.py`, as before. The output keeps the CLI's list mode, so no
+  caller changed how it parses.
+- **A read that cannot run refuses the check it feeds.** The check fails and
+  names the reason on its own line, whatever its verdict would have been. That
+  covers the six `val_events` checks that expect absence, which used to pass.
+  The summary says how many failures were refusals.
+- **The refusal is a lib-common primitive**: `harness_check` honours a ledger
+  that a harness arms (`HARNESS_REFUSALS`, written by `harness_refuse`), and a
+  harness that does not arm one behaves exactly as before.
+
 ### Fixed — the overdue reader missed a report made in its own second, so the #835 harness check flaked (#1789)
 
 `dispatch-overdue.py` takes "now" as a whole-second epoch, and `plane-readers.py`
