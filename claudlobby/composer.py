@@ -1461,13 +1461,14 @@ def _scheduler_tool_path(root: Path | None = None) -> str:
     Homebrew and the per-user npm/bun/.local bins where ``claude`` and
     ``claudlobby`` install — so a timer that shells out to them (e.g.
     reload-fleet's ``claude plugin update``) dies 'command not found' and fires
-    a false failure alert. Mirror lib/start-bot.sh:49's runtime construction so
-    a tool resolves identically under a timer as in a bot session, resolved at
+    a false failure alert. Mirror fleet_launch_path (lib-common), the PATH
+    start-bot.sh exports, so a tool resolves identically under a timer as in a
+    bot session (tests/test_claude_version.py pins the two), resolved at
     compose time: ``$HOME`` → the composing user's home; Homebrew → the host
     layout (lib/lib-common.sh detect_os — /opt/homebrew on Apple Silicon,
     /usr/local on Intel, absent off macOS). On Intel the Homebrew segment
     intentionally re-collides with the leading /usr/local/bin, matching
-    start-bot.sh's own duplication — a harmless, deliberate mirror.
+    fleet_launch_path's own duplication — a harmless, deliberate mirror.
 
     ``root`` appends ``<root>/.venv/bin`` (#805). The user-prefix segments above
     cover ``claude``, but ``claudlobby`` is a *console script* whose location

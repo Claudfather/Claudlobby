@@ -46,7 +46,10 @@ done
 disown
 # --- end boot-mass mitigation -------------------------------------------------
 
-export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}
+# The launch PATH is defined once, in lib-common, because the update job has to
+# resolve claude exactly where a pane will (fleet_launch_path, #1772).
+PATH="$(fleet_launch_path)"
+export PATH
 session_cli_path
 export HOME="$HOME"
 
