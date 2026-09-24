@@ -59,10 +59,13 @@ STATE_DIR="${CLAUDLOBBY_ROOT}/state/currency"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 setup_log_dir "$LOG"
 
-ts=$(ts_iso)
+# Stamped at write time, the #1770 idiom: a run that takes minutes logs how long
+# each step took, which is the evidence an operator needs when one goes wrong.
+# One ts_iso taken at the top stamped every line as the run's start (#1773).
+log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
 
 if ! git -C "$CLAUDLOBBY_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "$ts SKIP — $CLAUDLOBBY_ROOT is not a git checkout" >> "$LOG"
+    log "SKIP — $CLAUDLOBBY_ROOT is not a git checkout"
     exit 0
 fi
 
@@ -71,7 +74,7 @@ while IFS= read -r _r; do
     [ -n "$_r" ] && WATCHED+=("$_r")
 done < <(discover_framework_checkouts)
 
-echo "$ts WATCHING ${#WATCHED[@]} repo(s): ${WATCHED[*]}" >> "$LOG"
+log "WATCHING ${#WATCHED[@]} repo(s): ${WATCHED[*]}"
 
 # currency_outcome_phrase
 # Render the verdict notify_currency just recorded, for the audit log.
@@ -103,7 +106,7 @@ for repo in "${WATCHED[@]}"; do
     name=$(basename "$repo")
 
     if ! with_timeout 120 git -C "$repo" fetch --quiet --tags origin 2>>"$LOG"; then
-        echo "$ts [$name] FETCH FAILED — source currency unknown (nudge skipped)" >> "$LOG"
+        log "[$name] FETCH FAILED — source currency unknown (nudge skipped)"
         emit_script_error "" "notify-behind.sh" 1 \
             "git fetch origin failed for $name — source currency unknown"
         continue
@@ -111,7 +114,7 @@ for repo in "${WATCHED[@]}"; do
 
     branch=$(repo_default_branch "$repo")
     if ! behind=$(git -C "$repo" rev-list --count "HEAD..origin/$branch" 2>>"$LOG"); then
-        echo "$ts [$name] SKIP — no origin/$branch to compare against" >> "$LOG"
+        log "[$name] SKIP — no origin/$branch to compare against"
         continue
     fi
 
@@ -123,9 +126,9 @@ for repo in "${WATCHED[@]}"; do
         if [ "$behind" -gt 0 ]; then
             notify_currency "$name" "source_behind" "$behind" \
                 "$name on $(hostname) is $behind commit(s) behind origin/$branch — apply with: git -C $repo pull --ff-only"
-            echo "$ts [$name] BEHIND origin/$branch by $behind (untagged repo) — $(currency_outcome_phrase)" >> "$LOG"
+            log "[$name] BEHIND origin/$branch by $behind (untagged repo) — $(currency_outcome_phrase)"
         else
-            echo "$ts [$name] IN SYNC with origin/$branch" >> "$LOG"
+            log "[$name] IN SYNC with origin/$branch"
             currency_clear "$name" "source_behind"
         fi
         continue
@@ -136,7 +139,7 @@ for repo in "${WATCHED[@]}"; do
         # Behind a cut release — the case update-siblings.sh can actually fix.
         notify_currency "$name" "source_behind" "$tag_behind" \
             "$name on $(hostname) is $tag_behind commit(s) behind release $tag — apply with: git -C $repo pull --ff-only"
-        echo "$ts [$name] BEHIND TAG $tag by $tag_behind — $(currency_outcome_phrase)" >> "$LOG"
+        log "[$name] BEHIND TAG $tag by $tag_behind — $(currency_outcome_phrase)"
     elif [ "$behind" -gt 0 ]; then
         # On the newest release, but main has moved. Deliberately NOT phrased as
         # "pull": on a versioned dependency that would mean running unreleased
@@ -144,9 +147,9 @@ for repo in "${WATCHED[@]}"; do
         # This is the shape #1009 was filed from and could not previously say.
         notify_currency "$name" "source_release_gap" "$behind" \
             "$name on $(hostname) is at its newest release ($tag) but origin/$branch is $behind commit(s) ahead — unreleased fixes are not deployed; cut a release or upgrade deliberately"
-        echo "$ts [$name] AT RELEASE $tag, main +$behind — release-gap $(currency_outcome_phrase)" >> "$LOG"
+        log "[$name] AT RELEASE $tag, main +$behind — release-gap $(currency_outcome_phrase)"
     else
-        echo "$ts [$name] IN SYNC with origin/$branch and release $tag" >> "$LOG"
+        log "[$name] IN SYNC with origin/$branch and release $tag"
         currency_clear "$name" "source_behind"
         currency_clear "$name" "source_release_gap"
     fi

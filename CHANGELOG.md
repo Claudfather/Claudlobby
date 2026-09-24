@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — three jobs stamped every log line with the instant their run started (#1773)
+
+`weekly-worker-restart.sh`, `update-siblings.sh` and `notify-behind.sh` took one
+`ts_iso` at the top of a run and stamped every later line with it. A bounce or a
+fetch sweep lasting minutes to an hour therefore logged as a single instant, so
+per-step durations, which are what an operator needs when a run goes wrong,
+could not be recovered.
+
+- **Each line is now stamped when it is written**, through the same `log()` that
+  #1770 gave `update-claude-code.sh`. There is one idiom, not a fourth copy.
+- **Nothing read the old stamp.** The two readers of these logs match message
+  text: `lib/validate-bot-change.sh` greps the restart log for `worker:` and
+  `skip (manager):` lines, and `tests/test_notify_behind.py` looks for `notice
+  DELIVERED`. So no run-start field was needed. The run's start is still
+  recorded, as the stamp on its first line.
+- **Pinned.** `tests/test_job_log_stamps.py` drives each real script with a
+  known 2 s gap between two lines. At main each gap read `0:00:00`. A mutant that
+  re-hoists the stamp in any one script turns exactly that script's test red.
+
 ### Added — a staged Claude Code update, so a broken install never reaches a bot (#1768; opt-in, off by default)
 
 On 2026-09-23 `npm install -g` exited 0 and left a 500-byte stub where the fleet's

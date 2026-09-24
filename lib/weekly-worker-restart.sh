@@ -37,16 +37,19 @@ LOG_DIR="${CLAUDLOBBY_ROOT}/state"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/weekly-worker-restart.log"
 
-ts=$(ts_iso)
+# Stamped at write time, the #1770 idiom: a run that takes minutes logs how long
+# each step took, which is the evidence an operator needs when one goes wrong.
+# One ts_iso taken at the top stamped every line as the run's start (#1773).
+log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
 
 if [ -z "$FLEET" ]; then
-    echo "$ts RESTART abort: no fleet specified" >> "$LOG"
+    log "RESTART abort: no fleet specified"
     exit 0
 fi
 
 BOTS_DIR=$(resolve_bots_dir "$FLEET")
 if [ ! -d "$BOTS_DIR" ]; then
-    echo "$ts RESTART warning: bots dir not found: $BOTS_DIR" >> "$LOG"
+    log "RESTART warning: bots dir not found: $BOTS_DIR"
     exit 0
 fi
 
@@ -60,7 +63,7 @@ fi
 _wr_fleet_dir=$(resolve_fleet_dir "$FLEET") || _wr_fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET"
 declared_bots=$(parse_fleet_bots "$_wr_fleet_dir/fleet.yaml")
 
-echo "$ts RESTART starting weekly worker-only bounce: $FLEET" >> "$LOG"
+log "RESTART starting weekly worker-only bounce: $FLEET"
 restarted=0; skipped=0; failed=0
 for bot_dir in "$BOTS_DIR"/*/; do
     [ -d "$bot_dir" ] || continue
@@ -69,12 +72,12 @@ for bot_dir in "$BOTS_DIR"/*/; do
 
     # F5: managers are never auto-restarted.
     if bot_is_manager "$bot_dir"; then
-        echo "$ts RESTART skip (manager): $bot_id" >> "$LOG"
+        log "RESTART skip (manager): $bot_id"
         skipped=$((skipped + 1))
         continue
     fi
 
-    echo "$ts RESTART worker: $bot_id" >> "$LOG"
+    log "RESTART worker: $bot_id"
     # Write a unique fence marker BEFORE the bounce so the gate below only sees a
     # BRIDGE_READY after it (rotation-proof + fail-closed; see wait_bridge_ready).
     _wr_fence="$(bridge_fence_write "$bot_dir")"
@@ -112,18 +115,18 @@ for bot_dir in "$BOTS_DIR"/*/; do
         # mass-starve channel init (#688/#689). A gate timeout is logged + alerted
         # but does NOT abort the maintenance run — the next worker still bounces.
         if wait_bridge_ready "$bot_dir" "$_wr_ceiling" "$_wr_fence"; then
-            echo "$ts RESTART ready: $bot_id" >> "$LOG"
+            log "RESTART ready: $bot_id"
         else
-            echo "$ts RESTART bridge-timeout: $bot_id (no BRIDGE_READY in ${_wr_ceiling}s)" >> "$LOG"
+            log "RESTART bridge-timeout: $bot_id (no BRIDGE_READY in ${_wr_ceiling}s)"
             emit_failure_alert "$BOTS_DIR" "bridge_down" "worker $bot_id restarted but its Telegram bridge did not come ready within ${_wr_ceiling}s (weekly bounce)"
         fi
         restarted=$((restarted + 1))
     else
         rc=$?
-        echo "$ts RESTART FAILED: $bot_id (spin-up-bot rc=$rc)" >> "$LOG"
+        log "RESTART FAILED: $bot_id (spin-up-bot rc=$rc)"
         emit_failure_alert "$BOTS_DIR" "restart_failed" "worker $bot_id failed to restart on the weekly bounce (spin-up rc=$rc)"
         failed=$((failed + 1))
     fi
 done
-echo "$ts RESTART complete: $restarted restarted, $skipped manager(s) skipped, $failed failed" >> "$LOG"
+log "RESTART complete: $restarted restarted, $skipped manager(s) skipped, $failed failed"
 exit 0

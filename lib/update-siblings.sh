@@ -96,10 +96,13 @@ STATE_DIR="${CLAUDLOBBY_ROOT}/state/currency"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 setup_log_dir "$LOG"
 
-ts=$(ts_iso)
+# Stamped at write time, the #1770 idiom: a run that takes minutes logs how long
+# each step took, which is the evidence an operator needs when one goes wrong.
+# One ts_iso taken at the top stamped every line as the run's start (#1773).
+log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
 
 if ! git -C "$CLAUDLOBBY_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "$ts SKIP — $CLAUDLOBBY_ROOT is not a git checkout" >> "$LOG"
+    log "SKIP — $CLAUDLOBBY_ROOT is not a git checkout"
     exit 0
 fi
 
@@ -108,7 +111,7 @@ while IFS= read -r _r; do
     [ -n "$_r" ] && WATCHED+=("$_r")
 done < <(discover_framework_checkouts)
 
-echo "$ts START dry_run=$DRY_RUN watching ${#WATCHED[@]}: ${WATCHED[*]}" >> "$LOG"
+log "START dry_run=$DRY_RUN watching ${#WATCHED[@]}: ${WATCHED[*]}"
 
 SELF=$(git -C "$CLAUDLOBBY_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$CLAUDLOBBY_ROOT")
 
@@ -116,12 +119,12 @@ for repo in "${WATCHED[@]}"; do
     name=$(basename "$repo")
 
     if [ "$repo" = "$SELF" ]; then
-        echo "$ts [$name] SKIP — the compositor itself is not auto-updated (see header)" >> "$LOG"
+        log "[$name] SKIP — the compositor itself is not auto-updated (see header)"
         continue
     fi
 
     if ! with_timeout 120 git -C "$repo" fetch --quiet --tags origin 2>>"$LOG"; then
-        echo "$ts [$name] FETCH FAILED — skipped" >> "$LOG"
+        log "[$name] FETCH FAILED — skipped"
         emit_script_error "" "update-siblings.sh" 1 \
             "git fetch origin failed for $name — update skipped"
         continue
@@ -133,14 +136,14 @@ for repo in "${WATCHED[@]}"; do
     target=$(repo_currency_target "$repo")
 
     if ! behind=$(git -C "$repo" rev-list --count "HEAD..$target" 2>>"$LOG"); then
-        echo "$ts [$name] SKIP — cannot compare against $target" >> "$LOG"
+        log "[$name] SKIP — cannot compare against $target"
         emit_script_error "" "update-siblings.sh" 1 \
             "$name: cannot resolve $target — currency unknown, repo unwatched"
         continue
     fi
 
     if [ "${behind:-0}" -eq 0 ]; then
-        echo "$ts [$name] CURRENT at $target" >> "$LOG"
+        log "[$name] CURRENT at $target"
         currency_clear "$name" "sibling_update_blocked"
         currency_clear "$name" "sibling_update_failed"
         continue
@@ -154,15 +157,15 @@ for repo in "${WATCHED[@]}"; do
     # notifying".
     if [ "$DRY_RUN" -eq 1 ]; then
         if [ -n "$blocker" ]; then
-            echo "$ts [$name] DRY-RUN would SKIP ($blocker) — $behind behind $target" >> "$LOG"
+            log "[$name] DRY-RUN would SKIP ($blocker) — $behind behind $target"
         else
-            echo "$ts [$name] DRY-RUN would fast-forward $behind commit(s) to $target" >> "$LOG"
+            log "[$name] DRY-RUN would fast-forward $behind commit(s) to $target"
         fi
         continue
     fi
 
     if [ -n "$blocker" ]; then
-        echo "$ts [$name] BLOCKED ($blocker) — $behind behind $target, not pulling" >> "$LOG"
+        log "[$name] BLOCKED ($blocker) — $behind behind $target, not pulling"
         notify_currency "$name" "sibling_update_blocked" "$behind" \
             "$name on $(hostname) is $behind commit(s) behind $target but was NOT updated: $blocker — resolve it by hand, then: git -C $repo pull --ff-only"
         continue
@@ -181,19 +184,19 @@ for repo in "${WATCHED[@]}"; do
         # apart in a test: `git merge --ff-only` refuses a dirty tree on its
         # own, so asserting merely that HEAD did not move passes just as well
         # with the guards deleted. It did — that is how this was found.
-        echo "$ts [$name] FF FAILED — diverged from $target, human needed" >> "$LOG"
+        log "[$name] FF FAILED — diverged from $target, human needed"
         notify_currency "$name" "sibling_update_failed" "$target" \
             "$name on $(hostname) could not fast-forward to $target (diverged) — resolve by hand: git -C $repo status"
         continue
     fi
     to=$(git -C "$repo" rev-parse --short HEAD)
 
-    echo "$ts [$name] UPDATED $from -> $to ($behind commit(s) to $target)" >> "$LOG"
+    log "[$name] UPDATED $from -> $to ($behind commit(s) to $target)"
     # Loud by construction. A silent auto-update is #1009 inverted: the fleet
     # would again be running code nobody knew had changed.
     notify_currency "$name" "sibling_updated" "$to" \
         "$name on $(hostname) fast-forwarded $from -> $to ($behind commit(s)) to $target — running sessions pick it up on their next $name call; restart to be certain"
 done
 
-echo "$ts DONE" >> "$LOG"
+log "DONE"
 exit 0
