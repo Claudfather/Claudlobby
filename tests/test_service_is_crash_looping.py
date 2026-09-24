@@ -40,12 +40,32 @@ def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str, carry: str 
     stub = bindir / "systemctl"
     # Shuffled: NRestarts last, SubState before ActiveState. An unparseable or
     # absent counter is modelled by passing "" (the Key= line with no value).
+    # And it answers ONLY what -p asked for, as systemd does, recording each
+    # call's request in `requested`: a stub that printed every property whatever
+    # -p said could not see a call that stopped asking for NRestarts, which on
+    # real systemd reads every loop as "no verdict" forever (#1774 review).
+    requested = tmp_path / "requested"
+    props = (
+        "ExecMainStartTimestampMonotonic=990000000",
+        f"SubState={sub}",
+        f"ActiveState={active}",
+        "InactiveExitTimestampMonotonic=990000000",
+        f"NRestarts={nrestarts}",
+    )
     stub.write_text(
         "#!/bin/sh\n"
-        'printf "%s\\n" "ExecMainStartTimestampMonotonic=990000000" '
-        f'"SubState={sub}" "ActiveState={active}" '
-        '"InactiveExitTimestampMonotonic=990000000" '
-        f'"NRestarts={nrestarts}"\n'
+        'want=""; prev=""\n'
+        'for a in "$@"; do\n'
+        '  case "$prev" in -p|--property) want="$want $a" ;; esac\n'
+        '  case "$a" in --property=*) want="$want ${a#--property=}" ;; esac\n'
+        '  prev="$a"\n'
+        "done\n"
+        'want=$(printf "%s" "$want" | tr "," " ")\n'
+        f'printf "%s\\n" "$want" >> "{requested}"\n'
+        "for kv in " + " ".join(f'"{kv}"' for kv in props) + "; do\n"
+        # no -p at all: systemd prints every property
+        '  case " $want " in "  "|*" ${kv%%=*} "*) printf "%s\\n" "$kv" ;; esac\n'
+        "done\n"
     )
     stub.chmod(0o755)
     bot_dir = tmp_path / "bot"
@@ -311,6 +331,15 @@ class TestCrashLoopCarry:
             )
             is None
         )
+
+
+def test_the_one_show_asks_for_the_counter_by_name(tmp_path):
+    """The stub answers only what -p asked, so this is a real request, not a
+    property it would have printed anyway. Without it every loop reads as no
+    verdict on real systemd, and the loop tests above go red with it."""
+    _looping(tmp_path, active="activating", sub="start-pre", nrestarts="2")
+    requested = (tmp_path / "requested").read_text().split()
+    assert "NRestarts" in requested, requested
 
 
 def test_the_starting_gate_is_unchanged_by_the_shared_read(tmp_path):
