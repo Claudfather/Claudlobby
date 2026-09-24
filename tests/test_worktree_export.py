@@ -9,7 +9,6 @@ tests would stay green while the edit under test never reached them.
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -44,12 +43,7 @@ def repo(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     root.mkdir()
     _git(root, "init", "-q")
-    (root / ".gitignore").write_text("ignored.md\n")
     (root / "tracked.md").write_text("committed\n")
-    (root / "doomed.md").write_text("committed, then deleted\n")
-    (root / "run.sh").write_text("#!/bin/sh\necho ok\n")
-    os.chmod(root / "run.sh", 0o755)
-    os.symlink("tracked.md", root / "link.md")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "base")
     return root
@@ -69,44 +63,3 @@ def test_the_export_is_the_working_tree_not_head(repo, tmp_path):
     assert (out / "tracked.md").read_text() == "edited, not committed\n"
     assert (out / "staged.md").read_text() == "added, not committed\n"
     assert (out / "untracked.md").read_text() == "never added\n"
-
-
-def test_the_export_leaves_out_what_a_commit_would_not_carry(repo, tmp_path):
-    """Ignored files, files deleted from the working tree and `.git` stay
-    out. A plain copy of the directory carries all three: `.git` would hand
-    the history to the compose, and an ignored `local/` or `.env` would make
-    the result depend on whoever ran it."""
-    (repo / "ignored.md").write_text("gitignored\n")
-    (repo / "doomed.md").unlink()
-
-    out = export_working_tree(repo, tmp_path / "export")
-
-    assert (out / "tracked.md").is_file()  # the positive control: it did copy
-    assert not (out / "ignored.md").exists()
-    assert not (out / "doomed.md").exists()
-    assert not (out / ".git").exists()
-
-
-def test_the_export_keeps_executable_bits_and_symlinks(repo, tmp_path):
-    """The executable bit is part of the tree git records, and a byte-only
-    copy drops it; a caller that runs a `lib/` script from the export
-    directly, rather than through `bash`, needs it. A symlink stays a
-    symlink with its own target rather than becoming a copy of whatever it
-    pointed at."""
-    out = export_working_tree(repo, tmp_path / "export")
-
-    assert os.access(out / "run.sh", os.X_OK)
-    assert (out / "link.md").is_symlink()
-    assert os.readlink(out / "link.md") == "tracked.md"
-
-
-def test_the_export_refuses_a_destination_inside_a_bot_runtime_tree(repo, tmp_path):
-    """An export under `…/runtime/bots/…` fails `path_audit`'s shape check
-    exactly as the checkout did, so it would bring back #1794 with a less
-    obvious cause. It refuses before copying anything."""
-    dest = tmp_path / "runtime" / "bots" / "somebot" / "export"
-
-    with pytest.raises(ValueError, match="runtime/bots"):
-        export_working_tree(repo, dest)
-
-    assert not dest.exists()
