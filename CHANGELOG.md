@@ -45,6 +45,30 @@ by a polling reader, the consumers). `lib/validate-bot-change.sh` boots the real
 `start-bot.sh` through a staged link. `lib/rehearse-staged-claude-update.sh` runs
 the whole thing with real npm on a throwaway root.
 
+### Fixed — the merge command block refuses on its own when rung 0 or rung 4 did not run in its call (#1785)
+
+#1783's rung-4 refusal only binds within one shell call, and the Bash tool keeps
+no variables between calls. Run on its own, `gh pr merge` accepted an empty PR
+selector, an empty `--repo` and an empty `--match-head-commit`, and went straight
+to the API (vera measured it). So a manager who ran the checks in one call and
+the merge in another bypassed the refusal.
+
+- **Both guardrails that carry the block** (`merge-policy-auto-admin`,
+  `merge-policy-auto-after-review`) now open it with rung 4's guard: `REPO`, `N`
+  and `PH` must be non-empty, and `DELETE` must be **set**. Rung 4 empties
+  `DELETE` on purpose to keep a branch, so the test is `${DELETE+set}`, not
+  `-n "$DELETE"`.
+- **The one-call sentence now names the merge command too.** The guard is the
+  stronger half, because it holds even when the sentence is not followed.
+- **Evidence:** the block was extracted from each guardrail and run alone in a
+  fresh shell, against a recording `gh` in a scratch repo with no remote.
+  - Before the change, all 9 variable states reached `gh`.
+  - After it, all 7 unset or empty states refuse and `gh` is never called, and
+    both controls (all set, and `DELETE` deliberately empty) still reach it with
+    the right argv.
+  - The same probe gives the same results on the CLAUDE.md composed from a
+    `git archive` export.
+
 ### Fixed — a unit that fails every start read as "boot in flight" forever, so a 23 h outage paged no one (#1769)
 
 On 2026-09-23 a broken `claude` install met an unclean reboot, and every bot on
