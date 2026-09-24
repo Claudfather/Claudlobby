@@ -77,15 +77,16 @@ The manager auto-merges PRs using `--admin` when ALL of:
 4. **NO OPEN PR MAY STILL BE BASED ON THE BRANCH THIS MERGE DELETES — retarget each one FIRST.** An open PR whose *base* is this PR's head branch is **closed** by GitHub the moment `--delete-branch` removes that branch: not retargeted, not reported, and its author is not told. Observed: #1779 went `CLOSED` two seconds after #1776 merged, and its author found it twenty minutes later (#1781). So before the merge, move every dependent onto this PR's own base, and keep `--delete-branch` only if none is left:
 
    ```bash
-   BASE=$(gh pr view "$N" --repo "$REPO" --json baseRefName --jq .baseRefName)
-   STACKED=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number')
+   [ -n "$REPO" ] && [ -n "$N" ] && [ -n "$BR" ] && [ -n "$PH" ] || { echo "REFUSE: rung 0's REPO, N, BR and PH are not all set in this shell; run rung 0 and this rung in one call"; exit 1; }
+   BASE=$(gh pr view "$N" --repo "$REPO" --json baseRefName --jq .baseRefName) && [ -n "$BASE" ] || { echo "REFUSE: cannot read the base of #$N"; exit 1; }
+   STACKED=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number') || { echo "REFUSE: cannot list the open PRs based on $BR"; exit 1; }
    for M in $STACKED; do gh pr edit "$M" --repo "$REPO" --base "$BASE"; done
    DELETE=--delete-branch
-   LEFT=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number')
+   LEFT=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number') || { echo "REFUSE: cannot re-list the open PRs based on $BR"; exit 1; }
    [ -z "$LEFT" ] || { DELETE=""; echo "KEEPING $BR: still the base of $LEFT"; }
    ```
 
-   `$BR` is rung 0's head branch. **The re-list is the check, not the edit's exit code**: a PR that still names `$BR` as its base is exactly what the deletion would close, however the edit reported. A branch kept for a dependent is deleted once that PR has been retargeted or closed. **A retargeted PR needs its new base merged into it after this merge**: a squash lands this PR's commits under a new sha, so the dependent's own copies of them conflict until its author merges the base in — which is why the announcement below names it.
+   `$REPO`, `$N`, `$BR` and `$PH` are rung 0's. **Every read here refuses the merge rather than reading as empty.** The Bash tool keeps no variables between calls, so rung 0 and this rung must run in one call. An empty `--base` is not "no dependents": `gh pr list --base ""` returned the same open PRs as no filter at all, so an unset `$BR` would retarget PRs that have nothing to do with this merge. A listing that failed is not a listing that found nothing, so a throttled `gh` must stop the merge and never clear the deletion (#1146). And the merge command below anchors to `$PH`, so an empty one must never reach it. **The re-list is the check, not the edit's exit code**: a PR that still names `$BR` as its base is exactly what the deletion would close, however the edit reported. A branch kept for a dependent is deleted once that PR has been retargeted or closed. **A retargeted PR needs its new base merged into it after this merge**: a squash lands this PR's commits under a new sha, so the dependent's own copies of them conflict until its author merges the base in — which is why the announcement below names it.
 
 Merge command — **carrying the same `$PH` rung 0 anchored to**:
 
