@@ -447,6 +447,31 @@ SWITCHES: tuple[Switch, ...] = (
              "newest cut release (notify-behind REPORTS regardless)",
     ),
     Switch(
+        key="claude-staged-update",
+        # DOOR, not HOST_JOB, for the plane-prune-system-events reason: the
+        # `claude-update` timer is enrolled and stays so, and this is a MODE
+        # inside it. `job` names the unit that must carry the Environment=
+        # stamp, because a host timer sources no .env.
+        scope=DOOR,
+        polarity=OPT_IN,
+        carrier=ENV_HOST,
+        # CLAUDLOBBY_-prefixed for the mcp-package-probe reason: claiming the
+        # CLAUDE_ namespace would have the dead-flag sweep report Claude Code's
+        # own variables as ours, and dead.
+        env="CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED",
+        job="claude-update",
+        why_opt_in="no deployment gate — it changes which claude binary every "
+                   "bot on the host launches, and lib/ is read on demand, so a "
+                   "root pull would move the whole host at once. Armed per "
+                   "host, on the operator's say-so, after the rehearsal "
+                   "(lib/rehearse-staged-claude-update.sh)",
+        what="stage each Claude Code version into its own npm prefix under "
+             "state/claude/versions, run it there, and only then repoint the "
+             "one fleet link (state/bin/claude) in a single rename, keeping "
+             "the previous version — no sudo, and a failed install never "
+             "reaches a bot",
+    ),
+    Switch(
         key="boot-capture",
         scope=HOST_JOB,
         polarity=OPT_IN,

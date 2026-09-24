@@ -361,7 +361,8 @@ fi
 DIGEST_CHARS="$(wc -c <"$WORK" 2>/dev/null | tr -d ' ' || printf '0')"
 case "$DIGEST_CHARS" in ''|*[!0-9]*) DIGEST_CHARS=0 ;; esac
 
-CLAUDE="${CLAUDE_BIN:-claude}"
+# fleet_claude_bin: CLAUDE_BIN, else the staged fleet link (#1768), else PATH.
+CLAUDE="$(fleet_claude_bin)"
 if ! command -v "$CLAUDE" >/dev/null 2>&1; then
     emit_row "error" "" "model binary not found on PATH=$PATH"
     rm -f "$WORK" 2>/dev/null || true

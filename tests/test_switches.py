@@ -105,6 +105,13 @@ def test_exactly_the_categories_that_ship_off():
                       "manager-checkin",
                       # no deployment gate — see the docstring
                       "boot-capture", "boot-capture-stamp",
+                      # no deployment gate, and the door it gates decides
+                      # which claude binary EVERY bot on the host launches
+                      # (#1768): unflagged, one root pull would move the whole
+                      # host at the next 04:00 run with nothing to stage it on.
+                      # Nothing from the four list: its prune deletes only
+                      # versions it staged itself, never one a process runs.
+                      "claude-staged-update",
                       # pages a human with no rate guard beyond the debounce
                       # — outbound-to-people-at-scale's risk, not its volume
                       "worker-unassigned",
@@ -630,7 +637,9 @@ def test_the_composer_arming_tables_are_derived_not_listed():
     # table is DERIVED from the registry, never hand-listed.
     assert HOST_JOB_ARMING == sw.jobs_with_env(
         sw.HOST_JOB, sw.HOST_SERVICE, sw.DOOR)
-    assert set(HOST_JOB_ARMING) == {"plane-expire", "plane-prune"}
+    # claude-update (#1768): the staged mode is a DOOR lane inside that timer,
+    # so its flag must be stamped there for the same closed-env reason.
+    assert set(HOST_JOB_ARMING) == {"plane-expire", "plane-prune", "claude-update"}
 
 
 def test_the_validator_namespaces_come_from_the_registry():

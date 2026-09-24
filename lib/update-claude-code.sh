@@ -17,6 +17,14 @@
 # install, binary_update_failed after it — and binary_repaired says when a
 # reinstall fixed it.
 #
+# TWO MODES. In place, the default: `npm install -g` over the binary the fleet
+# launches (under sudo when that is a root-owned system install), so a broken
+# install is live the moment it lands. Staged, opt-in with
+# CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1 (#1768): each version goes into its own npm
+# prefix under state/claude/versions, is verified THERE, and only then is the
+# one fleet link (state/bin/claude) moved, in a single rename, keeping the
+# previous version. No sudo, and a failed install never reaches a bot.
+#
 # Usage: update-claude-code.sh [<fleet-name>]
 #   The optional fleet name is recorded with the run; this script restarts no bot.
 
@@ -63,16 +71,22 @@ update_failed() {
 # Detecting via this script's PATH updated that shadow user copy and left the
 # fleet's binary stale (#635). Mirror start-bot's ordering for detection +
 # version + the sudo choice; the PATH above still finds npm/node to RUN the
-# install. (A hand copy of start-bot's launch order — keep the two in sync;
-# one shared resolver is #1772.)
+# install. CLAUDE_BIN and the staged fleet link (#1768) come from
+# fleet_claude_bin, the resolver start-bot.sh launches through; only the PATH
+# fallback's ordering below is still a mirror of start-bot's (#1772).
 # CLAUDE_BIN is the same override start-bot.sh launches with — when the fleet
 # pins its binary explicitly, the updater targets THAT one (SSOT). Absent it,
 # mirror start-bot's launch ordering. CLAUDE_UPDATE_FLEET_PATH lets a test / an
 # unusual host substitute the resolution order.
 _FLEET_PATH="${CLAUDE_UPDATE_FLEET_PATH:-/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:$_HOMEBREW/bin}}"
 fleet_claude() {
-    if [ -n "${CLAUDE_BIN:-}" ]; then printf '%s' "$CLAUDE_BIN"; return; fi
-    PATH="$_FLEET_PATH" command -v claude 2>/dev/null || true
+    local c
+    c="$(fleet_claude_bin)"
+    if [ "$c" = claude ]; then
+        PATH="$_FLEET_PATH" command -v claude 2>/dev/null || true
+    else
+        printf '%s' "$c"
+    fi
 }
 
 # --- The one predicate: does the fleet's binary work? ------------------------
@@ -84,11 +98,12 @@ fleet_claude() {
 # rule claudlobby/source_state.py decides for read doors (unreachable is not a
 # value); that module answers whether a PATH can be opened, and a stub that
 # cannot run opens fine. Local until a second consumer needs it (#1772).
+# Measures $1 when given (a staged binary, #1768), else the fleet's binary.
 measure_claude_version() {
     CLAUDE_VERSION=""
     CLAUDE_VERSION_WHY=""
     local p out first said rc=0 re='[0-9]+\.[0-9]+\.[0-9]+'
-    p="$(fleet_claude)"
+    p="${1:-$(fleet_claude)}"
     if [ -z "$p" ]; then
         CLAUDE_VERSION_WHY="no claude binary resolved"
         return 1
@@ -139,6 +154,189 @@ if [ -n "$old_why" ]; then
     log "UPDATE ALERT — the fleet's binary cannot run before the update: $old_why"
     emit_failure_alert "$BOTS_DIR" "binary_unrunnable" \
         "the fleet's claude binary cannot run ($old_why) — a bot that starts or restarts on this host will not launch until it is repaired; reinstalling now"
+fi
+
+# --- The staged update (#1768): OPT-IN, CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1 --------
+# The in-place install below writes over the binary every bot launches AND the
+# file every running session re-executes (a session's grep/rg are its own binary
+# run as a multi-call tool, through CLAUDE_CODE_EXECPATH, the RESOLVED path). On
+# 2026-09-23 npm exited 0 leaving a 500-byte stub, and the host could not start a
+# bot for 23 h (#1767). Staged, a version is installed into its OWN npm prefix
+# under CLAUDLOBBY_ROOT, measured THERE, and only then does the ONE link the
+# fleet launches (fleet_claude_bin) move, in a single rename, keeping the
+# previous version. An unverified install is never visible to a bot, a failed
+# one leaves the fleet exactly where it was, and no step needs sudo. Off by
+# default: it decides which binary every bot on the host launches, and lib/ has
+# no deployment gate of its own, so the switch is the rollout
+# (claudlobby/switches.py).
+_CLAUDE_PKG="@anthropic-ai/claude-code"
+_CLAUDE_EXE_REL="lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+# A real Claude Code binary is ~226 MB and the stub a broken install leaves is
+# 500 bytes (both measured on the Pi, #1768), so the floor sits far from both.
+_CLAUDE_MIN_BINARY_BYTES="${CLAUDE_MIN_BINARY_BYTES:-10000000}"
+# The live process table; a seam, so a host without one is testable here.
+_PROC_DIR="${CLAUDE_UPDATE_PROC_DIR:-/proc}"
+_STAGED_LINK="$CLAUDLOBBY_ROOT/$_FLEET_CLAUDE_LINK_REL"
+_STAGED_VERSIONS="$CLAUDLOBBY_ROOT/$_FLEET_CLAUDE_VERSIONS_REL"
+
+# verify_staged <exe>: rc 0 iff <exe> ran and printed a version
+# (measure_claude_version, #1770) AND is above the size floor. Run first, so a
+# stub that fails is reported in its own words (it names the cause); the floor
+# then catches what runs but cannot be Claude Code. STAGED_WHY says which.
+verify_staged() {
+    local exe="$1" size
+    STAGED_WHY=""
+    if [ ! -x "$exe" ]; then
+        STAGED_WHY="no executable at $exe"
+        return 1
+    fi
+    if ! measure_claude_version "$exe"; then
+        STAGED_WHY="$CLAUDE_VERSION_WHY"
+        return 1
+    fi
+    size="$(wc -c <"$exe" 2>/dev/null | tr -d ' ' || true)"
+    case "$size" in "" | *[!0-9]*) size=0 ;; esac
+    if [ "$size" -lt "$_CLAUDE_MIN_BINARY_BYTES" ]; then
+        STAGED_WHY="$exe is $size bytes, under the $_CLAUDE_MIN_BINARY_BYTES-byte floor: not a Claude Code binary"
+        return 1
+    fi
+}
+
+# running_exes: the executable of every process whose table entry is readable,
+# one per line. These are RESOLVED paths, the same ones a session re-executes.
+running_exes() {
+    python3 -c '
+import os, sys
+root = sys.argv[1]
+for pid in os.listdir(root):
+    if pid.isdigit():
+        try:
+            print(os.readlink(os.path.join(root, pid, "exe")))
+        except OSError:
+            pass
+' "$_PROC_DIR" 2>/dev/null || true
+}
+
+# prune_versions: keep the linked version, the previous one, and every version a
+# live process executes from; delete the rest. Deleting a version a session still
+# runs breaks it exactly the way 09-23 did, so with no process table to read
+# nothing is deleted, and the log says so.
+prune_versions() {
+    local cur prev d real running nl=$'\n'
+    if [ ! -e "$_PROC_DIR/self/exe" ]; then
+        log "UPDATE prune skipped: no process table at $_PROC_DIR, so which versions are running cannot be read; nothing deleted"
+        return 0
+    fi
+    cur="$(readlink "$_STAGED_LINK" 2>/dev/null || true)"
+    prev="$(cat "$_STAGED_VERSIONS/.previous" 2>/dev/null || true)"
+    running="$nl$(running_exes)$nl"
+    for d in "$_STAGED_VERSIONS"/*/; do
+        d="${d%/}"
+        [ -d "$d" ] || continue
+        case "$cur" in "$d"/*) continue ;; esac
+        case "$prev" in "$d"/*) continue ;; esac
+        # The table holds canonical paths, so compare against one: a root reached
+        # through a symlink would otherwise match nothing and delete a live version.
+        real="$(cd -P "$d" 2>/dev/null && pwd -P || true)"
+        if [ -z "$real" ]; then
+            log "UPDATE prune: kept ${d##*/}, its real path could not be read"
+            continue
+        fi
+        case "$running" in *"$nl$real/"*)
+            log "UPDATE prune: kept ${d##*/}, a running process executes from it"
+            continue
+            ;;
+        esac
+        rm -rf "$d" && log "UPDATE prune: removed ${d##*/}"
+    done
+}
+
+# staged_update: the whole staged run. Runs under the lock (below), in a
+# subshell, so update_failed's exit ends the run and nothing else.
+staged_update() {
+    local target cur vdir exe stage npm_rc=0 was
+    # A crashed run's staging: never linked, so never launched. Safe to remove
+    # only because this runs under the lock, where no live run's staging exists.
+    rm -rf "$_STAGED_VERSIONS"/.staging-* 2>/dev/null || true
+    cur="$(readlink "$_STAGED_LINK" 2>/dev/null || true)"
+    was="${cur:-the system claude}"
+    # The version to stage: CLAUDE_UPDATE_VERSION pins one, else npm's latest.
+    target="${CLAUDE_UPDATE_VERSION:-}"
+    if [ -z "$target" ]; then
+        target="$(npm view "$_CLAUDE_PKG" version 2>>"$LOG" || true)"
+        target="${target##*$'\n'}"
+    fi
+    if ! [[ $target =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        update_failed 1 "staged update: could not resolve a version to stage (got '${target:0:80}'); the fleet link was NOT moved and the fleet still launches $was"
+    fi
+    vdir="$_STAGED_VERSIONS/$target"
+    exe="$vdir/$_CLAUDE_EXE_REL"
+    if [ -e "$_STAGED_LINK" ] && [ "$_STAGED_LINK" -ef "$exe" ] && verify_staged "$exe"; then
+        log "UPDATE no-op (staged): the fleet link already runs $target"
+        prune_versions
+        return 0
+    fi
+    if [ ! -d "$vdir" ]; then
+        stage="$_STAGED_VERSIONS/.staging-$target-$$"
+        log "UPDATE staging (no sudo): npm install -g --prefix $stage $_CLAUDE_PKG@$target"
+        npm install -g --prefix "$stage" --no-fund --no-audit "$_CLAUDE_PKG@$target" \
+            >>"$LOG" 2>&1 || npm_rc=$?
+        log "UPDATE staging finished (npm exit $npm_rc)"
+        if ! verify_staged "$stage/$_CLAUDE_EXE_REL"; then
+            rm -rf "$stage"
+            update_failed 1 "staged $target cannot run ($STAGED_WHY; npm exit $npm_rc) — the fleet link was NOT moved; the fleet still launches $was"
+        fi
+        if ! mv "$stage" "$vdir"; then
+            rm -rf "$stage"
+            update_failed 1 "the verified staging of $target could not be moved into $vdir; the fleet link was NOT moved and the fleet still launches $was"
+        fi
+    fi
+    # Measured again where the link will point: that file, not the staging copy,
+    # is what a bot launches.
+    if ! verify_staged "$exe"; then
+        update_failed 1 "$target at $vdir cannot run ($STAGED_WHY) — the fleet link was NOT moved; remove $vdir to restage it"
+    fi
+    new_version="$CLAUDE_VERSION"
+    if ! atomic_link_swap "$_STAGED_LINK" "$exe" 2>>"$LOG"; then
+        update_failed 1 "the link swap failed ($_STAGED_LINK -> $exe); the fleet link was NOT moved and the fleet still launches $was"
+    fi
+    # The rollback is the version the fleet launched before this one. Re-linking
+    # the version already linked must not overwrite it with itself.
+    if [ -n "$cur" ] && ! [ "$cur" -ef "$exe" ]; then
+        printf '%s\n' "$cur" >"$_STAGED_VERSIONS/.previous"
+    fi
+    log "UPDATE linked (staged): the fleet link now runs $new_version (previous: $was); each bot picks it up at its next restart"
+    if [ -n "$old_why" ]; then
+        emit_fleet_notice "$BOTS_DIR" "binary_repaired" \
+            "the fleet's claude binary runs again: $new_version, staged and linked (before this update it could not run: $old_why)"
+    fi
+    prune_versions
+}
+
+_staged_update_isolated() { (staged_update); }
+
+if [ "${CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED:-0}" = "1" ]; then
+    if [ -n "${CLAUDE_BIN:-}" ]; then
+        log "UPDATE skipped (staged): CLAUDE_BIN pins the fleet's binary to $CLAUDE_BIN, so a staged link would never be launched"
+        exit 0
+    fi
+    mkdir -p "$_STAGED_VERSIONS" "$(dirname "$_STAGED_LINK")"
+    # One run at a time. A second run waits, then finds the first run's work
+    # done; without the lock, its staging clean-up would delete a LIVE staging.
+    _staged_rc=0
+    with_lock "$_STAGED_VERSIONS/.lock" _staged_update_isolated || _staged_rc=$?
+    exit "$_staged_rc"
+fi
+
+# Staged updates OFF, but an earlier armed run left the fleet launching the staged
+# link (the resolver says so): an in-place install would update a binary no bot
+# runs. Say so, change nothing, and name both ways out.
+if [ "$_claude_path" = "$_STAGED_LINK" ]; then
+    _staged_to="$(readlink "$_STAGED_LINK" 2>/dev/null || true)"
+    log "UPDATE skipped — staged updates are OFF, but the fleet launches the staged link $_STAGED_LINK -> $_staged_to; an in-place install would not reach it. Re-arm CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1, or remove the link to return the fleet to the system claude."
+    emit_fleet_notice "$BOTS_DIR" "binary_update_skipped" \
+        "staged claude updates are off, but the fleet still launches the staged link ($_staged_to); nothing was updated. Re-arm CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1, or remove $_STAGED_LINK to return to the system claude"
+    exit 0
 fi
 
 # --- Install: elevate only when the fleet's binary is a root-owned system install

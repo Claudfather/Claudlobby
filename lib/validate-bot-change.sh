@@ -1527,6 +1527,42 @@ if [ "$fail" -gt "$_lossless_fail_before" ]; then
     echo "  ----------------------------------------------------------------"
 fi
 
+# === Scenario 2a: the staged fleet link is what start-bot launches (#1768) ===
+# The REAL start-bot.sh with NO CLAUDE_BIN, and the link an armed claude-update
+# leaves at $CLAUDLOBBY_ROOT/state/bin/claude. The session AND the plugin step
+# (plugin_ensure is handed start-bot's resolved binary) must both go through it.
+# start-bot rebuilds PATH, so no harness stub dir can stand in for the link: the
+# link's stub announces itself in the pane and logs its plugin calls.
+echo ""
+echo "=== validate-bot-change: staged fleet link launched (#1768) ==="
+RB_STAGED="$RB_ROOT/staged/claude.exe"
+mkdir -p "$RB_ROOT/staged" "$RB_ROOT/state/bin"
+cat > "$RB_STAGED" <<STUB
+#!/bin/bash
+if [ "\${1:-}" = plugin ]; then echo "\$*" >> "$RB_ROOT/staged-plugin-argv.log"; exit 0; fi
+echo ZZZ_STAGED_LINK_LAUNCHED
+exec cat
+STUB
+chmod +x "$RB_STAGED"
+ln -sfn "$RB_STAGED" "$RB_ROOT/state/bin/claude"
+_rb_conf_saved="$(cat "$RB_DIR/bot.conf")"
+printf 'FLEET_PLUGINS_REQUIRED="valstaged@ValMarketplace"\n' >> "$RB_DIR/bot.conf"
+rm -f "$RB_ROOT/staged-plugin-argv.log"
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    env -u CLAUDE_BIN "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.staged.out" 2>&1 || true
+sleep 1
+pane_staged="$(tmux capture-pane -t "$RB_SESSION" -p 2>/dev/null || true)"
+printf '%s' "$pane_staged" | grep -q ZZZ_STAGED_LINK_LAUNCHED && r=yes || r=no
+harness_check "no CLAUDE_BIN: start-bot launches the staged fleet link" "$r"
+grep -q '^plugin ' "$RB_ROOT/staged-plugin-argv.log" 2>/dev/null && r=yes || r=no
+harness_check "  ...and plugin_ensure runs the plugin step through the same link" "$r"
+printf '%s\n' "$_rb_conf_saved" > "$RB_DIR/bot.conf"
+rm -f "$RB_ROOT/state/bin/claude"
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+
 # === Scenario 2b: readiness probe — READY vs TIMEOUT + rc_timeout event (#533/#751) ===
 # Same REAL start-bot.sh. The probe now asserts bridge_state ground truth, not a
 # bring-up pane string (#751: the old `remote-control is active` grep drifted out of

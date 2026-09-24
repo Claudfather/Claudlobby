@@ -103,13 +103,18 @@ _reload_critical() {
     # happened to run first. A timer env resolves neither by default, and an
     # unresolvable tool is an install/PATH fault — naming it is the whole
     # difference between a 5-minute fix and a two-day silent outage.
-    if [ -n "$PLUGINS" ] && ! command -v claude >/dev/null 2>&1; then
-        printf 'claude not found on PATH=%s — install Claude Code or set CLAUDE_BIN' "$PATH" > "$_reason_file"
+    # The binary the fleet launches (fleet_claude_bin: CLAUDE_BIN, else the
+    # staged link #1768, else PATH) -- a plugin refreshed through a different
+    # binary than the bots run is a refresh nobody boots with.
+    local _claude
+    _claude="$(fleet_claude_bin)"
+    if [ -n "$PLUGINS" ] && ! command -v "$_claude" >/dev/null 2>&1; then
+        printf '%s not found on PATH=%s — install Claude Code or set CLAUDE_BIN' "$_claude" "$PATH" > "$_reason_file"
         return 1
     fi
     local _p
     for _p in $PLUGINS; do
-        _run_step "claude plugin update $_p" claude plugin update "$_p" || return 1
+        _run_step "claude plugin update $_p" "$_claude" plugin update "$_p" || return 1
     done
     _run_step "claudlobby generate" claudlobby_cli ${FLEET:+--fleet "$FLEET"} generate || return 1
     # #1633: enroll whatever this generate just composed, the same day it
