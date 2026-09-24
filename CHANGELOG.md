@@ -21,8 +21,10 @@ dev-checkout guardrail puts bot dev work, the checkout sits inside
   composes, which a `git archive` of HEAD would not give. The export refuses a
   destination inside `…/runtime/bots/…`.
 - **The tests no longer write into the checkout that runs them.** At `main` they
-  left `local/naked-probe/`, `runtime/_host/` and `state/` there, including a
-  plane database. They now leave nothing.
+  left `local/naked-probe/`, `runtime/_host/` and `state/` there, and the
+  naked-bot `generate` minted a `naked-probe` fleet and its two bots into
+  `state/plane/plane.db`. On a host whose live install is also its test checkout,
+  that is the production plane (#1601's class). They now leave nothing there.
 - The naked-bot fixture also runs the harness's own `_assert_compositor`, so a
   subprocess that imports an installed copy instead of the export fails loudly.
 
