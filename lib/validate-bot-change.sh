@@ -2523,8 +2523,15 @@ BPCONF
     CL_SVC="claudlobby-vbc-crashloop-$$"
     LB_SVC="claudlobby-vbc-longboot-$$"
     BP_LOOP_SVCS="$CL_SVC $LB_SVC"
-    CL_DIR="$BP_ROOT/local/$BP_FLEET/runtime/bots/crashprobe"
-    LB_DIR="$BP_ROOT/local/$BP_FLEET/runtime/bots/longboot"
+    # Their OWN fleet, never BP_FLEET: the #1002 pulses below walk every bot of
+    # the fleet they are given, and the +8s sample races a spawner that sleeps
+    # 8s. Two more bots there (one emitting crash_loop every pulse) lengthened
+    # each pulse enough to lose that race under load: active/exited where
+    # active/running was the point, then a keepalive restart the section
+    # exists to forbid.
+    CL_FLEET="loopfleet"
+    CL_DIR="$BP_ROOT/local/$CL_FLEET/runtime/bots/crashprobe"
+    LB_DIR="$BP_ROOT/local/$CL_FLEET/runtime/bots/longboot"
     mkdir -p "$CL_DIR/data" "$LB_DIR/data"
     cat > "$HOME/.config/systemd/user/$CL_SVC.service" <<CLUNIT
 [Unit]
@@ -2564,6 +2571,7 @@ LBUNIT
     # ExecStartPre window the first sample exists to observe (CI: "observed
     # active/running" where activating/start-pre was the point).
     val_plane_ready "$BP_ROOT" "$BP_FLEET"
+    val_plane_ready "$BP_ROOT" "$CL_FLEET"
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     # shellcheck disable=SC2086
     systemctl --user start --no-block "$BP_SVC" $BP_LOOP_SVCS >/dev/null 2>&1 || true
@@ -2593,14 +2601,31 @@ LBUNIT
     # of it -- or none, once it settled. One line per sample, until settled
     # (bounded at 150s): epoch state NRestarts starting? loop?
     LB_SAMPLES="$BP_ROOT/longboot-samples.txt"
+    cl_pulse() {
+        CLAUDLOBBY_ROOT="$BP_ROOT" CLAUDLOBBY_FLEET="$CL_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
+            "$LIB_DIR/fleet-pulse.sh" "$CL_FLEET" >/dev/null 2>&1 || true
+    }
+    # The loop fleet's ONE pulse runs from this sampler, at >=20s: late enough
+    # that the crash probe has looped (it restarts every ~2s), early enough that
+    # the long boot is still in its 60s stagger -- so one pulse is both the
+    # positive and the negative observation, and the PULSE line records the
+    # state of each at that instant rather than assuming it.
     (
-        _lb_end=$(($(date +%s) + 150))
+        _lb_t0=$(date +%s)
+        _lb_end=$((_lb_t0 + 150))
+        _lb_pulsed=0
         while [ "$(date +%s)" -lt "$_lb_end" ]; do
             _unit_start_facts "$LB_SVC"
             _lb_st="$_USF_ACTIVE/$_USF_SUB"
             _lb_s=no; service_is_starting "$LB_SVC" && _lb_s=yes
             _lb_l=no; service_is_crash_looping "$LB_SVC" "$LB_DIR" && _lb_l=yes
             printf '%s %s %s %s %s\n' "$(date +%s)" "$_lb_st" "${_USF_NRESTARTS:-?}" "$_lb_s" "$_lb_l" >>"$LB_SAMPLES"
+            if [ "$_lb_pulsed" -eq 0 ] && [ $(($(date +%s) - _lb_t0)) -ge 20 ]; then
+                _unit_start_facts "$CL_SVC"
+                printf 'PULSE %s %s %s\n' "$(date +%s)" "$_lb_st" "${_USF_NRESTARTS:-?}" >>"$LB_SAMPLES"
+                cl_pulse
+                _lb_pulsed=1
+            fi
             [ "$_lb_st" = "active/exited" ] && break
             sleep 2
         done
@@ -2719,9 +2744,16 @@ LBUNIT
     grep -q 'RESTART' "$_clkl" 2>/dev/null && r=no || r=yes
     harness_check "  ...and still stacks no restart of its own on top of systemd" "$r"
 
-    # Consumer: fleet-pulse -- the alarm fires, as its own critical type.
-    bp_pulse
-    _clev=$(val_events "$BP_ROOT" "$BP_FLEET" "crashprobe")
+    # Consumer: fleet-pulse -- from the loop fleet's one pulse, which the
+    # sampler runs at >=20s (see it above). Read after the sampler is done.
+    wait "$LB_SAMPLER_PID" 2>/dev/null || true
+    _pl_line=$(grep '^PULSE ' "$LB_SAMPLES" 2>/dev/null | head -1)
+    _pl_lbst=$(printf '%s' "$_pl_line" | awk '{print $3}')
+    _pl_clnr=$(printf '%s' "$_pl_line" | awk '{print $4}')
+    case "$_pl_lbst" in activating/* | active/running) _pl_mid=yes ;; *) _pl_mid=no ;; esac
+    [ -n "$_pl_line" ] && [ "$_pl_mid" = yes ] && [ "${_pl_clnr:-0}" -ge 2 ] 2>/dev/null && r=yes || r=no
+    harness_check "#1769 the loop fleet was pulsed with the loop LIVE and the long boot MID-STAGGER (crash probe NRestarts=${_pl_clnr:-?}, long boot ${_pl_lbst:-unpulsed})" "$r"
+    _clev=$(val_events "$BP_ROOT" "$CL_FLEET" "crashprobe")
     printf '%s' "$_clev" | grep -q '"type":"crash_loop"' && r=yes || r=no
     harness_check "fleet-pulse emits crash_loop for the looping unit" "$r"
     printf '%s' "$_clev" | grep -qE '"type":"(service_down|session_missing)"' && r=no || r=yes
@@ -2730,12 +2762,10 @@ LBUNIT
     # Negative control: the long boot, from the sampler started beside it.
     # Every START-state sample must read mid-start and none may read a loop;
     # its restart counter must never move; the samples must cover the stagger.
-    # The pulses above ran at +2s and +8s, inside that stagger, over the whole
-    # fleet -- so the no-crash_loop check below covers a pulse that saw it
-    # mid-start, not only one that saw it settled.
-    wait "$LB_SAMPLER_PID" 2>/dev/null || true
+    # The same pulse saw it mid-stagger (the check above says so or fails).
     _lb_samples=0 _lb_starting=0 _lb_loop=0 _lb_nr_moved=0 _lb_first="" _lb_last="" _lb_settled=no
     while read -r _t _st _nr _s _l; do
+        [ "$_t" = PULSE ] && continue
         case "$_st" in
         activating/* | active/running)
             _lb_samples=$((_lb_samples + 1))
@@ -2759,9 +2789,9 @@ LBUNIT
     harness_check "  ...and its restart counter never moved (it is one attempt, not a loop)" "$r"
     [ "$_lb_settled" = yes ] && r=yes || r=no
     harness_check "  ...and the sampler saw it settle to active/exited" "$r"
-    _lbev=$(val_events "$BP_ROOT" "$BP_FLEET" "longboot")
+    _lbev=$(val_events "$BP_ROOT" "$CL_FLEET" "longboot")
     printf '%s' "$_lbev" | grep -q '"type":"crash_loop"' && r=no || r=yes
-    harness_check "  ...and fleet-pulse emitted no crash_loop for it, across pulses that saw it mid-stagger" "$r"
+    harness_check "  ...and fleet-pulse emitted no crash_loop for it, from the pulse that saw it mid-stagger" "$r"
     _unit_start_facts "$LB_SVC"
     [ "$_USF_ACTIVE/$_USF_SUB" = "active/exited" ] && r=yes || r=no
     harness_check "  ...and it settled to active/exited (observed $_USF_ACTIVE/$_USF_SUB)" "$r"
