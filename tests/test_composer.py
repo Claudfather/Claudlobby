@@ -5290,3 +5290,16 @@ class TestNoLeafManagerShapesComposeByteIdentically:
             after_dormant = after["timers_text"]["DORMANT"]
             assert "manager-checkin" in before_dormant
             assert "manager-checkin" not in after_dormant
+
+
+def test_the_telegram_channel_dir_has_one_definition():
+    """#1786: bot.conf, access.json and the fleet units' alert sender all spell a
+    bot's channel dir through telegram_channel_rel, so they cannot drift apart.
+    The value is pinned too: bot.conf exports it as $HOME/<it>, and that exact
+    KEY=VALUE is the contract lib-common's poller-ownership check greps (#976)."""
+    import claudlobby.composer as composer_mod
+
+    assert composer_mod.telegram_channel_rel("h") == ".claude/channels/telegram-h"
+    src = Path(composer_mod.__file__).read_text()
+    assert src.count("channels/telegram-{") == 1, "a second spelling of the template"
+    assert '"channels" / f"telegram-' not in src, "the old hand-joined spelling is back"
