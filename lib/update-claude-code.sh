@@ -215,9 +215,15 @@ verify_staged() {
 prune_plan() {
     python3 - "$_PROC_DIR" "$_STAGED_VERSIONS" "$_STAGED_LINK" <<'PY'
 import os
+import re
 import sys
 
 proc, vroot, link = sys.argv[1:4]
+# Only what this job stages is its to delete: a copy a person made in a file
+# manager ("2.1.280 copy") or a folder parked beside the versions is not. The
+# pattern is the one the job enforces on the version it stages, and a version
+# name has no space, so no verdict line below can split when bash reads it.
+VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 
 
 def refuse(why):
@@ -266,6 +272,9 @@ except OSError as e:
 for name in names:
     d = os.path.join(vroot, name)
     if name.startswith(".") or os.path.islink(d) or not os.path.isdir(d):
+        continue
+    if not VERSION.fullmatch(name):
+        sys.stderr.write("prune: left %r alone: not a version this job stages\n" % name)
         continue
     here = os.path.realpath(d) + os.sep
     if any(p.startswith(here) for p in protected):

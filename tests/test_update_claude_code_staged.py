@@ -477,6 +477,30 @@ def test_a_respelled_root_never_costs_the_linked_or_previous_version(tmp_path, f
     assert not stale.exists(), h.log()
 
 
+@pytest.mark.parametrize("stray", [None, "2.1.280 copy", "2.1.280 (copy)", "backup"])
+def test_a_directory_the_job_never_staged_costs_nothing(tmp_path, stray):
+    """ravi's third-round probe on #1784. The plan is read line by line in bash, so
+    a name with a space split: `delete 2.1.280 copy` read as `delete 2.1.280`, and
+    the LINKED version went. A Finder duplicate is `2.1.280 copy`, a GNOME one
+    `2.1.280 (copy)`; `backup` is anything else a person parks there. The prune
+    touches only names the job stages. POSITIVE CONTROL: a stale version, which
+    must go in every arm, so a keep here cannot come from a prune that is dead."""
+    h = StagedHost(tmp_path)
+    h.body("2.1.280", healthy_big("2.1.280"))
+    assert h.run(latest="2.1.280").returncode == 0, h.log()
+    stale = _prunable(h, "2.1.270")
+    if stray:
+        (h.versions / stray).mkdir()
+    assert h.run(latest="2.1.280").returncode == 0, h.log()  # the no-op path, then the prune
+
+    assert h.exe("2.1.280").exists(), h.log()
+    out = subprocess.run([str(h.link), "--version"], capture_output=True, text=True)
+    assert out.stdout.startswith("2.1.280"), (out, h.log())
+    if stray:
+        assert (h.versions / stray).is_dir(), h.log()
+    assert not stale.exists(), h.log()
+
+
 FAIL_CLOSED = ["absent", "unlistable", "no-readable-process", "reader-crashes",
                "previous-unreadable"]
 
