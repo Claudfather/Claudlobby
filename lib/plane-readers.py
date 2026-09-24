@@ -415,6 +415,24 @@ def assignment_by_id(conn: sqlite3.Connection, asg_id: str, *, open_only: bool =
     return dict(zip(_ASG_ROW_COLS, row)) if row is not None else None
 
 
+def read_instant(now: float) -> str:
+    """The instant a reader reads AT, as the string its rows are compared with
+    (#1789). A stored instant is the aware ``isoformat()`` of its moment, with
+    microseconds whenever it has any (a whole-second stamp is stored bare), and
+    the open SQL compares the two AS STRINGS. So a
+    whole-second ``now`` (the matcher's truncated default, or a caller's
+    ``$(date +%s)``) is the END of that second. Rendered bare, ``…:56+00:00``
+    sorted BEFORE every ``…:56.171359+00:00`` (``+`` is below ``.``), so a
+    terminal event inside the reader's own second read as not yet happened:
+    the #835 harness check flaked on exactly that. Nothing stored in that
+    second can postdate the read, so its end admits no event from the future.
+    A precise instant keeps its own fraction."""
+    dt = datetime.fromtimestamp(now, timezone.utc)
+    if float(now).is_integer():
+        dt = dt.replace(microsecond=999999)
+    return dt.isoformat()
+
+
 def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, max_age: int,
                  progress_grace: int, entry: Optional[dict] = None
                  ) -> list[tuple[int, int, int, Optional[str]]]:
@@ -422,7 +440,7 @@ def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, ma
     task_id) — from the plane, the watchdog's rules mirrored; task_id None
     for an id-less row (the caller prints ``-``)."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    at = datetime.fromtimestamp(now, timezone.utc).isoformat()
+    at = read_instant(now)
     rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=False)
     last_progress = None
     uids = (entry or {}).get("uids", [])

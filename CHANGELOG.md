@@ -36,6 +36,60 @@ its entry (#1786).
   - The unit half lands only at the next `generate` plus `lib/setup-fleet` to
     reinstall the units. That is the stageable half: do one fleet first.
 
+### Fixed — the overdue reader missed a report made in its own second, so the #835 harness check flaked (#1789)
+
+`dispatch-overdue.py` takes "now" as a whole-second epoch, and `plane-readers.py`
+rendered it as `…:56+00:00`. A stored instant carries microseconds, and the open
+SQL compares the two **as strings**. `.` sorts after `+`, so a terminal event
+inside the reader's own second compared as later than "now", and its row stayed
+open. That is what made `#835 the resolved id actually closes the dispatch` flake
+on CI: three of the last fifteen failed runs.
+
+- **One helper, `read_instant`, renders the instant a reader reads at.** A
+  whole-second "now" is the **end** of that second (`…:56.999999+00:00`). Nothing
+  stored in that second can postdate the read. A precise instant keeps its own
+  fraction.
+- **The SQL is unchanged.** It is pinned byte-identical to
+  `queries.OPEN_ASSIGNMENTS_AT_SQL`. Every package read of the open set binds no
+  instant (`view.py`, brief's open list, `task recheck`), and brief's overdue
+  section reads through this same helper, so the two cannot disagree.
+- **It reaches:**
+  - the overdue sweep: `fleet-pulse.sh` calls `--all`, and could page one false
+    `overdue_dispatch` for a report landing in the sweep's own second;
+  - the orphan split built on the same rows, and brief's dispatch section;
+  - the progress grace, which reads at the same instant: a `progress` report in
+    the reader's own second now counts toward it too.
+- **It does not reach the report resolver.** `--open-task` never hands the `now`
+  it parses to the reader, and a reader given no instant applies no time filter.
+- **Measured on the #835 block, looped and paired**: each run lands a real
+  `report-back.sh` report with no `--task`, then reads it with main's reader and
+  this one at the same "now". Through the daemon's socket rung, main failed
+  **3 of 50** natural runs, each a same-second case (3 of 3), and **25 of 25** runs
+  forced into the report's own second. This reader failed none (0 of 50, 0 of 25).
+  An earlier unpaired run read 17 of 50 at main (17 of 17 same-second) and 0 of 100
+  here. Through the cold CLI rung the harness uses, this Pi never produced a
+  same-second case (0 of 20 paired, 0 of 100 unpaired), so that rung cannot show
+  the flake here either way.
+
+### Fixed — three jobs stamped every log line with the instant their run started (#1773)
+
+`weekly-worker-restart.sh`, `update-siblings.sh` and `notify-behind.sh` took one
+`ts_iso` at the top of a run and stamped every later line with it. A bounce or a
+fetch sweep lasting minutes to an hour therefore logged as a single instant, so
+per-step durations, which are what an operator needs when a run goes wrong,
+could not be recovered.
+
+- **Each line is now stamped when it is written**, through the same `log()` that
+  #1770 gave `update-claude-code.sh`. There is one idiom, not a fourth copy.
+- **Nothing read the old stamp.** The two readers of these logs match message
+  text: `lib/validate-bot-change.sh` greps the restart log for `worker:` and
+  `skip (manager):` lines, and `tests/test_notify_behind.py` looks for `notice
+  DELIVERED`. So no run-start field was needed. The run's start is still
+  recorded, as the stamp on its first line.
+- **Pinned.** `tests/test_job_log_stamps.py` drives each real script with a
+  known 2 s gap between two lines. At main each gap read `0:00:00`. A mutant that
+  re-hoists the stamp in any one script turns exactly that script's test red.
+
 ### Added — a staged Claude Code update, so a broken install never reaches a bot (#1768; opt-in, off by default)
 
 On 2026-09-23 `npm install -g` exited 0 and left a 500-byte stub where the fleet's
@@ -130,14 +184,26 @@ never binds.
   new **critical `crash_loop`** event, in the escalation set, and pushes a
   manager note naming `logs/startup.log`. For that bot it does not also emit
   `session_missing` or `service_down`, whose remedies (re-enroll, restart) are
-  wrong when systemd is already restarting the unit. keepalive logs `SKIP — crash
-  loop` and still never stacks a restart on top of systemd.
+  wrong when systemd is already restarting the unit (outside that same stop-post
+  window below). keepalive logs `SKIP — crash loop` and does not stack a restart
+  on top of systemd's, except in the few-millisecond `deactivating/stop-post`
+  window between two attempts, which reads no verdict (3.1–14.3 ms per attempt
+  on systemd 252, measured in the #1774 review).
 - **Reads through one helper.** `service_is_starting` and the new fact share
   `_unit_start_facts`, the single `systemctl show` the predicate already made,
   now with `-p NRestarts`. No new direct call, so the supervisor ratchet holds.
 - **Pinned:** fleet-pulse's two critical-type lists must be registered critical
   in `SYSTEM_EVENT_SEVERITY`. The escalation read filters on that severity, so a
   listed but unregistered type would never page, silently.
+- **Pinned in CI since #1780.** `tests/test_crash_loop_wiring.py` (first drafted
+  by vera) drives the real keepalive and fleet-pulse against a stateful
+  `systemctl` stub, at the real uptime and at a simulated 120 s and 30 s. It pins
+  keepalive's skip, its carry and the order of carry and restart, and
+  fleet-pulse's page, its suppression of the session and service pages, and its
+  clearing. Not pinned there: the `crash_loop` event's own keys and page text.
+  Both stubs now answer only what `-p` asks, as systemd does, so a call that
+  stopped asking for `NRestarts` reads as the "no verdict" it would be on a real
+  host.
 
 **Out of scope:** stopping the loop or changing the start limit (#1769 option
 (a)), which is a policy call. `update-claude-code.sh` accepting `unknown` as a
@@ -145,7 +211,13 @@ version is owned separately.
 
 **Rollout:** a `lib/` change, read on demand per use, so it is live on every
 bot the moment the install is pulled. It deploys with the next deliberate
-rollout rather than on merge.
+rollout rather than on merge. **Restart the plane daemon after the pull.** The
+`crash_loop` severity is stamped at ingest by the RESIDENT daemon, from the
+registry it loaded at start, and there is no schema bump, so nothing makes it
+repair itself: a daemon started before the pull stores `crash_loop` with NULL
+severity, and the escalation, `brief` and `events --critical` never see it (the
+manager push still fires). Rows stored meanwhile stay NULL after the restart
+(measured with real daemons in the #1774 review).
 
 ### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
 

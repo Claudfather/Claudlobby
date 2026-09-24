@@ -124,10 +124,14 @@ checkout migrated the live plane on its way out — the very act that makes a
 running daemon stale, with 0010's seconds-long write lock taken outside the
 daemon lock.
 
-**Deploying a migration.** A pull that carries one leaves every resident
-process on the old modules. Since #1485 the ingest daemon repairs itself, but
-bouncing it explicitly is still the fast path and is the only remedy for a
-daemon predating that fix:
+**Deploying a migration, or a registry change.** A pull that carries one leaves
+every resident process on the old modules. Since #1485 the ingest daemon repairs
+itself, but bouncing it explicitly is still the fast path and is the only remedy
+for a daemon predating that fix. **A registry change never repairs itself:**
+there is no schema bump to refuse on, so the daemon keeps stamping severity from
+the registry it loaded at start. A new critical type is stored with NULL
+severity, invisible to every critical read, until the bounce (`crash_loop`,
+#1774; rows stored meanwhile stay NULL):
 
 ```
 launchctl kickstart -k gui/$UID/claudlobby-plane-daemon    # macOS

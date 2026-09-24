@@ -4590,7 +4590,9 @@ _CRASH_LOOP_CARRY_REL="data/.restart-carry"
 # watchdogs logged 28,977 "boot in flight" skips and paged no one. A time bound
 # cannot fix that without billing the stagger, so this counts ATTEMPTS, and each
 # consumer decides what a loop means: fleet-pulse pages crash_loop, keepalive
-# still refuses to stack its own restart on top of systemd.
+# still refuses to stack its own restart on top of systemd, except in the
+# few-millisecond deactivating/stop-post window between two attempts, which reads
+# no verdict (3.1-14.3 ms per attempt on systemd 252, measured in the #1774 review).
 #
 # COUNTED FROM NRestarts, which is streak-scoped by construction on these units:
 # a manual start or a reboot zeroes it, and a successful boot is TERMINAL
