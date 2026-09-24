@@ -20,8 +20,23 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export CLAUDLOBBY_ROOT="$T"
 mkdir -p "$T/bin"
 # Stub curl: emit $CURL_STUB_JSON, exit $CURL_STUB_RC (default 0) — models the
-# API body without a network call. tg-post ignores curl's args for our purposes.
-printf '#!/bin/bash\nprintf "%%s" "$CURL_STUB_JSON"\nexit ${CURL_STUB_RC:-0}\n' > "$T/bin/curl"
+# API body without a network call. When CURL_URL_CAPTURE is set it also records
+# the url line of the --config file tg-post passes (the token rides there, never
+# argv) and whether a probe key from the channel file reached the environment.
+cat > "$T/bin/curl" <<'STUB'
+#!/bin/bash
+cfg=""
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--config" ]; then cfg="$2"; fi
+    shift
+done
+if [ -n "${CURL_URL_CAPTURE:-}" ] && [ -n "$cfg" ]; then
+    grep '^url' "$cfg" > "$CURL_URL_CAPTURE"
+    printf '%s\n' "${TG_LEAK_PROBE:-unset}" > "$CURL_URL_CAPTURE.leak"
+fi
+printf '%s' "$CURL_STUB_JSON"
+exit "${CURL_STUB_RC:-0}"
+STUB
 chmod +x "$T/bin/curl"
 
 run_tg() {  # $1=api-json  $2=curl-exit(default 0) → echoes tg-post's exit code
@@ -58,6 +73,43 @@ assert_eq "non-JSON response → exit 3" "3" "$rc"
 # 5) curl network failure (nonzero exit) → exit 3
 rc="$(run_tg '' 7)"
 assert_eq "curl network failure → exit 3" "3" "$rc"
+
+echo ""
+echo "=== #1771: the channel-file token is read through the shared parser ==="
+# Env-less callers (host timers) read the token from the channel dir's .env. A
+# private grep|sed kept a quoted value's quotes, so tg-post built
+# bot"<token>" and Telegram answered 404 on every timer send, while the bots
+# worked (start-bot.sh fills a session's token through the shared parser). These
+# are the positive control that fails on that reader.
+run_tg_file() {  # $1=the channel .env token line  $2=env token (optional) → the url line built
+    rm -rf "$T/chan" "$T/url" "$T/url.leak"; mkdir -p "$T/chan" "$T/home"
+    printf '%s\nTG_LEAK_PROBE=leaked\n' "$1" > "$T/chan/.env"
+    env -u TELEGRAM_BOT_TOKEN PATH="$T/bin:$PATH" HOME="$T/home" \
+        CURL_STUB_JSON='{"ok":true,"result":{"message_id":7}}' CURL_URL_CAPTURE="$T/url" \
+        TELEGRAM_STATE_DIR="$T/chan" TELEGRAM_GROUP_CHAT_ID="-100999" ${2:+TELEGRAM_BOT_TOKEN=$2} \
+        bash "$LIB_DIR/tg-post.sh" "hello" >/dev/null 2>"$T/err" || true
+    cat "$T/url" 2>/dev/null || echo "<no url captured>"
+}
+WANT='url = "https://api.telegram.org/bot123:ABC/sendMessage"'
+assert_eq "double-quoted token file → no quote in the URL" "$WANT" "$(run_tg_file 'TELEGRAM_BOT_TOKEN="123:ABC"')"
+assert_eq "single-quoted token file → no quote in the URL" "$WANT" "$(run_tg_file "TELEGRAM_BOT_TOKEN='123:ABC'")"
+assert_eq "unquoted token file → the same URL" "$WANT" "$(run_tg_file 'TELEGRAM_BOT_TOKEN=123:ABC')"
+assert_eq "an export-prefixed line → the same URL" "$WANT" "$(run_tg_file 'export TELEGRAM_BOT_TOKEN="123:ABC"')"
+assert_eq "an env token still wins over the file" 'url = "https://api.telegram.org/bot999:ENV/sendMessage"' \
+    "$(run_tg_file 'TELEGRAM_BOT_TOKEN="123:ABC"' '999:ENV')"
+run_tg_file 'TELEGRAM_BOT_TOKEN="123:ABC"' >/dev/null
+assert_eq "the channel file's other keys never reach tg-post's env" "unset" "$(cat "$T/url.leak" 2>/dev/null || echo '<none>')"
+# The parser warns about a line it rejects by quoting the line's head; for a
+# token line that is the token, and tg-post's stderr lands in
+# alert_delivery_failed.detail and the journal.
+rm -rf "$T/chan"; mkdir -p "$T/chan"
+printf 'TELEGRAM_BOT_TOKEN="123:ABC";\n' > "$T/chan/.env"
+env -u TELEGRAM_BOT_TOKEN PATH="$T/bin:$PATH" HOME="$T/home" TELEGRAM_STATE_DIR="$T/chan" \
+    TELEGRAM_GROUP_CHAT_ID=-100999 bash "$LIB_DIR/tg-post.sh" hello >/dev/null 2>"$T/err" || true
+assert_eq "a rejected token line never quotes the token on stderr" "false" "$(grep -q '123:ABC' "$T/err" && echo true || echo false)"
+# A rejected send states ok=false, not ok=<none>: that line now leads the record.
+rc="$(run_tg '{"ok":false,"error_code":404,"description":"Not Found"}')"
+assert_eq "a rejection reads ok=false" "true" "$(grep -q 'ok=false; error: Not Found' "$T/err" && echo true || echo false)"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
