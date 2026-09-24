@@ -4992,6 +4992,25 @@ _disclose_alert_recipient() {
         "$(json_escape "$mgr_fleet")" "$(json_escape "$declared")" "${candidates:-0}")" "" fleet
 }
 
+# _tg_post_verdict_first <captured tg-post output>
+# Reorder a captured tg-post run so the line saying WHY nothing was delivered
+# comes first. tg-post also writes benign notices -- a timer env has no
+# FLEET_NAME, so the plane-record skip is announced before the send -- and a
+# record cut to its first 300 characters led with that notice, which a reader
+# took for the cause (#1771). The verdict shapes are tg-post's three failure
+# exits (no token, no chat, rejected); output carrying none keeps its order.
+_TG_POST_VERDICT_RE='^tg-post: (send REJECTED|no TELEGRAM_BOT_TOKEN|TELEGRAM_GROUP_CHAT_ID not set)'
+_tg_post_verdict_first() {
+    local text="$1" verdict
+    verdict=$(printf '%s\n' "$text" | grep -E -m1 "$_TG_POST_VERDICT_RE" || true)
+    if [ -z "$verdict" ]; then
+        printf '%s' "$text"
+        return 0
+    fi
+    printf '%s\n' "$verdict"
+    printf '%s\n' "$text" | grep -v -x -F -- "$verdict" || true
+}
+
 _emit_fleet_signal() {
     local bots_dir="$1" event_type="$2" reason="$3" ev_source="$4" word="$5"
     local tmux_prefix="[FLEET-${word}]" tg_prefix="FLEET ${word}"
@@ -5086,6 +5105,7 @@ _emit_fleet_signal() {
         _ALERT_DELIVERED=1
     else
         _ALERT_DELIVERED=0
+        _tg_err=$(_tg_post_verdict_first "$_tg_err")
         # 1. Durable record. emit_fleet_event only appends JSONL, so there is no
         #    recursion back into this function.
         emit_fleet_event "alert_delivery_failed" "$ev_source" \
