@@ -417,8 +417,9 @@ def assignment_by_id(conn: sqlite3.Connection, asg_id: str, *, open_only: bool =
 
 def read_instant(now: float) -> str:
     """The instant a reader reads AT, as the string its rows are compared with
-    (#1789). A stored instant is the aware ``isoformat()`` of its moment,
-    microseconds included, and the open SQL compares the two AS STRINGS. So a
+    (#1789). A stored instant is the aware ``isoformat()`` of its moment, with
+    microseconds whenever it has any (a whole-second stamp is stored bare), and
+    the open SQL compares the two AS STRINGS. So a
     whole-second ``now`` (the matcher's truncated default, or a caller's
     ``$(date +%s)``) is the END of that second. Rendered bare, ``…:56+00:00``
     sorted BEFORE every ``…:56.171359+00:00`` (``+`` is below ``.``), so a
