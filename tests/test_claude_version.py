@@ -103,6 +103,15 @@ def _bash_verdict(tmp_path: Path, binary: str) -> tuple[str | None, str | None]:
     return (text, None) if kind == "V" else (None, text)
 
 
+def _shell_function(script: str, name: str) -> str:
+    """lib/<script>'s function `name`, from its definition line through its closing
+    brace: to run one function of a script that cannot be sourced, or to scope a
+    search to one function."""
+    text = (LIB / script).read_text()
+    start = text.index(f"\n{name}() {{")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
 # --- the door --------------------------------------------------------------------
 
 
@@ -124,6 +133,36 @@ def test_a_binary_that_hangs_is_could_not_measure_within_the_bound(tmp_path):
     r = _door(tmp_path, str(hangs), CLAUDE_VERSION_TIMEOUT_S="1")
     assert (r.returncode, r.stdout) == (3, ""), r.stderr
     assert "did not finish within 1s" in r.stderr, r.stderr
+
+
+#: One input per path on which measure_claude_version returns 1: each failing
+#: shape, a hang, and a caller whose own resolution found nothing (None).
+UNMEASURED = {
+    **{s: sc for s, (sc, v) in SHAPES.items() if not re.fullmatch(VERSION_PATTERN, v)},
+    "hangs": "#!/bin/bash\nsleep 2\n",
+    "nothing resolved": None,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(UNMEASURED))
+def test_could_not_measure_leaves_claude_version_empty(tmp_path, shape):
+    """The documented contract, on every path that returns 1: CLAUDE_VERSION is
+    EMPTY, never a sentinel, even straight after a measurement that succeeded.
+    Every consumer branches on the return code, so a stand-in left there passes
+    all of them, and is read as a version by the first caller that prints it."""
+    script = UNMEASURED[shape]
+    binary = "" if script is None else str(_stub(tmp_path, shape, script))
+    ok = _stub(tmp_path, "healthy", healthy("2.1.281"))
+    # Only the hang is measured under a short bound: under one, a binary that is
+    # merely slow to start would take the timeout path instead of its own.
+    bound = "CLAUDE_VERSION_TIMEOUT_S=0.2 " if shape == "hangs" else ""
+    r = _bash(
+        tmp_path,
+        f'measure_claude_version "{ok}"; before="$?:$CLAUDE_VERSION"; '
+        f'{bound}measure_claude_version "{binary}"; '
+        'printf "%s|%s|[%s]" "$before" "$?" "${CLAUDE_VERSION-UNSET}"',
+    )
+    assert r.stdout == "0:2.1.281|1|[]", (r.stdout, r.stderr)
 
 
 def test_the_door_refuses_a_binary_that_is_not_there(tmp_path):
@@ -303,24 +342,97 @@ def test_the_onboarding_seed_records_the_measured_version(tmp_path):
     assert seeded["projects"]["/x"]["hasTrustDialogAccepted"] is True
 
 
+#: A seed call whose continuation line stops the caller: it dies, or exits
+#: NONZERO. An `exit 0` there is a refusal that reads as success to whatever ran
+#: the harness.
+SEED_REFUSAL = re.compile(
+    r"seed_claude_auth_and_trust [^\n]*\\\n\s*\|\| (?:\{[^}]*exit [1-9]; \}|die )"
+)
+
+
+def _seed_calls_stop(text: str) -> list[bool]:
+    """For each seed call in a script, whether the line after it stops the caller.
+    Each call is matched from its own start, so no call is credited with the
+    refusal of the call after it."""
+    return [
+        SEED_REFUSAL.match(text, m.start(1)) is not None
+        for m in re.finditer(r"^[ \t]*(seed_claude_auth_and_trust )", text, re.M)
+    ]
+
+
 def test_every_seed_caller_stops_on_the_refusal():
     """A refusal a caller ignores is a stand-in by another route: the ladder runs
     without `set -e`, and would boot on with no onboarding seeded."""
-    callers = []
+    callers = {}
     for script in sorted(LIB.glob("*.sh")):
-        text = script.read_text()
-        for m in re.finditer(r"^\s*seed_claude_auth_and_trust .*$", text, re.M):
-            callers.append(script.name)
-            tail = text[m.start() : m.start() + 400]
-            assert re.search(r"\\\n\s*\|\| (?:\{[^}]*exit [0-9]; \}|die )", tail), (
-                f"{script.name} ignores the seed's refusal"
-            )
-    assert sorted(set(callers)) == [
+        if stops := _seed_calls_stop(script.read_text()):
+            callers[script.name] = stops
+    ignoring = sorted(name for name, stops in callers.items() if not all(stops))
+    assert ignoring == [], f"{ignoring} ignore the seed's refusal"
+    assert sorted(callers) == [
         "ab-comms-eval.sh",
         "boot-strand-sampler.sh",
         "freshbox-boot-gate.sh",
         "rehearse-permissions-ladder.sh",
     ]
+
+
+_SEED_CALL = 'seed_claude_auth_and_trust "$CFG" "$DIR" "$BIN" "$CREDS" \\\n'
+
+
+@pytest.mark.parametrize(
+    "script, stops",
+    [
+        (_SEED_CALL + '  || { say "FATAL: claude cannot run"; exit 2; }\n', [True]),
+        (_SEED_CALL + '  || die "claude cannot run"\n', [True]),
+        (_SEED_CALL + '  || { say "FATAL: claude cannot run"; exit 0; }\n', [False]),
+        (_SEED_CALL + '  || { say "FATAL: claude cannot run"; }\n', [False]),
+        (_SEED_CALL + "  || true\n", [False]),
+        (_SEED_CALL + "  || { exit 0; }\n" + _SEED_CALL + '  || die "x"\n', [False, True]),
+    ],
+    ids=["exit 2", "die", "exit 0", "no exit", "or true", "the next call's refusal"],
+)
+def test_the_seed_ratchet_takes_only_a_refusal_that_fails(script, stops):
+    """The ratchet's control. The harnesses' refusals sit after their real-boot
+    setup, where no hermetic test executes them, so this ratchet is all that keeps
+    an `exit 0` out of them."""
+    assert _seed_calls_stop(script) == stops
+
+
+def _ladder_record(tmp_path: Path, binary: Path) -> str:
+    """The value of the ladder's `claude --version` record, from its own
+    record_preconditions run with lib-common sourced. Only CLAUDE_BIN reaches that
+    line: the other globals only have to be bound (the ladder runs under `set -u`),
+    and jq, which feeds only the other lines, is stubbed out."""
+    fn = _shell_function("rehearse-permissions-ladder.sh", "record_preconditions")
+    unused = tmp_path / "unused"
+    r = _bash(
+        tmp_path,
+        f"jq() {{ :; }}{fn}record_preconditions cell",
+        CLAUDE_BIN=binary,
+        FAKE_CFG=unused,
+        FAKE_HOME=unused,
+        LOC2=unused,
+        LOC3=unused,
+        PLACEMENT="in-workspace",
+        TARGET=unused,
+        LOG="/dev/null",
+    )
+    records = re.findall(r"^claude --version +: (.*)$", r.stdout, re.M)
+    assert len(records) == 1, (r.stdout, r.stderr)
+    return records[0]
+
+
+def test_the_ladder_records_the_version_or_why_there_is_none(tmp_path):
+    """Each cell's record carries the reader's verdict: the version, or CANNOT RUN
+    with the reader's own reason. Never a stand-in, and never the first line of
+    whatever the binary printed, which is how an error once read as a version.
+    Reachable when the binary dies between the seed and a cell."""
+    ok = _stub(tmp_path, "healthy", healthy("2.1.281"))
+    assert _ladder_record(tmp_path, ok) == "2.1.281"
+    broken = _stub(tmp_path, "broken", broken_stub("stdout"))
+    _, why = _bash_verdict(tmp_path, str(broken))
+    assert why and _ladder_record(tmp_path, broken) == f"CANNOT RUN ({why})"
 
 
 def test_the_send_size_probe_refuses_before_building_anything(tmp_path):
@@ -509,8 +621,7 @@ def test_no_other_script_reads_a_claude_version():
     assert offenders - CHECKS_NOT_READERS == {"lib-common.sh"}, sorted(offenders)
     # ...and in lib-common, only inside measure_claude_version.
     lc = (LIB / "lib-common.sh").read_text()
-    body = lc[lc.index("measure_claude_version() {") :]
-    body = body[: body.index("\n}\n")]
+    body = _shell_function("lib-common.sh", "measure_claude_version")
     assert len(read.findall(lc)) == len(read.findall(body)) > 0
     py = [
         p.relative_to(REPO)
