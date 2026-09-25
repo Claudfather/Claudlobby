@@ -957,3 +957,105 @@ def test_a_root_whose_state_is_a_regular_file_still_serves(tmp_path: Path):
     assert "spool drain failed (startup)" in err, err
     assert "optimize skipped" in err, err
     assert "Traceback" not in err, err
+
+
+# --- #1657: batches staged during a socket cooldown ---------------------------
+# Under load every cooldown emission spawned the package-importing cold CLI,
+# and those spawns kept the CPU the daemon needed pegged. The fire-and-forget
+# emitters now stage their finalized batch in state/plane/staged/ instead, and
+# the daemon replays it. These pin the daemon's half; tests/test_plane_emit.sh
+# pins when the shim stages at all.
+
+def _stage(staged: Path, name: str, events: list) -> None:
+    """A staged batch written the way the client writes one: whole, then
+    renamed in, so the daemon never reads half a file."""
+    staged.mkdir(parents=True, exist_ok=True)
+    tmp = staged / f".{name}.tmp"
+    tmp.write_text(json.dumps({"events": events}) + "\n")
+    os.replace(tmp, staged / name)
+
+
+def _until(pred, timeout: float = 15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        got = pred()
+        if got:
+            return got
+        time.sleep(0.05)
+    raise AssertionError(f"not true within {timeout}s")
+
+
+def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_path: Path):
+    """The shim stages a RAW batch, so the daemon must land it through
+    emit_batch, the socket path's own call, for the capture policy to apply.
+    The spool's drain() ingests entries as-is (they are stored
+    policy-applied), and would keep a body a metadata fleet must not store."""
+    plane = tmp_path / "state" / "plane"
+    plane.mkdir(parents=True)
+    (plane / "capture.json").write_text('{"*": "metadata"}')
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
+    t = threading.Thread(target=lambda: daemon.serve(install_signals=False), daemon=True)
+    t.start()
+    try:
+        # The daemon creates the dir: it is the handshake the client stages on.
+        staged = _until(lambda: (plane / "staged").is_dir() and plane / "staged")
+        (plane / ".socket-wedged").write_text(f"{int(time.time())}\n")
+        shim = Path(__file__).resolve().parent.parent / "lib" / "plane-emit.sh"
+        r = subprocess.run(
+            ["bash", str(shim)],
+            input=json.dumps({"events": [_comm("c", body="secret content")]}),
+            capture_output=True, text=True,
+            env={**os.environ, "CLAUDLOBBY_ROOT": str(tmp_path),
+                 "PLANE_SOCKET": str(sock), "PLANE_EMIT_COOLDOWN_STAGE": "1",
+                 "PLANE_EMIT_CLI": "false"},
+        )
+        assert r.returncode == 6, f"rc={r.returncode} (1 means the cold CLI ran): {r.stderr}"
+
+        def landed():
+            conn = connect(db_path(tmp_path))
+            try:
+                return conn.execute("SELECT body, privacy FROM communications").fetchone()
+            finally:
+                conn.close()
+
+        row = _until(landed)
+        assert row["body"] is None and row["privacy"] == "metadata"
+        assert not list(staged.glob("*.batch"))
+    finally:
+        daemon.stop()
+        t.join(timeout=10)
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+def test_a_staged_batch_replayed_twice_lands_once(running):
+    """A daemon killed between a staged batch's commit and its unlink replays
+    it again; the pre-minted event_id must make that a duplicate, not a
+    second row."""
+    root, _sock, _ = running
+    staged = root / "state" / "plane" / "staged"
+    ev = {**_comm("d"), "event_id": mint_event_id()}
+    _stage(staged, f"1-{ev['event_id']}.batch", [ev])
+    _stage(staged, f"2-{ev['event_id']}.batch", [ev])
+    _until(lambda: not list(staged.glob("*.batch")))
+    conn = connect(db_path(root))
+    n = conn.execute("SELECT COUNT(*) FROM communications WHERE event_id = ?",
+                     (ev["event_id"],)).fetchone()[0]
+    conn.close()
+    assert n == 1
+
+
+def test_a_refused_staged_batch_is_quarantined_not_retried(running):
+    """Left in place, a batch the contract refuses fails again on every tick;
+    deleted, it is a record dropped in silence. It goes to the spool's
+    quarantine with its reason, and the daemon keeps serving."""
+    root, sock, _ = running
+    staged = root / "state" / "plane" / "staged"
+    bad = _comm("e")
+    bad["payload"]["message_class"] = "not-a-class"
+    _stage(staged, "1-bad.batch", [bad])
+    _until(lambda: not list(staged.glob("*.batch")))
+    reasons = list((root / "state" / "plane" / "spool" / "quarantine").glob("*.reason"))
+    assert len(reasons) == 1 and "contract" in reasons[0].read_text()
+    assert send_batch(sock, [_comm("f")])["ok"] is True
