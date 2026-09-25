@@ -41,7 +41,9 @@ explicit-root writers; no production flag has been added to those APIs.
 
 ## Harness census
 
-The initial census used parent `6927824750abeeb7aa295e5d6e9a1a81437be81f`:
+The initial census used parent `6927824750abeeb7aa295e5d6e9a1a81437be81f`,
+then was repeated after rebasing onto `991cbfe` (including the newly added
+dispatch-receipt and daemon cooldown tests):
 
 - Ambient inherited environments: guarded at session and function scope.
   `setup_system_dry_run` is the emission-capable session subprocess fixture;
