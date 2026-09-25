@@ -17,8 +17,10 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2852,6 +2854,38 @@ def _reconcile_access_json(
     access_path.write_text(json.dumps(existing, indent=2) + "\n")
 
 
+def _atomic_write_settings(path: Path, settings: dict) -> None:
+    """Install one complete permission document; never truncate a live reader.
+
+    This is an atomic file replacement, not a multi-artifact transaction or
+    power-loss durability guarantee. Only this invocation owns its temp file.
+    """
+    body = json.dumps(settings, indent=2) + "\n"
+    try:
+        previous = path.stat()
+    except FileNotFoundError:
+        previous = None
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(name)
+    try:
+        try:
+            stream = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with stream:
+            stream.write(body)
+            stream.flush()
+            if previous is not None:
+                current = os.fstat(stream.fileno())
+                if (current.st_uid, current.st_gid) != (previous.st_uid, previous.st_gid):
+                    os.fchown(stream.fileno(), previous.st_uid, previous.st_gid)
+            os.fchmod(stream.fileno(), stat.S_IMODE(previous.st_mode) if previous else 0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def compose_bot(
     bot: BotConfig,
     fleet: FleetConfig,
@@ -2919,9 +2953,7 @@ def compose_bot(
     settings_local = compose_settings_local(
         bot, fleet, paths, list(mcp["mcpServers"].keys())
     )
-    (bot_dir / ".claude" / "settings.local.json").write_text(
-        json.dumps(settings_local, indent=2) + "\n"
-    )
+    _atomic_write_settings(bot_dir / ".claude" / "settings.local.json", settings_local)
 
     _emit = log if log is not None else _log.info
     link_skills(
