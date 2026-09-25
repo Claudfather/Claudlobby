@@ -18,11 +18,13 @@ jobs:
         # test_dotenv subprocess checks (already present on ubuntu runners).
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Install package
-        run: pip install -e '.[dev]'
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
       - name: Run tests
         # One pre-existing failure is deselected pending separate triage
         # (tracked in the issue thread for #229). The rest of the suite must
         # stay green.
         run: |
-          pytest -v \
+          .venv/bin/python -m pytest -v \
             --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn
