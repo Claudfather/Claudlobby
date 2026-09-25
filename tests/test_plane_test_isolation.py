@@ -176,6 +176,7 @@ def test_owned_recording_reaches_real_cold_cli(tmp_path, scratch_plane_env, sent
     result = _emit(env)
     assert result.returncode == 0, result.stderr
     from claudlobby.plane.db import connect_ro, db_path
+    assert db_path(root).is_file(), "intentional scratch emission did not create its database"
     with connect_ro(db_path(root)) as conn:
         rows = conn.execute("SELECT msg_id, sender_alias, message_class FROM communications").fetchall()
     assert [tuple(row) for row in rows] == [(MSG_ID, "bot:scratch/test", "notice")]
