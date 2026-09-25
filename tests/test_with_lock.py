@@ -131,18 +131,17 @@ def test_live_holder_is_never_broken(scene):
     assert not (scene.root / "mutex.d").exists()
 
 
-def test_crash_reclaimed_and_retaken(scene):
+def test_crashed_owner_is_preserved(scene):
     p = hold(scene)
     scene.wait("holder.entered", p)
-    owner = (scene.root / "mutex.d/owner").read_text().split(" ", 1)
-    assert int(owner[0]) == p.pid  # real executing shell, including bash3.2
+    owner = (scene.root / "mutex.d/owner").read_bytes()
+    assert int(owner.split(b" ", 1)[0]) == p.pid
     p.kill()
     p.communicate(timeout=5)
-    result = scene.run('work() { test -s "$ROOT/mutex.d/owner"; printf "locked\\n"; }; with_lock "$ROOT/mutex" work')
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "locked\n"
-    assert "reclaimed" in result.stderr
-    assert not (scene.root / "mutex.d").exists()
+    result = scene.run('work() { touch "$ROOT/callback"; }; with_lock "$ROOT/mutex" work')
+    assert result.returncode == 75, result.stderr
+    assert not (scene.root / "callback").exists()
+    assert (scene.root / "mutex.d/owner").read_bytes() == owner
 
 
 def test_old_owner_cannot_release_replacement(scene):
@@ -166,11 +165,7 @@ def test_subshell_owner_is_not_parent_pid(scene):
     assert owner != parent.removeprefix("parent=")
 
 
-def test_concurrent_stale_reclaimers_do_not_overlap(scene):
-    p = hold(scene, "dead")
-    scene.wait("dead.entered", p)
-    p.kill()
-    p.communicate(timeout=5)
+def test_four_contenders_do_not_overlap(scene):
     contenders = []
     for i in range(4):
         os.mkfifo(scene.root / f"{i}.release")
@@ -204,38 +199,6 @@ def test_concurrent_stale_reclaimers_do_not_overlap(scene):
     assert not (scene.root / "mutex.d").exists()
 
 
-def test_delayed_reclaimer_cannot_retire_new_owner(scene):
-    dead = hold(scene, "dead")
-    scene.wait("dead.entered", dead)
-    dead.kill()
-    dead.communicate(timeout=5)
-    os.mkfifo(scene.root / "reclaimer.release")
-    delayed = scene.spawn('''
-      eval "$(declare -f _lock_retire | sed '1s/_lock_retire/_real_lock_retire/')"
-      _lock_retire() {
-        if [ "${3:-0}" = 1 ]; then
-          touch "$ROOT/stale.observed"
-          read -r line < "$ROOT/reclaimer.release"
-        fi
-        _real_lock_retire "$@"
-      }
-      work() { touch "$ROOT/stale.callback"; }
-      with_lock "$ROOT/mutex" work
-    ''')
-    scene.wait("stale.observed", delayed)
-    new = hold(scene, "new")
-    scene.wait("new.entered", new)
-    owner = (scene.root / "mutex.d/owner").read_bytes()
-    release(scene, "reclaimer")
-    _, err = delayed.communicate(timeout=5)
-    assert delayed.returncode == 75, err
-    assert not (scene.root / "stale.callback").exists()
-    assert (scene.root / "mutex.d/owner").read_bytes() == owner
-    release(scene, "new")
-    scene.finish(new)
-    assert not (scene.root / "mutex.d").exists()
-
-
 @pytest.mark.parametrize("record", ["", "garbage", "0 token", "999999 token\nextra"])
 def test_ambiguous_owner_is_preserved(scene, record):
     lock = scene.root / "mutex.d"
@@ -258,11 +221,37 @@ def test_lock_symlink_is_preserved(scene):
     assert (other / "owner").read_text() == "999999 missing\n"
 
 
-def test_permission_denied_probe_does_not_mean_dead(scene):
-    lock = scene.root / "mutex.d"
-    lock.mkdir()
-    (lock / "owner").write_text("999999 other-owner\n")
-    result = scene.run('''kill() { printf "kill: Operation not permitted\\n" >&2; return 1; }
-    with_lock "$ROOT/mutex" true''')
-    assert result.returncode == 75
-    assert (lock / "owner").read_text() == "999999 other-owner\n"
+
+def test_dead_shell_with_live_callback_child_cannot_be_reclaimed(scene):
+    """SIGKILL ends the shell, not its foreground child or its critical work."""
+    import signal
+
+    os.mkfifo(scene.root / "child.release")
+    owner = scene.spawn('''work() {
+      /bin/bash -c 'printf "%s\\n" "$$" > "$ROOT/child.pid";
+        touch "$ROOT/child.entered";
+        read -r line < "$ROOT/child.release";
+        touch "$ROOT/child.finished"' &
+      wait "$!"
+    }
+    with_lock "$ROOT/mutex" work''')
+    scene.wait("child.entered", owner)
+    child_pid = int((scene.root / "child.pid").read_text())
+    before = (scene.root / "mutex.d/owner").read_bytes()
+    try:
+        owner.kill()
+        owner.wait(timeout=5)
+        os.kill(child_pid, 0)  # positive control: protected callback still exists
+        contender = scene.run('work() { touch "$ROOT/overlap"; }; with_lock "$ROOT/mutex" work')
+        assert contender.returncode == 75, contender.stderr
+        assert not (scene.root / "overlap").exists()
+        assert (scene.root / "mutex.d/owner").read_bytes() == before
+        release(scene, "child")
+        scene.wait("child.finished")
+    finally:
+        # The orphan may not be a waitable child; kill only our recorded fixture PID.
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        owner.communicate(timeout=5)

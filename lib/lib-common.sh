@@ -486,28 +486,18 @@ with_timeout() {
     fi
 }
 
-# A failed signal probe is not necessarily a dead process (EPERM exists).
-# Reclaim only the explicit ESRCH verdict; unknown failures preserve the lock.
-_lock_pid_gone() {
-    local reason
-    if reason=$(LC_ALL=C kill -0 "$1" 2>&1); then return 1; fi
-    case "$reason" in *"No such process"*) return 0 ;; *) return 1 ;; esac
-}
-
 # Retire only the named owner. The guard lives INSIDE the directory: while
-# held, every participating releaser/reclaimer leaves that directory in place.
+# held, every participating releaser leaves that directory in place.
 # Re-read AFTER taking it, then rename the whole guarded directory atomically.
-# Removing pid/guard then rmdir would reopen an ABA gap: another reclaimer
-# could remove/recreate the directory before the old rmdir reaches it.
+# Removing pid/guard then rmdir would reopen an ABA gap: another writer
+# could replace the directory before the old rmdir reaches it.
 # rc 1 = busy/I/O failure, 2 = different or unknown owner; neither deletes.
 _lock_retire() {
-    local dir="$1" owner="$2" dead="${3:-0}" current pid retired
+    local dir="$1" owner="$2" current retired
     [ -d "$dir" ] && [ ! -L "$dir" ] && [ ! -L "$dir/owner" ] || return 2
     mkdir "$dir/.retiring" 2>/dev/null || return 1
     current=$(cat "$dir/owner" 2>/dev/null) || current=""
-    pid=${current%% *}
-    if [ "$current" != "$owner" ] || [ -z "$current" ] ||
-            { [ "$dead" = 1 ] && ! _lock_pid_gone "$pid"; }; then
+    if [ "$current" != "$owner" ] || [ -z "$current" ]; then
         rmdir "$dir/.retiring" 2>/dev/null || true
         return 2
     fi
@@ -527,26 +517,13 @@ _lock_retire() {
     return 0
 }
 
-_lock_reclaim() {
-    local dir="$1" owner pid
-    [ -d "$dir" ] && [ ! -L "$dir" ] && [ ! -L "$dir/owner" ] || return 1
-    owner=$(cat "$dir/owner" 2>/dev/null) || return 1
-    case "$owner" in *$'\n'*) return 1 ;; esac
-    pid=${owner%% *}
-    case "$pid" in ""|0|*[!0-9]*) return 1 ;; esac
-    # Require our PID + unique token record, not a legacy or torn beacon.
-    [ "$owner" != "$pid" ] && [ -n "${owner#* }" ] || return 1
-    _lock_pid_gone "$pid" || return 1
-    _lock_retire "$dir" "$owner" 1 || return 1
-    printf 'with_lock: reclaimed dead holder of %s\n' "$dir" >&2
-}
-
 # with_lock <lockfile> <command> [args...]
 # flock where available; otherwise an owned mkdir mutex. The mkdir arm waits
 # WITH_LOCK_WAIT_S (default 30) seconds, then refuses with rc 75, NEVER calling
 # the command unlocked. The command keeps its own exit status after acquisition.
-# An ownerless/ambiguous legacy lock or an interrupted retirement is preserved:
-# age is not proof of death. Diagnose it while the writers are quiesced.
+# Existing locks are NEVER reclaimed automatically. A dead shell PID does not
+# prove its callback children have stopped writing. Diagnose orphaned locks
+# only after establishing quiescence; neither age nor kill -0 proves it.
 with_lock() {
     local lockfile="${1:?Usage: with_lock <lockfile> <command...>}"; shift
     if [ -n "$_FLOCK_BIN" ]; then
@@ -566,7 +543,6 @@ with_lock() {
     token=$(safe_mktemp) || return 75
     owner="$pid $token"
     while ! mkdir "$lockdir" 2>/dev/null; do
-        if _lock_reclaim "$lockdir"; then continue; fi
         if [ "$i" -ge "$((10#$wait_s * 20))" ]; then
             printf 'with_lock: refused %s; ownership not acquired within %ss\n' "$lockdir" "$wait_s" >&2
             return 75
@@ -574,14 +550,14 @@ with_lock() {
         i=$((i + 1))
         sleep 0.05
     done
-    # Before publication, an empty directory is ambiguous and never reclaimed.
+    # The unique record is the release authority, never a reclamation permit.
     if ! printf '%s\n' "$owner" > "$lockdir/owner"; then
         printf 'with_lock: cannot publish ownership of %s; callback refused\n' "$lockdir" >&2
         return 75
     fi
     "$@" || rc=$?
-    # A contender which saw a previous dead owner may briefly hold the guard.
-    # Retry a bounded second; a changed owner is left untouched immediately.
+    # Retry a bounded second if retirement is busy; a changed owner is left
+    # untouched immediately. An interrupted retirement stays fail-closed.
     i=0
     while [ "$i" -lt 20 ]; do
         release_rc=0
