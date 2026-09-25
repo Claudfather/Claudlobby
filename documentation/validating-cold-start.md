@@ -75,7 +75,7 @@ carries any of `.git local .venv .env fleet.yaml runtime state`.
 still gets a contaminated run if the shell running the exercise is a bot session — which it will
 be, if a bot is the one measuring. Measured live (2026-08-27, `t-1787863382-7b06`): the first
 `claudlobby validate` inside a correctly-exported test tree silently resolved `fleet.yaml` to
-`/home/crog/claudlobby/fleet.yaml` — the shared install, a different checkout entirely — because
+`/home/user/claudlobby/fleet.yaml` — the shared install, a different checkout entirely — because
 the launching bot session still had `CLAUDLOBBY_ROOT` exported. A second round surfaced
 `GITHUB_PAT` set-but-empty from that same ambient session, which `validate` read and reported on
 as though it belonged to the tree under test.
