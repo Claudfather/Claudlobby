@@ -1,0 +1,158 @@
+name: supervisor native evidence
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/supervisor-native.yml'
+      - 'lib/supervisor.sh'
+      - 'lib/keepalive.sh'
+      - 'lib/spin-up-bot.sh'
+      - 'lib/spin-down-bot.sh'
+      - 'lib/validate-bot-change.sh'
+      - 'tests/native_supervisor_evidence.py'
+      - 'tests/test_supervisor_lifecycle.sh'
+  workflow_dispatch:
+    inputs:
+      parent_sha:
+        description: 'Exact pre-refactor commit to compare with this branch'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: native lifecycle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux jq dbus-user-session
+      - name: macOS prerequisites
+        if: runner.os == 'macOS'
+        run: |
+          for tool in tmux jq; do
+            command -v "$tool" >/dev/null || brew install "$tool"
+          done
+      - name: Export exact parent and candidate into disposable installations
+        env:
+          PARENT_REF: ${{ github.event.pull_request.base.sha || inputs.parent_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$PARENT_REF"
+          parent=$(git rev-parse "$PARENT_REF^{commit}")
+          candidate=$(git rev-parse HEAD)
+          native_root=$(mktemp -d /tmp/cl-native-XXXXXX)
+          mkdir -p "$native_root/parent" "$native_root/candidate" "$native_root/evidence"
+          git archive "$parent" | tar -x -C "$native_root/parent"
+          git archive "$candidate" | tar -x -C "$native_root/candidate"
+          cp tests/native_supervisor_evidence.py "$native_root/driver.py"
+          for version in parent candidate; do
+            python -m venv "$native_root/$version/.venv"
+            "$native_root/$version/.venv/bin/python" -m pip install -e "$native_root/$version[dev]"
+          done
+          printf 'CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT=%s\n' "$native_root" >> "$GITHUB_ENV"
+          printf 'NATIVE_PARENT_SHA=%s\nNATIVE_CANDIDATE_SHA=%s\n' "$parent" "$candidate" >> "$GITHUB_ENV"
+          printf 'parent=%s\ncandidate=%s\n' "$parent" "$candidate" > "$native_root/evidence/revisions.txt"
+      - name: Create a private Linux user manager
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          # A distinct hosted-runner user makes scratch HOME the manager's
+          # actual HOME, so real installers need no unit-path overrides.
+          native_user=claudlobby-native
+          ! id "$native_user" >/dev/null 2>&1
+          sudo useradd --create-home --home-dir "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/home" --shell /bin/bash "$native_user"
+          sudo chown -R "$native_user:$native_user" "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT"
+          sudo chmod 755 "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT"
+          native_uid=$(id -u "$native_user")
+          printf 'NATIVE_USER=%s\nNATIVE_UID=%s\n' "$native_user" "$native_uid" >> "$GITHUB_ENV"
+          sudo loginctl enable-linger "$native_user"
+          sudo systemctl start "user@$native_uid.service"
+      - name: Run native callers and the complete harness on both revisions
+        run: |
+          set +e
+          set -uo pipefail
+          result=0
+          for version in parent candidate; do
+            if [ "$RUNNER_OS" = Linux ]; then
+              sudo -u "$NATIVE_USER" env \
+                HOME="$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/home" USER="$NATIVE_USER" \
+                GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+                CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT="$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT" \
+                NATIVE_OUT="$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/evidence/$version.log" \
+                /bin/bash -c 'exec "$@" > "$NATIVE_OUT" 2>&1' -- \
+                "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/$version/.venv/bin/python" \
+                "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/driver.py" \
+                --source "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/$version" \
+                --scratch "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/$version-scratch" \
+                --evidence "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/evidence/$version" || result=1
+            else
+              mkdir -p "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/home"
+              HOME="$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/home" \
+                "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/$version/.venv/bin/python" \
+                "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/driver.py" \
+                --source "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/$version" \
+                --scratch "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/$version-scratch" \
+                --evidence "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/evidence/$version" \
+                > "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/evidence/$version.log" 2>&1 || result=1
+            fi
+            tail -80 "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/evidence/$version.log"
+          done
+          exit "$result"
+      - name: Compare failure identities without treating equal failures as passing
+        if: always() && env.CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT != ''
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT']) / 'evidence'
+          values = {}
+          for name in ('parent', 'candidate'):
+              path = root / name / 'result.json'
+              assert path.exists(), f'{name} did not finish; inspect {name}.log'
+              values[name] = json.loads(path.read_text())
+          failures = {name: set(result['validate'].get('failures', [])) for name, result in values.items()}
+          report = {
+              'parent_sha': os.environ['NATIVE_PARENT_SHA'],
+              'candidate_sha': os.environ['NATIVE_CANDIDATE_SHA'],
+              'shared_failures': sorted(failures['parent'] & failures['candidate']),
+              'candidate_only_failures': sorted(failures['candidate'] - failures['parent']),
+              'parent_only_failures': sorted(failures['parent'] - failures['candidate']),
+              'parent_passed': values['parent']['validate']['passed'],
+              'candidate_passed': values['candidate']['validate']['passed'],
+              'skips': {name: result['validate'].get('skips', []) for name, result in values.items()},
+          }
+          (root / 'comparison.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2))
+          assert all(result['validate']['passed'] and result['lifecycle']['passed']
+                     and result['preserved_existing_state'] and not result.get('cleanup_errors')
+                     for result in values.values()), 'Native acceptance incomplete; equal failures do not clear it'
+          PY
+      - name: Reap the dedicated Linux user manager
+        if: always() && runner.os == 'Linux' && env.NATIVE_USER != ''
+        run: |
+          sudo systemctl stop "user@$NATIVE_UID.service"
+          sudo loginctl disable-linger "$NATIVE_USER"
+          sudo userdel "$NATIVE_USER"
+          # Keep evidence readable by upload-artifact after the test user exits.
+          sudo chmod -R a+rX "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/evidence"
+      - uses: actions/upload-artifact@v4
+        if: always() && env.CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT != ''
+        with:
+          name: supervisor-native-${{ matrix.os }}
+          path: ${{ env.CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT }}/evidence
+          if-no-files-found: error
