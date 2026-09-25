@@ -3407,6 +3407,11 @@ marker_age_within() {
 # Fires the notification on first occurrence, then debounces. Caller clears the
 # marker via debounce_clear when the condition resolves.
 #
+# <notify_fn> gets <message> as its one argument, and its exit status is the
+# delivery verdict: 0 writes the marker, non-zero leaves it as it was, so the
+# next call fires again (#900). A notify_fn that cannot see delivery returns 0
+# and debounces exactly as before.
+#
 # <recipient> is an identity for WHO is being notified. The marker records it as
 # its CONTENT, so a changed recipient re-fires: keying on <bot_id>.<suffix>
 # alone recorded only THAT a notification fired, never to whom, so an alert
@@ -3512,11 +3517,17 @@ debounce_notify() {
     fi
     if [ "$fire" -eq 1 ]; then
         _DEBOUNCE_FIRED=1
-        "$notify_fn" "$message"
         # Written only on fire, deliberately: the marker's MTIME is what
         # marker_age_within reads for the renotify window above, so touching it
         # on a suppressed tick would silently disable that second leg entirely.
-        printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
+        # And only when notify_fn reports success, because the marker is what
+        # buys silence: a send that reached nobody must not buy the window
+        # (#900; the fleet-pulse burst detector's rule). Called as the if
+        # condition, so a failure neither aborts a set -e caller nor fires its
+        # ERR trap.
+        if "$notify_fn" "$message"; then
+            printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
+        fi
     fi
 }
 
@@ -4879,12 +4890,14 @@ repo_newest_tag() {
 # <distinct-value> is passed as debounce_notify's recipient, so the notice
 # re-fires when the SITUATION CHANGES (the distance moved, a release was cut, a
 # different commit landed) and otherwise only after the renotify window. A
-# stalled condition stays quiet; a worsening one speaks up.
+# stalled condition stays quiet; a worsening one speaks up. A rejected notice
+# is not marked, so it also fires again on the next run; one with no Telegram
+# target at all is marked, since no later run could deliver it.
 #
 # Requires BOTS_DIR and STATE_DIR in the caller's scope.
 #
 # Sets _CURRENCY_OUTCOME to the verdict of THIS call: `delivered`,
-# `undelivered` (raised, but the channel rejected it) or `suppressed` (the
+# `undelivered` (raised, but not delivered) or `suppressed` (the
 # debounce fired nothing at all). Three values rather than a boolean because
 # collapsing any two of them re-creates the bug this seam exists to close: a
 # caller that logs "raised" for all three cannot distinguish a healthy fleet
@@ -4899,7 +4912,16 @@ notify_currency() {
     local name="${1:?notify_currency: <repo-name> required}"
     local etype="${2:?notify_currency: <event_type> required}"
     local distinct="${3-}" message="${4:?notify_currency: <message> required}"
-    _nc_emit() { emit_fleet_notice "$BOTS_DIR" "$etype" "$1"; }
+    # Returns the delivery verdict, so debounce_notify leaves an undelivered
+    # notice unmarked. A marked one stays silent until the situation changes or
+    # CURRENCY_RENOTIFY_S passes, 7 days by default (#900). Exit 2, no Telegram
+    # target at all (a new install), counts as sent: no later run can deliver
+    # it, and each retry would nudge the manager again. A rejected send (exit 3)
+    # still retries.
+    _nc_emit() {
+        emit_fleet_notice "$BOTS_DIR" "$etype" "$1"
+        [ "${_ALERT_DELIVERED:-0}" -eq 1 ] || [ "${_ALERT_TG_EXIT:-}" = 2 ]
+    }
     _CURRENCY_OUTCOME=suppressed
     _ALERT_DELIVERED=0
     _DEBOUNCE_FIRED=0
@@ -5331,8 +5353,11 @@ _emit_fleet_signal() {
 
     local data _sig_tmux_ok=0
     # Set for the caller, not for us: gates debounce markers so a FAILED send
-    # cannot buy itself silence for the whole debounce window.
+    # cannot buy itself silence for the whole debounce window. _ALERT_TG_EXIT
+    # is tg-post's exit, 2 when no target resolved at all, so a caller can tell
+    # a host with no Telegram from a send the channel rejected (#1825 review).
     _ALERT_DELIVERED=0
+    _ALERT_TG_EXIT=""
     data=$(printf '{"reason":"%s"}' "$(json_escape "$reason")")
     emit_fleet_event "$event_type" "$ev_source" "$data" "" fleet
 
@@ -5415,6 +5440,7 @@ _emit_fleet_signal() {
         _tg_rc=2
         _tg_err="${_alert_refusal:-no alert chat-id resolved for this fleet}"
     fi
+    _ALERT_TG_EXIT="$_tg_rc"
 
     if [ "$_tg_rc" -eq 0 ]; then
         _ALERT_DELIVERED=1
@@ -5443,7 +5469,7 @@ _emit_fleet_signal() {
     # propagating a delivery failure would abort the watchdog that detected the
     # condition -- on every fleet that has no token, which is most of them. That
     # trades a silent alert for a dead detector, which is worse. Callers that
-    # need to branch read _ALERT_DELIVERED instead.
+    # need to branch read _ALERT_DELIVERED and _ALERT_TG_EXIT instead.
     return 0
 }
 
