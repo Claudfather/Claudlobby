@@ -1,4 +1,4 @@
-"""Tests for `service_is_crash_looping` and `crash_loop_carry` (#1769).
+"""Tests for `service_is_crash_looping` (#1769).
 
 `service_is_starting` ages the CURRENT start phase, and systemd stamps a fresh
 phase on every attempt of a Restart= loop -- measured on systemd 252, the retry
@@ -13,10 +13,9 @@ flip: rc 0 iff the unit is in a start state (the same states
 least twice in the current streak. It counts from NRestarts, which is
 streak-scoped by construction on these units: a manual start or a reboot zeroes
 it, and a successful boot is terminal (RemainAfterExit=yes), so any NRestarts
-seen while the unit is starting belongs to the current failing streak. The one
-thing that breaks that -- keepalive's own `systemctl --user restart` zeroing the
-counter mid-streak (measured: NRestarts 3 -> 0) -- is what `crash_loop_carry`
-exists for: keepalive records the count it is about to wipe.
+seen while the unit is starting belongs to the current failing streak.
+keepalive's own `systemctl --user restart` zeroes it mid-streak too (measured:
+NRestarts 3 -> 0); that is accepted rather than carried over (#1801).
 
 Driven like `test_service_is_starting.py`: `systemctl` stubbed on PATH with the
 properties in a DELIBERATELY SHUFFLED order (real systemd does not answer in
@@ -34,7 +33,7 @@ LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
 SUPERVISOR = Path(__file__).resolve().parent.parent / "lib" / "supervisor.sh"
 
 
-def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str, carry: str | None):
+def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "systemctl"
@@ -72,14 +71,7 @@ def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str, carry: str 
         "done\n"
     )
     stub.chmod(0o755)
-    bot_dir = tmp_path / "bot"
-    (bot_dir / "data").mkdir(parents=True, exist_ok=True)
-    carry_file = bot_dir / "data" / ".restart-carry"
-    if carry is not None:
-        carry_file.write_text(carry + "\n")
-    elif carry_file.exists():
-        carry_file.unlink()
-    return bindir, bot_dir, carry_file
+    return bindir
 
 
 def _bash(
@@ -112,41 +104,21 @@ def _bash(
     return proc
 
 
-def _looping(tmp_path, *, active, sub, nrestarts="0", carry=None, force_os="Linux"):
-    """-> (rc, CRASH_LOOP_RESTARTS, CRASH_LOOP_VERDICT, carry file text or None)."""
-    bindir, bot_dir, carry_file = _scene(
-        tmp_path, active=active, sub=sub, nrestarts=nrestarts, carry=carry
-    )
+def _looping(tmp_path, *, active, sub, nrestarts="0", force_os="Linux"):
+    """-> (rc, CRASH_LOOP_RESTARTS, CRASH_LOOP_VERDICT)."""
+    bindir = _scene(tmp_path, active=active, sub=sub, nrestarts=nrestarts)
     proc = _bash(
         tmp_path,
         bindir,
         # `|| rc=$?`, never `; rc=$?`: sourcing lib-common.sh arms `set -e`, so
         # a bare rc-1 answer ("not a crash loop" -- the answer most cases want)
         # would kill the probe before it printed and read as a harness failure.
-        'rc=0; service_is_crash_looping svc "$1" || rc=$?; '
+        'rc=0; service_is_crash_looping svc || rc=$?; '
         'printf "%s %s %s" "$rc" "${CRASH_LOOP_RESTARTS:-unset}" "${CRASH_LOOP_VERDICT:-unset}"',
-        str(bot_dir),
         force_os=force_os,
     )
     rc, restarts, verdict = proc.stdout.split()
-    return (
-        int(rc),
-        restarts,
-        verdict,
-        (carry_file.read_text().strip() if carry_file.exists() else None),
-    )
-
-
-def _carry(tmp_path, *, active, sub, nrestarts, carry=None, force_os="Linux"):
-    """Run crash_loop_carry; -> carry file text afterwards, or None when absent."""
-    bindir, bot_dir, carry_file = _scene(
-        tmp_path, active=active, sub=sub, nrestarts=nrestarts, carry=carry
-    )
-    proc = _bash(
-        tmp_path, bindir, 'crash_loop_carry svc "$1"', str(bot_dir), force_os=force_os
-    )
-    assert proc.returncode == 0, proc.stderr  # never fails the restart it precedes
-    return carry_file.read_text().strip() if carry_file.exists() else None
+    return int(rc), restarts, verdict
 
 
 class TestTheThresholdIsTwoAutomaticRestarts:
@@ -167,7 +139,7 @@ class TestTheThresholdIsTwoAutomaticRestarts:
         )
 
     def test_second_automatic_restart_is_a_crash_loop(self, tmp_path):
-        rc, restarts, verdict, _ = _looping(
+        rc, restarts, verdict = _looping(
             tmp_path, active="activating", sub="start-pre", nrestarts="2"
         )
         assert (rc, restarts, verdict) == (0, "2", "looping")
@@ -193,34 +165,29 @@ class TestAStreakThatEndedIsNotALoop:
     def test_settled_unit_with_a_stale_counter_is_not_looping(self, tmp_path):
         """NRestarts SURVIVES a successful boot: a unit that needed retries and
         then came up keeps its count while active/exited. Settled is settled."""
-        rc, _, verdict, carry = _looping(
-            tmp_path, active="active", sub="exited", nrestarts="5", carry="3"
-        )
+        rc, _, verdict = _looping(tmp_path, active="active", sub="exited", nrestarts="5")
         assert (rc, verdict) == (1, "over")
-        assert carry is None, "a completed boot ends the streak: the carry must go"
 
     @pytest.mark.parametrize("active,sub", [("inactive", "dead"), ("failed", "failed")])
     def test_stopped_or_given_up_ends_the_streak(self, tmp_path, active, sub):
         """Stopped on purpose, or systemd stopped retrying (start-limit-hit):
         either way nothing is looping now -- a failed unit is service_down's."""
-        rc, _, verdict, carry = _looping(
-            tmp_path, active=active, sub=sub, nrestarts="7", carry="2"
-        )
-        assert (rc, verdict, carry) == (1, "over", None)
+        rc, _, verdict = _looping(tmp_path, active=active, sub=sub, nrestarts="7")
+        assert (rc, verdict) == (1, "over")
 
 
 class TestAmbiguityIsNoVerdict:
-    def test_deactivating_is_no_verdict_and_keeps_the_carry(self, tmp_path):
+    def test_deactivating_is_no_verdict(self, tmp_path):
         """deactivating/* is BOTH the stop-post between two failed attempts and
         the deliberate stop of a settled unit whose counter is stale -- the
-        state cannot tell them apart, so it claims nothing and erases nothing."""
-        rc, _, verdict, carry = _looping(
-            tmp_path, active="deactivating", sub="stop-post", nrestarts="9", carry="2"
+        state cannot tell them apart, so it claims nothing."""
+        rc, _, verdict = _looping(
+            tmp_path, active="deactivating", sub="stop-post", nrestarts="9"
         )
-        assert (rc, verdict, carry) == (1, "none", "2")
+        assert (rc, verdict) == (1, "none")
 
     def test_unreadable_counter_is_no_verdict(self, tmp_path):
-        rc, _, verdict, _ = _looping(
+        rc, _, verdict = _looping(
             tmp_path, active="activating", sub="start-pre", nrestarts=""
         )
         assert (rc, verdict) == (1, "none")
@@ -228,113 +195,10 @@ class TestAmbiguityIsNoVerdict:
     def test_non_linux_never_claims_a_loop(self, tmp_path):
         """launchd has its own throttle and no cheap counter; sound in one
         direction only, like service_is_starting."""
-        rc, _, verdict, carry = _looping(
-            tmp_path,
-            active="activating",
-            sub="start-pre",
-            nrestarts="50",
-            carry="4",
-            force_os="Darwin",
+        rc, _, verdict = _looping(
+            tmp_path, active="activating", sub="start-pre", nrestarts="50", force_os="Darwin"
         )
-        assert (rc, verdict, carry) == (1, "unknown", "4")
-
-
-class TestTheStreakSurvivesKeepalivesOwnRestart:
-    def test_carried_count_plus_live_count_binds(self, tmp_path):
-        """keepalive restarted mid-streak (counter zeroed), then one more
-        automatic restart: 1 carried + 1 live = the second restart."""
-        rc, restarts, _, _ = _looping(
-            tmp_path, active="activating", sub="start-pre", nrestarts="1", carry="1"
-        )
-        assert (rc, restarts) == (0, "2")
-
-    def test_carried_count_alone_binds_right_after_the_restart(self, tmp_path):
-        assert (
-            _looping(
-                tmp_path, active="activating", sub="start-pre", nrestarts="0", carry="2"
-            )[0]
-            == 0
-        )
-
-    def test_garbage_carry_reads_as_zero(self, tmp_path):
-        rc, restarts, _, _ = _looping(
-            tmp_path, active="activating", sub="start-pre", nrestarts="1", carry="x1"
-        )
-        assert (rc, restarts) == (1, "1")
-
-
-class TestCrashLoopCarry:
-    @pytest.mark.parametrize(
-        "active,sub",
-        [
-            ("deactivating", "stop-post"),  # between two failed attempts
-            ("activating", "start-pre"),  # a phase aged past the boot grace
-            ("active", "running"),
-        ],
-    )
-    def test_a_restart_that_interrupts_a_streak_carries_the_count(
-        self, tmp_path, active, sub
-    ):
-        assert _carry(tmp_path, active=active, sub=sub, nrestarts="3") == "3"
-
-    def test_restarting_a_given_up_unit_starts_clean(self, tmp_path):
-        """failed/* means systemd stopped retrying; the fact already calls that
-        streak over, so a restart out of it must not re-enter as an instant
-        crash_loop before its first attempt has even run."""
-        assert (
-            _carry(tmp_path, active="failed", sub="failed", nrestarts="3", carry="2")
-            is None
-        )
-
-    def test_carries_accumulate_across_repeated_restarts(self, tmp_path):
-        assert (
-            _carry(
-                tmp_path,
-                active="deactivating",
-                sub="stop-post",
-                nrestarts="3",
-                carry="2",
-            )
-            == "5"
-        )
-
-    def test_restarting_a_settled_unit_starts_clean(self, tmp_path):
-        """The ordinary keepalive restart -- a dead session on a settled unit --
-        is not part of any streak: its stale counter must not seed the next one."""
-        assert (
-            _carry(tmp_path, active="active", sub="exited", nrestarts="4", carry="2")
-            is None
-        )
-
-    def test_restarting_a_stopped_unit_starts_clean(self, tmp_path):
-        assert (
-            _carry(tmp_path, active="inactive", sub="dead", nrestarts="4", carry="2")
-            is None
-        )
-
-    def test_nothing_to_carry_leaves_the_file_alone(self, tmp_path):
-        assert (
-            _carry(
-                tmp_path, active="activating", sub="start-pre", nrestarts="0", carry="1"
-            )
-            == "1"
-        )
-        assert (
-            _carry(tmp_path, active="activating", sub="start-pre", nrestarts="0")
-            is None
-        )
-
-    def test_non_linux_is_a_no_op(self, tmp_path):
-        assert (
-            _carry(
-                tmp_path,
-                active="deactivating",
-                sub="stop-post",
-                nrestarts="3",
-                force_os="Darwin",
-            )
-            is None
-        )
+        assert (rc, verdict) == (1, "unknown")
 
 
 def test_the_one_show_asks_for_the_counter_by_name(tmp_path):
@@ -372,9 +236,7 @@ def test_the_stub_answers_only_what_each_spelling_of_p_asks(tmp_path, argv, keys
     property, and one that dropped it when another -p was separate could not witness a call
     that still asks for NRestarts, so a refactor to that spelling, which systemd reads the
     same as the separate one, failed the loop tests."""
-    bindir, _, _ = _scene(
-        tmp_path, active="activating", sub="start-pre", nrestarts="2", carry=None
-    )
+    bindir = _scene(tmp_path, active="activating", sub="start-pre", nrestarts="2")
     out = subprocess.run(
         [str(bindir / "systemctl"), "show", *argv, "svc"],
         capture_output=True,
@@ -389,9 +251,7 @@ def test_the_starting_gate_is_unchanged_by_the_shared_read(tmp_path):
     looping at NRestarts 1503 is still 'starting' to it (the per-phase age is
     kept for what it was built for). Keepalive and fleet-pulse, not this gate,
     decide what a crash loop means."""
-    bindir, _, _ = _scene(
-        tmp_path, active="activating", sub="auto-restart", nrestarts="1503", carry=None
-    )
+    bindir = _scene(tmp_path, active="activating", sub="auto-restart", nrestarts="1503")
     uptime = tmp_path / "uptime"
     uptime.write_text("1000.00 4096.39\n")
     (tmp_path / "supervisor.sh").write_bytes(SUPERVISOR.read_bytes())

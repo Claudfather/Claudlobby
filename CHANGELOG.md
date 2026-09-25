@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed — the crash-loop carry, before it ships (#1801)
+
+`crash_loop_carry` (#1769), its `data/.restart-carry` file and the tests that
+served only them are gone. A keepalive restart mid-loop zeroes the count, and
+the loop reads as a loop again two attempts later, inside one pulse.
+
 ### Fixed — five compose tests failed on every checkout under a bot's `projects/` (#1794)
 
 They now compose against an export of the working tree, uncommitted edits
@@ -245,9 +251,8 @@ never binds.
   units.** A manual start or a reboot zeroes it, and a successful boot is
   terminal (`RemainAfterExit=yes`), so whatever it reads while the unit is
   starting belongs to the current failing streak. No first-sighting marker is
-  needed. The one exception is keepalive's own restart, which zeroes the counter
-  mid-streak (measured: 3 → 0). `crash_loop_carry` records the count that
-  restart wipes, in `data/.restart-carry`.
+  needed. keepalive's own restart zeroes it mid-streak too (measured: 3 → 0);
+  that is accepted rather than carried over (#1801).
 - **Each consumer draws its own action from the one fact.** fleet-pulse emits a
   new **critical `crash_loop`** event, in the escalation set, and pushes a
   manager note naming `logs/startup.log`. For that bot it does not also emit
@@ -264,17 +269,15 @@ never binds.
   in `SYSTEM_EVENT_SEVERITY`. The escalation read filters on that severity, so a
   listed but unregistered type would never page, silently.
 - **Pinned in CI since #1780.** `tests/test_crash_loop_wiring.py` (first drafted
-  by vera) drives the real keepalive and fleet-pulse against a stateful
-  `systemctl` stub. It pins keepalive's skip, its exit status and its plane
-  event; its carry, through either unit name, and the order of carry and
-  restart; and fleet-pulse's page, the `crash_loop` event and its keys, its
-  suppression of the session and service pages, and its clearing, which a
-  `none` or a `starting` read does not do. K2, K3, K6 and the C1 and C2 controls
-  also run at a simulated uptime of 120 s and 30 s; the other tests run at the
-  real one. Not pinned there: the page's text, whose only carrier is a tmux push to
-  the manager, which no scene sets up. Both stubs answer only what `-p` asks,
-  as systemd does and in every spelling of `-p`, so a call that stopped asking
-  for `NRestarts` reads as the "no verdict" it would be on a real host.
+  by vera) drives the real keepalive and fleet-pulse against a `systemctl` stub.
+  It pins keepalive's skip, its exit status and its plane event; and
+  fleet-pulse's page, the `crash_loop` event and its keys, its suppression of
+  the session and service pages, and its clearing, which a `none` or a
+  `starting` read does not do. Not pinned there: the page's text, whose only
+  carrier is a tmux push to the manager, which no scene sets up. Both stubs
+  answer only what `-p` asks, as systemd does and in every spelling of `-p`, so
+  a call that stopped asking for `NRestarts` reads as the "no verdict" it would
+  be on a real host.
 
 **Out of scope:** stopping the loop or changing the start limit (#1769 option
 (a)), which is a policy call. `update-claude-code.sh` accepting `unknown` as a

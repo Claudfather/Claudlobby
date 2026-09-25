@@ -2694,7 +2694,7 @@ LBUNIT
         _unit_start_facts "$CL_SVC"
         if [ "$_USF_ACTIVE/$_USF_SUB" = "activating/start-pre" ] && [ "$_USF_NRESTARTS" = "0" ]; then
             _cl_first_state="$_USF_ACTIVE/$_USF_SUB" _cl_first_nr=$_USF_NRESTARTS
-            service_is_crash_looping "$CL_SVC" "$CL_DIR" && _cl_first_loop=yes || _cl_first_loop=no
+            service_is_crash_looping "$CL_SVC" && _cl_first_loop=yes || _cl_first_loop=no
             break
         fi
         sleep 0.05
@@ -2723,7 +2723,7 @@ LBUNIT
             _unit_start_facts "$LB_SVC"
             _lb_st="$_USF_ACTIVE/$_USF_SUB"
             _lb_s=no; service_is_starting "$LB_SVC" && _lb_s=yes
-            _lb_l=no; service_is_crash_looping "$LB_SVC" "$LB_DIR" && _lb_l=yes
+            _lb_l=no; service_is_crash_looping "$LB_SVC" && _lb_l=yes
             printf '%s %s %s %s %s\n' "$(date +%s)" "$_lb_st" "${_USF_NRESTARTS:-?}" "$_lb_s" "$_lb_l" >>"$LB_SAMPLES"
             if [ "$_lb_pulsed" -eq 0 ] && [ $(($(date +%s) - _lb_t0)) -ge 20 ]; then
                 _unit_start_facts "$CL_SVC"
@@ -2837,7 +2837,7 @@ LBUNIT
     harness_check "#1769 the probe really is failing and being retried by systemd (observed ${_cl_state:-no start state} NRestarts=${_cl_nr:-?})" "$r"
     service_is_starting "$CL_SVC" && r=yes || r=no
     harness_check "  ...and the per-phase boot gate STILL reads it as mid-start -- the defect precondition; without it this section proves nothing" "$r"
-    service_is_crash_looping "$CL_SVC" "$CL_DIR" && r=yes || r=no
+    service_is_crash_looping "$CL_SVC" && r=yes || r=no
     harness_check "  ...and service_is_crash_looping reads it as a loop (verdict ${CRASH_LOOP_VERDICT:-?}, ${CRASH_LOOP_RESTARTS:-?} automatic restarts)" "$r"
 
     # Consumer: keepalive -- a distinct SKIP, and still no restart of its own.
@@ -2899,7 +2899,7 @@ LBUNIT
     _unit_start_facts "$LB_SVC"
     [ "$_USF_ACTIVE/$_USF_SUB" = "active/exited" ] && r=yes || r=no
     harness_check "  ...and it settled to active/exited (observed $_USF_ACTIVE/$_USF_SUB)" "$r"
-    service_is_crash_looping "$LB_SVC" "$LB_DIR" || true
+    service_is_crash_looping "$LB_SVC" || true
     [ "${CRASH_LOOP_VERDICT:-}" = "over" ] && r=yes || r=no
     harness_check "  ...where the fact reports the streak over (verdict ${CRASH_LOOP_VERDICT:-?})" "$r"
 

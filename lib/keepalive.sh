@@ -191,15 +191,12 @@ restart_bot_service() {
         desc="systemctl --user restart $BOT_SERVICE"
         echo "$(ts_iso) RESTART — $reason, $desc" >> "$LOG"
         emit_keepalive_event "RESTART" "$reason, $desc"
-        # A manual restart zeroes NRestarts; keep a streak it interrupts (#1769).
-        crash_loop_carry "$BOT_SERVICE" "$BOT_DIR"
         systemctl --user restart "$BOT_SERVICE.service" >>"$LOG" 2>&1
     elif [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
         # Pre-rename unit still installed (fleet not regenerated yet).
         desc="systemctl --user restart $BOT_NAME (pre-rename)"
         echo "$(ts_iso) RESTART — $reason, $desc" >> "$LOG"
         emit_keepalive_event "RESTART" "$reason, $desc"
-        crash_loop_carry "$BOT_NAME" "$BOT_DIR"
         systemctl --user restart "$BOT_NAME.service" >>"$LOG" 2>&1
     elif [ "$_OS" = "Darwin" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
         desc="launchctl kickstart $BOT_SERVICE"
@@ -332,7 +329,7 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
     # 2,086 times running. The ACTION is unchanged, deliberately: systemd is
     # already restarting the unit, and a restart stacked on top only zeroes
     # its counter. Paging the loop is fleet-pulse's job, from the same fact.
-    if [ -n "${BOT_SERVICE:-}" ] && service_is_crash_looping "$BOT_SERVICE" "$BOT_DIR"; then
+    if [ -n "${BOT_SERVICE:-}" ] && service_is_crash_looping "$BOT_SERVICE"; then
         echo "$(ts_iso) SKIP — crash loop ($CRASH_LOOP_RESTARTS automatic restarts, unit $CRASH_LOOP_STATE): systemd is retrying, not stacking a restart" >> "$LOG"
         emit_keepalive_event "SKIP" "crash loop ($CRASH_LOOP_RESTARTS automatic restarts), systemd is retrying, not restarting"
         exit 0
