@@ -335,7 +335,8 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
     # An earlier dispatch was received, so this recipient's hook is armed.
     assert _run(_hookjson(_arrival(safe), ensure_ascii=False), env).returncode == 0
     prog = ('. "$LIB/lib-common.sh"; set +e; '
-            'bot_tmux() { echo "$*"; [ "$TUI" = submits ] || return 0;'
+            'bot_tmux() { case "$*" in *capture-pane*) return 0;; esac;'  # a read, not a key
+            ' echo "$*"; [ "$TUI" = submits ] || return 0;'
             ' printf %s "$PROMPT" | bash "$LIB/plane-dispatch-in.sh"; }; '
             'pane_await_receipt sock "${DEST:-$BOT_ID}" "$MSG"')
 
@@ -359,6 +360,55 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
         == [("send_retry", held), ("send_retry", stuck), ("send_miss", stuck)]
     # A recipient that never recorded a receipt has no hook armed: no verdict, nothing pressed.
     assert gate(stuck, "holds", dest="dinesh")[:2] == (0, [])
+
+
+def test_a_queued_delivery_is_not_a_miss(tmp_path):
+    """#1099 review (vera, 8 of the 16 would-be misses): a recipient that starts a
+    turn after the door's idle probe QUEUES the prompt, and its receipt lands only
+    when that turn ends. That is not a held box, so a missing receipt from a busy
+    recipient gets no Enter and no send_miss -- checked before the Enter, and again
+    before the verdict, since the turn may start while the gate waits."""
+    root = _root(tmp_path)
+    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3")
+    _, safe, _ = _wire_proof("set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), env).returncode == 0  # armed
+    flag = tmp_path / "turn-started"
+    prog = ('. "$LIB/lib-common.sh"; set +e; '
+            'bot_tmux() { case "$*" in'
+            ' *capture-pane*) [ -f "$FLAG" ] && echo "esc to interrupt"; return 0;;'
+            ' *send-keys*) [ "$TURN" = after-enter ] && : > "$FLAG";; esac; echo "$*"; }; '
+            'pane_await_receipt sock "$BOT_ID" "$MSG"')
+
+    def gate(msgid, turn):   # -> (rc, the keys the stub TUI was sent)
+        if turn == "running":
+            flag.touch()
+        r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=120,
+                           env={**env, "LIB": str(LIB), "MSG": msgid, "TURN": turn, "FLAG": str(flag)})
+        flag.unlink(missing_ok=True)
+        return r.returncode, r.stdout.splitlines()
+
+    queued, late = "msg_" + "c" * 32, "msg_" + "e" * 32
+    assert gate(queued, "running") == (0, [])                               # nothing pressed
+    assert gate(late, "after-enter") == (0, [f"sock send-keys -t {BOT} Enter"])
+    assert [tuple(r) for r in _rows(root, (
+        "SELECT event, json_extract(detail, '$.data.msg_id') FROM events"
+        " WHERE kind = 'system' AND event IN ('send_retry', 'send_miss') ORDER BY ingest_seq"))] \
+        == [("send_retry", late)]                                            # no verdict for either
+
+
+def test_a_zero_wait_in_any_spelling_turns_the_gate_off(tmp_path):
+    """PANE_RECEIPT_WAIT_S=0 is the off switch; `0.0` must not read as on (#1099 review)."""
+    root = _root(tmp_path)
+    _, safe, _ = _wire_proof("set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0  # armed
+    for zero in ("0", "0.0"):
+        env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S=zero)
+        r = subprocess.run(["bash", "-c", '. "$LIB/lib-common.sh"; set +e; bot_tmux() { echo "$*"; }; '
+                            'pane_await_receipt sock "$BOT_ID" msg_' + "f" * 32],
+                           capture_output=True, text=True, timeout=60, env={**env, "LIB": str(LIB)})
+        assert (r.returncode, r.stdout) == (0, ""), zero                   # nothing pressed
+    assert _rows(root, "SELECT event FROM events WHERE kind = 'system'"
+                       " AND event IN ('send_retry', 'send_miss')") == []
 
 
 def _pasted(text: str, at: int) -> str:
