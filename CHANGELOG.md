@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the operator's home directory was back in the tree, and nothing caught it (#927)
+
+#1306 replaced the home paths #927 named but added no gate, and four later PRs
+put one back: a cold-start doc, two plan docs, and 24 composed host-timer units
+committed at the repo root (removed: the compositor writes those under
+`runtime/_host/`, which is ignored). `tests/test_boundary_invariants.py` now
+fails on any tracked `/home/<name>` or `/Users/<name>` whose name is not on a
+short placeholder allowlist.
+
 ### Changed — the validation harness tests keep one test per failure that happened (#1801)
 
 484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
