@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..utilization import compute_busy_pct, find_state_transition
 from .queries import fleet_alias_range
+from .time import instant_key, register_instant_key
 
 # Fleet scope is applied IN SQL (a LIKE on the alias) — the lens measured
 # 730 ms at 21 bots × 7 d when every fleet's rows were fetched and parsed
@@ -33,9 +34,9 @@ from .queries import fleet_alias_range
 HEARTBEAT_SERIES_SQL = (
     "SELECT i.alias AS alias, m.occurred_at AS occurred_at, m.value AS value"
     " FROM metric_samples m JOIN identity_registry i ON i.uid = m.subject_uid"
-    " WHERE m.metric = 'bot.heartbeat' AND m.occurred_at >= ?"
+    " WHERE m.metric = 'bot.heartbeat' AND claudlobby_instant_key(m.occurred_at) >= ?"
     f" AND (? IS NULL OR {fleet_alias_range('i.alias')})"
-    " ORDER BY i.alias, m.occurred_at, m.ingest_seq"
+    " ORDER BY i.alias, claudlobby_instant_key(m.occurred_at), m.ingest_seq"
 )
 
 
@@ -56,7 +57,10 @@ def heartbeat_series(conn, *, now: datetime | None = None,
     so no two surfaces can disagree about what was recorded."""
     if now is None:
         now = datetime.now(timezone.utc)
-    since = (now - timedelta(days=days)).isoformat()
+    register_instant_key(conn)
+    since = instant_key((now - timedelta(days=days)).isoformat())
+    if since is None:
+        raise ValueError("heartbeat now must be a timezone-aware instant")
     like = None if fleet is None else fleet
     series: dict[str, list] = {}
     for alias, occ, raw in conn.execute(HEARTBEAT_SERIES_SQL, (since, like, like, like)):

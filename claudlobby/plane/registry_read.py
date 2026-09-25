@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from .time import register_instant_key
 from .queries import (
     REG_CHANGES_SQL,
     REG_CURRENT_POINT_SQL,
@@ -29,6 +30,7 @@ from .queries import (
 def _q(conn, sql: str, params=()) -> list[dict]:
     """Rows as dicts regardless of the caller's row_factory — this module
     takes any plane connection and must not assume sqlite3.Row."""
+    register_instant_key(conn)
     cur = conn.execute(sql, params)
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -71,9 +73,7 @@ def current_entities(conn, *, entity_type: str | None = None,
 def entity_history(conn, ident: str) -> list[dict]:
     """SCD2 windows for one entity, by alias or uid — tombstone rows open
     the deleted period and are rendered, never filtered."""
-    rows = [_parse(r) for r in _q(conn, REG_HISTORY_SQL)]
-    return [r for r in rows
-            if r["entity_alias"] == ident or r["entity_uid"] == ident]
+    return [_parse(r) for r in _q(conn, REG_HISTORY_SQL, {"ident": ident})]
 
 
 def diff_fields(prev, curr, prefix: str = "") -> dict[str, tuple]:
@@ -103,7 +103,13 @@ def recent_changes(conn, *, limit: int = 50) -> list[dict]:
     ``deleted`` / ``recreated``, a first-in-partition row as
     ``first_observed`` (spec's derivation name — honestly first-OBSERVED,
     not created) — never a field storm."""
-    rows = [_parse(r) for r in _q(conn, REG_CHANGES_SQL)[:limit]]
+    if type(limit) is not int or limit < 0:
+        raise ValueError("registry changes limit must be a nonnegative integer")
+    if limit == 0:
+        return []
+    # Python slicing accepted arbitrarily large positive integers; SQLite
+    # binds signed 64-bit integers, whose maximum already exceeds any row count.
+    rows = [_parse(r) for r in _q(conn, REG_CHANGES_SQL, (min(limit, 2**63 - 1),))]
     out = []
     for r in rows:
         first = (r.get("prev_payload") is None
@@ -134,6 +140,7 @@ def current_hash(conn, host_uid: str, entity_type: str,
     reading is the tombstone dedup's answer. The DEFINITION is also the
     emitter's (REG_CURRENT_KEYS_SQL, same underlying SQL) — its bulk form
     lives beside this one in queries.py."""
+    register_instant_key(conn)
     row = conn.execute(REG_CURRENT_POINT_SQL,
                        (host_uid, entity_type, entity_uid)).fetchone()
     return None if row is None else row[0]

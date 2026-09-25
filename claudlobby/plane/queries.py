@@ -751,9 +751,11 @@ _F11_COMPLETION_JOIN = (
     " AND json_extract(d.detail,'$.complete') = 1)"
 )
 
+# Malformed/naive historical instants are excluded from chronology; stored
+# timestamps and payload/hash bytes are unchanged (see plane.time).
 _REG_EFFECTIVE = (
     "effective AS ("
-    " SELECT rs.*,"
+    " SELECT rs.*, claudlobby_instant_key(rs.occurred_at) AS instant_key,"
     "  (rs.tombstone = 0 OR " + _F11_COMPLETION_JOIN + ") AS f11_valid"
     " FROM registry_snapshots rs)"
 )
@@ -761,15 +763,15 @@ _REG_EFFECTIVE = (
 # Current state per SCD partition: the latest F11-valid row wins; when that
 # row is a (valid) tombstone the entity is absent from current. An INVALID
 # tombstone is not merely demoted — it is excluded, so the prior snapshot
-# remains current. Ordering is (occurred_at, ingest_seq), the spec's ONE
+# remains current. Ordering is (instant_key(occurred_at), ingest_seq), the ONE
 # SCD ordering (line 145: first-hand snapshots carry null observed_at, and
 # ingest_seq breaks producer-timestamp ties) — current is simply its tail.
 REG_CURRENT_SQL = (
     "WITH " + _REG_EFFECTIVE + ", latest AS ("
     " SELECT e.*, ROW_NUMBER() OVER ("
     "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
-    "   ORDER BY e.occurred_at DESC, e.ingest_seq DESC) AS rn"
-    " FROM effective e WHERE e.f11_valid = 1)"
+    "   ORDER BY e.instant_key DESC, e.ingest_seq DESC) AS rn"
+    " FROM effective e WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL)"
     " SELECT host_uid, entity_type, entity_uid, entity_alias, payload,"
     " payload_hash, cause, scan_id, vault_rev, occurred_at, ingest_seq"
     " FROM latest WHERE rn = 1 AND tombstone = 0"
@@ -801,17 +803,25 @@ REG_CURRENT_KEYS_SQL = (
 # the partition's next row (NULL = still open). Tombstone rows appear as
 # window-openers of the deleted period — the reader renders them, never
 # filters them, or deletion vanishes from history.
+# Select complete partitions first: a later alias must still close an old
+# alias's window. Only after LEAD may :ident select the returned rows.
 REG_HISTORY_SQL = (
-    "WITH " + _REG_EFFECTIVE +
+    "WITH " + _REG_EFFECTIVE + ", selected AS ("
+    " SELECT DISTINCT host_uid, entity_type, entity_uid"
+    " FROM registry_snapshots WHERE entity_alias = :ident OR entity_uid = :ident),"
+    " history AS ("
     " SELECT e.host_uid, e.entity_type, e.entity_uid, e.entity_alias,"
     " e.tombstone, e.payload, e.payload_hash, e.cause, e.scan_id,"
     " e.occurred_at AS valid_from,"
     " LEAD(e.occurred_at) OVER ("
     "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
-    "   ORDER BY e.occurred_at, e.ingest_seq) AS valid_to,"
+    "   ORDER BY e.instant_key, e.ingest_seq) AS valid_to,"
     " e.ingest_seq"
-    " FROM effective e WHERE e.f11_valid = 1"
-    " ORDER BY e.entity_type, e.entity_alias, e.occurred_at, e.ingest_seq"
+    " FROM effective e JOIN selected s"
+    " ON s.host_uid = e.host_uid AND s.entity_type = e.entity_type"
+    " AND s.entity_uid = e.entity_uid WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL)"
+    " SELECT * FROM history WHERE entity_alias = :ident OR entity_uid = :ident"
+    " ORDER BY entity_type, entity_alias, claudlobby_instant_key(valid_from), ingest_seq"
 )
 
 # Consecutive rows in a partition ARE the diff view (spec line 143). This
@@ -822,20 +832,21 @@ REG_HISTORY_SQL = (
 # as first_observed — spec's own derivation name, and a new entity is
 # prime drift signal (chunk-B gauntlet: the old WHERE silently dropped
 # exactly those rows from --changes).
+# LIMIT bounds returned payloads, not the SQL window's partition input.
 REG_CHANGES_SQL = (
     "WITH " + _REG_EFFECTIVE + ", ordered AS ("
     " SELECT e.*,"
     "  LAG(e.payload) OVER w AS prev_payload,"
     "  LAG(e.payload_hash) OVER w AS prev_hash,"
     "  LAG(e.tombstone) OVER w AS prev_tombstone"
-    " FROM effective e WHERE e.f11_valid = 1"
+    " FROM effective e WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL"
     " WINDOW w AS (PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
-    "   ORDER BY e.occurred_at, e.ingest_seq))"
+    "   ORDER BY e.instant_key, e.ingest_seq))"
     " SELECT entity_type, entity_alias, entity_uid, tombstone, payload,"
     " prev_payload, prev_tombstone, cause, scan_id,"
     " occurred_at, ingest_seq"
     " FROM ordered"
-    " ORDER BY ingest_seq DESC"
+    " ORDER BY ingest_seq DESC LIMIT ?"
 )
 
 # Trust: tombstones the F11 join does NOT validate. Nonzero means a scan

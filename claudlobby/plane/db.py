@@ -10,6 +10,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+from .time import register_instant_key
+
 
 def db_file(root: Path) -> Path:
     """WHERE the db lives — a pure join, no side effect. Readers and every
@@ -48,6 +50,7 @@ def connect_ro(path: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
         raise FileNotFoundError(path)
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=timeout)
     conn.row_factory = sqlite3.Row
+    register_instant_key(conn)
     conn.execute("PRAGMA query_only = 1")
     return conn
 
@@ -72,6 +75,7 @@ def connect(path: Path, *, synchronous: str = "NORMAL") -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=5.0)
     conn.isolation_level = None           # autocommit — ingest/migrate own txns
     conn.row_factory = sqlite3.Row
+    register_instant_key(conn)
     # busy_timeout FIRST, so the WAL switch below waits for a concurrent
     # creator where it can; the fresh-file case SQLite will NOT wait on (a
     # would-be deadlock between two first writers returns BUSY at once) is
