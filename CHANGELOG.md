@@ -33,6 +33,13 @@ committed at the repo root (removed: the compositor writes those under
 fails on any tracked `/home/<name>` or `/Users/<name>` whose name is not on a
 short placeholder allowlist.
 
+### Fixed — completed-work counts prompt a context self-check (#1294)
+
+Manager guidance now treats a high completed-work count as a prompt to check
+for degradation in its decision table, dispatch guidance and reviewer example.
+Reported degradation still follows the existing safe-restart and handoff policy;
+a count alone no longer authorizes restarting a reviewer.
+
 ### Fixed — a socket cooldown no longer spawns the cold CLI for fire-and-forget emitters (#1657)
 
 Under load every cooldown emission spawned the package-importing CLI, and
