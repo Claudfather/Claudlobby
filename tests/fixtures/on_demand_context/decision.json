@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "source_baseline": "28bbab1cbe7e80e0e8474efee7c3cf77424f4015",
+  "repetitions": 6,
+  "task_order": [
+    "T5",
+    "T6",
+    "T2",
+    "T3",
+    "T1",
+    "T7",
+    "T8",
+    "T4"
+  ],
+  "order_seed": 870,
+  "first_arm_odd": "B",
+  "max_turns": 8,
+  "max_seconds": 300,
+  "real_runs": "UNIMPLEMENTED",
+  "decision_precedence": [
+    "valid B violation: FAIL",
+    "invalid/missing/duplicate/mixed-version cells: INCONCLUSIVE",
+    "valid A-only violation: INCONCLUSIVE",
+    "all96 satisfy: candidate finite-battery success (real verifier required)"
+  ],
+  "offline_output": "NOT_RUN regardless of synthetic score",
+  "accounting": "UNIMPLEMENTED; never infer cost from bytes",
+  "required_before_real_run": [
+    "exact runtime/model/tool trace contract",
+    "reviewed containment and model-only broker/auth",
+    "pre-request reserve or verified provider hard cap",
+    "operator monetary ceiling",
+    "signed trusted traces and full request-tree accounting",
+    "independent review and preregistration"
+  ],
+  "specimen_sha256": "0d0dc0b40b79528e23039810fdcf7c4a3c8416bb8e36f55a2c97d33c358ecfc5"
+}
