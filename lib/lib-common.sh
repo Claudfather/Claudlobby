@@ -5356,20 +5356,14 @@ _emit_fleet_signal() {
     resolve_alert_target "$bots_dir"
     # shellcheck disable=SC2154  # _alert_* are set by resolve_alert_target above
     chat_id="$_alert_chat_id"; state_dir="$_alert_state_dir"
-    local _tg_rc=0 _tg_err="" _tg_token=""
-    # The resolved pair names its sender; an ambient token (a bot session's own)
-    # is kept only when the env itself supplied that session's pair, so it can
-    # never re-split a pair the resolver took from a bot (#1771).
-    if [ "$_alert_target_src" = "env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR" ]; then
-        _tg_token="${TELEGRAM_BOT_TOKEN:-}"
-    fi
+    local _tg_rc=0 _tg_err=""
     if [ -n "$chat_id" ]; then
         # Capture stderr rather than discarding it: tg-post distinguishes no-token
         # (1), no-chat (2) and API-rejected (3), and the body is where a rejected
         # send explains itself. A >/dev/null 2>&1 here threw away the whole
         # diagnosis of an alert that never arrived.
         _tg_err=$(TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
-            TELEGRAM_BOT_TOKEN="$_tg_token" \
+            TELEGRAM_BOT_TOKEN="$_alert_token" \
             "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" 2>&1) || _tg_rc=$?
     else
         # No resolvable target was ALSO silent: no attempt, no record, nothing to
@@ -5600,9 +5594,13 @@ EOF
 #      (default) is cross-fleet for host jobs, which run fleet-less; "fleet"
 #      restricts it to <bots_dir>.
 # Sets _alert_chat_id and _alert_state_dir (both empty on a refusal),
-# _alert_target_src (where the pair came from: a label, never a value) and
-# _alert_refusal (empty unless refused: the reason and the fix, no ids). Every
-# caller treats an empty chat as undeliverable, so a refusal is never a send.
+# _alert_target_src (where the pair came from: a label, never a value),
+# _alert_refusal (empty unless refused: the reason and the fix, no ids) and
+# _alert_token, the token that rides the pair: a bot session's own ambient
+# TELEGRAM_BOT_TOKEN only when the env supplied that session's own pair, else
+# empty, so tg-post reads the sender's and a session's token never re-splits a
+# pair taken from a bot (#1771). Every caller treats an empty chat as
+# undeliverable, so a refusal is never a send.
 # Outputs via globals (bash 3.2 has no namerefs; mirrors detect_os).
 resolve_alert_target() {
     local bots_dir="${1:-}" scan_scope="${2:-any}" _bot
@@ -5610,6 +5608,7 @@ resolve_alert_target() {
     _alert_state_dir=""
     _alert_target_src=""
     _alert_refusal=""
+    _alert_token=""
     if [ -n "${FLEET_PULSE_ESCALATION_CHAT_ID:-}" ]; then
         if [ -n "${FLEET_PULSE_ESCALATION_STATE_DIR:-}" ]; then
             _alert_chat_id="$FLEET_PULSE_ESCALATION_CHAT_ID"
@@ -5626,6 +5625,7 @@ resolve_alert_target() {
             _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
             _alert_state_dir="$TELEGRAM_STATE_DIR"
             _alert_target_src="env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR"
+            _alert_token="${TELEGRAM_BOT_TOKEN:-}"
             return 0
         fi
         _bot=$(_bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" || true)

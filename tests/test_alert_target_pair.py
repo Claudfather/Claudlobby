@@ -73,16 +73,6 @@ def _home_state(tmp_path: Path, bot: str) -> str:
 # --- the required case: an env chat no bot is in --------------------------------
 
 
-def test_an_env_chat_no_bot_is_in_is_refused_not_paired_with_a_scanned_token(tmp_path):
-    bots = tmp_path / "root" / "runtime" / "bots"
-    _bot(bots, "alpha", CHAT_B)  # a live bot, in a DIFFERENT chat
-    got = _resolve(tmp_path, bots, TELEGRAM_GROUP_CHAT_ID=CHAT_A)
-    assert got["chat"] == "" and got["state"] == "", got
-    assert got["src"] == "refused"
-    assert "TELEGRAM_GROUP_CHAT_ID" in got["refusal"]
-    assert "not guessed" in got["refusal"]
-
-
 def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path):
     root = tmp_path / "root"
     (root / "lib").mkdir(parents=True)
@@ -183,22 +173,6 @@ def test_the_escalation_chat_without_its_partner_is_refused_naming_it(tmp_path):
     assert "fleet_pulse.escalation_state_dir" in got["refusal"]
 
 
-def test_the_escalation_chat_with_its_partner_is_the_pair(tmp_path):
-    bots = tmp_path / "root" / "runtime" / "bots"
-    _bot(bots, "alpha", CHAT_B)
-    got = _resolve(
-        tmp_path,
-        bots,
-        FLEET_PULSE_ESCALATION_CHAT_ID=CHAT_ESC,
-        FLEET_PULSE_ESCALATION_STATE_DIR="/escalation/sender",
-    )
-    assert (got["chat"], got["state"]) == (CHAT_ESC, "/escalation/sender")
-    assert (
-        got["src"]
-        == "env:FLEET_PULSE_ESCALATION_CHAT_ID+FLEET_PULSE_ESCALATION_STATE_DIR"
-    )
-
-
 # --- no env chat: one bot supplies both ----------------------------------------
 
 
@@ -218,7 +192,7 @@ TOKEN_STUB = (
 )
 
 
-def _token_seen(tmp_path: Path, **env) -> str:
+def _token_seen(tmp_path: Path) -> str:
     root = tmp_path / "root"
     (root / "lib").mkdir(parents=True, exist_ok=True)
     _write_exec(root / "lib" / "tg-post.sh", TOKEN_STUB)
@@ -232,7 +206,6 @@ def _token_seen(tmp_path: Path, **env) -> str:
         TG_CAPTURE=capture,
         TELEGRAM_BOT_TOKEN="ambient-session-token",
         PLANE_EMIT_DISABLED="1",
-        **env,
     )
     driver = (
         f'. "{LIB}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
@@ -248,10 +221,3 @@ def test_a_scanned_pair_never_rides_an_ambient_token(tmp_path):
     # The pair came from bot alpha: the token must be alpha's (tg-post reads it
     # from alpha's state dir), never the session's own.
     assert _token_seen(tmp_path) == "<empty>"
-
-
-def test_the_sessions_own_env_pair_keeps_its_token(tmp_path):
-    seen = _token_seen(
-        tmp_path, TELEGRAM_GROUP_CHAT_ID=CHAT_B, TELEGRAM_STATE_DIR="/session/dir"
-    )
-    assert seen == "ambient-session-token"

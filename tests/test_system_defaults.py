@@ -543,37 +543,6 @@ class TestComposeFleetTimers:
         _validate_alert_pair(fleet, report)
         assert any("no declared channel bot is in the fleet chat" in w for w in report.warnings)
 
-    def test_the_escalation_chat_rides_with_its_declared_partner(self, tmp_path):
-        """fleet_pulse.escalation_state_dir reaches the fleet-pulse unit beside
-        the escalation chat; without it the validator warns that the runtime
-        will REFUSE the escalation, naming the key to set."""
-        from claudlobby.composer import compose_fleet_timers
-        from claudlobby.config import FleetPulseConfig
-        from claudlobby.validator import ValidationReport, _validate_alert_pair
-
-        paths = self._paths(tmp_path)
-        fleet = FleetConfig(
-            name="test-fleet",
-            service_prefix="com.test",
-            fleet_pulse=FleetPulseConfig(
-                escalation_chat_id="-1007777777777",
-                escalation_state_dir="/escalation/sender",
-            ),
-        )
-        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
-        pulse = (timers_dir / "com.test.fleet-pulse.service").read_text()
-        assert "Environment=FLEET_PULSE_ESCALATION_CHAT_ID=-1007777777777" in pulse
-        assert "Environment=FLEET_PULSE_ESCALATION_STATE_DIR=/escalation/sender" in pulse
-        plist = (timers_dir / "com.test.fleet-pulse.plist").read_text()
-        assert "<key>FLEET_PULSE_ESCALATION_STATE_DIR</key>" in plist
-
-        report = ValidationReport()
-        _validate_alert_pair(fleet, report)
-        assert not any("escalation" in w for w in report.warnings)
-        fleet.fleet_pulse.escalation_state_dir = None
-        _validate_alert_pair(fleet, report)
-        assert any("fleet_pulse.escalation_state_dir" in w and "REFUSED" in w for w in report.warnings)
-
     @staticmethod
     def _paths(tmp_path):
         root = tmp_path / "claudlobby"

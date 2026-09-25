@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the alert tests keep one test per failure that happened (#1801)
+
+306 test lines go. No behaviour changes: the session-token rule is stated once,
+in `resolve_alert_target`, and creds-check's getMe and getChat share one helper.
+
 ### Removed — the crash-loop carry, before it ships (#1801)
 
 `crash_loop_carry` (#1769), its `data/.restart-carry` file and the tests that
