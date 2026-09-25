@@ -5304,7 +5304,7 @@ class TestNoLeafManagerShapesComposeByteIdentically:
 
 
 def test_the_telegram_channel_dir_has_one_definition():
-    """#1786: bot.conf, access.json and the fleet units' alert sender all spell a
+    """#1786: bot.conf, access.json and fleet_alert_sender_state_dir spell a
     bot's channel dir through telegram_channel_rel, so they cannot drift apart.
     The value is pinned too: bot.conf exports it as $HOME/<it>, and that exact
     KEY=VALUE is the contract lib-common's poller-ownership check greps (#976)."""

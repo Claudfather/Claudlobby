@@ -536,7 +536,7 @@ def telegram_channel_rel(handle: str) -> str:
     definition behind its three consumers (#1786), which need it in two forms.
     ``bot.conf`` exports it as ``$HOME/<this>`` for the shell to expand, and that
     exact KEY=VALUE is a contract lib-common's poller-ownership check greps for
-    (#976); ``access.json`` and the fleet timer units' alert sender take it
+    (#976); ``access.json`` and ``fleet_alert_sender_state_dir`` take it
     absolute, as ``Path.home() / <this>``."""
     return f".claude/channels/telegram-{handle}"
 
@@ -572,14 +572,11 @@ def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
     """The channel state dir that SENDS a fleet timer's alerts, or None (#1771).
 
     A fleet timer's alert goes to the fleet chat, so its sender must be a bot IN
-    that chat: the lexically-first declared channel bot whose own chat (its
-    ``telegram.chat_id``, else the fleet chat) is the fleet chat. Lexical is the
-    order the runtime scan walks bot dirs, so a fleet that works today keeps its
-    sender. None when no bot is in the fleet chat: the timer then stamps neither
-    half of the pair and the runtime resolves both from one bot — a chat stamped
-    alone was paired with whichever bot's token a scan found first, and on one
-    fleet that bot was not in the chat for two months. Absolute, because a
-    unit's ``Environment=`` does not expand ``$HOME``.
+    that chat: a declared channel bot whose own chat (its ``telegram.chat_id``,
+    else the fleet chat) is the fleet chat. The runtime picks the sender itself
+    when it sends (``_bot_with_own_chat``, lib-common.sh); the validator calls
+    this at generate time, because None — no such bot — means those alerts will
+    be refused.
     """
     chat = fleet.telegram_group_chat_id
     if not chat:
@@ -3734,7 +3731,6 @@ def _write_timer_units(
     randomized_delay: int = 0,
     exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
-    telegram_state_dir: str | None = None,
     fleet_pulse_env: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
     abandon_children: bool = False,
@@ -3801,20 +3797,14 @@ def _write_timer_units(
     if fleet_name:
         service_lines.append(f"Environment=CLAUDLOBBY_FLEET={fleet_name}")
     # Fleet timers run in a minimal scheduler env (systemd/launchd start with
-    # almost nothing). Carry the fleet Telegram group so a scheduled job can
-    # deliver an alert from that env — creds-check's tg-post exits without it,
-    # silently dropping the dead-credential alert while the unit still exits 0
-    # (false-healthy). See lib/creds-check.sh record_and_alert.
-    # The alert PAIR (#1771): the chat and the channel state dir of a bot IN it,
-    # stamped together or not at all (fleet_alert_sender_state_dir). A chat
-    # stamped alone left the runtime to take the token from whichever bot a scan
-    # found first — on one fleet a bot that was not in the chat, so every alert
-    # failed for two months while a token-only check called it healthy.
-    if fleet_name and telegram_group_chat_id and telegram_state_dir:
+    # almost nothing). Carry the fleet Telegram group: it is where a scheduled
+    # job's alert goes, rather than the first bot's own chat. The sender is picked
+    # at run time from a bot in that chat, or the alert is refused
+    # (resolve_alert_target, #1771).
+    if fleet_name and telegram_group_chat_id:
         service_lines.append(
             f"Environment=TELEGRAM_GROUP_CHAT_ID={telegram_group_chat_id}"
         )
-        service_lines.append(f"Environment=TELEGRAM_STATE_DIR={telegram_state_dir}")
     # #1120: the fleet-pulse escalation knobs. Same reasoning as the line above
     # and the same door — a scheduler starts with almost no environment, and
     # this unit sources no .env, so an Environment= line is the only thing the
@@ -3931,13 +3921,11 @@ def _write_timer_units(
                 f"    <string>{fleet_name}</string>",
             ]
         )
-    if fleet_name and telegram_group_chat_id and telegram_state_dir:
+    if fleet_name and telegram_group_chat_id:
         plist_lines.extend(
             [
                 "    <key>TELEGRAM_GROUP_CHAT_ID</key>",
                 f"    <string>{telegram_group_chat_id}</string>",
-                "    <key>TELEGRAM_STATE_DIR</key>",
-                f"    <string>{telegram_state_dir}</string>",
             ]
         )
     # #1120 — parity with the systemd half above; the env-parity test compares
@@ -4234,8 +4222,6 @@ def compose_fleet_timers(
     the expected units somewhere other than ``runtime/``.
     """
     timers = merged_defaults.get("jobs", {})
-    # One sender for every fleet timer's alert chat (#1771); None stamps neither.
-    alert_sender = fleet_alert_sender_state_dir(fleet)
     has_leaf_manager = bool(fleet.leaf_manager_bots())
     if not has_leaf_manager:
         timers = {
@@ -4357,7 +4343,6 @@ def compose_fleet_timers(
                 abandon_children=bool(cfg.get("abandon_children", False)),
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
-                telegram_state_dir=alert_sender,
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
@@ -4388,7 +4373,6 @@ def compose_fleet_timers(
             fleet.name,
             paths,
             telegram_group_chat_id=fleet.telegram_group_chat_id,
-            telegram_state_dir=alert_sender,
         )
 
     # Equippable briefing (bots.<bot>.briefing) — the first dynamic
@@ -4436,7 +4420,6 @@ def compose_fleet_timers(
                 paths,
                 exec_args=[bot_id, slot],
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
-                telegram_state_dir=alert_sender,
                 extra_env=briefing_extra_env,
             )
             composed_briefing.add(unit)

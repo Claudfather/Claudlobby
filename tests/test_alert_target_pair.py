@@ -36,7 +36,7 @@ CHAT_ESC = "-1003333333333"
 def _bot(bots_dir: Path, name: str, chat: str | None, state_dir: bool = True) -> Path:
     d = bots_dir / name
     d.mkdir(parents=True)
-    lines = []
+    lines = [f'export TELEGRAM_BOT_HANDLE="{name}"']
     if chat:
         lines.append(f'export TELEGRAM_GROUP_CHAT_ID="{chat}"')
     if state_dir:

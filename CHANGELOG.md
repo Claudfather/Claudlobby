@@ -102,11 +102,9 @@ channel state dir `tg-post` reads the token from) as one pair from one source, o
 refuse with a reason naming what to set. It shipped without an entry; this is
 its entry (#1786).
 
-- **`generate` writes one more line into every fleet's timer units**, systemd and
-  launchd: `TELEGRAM_STATE_DIR`, stamped beside `TELEGRAM_GROUP_CHAT_ID`. It
-  comes from the lexically-first declared channel bot whose own chat is the
-  fleet chat, as an absolute path. If no bot is in the fleet chat, neither line
-  is stamped.
+- **Fleet timer units carry only the chat, as before** (#1801): the runtime
+  sends as the first channel bot whose own chat is the fleet chat, and refuses
+  the alert when there is none; `claudlobby validate` warns about that case.
 - **A new key and variable:** `fleet_pulse.escalation_state_dir`, carried as
   `FLEET_PULSE_ESCALATION_STATE_DIR`. It names the escalation chat's declared
   sender, with `~` and `$HOME/` expanded at generate time.
@@ -119,11 +117,9 @@ its entry (#1786).
     pair resolves.
 - **`creds-check` checks the pair daily with `getChat`.** Its refusal notice
   reaches Telegram through the scanned bot's own chat, never the refused one.
-- **Rollout, in this order.**
-  - The `lib/` half (the resolver, fleet-pulse, creds-check, `tg-post`) is live on
-    every bot the moment the shared install is pulled, with no canary window.
-  - The unit half lands only at the next `generate` plus `lib/setup-fleet` to
-    reinstall the units. That is the stageable half: do one fleet first.
+- **Rollout.** The `lib/` part (the resolver, fleet-pulse, creds-check, `tg-post`)
+  is live on every bot the moment the shared install is pulled, with no canary
+  window. Timer units change only where a fleet sets `escalation_state_dir`.
 
 ### Fixed — the overdue reader missed a report made in its own second, so the #835 harness check flaked (#1789)
 

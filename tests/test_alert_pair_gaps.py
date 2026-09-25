@@ -1,13 +1,12 @@
 """Pins for the parts of #1771 part B that no test kills -- reviewer-supplied for #1782.
 
-The PR's tests kill all nine of its own mutants. These six are the claims its body and docs make that survive
-deliberate mutation of the code behind them (each was run: green on the head, red under its mutation). Built on the
-PR's own helpers; fake ids and tokens only.
+These are the claims #1782's body and docs make that survive deliberate mutation of the code behind them (each
+was run: green on the head, red under its mutation). Built on the PR's own helpers; fake ids and tokens only.
 """
 
 from __future__ import annotations
 
-from claudlobby.config import FleetConfig, _coerce_fleet_pulse
+from claudlobby.config import _coerce_fleet_pulse
 from tests.test_alert_target_pair import CHAT_A, _bot, _resolve
 from tests.test_creds_check_telegram import (
     REVOKED_TOKEN,
@@ -16,7 +15,6 @@ from tests.test_creds_check_telegram import (
     _fleet,
     _run,
 )
-from tests.test_system_defaults import TestComposeFleetTimers as _Compose
 
 AMBIENT = "999999:ambientAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
@@ -46,7 +44,7 @@ def test_a_bot_in_the_chat_with_no_channel_dir_is_not_a_sender(tmp_path):
     assert got["src"] == "env:TELEGRAM_GROUP_CHAT_ID+bot:beta", got
 
 
-# --- what the schema doc promises the composer and config do -------------------------
+# --- what the schema doc promises the config does ------------------------------------
 
 
 def test_escalation_state_dir_expands_the_home_forms_the_docs_promise(
@@ -61,28 +59,6 @@ def test_escalation_state_dir_expands_the_home_forms_the_docs_promise(
             {"escalation_chat_id": "-1", "escalation_state_dir": raw}
         )
         assert fp.escalation_state_dir == want, raw
-
-
-def test_the_fleet_sender_is_lexically_first_not_declaration_first(
-    tmp_path, monkeypatch
-):
-    # mutation: `sorted(fleet.bots)` becomes dict order. The docs say lexical (it is the order the runtime scan
-    # walks), so a fleet keeps the sender it has today.
-    from claudlobby.composer import fleet_alert_sender_state_dir
-
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    fleet = FleetConfig(
-        name="f",
-        service_prefix="com.t",
-        telegram_group_chat_id="-1009999999999",
-        bots={  # declared zed first
-            "zed": _Compose._channel_bot("zed"),
-            "alpha": _Compose._channel_bot("alpha"),
-        },
-    )
-    assert fleet_alert_sender_state_dir(fleet) == str(
-        tmp_path / "home" / ".claude" / "channels" / "telegram-alpha_bot"
-    )
 
 
 # --- creds-check ----------------------------------------------------------------------

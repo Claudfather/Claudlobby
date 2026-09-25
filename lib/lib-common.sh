@@ -5698,12 +5698,16 @@ resolve_alert_target() {
 
 # _bot_with_own_chat <bots_dir> <chat_id>
 # The first bot dir in <bots_dir> (lexical) whose OWN TELEGRAM_GROUP_CHAT_ID is
-# <chat_id> and that declares a channel state dir; prints it, or returns 1.
+# <chat_id>, that is a channel bot (TELEGRAM_BOT_HANDLE: every bot.conf carries
+# a state dir, a channel-less one too) and that declares a channel state dir;
+# prints it, or returns 1. The validator warns at generate time when no declared
+# bot qualifies (composer.fleet_alert_sender_state_dir).
 _bot_with_own_chat() {
     local bots_dir="$1" chat="$2" d
     [ -d "$bots_dir" ] || return 1
     for d in "$bots_dir"/*/; do
         [ -f "$d/bot.conf" ] || continue
+        [ -n "$(bot_conf_get "$d" TELEGRAM_BOT_HANDLE "")" ] || continue
         [ "$(bot_conf_get "$d" TELEGRAM_GROUP_CHAT_ID "")" = "$chat" ] || continue
         [ -n "$(bot_conf_get "$d" TELEGRAM_STATE_DIR "")" ] || continue
         printf '%s' "${d%/}"

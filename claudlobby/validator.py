@@ -1882,8 +1882,8 @@ def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
     if fleet.telegram_group_chat_id and fleet_alert_sender_state_dir(fleet) is None:
         report.warnings.append(
             "telegram_group_chat_id: no declared channel bot is in the fleet chat "
-            "(none has it as its own chat), so fleet timers stamp no alert target "
-            "and their alerts go to the first bot's own chat instead (#1771)"
+            "(none has it as its own chat), so fleet-timer alerts to it will be "
+            "REFUSED at runtime (#1771)"
         )
     fp = fleet.fleet_pulse
     if fp is not None and fp.escalation_chat_id and not fp.escalation_state_dir:
