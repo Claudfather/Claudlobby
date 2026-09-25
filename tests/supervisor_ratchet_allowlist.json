@@ -7,7 +7,7 @@
   "lib/install-host-service-systemd.sh": 5,
   "lib/install_fleet_timer.sh": 3,
   "lib/install_fleet_timer_launchd.sh": 3,
-  "lib/keepalive.sh": 9,
+  "lib/keepalive.sh": 3,
   "lib/lib-common.sh": 15,
   "lib/migrate-fleet-to-system.sh": 4,
   "lib/reconcile-fleet.sh": 8,
@@ -16,7 +16,7 @@
   "lib/rehearse-keepalive-swap.sh": 6,
   "lib/setup-fleet": 11,
   "lib/setup-system": 2,
-  "lib/spin-down-bot.sh": 5,
-  "lib/spin-up-bot.sh": 3,
+  "lib/spin-down-bot.sh": 2,
+  "lib/spin-up-bot.sh": 1,
   "lib/validate-bot-change.sh": 6
 }
