@@ -53,7 +53,12 @@ from .loader import (
     load_voice,
     parse_expertise_file,
 )
-from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
+from .mcp_resolve import (
+    ExpandedMcp,
+    expand_mcp_entries,
+    iter_operator_contract_vars,
+    resolve_placeholders,
+)
 from .mcp_grammar import grammar
 from .paths import Paths, _iter_fleet_dirs
 from .supervision import build_supervision_spec, render_launchd_plist, render_systemd_unit
@@ -197,12 +202,24 @@ def _load_bot_fragments(bot: BotConfig, paths: Paths) -> dict[str, dict]:
     }
 
 
+def _mcp_identities_by_fragment(bot: BotConfig) -> dict[str, list[ExpandedMcp]]:
+    """Keep empty declarations distinct from absent ones while grouping identities."""
+    identities: dict[str, list[ExpandedMcp]] = {entry.name: [] for entry in bot.mcp}
+    for identity in expand_mcp_entries(bot.mcp):
+        identities[identity.name].append(identity)
+    return identities
+
+
 def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
     """Compose one bot's .mcp.json from its merged MCP fragments; returns the config dict."""
     import shutil
 
+    identities = _mcp_identities_by_fragment(bot)
     merged: dict = {"mcpServers": {}}
     for entry in bot.mcp:
+        instances = identities.pop(entry.name, None)
+        if instances is None:
+            continue
         frag = _load_mcp_fragment(entry.name, paths)
         if frag is None:
             continue
@@ -221,8 +238,8 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
             continue
 
         # Generate one server entry per instance
-        for instance in entry.instances:
-            output_name = entry.output_name(instance)
+        for identity in instances:
+            output_name = identity.output_name
 
             instance_config = copy.deepcopy(server_config)
 
@@ -248,7 +265,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
             for field in ["env", "url", "args", "headers"]:
                 if field in instance_config:
                     instance_config[field] = resolve_placeholders(
-                        instance_config[field], contract, entry, instance
+                        instance_config[field], contract, entry, identity.instance
                     )
 
             merged["mcpServers"][output_name] = instance_config
@@ -305,14 +322,18 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
       This keeps settings.local.json compact and prevents staleness when the
       server adds new tools.
     """
+    identities = _mcp_identities_by_fragment(bot)
     patterns: list[str] = []
     for entry in bot.mcp:
+        instances = identities.pop(entry.name, None)
+        if instances is None:
+            continue
         contract = _load_mcp_contract(paths, entry.name)
         if not contract:
             continue
         read_only = contract.get("read_only_tools")
-        for instance in entry.instances:
-            output_name = entry.output_name(instance)
+        for identity in instances:
+            output_name = identity.output_name
             if read_only is not None:
                 patterns.extend(f"mcp__{output_name}__{tool}" for tool in read_only)
             elif contract.get("tools"):
@@ -426,6 +447,7 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
     """
     from .loader import iter_integration_grants
 
+    identities = _mcp_identities_by_fragment(bot)
     grants: list[str] = []
     # Folder-aware (dir/ expansion) so generate resolves the same grant set the
     # validator shape-checks — the reader is shared with validator.py.
@@ -435,16 +457,16 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
         if not tool_grants:
             continue
         _assert_read_only_grants(name, tool_grants, paths)
-        entry = next((e for e in bot.mcp if e.name == name), None)
-        if entry is None:
+        instances = identities.get(name)
+        if instances is None:
             grants.extend(tool_grants)
             continue
         prefix = f"mcp__{name}__"
         for grant in tool_grants:
             if grant.startswith(prefix):
                 rest = grant[len(prefix) :]
-                for instance in entry.instances:
-                    grants.append(f"mcp__{entry.output_name(instance)}__{rest}")
+                for identity in instances:
+                    grants.append(f"mcp__{identity.output_name}__{rest}")
             else:
                 grants.append(grant)
     return grants
@@ -2870,6 +2892,7 @@ def compose_bot(
     re-creating the collision the ladder exists to prevent (#1002). Pass an
     explicit value only to compose a unit off the host ladder, e.g. in tests.
     """
+    expand_mcp_entries(bot.mcp)  # refuse ambiguous wiring before any runtime mutation
     if boot_delay_s is None:
         boot_delay_s = bot_boot_delay_s(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
