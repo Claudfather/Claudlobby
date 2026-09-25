@@ -473,3 +473,27 @@ class TestCurrencyOutcomeDoesNotLeak:
             'echo "fired=$_DEBOUNCE_FIRED"\n',
         )
         assert "fired=0" in out
+
+
+class TestUndeliveredNoticeIsRetried:
+    """#900: the debounce marker is what buys silence, so a notice the channel
+    rejected must not write it. On 2026-09-11 one did: the marker landed two
+    seconds before the send failed, and the next three daily runs matched it
+    and sent nothing while the root sat 92 commits behind."""
+
+    def test_rejected_notice_leaves_no_marker_and_the_next_run_sends_again(self, tmp_path):
+        h = Harness(tmp_path, behind=2)
+        tg_post = os.path.join(h.root, "lib", "tg-post.sh")
+        marker = os.path.join(h.root, "state", "currency", "root.source_behind")
+        _write_exec(tg_post, TG_STUB_REJECTED)
+        assert h.run().returncode == 0
+        assert not os.path.exists(marker), "a rejected send wrote the debounce marker"
+        assert h.run().returncode == 0
+        assert len(h.captured()) == 2, "the run after a rejected send did not retry it"
+        # Once a send lands, the debounce holds again. The marker appearing
+        # here is also what shows the absence above was checked at the right path.
+        _write_exec(tg_post, TG_STUB)
+        assert h.run().returncode == 0
+        assert os.path.exists(marker), "a delivered send left no marker"
+        assert h.run().returncode == 0
+        assert len(h.captured()) == 3, "a delivered notice was sent again inside the window"

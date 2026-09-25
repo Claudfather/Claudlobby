@@ -3364,6 +3364,11 @@ marker_age_within() {
 # Fires the notification on first occurrence, then debounces. Caller clears the
 # marker via debounce_clear when the condition resolves.
 #
+# <notify_fn> gets <message> as its one argument, and its exit status is the
+# delivery verdict: 0 writes the marker, non-zero leaves it as it was, so the
+# next call fires again (#900). A notify_fn that cannot see delivery returns 0
+# and debounces exactly as before.
+#
 # <recipient> is an identity for WHO is being notified. The marker records it as
 # its CONTENT, so a changed recipient re-fires: keying on <bot_id>.<suffix>
 # alone recorded only THAT a notification fired, never to whom, so an alert
@@ -3469,11 +3474,17 @@ debounce_notify() {
     fi
     if [ "$fire" -eq 1 ]; then
         _DEBOUNCE_FIRED=1
-        "$notify_fn" "$message"
         # Written only on fire, deliberately: the marker's MTIME is what
         # marker_age_within reads for the renotify window above, so touching it
         # on a suppressed tick would silently disable that second leg entirely.
-        printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
+        # And only when notify_fn reports success, because the marker is what
+        # buys silence: a send that reached nobody must not buy the window
+        # (#900; the fleet-pulse burst detector's rule). Called as the if
+        # condition, so a failure neither aborts a set -e caller nor fires its
+        # ERR trap.
+        if "$notify_fn" "$message"; then
+            printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
+        fi
     fi
 }
 
@@ -4836,7 +4847,8 @@ repo_newest_tag() {
 # <distinct-value> is passed as debounce_notify's recipient, so the notice
 # re-fires when the SITUATION CHANGES (the distance moved, a release was cut, a
 # different commit landed) and otherwise only after the renotify window. A
-# stalled condition stays quiet; a worsening one speaks up.
+# stalled condition stays quiet; a worsening one speaks up. An undelivered
+# notice is not marked, so it also fires again on the next run.
 #
 # Requires BOTS_DIR and STATE_DIR in the caller's scope.
 #
@@ -4856,7 +4868,10 @@ notify_currency() {
     local name="${1:?notify_currency: <repo-name> required}"
     local etype="${2:?notify_currency: <event_type> required}"
     local distinct="${3-}" message="${4:?notify_currency: <message> required}"
-    _nc_emit() { emit_fleet_notice "$BOTS_DIR" "$etype" "$1"; }
+    # Returns the delivery verdict, so debounce_notify leaves an undelivered
+    # notice unmarked. A marked one stays silent until the situation changes or
+    # CURRENCY_RENOTIFY_S passes, 7 days by default (#900).
+    _nc_emit() { emit_fleet_notice "$BOTS_DIR" "$etype" "$1"; [ "${_ALERT_DELIVERED:-0}" -eq 1 ]; }
     _CURRENCY_OUTCOME=suppressed
     _ALERT_DELIVERED=0
     _DEBOUNCE_FIRED=0

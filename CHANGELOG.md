@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a rejected currency notice no longer silences itself for a week (#900)
+
+`debounce_notify` writes its marker only when the notify function returns 0, and
+`notify_currency` returns the Telegram verdict. A rejected notice is sent again on
+the next run instead of waiting for the count to change or `CURRENCY_RENOTIFY_S`
+(7 days). Every other caller's notify function returns 0, so none of them changes.
+
 ### Changed — the validation harness tests keep one test per failure that happened (#1801)
 
 484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
