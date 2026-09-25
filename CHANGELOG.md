@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a FLEET ALERT or NOTICE reaches the manager's pane when the manager sorts first (#910)
+
+A manager's composed `MANAGER_TMUX` line carried `# this bot is a manager` on
+the same line, and `bot_conf_get` returned the comment as part of the value.
+The alert nudge takes its target from the fleet's first bot that declares
+`MANAGER_TMUX`, so wherever that bot is the manager itself (two of the four
+fleets on one host) it looked for a session that does not exist and skipped
+the pane without an event; fleet-pulse's pushes about the manager itself
+dropped the same way. The reader now ends an unquoted value at its first
+whitespace, as sourcing the file does, so the `bot.conf` files already on disk
+read clean on the next pull with no regenerate; a quoted value is left as
+read. The composer writes the comment on its own line, and `bot_is_manager`
+no longer keeps its own copy of the strip.
+
 ### Fixed — the operator's home directory was back in the tree, and nothing caught it (#927)
 
 #1306 replaced the home paths #927 named but added no gate, and four later PRs
