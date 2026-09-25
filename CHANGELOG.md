@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the validation harness tests keep one test per failure that happened (#1801)
+
+484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
+
 ### Changed — the alert tests keep one test per failure that happened (#1801)
 
 306 test lines go. No behaviour changes: the session-token rule is stated once,
