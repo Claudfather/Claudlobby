@@ -9,7 +9,7 @@ Restarting a worker tmux session **clears its context**. Workers often have real
 
 ## Before restarting any worker, verify all three:
 
-1. **tmux pane is idle.** `tmux capture-pane -t <bot> -p | tail -10` must NOT show any of:
+1. **tmux pane is idle.** `tmux -L <bot-service> capture-pane -t <bot-session> -p | tail -10` must NOT show any of:
    - `Thinking`, `Running`, `Reading`, `Writing`, `Editing`
    - `Spelunking`, `Prestidigitating`, or any other "active processing" verb
    - `esc to interrupt`
