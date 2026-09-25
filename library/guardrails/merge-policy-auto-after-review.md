@@ -53,28 +53,21 @@ The manager auto-merges PRs when ALL of:
 
    This rung is deliberately **not** a `mergeStateStatus` test. That field reports `BLOCKED` for the ordinary case of a PR still awaiting its review, so gating on `clean`/`unstable` refuses PRs that are perfectly mergeable.
 
-4. **NO OPEN PR MAY STILL BE BASED ON THE BRANCH THIS MERGE DELETES — retarget each one FIRST.** An open PR whose *base* is this PR's head branch is **closed** by GitHub the moment `--delete-branch` removes that branch: not retargeted, not reported, and its author is not told. Observed: #1779 went `CLOSED` two seconds after #1776 merged, and its author found it twenty minutes later (#1781). So before the merge, move every dependent onto this PR's own base, and keep `--delete-branch` only if none is left:
+4. **KEEP THE BRANCH WHILE ANY OPEN PR IS BASED ON IT.** `--delete-branch` makes GitHub close such a PR, and tells nobody: #1779 went `CLOSED` two seconds after #1776 merged (#1781). Delete only after a listing that succeeded and came back empty. A failed listing or an empty `$BR` (`gh pr list --base ""` is no filter) keeps the branch too:
 
    ```bash
-   [ -n "$REPO" ] && [ -n "$N" ] && [ -n "$BR" ] && [ -n "$PH" ] || { echo "REFUSE: rung 0's REPO, N, BR and PH are not all set in this shell; run rung 0 and this rung in one call"; exit 1; }
-   BASE=$(gh pr view "$N" --repo "$REPO" --json baseRefName --jq .baseRefName) && [ -n "$BASE" ] || { echo "REFUSE: cannot read the base of #$N"; exit 1; }
-   STACKED=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number') || { echo "REFUSE: cannot list the open PRs based on $BR"; exit 1; }
-   for M in $STACKED; do gh pr edit "$M" --repo "$REPO" --base "$BASE"; done
    DELETE=--delete-branch
-   LEFT=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number') || { echo "REFUSE: cannot re-list the open PRs based on $BR"; exit 1; }
-   [ -z "$LEFT" ] || { DELETE=""; echo "KEEPING $BR: still the base of $LEFT"; }
+   [ -n "$BR" ] && STACKED=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number --jq '.[].number') && [ -z "$STACKED" ] || { DELETE=""; echo "KEEPING $BR"; }
    ```
 
-   `$REPO`, `$N`, `$BR` and `$PH` are rung 0's. **Every read here refuses the merge rather than reading as empty.** The Bash tool keeps no variables between calls, so rung 0, this rung and the merge command must run in one call. An empty `--base` is not "no dependents": `gh pr list --base ""` returned the same open PRs as no filter at all, so an unset `$BR` would retarget PRs that have nothing to do with this merge. A listing that failed is not a listing that found nothing, so a throttled `gh` must stop the merge and never clear the deletion (#1146). And the merge command below anchors to `$PH`, so an empty one must never reach it. **The re-list is the check, not the edit's exit code**: a PR that still names `$BR` as its base is exactly what the deletion would close, however the edit reported. A branch kept for a dependent is deleted once that PR has been retargeted or closed. **A retargeted PR needs its new base merged into it after this merge**: a squash lands this PR's commits under a new sha, so the dependent's own copies of them conflict until its author merges the base in — which is why the announcement below names it.
+   Run rung 0, this rung and the merge command in one call: the Bash tool keeps no variables between calls, and a `$DELETE` that was never set just keeps the branch.
 
 Merge command — **carrying the same `$PH` rung 0 anchored to**:
 
 ```bash
-[ -n "$REPO" ] && [ -n "$N" ] && [ -n "$PH" ] && [ -n "${DELETE+set}" ] || { echo "REFUSE: REPO, N and PH (rung 0) and DELETE (rung 4) are not all set in this shell; run rungs 0 and 4 and this merge in one call"; exit 1; }
+[ -n "$REPO" ] && [ -n "$N" ] && [ -n "$PH" ] || { echo "REFUSE: REPO, N and PH (rung 0) are not all set in this shell; run rung 0 and this merge in one call"; exit 1; }
 gh pr merge "$N" --repo "$REPO" --squash $DELETE --match-head-commit "$PH"
 ```
-
-`$DELETE` is rung 4's, unquoted on purpose: a kept branch leaves no argument at all rather than an empty one. **The guard on its first line holds even where the one-call instruction is not followed** (#1785): run on its own, `gh pr merge` accepted an empty PR selector, an empty `--repo` and an empty `--match-head-commit` and went straight to the API (vera measured it). `DELETE` is tested for being *set*, not non-empty, because rung 4 empties it on purpose to keep a branch.
 
 **This matters more here than under `--admin`, not less.** This policy relies on branch protection to allow the merge, and protection does not check that the head you verified is the head you are merging — measured on this estate, not one ruleset of nine declares `required_status_checks` at all. So the flag is the only thing refusing a head that moved between rung 0 and the merge.
 
@@ -86,4 +79,4 @@ gh pr merge "$N" --repo "$REPO" --squash $DELETE --match-head-commit "$PH"
 - PRs where CI is failing or pending — **or where a required workflow is missing from the rollup.** "Not failing" is not "passed": an absent workflow cannot fail.
 - PRs the manager authored (self-merge requires a second reviewer).
 
-The manager posts "Merging #NN" to Telegram before executing, so the human has visibility — **naming every PR rung 4 retargeted** ("retargeted #M to <base>; merge <base> into it") **and any branch it kept for a dependent**, because the stacked PR's author is told nowhere else.
+The manager posts "Merging #NN" to Telegram before executing, so the human has visibility — **naming any branch rung 4 kept**, because the stacked PR's author is told nowhere else.
