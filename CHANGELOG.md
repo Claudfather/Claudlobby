@@ -27,7 +27,8 @@ short placeholder allowlist.
 ### Fixed — completed-work counts prompt a context self-check (#1294)
 
 Manager guidance now treats a high completed-work count as a prompt to check
-for degradation in its decision table, dispatch guidance and reviewer example.
+for degradation in its decision table, dispatch guidance, reviewer example and
+the safe-worker-restart protocol's reviewer guidance.
 Reported degradation still follows the existing safe-restart and handoff policy;
 a count alone no longer authorizes restarting a reviewer.
 
