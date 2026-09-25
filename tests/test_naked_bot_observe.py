@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixtures.worktree_export import export_working_tree
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -646,23 +648,34 @@ def test_write_probe_adds_a_teams_block_and_a_second_bot_only_when_teams_is_set(
 
 
 @pytest.fixture(scope="module")
-def leaf_manager_compose():
+def leaf_manager_compose(tmp_path_factory):
     """One real `generate` of the new arm, plus a fresh `baseline` compose to
     diff it against — the only real composes in this file (everything else
-    above is offline, per the module docstring). Composed directly against
-    THIS checkout (`nbo.REPO_ROOT`), not a `git archive` export of HEAD: these
-    tests exercise the harness's own in-progress code, so an export would
-    compose against whatever was last committed, not what is under test.
-    `local/naked-probe/` is gitignored, so this leaves nothing for git to see.
+    above is offline, per the module docstring).
+
+    Composed against an export of the WORKING TREE, which is neither this
+    checkout nor a `git archive` of HEAD. Not the checkout: under a bot's
+    `projects/` it sits inside `…/runtime/bots/…`, `path_audit` reads that as
+    fleet-owned by shape, and `generate` refuses (#1794) — the reason the
+    harness itself exports. Not HEAD: these tests exercise in-progress code,
+    and a HEAD export would compose whatever was last committed. The export
+    copies tracked and untracked-but-not-ignored files from disk
+    (`tests/fixtures/worktree_export.py`), so uncommitted edits are what
+    composes. `_assert_compositor` checks that a subprocess started the way
+    `generate` is (same interpreter, cwd at the export) imports the exported
+    package rather than an installed copy. The probe fleet lands in the
+    export, not in the checkout.
     """
+    root = export_working_tree(REPO_ROOT, tmp_path_factory.mktemp("naked-bot") / "export")
+    nbo._assert_compositor(root, sys.executable)
     sys.path.insert(0, str(REPO_ROOT))
     import claudlobby.defaults as registry
 
     baseline = nbo.observe_arm(
-        REPO_ROOT, sys.executable, nbo.Arm(label="baseline", system_defaults=None), registry
+        root, sys.executable, nbo.Arm(label="baseline", system_defaults=None), registry
     )
     leaf = nbo.observe_arm(
-        REPO_ROOT,
+        root,
         sys.executable,
         nbo.Arm(
             label="shape:leaf-manager",
@@ -710,9 +723,9 @@ def test_the_recorded_skill_symlink_target_is_scrubbed(leaf_manager_compose):
     Two observations of the SAME commit must still be byte-identical (that is
     the entire point of `scrub`), which fails today: a fresh `--ref` export
     would record a DIFFERENT `mktemp` path in the symlink target on every run.
-    Composed here against `REPO_ROOT` rather than a fresh export, so the
-    'run-specific' path IS `REPO_ROOT` and scrubbing it is exactly what
-    `scrub(entry, REPO_ROOT)` is for."""
+    Composed here against the fixture's fresh export, so the run-specific
+    path is that export's temp dir, the same shape a `--ref` run records,
+    and scrubbing it is exactly what `scrub(entry, root)` is for."""
     _, leaf = leaf_manager_compose
     leaf_skills = leaf.types["skills"].composed_artifacts
     checkin_entry = next(s for s in leaf_skills if s.startswith(".claude/skills/checkin"))

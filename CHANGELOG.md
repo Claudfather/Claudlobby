@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — five compose tests failed on every checkout under a bot's `projects/` (#1794)
+
+They now compose against an export of the working tree, uncommitted edits
+included (`tests/fixtures/worktree_export.py`), and no longer write into the
+checkout that runs them. Tests only; the cause in `path_audit` is #823.
+
 ### Fixed — the validation harness read an unreadable plane as zero rows (#1777)
 
 `lib/validate-bot-change.sh` read the plane through the `sqlite3` CLI and
