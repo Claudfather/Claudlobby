@@ -3562,6 +3562,106 @@ class TestResolveEffectiveIntegrations:
         assert resolve_effective_integrations(bot, paths) == []
 
 
+class TestParsedPermissionControls:
+    """Exercise public YAML parsing through the real artifact composers."""
+
+    @staticmethod
+    def _render(tmp_path, *, defaults=None, bot=None):
+        path = tmp_path / "fleet.yaml"
+        path.write_text(yaml.safe_dump({"fleet": {
+            "name": "permission-bool-regression", "system_defaults": False,
+            "defaults": defaults or {},
+            "bots": {"worker": {"expertise": ["eng"], "channels": [], **(bot or {})}},
+        }}))
+        fleet, _ = load_fleet(path)
+        worker = fleet.bots["worker"]
+        paths = _make_paths(tmp_path)
+        return (
+            compose_bot_conf(worker, fleet, paths, cascade={}),
+            compose_settings_local(worker, fleet, paths),
+        )
+
+    @staticmethod
+    def _flags(conf):
+        import shlex
+
+        line = next(line for line in conf.splitlines() if line.startswith("CLAUDE_FLAGS="))
+        return shlex.split(shlex.split(line)[0].partition("=")[2])
+
+    @pytest.mark.parametrize("value", [False, True])
+    @pytest.mark.parametrize("tier", ["defaults", "bot"])
+    def test_real_skip_boolean_selects_only_its_flag(self, tmp_path, value, tier):
+        conf, _ = self._render(tmp_path, **{tier: {"dangerously_skip_permissions": value}})
+        flags = self._flags(conf)
+        if value:
+            assert flags.count("--dangerously-skip-permissions") == 1
+            assert "--permission-mode" not in flags
+        else:
+            assert "--dangerously-skip-permissions" not in flags
+            assert flags[flags.index("--permission-mode") + 1] == "acceptEdits"
+
+    @pytest.mark.parametrize("field", [
+        "dangerously_skip_permissions", "remote_control",
+        "skip_auto_permission_prompt", "skip_dangerous_mode_permission_prompt",
+    ])
+    def test_quoted_false_rejected_before_rendering(self, tmp_path, field):
+        with pytest.raises(ValueError, match=field):
+            self._render(tmp_path, bot={field: "false", "permission_mode": "plan"})
+
+    @pytest.mark.parametrize("defaults,bot,expected", [
+        ({}, {"permission_mode": "plan", "dangerously_skip_permissions": True}, "plan"),
+        ({"permission_mode": "plan"}, {"dangerously_skip_permissions": True}, "plan"),
+        ({"permission_mode": "plan"}, {"permission_mode": "auto", "dangerously_skip_permissions": True}, "auto"),
+        ({}, {"permission_mode": "bypassPermissions", "dangerously_skip_permissions": True}, "bypassPermissions"),
+    ])
+    def test_explicit_mode_precedence(self, tmp_path, defaults, bot, expected):
+        conf, _ = self._render(tmp_path, defaults=defaults, bot=bot)
+        flags = self._flags(conf)
+        assert "--dangerously-skip-permissions" not in flags
+        assert flags.count("--permission-mode") == 1
+        assert flags[flags.index("--permission-mode") + 1] == expected
+
+    @pytest.mark.parametrize("value", [False, True])
+    def test_remote_control_and_consent_keep_typed_values(self, tmp_path, value):
+        conf, settings = self._render(tmp_path, bot={
+            "remote_control": value,
+            "skip_auto_permission_prompt": value,
+            "skip_dangerous_mode_permission_prompt": value,
+        })
+        assert ("--remote-control" in self._flags(conf)) is value
+        assert settings["skipAutoPermissionPrompt"] is value
+        assert settings["skipDangerousModePermissionPrompt"] is value
+
+    @pytest.mark.parametrize("defaults,bot,expected", [
+        ({}, {}, {"enabled": False}),
+        ({}, {"enabled": None, "auto_allow_bash": None}, {"enabled": False}),
+        ({"enabled": True, "auto_allow_bash": True},
+         {"enabled": None, "auto_allow_bash": None},
+         {"enabled": True, "autoAllowBashIfSandboxed": True}),
+        ({"enabled": True, "auto_allow_bash": True},
+         {"enabled": False, "auto_allow_bash": False},
+         {"enabled": False, "autoAllowBashIfSandboxed": False}),
+    ])
+    def test_sandbox_inheritance_preserves_setting_shape(self, tmp_path, defaults, bot, expected):
+        _, settings = self._render(tmp_path, defaults={"sandbox": defaults}, bot={"sandbox": bot})
+        assert settings["sandbox"] == {
+            **expected, "filesystem": {"allowWrite": [str(_make_paths(tmp_path).shared_docs)]},
+        }
+
+    def test_sandbox_lists_still_union(self, tmp_path):
+        _, settings = self._render(tmp_path,
+            defaults={"sandbox": {"enabled": True, "network_allowed_domains": ["api.example.com"],
+                                   "filesystem_allow_write": ["/tmp/shared"]}},
+            bot={"sandbox": {"enabled": False, "network_allowed_domains": ["api.example.com", "example.org"],
+                             "filesystem_allow_write": ["/tmp/worker"]}},
+        )
+        assert settings["sandbox"] == {
+            "enabled": False,
+            "network": {"allowedDomains": ["api.example.com", "example.org"]},
+            "filesystem": {"allowWrite": ["/tmp/shared", "/tmp/worker", str(_make_paths(tmp_path).shared_docs)]},
+        }
+
+
 class TestPermissionMode:
     """compose_bot_conf handles permission_mode vs dangerously_skip_permissions."""
 

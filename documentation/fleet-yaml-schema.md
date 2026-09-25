@@ -677,10 +677,12 @@ The compositor transforms the flat fleet.yaml format into Claude Code's nested m
 
 Sandbox network and filesystem allowlists, written to `settings.local.json`. Merged with defaults (lists unioned, bools overridden).
 
-- `enabled` — turn the sandbox layer on or off for this bot. Omitting it (or `None`) inherits the global `settings.json` sandbox setting; `true`/`false` overrides it per-bot.
+- `enabled` — YAML Boolean (`true`/`false`). Omitted or `null` inherits the fleet default; if neither tier sets it, the compositor writes `enabled: false`. An explicit bot `false` overrides fleet `true`.
 - `network_allowed_domains` — hostnames the bot may access (e.g., `api.github.com`, `"*.anthropic.com"`)
 - `filesystem_allow_write` — additional writable paths beyond the bot directory
-- `auto_allow_bash` — skip Bash tool permission prompts when running in sandbox mode
+- `auto_allow_bash` — YAML Boolean (`true`/`false`): skip Bash tool permission prompts when running in sandbox mode. Omitted or `null` inherits the fleet default; if neither tier sets it, the compositor omits `autoAllowBashIfSandboxed`.
+
+Both Boolean fields reject quoted strings, numbers, lists, and mappings at either tier, including a malformed fleet default shadowed by a valid bot override. Only these sandbox fields accept `null` as an inheritance sentinel.
 
 ### `bots.<name>.mounts`
 
@@ -764,6 +766,31 @@ Valid values:
 | `"auto"` | Auto-approve safe operations, prompt for risky ones |
 
 Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
+
+### Permission and session-control Boolean inputs
+
+`dangerously_skip_permissions`, `skip_auto_permission_prompt`,
+`skip_dangerous_mode_permission_prompt`, and `remote_control` require real YAML
+Booleans (`true` or `false`) wherever declared, in `defaults:` or on a bot.
+Quoted strings (including `"false"` and `"true"`), numbers, lists, mappings, and
+`null` are errors. Both tiers are validated even when a bot overrides the fleet
+default. A valid bot value then wins over a fleet value; omission at both tiers
+keeps the documented fallback. `sandbox.enabled` and `sandbox.auto_allow_bash`
+use the same strict Boolean rule except that `null` preserves inheritance.
+
+**Migration:** replace a bare key or explicit `null` on one of the four flat
+controls with `false` to preserve its previous effect. Deleting the key may
+instead inherit a fleet `true` or the field's `true` fallback. For quoted values,
+choose the intended unquoted `true` or `false`; the old parser treated every
+nonempty string as true, including `"false"`. Correct malformed fleet defaults
+as well as bot values. An explicit valid `permission_mode` still takes precedence
+over a valid skip Boolean, but it does not suppress validation of a malformed
+Boolean.
+
+This strict contract covers these six controls. It does not change the separate
+activation parsers (`sweep.enabled`, observability flags, `system_defaults`),
+`plugins.include_defaults`, `telegram.require_mention`, `claudron_session_loop`,
+or cosmetic and traffic preference fields.
 
 ### `bots.<name>.dangerously_skip_permissions`
 
