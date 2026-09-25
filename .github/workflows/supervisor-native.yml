@@ -10,6 +10,7 @@ on:
       - 'lib/spin-down-bot.sh'
       - 'lib/validate-bot-change.sh'
       - 'tests/native_supervisor_evidence.py'
+      - 'tests/test_native_supervisor_evidence.py'
       - 'tests/test_supervisor_lifecycle.sh'
   workflow_dispatch:
     inputs:
@@ -67,6 +68,17 @@ jobs:
           printf 'CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT=%s\n' "$native_root" >> "$GITHUB_ENV"
           printf 'NATIVE_PARENT_SHA=%s\nNATIVE_CANDIDATE_SHA=%s\n' "$parent" "$candidate" >> "$GITHUB_ENV"
           printf 'parent=%s\ncandidate=%s\n' "$parent" "$candidate" > "$native_root/evidence/revisions.txt"
+      - name: Prove timeout cleanup before native mutation
+        run: |
+          set -euo pipefail
+          cd "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/candidate"
+          mkdir -p "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/controls-home" "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/controls-tmp"
+          env -i HOME="$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/controls-home" \
+            TMPDIR="$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/controls-tmp" \
+            PATH="$PWD/.venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin" \
+            PLANE_EMIT_DISABLED=1 \
+            "$PWD/.venv/bin/python" -m pytest tests/test_native_supervisor_evidence.py -q \
+            --junitxml="$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/evidence/controls.xml"
       - name: Create a private Linux user manager
         if: runner.os == 'Linux'
         run: |

@@ -23,6 +23,94 @@ import traceback
 import uuid
 
 
+def process_group_members(pgid: int) -> dict[int, str]:
+    """Only identities/states are read; no process arguments or env are logged."""
+    listing = subprocess.run(['/bin/ps', '-eo', 'pid=,pgid=,stat='],
+                             text=True, capture_output=True, check=True, timeout=10)
+    return {int(row[0]): row[2] for line in listing.stdout.splitlines()
+            if len(row := line.split()) == 3 and int(row[1]) == pgid}
+
+
+def run_owned_session(argv, *, cwd, env, timeout, stdout_path, stderr_path, grace=20):
+    """Bound a separate process group, allowing TERM/EXIT cleanup before KILL.
+
+    File-backed capture cannot hang on a pipe kept open by an orphan. Normal
+    returns also audit the group: plain Python/Bun/sampler children must not
+    survive and contaminate the next revision's observation.
+    """
+    timed_out = False
+    cancelled = False
+    previous_term = signal.getsignal(signal.SIGTERM)
+
+    def cancel_controller(_signum, _frame):
+        raise InterruptedError('native validation controller cancelled')
+
+    cleanup = {'terminated_children': [], 'remaining': {}}
+    with stdout_path.open('w+') as out, stderr_path.open('w+') as err:
+        proc = subprocess.Popen([str(value) for value in argv], cwd=cwd, env=env,
+                                stdout=out, stderr=err, text=True, start_new_session=True)
+        signal.signal(signal.SIGTERM, cancel_controller)
+        try:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            except (InterruptedError, KeyboardInterrupt):
+                cancelled = True
+            if not timed_out and not cancelled:
+                end = time.monotonic() + 1
+                while process_group_members(proc.pid) and time.monotonic() < end:
+                    time.sleep(.1)
+        finally:
+            # On timeout or an interrupted controller, signal the entire owned
+            # group. BASH_ENV installs a TERM -> exit trap so the harness's
+            # existing EXIT handler retains its native-unit cleanup ownership.
+            # Do not let a second cancellation interrupt the bounded reap.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            try:
+                members = process_group_members(proc.pid)
+                if members:
+                    cleanup['terminated_children'] = sorted(members)
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    end = time.monotonic() + (min(grace, 5) if cancelled else grace)
+                    while time.monotonic() < end:
+                        proc.poll()  # Reap the leader before testing group absence.
+                        if not process_group_members(proc.pid):
+                            break
+                        time.sleep(.1)
+                    else:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                proc.wait(timeout=5)
+                end = time.monotonic() + 5
+                while process_group_members(proc.pid) and time.monotonic() < end:
+                    time.sleep(.1)
+                cleanup['remaining'] = process_group_members(proc.pid)
+            finally:
+                signal.signal(signal.SIGTERM, previous_term)
+        out.seek(0)
+        err.seek(0)
+        rc = 124 if timed_out else (130 if cancelled else proc.returncode)
+        completed = subprocess.CompletedProcess(argv, rc,
+                                                out.read(), err.read())
+    return completed, {'timed_out': timed_out, 'cancelled': cancelled, **cleanup}
+
+
+def start_records(directory: Path) -> list[str]:
+    marker = directory / 'data/native-starts'
+    return marker.read_text().splitlines() if marker.is_file() else []
+
+
+def recorded_new_start(directory: Path, pid: str | None, before: list[str]) -> bool:
+    """A live pane is insufficient: the configured stub must record its PID."""
+    return bool(pid) and start_records(directory) == before + [pid]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
@@ -63,6 +151,9 @@ def main() -> int:
         env.update(XDG_RUNTIME_DIR=f'/run/user/{uid}',
                    DBUS_SESSION_BUS_ADDRESS=f'unix:path=/run/user/{uid}/bus')
     validate_env = dict(env)  # Do not leak the lifecycle fixture's state path into the full harness.
+    cancel_trap = scratch / 'cancel-harness.sh'
+    cancel_trap.write_text("trap 'exit 124' TERM\n")
+    validate_env['BASH_ENV'] = str(cancel_trap)
     commands = []
 
     def run(argv, *, check=True, timeout=60, run_env=None):
@@ -191,8 +282,15 @@ def main() -> int:
         return directory, label
 
     def up(directory, label, old_pid=None):
+        before_starts = start_records(directory)
         run(['/bin/bash', source / 'lib/spin-up-bot.sh', directory])
-        return wait(lambda: pane_pid(directory, label, old_pid), f'{label} failed to start a new stub session')
+        return wait_for_stub(directory, label, before_starts, old_pid)
+
+    def wait_for_stub(directory, label, before_starts, old_pid=None, seconds=30):
+        def observed():
+            pid = pane_pid(directory, label, old_pid)
+            return pid if recorded_new_start(directory, pid, before_starts) else None
+        return wait(observed, f'{label}: configured session stub did not record the new pane PID', seconds)
 
     def pane_pid(directory, label, old_pid=None):
         probe = run(['tmux', '-L', label, 'list-panes', '-t', directory.name,
@@ -226,6 +324,23 @@ def main() -> int:
         if purge:
             assert not directory.exists()
 
+    # A live pane that bypasses CLAUDE_BIN must fail the same positive check.
+    impostor = scratch / 'impostor'
+    (impostor / 'data').mkdir(parents=True)
+    impostor_label = f'{prefix}.impostor'
+    try:
+        run(['tmux', '-L', impostor_label, 'new-session', '-d', '-s', impostor.name, '/bin/sleep 60'])
+        assert pane_pid(impostor, impostor_label), 'negative control did not create a live pane'
+        try:
+            wait_for_stub(impostor, impostor_label, [], seconds=1)
+        except AssertionError as error:
+            assert 'configured session stub did not record' in str(error)
+            result['live_pane_without_stub_rejected'] = True
+        else:
+            raise AssertionError('live pane without the configured stub was accepted')
+    finally:
+        run(['tmux', '-L', impostor_label, 'kill-server'], check=False)
+
     try:
         guard, guard_label = make_bot('guard')
         guard_pid = up(guard, guard_label)
@@ -235,18 +350,23 @@ def main() -> int:
         wait(lambda: settled(label), 'first launcher did not settle')
         second = up(target, label, first)
         wait(lambda: settled(label), 'restarted launcher did not settle')
+        before_heal = start_records(target)
         run(['tmux', '-L', label, 'kill-session', '-t', target.name])
         run(['/bin/bash', source / 'lib/keepalive.sh', target], timeout=90)
-        third = wait(lambda: pane_pid(target, label, second), 'keepalive did not restore the stub session')
+        third = wait_for_stub(target, label, before_heal, second)
         wait(lambda: settled(label), 'keepalive launcher did not settle')
         assert 'RESTART' in (target / 'keepalive.log').read_text()
         down(target, label)
         down(target, label)  # installed state already absent; cleanup is idempotent
-        up(target, label)
+        fourth = up(target, label, third)
         wait(lambda: settled(label), 're-enrolled launcher did not settle')
+        starts = {'guard': start_records(guard), 'target': start_records(target)}
+        assert starts == {'guard': [guard_pid], 'target': [first, second, third, fourth]}
+        (evidence / 'stub-starts.json').write_text(json.dumps(starts, indent=2) + '\n')
         down(target, label, purge=True)
         down(target, label, purge=True)  # already-purged bot is a no-op
         assert pane_pid(guard, guard_label) == guard_pid, 'unrelated native bot was disturbed'
+        assert start_records(guard) == [guard_pid], 'unrelated native bot was restarted'
         assert json.loads(state.read_text())['bots']['unrelated'] == preserved_key
         readers_spec = importlib.util.spec_from_file_location('native_plane_readers', source / 'lib/plane-readers.py')
         readers = importlib.util.module_from_spec(readers_spec)
@@ -258,7 +378,7 @@ def main() -> int:
         assert len(receipts) >= 3, 'intentional scratch recording did not produce teardown receipts'
         assert any(row['data']['action'] == 'spin-down --purge' for row in receipts)
         (evidence / 'receipts.json').write_text(json.dumps(receipts, indent=2) + '\n')
-        result['lifecycle'] = {'passed': True, 'pids': [first, second, third], 'receipts': len(receipts),
+        result['lifecycle'] = {'passed': True, 'starts': starts, 'receipts': len(receipts),
             'cases': ['fresh enrollment', 'installed restart', 'keepalive dead-session restart',
                       'teardown', 'repeat teardown', 're-enrollment', 'purge', 'repeat purge',
                       'unrelated native bot and state key preserved']}
@@ -283,8 +403,13 @@ def main() -> int:
 
     try:
         # Whole harness: no selector, rewrite, disabled recorder, or xfail.
-        proc = run(['/bin/bash', source / 'lib/validate-bot-change.sh'], check=False, timeout=1800,
-                   run_env=validate_env)
+        proc, process_cleanup = run_owned_session(
+            ['/bin/bash', source / 'lib/validate-bot-change.sh'], cwd=source, env=validate_env,
+            timeout=1800, stdout_path=evidence / 'validate.stdout.log',
+            stderr_path=evidence / 'validate.stderr.log')
+        (evidence / 'validate-process-cleanup.json').write_text(json.dumps(process_cleanup, indent=2) + '\n')
+        if process_cleanup['remaining'] or (process_cleanup['terminated_children'] and not process_cleanup['timed_out']):
+            result.setdefault('cleanup_errors', []).append({'validate_process_group': process_cleanup})
         output = proc.stdout + proc.stderr
         (evidence / 'validate-bot-change.log').write_text(output)
         failures = re.findall(r'^\s*FAIL\s+(.+)$', output, re.MULTILINE)
@@ -297,6 +422,7 @@ def main() -> int:
             result['validate']['native_bus_missing'] = True
     except Exception:
         result['validate']['error'] = traceback.format_exc()
+        result.setdefault('cleanup_errors', []).append('Validation controller failed; complete process cleanup was not established')
     # The complete harness has its own EXIT cleanup. Audit leaks independently;
     # on failure reap only newly observed servers carrying this owned HOME.
     # Detached tmux can outlive removal of its socket directory, so checking
