@@ -22,12 +22,34 @@ its harmless process, and boots out only that job. Cleanup is asserted both
 for normal completion and an assertion raised after startup. No fleet
 installer, authenticated bot session, Telegram account, or live fleet is used.
 An unavailable launchd domain is a failure in this opted-in lane. A JUnit
-check also refuses missing, skipped, or failed native observations.
+check also refuses missing, skipped, duplicate, or failed native observations,
+including each no-pidfile, early-exit and post-readiness startup-cleanup case.
 
 Bridge process startup owns cleanup from the moment it spawns: failure to
 write readiness, an early exit, and failures after yielding all reap the
 private process group. The group ID is the session leader's original PID,
-which remains usable after the leader exits.
+which remains usable after the leader exits. The post-readiness case injects an
+exception after the leaf has written its readiness PID but before the fixture
+returns ownership to its caller.
+
+The hosted macOS lane then runs
+`python tests/fixtures/native_ci_negative_controls.py --output native-controls`.
+This command refuses local hosts and exports the exact committed revision into
+an owned temporary directory. It first requires the four native bridge cases
+to pass, then removes startup cleanup and changes the executable guard to read
+the truncated `comm` column in that disposable export. Each mutant must fail
+its specific regression assertion; skip, setup error, unrelated failure or an
+unexpected pass fails the lane. The tests retain their final process-group
+reap, the driver restores each changed file, and the four restored cases must
+pass again. Logs, JUnit reports and a revision-stamped summary are uploaded.
+
+The separate one-time workflow failure control changes only the success arm
+of `test_native_launchd_scratch_lifecycle` to raise an assertion inside
+`_native_scratch_job`. Push that temporary test commit to the PR, record the
+failed macOS check and the intended assertion, then revert the control and
+require a green final-head run. The context manager must still boot out its
+unique job while the assertion propagates. Expected failures caught by the
+bridge-control driver do not substitute for this actual failed PR check.
 
 The checks must pass in the PR and then be selected as required checks in the
 repository's default-branch ruleset. Adding jobs alone does not enforce that

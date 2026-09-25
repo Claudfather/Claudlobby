@@ -85,6 +85,9 @@ jobs:
               'test_native_launchd_scratch_lifecycle[success]',
               'test_native_launchd_scratch_lifecycle[assertion-failure]',
               'test_native_host_long_exec_path_reads_up',
+              'test_native_bridge_startup_failure_reaps_tree[no-pidfile]',
+              'test_native_bridge_startup_failure_reaps_tree[early-exit]',
+              'test_native_bridge_startup_failure_reaps_tree[pre-yield]',
           }
           for name in sorted(expected):
               found = [case for case in cases if case.attrib['name'] == name]
@@ -92,6 +95,11 @@ jobs:
               assert not any(found[0].find(tag) is not None for tag in ('skipped', 'failure', 'error')), name
               print(f'Executed and passed: {name}')
           PY
+      - name: Prove native bridge negative controls
+        if: runner.os == 'macOS'
+        env:
+          CLAUDLOBBY_CI_NATIVE_SMOKE: '1'
+        run: .venv/bin/python tests/fixtures/native_ci_negative_controls.py --output native-controls
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -99,4 +107,5 @@ jobs:
           path: |
             pytest.log
             pytest-results.xml
+            native-controls/
           if-no-files-found: error

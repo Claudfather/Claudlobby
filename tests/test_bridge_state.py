@@ -452,13 +452,25 @@ def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
 
 
 @requires_node
-@pytest.mark.parametrize("early_exit", [False, True], ids=["no-pidfile", "early-exit"])
-def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, early_exit):
+@pytest.mark.parametrize("failure", ["no-pidfile", "early-exit", "pre-yield"])
+def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, failure):
     processes = []
     real_popen = subprocess.Popen
     observed = tmp_path / "observed.pid"
     leaf_source = "require('fs').writeFileSync(%r, String(process.pid));\n" % str(observed)
-    leaf_source += "process.exit(1);\n" if early_exit else "setTimeout(() => {}, 60000);\n"
+    if failure == "pre-yield":
+        leaf_source += "require('fs').writeFileSync(%r, String(process.pid));\n" % str(tmp_path / "state/bot.pid")
+    leaf_source += "process.exit(1);\n" if failure == "early-exit" else "setTimeout(() => {}, 60000);\n"
+    expected_failure = "pidfile never written"
+    if failure == "pre-yield":
+        real_wait = _wait_pidfile
+
+        def fail_after_readiness(pidfile):
+            real_wait(pidfile)
+            raise AssertionError("injected failure after readiness")
+
+        monkeypatch.setitem(globals(), "_wait_pidfile", fail_after_readiness)
+        expected_failure = "injected failure after readiness"
 
     def capture(*args, **kwargs):
         proc = real_popen(*args, **kwargs)
@@ -467,10 +479,12 @@ def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, early_e
 
     monkeypatch.setattr(subprocess, "Popen", capture)
     try:
-        with pytest.raises(AssertionError, match="pidfile never written"):
+        with pytest.raises(AssertionError, match=expected_failure):
             _spawn_bridge_native(_fake_bins_native(tmp_path), tmp_path / "state",
                                  leaf_source=leaf_source)
         assert observed.exists(), "fixture failed before its leaf process executed"
+        if failure == "pre-yield":
+            assert (tmp_path / "state/bot.pid").is_file(), "failure preceded readiness"
         proc = processes[0]
         assert proc.poll() is not None, "startup failure left the parent running"
         # Zombies can briefly remain after SIGKILL; no member may keep executing.
