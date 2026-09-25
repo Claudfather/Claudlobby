@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the harness's boot probe raced its own spawner on a loaded host (#1778)
+
+Each phase of the `#1002` probe unit now ends when `lib/validate-bot-change.sh`
+opens its gate, not on a fixed sleep, so a slow fleet-pulse or keepalive start
+can no longer let the unit settle mid-observation. Its tmux session now lives in
+the harness's socket dir: keepalive could not see it before, so the CONTROL
+passed without killing anything and every run left a server behind. One new
+check: the window held while both consumers judged it.
+
 ### Fixed — a rejected currency notice no longer silences itself for a week (#900)
 
 `debounce_notify` writes its marker only when the notify function returns 0, and
