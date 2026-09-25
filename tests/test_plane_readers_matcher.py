@@ -45,8 +45,8 @@ import pytest
 
 from claudlobby.plane import queries
 from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _cli, _matcher, _scene,
-                                  _stdlib_readers, plane_root, ro as _ro)
+from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _dispatch, _matcher, _report, _scene,
+                                  _stdlib_readers, plane_root)
 from tests.plane_fixtures import _live_dispatch
 
 
@@ -103,6 +103,21 @@ def test_the_expiry_cap_and_the_progress_grace_hold_on_the_plane(tmp_path):
     assert graced.returncode == 0 and "t-2-bbbb" not in graced.stdout and "t-3-cccc" in graced.stdout
     opened = _matcher(root, "--open", "w1", "--fleet", F)             # open is deadline-blind and grace-blind
     assert [l.split()[-1] for l in opened.stdout.splitlines()] == ["t-2-bbbb"]
+
+
+@pytest.mark.parametrize("report_at,closed", [
+    pytest.param("2026-09-02T20:00:00.171359+00:00", True, id="same-second"),
+    pytest.param("2026-09-02T20:00:01.000001+00:00", False, id="next-second"),
+])
+def test_a_report_inside_the_readers_own_second_closes_its_row(tmp_path, report_at, closed):
+    """#1789: a whole-second "now" (NOW_EPOCH, 20:00:00Z) reads as the END of that
+    second, so a report inside it closes the row and one in the next second does not."""
+    root = plane_root(tmp_path)
+    wi, asg = _dispatch(root, "1", "t-1-aaaa", "2026-09-02T10:00:00Z")
+    _report(root, wi, asg, report_at)
+    r = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
+    assert r.returncode == 0, r.stderr
+    assert (r.stdout == "") is closed, (report_at, r.stdout)
 
 
 def test_the_orphan_split_holds_on_the_plane(tmp_path):

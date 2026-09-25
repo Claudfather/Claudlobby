@@ -59,9 +59,6 @@ STATE_DIR="${CLAUDLOBBY_ROOT}/state/currency"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 setup_log_dir "$LOG"
 
-# Stamped at write time, the #1770 idiom: a run that takes minutes logs how long
-# each step took, which is the evidence an operator needs when one goes wrong.
-# One ts_iso taken at the top stamped every line as the run's start (#1773).
 log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
 
 if ! git -C "$CLAUDLOBBY_ROOT" rev-parse --git-dir >/dev/null 2>&1; then

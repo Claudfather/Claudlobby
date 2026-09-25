@@ -37,9 +37,6 @@ LOG_DIR="${CLAUDLOBBY_ROOT}/state"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/weekly-worker-restart.log"
 
-# Stamped at write time, the #1770 idiom: a run that takes minutes logs how long
-# each step took, which is the evidence an operator needs when one goes wrong.
-# One ts_iso taken at the top stamped every line as the run's start (#1773).
 log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
 
 if [ -z "$FLEET" ]; then
