@@ -17,6 +17,10 @@ keepalive's heartbeat and the host probe now stage their batch in
 host changes nothing until its daemon restarts on the new code: the daemon
 creates that directory, and without it the cold CLI runs as before.
 
+### Changed — the validation harness tests keep one test per failure that happened (#1801)
+
+484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
+
 ### Changed — the alert tests keep one test per failure that happened (#1801)
 
 306 test lines go. No behaviour changes: the session-token rule is stated once,
