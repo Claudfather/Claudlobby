@@ -356,3 +356,31 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
         "SELECT event, json_extract(detail, '$.data.msg_id') FROM events"
         " WHERE kind = 'system' AND event IN ('send_retry', 'send_miss') ORDER BY ingest_seq"))] \
         == [("send_retry", held), ("send_retry", stuck), ("send_miss", stuck)]
+
+
+def _pasted(text: str, at: int) -> str:
+    """Claude Code's wrapper for a pasted run -- SHAPE from live transcripts
+    (#1099; the id faked): the first `at` characters arrived as one paste,
+    the rest was typed after it. The boundary is a tmux chunk boundary, so it
+    can fall inside the trailer itself."""
+    return f'\n\n<pasted_content id="0f3a">\n{text[:at]}\n</pasted_content id="0f3a">\n\n{text[at:]}'
+
+
+@pytest.mark.parametrize("where", ["splits-the-trailer", "before-the-trailer"])
+def test_a_pasted_arrival_is_received_as_the_wire_form(tmp_path, where):
+    """#1099: the TUI wraps a pasted run in <pasted_content> tags. Where the
+    boundary split the trailer, the hook recorded NO receipt for a prompt that
+    WAS submitted (9 tracked prompts, 2026-09-20..24); where it fell before the
+    trailer, the tags were hashed in and a whole delivery read ALTERED (50).
+    The wrapper is the TUI's, not the sender's: without it, the arrival is
+    the wire form again."""
+    sha, safe, nbytes = _wire_proof("set +H; " + BODY)
+    arrival = _arrival(safe)
+    at = len(arrival) - 10 if where == "splits-the-trailer" else len(safe)
+    root = _root(tmp_path)
+    r = _run(_hookjson(_pasted(arrival, at), ensure_ascii=False), _env(root))
+    assert r.returncode == 0 and r.stdout == ""
+    rows = _received_row(root)
+    assert len(rows) == 1 and rows[0]["msg_id"] == MSGID
+    detail = json.loads(rows[0]["detail"])
+    assert (detail["received_sha256"], detail["received_bytes"]) == (sha, nbytes)
