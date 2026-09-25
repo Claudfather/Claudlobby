@@ -23,7 +23,7 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.path_audit import ExternalDecl
-from tests.conftest import _write_exec, git_isolation_env, install_real_template
+from tests.conftest import _write_exec, call_script_fn, git_isolation_env, install_real_template
 from claudlobby.composer import (
     _BOOT_STAGGER_SECONDS,
     _compose_hooks,
@@ -2567,23 +2567,6 @@ class TestCrossFleetManagerRecognition:
         )
         return proc.returncode == 0
 
-    def _bash_conf_get(self, bot_dir: Path, key: str) -> str:
-        """The real shipped reader every lib/ door resolves MANAGER_TMUX with."""
-        proc = subprocess.run(
-            [
-                "bash",
-                "-c",
-                '. "$1"; bot_conf_get "$2" "$3" ""',
-                "_",
-                str(self.LIB_COMMON),
-                str(bot_dir),
-                key,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        return proc.stdout
-
     def _compose_conf(self, tmp_path, fleet, bot_id):
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
@@ -2658,17 +2641,14 @@ class TestCrossFleetManagerRecognition:
     def test_the_composed_manager_line_reads_back_as_the_bare_session_name(
         self, tmp_path
     ):
-        """#910, measured on crog and ai-platform: the shared reader handed back
-        the manager's own MANAGER_TMUX as `clog  # this bot is a manager`, a
-        session that does not exist, so a FLEET ALERT / NOTICE skipped the
-        manager-pane nudge on any fleet whose first declaring bot is the manager.
-
-        Clean through the reader every lib/ door resolves it with, and clean at
-        the source, so a raw reader of the line never meets the comment either.
-        """
+        """#910: the shipped reader returned a manager's own MANAGER_TMUX as
+        `clog  # this bot is a manager`, a session that does not exist."""
         fleet = self._fleet(clog=["ari", "kev"])
         d = self._compose_conf(tmp_path, fleet, "clog")
-        assert self._bash_conf_get(d, "MANAGER_TMUX") == "clog"
+        got = call_script_fn(
+            self.LIB_COMMON, "bot_conf_get", str(d), "MANAGER_TMUX", ""
+        )
+        assert got == "clog"
         lines = (d / "bot.conf").read_text().splitlines()
         assert [ln for ln in lines if ln.startswith("export MANAGER_TMUX=")] == [
             "export MANAGER_TMUX=clog"

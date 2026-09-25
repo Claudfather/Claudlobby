@@ -5502,11 +5502,8 @@ install_error_trap() {
 # quotes (the composer emits values via shlex.quote, which single-quotes any
 # value containing a space, e.g. a multi-plugin FLEET_PLUGINS_REQUIRED).
 # An UNQUOTED value ends at its first whitespace, as it does when the file is
-# sourced, so an inline comment after one never reaches the caller. That is
-# the reader's job, not a regenerate's: a manager bot.conf composed with
-# `# this bot is a manager` on its MANAGER_TMUX line stays on disk, and lib/ is
-# live on every bot the moment it is pulled. A quoted value is data and keeps
-# any hash it holds.
+# sourced, so an inline comment never reaches the caller; a quoted value is
+# data and keeps any hash it holds.
 # Returns <default> if the file is missing or the key isn't found.
 bot_conf_get() {
     local bot_dir="$1" key="$2" default="$3" val=""
@@ -5515,13 +5512,11 @@ bot_conf_get() {
             | sed -E "s/^(export )?$key=//" || true)
         # Strip a surrounding quote pair (single or double) via parameter
         # expansion, kept outside the command substitution above so no literal
-        # quote sits inside $( ) where bash 3.2 mis-scans it. Any other value
-        # that opens a quote is left as read, so a hash inside quotes is never
-        # cut; only an unquoted value is cut at its first whitespace.
+        # quote sits inside $( ) where bash 3.2 mis-scans it.
         case "$val" in
             \"*\") val=${val#\"}; val=${val%\"} ;;
             \'*\') val=${val#\'}; val=${val%\'} ;;
-            \"*|\'*) ;;
+            \"*|\'*) ;;  # quoted but not one whole quoted token: left as read
             *) val=${val%%[[:space:]]*} ;;
         esac
     fi
@@ -5731,9 +5726,7 @@ _bot_with_own_chat() {
 # bot_is_manager <bot_dir>
 # True (0) if <bot_dir> is a team manager, false (1) otherwise. The composer
 # sets a manager's MANAGER_TMUX to its own BOT_ID; a worker's MANAGER_TMUX
-# points at a different bot. Both reads go through bot_conf_get, which drops
-# the inline comment an older compose left on a manager's MANAGER_TMUX line,
-# so there is no second copy of that parse here.
+# points at a different bot.
 bot_is_manager() {
     local bot_dir="${1:?Usage: bot_is_manager <bot_dir>}" mgr bid
     mgr=$(bot_conf_get "$bot_dir" MANAGER_TMUX "")

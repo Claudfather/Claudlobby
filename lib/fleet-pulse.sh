@@ -613,9 +613,9 @@ for bot_dir in "$BOTS_DIR"/*/; do
     if [ "$(bot_conf_get "$bot_dir" OBSERVABILITY_UNASSIGNED_CHECK 0)" = "1" ]; then
         # A manager has no assigner, so reported-and-not-re-tasked is its normal
         # resting state, not a strand. Uses bot_is_manager and never a
-        # hand-rolled MANAGER_TMUX read: the composed line carries a trailing
-        # comment that a naive parse swallows, which once reported three
-        # managers as workers across three fleets.
+        # hand-rolled MANAGER_TMUX read: an older compose left a trailing
+        # comment on that line that a naive parse swallows, which once reported
+        # three managers as workers across three fleets.
         if bot_is_manager "$bot_dir"; then
             debounce_clear "$state_dir" "$bot_id" "unassigned_alerted"
         else

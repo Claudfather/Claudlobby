@@ -36,10 +36,9 @@ result=$(bot_conf_get "$tmpdir" SOME_VAR "fallback")
 result=$(bot_conf_get "/nonexistent/path" BOT_SERVICE "fallback")
 [ "$result" = "fallback" ] || { echo "FAIL: missing conf got '$result'"; exit 1; }
 
-# Test 6: a manager bot.conf composed with the inline comment on its
-# MANAGER_TMUX line (still on disk until a regenerate) reads back as the bare
-# session name. It read as `alpha  # this bot is a manager` -- a session that
-# does not exist -- so every FLEET ALERT / NOTICE skipped the manager pane (#910).
+# Test 6 (#910): the manager line as composed with its inline comment, still on
+# disk until a regenerate, reads back as the bare session name. It used to read
+# back with the comment: a session that does not exist.
 result=$(bot_conf_get "$tmpdir" MANAGER_TMUX "fallback")
 [ "$result" = "alpha" ] || { echo "FAIL: MANAGER_TMUX got '$result'"; exit 1; }
 
