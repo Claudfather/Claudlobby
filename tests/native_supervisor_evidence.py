@@ -31,6 +31,48 @@ def process_group_members(pgid: int) -> dict[int, str]:
             if len(row := line.split()) == 3 and int(row[1]) == pgid}
 
 
+def tagged_processes(token: str, excluded_group: int) -> dict[int, dict[str, int | str]]:
+    """Find only this invocation's detached children; never persist argv/env.
+
+    A private inherited token also follows setsid descendants after they escape
+    the leader's process group. A UID-wide scan is read-only; mutations require
+    that exact random token, not a command name or an ambient HOME match.
+    """
+    listing = subprocess.run(
+        ['/bin/ps', 'eww', '-U', str(os.getuid()), '-o', 'pid=,ppid=,pgid=,stat=,command='],
+        text=True, capture_output=True, check=True, timeout=10)
+    marker = re.compile(r'(?:^| )CLAUDLOBBY_NATIVE_RUN_TOKEN=' + re.escape(token) + r'(?: |$)')
+    result = {}
+    for line in listing.stdout.splitlines():
+        row = line.split(None, 4)
+        if len(row) == 5 and int(row[2]) != excluded_group and marker.search(row[4]):
+            result[int(row[0])] = {'ppid': int(row[1]), 'pgid': int(row[2]), 'state': row[3]}
+    return result
+
+
+def reap_detached(token: str, excluded_group: int, grace: float) -> dict:
+    """Stop leaves first so still-live parents can wait/reap their children."""
+    terminated = set()
+    end = time.monotonic() + grace
+    while members := tagged_processes(token, excluded_group):
+        terminated.update(members)
+        parents = {value['ppid'] for value in members.values()}
+        leaves = members.keys() - parents
+        sig = signal.SIGTERM if time.monotonic() < end else signal.SIGKILL
+        for pid in leaves:
+            # Recheck ownership immediately before each signal (PID reuse).
+            if pid not in tagged_processes(token, excluded_group):
+                continue
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        if time.monotonic() >= end + 5:
+            break
+        time.sleep(.1)
+    return {'terminated': sorted(terminated), 'remaining': tagged_processes(token, excluded_group)}
+
+
 def run_owned_session(argv, *, cwd, env, timeout, stdout_path, stderr_path, grace=20):
     """Bound a separate process group, allowing TERM/EXIT cleanup before KILL.
 
@@ -45,9 +87,12 @@ def run_owned_session(argv, *, cwd, env, timeout, stdout_path, stderr_path, grac
     def cancel_controller(_signum, _frame):
         raise InterruptedError('native validation controller cancelled')
 
-    cleanup = {'terminated_children': [], 'remaining': {}}
+    token = uuid.uuid4().hex
+    child_env = {**env, 'CLAUDLOBBY_NATIVE_RUN_TOKEN': token}
+    cleanup = {'terminated_children': [], 'remaining': {},
+               'detached_terminated': [], 'detached_remaining': {}}
     with stdout_path.open('w+') as out, stderr_path.open('w+') as err:
-        proc = subprocess.Popen([str(value) for value in argv], cwd=cwd, env=env,
+        proc = subprocess.Popen([str(value) for value in argv], cwd=cwd, env=child_env,
                                 stdout=out, stderr=err, text=True, start_new_session=True)
         signal.signal(signal.SIGTERM, cancel_controller)
         try:
@@ -68,6 +113,10 @@ def run_owned_session(argv, *, cwd, env, timeout, stdout_path, stderr_path, grac
             # Do not let a second cancellation interrupt the bounded reap.
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             try:
+                # Kill escaped leaves while the shell is still alive to reap
+                # them. The harness's setsid scope probe is one such child.
+                detached = reap_detached(token, proc.pid, min(grace, 5))
+                cleanup['detached_terminated'] = detached['terminated']
                 members = process_group_members(proc.pid)
                 if members:
                     cleanup['terminated_children'] = sorted(members)
@@ -91,6 +140,10 @@ def run_owned_session(argv, *, cwd, env, timeout, stdout_path, stderr_path, grac
                 while process_group_members(proc.pid) and time.monotonic() < end:
                     time.sleep(.1)
                 cleanup['remaining'] = process_group_members(proc.pid)
+                # EXIT cleanup may briefly spawn another detached helper.
+                detached = reap_detached(token, proc.pid, min(grace, 5))
+                cleanup['detached_terminated'] = sorted(set(cleanup['detached_terminated']) | set(detached['terminated']))
+                cleanup['detached_remaining'] = detached['remaining']
             finally:
                 signal.signal(signal.SIGTERM, previous_term)
         out.seek(0)
@@ -408,7 +461,9 @@ def main() -> int:
             timeout=1800, stdout_path=evidence / 'validate.stdout.log',
             stderr_path=evidence / 'validate.stderr.log')
         (evidence / 'validate-process-cleanup.json').write_text(json.dumps(process_cleanup, indent=2) + '\n')
-        if process_cleanup['remaining'] or (process_cleanup['terminated_children'] and not process_cleanup['timed_out']):
+        if (process_cleanup['remaining'] or process_cleanup['detached_remaining']
+                or ((process_cleanup['terminated_children'] or process_cleanup['detached_terminated'])
+                    and not process_cleanup['timed_out'] and not process_cleanup['cancelled'])):
             result.setdefault('cleanup_errors', []).append({'validate_process_group': process_cleanup})
         output = proc.stdout + proc.stderr
         (evidence / 'validate-bot-change.log').write_text(output)
