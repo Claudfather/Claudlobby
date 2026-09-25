@@ -482,8 +482,8 @@ class TestUndeliveredNoticeIsRetried:
     seconds before the send failed, and the next three daily runs matched it
     and sent nothing while the root sat 92 commits behind."""
 
-    def test_rejected_notice_leaves_no_marker_and_the_next_run_sends_again(self, tmp_path):
-        h = Harness(tmp_path, behind=2)
+    def test_rejected_notice_leaves_no_marker_and_the_next_run_sends_again(self, tmp_path, scratch_plane_env):
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         tg_post = os.path.join(h.root, "lib", "tg-post.sh")
         marker = os.path.join(h.root, "state", "currency", "root.source_behind")
         _write_exec(tg_post, TG_STUB_REJECTED)
@@ -499,11 +499,11 @@ class TestUndeliveredNoticeIsRetried:
         assert h.run().returncode == 0
         assert len(h.captured()) == 3, "a delivered notice was sent again inside the window"
 
-    def test_a_notice_with_no_telegram_target_is_raised_once(self, tmp_path):
+    def test_a_notice_with_no_telegram_target_is_raised_once(self, tmp_path, scratch_plane_env):
         # No Telegram target at all (a new install) never reaches tg-post and
         # records exit 2. No later run can deliver it, so it counts as sent;
         # otherwise every run nudges the manager again (#1825 review).
-        h = Harness(tmp_path, behind=2)
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         with open(os.path.join(h.root, "runtime", "bots", "tbot", "bot.conf"), "w") as f:
             f.write('export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-tbot"\n')
         assert h.run().returncode == 0
