@@ -120,7 +120,7 @@ class TestCollectPlaneEvents:
     def test_the_rows_are_the_legacy_shape_and_nothing_private_leaks(self, scene):
         _root, paths = scene
         row = _collect(paths, event_type="session_missing")[0]
-        assert row == {"ts": "2026-06-10T10:00:00-04:00", "bot": "alpha", "type": "session_missing",
+        assert row == {"ts": "2026-06-10T14:00:00Z", "ts_local": "2026-06-10T10:00:00-04:00", "bot": "alpha", "type": "session_missing",
                        "source": "pulse", "data": {"session": "alpha"}}
 
     def test_a_fleet_with_no_events_yet_is_an_honest_empty(self, tmp_path):
@@ -165,7 +165,7 @@ class TestFormatEventTable:
 
     def test_detail_truncation(self):
         ev = {
-            "ts": "2026-06-10T10:00:00-04:00",
+            "ts": "2026-06-10T14:00:00Z",
             "bot": "alpha",
             "type": "test",
             "source": "test",

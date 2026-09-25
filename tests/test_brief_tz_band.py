@@ -42,3 +42,12 @@ def test_alert_window_tz_band_uses_instant_and_preserves_local_clock(paths, monk
             assert "2026-09-01T00:01:00Z" in format_event_table(events)
     finally:
         time.tzset()
+
+
+def test_legacy_row_normalizes_an_offset_occurred_at_without_losing_microseconds():
+    from tests.plane_fixtures import _stdlib_readers
+    readers = _stdlib_readers()
+    row = readers.legacy_event_row("2026-09-02T02:00:00.000001+02:00", "script_error", "critical", "actor", "bot:f/a", None, 0, "f")
+    assert row["ts"] == "2026-09-02T00:00:00.000001Z"
+    assert row["ts_local"] is None
+    assert "2026-09-02T00:00:00Z" in format_event_table([row])

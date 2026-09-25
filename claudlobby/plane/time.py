@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import sqlite3
 
 
-def instant_key(value: str) -> str | None:
+def instant_key(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     try:
