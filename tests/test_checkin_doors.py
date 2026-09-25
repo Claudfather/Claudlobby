@@ -49,14 +49,14 @@ def _decision() -> dict:
             "raise": {"decided": False, "reason": "no delta", "held": []}}
 
 
-def _stub_rig(tmp_path: Path) -> tuple[Path, dict]:
+def _stub_rig(tmp_path: Path, *, scratch_plane_env) -> tuple[Path, dict]:
     lib = tmp_path / "lib"
     lib.mkdir()
     (lib / "lib-common.sh").write_text(STUB_LIB_COMMON)
     for name in ("checkin-record.sh", "checkin-contract.py"):
         shutil.copy(LIB / name, lib / name)
         (lib / name).chmod(0o755)
-    env = {"EMIT_CAPTURE": str(tmp_path / "emit.json"), "FLEET_NAME": "f", "BOT_ID": "mgr",
+    env = {**scratch_plane_env(tmp_path), "EMIT_CAPTURE": str(tmp_path / "emit.json"), "FLEET_NAME": "f", "BOT_ID": "mgr",
            "TMPDIR": str(tmp_path), "PATH": os.environ["PATH"]}
     return lib, env
 
@@ -72,8 +72,8 @@ def _captured(env: dict) -> dict:
 
 # --- checkin-record.sh, stub transport ----------------------------------------
 
-def test_record_lands_one_actor_anchored_decision_with_the_shared_mint(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_lands_one_actor_anchored_decision_with_the_shared_mint(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(lib, "checkin-record.sh", env, json.dumps(_decision()))
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == STUB_CK                   # minted by plane_mint_id ck, never a private mint
@@ -86,15 +86,15 @@ def test_record_lands_one_actor_anchored_decision_with_the_shared_mint(tmp_path)
     assert e["payload"]["data"]["inputs_seen"]["issues_seen"] is None      # could not measure, kept null
 
 
-def test_record_prefers_bot_id_over_bot_name(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_prefers_bot_id_over_bot_name(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(lib, "checkin-record.sh", {**env, "BOT_NAME": "Display Name"}, json.dumps(_decision()))
     assert r.returncode == 0, r.stderr
     assert _captured(env)["events"][0]["payload"]["subject"] == "bot:f/mgr"
 
 
-def test_record_refuses_a_malformed_decision_at_rc_2_and_records_nothing(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_refuses_a_malformed_decision_at_rc_2_and_records_nothing(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     bad = _decision(); bad["action"] = "coffee"
     r = _run(lib, "checkin-record.sh", env, json.dumps(bad))
     assert r.returncode == 2
@@ -102,34 +102,34 @@ def test_record_refuses_a_malformed_decision_at_rc_2_and_records_nothing(tmp_pat
     assert not Path(env["EMIT_CAPTURE"]).exists()
 
 
-def test_record_says_rc_3_when_the_plane_did_not_record(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_says_rc_3_when_the_plane_did_not_record(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(lib, "checkin-record.sh", {**env, "STUB_EMIT_RC": "5"}, json.dumps(_decision()))
     assert r.returncode == 3 and "NOT recorded" in r.stderr and r.stdout == ""
 
 
-def test_record_silenced_only_by_the_harness_exemption_is_rc_3(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_silenced_only_by_the_harness_exemption_is_rc_3(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(lib, "checkin-record.sh", {**env, "PLANE_EMIT_DISABLED": "1"}, json.dumps(_decision()))
     assert r.returncode == 3 and "PLANE_EMIT_DISABLED" in r.stderr
     assert not Path(env["EMIT_CAPTURE"]).exists()
 
 
-def test_record_needs_an_identity_rc_1(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_needs_an_identity_rc_1(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     env = {k: v for k, v in env.items() if k not in ("FLEET_NAME", "BOT_ID")}
     r = _run(lib, "checkin-record.sh", env, json.dumps(_decision()))
     assert r.returncode == 1 and "identity" in r.stderr
 
 
-def test_record_unknown_flag_is_rc_1(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_unknown_flag_is_rc_1(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(lib, "checkin-record.sh", env, json.dumps(_decision()), "--bot", "x")
     assert r.returncode == 1 and "unknown flag" in r.stderr and r.stdout == ""
 
 
-def test_record_dry_run_validates_prefixes_the_id_and_writes_nothing(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_dry_run_validates_prefixes_the_id_and_writes_nothing(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(lib, "checkin-record.sh", env, json.dumps(_decision()), "--dry-run")
     assert r.returncode == 0 and r.stdout.strip() == f"DRY-RUN {STUB_CK}"   # never mistakable for a recorded id
     assert not Path(env["EMIT_CAPTURE"]).exists()
@@ -138,8 +138,8 @@ def test_record_dry_run_validates_prefixes_the_id_and_writes_nothing(tmp_path):
     assert r.returncode == 2 and r.stdout == ""                             # validation IS the dry run's point
 
 
-def test_record_help_prints_the_whole_header(tmp_path):
-    lib, env = _stub_rig(tmp_path)
+def test_record_help_prints_the_whole_header(tmp_path, scratch_plane_env):
+    lib, env = _stub_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(lib, "checkin-record.sh", env, "", "--help")
     assert r.returncode == 0 and "exit:" in r.stdout and "3 the plane could not record" in r.stdout
 

@@ -21,6 +21,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install -e '.[dev]'
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Run tests
         # One pre-existing failure is deselected pending separate triage
         # (tracked in the issue thread for #229). The rest of the suite must

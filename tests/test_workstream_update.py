@@ -390,8 +390,8 @@ class TestConcurrency:
             ws = _open(tmp_path, f"racer {i}", scratch_plane_env=scratch_plane_env)
             _run(tmp_path, "close", ws, scratch_plane_env=scratch_plane_env)
             with ThreadPoolExecutor(max_workers=2) as ex:
-                f1 = ex.submit(_run, tmp_path, "prune")
-                f2 = ex.submit(_run, tmp_path, "renew", ws, "--note", "race")
+                f1 = ex.submit(_run, tmp_path, "prune", scratch_plane_env=scratch_plane_env)
+                f2 = ex.submit(_run, tmp_path, "renew", ws, "--note", "race", scratch_plane_env=scratch_plane_env)
                 f1.result(); f2.result()
             for wid, entry in _registry(tmp_path)["workstreams"].items():
                 assert entry.get("id") == wid, f"zombie entry {wid!r}: {entry}"

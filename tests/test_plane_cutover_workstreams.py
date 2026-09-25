@@ -318,7 +318,7 @@ def test_import_is_idempotent_on_a_second_run(tmp_path):
     assert after == before, (before, after)
 
 
-def test_dedup_skips_an_id_already_live_or_archived(tmp_path):
+def test_dedup_skips_an_id_already_live_or_archived(tmp_path, scratch_plane_env):
     """R1 gauntlet hazard 1, reproduced: a construct id is unique per fleet
     FOREVER, live or archived — the importer must not re-mint either."""
     root, paths, _, _ = _scene(tmp_path)
@@ -339,9 +339,7 @@ def test_dedup_skips_an_id_already_live_or_archived(tmp_path):
             **_env(root),
             "FLEET_NAME": F,
             "BOT_NAME": "mgr",
-            "PLANE_EMIT_ENABLED": "1",
-            "PLANE_EMIT_CLI": str(CLI),
-            "PLANE_SOCKET": str(root / "no-daemon.sock"),
+            **scratch_plane_env(root),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "WORKSTREAM_LEASE_DAYS": "14",
         },

@@ -387,7 +387,7 @@ def test_fold_f5_send_to_bot_puts_the_msg_id_on_the_wire_as_plane_msg_id(tmp_pat
     assert "PLANE_WIRE_OUT" not in seen["env"]
 
 
-def test_fold_f5_a_nudge_tags_the_send_with_the_communications_own_msg_id(tmp_path, monkeypatch):
+def test_fold_f5_a_nudge_tags_the_send_with_the_communications_own_msg_id(tmp_path, monkeypatch, scratch_plane_env):
     """fold F5, end to end: `task nudge` must tag its send with the SAME msg_id
     it minted for the communication, so the receiver's `received` pairs with the
     right message in the delivery JOIN. Runs the real door and reads the plane."""
@@ -400,6 +400,8 @@ def test_fold_f5_a_nudge_tags_the_send_with_the_communications_own_msg_id(tmp_pa
         return 0, ""
 
     monkeypatch.setattr(task_cmd, "send_to_bot", fake)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     assert task_cmd.cmd_task_nudge(_Args(tmp_path, tid, as_who="chris")) == 0
     conn = connect(db_path(tmp_path))
     comm_ids = {r[0] for r in conn.execute(

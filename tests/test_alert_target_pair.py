@@ -201,6 +201,7 @@ def _token_seen(tmp_path: Path) -> str:
     full = constructed_env(
         HOME=tmp_path / "home",
         TG_CAPTURE=capture,
+        CLAUDLOBBY_ROOT=root,
         TELEGRAM_BOT_TOKEN="ambient-session-token",
         PLANE_EMIT_DISABLED="1",
     )
