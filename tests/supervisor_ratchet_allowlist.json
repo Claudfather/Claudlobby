@@ -18,5 +18,5 @@
   "lib/setup-system": 2,
   "lib/spin-down-bot.sh": 5,
   "lib/spin-up-bot.sh": 3,
-  "lib/validate-bot-change.sh": 7
+  "lib/validate-bot-change.sh": 6
 }

@@ -2587,12 +2587,9 @@ else
     BP_EVENTS="$BP_DIR/data/events"
     mkdir -p "$BP_DIR/data" "$BP_ROOT/state" "$HOME/.config/systemd/user"
 
-    # Each boot phase ends when the HARNESS opens its gate (touches
-    # <phase>.open), never on a clock (#1778). Fixed sleeps raced every step the
-    # harness takes inside a phase -- a whole fleet-pulse, keepalive's own
-    # start -- so on a loaded host a phase ended mid-observation and the checks
-    # judged a settled unit as a boot. The bound only frees a unit whose
-    # harness died before its trap.
+    # Each boot phase ends when the harness touches <phase>.open, never on a
+    # clock (#1778). The 600s bound only frees a unit whose harness died before
+    # its trap.
     cat > "$BP_ROOT/gate.sh" <<'BPGATE'
 #!/bin/bash
 for _ in $(seq 1 3000); do [ -e "${0%/*}/$1.open" ] && exit 0; sleep 0.2; done
@@ -2601,21 +2598,19 @@ BPGATE
 
     # Mirror start-bot.sh: do slow pre-session work (there, plugin install), THEN
     # create the session, THEN exit. The gap between "unit went active" and
-    # "session exists" is the window that stranded a bot for 35-178s. Its tmux
-    # dir is the one keepalive reads, as start-bot.sh gets it from the bot.conf
-    # pin keepalive also sources: a unit inherits nothing from this shell, and
-    # in the default dir the session is invisible to keepalive and to every
-    # kill-server here.
+    # "session exists" is the window that stranded a bot for 35-178s.
     cat > "$BP_ROOT/spawner.sh" <<BPSPAWN
 #!/bin/bash
 "$BP_ROOT/gate.sh" spawn
-export TMUX_TMPDIR="$TMUX_TMPDIR"
 tmux -L "$BP_SVC" new-session -d -s "$BP_BOT" 'sleep 600'
 BPSPAWN
     chmod +x "$BP_ROOT/spawner.sh"
 
-    # TimeoutStartSec: the start timeout also ends ExecStartPre, so its 90s
-    # default would be the one clock left that could end the held stagger.
+    # Environment=TMUX_TMPDIR: the composed unit's line, pointed at the
+    # harness's dir, where keepalive and every kill-server here look; a unit
+    # inherits nothing from this shell. TimeoutStartSec: the start timeout also
+    # ends ExecStartPre, so its 90s default would be the one clock left that
+    # could end the held stagger.
     cat > "$BP_UNIT" <<BPUNIT
 [Unit]
 Description=claudlobby validate-bot-change boot-window probe
@@ -2623,6 +2618,7 @@ Description=claudlobby validate-bot-change boot-window probe
 Type=simple
 RemainAfterExit=yes
 KillMode=process
+Environment=TMUX_TMPDIR=$TMUX_TMPDIR
 TimeoutStartSec=infinity
 ExecStartPre=$BP_ROOT/gate.sh stagger
 ExecStart=$BP_ROOT/spawner.sh
@@ -2667,11 +2663,8 @@ RestartSec=1
 ExecStartPre=/bin/sleep 1
 ExecStart=/bin/false
 CLUNIT
-    # The harness's tmux dir, as the boot probe's spawner: the cleanup's
-    # kill-server reaches no other.
     cat > "$BP_ROOT/longboot-spawner.sh" <<LBSPAWN
 #!/bin/bash
-export TMUX_TMPDIR="$TMUX_TMPDIR"
 tmux -L "$LB_SVC" new-session -d -s longboot 'sleep 600'
 LBSPAWN
     chmod +x "$BP_ROOT/longboot-spawner.sh"
@@ -2682,6 +2675,7 @@ Description=claudlobby validate-bot-change long-stagger boot probe (#1769 negati
 Type=simple
 RemainAfterExit=yes
 KillMode=process
+Environment=TMUX_TMPDIR=$TMUX_TMPDIR
 Restart=on-failure
 RestartSec=5
 ExecStartPre=/bin/sleep 60
@@ -2699,8 +2693,17 @@ LBUNIT
     # shellcheck disable=SC2086
     systemctl --user start --no-block "$BP_SVC" $BP_LOOP_SVCS >/dev/null 2>&1 || true
 
-    bp_state() { systemctl --user show -p ActiveState -p SubState --value "$BP_SVC" 2>/dev/null | paste -sd/ -; }
     bp_starting() { service_is_starting "$BP_SVC"; }
+    bp_session() { check_tmux_session "$BP_BOT" "$BP_SVC"; }
+    # bp_await <state>: poll (bounded) until the unit's ActiveState/SubState is
+    # <state>, leaving the last read in _USF_* for the caller's check.
+    bp_await() {
+        for _i in $(seq 1 100); do
+            _unit_start_facts "$BP_SVC"
+            [ "$_USF_ACTIVE/$_USF_SUB" = "$1" ] && return
+            sleep 0.2
+        done
+    }
 
     # #1769: the crash probe's FIRST attempt, sampled before it can have failed
     # twice. The same unit must read "not a loop" here and "a loop" later --
@@ -2760,18 +2763,9 @@ LBUNIT
             "$LIB_DIR/fleet-pulse.sh" "$BP_FLEET" >/dev/null 2>&1 || true
     }
 
-    # bp_await <ActiveState/SubState>: poll the unit into that state, bounded.
-    bp_await() {
-        for _i in $(seq 1 100); do
-            [ "$(bp_state)" = "$1" ] && return 0
-            sleep 0.2
-        done
-        return 1
-    }
-
     # --- State 1: activating (ExecStartPre — the boot stagger, held by its gate) ---
-    bp_await activating/start-pre || true
-    _s1=$(bp_state)
+    bp_await activating/start-pre
+    _s1="$_USF_ACTIVE/$_USF_SUB"
     bp_starting && r=yes || r=no
     harness_check "activating unit reads as mid-start (observed $_s1)" "$r"
     [ "$_s1" = "activating/start-pre" ] && r=yes || r=no
@@ -2788,10 +2782,9 @@ LBUNIT
 
     # --- State 2: active/running (spawner executing, session not up yet) ---
     # The state ActiveState alone cannot see, and where all 3 restarts landed.
-    bp_await active/running || true
-    _unit_start_facts "$BP_SVC"
+    bp_await active/running
     _s2="$_USF_ACTIVE/$_USF_SUB" _x2=$_USF_EXEC_US
-    _sess2=no; command tmux -L "$BP_SVC" has-session -t "$BP_BOT" 2>/dev/null && _sess2=yes
+    _sess2=no; bp_session && _sess2=yes
     [ "$_s2" = "active/running" ] && [ "$_sess2" = no ] && r=yes || r=no
     harness_check "mid-boot window reached: unit active/running with NO session (observed $_s2, session=$_sess2)" "$r"
     bp_starting && r=yes || r=no
@@ -2820,14 +2813,14 @@ LBUNIT
     # ends under them, every verdict above is about a settled unit (#1778); a
     # restart shows as a new ExecStart stamp.
     _unit_start_facts "$BP_SVC"
-    _sess2b=no; command tmux -L "$BP_SVC" has-session -t "$BP_BOT" 2>/dev/null && _sess2b=yes
+    _sess2b=no; bp_session && _sess2b=yes
     [ "$_USF_ACTIVE/$_USF_SUB" = "active/running" ] && [ -n "$_x2" ] && [ "$_USF_EXEC_US" = "$_x2" ] && [ "$_sess2b" = no ] && r=yes || r=no
     harness_check "#1778 the boot window held while both consumers judged it: the same start, still active/running, no session (observed $_USF_ACTIVE/$_USF_SUB, session=$_sess2b)" "$r"
     : > "$BP_ROOT/spawn.open"
 
     # --- State 3: active/exited — settled. The assumption the predicate rests on. ---
-    bp_await active/exited || true
-    _s3=$(bp_state)
+    bp_await active/exited
+    _s3="$_USF_ACTIVE/$_USF_SUB"
     [ "$_s3" = "active/exited" ] && r=yes || r=no
     harness_check "a SETTLED bot unit reads active/exited (observed $_s3) — if this ever reads active/running, SubState stops meaning mid-boot and the watchdog silently dies" "$r"
     bp_starting && r=no || r=yes
@@ -2836,7 +2829,7 @@ LBUNIT
     # --- CONTROL: settled unit + dead session MUST still restart. ---
     # This is what distinguishes the fix from "disable the watchdog". Genuinely
     # dead means it was up where keepalive looks before the kill.
-    _sess3=no; command tmux -L "$BP_SVC" has-session -t "$BP_BOT" 2>/dev/null && _sess3=yes
+    _sess3=no; bp_session && _sess3=yes
     command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
     : > "$_kl"
     CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
