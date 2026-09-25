@@ -179,18 +179,21 @@ def _received(a) -> int:
     """`--received <msg_id> --destination <bot> [--wait S]`: has the RECEIVER
     recorded this tracked send? plane-dispatch-in.sh writes the `received` row
     only when the prompt is actually SUBMITTED, so a payload held in the input
-    box leaves none (#1099). Polls up to S seconds: rc 0 once the row lands,
-    rc 1 when none has by then, rc 4 when <bot> has never recorded a receipt
+    box leaves none (#1099). Polls up to S seconds: rc 0 once the row lands
+    addressed to <bot> (fold F3, queries.DELIVERY_STATUS_SQL's rule: a prompt
+    that merely QUOTES the trailer files it under another bot), rc 1 when none
+    has by then, rc 4 when <bot> has never recorded a receipt
     at all (its hook is not armed, so an absence proves nothing), rc 3
     unreachable."""
     def fn(pr, conn):
-        sql = "SELECT 1 FROM events WHERE kind = 'transmission' AND event = 'received' AND {} = ? LIMIT 1"
+        sql = ("SELECT 1 FROM events WHERE kind = 'transmission' AND event = 'received'"
+               " AND json_extract(detail, '$.destination') = ? {} ORDER BY ingest_seq DESC LIMIT 1")
 
         def got():
-            return conn.execute(sql.format("msg_id"), (a.received,)).fetchone()
+            return conn.execute(sql.format("AND msg_id = ?"), (a.destination, a.received)).fetchone()
         if got():
             return 0
-        if not conn.execute(sql.format("json_extract(detail, '$.destination')"), (a.destination,)).fetchone():
+        if not conn.execute(sql.format(""), (a.destination,)).fetchone():
             return 4
         deadline = time.monotonic() + a.wait
         while time.monotonic() < deadline:

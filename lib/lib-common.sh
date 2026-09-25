@@ -3257,20 +3257,19 @@ _PANE_RECEIPT_WAIT_DEFAULT=10
 # pane only: a busy one queues the prompt, whose receipt lands when the turn
 # ends, if at all.
 pane_await_receipt() {
-    local socket="$1" session="$2" msg="$3" rc=0 fmt='{"session":"%s","msg_id":"%s","reason":"%s"}'
+    local socket="$1" session="$2" msg="$3" rc=0 data
     local wait="${PANE_RECEIPT_WAIT_S:-$_PANE_RECEIPT_WAIT_DEFAULT}"
     [ "$wait" != 0 ] || return 0
     local ask=(python3 -S -E "$_LIB_COMMON_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}"
         --received "$msg" --destination "$session" --wait "$wait")
     "${ask[@]}" || rc=$?
     [ "$rc" -eq 1 ] || return 0
-    # shellcheck disable=SC2059  # fmt is the constant above
-    emit_fleet_event send_retry dispatch "$(printf "$fmt" "$(json_escape "$session")" "$msg" no-receipt)"
+    printf -v data '{"session":"%s","msg_id":"%s","reason":"no-receipt"}' "$(json_escape "$session")" "$msg"
+    emit_fleet_event send_retry dispatch "$data"
     bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
     rc=0; "${ask[@]}" || rc=$?
     [ "$rc" -eq 1 ] || return 0
-    # shellcheck disable=SC2059
-    emit_fleet_event send_miss dispatch "$(printf "$fmt" "$(json_escape "$session")" "$msg" no-receipt-after-enter)"
+    emit_fleet_event send_miss dispatch "$data"
     printf 'pane_send: no receipt from %s for %s after one more Enter -- the payload may be held unsubmitted in its box\n' "$session" "$msg" >&2
     return 1
 }

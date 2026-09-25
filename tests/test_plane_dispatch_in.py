@@ -330,32 +330,35 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
     the REAL hook on the held prompt, as UserPromptSubmit would -- and the REAL
     plane-lookup.py reads what that hook wrote."""
     root = _root(tmp_path)
-    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="1")
+    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3")
     _, safe, _ = _wire_proof("set +H; " + BODY)
     # An earlier dispatch was received, so this recipient's hook is armed.
     assert _run(_hookjson(_arrival(safe), ensure_ascii=False), env).returncode == 0
     prog = ('. "$LIB/lib-common.sh"; set +e; '
-            'bot_tmux() { echo "$*" >> "$SENT"; [ "$TUI" = submits ] || return 0;'
+            'bot_tmux() { echo "$*"; [ "$TUI" = submits ] || return 0;'
             ' printf %s "$PROMPT" | bash "$LIB/plane-dispatch-in.sh"; }; '
-            'pane_await_receipt sock "$BOT_ID" "$MSG"')
+            'pane_await_receipt sock "${DEST:-$BOT_ID}" "$MSG"')
 
-    def gate(msgid, tui):
-        sent = tmp_path / f"keys-{msgid}"
-        sent.touch()
+    def gate(msgid, tui, dest=BOT):   # -> (rc, the keys the stub TUI was sent, stderr)
         r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=120,
-                           env={**env, "LIB": str(LIB), "SENT": str(sent), "TUI": tui, "MSG": msgid,
+                           env={**env, "LIB": str(LIB), "TUI": tui, "MSG": msgid, "DEST": dest,
                                 "PROMPT": _hookjson(_arrival(safe, msgid), ensure_ascii=False)})
-        return r.returncode, sent.read_text().splitlines(), r.stderr
+        return r.returncode, r.stdout.splitlines(), r.stderr
 
     held, stuck = "msg_" + "a" * 32, "msg_" + "b" * 32
     assert gate(MSGID, "submits")[:2] == (0, [])        # received already: no extra Enter
     assert gate(held, "submits")[:2] == (0, [f"sock send-keys -t {BOT} Enter"])
+    # A prompt elsewhere that merely quotes the trailer files a receipt under
+    # ANOTHER bot (fold F3): it must not read as this one's.
+    assert _run(_hookjson(_arrival(safe, stuck), ensure_ascii=False), {**env, "BOT_ID": "gilfoyle"}).returncode == 0
     rc, keys, err = gate(stuck, "holds")
     assert (rc, len(keys)) == (1, 1) and f"no receipt from {BOT}" in err
     assert [tuple(r) for r in _rows(root, (
         "SELECT event, json_extract(detail, '$.data.msg_id') FROM events"
         " WHERE kind = 'system' AND event IN ('send_retry', 'send_miss') ORDER BY ingest_seq"))] \
         == [("send_retry", held), ("send_retry", stuck), ("send_miss", stuck)]
+    # A recipient that never recorded a receipt has no hook armed: no verdict, nothing pressed.
+    assert gate(stuck, "holds", dest="dinesh")[:2] == (0, [])
 
 
 def _pasted(text: str, at: int) -> str:
