@@ -78,6 +78,26 @@ case "${_SUPERVISOR_LIB_DIR:-}" in
         ;;
 esac
 
+# svc_bot_unit_owned_by <unit-file> <bot-dir>
+# A label suffix is only a candidate, never ownership (#1811). Missing or
+# unreadable ownership preserves the installed unit. The reader is stdlib-only
+# and reads WorkingDirectory; no unit content is sourced or executed.
+svc_bot_unit_owned_by() {
+    local unit="${1:?unit file required}" bot_dir="${2:?bot directory required}" rc=0 output=""
+    if command -v python3 >/dev/null 2>&1; then
+        output="$(python3 "$_SUPERVISOR_LIB_DIR/bot-unit-owner.py" "$unit" "$bot_dir" 2>&1)" || rc=$?
+        # The reader has no output protocol. A traceback from a failed reader
+        # must not be mistaken for its rc 1 (a known foreign owner).
+        if [ -z "$output" ]; then
+            case "$rc" in
+                0|1) return "$rc" ;;
+            esac
+        fi
+    fi
+    printf 'unit ownership unknown; preserving %s (reader unavailable or unsupported unit)\n' "$unit" >&2
+    return 3
+}
+
 # svc_unit_name <bot_dir>
 # The shared label resolver. svc_is_registered and svc_state build on it;
 # svc_kick and svc_disenroll read BOT_SERVICE inline, as the code they were
