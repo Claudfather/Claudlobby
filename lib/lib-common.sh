@@ -4648,11 +4648,8 @@ service_is_starting() {
 # fetch) and still reads as a boot. The second is never a boot in flight: it is
 # systemd starting over a start that has already failed twice (#1769).
 _CRASH_LOOP_RESTARTS=2
-# Where keepalive leaves the count its own restart wipes (crash_loop_carry).
-# Under data/ (bot-owned, never regenerated) and not a name data-sweep ages.
-_CRASH_LOOP_CARRY_REL="data/.restart-carry"
 
-# service_is_crash_looping <bot_service> <bot_dir>
+# service_is_crash_looping <bot_service>
 # rc 0 iff the unit is failing its start over and over: it is in a START state
 # (exactly the ones service_is_starting accepts: activating/*, active/running)
 # AND systemd has automatically restarted it at least _CRASH_LOOP_RESTARTS
@@ -4678,27 +4675,26 @@ _CRASH_LOOP_CARRY_REL="data/.restart-carry"
 # (RemainAfterExit=yes holds active/exited until someone restarts it, zeroing
 # it). So whatever NRestarts reads while the unit is STARTING belongs to the
 # current failing streak, and no first-sighting marker is needed to scope it.
-# The one thing that breaks that is keepalive's own restart, which zeroes the
-# counter mid-streak (measured: 3 -> 0); crash_loop_carry records what it wipes
-# and it is added back here.
+# keepalive's own restart zeroes it mid-streak too (measured: 3 -> 0). That is
+# accepted rather than carried over (#1801): the loop reads as a loop again two
+# attempts later, inside one pulse.
 #
-# Sets for the caller: CRASH_LOOP_RESTARTS (carry included), CRASH_LOOP_STATE
+# Sets for the caller: CRASH_LOOP_RESTARTS (NRestarts), CRASH_LOOP_STATE
 # (ActiveState/SubState) and CRASH_LOOP_VERDICT, one of:
 #   looping   rc 0.
 #   starting  a start state below the threshold: a boot, as far as this knows.
 #   over      settled (active/exited), stopped (inactive/*) or given up
-#             (failed/*, which is service_down's): no loop NOW; carry cleared.
+#             (failed/*, which is service_down's): no loop NOW.
 #   none      cannot judge. deactivating/* is both the stop-post between two
 #             failed attempts AND the deliberate stop of a settled unit whose
 #             counter is stale; an unreadable counter is no count. Claims
-#             nothing and erases nothing.
+#             nothing.
 #   unknown   not Linux. launchd has its own throttle and no cheap counter, so
 #             this never claims a loop there: sound in one direction only, like
 #             service_is_starting.
 service_is_crash_looping() {
-    local svc="${1:?Usage: service_is_crash_looping <bot_service> <bot_dir>}"
-    local carry_file="${2:?Usage: service_is_crash_looping <bot_service> <bot_dir>}/$_CRASH_LOOP_CARRY_REL"
-    local nr carry=0
+    local svc="${1:?Usage: service_is_crash_looping <bot_service>}"
+    local nr
     CRASH_LOOP_RESTARTS=0 CRASH_LOOP_STATE="" CRASH_LOOP_VERDICT=unknown
     [ "$_OS" = "Linux" ] || return 1
 
@@ -4707,7 +4703,6 @@ service_is_crash_looping() {
     case "$CRASH_LOOP_STATE" in
     activating/* | active/running) ;;
     active/exited | inactive/* | failed/*)
-        rm -f "$carry_file" 2>/dev/null || true
         CRASH_LOOP_VERDICT=over
         return 1
         ;;
@@ -4723,53 +4718,13 @@ service_is_crash_looping() {
         return 1
         ;;
     esac
-    # `|| true`: a carry written without a trailing newline makes read return 1
-    # at EOF with the value already set, and under the caller's `set -e` that
-    # would end the watchdog at the one moment it matters.
-    if [ -f "$carry_file" ]; then read -r carry _ <"$carry_file" || true; fi
-    case "$carry" in "" | *[!0-9]*) carry=0 ;; esac
-    CRASH_LOOP_RESTARTS=$((10#$nr + 10#$carry))
+    CRASH_LOOP_RESTARTS=$((10#$nr))
     if [ "$CRASH_LOOP_RESTARTS" -ge "$_CRASH_LOOP_RESTARTS" ]; then
         CRASH_LOOP_VERDICT=looping
         return 0
     fi
     CRASH_LOOP_VERDICT=starting
     return 1
-}
-
-# crash_loop_carry <bot_service> <bot_dir>
-# Call IMMEDIATELY BEFORE keepalive's own restart of the unit, which zeroes
-# NRestarts: records the count that restart is about to wipe, so the streak
-# service_is_crash_looping counts survives it. Only a restart that INTERRUPTS a
-# start streak carries: a start state (a phase aged past the boot grace) or
-# deactivating/* (between two failed attempts). Restarting a settled, stopped
-# or given-up unit is not part of any streak, so the carry is cleared and a
-# stale counter cannot seed the next boot. Never fails: it must not cost the
-# restart it precedes.
-crash_loop_carry() {
-    local svc="${1:?Usage: crash_loop_carry <bot_service> <bot_dir>}"
-    local carry_file="${2:?Usage: crash_loop_carry <bot_service> <bot_dir>}/$_CRASH_LOOP_CARRY_REL"
-    local nr carry=0
-    [ "$_OS" = "Linux" ] || return 0
-
-    _unit_start_facts "$svc"
-    case "$_USF_ACTIVE/$_USF_SUB" in
-    activating/* | active/running | deactivating/*) ;;
-    *)
-        rm -f "$carry_file" 2>/dev/null || true
-        return 0
-        ;;
-    esac
-    nr=$_USF_NRESTARTS
-    case "$nr" in "" | *[!0-9]* | 0) return 0 ;; esac
-    if [ -f "$carry_file" ]; then read -r carry _ <"$carry_file" || true; fi
-    case "$carry" in "" | *[!0-9]*) carry=0 ;; esac
-    if printf '%s\n' "$((10#$nr + 10#$carry))" >"$carry_file.$$" 2>/dev/null; then
-        mv -f "$carry_file.$$" "$carry_file" 2>/dev/null || rm -f "$carry_file.$$" 2>/dev/null || true
-    else
-        rm -f "$carry_file.$$" 2>/dev/null || true
-    fi
-    return 0
 }
 
 # systemd_user_bus_available

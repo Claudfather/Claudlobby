@@ -401,7 +401,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     _svc_crashloop=0
     _svc_loop_verdict=""
     if [ -n "$BOT_SERVICE" ]; then
-        service_is_crash_looping "$BOT_SERVICE" "$bot_dir" && _svc_crashloop=1
+        service_is_crash_looping "$BOT_SERVICE" && _svc_crashloop=1
         _svc_loop_verdict=$CRASH_LOOP_VERDICT
     fi
     _svc_starting=0
@@ -971,7 +971,7 @@ _summary_tmp=$(safe_mktemp)
         # A crash loop is its own column value too (#1769), judged first for
         # the main loop's reason: without it this block printed "starting" for
         # a unit systemd had already restarted two thousand times.
-        if [ -n "$_s_svc" ] && service_is_crash_looping "$_s_svc" "$_s_bot_dir"; then
+        if [ -n "$_s_svc" ] && service_is_crash_looping "$_s_svc"; then
             [ "$_s_session_status" = "DOWN" ] && _s_session_status="crash-loop"
             _s_svc_status="crash-loop"
         elif [ -n "$_s_svc" ] && service_is_starting "$_s_svc"; then

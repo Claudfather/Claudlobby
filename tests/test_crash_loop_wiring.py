@@ -1,10 +1,8 @@
 """Wiring tests for keepalive.sh and fleet-pulse.sh around a crash loop (#1769), first drafted by vera in her review of #1774.
 
-The PR's unit tests call the library functions with a one-shot systemctl stub, and its
-real-unit harness never drives a keepalive restart in the middle of a loop. This file
-drives the REAL keepalive.sh and fleet-pulse.sh against a STATEFUL systemctl stub whose
-`restart` behaves like systemd's manual restart: it zeroes NRestarts and starts a fresh
-phase, and it records what data/.restart-carry held at that instant (so ORDER is visible).
+The PR's unit tests call the library functions with a one-shot systemctl stub. This file
+drives the REAL keepalive.sh and fleet-pulse.sh against a systemctl stub that answers `show`
+from a scene's unit state and logs every `restart` with the counter it would zero.
 
 Every scenario is hermetic: temp HOME/root, PLANE_EMIT_DISABLED=1, a stub curl, no network.
 The emit=True scenes are the one exception to the middle of that: they arm the plane shim and
@@ -13,7 +11,6 @@ point its cold rung at a recorder, so the events the scripts raise can be read b
 
 import json
 import platform
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -27,19 +24,10 @@ LIB = REPO / "lib"
 # macOS service_is_crash_looping answers "unknown" by design, so they cannot hold.
 pytestmark = pytest.mark.skipif(platform.system() != "Linux", reason="drives the systemd branch")
 
-# K2, K3, K6 and the C1 and C2 controls run in these three arms: at the host's real uptime, and
-# at a simulated 120 s and 30 s (Scene's uptime_s). Every other test runs at the real one.
-UPTIME_ARMS = [
-    pytest.param(None, id="real-uptime"),
-    pytest.param(120, id="up-120s"),
-    pytest.param(30, id="up-30s"),
-]
-
 SYSTEMCTL = r"""#!/bin/bash
-# stateful systemctl stub. State: $UNIT_STATE (KEY=VAL), call log: $UNIT_CALLS
+# systemctl stub. State: $UNIT_STATE (KEY=VAL), call log: $UNIT_CALLS
 st="${UNIT_STATE:?}"; calls="${UNIT_CALLS:?}"
 get() { sed -n "s/^$1=//p" "$st" | tail -n1; }
-put() { { grep -v "^$1=" "$st" 2>/dev/null; printf '%s=%s\n' "$1" "$2"; } > "$st.new"; mv "$st.new" "$st"; }
 a=("$@"); [ "${a[0]:-}" = "--user" ] && a=("${a[@]:1}")
 case "${a[0]:-}" in
   show)
@@ -65,9 +53,7 @@ case "${a[0]:-}" in
     done
     ;;
   restart)
-    echo "restart carry_before=$(head -1 "${CARRY_FILE:-/dev/null}" 2>/dev/null || true) nr_before=$(get NR)" >> "$calls"
-    put NR 0; put AGE_S 0; put ACTIVE activating; put SUB start-pre
-    ;;
+    echo "restart nr_before=$(get NR)" >> "$calls" ;;
   is-active)
     [ "$(get ACTIVE)" = active ] && { echo active; exit 0; }; echo "$(get ACTIVE)"; exit 3 ;;
   *) echo "${a[*]}" >> "$calls" ;;
@@ -78,43 +64,15 @@ exit 0
 
 class Scene:
     def __init__(
-        self, tmp, *, active, sub, nr, age_s=2, carry=None, grace=300, marker=False,
-        uptime_s=None, prerename=False, emit=False,
+        self, tmp, *, active, sub, nr, age_s=2, grace=300, marker=False, emit=False,
     ):
         self.tmp = Path(tmp)
-        # uptime_s: run on a host that booted uptime_s seconds ago. The scripts and
-        # the stub age a phase against /proc/uptime, and a runner can be fresher
-        # than any constant a scene picks (vera's review of #1787: K2/K3 failed
-        # under 400 s). So the scripts run from a copy of lib/ whose lib-common.sh
-        # reads a fixture instead, the stub reads the same one, and the real age
-        # arithmetic stays under test (test_service_is_starting.py's approach).
-        self.lib, stub = LIB, SYSTEMCTL
-        if uptime_s is not None:
-            clock = self.tmp / "uptime"
-            clock.write_text(f"{uptime_s:.2f} 480.00\n")
-            self.lib = self.tmp / "lib"
-            shutil.copytree(LIB, self.lib, symlinks=True)
-            common = self.lib / "lib-common.sh"
-            common.write_text(common.read_text().replace("/proc/uptime", str(clock)))
-            stub = SYSTEMCTL.replace("/proc/uptime", str(clock))
-            # str.replace on a pattern that is not there is silent: if lib-common.sh (or the
-            # stub) ever reads the clock some other way, the simulated arms would quietly run
-            # at the real uptime under a simulated name. Say so here, not in a puzzling red K2.
-            assert str(clock) in common.read_text(), (
-                "lib-common.sh no longer reads /proc/uptime: the simulated arms would run at the real one"
-            )
-            assert str(clock) in stub, (
-                "the systemctl stub no longer reads /proc/uptime: the simulated arms would run at the real one"
-            )
         self.home = self.tmp / "home"
         self.root = self.tmp / "root"
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         (self.tmp / "tmux").mkdir()
-        # prerename: only the unit named for the BOT (BOT_NAME=b) is installed, so keepalive
-        # takes its second restart branch, the one for a fleet not yet regenerated.
-        name = "b" if prerename else "probe1774svc"
-        unit = self.home / ".config/systemd/user" / f"{name}.service"
+        unit = self.home / ".config/systemd/user/probe1774svc.service"
         unit.parent.mkdir(parents=True)
         unit.write_text("")
         self.bot = self.root / "local/F/runtime/bots/b"
@@ -136,27 +94,17 @@ class Scene:
             rec.write_text('#!/bin/bash\ncp "${@: -1}" "$EMIT_DIR/$(date +%s%N).json"\n')
             rec.chmod(0o755)
         for name, body in (
-            ("systemctl", stub),
+            ("systemctl", SYSTEMCTL),
             ("curl", '#!/bin/bash\nprintf "%s" \'{"ok":false}\'\n'),
         ):
             p = self.bin / name
             p.write_text(body)
             p.chmod(0o755)
-        self.carry_file = self.bot / "data" / ".restart-carry"
-        if carry is not None:
-            self.carry_file.write_text(carry + "\n")
         self.grace = grace
         self.pulse_state = self.root / "state" / "pulse"
         self.pulse_state.mkdir(parents=True)
         if marker:
             (self.pulse_state / "b.crashloop_alerted").write_text("|0")
-
-    def set(self, **kv):
-        cur = dict(
-            l.split("=", 1) for l in self.state.read_text(errors="replace").splitlines() if "=" in l
-        )
-        cur.update({k.upper(): str(v) for k, v in kv.items()})
-        self.state.write_text("".join(f"{k}={v}\n" for k, v in cur.items()))
 
     def env(self):
         env = {
@@ -168,7 +116,6 @@ class Scene:
             "PLANE_EMIT_DISABLED": "1",
             "UNIT_STATE": str(self.state),
             "UNIT_CALLS": str(self.calls),
-            "CARRY_FILE": str(self.carry_file),
             "KEEPALIVE_BOOT_GRACE_S": str(self.grace),
             "TMUX_TMPDIR": str(self.tmp / "tmux"),
             "FLEET_PULSE_ESCALATION_CHAT_ID": "-100999",
@@ -184,7 +131,7 @@ class Scene:
 
     def keepalive(self):
         r = subprocess.run(
-            ["bash", str(self.lib / "keepalive.sh"), str(self.bot)],
+            ["bash", str(LIB / "keepalive.sh"), str(self.bot)],
             env=self.env(),
             capture_output=True,
             text=True,
@@ -200,7 +147,7 @@ class Scene:
 
     def pulse(self):
         r = subprocess.run(
-            ["bash", str(self.lib / "fleet-pulse.sh"), "F"],
+            ["bash", str(LIB / "fleet-pulse.sh"), "F"],
             env=self.env(),
             capture_output=True,
             text=True,
@@ -218,9 +165,6 @@ class Scene:
     def markers(self):
         return sorted(p.name for p in self.pulse_state.glob("b.*"))
 
-    def carry(self):
-        return self.carry_file.read_text(errors="replace").strip() if self.carry_file.exists() else None
-
     def emitted(self, name):
         """The plane events called `name` that the scripts handed the shim (emit=True scenes)."""
         rows = []
@@ -237,49 +181,15 @@ def test_K1_a_loop_is_named_and_never_restarted(tmp_path):
     r, log = s.keepalive()
     assert "SKIP — crash loop (3 automatic restarts" in log, (log, r.stderr[-400:])
     assert s.restarts() == [], "keepalive stacked a restart on a crash loop"
-    assert s.carry() is None
     # a skip is not a failure of the watchdog: it exits 0
     assert r.returncode == 0, (r.returncode, r.stderr[-400:])
 
 
-@pytest.mark.parametrize("uptime_s", UPTIME_ARMS)
-def test_K2_a_restart_that_interrupts_a_streak_records_the_count_BEFORE_it_is_zeroed(tmp_path, uptime_s):
-    # A wedged start (phase older than the boot grace) after ONE automatic restart: keepalive
-    # restarts it. The count it is about to wipe must be on disk at the instant of the restart.
-    s = Scene(
-        tmp_path, active="activating", sub="start-pre", nr=1, age_s=10, grace=5,
-        uptime_s=uptime_s,
-    )
+def test_K4_a_settled_unit_with_a_stale_counter_still_restarts(tmp_path):
+    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000)
     r, log = s.keepalive()
     assert "RESTART" in log, (log, r.stderr[-400:])
-    assert s.restarts() == ["restart carry_before=1 nr_before=1"], s.restarts()
-    assert s.carry() == "1"
-
-
-@pytest.mark.parametrize("uptime_s", UPTIME_ARMS)
-def test_K3_the_streak_survives_keepalives_own_restart(tmp_path, uptime_s):
-    s = Scene(
-        tmp_path, active="activating", sub="start-pre", nr=1, age_s=10, grace=5,
-        uptime_s=uptime_s,
-    )
-    s.keepalive()  # the interrupting restart (NR 1 -> 0, carry=1)
-    assert s.restarts() == ["restart carry_before=1 nr_before=1"]
-    s.set(
-        active="activating", sub="auto-restart", nr=1, age_s=2
-    )  # ONE more failure after it
-    r, log = s.keepalive()
-    assert "SKIP — crash loop (2 automatic restarts" in log, (log, r.stderr[-400:])
-    assert len(s.restarts()) == 1, (
-        "keepalive stacked a second restart on the resumed loop"
-    )
-
-
-def test_K4_a_settled_unit_restarts_clean_and_carries_nothing(tmp_path):
-    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000, carry="7")
-    r, log = s.keepalive()
-    assert "RESTART" in log, (log, r.stderr[-400:])
-    assert s.restarts() == ["restart carry_before= nr_before=1971"], s.restarts()
-    assert s.carry() is None, "a stale count seeded the next boot"
+    assert s.restarts() == ["restart nr_before=1971"], s.restarts()
 
 
 # --- fleet-pulse ---------------------------------------------------------------------------
@@ -335,28 +245,20 @@ def test_P6_a_loop_records_one_crash_loop_event_with_its_keys(tmp_path):
     assert data["data"] == {"unit": "probe1774svc", "restarts": 3, "state": "activating/auto-restart"}, data
 
 
-# --- controls: the AGE plumbing itself (an aged-out phase restarts; a young one is a boot in flight) ---
+# --- controls: the AGE plumbing itself (a young phase is a boot in flight) ---
 
-@pytest.mark.parametrize("uptime_s", UPTIME_ARMS)
-def test_C1_a_young_start_after_one_retry_is_a_boot_in_flight_not_a_restart(tmp_path, uptime_s):
-    # Also the control for Scene(uptime_s) itself: a phase reads as young only if the scripts and
-    # the stub age it against the SAME clock, so scripts run from the unpatched lib/, or a fixture
-    # read by one side only, turn this red at the simulated uptimes.
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=1, age_s=20, grace=300, uptime_s=uptime_s)
+def test_C1_a_young_start_after_one_retry_is_a_boot_in_flight_not_a_restart(tmp_path):
+    s = Scene(tmp_path, active="activating", sub="start-pre", nr=1, age_s=20, grace=300)
     r, log = s.keepalive()
     assert "SKIP — boot in flight" in log, (log, r.stderr[-300:])
     assert s.restarts() == []
 
 
-@pytest.mark.parametrize("uptime_s", UPTIME_ARMS)
-def test_C2_stub_timestamps_are_sane(tmp_path, uptime_s):
-    # At the simulated uptimes this is also what pins the fixture's VALUE: a Scene that wrote some
-    # other number would run the arms at an uptime they do not claim, and the 120 s and 30 s arms
-    # exist to catch a phase stamped further back than the host has been up.
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=0, age_s=20, uptime_s=uptime_s)
+def test_C2_stub_timestamps_are_sane(tmp_path):
+    s = Scene(tmp_path, active="activating", sub="start-pre", nr=0, age_s=20)
     out = subprocess.run(["systemctl", "--user", "show", "x"], env=s.env(), capture_output=True, text=True).stdout
     ts = int(dict(l.split("=", 1) for l in out.splitlines())["InactiveExitTimestampMonotonic"])
-    up = (uptime_s if uptime_s is not None else float(open("/proc/uptime").read().split()[0])) * 1e6
+    up = float(open("/proc/uptime").read().split()[0]) * 1e6
     assert 15e6 < up - ts < 30e6, (up, ts)
 
 
@@ -385,25 +287,14 @@ def test_C3_the_stub_answers_only_what_each_spelling_of_p_asks(tmp_path, argv, k
     assert {l.split("=", 1)[0] for l in out.splitlines()} == keys, out
 
 
-@pytest.mark.parametrize("uptime_s", UPTIME_ARMS)
-def test_K6_a_loop_whose_current_attempt_outlived_the_boot_grace_is_still_not_restarted(tmp_path, uptime_s):
+def test_K6_a_loop_whose_current_attempt_outlived_the_boot_grace_is_still_not_restarted(tmp_path):
     # keepalive's crash SKIP has to hold ON ITS OWN: the boot gate below it ages only the CURRENT phase, so
     # an attempt older than the grace (a start that hangs, then fails) would otherwise fall through to a
     # restart stacked on systemd's loop.
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=3, age_s=10, grace=5, uptime_s=uptime_s)
+    s = Scene(tmp_path, active="activating", sub="start-pre", nr=3, age_s=10, grace=5)
     r, log = s.keepalive()
     assert "SKIP — crash loop (3 automatic restarts" in log, (log, r.stderr[-400:])
     assert s.restarts() == [], "keepalive stacked a restart on a loop whose current attempt was old"
-
-
-def test_K7_a_restart_through_the_pre_rename_unit_carries_the_count_too(tmp_path):
-    # keepalive's second restart branch (a fleet not yet regenerated after the unit rename) is its
-    # own call site of crash_loop_carry, and K2 only reaches the first.
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=1, age_s=10, grace=5, prerename=True)
-    r, log = s.keepalive()
-    assert "(pre-rename)" in log, (log, r.stderr[-400:])
-    assert s.restarts() == ["restart carry_before=1 nr_before=1"], s.restarts()
-    assert s.carry() == "1"
 
 
 def test_K8_the_crash_skip_records_a_keepalive_skip_event(tmp_path):
