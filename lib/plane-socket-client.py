@@ -15,7 +15,8 @@ exit:   0 ok (committed/duplicate) — RECORDED, in the plane, queryable now
         6 spooled (#1711): accepted and durable on disk, NOT in the plane and
           invisible to every reader until a drain. A verdict, not a fallback
           trigger — the batch is already written, so replaying it through the
-          cold rung would only spool it a second time.
+          cold rung would only spool it a second time. Also the exit for a
+          cooldown batch --stage-to left for the daemon to replay (#1657).
         2 contract violation / bad request   (verdicts — the shim must NOT
         3 total failure                       fall back on these: the CLI
                                               would only repeat them)
@@ -34,6 +35,7 @@ import json
 import os
 import socket
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -58,7 +60,7 @@ VERDICT_EXITS = {"contract_violation": 2, "bad_request": 2,
 
 
 def _parse_argv(argv: list):
-    """--socket S --finalize-to F [--timeout T] [--finalize-only] — hand-rolled
+    """--socket S --finalize-to F [--timeout T] [--finalize-only [--stage-to D]] — hand-rolled
     (see header). Owns EVERY refusal message and returns None after printing
     one: the old split (parser printed some refusals, main re-diagnosed with a
     generic line) stacked two errors and misattributed unknown-arg failures."""
@@ -67,6 +69,7 @@ def _parse_argv(argv: list):
                     # so 1s is 5x headroom; anything slower is a wedge and the
                     # fallback rung (+ the shim's cooldown marker) is the fix
     finalize_only = False
+    stage_to = ""   # empty: this caller did not opt in to staging (#1657)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -76,6 +79,8 @@ def _parse_argv(argv: list):
             fin = argv[i + 1]; i += 2
         elif a == "--finalize-only":
             finalize_only = True; i += 1
+        elif a == "--stage-to" and i + 1 < len(argv):
+            stage_to = argv[i + 1]; i += 2
         elif a == "--timeout" and i + 1 < len(argv):
             try:
                 timeout = float(argv[i + 1])
@@ -95,7 +100,45 @@ def _parse_argv(argv: list):
         print("plane-socket-client: --socket and --finalize-to are required",
               file=sys.stderr)
         return None
-    return sock, fin, timeout, finalize_only
+    return sock, fin, timeout, finalize_only, stage_to
+
+
+def _stage(stage_dir: str, sock_path: str, payload: str, lead: str) -> bool:
+    """#1657: leave a cooldown batch for the daemon to replay, instead of the
+    cold CLI rung, whose package-import spawn per event on every bot is what
+    kept a loaded host pegged and the daemon missing its deadline. Only where
+    something WILL replay it: the dir exists (a daemon that replays staged
+    batches creates it at startup, so an older daemon still running after a
+    pull never gets one) and a listener takes the connect. A stale socket or
+    none refuses it, and the caller keeps the cold rung."""
+    if not os.path.isdir(stage_dir):
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.setblocking(False)
+    try:
+        probe.connect(sock_path)
+    except BlockingIOError:
+        pass            # a full backlog is still a listener
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    tmp = os.path.join(stage_dir, f".{lead}.tmp")
+    try:
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(payload + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, os.path.join(stage_dir, f"{time.time_ns()}-{lead}.batch"))
+        dfd = os.open(stage_dir, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        return False    # the cold rung still records it
+    return True
 
 
 def _finalize(events: list) -> list:
@@ -114,7 +157,7 @@ def main() -> int:
     parsed = _parse_argv(sys.argv[1:])
     if parsed is None:  # the parser already printed the one refusal
         return 2
-    sock_path, finalize_to, timeout, finalize_only = parsed
+    sock_path, finalize_to, timeout, finalize_only, stage_to = parsed
 
     try:
         parsed = json.loads(sys.stdin.read())
@@ -134,7 +177,13 @@ def main() -> int:
 
     if finalize_only:
         # The shim's wedge-cooldown path: mint + persist the idempotent batch
-        # for the CLI rung, no socket attempt at all.
+        # for the CLI rung, no socket attempt at all -- unless the caller
+        # opted in and a daemon will replay it from disk (#1657).
+        if stage_to and _stage(stage_to, sock_path, payload, finalized[0]["event_id"]):
+            print("plane-socket-client: cooldown -- batch STAGED for the daemon to"
+                  " replay: durable on disk, NOT in the plane until it does",
+                  file=sys.stderr)
+            return 6
         return 5
 
     # HARD TOTAL deadline, not per-operation (#1372 review F5): a live-but-

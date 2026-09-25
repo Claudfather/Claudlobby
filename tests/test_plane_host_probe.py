@@ -235,3 +235,31 @@ def test_empty_hostname_never_poisons_the_whole_batch(tmp_path):
     assert _run(root, env).returncode == 0
     s = _samples(root)
     assert s["host.job_ran"]["subject_uid"].startswith("host_")  # batch landed
+
+
+def test_a_cooldown_probe_stages_its_samples_for_the_daemon(tmp_path):
+    """#1657: the host probe opts in too, so during a socket cooldown its
+    per-minute batch is staged for the daemon instead of spawning the cold
+    CLI. The listener stands in for a live daemon."""
+    import shutil
+    import socket
+    import tempfile
+    import time
+
+    root, env = _rig(tmp_path)
+    plane = root / "state" / "plane"
+    (plane / "staged").mkdir()
+    (plane / ".socket-wedged").write_text(f"{int(time.time())}\n")
+    sdir = Path(tempfile.mkdtemp(prefix="hp", dir="/tmp"))
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(sdir / "s"))
+    listener.listen(64)
+    env.update(PLANE_SOCKET=str(sdir / "s"), PLANE_EMIT_CLI="false")
+    try:
+        _run(root, env)
+        batches = list((plane / "staged").glob("*.batch"))
+        assert len(batches) == 1, "the probe took the cold CLI during a cooldown"
+        assert "host.job_ran" in batches[0].read_text()
+    finally:
+        listener.close()
+        shutil.rmtree(sdir, ignore_errors=True)

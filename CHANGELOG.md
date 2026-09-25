@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a socket cooldown no longer spawns the cold CLI for fire-and-forget emitters (#1657)
+
+Under load every cooldown emission spawned the package-importing CLI, and
+those spawns kept the host's CPU pegged, so the daemon kept missing its 1 s
+reply limit and the cooldown re-armed itself. The fleet-event door,
+keepalive's heartbeat and the host probe now stage their batch in
+`state/plane/staged/` (rc 6) and the daemon replays it through the same
+`emit_batch()` as a socket request, so the capture policy still applies. A
+host changes nothing until its daemon restarts on the new code: the daemon
+creates that directory, and without it the cold CLI runs as before.
+
 ### Changed — the alert tests keep one test per failure that happened (#1801)
 
 306 test lines go. No behaviour changes: the session-token rule is stated once,
