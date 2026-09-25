@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — diff reports skill and mount link topology (#909)
+
+The bot preview now reports missing, retargeted and stale skill/mount links,
+directory replacements, and preserved regular-file obstacles using the same
+ordered selection plans as generation. Effective skills, overlay precedence,
+folder expansion and existing writer behavior are preserved. Nested mount names
+retain their full identity. Linked runtime ancestors, unreadable metadata and
+skill sources dependent on cleanup are reported as unavailable.
+
+Coverage names the remaining uninspected artifacts and distinguishes link
+topology from target contents. Skills and mounts are read on demand; a matching
+link does not prove unchanged source bytes, and generation can immediately
+change links. This is a read-only preview extension, not complete coverage of
+every generate effect; #909 remains open.
+
 ### Fixed — the harness's boot probe raced its own spawner on a loaded host (#1778)
 
 Each phase of the `#1002` probe unit now ends when `lib/validate-bot-change.sh`

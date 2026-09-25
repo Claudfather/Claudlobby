@@ -1537,39 +1537,24 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
     Collisions (two source dirs with the same leaf) are first-wins; the
     second is logged and skipped.
     """
-    bot_skills_dir = paths.bot_runtime(bot.bot_id) / ".claude" / "skills"
-    if bot_skills_dir.exists():
-        for entry in bot_skills_dir.iterdir():
-            if entry.is_symlink():
-                entry.unlink()
-            elif entry.is_dir():
-                shutil.rmtree(entry)
-    bot_skills_dir.mkdir(parents=True, exist_ok=True)
+    from .link_plan import skill_link_plan
 
-    linked: dict[str, Path] = {}  # leaf name → source dir, for collision detection
+    _apply_link_plan(skill_link_plan(paths, bot.bot_id, skills), log, parents=True)
 
-    def _add(leaf: str, src: Path) -> None:
-        if leaf in linked:
-            log(f"  skill '{leaf}' already linked from {linked[leaf]} — skipping {src}")
-            return
-        linked[leaf] = src
-        (bot_skills_dir / leaf).symlink_to(src.resolve())
 
-    for skill in skills:
-        if skill.endswith("/"):
-            dir_name = skill.rstrip("/")
-            collected = paths.expand_skill_folder(dir_name)
-            if not collected:
-                log(f"  skill folder '{skill}' empty or missing — skipped")
-                continue
-            for leaf, src in collected.items():
-                _add(leaf, src)
-        else:
-            src = paths.find_library_dir("skills", skill)
-            if src is None:
-                log(f"  skill '{skill}' missing — skipped")
-                continue
-            _add(src.name, src)
+def _apply_link_plan(operations, log, *, parents: bool = False) -> None:
+    """Apply a link door's lazy plan; diff consumes it without calling this."""
+    for operation in operations:
+        if operation.message:
+            log(operation.message)
+        if operation.kind == "unlink":
+            operation.path.unlink()
+        elif operation.kind == "rmtree":
+            shutil.rmtree(operation.path)
+        elif operation.kind == "mkdir":
+            operation.path.mkdir(parents=parents, exist_ok=True)
+        elif operation.kind == "create":
+            operation.path.symlink_to(operation.target)
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -1579,41 +1564,9 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
     Symlinks are placed under bot_dir/mounts/<name>.
     Stale symlinks (removed from config) are cleaned up.
     """
-    mounts_dir = bot_dir / "mounts"
-    mounts_dir.mkdir(exist_ok=True)
+    from .link_plan import mount_link_plan
 
-    # Clean stale symlinks
-    for entry in mounts_dir.iterdir():
-        if entry.is_symlink() and entry.name not in bot.mounts:
-            entry.unlink()
-
-    for name, target in bot.mounts.items():
-        target_path = Path(target).expanduser()
-        try:
-            resolved = target_path.resolve()
-            if not resolved.is_relative_to(Path.home()) and not resolved.is_relative_to(
-                bot_dir
-            ):
-                log(
-                    f"  mount '{name}': target {target_path} escapes home and bot dir — skipping"
-                )
-                continue
-        except (ValueError, OSError):
-            log(f"  mount '{name}': could not resolve target {target_path} — skipping")
-            continue
-        link = mounts_dir / name
-        if link.is_symlink():
-            if link.resolve() == target_path.resolve():
-                continue  # already correct
-            link.unlink()
-        elif link.exists():
-            log(f"  mount '{name}': non-symlink already exists at {link} — skipping")
-            continue
-        if not target_path.exists():
-            log(
-                f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink"
-            )
-        link.symlink_to(target_path)
+    _apply_link_plan(mount_link_plan(bot.mounts, bot_dir), log)
 
 
 # ----------------------------------------------------------------------
