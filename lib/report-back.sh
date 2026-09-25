@@ -5,6 +5,11 @@
 # The manager bot's tmux session receives a structured message it can parse.
 # Format: [BOTREPORT] <bot> | <status> | <summary> [| progress:<N>] [| pr:<url>] [| artifact:<url>]
 #
+# Delivery target: REPORTS_TO (composed from reports_to, else the team manager)
+# first, MANAGER_TMUX (the team manager / the manager marker) only as the
+# fallback. A report that would land in the sender's own pane is refused, rc 4,
+# nothing sent and nothing recorded (#1754).
+#
 # Options:
 #   --progress N      Progress percentage (0-100), added to BOTREPORT and ledger
 #   --artifact URL    Source artifact URL for findings provenance (repeatable)
@@ -38,10 +43,53 @@ STATUS="$2"
 SUMMARY="$3"
 shift 3
 
-MANAGER_SESSION="${MANAGER_TMUX:-claude-bot}"
-# The manager's private tmux server socket: prefer the composed field, else
-# reverse-look-up from its session name among the sibling bots.
-MANAGER_SOCKET="$(resolve_peer_socket "${MANAGER_TMUX_SOCKET:-}" "$MANAGER_SESSION")"
+# Where the report is DELIVERED (#1754). Two carriers, two facts:
+#   REPORTS_TO    -- the upward target the composer resolved from fleet.yaml
+#                    (the declared reports_to, else the team manager). THE
+#                    report-to fact.
+#   MANAGER_TMUX  -- the team manager for a worker, and for a manager ITS OWN
+#                    id (the bot_is_manager marker). Read only when no
+#                    REPORTS_TO reached this session (a bot.conf composed
+#                    before the field existed), so a worker keeps its target.
+# Before the split a manager resolved delivery from the marker, so every upward
+# report it sent landed in its OWN pane while the plane closed the row green;
+# the operator never saw it. An empty REPORTS_TO is absent, not a target.
+if [ -n "${REPORTS_TO:-}" ]; then
+    MANAGER_SESSION="$REPORTS_TO";                 _rb_sock_hint="${REPORTS_TO_SOCKET:-}"
+else
+    MANAGER_SESSION="${MANAGER_TMUX:-claude-bot}"; _rb_sock_hint="${MANAGER_TMUX_SOCKET:-}"
+fi
+# The two aliases the plane stores for this report. The sender is the
+# positional name (a hand caller may run with no BOT_ID exported); the
+# recipient carries the TARGET's fleet, not the sender's -- cross-fleet
+# managers are a supported shape (resolve_peer_socket's cross-fleet fallback),
+# and stamping the sender's fleet materialized a phantom party row on the
+# return leg of exactly the traffic dispatch-task's peer resolver exists for.
+SENDER_ALIAS="bot:${FLEET_NAME:-}/$BOT"
+RECIPIENT_FLEET="$(plane_peer_fleet "$MANAGER_SESSION" || true)"
+RECIPIENT_ALIAS="bot:${RECIPIENT_FLEET:-${FLEET_NAME:-}}/$MANAGER_SESSION"
+
+# A self-addressed report is REFUSED before anything is sent or recorded: the
+# send would land in this bot's own pane and the plane would close the row as
+# reported -- the silent-green failure that survived for a month. Nothing is
+# recorded on purpose (a row that closes on a report nobody received is the
+# defect, not a partial success) and the socket is not even resolved. The
+# invariant is stated on the ALIASES the plane stores, so it is enforced on
+# them -- fleet-aware, where a bare-name compare is not (#526) -- and a caller
+# driving the door on another bot's behalf (a harness, a manager) is not self.
+# rc 4 is this door's own code (1 usage, 2 bad flag value).
+if [ "$RECIPIENT_ALIAS" = "$SENDER_ALIAS" ]; then
+    printf 'report-back: REFUSED -- the delivery target %s is %s itself: this report would land in your own pane and the plane would record it as delivered.\n' "'$MANAGER_SESSION'" "'$BOT'" >&2
+    if [ -n "${REPORTS_TO:-}" ]; then
+        printf 'report-back: reports_to names this bot. Fix the declaration in fleet.yaml (bots.%s.reports_to) and regenerate.\n' "$BOT" >&2
+    else
+        printf 'report-back: no upward target is declared (no REPORTS_TO in bot.conf; MANAGER_TMUX is the manager marker, not an address). Declare reports_to: <bot> for %s in fleet.yaml and regenerate -- a cross-fleet bot is fine -- or deliver this to the human yourself (tg-post.sh / the Telegram reply tool). Nothing was sent and nothing was recorded.\n' "$BOT" >&2
+    fi
+    exit 4
+fi
+# The target's private tmux server socket: the composed hint, else a
+# reverse-lookup from its session name among the sibling bots.
+MANAGER_SOCKET="$(resolve_peer_socket "$_rb_sock_hint" "$MANAGER_SESSION")"
 
 # Validate status against allowed set
 case "$STATUS" in
@@ -271,15 +319,8 @@ _plane_emit_report_intent() {
     local _own_task_leg=0
     safe_msg=$(json_escape "$MESSAGE")
     safe_fleet=$(json_escape "$FLEET_NAME")
-    sender_alias="bot:$FLEET_NAME/$BOT"
+    sender_alias="$SENDER_ALIAS"
     safe_sender=$(json_escape "$sender_alias")
-    # The recipient alias carries the MANAGER's fleet, not the worker's
-    # (gauntlet round): cross-fleet managers are a supported shape
-    # (resolve_peer_socket's cross-fleet fallback), and stamping the worker's
-    # own fleet materialized a phantom party row on the return leg of exactly
-    # the traffic dispatch-task's peer resolver exists for.
-    local mgr_fleet
-    mgr_fleet="$(plane_peer_fleet "$MANAGER_SESSION" || true)"
     if [ -n "$PLANE_LINK_WI" ]; then
         link_frag="\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\","
     fi
@@ -287,7 +328,7 @@ _plane_emit_report_intent() {
         case "$ex" in pr:*) pr_url="${ex#pr:}" ;; esac
     done
     local comm events
-    comm="{\"event_type\":\"communication\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",\"sender\":\"$safe_sender\",\"recipient\":\"$(json_escape "bot:${mgr_fleet:-$FLEET_NAME}/$MANAGER_SESSION")\",\"recipient_raw\":\"$(json_escape "$MANAGER_SESSION")\",\"message_class\":\"report\",${link_frag}\"body\":\"$safe_msg\"}}"
+    comm="{\"event_type\":\"communication\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",\"sender\":\"$safe_sender\",\"recipient\":\"$(json_escape "$RECIPIENT_ALIAS")\",\"recipient_raw\":\"$(json_escape "$MANAGER_SESSION")\",\"message_class\":\"report\",${link_frag}\"body\":\"$safe_msg\"}}"
     events="$comm"
     if [ -n "$PLANE_LINK_WI" ]; then
         # Task facts ride the same atomic batch (F4). Status -> token per §8:

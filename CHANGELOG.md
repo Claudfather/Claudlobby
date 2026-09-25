@@ -295,6 +295,56 @@ stores `crash_loop` with NULL severity, and the escalation, `brief` and
 meanwhile stay NULL after the restart (measured with real daemons in the #1774
 review).
 
+### Fixed — a manager's report-back delivered into its OWN pane while the plane closed green (#1754, consolidating #475 / #1257 / #1703)
+
+`MANAGER_TMUX` carried two facts: "this bot is a manager" (`MANAGER_TMUX ==
+BOT_ID`, the `bot_is_manager` predicate) and "who this bot reports to". For a
+manager the marker won, and `report-back.sh` resolved delivery from that same
+field — so every upward report a manager sent landed in its own tmux session,
+the plane recorded `recipient == sender`, and the row closed as reported.
+Measured live 2026-09-22: the operator reconstructed a manager's answer from
+the plane because the report never left the manager's pane. The declared
+`reports_to` was rendered into CLAUDE.md prose only; no script could read it.
+
+- **Two carriers, two facts.** The composer resolves the upward target — the
+  declared `reports_to`, else the manager of the team the bot is a worker in —
+  into `bot.conf` as `REPORTS_TO` (and `REPORTS_TO_SOCKET` for an in-fleet
+  target; a cross-fleet target gets the name alone and `resolve_peer_socket`
+  finds its socket at run time). A sub-manager listed as a team worker now
+  reports to its team manager rather than to itself (#475's shape).
+  `MANAGER_TMUX` and `bot_is_manager` are untouched — the check-in beat and
+  `manager-checkin` enrollment keep working.
+- **`report-back.sh` delivers to `REPORTS_TO` first**, `MANAGER_TMUX` only when
+  no `REPORTS_TO` reached the session (a `bot.conf` composed before the field
+  existed). A worker's target is the same bot either way.
+- **A self-addressed report is refused, loudly**: rc 4, the remedy on stderr,
+  nothing sent and nothing recorded — a row that closes on a report nobody
+  received is the defect, not a partial success. The check compares the two
+  aliases the plane stores (sender vs recipient), so it is fleet-aware and a
+  caller driving the door for another bot is never mistaken for self. This is
+  the fleet-top manager's case (no `reports_to`); the door names the fix
+  (declare `reports_to`, cross-fleet allowed, or deliver to the human directly).
+- The validator refuses a `reports_to` naming the bot itself (error) and warns
+  on a team worker whose `reports_to` differs from its team manager (the
+  declaration wins).
+- `lib/` is read on demand per use: this is in force on every bot the moment it
+  merges, with no restart gate. The composed `REPORTS_TO` reaches a bot on the
+  next `generate` + restart — TWO windows, both safe and identical: before
+  `generate` writes the field, and after `generate` but before that bot's next
+  restart (the door reads the session's inherited env, never `bot.conf`
+  itself). `generate` alone changes nothing for a running manager.
+- **History is left as it is, and it is findable.** The plane is append-only
+  and every self-addressed row is a truthful record of what the door did
+  (delivered to the sender's own pane). Those rows are not rewritten and the
+  tasks a terminal one closed are not reopened: the work they reported is past, and a
+  reopen would page every manager on the estate about stale rows. Measured on
+  the authoring host: 12 such rows across two fleets (7 + 5), 6 carrying a task
+  event — 4 terminal (`completed`, closed the task), 2 `progress` (closed
+  nothing); an external reviewer from another fleet reported the same
+  signature on two further planes (their measurement, not reproducible from
+  here). The finder, and the ruling, are in
+  `documentation/runbooks/self-addressed-reports.md`.
+
 ### Fixed — every fleet-event emit paid a full second of sleep after its work was done (#1602)
 
 `plane_emit_bounded` backgrounds the emit shim and polls for its exit. It polled

@@ -280,6 +280,40 @@ class TestValidate:
             "reports_to" in w and "nonexistent-bot" in w for w in report.warnings
         )
 
+    def _worker1_reports_to(self, fleet_dir, monkeypatch, target: str):
+        """Validate the fixture with worker-1 declaring reports_to: <target>,
+        through the anchored-and-asserted idiom (_with_fleet_key's rule)."""
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        text = (fleet_dir / "fleet.yaml").read_text()
+        anchor = "    worker-1:\n      expertise: [software-engineering]\n"
+        assert text.count(anchor) == 1, "the fixture manifest's worker-1 block moved"
+        (fleet_dir / "fleet.yaml").write_text(
+            text.replace(anchor, anchor + f"      reports_to: {target}\n")
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return validate(fleet, _make_paths(fleet_dir))
+
+    def test_reports_to_naming_itself_is_an_error(self, fleet_dir, monkeypatch):
+        """report-back.sh delivers to reports_to (#1754); a self-edge has no
+        legal reading in any fleet, so it is refused at compose time rather
+        than composed and refused at run time."""
+        report = self._worker1_reports_to(fleet_dir, monkeypatch, "worker-1")
+        assert any("worker-1" in e and "names itself" in e for e in report.errors), report
+
+    def test_reports_to_agreeing_with_team_manager_is_silent(self, fleet_dir, monkeypatch):
+        report = self._worker1_reports_to(fleet_dir, monkeypatch, "lead")
+        assert not any("differs from its team" in w for w in report.warnings), report.warnings
+
+    def test_reports_to_differing_from_team_manager_is_warning(self, fleet_dir, monkeypatch):
+        """A worker in team eng (manager: lead) declaring reports_to: other
+        reports THERE at run time -- legal, and said out loud."""
+        report = self._worker1_reports_to(fleet_dir, monkeypatch, "other-lead")
+        assert any(
+            "worker-1" in w and "differs from its team" in w and "other-lead" in w
+            for w in report.warnings
+        ), report.warnings
+
     def test_manages_invalid_ref_is_warning(self, fleet_dir, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")

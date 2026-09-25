@@ -185,10 +185,14 @@ def plane_report_rows(root: Path) -> list[dict]:
         return []
     with _ro(root) as conn:
         rows = conn.execute(
-            "SELECT msg_id, sender_alias, body FROM communications"
+            "SELECT msg_id, sender_alias, recipient_alias, recipient_raw, body"
+            " FROM communications"
             " WHERE emitter = 'report-back' AND message_class = 'report' ORDER BY ingest_seq"
         ).fetchall()
-    return [{"plane_msg_id": m, "sender": s, "summary": b} for m, s, b in rows]
+    return [
+        {"plane_msg_id": m, "sender": s, "recipient": r, "recipient_raw": raw, "summary": b}
+        for m, s, r, raw, b in rows
+    ]
 
 
 # --- mint_task_id (lib-common SSOT) ----------------------------------------------

@@ -180,7 +180,7 @@ Beyond the pane message, `report-back.sh` lands the report on the plane (a commu
 
 ### Where the manager address comes from — you don't set it by hand
 
-`report-back.sh` sends to the session named in `MANAGER_TMUX` (default `claude-bot`) on the socket in `MANAGER_TMUX_SOCKET`. **The compositor sets both for you** from your `teams:` wiring: a bot listed in a team's `workers` gets `MANAGER_TMUX=<that team's manager>` and the manager's socket; a manager bot gets its own id. You configure the relationship in `fleet.yaml` (`teams:`), not the env var.
+`report-back.sh` sends to the session named in `REPORTS_TO` when the bot declares `reports_to:` in `fleet.yaml`, and otherwise to the session named in `MANAGER_TMUX` (default `claude-bot`) on the socket in `MANAGER_TMUX_SOCKET`. **The compositor sets all of them for you**: `reports_to:` composes `REPORTS_TO` (and `REPORTS_TO_SOCKET` for an in-fleet target); a bot listed in a team's `workers` gets `MANAGER_TMUX=<that team's manager>` and the manager's socket; a manager bot gets **its own id** there — that is the manager marker `bot_is_manager()` reads, not an address (#1754). A manager reports upward only through `reports_to:`; without one, a report that would land in its own pane is refused (rc 4, nothing sent, nothing recorded) instead of closing the plane row green while nobody reads it. You configure the relationship in `fleet.yaml` (`reports_to:` / `teams:`), not the env var.
 
 > If you're following an older guide that mentions `MANAGER_BOT_NAME`: that variable never existed in the shipping code and was a documented bug. The real variable is `MANAGER_TMUX`, and it's composed automatically.
 

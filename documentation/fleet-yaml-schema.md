@@ -71,7 +71,7 @@ fleet:
       expertise: [<list>]               # REQUIRED — area(s) of expertise from library/expertise/
       voice: voices/<file>.md           # OPTIONAL — personality overlay
       mission: <string>                 # OPTIONAL — one-paragraph charter
-      reports_to: <bot-name>            # OPTIONAL — bot_id of manager
+      reports_to: <bot-name>            # OPTIONAL — bot_id of manager; also where report-back.sh delivers
       manages: [<bot-name>, ...]        # OPTIONAL — bot_ids this bot manages
       scope:                            # OPTIONAL — operational boundary
         org: <github-org>
@@ -354,6 +354,8 @@ One-paragraph charter — why this bot exists, what success looks like. Forces e
 ### `bots.<name>.reports_to` / `bots.<name>.manages`
 
 Org structure fields. `reports_to` names the bot_id of this bot's manager. `manages` lists bot_ids this bot manages. Together they generate an `## Org Structure` section in CLAUDE.md showing the reporting hierarchy. Both are optional — bots without either get no org section.
+
+**`reports_to` is also where `report-back.sh` delivers** (#1754). The composer resolves the upward target — the declared `reports_to`, else the manager of the team the bot is a worker in — into `bot.conf` as `REPORTS_TO` (plus `REPORTS_TO_SOCKET` when the target is in this fleet), and the door reads that first; the `teams:`-derived `MANAGER_TMUX` is consulted only when no `REPORTS_TO` reached the session. The door never sources `bot.conf` itself; it reads the calling session's environment, inherited once at session start. So there are two windows in which a bot still falls through to `MANAGER_TMUX`, both behaving identically: before `generate` writes the field, and after `generate` but before that bot's next restart. Running `generate` alone does not change a running session's delivery. A sub-manager listed as a team worker therefore reports to its team manager, not to itself. This is what lets a **manager** report upward: `MANAGER_TMUX` is a manager's own id (the marker `bot_is_manager` keys on), so before the split a manager's report-back landed in its own pane while the plane closed the row green. A manager with no `reports_to` — a fleet top — has no upward target, and a report that would self-deliver is refused (rc 4, nothing sent, nothing recorded); declare `reports_to` (a bot in another fleet is fine; the validator only warns) or deliver to the human yourself. The validator refuses a `reports_to` naming the bot itself (an error — it has no legal reading), and warns when a team worker's `reports_to` differs from its team manager (the declaration wins).
 
 A manager whose `manages:` (or a `teams:` `workers:` list naming it) includes at least one in-fleet bot that is not itself a manager is a *leaf manager* and is equipped with the `checkin` protocol by default (see `fleet.teams`, above, for the full rule and its opt-out). A `manages:` target outside this fleet never counts toward that test (F5) — only in-fleet reports do, because the trigger that injects `/checkin` runs per fleet.
 
