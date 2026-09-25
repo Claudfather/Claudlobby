@@ -3807,7 +3807,7 @@ proc_rss_kb() {
 # --- Fleet path resolution ---------------------------------------------------
 
 # resolve_fleet_dir <fleet> — echo the fleet overlay dir, flat OR nested.
-# Flat local/<fleet>/ wins (byte-identical to pre-nesting). Else the unique
+# A real flat local/<fleet>/ wins. A marker-less flat husk yields to the unique
 # local/<system>/<fleet>/ carrying a fleet.yaml (one level under a container).
 # Marker-agnostic: a fleet is a dir with fleet.yaml. Empty output + nonzero if
 # none. The bash twin of Python paths._find_fleet_dir — the ONE home for the
@@ -3815,15 +3815,22 @@ proc_rss_kb() {
 resolve_fleet_dir() {
     local fleet="$1" root="${CLAUDLOBBY_ROOT:?}" flat d
     flat="$root/local/$fleet"
-    # Flat wins first — byte-identical: a bare dir resolves (scaffolding relies on it).
-    if [ -d "$flat" ]; then printf '%s\n' "$flat"; return 0; fi
+    # Preserve the real-flat collision branch until callers distinguish
+    # ambiguity from absence (#1608); they currently fall back to this path.
+    if [ -f "$flat/fleet.yaml" ]; then printf '%s\n' "$flat"; return 0; fi
     # Nested: the unique local/<system>/<fleet>/ that carries a fleet.yaml.
     local match="" n=0
     for d in "$root"/local/*/"$fleet"; do
+        # A real flat fleet is not a system container, even if a child has
+        # the requested name and a fleet.yaml of its own (Python twin rule).
+        [ -f "${d%/*}/fleet.yaml" ] && continue
         [ -f "$d/fleet.yaml" ] || continue
         match="$d"; n=$((n+1))
     done
     if [ "$n" -eq 1 ]; then printf '%s\n' "$match"; return 0; fi
+    # Keep bare scaffolding (and existing ambiguous-husk behavior) when no
+    # unique nested fleet can replace it. Never move or remove husk contents.
+    if [ -d "$flat" ]; then printf '%s\n' "$flat"; return 0; fi
     return 1   # none, or ambiguous (F5 — caller decides; keep flat-first semantics)
 }
 
