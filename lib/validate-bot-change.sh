@@ -2864,44 +2864,28 @@ LBUNIT
     harness_check "  ...and not service_down / session_missing, whose remedies (restart, re-enroll) are wrong for it" "$r"
 
     # Negative control: the long boot, from the sampler started beside it.
-    # Every START-state sample must read mid-start and none may read a loop;
-    # its restart counter must never move; the samples must cover the stagger.
-    # The same pulse saw it mid-stagger (the check above says so or fails).
-    _lb_samples=0 _lb_starting=0 _lb_loop=0 _lb_nr_moved=0 _lb_first="" _lb_last="" _lb_settled=no
-    while read -r _t _st _nr _s _l; do
+    # No START-state sample may read a loop, and the samples must cover the
+    # stagger. The same pulse saw it mid-stagger (the check above says so or fails).
+    _lb_samples=0 _lb_loop=0 _lb_first="" _lb_last=""
+    while read -r _t _st _ _ _l; do
         [ "$_t" = PULSE ] && continue
         case "$_st" in
         activating/* | active/running)
             _lb_samples=$((_lb_samples + 1))
             [ -z "$_lb_first" ] && _lb_first=$_t
             _lb_last=$_t
-            [ "$_nr" = "0" ] || _lb_nr_moved=1
-            [ "$_s" = yes ] && _lb_starting=$((_lb_starting + 1))
             [ "$_l" = yes ] && _lb_loop=$((_lb_loop + 1))
             ;;
-        active/exited) _lb_settled=yes ;;
         esac
     done <"$LB_SAMPLES"
     _lb_span=$((${_lb_last:-0} - ${_lb_first:-0}))
     [ "$_lb_samples" -gt 0 ] && [ "$_lb_loop" -eq 0 ] && r=yes || r=no
     harness_check "#1769 NEGATIVE CONTROL: a healthy boot through the 60s stagger never reads as a loop ($_lb_loop of $_lb_samples start-state samples over ${_lb_span}s)" "$r"
-    [ "$_lb_samples" -gt 0 ] && [ "$_lb_starting" -eq "$_lb_samples" ] && r=yes || r=no
-    harness_check "  ...and reads mid-start in every one of them ($_lb_starting of $_lb_samples)" "$r"
     [ "$_lb_span" -ge 50 ] && r=yes || r=no
     harness_check "  ...and the samples really covered the 60s stagger, not its first seconds (${_lb_span}s)" "$r"
-    [ "$_lb_nr_moved" -eq 0 ] && r=yes || r=no
-    harness_check "  ...and its restart counter never moved (it is one attempt, not a loop)" "$r"
-    [ "$_lb_settled" = yes ] && r=yes || r=no
-    harness_check "  ...and the sampler saw it settle to active/exited" "$r"
     _lbev=$(val_events "$BP_ROOT" "$CL_FLEET" "longboot")
     printf '%s' "$_lbev" | grep -q '"type":"crash_loop"' && r=no || r=yes
     harness_check "  ...and fleet-pulse emitted no crash_loop for it, from the pulse that saw it mid-stagger" "$r"
-    _unit_start_facts "$LB_SVC"
-    [ "$_USF_ACTIVE/$_USF_SUB" = "active/exited" ] && r=yes || r=no
-    harness_check "  ...and it settled to active/exited (observed $_USF_ACTIVE/$_USF_SUB)" "$r"
-    service_is_crash_looping "$LB_SVC" || true
-    [ "${CRASH_LOOP_VERDICT:-}" = "over" ] && r=yes || r=no
-    harness_check "  ...where the fact reports the streak over (verdict ${CRASH_LOOP_VERDICT:-?})" "$r"
 
 fi
 

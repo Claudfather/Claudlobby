@@ -58,9 +58,15 @@ def _run(
     stub = bindir / "systemctl"
     stub.write_text(
         "#!/bin/sh\n"
-        f'printf "%s\\n" "ExecMainStartTimestampMonotonic={exec_main_us}" '
+        # Only what -p asked for, as systemd answers, in the one spelling the helper
+        # uses: a stub that printed every property could not see a call that stopped
+        # asking for one, and the helper reads an absent stamp as an unreadable age.
+        'for a in "$@"; do [ "$p" = 1 ] && want="$want $a"; p=0; [ "$a" = -p ] && p=1; done\n'
+        f'for kv in "ExecMainStartTimestampMonotonic={exec_main_us}" '
         f'"ActiveState={active}" "SubState={sub}" '
-        f'"InactiveExitTimestampMonotonic={inactive_exit_us}"\n'
+        f'"InactiveExitTimestampMonotonic={inactive_exit_us}"; do\n'
+        '  case "$want " in *" ${kv%%=*} "*) printf "%s\\n" "$kv" ;; esac\n'
+        "done\n"
     )
     stub.chmod(0o755)
 
@@ -206,6 +212,21 @@ class TestGraceCap:
                 uptime_s="1000.00",
             )
             == 0
+        )
+
+    def test_activating_older_than_grace_is_not_mid_start(self, tmp_path):
+        """An activating unit ages from its InactiveExit stamp, so a call that stopped
+        asking for it reads an unreadable age, which the helper trusts as mid-start:
+        every activating unit would, however long it had been failing."""
+        assert (
+            _run(
+                tmp_path,
+                active="activating",
+                sub="start-pre",
+                inactive_exit_us="100000000",
+                exec_main_us="0",
+            )
+            != 0
         )
 
     def test_running_ages_from_the_spawner_not_the_start_attempt(self, tmp_path):
