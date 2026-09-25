@@ -34,6 +34,10 @@ def _assert_reviewer_protocol(text):
     assert "`context-degraded`" in reviewer
     assert "safe" in reviewer and "`/restart`" in reviewer
     assert "handoff" in reviewer and "notification" in reviewer
+    assert "three checks above" in reviewer
+    assert "ask the reviewer to run its own `/restart` if equipped" in reviewer
+    assert "canonical self-restart procedure" in reviewer
+    assert "library/skills/restart/SKILL.md" in reviewer
 
 
 def test_source_and_composed_manager_keep_count_as_selfcheck(fleet_dir, tmp_path, monkeypatch):
