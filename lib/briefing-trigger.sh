@@ -26,8 +26,6 @@ SLOT="${3:?Usage: briefing-trigger.sh <fleet> <bot> <slot>}"
 
 BOTS_DIR="$(resolve_bots_dir "$FLEET")"
 BOT_DIR="$BOTS_DIR/$BOT"
-LOG="${BRIEFING_TRIGGER_LOG:-$BOT_DIR/logs/briefing-trigger.log}"
-setup_log_dir "$LOG"
 TS="$(ts_iso)"
 
 # Event data payload — reason names why the run dispatched or deferred.
@@ -38,12 +36,15 @@ briefing_data() { printf '{"bot":"%s","slot":"%s","reason":"%s"}' "$BOT" "$SLOT"
 missed() { emit_fleet_notice "$BOTS_DIR" briefing_missed "$BOT $SLOT ($1)"; }
 
 if [ ! -d "$BOT_DIR" ]; then
-    echo "$TS SKIP $BOT/$SLOT — bot dir absent: $BOT_DIR" >> "$LOG"
+    echo "$TS SKIP $BOT/$SLOT — bot dir absent: $BOT_DIR" >&2
     # No bot dir to own the event — fleet-level ledger, attributed to the bot id.
     emit_fleet_event briefing_deferred briefing "$(briefing_data bot_dir_absent)" "" "$BOT"
     missed bot_dir_absent
     exit 0
 fi
+# The log lives in the bot dir, so it can only be made once the dir is known to exist.
+LOG="${BRIEFING_TRIGGER_LOG:-$BOT_DIR/logs/briefing-trigger.log}"
+setup_log_dir "$LOG"
 
 # Session name is the bot name; tmux resolves it to the running session on the
 # bot private socket (the dispatch.sh / tmux_socket_for_session convention).
