@@ -273,7 +273,9 @@ _link_library_tree() {
 
 # _generate_or_die <root> <label> — the compose-or-fail block, once.
 _generate_or_die() {
-    if ! CLAUDLOBBY_ROOT="$1" PYTHONPATH="$SRC" python3 -m claudlobby generate >"$1/generate.out" 2>&1; then
+    # -m puts cwd ahead of PYTHONPATH. Bind both so a caller's unrelated
+    # checkout cannot supply a different compositor than this harness's gate.
+    if ! (cd "$SRC" && CLAUDLOBBY_ROOT="$1" PYTHONPATH="$SRC" python3 -m claudlobby generate) >"$1/generate.out" 2>&1; then
         cat "$1/generate.out" >&2
         die "claudlobby generate failed for $2"
     fi
@@ -677,10 +679,10 @@ YAML
 # The stock composed pair may differ only by the complete declared component
 # and its template separator. Source markers are part of the checked bytes.
 suc_assert_component_only() {
-    python3 -m claudlobby.ab_component_gate \
+    (cd "$SRC" && PYTHONPATH="$SRC" python3 -m claudlobby.ab_component_gate \
         "$ROOT/without/runtime/bots/suc-probe/CLAUDE.md" \
         "$ROOT/with/runtime/bots/suc-probe/CLAUDE.md" \
-        "$SRC/$SUC_COMPONENT_REL" \
+        "$SRC/$SUC_COMPONENT_REL") \
         || die "variant isolation FAILED — composed outputs differ beyond the component; refusing to run"
 }
 

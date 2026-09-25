@@ -13,6 +13,7 @@ from .component_sources import END_MARKER, attribute
 from .loader import load_library_item
 
 SOURCE = "shared/library/protocols/token-efficiency.md"
+PREDECESSOR = "shared/library/protocols/context-management.md"
 _START = re.compile(r"<!-- claudlobby:source ([^\r\n<>]+) -->")
 
 
@@ -40,6 +41,16 @@ def assert_component_only(without: str, with_component: str, source: Path) -> No
     target = [part for part in after if part.source == SOURCE]
     if any(part.source == SOURCE for part in before) or len(target) != 1:
         raise ValueError("declared component must be absent WITHOUT and appear once WITH")
+    predecessors = [[part for part in arm if part.source == PREDECESSOR]
+                    for arm in (before, after)]
+    if any(len(parts) != 1 for parts in predecessors):
+        raise ValueError("frozen fixture requires one context-management predecessor per arm")
+    predecessor = predecessors[1][0]
+    lines = with_component.splitlines(keepends=True)
+    if (target[0].start_line != predecessor.end_line + 2
+            or "".join(lines[predecessor.end_line - 1:target[0].start_line - 1])
+            != END_MARKER + "\n\n"):
+        raise ValueError("declared component moved from its frozen protocol position")
     item = load_library_item(source)
     if item is None:
         raise ValueError("declared component source is missing")
@@ -47,7 +58,6 @@ def assert_component_only(without: str, with_component: str, source: Path) -> No
                 f"### {item.title}\n\n{item.body.strip()}\n{END_MARKER}\n\n")
     # The stock section macro includes exactly two LF bytes after the closing
     # marker. Keep all other bytes, including other source markers and order.
-    lines = with_component.splitlines(keepends=True)
     start, end = target[0].start_line - 1, target[0].end_line + 1
     if "".join(lines[start:end]) != expected:
         raise ValueError("declared component differs from its loaded template block")
