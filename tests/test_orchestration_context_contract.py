@@ -25,20 +25,32 @@ def _assert_decisions(text):
     assert "safe" in degradation
 
 
+def _assert_reviewer_protocol(text):
+    reviewer = next(line for line in text.splitlines() if line.startswith("For reviewers"))
+    assert "~3 completed rows" in reviewer
+    assert "self-check" in reviewer
+    assert "count alone does not justify a restart" in reviewer
+    assert "context-management" in reviewer
+    assert "`context-degraded`" in reviewer
+    assert "safe" in reviewer and "`/restart`" in reviewer
+    assert "handoff" in reviewer and "notification" in reviewer
+
+
 def test_source_and_composed_manager_keep_count_as_selfcheck(fleet_dir, tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
     monkeypatch.setenv("PLANE_SOCKET", str(tmp_path / "absent.sock"))
-    for relative in ("expertise/orchestration.md", "protocols/context-management.md"):
+    for relative in ("expertise/orchestration.md", "protocols/context-management.md",
+                     "protocols/safe-worker-restart.md"):
         shutil.copy2(SOURCE / "library" / relative, fleet_dir / "library" / relative)
     shutil.copytree(SOURCE / "library/skills/restart", fleet_dir / "library/skills/restart")
     install_real_template(fleet_dir)
     fleet = load_test_fleet(fleet_dir)
     bot = fleet.bots["lead"]
     bot.telegram.handle = ""
-    bot.protocols = ["context-management"]
+    bot.protocols = ["context-management", "safe-worker-restart"]
     bot.skills = ["restart"]
     paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
     output = compose_bot(bot, fleet, paths, log=lambda message: None)
@@ -46,6 +58,8 @@ def test_source_and_composed_manager_keep_count_as_selfcheck(fleet_dir, tmp_path
     rendered = (output / "CLAUDE.md").read_text()
     _assert_decisions(source)
     _assert_decisions(rendered)
+    _assert_reviewer_protocol((fleet_dir / "library/protocols/safe-worker-restart.md").read_text())
+    _assert_reviewer_protocol(rendered)
     assert "not as a threshold in itself" in rendered
     linked = output / ".claude/skills/restart"
     assert linked.is_symlink()
