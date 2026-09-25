@@ -227,11 +227,13 @@ def test_dead_shell_with_live_callback_child_cannot_be_reclaimed(scene):
     import signal
 
     os.mkfifo(scene.root / "child.release")
+    os.mkfifo(scene.root / "child.exit")
     owner = scene.spawn('''work() {
       /bin/bash -c 'printf "%s\\n" "$$" > "$ROOT/child.pid";
         touch "$ROOT/child.entered";
         read -r line < "$ROOT/child.release";
-        touch "$ROOT/child.finished"' &
+        touch "$ROOT/child.finished";
+        read -r line < "$ROOT/child.exit"' &
       wait "$!"
     }
     with_lock "$ROOT/mutex" work''')
@@ -249,7 +251,8 @@ def test_dead_shell_with_live_callback_child_cannot_be_reclaimed(scene):
         release(scene, "child")
         scene.wait("child.finished")
     finally:
-        # The orphan may not be a waitable child; kill only our recorded fixture PID.
+        # The fixture remains blocked on one of its FIFOs until this cleanup,
+        # so this PID cannot have exited and been reused by an unrelated process.
         try:
             os.kill(child_pid, signal.SIGKILL)
         except ProcessLookupError:
