@@ -10,6 +10,7 @@ healthy. These pin the record and the two rungs that read it.
 from __future__ import annotations
 
 import json
+import pytest
 import subprocess
 from pathlib import Path
 
@@ -54,6 +55,19 @@ def _paths(tmp_path: Path, *, in_git: bool = False, manifest: str = FLEET_YAML):
         _git(["add", "fleet.yaml"], fleet_dir)
         _git(["commit", "-qm", "seed"], fleet_dir)
     return Paths(root=root, fleet_dir=fleet_dir)
+
+
+# These tests isolate the fleet-manifest behavior from the developer package
+# checkout. Source-tree behavior has real independent git fixtures in
+# test_core_source_provenance.py, rather than inheriting our current branch.
+@pytest.fixture(autouse=True)
+def _private_package(tmp_path, monkeypatch):
+    from claudlobby import composer
+    root = tmp_path / "install"
+    for name in ("claudlobby", "templates", "library", "voices", "lib"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    (root / "claudlobby/system.yaml").write_text("defaults: {}\n")
+    monkeypatch.setattr(composer, "__file__", str(root / "claudlobby/composer.py"))
 
 
 class TestTheRecord:
@@ -295,7 +309,7 @@ class TestTheRungStaysQuietWhereItHasNothingToSay:
         root = tmp_path / "install"
         fleet_dir = root / "local" / "demo"
         fleet_dir.mkdir(parents=True)
-        (root / "lib").mkdir(parents=True)
+        (root / "lib").mkdir(parents=True, exist_ok=True)
         (fleet_dir / "fleet.yaml").write_text(FLEET_YAML)
         paths = Paths(root=root, fleet_dir=fleet_dir)
         assert self._checks(_fleet(), paths) == []

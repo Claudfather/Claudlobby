@@ -1123,6 +1123,8 @@ def check_manifest_provenance(
     """
     from .composer import (
         MANIFEST_PROVENANCE_SCHEMA,
+        MANIFEST_PROVENANCE_SCHEMAS_READABLE,
+        source_provenance_status,
         changed_manifest_inputs,
         manifest_change_attribution,
         manifest_warnings,
@@ -1143,14 +1145,16 @@ def check_manifest_provenance(
                    "composed by a claudlobby without provenance — run `generate` "
                    "to record what this runtime was composed from")
         return
-    if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA:
+    if prov.get("schema") not in MANIFEST_PROVENANCE_SCHEMAS_READABLE:
         report.add("manifest-provenance", "warn",
                    f"provenance schema {prov.get('schema')!r} is not the "
                    f"{MANIFEST_PROVENANCE_SCHEMA} this build reads — not "
                    "interpreting it; run `generate` to re-record")
         return
 
-    changed = changed_manifest_inputs(fleet, paths, prov)
+    source_hashes: dict = {}
+    source_changes, source_notes = source_provenance_status(paths, prov, file_hashes_out=source_hashes)
+    changed = changed_manifest_inputs(fleet, paths, prov, source_file_hashes=source_hashes)
     if changed:
         # HOW it changed, asked of the tree NOW — the compose-time record is a
         # snapshot and cannot answer this once the git state has been repaired.
@@ -1168,6 +1172,13 @@ def check_manifest_provenance(
     # sitting still afterwards.
     for warning in manifest_warnings(prov):
         report.add("manifest-provenance", "warn", f"at compose time: {warning}")
+        return
+
+    if source_changes or source_notes:
+        report.add("manifest-provenance", "warn",
+                   ("core sources changed since compose: " + ", ".join(source_changes) + "; "
+                    if source_changes else "") + "; ".join(source_notes)
+                   + " — source-tree observation, not an atomic or consumed-file attestation")
         return
 
     report.add("manifest-provenance", "pass",

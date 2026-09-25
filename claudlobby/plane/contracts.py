@@ -784,21 +784,52 @@ class CompositionGit(_Strict):
     interrupted: Optional[bool] = Field(None, strict=True)
 
 
+class CompositionSourceRoot(_Strict):
+    path: str
+    labels: list[str]
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    complete: bool = Field(strict=True)
+    entries: int = Field(ge=0, strict=True)
+    issues: list[str] = Field(max_length=16)
+
+
+class CompositionSourceRepository(_Strict):
+    path: str
+    roots: list[str]
+    state: Literal["observed", "no_git", "unavailable"]
+    commit: Optional[str] = Field(None, pattern=r"^[0-9a-f]{40,64}$")
+    branch: Optional[str] = None
+    detached: Optional[bool] = Field(None, strict=True)
+    on_default_branch: Optional[bool] = Field(None, strict=True)
+    dirty: Optional[bool] = Field(None, strict=True)
+    interrupted: Optional[bool] = Field(None, strict=True)
+
+
+class CompositionSources(_Strict):
+    package_root: str
+    roots: list[CompositionSourceRoot]
+    repositories: list[CompositionSourceRepository]
+    complete: bool = Field(strict=True)
+
+
 class CompositionObservation(_Strict):
     """One recorded generate observation, never source file contents.
 
     Optional on old/non-compose declarations. Bound its serialized record at
     64 KiB; an oversized observation refuses rather than truncating provenance.
     """
-    provenance_schema: Literal[1] = Field(alias="schema")
+    provenance_schema: Literal[1, 2] = Field(alias="schema")
     fleet: str = Field(min_length=1)
     composed_at: AwareDatetime
     files: dict[str, CompositionInput]
     git: CompositionGit
     bot_ids: list[str]
+    sources: Optional[CompositionSources] = None
 
     @model_validator(mode="after")
     def _bounded(self):
+        if self.provenance_schema == 2 and self.sources is None:
+            raise ValueError("schema 2 composition requires core source provenance")
         if len(self.model_dump_json(by_alias=True).encode("utf-8")) > 65536:
             raise ValueError("composition observation exceeds 64 KiB")
         return self
