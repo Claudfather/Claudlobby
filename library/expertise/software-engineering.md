@@ -50,6 +50,6 @@ Use the Agent tool to keep your main context lean:
 ## Self-Restart
 
 Use `/restart` when equipped. If it is unavailable, follow the handoff and
-notification procedure in `{{CLAUDLOBBY_ROOT}}/library/skills/restart/SKILL.md`
+notification procedure in `library/skills/restart/SKILL.md` under `$CLAUDLOBBY_ROOT`
 before running `"$CLAUDLOBBY_ROOT/lib/spin-up-bot.sh" "$BOT_DIR"`.
 The restart ends this session; preserve context first.
