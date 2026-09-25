@@ -36,7 +36,7 @@ CHAT_ESC = "-1003333333333"
 def _bot(bots_dir: Path, name: str, chat: str | None, state_dir: bool = True) -> Path:
     d = bots_dir / name
     d.mkdir(parents=True)
-    lines = []
+    lines = [f'export TELEGRAM_BOT_HANDLE="{name}"']
     if chat:
         lines.append(f'export TELEGRAM_GROUP_CHAT_ID="{chat}"')
     if state_dir:
@@ -128,6 +128,17 @@ def test_an_env_chat_pairs_with_the_bot_whose_own_chat_it_is(tmp_path):
     assert got["state"] == _home_state(tmp_path, "beta"), got
     assert got["src"] == "env:TELEGRAM_GROUP_CHAT_ID+bot:beta"
     assert got["refusal"] == ""
+
+
+def test_a_moved_bots_leftover_dir_does_not_send_its_old_fleets_alerts(tmp_path):
+    # move-bot keeps the source runtime dir unless --cleanup-source. A leftover that
+    # sorts first would pair the fleet chat with a bot that may have left the group.
+    bots = tmp_path / "root" / "runtime" / "bots"
+    _bot(bots, "alpha", CHAT_A)  # moved to another fleet; its old dir remains
+    _bot(bots, "beta", CHAT_A)
+    (tmp_path / "root" / "fleet.yaml").write_text("fleet:\n  bots:\n    beta:\n")
+    got = _resolve(tmp_path, bots, TELEGRAM_GROUP_CHAT_ID=CHAT_A)
+    assert got["src"] == "env:TELEGRAM_GROUP_CHAT_ID+bot:beta", got
 
 
 def test_a_state_dir_set_beside_the_env_chat_is_the_pair(tmp_path):

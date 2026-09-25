@@ -423,7 +423,7 @@ def _alldead_scene(tmp_path, bot_chat):
             "CLAUDLOBBY_CREDS_LOG": str(root / "creds-check.log"),
             "CLAUDLOBBY_CREDS_STATE": str(state),
             "TG_CAPTURE": str(capture),
-            # Composed timer env as a unit composed before #1771 carries it: the
+            # Composed timer env as a fleet timer unit carries it: the
             # fleet chat, no state dir beside it.
             "TELEGRAM_GROUP_CHAT_ID": "-100COMPOSEDENV",
             # _scrubbed_env only strips TELEGRAM/CLAUDLOBBY/FLEET, so a host token
