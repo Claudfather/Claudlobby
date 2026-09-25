@@ -447,3 +447,25 @@ def test_absolute_mount_declaration_and_home_expansion_remain_supported(scene):
     scene[0].mounts = {'docs': '~/mounted'}
     changes, notes = link_preview(scene[0], scene[2], skills=['one'])
     assert changes == [] and 'mounts: expected 1, matching 1' in notes
+
+
+def test_absent_overlay_search_root_can_appear_after_earlier_skill_creation(scene):
+    from claudlobby.link_diff import link_preview
+    bot, _, original, _, _ = scene
+    overlay = original.root / 'local/overlay'
+    (overlay / 'library').mkdir(parents=True)
+    paths = Paths(root=original.root, fleet_dir=overlay)
+    namespace = paths.bot_runtime(bot.bot_id) / '.claude/skills'
+    namespace.mkdir(parents=True)
+    alias = overlay / 'library/skills'
+    alias.symlink_to(namespace / 'one')
+    second = original.root / 'library/skills/one/two'
+    second.mkdir(); (second / 'SKILL.md').write_text('body')
+    assert not alias.exists()
+    before = snapshot(original.root)
+    changes, _ = link_preview(bot, paths, skills=['one', 'two'])
+    assert any('skill topology unavailable' in change for change in changes)
+    assert before == snapshot(original.root)
+    link_skills(bot, paths, lambda _: None, skills=['one', 'two'])
+    assert (namespace / 'one').is_symlink()
+    assert (namespace / 'two').is_symlink()

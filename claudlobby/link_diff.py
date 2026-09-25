@@ -87,11 +87,17 @@ def _skill_source_candidates(paths, skills):
     a complete selection. This preflight only refuses namespace dependencies;
     the writer's plan remains authoritative for the actual selected set.
     """
+    # library_search_dirs intentionally filters absent overlays for selection.
+    # Preflight must also inspect that missing root: an earlier generated skill
+    # can make an overlay alias eligible before the next selection occurs.
+    roots = [paths.base_library]
+    if paths.overlay_library is not None:
+        roots.insert(0, paths.overlay_library)
     for skill in skills:
         if '..' in skill:
             raise ValueError('path traversal in skill selection')
-        for search_dir in paths.library_search_dirs('skills'):
-            candidate = search_dir / skill.rstrip('/')
+        for root in roots:
+            candidate = root / 'skills' / skill.rstrip('/')
             yield candidate
             if skill.endswith('/'):
                 yield from candidate.rglob('*')
