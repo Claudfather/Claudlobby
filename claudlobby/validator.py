@@ -39,6 +39,7 @@ from .known_values import (
     KNOWN_CREDENTIAL_SOURCES,
     KNOWN_HOOK_EVENTS,
     KNOWN_MODELS,
+    MARKDOWN_BOT_REFERENCE_FIELDS,
     OUTCOME_ACTIONS,
     OUTCOME_KEYS,
     PROJECT_KEYS,
@@ -2230,6 +2231,31 @@ def _validate_mcp_packages(
         report.warnings.append(finding.message())
 
 
+def _validate_principles_and_permissions(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport,
+) -> None:
+    """Warn for the two markdown slots absent from the older bot loops.
+
+    #773 stays open for migrating those loops to the shared category view.
+    Keep this preflight separate from the concurrently extracted bot checks:
+    existing integrations/guardrails/etc. warnings must not be duplicated.
+    """
+    for bot_name, bot in fleet.bots.items():
+        for kind in MARKDOWN_BOT_REFERENCE_FIELDS:
+            if kind not in {"principles", "permissions"}:
+                continue
+            for ref in getattr(bot, kind):
+                if ref.endswith("/"):
+                    if not paths.expand_library_folder(kind, ref.rstrip("/")):
+                        report.warnings.append(
+                            f"bot '{bot_name}': {kind[:-1]} folder '{ref}' empty or missing "
+                            f"in any library/{kind}/ — no items will be loaded")
+                elif paths.find_library_file(kind, ref, ".md") is None:
+                    report.warnings.append(
+                        f"bot '{bot_name}': {kind[:-1]} '{ref}' not in any library/{kind}/ "
+                        "— section will be skipped")
+
+
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
@@ -2242,6 +2268,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     fleet_env = dotenv.read(paths.env_file)
     _warn_dead_flags(fleet_env, paths, report)
     _validate_bots(fleet, paths, fleet_env, report)
+    _validate_principles_and_permissions(fleet, paths, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)

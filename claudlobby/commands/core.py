@@ -9,6 +9,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ..known_values import LIBRARY_CATEGORIES
 from ..mcp_grammar import GrammarUnavailable, grammar
 from ..composer import compose_bot, compose_fleet
 from ..diff import diff_bot, promote_bot
@@ -350,12 +351,9 @@ def cmd_list_library(args) -> int:
         for p in sorted(paths.base_mcp.glob("*.json")):
             log.info("  %s", p.stem)
 
-    _list_md("Integrations", "integrations")
-    _list_md("Protocols", "protocols")
-    _list_md("Guardrails", "guardrails")
-    _list_md("Resources", "resources")
-    _list_md("Lessons", "lessons")
-    _list_md("Post-actions", "post_actions")
+    for category in LIBRARY_CATEGORIES:
+        if category.bot_markdown:
+            _list_md(category.name.replace("_", "-").capitalize(), category.name)
 
     log.info("Skills:")
     seen_skills: dict[str, str] = {}  # rel_key → tag
