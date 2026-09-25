@@ -674,27 +674,14 @@ YAML
     fi
 }
 
-# suc_assert_component_only — run-blocking: every line differing between the
-# two composed CLAUDE.mds must belong to the component (frontmatter stripped —
-# the loader consumes it; heading markers normalized — the loader demotes them;
-# the composed section title is covered by the H1 text, which the contract
-# keeps equal to frontmatter title:).
+# The stock composed pair may differ only by the complete declared component
+# and its template separator. Source markers are part of the checked bytes.
 suc_assert_component_only() {
-    local with_md="$ROOT/with/runtime/bots/suc-probe/CLAUDE.md"
-    local without_md="$ROOT/without/runtime/bots/suc-probe/CLAUDE.md"
-    local allowed="$ROOT/component-lines.norm" got="$ROOT/composed-diff.norm" bad
-    awk 'NR==1 && /^---$/ {fm=1; next} fm==1 {if ($0 == "---") fm=2; next} {print}' \
+    python3 -m claudlobby.ab_component_gate \
+        "$ROOT/without/runtime/bots/suc-probe/CLAUDE.md" \
+        "$ROOT/with/runtime/bots/suc-probe/CLAUDE.md" \
         "$SRC/$SUC_COMPONENT_REL" \
-        | sed 's/^#*[[:space:]]*//' | sed '/^$/d' | sort -u > "$allowed"
-    diff "$without_md" "$with_md" | sed -n 's/^[<>] //p' \
-        | sed 's/^#*[[:space:]]*//' | sed '/^$/d' | sort -u > "$got" || true
-    [ -s "$allowed" ] || die "component delta computed empty — component file unreadable"
-    [ -s "$got" ] || die "composed CLAUDE.mds are identical — the component did not compose; nothing to test"
-    bad="$(comm -23 "$got" "$allowed")"
-    if [ -n "$bad" ]; then
-        printf 'ab-comms-eval: composed diff exceeds the component block:\n%s\n' "$bad" >&2
-        die "variant isolation FAILED — composed outputs differ beyond the component; refusing to run"
-    fi
+        || die "variant isolation FAILED — composed outputs differ beyond the component; refusing to run"
 }
 
 # suc_run_cell <task> <rep> <variant> — one headless real session; row appended.
