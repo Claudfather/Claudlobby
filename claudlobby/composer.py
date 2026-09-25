@@ -1312,7 +1312,10 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             )
             break
     if bot.bot_id in fleet.manager_bots():
-        lines.append(f"export MANAGER_TMUX={_shq(bot.bot_id)}  # this bot is a manager")
+        # The comment gets its own line: left on the assignment line, a raw
+        # read of MANAGER_TMUX (grep, cut) takes it as part of the session name.
+        lines.append("# this bot is a manager")
+        lines.append(f"export MANAGER_TMUX={_shq(bot.bot_id)}")
         lines.append(f"export MANAGER_TMUX_SOCKET={_shq(bot_service)}")
 
     # Git credential routing — point git at the composed per-org gitconfig. Only
