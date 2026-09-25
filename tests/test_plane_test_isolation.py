@@ -99,8 +99,8 @@ def test_child_builders_silence_real_shim(builder, explicit_root, sentinel, monk
     before = _artifacts(REPO)
     result = _emit(env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == result.stderr == ""
     _assert_untouched(sentinel)
+    assert result.stdout == result.stderr == ""
     assert _artifacts(REPO) == before
 
 
