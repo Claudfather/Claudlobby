@@ -707,18 +707,13 @@ _ESCALATION_WINDOW="${FLEET_PULSE_ESCALATION_WINDOW:-10}"
 # chat-id (override → composed fleet env → bot.conf scan). Fleet-scoped: a fleet's
 # escalation must not page a peer fleet's channel, and an empty result keeps the
 # loud no-receiver warning below.
-resolve_alert_target "$BOTS_DIR" fleet   # sets _alert_chat_id / _alert_state_dir (sourced lib-common)
+resolve_alert_target "$BOTS_DIR" fleet   # sets the _alert_* pair and its token (sourced lib-common)
 # shellcheck disable=SC2154
 _ESCALATION_CHAT_ID="$_alert_chat_id"
 # shellcheck disable=SC2154
 _ESCALATION_STATE_DIR="$_alert_state_dir"
-# The pair names its sender: an ambient token (a hand run inside a bot session)
-# is kept only for that session's own env pair, so it cannot re-split it (#1771).
-_ESCALATION_TOKEN=""
 # shellcheck disable=SC2154
-if [ "$_alert_target_src" = "env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR" ]; then
-    _ESCALATION_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
-fi
+_ESCALATION_TOKEN="$_alert_token"
 
 # No chat ID anywhere means the critical-alert safety net is mute. Say so
 # loudly rather than no-op silently.
