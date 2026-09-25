@@ -662,8 +662,8 @@ def run_generate_scan(paths, fleet) -> dict | None:
         seen = {(t, a) for t, a, _ in entities}
         if db.is_file():
             try:
-                conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-                conn.row_factory = sqlite3.Row
+                from .db import connect_ro
+                conn = connect_ro(db)
                 # THIS host's envelope uid — the SAME value ingest stamps
                 # rows with, READ from the uid file, never ensure_host_uid:
                 # ensure_ MINTS on absence (mkdir+write — a write this read

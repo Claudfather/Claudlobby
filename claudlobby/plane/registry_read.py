@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from .time import register_instant_key
 from .queries import (
     REG_CHANGES_SQL,
     REG_CURRENT_POINT_SQL,
@@ -29,6 +30,7 @@ from .queries import (
 def _q(conn, sql: str, params=()) -> list[dict]:
     """Rows as dicts regardless of the caller's row_factory — this module
     takes any plane connection and must not assume sqlite3.Row."""
+    register_instant_key(conn)
     cur = conn.execute(sql, params)
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -138,6 +140,7 @@ def current_hash(conn, host_uid: str, entity_type: str,
     reading is the tombstone dedup's answer. The DEFINITION is also the
     emitter's (REG_CURRENT_KEYS_SQL, same underlying SQL) — its bulk form
     lives beside this one in queries.py."""
+    register_instant_key(conn)
     row = conn.execute(REG_CURRENT_POINT_SQL,
                        (host_uid, entity_type, entity_uid)).fetchone()
     return None if row is None else row[0]

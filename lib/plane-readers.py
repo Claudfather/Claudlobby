@@ -911,8 +911,8 @@ def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_thre
 # fleet's `emit_fleet_event` door landed — selected by PROVENANCE (the
 # source_ref prefix the door stamps, never an event-name list, so the plane's
 # own machinery and a report door's marker can never leak in) and rendered
-# back as the legacy row {ts, bot, type, source, data} so every reader keeps
-# its row contract. The door stamps occurred_at in UTC (`+00:00` once stored),
+# back with UTC `ts` and the original wall clock in `ts_local`; other
+# legacy row fields retain their contract. The door stamps occurred_at in UTC (`+00:00` once stored),
 # so `since` — normalised to that form by since_form — compares lexically on
 # the indexed column. The filters ride in the SQL: brief asks for one bot's day.
 FLEET_UID_SQL = "SELECT uid FROM identity_registry WHERE kind = 'fleet' AND alias = ? LIMIT 1"
@@ -987,7 +987,14 @@ def legacy_event_row(occurred_at, event, severity, subject_kind, subject_alias,
         bot = "host"          # a host job's receipt (fleet "_host"): the retired file said "fleet"; the plane says host
     else:
         bot = (subject_alias or "?").removeprefix(prefix)
-    return {"ts": (data.get("legacy_ts") or (occurred_at or "").replace("+00:00", "Z")),
+    # This module is also imported by stdlib-only shell doors: UTC display
+    # uses datetime directly and does not require the installed package.
+    try:
+        at = datetime.fromisoformat((occurred_at or "").replace("Z", "+00:00"))
+        ts = at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if at.tzinfo else ""
+    except (ValueError, OverflowError):
+        ts = ""
+    return {"ts": ts, "ts_local": data.get("legacy_ts"),
             "bot": bot, "type": event, "source": data.get("source") or "plane",
             "data": data.get("data") if isinstance(data.get("data"), dict) else {},
             "_severity": severity, "_truncated": bool(truncated)}
