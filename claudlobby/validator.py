@@ -2230,6 +2230,25 @@ def _validate_mcp_packages(
         report.warnings.append(finding.message())
 
 
+def _validate_composed_budget(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport,
+) -> None:
+    """Measure the actual pure renderer; do not write runtime artifacts."""
+    from .composer import compose_claude_md
+    from .prompt_budget import measure, over_budget
+
+    for name, bot in fleet.bots.items():
+        try:
+            warning = over_budget(measure(compose_claude_md(bot, fleet, paths)))
+        except Exception as exc:  # advisory: existing validation owns render defects
+            report.warnings.append(
+                f"bot '{name}': composed CLAUDE.md size unavailable "
+                f"({type(exc).__name__}) — budget was not checked")
+            continue
+        if warning:
+            report.warnings.append(f"bot '{name}': {warning}")
+
+
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
@@ -2268,6 +2287,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_library_requires(paths, report)
     _validate_env_contracts(paths, report)
     _validate_mcp_packages(fleet, paths, report)
+    _validate_composed_budget(fleet, paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
     if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):

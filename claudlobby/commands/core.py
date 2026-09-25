@@ -295,7 +295,23 @@ def cmd_generate(args) -> int:
     except Exception as exc:  # noqa: BLE001 — non-blocking by contract
         log.warning("registry scan failed (generate unaffected): %s", exc)
 
+    _report_composed_sizes(paths, [args.bot] if args.bot else list(fleet.bots))
     return 0
+
+
+def _report_composed_sizes(paths: Paths, bot_names: list[str]) -> None:
+    """Report only artifacts this generate composed; diagnostics never break it."""
+    from ..prompt_budget import measure, summary
+
+    for name in bot_names:
+        try:
+            # Read exact UTF-8 bytes without newline translation: report the
+            # installed artifact, including any final template/marker overhead.
+            rendered = (paths.bot_runtime(name) / "CLAUDE.md").read_bytes().decode("utf-8")
+            log.info("bot '%s': composed size %s", name, summary(measure(rendered)))
+        except Exception as exc:  # advisory, per bot so later reports still run
+            log.warning("bot '%s': composed size unavailable (%s); generate unaffected",
+                        name, type(exc).__name__)
 
 
 def cmd_host_timers(args) -> int:
