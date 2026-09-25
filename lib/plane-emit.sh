@@ -50,6 +50,9 @@
 #   PLANE_SOCKET         socket override (default: $ROOT/state/plane/ingest.sock)
 #   PLANE_EMIT_DISABLED  =1 -> no-op exit 0 (the ruled harness exemption:
 #                        byte-identical legacy behavior, nothing spawned)
+#   PLANE_EMIT_COOLDOWN_STAGE  =1 -> in a wedge cooldown, stage the batch for
+#                        the daemon (rc 6) instead of the cold CLI (#1657). Set
+#                        only by callers that never read the result.
 #   PLANE_EMIT_CLI       fallback command override (tests stub it; default
 #                        resolves through lib-common's claudlobby_cli).
 #                        CONTRACT: a command LINE, whitespace-split — the
@@ -95,7 +98,9 @@ if [ -f "$WEDGE_MARK" ]; then
     # rung 1 matters most. Negative delta = expired.
     if [ "$_delta" -ge 0 ] && [ "$_delta" -lt "$COOLDOWN" ]; then
         skip_socket=1
-        printf 'plane-emit: socket in wedge cooldown (%ss) — straight to cold CLI\n' "$COOLDOWN" >&2
+        # Not "straight to cold CLI": an opted-in batch may be staged for the
+        # daemon instead (#1657), and the next line says which route it took.
+        printf 'plane-emit: socket in wedge cooldown (%ss) — skipping the socket\n' "$COOLDOWN" >&2
     else
         rm -f "$WEDGE_MARK"
     fi
@@ -107,8 +112,17 @@ if [ "$skip_socket" = "1" ]; then
     # and 5 on finalize-only success — pass it through, never overwrite: a
     # hardcoded 5 here turned a contract violation into "daemon unavailable"
     # + a doomed CLI replay + exit 3, precisely during incident windows.
+    #
+    # #1657: a caller that never reads the result opts in with
+    # PLANE_EMIT_COOLDOWN_STAGE=1, and the client then STAGES the batch for
+    # the daemon to replay (rc 6) instead of this shim spawning the cold CLI,
+    # whose package import per event is what kept a loaded host pegged. The
+    # doors that refuse on a non-zero rc never opt in. The client stages only
+    # when a daemon will replay it, and returns 5 as before otherwise.
+    _stage=""
+    [ "${PLANE_EMIT_COOLDOWN_STAGE:-0}" = "1" ] && _stage="$ROOT/state/plane/staged"
     python3 -S -E "$LIB_DIR/plane-socket-client.py" \
-        --socket "$SOCK" --finalize-to "$finalized" --finalize-only
+        --socket "$SOCK" --finalize-to "$finalized" --finalize-only --stage-to "$_stage"
     rc=$?
 else
     # -S -E: skip site/pyvenv machinery — the client is minimal-stdlib by

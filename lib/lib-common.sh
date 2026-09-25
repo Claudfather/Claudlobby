@@ -982,7 +982,10 @@ plane_emit_bounded() {
     # does not reap early (measured), so the worst case is a bounded burst of
     # CPU rather than an emission killed mid-flight.
     _deadline=$(( SECONDS + bound + 1 ))
-    "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
+    # Opted in to cooldown staging (#1657): no caller of this door reads the
+    # result (emit_fleet_event restores PLANE_EMIT_LAST_RC), and it carries
+    # most of the host's traffic, bot-vitals' two per tool call included.
+    PLANE_EMIT_COOLDOWN_STAGE=1 "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
     _pid=$!
     while kill -0 "$_pid" 2>/dev/null && [ "$SECONDS" -lt "$_deadline" ]; do
         # 50ms: the socket rung answers in ~40ms, so a 1s poll spent ~96% of

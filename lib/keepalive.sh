@@ -135,7 +135,7 @@ plane_presence_samples() {
     local _eto="${KEEPALIVE_EMIT_TIMEOUT_S:-110}"
     (
         printf '%s' '{"events":[{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":'"$payload"'}]}' \
-            | plane_emit_events keepalive >>"$LOG" 2>&1 &
+            | PLANE_EMIT_COOLDOWN_STAGE=1 plane_emit_events keepalive >>"$LOG" 2>&1 &   # #1657: fire-and-forget
         _w=$!
         _i=0
         while kill -0 "$_w" 2>/dev/null && [ "$_i" -lt "$_eto" ]; do
