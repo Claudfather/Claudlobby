@@ -105,6 +105,16 @@ integrity only; they are not an OS containment boundary against a same-user
 agent. A reviewed future broker must own mock backing state and authoritative
 logs outside the agent's filesystem/process boundary.
 
+`validate_payload` is a preparation helper, not a runtime intake verifier. It
+rejects descendant symlinks but accepts a symlink used as the payload root; it
+does not establish canonical root or ancestor ownership. It checks the file
+allowlist and frozen guide, but does not compare other artifacts to the manifest
+or re-verify the pointer in CLAUDE.md. `prepare` separately checks the actual
+paired bytes and records written hashes. Before any future mount or execution,
+the trusted adapter must verify the canonical intended root, permitted mount
+topology, every registered artifact hash and the pointer target at that boundary.
+It must never use `validate_payload` alone as approval or isolation evidence.
+
 The offline scorer checks ordered attempts, routes/arguments/results, final
 state and controller-supplied final-response judgements bound to the exact
 response hash. Those judgements are **not** authenticated by a JSON field. A
