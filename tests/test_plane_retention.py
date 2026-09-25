@@ -19,9 +19,7 @@ from pathlib import Path
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.retention import (
-    DEFAULT_RETENTION_DAYS, prune_metric_samples,
-)
+from claudlobby.plane.retention import prune_metric_samples
 
 REPO = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -34,20 +32,22 @@ def _root(tmp_path: Path) -> Path:
     return root
 
 
-def _sample(root: Path, subj_alias="bot:f/erlich"):
-    emit_batch(root, [{
-        "event_type": "metric_sample", "emitter": "keepalive", "fleet": "f",
+def _sample(root: Path, subj_alias="bot:f/erlich", **extra):
+    return emit_batch(root, [{
+        "event_type": "metric_sample", "emitter": "keepalive", "fleet": "f", **extra,
         "payload": {"subject_kind": "bot_instance", "subject": subj_alias,
                     "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}])
 
 
-def _backdate_all(root: Path, days_old: float):
+def _backdate_all(root: Path, days_old: float, ledger: bool = False):
     """Rewrite metric_samples.ingested_at to <days_old> in the past — the
     field retention ages by."""
     db = connect(db_path(root))
     old = (NOW - timedelta(days=days_old)).isoformat()
     try:
         db.execute("UPDATE metric_samples SET ingested_at = ?", (old,))
+        if ledger:  # a real ingest stamps both at once
+            db.execute("UPDATE ingest_ledger SET ingested_at = ?", (old,))
     finally:
         db.close()
 
@@ -321,17 +321,12 @@ def test_a_replayed_sample_survives_its_own_prune(tmp_path):
     """An ack-lost retry resends a sample that was pruned since: the watermark
     lets it classify as a duplicate instead of refusing the batch."""
     root = _root(tmp_path)
-    ev = {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "f",
-          "payload": {"subject_kind": "bot_instance", "subject": "bot:f/erlich",
-                      "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}
-    (first,) = emit_batch(root, [ev])
+    (first,) = _sample(root)
+    _backdate_all(root, days_old=40, ledger=True)
     conn = connect(db_path(root))
     try:
-        old = (NOW - timedelta(days=40)).isoformat()
-        for table in ("metric_samples", "ingest_ledger"):  # ingest stamps both
-            conn.execute(f"UPDATE {table} SET ingested_at = ?", (old,))
         assert prune_metric_samples(conn, now=NOW).deleted == 1
     finally:
         conn.close()
-    replay = emit_batch(root, [{**ev, "event_id": first.event_id}])
+    replay = _sample(root, event_id=first.event_id)
     assert [o.status for o in replay] == ["duplicate"]

@@ -141,7 +141,7 @@ def prune_system_events(conn, *, now=None, days: int = DEFAULT_RETENTION_DAYS,
     # for new rows too; here it holds only behind a cutoff this lane actually
     # ran, and only for the family it ran on.
     #
-    # `MAX` so a re-run with a shorter window cannot walk the watermark
+    # `MAX` so a re-run with a longer window cannot walk the watermark
     # backwards and re-expose rows it already explained.
     if deleted:
         conn.execute(
