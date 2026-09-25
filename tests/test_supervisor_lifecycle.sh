@@ -91,9 +91,15 @@ if [ "${PROBE_FAULT:-}" = callback ]; then
 fi
 ''')
         for binary in ('systemctl', 'launchctl', 'absolute-launchctl', 'tmux'):
+            # PROBE_RC injects action failure. A bridge-heal tick also reads the
+            # pane before it restarts; failing that unrelated read produces
+            # inherited ERR receipts on bash 3.2 before the action under test.
+            # Keep this observation successful; kill-server still tests rc.
+            read_success = ('case " $* " in *" capture-pane "*) exit 0 ;; esac\n'
+                            if binary == 'tmux' else '')
             executable(bindir / binary,
                 'printf "action:%s %s\\n" "${0##*/}" "$*" >> "$PROBE_TRACE"\n'
-                'exit "${PROBE_RC:-0}"\n')
+                + read_success + 'exit "${PROBE_RC:-0}"\n')
         executable(bindir / 'uname', 'printf "%s\\n" "$PROBE_OS"\n')
         executable(bindir / 'hostname', 'printf test-host\n')
         for script in ('install-bot-systemd.sh', 'install-bot.sh', 'start-bot.sh'):
