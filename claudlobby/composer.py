@@ -4833,9 +4833,9 @@ def manifest_provenance(fleet: FleetConfig, paths: Paths) -> dict:
     content that arrived through git. It cannot separate a commit from a
     checkout; nothing readable afterwards can.
 
-    A durable per-generate trail is a different deliverable and is deliberately
-    not built here (the plane's registry lane already keeps a per-change history
-    of the fleet's composed SHAPE, which is the natural carrier for it) — #1732.
+    The generate completion receipt preserves observations actually recorded
+    before a repair (#1732). It cannot infer a transient state repaired before
+    any generate observed it; the repair-then-generate bound still holds there.
     """
     inputs = manifest_inputs(fleet, paths)
     files = {
@@ -4975,8 +4975,13 @@ def changed_manifest_inputs(fleet: FleetConfig, paths: Paths,
     return sorted(set(changed))
 
 
-def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
-    """Compose every bot in the fleet; returns a dict of bot_id -> bot_dir."""
+def compose_fleet(fleet: FleetConfig, paths: Paths, log=None, *,
+                  provenance_out: dict | None = None) -> dict[str, Path]:
+    """Compose every bot; optionally return the computed snapshot in a sink.
+
+    The mapping return is unchanged. The generate command passes a private sink
+    to record this observation without racing a later composed.json overwrite.
+    """
     paths.runtime_bots.mkdir(parents=True, exist_ok=True)
 
     # Scaffold shared documentation directories
@@ -5026,6 +5031,8 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
     # Written after the bots so a fleet that failed to compose leaves no record
     # claiming it was composed from anything.
     prov = write_manifest_provenance(fleet, paths)
+    if provenance_out is not None:
+        provenance_out.update(prov)
     for warning in manifest_warnings(prov):
         _log.warning("%s", warning)
         print(f"claudlobby: WARNING — {warning}", file=sys.stderr)

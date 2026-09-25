@@ -221,6 +221,7 @@ def cmd_generate(args) -> int:
         compose_host_bot_handles,
         compose_host_mention_allowlist,
         compose_host_timers,
+        manifest_provenance,
     )
 
     paths = _resolve_paths(args)
@@ -241,15 +242,17 @@ def cmd_generate(args) -> int:
     for w in report.warnings:
         log.warning("%s", w)
 
+    composition = {}
     if args.bot:
         bot = fleet.bots.get(args.bot)
         if not bot:
             log.error("bot '%s' not in fleet.yaml", args.bot)
             return 1
         out = compose_bot(bot, fleet, paths)
+        composition.update(manifest_provenance(fleet, paths))
         log.info("composed %s → %s", args.bot, out)
     else:
-        out = compose_fleet(fleet, paths)
+        out = compose_fleet(fleet, paths, provenance_out=composition)
         log.info("composed %d bots → %s", len(out), paths.runtime_bots)
 
     # Fleet-level timer generation (after per-bot loop). Called unconditionally:
@@ -277,14 +280,13 @@ def cmd_generate(args) -> int:
 
     _warn_unresolvable_skill_refs(paths)
 
-    # Phase 2b: the generate-time registry scan (cause=generate). NON-
-    # BLOCKING and dormant: unarmed fleets (no PLANE_EMIT_ENABLED=1 in the
-    # fleet env) return None silently, and a scan failure must never break
-    # a generate — the composed estate is correct with or without its
-    # keyframes; the scan just records what generate produced.
+    # The optional completion observation is this successful generate's own
+    # snapshot, never a reread of the overwriteable sidecar. complete retains
+    # its registry-enumeration meaning; a scan failure cannot fail generation.
+    composition["bot_ids"] = [args.bot] if args.bot else sorted(fleet.bots)
     try:
         from ..plane.registry_emit import run_generate_scan
-        summary = run_generate_scan(paths, fleet)
+        summary = run_generate_scan(paths, fleet, composition=composition)
         if summary:
             log.info(
                 "registry scan %s: %d entities (%d tombstoned,"
@@ -292,6 +294,12 @@ def cmd_generate(args) -> int:
                 summary["scan_id"], summary["entities"],
                 summary["tombstoned"], summary["complete"],
                 summary["outcomes"])
+            if any(status not in {"committed", "duplicate"}
+                   for status in summary["outcomes"]):
+                log.warning("composition history has uncommitted scan emissions; "
+                            "this generate may be absent until recovery")
+        else:
+            log.warning("composition history not recorded: registry scan disabled")
     except Exception as exc:  # noqa: BLE001 — non-blocking by contract
         log.warning("registry scan failed (generate unaffected): %s", exc)
 

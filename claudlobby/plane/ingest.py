@@ -447,7 +447,10 @@ def _declaration_row(payload, entity):
         detail = {k: v for k, v in {
             "scan_id": payload.scan_id, "scope": payload.scope,
             "counts": payload.counts, "complete": payload.complete,
-            "source_rev": payload.source_rev}.items() if v is not None}
+            "source_rev": payload.source_rev,
+            "composition": (payload.composition.model_dump(mode="json", by_alias=True)
+                            if payload.composition is not None else None),
+        }.items() if v is not None}
     return {
         "kind": "declaration",
         "event": payload.event,
