@@ -20,6 +20,15 @@ read clean on the next pull with no regenerate; a quoted value is left as
 read. The composer writes the comment on its own line, and `bot_is_manager`
 no longer keeps its own copy of the strip.
 
+### Fixed — a rejected currency notice no longer silences itself for a week (#900)
+
+`debounce_notify` writes its marker only when the notify function returns 0, and
+`notify_currency` returns the Telegram verdict. A rejected notice is sent again on
+the next run instead of waiting for the count to change or `CURRENCY_RENOTIFY_S`
+(7 days). A host with no Telegram target at all (tg-post exit 2, as on a new
+install) counts as sent, so its manager is nudged once rather than on every run.
+Every other caller's notify function returns 0, so none of them changes.
+
 ### Fixed — the operator's home directory was back in the tree, and nothing caught it (#927)
 
 #1306 replaced the home paths #927 named but added no gate, and four later PRs
