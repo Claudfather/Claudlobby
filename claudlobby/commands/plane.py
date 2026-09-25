@@ -546,6 +546,42 @@ def cmd_plane_doctor(args) -> int:
     return _guarded("plane doctor", run)
 
 
+def _cmd_compositions(root, args) -> int:
+    from ..plane.composition_history import history_result, read_compositions
+    from ..plane.db import open_ro
+
+    try:
+        result = history_result(args.compositions, args.limit)
+        conn, reason = open_ro(root)
+        if conn is None:
+            result = history_result(args.compositions, args.limit, available=False, error=reason)
+        else:
+            try:
+                result = read_compositions(conn, args.compositions, limit=args.limit)
+            except sqlite3.Error as exc:
+                result = history_result(args.compositions, args.limit, available=False,
+                                        error=f"composition history unreadable: {exc}")
+            finally:
+                conn.close()
+    except ValueError as exc:
+        print(f"composition history: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(result["coverage"]["note"])
+        if result.get("error"):
+            print(result["error"], file=sys.stderr)
+        for row in result["observations"]:
+            print(f"{row['ingest_seq']}  {row.get('scan_id')}  {row['status']}"
+                  f"  registry_complete={row.get('registry_complete')}")
+            if row["composition"] is not None:
+                print(json.dumps(row["composition"], sort_keys=True, ensure_ascii=False))
+        if not result["observations"]:
+            print("No retained completion observations found; attempt coverage is unknown.")
+    return 0 if result["available"] else 1
+
+
 def cmd_plane_registry(args) -> int:
     """The registry lane's read door (chunk B): current state, SCD history,
     field-level changes, and --verify (projection vs re-derived estate).
@@ -556,6 +592,8 @@ def cmd_plane_registry(args) -> int:
     root = paths.root
 
     def run() -> int:
+        if getattr(args, "compositions", None):
+            return _cmd_compositions(root, args)
         from ..plane import registry_read as rr
 
         path = db_file(root)

@@ -768,6 +768,42 @@ class MetricSample(_Strict):
     status: Optional[Literal["ok", "warn", "alert"]] = None
 
 
+class CompositionInput(_Strict):
+    path: str
+    sha256: Optional[str] = Field(pattern=r"^[0-9a-f]{64}$")
+    present: bool = Field(strict=True)
+
+
+class CompositionGit(_Strict):
+    in_git: bool = Field(strict=True)
+    branch: Optional[str] = None
+    commit: Optional[str] = None
+    default_branch: Optional[str] = None
+    on_default_branch: Optional[bool] = Field(None, strict=True)
+    dirty: Optional[bool] = Field(None, strict=True)
+    interrupted: Optional[bool] = Field(None, strict=True)
+
+
+class CompositionObservation(_Strict):
+    """One recorded generate observation, never source file contents.
+
+    Optional on old/non-compose declarations. Bound its serialized record at
+    64 KiB; an oversized observation refuses rather than truncating provenance.
+    """
+    provenance_schema: Literal[1] = Field(alias="schema")
+    fleet: str = Field(min_length=1)
+    composed_at: AwareDatetime
+    files: dict[str, CompositionInput]
+    git: CompositionGit
+    bot_ids: list[str]
+
+    @model_validator(mode="after")
+    def _bounded(self):
+        if len(self.model_dump_json(by_alias=True).encode("utf-8")) > 65536:
+            raise ValueError("composition observation exceeds 64 KiB")
+        return self
+
+
 class Declaration(_Strict):
     """events kind=declaration — the provenance chain that never disappears
     into the hash gate: revision_seen records every newly observed vault
@@ -783,6 +819,7 @@ class Declaration(_Strict):
     counts: Optional[dict] = None
     complete: Optional[bool] = None
     source_rev: Optional[str] = None   # optional BY DESIGN: vaultless fleets scan too
+    composition: Optional[CompositionObservation] = None
 
     @model_validator(mode="after")
     def _per_token_detail(self):
@@ -795,6 +832,11 @@ class Declaration(_Strict):
                     or self.scope is None:
                 raise ValueError("scan_completed requires scope, counts and"
                                  " complete (§9d detail)")
+        if self.composition is not None:
+            if self.event != "scan_completed":
+                raise ValueError("composition requires scan_completed")
+            if self.scope != f"host+shared+fleet:{self.composition.fleet}":
+                raise ValueError("composition fleet must match scan scope")
         if self.event == "revision_seen" and not self.vault_rev:
             raise ValueError("revision_seen requires vault_rev")
         return self

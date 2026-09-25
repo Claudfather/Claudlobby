@@ -578,7 +578,7 @@ def assemble_entities(paths, fleet, vault_rev):
     return entities, not skipped
 
 
-def run_generate_scan(paths, fleet) -> dict | None:
+def run_generate_scan(paths, fleet, *, composition: dict | None = None) -> dict | None:
     """Emit one generate-cause registry scan for *fleet*. Returns the summary
     dict, or None when a tier has turned the scan OFF. Raises only upward
     through the non-blocking hook in cmd_generate."""
@@ -631,7 +631,10 @@ def run_generate_scan(paths, fleet) -> dict | None:
         return None
 
     from .emit_api import emit_batch
+    from .ids import derive_uid
 
+    if composition is not None and composition.get("fleet") != fleet.name:
+        raise ValueError("composition observation belongs to another fleet")
     root = paths.root
     scan_id = f"scan-{uuid.uuid4().hex[:12]}"
     vault_rev = _vault_rev(paths)
@@ -744,12 +747,14 @@ def run_generate_scan(paths, fleet) -> dict | None:
         counts[t] = counts.get(t, 0) + 1
     events.append({
         "event_type": "declaration", "emitter": "generate",
+        "event_id": derive_uid("ev", f"scan-completed:{fleet.name}:{scan_id}"),
         "fleet": fleet.name,
         "payload": {"event": "scan_completed", "subject_kind": "host",
                     "subject": platform.node(), "scan_id": scan_id,
                     "scope": f"host+shared+fleet:{fleet.name}",
                     "counts": {**counts, "tombstoned": tombstoned},
-                    "complete": complete, "source_rev": vault_rev}})
+                    "complete": complete, "source_rev": vault_rev,
+                    **({"composition": composition} if composition is not None else {})}})
 
     outcomes = []
     # One cold-path CLI spawn + transaction per chunk; 50 keeps a ~190-event

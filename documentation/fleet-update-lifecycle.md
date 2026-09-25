@@ -477,8 +477,31 @@ It deliberately does **not** claim to separate a commit from a checkout. Nothing
 readable afterwards can, and naming what the answer excludes is what lets a
 reader go and look instead of trusting a word.
 
-A durable per-generate trail would close the second row and is **not** built
-here — tracked as #1732.
+`claudlobby plane registry --compositions <fleet-alias> --limit 20 --json`
+reads durable composition observations from retained `scan_completed` receipts
+(#1732). Each successful generate passes its computed input hashes, git state,
+observation time and composed bot ids directly to its completion receipt;
+single-bot generation names only that bot. Identical generations have separate
+scan ids without forcing new registry entity versions. `complete` still means
+registry enumeration completed, not that every generate attempt was recorded.
+
+This preserves an **earlier recorded interrupted observation** after a later
+clean generate replaces the snapshot. It cannot close the table's second row
+when no generate observed the interrupted state: history cannot reconstruct an
+unobserved checkout/rebase. The CLI states this bound in text and JSON. It
+returns the last N retained completion receipts in recording (`ingest_seq`)
+order; older receipts lacking provenance are explicitly marked `not_recorded`.
+Disabled/failed emissions, aborted generates and normal Plane retention leave
+coverage gaps. An empty or clean result never proves those gaps did not occur.
+
+Composition observations are typed and capped at 64 KiB without truncation;
+source file bodies and secret values are never included. Oversize or invalid
+observations follow the existing non-blocking scan failure path and leave a
+warning, not a fabricated history row. Accepting contracts/readers must be
+installed before emitters when host versions can differ; old records remain
+valid without this optional field. Backout stops new observations and preserves
+existing receipts. This is durability within Plane retention, not an infinite
+archive or a generate-attempt journal.
 
 ## Mechanism 1 — daily live reload (plugins + skills)
 

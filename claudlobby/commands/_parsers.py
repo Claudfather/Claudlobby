@@ -617,6 +617,13 @@ def register_subparsers(sub) -> None:
                       help="One entity's current payload (alias or uid)")
     mode.add_argument("--history", metavar="ALIAS",
                       help="One entity's SCD windows (alias or uid)")
+    mode.add_argument("--compositions", metavar="FLEET_ALIAS",
+                      help="Retained generate observations for <fleet-alias>; "
+                      "cannot infer unobserved or aborted runs")
+    prg.add_argument("--limit", type=int, default=20, metavar="N",
+                     help="Composition receipts to read (1-1000, default 20)")
+    prg.add_argument("--json", action="store_true",
+                     help="JSON composition history, including coverage gaps")
     mode.add_argument("--changes", type=int, nargs="?", const=20,
                       metavar="N", help="Recent field-level changes"
                       " (default 20)")
