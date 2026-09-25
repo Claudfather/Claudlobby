@@ -497,3 +497,15 @@ class TestUndeliveredNoticeIsRetried:
         assert os.path.exists(marker), "a delivered send left no marker"
         assert h.run().returncode == 0
         assert len(h.captured()) == 3, "a delivered notice was sent again inside the window"
+
+    def test_a_notice_with_no_telegram_target_is_raised_once(self, tmp_path):
+        # No Telegram target at all (a new install) never reaches tg-post and
+        # records exit 2. No later run can deliver it, so it counts as sent;
+        # otherwise every run nudges the manager again (#1825 review).
+        h = Harness(tmp_path, behind=2)
+        with open(os.path.join(h.root, "runtime", "bots", "tbot", "bot.conf"), "w") as f:
+            f.write('export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-tbot"\n')
+        assert h.run().returncode == 0
+        assert '"exit":2' in h.events(), "precondition: no Telegram target resolved"
+        assert h.run().returncode == 0
+        assert h.events().count('"type":"source_behind"') == 1, "a notice with no target was raised again"

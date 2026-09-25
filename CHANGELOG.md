@@ -11,7 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 `debounce_notify` writes its marker only when the notify function returns 0, and
 `notify_currency` returns the Telegram verdict. A rejected notice is sent again on
 the next run instead of waiting for the count to change or `CURRENCY_RENOTIFY_S`
-(7 days). Every other caller's notify function returns 0, so none of them changes.
+(7 days). A host with no Telegram target at all (tg-post exit 2, as on a new
+install) counts as sent, so its manager is nudged once rather than on every run.
+Every other caller's notify function returns 0, so none of them changes.
 
 ### Fixed — a tracked dispatch into an idle pane waits for the receiver's receipt (#1099)
 
