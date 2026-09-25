@@ -273,7 +273,9 @@ _link_library_tree() {
 
 # _generate_or_die <root> <label> — the compose-or-fail block, once.
 _generate_or_die() {
-    if ! CLAUDLOBBY_ROOT="$1" PYTHONPATH="$SRC" python3 -m claudlobby generate >"$1/generate.out" 2>&1; then
+    # -m puts cwd ahead of PYTHONPATH. Bind both so a caller's unrelated
+    # checkout cannot supply a different compositor than this harness's gate.
+    if ! (cd "$SRC" && CLAUDLOBBY_ROOT="$1" PYTHONPATH="$SRC" python3 -m claudlobby generate) >"$1/generate.out" 2>&1; then
         cat "$1/generate.out" >&2
         die "claudlobby generate failed for $2"
     fi
@@ -674,27 +676,14 @@ YAML
     fi
 }
 
-# suc_assert_component_only — run-blocking: every line differing between the
-# two composed CLAUDE.mds must belong to the component (frontmatter stripped —
-# the loader consumes it; heading markers normalized — the loader demotes them;
-# the composed section title is covered by the H1 text, which the contract
-# keeps equal to frontmatter title:).
+# The stock composed pair may differ only by the complete declared component
+# and its template separator. Source markers are part of the checked bytes.
 suc_assert_component_only() {
-    local with_md="$ROOT/with/runtime/bots/suc-probe/CLAUDE.md"
-    local without_md="$ROOT/without/runtime/bots/suc-probe/CLAUDE.md"
-    local allowed="$ROOT/component-lines.norm" got="$ROOT/composed-diff.norm" bad
-    awk 'NR==1 && /^---$/ {fm=1; next} fm==1 {if ($0 == "---") fm=2; next} {print}' \
-        "$SRC/$SUC_COMPONENT_REL" \
-        | sed 's/^#*[[:space:]]*//' | sed '/^$/d' | sort -u > "$allowed"
-    diff "$without_md" "$with_md" | sed -n 's/^[<>] //p' \
-        | sed 's/^#*[[:space:]]*//' | sed '/^$/d' | sort -u > "$got" || true
-    [ -s "$allowed" ] || die "component delta computed empty — component file unreadable"
-    [ -s "$got" ] || die "composed CLAUDE.mds are identical — the component did not compose; nothing to test"
-    bad="$(comm -23 "$got" "$allowed")"
-    if [ -n "$bad" ]; then
-        printf 'ab-comms-eval: composed diff exceeds the component block:\n%s\n' "$bad" >&2
-        die "variant isolation FAILED — composed outputs differ beyond the component; refusing to run"
-    fi
+    (cd "$SRC" && PYTHONPATH="$SRC" python3 -m claudlobby.ab_component_gate \
+        "$ROOT/without/runtime/bots/suc-probe/CLAUDE.md" \
+        "$ROOT/with/runtime/bots/suc-probe/CLAUDE.md" \
+        "$SRC/$SUC_COMPONENT_REL") \
+        || die "variant isolation FAILED — composed outputs differ beyond the component; refusing to run"
 }
 
 # suc_run_cell <task> <rep> <variant> — one headless real session; row appended.

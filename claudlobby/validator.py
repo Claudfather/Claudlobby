@@ -2249,6 +2249,21 @@ def _validate_composed_budget(
             report.warnings.append(f"bot '{name}': {warning}")
 
 
+def _validate_component_headings(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport,
+) -> None:
+    from .composer import compose_claude_md
+    from .component_sources import duplicate_heading_sources, template_label
+
+    for name, bot in fleet.bots.items():
+        try:
+            rendered = compose_claude_md(bot, fleet, paths)
+            warnings = duplicate_heading_sources(rendered, template_label(paths))
+        except Exception:  # the budget preflight already discloses render failure
+            continue
+        report.warnings.extend(f"bot '{name}': {warning}" for warning in warnings)
+
+
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
@@ -2288,6 +2303,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_env_contracts(paths, report)
     _validate_mcp_packages(fleet, paths, report)
     _validate_composed_budget(fleet, paths, report)
+    _validate_component_headings(fleet, paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
     if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):

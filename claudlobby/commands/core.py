@@ -296,6 +296,7 @@ def cmd_generate(args) -> int:
         log.warning("registry scan failed (generate unaffected): %s", exc)
 
     _report_composed_sizes(paths, [args.bot] if args.bot else list(fleet.bots))
+    _report_composed_sources(paths, [args.bot] if args.bot else list(fleet.bots))
     return 0
 
 
@@ -311,6 +312,28 @@ def _report_composed_sizes(paths: Paths, bot_names: list[str]) -> None:
             log.info("bot '%s': composed size %s", name, summary(measure(rendered)))
         except Exception as exc:  # advisory, per bot so later reports still run
             log.warning("bot '%s': composed size unavailable (%s); generate unaffected",
+                        name, type(exc).__name__)
+
+
+def _report_composed_sources(paths: Paths, bot_names: list[str]) -> None:
+    from ..component_sources import attribute
+
+    for name in bot_names:
+        try:
+            rendered = (paths.bot_runtime(name) / "CLAUDE.md").read_bytes().decode("utf-8")
+            report = attribute(rendered)
+            if not report.available:
+                log.warning("bot '%s': component attribution unavailable: %s", name, report.reason)
+                continue
+            log.info("bot '%s': component attribution %d/%d bytes; %d template/unattributed bytes",
+                     name, report.total_bytes - report.unattributed_bytes,
+                     report.total_bytes, report.unattributed_bytes)
+            for component in report.components:
+                log.info("  %s: %d final bytes (%d marker bytes), lines %d-%d",
+                         component.source, component.nbytes, component.marker_bytes,
+                         component.start_line, component.end_line)
+        except Exception as exc:  # diagnostics never break a successful generate
+            log.warning("bot '%s': component attribution unavailable (%s); generate unaffected",
                         name, type(exc).__name__)
 
 

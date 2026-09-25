@@ -30,9 +30,11 @@
 # {{ bot.name }}{% if title_label %} — {{ title_label }}{% endif %}
 
 {% if voice -%}
+{{ voice.source_path | source_marker }}
 ## Voice: {{ voice.title }}
 
 {{ voice.body }}
+<!-- /claudlobby:source -->
 
 {% endif -%}
 {{ expertise_body }}
@@ -218,9 +220,11 @@ meeting its project's declared tier.
 ## {{ label }}
 
 {% for item in items -%}
+{{ item.source_path | source_marker }}
 ### {{ item.title }}
 
 {{ item.body | trim }}
+<!-- /claudlobby:source -->
 
 {% endfor -%}
 {% endif -%}

@@ -122,6 +122,8 @@ def _compose_expertise(
     if not bot.expertise:
         raise ValueError(f"bot '{bot.bot_id}': expertise list is empty")
 
+    from .component_sources import source_block
+
     first_label: str | None = None
     body_chunks: list[str] = []
     for i, area in enumerate(bot.expertise):
@@ -133,7 +135,7 @@ def _compose_expertise(
             continue
         if i == 0:
             first_label = item.title_label
-        body_chunks.append(item.body)
+        body_chunks.append(source_block(item.body, item.source_path, paths))
     expertise_body = "\n\n".join(b for b in body_chunks if b).rstrip()
     return first_label, _expand(expertise_body, ctx)
 
@@ -161,6 +163,9 @@ def _build_jinja_env(paths: Paths) -> jinja2.Environment:
         keep_trailing_newline=True,
     )
     env.filters["quote_backtick"] = lambda s: f"`{s}`"
+    from .component_sources import start_marker
+
+    env.filters["source_marker"] = lambda path: start_marker(path, paths)
     return env
 
 
