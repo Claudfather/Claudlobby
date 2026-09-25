@@ -28,6 +28,7 @@ import os
 import json
 import sqlite3
 import sys
+import time
 
 # The package twin of this read went with the importer (F18 R3); the dispatch
 # door's supersession closure and the report door's link ride this stdlib read
@@ -174,6 +175,35 @@ def _checkin_id(a) -> int:
     return _with_plane(a.root, fn)
 
 
+def _received(a) -> int:
+    """`--received <msg_id> --destination <bot> [--wait S]`: has the RECEIVER
+    recorded this tracked send? plane-dispatch-in.sh writes the `received` row
+    only when the prompt is actually SUBMITTED, so a payload held in the input
+    box leaves none (#1099). Polls up to S seconds: rc 0 once the row lands
+    addressed to <bot> (fold F3, queries.DELIVERY_STATUS_SQL's rule: a prompt
+    that merely QUOTES the trailer files it under another bot), rc 1 when none
+    has by then, rc 4 when <bot> has never recorded a receipt
+    at all (its hook is not armed, so an absence proves nothing), rc 3
+    unreachable."""
+    def fn(pr, conn):
+        sql = ("SELECT 1 FROM events WHERE kind = 'transmission' AND event = 'received'"
+               " AND json_extract(detail, '$.destination') = ? {} ORDER BY ingest_seq DESC LIMIT 1")
+
+        def got():
+            return conn.execute(sql.format("AND msg_id = ?"), (a.destination, a.received)).fetchone()
+        if got():
+            return 0
+        if not conn.execute(sql.format(""), (a.destination,)).fetchone():
+            return 4
+        deadline = time.monotonic() + a.wait
+        while time.monotonic() < deadline:
+            time.sleep(0.25)
+            if got():
+                return 0
+        return 1
+    return _with_plane(a.root, fn)
+
+
 def _escalated(a) -> int:
     """`--escalated --fleet F`: `<assignment_id> <task_id> <by> <occurred_at>
     <question>` per OPEN escalation, oldest first, TAB-separated so a question
@@ -230,6 +260,11 @@ def main(argv=None) -> int:
     ap.add_argument("--or-empty", action="store_true",
                     help="--workstreams: a fleet the plane holds no identity for renders the EMPTY"
                          " registry instead of refusing (the writer's first open of a fresh fleet)")
+    ap.add_argument("--received", default=None,
+                    help="rc 0 once the receiver's `received` row for this msg id is on the plane, rc 1"
+                    " when none by --wait, rc 4 when --destination never recorded one (#1099)")
+    ap.add_argument("--destination", default=None)
+    ap.add_argument("--wait", type=float, default=0)
     ap.add_argument("--fleet", default=None)
     ap.add_argument("--bot", default=None)
     a = ap.parse_args(argv)
@@ -240,6 +275,8 @@ def main(argv=None) -> int:
         return 3
     if a.checkin_id:
         return _checkin_id(a)
+    if a.received:
+        return _received(a)   # no --destination matches no receipt: rc 4, no verdict
     if a.escalated:
         if not a.fleet:
             ap.error("--escalated needs --fleet")

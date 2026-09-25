@@ -13,6 +13,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 the next run instead of waiting for the count to change or `CURRENCY_RENOTIFY_S`
 (7 days). Every other caller's notify function returns 0, so none of them changes.
 
+### Fixed — a tracked dispatch into an idle pane waits for the receiver's receipt (#1099)
+
+`pane_send_verified` reads the pane, and a payload held in the input box, its
+Enter turned into a newline, read clean there. After a tracked send its idle
+probe cleared, `dispatch-task.sh` now asks the RECEIVER: `pane_await_receipt`
+waits for the `received` row the recipient's `UserPromptSubmit` hook writes.
+A missing receipt gets ONE more Enter (`send_retry`, reason `no-receipt`);
+still none files `send_miss` and a stderr line, and the door keeps its own rc.
+Nothing is pressed and no verdict is given when the plane cannot answer, when
+the recipient never recorded a receipt (its hook is not armed), or when the
+recipient is busy: a prompt that arrives mid-turn is queued, and its receipt
+lands only when that turn ends.
+
+- `PANE_RECEIPT_WAIT_S` (default 10) is the wait per phase, in seconds; `0`
+  (in any spelling, `0.0` included) turns the gate off.
+- `plane-dispatch-in.sh` drops Claude Code's `<pasted_content>` wrapper before
+  matching the trailer; it had hidden the receipts of 9 submitted prompts.
+
 ### Changed — the validation harness tests keep one test per failure that happened (#1801)
 
 484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
