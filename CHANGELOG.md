@@ -103,8 +103,8 @@ refuse with a reason naming what to set. It shipped without an entry; this is
 its entry (#1786).
 
 - **Fleet timer units carry only the chat, as before** (#1801): the runtime
-  sends as the first channel bot whose own chat is the fleet chat, and refuses
-  the alert when there is none; `claudlobby validate` warns about that case.
+  sends as the first declared channel bot whose own chat is the fleet chat, and
+  refuses the alert when there is none; `claudlobby validate` warns about that.
 - **A new key and variable:** `fleet_pulse.escalation_state_dir`, carried as
   `FLEET_PULSE_ESCALATION_STATE_DIR`. It names the escalation chat's declared
   sender, with `~` and `$HOME/` expanded at generate time.

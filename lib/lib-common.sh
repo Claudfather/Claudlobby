@@ -5697,16 +5697,20 @@ resolve_alert_target() {
 }
 
 # _bot_with_own_chat <bots_dir> <chat_id>
-# The first bot dir in <bots_dir> (lexical) whose OWN TELEGRAM_GROUP_CHAT_ID is
-# <chat_id>, that is a channel bot (TELEGRAM_BOT_HANDLE: every bot.conf carries
-# a state dir, a channel-less one too) and that declares a channel state dir;
-# prints it, or returns 1. The validator warns at generate time when no declared
+# The first bot dir in <bots_dir> (lexical) that its fleet.yaml declares (every
+# dir when the roster is empty), whose OWN TELEGRAM_GROUP_CHAT_ID is <chat_id>,
+# that is a channel bot (TELEGRAM_BOT_HANDLE: every bot.conf carries a state
+# dir, a channel-less one too) and that declares a channel state dir; prints it,
+# or returns 1. Both filters are creds-check's: move-bot leaves a moved bot's old
+# dir behind by default. The validator warns at generate time when no declared
 # bot qualifies (composer.fleet_alert_sender_state_dir).
 _bot_with_own_chat() {
-    local bots_dir="$1" chat="$2" d
+    local bots_dir="$1" chat="$2" d declared
     [ -d "$bots_dir" ] || return 1
+    declared=$(parse_fleet_bots "${bots_dir%/runtime/bots}/fleet.yaml")
     for d in "$bots_dir"/*/; do
         [ -f "$d/bot.conf" ] || continue
+        bot_in_fleet "$(basename "$d")" "$declared" || continue
         [ -n "$(bot_conf_get "$d" TELEGRAM_BOT_HANDLE "")" ] || continue
         [ "$(bot_conf_get "$d" TELEGRAM_GROUP_CHAT_ID "")" = "$chat" ] || continue
         [ -n "$(bot_conf_get "$d" TELEGRAM_STATE_DIR "")" ] || continue

@@ -136,7 +136,7 @@ fleet:
 
 Cosmetic + service-unit naming + default Telegram chat. Bots may override `chat_id` per-bot.
 
-The fleet chat is also where fleet timers' alerts go. It is stamped into their units, and the runtime sends **as a bot in it** (#1771): the first channel bot, by name, whose own chat IS the fleet chat (a bot that overrides `chat_id` is not in it). When no bot is in the fleet chat, those alerts are **refused** and `claudlobby validate` warns — a chat paired with a token that cannot reach it is what silenced one fleet's alerts for two months.
+The fleet chat is also where fleet timers' alerts go. It is stamped into their units, and the runtime sends **as a bot in it** (#1771): the first declared channel bot, by name, whose own chat IS the fleet chat (a bot that overrides `chat_id` is not in it). When no bot is in the fleet chat, those alerts are **refused** and `claudlobby validate` warns — a chat paired with a token that cannot reach it is what silenced one fleet's alerts for two months.
 
 ### `fleet.accounts`
 
