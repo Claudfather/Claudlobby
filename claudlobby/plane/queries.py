@@ -801,8 +801,13 @@ REG_CURRENT_KEYS_SQL = (
 # the partition's next row (NULL = still open). Tombstone rows appear as
 # window-openers of the deleted period — the reader renders them, never
 # filters them, or deletion vanishes from history.
+# Select complete partitions first: a later alias must still close an old
+# alias's window. Only after LEAD may :ident select the returned rows.
 REG_HISTORY_SQL = (
-    "WITH " + _REG_EFFECTIVE +
+    "WITH " + _REG_EFFECTIVE + ", selected AS ("
+    " SELECT DISTINCT host_uid, entity_type, entity_uid"
+    " FROM registry_snapshots WHERE entity_alias = :ident OR entity_uid = :ident),"
+    " history AS ("
     " SELECT e.host_uid, e.entity_type, e.entity_uid, e.entity_alias,"
     " e.tombstone, e.payload, e.payload_hash, e.cause, e.scan_id,"
     " e.occurred_at AS valid_from,"
@@ -810,8 +815,11 @@ REG_HISTORY_SQL = (
     "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
     "   ORDER BY e.occurred_at, e.ingest_seq) AS valid_to,"
     " e.ingest_seq"
-    " FROM effective e WHERE e.f11_valid = 1"
-    " ORDER BY e.entity_type, e.entity_alias, e.occurred_at, e.ingest_seq"
+    " FROM effective e JOIN selected s"
+    " ON s.host_uid = e.host_uid AND s.entity_type = e.entity_type"
+    " AND s.entity_uid = e.entity_uid WHERE e.f11_valid = 1)"
+    " SELECT * FROM history WHERE entity_alias = :ident OR entity_uid = :ident"
+    " ORDER BY entity_type, entity_alias, valid_from, ingest_seq"
 )
 
 # Consecutive rows in a partition ARE the diff view (spec line 143). This
@@ -822,6 +830,7 @@ REG_HISTORY_SQL = (
 # as first_observed — spec's own derivation name, and a new entity is
 # prime drift signal (chunk-B gauntlet: the old WHERE silently dropped
 # exactly those rows from --changes).
+# LIMIT bounds returned payloads, not the SQL window's partition input.
 REG_CHANGES_SQL = (
     "WITH " + _REG_EFFECTIVE + ", ordered AS ("
     " SELECT e.*,"
@@ -835,7 +844,7 @@ REG_CHANGES_SQL = (
     " prev_payload, prev_tombstone, cause, scan_id,"
     " occurred_at, ingest_seq"
     " FROM ordered"
-    " ORDER BY ingest_seq DESC"
+    " ORDER BY ingest_seq DESC LIMIT ?"
 )
 
 # Trust: tombstones the F11 join does NOT validate. Nonzero means a scan
