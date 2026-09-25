@@ -577,3 +577,39 @@ PR #399 added `lib/update-claude-code.sh` with a daily **fleet-wide bounce** —
 | `lib/pre-stop-handoff.sh` | Best-effort, non-blocking handoff before an intentional restart |
 
 Full design history, decision forks, and rationale: `documentation/plans/archive/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.
+
+
+### Core source observation (schema 2)
+
+`composed.json` keeps the original fleet `files` and `git` fields and adds a
+separate `sources` inventory. It records the imported package root, the base
+library/templates/voices/lib roots, resolved system defaults, and actual fleet
+library/voice/template overlays in lookup precedence. An overlay repository is
+not the package repository. Full source commit IDs, local branch/detached and
+scoped dirty/interrupted states are separate from the fleet-manifest state.
+A non-Git installation explicitly has `no_git` revision state: content digests
+can be compared, but no source commit can be asserted.
+
+The digests cover sorted relative source paths and file-byte hashes. They omit
+cache/generated paths at every depth (`__pycache__`, `*.pyc`, `.DS_Store`,
+`build`, `.pytest_cache`), Git/runtime directories and `.env` files. Symlink
+identity contributes to the digest; targets are read only inside declared,
+non-excluded source roots. Escaping, excluded, dangling, cyclic or unreadable
+sources make coverage incomplete. No file bodies, patches or credential values
+are stored. Root labels in warnings identify the affected source layer.
+
+This is a **source-tree observation**, not a consumed-file trace or an atomic
+attestation of a checkout that can change during rendering. `doctor` and the
+`diff` header distinguish fleet-manifest drift from core/overlay source drift.
+Schema-1 snapshots remain readable and explicitly lack core provenance;
+malformed or unsupported snapshots cannot establish unchanged sources. Reads
+perform no fetch and make no assertion that a cached remote ref is current.
+
+The next separately approved generation populates schema 2. Install its
+accepting history contract/ingest/reader and activate the Plane daemon first;
+#1732 completion receipts must accept schema 2 before the emitter sends it.
+Backout should stop schema-2 emission while retaining accepting consumers until
+queued receipts drain. Preserve sidecars and existing receipts: old schema-1
+readers report schema 2 unsupported instead of claiming a clean source state.
+The shared-install writing policy and unattended generation refusal decisions
+remain open under #953; provenance alone does not enforce them.

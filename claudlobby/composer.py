@@ -4698,7 +4698,8 @@ def _host_job_switch_env(paths: Paths, flags, cache: dict) -> dict[str, str] | N
 #: a reader that finds a newer schema than it knows must say so rather than
 #: interpret fields by name, because "manifest unchanged" read off a
 #: misunderstood file is the exact false clear this whole record exists to end.
-MANIFEST_PROVENANCE_SCHEMA = 1
+MANIFEST_PROVENANCE_SCHEMA = 2
+MANIFEST_PROVENANCE_SCHEMAS_READABLE = (1, 2)
 
 #: The default branches a checkout may be on without the compose being flagged.
 #: Asked of the remote first (``origin/HEAD``); this is the fallback for a
@@ -4733,9 +4734,9 @@ def _sha256_file(path: Path) -> str | None:
 def manifest_inputs(fleet: FleetConfig, paths: Paths) -> dict[str, Path]:
     """The compose inputs whose CONTENT decides what a bot receives.
 
-    Deliberately not "every file generate opens": ``library/`` is versioned with
-    the compositor and is #1251's question, not this one. These four are the
-    fleet's own declaration, and they live in a tree other tools rewrite.
+    These retain the fleet-manifest meaning. Core/overlay source trees are
+    observed separately under ``sources`` (#953), never relabelled as fleet
+    inputs or as an exact trace of every file consumed by rendering.
     """
     out: dict[str, Path] = {
         "fleet.yaml": paths.fleet_yaml,
@@ -4812,8 +4813,9 @@ def manifest_provenance(fleet: FleetConfig, paths: Paths) -> dict:
 
     Computed ONCE per generate (``compose_fleet`` threads nothing from it into
     bot.conf but the one stable hash): the git reads are subprocesses, and a
-    per-bot call would pay them once per bot for an answer that cannot change
-    mid-run.
+    per-bot call would pay them once per bot. The source tree CAN change
+    mid-run: this observation is neither an atomic attestation nor an exact
+    trace of the files the renderer consumed.
 
     **BOUND — this is a compose-time SNAPSHOT, not an audit trail, and the
     difference decides what it can attribute.** The git half says what the
@@ -4838,8 +4840,12 @@ def manifest_provenance(fleet: FleetConfig, paths: Paths) -> dict:
     any generate observed it; the repair-then-generate bound still holds there.
     """
     inputs = manifest_inputs(fleet, paths)
+    source_hashes: dict = {}
+    sources = current_source_provenance(paths, file_hashes_out=source_hashes)
+    from .source_provenance import observed_file_hash
     files = {
-        name: {"path": str(path), "sha256": _sha256_file(path),
+        name: {"path": str(path), "sha256": (observed_file_hash(path, source_hashes)
+               if name == "system.yaml" else _sha256_file(path)),
                "present": path.is_file()}
         for name, path in inputs.items()
     }
@@ -4852,7 +4858,25 @@ def manifest_provenance(fleet: FleetConfig, paths: Paths) -> dict:
                                .replace(microsecond=0).isoformat(),
         "files": files,
         "git": _git_state(config_dir, in_tree),
+        "sources": sources,
     }
+
+
+def current_source_provenance(paths: Paths, *, file_hashes_out: dict | None = None) -> dict:
+    from .source_provenance import source_observation
+    package_dir = Path(__file__).resolve().parent
+    return source_observation(paths, package_dir, _resolve_system_yaml(package_dir),
+                              file_hashes_out=file_hashes_out)
+
+
+def source_provenance_status(paths: Paths, prov: dict, *,
+                             file_hashes_out: dict | None = None) -> tuple[list[str], list[str]]:
+    from .source_provenance import source_comparison, source_warnings
+    sources = prov.get("sources")
+    current = current_source_provenance(paths, file_hashes_out=file_hashes_out)
+    if sources is None:
+        return [], source_warnings(None)
+    return source_comparison(sources, current)
 
 
 def manifest_warnings(prov: dict) -> list[str]:
@@ -4887,6 +4911,8 @@ def manifest_warnings(prov: dict) -> list[str]:
             "required compose input(s) absent from disk: " + ", ".join(sorted(missing)) +
             " — a manifest file that VANISHED reads to the compositor exactly "
             "like one that was never configured")
+    from .source_provenance import source_warnings
+    out.extend(source_warnings(prov.get("sources")))
     return out
 
 
@@ -4910,8 +4936,22 @@ def read_manifest_provenance(paths: Paths) -> dict | None:
     the absence rather than assuming a fleet composed by an older claudlobby is
     unchanged."""
     try:
-        return json.loads((paths.runtime / "composed.json").read_text())
-    except (OSError, ValueError):
+        value = json.loads((paths.runtime / "composed.json").read_text())
+        if not isinstance(value, dict):
+            return None
+        if value.get("schema") in MANIFEST_PROVENANCE_SCHEMAS_READABLE:
+            if not isinstance(value.get("files"), dict) or not isinstance(value.get("git"), dict):
+                return None
+            if any(not isinstance(f, dict) for f in value["files"].values()):
+                return None
+            from .plane.contracts import CompositionGit, CompositionInput, CompositionSources
+            CompositionGit.model_validate(value["git"])
+            for item in value["files"].values():
+                CompositionInput.model_validate(item)
+            if value.get("sources") is not None:
+                CompositionSources.model_validate(value["sources"])
+        return value
+    except (OSError, ValueError, TypeError):
         return None
 
 
@@ -4952,7 +4992,8 @@ def manifest_change_attribution(fleet: FleetConfig, paths: Paths) -> str | None:
 
 
 def changed_manifest_inputs(fleet: FleetConfig, paths: Paths,
-                            prov: dict | None = None) -> list[str]:
+                            prov: dict | None = None, *,
+                            source_file_hashes: dict | None = None) -> list[str]:
     """Input names whose content differs NOW from what the fleet was composed
     from. Empty when nothing moved; empty ALSO when there is no record, so
     every caller checks for the record separately — an unknown answer and a
@@ -4967,8 +5008,16 @@ def changed_manifest_inputs(fleet: FleetConfig, paths: Paths,
         was = recorded.get(name)
         if was is None:
             changed.append(name)                    # not recorded = new input
-        elif was.get("sha256") != _sha256_file(path):
-            changed.append(name)
+        else:
+            if name == "system.yaml":
+                from .source_provenance import observed_file_hash, system_file_hash
+                digest = (observed_file_hash(path, source_file_hashes)
+                          if source_file_hashes is not None else
+                          system_file_hash(paths, Path(__file__).resolve().parent, path))
+            else:
+                digest = _sha256_file(path)
+            if was.get("sha256") != digest:
+                changed.append(name)
     for name in recorded:
         if name not in now:
             changed.append(name)                    # input disappeared entirely

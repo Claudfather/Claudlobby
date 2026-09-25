@@ -32,7 +32,7 @@ from .paths import Paths
 #: newer record is reported as unread rather than interpreted by field
 #: name — 'unchanged' read off a misunderstood file is the false clear
 #: the record exists to prevent.
-MANIFEST_PROVENANCE_SCHEMA_EXPECTED = 1
+MANIFEST_PROVENANCE_SCHEMA_EXPECTED = 2
 
 
 def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
@@ -47,6 +47,8 @@ def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
         changed_manifest_inputs,
         manifest_change_attribution,
         read_manifest_provenance,
+        source_provenance_status,
+        MANIFEST_PROVENANCE_SCHEMAS_READABLE,
     )
 
     prov = read_manifest_provenance(paths)
@@ -55,19 +57,28 @@ def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
                 "claudlobby that did not stamp its inputs; run `generate` to "
                 "record them. Nothing below distinguishes an input change from "
                 "runtime drift.\n")
-    if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA_EXPECTED:
+    if prov.get("schema") not in MANIFEST_PROVENANCE_SCHEMAS_READABLE:
         return (f"manifest: provenance schema {prov.get('schema')!r} is not the "
                 f"{MANIFEST_PROVENANCE_SCHEMA_EXPECTED} this build reads — not "
                 "interpreting it. Run `generate` to re-record.\n")
-    changed = changed_manifest_inputs(fleet, paths, prov)
+    source_hashes: dict = {}
+    source_changes, source_notes = source_provenance_status(paths, prov, file_hashes_out=source_hashes)
+    source_line = ("core sources: CHANGED — " + ", ".join(source_changes) if source_changes
+                   else "core sources: UNAVAILABLE/INCOMPLETE" if any(
+                       "unavailable" in n or "incomplete" in n for n in source_notes)
+                   else "core sources: unchanged source-tree observation")
+    if source_notes:
+        source_line += " — " + "; ".join(source_notes)
+    source_line += "; not a consumed-file trace or atomic attestation\n"
+    changed = changed_manifest_inputs(fleet, paths, prov, source_file_hashes=source_hashes)
     if changed:
         how = manifest_change_attribution(fleet, paths)
         return ("manifest: CHANGED — " + ", ".join(changed) +
                 " differ(s) from what this runtime was composed from"
                 f" (composed {prov.get('composed_at')}). The inputs moved, not"
                 " just the runtime." + (f" {how.capitalize()}." if how else "")
-                + "\n")
-    return f"manifest: unchanged since compose ({prov.get('composed_at')})\n"
+                + "\n" + source_line)
+    return f"manifest: unchanged since compose ({prov.get('composed_at')})\n" + source_line
 
 
 def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
