@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a briefing timer could fire `/briefing` into a bot without the skill (#1819)
+
+A `briefing:` stanza composed the bot's timers but linked the `briefing` skill
+only when `skills:` listed it too, though the schema doc, the skill and
+`BriefingConfig` all say the stanza alone equips the bot. Claude Code rejects
+an unknown slash command locally, the input box still clears, and the send
+read as delivered. The stanza now links the skill (`resolve_effective_skills`),
+and `briefing-trigger.sh` refuses to send into a bot with no composed skill
+(`briefing_failed`, reason `skill_absent`, exit 1, and a stderr line), so a
+hand-built timer or a lost link fails loudly rather than silently.
+
 ### Changed — the alert tests keep one test per failure that happened (#1801)
 
 306 test lines go. No behaviour changes: the session-token rule is stated once,
