@@ -21,7 +21,7 @@
 # (skip = required env var missing — no transition alert, but re-surfaces
 # once it has persisted past day 3; see next_alert_day).
 #
-# Env vars consulted (sourced from $CLAUDLOBBY_ROOT/.env):
+# Env vars consulted (resolved through the runtime .env cascade):
 #   GITHUB_PERSONAL_ACCESS_TOKEN   — fleet GitHub PAT
 #   RAILWAY_PERSONAL_TOKEN         — Railway ACCOUNT token; answers `me`
 #   RAILWAY_PERSONAL_PROJECT_TOKEN — Railway WORKSPACE token; answers
@@ -61,38 +61,26 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
-# Resolve the .env tier THIS FLEET ACTUALLY READS (#1104).
-#
-# This line used to be `${CLAUDLOBBY_ENV:-$CLAUDLOBBY_ROOT/.env}` — always the
-# ROOT .env, while the script is invoked per-fleet (`creds-check.sh <fleet>`,
-# the composed-timer contract just above). Fleet-tier credentials were therefore
-# invisible to it by construction, and resolution fell through to whatever was
-# ambient. Measured consequence: a VALID Railway token sat in a fleet .env the
-# check never opened while the check FAILed against a stale ambient one, and an
-# operator learned to disbelieve the checker.
-#
-# The tier rule is the Python side's `Paths.env_file`, deliberately mirrored
-# rather than reinvented: the fleet .env when one exists, the root .env
-# otherwise — one or the other, never merged. Matching it is what keeps this
-# check and `claudlobby creds-reconcile` describing the same reality; a private
-# rule here is how the two would drift into disagreeing about which credential
-# is live.
-ENV_FILE="${CLAUDLOBBY_ENV:-}"
-if [ -z "$ENV_FILE" ] && [ -n "$FLEET_ARG" ]; then
-    _cc_fleet_dir="$(resolve_fleet_dir "$FLEET_ARG" 2>/dev/null || true)"
-    if [ -n "$_cc_fleet_dir" ] && [ -f "$_cc_fleet_dir/.env" ]; then
-        ENV_FILE="$_cc_fleet_dir/.env"
-    fi
-fi
-ENV_FILE="${ENV_FILE:-$CLAUDLOBBY_ROOT/.env}"
 LOG="${CLAUDLOBBY_CREDS_LOG:-$CLAUDLOBBY_ROOT/lib/creds-check.log}"
 STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/state/creds-check-state.json}"
 mkdir -p "$(dirname "$STATE")"
 TG_POST="$CLAUDLOBBY_ROOT/lib/tg-post.sh"
 
-# Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
-# the source of truth for runtime credentials. Parse it safely before any check.
-parse_env_file "$ENV_FILE"
+# Use the runtime's order; every later assignment, including empty, wins.
+# CLAUDLOBBY_ENV deliberately remains an exclusive single-file override.
+if [ -n "${CLAUDLOBBY_ENV:-}" ]; then
+    parse_env_file "$CLAUDLOBBY_ENV"
+else
+    # This is a fleet check, even when called from inside an unrelated bot.
+    # Empty arguments otherwise fall back to ambient BOT_DIR/FLEET_NAME.
+    if ! _cc_env_files=$(BOT_DIR="" FLEET_NAME="" env_tier_present_files "" "$FLEET_ARG"); then
+        printf '%s\n' 'creds-check: env resolver unreachable — nothing probed' >&2
+        exit 3
+    fi
+    while IFS= read -r _cc_tier; do
+        [ -z "$_cc_tier" ] || parse_env_file "$_cc_tier"
+    done <<< "$_cc_env_files"
+fi
 
 JQ="$(command -v jq || echo "${_HOMEBREW:-/usr/local}/bin/jq")"
 CURL="$(command -v curl || echo /usr/bin/curl)"
@@ -316,7 +304,7 @@ check_github_pat() {
         # App-less fleet attempt a doomed mint. This is the App half of #1213's
         # 'a declared integration is a fail, not a skip' — the fleet declared
         # App auth, so absence of a working token is a fail, not a skip.
-        # Boundary: reads only the .env tier (the vars are exported by
+        # Boundary: reads the .env tiers (the vars are exported by
         # parse_env_file above), so a manual setup that put GITHUB_APP_* ONLY
         # in the helper's ~/.config/claudlobby/github-app.conf fallback reads
         # as skip here — composed fleets always wire .env, so this bites only
