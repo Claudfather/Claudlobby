@@ -298,7 +298,7 @@ def test_records_with_no_plane_flag_at_all(tmp_path, *, scratch_plane_env):
     """F18 R1 always-on: no PLANE_EMIT_* flag -> still recorded."""
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
+    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, PLANE_EMIT_DISABLED=None, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     assert len(_received_row(root)) == 1
 

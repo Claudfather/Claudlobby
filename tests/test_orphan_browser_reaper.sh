@@ -5,7 +5,7 @@
 # someone's working browser, a false negative is the #807 leak coming back.
 #
 # Every case runs --dry-run, so nothing is killed and no FLEET NOTICE is emitted.
-# Belt and braces on top of that: hermetic under env -i PLANE_EMIT_DISABLED=1 with a scratch
+# Belt and braces on top of that: hermetic under env -i with a scratch
 # CLAUDLOBBY_ROOT and stubbed tmux/tg-post, so even a regression that reached the
 # alert path could not touch a real manager session or leak a bot token. A test
 # must never push fleet-wide notices.

@@ -984,7 +984,7 @@ def _until(pred, timeout: float = 15.0):
     raise AssertionError(f"not true within {timeout}s")
 
 
-def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_path: Path):
+def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_path: Path, scratch_plane_env):
     """The shim stages a RAW batch, so the daemon must land it through
     emit_batch, the socket path's own call, for the capture policy to apply.
     The spool's drain() ingests entries as-is (they are stored
@@ -992,7 +992,7 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_
     plane = tmp_path / "state" / "plane"
     plane.mkdir(parents=True)
     (plane / "capture.json").write_text('{"*": "metadata"}')
-    sdir = _short_sock_dir()
+    sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     t = threading.Thread(target=lambda: daemon.serve(install_signals=False), daemon=True)
@@ -1006,8 +1006,8 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_
             ["bash", str(shim)],
             input=json.dumps({"events": [_comm("c", body="secret content")]}),
             capture_output=True, text=True,
-            env={**os.environ, "CLAUDLOBBY_ROOT": str(tmp_path),
-                 "PLANE_SOCKET": str(sock), "PLANE_EMIT_COOLDOWN_STAGE": "1",
+            env={**os.environ, **scratch_plane_env(tmp_path, socket=sock),
+                 "PLANE_EMIT_COOLDOWN_STAGE": "1",
                  "PLANE_EMIT_CLI": "false"},
         )
         assert r.returncode == 6, f"rc={r.returncode} (1 means the cold CLI ran): {r.stderr}"

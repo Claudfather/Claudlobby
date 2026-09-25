@@ -123,7 +123,7 @@ def test_outbound_records_without_any_flag_and_ignores_enabled_zero(tmp_path, *,
     """The always-on contract: no plane flag at all → the reply is recorded;
     PLANE_EMIT_ENABLED=0 → still recorded, the flag is not read."""
     root = _root(tmp_path)
-    r = _run(OUT, _out_payload(), _env(root, PLANE_EMIT_ENABLED=None, scratch_plane_env=scratch_plane_env))
+    r = _run(OUT, _out_payload(), _env(root, PLANE_EMIT_ENABLED=None, PLANE_EMIT_DISABLED=None, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0
     assert len(_rows(root, "SELECT 1 FROM communications")) == 1
     root2 = tmp_path / "second"
@@ -209,7 +209,7 @@ def test_inbound_handles_attr_order_multiline_and_missing_user(tmp_path, *, scra
 
 def test_inbound_records_without_any_flag_and_disabled_silences_it(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
-    r = _run(IN, _channel_prompt(), _env(root, PLANE_EMIT_ENABLED=None, scratch_plane_env=scratch_plane_env))
+    r = _run(IN, _channel_prompt(), _env(root, PLANE_EMIT_ENABLED=None, PLANE_EMIT_DISABLED=None, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     assert len(_rows(root, "SELECT 1 FROM communications")) == 1
     root2 = tmp_path / "second"

@@ -30,7 +30,7 @@ def _signal_root(tmp_path, bots_at="runtime/bots"):
 
 def _run(script, args, root, tmp_path, extra_env=None, *, scratch_plane_env):
     env = _scrubbed_env(
-         TG_CAPTURE=str(tmp_path / "tg-capture"),
+        TG_CAPTURE=str(tmp_path / "tg-capture"),
         **scratch_plane_env(root),          # the host job's receipt lands on the plane under _host
     )
     env.update(extra_env or {})
@@ -413,7 +413,7 @@ class TestReloadFailureReasonIsTheRealError:
             env=_scrubbed_env(
                 CLAUDLOBBY_ROOT=str(root),
                 PATH=f"{bindir}:{sysbin or '/usr/bin:/bin:/usr/sbin:/sbin'}",
-                TG_CAPTURE=str(tmp_path / "tg-capture"),
+               TG_CAPTURE=str(tmp_path / "tg-capture"),
                 TMUX_TMPDIR=str(tmp_path / "no-tmux"),
                 **env_extra,
             ),
