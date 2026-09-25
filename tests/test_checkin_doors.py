@@ -150,14 +150,14 @@ REAL_DOOR_FILES = ("checkin-record.sh", "checkin-contract.py", "lib-common.sh",
                    "supervisor.sh", "plane-emit.sh", "plane-socket-client.py")
 
 
-def _real_rig(tmp_path: Path) -> tuple[Path, dict]:
+def _real_rig(tmp_path: Path, *, scratch_plane_env) -> tuple[Path, dict]:
     root = plane_root(tmp_path)
     lib = root / "lib"
     lib.mkdir()
     for name in REAL_DOOR_FILES:
         (lib / name).symlink_to(LIB / name)
-    env = {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "f", "BOT_ID": "mgr",
-           "PLANE_EMIT_CLI": str(CLI), "PLANE_SOCKET": str(root / "no-daemon.sock"),
+    env = {**scratch_plane_env(root), "FLEET_NAME": "f", "BOT_ID": "mgr",
+
            "HOME": str(root), "PATH": os.environ["PATH"]}
     return lib, env
 
@@ -169,8 +169,8 @@ def _rows(root: Path) -> list[tuple]:
         return [tuple(r) for r in conn.execute("SELECT kind, event, severity FROM events")]
 
 
-def test_the_decision_lands_on_a_real_plane(tmp_path):
-    lib, env = _real_rig(tmp_path)
+def test_the_decision_lands_on_a_real_plane(tmp_path, *, scratch_plane_env):
+    lib, env = _real_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(lib, "checkin-record.sh", env, json.dumps(_decision()))
     assert r.returncode == 0, r.stderr
     ck = r.stdout.strip()
@@ -186,11 +186,11 @@ def test_the_decision_lands_on_a_real_plane(tmp_path):
     assert _rows(Path(env["CLAUDLOBBY_ROOT"])) == [("system", "checkin_decision", "notice")]   # and nothing else
 
 
-def test_a_refused_decision_leaves_no_row_at_all_on_a_real_plane(tmp_path):
+def test_a_refused_decision_leaves_no_row_at_all_on_a_real_plane(tmp_path, *, scratch_plane_env):
     # cycle-3 B2: under the REAL lib-common the ERR trap fires inside a command
     # substitution and lands a critical script_error while the door says "nothing
     # recorded"; the door runs the contract as a form-D pipeline so nothing fires
-    lib, env = _real_rig(tmp_path)
+    lib, env = _real_rig(tmp_path, scratch_plane_env=scratch_plane_env)
     bad = _decision(); bad["action"] = "coffee"
     r = _run(lib, "checkin-record.sh", env, json.dumps(bad))
     assert r.returncode == 2 and "nothing recorded" in r.stderr and r.stdout == ""
@@ -205,8 +205,8 @@ DISPATCH_STUB = "#!/bin/bash\nprintf '%s\\n' \"$2\" > \"$DISPATCH_CAPTURE\"\nexi
 CK = "ck_" + "a" * 32
 
 
-def test_dispatch_project_alone_opens_the_envelope_and_stamps_the_work_item(tmp_path):
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+def test_dispatch_project_alone_opens_the_envelope_and_stamps_the_work_item(tmp_path, *, scratch_plane_env):
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
     r = _bash(f'"{libdir}/dispatch-task.sh" --project shop w1 "fix the feed"', env=env)
     assert r.returncode == 0, r.stderr
@@ -217,16 +217,16 @@ def test_dispatch_project_alone_opens_the_envelope_and_stamps_the_work_item(tmp_
     assert row["project_key"] == "shop"
 
 
-def test_dispatch_refuses_a_non_slug_project(tmp_path):
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+def test_dispatch_refuses_a_non_slug_project(tmp_path, *, scratch_plane_env):
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --project "Not Slug" w1 "x"', env=env)
     # the literal validation text (dispatch-task.sh:130), not the unknown-flag
     # catch-all -- "unknown flag '--project'" also contains the substring "project"
     assert r.returncode == 1 and "must be a projects.yaml slug" in r.stderr
 
 
-def test_dispatch_checkin_appends_the_join_row_to_the_same_batch(tmp_path):
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+def test_dispatch_checkin_appends_the_join_row_to_the_same_batch(tmp_path, *, scratch_plane_env):
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
     r = _bash(f'"{libdir}/dispatch-task.sh" --project shop --checkin {CK} w1 "fix the feed"', env=env)
     assert r.returncode == 0, r.stderr
@@ -243,10 +243,10 @@ def test_dispatch_checkin_appends_the_join_row_to_the_same_batch(tmp_path):
     assert link["subject_uid"] == asg["assigned_by_uid"]      # the dispatcher, by the plane's own alias rule
 
 
-def test_dispatch_checkin_on_an_id_less_task_dispatch_records_task_id_null(tmp_path):
+def test_dispatch_checkin_on_an_id_less_task_dispatch_records_task_id_null(tmp_path, *, scratch_plane_env):
     # a flagless task send is TRACKED (#1491: the gate is the type) but mints no
     # legacy id, so the join carries task_id null -- never "" (cycle-3 gap)
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
     r = _bash(f'"{libdir}/dispatch-task.sh" --checkin {CK} w1 "fix the feed"', env=env)
     assert r.returncode == 0, r.stderr
@@ -257,8 +257,8 @@ def test_dispatch_checkin_on_an_id_less_task_dispatch_records_task_id_null(tmp_p
     assert link is not None and json.loads(link["detail"])["task_id"] is None
 
 
-def test_dispatch_checkin_on_an_untracked_dispatch_is_disclosed_not_dropped(tmp_path):
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+def test_dispatch_checkin_on_an_untracked_dispatch_is_disclosed_not_dropped(tmp_path, *, scratch_plane_env):
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
     r = _bash(f'"{libdir}/dispatch-task.sh" --type query --checkin {CK} w1 "where are you?"', env=env)
     assert r.returncode == 0, r.stderr
@@ -267,27 +267,27 @@ def test_dispatch_checkin_on_an_untracked_dispatch_is_disclosed_not_dropped(tmp_
         assert conn.execute("SELECT COUNT(*) FROM events WHERE event='checkin_dispatch'").fetchone()[0] == 0
 
 
-def test_dispatch_refuses_a_malformed_checkin_id(tmp_path):
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+def test_dispatch_refuses_a_malformed_checkin_id(tmp_path, *, scratch_plane_env):
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --checkin nope w1 "x"', env=env)
     # the literal validation text (dispatch-task.sh:133), not the unknown-flag
     # catch-all -- "unknown flag '--checkin'" also contains the substring "--checkin"
     assert r.returncode == 1 and "must be a check-in id" in r.stderr
 
 
-def test_dispatch_checkin_without_a_value_is_rc_1_never_0(tmp_path):
+def test_dispatch_checkin_without_a_value_is_rc_1_never_0(tmp_path, *, scratch_plane_env):
     # flag FIRST and alone: the parse loop stops at the first positional
     # (dispatch-task.sh:115), so a trailing flag would be task text. Through
     # _fake_lib the REAL lib-common (and its EXIT trap) is in play.
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --checkin', env=env)
     assert r.returncode == 1 and "--checkin needs a value" in r.stderr and r.stdout == ""
 
 
-def test_plane_lookup_answers_a_checkin_id(tmp_path):
+def test_plane_lookup_answers_a_checkin_id(tmp_path, *, scratch_plane_env):
     from claudlobby.plane.emit_api import emit_batch
     from tests.test_task_id_dispatch import plane_env
-    plane_env(tmp_path)
+    plane_env(tmp_path, scratch_plane_env=scratch_plane_env)
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t", "fleet": "f", "source_ref": f"checkin:{CK}",
                            "payload": {"event": "checkin_decision", "subject_kind": "actor", "subject": "bot:f/mgr", "data": {"schema": 1}}}])
     look = [sys.executable, "-S", "-E", str(LIB / "plane-lookup.py"), "--root", str(tmp_path), "--checkin-id"]
@@ -297,14 +297,14 @@ def test_plane_lookup_answers_a_checkin_id(tmp_path):
     assert miss.returncode == 0 and miss.stdout == "" and "no checkin_decision" in miss.stderr
 
 
-def test_dispatch_checkin_to_a_decision_the_plane_cannot_see_is_disclosed_not_refused(tmp_path):
+def test_dispatch_checkin_to_a_decision_the_plane_cannot_see_is_disclosed_not_refused(tmp_path, *, scratch_plane_env):
     # the skill hands the id over in the same call (ck=$(record) && dispatch), a hand
     # caller pastes it; a well-formed id can still name nothing (mis-copied by hand, or
     # a record the shim spooled): say so, record the join as given.
     # The plane must EXIST for this to be "cannot see" rather than "cannot answer"
     # (a fresh rig has no db until the first emit), so one unrelated row seeds it.
     from claudlobby.plane.emit_api import emit_batch
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t", "fleet": "f",
                            "payload": {"event": "report_status", "subject_kind": "actor", "subject": "bot:f/w1", "data": {"status": "progress"}}}])
@@ -315,7 +315,7 @@ def test_dispatch_checkin_to_a_decision_the_plane_cannot_see_is_disclosed_not_re
         assert conn.execute("SELECT COUNT(*) FROM events WHERE event='checkin_dispatch'").fetchone()[0] == 1
 
 
-def test_dispatch_checkin_when_the_plane_cannot_answer_says_so_not_absent(tmp_path):
+def test_dispatch_checkin_when_the_plane_cannot_answer_says_so_not_absent(tmp_path, *, scratch_plane_env):
     # unreachable is not empty (source_state): a root whose plane db cannot be
     # opened must not print the "names no checkin_decision" line. The lookup runs
     # in the join block, which sits INSIDE the door's first emit, so on a root with
@@ -324,7 +324,7 @@ def test_dispatch_checkin_when_the_plane_cannot_answer_says_so_not_absent(tmp_pa
     # is an UNOPENABLE db (a directory where the db file belongs: sqlite refuses
     # it, rc 3). The lookup is one python3 spawn on the pre-send path (cycle 9);
     # chunk 3 may move it below the send if the measured cost warrants.
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
     broken = tmp_path / "broken"
     (broken / "state" / "plane" / "plane.db").mkdir(parents=True)
@@ -334,9 +334,9 @@ def test_dispatch_checkin_when_the_plane_cannot_answer_says_so_not_absent(tmp_pa
     assert "the plane could not answer" in r.stderr and "names no checkin_decision" not in r.stderr
 
 
-def test_dispatch_checkin_to_a_recorded_decision_is_quiet(tmp_path):
+def test_dispatch_checkin_to_a_recorded_decision_is_quiet(tmp_path, *, scratch_plane_env):
     from claudlobby.plane.emit_api import emit_batch
-    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB)
+    libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t", "fleet": "f", "source_ref": f"checkin:{CK}",
                            "payload": {"event": "checkin_decision", "subject_kind": "actor", "subject": "bot:f/lead", "data": {"schema": 1}}}])

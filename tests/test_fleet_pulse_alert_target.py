@@ -35,7 +35,7 @@ def _marker(root):
 # --- a refused escalation target is loud ------------------------------------------
 
 
-def test_a_refused_escalation_chat_is_loud(tmp_path):
+def test_a_refused_escalation_chat_is_loud(tmp_path, *, scratch_plane_env):
     root, paths, wi, asg = _scene(tmp_path)
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
@@ -45,7 +45,7 @@ def test_a_refused_escalation_chat_is_loud(tmp_path):
         **FAST,
     }
 
-    r = _pulse(root, libdir, **refused)
+    r = _pulse(root, libdir, **refused, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     # loud, and it names the fix
     assert "escalation Telegram target REFUSED" in r.stderr, r.stderr[-1500:]

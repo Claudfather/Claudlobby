@@ -52,11 +52,11 @@ def _root(tmp_path: Path) -> Path:
     return root
 
 
-def _env(root: Path, **extra) -> dict:
+def _env(root: Path, *, scratch_plane_env, **extra) -> dict:
     env = {
         "PATH": f"{REPO}/.venv/bin:" + os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp"),
-        "CLAUDLOBBY_ROOT": str(root),
+        **scratch_plane_env(root),
         "FLEET_NAME": FLEET,
         "BOT_ID": BOT,
     }
@@ -151,12 +151,12 @@ _SHAPES = {
 
 @pytest.mark.parametrize("shape", sorted(_SHAPES))
 @pytest.mark.parametrize("ensure_ascii", [True, False], ids=["escaped", "literal"])
-def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_ascii):
+def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_ascii, *, scratch_plane_env):
     body = _SHAPES[shape]
     payload = "set +H; " + body                # what dispatch.sh sends for prose
     sha, safe, nbytes = _wire_proof(payload)
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=ensure_ascii), _env(root))
+    r = _run(_hookjson(_arrival(safe), ensure_ascii=ensure_ascii), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0
     assert r.stdout == ""                      # THE law: stdout feeds the model
     rows = _received_row(root)
@@ -168,19 +168,19 @@ def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_
     assert d["received_bytes"] == nbytes
 
 
-def test_a_slash_command_briefing_carries_no_prefix_and_still_round_trips(tmp_path):
+def test_a_slash_command_briefing_carries_no_prefix_and_still_round_trips(tmp_path, *, scratch_plane_env):
     """report-back and a `/briefing` send go through bot_tmux_send directly (no
     `set +H; `), so the hook must round-trip a trailer-only wire form too."""
     sha, safe, nbytes = _wire_proof("/briefing morning")
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     d = json.loads(_received_row(root)[0]["detail"])
     assert d["received_sha256"] == sha
     assert d["received_bytes"] == nbytes
 
 
-def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path):
+def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path, *, scratch_plane_env):
     """The acceptance test F1 exists for: a fully-delivered MULTI-LINE dispatch
     classifies DELIVERED, not ALTERED. Real sanitize + real hook land the
     `received`; a seeded pane_submitted carries the same wire proof; the JOIN
@@ -204,7 +204,7 @@ def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path):
                      "destination": BOT, "state": "pane_submitted",
                      "wire_sha256": sha, "wire_bytes": nbytes}},
     ])
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     db = root / "state" / "plane" / "plane.db"
     conn = connect(str(db)); migrate(conn); conn.row_factory = sqlite3.Row
@@ -212,7 +212,7 @@ def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path):
     assert row["delivery"] == "delivered"
 
 
-def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path):
+def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path, *, scratch_plane_env):
     """TRUNCATED is reserved for REAL tail loss: the wire proof is the whole
     message, the arrival is a strict prefix of it (the trailer still rode the
     last chunk), so received_bytes < wire_bytes and the JOIN reads truncated."""
@@ -236,7 +236,7 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
                      "wire_sha256": sha, "wire_bytes": nbytes}},
     ])
     # a shortened arrival: drop the tail of the wire form, keep the trailer
-    r = _run(_hookjson(_arrival(safe[:-12]), ensure_ascii=False), _env(root))
+    r = _run(_hookjson(_arrival(safe[:-12]), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     db = root / "state" / "plane" / "plane.db"
     conn = connect(str(db)); migrate(conn); conn.row_factory = sqlite3.Row
@@ -246,7 +246,7 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
 
 # --- the prefilter / recogniser ---------------------------------------------
 
-def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path):
+def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     for prompt in (
         "fix the flaky test in tests/test_auth.py",
@@ -255,27 +255,27 @@ def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path):
         # a marker-shaped tail that is NOT a minted trailer: recorded as nothing
         "do the thing\n⟦plane:not-a-real-id⟧",
     ):
-        r = _run(_hookjson(prompt, ensure_ascii=False), _env(root))
+        r = _run(_hookjson(prompt, ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
         assert r.returncode == 0
         assert r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
-def test_a_marker_shaped_but_invalid_trailer_is_disclosed_never_recorded(tmp_path):
+def test_a_marker_shaped_but_invalid_trailer_is_disclosed_never_recorded(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
-    r = _run(_hookjson("do the thing\n⟦plane:msg_short⟧", ensure_ascii=False), _env(root))
+    r = _run(_hookjson("do the thing\n⟦plane:msg_short⟧", ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
     assert "did not parse" in r.stderr or "not recorded" in r.stderr
 
 
-def test_a_trailing_marker_wins_even_if_the_body_quotes_one(tmp_path):
+def test_a_trailing_marker_wins_even_if_the_body_quotes_one(tmp_path, *, scratch_plane_env):
     """The end anchor: a body that mentions a marker mid-text does not confuse
     the real trailer at the tail."""
     body = "explain ⟦plane:msg_00000000000000000000000000000000⟧ to a new hire"
     sha, safe, nbytes = _wire_proof(body)
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     row = _received_row(root)[0]
     assert row["msg_id"] == MSGID          # the TAIL trailer, not the quoted one
@@ -285,38 +285,38 @@ def test_a_trailing_marker_wins_even_if_the_body_quotes_one(tmp_path):
 
 # --- dormancy / arming ------------------------------------------------------
 
-def test_disabled_exemption_silences_it(tmp_path):
+def test_disabled_exemption_silences_it(tmp_path, *, scratch_plane_env):
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)
     r = _run(_hookjson(_arrival(safe), ensure_ascii=False),
-             _env(root, PLANE_EMIT_DISABLED="1"))
+             _env(root, PLANE_EMIT_DISABLED="1", scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
-def test_records_with_no_plane_flag_at_all(tmp_path):
+def test_records_with_no_plane_flag_at_all(tmp_path, *, scratch_plane_env):
     """F18 R1 always-on: no PLANE_EMIT_* flag -> still recorded."""
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     assert len(_received_row(root)) == 1
 
 
-def test_missing_identity_does_not_record(tmp_path):
+def test_missing_identity_does_not_record(tmp_path, *, scratch_plane_env):
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)
-    env = _env(root)
+    env = _env(root, scratch_plane_env=scratch_plane_env)
     del env["BOT_ID"]
     r = _run(_hookjson(_arrival(safe), ensure_ascii=False), env)
     assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
-def test_broken_stdin_is_silent(tmp_path):
+def test_broken_stdin_is_silent(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     for garbage in ("", "not json", '{"prompt":'):
-        r = _run(garbage, _env(root))
+        r = _run(garbage, _env(root, scratch_plane_env=scratch_plane_env))
         assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
 

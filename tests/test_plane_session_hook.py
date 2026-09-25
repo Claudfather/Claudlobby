@@ -22,17 +22,17 @@ def _run(payload: str, env: dict):
     )
 
 
-def _armed_env(tmp_path: Path) -> dict:
+def _armed_env(tmp_path: Path, *, scratch_plane_env) -> dict:
     bot = tmp_path / "bots" / "b1"
     bot.mkdir(parents=True)
-    return {"PLANE_EMIT_ENABLED": "1", "BOT_DIR": str(bot)}
+    return {**scratch_plane_env(tmp_path), "PLANE_EMIT_ENABLED": "1", "BOT_DIR": str(bot)}
 
 
-def test_bash_derivation_matches_python_byte_for_byte(tmp_path):
+def test_bash_derivation_matches_python_byte_for_byte(tmp_path, *, scratch_plane_env):
     """THE parity pin — now including the #1372-review F8 counterexamples:
     \\uXXXX escapes (café), escaped quotes, and raw non-ASCII, which the old
     sed parse derived DIFFERENTLY from derive_session_uid."""
-    env = _armed_env(tmp_path)
+    env = _armed_env(tmp_path, scratch_plane_env=scratch_plane_env)
     for sid in ("8ad2aa7e-bade-4c55-b3c3-000000000000", "abc", "UPPER-and-123",
                 "café", 'quo"ted', "emoji-🎯"):
         r = _run(json.dumps({"session_id": sid}), env)
@@ -46,10 +46,10 @@ def test_bash_derivation_matches_python_byte_for_byte(tmp_path):
     assert out["session_uid"] == derive_session_uid("café")
 
 
-def test_refused_start_invalidates_stale_identity(tmp_path):
+def test_refused_start_invalidates_stale_identity(tmp_path, *, scratch_plane_env):
     """#1372 review F8: a later {} retained the previous session's identity,
     attributing the new session's work to the old one. A refusal DELETES."""
-    env = _armed_env(tmp_path)
+    env = _armed_env(tmp_path, scratch_plane_env=scratch_plane_env)
     _run(json.dumps({"session_id": "old-transcript"}), env)
     f = Path(env["BOT_DIR"]) / "data" / ".plane-session"
     assert f.exists()
@@ -58,15 +58,15 @@ def test_refused_start_invalidates_stale_identity(tmp_path):
     assert not f.exists(), "stale identity must be invalidated on refusal"
 
 
-def test_whitespace_only_id_refused(tmp_path):
-    env = _armed_env(tmp_path)
+def test_whitespace_only_id_refused(tmp_path, *, scratch_plane_env):
+    env = _armed_env(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(json.dumps({"session_id": "   "}), env)
     assert r.returncode == 0 and "refusing to derive" in r.stderr
     assert not (Path(env["BOT_DIR"]) / "data" / ".plane-session").exists()
 
 
-def test_process_uid_fresh_per_invocation_and_well_formed(tmp_path):
-    env = _armed_env(tmp_path)
+def test_process_uid_fresh_per_invocation_and_well_formed(tmp_path, *, scratch_plane_env):
+    env = _armed_env(tmp_path, scratch_plane_env=scratch_plane_env)
     uids = []
     for _ in range(2):
         r = _run(json.dumps({"session_id": "same-transcript"}), env)
@@ -80,8 +80,8 @@ def test_process_uid_fresh_per_invocation_and_well_formed(tmp_path):
     assert derive_session_uid("same-transcript")
 
 
-def test_empty_platform_id_rejected_with_disclosure(tmp_path):
-    env = _armed_env(tmp_path)
+def test_empty_platform_id_rejected_with_disclosure(tmp_path, *, scratch_plane_env):
+    env = _armed_env(tmp_path, scratch_plane_env=scratch_plane_env)
     for payload in ("{}", json.dumps({"session_id": ""}), "not json"):
         r = _run(payload, env)
         assert r.returncode == 0, "a hook must never break a boot"
@@ -89,14 +89,14 @@ def test_empty_platform_id_rejected_with_disclosure(tmp_path):
         assert not (Path(env["BOT_DIR"]) / "data" / ".plane-session").exists()
 
 
-def test_no_flag_and_enabled_zero_both_publish_and_disabled_silences(tmp_path):
+def test_no_flag_and_enabled_zero_both_publish_and_disabled_silences(tmp_path, *, scratch_plane_env):
     """The always-on contract (F18 closure R1): with NO plane flag in the
     environment the hook publishes the session identity; PLANE_EMIT_ENABLED=0
     is IGNORED (the flag is not read any more); PLANE_EMIT_DISABLED=1, the
     harness exemption, is the one silent no-op."""
-    base = _armed_env(tmp_path)
+    base = _armed_env(tmp_path, scratch_plane_env=scratch_plane_env)
     f = Path(base["BOT_DIR"]) / "data" / ".plane-session"
-    no_flag = {k: v for k, v in base.items() if k != "PLANE_EMIT_ENABLED"}
+    no_flag = {k: v for k, v in base.items() if k not in ("PLANE_EMIT_ENABLED", "PLANE_EMIT_DISABLED")}
     r = _run(json.dumps({"session_id": "x"}), no_flag)
     assert r.returncode == 0, r.stderr
     assert json.loads(f.read_text())["session_uid"] == derive_session_uid("x")
@@ -110,11 +110,11 @@ def test_no_flag_and_enabled_zero_both_publish_and_disabled_silences(tmp_path):
     assert not f.exists()
 
 
-def test_file_mode_is_0600(tmp_path):
+def test_file_mode_is_0600(tmp_path, *, scratch_plane_env):
     import os
     import stat
 
-    env = _armed_env(tmp_path)
+    env = _armed_env(tmp_path, scratch_plane_env=scratch_plane_env)
     _run(json.dumps({"session_id": "modecheck"}), env)
     f = Path(env["BOT_DIR"]) / "data" / ".plane-session"
     assert stat.S_IMODE(os.stat(f).st_mode) == 0o600

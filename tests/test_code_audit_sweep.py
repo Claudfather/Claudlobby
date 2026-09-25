@@ -251,7 +251,7 @@ class TestSweepSelector:
     an idle session. No live GitHub or real bot — so it runs in CI offline.
     """
 
-    def _run(self, tmp_path: Path):
+    def _run(self, tmp_path: Path, *, scratch_plane_env):
         repo_root = Path(__file__).resolve().parents[1]
         selector = repo_root / "lib" / "code-audit-sweep.sh"
 
@@ -302,13 +302,13 @@ class TestSweepSelector:
         gh.chmod(0o755)
         tmux.chmod(0o755)
 
-        from tests.conftest import plane_emit_env, read_fleet_events
+        from tests.conftest import read_fleet_events
         env = dict(os.environ)
         env["CLAUDLOBBY_ROOT"] = str(root)
         env["CLAUDLOBBY_FLEET"] = "tf"          # the fleet job's carrier: the sweep's events anchor on bot:tf/owner
         env["PATH"] = f"{bindir}:{env['PATH']}"
         env["TMUX_BIN"] = str(tmux)
-        env.update(plane_emit_env())
+        env.update(scratch_plane_env(root))
         proc = subprocess.run(
             ["bash", str(selector), "tf"],
             env=env,
@@ -322,8 +322,8 @@ class TestSweepSelector:
         events = read_fleet_events(root)
         return proc, (events or None)
 
-    def test_selects_stalest_and_dispatches(self, tmp_path):
-        proc, log = self._run(tmp_path)
+    def test_selects_stalest_and_dispatches(self, tmp_path, *, scratch_plane_env):
+        proc, log = self._run(tmp_path, scratch_plane_env=scratch_plane_env)
         assert proc.returncode == 0, proc.stderr
         assert log is not None, f"no event recorded on the plane: {proc.stderr}"
         assert '"bot":"owner"' in log                    # anchored on the owner bot

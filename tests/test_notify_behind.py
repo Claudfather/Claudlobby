@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 
-from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, plane_emit_env, read_fleet_events
+from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "lib", "notify-behind.sh")
@@ -59,7 +59,8 @@ class Harness:
     """
 
     def __init__(self, tmp_path, behind=0, bots_at="runtime/bots",
-                 tag_at_seed=None, tag_after=None):
+                 tag_at_seed=None, tag_after=None, *, scratch_plane_env):
+        self.scratch_plane_env = scratch_plane_env
         self.origin = str(tmp_path / "origin")
         self.root = str(tmp_path / "root")
         self.capture = str(tmp_path / "tg-capture")
@@ -93,7 +94,7 @@ class Harness:
 
     def env(self):
         # a host job: no fleet, so its receipts land on the plane under _host
-        return _scrubbed_env(CLAUDLOBBY_ROOT=self.root, TG_CAPTURE=self.capture, **plane_emit_env())
+        return _scrubbed_env(TG_CAPTURE=self.capture, **self.scratch_plane_env(self.root))
 
     def run(self, script=SCRIPT):
         return subprocess.run(
@@ -121,8 +122,8 @@ class Harness:
 
 
 class TestNotifyBehind:
-    def test_behind_nudges_with_count_and_notice_framing(self, tmp_path):
-        h = Harness(tmp_path, behind=2)
+    def test_behind_nudges_with_count_and_notice_framing(self, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         r = h.run()
         assert r.returncode == 0, r.stderr
         lines = h.captured()
@@ -137,25 +138,25 @@ class TestNotifyBehind:
         assert "FLEET ALERT" not in msg
         assert "2 commit" in msg
 
-    def test_never_pulls(self, tmp_path):
+    def test_never_pulls(self, tmp_path, *, scratch_plane_env):
         # The core F5=c contract: notify-only. HEAD must be untouched and the
         # origin's new work must NOT appear in the tree after a run.
-        h = Harness(tmp_path, behind=2)
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         before = h.head()
         r = h.run()
         assert r.returncode == 0, r.stderr
         assert h.head() == before
         assert not os.path.exists(os.path.join(h.root, "ahead-0"))
 
-    def test_in_sync_is_silent(self, tmp_path):
-        h = Harness(tmp_path, behind=0)
+    def test_in_sync_is_silent(self, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=0, scratch_plane_env=scratch_plane_env)
         r = h.run()
         assert r.returncode == 0, r.stderr
         assert h.captured() == []
         assert "source_behind" not in h.events()
 
-    def test_behind_writes_notice_event(self, tmp_path):
-        h = Harness(tmp_path, behind=1)
+    def test_behind_writes_notice_event(self, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=1, scratch_plane_env=scratch_plane_env)
         r = h.run()
         assert r.returncode == 0, r.stderr
         events = h.events()
@@ -165,10 +166,10 @@ class TestNotifyBehind:
         # "fleet"): never misattributed to a bot
         assert '"bot":"host"' in events
 
-    def test_fetch_failure_is_quiet_but_evidenced(self, tmp_path):
+    def test_fetch_failure_is_quiet_but_evidenced(self, tmp_path, *, scratch_plane_env):
         # Offline host: no nudge, no alert spam, exit 0 — but a durable
         # script_error breadcrumb lands in state/events for later diagnosis.
-        h = Harness(tmp_path, behind=1)
+        h = Harness(tmp_path, behind=1, scratch_plane_env=scratch_plane_env)
         shutil.rmtree(h.origin)
         r = h.run()
         assert r.returncode == 0, r.stderr
@@ -187,12 +188,12 @@ class TestNotifyBehind:
         )
         assert r.returncode == 0, r.stderr
 
-    def test_multifleet_fallback_delivers(self, tmp_path):
+    def test_multifleet_fallback_delivers(self, tmp_path, *, scratch_plane_env):
         # Host jobs run fleet-less: resolve_bots_dir "" points at root-mode
         # runtime/bots, which is EMPTY on a multi-fleet host. The nudge must
         # fall back to scanning local/*/runtime/bots or it is dead on exactly
         # the hosts the tier targets.
-        h = Harness(tmp_path, behind=3, bots_at="local/eng/runtime/bots")
+        h = Harness(tmp_path, behind=3, bots_at="local/eng/runtime/bots", scratch_plane_env=scratch_plane_env)
         os.makedirs(os.path.join(h.root, "runtime", "bots"), exist_ok=True)
         r = h.run()
         assert r.returncode == 0, r.stderr
@@ -298,8 +299,8 @@ class TestBotConfGetPath:
 
 
 class TestFleetSignalPrimitives:
-    def _emit(self, tmp_path, fn, event_type, msg):
-        h = Harness(tmp_path, behind=0)
+    def _emit(self, tmp_path, fn, event_type, msg, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=0, scratch_plane_env=scratch_plane_env)
         bots_dir = os.path.join(h.root, "runtime", "bots")
         r = subprocess.run(
             [
@@ -314,10 +315,10 @@ class TestFleetSignalPrimitives:
         assert r.returncode == 0, r.stderr
         return h
 
-    def test_failure_alert_framing_preserved(self, tmp_path):
+    def test_failure_alert_framing_preserved(self, tmp_path, *, scratch_plane_env):
         # emit_failure_alert predates the notice variant; the shared body must
         # keep its wire format byte-identical for existing callers.
-        h = self._emit(tmp_path, "emit_failure_alert", "boom_type", "it broke")
+        h = self._emit(tmp_path, "emit_failure_alert", "boom_type", "it broke", scratch_plane_env=scratch_plane_env)
         lines = h.captured()
         assert len(lines) == 1
         assert "FLEET ALERT [boom_type]: it broke" in lines[0]
@@ -325,8 +326,8 @@ class TestFleetSignalPrimitives:
         assert '"type":"boom_type"' in events
         assert '"source":"alert"' in events
 
-    def test_notice_framing(self, tmp_path):
-        h = self._emit(tmp_path, "emit_fleet_notice", "heads_up", "fyi")
+    def test_notice_framing(self, tmp_path, *, scratch_plane_env):
+        h = self._emit(tmp_path, "emit_fleet_notice", "heads_up", "fyi", scratch_plane_env=scratch_plane_env)
         lines = h.captured()
         assert len(lines) == 1
         assert "FLEET NOTICE [heads_up]: fyi" in lines[0]
@@ -367,17 +368,17 @@ class TestCurrencyOutcomeIsLogged:
         p = os.path.join(h.root, "state", "notify-behind.log")
         return open(p).read() if os.path.exists(p) else ""
 
-    def test_delivered_send_is_logged_as_delivered(self, tmp_path):
-        h = Harness(tmp_path, behind=2)
+    def test_delivered_send_is_logged_as_delivered(self, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         r = h.run()
         assert r.returncode == 0, r.stderr
         assert len(h.captured()) == 1, "precondition: the send was attempted"
         assert "notice DELIVERED" in self._log(h)
 
-    def test_rejected_send_is_not_logged_as_delivered(self, tmp_path):
+    def test_rejected_send_is_not_logged_as_delivered(self, tmp_path, *, scratch_plane_env):
         # The headline defect. A dead token must never leave a log line a human
         # would audit as a correctly-escalated notice.
-        h = Harness(tmp_path, behind=2)
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         self._reject(h)
         r = h.run()
         assert r.returncode == 0, r.stderr
@@ -387,19 +388,19 @@ class TestCurrencyOutcomeIsLogged:
         # The old text is the specific lie; it must not survive anywhere.
         assert "notice raised" not in log
 
-    def test_rejected_send_still_reports_the_distance(self, tmp_path):
+    def test_rejected_send_still_reports_the_distance(self, tmp_path, *, scratch_plane_env):
         # The behind-count is factual regardless of delivery; fixing the
         # outcome clause must not cost the operator the measurement.
-        h = Harness(tmp_path, behind=2)
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         self._reject(h)
         assert h.run().returncode == 0
         assert "BEHIND" in self._log(h) and "2" in self._log(h)
 
-    def test_debounced_tick_is_not_logged_as_raised(self, tmp_path):
+    def test_debounced_tick_is_not_logged_as_raised(self, tmp_path, *, scratch_plane_env):
         # Second run inside the renotify window raises nothing at all. Logging
         # it as a raised notice inflates the apparent escalation count with
         # notices that were never sent.
-        h = Harness(tmp_path, behind=2)
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         assert h.run().returncode == 0
         first = self._log(h)
         assert h.run().returncode == 0
@@ -408,10 +409,10 @@ class TestCurrencyOutcomeIsLogged:
         assert "SUPPRESSED" in second
         assert "DELIVERED" not in second
 
-    def test_release_gap_site_reports_its_outcome(self, tmp_path):
+    def test_release_gap_site_reports_its_outcome(self, tmp_path, *, scratch_plane_env):
         # The third site (source_release_gap) carried the same defect and is
         # reached only when a tag sits at HEAD while main has moved.
-        h = Harness(tmp_path, behind=2, tag_at_seed="v1.0.0")
+        h = Harness(tmp_path, behind=2, tag_at_seed="v1.0.0", scratch_plane_env=scratch_plane_env)
         self._reject(h)
         assert h.run().returncode == 0
         log = self._log(h)
@@ -419,9 +420,9 @@ class TestCurrencyOutcomeIsLogged:
         assert "NOT DELIVERED" in log
         assert "notice raised" not in log
 
-    def test_behind_tag_site_reports_its_outcome(self, tmp_path):
+    def test_behind_tag_site_reports_its_outcome(self, tmp_path, *, scratch_plane_env):
         # The second site: behind a cut release.
-        h = Harness(tmp_path, behind=2, tag_after="v2.0.0")
+        h = Harness(tmp_path, behind=2, tag_after="v2.0.0", scratch_plane_env=scratch_plane_env)
         self._reject(h)
         assert h.run().returncode == 0
         log = self._log(h)
@@ -438,8 +439,8 @@ class TestCurrencyOutcomeDoesNotLeak:
     the original lie one layer down.
     """
 
-    def _probe(self, tmp_path, script):
-        h = Harness(tmp_path, behind=0)
+    def _probe(self, tmp_path, script, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=0, scratch_plane_env=scratch_plane_env)
         bots_dir = os.path.join(h.root, "runtime", "bots")
         state_dir = os.path.join(h.root, "state", "currency")
         os.makedirs(state_dir, exist_ok=True)
@@ -453,7 +454,7 @@ class TestCurrencyOutcomeDoesNotLeak:
         assert r.returncode == 0, r.stderr
         return r.stdout.strip()
 
-    def test_delivered_then_suppressed_reports_suppressed(self, tmp_path):
+    def test_delivered_then_suppressed_reports_suppressed(self, tmp_path, *, scratch_plane_env):
         out = self._probe(
             tmp_path,
             'notify_currency repoA source_behind 1 "msg A"\n'
@@ -461,17 +462,17 @@ class TestCurrencyOutcomeDoesNotLeak:
             # Same repo+event+distinct: the debounce marker suppresses this one.
             'notify_currency repoA source_behind 1 "msg A"\n'
             'echo "second=$_CURRENCY_OUTCOME"\n',
-        )
+        scratch_plane_env=scratch_plane_env)
         assert "first=delivered" in out
         assert "second=suppressed" in out
 
-    def test_fired_flag_is_reset_per_call(self, tmp_path):
+    def test_fired_flag_is_reset_per_call(self, tmp_path, *, scratch_plane_env):
         out = self._probe(
             tmp_path,
             'notify_currency repoA source_behind 1 "msg A"\n'
             'notify_currency repoA source_behind 1 "msg A"\n'
             'echo "fired=$_DEBOUNCE_FIRED"\n',
-        )
+        scratch_plane_env=scratch_plane_env)
         assert "fired=0" in out
 
 

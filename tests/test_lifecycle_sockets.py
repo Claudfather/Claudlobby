@@ -25,6 +25,8 @@ import textwrap
 
 import pytest
 
+from tests.conftest import constructed_env
+
 from claudlobby.composer import (
     compose_bot_conf,
     compose_launchd_plist,
@@ -45,7 +47,7 @@ LIB_DIR = os.path.join(_REPO_ROOT, "lib")
 
 def _run_bash(script, env=None):
     """Run a bash snippet against lib-common.sh; return (stdout, stderr, rc)."""
-    merged_env = {**os.environ, **(env or {})}
+    merged_env = constructed_env(**(env or {}))
     r = subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
@@ -250,15 +252,15 @@ class TestSocketWrappers:
         assert rc != 0
         assert "refusing" in err.lower()
 
-    def test_bot_tmux_send_logs_send_miss_on_empty_socket(self, tmp_path):
+    def test_bot_tmux_send_logs_send_miss_on_empty_socket(self, tmp_path, *, scratch_plane_env):
         """A cross-socket send with no resolvable socket must emit a send_miss
         event (observable) and return non-zero — never a silent drop."""
-        from tests.conftest import plane_emit_env, read_fleet_events
+        from tests.conftest import read_fleet_events
         d = _write_bot_conf(tmp_path / "alpha")
         out, err, rc = _run_bash(
             _src('bot_tmux_send "" lead "hello there"'),
             env={"BOT_DIR": str(d), "BOT_ID": "alpha", "FLEET_NAME": "fleet-a",
-                 "CLAUDLOBBY_ROOT": str(tmp_path), **plane_emit_env()},
+                 "CLAUDLOBBY_ROOT": str(tmp_path), **scratch_plane_env(tmp_path)},
         )
         assert rc != 0
         assert "dropped" in err.lower()
@@ -382,3 +384,5 @@ class TestLifecycleScriptExitGuards:
         )
         assert rc != 0
         assert "cannot resolve tmux socket" in err.lower()
+        assert not list(tmp_path.rglob("plane.db*"))
+        assert not list(tmp_path.rglob("spool"))

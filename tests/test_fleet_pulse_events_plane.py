@@ -47,10 +47,10 @@ def _pulse_lib(tmp_path, capture, *, matcher_stub=None):
     return libdir
 
 
-def _pulse(root, libdir, **extra):
-    env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F,
-           "PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_CLI": str(CLI),
-           "PLANE_SOCKET": str(root / "no-daemon.sock"),
+def _pulse(root, libdir, *, scratch_plane_env, **extra):
+    env = {**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": F,
+           "PLANE_EMIT_ENABLED": "1",
+
            "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMUX_TMPDIR": str(root / "tmux"),
            "FLEET_PULSE_ESCALATION_CHAT_ID": "-1001234567890",
            "FLEET_PULSE_ESCALATION_STATE_DIR": str(root / "escalation-sender"),
@@ -85,12 +85,12 @@ def _summary(root):
 
 
 @needs_tmux
-def test_the_escalation_and_the_summary_read_the_plane_with_no_flag(tmp_path):
+def test_the_escalation_and_the_summary_read_the_plane_with_no_flag(tmp_path, *, scratch_plane_env):
     root, paths = _two_dead_bots(tmp_path)
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
     env_without_flags = {k: "" for k in ("PLANE_READ_EVENTS",)}       # explicitly unset, never read
-    r = _pulse(root, libdir, **env_without_flags)
+    r = _pulse(root, libdir, **env_without_flags, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     assert PAGE in capture.read_text(), capture.read_text() + r.stderr[-2000:]
     assert "UNREACHABLE" not in r.stderr and "cutover_declared" not in r.stderr and "keep the files" not in r.stderr
@@ -101,7 +101,7 @@ def test_the_escalation_and_the_summary_read_the_plane_with_no_flag(tmp_path):
 
 
 @needs_tmux
-def test_an_unreachable_plane_is_unknown_per_bot_and_paged_never_none(tmp_path):
+def test_an_unreachable_plane_is_unknown_per_bot_and_paged_never_none(tmp_path, *, scratch_plane_env):
     """The db path made unopenable (a directory — the shape a wedged disk
     presents), so the sweep's own doors spool and its readers refuse."""
     root, paths = _two_dead_bots(tmp_path)
@@ -110,7 +110,7 @@ def test_an_unreachable_plane_is_unknown_per_bot_and_paged_never_none(tmp_path):
     for p in (root / "state" / "plane").glob("plane.db*"):
         p.unlink()
     (root / "state" / "plane" / "plane.db").mkdir()
-    r = _pulse(root, libdir)
+    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     assert "UNREACHABLE" in r.stderr and "cannot be judged this pass" in r.stderr
     # a MISSING SCRIPT would say "No such file" too — but so does Linux's socket
@@ -125,7 +125,7 @@ def test_an_unreachable_plane_is_unknown_per_bot_and_paged_never_none(tmp_path):
 
 
 @needs_tmux
-def test_a_refused_overdue_reader_is_unknown_per_bot_in_the_summary(tmp_path):
+def test_a_refused_overdue_reader_is_unknown_per_bot_in_the_summary(tmp_path, *, scratch_plane_env):
     """The plane answers the events readers; only the overdue reader refuses
     (rc 3, as it does when the plane cannot serve it) — the summary once
     printed `none` per bot here."""
@@ -134,7 +134,7 @@ def test_a_refused_overdue_reader_is_unknown_per_bot_in_the_summary(tmp_path):
     stub = ('import sys\nprint("dispatch-overdue: --all: the plane is UNREACHABLE (stub)", file=sys.stderr)\n'
             'sys.exit(3)\n')
     libdir = _pulse_lib(tmp_path, capture, matcher_stub=stub)
-    r = _pulse(root, libdir)
+    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     summary = _summary(root)
     assert summary.count("unknown (overdue reader unreachable)") == 2, summary
@@ -144,7 +144,7 @@ def test_a_refused_overdue_reader_is_unknown_per_bot_in_the_summary(tmp_path):
 
 
 @needs_tmux
-def test_no_event_file_is_read_or_reaped(tmp_path):
+def test_no_event_file_is_read_or_reaped(tmp_path, *, scratch_plane_env):
     """A stale dated file under a bot's data/events — the shape the retired
     ledgers had, with a reap window of 0 days that the old reaper would have
     deleted it under — is neither read (its service_down never reaches the
@@ -158,7 +158,7 @@ def test_no_event_file_is_read_or_reaped(tmp_path):
     body = '{"ts":"2020-01-01T00:00:00Z","type":"service_down","source":"pulse","bot":"w1","data":{}}\n'
     stale.write_text(body)
     os.utime(stale, (946684800, 946684800))
-    r = _pulse(root, libdir)
+    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     assert stale.exists() and stale.read_text() == body and int(stale.stat().st_mtime) == 946684800
     assert "service_down" not in _summary(root)

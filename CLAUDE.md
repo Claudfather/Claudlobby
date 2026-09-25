@@ -267,6 +267,16 @@ Each library category has its own format. Check the category's `README.md` for s
 4. Run `claudlobby --fleet <name> diff` to verify no unintended drift
 5. Commit to a branch, PR, review
 
+**Plane test isolation.** Run tests from a disposable checkout with its own
+editable-install venv and scratch HOME; never from a live fleet root. Pytest's
+session and function defaults silence incidental emission, and both shared
+child-env builders do the same. New subprocess tests use `constructed_env`;
+intentional recording uses `constructed_env(**scratch_plane_env(root))`, with a
+pytest-owned root and private socket. Direct Python database writers still need
+explicit scratch roots: the silencer is not a database access control. See
+[`documentation/testing-plane-isolation.md`](documentation/testing-plane-isolation.md)
+for recording, standalone-shell, and census conventions.
+
 **Three things about the test suite that will otherwise cost you an hour.**
 
 *Run it unsandboxed — and do not diff sandboxed runs either.* `lib/` scripts call `mktemp -d`

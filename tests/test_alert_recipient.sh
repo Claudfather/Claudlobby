@@ -31,6 +31,7 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export CLAUDLOBBY_ROOT="$T"
 export PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh"
 export PLANE_SOCKET="$T/no.sock"
+export PLANE_EMIT_DISABLED=0
 export PLANE_CAPTURE="$T/plane-capture.jsonl"; : > "$PLANE_CAPTURE"
 cap_count() { grep -c "$1" "$PLANE_CAPTURE" 2>/dev/null | tr -d ' '; }
 cap_reset() { : > "$PLANE_CAPTURE"; }

@@ -79,6 +79,7 @@ CAPTURE="$TMPD/plane-capture.jsonl"
 PLANE_EMIT_CLI="$TMPD/capture-cli"
 export PLANE_EMIT_CLI
 printf '%s\n' '#!/bin/bash' 'f="${@: -1}"' 'cat "$f" >> "'"$CAPTURE"'"' 'echo >> "'"$CAPTURE"'"' > "$PLANE_EMIT_CLI"
+export PLANE_EMIT_DISABLED=0
 chmod +x "$PLANE_EMIT_CLI"
 # The finalized batch is re-serialized by the shim (json.dumps: a space after
 # each colon), so every reason/event match below tolerates either spacing.

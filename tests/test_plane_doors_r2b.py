@@ -27,8 +27,8 @@ def _who():
     return mod
 
 
-def test_an_idless_report_keeps_its_pr_url_on_the_marker_and_who_reviewed_reads_it(tmp_path):
-    libdir, env = _plane_lib(tmp_path)
+def test_an_idless_report_keeps_its_pr_url_on_the_marker_and_who_reviewed_reads_it(tmp_path, *, scratch_plane_env):
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     url = "https://github.com/o/r/pull/77"
     r = _bash(f'"{libdir}/report-back.sh" w1 completed "reviewed it" --pr {url}', env)   # no --task, nothing open
     assert r.returncode == 0, r.stderr

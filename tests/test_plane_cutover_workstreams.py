@@ -27,18 +27,18 @@ LIB = REPO / "lib"
 CLI = Path(sys.executable).parent / "claudlobby"
 
 
-def _door_env(root, **extra):
-    env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F, "BOT_NAME": "mgr",
-           "PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_CLI": str(CLI),
-           "PLANE_SOCKET": str(root / "no-daemon.sock"), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+def _door_env(root, *, scratch_plane_env, **extra):
+    env = {**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": F, "BOT_NAME": "mgr",
+           "PLANE_EMIT_ENABLED": "1",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
            "WORKSTREAM_LEASE_DAYS": "14"}
     env.update(extra)
     return env
 
 
-def _ws(root, *args, **extra):
+def _ws(root, *args, scratch_plane_env, **extra):
     r = subprocess.run(["bash", str(LIB / "workstream-update.sh"), *args], capture_output=True, text=True,
-                       timeout=180, env=_door_env(root, **extra))
+                       timeout=180, env=_door_env(root, **extra, scratch_plane_env=scratch_plane_env))
     return r
 
 
@@ -67,24 +67,24 @@ SHARED = ("id", "fleet", "title", "project", "status", "owner_bot", "next", "tas
           "opened_ts", "last_progress_ts", "lease_expires_ts")
 
 
-def test_the_plane_renders_every_verb_the_door_wrote(tmp_path):
+def test_the_plane_renders_every_verb_the_door_wrote(tmp_path, *, scratch_plane_env):
     """The whole verb table through the real door, read back through the
     renderer the door itself materializes from — and no file anywhere."""
     root, paths, _, _ = _scene(tmp_path)
     reg = _reg(paths)
-    a = _ws(root, "open", "Ship the widget", "--owner", "w1", "--project", "alpha", "--next", "first cut")
+    a = _ws(root, "open", "Ship the widget", "--owner", "w1", "--project", "alpha", "--next", "first cut", scratch_plane_env=scratch_plane_env)
     assert a.returncode == 0, a.stderr
     ws_a = a.stdout.strip()
-    b = _ws(root, "open", "A second one"); ws_b = b.stdout.strip()
-    assert _ws(root, "progress", ws_a, "--next", "second cut").returncode == 0
+    b = _ws(root, "open", "A second one", scratch_plane_env=scratch_plane_env); ws_b = b.stdout.strip()
+    assert _ws(root, "progress", ws_a, "--next", "second cut", scratch_plane_env=scratch_plane_env).returncode == 0
     # a DIFFERENT lease on the renew: the renewal's own instant (renewed_until) must
     # be what the plane renders, not the last progress plus the fleet's lease —
     # the two coincide to the second when both verbs run in one second (a
     # mutant dropping the renewal survived the first pin)
-    assert _ws(root, "renew", ws_a, "--note", "still on it", WORKSTREAM_LEASE_DAYS="30").returncode == 0
-    assert _ws(root, "block", ws_a, "--note", "waiting on review").returncode == 0
-    assert _ws(root, "close", ws_b, "--status", "done").returncode == 0
-    pruned = _ws(root, "prune")
+    assert _ws(root, "renew", ws_a, "--note", "still on it", WORKSTREAM_LEASE_DAYS="30", scratch_plane_env=scratch_plane_env).returncode == 0
+    assert _ws(root, "block", ws_a, "--note", "waiting on review", scratch_plane_env=scratch_plane_env).returncode == 0
+    assert _ws(root, "close", ws_b, "--status", "done", scratch_plane_env=scratch_plane_env).returncode == 0
+    pruned = _ws(root, "prune", scratch_plane_env=scratch_plane_env)
     assert pruned.returncode == 0 and "archived on the plane" in pruned.stdout
     assert not reg.exists()                                                     # the plane event IS the write
     assert not (root / "local" / F / "runtime" / "workstreams-archive.jsonl").exists()   # the archived event is the archive
@@ -104,10 +104,10 @@ def test_the_plane_renders_every_verb_the_door_wrote(tmp_path):
     assert plane_reg["updated"] >= e["last_progress_ts"]
 
 
-def test_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path):
+def test_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path, *, scratch_plane_env):
     root, paths, _, _ = _scene(tmp_path)
     reg = _reg(paths)
-    a = _ws(root, "open", "Retired-era work", "--owner", "w2", "--next", "plan it")
+    a = _ws(root, "open", "Retired-era work", "--owner", "w2", "--next", "plan it", scratch_plane_env=scratch_plane_env)
     assert a.returncode == 0, a.stderr
     ws_a = a.stdout.strip()
     assert not reg.exists()                                                     # the plane event IS the write
@@ -116,8 +116,8 @@ def test_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path):
     assert listing.returncode == 0 and ws_a in listing.stdout and "w2" in listing.stdout, listing.stdout + listing.stderr
     shown = _ws_cli(root, "show", ws_a)
     assert shown.returncode == 0 and "Retired-era work" in shown.stdout and "plan it" in shown.stdout
-    assert _ws(root, "progress", ws_a, "--next", "build it").returncode == 0
-    assert _ws(root, "block", ws_a, "--note", "blocked on x").returncode == 0
+    assert _ws(root, "progress", ws_a, "--next", "build it", scratch_plane_env=scratch_plane_env).returncode == 0
+    assert _ws(root, "block", ws_a, "--note", "blocked on x", scratch_plane_env=scratch_plane_env).returncode == 0
     assert _await(root, "SELECT COUNT(*) FROM events WHERE kind = 'workstream'", 2) == 2
     assert not reg.exists()
     deg = []
@@ -125,8 +125,8 @@ def test_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path):
     section = _workstream_section(fleet, paths, int(time.time()), deg)
     assert section == {"active": [], "stalled": []}                             # blocked: not active — served, not omitted
     assert not any(d.field == "workstreams" for d in deg)
-    assert _ws(root, "close", ws_a, "--status", "done").returncode == 0
-    pruned = _ws(root, "prune")
+    assert _ws(root, "close", ws_a, "--status", "done", scratch_plane_env=scratch_plane_env).returncode == 0
+    pruned = _ws(root, "prune", scratch_plane_env=scratch_plane_env)
     assert pruned.returncode == 0 and "Pruned 1" in pruned.stdout
     assert not (root / "local" / F / "runtime" / "workstreams-archive.jsonl").exists()   # the archived event is the archive
     assert _await(root, "SELECT COUNT(*) FROM events WHERE kind = 'workstream' AND event = 'archived'", 1) == 1
@@ -139,13 +139,13 @@ def test_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path):
     assert unknown.returncode == 3 and unknown.stdout == "" and "UNREACHABLE" in unknown.stderr
 
 
-def test_an_unrecorded_verb_refuses_and_changes_nothing(tmp_path):
+def test_an_unrecorded_verb_refuses_and_changes_nothing(tmp_path, *, scratch_plane_env):
     """An emission the shim could not record is a REFUSAL (rc 4): the verb did
     not happen, the plane is unchanged, and no file appears — there is
     nothing to land it in any more."""
     root, paths, _, _ = _scene(tmp_path)
     reg = _reg(paths)
-    a = _ws(root, "open", "Lost in the post", PLANE_EMIT_CLI="/usr/bin/false")
+    a = _ws(root, "open", "Lost in the post", PLANE_EMIT_CLI="/usr/bin/false", scratch_plane_env=scratch_plane_env)
     assert a.returncode == 4, a.stdout + a.stderr
     assert "did not record this verb" in a.stderr and "nothing changed" in a.stderr
     assert "landed at" not in a.stderr

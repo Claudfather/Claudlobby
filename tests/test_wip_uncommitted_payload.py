@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import constructed_env, plane_emit_env, read_fleet_events
+from tests.conftest import constructed_env, read_fleet_events
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FLEET_PULSE = REPO_ROOT / "lib" / "fleet-pulse.sh"
@@ -68,11 +68,11 @@ def wip_root(tmp_path):
     return root, repo
 
 
-def _run(root: Path, **extra) -> subprocess.CompletedProcess:
+def _run(root: Path, *, scratch_plane_env, **extra) -> subprocess.CompletedProcess:
     """A CONSTRUCTED child env (conftest's ratified default) plus the two keys
     that make the shim record into this root's own plane via its cold rung."""
-    env = constructed_env(HOME=str(root / "home"), CLAUDLOBBY_ROOT=str(root),
-                          **plane_emit_env(), **extra)
+    env = constructed_env(HOME=str(root / "home"),
+                          **scratch_plane_env(root), **extra)
     return subprocess.run(["bash", str(FLEET_PULSE), FLEET],
                           capture_output=True, text=True, env=env, timeout=180)
 
@@ -83,21 +83,21 @@ def _wip_rows(root: Path) -> list[dict]:
     return [r for r in rows if r.get("type") == "wip_uncommitted"]
 
 
-def _one_row(root: Path) -> dict:
-    proc = _run(root)
+def _one_row(root: Path, *, scratch_plane_env) -> dict:
+    proc = _run(root, scratch_plane_env=scratch_plane_env)
     assert proc.returncode == 0, f"pulse aborted\n{proc.stdout}\n{proc.stderr}"
     rows = _wip_rows(root)
     assert rows, f"no wip_uncommitted row emitted\n{proc.stdout}\n{proc.stderr}"
     return rows[-1]["data"]
 
 
-def test_an_untracked_only_repo_is_reported_AS_untracked(wip_root):
+def test_an_untracked_only_repo_is_reported_AS_untracked(wip_root, *, scratch_plane_env):
     """The `.venv/` case: still emitted (never filtered), and now legible."""
     root, repo = wip_root
     (repo / ".venv").mkdir()
     (repo / ".venv" / "pyvenv.cfg").write_text("x\n")
 
-    data = _one_row(root)
+    data = _one_row(root, scratch_plane_env=scratch_plane_env)
 
     assert data["dirty_untracked"] == 1
     assert data["dirty_tracked"] == 0
@@ -106,12 +106,12 @@ def test_an_untracked_only_repo_is_reported_AS_untracked(wip_root):
     assert data["dirty_files"] == 1
 
 
-def test_a_tracked_edit_is_reported_AS_tracked(wip_root):
+def test_a_tracked_edit_is_reported_AS_tracked(wip_root, *, scratch_plane_env):
     """The case the alert exists for."""
     root, repo = wip_root
     (repo / "tracked.md").write_text("edited\n")
 
-    data = _one_row(root)
+    data = _one_row(root, scratch_plane_env=scratch_plane_env)
 
     assert data["dirty_tracked"] == 1
     assert data["dirty_untracked"] == 0
@@ -119,18 +119,18 @@ def test_a_tracked_edit_is_reported_AS_tracked(wip_root):
                for p in data["paths"]), data
 
 
-def test_the_two_cases_a_COUNT_cannot_separate_are_now_separable(wip_root):
+def test_the_two_cases_a_COUNT_cannot_separate_are_now_separable(wip_root, *, scratch_plane_env):
     """THE DEFECT, stated as a test: a venv and a mid-edit are both
     `dirty_files == 1`, and the whole decision turns on which one it is."""
     root, repo = wip_root
     (repo / ".venv").mkdir()
     (repo / ".venv" / "pyvenv.cfg").write_text("x\n")
-    venv = _one_row(root)
+    venv = _one_row(root, scratch_plane_env=scratch_plane_env)
 
     (repo / ".venv" / "pyvenv.cfg").unlink()
     (repo / ".venv").rmdir()
     (repo / "tracked.md").write_text("edited\n")
-    edit = _one_row(root)
+    edit = _one_row(root, scratch_plane_env=scratch_plane_env)
 
     assert venv["dirty_files"] == edit["dirty_files"] == 1, (
         "the premise of the bug: identical counts")
@@ -139,7 +139,7 @@ def test_the_two_cases_a_COUNT_cannot_separate_are_now_separable(wip_root):
     assert venv["paths"] != edit["paths"]
 
 
-def test_an_untracked_only_repo_is_NEVER_silently_filtered(wip_root):
+def test_an_untracked_only_repo_is_NEVER_silently_filtered(wip_root, *, scratch_plane_env):
     """The refusal, pinned. Excluding untracked paths is the obvious way to
     quieten this alert and it is the one change that must not be made: a new
     source file is untracked and IS work in flight, with no copy anywhere.
@@ -148,21 +148,21 @@ def test_an_untracked_only_repo_is_NEVER_silently_filtered(wip_root):
     root, repo = wip_root
     (repo / "brand-new-source.py").write_text("def f():\n    return 1\n")
 
-    data = _one_row(root)
+    data = _one_row(root, scratch_plane_env=scratch_plane_env)
 
     assert data["dirty_untracked"] == 1, (
         "an untracked NEW FILE is work in flight and must still be reported")
     assert any("brand-new-source.py" in p for p in data["paths"]), data
 
 
-def test_the_path_list_STATES_ITS_BOUND(wip_root):
+def test_the_path_list_STATES_ITS_BOUND(wip_root, *, scratch_plane_env):
     """#1742 estate-wide: a capped list must never read as the whole of the
     dirt, so the cap is emitted beside the total."""
     root, repo = wip_root
     for i in range(7):
         (repo / f"extra-{i}.txt").write_text("x\n")
 
-    proc = _run(root, OBSERVABILITY_WIP_PATHS_MAX="3")
+    proc = _run(root, OBSERVABILITY_WIP_PATHS_MAX="3", scratch_plane_env=scratch_plane_env)
     assert proc.returncode == 0, proc.stderr
     data = _wip_rows(root)[-1]["data"]
 
@@ -172,7 +172,7 @@ def test_the_path_list_STATES_ITS_BOUND(wip_root):
     assert data["paths_shown"] < data["paths_total"], "this run IS truncated"
 
 
-def test_how_long_the_condition_has_been_true_is_reported_and_RESETS(wip_root):
+def test_how_long_the_condition_has_been_true_is_reported_and_RESETS(wip_root, *, scratch_plane_env):
     """A condition true for hours reads differently from one that appeared a
     tick ago — and the hash is what gates it, which is the half a broken
     implementation would get wrong while still printing a big number."""
@@ -180,7 +180,7 @@ def test_how_long_the_condition_has_been_true_is_reported_and_RESETS(wip_root):
     (repo / ".venv").mkdir()
     (repo / ".venv" / "pyvenv.cfg").write_text("x\n")
 
-    first = _one_row(root)
+    first = _one_row(root, scratch_plane_env=scratch_plane_env)
     assert first["unchanged_for_s"] == 0, "the first sighting is a floor of 0"
 
     # Backdate only the timestamp the previous run wrote. The hash comparison is
@@ -190,7 +190,7 @@ def test_how_long_the_condition_has_been_true_is_reported_and_RESETS(wip_root):
     assert len(stamps) == 1, [p.name for p in stamps]
     stamps[0].write_text(str(int(time.time()) - 7200))
 
-    held = _one_row(root)
+    held = _one_row(root, scratch_plane_env=scratch_plane_env)
     assert held["unchanged_for_s"] >= 7200, held
 
     # CONTROL: change the dirty state and the clock must restart, even though
@@ -198,7 +198,7 @@ def test_how_long_the_condition_has_been_true_is_reported_and_RESETS(wip_root):
     # keep reporting two hours.
     (repo / "another.txt").write_text("x\n")
     stamps[0].write_text(str(int(time.time()) - 7200))
-    moved = _one_row(root)
+    moved = _one_row(root, scratch_plane_env=scratch_plane_env)
     assert moved["unchanged_for_s"] == 0, (
         "a CHANGED status must reset the clock; a stale stamp must not survive "
         "it")

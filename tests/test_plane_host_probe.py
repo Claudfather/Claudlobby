@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parent.parent
 CLI = Path(sys.executable).parent / "claudlobby"
 
 
-def _rig(tmp_path, *, pi=False, armed=True, disabled=False):
+def _rig(tmp_path, *, pi=False, armed=True, disabled=False, scratch_plane_env):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
@@ -53,15 +53,17 @@ def _rig(tmp_path, *, pi=False, armed=True, disabled=False):
     for f in stub.iterdir():
         f.chmod(0o755)
     env = {
-        "CLAUDLOBBY_ROOT": str(root),
+        **scratch_plane_env(root),
         "HOME": str(tmp_path),
-        "PLANE_EMIT_CLI": str(CLI),
-        "PLANE_SOCKET": str(tmp_path / "no.sock"),
+
+
         "FLEET_NAME": "_host",
         "PATH": f"{stub}:/usr/bin:/bin",
     }
     if armed:
         env["PLANE_EMIT_ENABLED"] = "1"     # ignored since R1; kept for the shape
+    if not armed:
+        env.pop("PLANE_EMIT_DISABLED")  # validated scratch destination, default-on contract
     if disabled:
         env["PLANE_EMIT_DISABLED"] = "1"
     return root, env
@@ -87,8 +89,8 @@ def _samples(root):
         conn.close()
 
 
-def test_probe_emits_the_portable_facets(tmp_path):
-    root, env = _rig(tmp_path)
+def test_probe_emits_the_portable_facets(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _run(root, env)
     assert r.returncode == 0, r.stderr
     s = _samples(root)
@@ -101,30 +103,30 @@ def test_probe_emits_the_portable_facets(tmp_path):
     assert s["host.load"]["subject_uid"].startswith("host_")
 
 
-def test_pi_facets_present_only_on_a_pi(tmp_path):
-    root, env = _rig(tmp_path, pi=True)
+def test_pi_facets_present_only_on_a_pi(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, pi=True, scratch_plane_env=scratch_plane_env)
     assert _run(root, env).returncode == 0
     s = _samples(root)
     assert s["host.thermal_flags"]["value"].strip('"') == "0x50005"
     assert json.loads(s["host.undervoltage"]["value"]) is True   # bit0 set
 
 
-def test_no_pi_facets_are_fabricated_off_a_pi(tmp_path):
-    root, env = _rig(tmp_path, pi=False)   # no vcgencmd on PATH
+def test_no_pi_facets_are_fabricated_off_a_pi(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, pi=False, scratch_plane_env=scratch_plane_env)   # no vcgencmd on PATH
     assert _run(root, env).returncode == 0
     s = _samples(root)
     assert "host.thermal_flags" not in s   # absent, never a fabricated 0
     assert "host.undervoltage" not in s
 
 
-def test_records_without_any_flag_and_disabled_silences_it(tmp_path):
+def test_records_without_any_flag_and_disabled_silences_it(tmp_path, *, scratch_plane_env):
     """The always-on contract (F18 closure R1): no plane flag → the probe
     records (the job_ran proof-of-run lands); PLANE_EMIT_DISABLED=1 → nothing."""
-    root, env = _rig(tmp_path, armed=False)
+    root, env = _rig(tmp_path, armed=False, scratch_plane_env=scratch_plane_env)
     r = _run(root, env)
     assert r.returncode == 0, r.stderr
     assert _samples(root)["host.job_ran"]["value"] in ("1", 1)
-    root2, env2 = _rig(tmp_path / "d", disabled=True)
+    root2, env2 = _rig(tmp_path / "d", disabled=True, scratch_plane_env=scratch_plane_env)
     r = _run(root2, env2)
     assert r.returncode == 0
     assert not db_path(root2).is_file()
@@ -191,24 +193,24 @@ def test_boot_time_sed_extracts_sec_not_usec():
     assert bad == "60460"                    # the old greedy bug, for contrast
 
 
-def test_boot_time_is_a_real_utc_instant_not_1970(tmp_path):
+def test_boot_time_is_a_real_utc_instant_not_1970(tmp_path, *, scratch_plane_env):
     """End-to-end, OS-tolerant: whichever source the host uses (/proc/stat
     on Linux, kern.boottime on macOS) the recorded boot_time is a valid
     UTC+Z ISO instant and never 1970 (the SEV-1 symptom)."""
     import re
-    root, env = _rig(tmp_path)
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     assert _run(root, env).returncode == 0
     bt = _samples(root)["host.boot_time"]["value"].strip('"')
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", bt), bt
     assert not bt.startswith("1970")
 
 
-def test_comma_decimal_locale_load_is_dropped_not_corrupted(tmp_path):
+def test_comma_decimal_locale_load_is_dropped_not_corrupted(tmp_path, *, scratch_plane_env):
     """r-gauntlet SEV-2: a comma-decimal locale (0,52) would split a
     decimal comma into a bogus separator and record silently-wrong
     numbers. Each token is validated as a bare decimal; a comma-decimal
     line is DROPPED, never mis-recorded."""
-    root, env = _rig(tmp_path)
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     import os
     # override uptime to emit the comma-decimal shape (LC_ALL=C in the
     # script normalizes real locales, but a pre-formatted comma line still
@@ -223,11 +225,11 @@ def test_comma_decimal_locale_load_is_dropped_not_corrupted(tmp_path):
     assert "host.job_ran" in s               # the rest of the batch survives
 
 
-def test_empty_hostname_never_poisons_the_whole_batch(tmp_path):
+def test_empty_hostname_never_poisons_the_whole_batch(tmp_path, *, scratch_plane_env):
     """r-gauntlet SEV-3: an empty subject fails min_length=1 and the CLI
     rejects the ENTIRE batch — job_ran included, the edge it exists for.
     A fallback host keeps the batch valid."""
-    root, env = _rig(tmp_path)
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     (tmp_path / "bin" / "hostname").write_text('#!/bin/bash\nexit 1\n')
     (tmp_path / "bin" / "hostname").chmod(0o755)
     (tmp_path / "bin" / "uname").write_text('#!/bin/bash\necho\n')  # empty -n

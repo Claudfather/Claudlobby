@@ -5,7 +5,7 @@
 # kworker/PID churn of a single ongoing incident, yet resets across a reboot so a
 # post-reboot recurrence is never swallowed — and that the storage grep + throttle
 # decode cover the real SD/MMC failure signatures without firing empty-label alerts.
-# Runs hermetically under env -i so the real alert path (manager tmux + Telegram)
+# Runs hermetically under env -i PLANE_EMIT_DISABLED=1 so the real alert path (manager tmux + Telegram)
 # cannot be reached and no real bot token leaks into the subprocess. Standalone
 # bash (not pytest-collected); runs under macOS /bin/bash (3.2).
 set -euo pipefail
@@ -41,10 +41,10 @@ chmod +x "$ROOT/lib/tg-post.sh"
 
 # run_check THROTTLED JOURNAL BOOT_ID → one check in an isolated env; the
 # ALERT/REPEAT/OK verdict lands in $LOG. The alert-delivery leg is neutered:
-# scratch CLAUDLOBBY_ROOT has no lib/tg-post.sh, env -i drops any real token, and
+# scratch CLAUDLOBBY_ROOT has no lib/tg-post.sh, env -i PLANE_EMIT_DISABLED=1 drops any real token, and
 # tmux is a no-op — so nothing escapes to the real fleet.
 run_check() {
-    env -i PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$T" \
+    env -i PLANE_EMIT_DISABLED=1 PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$T" \
         CLAUDLOBBY_ROOT="$ROOT" TGPOST_RC="${TGPOST_RC:-0}" \
         TELEGRAM_GROUP_CHAT_ID="-1001234567890" TELEGRAM_STATE_DIR="$T/sender" \
         THROTTLED="$1" JOURNAL="$2" HOST_HEALTH_BOOT_ID="$3" \
