@@ -102,9 +102,9 @@ Carried from the chunk-1 plan where they still bind, plus three that are new her
 - [ ] **Step 1: Worktree on a fresh branch off main — after PRs 1–3 are ON main**
 
 ```bash
-git -C /Users/chris/Projects/Claudlobby fetch -q origin main
+git -C /Users/user/Projects/Claudlobby fetch -q origin main
 for f in library/protocols/checkin.md library/skills/checkin/SKILL.md lib/manager-checkin.sh; do
-  git -C /Users/chris/Projects/Claudlobby show "origin/main:$f" > /dev/null || { echo "STOP: $f is not on origin/main -- PRs 1-3 must merge first"; exit 1; }
+  git -C /Users/user/Projects/Claudlobby show "origin/main:$f" > /dev/null || { echo "STOP: $f is not on origin/main -- PRs 1-3 must merge first"; exit 1; }
 done
 WT="$HOME/Projects/claudlobby-worktrees/ck5"
 OUT="$WT-out"
@@ -130,7 +130,7 @@ no_names() {   # <file>: refuse when any host identifier reached a body bound fo
 FN
   printf 'cd "%s" || { echo "STOP: worktree %s missing"; exit 1; }\n' "$WT" "$WT"
 } > "$OUT/env.sh"
-cd /Users/chris/Projects/Claudlobby
+cd /Users/user/Projects/Claudlobby
 git worktree add -B checkin/chunk5-default "$WT" origin/main
 . "$OUT/env.sh"; git log --oneline -1; type no_names | head -1
 ```

@@ -15,6 +15,35 @@ the harness's socket dir: keepalive could not see it before, so the CONTROL
 passed without killing anything and every run left a server behind. One new
 check: the window held while both consumers judged it.
 
+### Fixed — a rejected currency notice no longer silences itself for a week (#900)
+
+`debounce_notify` writes its marker only when the notify function returns 0, and
+`notify_currency` returns the Telegram verdict. A rejected notice is sent again on
+the next run instead of waiting for the count to change or `CURRENCY_RENOTIFY_S`
+(7 days). A host with no Telegram target at all (tg-post exit 2, as on a new
+install) counts as sent, so its manager is nudged once rather than on every run.
+Every other caller's notify function returns 0, so none of them changes.
+
+### Fixed — the operator's home directory was back in the tree, and nothing caught it (#927)
+
+#1306 replaced the home paths #927 named but added no gate, and four later PRs
+put one back: a cold-start doc, two plan docs, and 24 composed host-timer units
+committed at the repo root (removed: the compositor writes those under
+`runtime/_host/`, which is ignored). `tests/test_boundary_invariants.py` now
+fails on any tracked `/home/<name>` or `/Users/<name>` whose name is not on a
+short placeholder allowlist.
+
+### Fixed — a socket cooldown no longer spawns the cold CLI for fire-and-forget emitters (#1657)
+
+Under load every cooldown emission spawned the package-importing CLI, and
+those spawns kept the host's CPU pegged, so the daemon kept missing its 1 s
+reply limit and the cooldown re-armed itself. The fleet-event door,
+keepalive's heartbeat and the host probe now stage their batch in
+`state/plane/staged/` (rc 6) and the daemon replays it through the same
+`emit_batch()` as a socket request, so the capture policy still applies. A
+host changes nothing until its daemon restarts on the new code: the daemon
+creates that directory, and without it the cold CLI runs as before.
+
 ### Fixed — a tracked dispatch into an idle pane waits for the receiver's receipt (#1099)
 
 `pane_send_verified` reads the pane, and a payload held in the input box, its

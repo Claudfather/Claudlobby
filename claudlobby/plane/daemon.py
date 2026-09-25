@@ -81,7 +81,7 @@ from .emit_api import emit_batch
 from .writer import PlaneWriter
 from .ids import ensure_host_uid
 from .migrations import SCHEMA_USER_VERSION, DowngradeError, migrate
-from .spool import SpoolWriteError, drain
+from .spool import SpoolWriteError, _mkdir_fsynced, drain, quarantine_entry
 
 # One line carries one batch; communications bodies cap at 16KiB each, so
 # 4MiB bounds any sane batch while refusing a runaway/hostile writer.
@@ -90,6 +90,13 @@ MAX_REQUEST_BYTES = 4 * 1024 * 1024
 # letting bind() truncate or fail obscurely.
 MAX_SOCKET_PATH_BYTES = 100
 DEFAULT_DRAIN_INTERVAL = 600.0
+
+
+def staged_dir(root: Path) -> Path:
+    """Where the shim leaves batches during a socket cooldown (#1657). The
+    daemon creates it at startup: its existence tells the client a replayer
+    is there, so an older daemon, which never made it, gets none."""
+    return Path(root) / "state" / "plane" / "staged"
 
 # Process exit code for the stale-daemon exit (#1485). 4 rather than a fresh
 # number: `downgrade -> 4` is already the taxonomy's, on the CLI's exits and
@@ -256,6 +263,7 @@ class PlaneDaemon:
         self._stop = False
         self._listener: Optional[socket.socket] = None
         self._last_drain = 0.0
+        self._next_replay = 0.0
         self._own_uid = os.geteuid()
         self._lock_fd: Optional[int] = None
         self._sock_stat: Optional[tuple[int, int]] = None
@@ -349,6 +357,38 @@ class PlaneDaemon:
                 "quarantined": report.quarantined,
                 "remaining": report.remaining,
             })
+
+    def _replay_staged(self) -> None:
+        """Batches the shim STAGED during a socket cooldown, instead of spawning
+        the cold CLI (#1657). They are raw, so each goes through emit_batch
+        exactly as a socket request does (capture, validation, idempotency on
+        the pre-minted ids). Never through drain(), which ingests spool
+        entries as-is because they are stored policy-applied."""
+        self._next_replay = time.monotonic() + 1.0
+        sd = staged_dir(self.root)
+        try:
+            if not sd.is_dir():
+                _mkdir_fsynced(sd, 0o700)   # the handshake the client stages on
+            batches = sorted(p for p in sd.iterdir() if p.name.endswith(".batch"))
+        except OSError:
+            return                          # a broken root: the cold rung keeps recording
+        for f in batches:
+            try:
+                emit_batch(self.root, json.loads(f.read_text())["events"],
+                           conn_factory=self.writer.connection)
+            except DowngradeError as exc:
+                raise self._downgrade_exit(exc) from None
+            except (ValueError, KeyError, TypeError) as exc:  # ContractViolation is a ValueError
+                why = "contract violation" if isinstance(exc, ContractViolation) else "malformed batch"
+                quarantine_entry(self.root, f, f"{why} on replay: {exc}", as_name=f.stem + ".json")
+                continue
+            except Exception as exc:  # noqa: BLE001 — disclosed; kept for a later tick
+                print(f"plane-daemon: staged replay failed ({f.name}): {exc}",
+                      file=sys.stderr)
+                self._next_replay = time.monotonic() + 30.0
+                return
+            self.writer.after_batch()
+            f.unlink()
 
     # -- request handling ---------------------------------------------------
     def _handle(self, conn: socket.socket) -> None:
@@ -565,6 +605,8 @@ class PlaneDaemon:
                 if time.monotonic() - self._last_drain >= self.drain_interval:
                     self._drain_spool(reason="interval")
                     self._optimize()
+                if time.monotonic() >= self._next_replay:
+                    self._replay_staged()
                 try:
                     conn, _ = self._listener.accept()
                 except socket.timeout:

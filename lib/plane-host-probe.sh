@@ -114,5 +114,6 @@ fi
 # never fired at all.
 _add "$(_metric host.job_ran 1)"
 
-printf '{"events":[%s]}' "$_samples" | plane_emit_events plane-host-probe || true
+# Fire-and-forget, so a socket cooldown stages it for the daemon (#1657).
+printf '{"events":[%s]}' "$_samples" | PLANE_EMIT_COOLDOWN_STAGE=1 plane_emit_events plane-host-probe || true
 exit 0
