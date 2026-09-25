@@ -319,3 +319,121 @@ def test_broken_stdin_is_silent(tmp_path):
         r = _run(garbage, _env(root))
         assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
+
+
+def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
+    """#1099/#1236, the failure that happened: a tracked dispatch sat in an idle
+    recipient's box, its Enter turned into a newline, and the pane-reading
+    verify called it a clean send. The dispatch door now asks the RECEIVER:
+    pane_await_receipt waits for this hook's `received` row and gives a missing
+    one ONE more Enter. Only the TUI is a stub -- the Enter it is handed runs
+    the REAL hook on the held prompt, as UserPromptSubmit would -- and the REAL
+    plane-lookup.py reads what that hook wrote."""
+    root = _root(tmp_path)
+    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3")
+    _, safe, _ = _wire_proof("set +H; " + BODY)
+    # An earlier dispatch was received, so this recipient's hook is armed.
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), env).returncode == 0
+    prog = ('. "$LIB/lib-common.sh"; set +e; '
+            'bot_tmux() { case "$*" in *capture-pane*) return 0;; esac;'  # a read, not a key
+            ' echo "$*"; [ "$TUI" = submits ] || return 0;'
+            ' printf %s "$PROMPT" | bash "$LIB/plane-dispatch-in.sh"; }; '
+            'pane_await_receipt sock "${DEST:-$BOT_ID}" "$MSG"')
+
+    def gate(msgid, tui, dest=BOT):   # -> (rc, the keys the stub TUI was sent, stderr)
+        r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=120,
+                           env={**env, "LIB": str(LIB), "TUI": tui, "MSG": msgid, "DEST": dest,
+                                "PROMPT": _hookjson(_arrival(safe, msgid), ensure_ascii=False)})
+        return r.returncode, r.stdout.splitlines(), r.stderr
+
+    held, stuck = "msg_" + "a" * 32, "msg_" + "b" * 32
+    assert gate(MSGID, "submits")[:2] == (0, [])        # received already: no extra Enter
+    assert gate(held, "submits")[:2] == (0, [f"sock send-keys -t {BOT} Enter"])
+    # A prompt elsewhere that merely quotes the trailer files a receipt under
+    # ANOTHER bot (fold F3): it must not read as this one's.
+    assert _run(_hookjson(_arrival(safe, stuck), ensure_ascii=False), {**env, "BOT_ID": "gilfoyle"}).returncode == 0
+    rc, keys, err = gate(stuck, "holds")
+    assert (rc, len(keys)) == (1, 1) and f"no receipt from {BOT}" in err
+    assert [tuple(r) for r in _rows(root, (
+        "SELECT event, json_extract(detail, '$.data.msg_id') FROM events"
+        " WHERE kind = 'system' AND event IN ('send_retry', 'send_miss') ORDER BY ingest_seq"))] \
+        == [("send_retry", held), ("send_retry", stuck), ("send_miss", stuck)]
+    # A recipient that never recorded a receipt has no hook armed: no verdict, nothing pressed.
+    assert gate(stuck, "holds", dest="dinesh")[:2] == (0, [])
+
+
+def test_a_queued_delivery_is_not_a_miss(tmp_path):
+    """#1099 review (vera, 8 of the 16 would-be misses): a recipient that starts a
+    turn after the door's idle probe QUEUES the prompt, and its receipt lands only
+    when that turn ends. That is not a held box, so a missing receipt from a busy
+    recipient gets no Enter and no send_miss -- checked before the Enter, and again
+    before the verdict, since the turn may start while the gate waits."""
+    root = _root(tmp_path)
+    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3")
+    _, safe, _ = _wire_proof("set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), env).returncode == 0  # armed
+    flag = tmp_path / "turn-started"
+    prog = ('. "$LIB/lib-common.sh"; set +e; '
+            'bot_tmux() { case "$*" in'
+            ' *capture-pane*) [ -f "$FLAG" ] && echo "esc to interrupt"; return 0;;'
+            ' *send-keys*) [ "$TURN" = after-enter ] && : > "$FLAG";; esac; echo "$*"; }; '
+            'pane_await_receipt sock "$BOT_ID" "$MSG"')
+
+    def gate(msgid, turn):   # -> (rc, the keys the stub TUI was sent)
+        if turn == "running":
+            flag.touch()
+        r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=120,
+                           env={**env, "LIB": str(LIB), "MSG": msgid, "TURN": turn, "FLAG": str(flag)})
+        flag.unlink(missing_ok=True)
+        return r.returncode, r.stdout.splitlines()
+
+    queued, late = "msg_" + "c" * 32, "msg_" + "e" * 32
+    assert gate(queued, "running") == (0, [])                               # nothing pressed
+    assert gate(late, "after-enter") == (0, [f"sock send-keys -t {BOT} Enter"])
+    assert [tuple(r) for r in _rows(root, (
+        "SELECT event, json_extract(detail, '$.data.msg_id') FROM events"
+        " WHERE kind = 'system' AND event IN ('send_retry', 'send_miss') ORDER BY ingest_seq"))] \
+        == [("send_retry", late)]                                            # no verdict for either
+
+
+def test_a_zero_wait_in_any_spelling_turns_the_gate_off(tmp_path):
+    """PANE_RECEIPT_WAIT_S=0 is the off switch; `0.0` must not read as on (#1099 review)."""
+    root = _root(tmp_path)
+    _, safe, _ = _wire_proof("set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0  # armed
+    for zero in ("0", "0.0"):
+        env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S=zero)
+        r = subprocess.run(["bash", "-c", '. "$LIB/lib-common.sh"; set +e; bot_tmux() { echo "$*"; }; '
+                            'pane_await_receipt sock "$BOT_ID" msg_' + "f" * 32],
+                           capture_output=True, text=True, timeout=60, env={**env, "LIB": str(LIB)})
+        assert (r.returncode, r.stdout) == (0, ""), zero                   # nothing pressed
+    assert _rows(root, "SELECT event FROM events WHERE kind = 'system'"
+                       " AND event IN ('send_retry', 'send_miss')") == []
+
+
+def _pasted(text: str, at: int) -> str:
+    """Claude Code's wrapper for a pasted run -- SHAPE from live transcripts
+    (#1099; the id faked): the first `at` characters arrived as one paste,
+    the rest was typed after it. The boundary is a tmux chunk boundary, so it
+    can fall inside the trailer itself."""
+    return f'\n\n<pasted_content id="0f3a">\n{text[:at]}\n</pasted_content id="0f3a">\n\n{text[at:]}'
+
+
+@pytest.mark.parametrize("where", ["splits-the-trailer", "before-the-trailer"])
+def test_a_pasted_arrival_is_received_as_the_wire_form(tmp_path, where):
+    """#1099: the TUI wraps a pasted run in <pasted_content> tags. Where the
+    boundary split the trailer, the hook recorded NO receipt for a prompt that
+    WAS submitted (9 tracked prompts, 2026-09-20..24); where it fell before the
+    trailer, the tags were hashed in and a whole delivery read ALTERED (50).
+    The wrapper is the TUI's, not the sender's: without it, the arrival is
+    the wire form again."""
+    sha, safe, nbytes = _wire_proof("set +H; " + BODY)
+    arrival = _arrival(safe)
+    at = len(arrival) - 10 if where == "splits-the-trailer" else len(safe)
+    root = _root(tmp_path)
+    r = _run(_hookjson(_pasted(arrival, at), ensure_ascii=False), _env(root))
+    assert r.returncode == 0 and r.stdout == ""
+    rows = _received_row(root)
+    assert len(rows) == 1 and rows[0]["msg_id"] == MSGID
+    detail = json.loads(rows[0]["detail"])
+    assert (detail["received_sha256"], detail["received_bytes"]) == (sha, nbytes)
