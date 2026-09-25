@@ -2480,11 +2480,11 @@ BRIEFING_SOURCES="github"
 BRIEFING_SECTIONS_MORNING="wrap tomorrow overnight"
 CONF
 done
-# The composed skill link (bots.<bot>.skills: [briefing]) on the two briefing
-# bots, as generate writes it; BRIEFNOSKILL has the stanza's env and no link.
+# The skill link the briefing: stanza composes, on the two briefing bots;
+# BRIEFNOSKILL has the briefing env and no link (a hand-built timer, a lost link).
 for _d in "$BRIEF_DIR" "$BRIEFBUSY_DIR"; do
     mkdir -p "$_d/.claude/skills"
-    ln -s "$LIB_DIR/../library/skills/briefing" "$_d/.claude/skills/briefing"
+    ln -s "$VAL_REPO/library/skills/briefing" "$_d/.claude/skills/briefing"
 done
 
 # Idle briefing bot: plain pane, no esc-to-interrupt, no fresh .last-tool-call

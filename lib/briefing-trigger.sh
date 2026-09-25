@@ -49,14 +49,15 @@ if [ ! -d "$BOT_DIR" ]; then
     exit 0
 fi
 
-# /briefing resolves only through the COMPOSED skill (bots.<bot>.skills:
-# [briefing]; the briefing: stanza alone composes the timer, not the skill).
-# Without it Claude Code rejects the command locally as "Unknown command", the
-# input box still clears, and the send below reads OK with nothing run (#1819).
-# So check the link before sending, as manager-checkin.sh does for /checkin, and
-# fail loud: a declared briefing that can never run is a defect, not a defer.
-if [ ! -e "$BOT_DIR/.claude/skills/briefing" ]; then
-    echo "$TS FAIL $BOT/$SLOT — no briefing skill composed: add briefing to bots.$BOT.skills and regenerate" \
+# /briefing resolves only through the COMPOSED skill, which the briefing: stanza
+# links. Without it (a hand-built timer, a deleted link) Claude Code rejects the
+# command locally as "Unknown command", the input box still clears, and the send
+# below reads OK with nothing run (#1819). /briefing is a library skill, never a
+# native command, so only "available" sends; and a briefing that can never run
+# is a defect, not a defer.
+_skill_status="$(session_command_status /briefing "$BOT_DIR" || true)"
+if [ "$_skill_status" != available ]; then
+    echo "$TS FAIL $BOT/$SLOT — no briefing skill composed: declare bots.$BOT.briefing and regenerate" \
         | tee -a "$LOG" >&2
     emit_fleet_event briefing_failed briefing "$(briefing_data skill_absent)" "$BOT_DIR" "$BOT"
     exit 1
