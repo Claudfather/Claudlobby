@@ -22,6 +22,15 @@ The per-attempt `briefing_*` events are not reclassified, so a deferral that
 recovers pages nobody. The pane push misses on a fleet whose first
 `MANAGER_TMUX` bot is its manager, until #910 lands.
 
+### Fixed — the operator's home directory was back in the tree, and nothing caught it (#927)
+
+#1306 replaced the home paths #927 named but added no gate, and four later PRs
+put one back: a cold-start doc, two plan docs, and 24 composed host-timer units
+committed at the repo root (removed: the compositor writes those under
+`runtime/_host/`, which is ignored). `tests/test_boundary_invariants.py` now
+fails on any tracked `/home/<name>` or `/Users/<name>` whose name is not on a
+short placeholder allowlist.
+
 ### Fixed — a socket cooldown no longer spawns the cold CLI for fire-and-forget emitters (#1657)
 
 Under load every cooldown emission spawned the package-importing CLI, and

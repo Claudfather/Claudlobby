@@ -15,7 +15,10 @@ gate can never be a green rubber stamp:
   4. composed vault-wired bot env names only ``CLAUDRON_VAULT_PATH`` — never a
      deprecated alias;
   5. no composed settings file grants the ``Bash(claudron *)`` wildcard (guards
-     L2's narrow-verb-grant rule).
+     L2's narrow-verb-grant rule);
+  6. no tracked file names a real operator home directory (root ``CLAUDE.md``'s
+     no-PII rule rather than the claudron boundary; it sits beside the other
+     "never" gates, where #927 proposed it).
 
 Docstring-truth (deliverable 4) lives with the compat table it describes, in
 ``tests/test_claudron_compat.py``.
@@ -26,7 +29,10 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from claudlobby.composer import compose_bot_conf, compose_settings_local
 from claudlobby.config import BotConfig, FleetConfig
@@ -291,3 +297,74 @@ class TestNoWildcardGrant:
 
     def test_wildcard_checker_fires(self):
         assert WILDCARD_GRANT in json.dumps({"permissions": {"allow": [WILDCARD_GRANT]}})
+
+
+# ===========================================================================
+# Invariant 6 — no tracked file names a real operator home directory (#927)
+# ===========================================================================
+
+# A home path names the operator's OS account, and this repo is public. #1306
+# cleaned the tree but added no gate, and four later PRs put the path back.
+# An ALLOWLIST of placeholders, never a denylist: a denylist must carry the very
+# value it bans, and it cannot see a name nobody thought to list. A new
+# placeholder costs a line here; a missed real name is PII in a public repo.
+PLACEHOLDER_HOMES = frozenset(
+    {
+        "alice", "botuser", "example", "olduser", "operator", "pi",
+        "runner", "ubuntu", "user", "x", "you",
+    }
+)
+
+# Only an absolute path counts: `local/home/<fleet>` is a directory named home,
+# so a path character before the slash disqualifies it (`/` does not — the
+# permission syntax `Read(//home/<name>/…)` is an absolute path). The name ends
+# at the first dot, so a sentence ending `/home/user.` still reads `user`.
+_HOME_PATH_RE = re.compile(r"(?<![\w.~-])/(?:home|Users)/([A-Za-z0-9][\w-]*)")
+
+
+def real_home_paths(text: str) -> list[int]:
+    """Line numbers naming a home directory outside ``PLACEHOLDER_HOMES``."""
+    return [
+        i
+        for i, line in enumerate(text.splitlines(), 1)
+        if any(
+            m.group(1) not in PLACEHOLDER_HOMES for m in _HOME_PATH_RE.finditer(line)
+        )
+    ]
+
+
+def _tracked_files() -> list[str]:
+    # git's own list, so gitignored local/, runtime/ and .env — which hold real
+    # paths legitimately — are out of scope by construction.
+    proc = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    files = [f for f in proc.stdout.split("\0") if f]
+    if proc.returncode or "tests/test_boundary_invariants.py" not in files:
+        pytest.skip("not a git checkout of this repo; no tracked set to scan")
+    return files
+
+
+class TestNoOperatorHomePath:
+    def test_no_tracked_file_names_a_real_home_dir(self):
+        offenders = {}
+        for rel in _tracked_files():
+            path = REPO_ROOT / rel
+            if path.is_file():
+                if lines := real_home_paths(path.read_text(errors="replace")):
+                    offenders[rel] = lines
+        # Locations only: the failure log must not repeat the value it caught.
+        assert not offenders, (
+            "a tracked file names a real home directory (root CLAUDE.md, no PII). "
+            f"Use a placeholder from PLACEHOLDER_HOMES, or add one there: {offenders}"
+        )
+
+    def test_home_path_checker_fires(self):
+        name = "jdoe"  # assembled at runtime, so this file passes its own scan
+        assert real_home_paths(f"fleet.yaml resolved to /home/{name}/claudlobby")
+        assert real_home_paths(f"PATH=/usr/bin:/Users/{name}/.local/bin")
+        assert real_home_paths(f"Read(//home/{name}/claudlobby/**)")
+        # …and stays quiet on placeholders and on a directory merely named home:
+        assert not real_home_paths("cd /home/user/claudlobby && ls /Users/you")
+        assert not real_home_paths("local/home/ai-platform/runtime/bots")
+        assert not real_home_paths("see /home/.../x, or /home/user.")
