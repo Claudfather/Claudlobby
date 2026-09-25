@@ -20,6 +20,24 @@ _MARKERS = re.compile(
     r"(?m)^<!-- claudlobby:source (?P<source>[^\r\n<>]+) -->(?:\r\n|\n|\r)"
     r"|(?:\r\n|\n|\r)<!-- /claudlobby:source -->"
 )
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _fenced_lines(markdown: str) -> set[int]:
+    """Track Markdown fences so documentation examples cannot claim sources."""
+    fenced = set()
+    fence_char = ""
+    fence_length = 0
+    for number, line in enumerate(re.split(r"\r\n|\r|\n", markdown), 1):
+        fence = _FENCE.match(line)
+        if fence_char:
+            fenced.add(number)
+            if (fence and fence[1][0] == fence_char
+                    and len(fence[1]) >= fence_length and not fence[2].strip()):
+                fence_char = ""
+        elif fence and (fence[1][0] == "~" or "`" not in fence[2]):
+            fence_char, fence_length = fence[1][0], len(fence[1])
+    return fenced
 
 
 def source_label(path: Path, paths) -> str:
@@ -80,10 +98,16 @@ def attribute(markdown: str) -> Attribution:
     """Attribute actual final spans, including their two marker lines."""
     total = len(markdown.encode("utf-8"))
     line_starts = [0] + [m.end() for m in re.finditer(r"\r\n|\r|\n", markdown)]
+    fenced = _fenced_lines(markdown)
     components = []
     opened = None
     reason = ""
     for marker in _MARKERS.finditer(markdown):
+        # End matches include the preceding line ending for exact accounting.
+        marker_start = marker.start() + len(marker.group()) - len(marker.group().lstrip("\r\n"))
+        if bisect_right(line_starts, marker_start) in fenced:
+            reason = "reserved source marker in fenced code"
+            break
         if marker["source"] is not None:
             if opened is not None:
                 reason = "nested source markers"

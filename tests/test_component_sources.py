@@ -143,7 +143,39 @@ def test_literal_or_nested_reserved_markers_refuse_attribution_instead_of_guessi
     markdown = ('<!-- claudlobby:source shared/outer -->\n```\n'
                 '<!-- claudlobby:source shared/example -->\n```\n'
                 '<!-- /claudlobby:source -->')
-    assert attribute(markdown).reason == 'nested source markers'
+    assert attribute(markdown).reason == 'reserved source marker in fenced code'
+
+
+@pytest.mark.parametrize('fence', ['```markdown', '~~~~', '   ```'])
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+def test_standalone_fenced_marker_example_cannot_invent_a_component(fence, newline):
+    from claudlobby.component_sources import attribute
+    text = newline.join([
+        '# Custom', fence,
+        '<!-- claudlobby:source shared/library/protocols/not-actually-loaded.md -->',
+        'not guidance', '<!-- /claudlobby:source -->', fence.strip().split('markdown')[0], '',
+    ])
+    result = attribute(text)
+    assert not result.available
+    assert result.reason == 'reserved source marker in fenced code'
+    assert result.components == () and result.unattributed_bytes == len(text.encode())
+
+
+def test_custom_template_marker_example_reports_ambiguous_attribution(scene, caplog):
+    bot, fleet, paths = scene
+    put(paths.fleet_dir, 'templates/claude.md.j2',
+        '# Custom\n```markdown\n'
+        '<!-- claudlobby:source shared/library/protocols/not-actually-loaded.md -->\n'
+        'not guidance\n<!-- /claudlobby:source -->\n```\n')
+    rendered = compose_claude_md(bot, fleet, paths)
+    path = put(paths.bot_runtime(bot.bot_id), 'CLAUDE.md', rendered)
+    before = path.read_bytes()
+    with caplog.at_level(logging.INFO, logger='claudlobby'):
+        core._report_composed_sources(paths, [bot.bot_id])
+    assert 'component attribution unavailable' in caplog.text
+    assert 'reserved source marker in fenced code' in caplog.text
+    assert 'not-actually-loaded' not in caplog.text
+    assert path.read_bytes() == before
 
 
 def test_report_lists_exact_components_and_keeps_artifacts_unchanged(scene, caplog):
