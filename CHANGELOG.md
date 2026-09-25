@@ -12,6 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 served only them are gone. A keepalive restart mid-loop zeroes the count, and
 the loop reads as a loop again two attempts later, inside one pulse.
 
+### Removed — crash-loop tests that guard no failure anyone has seen (#1801)
+
+Nine tests (23 cases), the wiring stub's `-p` parser and five of the harness's
+eight long-boot checks. `test_service_is_starting.py`'s stub now answers only
+what `-p` asks, with one new case for `InactiveExit`: a dropped property fails.
+
 ### Fixed — five compose tests failed on every checkout under a bot's `projects/` (#1794)
 
 They now compose against an export of the working tree, uncommitted edits
@@ -227,14 +233,14 @@ never binds.
   listed but unregistered type would never page, silently.
 - **Pinned in CI since #1780.** `tests/test_crash_loop_wiring.py` (first drafted
   by vera) drives the real keepalive and fleet-pulse against a `systemctl` stub.
-  It pins keepalive's skip, its exit status and its plane event; and
-  fleet-pulse's page, the `crash_loop` event and its keys, its suppression of
-  the session and service pages, and its clearing, which a `none` or a
-  `starting` read does not do. Not pinned there: the page's text, whose only
-  carrier is a tmux push to the manager, which no scene sets up. Both stubs
-  answer only what `-p` asks, as systemd does and in every spelling of `-p`, so
-  a call that stopped asking for `NRestarts` reads as the "no verdict" it would
-  be on a real host.
+  It pins keepalive's skip and its exit status; and fleet-pulse's page, the
+  `crash_loop` event and its keys, its suppression of the session and service
+  pages, and its clearing on a settled unit. Not pinned there: the page's text,
+  whose only carrier is a tmux push to the manager, which no scene sets up;
+  keepalive's `keepalive_skip` event; and that a `none` or `starting` read
+  leaves the page up (#1801). The unit tests' stubs answer only what `-p` asks,
+  as systemd does, so a call that stopped asking for `NRestarts` reads as the
+  "no verdict" it would be on a real host.
 
 **Out of scope:** stopping the loop or changing the start limit (#1769 option
 (a)), which is a policy call. `update-claude-code.sh` accepting `unknown` as a
