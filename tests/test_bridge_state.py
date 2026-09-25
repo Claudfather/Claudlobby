@@ -402,6 +402,11 @@ def _fake_bins_native(tmp_path: Path) -> Path:
         dst = bindir / name
         shutil.copy(_NODE, dst)
         os.chmod(dst, 0o755)
+    # Homebrew Node may load libnode through an executable-relative rpath.
+    # Preserve that runtime dependency without editing the copied executable.
+    source_lib = Path(_NODE).resolve().parent.parent / "lib"
+    for library in source_lib.glob("libnode*.dylib"):
+        (bindir / library.name).symlink_to(library)
     return bindir
 
 
@@ -447,13 +452,13 @@ def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
 
 
 @requires_node
-@pytest.mark.parametrize("leaf_source", [
-    "setTimeout(() => {}, 60000);\n",  # live tree, never writes readiness
-    "process.exit(1);\n",             # exits before yielding to caller
-])
-def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, leaf_source):
+@pytest.mark.parametrize("early_exit", [False, True], ids=["no-pidfile", "early-exit"])
+def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, early_exit):
     processes = []
     real_popen = subprocess.Popen
+    observed = tmp_path / "observed.pid"
+    leaf_source = "require('fs').writeFileSync(%r, String(process.pid));\n" % str(observed)
+    leaf_source += "process.exit(1);\n" if early_exit else "setTimeout(() => {}, 60000);\n"
 
     def capture(*args, **kwargs):
         proc = real_popen(*args, **kwargs)
@@ -461,20 +466,26 @@ def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, leaf_so
         return proc
 
     monkeypatch.setattr(subprocess, "Popen", capture)
-    with pytest.raises(AssertionError, match="pidfile never written"):
-        _spawn_bridge_native(_fake_bins_native(tmp_path), tmp_path / "state",
-                             leaf_source=leaf_source)
-    proc = processes[0]
-    assert proc.poll() is not None, "startup failure left the parent running"
-    # Zombies can briefly remain after SIGKILL; no member may keep executing.
-    for _ in range(100):
-        rows = subprocess.check_output(["ps", "-axo", "pgid=,stat="], text=True)
-        live = [r for r in rows.splitlines()
-                if r.split()[0] == str(proc.pid) and not r.split()[1].startswith("Z")]
-        if not live:
-            break
-        time.sleep(0.05)
-    assert not live, f"startup failure left process group {proc.pid}: {live}"
+    try:
+        with pytest.raises(AssertionError, match="pidfile never written"):
+            _spawn_bridge_native(_fake_bins_native(tmp_path), tmp_path / "state",
+                                 leaf_source=leaf_source)
+        assert observed.exists(), "fixture failed before its leaf process executed"
+        proc = processes[0]
+        assert proc.poll() is not None, "startup failure left the parent running"
+        # Zombies can briefly remain after SIGKILL; no member may keep executing.
+        for _ in range(100):
+            rows = subprocess.check_output(["ps", "-axo", "pgid=,stat="], text=True)
+            live = [r for r in rows.splitlines()
+                    if r.split()[0] == str(proc.pid) and not r.split()[1].startswith("Z")]
+            if not live:
+                break
+            time.sleep(0.05)
+        assert not live, f"startup failure left process group {proc.pid}: {live}"
+    finally:
+        # Keep a deliberately broken cleanup mutation from leaking its tree.
+        if processes:
+            _kill_tree(processes[0])
 
 
 @requires_node
