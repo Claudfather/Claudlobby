@@ -3242,6 +3242,46 @@ pane_send_verified() {
     bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
 }
 
+# Seconds pane_await_receipt waits for a receipt, per phase; 0 turns it off
+# (0.0 and 00 too: the switch is read as a number, not a string).
+# Measured on the Pi's plane, 2026-09-20..24: of 247 idle dispatches with a
+# receipt, 193 had it land BEFORE the sender's own pane_submitted row and 237
+# within 10s of it; the ones past 20s were held boxes a human rescued.
+_PANE_RECEIPT_WAIT_DEFAULT=10
+
+# pane_await_receipt <socket> <session> <msg_id>
+# A tracked send was SUBMITTED only once the receiver's UserPromptSubmit hook
+# (plane-dispatch-in.sh) has recorded its `received` row: the one signal a held
+# input box cannot fake. pane_send_verified reads the pane, and a payload held
+# in the box, its Enter turned into a newline, read clean there (#1099, #1236).
+# So: wait for the receipt; none -> ONE more Enter (send_retry) and wait again;
+# still none -> send_miss, loudly, rc 1. Never a loop, never the payload again.
+# No verdict and nothing pressed when the plane cannot answer or the receiver
+# has never recorded a receipt (its hook is not armed). For a send into an IDLE
+# pane only: a busy one queues the prompt, whose receipt lands when the turn
+# ends, if at all. So a receiver found BUSY when its receipt is missing (a turn
+# that began after the door's idle probe, or during the wait) is not a held box
+# either: nothing pressed, no verdict, checked before the Enter and the miss.
+pane_await_receipt() {
+    local socket="$1" session="$2" msg="$3" rc=0 data off='^0*\.?0*$'
+    local wait="${PANE_RECEIPT_WAIT_S:-$_PANE_RECEIPT_WAIT_DEFAULT}"
+    if [[ "$wait" =~ $off ]]; then return 0; fi
+    local ask=(python3 -S -E "$_LIB_COMMON_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}"
+        --received "$msg" --destination "$session" --wait "$wait")
+    "${ask[@]}" || rc=$?
+    [ "$rc" -eq 1 ] || return 0
+    if bot_is_busy "$socket" "$session"; then return 0; fi
+    printf -v data '{"session":"%s","msg_id":"%s","reason":"no-receipt"}' "$(json_escape "$session")" "$msg"
+    emit_fleet_event send_retry dispatch "$data"
+    bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
+    rc=0; "${ask[@]}" || rc=$?
+    [ "$rc" -eq 1 ] || return 0
+    if bot_is_busy "$socket" "$session"; then return 0; fi
+    emit_fleet_event send_miss dispatch "$data"
+    printf 'pane_send: no receipt from %s for %s after one more Enter -- held unsubmitted in its box, or queued behind a turn the busy check did not see\n' "$session" "$msg" >&2
+    return 1
+}
+
 # Base idle-detection regex — single source of truth for keepalive.sh
 # classify_pane and fleet-pulse pane_is_idle. Operators extend at runtime
 # via KEEPALIVE_IDLE_PATTERNS (appended by both consumers).
