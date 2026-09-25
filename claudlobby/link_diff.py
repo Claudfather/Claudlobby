@@ -45,12 +45,12 @@ def _guard_directory(path, trusted_root, *, required=False):
             raise _Unavailable('namespace ancestor is not a directory')
 
 
-def _source_depends_on_cleanup(source, removed):
-    """Follow source metadata, detecting even an intermediate removed symlink.
+def _references_namespace(source, namespace):
+    """Follow metadata, detecting even an intermediate namespace reference.
 
     Comparing only final resolve() results misses source -> runtime-link ->
-    external-directory: cleanup deletes the middle link before selection.
-    No target contents are opened, and ordinary external sources still work.
+    external-directory. Both cleanup and creation can change source eligibility
+    or target resolution. No contents are opened; missing paths are checked too.
     """
     pending = deque(source.absolute().parts[1:])
     current = Path(source.absolute().anchor)
@@ -61,13 +61,13 @@ def _source_depends_on_cleanup(source, removed):
             current = current.parent
             continue
         candidate = current / part
-        if any(candidate.is_relative_to(path) for path in removed):
+        if candidate.is_relative_to(namespace):
             return True
         node = _node(candidate)
         if node is not None and stat.S_ISLNK(node.st_mode):
             hops += 1
             if hops > 40:
-                raise _Unavailable('skill source symlink chain is unresolved')
+                raise _Unavailable('source/target symlink chain is unresolved')
             target = Path(os.readlink(candidate))
             if target.is_absolute():
                 current = Path(target.anchor)
@@ -79,7 +79,25 @@ def _source_depends_on_cleanup(source, removed):
     return False
 
 
-def _preview(kind, directory, operations, *, trusted_root, selected=()):
+def _skill_source_candidates(paths, skills):
+    """Inspect potential lookup paths, not a second skill selection policy.
+
+    A missing candidate may appear after an earlier link is created. Folder
+    expansion likewise needs missing/dangling entries checked before claiming
+    a complete selection. This preflight only refuses namespace dependencies;
+    the writer's plan remains authoritative for the actual selected set.
+    """
+    for skill in skills:
+        if '..' in skill:
+            raise ValueError('path traversal in skill selection')
+        for search_dir in paths.library_search_dirs('skills'):
+            candidate = search_dir / skill.rstrip('/')
+            yield candidate
+            if skill.endswith('/'):
+                yield from candidate.rglob('*')
+
+
+def _preview(kind, directory, operations, *, trusted_root, selected=(), sources=(), targets=()):
     try:
         _guard_directory(directory, trusted_root)
         for entry in selected:
@@ -88,13 +106,17 @@ def _preview(kind, directory, operations, *, trusted_root, selected=()):
                 raise _Unavailable('selected path leaves the namespace')
             if entry.parent != directory:
                 _guard_directory(entry.parent, trusted_root, required=True)
+        namespace = directory.resolve()
+        for source in sources:
+            if _references_namespace(source, namespace):
+                raise _Unavailable('skill source selection may depend on generate cleanup/creation')
+        for target in targets:
+            target = Path(target).expanduser()
+            if not target.is_absolute():
+                raise _Unavailable('relative mount declarations use distinct cwd/link-parent frames')
+            if _references_namespace(target, namespace):
+                raise _Unavailable('mount target resolution may depend on generate cleanup/creation')
         plan = list(operations)
-        if kind == 'skill':
-            removed = [op.path.parent.resolve() / op.path.name for op in plan
-                       if op.kind in ('unlink', 'rmtree')]
-            if any(op.source is not None and _source_depends_on_cleanup(op.source, removed)
-                   for op in plan):
-                raise _Unavailable('skill source selection depends on generate cleanup')
         actual = {p.name: p for p in directory.iterdir()} if directory.exists() else {}
         def name(path):
             return path.relative_to(directory).as_posix()
@@ -155,11 +177,13 @@ def link_preview(bot, paths, *, skills):
     trusted_root = paths.fleet_dir or paths.root
     changes, notes = _preview('skill', bot_dir / '.claude/skills',
                               skill_link_plan(paths, bot.bot_id, skills),
-                              trusted_root=trusted_root)
+                              trusted_root=trusted_root,
+                              sources=_skill_source_candidates(paths, skills))
     mount_changes, mount_notes = _preview('mount', bot_dir / 'mounts',
                                          mount_link_plan(bot.mounts, bot_dir),
                                          trusted_root=trusted_root,
-                                         selected=(bot_dir / 'mounts' / name for name in bot.mounts))
+                                         selected=(bot_dir / 'mounts' / name for name in bot.mounts),
+                                         targets=bot.mounts.values())
     return changes + mount_changes, notes + mount_notes + [
         'target content not compared: unchanged links do not establish unchanged source bytes; '
         'current target content is read on demand']

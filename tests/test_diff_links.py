@@ -373,3 +373,77 @@ def test_matching_dangling_mount_has_note_and_remains_unchanged(scene):
     assert 'no drift in lead' in text
     link_mounts(scene[0], scene[2].bot_runtime('lead'), lambda _: None)
     assert before == (os.readlink(mount_link(scene)), mount_link(scene).lstat().st_mtime_ns)
+
+
+@pytest.mark.parametrize('folder', [False, True])
+def test_missing_skill_source_can_appear_after_an_earlier_link(scene, folder):
+    from claudlobby.link_diff import link_preview
+    bot, _, paths, _, _ = scene
+    first = skill_link(scene); first.unlink()
+    if folder:
+        pack = paths.root / 'library/skills/pack'; pack.mkdir()
+        source = pack / 'two'
+        skills = ['one', 'pack/']
+    else:
+        source = paths.root / 'library/skills/two'
+        skills = ['one', 'two']
+    source.symlink_to(first)
+    before = snapshot(paths.root)
+    changes, _ = link_preview(bot, paths, skills=skills)
+    assert any('skill topology unavailable' in change for change in changes)
+    assert before == snapshot(paths.root)
+    link_skills(bot, paths, lambda _: None, skills=skills)
+    assert first.is_symlink()
+    assert (first.parent / 'two').is_symlink()
+
+
+@pytest.mark.parametrize('via_alias', [False, True])
+def test_mount_target_resolution_can_change_after_stale_cleanup(scene, tmp_path, via_alias):
+    from claudlobby.link_diff import link_preview
+    bot, _, paths, home, _ = scene
+    stale = mount_link(scene).parent / 'stale'
+    stale.symlink_to(tmp_path / 'outside-home')
+    target = stale / 'child'
+    if via_alias:
+        alias = home / 'target-alias'
+        alias.symlink_to(stale)
+        target = alias / 'child'
+    bot.mounts = {'docs': str(target)}
+    before = snapshot(paths.root), snapshot(home)
+    changes, _ = link_preview(bot, paths, skills=['one'])
+    assert any('mount topology unavailable' in change for change in changes)
+    assert not any('escapes home' in change for change in changes)
+    assert before == (snapshot(paths.root), snapshot(home))
+    link_mounts(bot, paths.bot_runtime('lead'), lambda _: None)
+    assert os.readlink(mount_link(scene)) == str(target)
+    assert not mount_link(scene).exists()
+
+
+def test_relative_mount_declaration_is_unavailable_without_changing_writer(scene, monkeypatch):
+    from claudlobby.link_diff import link_preview
+    bot, _, paths, home, _ = scene
+    monkeypatch.chdir(home)
+    bot.mounts = {'docs': 'mounted'}
+    # The existing writer preserves an absolute link resolving under cwd.
+    before = os.readlink(mount_link(scene)), mount_link(scene).lstat().st_mtime_ns
+    changes, _ = link_preview(bot, paths, skills=['one'])
+    assert any('mount topology unavailable' in change and 'relative' in change for change in changes)
+    link_mounts(bot, paths.bot_runtime('lead'), lambda _: None)
+    assert before == (os.readlink(mount_link(scene)), mount_link(scene).lstat().st_mtime_ns)
+    # Creation stores the raw relative value, which resolves under the link parent.
+    mount_link(scene).unlink()
+    link_mounts(bot, paths.bot_runtime('lead'), lambda _: None)
+    assert os.readlink(mount_link(scene)) == 'mounted'
+    assert not mount_link(scene).exists()
+    changes, _ = link_preview(bot, paths, skills=['one'])
+    assert any('mount topology unavailable' in change and 'relative' in change for change in changes)
+    assert not any('retarget' in change for change in changes)
+    link_mounts(bot, paths.bot_runtime('lead'), lambda _: None)
+    assert os.readlink(mount_link(scene)) == 'mounted'
+
+
+def test_absolute_mount_declaration_and_home_expansion_remain_supported(scene):
+    from claudlobby.link_diff import link_preview
+    scene[0].mounts = {'docs': '~/mounted'}
+    changes, notes = link_preview(scene[0], scene[2], skills=['one'])
+    assert changes == [] and 'mounts: expected 1, matching 1' in notes

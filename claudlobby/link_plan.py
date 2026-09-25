@@ -17,7 +17,6 @@ class LinkOperation:
     path: Path
     target: Path | None = None
     message: str = ""
-    source: Path | None = None
 
 
 def skill_link_plan(paths, bot_id: str, skills: list[str]) -> Iterator[LinkOperation]:
@@ -36,7 +35,7 @@ def skill_link_plan(paths, bot_id: str, skills: list[str]) -> Iterator[LinkOpera
             return LinkOperation('notice', directory / leaf, message=(
                 f"  skill '{leaf}' already linked from {linked[leaf]} — skipping {src}"))
         linked[leaf] = src
-        return LinkOperation('create', directory / leaf, src.resolve(), source=src)
+        return LinkOperation('create', directory / leaf, src.resolve())
 
     for skill in skills:
         if skill.endswith('/'):

@@ -12,8 +12,9 @@ The bot preview now reports missing, retargeted and stale skill/mount links,
 directory replacements, and preserved regular-file obstacles using the same
 ordered selection plans as generation. Effective skills, overlay precedence,
 folder expansion and existing writer behavior are preserved. Nested mount names
-retain their full identity. Linked runtime ancestors, unreadable metadata and
-skill sources dependent on cleanup are reported as unavailable.
+retain their full identity. Linked runtime ancestors, unreadable metadata,
+skill sources or mount targets dependent on link cleanup/creation, and relative
+mount declarations with differing lookup frames are reported as unavailable.
 
 Coverage names the remaining uninspected artifacts and distinguishes link
 topology from target contents. Skills and mounts are read on demand; a matching
