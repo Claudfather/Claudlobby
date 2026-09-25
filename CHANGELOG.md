@@ -15,6 +15,15 @@ the next run instead of waiting for the count to change or `CURRENCY_RENOTIFY_S`
 install) counts as sent, so its manager is nudged once rather than on every run.
 Every other caller's notify function returns 0, so none of them changes.
 
+### Fixed — the operator's home directory was back in the tree, and nothing caught it (#927)
+
+#1306 replaced the home paths #927 named but added no gate, and four later PRs
+put one back: a cold-start doc, two plan docs, and 24 composed host-timer units
+committed at the repo root (removed: the compositor writes those under
+`runtime/_host/`, which is ignored). `tests/test_boundary_invariants.py` now
+fails on any tracked `/home/<name>` or `/Users/<name>` whose name is not on a
+short placeholder allowlist.
+
 ### Fixed — a socket cooldown no longer spawns the cold CLI for fire-and-forget emitters (#1657)
 
 Under load every cooldown emission spawned the package-importing CLI, and

@@ -132,9 +132,9 @@ Every task's requirements include these. Exact values are copied from the spec a
 This plan and its spec must be in the tree the PR merges into (cycle-6 R10): PR #1550 (the docs branch) merges first, and the first command below refuses otherwise.
 
 ```bash
-git -C /Users/chris/Projects/Claudlobby fetch -q origin main
+git -C /Users/user/Projects/Claudlobby fetch -q origin main
 for d in documentation/plans/2026-09-14-manager-checkin-chunk1-contract.md documentation/plans/2026-09-13-manager-checkin-design.md; do
-  git -C /Users/chris/Projects/Claudlobby show "origin/main:$d" > /dev/null || { echo "STOP: $d is not on origin/main -- merge PR #1550 first"; exit 1; }
+  git -C /Users/user/Projects/Claudlobby show "origin/main:$d" > /dev/null || { echo "STOP: $d is not on origin/main -- merge PR #1550 first"; exit 1; }
 done
 WT="$HOME/Projects/claudlobby-worktrees/ck1"      # the one path every later step uses
 OUT="$WT-out"                                       # evidence files, beside the worktree, never in a session TMPDIR, never committed
@@ -164,7 +164,7 @@ no_names() {   # <file>: refuse when any host identifier reached a body bound fo
 FN
   printf 'cd "%s" || { echo "STOP: the worktree %s is missing -- Task 0 step 1 creates it"; exit 1; }\n' "$WT" "$WT"     # the OTHER half of shell state: every sourcing block lands in the worktree (cycle-8 B1)
 } > "$OUT/env.sh"
-cd /Users/chris/Projects/Claudlobby
+cd /Users/user/Projects/Claudlobby
 git fetch -q origin main
 git worktree add -B checkin/chunk1-record "$WT" origin/main     # -B: a branch of that name is left over from an earlier attempt at an older tip (measured, cycle 9) -- reset it to the tip just fetched, never reuse it
 . "$OUT/env.sh"; echo "env: $(wc -l < "$OUT/env.sh" | tr -d ' ') lines; gate: $(type no_names | head -1); cwd: $(pwd)"; git log --oneline -1
