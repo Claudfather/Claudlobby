@@ -49,6 +49,19 @@ if [ ! -d "$BOT_DIR" ]; then
     exit 0
 fi
 
+# /briefing resolves only through the COMPOSED skill (bots.<bot>.skills:
+# [briefing]; the briefing: stanza alone composes the timer, not the skill).
+# Without it Claude Code rejects the command locally as "Unknown command", the
+# input box still clears, and the send below reads OK with nothing run (#1819).
+# So check the link before sending, as manager-checkin.sh does for /checkin, and
+# fail loud: a declared briefing that can never run is a defect, not a defer.
+if [ ! -e "$BOT_DIR/.claude/skills/briefing" ]; then
+    echo "$TS FAIL $BOT/$SLOT — no briefing skill composed: add briefing to bots.$BOT.skills and regenerate" \
+        | tee -a "$LOG" >&2
+    emit_fleet_event briefing_failed briefing "$(briefing_data skill_absent)" "$BOT_DIR" "$BOT"
+    exit 1
+fi
+
 # Session name is the bot name; tmux resolves it to the running session on the
 # bot private socket (the dispatch.sh / tmux_socket_for_session convention).
 SOCKET="$(tmux_socket_for_bot "$BOT_DIR" 2>/dev/null || true)"

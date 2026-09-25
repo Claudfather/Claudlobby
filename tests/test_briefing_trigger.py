@@ -13,6 +13,7 @@ and the dispatched payload are captured to files the assertions read.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -33,7 +34,7 @@ ts_iso() { printf '%s' "2026-07-16T00:00:00Z"; }
 tmux_socket_for_bot() { printf '%s' "fakesock"; }
 check_tmux_session() { return "${STUB_SESSION_RC:-0}"; }
 bot_is_busy() { return "${STUB_BUSY_RC:-1}"; }
-emit_fleet_event() { printf '%s\\n' "$1" >> "$EVENTS_CAPTURE"; }
+emit_fleet_event() { printf '%s\\n' "$1" >> "$EVENTS_CAPTURE"; printf '%s\\n' "$3" >> "$EVENTS_CAPTURE.data"; }
 # chunk P fold: briefing-trigger.sh now sources these three from lib-common —
 # _read_wire_out (called unconditionally; the real one no-ops on an empty path),
 # and safe_mktemp / _wire_frag (reached only when PLANE_ARMED=1). Stubbed so the
@@ -51,7 +52,9 @@ exit "${STUB_DISPATCH_RC:-0}"
 """
 
 
-def _run(tmp_path: Path, *, env_extra: dict) -> tuple[int, str, str]:
+def _run(
+    tmp_path: Path, *, env_extra: dict, skill: bool = True
+) -> tuple[int, str, str]:
     libdir = tmp_path / "lib"
     libdir.mkdir(exist_ok=True)
     (libdir / "lib-common.sh").write_text(STUB_LIB_COMMON)
@@ -62,6 +65,11 @@ def _run(tmp_path: Path, *, env_extra: dict) -> tuple[int, str, str]:
 
     bots_dir = tmp_path / "bots"
     (bots_dir / "kev").mkdir(parents=True, exist_ok=True)
+    if skill:
+        # The link generate composes for bots.<bot>.skills: [briefing].
+        (bots_dir / "kev" / ".claude" / "skills" / "briefing").mkdir(
+            parents=True, exist_ok=True
+        )
 
     env = {
         **os.environ,
@@ -128,3 +136,17 @@ def test_failed_dispatch_emits_briefing_failed(tmp_path):
     )
     assert rc != 0
     assert _event(tmp_path) == "briefing_failed"
+
+
+def test_refuses_and_fails_loud_when_the_briefing_skill_is_not_composed(tmp_path):
+    # #1819: with no briefing skill composed, Claude Code answers /briefing with
+    # a local "Unknown command" record, the box still clears, and the send reads
+    # OK. So the trigger must refuse BEFORE sending, and fail loud, not defer.
+    rc, _out, _err = _run(
+        tmp_path, env_extra={"STUB_SESSION_RC": "0", "STUB_BUSY_RC": "1"}, skill=False
+    )
+    assert rc != 0
+    assert _dispatched(tmp_path) == ""
+    assert _event(tmp_path) == "briefing_failed"
+    data = (tmp_path / "events_capture.data").read_text().strip()
+    assert json.loads(data)["reason"] == "skill_absent"
