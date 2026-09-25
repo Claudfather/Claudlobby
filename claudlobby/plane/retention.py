@@ -186,13 +186,7 @@ def prune_metric_samples(conn, *, now=None, days: int = DEFAULT_RETENTION_DAYS,
         "DELETE FROM metric_samples WHERE ingested_at < ?", (cutoff,))
     deleted = cur.rowcount
 
-    # RECORD THE PRUNE so the duplicate verifier can tell a pruned row from a
-    # corrupted one (#1751) — the same watermark #1744 added for the system
-    # lane beside this one. Without this, replaying a pruned metric_sample
-    # reaches `_verify_duplicates` with a ledger row and no family row and is
-    # refused as integrity damage, taking every other event in that batch
-    # with it. `MAX` so a re-run with a shorter window cannot walk the
-    # watermark backwards and re-expose rows it already explained.
+    # Record the prune: the watermark comment in prune_system_events applies (#1751).
     if deleted:
         conn.execute(
             "INSERT INTO prune_watermarks (family, pruned_before, pruned_at)"

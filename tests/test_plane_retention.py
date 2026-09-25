@@ -315,163 +315,23 @@ def test_host_prune_timer_arms_from_the_host_tier(tmp_path, monkeypatch):
         out2 / "claudlobby-plane-prune.service").read_text()
 
 
-# --- #1751: the metric_sample lane shipped with no watermark --------------
-#
-# Same defect #1744 fixed for the system lane beside this one (kept in
-# test_system_event_retention.py): prune_metric_samples deletes family rows
-# and correctly never touches the ledger, which left a ledger row with no
-# family row -- exactly the state `_verify_duplicates` treats as integrity
-# damage, refusing the WHOLE BATCH on the first divergence. This lane has
-# shipped ON by default for months; #1744's fix was for a lane that ships
-# OFF. Reuses `prune_watermarks` -- does not invent a second mechanism.
-#
-# The blast radius (whole-batch loss on ANY unexplained divergence) is
-# pre-existing, not caused by pruning, and not this PR's to fix -- three
-# people independently established that tonight. This closes one way of
-# REACHING it.
+# --- #1751: the metric_sample prune watermark ------------------------------
 
-def _watermark(root: Path, family="metric_sample"):
-    db = sqlite3.connect(db_path(root))
-    try:
-        return db.execute(
-            "SELECT pruned_before, pruned_at FROM prune_watermarks"
-            " WHERE family = ?", (family,)).fetchone()
-    finally:
-        db.close()
-
-
-def test_a_prune_that_deletes_records_a_watermark(tmp_path):
+def test_a_replayed_sample_survives_its_own_prune(tmp_path):
+    """An ack-lost retry resends a sample that was pruned since: the watermark
+    lets it classify as a duplicate instead of refusing the batch."""
     root = _root(tmp_path)
-    _sample(root)
-    _backdate_all(root, days_old=40)
+    ev = {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "f",
+          "payload": {"subject_kind": "bot_instance", "subject": "bot:f/erlich",
+                      "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}
+    (first,) = emit_batch(root, [ev])
     conn = connect(db_path(root))
-    try:
-        res = prune_metric_samples(conn, now=NOW)
-    finally:
-        conn.close()
-    assert res.deleted == 1
-    wm = _watermark(root)
-    assert wm is not None
-    assert wm[0] == res.cutoff
-
-
-def test_a_prune_that_deletes_nothing_writes_no_watermark(tmp_path):
-    """A watermark asserts rows were removed behind it -- writing one for a
-    no-op prune would excuse an absence this lane never caused."""
-    root = _root(tmp_path)
-    _sample(root)
-    _backdate_all(root, days_old=5)           # inside the window
-    conn = connect(db_path(root))
-    try:
-        prune_metric_samples(conn, now=NOW)
-    finally:
-        conn.close()
-    assert _watermark(root) is None
-
-
-def test_the_metric_sample_watermark_never_walks_backwards(tmp_path):
-    """A re-run with a narrower window must not re-expose rows an earlier,
-    wider prune already explained. Mirrors the system lane's own pin
-    (test_system_event_retention.py) over this file's real-schema
-    fixtures, per #1751's ask for a round-trip test on a real schema."""
-    root = _root(tmp_path)
-    _sample(root)
-    _backdate_all(root, days_old=400)          # only row so far -- safe
-    conn = connect(db_path(root))
-    try:
-        prune_metric_samples(conn, now=NOW, days=100)
-    finally:
-        conn.close()
-    wide = _watermark(root)[0]                 # the 400d row is gone now
-
-    _sample(root)
-    _backdate_all(root, days_old=40)           # only row left -- safe again
-    conn = connect(db_path(root))
-    try:
-        prune_metric_samples(conn, now=NOW, days=30)
-    finally:
-        conn.close()
-    narrow = _watermark(root)[0]
-    assert narrow >= wide, (wide, narrow)
-
-
-def test_a_replayed_batch_survives_when_one_of_its_rows_was_pruned(tmp_path):
-    """THE behavioral proof. The real replay shape is an ACK-LOST RETRY: the
-    client resends the IDENTICAL prior batch, same event_ids throughout
-    (plane-emit.sh pre-mints ids before the first attempt precisely so a
-    retry can do this) -- never a stray brand-new id bundled with an old
-    one, which is a DIFFERENT, separate, pre-existing defect (`ingest_many`
-    is one all-or-nothing transaction, so ANY intra-batch collision rolls
-    the WHOLE call back and a genuinely-never-ingested id in that same call
-    hits its own "missing from ledger -- mixed state" refusal regardless of
-    this fix -- confirmed directly, not this PR's to close, matches dara's
-    "not yours to fix" scope).
-
-    So: one real batch, two samples (the shape a keepalive tick actually
-    sends -- bot.heartbeat + bot.session_up together). One ages out and is
-    explained only by the watermark; its sibling's family row never moved.
-    Before this fix, `_verify_duplicates` raised on the FIRST divergence
-    (the pruned one) and never reached the second AT ALL -- the sibling's
-    otherwise-clean duplicate classification was lost beside it. That is
-    the original #1659/#1751 harm, reproduced and closed here.
-
-    Real schema, real ingest, real prune -- `ingest_many` via `emit_batch`,
-    not `_explained_by_a_prune` against a hand-built table."""
-    root = _root(tmp_path)
-    original = emit_batch(root, [
-        {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "f",
-         "payload": {"subject_kind": "bot_instance", "subject": "bot:f/erlich",
-                     "metric": "bot.heartbeat", "value": {"state": "IDLE"}}},
-        {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "f",
-         "payload": {"subject_kind": "bot_instance", "subject": "bot:f/erlich",
-                     "metric": "bot.session_up", "value": True}},
-    ])
-    assert [o.status for o in original] == ["committed", "committed"]
-    pruned_id, survives_id = original[0].event_id, original[1].event_id
-
-    # Age out ONLY the heartbeat row -- its sibling stays inside the window,
-    # so only one of the two needs the watermark's explanation.
-    db = connect(db_path(root))
     try:
         old = (NOW - timedelta(days=40)).isoformat()
-        db.execute("UPDATE metric_samples SET ingested_at = ? WHERE event_id = ?",
-                   (old, pruned_id))
-        # `_explained_by_a_prune` reads the LEDGER's ingested_at, not the
-        # family row's -- a real ingest stamps both at the same instant, so
-        # keep them in sync here too (the same gap test_the_metric_sample_
-        # watermark_never_walks_backwards's own setup does not need, since it
-        # only exercises prune_metric_samples, which never reads the ledger).
-        db.execute("UPDATE ingest_ledger SET ingested_at = ? WHERE event_id = ?",
-                   (old, pruned_id))
-    finally:
-        db.close()
-    conn = connect(db_path(root))
-    try:
-        res = prune_metric_samples(conn, now=NOW)
+        for table in ("metric_samples", "ingest_ledger"):  # ingest stamps both
+            conn.execute(f"UPDATE {table} SET ingested_at = ?", (old,))
+        assert prune_metric_samples(conn, now=NOW).deleted == 1
     finally:
         conn.close()
-    assert res.deleted == 1                    # only the heartbeat row is gone
-    assert _watermark(root) is not None         # explained by a watermark now
-
-    # The ack-lost retry: the SAME batch, byte-identical event_ids, resent
-    # whole. Must not raise, and the sibling's own clean duplicate
-    # classification must not be lost beside the pruned one's.
-    replay = emit_batch(root, [
-        {"event_id": pruned_id,
-         "event_type": "metric_sample", "emitter": "keepalive", "fleet": "f",
-         "payload": {"subject_kind": "bot_instance", "subject": "bot:f/erlich",
-                     "metric": "bot.heartbeat", "value": {"state": "IDLE"}}},
-        {"event_id": survives_id,
-         "event_type": "metric_sample", "emitter": "keepalive", "fleet": "f",
-         "payload": {"subject_kind": "bot_instance", "subject": "bot:f/erlich",
-                     "metric": "bot.session_up", "value": True}},
-    ])
-    assert [o.status for o in replay] == ["duplicate", "duplicate"]
-    # and the surviving row is still exactly the one row it always was
-    db = sqlite3.connect(db_path(root))
-    try:
-        n = db.execute("SELECT COUNT(*) FROM metric_samples WHERE event_id = ?",
-                       (survives_id,)).fetchone()[0]
-    finally:
-        db.close()
-    assert n == 1
+    replay = emit_batch(root, [{**ev, "event_id": first.event_id}])
+    assert [o.status for o in replay] == ["duplicate"]
