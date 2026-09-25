@@ -486,28 +486,90 @@ with_timeout() {
     fi
 }
 
+# Retire only the named owner. The guard lives INSIDE the directory: while
+# held, every participating releaser leaves that directory in place.
+# Re-read AFTER taking it, then rename the whole guarded directory atomically.
+# Removing pid/guard then rmdir would reopen an ABA gap: another writer
+# could replace the directory before the old rmdir reaches it.
+# rc 1 = busy/I/O failure, 2 = different or unknown owner; neither deletes.
+_lock_retire() {
+    local dir="$1" owner="$2" current retired
+    [ -d "$dir" ] && [ ! -L "$dir" ] && [ ! -L "$dir/owner" ] || return 2
+    mkdir "$dir/.retiring" 2>/dev/null || return 1
+    current=$(cat "$dir/owner" 2>/dev/null) || current=""
+    if [ "$current" != "$owner" ] || [ -z "$current" ]; then
+        rmdir "$dir/.retiring" 2>/dev/null || true
+        return 2
+    fi
+    retired=$(mktemp -d "${dir}.retired.XXXXXXXXXX") || {
+        rmdir "$dir/.retiring" 2>/dev/null || true
+        return 1
+    }
+    if ! mv "$dir" "$retired/lock"; then
+        rmdir "$dir/.retiring" "$retired" 2>/dev/null || true
+        return 1
+    fi
+    # Only remove our two known entries; unexpected contents are preserved.
+    rm -f "$retired/lock/owner"
+    rmdir "$retired/lock/.retiring" "$retired/lock" "$retired" 2>/dev/null || {
+        printf 'with_lock: retired directory retained for inspection: %s\n' "$retired" >&2
+    }
+    return 0
+}
+
 # with_lock <lockfile> <command> [args...]
-# Portable mutex: uses flock if available, else an atomic mkdir-based spinlock
-# (mkdir is atomic on every POSIX filesystem). Spins up to ~5s then proceeds
-# best-effort. Suitable for the small jq+mv critical sections in this repo.
+# flock where available; otherwise an owned mkdir mutex. The mkdir arm waits
+# WITH_LOCK_WAIT_S (default 30) seconds, then refuses with rc 75, NEVER calling
+# the command unlocked. The command keeps its own exit status after acquisition.
+# Existing locks are NEVER reclaimed automatically. A dead shell PID does not
+# prove its callback children have stopped writing. Diagnose orphaned locks
+# only after establishing quiescence; neither age nor kill -0 proves it.
 with_lock() {
     local lockfile="${1:?Usage: with_lock <lockfile> <command...>}"; shift
     if [ -n "$_FLOCK_BIN" ]; then
         ( "$_FLOCK_BIN" -x 200; "$@" ) 200>"$lockfile"
         return $?
     fi
-    # 30s budget (WITH_LOCK_WAIT_S), not 5: a critical section that reaches
-    # the plane through the cold-CLI rung runs 1-2s, and a waiter that gives up
-    # runs UNLOCKED — measured by the R1 gauntlet with six concurrent opens.
-    local lockdir="${lockfile}.d" i=0 _max=$(( ${WITH_LOCK_WAIT_S:-30} * 20 ))
+    local lockdir="${lockfile}.d" i=0 wait_s="${WITH_LOCK_WAIT_S:-30}"
+    local owner pid token rc=0 released=0 release_rc=0
+    case "$wait_s" in ""|*[!0-9]*)
+        printf 'with_lock: WITH_LOCK_WAIT_S must be a nonnegative integer\n' >&2
+        return 75 ;;
+    esac
+    # exec replaces the command-substitution shell: PPID is the shell actually
+    # running this call. $$ alone identifies the PARENT in a bash subshell,
+    # and BASHPID is absent in the supported macOS bash 3.2.
+    pid=$(exec /bin/sh -c 'printf "%s\n" "$PPID"')
+    token=$(safe_mktemp) || return 75
+    owner="$pid $token"
     while ! mkdir "$lockdir" 2>/dev/null; do
+        if [ "$i" -ge "$((10#$wait_s * 20))" ]; then
+            printf 'with_lock: refused %s; ownership not acquired within %ss\n' "$lockdir" "$wait_s" >&2
+            return 75
+        fi
         i=$((i + 1))
-        [ "$i" -ge "$_max" ] && break
         sleep 0.05
     done
-    local rc=0
+    # The unique record is the release authority, never a reclamation permit.
+    if ! printf '%s\n' "$owner" > "$lockdir/owner"; then
+        printf 'with_lock: cannot publish ownership of %s; callback refused\n' "$lockdir" >&2
+        return 75
+    fi
     "$@" || rc=$?
-    rmdir "$lockdir" 2>/dev/null || true
+    # Retry a bounded second if retirement is busy; a changed owner is left
+    # untouched immediately. An interrupted retirement stays fail-closed.
+    i=0
+    while [ "$i" -lt 20 ]; do
+        release_rc=0
+        _lock_retire "$lockdir" "$owner" || release_rc=$?
+        if [ "$release_rc" -eq 0 ]; then released=1; break; fi
+        [ "$release_rc" -eq 2 ] && break
+        i=$((i + 1))
+        sleep 0.05
+    done
+    if [ "$released" -ne 1 ]; then
+        printf 'with_lock: could not release owned lock %s; directory preserved\n' "$lockdir" >&2
+    fi
     return $rc
 }
 
