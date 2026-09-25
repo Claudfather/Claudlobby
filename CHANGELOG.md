@@ -15,6 +15,13 @@ committed at the repo root (removed: the compositor writes those under
 fails on any tracked `/home/<name>` or `/Users/<name>` whose name is not on a
 short placeholder allowlist.
 
+### Fixed — rejected environment values stay out of parser diagnostics (#1608)
+
+The restricted `.env` reader now reports the filename, physical line number,
+and rejection reason without copying input into startup or job logs. Accepted
+input and rejection rules are unchanged. This prevents new diagnostic leaks;
+it does not alter existing logs or complete the parser-parity work in #1608.
+
 ### Fixed — a socket cooldown no longer spawns the cold CLI for fire-and-forget emitters (#1657)
 
 Under load every cooldown emission spawned the package-importing CLI, and
