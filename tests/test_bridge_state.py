@@ -165,7 +165,9 @@ def _spawn_bridge(bindir, state_dir, *, owned=True, env_state_dir=None):
 
 def _kill_tree(proc):
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        # Every fixture starts a new session: its PID remains the group ID
+        # even if the leader exited before its children.
+        os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
     try:
@@ -403,7 +405,7 @@ def _fake_bins_native(tmp_path: Path) -> Path:
     return bindir
 
 
-def _spawn_bridge_native(bindir: Path, state_dir: Path):
+def _spawn_bridge_native(bindir: Path, state_dir: Path, *, leaf_source=None):
     """Reproduce the production tree with native stand-ins:
 
         claude -> bun (`start` shim) -> bun server.ts   <- writes bot.pid
@@ -416,7 +418,7 @@ def _spawn_bridge_native(bindir: Path, state_dir: Path):
     pidfile = state_dir / "bot.pid"
 
     leaf = bindir / "leaf.js"
-    leaf.write_text(
+    leaf.write_text(leaf_source if leaf_source is not None else
         "require('fs').writeFileSync(%r, String(process.pid));\n"
         "setTimeout(() => {}, 60000);\n" % str(pidfile)
     )
@@ -435,8 +437,44 @@ def _spawn_bridge_native(bindir: Path, state_dir: Path):
     proc = subprocess.Popen(
         [str(claude), str(tree)], env=env, start_new_session=True
     )
-    _wait_pidfile(pidfile)
+    try:
+        _wait_pidfile(pidfile)
+        assert proc.poll() is None, "native bridge exited before startup completed"
+    except BaseException:
+        _kill_tree(proc)
+        raise
     return proc
+
+
+@requires_node
+@pytest.mark.parametrize("leaf_source", [
+    "setTimeout(() => {}, 60000);\n",  # live tree, never writes readiness
+    "process.exit(1);\n",             # exits before yielding to caller
+])
+def test_native_bridge_startup_failure_reaps_tree(tmp_path, monkeypatch, leaf_source):
+    processes = []
+    real_popen = subprocess.Popen
+
+    def capture(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    with pytest.raises(AssertionError, match="pidfile never written"):
+        _spawn_bridge_native(_fake_bins_native(tmp_path), tmp_path / "state",
+                             leaf_source=leaf_source)
+    proc = processes[0]
+    assert proc.poll() is not None, "startup failure left the parent running"
+    # Zombies can briefly remain after SIGKILL; no member may keep executing.
+    for _ in range(100):
+        rows = subprocess.check_output(["ps", "-axo", "pgid=,stat="], text=True)
+        live = [r for r in rows.splitlines()
+                if r.split()[0] == str(proc.pid) and not r.split()[1].startswith("Z")]
+        if not live:
+            break
+        time.sleep(0.05)
+    assert not live, f"startup failure left process group {proc.pid}: {live}"
 
 
 @requires_node

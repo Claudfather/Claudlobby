@@ -1,59 +1,20 @@
-"""macOS supervision coverage — run what can run here, gate only what cannot (#1012).
+"""Portable plist contracts plus native macOS utility/lifecycle evidence.
 
-The gap this module marks, measured rather than assumed:
-
-  * `lib/install-bot.sh` — the launchd bot enroller — was named by **no test at
-    all**.
-  * `lib/install_fleet_timer_launchd.sh` is named by exactly one assertion
-    (`test_setup_system.py:103`), which checks that the STRING appears in
-    another file's text. Nothing runs it.
-  * Corrupting `compose_launchd_plist` outright fails only 3 of 2268 tests, all
-    of them composition assertions — a `.plist` is just text, so those run
-    anywhere and are not evidence about launchd.
-
-On the platform side there is no macOS CI (ubuntu-only), no macOS canary host,
-no automated macOS suite, and a manual baseline that is red at 34 failures.
-`vera` hit exactly this being unable to canary #983.
-
-GATE ONLY WHAT THE PLATFORM ACTUALLY WITHHOLDS. The first cut of this file
-gated all three tests behind `platform.system() != "Darwin"`, and two of them
-never needed it: a filesystem stat and a `plistlib` parse are both pure POSIX +
-portable stdlib. Over-gating is conservative rather than wrong, which is
-precisely why it would never have been revisited — and the cost is real, since
-an over-gated test runs NOWHERE on ubuntu-only CI while looking accounted-for
-in the skip list. Ungated, they run on every CI run forever, which shrinks the
-blind spot instead of relabelling it.
-
-The tell was already on the record: the plist body had been executed on Linux
-by hand to check its API calls, passed, and was left gated anyway — and its
-docstring described a `plutil -lint` platform verdict the body never invoked.
-Caught by `vera` going assertion-by-assertion instead of accepting that the
-tests skipped cleanly.
-
-WHY THIS IS NOT THE DEFECT #1012 DESCRIBED, so the next reader does not
-re-derive it: #1012 predicted platform-specific tests that run off-platform and
-trivially pass. Mutation testing found none — the stub-the-binary + force-`_OS`
-pattern gives those real teeth (breaking `bridge_state`'s macOS branch fails 2
-of its 4 `ps-eww` cases; breaking `service_is_active`'s Darwin arm fails 2 of
-its 3). What was missing is not a lying test but an ABSENT one, which is
-quieter still, because a test that does not exist cannot even be counted.
-
-WHAT THE force-`_OS` PATTERN DOES AND DOES NOT BUY, since a green `[ps-eww]`
-invites the wrong conclusion: it exercises the macOS *branch logic* on Linux.
-It cannot reproduce another kernel's *behaviour* — #973 was macOS `ps` column
-formatting, which by construction never executed until someone ran it on a Mac
-(see the native-host block in `tests/test_bridge_state.py`, PR #981).
-
-DELIBERATELY NOT BUILT: cross-platform `ps`/`launchctl` fixtures captured from
-both kernels. Better long-term, and it does not pass YAGNI at zero confirmed
-carriers (Chris's ruling on #1012).
+The service smoke is opt-in and runs only on an ephemeral GitHub-hosted Mac.
+It composes a real plist whose launcher is a scratch executable, observes that
+process, and proves cleanup on success and assertion failure. No fleet service
+installer, real bot session, credentials, or Telegram transport is involved.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import os
 import platform
 import plistlib
 import subprocess
+import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -76,8 +37,7 @@ needs_launchctl = pytest.mark.skipif(
     platform.system() != "Darwin",
     reason=(
         "needs macOS `launchctl` — the binary does not exist on Linux, so this "
-        "rung cannot execute here; the estate has no macOS CI, canary host, or "
-        "automated suite (#1012)"
+        "rung runs in the supported macOS CI lane (#1810)"
     ),
 )
 
@@ -121,11 +81,7 @@ def test_composed_plist_is_structurally_valid(tmp_path):
 
 @needs_launchctl
 def test_launchctl_is_reachable():
-    """If this fails on a Mac, every launchd rung below it is moot.
-
-    This body has never run — there is no macOS host in the estate — and saying
-    so is the point of the file rather than an apology for it.
-    """
+    """If this fails on a Mac, every launchd rung below it is moot."""
     rc = subprocess.run(["launchctl", "version"], capture_output=True).returncode
     assert rc == 0, "launchctl not reachable on a Darwin host"
 
@@ -137,3 +93,89 @@ def test_the_gate_names_the_binary_not_just_the_platform():
     reason = needs_launchctl.kwargs["reason"]
     assert "launchctl" in reason
     assert len(reason) > 40, "reason too thin to tell a reader what is missing"
+
+
+@needs_launchctl
+def test_native_plutil_accepts_composed_plist(tmp_path):
+    bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+    fleet = FleetConfig(name="ci", service_prefix="claudlobby-ci", bots={"worker": bot})
+    plist = tmp_path / "worker.plist"
+    plist.write_text(compose_launchd_plist(bot, fleet, Paths(root=tmp_path)))
+    result = subprocess.run(["/usr/bin/plutil", "-lint", str(plist)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@contextmanager
+def _native_scratch_job(tmp_path):
+    prefix = "claudlobby-ci-" + uuid.uuid4().hex
+    bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+    fleet = FleetConfig(name="ci", service_prefix=prefix, bots={"worker": bot})
+    paths = Paths(root=tmp_path)
+    bot_dir = paths.bot_runtime(bot.bot_id)
+    bot_dir.mkdir(parents=True)
+    (paths.lib / "logs").mkdir(parents=True)
+    launcher = paths.lib / "start-bot.sh"
+    launcher.write_text('#!/bin/bash\nprintf "%s\\n" "$$" > "$1/native.pid"\nexec /bin/sleep 60\n')
+    launcher.chmod(0o755)
+    plist = tmp_path / "native.plist"
+    plist.write_text(compose_launchd_plist(bot, fleet, paths))
+    lint = subprocess.run(["/usr/bin/plutil", "-lint", str(plist)],
+                          capture_output=True, text=True)
+    assert lint.returncode == 0, lint.stdout + lint.stderr
+    domain = None
+    diagnostics = []
+    for candidate in (f"gui/{os.getuid()}", f"user/{os.getuid()}"):
+        probe = subprocess.run(["/bin/launchctl", "print", candidate],
+                               capture_output=True, text=True)
+        if probe.returncode == 0:
+            domain = candidate
+            break
+        diagnostics.append(f"{candidate}: {probe.stderr.strip()}")
+    assert domain, "No usable per-user launchd domain: " + "; ".join(diagnostics)
+    target = f"{domain}/{prefix}.worker"
+    try:
+        start = subprocess.run(["/bin/launchctl", "bootstrap", domain, str(plist)],
+                               capture_output=True, text=True)
+        assert start.returncode == 0, f"bootstrap {target}: {start.stdout}{start.stderr}"
+        pidfile = bot_dir / "native.pid"
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            time.sleep(0.05)
+        assert pidfile.exists(), f"job {target} never started"
+        pid = int(pidfile.read_text().strip())
+        state = subprocess.run(["/bin/launchctl", "print", target],
+                               capture_output=True, text=True)
+        assert state.returncode == 0, state.stderr
+        assert f"pid = {pid}" in state.stdout, state.stdout
+        command = subprocess.check_output(["ps", "-p", str(pid), "-o", "comm="], text=True)
+        assert command.strip().endswith("sleep"), command
+        yield target
+    finally:
+        stop = subprocess.run(["/bin/launchctl", "bootout", target],
+                              capture_output=True, text=True)
+        for _ in range(100):
+            absent = subprocess.run(["/bin/launchctl", "print", target],
+                                    capture_output=True, text=True)
+            if absent.returncode != 0:
+                break
+            time.sleep(0.05)
+        assert absent.returncode != 0, f"cleanup failed for {target}: {stop.stderr}"
+
+
+@pytest.mark.skipif(
+    platform.system() != "Darwin"
+    or os.environ.get("CLAUDLOBBY_CI_NATIVE_SMOKE") != "1"
+    or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted",
+    reason="launchctl service mutation requires an opted-in GitHub-hosted macOS runner",
+)
+@pytest.mark.parametrize("fail_after_start", [False, True], ids=["success", "assertion-failure"])
+def test_native_launchd_scratch_lifecycle(tmp_path, fail_after_start):
+    if fail_after_start:
+        with pytest.raises(AssertionError, match="exercise cleanup"):
+            with _native_scratch_job(tmp_path):
+                raise AssertionError("exercise cleanup")
+    else:
+        with _native_scratch_job(tmp_path):
+            pass
