@@ -17,6 +17,10 @@ and `briefing-trigger.sh` refuses to send into a bot with no composed skill
 (`briefing_failed`, reason `skill_absent`, exit 1, and a stderr line), so a
 hand-built timer or a lost link fails loudly rather than silently.
 
+### Changed — the validation harness tests keep one test per failure that happened (#1801)
+
+484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
+
 ### Changed — the alert tests keep one test per failure that happened (#1801)
 
 306 test lines go. No behaviour changes: the session-token rule is stated once,
