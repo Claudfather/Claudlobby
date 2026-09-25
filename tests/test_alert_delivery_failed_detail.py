@@ -93,36 +93,11 @@ def test_the_rejection_leads_the_recorded_detail(tmp_path):
     assert "error: Not Found" in detail.split("FLEET_NAME is empty")[0], detail
 
 
-def test_the_journal_line_leads_with_the_rejection_too(tmp_path):
-    root, env = _host(tmp_path)
-    r = _fire(root, env)
-    journal = [
-        line for line in r.stderr.splitlines() if "ALERT-DELIVERY-FAILED" in line
-    ]
-    assert journal, r.stderr
-    assert "tg-post exit 3 (tg-post: send REJECTED" in journal[0], journal[0]
-
-
 def _failed_row(root):
     rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
     failed = [row["data"] for row in rows if row["type"] == "alert_delivery_failed"]
     assert len(failed) == 1, rows
     return rows, failed[0]
-
-
-def test_a_missing_token_verdict_leads_past_the_fallback_notice(tmp_path):
-    # The common failure: no .env in the state dir. tg-post first announces its
-    # fall back to the default channel, whose file holds no token either.
-    root, env = _host(tmp_path)
-    (tmp_path / "chan" / ".env").unlink()
-    default = tmp_path / "home" / ".claude" / "channels" / "telegram"
-    default.mkdir(parents=True)
-    (default / ".env").write_text("FOO=bar\n")
-    _fire(root, env)
-    _, data = _failed_row(root)
-    assert data["exit"] == 1, data
-    assert "falling back to the default channel token" in data["detail"], data
-    assert data["detail"].startswith("tg-post: no TELEGRAM_BOT_TOKEN"), data["detail"][:120]
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")

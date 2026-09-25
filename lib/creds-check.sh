@@ -487,7 +487,7 @@ check_telegram_tokens() {
             continue
         fi
 
-        resp="$(_telegram_getme "$token")"
+        resp="$(_telegram_api "$token" getMe)"
         if [ -z "$resp" ]; then
             record_and_alert "$key" "fail" "getMe no response (network or timeout)"
             continue
@@ -526,16 +526,18 @@ check_telegram_tokens() {
 }
 
 # ---------------------------------------------------------------------
-# getMe probe (shared)
+# Telegram Bot API probe (shared)
 # ---------------------------------------------------------------------
-# Echo the Telegram getMe response body (empty on no response). The token rides
-# a curl config file, never argv. Shared by check_telegram_tokens (per-bot
-# credential validation) and resolve_delivery_token (alert-channel selection)
-# so the argv-safety + timeout invariant lives in one place.
-_telegram_getme() {
-    local _tok="$1" _cfg _resp
+# _telegram_api <token> <method> [chat_id]: echo the response body (empty on no
+# response). The token, and the chat id when given, ride a curl config file,
+# never argv. Shared by check_telegram_tokens and resolve_delivery_token (getMe)
+# and check_alert_pair (getChat), so the argv-safety + timeout invariant lives
+# in one place.
+_telegram_api() {
+    local _tok="$1" _method="$2" _chat="${3:-}" _cfg _resp
     _cfg="$(safe_mktemp)"
-    printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$_tok" > "$_cfg"
+    printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$_tok" "$_method" > "$_cfg"
+    [ -z "$_chat" ] || printf 'data = "chat_id=%s"\n' "$_chat" >> "$_cfg"
     _resp="$("$CURL" -sS --max-time 10 --config "$_cfg" 2>/dev/null)" || _resp=""
     rm -f "$_cfg"
     printf '%s' "$_resp"
@@ -584,7 +586,7 @@ resolve_delivery_token() {
         [ "$(bot_conf_get "$_d" TELEGRAM_GROUP_CHAT_ID "")" = "$_alert_chat_id" ] || continue
         _tok="$(resolve_bot_telegram_token "$_d")" || true
         [ -n "$_tok" ] || continue
-        if [ "$(_telegram_getme "$_tok" | "$JQ" -r '.ok // false' 2>/dev/null)" = "true" ]; then
+        if [ "$(_telegram_api "$_tok" getMe | "$JQ" -r '.ok // false' 2>/dev/null)" = "true" ]; then
             _delivery_token="$_tok"
             _delivery_state_dir="$(bot_conf_get_path "$_d" TELEGRAM_STATE_DIR "")"
             _delivery_bot="$(basename "$_d")"
@@ -594,14 +596,10 @@ resolve_delivery_token() {
 }
 
 # The sender's token, exported with ITS state dir so record_and_alert's tg-post
-# sends as that bot; skipped when the env already carries this pair's token (a
-# bot session run by hand, whose own env pair it is). Any other ambient token is
-# dropped: it would re-split the pair.
+# sends as that bot, unless the resolver kept a session's own (_alert_token).
 # shellcheck disable=SC2154  # set by resolve_alert_target (sourced lib-common)
-if [ "$_alert_target_src" != "env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR" ]; then
+if [ -z "$_alert_token" ]; then
     unset TELEGRAM_BOT_TOKEN
-fi
-if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
     resolve_delivery_token
     if [ -n "$_delivery_token" ]; then
         export TELEGRAM_BOT_TOKEN="$_delivery_token"
@@ -616,18 +614,6 @@ if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
         log "alert delivery token resolved for scheduled Telegram alerts"
     fi
 fi
-
-# _telegram_getchat <token> <chat_id>
-# Echo the Telegram getChat response body (empty on no response). The token AND
-# the chat id ride a curl config file, never argv -- the _telegram_getme contract.
-_telegram_getchat() {
-    local _tok="$1" _chat="$2" _cfg _resp
-    _cfg="$(safe_mktemp)"
-    printf 'url = "https://api.telegram.org/bot%s/getChat"\ndata = "chat_id=%s"\n' "$_tok" "$_chat" > "$_cfg"
-    _resp="$("$CURL" -sS --max-time 10 --config "$_cfg" 2>/dev/null)" || _resp=""
-    rm -f "$_cfg"
-    printf '%s' "$_resp"
-}
 
 # check_alert_pair: can the resolved (chat, sender) pair actually deliver? getMe
 # proves a token is live, not that its bot can see the chat -- a live token of a
@@ -652,7 +638,7 @@ check_alert_pair() {
         emit_failure_alert "$(resolve_bots_dir "$FLEET_ARG")" "alert_pair_unreachable" "creds-check: the alert pair's sender holds no token (sender: ${_alert_target_src})"
         return 0
     fi
-    resp="$(_telegram_getchat "$token" "$_alert_chat_id")"
+    resp="$(_telegram_api "$token" getChat "$_alert_chat_id")"
     okflag="$(printf '%s' "$resp" | "$JQ" -r '.ok // false' 2>/dev/null)" || okflag="false"
     if [ "$okflag" = "true" ]; then
         record_and_alert "$key" "ok" "getChat ok (sender: ${_alert_target_src})"

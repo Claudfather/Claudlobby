@@ -40,11 +40,10 @@ def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str):
     # Shuffled: NRestarts last, SubState before ActiveState. An unparseable or
     # absent counter is modelled by passing "" (the Key= line with no value).
     # And it answers ONLY what -p asked for, as systemd does (whichever spelling
-    # getopt takes: -p X, -pX, --property=X, --property X), recording each
-    # call's request in `requested`: a stub that printed every property whatever
-    # -p said could not see a call that stopped asking for NRestarts, which on
-    # real systemd reads every loop as "no verdict" forever (#1774 review).
-    requested = tmp_path / "requested"
+    # getopt takes: -p X, -pX, --property=X, --property X): a stub that printed
+    # every property whatever -p said could not see a call that stopped asking
+    # for NRestarts, which on real systemd reads every loop as "no verdict"
+    # forever (#1774 review). The loop tests below go red when one does.
     props = (
         "ExecMainStartTimestampMonotonic=990000000",
         f"SubState={sub}",
@@ -64,7 +63,6 @@ def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str):
         '  prev="$a"\n'
         "done\n"
         'want=$(printf "%s" "$want" | tr "," " ")\n'
-        f'printf "%s\\n" "$want" >> "{requested}"\n'
         "for kv in " + " ".join(f'"{kv}"' for kv in props) + "; do\n"
         # no -p at all: systemd prints every property
         '  case " $want " in "  "|*" ${kv%%=*} "*) printf "%s\\n" "$kv" ;; esac\n'
@@ -199,77 +197,6 @@ class TestAmbiguityIsNoVerdict:
             tmp_path, active="activating", sub="start-pre", nrestarts="50", force_os="Darwin"
         )
         assert (rc, verdict) == (1, "unknown")
-
-
-def test_the_one_show_asks_for_the_counter_by_name(tmp_path):
-    """The stub answers only what -p asked, so this is a real request, not a
-    property it would have printed anyway. Without it every loop reads as no
-    verdict on real systemd, and the loop tests above go red with it."""
-    _looping(tmp_path, active="activating", sub="start-pre", nrestarts="2")
-    requested = (tmp_path / "requested").read_text().split()
-    assert "NRestarts" in requested, requested
-
-
-@pytest.mark.parametrize(
-    "argv, keys",
-    [
-        pytest.param(["-p", "NRestarts"], {"NRestarts"}, id="p-separate"),
-        pytest.param(["-pNRestarts"], {"NRestarts"}, id="p-attached"),
-        pytest.param(["-p", "SubState", "-pNRestarts"], {"SubState", "NRestarts"}, id="p-mixed"),
-        pytest.param(["-pNRestarts,SubState"], {"NRestarts", "SubState"}, id="p-attached-comma"),
-        pytest.param(["--property=NRestarts"], {"NRestarts"}, id="property-equals"),
-        pytest.param(["--property", "NRestarts"], {"NRestarts"}, id="property-separate"),
-        pytest.param(["-p", "Bogus"], set(), id="p-unknown"),
-        pytest.param(
-            [],
-            {
-                "NRestarts", "SubState", "ActiveState",
-                "ExecMainStartTimestampMonotonic", "InactiveExitTimestampMonotonic",
-            },
-            id="no-p",
-        ),
-    ],
-)
-def test_the_stub_answers_only_what_each_spelling_of_p_asks(tmp_path, argv, keys):
-    """What real systemd 252 answers for each way of writing -p (measured against a running
-    unit): only what was asked. A stub that read `-pNRestarts` as no -p at all answered every
-    property, and one that dropped it when another -p was separate could not witness a call
-    that still asks for NRestarts, so a refactor to that spelling, which systemd reads the
-    same as the separate one, failed the loop tests."""
-    bindir = _scene(tmp_path, active="activating", sub="start-pre", nrestarts="2")
-    out = subprocess.run(
-        [str(bindir / "systemctl"), "show", *argv, "svc"],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    ).stdout
-    assert {ln.split("=", 1)[0] for ln in out.splitlines()} == keys, out
-
-
-def test_the_starting_gate_is_unchanged_by_the_shared_read(tmp_path):
-    """service_is_starting now reads through the same one-show helper; a unit
-    looping at NRestarts 1503 is still 'starting' to it (the per-phase age is
-    kept for what it was built for). Keepalive and fleet-pulse, not this gate,
-    decide what a crash loop means."""
-    bindir = _scene(tmp_path, active="activating", sub="auto-restart", nrestarts="1503")
-    uptime = tmp_path / "uptime"
-    uptime.write_text("1000.00 4096.39\n")
-    (tmp_path / "supervisor.sh").write_bytes(SUPERVISOR.read_bytes())
-    lib = tmp_path / "lib-common.sh"
-    lib.write_text(LIB_COMMON.read_text().replace("/proc/uptime", str(uptime)))
-    env = {
-        **os.environ,
-        "PATH": f"{bindir}:{os.environ.get('PATH', '')}",
-        "HOME": str(tmp_path),
-    }
-    proc = subprocess.run(
-        ["bash", "-c", '. "$1"; _OS=Linux; service_is_starting svc', "_", str(lib)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=20,
-    )
-    assert proc.returncode == 0, proc.stderr
 
 
 def test_fleet_pulse_critical_lists_are_registered_critical():

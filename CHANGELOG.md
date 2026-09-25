@@ -24,11 +24,26 @@ lands only when that turn ends.
 - `plane-dispatch-in.sh` drops Claude Code's `<pasted_content>` wrapper before
   matching the trailer; it had hidden the receipts of 9 submitted prompts.
 
+### Changed — the validation harness tests keep one test per failure that happened (#1801)
+
+484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
+
+### Changed — the alert tests keep one test per failure that happened (#1801)
+
+306 test lines go. No behaviour changes: the session-token rule is stated once,
+in `resolve_alert_target`, and creds-check's getMe and getChat share one helper.
+
 ### Removed — the crash-loop carry, before it ships (#1801)
 
 `crash_loop_carry` (#1769), its `data/.restart-carry` file and the tests that
 served only them are gone. A keepalive restart mid-loop zeroes the count, and
 the loop reads as a loop again two attempts later, inside one pulse.
+
+### Removed — crash-loop tests that guard no failure anyone has seen (#1801)
+
+Nine tests (23 cases), the wiring stub's `-p` parser and five of the harness's
+eight long-boot checks. `test_service_is_starting.py`'s stub now answers only
+what `-p` asks, with one new case for `InactiveExit`: a dropped property fails.
 
 ### Fixed — five compose tests failed on every checkout under a bot's `projects/` (#1794)
 
@@ -245,14 +260,14 @@ never binds.
   listed but unregistered type would never page, silently.
 - **Pinned in CI since #1780.** `tests/test_crash_loop_wiring.py` (first drafted
   by vera) drives the real keepalive and fleet-pulse against a `systemctl` stub.
-  It pins keepalive's skip, its exit status and its plane event; and
-  fleet-pulse's page, the `crash_loop` event and its keys, its suppression of
-  the session and service pages, and its clearing, which a `none` or a
-  `starting` read does not do. Not pinned there: the page's text, whose only
-  carrier is a tmux push to the manager, which no scene sets up. Both stubs
-  answer only what `-p` asks, as systemd does and in every spelling of `-p`, so
-  a call that stopped asking for `NRestarts` reads as the "no verdict" it would
-  be on a real host.
+  It pins keepalive's skip and its exit status; and fleet-pulse's page, the
+  `crash_loop` event and its keys, its suppression of the session and service
+  pages, and its clearing on a settled unit. Not pinned there: the page's text,
+  whose only carrier is a tmux push to the manager, which no scene sets up;
+  keepalive's `keepalive_skip` event; and that a `none` or `starting` read
+  leaves the page up (#1801). The unit tests' stubs answer only what `-p` asks,
+  as systemd does, so a call that stopped asking for `NRestarts` reads as the
+  "no verdict" it would be on a real host.
 
 **Out of scope:** stopping the loop or changing the start limit (#1769 option
 (a)), which is a policy call. `update-claude-code.sh` accepting `unknown` as a

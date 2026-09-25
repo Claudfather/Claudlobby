@@ -500,6 +500,9 @@ def test_a_live_sender_that_cannot_see_the_chat_fails_the_pair_check(tmp_path):
     pair = state["telegram_alert_pair_f"]
     assert pair["status"] == "fail", pair
     assert "getChat error_code=404" in pair["detail"], pair
+    # Raised through emit_failure_alert too: the ladder's own send rides the failed pair.
+    posts = f["tg_log"].read_text() if f["tg_log"].exists() else ""
+    assert "alert_pair_unreachable" in posts, posts
     argv = (f["bindir"] / "argv.log").read_text()
     assert WRONGBOT_TOKEN not in argv
     assert "-1001234567890" not in argv
