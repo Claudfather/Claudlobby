@@ -1177,10 +1177,12 @@ function renderTrust(env) {
       ${fleets}
     </div>
     <div class="trust-block"><h3>identities</h3>
-      <div class="trust-row">${trustNum(d.provisional_identities, "trust-warn")}
-        <b>provisional identities</b>
-        <small>lazily minted, unconfirmed by the registry — Phase 2b
-        confirms these</small></div>
+      <div class="trust-row">${trustNum(d.provisional_actor_suspects, "trust-warn")}
+        <b>unconfirmed bot actors</b>
+        <small>not confirmed by the registry — excludes external humans</small></div>
+      <div class="trust-row"><span class="trust-num">${d.provisional_identities}</span>
+        <b>provisional identities in total</b>
+        <small>external humans can remain provisional</small></div>
     </div>`;
 }
 

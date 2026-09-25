@@ -141,6 +141,35 @@ def test_trust_counts_provisional_identities(tmp_path):
     assert body["data"]["provisional_identities"] > 0  # lazily-minted seeds
 
 
+@pytest.mark.parametrize("mixed", [False, True], ids=["human-only", "mixed-identities"])
+def test_trust_and_doctor_share_provisional_suspects(tmp_path, mixed):
+    """Humans and non-actors retain their raw flags without raising a typo warning."""
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.identity import provisional_actors, resolve
+    from claudlobby.plane.migrations import migrate
+
+    conn = connect(db_path(tmp_path))
+    try:
+        migrate(conn)
+        at = "2026-09-25T00:00:00+00:00"
+        resolve(conn, "actor", "human:operator", now=at)
+        if mixed:
+            resolve(conn, "actor", "bot:f/unknown", now=at)
+            confirmed = resolve(conn, "actor", "bot:f/confirmed", now=at)
+            conn.execute("UPDATE identity_registry SET provisional = 0 WHERE uid = ?",
+                         (confirmed,))
+            resolve(conn, "bot_instance", "bot:f/unscanned", now=at)
+        before = [tuple(r) for r in conn.execute("SELECT * FROM identity_registry")]
+        suspects = provisional_actors(conn)  # the same reader used by doctor
+        body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+        assert body["state"] == "ok"
+        assert body["data"]["provisional_identities"] == (3 if mixed else 1)
+        assert body["data"]["provisional_actor_suspects"] == len(suspects) == int(mixed)
+        assert [tuple(r) for r in conn.execute("SELECT * FROM identity_registry")] == before
+    finally:
+        conn.close()
+
+
 def test_search_and_trust_are_read_only_routes(tmp_path):
     _seed(tmp_path)
     client = TestClient(create_app(tmp_path))

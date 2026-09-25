@@ -64,6 +64,7 @@ from ..source_state import (
 )
 from .daemon import probe_daemon, socket_path
 from .emit_api import CaptureConfigError, capture_mode, load_capture_config
+from .identity import provisional_actors
 from .ingest import CONSTRUCT_TABLES
 from .spool import oldest_spooled_at, scan_spool
 from .ingest import now_iso as _now_iso
@@ -974,6 +975,7 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
         "fleets": fleets,
         "capture_config": capture_state,
         "provisional_identities": provisional,
+        "provisional_actor_suspects": len(provisional_actors(conn)),
     }
 
 
