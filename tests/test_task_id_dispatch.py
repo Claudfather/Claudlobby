@@ -50,7 +50,7 @@ TASK_ID_RE = re.compile(r"^t-[0-9]+-[0-9a-f]{4}$")
 SHIM_STDERR_RE = re.compile(
     r"^(plane-emit: (transport failed \(rc=\d+\) — falling back to cold CLI"
     r"|cooldown finalize succeeded \(rc=\d+\) — daemon not contacted, replaying cold as planned"
-    r"|socket in wedge cooldown \(\d+s\) — straight to cold CLI)"
+    r"|socket in wedge cooldown \(\d+s\) — skipping the socket)"
     r"|plane-socket-client: transport failed: .*)$"   # the socket rung's own voice (Linux: ENOENT; macOS: path too long)
 )
 

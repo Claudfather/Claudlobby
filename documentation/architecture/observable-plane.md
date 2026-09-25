@@ -113,6 +113,23 @@ passthrough arm carries **2 and 3 only**; a `4` there was dead code. A
 CLI's rc verbatim — there the install itself is behind the db and no rung can
 help.
 
+**Cooldown staging (#1657).** Under load that cooldown did not damp: each
+diverted emission spawned the package-importing cold CLI (`claudlobby --help`
+alone took 1.8–4.9 s at load ~20 on the Pi), and those spawns kept the CPU the
+daemon needed pegged, so it kept missing its deadline. The three emitters that
+never read the result — `plane_emit_bounded` (every `emit_fleet_event`),
+keepalive's heartbeat and the host probe — set `PLANE_EMIT_COOLDOWN_STAGE=1`,
+and in a cooldown `plane-socket-client.py --stage-to` leaves their finalized
+batch in `state/plane/staged/` instead (rc 6: durable, not yet in the plane).
+The daemon replays staged batches on each loop tick through the same
+`emit_batch()` a socket request runs, never through the spool's `drain()`,
+which ingests its entries as-is because they are stored policy-applied and so
+would skip the capture policy for a raw batch. The client stages only when that
+directory exists (the daemon creates it at startup, so an older daemon never
+gets one) and a connect probe finds a listener; otherwise it takes the cold
+rung as before. Doors that read a non-zero rc as "not recorded" never opt in.
+Staged depth is not yet a `plane doctor` rung.
+
 There is no separate startup check: the daemon's first writes after bind —
 the lifecycle receipt and the startup spool drain — go through `migrate()`,
 which refuses a db newer than the code before writing anything, and that

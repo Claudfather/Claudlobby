@@ -90,6 +90,12 @@ try:
 except Exception:
     sys.exit(0)
 prompt = hook.get("prompt") or ""
+# The TUI wraps a pasted run as <pasted_content id="…">…</pasted_content id="…">,
+# and the boundary falls on a tmux chunk boundary, inside the trailer too (#1099).
+# The wrapper is the TUI's, never the sender's: dropped with its newlines, the
+# arrival is the wire form again (59 of 60 live wrapped prompts, 2026-09-20..24;
+# the 60th was two sends glued together, #1543, and still reads as altered).
+prompt = re.sub(r'\n*</?pasted_content id="[^"]*">\n*', "", prompt)
 # The trailer, at the very END (a re-send would only append a fresh one; the
 # end anchor + the minted-id grammar make a body that merely QUOTES a marker
 # harmless). `\s*$` tolerates any trailing whitespace the terminal/pane added

@@ -814,6 +814,8 @@ if [ "$PLANE_ARMED" = "1" ]; then
         _plane_emit_transmission "carrier_queued" || true
     else
         _plane_emit_transmission "pane_submitted" || true
+        # #1099: the receiver's receipt, not the pane, says it was submitted.
+        pane_await_receipt "$WORKER_SOCKET" "$WORKER_SESSION" "$PLANE_MSG_ID" || true
     fi
 fi
 exit "$send_rc"
