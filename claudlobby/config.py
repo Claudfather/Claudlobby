@@ -1686,11 +1686,12 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         YAML null (`key:` with no value) is treated as unset, not False, so a bare
         key never silently disables a vault-wired loop (the sibling string fields
         like `claudron_vault_path` fall through on null the same way)."""
+        inherited = defaults.get(key)
+        if inherited is not None:
+            inherited = _strict_bool(f"fleet defaults '{key}'", inherited)
         if raw.get(key) is not None:
-            return bool(raw[key])
-        if defaults.get(key) is not None:
-            return bool(defaults[key])
-        return None
+            return _strict_bool(f"bot '{name}' '{key}'", raw[key])
+        return inherited
 
     return BotConfig(
         bot_id=name,
