@@ -26,7 +26,7 @@ def operational_errors(text):
                 fence = None
             continue
         if fence:
-            for match in re.finditer(r'\btmux\s+([^;|`\n]+)', line):
+            for match in re.finditer(r'\btmux\s+([^;&|`\n]+)', line):
                 command = match.group(1)
                 if re.search(r'\bsend-keys\b', command):
                     errors.append((number, 'dispatch through lib/dispatch.sh or dispatch-task.sh'))
@@ -34,7 +34,7 @@ def operational_errors(text):
                     read = re.search(r'\b(capture-pane|list-sessions|has-session)\b', command)
                     if read and not re.search(r'(?:^|\s)-(?:L|S)\s*\S+', command[:read.start()]):
                         errors.append((number, 'read the explicit bot socket with tmux -L/-S'))
-        for match in re.finditer(r'\b(?:sudo\s+)?systemctl\s+([^`\n]+)', line):
+        for match in re.finditer(r'\b(?:sudo\s+)?systemctl\s+([^;&|`\n]+)', line):
             whole, tail = match.group(0), match.group(1)
             action = re.search(r'\b(restart|stop|start)\b(?:\s+(\S+))?', tail)
             if whole.startswith('sudo '):
@@ -49,7 +49,7 @@ def operational_errors(text):
 
 
 def test_library_operational_commands_use_their_doors():
-    paths = sorted((ROOT/'library/expertise').glob('*.md')) + sorted((ROOT/'library/protocols').glob('*.md'))
+    paths = sorted((ROOT/'library/expertise').rglob('*.md')) + sorted((ROOT/'library/protocols').rglob('*.md'))
     paths.append(ROOT/'library/skills/delegate/SKILL.md')
     errors = [(str(path.relative_to(ROOT)), line, why) for path in paths
               for line, why in operational_errors(path.read_text())]
@@ -62,6 +62,9 @@ def test_library_operational_commands_use_their_doors():
     'tmux capture-pane -t worker -p', 'tmux capture-pane -t worker -L too-late', 'tmux list-sessions', 'tmux has-session -t worker',
     'sudo systemctl restart worker', 'systemctl restart worker',
     'systemctl --user restart worker',
+    'systemctl --user restart "$BOT_SERVICE.service"; sudo systemctl restart worker',
+    'systemctl --user restart "$BOT_SERVICE.service" && systemctl --user restart worker',
+    'tmux -L private has-session -t worker && tmux capture-pane -t worker -p',
 ])
 def test_reintroduced_bad_recipe_is_rejected(command):
     assert operational_errors('```bash\n'+command+'\n```')
@@ -82,6 +85,19 @@ def test_valid_recipe_and_prohibition_quotes_are_accepted(text):
 def test_prose_sudo_is_rejected_and_dispatch_protocol_quotes_pass():
     assert operational_errors('Linux: `sudo systemctl restart <bot>`')
     assert not operational_errors((ROOT/'library/protocols/dispatch.md').read_text())
+
+
+@pytest.mark.parametrize('category', ['expertise', 'protocols'])
+def test_nested_bad_recipe_is_discovered_by_the_actual_gate(tmp_path, monkeypatch, category):
+    for directory in ('expertise', 'protocols', 'skills/delegate'):
+        (tmp_path/'library'/directory).mkdir(parents=True)
+    (tmp_path/'library/skills/delegate/SKILL.md').write_text('Safe delegate fixture.\n')
+    nested = tmp_path/'library'/category/'nested/unsafe.md'
+    nested.parent.mkdir()
+    nested.write_text('```bash\ntmux send-keys -t worker task Enter\nsudo systemctl restart worker\n```\n')
+    monkeypatch.setitem(globals(), 'ROOT', tmp_path)
+    with pytest.raises(AssertionError, match='nested/unsafe.md'):
+        test_library_operational_commands_use_their_doors()
 
 
 def test_rendered_manager_and_worker_use_the_same_operational_doors(fleet_dir, tmp_path, monkeypatch):
