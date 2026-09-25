@@ -21,6 +21,7 @@ from .known_values import (
     SHELL_IDENT_RE,
     VALID_PERMISSION_MODES,
     closest_match,
+    hint,
 )
 from .path_audit import ExternalDecl, parse_external_decls
 
@@ -97,9 +98,9 @@ class SystemDefaultsConfig:
 
     KNOWN BOUND: the keys below are a fixed set, not "one per entity type".
     Ten of the twelve library entity types still have no opt-out, and an
-    unrecognised key is silently dropped — so a fleet cannot yet tell a working
-    opt-out from a typo (#1168 Phase 3 finding 2). Adding a key here is what
-    gives a type an opt-out; the check is in the code that consumes the default.
+    unrecognised key is ignored with a load-time warning (#1807). Adding a
+    key here gives a type an opt-out; the check is in the code that consumes
+    the default.
     """
 
     enabled: bool = True
@@ -840,6 +841,8 @@ class FleetConfig:
     # Workstream registry bounds (P5). Always present (defaults apply when the
     # fleet omits the block) so the composer can emit WORKSTREAM_* unconditionally.
     workstreams: WorkstreamsConfig = field(default_factory=WorkstreamsConfig)
+    # Raw source diagnostics survive normalization for every validation consumer.
+    config_warnings: list[str] = field(default_factory=list)
 
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
@@ -1649,6 +1652,33 @@ def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | N
     return value
 
 
+# Raw YAML keys, inventoried from the parsers and consumers below. Keep these
+# explicit: dataclass names include internal fields and aliases such as `brief`
+# intentionally differ. Only these schema levels are checked; nested extension
+# dictionaries (env, hooks, scope, MCP/tool parameters, etc.) remain open.
+_INHERITED_BOT_KEYS = frozenset({
+    "account", "bench", "brief", "channels", "claudna_version",
+    "claudosseum_tenant_id", "claudron_session_loop", "claudron_vault_path",
+    "credential_sources", "dangerously_skip_permissions",
+    "disable_nonessential_traffic", "effort", "expertise", "external_paths",
+    "extra_flags", "git_credentials", "github_app", "guardrails", "hooks",
+    "integrations", "lessons", "mcp", "mission", "model", "model_strategy",
+    "mounts", "observability", "permission_mode", "permissions", "post_actions",
+    "preferred_notif_channel", "prefers_reduced_motion", "principles",
+    "prompt_suggestions", "protocols", "remote_control", "resources", "sandbox",
+    "scope", "secret_files", "skills", "skip_auto_permission_prompt",
+    "skip_dangerous_mode_permission_prompt", "spinner_tips_enabled", "telegram",
+    "tool_permissions", "tools",
+})
+_BOT_KEYS = _INHERITED_BOT_KEYS | {
+    "autonomous_runner", "briefing", "env", "manages", "name", "persona",
+    "reports_to", "startup_prompt", "voice",
+}
+# `jobs` is fleet-only. `env` remains a recognized raw defaults/registry field;
+# recognizing it does not add bot inheritance or alter its semantics (#1383).
+_DEFAULT_KEYS = _INHERITED_BOT_KEYS | {"jobs", "env"}
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
@@ -1835,6 +1865,11 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     )
 
 
+_SYSTEM_DEFAULT_KEYS = frozenset({
+    "enabled", "hooks", "timers", "observability", "guardrails", "protocols",
+})
+
+
 def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
     """Parse the ``fleet.system_defaults`` field.
 
@@ -1949,6 +1984,51 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
     return merged
 
 
+_DOCUMENT_KEYS = frozenset({"fleet"})
+_FLEET_KEYS = frozenset({
+    "name", "service_prefix", "telegram_group_chat_id", "human_telegram_id",
+    "accounts", "plugins", "system_defaults", "defaults", "teams", "bots",
+    "sweep", "fleet_pulse", "mission", "mission_file", "workstreams",
+    "github",  # composer.compose_host_mention_allowlist consumes the raw mapping
+})
+
+
+def _unknown_keys(raw: Any, allowed: frozenset[str], path: str) -> list[str]:
+    """Name ignored source keys without ever formatting their values.
+
+    Shape/type validation stays with existing parsers. In particular the
+    supported Boolean system_defaults shorthand is not a mapping to inspect.
+    """
+    if not isinstance(raw, dict):
+        return []
+    warnings = []
+    for key in raw:
+        if key not in allowed:
+            qualified = f"{path}.{key}" if path else str(key)
+            suggestion = hint(key, allowed) if isinstance(key, str) else ""
+            warnings.append(f"{qualified!r}: unknown key (ignored){suggestion}")
+    return warnings
+
+
+def _raw_config_warnings(doc: dict) -> list[str]:
+    """Inspect raw declarations once, before defaults spread across bots."""
+    warnings = _unknown_keys(doc, _DOCUMENT_KEYS, "")
+    fleet = doc["fleet"]
+    warnings.extend(_unknown_keys(fleet, _FLEET_KEYS, "fleet"))
+    if isinstance(fleet, dict):
+        warnings.extend(_unknown_keys(
+            fleet.get("defaults"), _DEFAULT_KEYS, "fleet.defaults"
+        ))
+        warnings.extend(_unknown_keys(
+            fleet.get("system_defaults"), _SYSTEM_DEFAULT_KEYS, "fleet.system_defaults"
+        ))
+        bots = fleet.get("bots")
+        if isinstance(bots, dict):
+            for bot_id, raw in bots.items():
+                warnings.extend(_unknown_keys(raw, _BOT_KEYS, f"fleet.bots.{bot_id}"))
+    return warnings
+
+
 def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
     """Parse fleet.yaml into a FleetConfig; returns (fleet, merged_defaults)."""
     if not fleet_yaml.is_file():
@@ -1960,6 +2040,7 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
     if not isinstance(doc, dict) or "fleet" not in doc:
         raise ValueError(f"{fleet_yaml}: top-level key 'fleet' missing")
 
+    config_warnings = _raw_config_warnings(doc)
     fleet = doc["fleet"]
 
     teams_raw = fleet.get("teams", {}) or {}
@@ -2045,5 +2126,6 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         )
         or None,
         workstreams=_coerce_workstreams(fleet.get("workstreams")),
+        config_warnings=config_warnings,
     )
     return fleet_cfg, merged_defaults
