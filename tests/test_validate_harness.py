@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+from tests.conftest import constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "lib" / "validate-bot-change.sh"
@@ -22,7 +25,15 @@ HARNESS = REPO_ROOT / "lib" / "validate-bot-change.sh"
 @pytest.mark.skipif(
     shutil.which("tmux") is None, reason="tmux required for the observe step"
 )
-def test_validate_bot_change_harness():
+def test_validate_bot_change_harness(tmp_path, scratch_plane_env):
+    # The harness creates each scenario root below TMPDIR, then assigns it
+    # explicitly to its doors. Own that allocation parent and HOME before
+    # opting into the recording this observation is supposed to verify.
+    home, temporary, bootstrap = (tmp_path / name for name in ("home", "tmp", "bootstrap"))
+    for directory in (home, temporary, bootstrap):
+        directory.mkdir()
+    env = constructed_env(HOME=home, TMPDIR=temporary, **scratch_plane_env(bootstrap))
+    env["PATH"] = f"{Path(sys.executable).parent}:{env['PATH']}"
     # F18 R1: every door in the harness records through the plane shim (the
     # cold-CLI rung, ~0.5-1s per emission, ~150 emissions a run), so the
     # harness takes minutes rather than seconds; the timeout is the measured
@@ -32,6 +43,7 @@ def test_validate_bot_change_harness():
         capture_output=True,
         text=True,
         timeout=1800,
+        env=env,
     )
     # Surface the harness output on failure so the failing behavior is visible.
     assert result.returncode == 0, f"harness failed:\n{result.stdout}\n{result.stderr}"
