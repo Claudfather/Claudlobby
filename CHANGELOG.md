@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the harness's boot probe raced its own spawner on a loaded host (#1778)
+
+Each phase of the `#1002` probe unit now ends when `lib/validate-bot-change.sh`
+opens its gate, not on a fixed sleep, so a slow fleet-pulse or keepalive start
+can no longer let the unit settle mid-observation. Its tmux session now lives in
+the harness's socket dir: keepalive could not see it before, so the CONTROL
+passed without killing anything and every run left a server behind. One new
+check: the window held while both consumers judged it.
+
 ### Changed — the validation harness tests keep one test per failure that happened (#1801)
 
 484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
