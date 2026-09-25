@@ -535,7 +535,7 @@ def test_failed_drain_advances_the_deadline(tmp_path: Path, monkeypatch):
 
     calls = []
 
-    def broken_drain(root, conn, host_uid):
+    def broken_drain(root, conn, host_uid, **kwargs):
         calls.append(1)
         raise RuntimeError("db is broken")
 

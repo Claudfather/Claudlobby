@@ -18,6 +18,9 @@ import json
 import os
 import re
 import sqlite3
+import math
+import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -283,7 +286,116 @@ class DrainReport:
     ingested: int = 0
     duplicates: int = 0
     quarantined: int = 0
-    remaining: int = 0
+    remaining: int | None = 0
+    processed: int = 0
+    payload_bytes: int = 0
+    budget_exhausted: bool = False
+    more_work: bool = False
+    release_errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DrainBudget:
+    max_entries: int = 64
+    max_bytes: int = 8 * 1024 * 1024
+    max_elapsed_s: float = 0.1
+
+    def __post_init__(self):
+        if any(type(v) is not int or v <= 0 for v in (self.max_entries, self.max_bytes)):
+            raise ValueError("drain entry and byte budgets must be positive integers")
+        if (isinstance(self.max_elapsed_s, bool)
+                or not isinstance(self.max_elapsed_s, (int, float))
+                or not math.isfinite(self.max_elapsed_s) or self.max_elapsed_s <= 0):
+            raise ValueError("drain time budget must be finite and positive")
+
+
+class RecoveryCursor:
+    """Transient directory position: skipped live claims cannot starve later files.
+
+    Reuse across bounded passes; no queue authority or durable state is added.
+    A pass which releases admitted files rewinds so those names are revisited.
+    Retry eligibility lasts until the caller's next normal recovery interval,
+    independently of rewinds for healthy backlog. Failed claim releases remain
+    owned by this cursor; closing an iterator must never forget them.
+    """
+    def __init__(self):
+        self.iterator = None
+        self.directory = None
+        self.deferred = None
+        self.deferred_retries: set[Path] = set()
+        self.pending_releases: dict[Path, Path] = {}
+
+    def close(self):
+        if self.iterator is not None:
+            self.iterator.close()
+        self.iterator = self.directory = self.deferred = None
+
+    def next(self, directory: Path) -> Path | None:
+        if self.directory != directory:
+            self.close()
+            self.directory = directory
+            self.iterator = os.scandir(directory)
+        if self.deferred is not None:
+            value, self.deferred = self.deferred, None
+            return value
+        try:
+            return Path(next(self.iterator).path)
+        except StopIteration:
+            self.close()
+            return None
+
+    def defer(self, path: Path):
+        self.deferred = path
+
+    def clear_deferred_retries(self):
+        """Start a normal retry interval, never a fast backlog continuation."""
+        self.deferred_retries.clear()
+        self.close()
+
+    def release_claims(self) -> tuple[bool, tuple[str, ...]]:
+        """Try EVERY owned release, retaining failed ones for the next pass."""
+        released = False
+        errors = []
+        for claimed, original in list(self.pending_releases.items()):
+            try:
+                # Ingest/quarantine may already have consumed this claim.
+                # stat, unlike exists(), does not turn an I/O error into absence.
+                try:
+                    claimed.stat()
+                except FileNotFoundError:
+                    del self.pending_releases[claimed]
+                    continue
+                if original.exists():
+                    claimed.unlink()  # the retry rewrite published newer content
+                else:
+                    os.rename(claimed, original)
+                del self.pending_releases[claimed]
+                released = True
+            except OSError as exc:
+                message = f"{claimed.name}: {exc}"
+                errors.append(message)
+                print(f"plane recovery: claim release failed: {message}", file=sys.stderr)
+        if released:
+            self.close()
+        return released, tuple(errors)
+
+
+class SpoolReleaseError(OSError):
+    """A caller without a reusable cursor must retain this one to retry cleanup."""
+    def __init__(self, cursor: RecoveryCursor, errors: tuple[str, ...]):
+        super().__init__("spool claim release failed: " + "; ".join(errors))
+        self.cursor = cursor
+
+
+def _read_claimed_json(path: Path, size: int):
+    # A checked finite read detects growth after admission. The first envelope
+    # may exceed the byte target: largest-envelope memory/latency is NOT capped,
+    # even for malformed JSON. A fixed ceiling needs a separate input contract.
+    with path.open("rb") as stream:
+        body = stream.read(size + 1)
+    if len(body) > size:
+        raise ValueError("recovery file grew after size admission")
+    return json.loads(body)
 
 
 def _spool_envelope_problem(data) -> str | None:
@@ -348,6 +460,48 @@ def _recover_stale_inflight(sd: Path) -> None:
     _fsync_dir(sd)
 
 
+def _ingest_claim(root, conn, host_uid, orig_name, claimed, entry):
+    """The shared complete-envelope transaction and retry policy."""
+    sd = spool_dir(root)
+    try:
+        items = [validate_request(r) for r in entry["requests"]]
+    except ContractViolation as exc:
+        quarantine_entry(root, claimed, f"contract violation on drain: {exc}", as_name=orig_name)
+        return "quarantined"
+    try:
+        results = ingest_many(conn, items, host_uid=host_uid)
+    except sqlite3.OperationalError as exc:
+        if not is_retryable(exc):
+            # Missing table / SQL typo are OperationalError too — bugs,
+            # not infrastructure (round-4 F6).
+            quarantine_entry(root, claimed, f"non-retryable operational: {exc}", as_name=orig_name)
+            return "quarantined"
+        entry["attempts"] = int(entry.get("attempts", 0)) + 1
+        entry["error"] = str(exc)
+        history = entry.get("history")
+        if not isinstance(history, list):
+            history = []
+        history.append({"at": datetime.now(timezone.utc).isoformat(), "error": str(exc)})
+        entry["history"] = history[-HISTORY_LIMIT:]
+        if entry["attempts"] >= MAX_ATTEMPTS:
+            _write_entry_file(sd, claimed.name, entry)
+            quarantine_entry(root, sd / claimed.name, f"retries exhausted: {exc}", as_name=orig_name)
+            return "quarantined"
+        else:
+            _write_entry_file(sd, orig_name, entry)
+            claimed.unlink()
+        return "retry"
+    except Exception as exc:  # noqa: BLE001 — integrity/programming: poison
+        quarantine_entry(root, claimed, f"non-retryable on drain: {exc}", as_name=orig_name)
+        return "quarantined"
+    if all(r.duplicate for r in results):
+        verdict = "duplicates"
+    else:
+        verdict = "ingested"
+    claimed.unlink()  # only after committed ingestion
+    return verdict
+
+
 def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
     sd = spool_dir(root)
     _recover_stale_inflight(sd)
@@ -372,44 +526,109 @@ def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
             continue
         entries.append((data.get("spooled_at") or "", orig_name, claimed, data))
     for _, orig_name, claimed, entry in sorted(entries, key=lambda e: (e[0], e[1])):
-        try:
-            items = [validate_request(r) for r in entry["requests"]]
-        except ContractViolation as exc:
-            quarantine_entry(root, claimed, f"contract violation on drain: {exc}", as_name=orig_name)
-            quarantined += 1
-            continue
-        try:
-            results = ingest_many(conn, items, host_uid=host_uid)
-        except sqlite3.OperationalError as exc:
-            if not is_retryable(exc):
-                # Missing table / SQL typo are OperationalError too — bugs,
-                # not infrastructure (round-4 F6).
-                quarantine_entry(root, claimed, f"non-retryable operational: {exc}", as_name=orig_name)
-                quarantined += 1
-                continue
-            entry["attempts"] = int(entry.get("attempts", 0)) + 1
-            entry["error"] = str(exc)
-            history = entry.get("history")
-            if not isinstance(history, list):
-                history = []
-            history.append({"at": datetime.now(timezone.utc).isoformat(), "error": str(exc)})
-            entry["history"] = history[-HISTORY_LIMIT:]
-            if entry["attempts"] >= MAX_ATTEMPTS:
-                _write_entry_file(sd, claimed.name, entry)
-                quarantine_entry(root, sd / claimed.name, f"retries exhausted: {exc}", as_name=orig_name)
-                quarantined += 1
-            else:
-                _write_entry_file(sd, orig_name, entry)
-                claimed.unlink()
-            continue
-        except Exception as exc:  # noqa: BLE001 — integrity/programming: poison
-            quarantine_entry(root, claimed, f"non-retryable on drain: {exc}", as_name=orig_name)
-            quarantined += 1
-            continue
-        if all(r.duplicate for r in results):
-            duplicates += 1
-        else:
-            ingested += 1
-        claimed.unlink()  # only after committed ingestion
+        verdict = _ingest_claim(root, conn, host_uid, orig_name, claimed, entry)
+        ingested += verdict == "ingested"
+        duplicates += verdict == "duplicates"
+        quarantined += verdict == "quarantined"
     remaining = len(list(sd.glob("*.json")))
     return DrainReport(ingested, duplicates, quarantined, remaining)
+
+
+def drain_pass(root: Path, conn: sqlite3.Connection, host_uid: str, *,
+               budget: DrainBudget = DrainBudget(), cursor: RecoveryCursor | None = None) -> DrainReport:
+    """Bound admission and yield between complete envelopes.
+
+    Spool order is spooled_at within the admitted batch, not global FIFO.
+    Byte/time targets allow one envelope of overrun. Metadata enumeration is
+    bounded too; remaining is unknown (None) until this traversal reaches its
+    end. Reuse a cursor across passes so live claims do not hide later work.
+    The old drain() is the explicit unbounded, single-snapshot operator path.
+    """
+    sd = spool_dir(root)
+    owned_cursor = cursor is None
+    cursor = cursor if cursor is not None else RecoveryCursor()
+    _, release_errors = cursor.release_claims()
+    if release_errors:
+        # Do not admit another batch while our earlier live-PID claims remain.
+        return DrainReport(remaining=None, more_work=True, release_errors=release_errors)
+    started = time.monotonic()
+    entries, claims = [], []
+    visited = payload_bytes = processed = quarantined = ingested = duplicates = 0
+    exhausted = False
+    released = retried = False
+    try:
+        while visited < budget.max_entries and (visited == 0 or time.monotonic() - started < budget.max_elapsed_s):
+            path = cursor.next(sd)
+            if path is None:
+                exhausted = True
+                break
+            visited += 1
+            match = _INFLIGHT_RE.search(path.name)
+            if match and ".json.inflight." in path.name:
+                if _pid_alive(int(match.group(1))):
+                    continue
+                original = sd / path.name[:path.name.index(".inflight.")]
+                try:
+                    if original.exists():
+                        path.unlink()
+                    else:
+                        os.rename(path, original)
+                    path = original
+                except OSError:
+                    continue
+            if (not path.name.endswith(".json") or path in cursor.deferred_retries
+                    or not path.is_file()):
+                continue
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                continue
+            if claims and payload_bytes + size > budget.max_bytes:
+                cursor.defer(path)
+                break
+            claimed = _claim(path)
+            if claimed is None:
+                continue
+            claims.append((path.name, claimed))
+            cursor.pending_releases[claimed] = path
+            payload_bytes += size
+            try:
+                data = _read_claimed_json(claimed, size)
+                problem = _spool_envelope_problem(data)
+                if problem:
+                    raise ValueError(problem)
+            except (ValueError, OSError, UnicodeError) as exc:
+                quarantine_entry(root, claimed, f"malformed spool file: {exc}", as_name=path.name)
+                quarantined += 1
+                processed += 1
+                continue
+            entries.append((data.get("spooled_at") or "", path.name, claimed, data))
+            if payload_bytes >= budget.max_bytes:
+                break
+        for _, name, claimed, entry in sorted(entries, key=lambda e: (e[0], e[1])):
+            if processed and time.monotonic() - started >= budget.max_elapsed_s:
+                break
+            verdict = _ingest_claim(root, conn, host_uid, name, claimed, entry)
+            processed += 1
+            ingested += verdict == "ingested"
+            duplicates += verdict == "duplicates"
+            quarantined += verdict == "quarantined"
+            retried |= verdict == "retry"
+            if verdict == "retry":
+                cursor.deferred_retries.add(sd / name)
+    finally:
+        # Best effort per claim: one failed release must not strand its siblings.
+        released, release_errors = cursor.release_claims()
+        if owned_cursor:
+            cursor.close()
+        try:
+            _fsync_dir(sd)
+        finally:
+            if release_errors and owned_cursor:
+                # Preserve a one-shot caller's cleanup handle even when the
+                # original operation also raised (its exception is chained).
+                raise SpoolReleaseError(cursor, release_errors)
+    more = not exhausted or released or retried or bool(cursor.deferred_retries) or bool(release_errors)
+    return DrainReport(ingested, duplicates, quarantined, None if more else 0,
+                       processed, payload_bytes,
+                       (not exhausted or released) and not release_errors, more, release_errors)
