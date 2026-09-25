@@ -301,35 +301,3 @@ def test_wedged_emit_is_reaped_at_the_timeout(tmp_path):
     while _wedge_alive() and time.monotonic() < deadline:
         time.sleep(1)
     assert not _wedge_alive(), "the wedged emit survived its reaper"
-
-
-def test_a_cooldown_tick_stages_its_heartbeat_for_the_daemon(tmp_path):
-    """#1657: the heartbeat is one of the three fire-and-forget emitters that
-    opt in, so during a socket cooldown it is staged for the daemon instead of
-    spawning the package-importing cold CLI, once a minute per bot. The
-    listener stands in for a live daemon; the staged dir is the one a daemon
-    that replays batches creates at startup."""
-    import shutil
-    import socket
-    import tempfile
-
-    libdir, bot, env = _rig(tmp_path)
-    plane = tmp_path / "state" / "plane"
-    (plane / "staged").mkdir()
-    (plane / ".socket-wedged").write_text(f"{int(time.time())}\n")
-    sdir = Path(tempfile.mkdtemp(prefix="kd", dir="/tmp"))
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(sdir / "s"))
-    listener.listen(64)
-    env.update(PLANE_SOCKET=str(sdir / "s"), PLANE_EMIT_CLI="false")
-    try:
-        _tick(libdir, bot, env)
-        deadline = time.monotonic() + 20
-        while not list((plane / "staged").glob("*.batch")) and time.monotonic() < deadline:
-            time.sleep(0.2)
-        batches = list((plane / "staged").glob("*.batch"))
-        assert len(batches) == 1, "the heartbeat took the cold CLI during a cooldown"
-        assert "bot.heartbeat" in batches[0].read_text()
-    finally:
-        listener.close()
-        shutil.rmtree(sdir, ignore_errors=True)

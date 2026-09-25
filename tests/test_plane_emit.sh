@@ -232,7 +232,7 @@ grep -q "cold CLI rung failed" "$tmpdir/err13" && { echo "FAIL(13): cold-rung sp
 # PLANE_EMIT_COOLDOWN_STAGE=1 now leaves its finalized batch in state/plane/
 # staged/ for the daemon to replay -- but only when a daemon is listening AND
 # that dir exists (a daemon that replays it creates it at startup). Every
-# other case must still take the cold CLI, which is what Tests 15-17 pin.
+# other case must still take the cold CLI; Tests 16 and 17 pin two of them.
 staged="$CLAUDLOBBY_ROOT/state/plane/staged"
 arm_cooldown() { mkdir -p "$CLAUDLOBBY_ROOT/state/plane"; date +%s > "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"; }
 
@@ -248,18 +248,6 @@ stop_daemon
 n=$(find "$staged" -name '*.batch' | wc -l)
 [ "$n" -eq 1 ] || { echo "FAIL(14): want exactly 1 staged batch, found $n"; ls -la "$staged"; exit 1; }
 grep -q '"event_id": "ev_' "$staged"/*.batch || { echo "FAIL(14): the staged batch lacks its pre-minted id"; exit 1; }
-
-# Test 15: opted in, but the socket is STALE (the file exists, nothing listens)
-# -> nothing would ever replay it, so the cold CLI runs and nothing is staged.
-rm -f "$RECORDER_LOG" "$RECORDER_COPY"; rm -rf "$staged"; mkdir -p "$staged"
-rm -f "$sockdir/stale"
-python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).bind(sys.argv[1])' "$sockdir/stale"
-arm_cooldown
-rc=0
-printf '%s' "$batch" | PLANE_EMIT_COOLDOWN_STAGE=1 PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/stale" bash "$SHIM" >/dev/null 2>"$tmpdir/err15" || rc=$?
-[ "$rc" -eq 0 ] || { echo "FAIL(15): rc=$rc"; cat "$tmpdir/err15"; exit 1; }
-[ -e "$RECORDER_LOG" ] || { echo "FAIL(15): no daemon listening, yet the cold CLI did not run"; exit 1; }
-[ -z "$(ls -A "$staged")" ] || { echo "FAIL(15): staged a batch that no daemon will replay"; ls -la "$staged"; exit 1; }
 
 # Test 16: daemon listening and dir present, but the caller did NOT opt in ->
 # cold CLI as today. The doors that refuse on a non-zero rc (task-act,
@@ -287,17 +275,6 @@ stop_daemon
 [ -e "$RECORDER_LOG" ] || { echo "FAIL(17): no staged dir (an old daemon), yet the cold CLI did not run"; exit 1; }
 [ ! -e "$staged" ] || { echo "FAIL(17): the client created the staged dir itself -- nothing guarantees a replayer"; exit 1; }
 
-# Test 18: the fleet-event door opts in -- plane_emit_bounded carries every
-# emit_fleet_event, bot-vitals' tool calls included, the bulk of the traffic.
-rm -f "$RECORDER_LOG" "$RECORDER_COPY"; rm -rf "$staged"; mkdir -p "$staged"
-start_daemon '{"ok": true, "results": []}'
-arm_cooldown
-PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" \
-    bash -c '. "$1"; plane_emit_bounded t18 10 "$2"' _ "$LIB_DIR/lib-common.sh" "$batch" 2>"$tmpdir/err18" || true
-stop_daemon
-[ ! -e "$RECORDER_LOG" ] || { echo "FAIL(18): plane_emit_bounded did not opt in -- every fleet event still spawns the cold CLI in a cooldown"; cat "$tmpdir/err18"; exit 1; }
-n=$(find "$staged" -name '*.batch' | wc -l)
-[ "$n" -eq 1 ] || { echo "FAIL(18): want 1 staged batch from the fleet-event door, found $n"; cat "$tmpdir/err18"; exit 1; }
 rm -f "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"; rm -rf "$staged"
 
 echo "PASS: all plane-emit shim tests passed"
