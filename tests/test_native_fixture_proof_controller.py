@@ -3,6 +3,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
+import stat
 import subprocess
 import sys
 import types
@@ -287,3 +289,18 @@ def test_cleanup_never_unlinks_a_replacement_registration(tmp_path, monkeypatch)
     assert registry.read_text() == '{"other": "owner"}\n'
     receipt = json.loads((base / "evidence/parent-2/pytest-root-cleanup.json").read_text())
     assert receipt["removed"] and not receipt["unregistered"]
+
+
+@pytest.mark.parametrize("name", ["python", "python3"])
+def test_python_entrypoint_keeps_venv_spelling_for_site_guards(tmp_path, monkeypatch, name):
+    state = tmp_path / "state"
+    state.mkdir()
+    python = tmp_path / "private venv" / "bin/python"
+    monkeypatch.setattr(proof.shutil, "which", lambda utility, **kwargs: "/never-run/" + utility)
+    tools, _ = proof.make_tools(state, python, "/never-run/tmux", tmp_path)
+    entry = tools / name
+    assert not entry.is_symlink(), "an external symlink bypasses the venv's site guards"
+    lines = entry.read_text().splitlines()
+    assert lines[0] == "#!/bin/bash"
+    assert shlex.split(lines[1]) == ["exec", str(python), "$@"]
+    assert stat.S_IMODE(entry.stat().st_mode) == 0o755

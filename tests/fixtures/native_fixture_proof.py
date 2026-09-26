@@ -391,7 +391,12 @@ def make_tools(state, python, real_tmux, proof_root):
         (tools / name).symlink_to(path)
         native[name] = path
     for name in ("python", "python3"):
-        (tools / name).symlink_to(python)
+        # A symlink outside the venv can make CPython discover the base
+        # installation instead, silently bypassing its installed .pth guards.
+        # Exec the venv spelling explicitly; do not resolve its own symlinks.
+        entry = tools / name
+        entry.write_text("#!/bin/bash\nexec " + shlex.quote(str(python)) + ' "$@"\n')
+        entry.chmod(0o755)
     (tools / "claudlobby").symlink_to(python.parent / "claudlobby")
     wrapper = tools / "tmux"
     wrapper.write_text("#!/bin/bash\nexec " + " ".join(shlex.quote(str(x)) for x in
