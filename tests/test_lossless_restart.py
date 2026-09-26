@@ -9,8 +9,9 @@ These back Mechanism 2 of the fleet update lifecycle:
   way mtime is not), falling back to mtime only for legacy artifacts.
 - ``bot_is_manager`` — the F5 guard ``weekly-worker-restart.sh`` uses to skip
   managers (and ``update-claude-code.sh`` to address failure notifications).
-  Managers carry ``MANAGER_TMUX == BOT_ID`` plus an inline comment that
-  ``bot_conf_get`` does not strip; getting this wrong bounces a manager.
+  Managers carry ``MANAGER_TMUX == BOT_ID``, and an older compose left an
+  inline comment on that line which ``bot_conf_get`` must drop; getting this
+  wrong bounces a manager.
 
 CI runs pytest only, so these bash helpers are exercised here via subprocess —
 without this wrapper the logic would be untested in CI.
