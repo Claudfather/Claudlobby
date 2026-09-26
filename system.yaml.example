@@ -11,6 +11,11 @@
 # touching your fleet. This root copy exists so the three-tier story is
 # readable in one place.
 #
+# To change a HOST job on one host (arm, disarm, pause), use that host's
+# override, ~/.config/claudlobby/system.yaml -- host.jobs only, merged per job and per
+# field, outside the tracked tree so a pull never has to carry it:
+#   host: { jobs: { claude-update: { enroll: false } } }
+#
 # To override a system default, do it from fleet.yaml (your version wins):
 #   - per-category kill switches:  system_defaults: {hooks: false}
 #   - single-job opt-in/out:       defaults: {jobs: {weekly-worker-restart: {enroll: true}}}
@@ -69,8 +74,10 @@
 #   defaults:
 #     jobs:
 #       weekly-worker-restart: { enroll: true }
-# A HOST job is armed in the host's own system.yaml -- host jobs deliberately
-# bypass the fleet defaults merge, so fleet.yaml cannot reach one.
+# A HOST job is armed in THIS host's override, ~/.config/claudlobby/system.yaml, which
+# overrides host.jobs only, per job and per field (config.load_host_jobs).
+# Host jobs deliberately bypass the fleet defaults merge, so fleet.yaml cannot
+# reach one; and a host-local edit to THIS file dirties the install's tree.
 
 host:
   # Host jobs are host-scoped by design and so pass NO fleet. Which manager
@@ -178,8 +185,8 @@ host:
     # any unit an earlier release installed -- which is what makes "stays
     # opt-in" a fact rather than a comment, on a host that already ran.
     #
-    # Arm it in THIS host's own system.yaml -- host jobs bypass the fleet
-    # defaults merge, so the fleet.yaml recipe this comment used to print
+    # Arm it in THIS host's override, ~/.config/claudlobby/system.yaml -- host jobs
+    # bypass the fleet defaults merge, so the fleet.yaml recipe this comment used to print
     # could never have worked:
     #   host: { jobs: { update-siblings: { enroll: true } } }
     # notify-behind REPORTS regardless, so #1009's blind spot is closed even
@@ -210,8 +217,8 @@ host:
     #
     # DORMANT. Armed, it COMMITS AND PUSHES on every host it runs on -- the
     # "mutates operator source" category the defaults rule reserves for opt-in.
-    # Arm it in THAT host's own system.yaml, which host jobs read directly
-    # (fleet.yaml cannot reach them):
+    # Arm it in THAT host's override, ~/.config/claudlobby/system.yaml, which host jobs
+    # read directly (fleet.yaml cannot reach them):
     #   host: { jobs: { vault-sync: { enroll: true } } }
     # then run lib/setup-system. Ship dormant, arm one host, watch
     # vault.sync_ok for a week, then arm the second.
@@ -241,7 +248,7 @@ host:
     # the macOS enroll leg starts every claudlobby-*.plist it finds): unarmed
     # means NO units are even composed. That gate is unchanged -- only the
     # default moved.
-    # DISARMING: flip enroll: false in THIS host's own system.yaml (host jobs
+    # DISARMING: set enroll: false in THIS host's override, ~/.config/claudlobby/system.yaml (host jobs
     # bypass the fleet defaults merge, so fleet.yaml cannot reach it) and
     # re-run generate (this PRUNES the composed units, so no future setup run
     # can re-enroll it) — then stop the installed unit yourself, since pruning
@@ -338,9 +345,9 @@ host:
     # run it is every host.
     #
     # Host-job dormancy is COMPOSE-time, so unarmed emits no unit at all and no
-    # setup run can re-enroll it. Armed in THIS host's OWN system.yaml -- host
-    # jobs deliberately bypass the fleet defaults merge (load_host_jobs reads
-    # only this file's `host.jobs`), so a fleet.yaml recipe cannot reach one:
+    # setup run can re-enroll it. Armed in THIS host's override, ~/.config/claudlobby/system.yaml --
+    # host jobs deliberately bypass the fleet defaults merge (load_host_jobs reads
+    # only this file's `host.jobs` and that override), so a fleet.yaml recipe cannot reach one:
     #   host:
     #     jobs:
     #       boot-capture: { enroll: true }
