@@ -233,6 +233,38 @@ class TestPasteUnwrap:
         rec = _framed(pay[:900]) + "\n" + pay[900:]
         assert _fn("classify_arrival", pay, _fn("paste_unwrap", rec)) == "whole"
 
+    @pytest.mark.parametrize(
+        "record, expected",
+        [
+            ("plain payload", "plain payload"),
+            ("left < literal / $value & right >", "left < literal / $value & right >"),
+            (
+                "head" + _framed("first") + "middle"
+                + _framed("second").replace("0a1b", "9f2e") + "tail",
+                "headfirstmiddlesecondtail",
+            ),
+            (
+                '<pasted_content id="abc">keep</pasted_content id="abc">',
+                '<pasted_content id="abc">keep</pasted_content id="abc">',
+            ),
+        ],
+        ids=["unframed", "literal-angle-brackets", "multiple-frames", "nonmatching-tag"],
+    )
+    def test_system_bash_unwrap_preserves_payload(self, tmp_path, record, expected):
+        # Pin the shebang interpreter: PATH may contain a newer Bash on macOS.
+        # Sourcing uses the script's guarded entry point; no probe is launched.
+        home, temporary = tmp_path / "home", tmp_path / "tmp"
+        home.mkdir()
+        temporary.mkdir()
+        result = subprocess.run(
+            ["/bin/bash", "-c", '. "$1"; paste_unwrap "$2"', "_", str(PROBE), record],
+            env=constructed_env(HOME=home, TMPDIR=temporary),
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == ""
+        assert result.stdout == expected
+
 
 class TestAwaitRecord:
     def test_a_framed_record_is_read_whole_not_as_its_first_line(self, tmp_path):
