@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `pr-review-state.py` read two of the four verdicts reviewers are taught as "not assessed" (#1895)
+
+`library/protocols/review-flow.md` and `library/expertise/code-review.md` teach
+four verdict markers, and the reader parsed two of them. `**Verdict: Mechanical
+fixes**` and `**Verdict: Architectural concerns**` both mean "do not merge yet",
+and both read as `UNPARSED-HEADER` / `NO-RECOGNITION`. Measured on 1,506
+review/comment events (Claudlobby's newest 600 PRs; all of clauDNA, Claudron and
+Claudosseum), there were 29 such verdicts, not the three reported. 23 read as
+nothing. 5 read as blocking only because a later, unrelated bold span matched
+(four of them an aside saying `not blocking`). One, Claudlobby#465's
+`Architectural concerns`, read as **APPROVE**, from a bold `**Approve**` in
+prose about a different PR.
+
+- Both now map to `REQUEST-CHANGES`, and the reviewer's own words travel beside
+  the state: `REQUEST-CHANGES("Architectural concerns")` in the text, and a
+  `said` field on each resolved verdict in `--json` (additive; schema stays 1).
+  Three of the four taught verdicts share one state, so the words are what tell
+  a manager whether to send the PR back, wait for a substantive fix, or bring in
+  a human.
+- **What a manager will notice.** A PR where the reviewer asked for mechanical
+  fixes, the author made them and the reviewer then approved used to read
+  `0 blocking`, because the first verdict was invisible. Without `--attribute`
+  it now reads `1 stale, 1 blocking` and says to re-run with `--attribute`; with
+  it, the reviewer's later approval supersedes their own block (Claudlobby#1823:
+  `0 blocking`, rc 0). Staleness is the cue to re-check; an attributed later
+  verdict is what clears the block. A block that can never be attributed is #1691.
+- Pinned by one new test on #1892's real review, and by the on-every-run
+  selftest, which now carries the four taught markers verbatim. Eight mutants
+  (each token dropped from the regex, dropped from `NORM` or mapped to
+  `APPROVE`; the words dropped from the render or not carried) all go red.
+
 ### Fixed — `claudlobby events --since` works, as the fleet-observability protocol and the fleet-pulse skill tell every manager to run it (#1896)
 
 The flag was never registered, so `events --since 24h` failed with rc 2, while
