@@ -87,7 +87,7 @@ jobs:
             ) &
             controls_pid=$!
           fi
-          .venv/bin/python -m pytest --maxfail=1 -v --junitxml=pytest-results.xml \
+          .venv/bin/python -m pytest -v --junitxml=pytest-results.xml \
             --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn > pytest.log 2>&1
           result=$?
           printf '%s\n' "$result" > pytest.rc
