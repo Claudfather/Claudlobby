@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -30,10 +31,13 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
-def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
+def doctor_fleet(tmp_path: Path, monkeypatch) -> tuple[Path, "FleetConfig", Paths]:
     """Minimal fleet layout for doctor tests."""
     root = tmp_path / "claudlobby"
     root.mkdir()
+    home = tmp_path / "private-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
 
     (root / "fleet.yaml").write_text(
         dedent("""\
@@ -89,6 +93,12 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
 
 
 class TestCheckEnvVars:
+    @pytest.fixture(autouse=True)
+    def _real_resolver(self, doctor_fleet):
+        root, _, _ = doctor_fleet
+        for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh"):
+            shutil.copyfile(REPO / "lib" / name, root / "lib" / name)
+
     def test_pass_when_all_present(self, doctor_fleet, monkeypatch):
         _, fleet, paths = doctor_fleet
         monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
