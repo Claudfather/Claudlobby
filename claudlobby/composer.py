@@ -2841,13 +2841,10 @@ def compose_bot(
 
     assert_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths))
 
-    bot_dir.mkdir(parents=True, exist_ok=True)
-    (bot_dir / ".claude").mkdir(exist_ok=True)
-    (bot_dir / "memory").mkdir(exist_ok=True)
-    (bot_dir / "projects").mkdir(exist_ok=True)
-    (bot_dir / "data").mkdir(exist_ok=True)
-    (bot_dir / "data" / "events").mkdir(exist_ok=True)
-    (bot_dir / "logs").mkdir(exist_ok=True)
+    from .directory_plan import bot_directory_plan
+
+    for creation in bot_directory_plan(bot_dir):
+        creation.path.mkdir(parents=creation.parents, exist_ok=True)
 
     (bot_dir / "CLAUDE.md").write_text(compose_claude_md(bot, fleet, paths))
 
@@ -4904,18 +4901,10 @@ def changed_manifest_inputs(fleet: FleetConfig, paths: Paths,
 
 def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
     """Compose every bot in the fleet; returns a dict of bot_id -> bot_dir."""
-    paths.runtime_bots.mkdir(parents=True, exist_ok=True)
+    from .directory_plan import fleet_directory_plan
 
-    # Scaffold shared documentation directories
-    if paths.shared_docs:
-        for subdir in [
-            "planning/active",
-            "planning/completed",
-            "decisions",
-            "knowledge",
-            "runbooks",
-        ]:
-            (paths.shared_docs / subdir).mkdir(parents=True, exist_ok=True)
+    for creation in fleet_directory_plan(paths):
+        creation.path.mkdir(parents=creation.parents, exist_ok=True)
 
     # ONE resolver read per generate, threaded into every bot.conf: the switch
     # carriers the composer bridges (today the estate silencer) come from the

@@ -423,6 +423,8 @@ def cmd_diff(args) -> int:
     # manifest, not about any bot.
     from ..diff import manifest_header
     sys.stdout.write(manifest_header(fleet, paths))
+    from ..directory_plan import diff_directory_creations
+    sys.stdout.write(diff_directory_creations(fleet, paths, bot_name=args.bot or None))
     if args.bot:
         sys.stdout.write(diff_bot(args.bot, fleet, paths))
     else:
