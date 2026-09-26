@@ -3720,7 +3720,9 @@ else
 
     # Resolve a real owned fleet and peer before the daemon-down case. A
     # missing fleet triggers resolver ERR receipts under redirected stderr,
-    # arming cooldown before the dispatch whose disclosure we observe.
+    # arming cooldown before the dispatch whose disclosure we observe. Bind
+    # both fleet selectors below: the outer harness exports CLAUDLOBBY_FLEET,
+    # which takes precedence over FLEET_NAME in the production resolvers.
     mkdir -p "$PL_ROOT/local/vbc-fleet/runtime/bots/w1"
     cat > "$PL_ROOT/local/vbc-fleet/runtime/bots/w1/bot.conf" <<'PLCONF'
 BOT_NAME="w1"
@@ -3749,7 +3751,7 @@ PLCONF
             else echo 'wedge before: absent'; fi
         } > "$leg.meta"
         env CLAUDLOBBY_ROOT="$PL_ROOT" TMUX_BIN="$PL_ROOT/tmux" BOT_ID=vbc \
-            BOT_NAME=vbc FLEET_NAME=vbc-fleet PLANE_SOCKET="$PL_SOCK" \
+            BOT_NAME=vbc CLAUDLOBBY_FLEET=vbc-fleet FLEET_NAME=vbc-fleet PLANE_SOCKET="$PL_SOCK" \
             PLANE_EMIT_CLI="$PL_CLI" OBSERVABILITY_DISPATCH_DEADLINE=600 \
             PATH="/usr/bin:/bin" $1 \
             bash "$PL_LIB/dispatch-task.sh" --botcommand w1 "$2" \
