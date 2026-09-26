@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the send-size probe could not see a paste-framed arrival, and would have called it lost (#1876)
+
+`lib/send-size-probe.sh` now records which bytes of each payload arrive inside
+`<pasted_content>` (a new `pasted` column) and takes `capN` arms for any chunk
+size. Two defects stood in the way. Its receiver is not logged in, so it never
+got the server flag that makes the TUI frame a paste, and nothing was ever
+framed; the probe now seeds that flag. And its reader kept only the first line
+of a record, which for a framed record is empty, so a delivered send would have
+been reported `absent`.
+
 ### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
 
 A briefing that found its bot busy or its session gone was skipped for the
