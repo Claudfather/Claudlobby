@@ -1657,7 +1657,7 @@ def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | N
 # intentionally differ. Only these schema levels are checked; nested extension
 # dictionaries (env, hooks, scope, MCP/tool parameters, etc.) remain open.
 _INHERITED_BOT_KEYS = frozenset({
-    "account", "bench", "brief", "channels", "claudna_version",
+    "account", "brief", "channels", "claudna_version",
     "claudosseum_tenant_id", "claudron_session_loop", "claudron_vault_path",
     "credential_sources", "dangerously_skip_permissions",
     "disable_nonessential_traffic", "effort", "expertise", "external_paths",

@@ -205,3 +205,65 @@ def test_non_string_unknown_key_is_reported_without_value(manifest):
     assert len(_unknown(fleet)) == 1
     assert "fleet.defaults.42" in _unknown(fleet)[0]
     assert SECRET not in _unknown(fleet)[0]
+
+
+@pytest.mark.parametrize("scope", ["bot", "defaults"])
+@pytest.mark.parametrize("value", [True, False, {"private": SECRET}])
+def test_retired_bench_is_an_unknown_source_key(manifest, scope, value):
+    root, doc, write = manifest
+    if scope == "bot":
+        target = doc["fleet"]["bots"]["probe"]
+        source_path = "fleet.bots.probe.bench"
+    else:
+        target = doc["fleet"].setdefault("defaults", {})
+        source_path = "fleet.defaults.bench"
+        doc["fleet"]["bots"]["second"] = deepcopy(doc["fleet"]["bots"]["probe"])
+    target["bench"] = value
+    fleet = write()
+    # The retirement removed the consumer; this regression is about the
+    # explicit raw-key inventory which otherwise continues accepting it.
+    assert not hasattr(fleet.bots["probe"], "bench")
+    warnings = _unknown(fleet)
+    assert len(warnings) == 1
+    assert source_path in warnings[0] and "unknown key (ignored)" in warnings[0]
+    assert SECRET not in warnings[0]
+    assert [w for w in validate(fleet, Paths(root=root)).warnings if "unknown key" in w] == warnings
+    assert not (root / "runtime").exists()
+
+
+@pytest.mark.parametrize("scope", ["bot", "defaults"])
+@pytest.mark.parametrize("command", ["validate", "generate"])
+def test_retired_bench_strict_cli_refuses_before_writes(manifest, monkeypatch, caplog, scope, command):
+    root, doc, write = manifest
+    baseline = validate(write(), Paths(root=root))
+    assert baseline.errors == baseline.warnings == []
+    target = (doc["fleet"]["bots"]["probe"] if scope == "bot"
+              else doc["fleet"].setdefault("defaults", {}))
+    target["bench"] = True
+    write()
+    def no_compose(*args, **kwargs):
+        pytest.fail("strict retired-key validation reached composition")
+    monkeypatch.setattr("claudlobby.commands.core.compose_fleet", no_compose)
+    monkeypatch.setattr("claudlobby.commands.core.compose_bot", no_compose)
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    # Ordinary validation keeps the existing warning-only compatibility.
+    assert main(["--root", str(root), "validate"]) == 0
+    assert main(["--root", str(root), command, "--strict"]) == 1
+    assert ".bench" in caplog.text and "unknown key" in caplog.text
+    assert not (root / "runtime").exists()
+    assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("scope", ["bot", "defaults"])
+def test_bench_inside_extension_env_map_remains_valid(manifest, scope):
+    _, doc, write = manifest
+    target = (doc["fleet"]["bots"]["probe"] if scope == "bot"
+              else doc["fleet"].setdefault("defaults", {}))
+    target["env"] = {"bench": "arbitrary-extension-value"}
+    fleet = write()
+    assert _unknown(fleet) == []
+    if scope == "bot":
+        assert fleet.bots["probe"].env == target["env"]
+    else:
+        assert fleet.defaults["env"] == target["env"]
+        assert fleet.bots["probe"].env == {}  # defaults.env still is not inherited
