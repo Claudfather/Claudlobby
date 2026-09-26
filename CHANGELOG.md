@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the printify fragment launched a package npm does not have, under a name anyone could claim (#1890)
+
+`library/mcp/printify.json` ran `npx -y printify-mcp`, and npm has no such
+package (E404), so a bot equipping the shared fragment got a dead server. The
+unscoped name was also unclaimed, so whoever published it next would run on
+every such bot's start. The fragment now pins the package it was written for,
+`@tsavo/printify-mcp@0.1.1` (all 19 contracted tools are in its source, and
+0.1.1 is its only published version). A test guards the shipped library with
+#1058's own predicate: no fragment may launch an unpinned npx package. The one
+allowance is `spotify.json`, whose `@modelcontextprotocol/server-spotify` is
+also E404, so there is nothing to pin. A composed `.mcp.json` changes at the
+next `generate` plus a restart.
+
 ### Fixed — a long dispatch no longer arrives with its envelope framed as pasted text, and a framed one can be verified (#1876)
 
 Dispatches now cross the pane in 400-byte chunks instead of 900. The receiving
