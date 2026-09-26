@@ -26,6 +26,7 @@ from .config import (
     _PROJECT_VALIDATION_KEYS,
     _qualified_repo,
     GITHUB_APP_ENV_VARS,
+    BotConfig,
     FleetConfig,
     is_pos_int,
     load_projects,
@@ -465,6 +466,857 @@ def _validate_env_contracts(paths: Paths, report: ValidationReport) -> None:
             )
 
 
+def _validate_bot_sources(
+    bot_name: str,
+    bot: BotConfig,
+    fleet: FleetConfig,
+    paths: Paths,
+    report: ValidationReport,
+) -> None:
+    # Mirror generate's two source guards, retaining its ValueError-only
+    # collect-all boundary and source-before-grant diagnostic order.
+    from .composer import _load_bot_fragments, compose_settings_local
+    from .path_audit import audit_bot_sources
+
+    for sf in audit_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths)):
+        report.errors.append(
+            f"bot '{bot_name}': {sf.source} = {sf.value!r} — {sf.reason}: "
+            f"{sf.path} (anchor on FLEET_ROOT/BOT_DIR/CLAUDLOBBY_ROOT, declare "
+            "in external_paths, or drop any shell metacharacter)"
+        )
+
+    # Grant-path parity: the allow-list L1 deny (a foreign absolute in
+    # tool_permissions.allow or an expertise/guardrail/skill/integration grant)
+    # fires inside the composer's settings assembly, never in audit_bot_sources
+    # — grant strings are EXEMPT on the walk, classified at the settings choke.
+    # Run that pure, zero-write builder so the census catches what generate
+    # would; collect-all — convert its raise to a report error, never abort.
+    try:
+        compose_settings_local(bot, fleet, paths)
+    except ValueError as exc:
+        report.errors.append(f"bot '{bot_name}': {exc}")
+
+
+def _validate_bot_expertise_and_voice(
+    bot_name: str,
+    bot: BotConfig,
+    paths: Paths,
+    avail_expertise: set[str],
+    report: ValidationReport,
+) -> None:
+    # Expertise — at least one must exist (HARD)
+    if not bot.expertise:
+        report.errors.append(
+            f"bot '{bot_name}': expertise list is empty — need at least one entry from library/expertise/"
+        )
+    for area in bot.expertise:
+        if paths.find_library_file("expertise", area, ".md") is None:
+            suggestion = closest_match(area, avail_expertise)
+            suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            report.errors.append(
+                f"bot '{bot_name}': expertise '{area}' not found in overlay or base library{suggestion_hint}"
+            )
+
+    # Voice (warn)
+    if bot.voice:
+        if paths.find_voice_file(bot.voice) is None:
+            report.warnings.append(
+                f"bot '{bot_name}': voice file '{bot.voice}' not found — bare expertise will be used"
+            )
+
+
+def _validate_bot_skills_and_checkin(
+    bot_name: str,
+    bot: BotConfig,
+    fleet: FleetConfig,
+    paths: Paths,
+    report: ValidationReport,
+) -> list[str]:
+    # Skills (warn). Accepts:
+    #   name        — skills/name/
+    #   dir/name    — skills/dir/name/
+    #   dir/        — folder expansion (skills/dir/**)
+    #
+    # Checked against the EFFECTIVE set (declared plus every requires.skills
+    # entry of the bot's effective protocols, spec §10) — never bot.skills
+    # alone — so a protocol requiring a skill that has since gone missing is
+    # reported here too, not only in the grant loop further down.
+    from .composer import resolve_effective_skills
+
+    effective_skills = resolve_effective_skills(
+        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+    )
+    for skill in effective_skills:
+        if skill.endswith("/"):
+            dir_name = skill.rstrip("/")
+            if not paths.expand_skill_folder(dir_name):
+                report.warnings.append(
+                    f"bot '{bot_name}': skill folder '{skill}' empty or missing in any library/skills/ — no skills will be linked"
+                )
+        elif paths.find_library_dir("skills", skill) is None:
+            report.warnings.append(
+                f"bot '{bot_name}': skill '{skill}' not in any library/skills/ — symlink will be skipped"
+            )
+
+    # Leaf-manager check-in surface (warn, no silent switches — spec §10,
+    # §5 step 1). The `manager-checkin` trigger injects into any idle
+    # MANAGER equipped with the checkin skill: `bot_is_manager` reads
+    # true for a coordinator too, so that gate alone cannot tell a leaf
+    # manager from a coordinator — by DEFAULT only a leaf manager is
+    # equipped (`fleet.leaf_manager_bots()`), but a hand declaration
+    # equips a coordinator just the same, and the beat then injects into
+    # it too. A worker that declares `checkin` gets an injection that
+    # will never come (`bot_is_manager` is false for it); a coordinator
+    # that declares it gets one the DEFAULT withheld but the declaration
+    # itself grants. Both warn, never error, and each says which.
+    if "checkin" in bot.protocols and bot.bot_id not in fleet.leaf_manager_bots():
+        if bot.bot_id in fleet.manager_bots():
+            # A coordinator is NOT excluded from injection the way a
+            # worker is: `bot_is_manager` reads true for it too, and
+            # declaring the protocol here is what links the skill (the
+            # other gate). Once both pass, the beat WILL inject — this
+            # warning says why the DEFAULT skipped it, never that the
+            # trigger never will.
+            report.warnings.append(
+                f"bot '{bot_name}': protocol 'checkin' declared, but "
+                "checkin is a leaf-manager default and this bot is a "
+                "coordinator (every in-fleet report is itself a "
+                "manager), so it does not receive it by default. "
+                "Because it is declared here, the skill links and the "
+                "beat WILL inject into it once the fleet arms "
+                "manager-checkin (the trigger selects manager + "
+                "equipped), and a coordinator's check-in has only "
+                "managers to dispatch to."
+            )
+        else:
+            report.warnings.append(
+                f"bot '{bot_name}': protocol 'checkin' declared, but "
+                "this bot is a worker (not a manager) — the "
+                "manager-checkin trigger will never inject into it. "
+                "The skill still links, so /checkin runs by hand; only "
+                "the automatic injection is withheld."
+            )
+    return effective_skills
+
+
+def _validate_bot_mcp(
+    bot_name: str,
+    bot: BotConfig,
+    paths: Paths,
+    effective_env: dict[str, str],
+    avail_mcp: set[str],
+    report: ValidationReport,
+) -> None:
+    from .loader import integration_tool_grants
+
+    # MCP fragment existence (warn). bot.mcp is list[McpEntry]; the file
+    # on disk is named after .name regardless of how many instances the
+    # entry composes into .mcp.json.
+    for mcp in bot.mcp:
+        frag_path = paths.find_library_file("mcp", mcp.name, ".json")
+        if frag_path is None:
+            suggestion = closest_match(mcp.name, avail_mcp)
+            suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            report.warnings.append(
+                f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{suggestion_hint}"
+            )
+        else:
+            # Migration-gap warning (remove with the P8 _permissions_contract cut):
+            # a fragment that still grants tools whose paired integration hasn't
+            # been given covering tool_grants would be dropped by the eventual
+            # cut. A read-only-split fragment must NOT be covered by a wildcard —
+            # the hint mirrors what compose will actually accept.
+            contract = _mcp_contract(frag_path)
+            if contract.get("tools") and not integration_tool_grants(
+                paths, mcp.name
+            ):
+                suggestion_hint = (
+                    f"mirror its read_only_tools as exact mcp__{mcp.name}__<tool> entries"
+                    if contract.get("read_only_tools") is not None
+                    else f'add tool_grants: ["mcp__{mcp.name}__*"]'
+                )
+                report.warnings.append(
+                    f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
+                    f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
+                    f"won't migrate ({suggestion_hint})"
+                )
+
+    # MCP env-contract check (warn) — uses the canonical instance-renamed
+    # var names (the same names composer puts into the rendered
+    # `.mcp.json`), and looks across the full 3-tier env (host →
+    # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
+    # didn't know about instance scoping or bot-tier .env files.
+    for req in _mcp_required_vars(bot, paths):
+        if _env_has_value(effective_env, req.name):
+            continue
+        inst_note = f" (instance: {req.instance})" if req.instance else ""
+        # The consequence is stated per what was MEASURED, not per what the
+        # name suggests (#1214 F8). An MCP server with an unresolved var does
+        # NOT fail: the client expands the unset placeholder to the empty
+        # string and the server starts and serves ANONYMOUSLY — verified
+        # across the running estate, 11 live servers holding an empty token
+        # and zero holding the literal placeholder. The old wording promised
+        # a loud failure that never arrives, which is worse than silence
+        # because it talks the reader out of investigating.
+        consequence = (
+            "MCP server will start and serve ANONYMOUSLY (unauthenticated), "
+            "not fail"
+            if req.secret
+            else "MCP server will start with this unset"
+        )
+        # Names the CONVENTIONAL tier, and says it is one of four. The old
+        # wording — "add to <tier>-tier .env" — read the declared default as
+        # THE location, which is the #1226 defect in one sentence: it sends
+        # an operator to the fleet file for a var that would resolve just as
+        # well from ~/.env, and it is why a value already placed at the host
+        # or bot tier still reads as missing here.
+        # SET-BUT-EMPTY is a different defect from ABSENT and needs the
+        # opposite remedy. `_env_has_value` correctly treats both as "no
+        # value", but telling an operator to ADD a var that is already
+        # assigned-empty sends them to write it at the very tier whose empty
+        # assignment is blanking it. That is not hypothetical: two fleets
+        # carry a pristine `export GITHUB_PAT=` scaffold stub, and under
+        # shell assignment semantics that stub WINS over anything upstream.
+        if req.name in effective_env:
+            remedy = (
+                f"it is SET BUT EMPTY — some tier assigns it the empty "
+                f"string, which under shell sourcing WINS over any value at "
+                f"a less specific tier. Fill it in or delete the assignment; "
+                f"adding it again at the same tier changes nothing"
+            )
+        else:
+            remedy = (
+                f"no .env tier sets it — add it at any tier "
+                f"({', '.join(ENV_TIERS)}); conventionally {req.default_tier}. "
+                f"The most specific tier that sets it wins"
+            )
+        report.warnings.append(
+            f"bot '{bot_name}': {req.origin}{inst_note} requires {req.name} but "
+            f"{remedy} ({consequence})"
+        )
+
+
+def _validate_bot_credential_sources(
+    bot_name: str,
+    bot: BotConfig,
+    report: ValidationReport,
+) -> None:
+    # Per-scope credential source overrides (#1214 F6c). Held to the SAME
+    # closed registry as a contract's own `source`, and that is the point:
+    # fork F5's injection guarantee is that the resolver dispatches on a
+    # whole registered identifier through a fixed `case` arm, so a value
+    # arriving from fleet.yaml must be no more admissible than one arriving
+    # from a library fragment. A second, laxer door into the same resolver
+    # would void the guarantee for both.
+    for var_name, source in sorted(bot.credential_sources.items()):
+        if source not in KNOWN_CREDENTIAL_SOURCES:
+            known = ", ".join(sorted(KNOWN_CREDENTIAL_SOURCES))
+            report.errors.append(
+                f"bot '{bot_name}': credential_sources['{var_name}'] = "
+                f"{source!r} is not in the closed source registry, one of: "
+                f"{known}{hint(source, KNOWN_CREDENTIAL_SOURCES)}"
+            )
+        elif source == "mint:github-app":
+            # Registered but deliberately unresolvable: no boot-time
+            # resolver reads it, and that is a design decision, not a gap
+            # (a resolver would put ~1h tokens at rest in the launch env).
+            # Fleet-scope App minting ships as the USE-TIME helper instead.
+            # Declaring it is legal and records intent; saying so here is
+            # what stops someone waiting for a value that is never coming.
+            report.warnings.append(
+                f"bot '{bot_name}': credential_sources['{var_name}'] = "
+                f"'mint:github-app' is RESERVED — no boot-time resolver "
+                f"reads it (deliberate; App-auth mints at use time via "
+                f"lib/git-credential-github-app, see mcp: [github-app] "
+                f"and lib/mint-github-token.sh). Supply {var_name} in a "
+                f".env tier or adopt App mode; the resolver arm belongs "
+                f"to #252's per-bot sidecar"
+            )
+
+
+def _validate_bot_integrations(
+    bot_name: str,
+    bot: BotConfig,
+    paths: Paths,
+    report: ValidationReport,
+) -> None:
+    # Integrations (warn). Accepts `name`, `dir/name`, or `dir/`.
+    for integ in bot.integrations:
+        if integ.endswith("/"):
+            dir_name = integ.rstrip("/")
+            if not paths.expand_library_folder("integrations", dir_name):
+                report.warnings.append(
+                    f"bot '{bot_name}': integration folder '{integ}' empty or missing in any library/integrations/ — skipped"
+                )
+        elif paths.find_library_file("integrations", integ, ".md") is None:
+            report.warnings.append(
+                f"bot '{bot_name}': integration '{integ}' not in any library/integrations/ — skipped"
+            )
+
+
+def _validate_bot_grant_contracts(
+    bot_name: str,
+    bot: BotConfig,
+    paths: Paths,
+    effective_skills: list[str],
+    report: ValidationReport,
+) -> None:
+    from .loader import (
+        iter_expertise_permissions,
+        iter_guardrail_permissions,
+        iter_integration_grants,
+        iter_skill_grants,
+    )
+
+    # Grant contracts on equipped sources — expertise (deny-capable
+    # permissions:), integrations (additive tool_grants), skills (additive
+    # tool_grants), guardrails (deny-capable permissions:) — all validated
+    # against the single F3(a) grammar via _grant_shape_warnings.
+    # iter_integration_grants folder-expands dir/ equips so a contract nested in
+    # an expanded folder is not silently skipped (same guarantee as skills).
+    #
+    # Expertise is checked here because it was the ONE grant-declaring source
+    # the shape check never ran on, and it is the source the shipped library
+    # actually uses to grant bare 'Bash' (#913). Three doors were policed and
+    # the fourth, unpoliced one is where the library does the thing the other
+    # three forbid. allow_all gets its own warning rather than riding the
+    # bare-'Bash' one: the parse keeps it as a separate flag and never expands
+    # it into .allow (loader._parse_expertise_permissions), so the expansion to
+    # ALL_TOOLS — bare 'Bash' included — happens later in the composer and is
+    # invisible to a check that only reads .allow.
+    from .composer import resolve_effective_integrations
+
+    for area, xperms in iter_expertise_permissions(paths, bot.expertise):
+        if xperms is None:
+            continue
+        report.warnings.extend(
+            _grant_shape_warnings(
+                bot_name, "expertise", area, xperms.allow, allow_side=True
+            )
+        )
+        report.errors.extend(
+            _inert_path_errors(bot_name, "expertise", area, xperms.allow)
+            + _inert_path_errors(bot_name, "expertise", area, xperms.deny)
+        )
+        report.warnings.extend(
+            _grant_shape_warnings(
+                bot_name, "expertise", area, xperms.deny, allow_side=False
+            )
+        )
+        if xperms.allow_all:
+            report.warnings.append(
+                f"bot '{bot_name}': expertise '{area}' declares allow_all — expands "
+                "to ALL_TOOLS including bare 'Bash', which subsumes every "
+                "Bash(<cmd> *) grant composed beside it"
+            )
+
+    for name, grants in iter_integration_grants(
+        paths, resolve_effective_integrations(bot, paths)
+    ):
+        report.warnings.extend(
+            _grant_shape_warnings(
+                bot_name, "integration", name, grants, allow_side=True
+            )
+        )
+        report.errors.extend(
+            _inert_path_errors(bot_name, "integration", name, grants)
+        )
+    for name, grants in iter_skill_grants(paths, effective_skills):
+        report.warnings.extend(
+            _grant_shape_warnings(bot_name, "skill", name, grants, allow_side=True)
+        )
+        report.errors.extend(_inert_path_errors(bot_name, "skill", name, grants))
+    for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
+        if gperms is None:
+            continue
+        report.warnings.extend(
+            _grant_shape_warnings(
+                bot_name, "guardrail", name, gperms.allow, allow_side=True
+            )
+        )
+        report.warnings.extend(
+            _grant_shape_warnings(
+                bot_name, "guardrail", name, gperms.deny, allow_side=False
+            )
+        )
+        report.errors.extend(
+            _inert_path_errors(bot_name, "guardrail", name, gperms.allow)
+            + _inert_path_errors(bot_name, "guardrail", name, gperms.deny)
+        )
+
+
+def _validate_bot_briefing_and_library_refs(
+    bot_name: str,
+    bot: BotConfig,
+    paths: Paths,
+    report: ValidationReport,
+) -> None:
+    # Briefing source coverage (warn). A briefing-equipped bot with no
+    # integrations and no mcp servers has nothing to summarize — the skill
+    # would render only self-derivable sections. Parse-time already
+    # hard-rejects malformed slot names / cron (config._coerce_briefing).
+    if bot.briefing and not bot.integrations and not bot.mcp:
+        report.warnings.append(
+            f"bot '{bot_name}': briefing equipped but no integrations/mcp "
+            "source coverage — sections that read external data will be empty"
+        )
+
+    # Guardrails / protocols / resources / lessons / post_actions (warn).
+    # Each entry can be `name`, `dir/name`, or `dir/` (folder expansion).
+    for ref, kind in [
+        (bot.guardrails, "guardrails"),
+        (bot.protocols, "protocols"),
+        (bot.resources, "resources"),
+        (bot.lessons, "lessons"),
+        (bot.post_actions, "post_actions"),
+    ]:
+        for item in ref:
+            if item.endswith("/"):
+                dir_name = item.rstrip("/")
+                if not paths.expand_library_folder(kind, dir_name):
+                    report.warnings.append(
+                        f"bot '{bot_name}': {kind[:-1]} folder '{item}' empty or missing in any library/{kind}/ — no items will be loaded"
+                    )
+            elif paths.find_library_file(kind, item, ".md") is None:
+                report.warnings.append(
+                    f"bot '{bot_name}': {kind[:-1]} '{item}' not in any library/{kind}/ — section will be skipped"
+                )
+
+
+def _validate_bot_tools(
+    bot_name: str,
+    bot: BotConfig,
+    paths: Paths,
+    effective_env: dict[str, str],
+    avail_tools: set[str],
+    report: ValidationReport,
+) -> None:
+    # Tools (library/tools/ refs). Ref/manifest/param defects are HARD
+    # errors — generate would raise on the same defect, and a bad param
+    # means a broken 0755 executable. The env contract mirrors the MCP
+    # check above: warn only, the script fails at runtime.
+    tool_targets: dict[str, str] = {}  # target filename → tool name
+    for tool_entry in bot.tools:
+        tool_dir = paths.find_library_dir("tools", tool_entry.name)
+        if tool_dir is None:
+            suggestion = closest_match(tool_entry.name, avail_tools)
+            suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            report.errors.append(
+                f"bot '{bot_name}': tool '{tool_entry.name}' not in any library/tools/{suggestion_hint}"
+            )
+            continue
+        try:
+            manifest = tool_resolve.load_tool_manifest(tool_dir)
+            template_path = tool_resolve.tool_template_path(tool_dir, manifest)
+            tool_resolve.resolve_tool_params(
+                tool_entry.name, manifest, tool_entry.params, bot.external_paths
+            )
+        except ValueError as e:
+            report.errors.append(f"bot '{bot_name}': {e}")
+            continue
+        target = tool_resolve.tool_target_name(template_path)
+        if target in tool_targets:
+            report.errors.append(
+                f"bot '{bot_name}': tools '{tool_targets[target]}' and "
+                f"'{tool_entry.name}' both render '{target}' — generate would fail"
+            )
+        else:
+            tool_targets[target] = tool_entry.name
+        # Mirror the generate-time gh-shim collision as a validate error so
+        # `validate` ≡ `generate` (the contract this function stands on): an
+        # App bot composes a tools/gh shim, so a declared tool also
+        # rendering 'gh' would only fail at generate otherwise.
+        if target == "gh" and bot.github_app:
+            report.errors.append(
+                f"bot '{bot_name}': tool '{tool_entry.name}' renders 'gh', "
+                "but github_app composes a tools/gh shim — rename the tool "
+                "or disable github_app for this bot"
+            )
+        for var in manifest.get("env") or []:
+            if not _env_has_value(effective_env, var):
+                report.warnings.append(
+                    f"bot '{bot_name}': tool '{tool_entry.name}' requires {var} but it's not set — "
+                    f"add to a .env tier (script will fail at runtime)"
+                )
+
+
+def _validate_bot_credentials(
+    bot_name: str,
+    bot: BotConfig,
+    effective_env: dict[str, str],
+    git_identity_problem: str | None,
+    reverse_insteadof_problem: str | None,
+    report: ValidationReport,
+) -> None:
+    # Telegram token env (warn). Value-based, not mere presence: warn when the
+    # token_env resolves EMPTY or absent, so a scaffolded-but-unfilled stub
+    # still nudges. A presence check fires once (the first cold generate,
+    # before the stub exists) then goes permanently silent even if the operator
+    # never fills in a real value (#755). Reading effective_env lets bot-tier
+    # .env values count (the common case — per-bot Telegram tokens live in
+    # runtime/bots/<bot>/.env so multi-bot fleets don't cross-wire). Skip the
+    # self-referential case (token_env == TELEGRAM_BOT_TOKEN): the compositor
+    # deliberately does not scaffold it and its home is the plugin's channel-dir
+    # .env, which is not a tier we inspect — so the check would false-alarm on
+    # the documented default (#750).
+    if (
+        bot.telegram.token_env
+        and not bot.telegram.token_env_is_self_referential
+        and not _env_has_value(effective_env, bot.telegram.token_env)
+    ):
+        report.warnings.append(
+            f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in any tier of .env — bot won't connect to Telegram"
+        )
+
+    # Git credential env (warn, never fail). Same value-based shape as
+    # telegram.token_env above: a declared org whose token is missing or empty
+    # composes valid routing that then presents no credential, so git silently
+    # falls through to the host default and the push fails with a 403 that reads
+    # like a permissions problem. A missing token is an operator gap, not a
+    # composition error — warn and still generate.
+    for org, env_name in sorted(bot.git_credentials.items()):
+        if not _env_has_value(effective_env, env_name):
+            report.warnings.append(
+                f"bot '{bot_name}': git_credentials['{org}'] names '{env_name}', "
+                f"not set in any tier of .env — the org helper answers with an "
+                f"EMPTY password, which git presents and GitHub 401s; later "
+                f"helpers (App or host default) are NOT consulted (D2: a "
+                f"declared org wins by declaration, not by having a value)"
+            )
+
+    # The other half of the same declaration: routing composes an [include] of
+    # the operator's ~/.gitconfig for identity, and git ignores a missing or
+    # identity-less include silently — so the bot pushes fine and then cannot
+    # commit at all. Warn (never fail): it is an operator-side host gap, same
+    # severity as the missing token above.
+    if bot.git_credentials and git_identity_problem:
+        report.warnings.append(
+            f"bot '{bot_name}': git_credentials composes an [include] for git "
+            f"identity, but {git_identity_problem} — credential routing will work "
+            f"while every commit fails 'Author identity unknown'"
+        )
+
+    # GitHub App routing (App-auth P3 #1273) — all warn, never fail.
+    app = bot.github_app
+    if app:
+        for var_name in GITHUB_APP_ENV_VARS:
+            if not _env_has_value(effective_env, var_name):
+                report.warnings.append(
+                    f"bot '{bot_name}': github_app routing requires {var_name}, "
+                    f"not set in any tier of .env — the composed helper will "
+                    f"fail loudly (quit=1) at the first git auth; set it, or "
+                    f"run lib/setup-github-app.sh (its config-file fallback "
+                    f"covers operator/cron shells only, never bot sessions)"
+                )
+            if var_name in bot.env:
+                report.warnings.append(
+                    f"bot '{bot_name}': bot-tier env overrides {var_name} — "
+                    f"all bots on this host share ONE git credential-cache "
+                    f"daemon keyed only by URL, so a per-bot installation "
+                    f"override can cross-serve another installation's cached "
+                    f"token with zero symptoms (D4); App credentials are "
+                    f"fleet-tier in v1"
+                )
+        if bool(app.slug) != bool(app.bot_user_id):
+            have, need = (
+                ("slug", "bot_user_id") if app.slug else ("bot_user_id", "slug")
+            )
+            report.warnings.append(
+                f"bot '{bot_name}': github_app declares {have} without {need} — "
+                f"the App commit identity composes only when BOTH are set, so "
+                f"commits will carry the operator identity (get both from "
+                f"lib/setup-github-app.sh output)"
+            )
+        if git_identity_problem and not app.composes_identity:
+            report.warnings.append(
+                f"bot '{bot_name}': github_app without a composed App identity "
+                f"relies on the operator include for user.email, but "
+                f"{git_identity_problem} — commits will fail 'Author identity "
+                f"unknown'"
+            )
+        for shadow in ("GH_TOKEN", "GITHUB_TOKEN"):
+            if _env_has_value(effective_env, shadow):
+                report.warnings.append(
+                    f"bot '{bot_name}': {shadow} is set in a .env tier while "
+                    f"github_app is declared — the composed tools/gh shim "
+                    f"mints only when neither GH_TOKEN nor GITHUB_TOKEN is "
+                    f"set, so an ambient value silently makes `gh` run as "
+                    f"THAT identity, not the App (the silent operator-"
+                    f"identity substitution the shim exists to stop)"
+                )
+        if reverse_insteadof_problem:
+            report.warnings.append(
+                f"bot '{bot_name}': github_app routing is defeated by the "
+                f"operator gitconfig: {reverse_insteadof_problem} — an "
+                f"ssh-forcing rewrite bypasses the credential layer entirely "
+                f"(URL rewriting is single-pass; the composed git@->https "
+                f"rule cannot undo it); remove it or scope it away from "
+                f"github.com"
+            )
+
+
+def _validate_bot_observability(
+    bot_name: str,
+    bot: BotConfig,
+    report: ValidationReport,
+) -> None:
+    # Observability config (warn). Fields may be None (= use hardcoded default);
+    # only validate when explicitly set.
+    obs = bot.observability
+    if obs.pulse_interval is not None:
+        if obs.pulse_interval <= 0:
+            report.warnings.append(
+                f"bot '{bot_name}': observability.pulse_interval must be > 0 (got {obs.pulse_interval})"
+            )
+        elif obs.pulse_interval > 3600:
+            report.warnings.append(
+                f"bot '{bot_name}': observability.pulse_interval > 3600s (1h) is unusually long — got {obs.pulse_interval}"
+            )
+    for retired_key in obs.retired:
+        # A key nothing reads is a lie in the config surface: said, never
+        # silently ignored (and never refused — an old manifest must load).
+        report.warnings.append(
+            f"bot '{bot_name}': observability.{retired_key} has no reader since the F18 closure"
+            f" — remove it ({_RETIRED_OBSERVABILITY_KEYS.get(retired_key, 'retired')})"
+        )
+    if obs.bridge_heal_max_attempts is not None and not (
+        1 <= obs.bridge_heal_max_attempts <= 10
+    ):
+        report.warnings.append(
+            f"bot '{bot_name}': observability.bridge_heal_max_attempts must be "
+            f"1..10 (got {obs.bridge_heal_max_attempts})"
+        )
+
+
+def _validate_bot_models_and_hooks(
+    bot_name: str,
+    bot: BotConfig,
+    report: ValidationReport,
+) -> None:
+    # Model validation (warn + pass-through)
+    if bot.model and bot.model not in KNOWN_MODELS:
+        suggestion = closest_match(bot.model, KNOWN_MODELS)
+        suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+        report.warnings.append(
+            f"bot '{bot_name}': model '{bot.model}' not in known models{suggestion_hint}. "
+            f"Known: {', '.join(sorted(KNOWN_MODELS))}. "
+            f"Passing through as-is (may be a new model)."
+        )
+
+    # model_strategy.base and escalate_to (warn + suggest)
+    if bot.model_strategy:
+        for field_name, val in [
+            ("base", bot.model_strategy.base),
+            ("escalate_to", bot.model_strategy.escalate_to),
+        ]:
+            if val and val not in KNOWN_MODELS:
+                suggestion = closest_match(val, KNOWN_MODELS)
+                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                report.warnings.append(
+                    f"bot '{bot_name}': model_strategy.{field_name} '{val}' not in known models{suggestion_hint}"
+                )
+
+    # Hook event keys (warn)
+    for event in bot.hooks:
+        if event not in KNOWN_HOOK_EVENTS:
+            suggestion = closest_match(event, KNOWN_HOOK_EVENTS)
+            suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            report.warnings.append(
+                f"bot '{bot_name}': hook event '{event}' not recognized{suggestion_hint}. "
+                f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
+                f"This hook will be silently ignored by Claude Code."
+            )
+
+
+def _validate_bot_remote_control_env(
+    bot_name: str,
+    bot: BotConfig,
+    report: ValidationReport,
+) -> None:
+    # RC-killing env vs remote-control/channels (error, #533). extra_flags
+    # is checked too so a raw "--remote-control" there gets the same guard.
+    # See RC_KILLING_ENV_VARS for why these vars break channel replies.
+    # Scope: bot.env is exactly what composes today (config.py doesn't merge
+    # defaults.env; the composer emits only bot.env) — if defaults.env ever
+    # merges, this check must follow it or it becomes a silent hole.
+    needs_rc = (
+        bot.remote_control
+        or bot.channels
+        or any("--remote-control" in f for f in bot.extra_flags)
+    )
+    if needs_rc:
+        for var in RC_KILLING_ENV_VARS:
+            if var in bot.env:
+                report.errors.append(
+                    f"bot '{bot_name}': env sets {var} but the bot uses "
+                    f"remote-control/channels — this var disables Claude Code's "
+                    f"feature-flag evaluation and with it remote-control, so "
+                    f"channel replies are silently dropped (#533). Remove it, or "
+                    f"set remote_control: false and channels: [] if this bot "
+                    f"genuinely needs it."
+                )
+
+
+def _validate_bot_vault(
+    bot_name: str,
+    bot: BotConfig,
+    claudron_on_path: bool,
+    vault_resolutions: dict[str, bool],
+    report: ValidationReport,
+) -> None:
+    # Ecosystem: the Claudron door a vault-wired bot actually walks through
+    # is the CLI (Claudron's CLI_CONTRACT is the consumption ABI) — never an
+    # MCP server. Warn, never error: a fleet is legitimately composed on a
+    # host that has no claudron installed yet.
+    if bot.claudron_vault_path:
+        if not claudron_on_path:
+            report.warnings.append(
+                f"bot '{bot_name}': claudron_vault_path is set but the claudron CLI "
+                f"is not on PATH — bots reach the vault through the CLI "
+                f"(see {CLAUDRON_INTEGRATION_URL})"
+            )
+        vault_path = Path(bot.claudron_vault_path).expanduser()
+        if not vault_path.is_dir():
+            report.warnings.append(
+                f"bot '{bot_name}': claudron_vault_path "
+                f"'{bot.claudron_vault_path}' is not a directory on this host — "
+                f"the bot will get no vault (see {CLAUDRON_INTEGRATION_URL})"
+            )
+        else:
+            # Memo the scan, not just its result: guard the call so
+            # detect_vault (a full walk-up) runs once per distinct path, not
+            # once per bot. `setdefault(k, detect_vault(...))` evaluates the
+            # default eagerly every iteration and would not save the scan.
+            key = bot.claudron_vault_path
+            if key not in vault_resolutions:
+                vault_resolutions[key] = detect_vault(vault_path) is not None
+            if not vault_resolutions[key]:
+                report.warnings.append(
+                    f"bot '{bot_name}': claudron_vault_path "
+                    f"'{bot.claudron_vault_path}' does not resolve to a vault — no "
+                    f"'_shared/' (or 'shared/') marker found walking up "
+                    f"(see {CLAUDRON_INTEGRATION_URL})"
+                )
+
+    # Ecosystem: the session loop (L2) needs a vault to run against. An
+    # explicit `claudron_session_loop: true` with no `claudron_vault_path` is
+    # an error — its hooks (pull/recall/push) and narrow verb grants are
+    # meaningless without one. Left UNSET the loop defaults on only when a
+    # vault is wired (composer._session_loop_enabled), so this never fires on
+    # the default path — only on an opt-in that cannot work. (Loop enabled +
+    # vault set but claudron CLI absent is covered by the L1 PATH warning above.)
+    if bot.claudron_session_loop is True and not bot.claudron_vault_path:
+        report.errors.append(
+            f"bot '{bot_name}': claudron_session_loop is true but "
+            f"claudron_vault_path is unset — the session loop has no vault to "
+            f"pull, recall, or push against. Set claudron_vault_path, or remove "
+            f"claudron_session_loop (see {CLAUDRON_INTEGRATION_URL})"
+        )
+
+
+def _validate_bot_tool_conflicts(
+    bot_name: str,
+    bot: BotConfig,
+    report: ValidationReport,
+) -> None:
+    # Tool deny vs expertise conflict (warn). Flag when a denied tool is
+    # core to the bot's expertise — the bot won't be able to do its job.
+    if bot.tool_permissions.deny:
+        denied = set(bot.tool_permissions.deny)
+        for area in bot.expertise:
+            core = EXPERTISE_CORE_TOOLS.get(area, set())
+            conflict = denied & core
+            if conflict:
+                report.warnings.append(
+                    f"bot '{bot_name}': tools.deny includes {sorted(conflict)} "
+                    f"but expertise '{area}' typically requires them"
+                )
+        # The one source a human hand-writes, so the one most likely to
+        # acquire a bare-absolute path rule now the composer cannot emit one.
+        report.errors.extend(
+            _inert_path_errors(
+                bot_name, "fleet.yaml", "tools.allow", bot.tool_permissions.allow
+            )
+            + _inert_path_errors(
+                bot_name, "fleet.yaml", "tools.deny", bot.tool_permissions.deny
+            )
+        )
+
+        # Also warn if same tool appears in both allow and deny
+        if bot.tool_permissions.allow:
+            overlap = denied & set(bot.tool_permissions.allow)
+            if overlap:
+                report.warnings.append(
+                    f"bot '{bot_name}': tools {sorted(overlap)} appear in both allow and deny lists"
+                )
+
+
+def _validate_bot_autonomous_runner(
+    bot_name: str,
+    bot: BotConfig,
+    report: ValidationReport,
+) -> None:
+    # Autonomous-runner block (Phase 4). Soft validation: mostly warnings
+    # since the wrapper at runtime is more authoritative than this static
+    # checker. One hard error: github_issues picker without a label.
+    ar = bot.autonomous_runner
+    if ar is not None:
+        if ar.skill not in AUTO_ELIGIBLE_SKILLS:
+            suggestion = closest_match(ar.skill, AUTO_ELIGIBLE_SKILLS)
+            suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            report.warnings.append(
+                f"bot '{bot_name}': autonomous_runner.skill '{ar.skill}' is not on the "
+                f"--auto-eligible list — the wrapper will still invoke it, but unknown "
+                f"clauDNA skills may not emit a structured result{suggestion_hint}"
+            )
+
+        if not _CADENCE_RE.match(ar.cadence):
+            report.warnings.append(
+                f"bot '{bot_name}': autonomous_runner.cadence '{ar.cadence}' doesn't match "
+                f"<N><m|h|d> — the bot may not fire on the expected interval"
+            )
+
+        if "/" not in ar.target_repo or ar.target_repo.count("/") != 1:
+            report.warnings.append(
+                f"bot '{bot_name}': autonomous_runner.target_repo '{ar.target_repo}' "
+                f"should be 'org/repo' format"
+            )
+
+        if ar.picker is not None:
+            if ar.picker.type == "github_issues" and not ar.picker.label:
+                report.errors.append(
+                    f"bot '{bot_name}': autonomous_runner.picker.label is required when "
+                    f"type='github_issues'"
+                )
+
+        if ar.bypass is not None:
+            if ar.bypass.on_bypass not in BYPASS_ACTIONS:
+                report.warnings.append(
+                    f"bot '{bot_name}': autonomous_runner.bypass.on_bypass "
+                    f"'{ar.bypass.on_bypass}' not in known set "
+                    f"({sorted(BYPASS_ACTIONS)})"
+                )
+
+        for k, v in ar.on_outcome.items():
+            if k not in OUTCOME_KEYS:
+                report.warnings.append(
+                    f"bot '{bot_name}': autonomous_runner.on_outcome key '{k}' is not a "
+                    f"known outcome (expected one of {sorted(OUTCOME_KEYS)})"
+                )
+            if v not in OUTCOME_ACTIONS:
+                report.warnings.append(
+                    f"bot '{bot_name}': autonomous_runner.on_outcome action '{v}' is not "
+                    f"a known action (expected one of {sorted(OUTCOME_ACTIONS)})"
+                )
+
+        for hook in ar.pre_hooks + ar.post_hooks:
+            if not hook.startswith("/claudna:"):
+                report.warnings.append(
+                    f"bot '{bot_name}': autonomous_runner hook '{hook}' is not a "
+                    f"/claudna: skill — hooks should be clauDNA skill names"
+                )
+
+
 def _validate_bots(
     fleet: FleetConfig,
     paths: Paths,
@@ -505,656 +1357,27 @@ def _validate_bots(
     # typically resolves the *same* path. Memo per run, same reason as above.
     vault_resolutions: dict[str, bool] = {}
 
-    # Grant-contract readers (folder-aware; shared with the P2 composer resolvers).
-    from .loader import (
-        integration_tool_grants,
-        iter_expertise_permissions,
-        iter_guardrail_permissions,
-        iter_integration_grants,
-        iter_skill_grants,
-    )
-
-    # The L1 source guard runs at generate-time (composer.compose_bot); mirror it
-    # here so `validate` ≡ `generate` for the deny-by-default path rule — an
-    # unanchored, undeclared absolute in a bot source is a hard error, surfaced
-    # before generate is ever attempted. Two source classes need two calls: the
-    # dataclass / MCP-fragment leaves via audit_bot_sources, and the grant paths
-    # (which live in the composed settings.local.json allow-list, not on BotConfig)
-    # via compose_settings_local — the same pure builder generate raises from (#704).
-    from .composer import _load_bot_fragments, compose_settings_local
-    from .path_audit import audit_bot_sources
-
     for bot_name, bot in fleet.bots.items():
         bot_env = dotenv.read(paths.bot_runtime(bot_name) / ".env")
         effective_env: dict[str, str] = {**os.environ, **fleet_env, **bot_env}
 
-        for sf in audit_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths)):
-            report.errors.append(
-                f"bot '{bot_name}': {sf.source} = {sf.value!r} — {sf.reason}: "
-                f"{sf.path} (anchor on FLEET_ROOT/BOT_DIR/CLAUDLOBBY_ROOT, declare "
-                "in external_paths, or drop any shell metacharacter)"
-            )
-
-        # Grant-path parity: the allow-list L1 deny (a foreign absolute in
-        # tool_permissions.allow or an expertise/guardrail/skill/integration grant)
-        # fires inside the composer's settings assembly, never in audit_bot_sources
-        # — grant strings are EXEMPT on the walk, classified at the settings choke.
-        # Run that pure, zero-write builder so the census catches what generate
-        # would; collect-all — convert its raise to a report error, never abort.
-        try:
-            compose_settings_local(bot, fleet, paths)
-        except ValueError as exc:
-            report.errors.append(f"bot '{bot_name}': {exc}")
-
-        # Expertise — at least one must exist (HARD)
-        if not bot.expertise:
-            report.errors.append(
-                f"bot '{bot_name}': expertise list is empty — need at least one entry from library/expertise/"
-            )
-        for area in bot.expertise:
-            if paths.find_library_file("expertise", area, ".md") is None:
-                suggestion = closest_match(area, avail_expertise)
-                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-                report.errors.append(
-                    f"bot '{bot_name}': expertise '{area}' not found in overlay or base library{suggestion_hint}"
-                )
-
-        # Voice (warn)
-        if bot.voice:
-            if paths.find_voice_file(bot.voice) is None:
-                report.warnings.append(
-                    f"bot '{bot_name}': voice file '{bot.voice}' not found — bare expertise will be used"
-                )
-
-        # Skills (warn). Accepts:
-        #   name        — skills/name/
-        #   dir/name    — skills/dir/name/
-        #   dir/        — folder expansion (skills/dir/**)
-        #
-        # Checked against the EFFECTIVE set (declared plus every requires.skills
-        # entry of the bot's effective protocols, spec §10) — never bot.skills
-        # alone — so a protocol requiring a skill that has since gone missing is
-        # reported here too, not only in the grant loop further down.
-        from .composer import resolve_effective_skills
-
-        effective_skills = resolve_effective_skills(
-            bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+        _validate_bot_sources(bot_name, bot, fleet, paths, report)
+        _validate_bot_expertise_and_voice(bot_name, bot, paths, avail_expertise, report)
+        effective_skills = _validate_bot_skills_and_checkin(bot_name, bot, fleet, paths, report)
+        _validate_bot_mcp(bot_name, bot, paths, effective_env, avail_mcp, report)
+        _validate_bot_credential_sources(bot_name, bot, report)
+        _validate_bot_integrations(bot_name, bot, paths, report)
+        _validate_bot_grant_contracts(bot_name, bot, paths, effective_skills, report)
+        _validate_bot_briefing_and_library_refs(bot_name, bot, paths, report)
+        _validate_bot_tools(bot_name, bot, paths, effective_env, avail_tools, report)
+        _validate_bot_credentials(
+            bot_name, bot, effective_env, git_identity_problem,
+            reverse_insteadof_problem, report,
         )
-        for skill in effective_skills:
-            if skill.endswith("/"):
-                dir_name = skill.rstrip("/")
-                if not paths.expand_skill_folder(dir_name):
-                    report.warnings.append(
-                        f"bot '{bot_name}': skill folder '{skill}' empty or missing in any library/skills/ — no skills will be linked"
-                    )
-            elif paths.find_library_dir("skills", skill) is None:
-                report.warnings.append(
-                    f"bot '{bot_name}': skill '{skill}' not in any library/skills/ — symlink will be skipped"
-                )
-
-        # Leaf-manager check-in surface (warn, no silent switches — spec §10,
-        # §5 step 1). The `manager-checkin` trigger injects into any idle
-        # MANAGER equipped with the checkin skill: `bot_is_manager` reads
-        # true for a coordinator too, so that gate alone cannot tell a leaf
-        # manager from a coordinator — by DEFAULT only a leaf manager is
-        # equipped (`fleet.leaf_manager_bots()`), but a hand declaration
-        # equips a coordinator just the same, and the beat then injects into
-        # it too. A worker that declares `checkin` gets an injection that
-        # will never come (`bot_is_manager` is false for it); a coordinator
-        # that declares it gets one the DEFAULT withheld but the declaration
-        # itself grants. Both warn, never error, and each says which.
-        if "checkin" in bot.protocols and bot.bot_id not in fleet.leaf_manager_bots():
-            if bot.bot_id in fleet.manager_bots():
-                # A coordinator is NOT excluded from injection the way a
-                # worker is: `bot_is_manager` reads true for it too, and
-                # declaring the protocol here is what links the skill (the
-                # other gate). Once both pass, the beat WILL inject — this
-                # warning says why the DEFAULT skipped it, never that the
-                # trigger never will.
-                report.warnings.append(
-                    f"bot '{bot_name}': protocol 'checkin' declared, but "
-                    "checkin is a leaf-manager default and this bot is a "
-                    "coordinator (every in-fleet report is itself a "
-                    "manager), so it does not receive it by default. "
-                    "Because it is declared here, the skill links and the "
-                    "beat WILL inject into it once the fleet arms "
-                    "manager-checkin (the trigger selects manager + "
-                    "equipped), and a coordinator's check-in has only "
-                    "managers to dispatch to."
-                )
-            else:
-                report.warnings.append(
-                    f"bot '{bot_name}': protocol 'checkin' declared, but "
-                    "this bot is a worker (not a manager) — the "
-                    "manager-checkin trigger will never inject into it. "
-                    "The skill still links, so /checkin runs by hand; only "
-                    "the automatic injection is withheld."
-                )
-
-        # MCP fragment existence (warn). bot.mcp is list[McpEntry]; the file
-        # on disk is named after .name regardless of how many instances the
-        # entry composes into .mcp.json.
-        for mcp in bot.mcp:
-            frag_path = paths.find_library_file("mcp", mcp.name, ".json")
-            if frag_path is None:
-                suggestion = closest_match(mcp.name, avail_mcp)
-                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-                report.warnings.append(
-                    f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{suggestion_hint}"
-                )
-            else:
-                # Migration-gap warning (remove with the P8 _permissions_contract cut):
-                # a fragment that still grants tools whose paired integration hasn't
-                # been given covering tool_grants would be dropped by the eventual
-                # cut. A read-only-split fragment must NOT be covered by a wildcard —
-                # the hint mirrors what compose will actually accept.
-                contract = _mcp_contract(frag_path)
-                if contract.get("tools") and not integration_tool_grants(
-                    paths, mcp.name
-                ):
-                    suggestion_hint = (
-                        f"mirror its read_only_tools as exact mcp__{mcp.name}__<tool> entries"
-                        if contract.get("read_only_tools") is not None
-                        else f'add tool_grants: ["mcp__{mcp.name}__*"]'
-                    )
-                    report.warnings.append(
-                        f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
-                        f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
-                        f"won't migrate ({suggestion_hint})"
-                    )
-
-        # MCP env-contract check (warn) — uses the canonical instance-renamed
-        # var names (the same names composer puts into the rendered
-        # `.mcp.json`), and looks across the full 3-tier env (host →
-        # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
-        # didn't know about instance scoping or bot-tier .env files.
-        for req in _mcp_required_vars(bot, paths):
-            if _env_has_value(effective_env, req.name):
-                continue
-            inst_note = f" (instance: {req.instance})" if req.instance else ""
-            # The consequence is stated per what was MEASURED, not per what the
-            # name suggests (#1214 F8). An MCP server with an unresolved var does
-            # NOT fail: the client expands the unset placeholder to the empty
-            # string and the server starts and serves ANONYMOUSLY — verified
-            # across the running estate, 11 live servers holding an empty token
-            # and zero holding the literal placeholder. The old wording promised
-            # a loud failure that never arrives, which is worse than silence
-            # because it talks the reader out of investigating.
-            consequence = (
-                "MCP server will start and serve ANONYMOUSLY (unauthenticated), "
-                "not fail"
-                if req.secret
-                else "MCP server will start with this unset"
-            )
-            # Names the CONVENTIONAL tier, and says it is one of four. The old
-            # wording — "add to <tier>-tier .env" — read the declared default as
-            # THE location, which is the #1226 defect in one sentence: it sends
-            # an operator to the fleet file for a var that would resolve just as
-            # well from ~/.env, and it is why a value already placed at the host
-            # or bot tier still reads as missing here.
-            # SET-BUT-EMPTY is a different defect from ABSENT and needs the
-            # opposite remedy. `_env_has_value` correctly treats both as "no
-            # value", but telling an operator to ADD a var that is already
-            # assigned-empty sends them to write it at the very tier whose empty
-            # assignment is blanking it. That is not hypothetical: two fleets
-            # carry a pristine `export GITHUB_PAT=` scaffold stub, and under
-            # shell assignment semantics that stub WINS over anything upstream.
-            if req.name in effective_env:
-                remedy = (
-                    f"it is SET BUT EMPTY — some tier assigns it the empty "
-                    f"string, which under shell sourcing WINS over any value at "
-                    f"a less specific tier. Fill it in or delete the assignment; "
-                    f"adding it again at the same tier changes nothing"
-                )
-            else:
-                remedy = (
-                    f"no .env tier sets it — add it at any tier "
-                    f"({', '.join(ENV_TIERS)}); conventionally {req.default_tier}. "
-                    f"The most specific tier that sets it wins"
-                )
-            report.warnings.append(
-                f"bot '{bot_name}': {req.origin}{inst_note} requires {req.name} but "
-                f"{remedy} ({consequence})"
-            )
-
-        # Per-scope credential source overrides (#1214 F6c). Held to the SAME
-        # closed registry as a contract's own `source`, and that is the point:
-        # fork F5's injection guarantee is that the resolver dispatches on a
-        # whole registered identifier through a fixed `case` arm, so a value
-        # arriving from fleet.yaml must be no more admissible than one arriving
-        # from a library fragment. A second, laxer door into the same resolver
-        # would void the guarantee for both.
-        for var_name, source in sorted(bot.credential_sources.items()):
-            if source not in KNOWN_CREDENTIAL_SOURCES:
-                known = ", ".join(sorted(KNOWN_CREDENTIAL_SOURCES))
-                report.errors.append(
-                    f"bot '{bot_name}': credential_sources['{var_name}'] = "
-                    f"{source!r} is not in the closed source registry, one of: "
-                    f"{known}{hint(source, KNOWN_CREDENTIAL_SOURCES)}"
-                )
-            elif source == "mint:github-app":
-                # Registered but deliberately unresolvable: no boot-time
-                # resolver reads it, and that is a design decision, not a gap
-                # (a resolver would put ~1h tokens at rest in the launch env).
-                # Fleet-scope App minting ships as the USE-TIME helper instead.
-                # Declaring it is legal and records intent; saying so here is
-                # what stops someone waiting for a value that is never coming.
-                report.warnings.append(
-                    f"bot '{bot_name}': credential_sources['{var_name}'] = "
-                    f"'mint:github-app' is RESERVED — no boot-time resolver "
-                    f"reads it (deliberate; App-auth mints at use time via "
-                    f"lib/git-credential-github-app, see mcp: [github-app] "
-                    f"and lib/mint-github-token.sh). Supply {var_name} in a "
-                    f".env tier or adopt App mode; the resolver arm belongs "
-                    f"to #252's per-bot sidecar"
-                )
-
-        # Integrations (warn). Accepts `name`, `dir/name`, or `dir/`.
-        for integ in bot.integrations:
-            if integ.endswith("/"):
-                dir_name = integ.rstrip("/")
-                if not paths.expand_library_folder("integrations", dir_name):
-                    report.warnings.append(
-                        f"bot '{bot_name}': integration folder '{integ}' empty or missing in any library/integrations/ — skipped"
-                    )
-            elif paths.find_library_file("integrations", integ, ".md") is None:
-                report.warnings.append(
-                    f"bot '{bot_name}': integration '{integ}' not in any library/integrations/ — skipped"
-                )
-
-        # Grant contracts on equipped sources — expertise (deny-capable
-        # permissions:), integrations (additive tool_grants), skills (additive
-        # tool_grants), guardrails (deny-capable permissions:) — all validated
-        # against the single F3(a) grammar via _grant_shape_warnings.
-        # iter_integration_grants folder-expands dir/ equips so a contract nested in
-        # an expanded folder is not silently skipped (same guarantee as skills).
-        #
-        # Expertise is checked here because it was the ONE grant-declaring source
-        # the shape check never ran on, and it is the source the shipped library
-        # actually uses to grant bare 'Bash' (#913). Three doors were policed and
-        # the fourth, unpoliced one is where the library does the thing the other
-        # three forbid. allow_all gets its own warning rather than riding the
-        # bare-'Bash' one: the parse keeps it as a separate flag and never expands
-        # it into .allow (loader._parse_expertise_permissions), so the expansion to
-        # ALL_TOOLS — bare 'Bash' included — happens later in the composer and is
-        # invisible to a check that only reads .allow.
-        from .composer import resolve_effective_integrations
-
-        for area, xperms in iter_expertise_permissions(paths, bot.expertise):
-            if xperms is None:
-                continue
-            report.warnings.extend(
-                _grant_shape_warnings(
-                    bot_name, "expertise", area, xperms.allow, allow_side=True
-                )
-            )
-            report.errors.extend(
-                _inert_path_errors(bot_name, "expertise", area, xperms.allow)
-                + _inert_path_errors(bot_name, "expertise", area, xperms.deny)
-            )
-            report.warnings.extend(
-                _grant_shape_warnings(
-                    bot_name, "expertise", area, xperms.deny, allow_side=False
-                )
-            )
-            if xperms.allow_all:
-                report.warnings.append(
-                    f"bot '{bot_name}': expertise '{area}' declares allow_all — expands "
-                    "to ALL_TOOLS including bare 'Bash', which subsumes every "
-                    "Bash(<cmd> *) grant composed beside it"
-                )
-
-        for name, grants in iter_integration_grants(
-            paths, resolve_effective_integrations(bot, paths)
-        ):
-            report.warnings.extend(
-                _grant_shape_warnings(
-                    bot_name, "integration", name, grants, allow_side=True
-                )
-            )
-            report.errors.extend(
-                _inert_path_errors(bot_name, "integration", name, grants)
-            )
-        for name, grants in iter_skill_grants(paths, effective_skills):
-            report.warnings.extend(
-                _grant_shape_warnings(bot_name, "skill", name, grants, allow_side=True)
-            )
-            report.errors.extend(_inert_path_errors(bot_name, "skill", name, grants))
-        for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
-            if gperms is None:
-                continue
-            report.warnings.extend(
-                _grant_shape_warnings(
-                    bot_name, "guardrail", name, gperms.allow, allow_side=True
-                )
-            )
-            report.warnings.extend(
-                _grant_shape_warnings(
-                    bot_name, "guardrail", name, gperms.deny, allow_side=False
-                )
-            )
-            report.errors.extend(
-                _inert_path_errors(bot_name, "guardrail", name, gperms.allow)
-                + _inert_path_errors(bot_name, "guardrail", name, gperms.deny)
-            )
-
-        # Briefing source coverage (warn). A briefing-equipped bot with no
-        # integrations and no mcp servers has nothing to summarize — the skill
-        # would render only self-derivable sections. Parse-time already
-        # hard-rejects malformed slot names / cron (config._coerce_briefing).
-        if bot.briefing and not bot.integrations and not bot.mcp:
-            report.warnings.append(
-                f"bot '{bot_name}': briefing equipped but no integrations/mcp "
-                "source coverage — sections that read external data will be empty"
-            )
-
-        # Guardrails / protocols / resources / lessons / post_actions (warn).
-        # Each entry can be `name`, `dir/name`, or `dir/` (folder expansion).
-        for ref, kind in [
-            (bot.guardrails, "guardrails"),
-            (bot.protocols, "protocols"),
-            (bot.resources, "resources"),
-            (bot.lessons, "lessons"),
-            (bot.post_actions, "post_actions"),
-        ]:
-            for item in ref:
-                if item.endswith("/"):
-                    dir_name = item.rstrip("/")
-                    if not paths.expand_library_folder(kind, dir_name):
-                        report.warnings.append(
-                            f"bot '{bot_name}': {kind[:-1]} folder '{item}' empty or missing in any library/{kind}/ — no items will be loaded"
-                        )
-                elif paths.find_library_file(kind, item, ".md") is None:
-                    report.warnings.append(
-                        f"bot '{bot_name}': {kind[:-1]} '{item}' not in any library/{kind}/ — section will be skipped"
-                    )
-
-        # Tools (library/tools/ refs). Ref/manifest/param defects are HARD
-        # errors — generate would raise on the same defect, and a bad param
-        # means a broken 0755 executable. The env contract mirrors the MCP
-        # check above: warn only, the script fails at runtime.
-        tool_targets: dict[str, str] = {}  # target filename → tool name
-        for tool_entry in bot.tools:
-            tool_dir = paths.find_library_dir("tools", tool_entry.name)
-            if tool_dir is None:
-                suggestion = closest_match(tool_entry.name, avail_tools)
-                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-                report.errors.append(
-                    f"bot '{bot_name}': tool '{tool_entry.name}' not in any library/tools/{suggestion_hint}"
-                )
-                continue
-            try:
-                manifest = tool_resolve.load_tool_manifest(tool_dir)
-                template_path = tool_resolve.tool_template_path(tool_dir, manifest)
-                tool_resolve.resolve_tool_params(
-                    tool_entry.name, manifest, tool_entry.params, bot.external_paths
-                )
-            except ValueError as e:
-                report.errors.append(f"bot '{bot_name}': {e}")
-                continue
-            target = tool_resolve.tool_target_name(template_path)
-            if target in tool_targets:
-                report.errors.append(
-                    f"bot '{bot_name}': tools '{tool_targets[target]}' and "
-                    f"'{tool_entry.name}' both render '{target}' — generate would fail"
-                )
-            else:
-                tool_targets[target] = tool_entry.name
-            # Mirror the generate-time gh-shim collision as a validate error so
-            # `validate` ≡ `generate` (the contract this function stands on): an
-            # App bot composes a tools/gh shim, so a declared tool also
-            # rendering 'gh' would only fail at generate otherwise.
-            if target == "gh" and bot.github_app:
-                report.errors.append(
-                    f"bot '{bot_name}': tool '{tool_entry.name}' renders 'gh', "
-                    "but github_app composes a tools/gh shim — rename the tool "
-                    "or disable github_app for this bot"
-                )
-            for var in manifest.get("env") or []:
-                if not _env_has_value(effective_env, var):
-                    report.warnings.append(
-                        f"bot '{bot_name}': tool '{tool_entry.name}' requires {var} but it's not set — "
-                        f"add to a .env tier (script will fail at runtime)"
-                    )
-
-        # Telegram token env (warn). Value-based, not mere presence: warn when the
-        # token_env resolves EMPTY or absent, so a scaffolded-but-unfilled stub
-        # still nudges. A presence check fires once (the first cold generate,
-        # before the stub exists) then goes permanently silent even if the operator
-        # never fills in a real value (#755). Reading effective_env lets bot-tier
-        # .env values count (the common case — per-bot Telegram tokens live in
-        # runtime/bots/<bot>/.env so multi-bot fleets don't cross-wire). Skip the
-        # self-referential case (token_env == TELEGRAM_BOT_TOKEN): the compositor
-        # deliberately does not scaffold it and its home is the plugin's channel-dir
-        # .env, which is not a tier we inspect — so the check would false-alarm on
-        # the documented default (#750).
-        if (
-            bot.telegram.token_env
-            and not bot.telegram.token_env_is_self_referential
-            and not _env_has_value(effective_env, bot.telegram.token_env)
-        ):
-            report.warnings.append(
-                f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in any tier of .env — bot won't connect to Telegram"
-            )
-
-        # Git credential env (warn, never fail). Same value-based shape as
-        # telegram.token_env above: a declared org whose token is missing or empty
-        # composes valid routing that then presents no credential, so git silently
-        # falls through to the host default and the push fails with a 403 that reads
-        # like a permissions problem. A missing token is an operator gap, not a
-        # composition error — warn and still generate.
-        for org, env_name in sorted(bot.git_credentials.items()):
-            if not _env_has_value(effective_env, env_name):
-                report.warnings.append(
-                    f"bot '{bot_name}': git_credentials['{org}'] names '{env_name}', "
-                    f"not set in any tier of .env — the org helper answers with an "
-                    f"EMPTY password, which git presents and GitHub 401s; later "
-                    f"helpers (App or host default) are NOT consulted (D2: a "
-                    f"declared org wins by declaration, not by having a value)"
-                )
-
-        # The other half of the same declaration: routing composes an [include] of
-        # the operator's ~/.gitconfig for identity, and git ignores a missing or
-        # identity-less include silently — so the bot pushes fine and then cannot
-        # commit at all. Warn (never fail): it is an operator-side host gap, same
-        # severity as the missing token above.
-        if bot.git_credentials and git_identity_problem:
-            report.warnings.append(
-                f"bot '{bot_name}': git_credentials composes an [include] for git "
-                f"identity, but {git_identity_problem} — credential routing will work "
-                f"while every commit fails 'Author identity unknown'"
-            )
-
-        # GitHub App routing (App-auth P3 #1273) — all warn, never fail.
-        app = bot.github_app
-        if app:
-            for var_name in GITHUB_APP_ENV_VARS:
-                if not _env_has_value(effective_env, var_name):
-                    report.warnings.append(
-                        f"bot '{bot_name}': github_app routing requires {var_name}, "
-                        f"not set in any tier of .env — the composed helper will "
-                        f"fail loudly (quit=1) at the first git auth; set it, or "
-                        f"run lib/setup-github-app.sh (its config-file fallback "
-                        f"covers operator/cron shells only, never bot sessions)"
-                    )
-                if var_name in bot.env:
-                    report.warnings.append(
-                        f"bot '{bot_name}': bot-tier env overrides {var_name} — "
-                        f"all bots on this host share ONE git credential-cache "
-                        f"daemon keyed only by URL, so a per-bot installation "
-                        f"override can cross-serve another installation's cached "
-                        f"token with zero symptoms (D4); App credentials are "
-                        f"fleet-tier in v1"
-                    )
-            if bool(app.slug) != bool(app.bot_user_id):
-                have, need = (
-                    ("slug", "bot_user_id") if app.slug else ("bot_user_id", "slug")
-                )
-                report.warnings.append(
-                    f"bot '{bot_name}': github_app declares {have} without {need} — "
-                    f"the App commit identity composes only when BOTH are set, so "
-                    f"commits will carry the operator identity (get both from "
-                    f"lib/setup-github-app.sh output)"
-                )
-            if git_identity_problem and not app.composes_identity:
-                report.warnings.append(
-                    f"bot '{bot_name}': github_app without a composed App identity "
-                    f"relies on the operator include for user.email, but "
-                    f"{git_identity_problem} — commits will fail 'Author identity "
-                    f"unknown'"
-                )
-            for shadow in ("GH_TOKEN", "GITHUB_TOKEN"):
-                if _env_has_value(effective_env, shadow):
-                    report.warnings.append(
-                        f"bot '{bot_name}': {shadow} is set in a .env tier while "
-                        f"github_app is declared — the composed tools/gh shim "
-                        f"mints only when neither GH_TOKEN nor GITHUB_TOKEN is "
-                        f"set, so an ambient value silently makes `gh` run as "
-                        f"THAT identity, not the App (the silent operator-"
-                        f"identity substitution the shim exists to stop)"
-                    )
-            if reverse_insteadof_problem:
-                report.warnings.append(
-                    f"bot '{bot_name}': github_app routing is defeated by the "
-                    f"operator gitconfig: {reverse_insteadof_problem} — an "
-                    f"ssh-forcing rewrite bypasses the credential layer entirely "
-                    f"(URL rewriting is single-pass; the composed git@->https "
-                    f"rule cannot undo it); remove it or scope it away from "
-                    f"github.com"
-                )
-
-        # Observability config (warn). Fields may be None (= use hardcoded default);
-        # only validate when explicitly set.
-        obs = bot.observability
-        if obs.pulse_interval is not None:
-            if obs.pulse_interval <= 0:
-                report.warnings.append(
-                    f"bot '{bot_name}': observability.pulse_interval must be > 0 (got {obs.pulse_interval})"
-                )
-            elif obs.pulse_interval > 3600:
-                report.warnings.append(
-                    f"bot '{bot_name}': observability.pulse_interval > 3600s (1h) is unusually long — got {obs.pulse_interval}"
-                )
-        for retired_key in obs.retired:
-            # A key nothing reads is a lie in the config surface: said, never
-            # silently ignored (and never refused — an old manifest must load).
-            report.warnings.append(
-                f"bot '{bot_name}': observability.{retired_key} has no reader since the F18 closure"
-                f" — remove it ({_RETIRED_OBSERVABILITY_KEYS.get(retired_key, 'retired')})"
-            )
-        if obs.bridge_heal_max_attempts is not None and not (
-            1 <= obs.bridge_heal_max_attempts <= 10
-        ):
-            report.warnings.append(
-                f"bot '{bot_name}': observability.bridge_heal_max_attempts must be "
-                f"1..10 (got {obs.bridge_heal_max_attempts})"
-            )
-
-        # Model validation (warn + pass-through)
-        if bot.model and bot.model not in KNOWN_MODELS:
-            suggestion = closest_match(bot.model, KNOWN_MODELS)
-            suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-            report.warnings.append(
-                f"bot '{bot_name}': model '{bot.model}' not in known models{suggestion_hint}. "
-                f"Known: {', '.join(sorted(KNOWN_MODELS))}. "
-                f"Passing through as-is (may be a new model)."
-            )
-
-        # model_strategy.base and escalate_to (warn + suggest)
-        if bot.model_strategy:
-            for field_name, val in [
-                ("base", bot.model_strategy.base),
-                ("escalate_to", bot.model_strategy.escalate_to),
-            ]:
-                if val and val not in KNOWN_MODELS:
-                    suggestion = closest_match(val, KNOWN_MODELS)
-                    suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-                    report.warnings.append(
-                        f"bot '{bot_name}': model_strategy.{field_name} '{val}' not in known models{suggestion_hint}"
-                    )
-
-        # Hook event keys (warn)
-        for event in bot.hooks:
-            if event not in KNOWN_HOOK_EVENTS:
-                suggestion = closest_match(event, KNOWN_HOOK_EVENTS)
-                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-                report.warnings.append(
-                    f"bot '{bot_name}': hook event '{event}' not recognized{suggestion_hint}. "
-                    f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
-                    f"This hook will be silently ignored by Claude Code."
-                )
-
-        # RC-killing env vs remote-control/channels (error, #533). extra_flags
-        # is checked too so a raw "--remote-control" there gets the same guard.
-        # See RC_KILLING_ENV_VARS for why these vars break channel replies.
-        # Scope: bot.env is exactly what composes today (config.py doesn't merge
-        # defaults.env; the composer emits only bot.env) — if defaults.env ever
-        # merges, this check must follow it or it becomes a silent hole.
-        needs_rc = (
-            bot.remote_control
-            or bot.channels
-            or any("--remote-control" in f for f in bot.extra_flags)
-        )
-        if needs_rc:
-            for var in RC_KILLING_ENV_VARS:
-                if var in bot.env:
-                    report.errors.append(
-                        f"bot '{bot_name}': env sets {var} but the bot uses "
-                        f"remote-control/channels — this var disables Claude Code's "
-                        f"feature-flag evaluation and with it remote-control, so "
-                        f"channel replies are silently dropped (#533). Remove it, or "
-                        f"set remote_control: false and channels: [] if this bot "
-                        f"genuinely needs it."
-                    )
-
-        # Ecosystem: the Claudron door a vault-wired bot actually walks through
-        # is the CLI (Claudron's CLI_CONTRACT is the consumption ABI) — never an
-        # MCP server. Warn, never error: a fleet is legitimately composed on a
-        # host that has no claudron installed yet.
-        if bot.claudron_vault_path:
-            if not claudron_on_path:
-                report.warnings.append(
-                    f"bot '{bot_name}': claudron_vault_path is set but the claudron CLI "
-                    f"is not on PATH — bots reach the vault through the CLI "
-                    f"(see {CLAUDRON_INTEGRATION_URL})"
-                )
-            vault_path = Path(bot.claudron_vault_path).expanduser()
-            if not vault_path.is_dir():
-                report.warnings.append(
-                    f"bot '{bot_name}': claudron_vault_path "
-                    f"'{bot.claudron_vault_path}' is not a directory on this host — "
-                    f"the bot will get no vault (see {CLAUDRON_INTEGRATION_URL})"
-                )
-            else:
-                # Memo the scan, not just its result: guard the call so
-                # detect_vault (a full walk-up) runs once per distinct path, not
-                # once per bot. `setdefault(k, detect_vault(...))` evaluates the
-                # default eagerly every iteration and would not save the scan.
-                key = bot.claudron_vault_path
-                if key not in vault_resolutions:
-                    vault_resolutions[key] = detect_vault(vault_path) is not None
-                if not vault_resolutions[key]:
-                    report.warnings.append(
-                        f"bot '{bot_name}': claudron_vault_path "
-                        f"'{bot.claudron_vault_path}' does not resolve to a vault — no "
-                        f"'_shared/' (or 'shared/') marker found walking up "
-                        f"(see {CLAUDRON_INTEGRATION_URL})"
-                    )
-
-        # Ecosystem: the session loop (L2) needs a vault to run against. An
-        # explicit `claudron_session_loop: true` with no `claudron_vault_path` is
-        # an error — its hooks (pull/recall/push) and narrow verb grants are
-        # meaningless without one. Left UNSET the loop defaults on only when a
-        # vault is wired (composer._session_loop_enabled), so this never fires on
-        # the default path — only on an opt-in that cannot work. (Loop enabled +
-        # vault set but claudron CLI absent is covered by the L1 PATH warning above.)
-        if bot.claudron_session_loop is True and not bot.claudron_vault_path:
-            report.errors.append(
-                f"bot '{bot_name}': claudron_session_loop is true but "
-                f"claudron_vault_path is unset — the session loop has no vault to "
-                f"pull, recall, or push against. Set claudron_vault_path, or remove "
-                f"claudron_session_loop (see {CLAUDRON_INTEGRATION_URL})"
-            )
+        _validate_bot_observability(bot_name, bot, report)
+        _validate_bot_models_and_hooks(bot_name, bot, report)
+        _validate_bot_remote_control_env(bot_name, bot, report)
+        _validate_bot_vault(bot_name, bot, claudron_on_path, vault_resolutions, report)
 
         # Account (warn)
         if bot.account not in fleet.accounts:
@@ -1162,96 +1385,8 @@ def _validate_bots(
                 f"bot '{bot_name}': account '{bot.account}' not in fleet.accounts — falling back to 'default'"
             )
 
-        # Tool deny vs expertise conflict (warn). Flag when a denied tool is
-        # core to the bot's expertise — the bot won't be able to do its job.
-        if bot.tool_permissions.deny:
-            denied = set(bot.tool_permissions.deny)
-            for area in bot.expertise:
-                core = EXPERTISE_CORE_TOOLS.get(area, set())
-                conflict = denied & core
-                if conflict:
-                    report.warnings.append(
-                        f"bot '{bot_name}': tools.deny includes {sorted(conflict)} "
-                        f"but expertise '{area}' typically requires them"
-                    )
-            # The one source a human hand-writes, so the one most likely to
-            # acquire a bare-absolute path rule now the composer cannot emit one.
-            report.errors.extend(
-                _inert_path_errors(
-                    bot_name, "fleet.yaml", "tools.allow", bot.tool_permissions.allow
-                )
-                + _inert_path_errors(
-                    bot_name, "fleet.yaml", "tools.deny", bot.tool_permissions.deny
-                )
-            )
-
-            # Also warn if same tool appears in both allow and deny
-            if bot.tool_permissions.allow:
-                overlap = denied & set(bot.tool_permissions.allow)
-                if overlap:
-                    report.warnings.append(
-                        f"bot '{bot_name}': tools {sorted(overlap)} appear in both allow and deny lists"
-                    )
-
-        # Autonomous-runner block (Phase 4). Soft validation: mostly warnings
-        # since the wrapper at runtime is more authoritative than this static
-        # checker. One hard error: github_issues picker without a label.
-        ar = bot.autonomous_runner
-        if ar is not None:
-            if ar.skill not in AUTO_ELIGIBLE_SKILLS:
-                suggestion = closest_match(ar.skill, AUTO_ELIGIBLE_SKILLS)
-                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-                report.warnings.append(
-                    f"bot '{bot_name}': autonomous_runner.skill '{ar.skill}' is not on the "
-                    f"--auto-eligible list — the wrapper will still invoke it, but unknown "
-                    f"clauDNA skills may not emit a structured result{suggestion_hint}"
-                )
-
-            if not _CADENCE_RE.match(ar.cadence):
-                report.warnings.append(
-                    f"bot '{bot_name}': autonomous_runner.cadence '{ar.cadence}' doesn't match "
-                    f"<N><m|h|d> — the bot may not fire on the expected interval"
-                )
-
-            if "/" not in ar.target_repo or ar.target_repo.count("/") != 1:
-                report.warnings.append(
-                    f"bot '{bot_name}': autonomous_runner.target_repo '{ar.target_repo}' "
-                    f"should be 'org/repo' format"
-                )
-
-            if ar.picker is not None:
-                if ar.picker.type == "github_issues" and not ar.picker.label:
-                    report.errors.append(
-                        f"bot '{bot_name}': autonomous_runner.picker.label is required when "
-                        f"type='github_issues'"
-                    )
-
-            if ar.bypass is not None:
-                if ar.bypass.on_bypass not in BYPASS_ACTIONS:
-                    report.warnings.append(
-                        f"bot '{bot_name}': autonomous_runner.bypass.on_bypass "
-                        f"'{ar.bypass.on_bypass}' not in known set "
-                        f"({sorted(BYPASS_ACTIONS)})"
-                    )
-
-            for k, v in ar.on_outcome.items():
-                if k not in OUTCOME_KEYS:
-                    report.warnings.append(
-                        f"bot '{bot_name}': autonomous_runner.on_outcome key '{k}' is not a "
-                        f"known outcome (expected one of {sorted(OUTCOME_KEYS)})"
-                    )
-                if v not in OUTCOME_ACTIONS:
-                    report.warnings.append(
-                        f"bot '{bot_name}': autonomous_runner.on_outcome action '{v}' is not "
-                        f"a known action (expected one of {sorted(OUTCOME_ACTIONS)})"
-                    )
-
-            for hook in ar.pre_hooks + ar.post_hooks:
-                if not hook.startswith("/claudna:"):
-                    report.warnings.append(
-                        f"bot '{bot_name}': autonomous_runner hook '{hook}' is not a "
-                        f"/claudna: skill — hooks should be clauDNA skill names"
-                    )
+        _validate_bot_tool_conflicts(bot_name, bot, report)
+        _validate_bot_autonomous_runner(bot_name, bot, report)
 
 
 def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:

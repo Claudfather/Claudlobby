@@ -1,0 +1,520 @@
+{
+  "minimal": {
+    "errors": [],
+    "warnings": [],
+    "has_errors": false,
+    "has_issues": false,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 2
+    },
+    "equipment": {
+      "first": {
+        "integrations": [],
+        "skills": []
+      }
+    }
+  },
+  "dense": {
+    "errors": [
+      "bot 'first': bots.first.env.FOREIGN_PATH = '/fixture/foreign' — denied absolute path: /fixture/foreign (anchor on FLEET_ROOT/BOT_DIR/CLAUDLOBBY_ROOT, declare in external_paths, or drop any shell metacharacter)",
+      "bot 'first': bots.first.autonomous_runner.post_hooks[0] = '/wrong:skill' — denied absolute path: /wrong (anchor on FLEET_ROOT/BOT_DIR/CLAUDLOBBY_ROOT, declare in external_paths, or drop any shell metacharacter)",
+      "bot 'first': bot 'first': integration tool_grants would drop legacy MCP grants ['mcp__sample-work__*'] — every fragment-backed mcp entry needs a paired integration file whose tool_grants cover it before the _permissions_contract cut.",
+      "bot 'first': expertise 'enginering' not found in overlay or base library — did you mean 'engineering'?",
+      "bot 'first': credential_sources['Z_TOKEN'] = 'literl' is not in the closed source registry, one of: cli:gh-token, literal, mint:github-app — did you mean 'literal'?",
+      "bot 'first': expertise 'risky' rule 'Read(/fixture/input/**)' can never match — a single leading slash anchors at the settings source, not the filesystem root. Use 'Read(//fixture/input/**)' for an absolute path.",
+      "bot 'first': expertise 'risky' rule 'Write(/fixture/output/**)' can never match — a single leading slash anchors at the settings source, not the filesystem root. Use 'Write(//fixture/output/**)' for an absolute path.",
+      "bot 'first': integration 'risky-integration' rule 'Read(/fixture/integration/**)' can never match — a single leading slash anchors at the settings source, not the filesystem root. Use 'Read(//fixture/integration/**)' for an absolute path.",
+      "bot 'first': skill 'risky-skill' rule 'Read(/fixture/skill/**)' can never match — a single leading slash anchors at the settings source, not the filesystem root. Use 'Read(//fixture/skill/**)' for an absolute path.",
+      "bot 'first': tool 'missing-tool' not in any library/tools/ — did you mean 'gh-tool'?",
+      "bot 'first': tools 'one' and 'two' both render 'same.sh' — generate would fail",
+      "bot 'first': tool 'gh-tool' renders 'gh', but github_app composes a tools/gh shim — rename the tool or disable github_app for this bot",
+      "bot 'first': tool 'parameter': missing required param 'required'",
+      "bot 'first': env sets DISABLE_TELEMETRY but the bot uses remote-control/channels — this var disables Claude Code's feature-flag evaluation and with it remote-control, so channel replies are silently dropped (#533). Remove it, or set remote_control: false and channels: [] if this bot genuinely needs it.",
+      "bot 'first': claudron_session_loop is true but claudron_vault_path is unset — the session loop has no vault to pull, recall, or push against. Set claudron_vault_path, or remove claudron_session_loop (see https://github.com/Claudfather/Claudron/blob/main/docs/INTEGRATION.md)",
+      "bot 'first': fleet.yaml 'tools.allow' rule 'Read(/fixture/input/**)' can never match — a single leading slash anchors at the settings source, not the filesystem root. Use 'Read(//fixture/input/**)' for an absolute path.",
+      "bot 'first': autonomous_runner.picker.label is required when type='github_issues'",
+      "bot 'later': expertise list is empty — need at least one entry from library/expertise/"
+    ],
+    "warnings": [
+      "bot 'first': voice file 'missing-voice' not found — bare expertise will be used",
+      "bot 'first': skill folder 'empty/' empty or missing in any library/skills/ — no skills will be linked",
+      "bot 'first': skill 'missing-skill' not in any library/skills/ — symlink will be skipped",
+      "bot 'first': protocol 'checkin' declared, but this bot is a worker (not a manager) — the manager-checkin trigger will never inject into it. The skill still links, so /checkin runs by hand; only the automatic injection is withheld.",
+      "bot 'first': mcp 'sample' grants tools via _permissions_contract but the paired integration 'sample.md' has no tool_grants — the grant won't migrate (add tool_grants: [\"mcp__sample__*\"])",
+      "bot 'first': mcp fragment 'sampl.json' not found — server will not be configured — did you mean 'sample'?",
+      "bot 'first': mcp/sample (instance: work) requires SAMPLE_WORK_TOKEN but no .env tier sets it — add it at any tier (host, root, fleet, bot); conventionally bot. The most specific tier that sets it wins (MCP server will start and serve ANONYMOUSLY (unauthenticated), not fail)",
+      "bot 'first': mcp/sample requires LABEL but no .env tier sets it — add it at any tier (host, root, fleet, bot); conventionally fleet. The most specific tier that sets it wins (MCP server will start with this unset)",
+      "bot 'first': credential_sources['A_TOKEN'] = 'mint:github-app' is RESERVED — no boot-time resolver reads it (deliberate; App-auth mints at use time via lib/git-credential-github-app, see mcp: [github-app] and lib/mint-github-token.sh). Supply A_TOKEN in a .env tier or adopt App mode; the resolver arm belongs to #252's per-bot sidecar",
+      "bot 'first': integration folder 'empty/' empty or missing in any library/integrations/ — skipped",
+      "bot 'first': integration 'missing-integration' not in any library/integrations/ — skipped",
+      "bot 'first': expertise 'risky' grants bare 'Bash' — scope it to Bash(<cmd> *) so the contract is specific (missing scoped Bash(...))",
+      "bot 'first': expertise 'risky' grant 'Read(/fixture/input/**)' is malformed — must be an mcp__ glob, a Bash(...) grant, or a bare tool name",
+      "bot 'first': expertise 'risky' grant 'Write(/fixture/output/**)' is malformed — must be an mcp__ glob, a Bash(...) grant, or a bare tool name",
+      "bot 'first': expertise 'risky' declares allow_all — expands to ALL_TOOLS including bare 'Bash', which subsumes every Bash(<cmd> *) grant composed beside it",
+      "bot 'first': integration 'risky-integration' grants bare 'Bash' — scope it to Bash(<cmd> *) so the contract is specific (missing scoped Bash(...))",
+      "bot 'first': integration 'risky-integration' grant 'Read(/fixture/integration/**)' is malformed — must be an mcp__ glob, a Bash(...) grant, or a bare tool name",
+      "bot 'first': skill 'risky-skill' grants bare 'Bash' — scope it to Bash(<cmd> *) so the contract is specific (missing scoped Bash(...))",
+      "bot 'first': skill 'risky-skill' grant 'Read(/fixture/skill/**)' is malformed — must be an mcp__ glob, a Bash(...) grant, or a bare tool name",
+      "bot 'first': guardrail 'guard' grants bare 'Bash' — scope it to Bash(<cmd> *) so the contract is specific (missing scoped Bash(...))",
+      "bot 'first': guardrail 'missing-guard' not in any library/guardrails/ — section will be skipped",
+      "bot 'first': protocol 'missing-protocol' not in any library/protocols/ — section will be skipped",
+      "bot 'first': resource 'missing-resource' not in any library/resources/ — section will be skipped",
+      "bot 'first': lesson folder 'empty/' empty or missing in any library/lessons/ — no items will be loaded",
+      "bot 'first': post_action 'missing-action' not in any library/post_actions/ — section will be skipped",
+      "bot 'first': tool 'one' requires TOOL_TOKEN but it's not set — add to a .env tier (script will fail at runtime)",
+      "bot 'first': tool 'two' requires TOOL_TOKEN but it's not set — add to a .env tier (script will fail at runtime)",
+      "bot 'first': tool 'gh-tool' requires TOOL_TOKEN but it's not set — add to a .env tier (script will fail at runtime)",
+      "bot 'first': telegram.token_env 'TG_TOKEN' not set in any tier of .env — bot won't connect to Telegram",
+      "bot 'first': git_credentials['Alpha'] names 'A_PAT', not set in any tier of .env — the org helper answers with an EMPTY password, which git presents and GitHub 401s; later helpers (App or host default) are NOT consulted (D2: a declared org wins by declaration, not by having a value)",
+      "bot 'first': git_credentials['Zulu'] names 'Z_PAT', not set in any tier of .env — the org helper answers with an EMPTY password, which git presents and GitHub 401s; later helpers (App or host default) are NOT consulted (D2: a declared org wins by declaration, not by having a value)",
+      "bot 'first': git_credentials composes an [include] for git identity, but fixture operator has no identity — credential routing will work while every commit fails 'Author identity unknown'",
+      "bot 'first': github_app routing requires GITHUB_APP_ID, not set in any tier of .env — the composed helper will fail loudly (quit=1) at the first git auth; set it, or run lib/setup-github-app.sh (its config-file fallback covers operator/cron shells only, never bot sessions)",
+      "bot 'first': bot-tier env overrides GITHUB_APP_ID — all bots on this host share ONE git credential-cache daemon keyed only by URL, so a per-bot installation override can cross-serve another installation's cached token with zero symptoms (D4); App credentials are fleet-tier in v1",
+      "bot 'first': github_app routing requires GITHUB_APP_INSTALLATION_ID, not set in any tier of .env — the composed helper will fail loudly (quit=1) at the first git auth; set it, or run lib/setup-github-app.sh (its config-file fallback covers operator/cron shells only, never bot sessions)",
+      "bot 'first': github_app routing requires GITHUB_APP_PRIVATE_KEY_PATH, not set in any tier of .env — the composed helper will fail loudly (quit=1) at the first git auth; set it, or run lib/setup-github-app.sh (its config-file fallback covers operator/cron shells only, never bot sessions)",
+      "bot 'first': github_app declares slug without bot_user_id — the App commit identity composes only when BOTH are set, so commits will carry the operator identity (get both from lib/setup-github-app.sh output)",
+      "bot 'first': github_app without a composed App identity relies on the operator include for user.email, but fixture operator has no identity — commits will fail 'Author identity unknown'",
+      "bot 'first': GH_TOKEN is set in a .env tier while github_app is declared — the composed tools/gh shim mints only when neither GH_TOKEN nor GITHUB_TOKEN is set, so an ambient value silently makes `gh` run as THAT identity, not the App (the silent operator-identity substitution the shim exists to stop)",
+      "bot 'first': GITHUB_TOKEN is set in a .env tier while github_app is declared — the composed tools/gh shim mints only when neither GH_TOKEN nor GITHUB_TOKEN is set, so an ambient value silently makes `gh` run as THAT identity, not the App (the silent operator-identity substitution the shim exists to stop)",
+      "bot 'first': github_app routing is defeated by the operator gitconfig: fixture operator forces ssh — an ssh-forcing rewrite bypasses the credential layer entirely (URL rewriting is single-pass; the composed git@->https rule cannot undo it); remove it or scope it away from github.com",
+      "bot 'first': observability.pulse_interval must be > 0 (got 0)",
+      "bot 'first': observability.reap_days has no reader since the F18 closure — remove it (no reader since the F18 closure (#1467) — the event files it aged are gone; the plane's `plane prune` retention replaced them)",
+      "bot 'first': observability.bridge_heal_max_attempts must be 1..10 (got 11)",
+      "bot 'first': model 'opuss' not in known models — did you mean 'opus'?. Known: claude-fable-5, claude-haiku-4-5-20251001, claude-opus-4-8, claude-sonnet-5, fable, haiku, opus, sonnet. Passing through as-is (may be a new model).",
+      "bot 'first': model_strategy.base 'sonnett' not in known models — did you mean 'sonnet'?",
+      "bot 'first': model_strategy.escalate_to 'mystery' not in known models",
+      "bot 'first': hook event 'SessionStars' not recognized — did you mean 'SessionStart'?. Known events: ConfigChange, CwdChanged, Elicitation, ElicitationResult, FileChanged, InstructionsLoaded, MessageDisplay, Notification, PermissionDenied, PermissionRequest, PostCompact, PostToolBatch, PostToolUse, PostToolUseFailure, PreCompact, PreToolUse, SessionEnd, SessionStart, Setup, Stop, StopFailure, SubagentStart, SubagentStop, TaskCompleted, TaskCreated, TeammateIdle, UserPromptExpansion, UserPromptSubmit, WorktreeCreate, WorktreeRemove. This hook will be silently ignored by Claude Code.",
+      "bot 'first': account 'missing-account' not in fleet.accounts — falling back to 'default'",
+      "bot 'first': tools.deny includes ['Write'] but expertise 'software-engineering' typically requires them",
+      "bot 'first': tools ['Write'] appear in both allow and deny lists",
+      "bot 'first': autonomous_runner.skill 'unknown' is not on the --auto-eligible list — the wrapper will still invoke it, but unknown clauDNA skills may not emit a structured result",
+      "bot 'first': autonomous_runner.cadence 'tomorrow' doesn't match <N><m|h|d> — the bot may not fire on the expected interval",
+      "bot 'first': autonomous_runner.target_repo 'invalid' should be 'org/repo' format",
+      "bot 'first': autonomous_runner.bypass.on_bypass 'unknown' not in known set (['comment_and_label', 'comment_only', 'exit_silent'])",
+      "bot 'first': autonomous_runner.on_outcome key 'unknown' is not a known outcome (expected one of ['blocked', 'bypassed', 'completed', 'needs_input', 'partial'])",
+      "bot 'first': autonomous_runner.on_outcome action 'unknown' is not a known action (expected one of ['report', 'report_and_pause', 'silent'])",
+      "bot 'first': autonomous_runner hook 'echo fixture' is not a /claudna: skill — hooks should be clauDNA skill names",
+      "bot 'first': autonomous_runner hook '/wrong:skill' is not a /claudna: skill — hooks should be clauDNA skill names",
+      "bot 'later': voice file 'later-voice' not found — bare expertise will be used",
+      "bot 'later': skill 'briefing' not in any library/skills/ — symlink will be skipped",
+      "bot 'later': briefing equipped but no integrations/mcp source coverage — sections that read external data will be empty",
+      "bot 'later': observability.pulse_interval > 3600s (1h) is unusually long — got 3601",
+      "bot 'later': observability.bridge_heal_max_attempts must be 1..10 (got 0)"
+    ],
+    "has_errors": true,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "git_identity": 1,
+      "git_rewrite": 1,
+      "integrations:first": 2,
+      "skills:first": 1,
+      "integrations:later": 2,
+      "skills:later": 2
+    },
+    "equipment": {
+      "first": {
+        "integrations": [
+          "bundle/",
+          "risky-integration",
+          "empty/",
+          "missing-integration",
+          "sample"
+        ],
+        "skills": [
+          "bundle/",
+          "risky-skill",
+          "empty/",
+          "missing-skill",
+          "required-skill",
+          "checkin"
+        ]
+      },
+      "later": {
+        "integrations": [],
+        "skills": [
+          "briefing"
+        ]
+      }
+    }
+  },
+  "overlay": {
+    "errors": [],
+    "warnings": [],
+    "has_errors": false,
+    "has_issues": false,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 2
+    },
+    "equipment": {
+      "first": {
+        "integrations": [
+          "bundle/"
+        ],
+        "skills": [
+          "bundle/",
+          "required-skill"
+        ]
+      }
+    }
+  },
+  "env-absent": {
+    "errors": [
+      "bot 'first': bot 'first': integration tool_grants would drop legacy MCP grants ['mcp__sample-work__*'] — every fragment-backed mcp entry needs a paired integration file whose tool_grants cover it before the _permissions_contract cut."
+    ],
+    "warnings": [
+      "bot 'first': mcp 'sample' grants tools via _permissions_contract but the paired integration 'sample.md' has no tool_grants — the grant won't migrate (add tool_grants: [\"mcp__sample__*\"])",
+      "bot 'first': mcp/sample (instance: work) requires SAMPLE_WORK_TOKEN but no .env tier sets it — add it at any tier (host, root, fleet, bot); conventionally bot. The most specific tier that sets it wins (MCP server will start and serve ANONYMOUSLY (unauthenticated), not fail)",
+      "bot 'first': mcp/sample requires LABEL but no .env tier sets it — add it at any tier (host, root, fleet, bot); conventionally fleet. The most specific tier that sets it wins (MCP server will start with this unset)",
+      "bot 'first': tool 'one' requires TOOL_TOKEN but it's not set — add to a .env tier (script will fail at runtime)"
+    ],
+    "has_errors": true,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 1
+    },
+    "equipment": {
+      "first": {
+        "integrations": [
+          "sample"
+        ],
+        "skills": []
+      }
+    }
+  },
+  "env-process": {
+    "errors": [
+      "bot 'first': bot 'first': integration tool_grants would drop legacy MCP grants ['mcp__sample-work__*'] — every fragment-backed mcp entry needs a paired integration file whose tool_grants cover it before the _permissions_contract cut."
+    ],
+    "warnings": [
+      "bot 'first': mcp 'sample' grants tools via _permissions_contract but the paired integration 'sample.md' has no tool_grants — the grant won't migrate (add tool_grants: [\"mcp__sample__*\"])"
+    ],
+    "has_errors": true,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 1
+    },
+    "equipment": {
+      "first": {
+        "integrations": [
+          "sample"
+        ],
+        "skills": []
+      }
+    }
+  },
+  "env-fleet-empty": {
+    "errors": [
+      "bot 'first': bot 'first': integration tool_grants would drop legacy MCP grants ['mcp__sample-work__*'] — every fragment-backed mcp entry needs a paired integration file whose tool_grants cover it before the _permissions_contract cut."
+    ],
+    "warnings": [
+      "bot 'first': mcp 'sample' grants tools via _permissions_contract but the paired integration 'sample.md' has no tool_grants — the grant won't migrate (add tool_grants: [\"mcp__sample__*\"])",
+      "bot 'first': mcp/sample (instance: work) requires SAMPLE_WORK_TOKEN but it is SET BUT EMPTY — some tier assigns it the empty string, which under shell sourcing WINS over any value at a less specific tier. Fill it in or delete the assignment; adding it again at the same tier changes nothing (MCP server will start and serve ANONYMOUSLY (unauthenticated), not fail)",
+      "bot 'first': mcp/sample requires LABEL but no .env tier sets it — add it at any tier (host, root, fleet, bot); conventionally fleet. The most specific tier that sets it wins (MCP server will start with this unset)",
+      "bot 'first': tool 'one' requires TOOL_TOKEN but it's not set — add to a .env tier (script will fail at runtime)"
+    ],
+    "has_errors": true,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 1
+    },
+    "equipment": {
+      "first": {
+        "integrations": [
+          "sample"
+        ],
+        "skills": []
+      }
+    }
+  },
+  "env-bot-empty": {
+    "errors": [
+      "bot 'first': bot 'first': integration tool_grants would drop legacy MCP grants ['mcp__sample-work__*'] — every fragment-backed mcp entry needs a paired integration file whose tool_grants cover it before the _permissions_contract cut."
+    ],
+    "warnings": [
+      "bot 'first': mcp 'sample' grants tools via _permissions_contract but the paired integration 'sample.md' has no tool_grants — the grant won't migrate (add tool_grants: [\"mcp__sample__*\"])",
+      "bot 'first': mcp/sample (instance: work) requires SAMPLE_WORK_TOKEN but it is SET BUT EMPTY — some tier assigns it the empty string, which under shell sourcing WINS over any value at a less specific tier. Fill it in or delete the assignment; adding it again at the same tier changes nothing (MCP server will start and serve ANONYMOUSLY (unauthenticated), not fail)",
+      "bot 'first': mcp/sample requires LABEL but no .env tier sets it — add it at any tier (host, root, fleet, bot); conventionally fleet. The most specific tier that sets it wins (MCP server will start with this unset)",
+      "bot 'first': tool 'one' requires TOOL_TOKEN but it's not set — add to a .env tier (script will fail at runtime)"
+    ],
+    "has_errors": true,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 1
+    },
+    "equipment": {
+      "first": {
+        "integrations": [
+          "sample"
+        ],
+        "skills": []
+      }
+    }
+  },
+  "env-bot-present": {
+    "errors": [
+      "bot 'first': bot 'first': integration tool_grants would drop legacy MCP grants ['mcp__sample-work__*'] — every fragment-backed mcp entry needs a paired integration file whose tool_grants cover it before the _permissions_contract cut."
+    ],
+    "warnings": [
+      "bot 'first': mcp 'sample' grants tools via _permissions_contract but the paired integration 'sample.md' has no tool_grants — the grant won't migrate (add tool_grants: [\"mcp__sample__*\"])"
+    ],
+    "has_errors": true,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 1
+    },
+    "equipment": {
+      "first": {
+        "integrations": [
+          "sample"
+        ],
+        "skills": []
+      }
+    }
+  },
+  "shared-vault": {
+    "errors": [],
+    "warnings": [],
+    "has_errors": false,
+    "has_issues": false,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 2,
+      "vault:@FIXTURE_ROOT@/vault": 1,
+      "integrations:later": 2,
+      "skills:later": 2
+    },
+    "equipment": {
+      "first": {
+        "integrations": [],
+        "skills": []
+      },
+      "later": {
+        "integrations": [],
+        "skills": []
+      }
+    }
+  },
+  "distinct-vaults": {
+    "errors": [],
+    "warnings": [],
+    "has_errors": false,
+    "has_issues": false,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 2,
+      "vault:@FIXTURE_ROOT@/vault": 1,
+      "integrations:later": 2,
+      "skills:later": 2,
+      "vault:@FIXTURE_ROOT@/vault-two": 1
+    },
+    "equipment": {
+      "first": {
+        "integrations": [],
+        "skills": []
+      },
+      "later": {
+        "integrations": [],
+        "skills": []
+      }
+    }
+  },
+  "invalid-vaults": {
+    "errors": [],
+    "warnings": [
+      "bot 'first': claudron_vault_path is set but the claudron CLI is not on PATH — bots reach the vault through the CLI (see https://github.com/Claudfather/Claudron/blob/main/docs/INTEGRATION.md)",
+      "bot 'first': claudron_vault_path '@FIXTURE_ROOT@/markerless' does not resolve to a vault — no '_shared/' (or 'shared/') marker found walking up (see https://github.com/Claudfather/Claudron/blob/main/docs/INTEGRATION.md)",
+      "bot 'later': claudron_vault_path is set but the claudron CLI is not on PATH — bots reach the vault through the CLI (see https://github.com/Claudfather/Claudron/blob/main/docs/INTEGRATION.md)",
+      "bot 'later': claudron_vault_path '@FIXTURE_ROOT@/missing' is not a directory on this host — the bot will get no vault (see https://github.com/Claudfather/Claudron/blob/main/docs/INTEGRATION.md)"
+    ],
+    "has_errors": false,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 2,
+      "vault:@FIXTURE_ROOT@/markerless": 1,
+      "integrations:later": 2,
+      "skills:later": 2
+    },
+    "equipment": {
+      "first": {
+        "integrations": [],
+        "skills": []
+      },
+      "later": {
+        "integrations": [],
+        "skills": []
+      }
+    }
+  },
+  "credentials": {
+    "errors": [],
+    "warnings": [
+      "bot 'first': git_credentials composes an [include] for git identity, but fixture operator has no identity — credential routing will work while every commit fails 'Author identity unknown'",
+      "bot 'later': git_credentials composes an [include] for git identity, but fixture operator has no identity — credential routing will work while every commit fails 'Author identity unknown'"
+    ],
+    "has_errors": false,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "git_identity": 1,
+      "integrations:first": 2,
+      "skills:first": 2,
+      "integrations:later": 2,
+      "skills:later": 2
+    },
+    "equipment": {
+      "first": {
+        "integrations": [],
+        "skills": []
+      },
+      "later": {
+        "integrations": [],
+        "skills": []
+      }
+    }
+  },
+  "roles": {
+    "errors": [],
+    "warnings": [
+      "bot 'first': protocol 'checkin' declared, but checkin is a leaf-manager default and this bot is a coordinator (every in-fleet report is itself a manager), so it does not receive it by default. Because it is declared here, the skill links and the beat WILL inject into it once the fleet arms manager-checkin (the trigger selects manager + equipped), and a coordinator's check-in has only managers to dispatch to.",
+      "bot 'worker': protocol 'checkin' declared, but this bot is a worker (not a manager) — the manager-checkin trigger will never inject into it. The skill still links, so /checkin runs by hand; only the automatic injection is withheld."
+    ],
+    "has_errors": false,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "integrations:first": 2,
+      "skills:first": 2,
+      "integrations:lead": 2,
+      "skills:lead": 2,
+      "integrations:worker": 2,
+      "skills:worker": 2
+    },
+    "equipment": {
+      "first": {
+        "integrations": [],
+        "skills": [
+          "checkin"
+        ]
+      },
+      "lead": {
+        "integrations": [],
+        "skills": [
+          "checkin"
+        ]
+      },
+      "worker": {
+        "integrations": [],
+        "skills": [
+          "checkin"
+        ]
+      }
+    }
+  },
+  "settings-value-error": {
+    "errors": [
+      "bot 'first': fixture settings failure"
+    ],
+    "warnings": [],
+    "has_errors": true,
+    "has_issues": true,
+    "exception": null,
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1,
+      "skills:first": 1,
+      "integrations:first": 1
+    },
+    "equipment": {
+      "first": {
+        "skills": [],
+        "integrations": []
+      }
+    }
+  },
+  "settings-runtime-error": {
+    "exception": {
+      "type": "RuntimeError",
+      "message": "fixture settings failure"
+    },
+    "probes": {
+      "available_expertise": 1,
+      "available_mcp": 1,
+      "available_tools": 1,
+      "which:claudron": 1
+    },
+    "equipment": {}
+  }
+}
