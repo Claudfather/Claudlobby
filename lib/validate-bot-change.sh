@@ -388,7 +388,7 @@ cleanup() {
             "$rc" "$((${pass:-0} + ${fail:-0}))"
     fi
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFNOSKILL:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -1036,11 +1036,9 @@ val_scenario "validate #1024: reported-but-never-re-dispatched (mirror watchdog)
 ua_iso() { python3 -c "import datetime,sys;print(datetime.datetime.fromtimestamp(int(sys.argv[1]),datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1"; }
 
 # ua_bot <name> <check:1|0> <manager_tmux> [trailing_comment]
-# The composer writes the trailing comment on MANAGER bots only, so only the
-# manager fixture gets one — and it must, because bot_conf_get strips quotes but
-# NOT comments. bot_is_manager does its own stripping; putting the comment on a
-# worker here would instead corrupt _manager_target and silently kill the push
-# this section asserts on.
+# Only the manager fixture gets the trailing comment: it is the line shape an
+# older compose left on the MANAGER_TMUX line of a manager, and bot_conf_get
+# must read it back as the bare name for bot_is_manager to keep that bot quiet.
 ua_bot() {
     local n="$1" chk="$2" mgr="$3" cmt="${4:-}" d="$ROOT/local/$FLEET/runtime/bots/$1"
     mkdir -p "$d/data/events"
@@ -2444,22 +2442,25 @@ harness_check "#602 fleet-pulse health-checks a bot in a NESTED fleet (session_m
 # bot goes idle inside the window (#1826); the shared dispatch.sh classifier must keep the
 # set +H; guard on (d) prose, (e) file-path prose + a leading-whitespace slash;
 # and (f) the /briefing skill's documented env-read must resolve the CONFIGURED
-# sections, not the canonical default. This is BEHAVIOR a unit test cannot
-# prove. The composed-timer plumbing (compose -> enroll -> journal fire ->
-# reconcile prune, incl. the launchd .plist prune) is the sibling
+# sections, not the canonical default; (g) a bot with no composed briefing
+# skill gets NO send and a loud briefing_failed (#1819: Claude Code would
+# reject the command locally while the box cleared). This is BEHAVIOR a unit
+# test cannot prove. The composed-timer plumbing (compose -> enroll -> journal
+# fire -> reconcile prune, incl. the launchd .plist prune) is the sibling
 # lib/rehearse-briefing-timer.sh (real systemd timer, ~2 min, run separately).
 # ===========================================================================
 val_scenario "validate-bot-change: equippable briefing trigger (#627 P6)"
 
-BRIEF="valbrief"; BRIEFBUSY="valbriefbusy"; BRIEFWAIT="valbriefwait"; SINK="valsink"
+BRIEF="valbrief"; BRIEFBUSY="valbriefbusy"; BRIEFNOSKILL="valbriefnoskill"; BRIEFWAIT="valbriefwait"; SINK="valsink"
 BRIEF_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEF"
 BRIEFBUSY_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEFBUSY"
+BRIEFNOSKILL_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEFNOSKILL"
 BRIEFWAIT_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEFWAIT"
 # data/ holds the busy bot's .last-tool-call marker and is where the trigger
 # emits events; briefing-trigger.sh + emit_fleet_event land on the plane (logs/ still)
 # on demand. SINK is a pure classifier sink (pane-only) — no dir needed; its
 # socket resolves by the basename fallback.
-mkdir -p "$BRIEF_DIR/data" "$BRIEFBUSY_DIR/data" "$BRIEFWAIT_DIR/data"
+mkdir -p "$BRIEF_DIR/data" "$BRIEFBUSY_DIR/data" "$BRIEFNOSKILL_DIR/data" "$BRIEFWAIT_DIR/data"
 
 # Composed-SHAPE bot.conf: BOT_SERVICE empty so tmux_socket_for_bot resolves the
 # harness fallback tmux-<name> (the socket the tmux() shim targets). BRIEFING_*
@@ -2468,7 +2469,7 @@ mkdir -p "$BRIEF_DIR/data" "$BRIEFBUSY_DIR/data" "$BRIEFWAIT_DIR/data"
 # by upper-casing the dispatched slot — with a NON-default section list so (f)
 # can tell config-tracking from the canonical morning default. (Emission case is
 # unit-tested in tests/test_briefing.py; this scenario proves the read-side.)
-for _d in "$BRIEF_DIR" "$BRIEFBUSY_DIR" "$BRIEFWAIT_DIR"; do
+for _d in "$BRIEF_DIR" "$BRIEFBUSY_DIR" "$BRIEFNOSKILL_DIR" "$BRIEFWAIT_DIR"; do
     _n="$(basename "$_d")"
     cat > "$_d/bot.conf" <<CONF
 BOT_NAME="$_n"
@@ -2479,6 +2480,13 @@ BRIEFING_SLOTS="morning"
 BRIEFING_SOURCES="github"
 BRIEFING_SECTIONS_MORNING="wrap tomorrow overnight"
 CONF
+done
+# The skill link the briefing: stanza composes, on every briefing bot but
+# BRIEFNOSKILL, which has the briefing env and no link (a hand-built timer, a
+# lost link). BRIEFWAIT needs it too: its retry must reach the send.
+for _d in "$BRIEF_DIR" "$BRIEFBUSY_DIR" "$BRIEFWAIT_DIR"; do
+    mkdir -p "$_d/.claude/skills"
+    ln -s "$VAL_REPO/library/skills/briefing" "$_d/.claude/skills/briefing"
 done
 
 # Idle briefing bot: plain pane, no esc-to-interrupt, no fresh .last-tool-call
@@ -2494,12 +2502,14 @@ touch "$BRIEFWAIT_DIR/data/.last-tool-call"
 # Every bot here names $MGR, so the FLEET NOTICE must land in its pane, which
 # must be alive to take the push: the first scenario's sleep 600 may have ended.
 tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "sleep 600"
+# Idle briefing bot with no composed skill: the trigger must refuse it.
+tmux new-session -d -s "$BRIEFNOSKILL" "sleep 600"
 # Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
 # computed PAYLOAD (bare vs set +H;) is observable verbatim in the captured pane.
 tmux new-session -d -s "$SINK" "sleep 600"
 sleep 1  # let panes render
 
-# --- Observe: the real trigger against the idle + busy briefing bots ----------
+# --- Observe: the real trigger against the idle, busy + skill-less bots --------
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEF" morning >/dev/null 2>&1 || true
 # The busy bot stays busy through a 3s retry window, so it gives up; the retry
 # bot goes idle 2s into a 20s window, so its retry sends.
@@ -2508,6 +2518,8 @@ BRIEFING_RETRY_WINDOW_S=3 BRIEFING_RETRY_POLL_S=1 CLAUDLOBBY_ROOT="$ROOT" \
 ( sleep 2; rm -f "$BRIEFWAIT_DIR/data/.last-tool-call" ) &
 BRIEFING_RETRY_WINDOW_S=20 BRIEFING_RETRY_POLL_S=1 CLAUDLOBBY_ROOT="$ROOT" \
     "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEFWAIT" morning >/dev/null 2>&1 || true
+noskill_rc=0
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEFNOSKILL" morning >/dev/null 2>&1 || noskill_rc=$?
 # Prose + classifier-edge payloads straight through dispatch.sh: prose with a
 # bang, file-path prose, and a leading-whitespace slash must ALL keep set +H;.
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" "deploy failed alert !!" >/dev/null 2>&1 || true
@@ -2583,6 +2595,18 @@ _instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null
     && printf '%s\n' "$_instr" | grep -q 'BRIEFING_SECTIONS' \
     && printf '%s\n' "$_instr" | grep -qi 'configured section'; } && r=yes || r=no
 harness_check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (read the var + render the configured sections)" "$r"
+
+# (g) no composed skill — briefing_failed/skill_absent, nonzero, NOTHING sent (#1819)
+noskill_events=$(val_events "$ROOT" "$FLEET" "$BRIEFNOSKILL")
+noskill_pane=$(tmux capture-pane -t "$BRIEFNOSKILL" -p 2>/dev/null || true)
+printf '%s' "$noskill_pane" | grep -q '/briefing' && _sent=yes || _sent=no
+{ printf '%s' "$noskill_events" | grep -q '"type":"briefing_failed".*"reason":"skill_absent"' \
+    && [ "$noskill_rc" -ne 0 ] && [ "$_sent" = no ]; } && r=yes || r=no
+harness_check "briefing refuses a bot with no composed skill: briefing_failed/skill_absent, nonzero, no dispatch" "$r"
+_n=$(printf '%s' "$missed_events" | grep -c "$BRIEFNOSKILL morning (skill_absent)" || true)
+{ [ "$_n" = 1 ] \
+    && printf '%s' "$mgr_pane" | grep -qF "[FLEET-NOTICE] briefing_missed: $BRIEFNOSKILL morning (skill_absent)"; } && r=yes || r=no
+harness_check "  ...and pages ONCE like any other terminal miss: one briefing_missed notice (skill_absent) in the manager pane" "$r"
 
 # ===========================================================================
 # #1002 — the boot window. A bot whose unit is mid-start has no tmux session
