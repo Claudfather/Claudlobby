@@ -13,6 +13,7 @@ from textwrap import dedent
 import pytest
 
 from claudlobby.config import DEFAULT_GUARDRAILS
+from claudlobby.tree_guard import assert_cli_imports_tree
 
 
 @pytest.fixture(autouse=True)
@@ -63,9 +64,18 @@ def plane_emit_env():
     plane through the shim's cold-CLI rung (no daemon listens on the socket):
     merge into a scrubbed/constructed env. A fleet-less script (a host job)
     lands under the `_host` anchor; a fleet-scoped one needs FLEET_NAME /
-    CLAUDLOBBY_FLEET or a bot dir beside it."""
+    CLAUDLOBBY_FLEET or a bot dir beside it.
+
+    The CLI is the one beside the interpreter running the suite, and it is
+    asked which claudlobby it imports before anything records through it
+    (#1316). With an editable install it imports the tree its venv was built
+    from, while the test reads back with this tree: run with another
+    checkout's venv, 18 tests failed for a defect this tree does not have.
+    A CLI from another tree now refuses here, with the remedy."""
     import sys
-    return {"PLANE_EMIT_CLI": str(Path(sys.executable).parent / "claudlobby"),
+    cli = Path(sys.executable).parent / "claudlobby"
+    return {"PLANE_EMIT_CLI": assert_cli_imports_tree(
+                Path(__file__).resolve().parent.parent, cli),
             "PLANE_SOCKET": "/tmp/claudlobby-test-no-daemon.sock"}
 
 

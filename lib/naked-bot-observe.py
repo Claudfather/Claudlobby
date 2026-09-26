@@ -42,7 +42,8 @@ reasons, and each one alone would force it:
     gives a history-free tree at an exact commit, so a baseline is attributable
     to a SHA instead of to whatever was uncommitted that afternoon.
 
-THE ASSERTION THAT MAKES THE RESULT MEAN ANYTHING (``_assert_compositor``). An
+THE ASSERTION THAT MAKES THE RESULT MEAN ANYTHING
+(``claudlobby.tree_guard.assert_imports_tree``, shared since #1316). An
 editable install of this same package is normally on ``sys.path``. If the
 subprocess resolved THAT instead of the exported tree, every arm would compose
 against a compositor of unknown vintage and come back green having tested
@@ -394,29 +395,6 @@ def write_probe(root: Path, arm: Arm) -> None:
     (overlay / "fleet.yaml").write_text(
         FLEET_TEMPLATE.format(system_defaults=sd, declared=declared, teams=teams)
     )
-
-
-def _assert_compositor(root: Path, python: str) -> None:
-    """Refuse to run unless the subprocess resolves the EXPORTED compositor.
-
-    An editable install of this package is normally importable, and a green run
-    against a stale one is indistinguishable from a green run against the tree
-    under test. The failure mode is a PASS, so it is checked, not assumed.
-    """
-    got = subprocess.run(
-        [python, "-c", "import claudlobby, sys; sys.stdout.write(claudlobby.__file__)"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    want = str(root / "claudlobby" / "__init__.py")
-    if Path(got).resolve() != Path(want).resolve():
-        raise RuntimeError(
-            "REFUSING TO OBSERVE: the subprocess resolved a different claudlobby "
-            f"than the exported tree.\n  loaded: {got}\n  export: {want}\n"
-            "A run against a stale compositor comes back green having tested nothing."
-        )
 
 
 def scrub(text: str, root: Path) -> str:
@@ -819,6 +797,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sys.path.insert(0, str(REPO_ROOT))
     import claudlobby.defaults as registry  # noqa: PLC0415 — needs the path above
+    from claudlobby.tree_guard import assert_imports_tree  # noqa: PLC0415 — same
 
     workdir = Path(tempfile.mkdtemp(prefix="naked-bot-observe-"))
     # An export path that itself traverses `/runtime/bots/` would trip the very
@@ -835,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = workdir / "export"
         sha = export_tree(args.ref, root)
-        _assert_compositor(root, sys.executable)
+        assert_imports_tree(root, sys.executable)
 
         arms = [
             observe_arm(root, sys.executable, arm, registry)

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from claudlobby.tree_guard import assert_imports_tree
 from tests.fixtures.worktree_export import export_working_tree
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -661,13 +662,13 @@ def leaf_manager_compose(tmp_path_factory):
     and a HEAD export would compose whatever was last committed. The export
     copies tracked and untracked-but-not-ignored files from disk
     (`tests/fixtures/worktree_export.py`), so uncommitted edits are what
-    composes. `_assert_compositor` checks that a subprocess started the way
+    composes. `assert_imports_tree` checks that a subprocess started the way
     `generate` is (same interpreter, cwd at the export) imports the exported
     package rather than an installed copy. The probe fleet lands in the
     export, not in the checkout.
     """
     root = export_working_tree(REPO_ROOT, tmp_path_factory.mktemp("naked-bot") / "export")
-    nbo._assert_compositor(root, sys.executable)
+    assert_imports_tree(root, sys.executable)
     sys.path.insert(0, str(REPO_ROOT))
     import claudlobby.defaults as registry
 

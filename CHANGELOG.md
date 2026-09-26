@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `plane_emit_env()` and the plane-prune launcher tests refuse a CLI from another tree (#1316)
+
+`plane_emit_env()` and the plane-prune launcher tests ran whichever `claudlobby`
+CLI the interpreter or PATH supplied, and with an editable install that CLI runs
+the tree its venv was built from. With another checkout's venv, 18 tests failed
+for a defect the tree under test did not have; from a bot session, the launcher
+tests ran the host install, which refused the tree's newer db. Both now ask the
+CLI which tree it imports and refuse, with the remedy, when it is not this one.
+The check is `claudlobby/tree_guard.py`, promoted from `lib/naked-bot-observe.py`.
+
 ### Fixed — the operator's home directory was back in the tree, and nothing caught it (#927)
 
 #1306 replaced the home paths #927 named but added no gate, and four later PRs

@@ -88,7 +88,7 @@ printf '{}\n' > "$FAKE_HOME/.claude/settings.json"
 printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"0.0.0"}\n' > "$FAKE_HOME/.claude.json"
 # The compositor under test is the EXPORTED one, never an editable install that
 # might be a different commit — a green run against a stale package is a pass
-# that tested nothing (naked-bot-observe.py's _assert_compositor lesson).
+# that tested nothing (the #1316 lesson; claudlobby/tree_guard.py).
 PYBIN="$SRC_ROOT/.venv/bin/python"
 [ -x "$PYBIN" ] || PYBIN="$(command -v python3)"
 

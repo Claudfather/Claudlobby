@@ -17,9 +17,12 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.retention import prune_metric_samples
+from claudlobby.tree_guard import NotTheTreeUnderTest, assert_cli_imports_tree
 
 REPO = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -204,12 +207,26 @@ def test_prune_job_ships_enrolled_and_reads_root():
     assert "plane-prune.sh" in job["script"]
 
 
-def _launcher(root: Path, *argv, armed):
+def _launcher_env(root: Path) -> dict:
+    """The env the launcher runs in, once the CLI it will exec is checked.
+
+    The throwaway root has no .venv, so the launcher takes its PATH rung and
+    execs whatever `command -v claudlobby` finds. The CLI beside this
+    interpreter goes first (the one `plane_emit_env` uses), and whichever
+    CLI PATH resolves is asked which claudlobby it imports (#1316): the
+    repo's .venv/bin used to go first, and where the tree had no .venv, PATH
+    fell through to the host install."""
     import os
-    # the throwaway root has no .venv; the launcher resolves the CLI via
-    # its PATH rung, so put the repo venv there (how the estate resolves)
+    import shutil
     env = dict(os.environ, CLAUDLOBBY_ROOT=str(root),
-               PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
+               PATH=f"{Path(sys.executable).parent}:" + os.environ.get("PATH", ""))
+    assert_cli_imports_tree(REPO, shutil.which("claudlobby", path=env["PATH"]),
+                            env=env)
+    return env
+
+
+def _launcher(root: Path, *argv, armed):
+    env = _launcher_env(root)
     # Opt-OUT since the defaults flip: absence RUNS, only an exact 0 stops it.
     env["PLANE_PRUNE_ENABLED"] = "1" if armed else "0"
     return subprocess.run(
@@ -239,17 +256,56 @@ def test_launcher_runs_by_default_and_its_off_switch_is_LOUD(tmp_path):
 
 def test_launcher_prunes_with_no_flag_at_all(tmp_path):
     """Absence is ON — the flip itself. Fails if `${FLAG:-0}` comes back."""
-    import os
     root = _root(tmp_path)
     _sample(root)
     _backdate_all(root, days_old=40)
-    env = {k: v for k, v in os.environ.items() if k != "PLANE_PRUNE_ENABLED"}
-    env.update(CLAUDLOBBY_ROOT=str(root),
-               PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
+    env = _launcher_env(root)
+    env.pop("PLANE_PRUNE_ENABLED", None)
     r = subprocess.run(["bash", str(REPO / "lib" / "plane-prune.sh")],
                        capture_output=True, text=True, timeout=120, env=env)
     assert r.returncode == 0, r.stderr
     assert _counts(root)[0] == 0
+
+
+def _cli_further_down_path(tmp_path, monkeypatch, imports_from):
+    """The interpreter's own bin/ holds no CLI, so the launcher's PATH rung
+    falls through to one further down PATH that imports `imports_from`."""
+    import os
+    from tests.fixtures.venv_from_tree import venv_importing
+    bare = tmp_path / "bare" / "bin"
+    bare.mkdir(parents=True)
+    monkeypatch.setattr(sys, "executable", str(bare / "python"))
+    host_bin = venv_importing(tmp_path / "host", imports_from)
+    monkeypatch.setenv("PATH", f"{host_bin}:{os.environ['PATH']}")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    return host_bin / "claudlobby"
+
+
+def test_the_launcher_refuses_a_cli_on_path_that_imports_another_tree(
+        tmp_path, monkeypatch):
+    """#1316's second route: the launcher execs whatever its PATH rung finds.
+    From a bot session that was the host install, older than this tree, and
+    it refused the db this tree had just created (`plane.db user_version=12
+    is newer than this code`). The test now refuses before the launcher
+    runs, naming the CLI, and nothing is pruned."""
+    from tests.fixtures.venv_from_tree import tree
+    root = _root(tmp_path)
+    _sample(root)
+    _backdate_all(root, days_old=40)
+    cli = _cli_further_down_path(tmp_path, monkeypatch, tree(tmp_path / "other"))
+    with pytest.raises(NotTheTreeUnderTest) as refused:
+        _launcher(root, armed=True)
+    assert str(cli) in str(refused.value)
+    assert _counts(root)[0] == 1              # the launcher never ran
+
+
+def test_the_launcher_takes_a_cli_on_path_that_imports_this_tree(
+        tmp_path, monkeypatch):
+    """The control: the same fall-through, to a CLI that imports this tree."""
+    import shutil
+    cli = _cli_further_down_path(tmp_path, monkeypatch, REPO)
+    env = _launcher_env(_root(tmp_path))
+    assert shutil.which("claudlobby", path=env["PATH"]) == str(cli)
 
 
 def test_cli_negative_window_is_a_clean_refusal(tmp_path):

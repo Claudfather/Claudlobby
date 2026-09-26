@@ -353,8 +353,8 @@ until the probe was added.
 - **The compositor under test is asserted, not assumed.** An editable install of
   the same package is normally importable; if the subprocess resolved that
   instead, every arm would compose against a compositor of unknown vintage and
-  come back **green having tested nothing**. `_assert_compositor` refuses to run
-  in that case. The failure mode being a PASS is why it is checked.
+  come back **green having tested nothing**. `claudlobby.tree_guard.assert_imports_tree`
+  (this script's own check until #1316 shared it) refuses to run in that case. The failure mode being a PASS is why it is checked.
 - **Every negative has a positive control.** `guardrails` for the opt-out, a real
   declared skill for the wiring. A probe that has not found something known is
   not yet evidence.
