@@ -1,0 +1,61 @@
+name: native fixture proof
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/native-fixture-proof.yml
+      - tests/fixtures/native_fixture_proof.py
+      - tests/test_lib_common_tmpdir_fallback.py
+      - tests/test_claude_session_pid.py
+      - tests/test_fleet_pulse_no_events.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    name: fixture proof (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: '3.10'}
+          - {os: ubuntu-latest, python: '3.11'}
+          - {os: macos-latest, python: '3.11'}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Linux native utilities
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install macOS native prerequisites
+        if: runner.os == 'macOS'
+        run: |
+          command -v tmux || brew install tmux
+          command -v jq || brew install jq
+      - name: Verify proof controller without native fixture execution
+        run: python tests/fixtures/native_fixture_proof.py --self-check
+      - name: Exact parent, candidate and negative controls
+        # This helper refuses local/self-hosted execution. No fleet services,
+        # model clients, accounts or operator roots are needed by these tests.
+        env:
+          CLAUDLOBBY_NATIVE_FIXTURE_PROOF: '1'
+        run: python tests/fixtures/native_fixture_proof.py --output "$RUNNER_TEMP/native-fixture-proof"
+      - name: Preserve exact logs, results and cleanup observations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-fixture-proof-${{ matrix.os }}-py${{ matrix.python }}
+          path: ${{ runner.temp }}/native-fixture-proof/evidence
+          if-no-files-found: error
