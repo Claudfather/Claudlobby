@@ -1897,8 +1897,9 @@ def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
 def resolve_effective_skills(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
 ) -> list[str]:
-    """The skills a bot is ACTUALLY composed with: declared, plus every
-    ``requires.skills`` entry of its EFFECTIVE protocols (spec §10).
+    """The skills a bot is ACTUALLY composed with: declared, plus ``briefing``
+    when it equips a ``briefing:`` stanza, plus every ``requires.skills`` entry
+    of its EFFECTIVE protocols (spec §10).
 
     ONE definition, for the reason ``resolve_effective_protocols`` states two
     functions up: the compose path, the validator, freshbox and the plane's
@@ -1908,6 +1909,10 @@ def resolve_effective_skills(
     declared is not duplicated.
     """
     skills = list(bot.skills)
+    # The stanza's timers fire /briefing into the bot's own session; without the
+    # skill Claude Code rejects the command locally and the send reads OK (#1819).
+    if bot.briefing and bot.briefing.slots and "briefing" not in skills:
+        skills.append("briefing")
     protocol_names = resolve_effective_protocols(
         bot, fleet, paths, is_manager=is_manager
     )

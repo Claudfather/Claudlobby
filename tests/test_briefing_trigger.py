@@ -16,6 +16,7 @@ and the dispatched payload are captured to files the assertions read.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 TRIGGER = REPO / "lib" / "briefing-trigger.sh"
+LIB_COMMON = REPO / "lib" / "lib-common.sh"
 
 # Stub lib-common: every helper briefing-trigger.sh sources, reduced to a
 # controllable no-tmux shim. Return codes are driven by env so each test steers
@@ -58,11 +60,15 @@ exit "${STUB_DISPATCH_RC:-0}"
 
 
 def _run(
-    tmp_path: Path, *, env_extra: dict, bot_dir: bool = True
+    tmp_path: Path, *, env_extra: dict, bot_dir: bool = True, skill: bool = True
 ) -> tuple[int, str, str]:
     libdir = tmp_path / "lib"
     libdir.mkdir(exist_ok=True)
-    (libdir / "lib-common.sh").write_text(STUB_LIB_COMMON)
+    # The skill check is the REAL predicate, lifted from lib-common.sh.
+    real = re.search(
+        r"^session_command_status\(\) \{.*?^\}\n", LIB_COMMON.read_text(), re.S | re.M
+    )
+    (libdir / "lib-common.sh").write_text(STUB_LIB_COMMON + real.group(0))
     dispatch = libdir / "dispatch.sh"
     dispatch.write_text(STUB_DISPATCH)
     dispatch.chmod(0o755)
@@ -72,6 +78,11 @@ def _run(
     bots_dir.mkdir(exist_ok=True)
     if bot_dir:
         (bots_dir / "kev").mkdir(exist_ok=True)
+        if skill:
+            # The link generate composes for bots.<bot>.skills: [briefing].
+            (bots_dir / "kev" / ".claude" / "skills" / "briefing").mkdir(
+                parents=True, exist_ok=True
+            )
 
     env = {
         **os.environ,
@@ -182,3 +193,24 @@ def test_a_missing_bot_dir_is_noticed_once(tmp_path):
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     _assert_one_missed_notice(tmp_path, "bot_dir_absent")
+
+
+def test_refuses_and_fails_loud_when_the_briefing_skill_is_not_composed(tmp_path):
+    # #1819: see the check in briefing-trigger.sh.
+    rc, _out, err = _run(
+        tmp_path, env_extra={"STUB_SESSION_RC": "0", "STUB_BUSY_RC": "1"}, skill=False
+    )
+    assert rc != 0
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == ["briefing_failed"]
+    assert "no briefing skill composed" in err
+
+
+def test_a_skill_absent_refusal_is_noticed_once(tmp_path):
+    # A send refused for want of the skill is a terminal miss like the others:
+    # without the page, a lost link reads as silence until someone looks.
+    rc, _out, err = _run(
+        tmp_path, env_extra={"STUB_SESSION_RC": "0", "STUB_BUSY_RC": "1"}, skill=False
+    )
+    assert rc != 0, err
+    _assert_one_missed_notice(tmp_path, "skill_absent")
