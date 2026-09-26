@@ -37,7 +37,13 @@ and fleet artifacts, which a bot-directory-only snapshot would miss.
 Eleven injected-writer controls demonstrate refusal of new outputs across six
 domains and of added append, chmod, removal, mkdir and symlink operations. Seven
 boundary controls demonstrate refusal before outside-estate mutation, escaped
-links, unknown process execution and network connection. A new intentional
+links, unknown process execution and network connection. Sixteen additional
+controls emit socket/DNS audit events through the same registered recorder,
+including the sendto/sendmsg and resolver events a connection-only guard would
+miss. These controls invoke no networking APIs: they remain safe on the unfixed
+parent. The whole `socket.*` namespace is refused because generation has no
+valid socket use; explicit current alias and future-event probes prevent a
+partial allowlist from replacing that rule. A new intentional
 output requires review of this contract and its preview/rollout classification;
 updating a count alone is insufficient.
 
@@ -61,6 +67,10 @@ environment otherwise omits it. That shell's scratch creation/removal is
 outside Python's audit-event count; the final snapshot checks no residue.
 The environment query must return four private rows successfully. Refusals are
 retained even if a best-effort caller catches their exceptions.
+
+This is an audit-event boundary, not an operating-system network sandbox. In
+particular it does not instrument unaudited native operations or writes through
+preexisting descriptors. The controlled fixture supplies no connected sockets.
 
 This is test-only characterization. A valid existing parent passes it; injected
 writer changes fail. It adds no public diff report, runtime policy, production

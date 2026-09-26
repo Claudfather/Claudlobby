@@ -73,7 +73,12 @@ class Operations:
     def audit(self, event, args):
         if not self.active:
             return
-        if event == "open":
+        # Generate has no permitted socket use. Deny the entire namespace,
+        # including DNS, datagrams, socket creation and future entry points;
+        # connect/bind alone do not close outbound effects.
+        if event.startswith("socket."):
+            self.refuse(f"unexpected external effect: {event}")
+        elif event == "open":
             path, _mode, flags = args
             if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
                 self.note("append" if flags & os.O_APPEND else "write", path)
@@ -107,8 +112,7 @@ class Operations:
             if (not (tier or git) or child.get("HOME") != str(self.estate / "home")
                     or child.get("TMPDIR") != str(self.estate / "tmp")):
                 self.refuse(f"unexpected subprocess: {command}")
-        elif event in ("socket.connect", "socket.bind", "socket.getaddrinfo",
-                       "os.system", "os.posix_spawn", "os.exec", "os.fork",
+        elif event in ("os.system", "os.posix_spawn", "os.exec", "os.fork",
                        "os.forkpty", "pty.spawn"):
             self.refuse(f"unexpected external effect: {event}")
 
@@ -546,3 +550,39 @@ def test_recording_boundary_refuses_before_effect(estate, monkeypatch, effect):
     assert (outside.read_bytes(), outside.stat().st_mode) == before
     if effect == "link-target":
         assert not link.is_symlink()
+
+
+@pytest.mark.parametrize("event,args", [
+    ("socket.__new__", (object(), socket.AF_INET, socket.SOCK_DGRAM, 0)),
+    ("socket.bind", (object(), ("192.0.2.1", 9))),
+    ("socket.connect", (object(), ("192.0.2.1", 9))),
+    ("socket.getaddrinfo", ("example.invalid", 9, 0, 0, 0)),
+    ("socket.gethostbyaddr", ("192.0.2.1",)),
+    ("socket.gethostbyname", ("example.invalid",)),
+    ("socket.gethostname", ()),
+    ("socket.getnameinfo", (("192.0.2.1", 9), 0)),
+    ("socket.getservbyname", ("discard", "udp")),
+    ("socket.getservbyport", (9, "udp")),
+    ("socket.sendmsg", (object(), ("192.0.2.1", 9))),
+    ("socket.sendto", (object(), ("192.0.2.1", 9))),
+    ("socket.sethostname", (b"private-invalid",)),
+    # CPython currently reports connect_ex as socket.connect and
+    # gethostbyname_ex as socket.gethostbyname. These explicit alias/future
+    # events prove the boundary is a namespace rule, not today's short list.
+    ("socket.connect_ex", (object(), ("192.0.2.1", 9))),
+    ("socket.gethostbyname_ex", ("example.invalid",)),
+    ("socket.future_entrypoint", ()),
+], ids=lambda value: value if isinstance(value, str) else None)
+def test_socket_audit_namespace_is_closed(estate, monkeypatch, event, args):
+    """Exercise the registered inner hook without any socket or DNS request.
+
+    sys.audit dispatches the event; none of the represented APIs is called.
+    This remains safe when tested against the unfixed parent.
+    """
+    base, _, _, _ = estate
+    recorder = Operations(base)
+    with recorder.recording(monkeypatch):
+        with pytest.raises(AssertionError, match="unexpected external effect"):
+            sys.audit(event, *args)
+    assert recorder.refusals == [f"unexpected external effect: {event}"]
+    assert recorder.events == set()
