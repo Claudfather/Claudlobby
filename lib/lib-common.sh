@@ -341,29 +341,51 @@ fleet_claude_path() {
 measure_claude_version() {
     CLAUDE_VERSION=""
     CLAUDE_VERSION_WHY=""
-    local p out first said rc=0 re='[0-9]+\.[0-9]+\.[0-9]+' secs="${CLAUDE_VERSION_TIMEOUT_S:-10}"
+    local p out first said header helper_rc=0 rc=0 re='[0-9]+\.[0-9]+\.[0-9]+' secs="${CLAUDE_VERSION_TIMEOUT_S:-10}"
     if [ "$#" -gt 0 ]; then p="$1"; else p="$(fleet_claude_path)"; fi
     if [ -z "$p" ]; then
         CLAUDE_VERSION_WHY="no claude binary resolved"
         return 1
     fi
-    # Settled inside the substitution (|| exit) so install_error_trap never sees
-    # the failing binary. Unneeded on bash 5.2 (measured: callers are all `if`s,
-    # whose ERR suppression reaches in); kept for bash 3.2, unmeasured.
-    out="$(with_timeout "$secs" "$p" --version 2>/dev/null || exit $?)" || rc=$?
+    if ! command -v python3 >/dev/null 2>&1; then
+        CLAUDE_VERSION_WHY="version deadline requires python3; no probe started"
+        return 1
+    fi
+    # One portable path even without GNU timeout. The helper reports child
+    # exit status separately, so a child exit 124 cannot impersonate expiry.
+    # Keep helper failures inside the substitution for ERR-trap callers.
+    out="$(python3 "$_LIB_COMMON_DIR/command-deadline.py" "$secs" stdout "$p" --version 2>&1 || exit $?)" || helper_rc=$?
+    if [ "$helper_rc" -eq 124 ]; then
+        CLAUDE_VERSION_WHY="$p --version did not finish within ${secs}s"
+        return 1
+    fi
+    header="${out%%$'\n'*}"
+    if [ "$helper_rc" -ne 0 ] || ! [[ "$header" =~ ^exit\ [0-9]+$ ]]; then
+        CLAUDE_VERSION_WHY="version deadline helper failed: ${out:0:200}"
+        return 1
+    fi
+    rc="${header#exit }"
+    if [[ "$out" == *$'\n'* ]]; then out="${out#*$'\n'}"; else out=""; fi
     first="${out%%$'\n'*}"
     if [ "$rc" -eq 0 ] && [[ $first =~ $re ]]; then
         CLAUDE_VERSION="${BASH_REMATCH[0]}"
         return 0
     fi
-    if [ "$rc" -eq 124 ] && [ -n "$_TIMEOUT_BIN" ]; then
-        CLAUDE_VERSION_WHY="$p --version did not finish within ${secs}s"
-        return 1
-    fi
     # Could not measure: say why in the binary's own words. stderr is where a
     # binary that cannot run explains itself; the read above discards it so a
     # warning can never be parsed as the version.
-    said="$(with_timeout "$secs" "$p" --version 2>&1 || true)"
+    helper_rc=0
+    said="$(python3 "$_LIB_COMMON_DIR/command-deadline.py" "$secs" combined "$p" --version 2>&1 || exit $?)" || helper_rc=$?
+    if [ "$helper_rc" -eq 124 ]; then
+        CLAUDE_VERSION_WHY="$p --version diagnostic probe did not finish within ${secs}s"
+        return 1
+    fi
+    header="${said%%$'\n'*}"
+    if [ "$helper_rc" -ne 0 ] || ! [[ "$header" =~ ^exit\ [0-9]+$ ]]; then
+        CLAUDE_VERSION_WHY="version deadline helper failed: ${said:0:200}"
+        return 1
+    fi
+    if [[ "$said" == *$'\n'* ]]; then said="${said#*$'\n'}"; else said=""; fi
     said="${said%%$'\n'*}"
     if [ "$rc" -ne 0 ]; then
         CLAUDE_VERSION_WHY="$p --version exited $rc"
@@ -2078,7 +2100,7 @@ _session_candidate_dir() {
 # value (the composed MANAGER_TMUX_SOCKET field, however the caller read it),
 # else reverse-look it up from the peer's session name. The single home for the
 # "explicit field, else reverse-lookup" precedence shared by report-back,
-# sprint-trigger, fleet-pulse, evening-audit, and emit_failure_alert.
+# fleet-pulse, evening-audit, and emit_failure_alert.
 resolve_peer_socket() {
     local explicit="$1" session="$2" bots_dir="${3:-}"
     if [ -n "$explicit" ]; then
@@ -3310,7 +3332,7 @@ pane_is_idle() {
 
 # Base busy-detection regex — single source of truth for keepalive.sh
 # classify_pane and every "should I inject keystrokes?" consumer
-# (sprint-trigger, bot-sweep-cron). "esc to interrupt" is drawn during ANY
+# (bot-sweep-cron). "esc to interrupt" is drawn during ANY
 # active turn and is stable across Claude Code releases and
 # prefersReducedMotion; the churning verb lists (Thinking/Running/…) that
 # consumers previously grepped silently degrade on UI changes and must not
