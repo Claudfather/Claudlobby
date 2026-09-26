@@ -31,40 +31,63 @@ assert_eq() {
 
 . "$LIB_DIR/lib-common.sh"
 
+# Independent of GNU/BSD date syntax. Bracket the real helper call so crossing a
+# second, minute, midnight or zone transition cannot make a valid result fail.
+# Local subtraction is seven calendar days; UTC subtraction is seven UTC days.
+check_relative() {
+    local desc="$1" zone="$2" oracle_zone="$3" fmt="${4:-%Y-%m-%d}"
+    local before after got matches
+    before=$(python3 -c 'import time; print(time.time())')
+    if [ "$#" -eq 3 ]; then
+        got=$(TZ="$zone" date_relative "-7 days")
+    else
+        got=$(TZ="$zone" date_relative "-7 days" "$fmt")
+    fi
+    after=$(python3 -c 'import time; print(time.time())')
+    matches=$(python3 - "$before" "$after" "$oracle_zone" "$fmt" "$got" <<'PY'
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import sys
+
+before, after = (int(float(value)) for value in sys.argv[1:3])
+assert after >= before, "wall clock moved backwards during the check"
+zone = ZoneInfo(sys.argv[3])
+expected = {
+    (datetime.fromtimestamp(second, zone) - timedelta(days=7)).strftime(sys.argv[4])
+    for second in range(before, after + 1)
+}
+print("yes" if sys.argv[5] in expected else f"expected one of {sorted(expected)!r}; got {sys.argv[5]!r}")
+PY
+)
+    assert_eq "$desc" "yes" "$matches"
+}
+
 # Zones deliberately on BOTH sides of UTC. West-only would have passed against
 # the bug in the direction that merely over-retains.
 ZONES="Pacific/Auckland UTC America/New_York"
 
 echo "=== a Z format resolves to real UTC in every zone ==="
 for z in $ZONES; do
-    got=$(TZ="$z" date_relative "-7 days" "%Y-%m-%dT%H:%M:%SZ")
-    want=$(TZ="$z" date -u -d "-7 days" +%Y-%m-%dT%H:%M:%SZ)
-    assert_eq "TZ=$z Z-format equals true UTC" "$want" "$got"
+    check_relative "TZ=$z Z-format equals true UTC" "$z" UTC "%Y-%m-%dT%H:%M:%SZ"
 done
 
 echo "=== and the answer is the SAME instant regardless of zone ==="
 # The load-bearing property: retention must not depend on where the host sits.
-# Compared to the minute, since the three calls are seconds apart.
-ref=$(TZ=UTC date_relative "-7 days" "%Y-%m-%dT%H:%MZ")
+# Compare each call to its own UTC window, including a possible minute rollover.
 for z in $ZONES; do
-    got=$(TZ="$z" date_relative "-7 days" "%Y-%m-%dT%H:%MZ")
-    assert_eq "TZ=$z agrees with UTC to the minute" "$ref" "$got"
+    check_relative "TZ=$z agrees with UTC to the minute" "$z" UTC "%Y-%m-%dT%H:%MZ"
 done
 
 echo "=== a format WITHOUT Z is still local, unchanged ==="
 # The fix must not silently move every caller to UTC. finance-presync.sh asks
 # for a local calendar date and must keep getting one.
 for z in $ZONES; do
-    got=$(TZ="$z" date_relative "-7 days")
-    want=$(TZ="$z" date -d "-7 days" +%Y-%m-%d)
-    assert_eq "TZ=$z no-Z format stays local" "$want" "$got"
+    check_relative "TZ=$z no-Z format stays local" "$z" "$z"
 done
 
 echo "=== %Z is the zone NAME directive, not a UTC request ==="
 # The discriminator that stops the detection being a naive substring test.
-got=$(TZ=America/New_York date_relative "-7 days" "%Z")
-want=$(TZ=America/New_York date -d "-7 days" +%Z)
-assert_eq "%Z stays the local zone name" "$want" "$got"
+check_relative "%Z stays the local zone name" America/New_York America/New_York "%Z"
 
 # (rotate_jsonl_by_ts — the consumer that carried the defect into production —
 # went with the ledgers in the F18 closure; date_relative itself is pinned above.)
