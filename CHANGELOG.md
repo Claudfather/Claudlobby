@@ -14,8 +14,9 @@ only when `skills:` listed it too, though the schema doc, the skill and
 an unknown slash command locally, the input box still clears, and the send
 read as delivered. The stanza now links the skill (`resolve_effective_skills`),
 and `briefing-trigger.sh` refuses to send into a bot with no composed skill
-(`briefing_failed`, reason `skill_absent`, exit 1, and a stderr line), so a
-hand-built timer or a lost link fails loudly rather than silently.
+(`briefing_failed`, reason `skill_absent`, exit 1, a stderr line, and one
+`briefing_missed` FLEET NOTICE like any other missed slot), so a hand-built
+timer or a lost link fails loudly rather than silently.
 
 ### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
 

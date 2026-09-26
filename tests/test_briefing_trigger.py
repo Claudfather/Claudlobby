@@ -204,3 +204,13 @@ def test_refuses_and_fails_loud_when_the_briefing_skill_is_not_composed(tmp_path
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == ["briefing_failed"]
     assert "no briefing skill composed" in err
+
+
+def test_a_skill_absent_refusal_is_noticed_once(tmp_path):
+    # A send refused for want of the skill is a terminal miss like the others:
+    # without the page, a lost link reads as silence until someone looks.
+    rc, _out, err = _run(
+        tmp_path, env_extra={"STUB_SESSION_RC": "0", "STUB_BUSY_RC": "1"}, skill=False
+    )
+    assert rc != 0, err
+    _assert_one_missed_notice(tmp_path, "skill_absent")

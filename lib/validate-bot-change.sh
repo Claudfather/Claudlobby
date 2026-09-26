@@ -2605,6 +2605,10 @@ printf '%s' "$noskill_pane" | grep -q '/briefing' && _sent=yes || _sent=no
 { printf '%s' "$noskill_events" | grep -q '"type":"briefing_failed".*"reason":"skill_absent"' \
     && [ "$noskill_rc" -ne 0 ] && [ "$_sent" = no ]; } && r=yes || r=no
 harness_check "briefing refuses a bot with no composed skill: briefing_failed/skill_absent, nonzero, no dispatch" "$r"
+_n=$(printf '%s' "$missed_events" | grep -c "$BRIEFNOSKILL morning (skill_absent)" || true)
+{ [ "$_n" = 1 ] \
+    && printf '%s' "$mgr_pane" | grep -qF "[FLEET-NOTICE] briefing_missed: $BRIEFNOSKILL morning (skill_absent)"; } && r=yes || r=no
+harness_check "  ...and pages ONCE like any other terminal miss: one briefing_missed notice (skill_absent) in the manager pane" "$r"
 
 # ===========================================================================
 # #1002 — the boot window. A bot whose unit is mid-start has no tmux session

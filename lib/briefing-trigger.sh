@@ -57,6 +57,7 @@ if [ "$_skill_status" != available ]; then
     echo "$TS FAIL $BOT/$SLOT — no briefing skill composed: declare bots.$BOT.briefing and regenerate" \
         | tee -a "$LOG" >&2
     emit_fleet_event briefing_failed briefing "$(briefing_data skill_absent)" "$BOT_DIR" "$BOT"
+    missed skill_absent
     exit 1
 fi
 
