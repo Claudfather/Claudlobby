@@ -603,7 +603,7 @@ def _validate_bot_mcp(
     bot_name: str,
     bot: BotConfig,
     paths: Paths,
-    effective_env: dict[str, str],
+    effective_env: dict[str, str] | None,
     avail_mcp: set[str],
     report: ValidationReport,
 ) -> None:
@@ -643,9 +643,11 @@ def _validate_bot_mcp(
 
     # MCP env-contract check (warn) — uses the canonical instance-renamed
     # var names (the same names composer puts into the rendered
-    # `.mcp.json`), and looks across the full 3-tier env (host →
-    # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
-    # didn't know about instance scoping or bot-tier .env files.
+    # `.mcp.json`), across all four runtime .env tiers and explicit bot.env.
+    # An unavailable resolver is unknown, not missing credentials; the
+    # caller has already disclosed the skipped environment checks.
+    if effective_env is None:
+        return
     for req in _mcp_required_vars(bot, paths):
         if _env_has_value(effective_env, req.name):
             continue
@@ -887,7 +889,7 @@ def _validate_bot_tools(
     bot_name: str,
     bot: BotConfig,
     paths: Paths,
-    effective_env: dict[str, str],
+    effective_env: dict[str, str] | None,
     avail_tools: set[str],
     report: ValidationReport,
 ) -> None:
@@ -933,7 +935,7 @@ def _validate_bot_tools(
                 "or disable github_app for this bot"
             )
         for var in manifest.get("env") or []:
-            if not _env_has_value(effective_env, var):
+            if effective_env is not None and not _env_has_value(effective_env, var):
                 report.warnings.append(
                     f"bot '{bot_name}': tool '{tool_entry.name}' requires {var} but it's not set — "
                     f"add to a .env tier (script will fail at runtime)"
@@ -943,7 +945,7 @@ def _validate_bot_tools(
 def _validate_bot_credentials(
     bot_name: str,
     bot: BotConfig,
-    effective_env: dict[str, str],
+    effective_env: dict[str, str] | None,
     git_identity_problem: str | None,
     reverse_insteadof_problem: str | None,
     report: ValidationReport,
@@ -960,7 +962,8 @@ def _validate_bot_credentials(
     # .env, which is not a tier we inspect — so the check would false-alarm on
     # the documented default (#750).
     if (
-        bot.telegram.token_env
+        effective_env is not None
+        and bot.telegram.token_env
         and not bot.telegram.token_env_is_self_referential
         and not _env_has_value(effective_env, bot.telegram.token_env)
     ):
@@ -975,7 +978,7 @@ def _validate_bot_credentials(
     # like a permissions problem. A missing token is an operator gap, not a
     # composition error — warn and still generate.
     for org, env_name in sorted(bot.git_credentials.items()):
-        if not _env_has_value(effective_env, env_name):
+        if effective_env is not None and not _env_has_value(effective_env, env_name):
             report.warnings.append(
                 f"bot '{bot_name}': git_credentials['{org}'] names '{env_name}', "
                 f"not set in any tier of .env — the org helper answers with an "
@@ -1000,7 +1003,7 @@ def _validate_bot_credentials(
     app = bot.github_app
     if app:
         for var_name in GITHUB_APP_ENV_VARS:
-            if not _env_has_value(effective_env, var_name):
+            if effective_env is not None and not _env_has_value(effective_env, var_name):
                 report.warnings.append(
                     f"bot '{bot_name}': github_app routing requires {var_name}, "
                     f"not set in any tier of .env — the composed helper will "
@@ -1035,7 +1038,7 @@ def _validate_bot_credentials(
                 f"unknown'"
             )
         for shadow in ("GH_TOKEN", "GITHUB_TOKEN"):
-            if _env_has_value(effective_env, shadow):
+            if effective_env is not None and _env_has_value(effective_env, shadow):
                 report.warnings.append(
                     f"bot '{bot_name}': {shadow} is set in a .env tier while "
                     f"github_app is declared — the composed tools/gh shim "
@@ -1317,6 +1320,37 @@ def _validate_bot_autonomous_runner(
                 )
 
 
+def _bot_effective_env(
+    bot_name: str, bot: BotConfig, paths: Paths, report: ValidationReport
+) -> dict[str, str] | None:
+    """Resolve assignment presence for this bot's environment consumers.
+
+    The runtime door owns host → root → fleet → bot ordering. An ambient
+    value is only a fallback for a key no tier assigns, including empty
+    assignments. The session then sources bot.conf: explicit bot.env is
+    last, stringified like the composer. These checks only ask presence;
+    they neither execute values nor model path-anchor expansion.
+    """
+    from .env_tiers import ResolverUnavailable
+
+    try:
+        resolved = paths.env_resolved(bot_name=bot_name)
+    except ResolverUnavailable:
+        # Resolver stderr can contain arbitrary file content. Report the
+        # unavailable instrument without exposing values or pretending the
+        # old single-file reader is an authoritative fallback.
+        report.warnings.append(
+            f"bot '{bot_name}': environment checks unavailable — cannot resolve "
+            "the runtime .env tiers; restore lib/env-tiers.sh and its runtime "
+            "dependencies, then validate again (credential presence is unknown)"
+        )
+        return None
+    effective = dict(os.environ)
+    effective.update({name: item.value for name, item in resolved.items()})
+    effective.update({name: str(value) for name, value in bot.env.items()})
+    return effective
+
+
 def _validate_bots(
     fleet: FleetConfig,
     paths: Paths,
@@ -1358,8 +1392,7 @@ def _validate_bots(
     vault_resolutions: dict[str, bool] = {}
 
     for bot_name, bot in fleet.bots.items():
-        bot_env = dotenv.read(paths.bot_runtime(bot_name) / ".env")
-        effective_env: dict[str, str] = {**os.environ, **fleet_env, **bot_env}
+        effective_env = _bot_effective_env(bot_name, bot, paths, report)
 
         _validate_bot_sources(bot_name, bot, fleet, paths, report)
         _validate_bot_expertise_and_voice(bot_name, bot, paths, avail_expertise, report)

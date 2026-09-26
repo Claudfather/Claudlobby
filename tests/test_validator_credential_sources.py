@@ -75,6 +75,10 @@ def credential_paths(tmp_path: Path, monkeypatch) -> Paths:
         pytest.fail("credential validation must not launch a host/credential probe")
 
     monkeypatch.setattr(subprocess, "run", unexpected_probe)
+    # This source-registry fixture declares no env consumers or assignments.
+    # Pin the query result while retaining its ban on unrelated subprocesses;
+    # test_validator_env_cascade exercises the real runtime door separately.
+    monkeypatch.setattr(Paths, "env_resolved", lambda self, **kwargs: {})
     monkeypatch.setattr("claudlobby.validator.shutil.which", lambda name: None)
     (root / "library" / "expertise").mkdir(parents=True)
     (root / "library" / "expertise" / "engineering.md").write_text(

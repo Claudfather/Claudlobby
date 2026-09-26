@@ -1,4 +1,4 @@
-"""Ordered public reports preserved across the #1818 extraction and parent refreshes."""
+"""Ordered reports across parent refreshes; #1661 removes one false bot.env ID warning."""
 from __future__ import annotations
 
 import json
@@ -78,6 +78,10 @@ def test_real_overlay_and_effective_equipment_resolution(characterized):
         "skills": ["bundle/", "required-skill"], "integrations": ["bundle/"],
     }
     assert "sample" in actual["dense"]["equipment"]["first"]["integrations"]
+    # The explicit bot.conf override now satisfies the env consumer, but its
+    # independent App-topology warning remains part of the ordered report.
+    assert not any("routing requires GITHUB_APP_ID," in w for w in actual["dense"]["warnings"])
+    assert any("bot-tier env overrides GITHUB_APP_ID" in w for w in actual["dense"]["warnings"])
     assert "required-skill" in actual["dense"]["equipment"]["first"]["skills"]
     role_warnings = actual["roles"]["warnings"]
     assert any("bot 'first'" in w and "coordinator" in w for w in role_warnings)

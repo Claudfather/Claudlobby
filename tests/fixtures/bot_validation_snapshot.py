@@ -3,7 +3,7 @@
 Run each source revision in a fresh process against the same scratch path. Only
 unrelated network/ignition probes and operator host facts are pinned. Library,
 overlay, effective equipment, source/grant, dotenv and vault marker readers stay
-real. The fixture refuses subprocesses and checks its complete file inventory.
+real. The fixture permits only its private tier-query subprocess and checks its complete file inventory.
 """
 from __future__ import annotations
 
@@ -77,6 +77,12 @@ def _setup(root: Path):
         _write(base / f"library/tools/{name}/{target}.j2", "#!/bin/sh\nexit 0\n")
     _write(base / "library/tools/parameter/tool.yaml", "type: script\nparams:\n  required:\n    required: true\n")
     _write(base / "library/tools/parameter/parameter.sh.j2", "#!/bin/sh\nexit 0\n")
+    # Wire the real read-only tier query; the subprocess guard below permits
+    # only this private copy, with fixture-owned env and no live services.
+    lib = base / "lib"
+    lib.mkdir()
+    for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh"):
+        shutil.copy2(Path(__file__).resolve().parents[2] / "lib" / name, lib / name)
     _write(paths.env_file, "")
     (root / "home").mkdir()
     (root / "vault/shared").mkdir(parents=True)
@@ -209,6 +215,13 @@ def snapshot(source: Path, fixture_root: Path) -> dict:
             result = real_integrations(bot, *args, **kwargs)
             equipment.setdefault(bot.bot_id, {})["integrations"] = result
             return result
+        real_run = __import__("subprocess").run
+        def fixture_tier_query(args, *a, **kwargs):
+            assert args[:2] == ["bash", str(paths.lib / "env-tiers.sh")], args
+            assert kwargs["env"]["HOME"] == str(case_root / "home")
+            assert kwargs["env"]["CLAUDLOBBY_ROOT"] == str(paths.root)
+            assert kwargs["env"]["BOT_DIR"].startswith(str(paths.runtime_bots) + "/")
+            return real_run(args, *a, **kwargs)
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, env, clear=True))
             stack.enter_context(patch.object(validator, "shutil", SimpleNamespace(which=which)))
@@ -223,7 +236,7 @@ def snapshot(source: Path, fixture_root: Path) -> dict:
             for unrelated in ("_validate_mcp_packages", "_validate_ignition", "_validate_goal_binding"):
                 stack.enter_context(patch.object(validator, unrelated, lambda *a, **kw: None))
             stack.enter_context(patch("claudlobby.ignition.ignition_doors", return_value={}))
-            stack.enter_context(patch("subprocess.run", side_effect=AssertionError("unexpected external probe")))
+            stack.enter_context(patch("subprocess.run", side_effect=fixture_tier_query))
             if name.startswith("settings-"):
                 error = ValueError if name == "settings-value-error" else RuntimeError
                 stack.enter_context(patch.object(composer, "compose_settings_local", side_effect=error("fixture settings failure")))
