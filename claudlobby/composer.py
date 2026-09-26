@@ -1540,39 +1540,24 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
     Collisions (two source dirs with the same leaf) are first-wins; the
     second is logged and skipped.
     """
-    bot_skills_dir = paths.bot_runtime(bot.bot_id) / ".claude" / "skills"
-    if bot_skills_dir.exists():
-        for entry in bot_skills_dir.iterdir():
-            if entry.is_symlink():
-                entry.unlink()
-            elif entry.is_dir():
-                shutil.rmtree(entry)
-    bot_skills_dir.mkdir(parents=True, exist_ok=True)
+    from .link_plan import skill_link_plan
 
-    linked: dict[str, Path] = {}  # leaf name → source dir, for collision detection
+    _apply_link_plan(skill_link_plan(paths, bot.bot_id, skills), log, parents=True)
 
-    def _add(leaf: str, src: Path) -> None:
-        if leaf in linked:
-            log(f"  skill '{leaf}' already linked from {linked[leaf]} — skipping {src}")
-            return
-        linked[leaf] = src
-        (bot_skills_dir / leaf).symlink_to(src.resolve())
 
-    for skill in skills:
-        if skill.endswith("/"):
-            dir_name = skill.rstrip("/")
-            collected = paths.expand_skill_folder(dir_name)
-            if not collected:
-                log(f"  skill folder '{skill}' empty or missing — skipped")
-                continue
-            for leaf, src in collected.items():
-                _add(leaf, src)
-        else:
-            src = paths.find_library_dir("skills", skill)
-            if src is None:
-                log(f"  skill '{skill}' missing — skipped")
-                continue
-            _add(src.name, src)
+def _apply_link_plan(operations, log, *, parents: bool = False) -> None:
+    """Apply a link door's lazy plan; diff consumes it without calling this."""
+    for operation in operations:
+        if operation.message:
+            log(operation.message)
+        if operation.kind == "unlink":
+            operation.path.unlink()
+        elif operation.kind == "rmtree":
+            shutil.rmtree(operation.path)
+        elif operation.kind == "mkdir":
+            operation.path.mkdir(parents=parents, exist_ok=True)
+        elif operation.kind == "create":
+            operation.path.symlink_to(operation.target)
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -1582,41 +1567,9 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
     Symlinks are placed under bot_dir/mounts/<name>.
     Stale symlinks (removed from config) are cleaned up.
     """
-    mounts_dir = bot_dir / "mounts"
-    mounts_dir.mkdir(exist_ok=True)
+    from .link_plan import mount_link_plan
 
-    # Clean stale symlinks
-    for entry in mounts_dir.iterdir():
-        if entry.is_symlink() and entry.name not in bot.mounts:
-            entry.unlink()
-
-    for name, target in bot.mounts.items():
-        target_path = Path(target).expanduser()
-        try:
-            resolved = target_path.resolve()
-            if not resolved.is_relative_to(Path.home()) and not resolved.is_relative_to(
-                bot_dir
-            ):
-                log(
-                    f"  mount '{name}': target {target_path} escapes home and bot dir — skipping"
-                )
-                continue
-        except (ValueError, OSError):
-            log(f"  mount '{name}': could not resolve target {target_path} — skipping")
-            continue
-        link = mounts_dir / name
-        if link.is_symlink():
-            if link.resolve() == target_path.resolve():
-                continue  # already correct
-            link.unlink()
-        elif link.exists():
-            log(f"  mount '{name}': non-symlink already exists at {link} — skipping")
-            continue
-        if not target_path.exists():
-            log(
-                f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink"
-            )
-        link.symlink_to(target_path)
+    _apply_link_plan(mount_link_plan(bot.mounts, bot_dir), log)
 
 
 # ----------------------------------------------------------------------
@@ -4437,9 +4390,6 @@ def compose_fleet_timers(
     return timers_dir
 
 
-_HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-
-
 def compose_host_mention_allowlist(
     paths: Paths, *, output_dir: Path | None = None
 ) -> Path:
@@ -4466,25 +4416,14 @@ def compose_host_mention_allowlist(
     lib/mention-rewrite.py. Without that, someone eventually allowlists a bot's
     name meaning our bot and silently re-arms the original bug.
     """
-    names: set[str] = set()
-    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
-        manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():
-            continue
-        try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            continue
-        if isinstance(data, dict):
-            gh = (data.get("fleet") or {}).get("github") or {}
-            if isinstance(gh, dict):
-                names.update(gh.get("mention_allowlist") or [])
+    from .host_guard_lists import collect_host_guard_names, render_host_guard_names
+
+    names = collect_host_guard_names(paths, "mention-allowlist")
 
     base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
     base.mkdir(parents=True, exist_ok=True)
     target = base / "mention-allowlist"
-    safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
-    target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    target.write_text(render_host_guard_names(names), encoding="utf-8")
     return target
 
 
@@ -4511,33 +4450,14 @@ def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) ->
     nothing rather than raising: one fleet's broken config must not stop another
     fleet's generate. The cost is a narrower guard, which the hook reports.
     """
-    names: set[str] = set()
-    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
-        manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():  # a container or a non-fleet dir
-            continue
-        try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            # A sibling fleet's unreadable manifest must not stop this generate.
-            # Narrow ON PURPOSE: the first cut caught bare Exception, so a
-            # missing `import yaml` raised NameError on EVERY fleet and was
-            # swallowed as "all four manifests are broken" — the guard composed
-            # an empty list and would have protected nothing, silently.
-            continue
-        if isinstance(data, dict):
-            names.update((data.get("fleet") or {}).get("bots") or {})
+    from .host_guard_lists import collect_host_guard_names, render_host_guard_names
+
+    names = collect_host_guard_names(paths, "bot-handles")
+
     base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
     base.mkdir(parents=True, exist_ok=True)
     target = base / "bot-handles"
-    # Only names safe to drop into the hook's regex alternation. Deliberately
-    # NOT SHELL_IDENT_RE, which forbids hyphens — `worker-1` is a real bot name
-    # shape (fleet.yaml.example uses it), and excluding it would leave exactly
-    # those bots unguarded while looking covered. This charset carries no regex
-    # metacharacters, and matches the hook's own `grep -Ex` filter so the two
-    # cannot disagree about which names are admissible.
-    safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
-    target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    target.write_text(render_host_guard_names(names), encoding="utf-8")
     return target
 
 
