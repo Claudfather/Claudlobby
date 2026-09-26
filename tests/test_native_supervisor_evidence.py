@@ -1,5 +1,6 @@
 """Falsify the native evidence controller without starting a native service."""
 import os
+import hashlib
 from copy import deepcopy
 from pathlib import Path
 import shutil
@@ -163,3 +164,31 @@ def test_launchd_preservation_rejects_persistent_changes(mutation, expected):
         del after["registrations"]["guard"]
     with pytest.raises(AssertionError, match=expected):
         native.verify_launchd_preservation(before, after)
+
+
+def test_macos_agent_labels_use_native_parser_and_preserve_original_bytes(tmp_path, monkeypatch):
+    raw = b"<?xml version=1.0?><plist><dict><key>Label</key><string>guard</string></dict></plist>"
+    path = tmp_path / "guard.plist"
+    path.write_bytes(raw)
+    monkeypatch.setattr(native.platform, "system", lambda: "Darwin")
+    calls = []
+
+    def native_read(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "guard\n", "")
+
+    monkeypatch.setattr(native.subprocess, "run", native_read)
+    snapshot = native.persistent_launch_agents([tmp_path])
+    assert snapshot == {"files": {str(path): hashlib.sha256(raw).hexdigest()}, "labels": ["guard"]}
+    assert calls == [["/usr/bin/plutil", "-extract", "Label", "raw", "-expect", "string", "-o", "-", str(path)]]
+    assert path.read_bytes() == raw
+
+
+def test_native_plist_parse_failure_names_the_file_instead_of_skipping(tmp_path, monkeypatch):
+    path = tmp_path / "broken.plist"
+    path.write_text("broken")
+    monkeypatch.setattr(native.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(native.subprocess, "run", lambda argv, **kwargs:
+                        subprocess.CompletedProcess(argv, 1, "", "parse rejected"))
+    with pytest.raises(AssertionError, match="broken.plist: native plist Label read failed: parse rejected"):
+        native.persistent_launch_agents([tmp_path])

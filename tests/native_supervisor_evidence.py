@@ -191,7 +191,21 @@ def persistent_launch_agents(directories: list[Path]) -> dict:
         for path in directory.glob('*.plist'):
             raw = path.read_bytes()
             files[str(path)] = hashlib.sha256(raw).hexdigest()
-            label = plistlib.loads(raw).get('Label')
+            if platform.system() == 'Darwin':
+                # launchd consumes the platform plist grammar. Some shipped
+                # agent files use declarations Python's XML parser rejects.
+                # Keep hashing their original bytes; never rewrite/skip them.
+                probe = subprocess.run(
+                    ['/usr/bin/plutil', '-extract', 'Label', 'raw', '-expect', 'string', '-o', '-', str(path)],
+                    text=True, capture_output=True, timeout=10)
+                assert probe.returncode == 0, f'{path}: native plist Label read failed: {probe.stderr or probe.stdout}'
+                label = probe.stdout.strip()
+                assert label, f'{path}: native plist Label is empty'
+            else:
+                try:
+                    label = plistlib.loads(raw).get('Label')
+                except Exception as error:
+                    raise ValueError(f'{path}: cannot read launch-agent Label') from error
             if isinstance(label, str):
                 labels.add(label)
     return {'files': files, 'labels': sorted(labels)}
