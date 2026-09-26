@@ -15,8 +15,9 @@
 # their bodies in and turns them into thin wrappers), and spin-down-bot.sh's
 # supervision leg (svc_disenroll) — not reinvented here.
 #
-# In THIS PR no existing call site migrates onto these verbs (PR B does the
-# boot path). This file exists, is sourced, and is contract-tested
+# keepalive.sh and spin-up/down-bot.sh use the action verbs below. Readers
+# and installer bodies retain their separate contracts under #1607. The
+# adapter is sourced and contract-tested
 # (tests/test_supervisor_adapter.sh) against fake systemctl/launchctl
 # binaries. tests/test_supervisor_ratchet.py fences every OTHER lib/ file's
 # direct systemctl/launchctl calls at their current count — this file is the
@@ -29,10 +30,10 @@
 #   svc_is_registered <bot_dir>   — rc 0/1: is a unit/plist installed.
 #   svc_state <bot_dir>           — prints loaded-active | loaded-inactive |
 #                                    not-loaded | unknown.
-#   svc_kick <bot_dir>            — restart/kickstart; rc 2 if no branch
-#                                    applies (caller falls back to
-#                                    start-bot.sh itself — this file never
-#                                    does, so it stays a pure mechanism).
+#   svc_kick <bot_dir> [...]      — restart/kickstart; SVC_KICK_SELECTED=0
+#                                    and rc 2 if no branch applies. A selected
+#                                    action preserves native status (also 2).
+#                                    The caller owns a no-target fallback.
 #   svc_enroll <bot_dir>          — installs + starts the composed unit.
 #   svc_disenroll <bot_dir>       — removes supervision + the tmux server the
 #                                    unit/plist cannot hook.
@@ -46,10 +47,9 @@
 # $( ), printf '%s' for values, and every probing external call guarded with
 # `|| true` where "not found" is a state, not an error — mirroring exactly
 # which calls carry that guard in the source they were moved from. Action
-# calls (the actual restart / enroll) are left unguarded, exactly as
-# keepalive.sh's restart ladder leaves them, so a genuine failure still
-# propagates under the caller's set -euo pipefail rather than being silently
-# swallowed.
+# calls preserve their own status explicitly. Callers capture it to distinguish
+# selection from failure, then restore their unguarded ERR/errexit boundary;
+# capture must never turn a failed action into a second startup attempt.
 #
 # svc_enroll's sibling-script lookup is deliberately NOT $CLAUDLOBBY_ROOT/lib
 # (see the comment beside this file's own source line in lib-common.sh for
@@ -186,43 +186,44 @@ EOF
     return 0
 }
 
-# svc_kick <bot_dir>
-# The restart ladder moved verbatim from keepalive.sh's restart_bot_service:
-# BOT_SERVICE-named systemd unit, else the pre-rename BOT_NAME.service, else
-# launchd kickstart. Prints one line describing what it did (for the
-# caller's own log — this file owns no log of its own), THEN PROPAGATES the
-# restart/kickstart command's own exit status — never a hardcoded 0.
-# restart_bot_service propagated this for free (no `return` of its own, so
-# bash returns the last command's status); a bare `return 0` here would
-# silently read a FAILED restart as success inside a caller's
-# `if svc_kick ...`, and PR B's caller (rc 2 -> fall back to start-bot.sh)
-# would never see the failure to fall back from. rc 2 stays reserved for "no
-# branch applies" — nothing was invoked — so the caller falls back to
-# start-bot.sh exactly as restart_bot_service's own final branch does; that
-# fallback is NOT moved here; it stays the caller's decision (PR B migrates
-# the caller).
+# svc_kick <bot_dir> [before_action_function [loaded_service [loaded_name]]]
+# Resolve once, then announce before acting. With a callback, it owns output;
+# without one, preserve the original printed-description contract. Explicit
+# identity arguments are snapshots sourced by the caller, including an empty
+# value. The one-argument API retains bot_conf_get parsing for direct users.
+# SVC_KICK_SELECTED is a SAME-SHELL result: 0 means no target (rc 2), while 1
+# means a target was selected, even if the callback or native command failed.
+# In particular native rc 2 must never license an extra start-bot fallback.
 svc_kick() {
     local bot_dir="${1:?Usage: svc_kick <bot_dir>}"
-    local bot_service bot_name rc
-    bot_service="$(bot_conf_get "$bot_dir" BOT_SERVICE "")"
-    bot_name="$(bot_conf_get "$bot_dir" BOT_NAME "")"
+    local before_action="${2:-}" bot_service bot_name desc target kind rc
+    SVC_KICK_SELECTED=0
+    if [ "$#" -ge 3 ]; then bot_service="$3"; else bot_service="$(bot_conf_get "$bot_dir" BOT_SERVICE "")"; fi
+    if [ "$#" -ge 4 ]; then bot_name="$4"; else bot_name="$(bot_conf_get "$bot_dir" BOT_NAME "")"; fi
     if [ "$_OS" = "Linux" ] && [ -n "$bot_service" ] && [ -f "$HOME/.config/systemd/user/$bot_service.service" ]; then
-        printf 'systemctl --user restart %s\n' "$bot_service"
-        rc=0
-        systemctl --user restart "$bot_service.service" || rc=$?
-        return "$rc"
-    elif [ "$_OS" = "Linux" ] && [ -n "$bot_name" ] && [ -f "$HOME/.config/systemd/user/$bot_name.service" ]; then
-        printf 'systemctl --user restart %s (pre-rename)\n' "$bot_name"
-        rc=0
-        systemctl --user restart "$bot_name.service" || rc=$?
-        return "$rc"
+        desc="systemctl --user restart $bot_service"
+        target="$bot_service.service"; kind=systemd
+    elif [ "$_OS" = "Linux" ] && { [ "$#" -ge 4 ] || [ -n "$bot_name" ]; } && [ -f "$HOME/.config/systemd/user/$bot_name.service" ]; then
+        desc="systemctl --user restart $bot_name (pre-rename)"
+        target="$bot_name.service"; kind=systemd
     elif [ "$_OS" = "Darwin" ] && [ -n "$bot_service" ] && [ -f "$HOME/Library/LaunchAgents/$bot_service.plist" ]; then
-        printf 'launchctl kickstart %s\n' "$bot_service"
-        rc=0
-        launchctl kickstart -k "gui/$(id -u)/$bot_service" || rc=$?
-        return "$rc"
+        desc="launchctl kickstart $bot_service"
+        target="gui/$(id -u)/$bot_service"; kind=launchd
+    else
+        return 2
     fi
-    return 2
+    SVC_KICK_SELECTED=1
+    if [ -n "$before_action" ]; then
+        "$before_action" "$desc" || return $?
+    else
+        printf '%s\n' "$desc" || return $?
+    fi
+    rc=0
+    case "$kind" in
+        systemd) systemctl --user restart "$target" || rc=$? ;;
+        launchd) launchctl kickstart -k "$target" || rc=$? ;;
+    esac
+    return "$rc"
 }
 
 # svc_enroll <bot_dir>
@@ -244,58 +245,59 @@ svc_enroll() {
     esac
 }
 
-# svc_disenroll <bot_dir>
-# Moved from spin-down-bot.sh's reap_supervision + reap_tmux legs (Linux:
-# disable --now, daemon-reload, reset-failed, remove the installed unit;
-# Darwin: bootout + remove the plist — bare `launchctl`, not spin-down-bot.sh's
-# absolute /bin/launchctl: the same target, the same action, resolved through
-# PATH like every other verb here so the whole adapter's external calls are
-# uniformly fakeable, matching keepalive.sh's own kickstart spelling). BOTH
-# branches then run the teardown a unit/plist cannot hook — killing the
-# bot's private tmux server and dropping .tmux-env — unconditionally, because
-# that leg is OS-independent in the source it was moved from (on Linux the
-# unit's own ExecStop already did it; repeating it is idempotent). An
-# unrecognized OS skips the supervision leg (nothing to invoke) but still
-# runs the OS-independent tmux teardown, exactly as spin-down-bot.sh's own
-# `case "$_OS" in ... *) skip ;; esac` falls through to its next leg rather
-# than aborting. Resolves BOT_SERVICE only -- no BOT_NAME pre-rename fallback
-# the way svc_unit_name/svc_kick have one -- because spin-down-bot.sh's own
-# reap_supervision never had one either; this is a move, not a gap, and PR B
-# may decide to add one.
+# svc_disenroll <bot_dir> [log_function [loaded_service [launchctl_command]]]
+# Supervision first, then the OS-independent private tmux teardown. No legacy
+# BOT_NAME fallback: spin-down never had one. A callback receives the existing
+# spin-down log text; absent a callback, preserve the adapter diagnostic voice.
+# The production reaper passes /bin/launchctl explicitly, preserving its binary
+# resolution. The optional command only scopes direct contract-test invocations;
+# there is no host-global binary override.
 svc_disenroll() {
     local bot_dir="${1:?Usage: svc_disenroll <bot_dir>}"
-    local label
-    label="$(bot_conf_get "$bot_dir" BOT_SERVICE "")"
-    case "$_OS" in
-        Linux)
-            if [ -n "$label" ]; then
+    local logger="${2:-}" label launchctl_command="${4:-launchctl}" message
+    if [ "$#" -ge 3 ]; then label="$3"; else label="$(bot_conf_get "$bot_dir" BOT_SERVICE "")"; fi
+    if [ -z "$label" ]; then
+        if [ -n "$logger" ]; then
+            "$logger" "BOT_SERVICE unset — no supervised unit to remove" || return $?
+        else
+            case "$_OS" in
+                Linux) printf 'svc_disenroll: BOT_SERVICE unset for %s -- no supervised unit to remove\n' "$bot_dir" ;;
+                Darwin) printf 'svc_disenroll: BOT_SERVICE unset for %s -- no supervised agent to remove\n' "$bot_dir" ;;
+                *) printf 'svc_disenroll: unsupported OS (%s) -- skipping supervision leg\n' "$_OS" >&2 ;;
+            esac
+        fi
+    else
+        case "$_OS" in
+            Linux)
                 local ud="$HOME/.config/systemd/user"
                 systemctl --user disable --now "$label.service" 2>/dev/null || true
                 rm -f "$ud/$label.service" "$ud/default.target.wants/$label.service"
                 systemctl --user daemon-reload 2>/dev/null || true
                 systemctl --user reset-failed "$label.service" 2>/dev/null || true
-                printf 'systemd user unit %s.service stopped + disabled + removed\n' "$label"
-            else
-                printf 'svc_disenroll: BOT_SERVICE unset for %s -- no supervised unit to remove\n' "$bot_dir"
-            fi
-            ;;
-        Darwin)
-            if [ -n "$label" ]; then
-                launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+                message="systemd user unit $label.service stopped + disabled + removed"
+                ;;
+            Darwin)
+                "$launchctl_command" bootout "gui/$(id -u)/$label" 2>/dev/null || true
                 rm -f "$HOME/Library/LaunchAgents/$label.plist"
-                printf 'launchd agent %s booted out + plist removed\n' "$label"
-            else
-                printf 'svc_disenroll: BOT_SERVICE unset for %s -- no supervised agent to remove\n' "$bot_dir"
-            fi
-            ;;
-        *)
+                message="launchd agent $label booted out + plist removed"
+                ;;
+            *) message="unsupported OS ($_OS) — skipping supervision leg" ;;
+        esac
+        if [ -n "$logger" ]; then
+            "$logger" "$message" || return $?
+        elif [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; then
+            printf '%s\n' "$message"
+        else
             printf 'svc_disenroll: unsupported OS (%s) -- skipping supervision leg\n' "$_OS" >&2
-            ;;
-    esac
+        fi
+    fi
     local sock
     sock="$(tmux_socket_for_bot "$bot_dir" 2>/dev/null)" || sock=""
     if [ -n "$sock" ]; then
         bot_tmux "$sock" kill-server 2>/dev/null || true
+        [ -z "$logger" ] || "$logger" "tmux server -L $sock killed" || return $?
+    else
+        [ -z "$logger" ] || "$logger" "no resolvable tmux socket — skipping tmux leg" || return $?
     fi
     rm -f "$bot_dir/.tmux-env" 2>/dev/null || true
     return 0

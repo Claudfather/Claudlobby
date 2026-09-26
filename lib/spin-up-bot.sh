@@ -25,48 +25,48 @@ BOT_DIR="$(cd "$BOT_DIR" && pwd)"
 load_bot_conf "$BOT_DIR" || exit 1
 install_error_trap "$BOT_DIR"
 
-case "$_OS" in
-Linux)
-    # BOT_SERVICE is the canonical unit name (set by compositor in bot.conf).
-    # Fall back to BOT_NAME for fleets that haven't regenerated yet.
-    UNIT_DIR="$HOME/.config/systemd/user"
-    if [ -n "${BOT_SERVICE:-}" ] && [ -f "$UNIT_DIR/$BOT_SERVICE.service" ]; then
-        echo "spin-up-bot: $BOT_SERVICE.service exists — restarting"
-        systemctl --user restart "$BOT_SERVICE.service"
-    elif [ -f "$UNIT_DIR/$BOT_NAME.service" ]; then
-        # Pre-rename unit still installed. Restart it if the new unit file
-        # doesn't exist yet (fleet not regenerated); otherwise re-enroll
-        # to migrate to the new name.
-        if [ -n "${BOT_SERVICE:-}" ] && [ -f "$BOT_DIR/$BOT_SERVICE.service" ]; then
-            echo "spin-up-bot: migrating $BOT_NAME → $BOT_SERVICE"
-            "$LIB_DIR/install-bot-systemd.sh" "$BOT_DIR"
-        else
-            echo "spin-up-bot: $BOT_NAME.service exists (pre-rename) — restarting"
-            systemctl --user restart "$BOT_NAME.service"
-        fi
-    else
-        # install-bot-systemd.sh handles stale unit cleanup + fresh install.
+_spin_up_before_restart() {
+    case "$1" in
+        *" (pre-rename)") echo "spin-up-bot: $BOT_NAME.service exists (pre-rename) — restarting" ;;
+        "systemctl "*) echo "spin-up-bot: $BOT_SERVICE.service exists — restarting" ;;
+        *) echo "spin-up-bot: $BOT_SERVICE.plist exists — kickstart" ;;
+    esac
+}
+
+_spin_up_bot() {
+    local rc=0
+    case "$_OS" in
+        Linux)
+            # A regenerated canonical file migrates an installed legacy unit.
+            # Keep this caller policy separate from the adapter restart ladder.
+            local unit_dir="$HOME/.config/systemd/user"
+            if [ -n "${BOT_SERVICE:-}" ] && [ ! -f "$unit_dir/$BOT_SERVICE.service" ] &&
+                [ -f "$unit_dir/$BOT_NAME.service" ] && [ -f "$BOT_DIR/$BOT_SERVICE.service" ]; then
+                echo "spin-up-bot: migrating $BOT_NAME → $BOT_SERVICE"
+                svc_enroll "$BOT_DIR"
+                return
+            fi
+            ;;
+        Darwin) ;;
+        *)
+            echo "spin-up-bot: unsupported host ($_OS) — falling back to start-bot.sh"
+            echo "spin-up-bot: install cron-tmux supervision separately if you want auto-restart"
+            "$LIB_DIR/start-bot.sh" "$BOT_DIR"
+            return
+            ;;
+    esac
+    svc_kick "$BOT_DIR" _spin_up_before_restart "${BOT_SERVICE:-}" "$BOT_NAME" || rc=$?
+    if [ "$SVC_KICK_SELECTED" -eq 1 ]; then
+        # Let an unguarded function return restore the existing ERR trap;
+        # selected native rc 2 is failure, never an enrollment fallback.
+        return "$rc"
+    fi
+    if [ "$_OS" = Linux ]; then
         echo "spin-up-bot: enrolling $BOT_NAME as systemd-user service"
-        "$LIB_DIR/install-bot-systemd.sh" "$BOT_DIR"
-    fi
-    ;;
-Darwin)
-    if [ -n "${BOT_SERVICE:-}" ]; then
-        PLIST_FILE="$HOME/Library/LaunchAgents/$BOT_SERVICE.plist"
-    else
-        PLIST_FILE=""
-    fi
-    if [ -n "$PLIST_FILE" ] && [ -f "$PLIST_FILE" ]; then
-        echo "spin-up-bot: $BOT_SERVICE.plist exists — kickstart"
-        launchctl kickstart -k "gui/$(id -u)/$BOT_SERVICE"
     else
         echo "spin-up-bot: enrolling $BOT_NAME as launchd LaunchAgent"
-        "$LIB_DIR/install-bot.sh" "$BOT_DIR"
     fi
-    ;;
-*)
-    echo "spin-up-bot: unsupported host ($_OS) — falling back to start-bot.sh"
-    echo "spin-up-bot: install cron-tmux supervision separately if you want auto-restart"
-    "$LIB_DIR/start-bot.sh" "$BOT_DIR"
-    ;;
-esac
+    svc_enroll "$BOT_DIR"
+}
+
+_spin_up_bot
