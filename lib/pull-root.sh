@@ -66,7 +66,7 @@ setup_log_dir "$LOG"
 log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
 
 OUTCOME="" FROM="" TO="" TARGET="" BEHIND=0 LIB_N=0 CL_CHANGED=false
-MIGRATIONS="" UV_BEFORE="" UV_AFTER="" RESTARTED="" HOLD="" BLOCKER=""
+MIGRATIONS="" UV_BEFORE="" UV_AFTER="" RESTARTED="" RESTART_CHECK="" HOLD="" BLOCKER=""
 VERDICT="" FINDINGS=""
 
 # The ONE plane record of this run. emit_fleet_event with no fleet in the
@@ -74,9 +74,9 @@ VERDICT="" FINDINGS=""
 record() {
     [ "$DRY_RUN" -eq 1 ] && return 0
     local data
-    data=$(printf '{"outcome":"%s","from":"%s","to":"%s","target":"%s","behind":%s,"lib_files":%s,"claudlobby_changed":%s,"migrations":"%s","user_version_before":"%s","user_version_after":"%s","restarted":"%s","hold":"%s","blocker":"%s","watch":"%s","findings":"%s"}' \
+    data=$(printf '{"outcome":"%s","from":"%s","to":"%s","target":"%s","behind":%s,"lib_files":%s,"claudlobby_changed":%s,"migrations":"%s","user_version_before":"%s","user_version_after":"%s","restarted":"%s","restart_check":"%s","hold":"%s","blocker":"%s","watch":"%s","findings":"%s"}' \
         "$(json_escape "$OUTCOME")" "$FROM" "$TO" "$(json_escape "$TARGET")" "${BEHIND:-0}" "${LIB_N:-0}" \
-        "$CL_CHANGED" "$(json_escape "$MIGRATIONS")" "$UV_BEFORE" "$UV_AFTER" "$(json_escape "$RESTARTED")" \
+        "$CL_CHANGED" "$(json_escape "$MIGRATIONS")" "$UV_BEFORE" "$UV_AFTER" "$(json_escape "$RESTARTED")" "$(json_escape "$RESTART_CHECK")" \
         "$(json_escape "$HOLD")" "$(json_escape "$BLOCKER")" "$VERDICT" "$(json_escape "$FINDINGS")")
     emit_fleet_event source_pull pull-root "$data" "" || true
     log "RECORD outcome=$OUTCOME from=$FROM to=$TO watch=$VERDICT findings=${FINDINGS:-none}"
@@ -166,7 +166,8 @@ fi
 
 BLOCKER=$(repo_pull_blocker "$ROOT")
 if [ -n "$BLOCKER" ]; then
-    paths=$(git -C "$ROOT" status --porcelain | awk 'NR <= 5 { print $NF }' | paste -sd, -)
+    paths=$(git -C "$ROOT" status --porcelain \
+        | awk 'NR <= 5 { print $NF } END { if (NR > 5) print "+" NR - 5 " more" }' | paste -sd, -)
     BLOCKER="$BLOCKER: ${paths:-?}"
     OUTCOME=blocked
     log "BLOCKED ($BLOCKER) — $BEHIND behind $TARGET, not pulling"
@@ -194,19 +195,25 @@ done
 T_PRE=$(iso_ago "$WATCH_S")
 for f in ${FLEETS[@]+"${FLEETS[@]}"}; do
     python3 "$LIB_DIR/plane-lookup.py" --escalation --since "$T_PRE" --fleet "$f" --root "$ROOT" \
-        > "$RUN_DIR/pre.$f" 2>>"$LOG" || : > "$RUN_DIR/pre.$f"
+        > "$RUN_DIR/pre.$f" 2>>"$LOG" || {
+        : > "$RUN_DIR/pre.$f"
+        FINDINGS="${FINDINGS}$f: the pre-pull critical events could not be read, so a critical below may predate the pull; "
+    }
 done
 UV_BEFORE=$(user_version)
 
 T0=$(iso_ago 0)
 # The two windows, for whoever reads this run later (and the tests).
 printf '%s %s\n' "$T_PRE" "$T0" > "$RUN_DIR/window"
-if ! git -C "$ROOT" merge --ff-only "$TARGET" >>"$LOG" 2>&1; then
+if ! git -C "$ROOT" merge --ff-only "$TARGET" > "$RUN_DIR/merge.out" 2>&1; then
+    cat "$RUN_DIR/merge.out" >> "$LOG"
     OUTCOME=ff_failed
-    log "FF FAILED — $FROM could not fast-forward to $TARGET"
-    notice source_pull_failed "$TARGET" "claudlobby root on $(hostname) could not fast-forward $FROM to $TARGET (diverged) -- a human has to look: git -C $ROOT status"
+    why=$(awk 'NF { print; exit }' "$RUN_DIR/merge.out")
+    log "FF FAILED — $FROM could not fast-forward to $TARGET: $why"
+    notice source_pull_failed "$TARGET" "claudlobby root on $(hostname) could not fast-forward $FROM to $TARGET: ${why:-git gave no reason} -- a human has to look: git -C $ROOT status"
     record; exit 0
 fi
+cat "$RUN_DIR/merge.out" >> "$LOG"
 TO=$(git -C "$ROOT" rev-parse --short HEAD)
 OUTCOME=pulled
 log "PULLED $FROM -> $TO ($BEHIND commit(s), lib files $LIB_N, claudlobby/ changed $CL_CHANGED, migrations ${MIGRATIONS:-none})"
@@ -272,6 +279,28 @@ for bot in json.load(open(sys.argv[3])).get("bots", []):
     else
         FINDINGS="${FINDINGS}$f: heartbeats could not be read; "
     fi
+done
+# The restarts, judged by what the supervisor reports after the watch -- never
+# by svc_restart_host's rc: systemctl returns 0 for a unit that dies a second
+# later (measured in the #1883 review: rc 0, then NRestarts 0 -> 1 -> 2). A
+# restarted unit is healthy only as active/running with NO restart by systemd
+# since ours, which zeroed the counter (service_is_crash_looping, #1769). A
+# supervisor that cannot say (launchd has no cheap counter) is recorded as
+# not verified, never as healthy.
+for unit in $RESTARTED; do
+    service_is_crash_looping "$unit" || true
+    case "$CRASH_LOOP_VERDICT" in
+    unknown) RESTART_CHECK="${RESTART_CHECK:+$RESTART_CHECK }$unit:not-verified" ;;
+    none) FINDINGS="${FINDINGS}$unit could not be judged after the restart (${CRASH_LOOP_STATE:-no state read}); " ;;
+    over) FINDINGS="${FINDINGS}$unit is $CRASH_LOOP_STATE after the restart; " ;;
+    *)
+        if [ "$CRASH_LOOP_STATE" = active/running ] && [ "$CRASH_LOOP_RESTARTS" -eq 0 ]; then
+            RESTART_CHECK="${RESTART_CHECK:+$RESTART_CHECK }$unit:active"
+        else
+            FINDINGS="${FINDINGS}$unit is $CRASH_LOOP_STATE, restarted $CRASH_LOOP_RESTARTS time(s) by systemd since the pull; "
+        fi
+        ;;
+    esac
 done
 UV_AFTER=$(user_version)
 

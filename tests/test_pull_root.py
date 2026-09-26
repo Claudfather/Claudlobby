@@ -32,8 +32,13 @@ if "--escalation" in sys.argv:
     n = int(open(calls).read()) if os.path.exists(calls) else 0
     open(calls, "w").write(str(n + 1))
     name = "esc_pre" if n == 0 else "esc_post"
+    # A read that cannot reach the plane refuses at rc 3, as the real door does.
+    if os.path.exists(os.path.join(stub, "fail_pre" if n == 0 else "fail_post")):
+        sys.exit(3)
 elif "script_error" in sys.argv:
     name = "errors"
+    if os.path.exists(os.path.join(stub, "fail_post")):
+        sys.exit(3)
 else:
     sys.exit(0)
 path = os.path.join(stub, name)
@@ -41,11 +46,23 @@ if os.path.exists(path):
     sys.stdout.write(open(path).read())
 """
 
+# `systemctl` stub: `show` answers as systemd does (Key=Value, a settled unit by
+# default); anything else is logged and returns systemctl.rc (default 0).
+SYSTEMCTL_STUB = r"""#!/bin/bash
+case "$*" in
+*" show "*) cat "$PULL_ROOT_STUB/unit_show" 2>/dev/null \
+    || printf 'ActiveState=active\nSubState=running\nNRestarts=0\n' ;;
+*) echo "$*" >> "$PULL_ROOT_STUB/systemctl.log"
+    exit "$(cat "$PULL_ROOT_STUB/systemctl.rc" 2>/dev/null || echo 0)" ;;
+esac
+"""
+
 # `claudlobby` stub: the job's two CLI reads.
 CLI_STUB = """#!/usr/bin/env bash
 case "$*" in
-*host-job*) cat "$PULL_ROOT_STUB/job.json" ;;
-*status*--json*) python3 "$PULL_ROOT_STUB/status.py" "$CLAUDLOBBY_ROOT" ;;
+*host-job*) [ -e "$PULL_ROOT_STUB/job_fails" ] && exit 1; cat "$PULL_ROOT_STUB/job.json" ;;
+*status*--json*) [ -e "$PULL_ROOT_STUB/status_fails" ] && exit 3
+    python3 "$PULL_ROOT_STUB/status.py" "$CLAUDLOBBY_ROOT" ;;
 esac
 """
 
@@ -109,10 +126,7 @@ class Install:
         self.bin.mkdir()
         for name, body in (
             ("claudlobby", CLI_STUB),
-            (
-                "systemctl",
-                '#!/bin/bash\necho "$*" >> "$PULL_ROOT_STUB/systemctl.log"\n',
-            ),
+            ("systemctl", SYSTEMCTL_STUB),
         ):
             (self.bin / name).write_text(body)
             (self.bin / name).chmod(0o755)
@@ -264,6 +278,10 @@ def test_the_plane_services_restart_when_claudlobby_moved_and_only_then(inst):
         inst.records()[-1]["restarted"]
         == "claudlobby-plane-daemon claudlobby-plane-view"
     )
+    # ...and judged by the settled state the supervisor reports, not the rc.
+    assert inst.records()[-1]["restart_check"] == (
+        "claudlobby-plane-daemon:active claudlobby-plane-view:active"
+    )
 
 
 def test_the_watch_pages_on_a_bot_that_went_silent_at_the_pull(inst):
@@ -335,13 +353,17 @@ def test_a_migration_pull_page_carries_the_revert_runbook(inst):
 
 def test_the_job_finishes_on_its_own_bytes_when_the_pull_rewrites_it(inst):
     # Run from INSIDE the tree: git replaces a changed file with a new inode, so
-    # the running script keeps its old bytes. The rewrite shifts every offset
-    # and ends in a marker-and-exit that would fire if bash read the new file.
+    # the running script keeps its old bytes. The rewrite is LONGER than the
+    # running script, so bash reading the new file from its old offset would
+    # walk the filler into a marker-and-exit; a shorter one would only hit EOF.
+    old_size = (inst.root / "lib" / "pull-root.sh").stat().st_size
+    filler = "# shifted " + "." * 50
     new = "\n".join(
         ["#!/usr/bin/env bash"]
-        + ["# shifted"] * 400
+        + [filler] * (old_size // len(filler) + 100)
         + ['touch "$CLAUDLOBBY_ROOT/NEW-BYTES-RAN"; exit 7', ""]
     )
+    assert len(new) > old_size + 4000
     inst.merge_upstream({"lib/pull-root.sh": new}, "rewrite the job")
     proc = inst.run()
     _ok(proc)
@@ -388,3 +410,65 @@ def test_a_new_critical_pages_even_when_the_window_before_was_quiet(inst):
     inst.merge_upstream({"lib/new.sh": "echo new\n"})
     _ok(inst.run())
     assert "new critical otis/crash_loop" in inst.records()[0]["findings"]
+
+
+# --- the fail-closed paths: a watch that cannot see must never read clean ---
+
+
+def test_a_read_that_could_not_run_pages_as_unknown_never_clean(inst):
+    # The design's rule. otis deleted every could-not-be-read branch and all 12
+    # earlier tests still passed, because no stub ever failed.
+    (inst.stub / "fail_post").write_text("")
+    (inst.stub / "status_fails").write_text("")
+    inst.merge_upstream({"lib/new.sh": "echo new\n"})
+    _ok(inst.run())
+    (record,) = inst.records()
+    assert record["watch"] == "paged"
+    for read in ("critical events", "script_error", "heartbeats"):
+        assert f"f1: {read} could not be read" in record["findings"]
+
+
+def test_a_failed_pre_pull_read_is_named_not_read_as_a_quiet_fleet(inst):
+    # An empty pre-window is what a quiet fleet looks like; one that could not
+    # be read must say so, or a critical already firing pages as the pull's.
+    (inst.stub / "fail_pre").write_text("")
+    inst.merge_upstream({"lib/new.sh": "echo new\n"})
+    _ok(inst.run())
+    assert "pre-pull critical events could not be read" in inst.records()[0]["findings"]
+
+
+def test_a_restart_the_supervisor_refused_pages(inst):
+    (inst.stub / "systemctl.rc").write_text("1")
+    inst.merge_upstream({"claudlobby/plane/ingest.py": "# moved\n"})
+    _ok(inst.run())
+    findings = inst.records()[0]["findings"]
+    assert "the restart of claudlobby-plane-daemon failed (rc 1)" in findings
+
+
+def test_a_service_that_dies_after_its_restart_pages_though_systemctl_said_0(inst):
+    # Measured in the #1883 review: systemctl returned 0, then NRestarts went
+    # 0 -> 1 -> 2 on a unit that died a second after each start. The rc is not
+    # the verdict; the supervisor's state after the watch is.
+    (inst.stub / "unit_show").write_text(
+        "ActiveState=activating\nSubState=auto-restart\nNRestarts=3\n"
+    )
+    inst.merge_upstream({"claudlobby/plane/ingest.py": "# moved\n"})
+    _ok(inst.run())
+    (record,) = inst.records()
+    assert record["watch"] == "paged"
+    assert (
+        "claudlobby-plane-daemon is activating/auto-restart, restarted 3 time(s)"
+        in record["findings"]
+    )
+    assert record["restart_check"] == ""
+
+
+def test_an_unreadable_hold_holds_and_does_not_pull(inst):
+    # The override may carry a hold the job cannot see: pulling past it is the
+    # #865 failure; holding and saying why is the only safe reading.
+    before = inst.head()
+    (inst.stub / "job_fails").write_text("")
+    inst.merge_upstream({"lib/new.sh": "echo new\n"})
+    _ok(inst.run())
+    assert inst.head() == before
+    assert inst.records()[0]["outcome"] == "hold_unreadable"

@@ -37,7 +37,8 @@
 # instead of writing it in place, and bash keeps reading the inode it opened,
 # so a running script finishes on its old bytes. Measured on the Pi (git
 # 2.39.5, ext4), with an in-place write as the positive control that does
-# corrupt a run (#1251 issuecomment-5845912184; grow and shrink re-derived in issuecomment-5846080563). notify-behind.sh still REPORTS the root.
+# corrupt a run (#1251 issuecomment-5845912184; grow and shrink re-derived
+# in issuecomment-5846080563). notify-behind.sh still REPORTS the root.
 #
 # ---------------------------------------------------------------------------
 # WHY THIS CLOCK
