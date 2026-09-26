@@ -472,3 +472,39 @@ def test_an_unreadable_hold_holds_and_does_not_pull(inst):
     _ok(inst.run())
     assert inst.head() == before
     assert inst.records()[0]["outcome"] == "hold_unreadable"
+
+
+UNREACHABLE_STATUS_PY = """import json
+reason = "the plane could not answer: probe"
+print(json.dumps({"fleet": "f1", "switches_off": [], "bots": [
+    {"name": "healthy", "last_heartbeat": None, "plane_unreachable": reason},
+    {"name": "otis", "last_heartbeat": None, "plane_unreachable": reason}]}))
+"""
+
+
+def test_status_rc0_with_the_plane_unreachable_pages_as_unknown(inst):
+    # status --json exits 0 on an unreachable plane and says so per bot (core.py:503-507).
+    (inst.stub / "status.py").write_text(UNREACHABLE_STATUS_PY)
+    inst.merge_upstream({"lib/new.sh": "echo new\n"})
+    _ok(inst.run())
+    (record,) = inst.records()
+    assert record["watch"] == "paged"
+    assert "f1: heartbeats could not be read" in record["findings"]
+
+
+def test_a_restarted_unit_left_failed_pages(inst):
+    (inst.stub / "unit_show").write_text("ActiveState=failed\nSubState=failed\nNRestarts=0\n")
+    inst.merge_upstream({"claudlobby/plane/ingest.py": "# moved\n"})
+    _ok(inst.run())
+    (record,) = inst.records()
+    assert record["watch"] == "paged"
+    assert "claudlobby-plane-daemon is failed/failed after the restart" in record["findings"]
+
+
+def test_a_unit_caught_deactivating_pages_as_unjudged(inst):
+    (inst.stub / "unit_show").write_text("ActiveState=deactivating\nSubState=stop-sigterm\nNRestarts=0\n")
+    inst.merge_upstream({"claudlobby/plane/ingest.py": "# moved\n"})
+    _ok(inst.run())
+    (record,) = inst.records()
+    assert record["watch"] == "paged"
+    assert "claudlobby-plane-daemon could not be judged after the restart" in record["findings"]
