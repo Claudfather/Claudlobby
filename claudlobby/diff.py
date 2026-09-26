@@ -13,6 +13,7 @@ the user at the right library/ file based on heuristics.
 from __future__ import annotations
 import difflib
 import json
+import stat
 from pathlib import Path
 
 from .composer import (
@@ -126,6 +127,55 @@ def _access_owned_view(access: dict, chat_id: str, human_id: str) -> dict:
     return owned
 
 
+def _tool_drift(expected: dict[str, str], directory: Path, bot_name: str,
+                parts: list[str]) -> None:
+    """Preview compose_tools' bytes and 0755 mode without repairing either.
+
+    stat follows symlinks just as the existing writer's write_text/chmod do.
+    Metadata is a read-time snapshot, not protection against concurrent writes.
+    """
+    try:
+        actual_names = {path.name for path in directory.iterdir()}
+    except FileNotFoundError:
+        actual_names = set()
+    except OSError as exc:
+        parts.append(f"\n=== tools in {bot_name}: unavailable ({type(exc).__name__}) ===")
+        return
+    for name in sorted(set(expected) | actual_names):
+        path = directory / name
+        try:
+            node = path.stat()
+        except FileNotFoundError:
+            node = None
+        except OSError as exc:
+            parts.append(f"\n=== tools/{name} in {bot_name}: unavailable ({type(exc).__name__}) ===")
+            continue
+        if node is not None and not stat.S_ISREG(node.st_mode):
+            if name in expected:
+                parts.append(f"\n=== tools/{name} in {bot_name}: unavailable (not a regular file) ===")
+            continue  # compose_tools also preserves undeclared non-files.
+        try:
+            actual_text = path.read_text() if node is not None else ""
+        except (OSError, UnicodeError) as exc:
+            parts.append(f"\n=== tools/{name} in {bot_name}: unavailable ({type(exc).__name__}) ===")
+            continue
+        if name in expected:
+            if node is None:
+                parts.append(f"\n=== tools/{name} missing in {bot_name} ===")
+            else:
+                mode = stat.S_IMODE(node.st_mode)
+                if mode != 0o755:
+                    parts.append(f"\n=== tools/{name} mode drift in {bot_name}: "
+                                 f"expected 0755, current {mode:04o} ===")
+        expected_text = expected.get(name, "")
+        if expected_text != actual_text or (name not in expected and node is not None):
+            parts.append(f"\n=== tools/{name} drift in {bot_name} ===")
+            parts.extend(difflib.unified_diff(
+                expected_text.splitlines(), actual_text.splitlines(),
+                fromfile="library-composed (would be regenerated)",
+                tofile=f"runtime/bots/{bot_name}/tools/{name} (current)", lineterm=""))
+
+
 def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     bot = fleet.bots.get(bot_name)
     if not bot:
@@ -231,30 +281,9 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
             )
         )
 
-    # tools/ — composited scripts. The whole dir is compositor-owned, so a
-    # hand-edited, deleted, or stray file is all drift.
-    expected_tools = compose_tool_outputs(bot, fleet, paths, bot_dir)
-    tools_dir = bot_dir / "tools"
-    actual_tools = (
-        {p.name: p.read_text() for p in sorted(tools_dir.iterdir()) if p.is_file()}
-        if tools_dir.is_dir()
-        else {}
-    )
-    for tool_name in sorted(set(expected_tools) | set(actual_tools)):
-        expected_text = expected_tools.get(tool_name, "")
-        actual_text = actual_tools.get(tool_name, "")
-        if expected_text == actual_text:
-            continue
-        parts.append(f"\n=== tools/{tool_name} drift in {bot_name} ===")
-        parts.extend(
-            difflib.unified_diff(
-                expected_text.splitlines(),
-                actual_text.splitlines(),
-                fromfile="library-composed (would be regenerated)",
-                tofile=f"runtime/bots/{bot_name}/tools/{tool_name} (current)",
-                lineterm="",
-            )
-        )
+    # tools/ — content and exact permission bits are compositor-owned.
+    _tool_drift(compose_tool_outputs(bot, fleet, paths, bot_dir),
+                bot_dir / "tools", bot_name, parts)
 
     # Settings are fully overwritten. Surface runtime grants before they vanish.
     label = f"settings.local.json in {bot_name}"
@@ -313,7 +342,7 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     except (OSError, ValueError, RuntimeError) as exc:
         parts.append(f"\n=== link topology unavailable ({type(exc).__name__}) ===")
         link_notes = []
-    coverage = ("coverage: CLAUDE.md, .mcp.json, bot.conf, git configuration, tools, "
+    coverage = ("coverage: CLAUDE.md, .mcp.json, bot.conf, git configuration, tools (content and 0755 mode), "
                 f"settings.local.json, bot service/plist, {access_note}, skill/mount topology; "
                 "not compared: target content, host outputs, env scaffolding, runtime data; "
                 "commands/agents are not current compositor outputs. "
