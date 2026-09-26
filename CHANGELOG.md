@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
+
+A briefing that found its bot busy or its session gone was skipped for the
+day, and a slot that failed to send paged nobody. Both events were severity
+notice, which fleet-pulse and `brief` do not read. Now `briefing-trigger.sh`
+re-checks a deferred slot every 60 s for up to 30 min, counted in polls rather
+than read off the clock, and sends at the first idle check. The slot's own
+timer is no retry, because it next fires a day later. A slot still missed
+after that, or whose dispatch fails, or whose bot dir is gone, sends ONE
+`briefing_missed` FLEET NOTICE through the shared `emit_fleet_notice` path: a
+line on the fleet's Telegram chat, a push into the fleet manager's pane (for a
+manager's own briefing, its own pane), and a plane event registered at notice.
+The per-attempt `briefing_*` events are not reclassified, so a deferral that
+recovers pages nobody. The pane push misses on a fleet whose first
+`MANAGER_TMUX` bot is its manager, until #910 lands.
+
 ### Fixed — the harness's boot probe raced its own spawner on a loaded host (#1778)
 
 Each phase of the `#1002` probe unit now ends when `lib/validate-bot-change.sh`

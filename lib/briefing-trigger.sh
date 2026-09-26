@@ -9,10 +9,10 @@
 #
 # Delivers "/briefing <slot>" to the bot's OWN session through the slash-aware
 # dispatch.sh (P2/#629): the slash reaches the pane as its first characters so
-# Claude Code fires the skill, instead of the old set +H; degraded prose. Skips
-# with a logged briefing_deferred event when the bot is busy or its session is
-# absent — briefings are time-sensitive, so skip-and-log beats queue
-# (skip-and-log precedent).
+# Claude Code fires the skill, instead of the old set +H; degraded prose. A busy
+# or absent bot defers the slot (briefing_deferred) and gets a bounded retry,
+# sent at its first idle check — briefings are time-sensitive, so a bounded wait
+# beats a queue. A slot that is missed sends ONE FLEET NOTICE.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,40 +26,63 @@ SLOT="${3:?Usage: briefing-trigger.sh <fleet> <bot> <slot>}"
 
 BOTS_DIR="$(resolve_bots_dir "$FLEET")"
 BOT_DIR="$BOTS_DIR/$BOT"
-LOG="${BRIEFING_TRIGGER_LOG:-$BOT_DIR/logs/briefing-trigger.log}"
-setup_log_dir "$LOG"
 TS="$(ts_iso)"
 
 # Event data payload — reason names why the run dispatched or deferred.
 briefing_data() { printf '{"bot":"%s","slot":"%s","reason":"%s"}' "$BOT" "$SLOT" "$1"; }
 
-# Skip-with-log: emit a briefing_deferred event + log line, then exit 0. One home
-# for the deferred-event shape shared by the session-absent and busy branches.
-# $1 = reason (event data), $2 = human-readable log note.
-defer() {
-    echo "$TS DEFER $BOT/$SLOT — $2" >> "$LOG"
-    emit_fleet_event briefing_deferred briefing "$(briefing_data "$1")" "$BOT_DIR" "$BOT"
-    exit 0
-}
+# A missed slot pages ONCE through the shared FLEET NOTICE path (#1826). Each run
+# owns one slot fire and calls this at most once, so it needs no dedup marker.
+missed() { emit_fleet_notice "$BOTS_DIR" briefing_missed "$BOT $SLOT ($1)"; }
 
 if [ ! -d "$BOT_DIR" ]; then
-    echo "$TS SKIP $BOT/$SLOT — bot dir absent: $BOT_DIR" >> "$LOG"
+    echo "$TS SKIP $BOT/$SLOT — bot dir absent: $BOT_DIR" >&2
     # No bot dir to own the event — fleet-level ledger, attributed to the bot id.
     emit_fleet_event briefing_deferred briefing "$(briefing_data bot_dir_absent)" "" "$BOT"
+    missed bot_dir_absent
     exit 0
 fi
+# The log lives in the bot dir, so it can only be made once the dir is known to exist.
+LOG="${BRIEFING_TRIGGER_LOG:-$BOT_DIR/logs/briefing-trigger.log}"
+setup_log_dir "$LOG"
 
 # Session name is the bot name; tmux resolves it to the running session on the
 # bot private socket (the dispatch.sh / tmux_socket_for_session convention).
 SOCKET="$(tmux_socket_for_bot "$BOT_DIR" 2>/dev/null || true)"
 
-if ! check_tmux_session "$BOT" "$SOCKET"; then
-    defer session_absent "session not alive"
-fi
-
+# Why the bot cannot take the slash right now, in REASON; empty when it can.
 # Never inject into an active turn (bot_is_busy, lib-common SSOT).
-if bot_is_busy "$SOCKET" "$BOT"; then
-    defer bot_busy "bot busy"
+not_ready() {
+    REASON=""
+    if ! check_tmux_session "$BOT" "$SOCKET"; then REASON=session_absent
+    elif bot_is_busy "$SOCKET" "$BOT" "$BOT_DIR"; then REASON=bot_busy
+    fi
+}
+
+# A deferred slot is re-checked every RETRY_POLL_S for up to RETRY_WINDOW_S and
+# sent at the first idle check (#1826). It waits here because the timer's next
+# tick is the next day's briefing; the oneshot unit has no start timeout. The
+# window is counted in polls, never read off a clock a boot-time step can move.
+# The env overrides are a harness and test seam: the timer's env is closed.
+RETRY_WINDOW_S="${BRIEFING_RETRY_WINDOW_S:-1800}"
+RETRY_POLL_S="${BRIEFING_RETRY_POLL_S:-60}"
+not_ready
+if [ -n "$REASON" ]; then
+    echo "$TS DEFER $BOT/$SLOT — $REASON; retrying for up to ${RETRY_WINDOW_S}s" >> "$LOG"
+    emit_fleet_event briefing_deferred briefing "$(briefing_data "$REASON")" "$BOT_DIR" "$BOT"
+    TRIES=$(( RETRY_WINDOW_S / RETRY_POLL_S ))
+    while [ -n "$REASON" ] && [ "$TRIES" -gt 0 ]; do
+        sleep "$RETRY_POLL_S"
+        TRIES=$(( TRIES - 1 ))
+        not_ready
+    done
+    TS="$(ts_iso)"
+    if [ -n "$REASON" ]; then
+        echo "$TS GIVEUP $BOT/$SLOT — still $REASON after ${RETRY_WINDOW_S}s" >> "$LOG"
+        emit_fleet_event briefing_failed briefing "$(briefing_data "$REASON")" "$BOT_DIR" "$BOT"
+        missed "$REASON"
+        exit 0
+    fi
 fi
 
 # --- observable-plane record (PR-B T6; the inventory's judgment row: a
@@ -105,5 +128,6 @@ else
     echo "$TS FAIL $BOT/$SLOT — dispatch failed" >> "$LOG"
     emit_fleet_event briefing_failed briefing "$(briefing_data dispatch_failed)" "$BOT_DIR" "$BOT"
     _plane_transmission "failed"
+    missed dispatch_failed
     exit 1
 fi
