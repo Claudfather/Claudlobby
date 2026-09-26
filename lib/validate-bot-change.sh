@@ -2652,8 +2652,8 @@ touch "$BRIEFBUSY_DIR/data/.last-tool-call"
 tmux new-session -d -s "$BRIEFWAIT" "sleep 600"
 touch "$BRIEFWAIT_DIR/data/.last-tool-call"
 # Every bot here names $MGR, so the FLEET NOTICE must land in its pane, which
-# must be alive to take the push: the first scenario's sleep 600 may have ended.
-tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "sleep 600"
+# must be alive to take the push. Recreate its draining reader if it has exited.
+tmux has-session -t "$MGR" 2>/dev/null || val_start_manager "$MGR"
 # Idle briefing bot with no composed skill: the trigger must refuse it.
 tmux new-session -d -s "$BRIEFNOSKILL" "sleep 600"
 # Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
