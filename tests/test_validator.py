@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,13 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _make_paths(root: Path) -> Paths:
+    # These validator fixtures now reach the real four-tier env query door.
+    # Copy its source-only dependencies, never link a writable directory.
+    lib = root / "lib"
+    lib.mkdir(exist_ok=True)
+    for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh"):
+        if not (lib / name).exists():
+            shutil.copy2(REPO / "lib" / name, lib / name)
     return Paths(root=root, fleet_dir=None)
 
 

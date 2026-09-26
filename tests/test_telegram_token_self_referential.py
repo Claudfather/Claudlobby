@@ -17,6 +17,7 @@ still preserved by the merge.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from textwrap import dedent
 
@@ -92,9 +93,18 @@ def test_self_referential_token_env_no_validator_warning(tmp_path, monkeypatch):
     # default. Suppressed for self-ref; kept for a genuinely-unconfigured distinct name.
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("DISTINCT_TG_TOKEN", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     root, paths = _setup(tmp_path)
+    # Exercise the real tier query without reading the operator's home tier.
+    lib = root / "lib"
+    lib.mkdir()
+    for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh"):
+        shutil.copy2(Path(__file__).resolve().parents[1] / "lib" / name, lib / name)
     fleet, _md = load_fleet(root / "fleet.yaml")
     report = validate(fleet, paths)
     warns = "\n".join(report.warnings)
     assert "TELEGRAM_BOT_TOKEN" not in warns  # self-ref: suppressed
     assert "DISTINCT_TG_TOKEN" in warns  # distinct + unconfigured: still warns
+    assert "environment checks unavailable" not in warns

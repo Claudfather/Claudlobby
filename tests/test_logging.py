@@ -8,6 +8,7 @@ the right log levels for success, warning, and error conditions.
 from __future__ import annotations
 
 import logging
+import shutil
 import types
 from pathlib import Path
 from unittest.mock import patch  # noqa: F401 — used in generate tests
@@ -89,14 +90,23 @@ class TestValidateCommandLogging:
         assert "no-such-expertise" in caplog.text
 
     def test_validate_logs_warnings_for_missing_env(
-        self, fleet_dir, monkeypatch, caplog
+        self, fleet_dir, tmp_path, monkeypatch, caplog
     ):
+        # Absence is only knowable with the real tier query door available.
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        lib = fleet_dir / "lib"
+        lib.mkdir(exist_ok=True)
+        for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh"):
+            shutil.copy2(Path(__file__).resolve().parents[1] / "lib" / name, lib / name)
         monkeypatch.delenv("TELEGRAM_TOKEN_LEAD", raising=False)
         monkeypatch.delenv("TELEGRAM_TOKEN_WORKER1", raising=False)
         args = _args(root=str(fleet_dir))
         with caplog.at_level(logging.WARNING, logger="claudlobby"):
             cmd_validate(args)
         assert "TELEGRAM_TOKEN_LEAD" in caplog.text
+        assert "environment checks unavailable" not in caplog.text
 
     def test_validate_strict_logs_error_on_warnings(
         self, fleet_dir, monkeypatch, caplog

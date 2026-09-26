@@ -3,6 +3,7 @@ compose (render/0755/reconcile), validator checks, and diff coverage."""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from textwrap import dedent
 
@@ -333,12 +334,23 @@ class TestComposeTools:
 
 
 class TestToolsValidation:
+    @pytest.fixture(autouse=True)
+    def _private_env_tier_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
     def _setup_root(self, tmp_path, fleet_tools: str) -> tuple:
         root = tmp_path / "claudlobby"
         (root / "library" / "expertise").mkdir(parents=True)
         (root / "library" / "expertise" / "eng.md").write_text(
             "---\ntitle: Eng\n---\n# Eng\n"
         )
+        # A tool's env contract needs the real query door, not an unknown tier.
+        lib = root / "lib"
+        lib.mkdir()
+        for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh"):
+            shutil.copy2(Path(__file__).resolve().parents[1] / "lib" / name, lib / name)
         _write_tool(root / "library", "greeter", GREET_MANIFEST, GREET_TEMPLATE)
         (root / "fleet.yaml").write_text(
             dedent(f"""\
@@ -381,6 +393,7 @@ class TestToolsValidation:
         )
         report = validate(fleet, paths)
         assert any("tool 'greeter' requires GREET_TOKEN" in w for w in report.warnings)
+        assert not any("environment checks unavailable" in w for w in report.warnings)
 
     def test_env_contract_quiet_when_set(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GREET_TOKEN", "x")
@@ -389,6 +402,7 @@ class TestToolsValidation:
         )
         report = validate(fleet, paths)
         assert not any("GREET_TOKEN" in w for w in report.warnings)
+        assert not any("environment checks unavailable" in w for w in report.warnings)
 
     def test_target_collision_is_validate_error(self, tmp_path):
         fleet, paths = self._setup_root(
