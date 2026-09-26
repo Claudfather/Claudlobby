@@ -316,8 +316,10 @@ fleet_claude_path() {
     c="$(fleet_claude_bin)"
     case "$c" in
         */*) p="$c" ;;
-        # type -P: a PATH search only, where command -v would answer a function's bare name.
-        *) p="$(PATH="${1:-$(fleet_launch_path)}" type -P "$c" 2>/dev/null)" || p="" ;;
+        # type -P searches PATH only, ignoring a same-named shell function.
+        # Guard its expected miss INSIDE the substitution: bash 3.2 otherwise
+        # fires the inherited ERR trap even with an OR on the outer assignment.
+        *) p="$(PATH="${1:-$(fleet_launch_path)}" type -P "$c" 2>/dev/null || true)" ;;
     esac
     printf '%s' "$p"
 }

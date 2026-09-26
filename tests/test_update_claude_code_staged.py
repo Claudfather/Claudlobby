@@ -26,6 +26,7 @@ fixtures this module reuses rather than copies.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -180,6 +181,24 @@ class StagedHost:
         from tests.conftest import read_fleet_events
 
         return _event_types(read_fleet_events(self.root))
+
+    def event_rows(self) -> list[dict]:
+        from tests.conftest import read_fleet_events
+
+        return [json.loads(line) for line in read_fleet_events(self.root).splitlines()]
+
+    def prune_tick(self, **extra):
+        """Observe only this invocation, preserving earlier setup receipts.
+
+        Identical fleet notices have second-granularity content keys. Cross a
+        second boundary so the measured refusal must land its own receipt;
+        an older setup notice can never stand in for a missing current one.
+        """
+        before = len(self.event_rows())
+        log_offset = len(self.log())
+        time.sleep(1.05 - (time.time() % 1))
+        result = self.run(**extra)
+        return result, self.log()[log_offset:], self.event_rows()[before:]
 
     def sent(self) -> list[str]:
         return _captured(self.tmp).splitlines()
@@ -444,6 +463,41 @@ def _prunable(h: StagedHost, version: str) -> Path:
     return d
 
 
+def _staged_snapshot(h: StagedHost) -> dict:
+    """Paths and content the prune is responsible for preserving on refusal."""
+    snapshot = {}
+    for path in h.versions.rglob("*"):
+        name = str(path.relative_to(h.versions))
+        if path.is_symlink():
+            snapshot[name] = ("link", os.readlink(path))
+        elif path.is_dir():
+            snapshot[name] = ("directory",)
+        else:
+            snapshot[name] = ("file", path.read_bytes())
+    return snapshot
+
+
+def _assert_native_prune_tick(h: StagedHost, stale: Path, before: dict,
+                              log: str, rows: list[dict]) -> None:
+    """Native Linux proves deletion; a host without /proc proves loud refusal."""
+    skipped = [row for row in rows if row["type"] == "binary_prune_skipped"]
+    assert not [row for row in rows if row["type"] == "script_error"], rows
+    if Path("/proc/self/exe").exists():
+        assert not stale.exists(), log  # The positive: this prune really deletes.
+        assert skipped == [], rows
+        prefix = str(stale.relative_to(h.versions))
+        expected = {key: value for key, value in before.items()
+                    if key != prefix and not key.startswith(prefix + "/")}
+        assert _staged_snapshot(h) == expected, "prune changed a protected staged path"
+    else:
+        assert _staged_snapshot(h) == before, "refused prune changed staged versions"
+        assert stale.exists(), log
+        assert "no process table at /proc" in log, log
+        assert len(skipped) == 1, ("no fresh refusal receipt for this tick", rows)
+        assert "no process table at /proc" in skipped[0]["data"]["reason"], skipped
+        assert "Nothing was deleted" in skipped[0]["data"]["reason"], skipped
+
+
 @pytest.mark.parametrize("first,second", [
     ("real", "real"),  # the control: one spelling throughout
     ("real", "via-symlink"), ("via-symlink", "real"),
@@ -456,7 +510,9 @@ def test_a_respelled_root_never_costs_the_linked_or_previous_version(tmp_path, f
     RECOGNISED is their only protection, and recognition must resolve BOTH sides:
     each direction is an arm. The composer stamps the resolved root on the unit
     while lib-common keeps the logical pwd, so a hand run through a symlinked
-    checkout spells it differently."""
+    checkout spells it differently. On a native host without /proc, the contract
+    is instead a loud refusal that preserves every staged path and its content;
+    this arm must exercise that refusal, not claim that recognition ran."""
     h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     via = tmp_path / "via-link"
     via.symlink_to(h.root)
@@ -465,16 +521,16 @@ def test_a_respelled_root_never_costs_the_linked_or_previous_version(tmp_path, f
         h.body(v, healthy_big(v))
         assert h.run(latest=v, CLAUDLOBBY_ROOT=spell[first]).returncode == 0, h.log()
     stale = _prunable(h, "2.1.270")
-    r = h.run(latest="2.1.281", CLAUDLOBBY_ROOT=spell[second])
+    before = _staged_snapshot(h)
+    r, this_log, rows = h.prune_tick(latest="2.1.281", CLAUDLOBBY_ROOT=spell[second])
 
-    assert r.returncode == 0, h.log()
-    assert "no-op" in h.log(), h.log()
+    assert r.returncode == 0, this_log
+    assert "no-op" in this_log, this_log
     assert h.exe("2.1.281").exists(), h.log()  # linked
     assert h.exe("2.1.280").exists(), h.log()  # previous
     out = subprocess.run([str(h.link), "--version"], capture_output=True, text=True)
     assert out.stdout.startswith("2.1.281"), (out, h.log())
-    # The positive control: the same prune, in every arm, is live.
-    assert not stale.exists(), h.log()
+    _assert_native_prune_tick(h, stale, before, this_log, rows)
 
 
 @pytest.mark.parametrize("stray", [None, "2.1.280 copy", "2.1.280 (copy)", "backup"])
@@ -484,21 +540,25 @@ def test_a_directory_the_job_never_staged_costs_nothing(tmp_path, stray, *, scra
     the LINKED version went. A Finder duplicate is `2.1.280 copy`, a GNOME one
     `2.1.280 (copy)`; `backup` is anything else a person parks there. The prune
     touches only names the job stages. POSITIVE CONTROL: a stale version, which
-    must go in every arm, so a keep here cannot come from a prune that is dead."""
+    must go on a host with a readable native /proc. Without it, every staged
+    path must survive and this tick must record its real refusal reason."""
     h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     h.body("2.1.280", healthy_big("2.1.280"))
     assert h.run(latest="2.1.280").returncode == 0, h.log()
     stale = _prunable(h, "2.1.270")
     if stray:
         (h.versions / stray).mkdir()
-    assert h.run(latest="2.1.280").returncode == 0, h.log()  # the no-op path, then the prune
+    before = _staged_snapshot(h)
+    r, this_log, rows = h.prune_tick(latest="2.1.280")  # the no-op path, then the prune
+    assert r.returncode == 0, this_log
+    assert "no-op" in this_log, this_log
 
     assert h.exe("2.1.280").exists(), h.log()
     out = subprocess.run([str(h.link), "--version"], capture_output=True, text=True)
     assert out.stdout.startswith("2.1.280"), (out, h.log())
     if stray:
         assert (h.versions / stray).is_dir(), h.log()
-    assert not stale.exists(), h.log()
+    _assert_native_prune_tick(h, stale, before, this_log, rows)
 
 
 FAIL_CLOSED = ["absent", "unlistable", "no-readable-process", "reader-crashes",
@@ -536,25 +596,29 @@ def test_a_prune_that_cannot_read_its_inputs_deletes_nothing(tmp_path, arm, *, s
             os.chmod(fake, 0o111)  # traversable, so self/exe resolves; not listable
         if arm == "previous-unreadable":
             os.chmod(previous, 0)
-        r = h.run(latest="2.1.282", CLAUDE_UPDATE_PROC_DIR=proc)  # a no-op: prune only
+        r, this_log, rows = h.prune_tick(latest="2.1.282", CLAUDE_UPDATE_PROC_DIR=proc)
     finally:
         os.chmod(fake, 0o755)
         os.chmod(previous, 0o644)
 
-    assert r.returncode == 0, h.log()
-    assert "no-op" in h.log(), h.log()
+    assert r.returncode == 0, this_log
+    assert "no-op" in this_log, this_log
+    skipped = [row for row in rows if row["type"] == "binary_prune_skipped"]
+    assert not [row for row in rows if row["type"] == "script_error"], rows
     for kept in (running, h.versions / "2.1.281", h.versions / "2.1.282"):
         assert kept.exists(), (arm, kept.name, h.log())
     if arm == "readable":
         # The positive control: this very prune deletes, and asks nobody.
         assert not stale.exists(), h.log()
-        assert "binary_prune_skipped" not in h.events()
+        assert skipped == [], rows
     else:
         assert stale.exists(), (arm, h.log())
-        assert "nothing deleted" in h.log(), h.log()
-        assert "binary_prune_skipped" in h.events(), h.events()
-        # Refusing is not an error: no script_error beside the notice.
-        assert "script_error" not in h.events(), h.events()
+        assert "nothing deleted" in this_log, this_log
+        assert len(skipped) == 1, ("no fresh refusal receipt for this tick", rows)
+        reason = skipped[0]["data"]["reason"]
+        expected = (f"no process table at {proc}" if arm == "absent"
+                    else "it could not read everything it protects")
+        assert expected in reason, skipped
 
 
 @pytest.mark.parametrize("link_dir", ["writable", "read-only"])
