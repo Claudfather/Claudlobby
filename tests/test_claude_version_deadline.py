@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -37,12 +38,18 @@ def probe(tmp_path):
     binary = tmp_path / "fake-claude"
 
     def write(body):
-        binary.write_text(
-            f"#!{sys.executable}\nimport os, sys, time, signal, subprocess\n"
+        program = tmp_path / "fake-claude-body.py"
+        program.write_text(
+            "import os, sys, time, signal, subprocess\n"
             "from pathlib import Path\n"
-            "with open(os.environ['CALLS'], 'a') as f: f.write('called\\n')\n"
             "with open(os.environ['GROUPS'], 'a') as f: f.write(str(os.getpgrp())+'\\n')\n"
             + body + "\n")
+        # A shell builtin records executable entry before a fresh interpreter
+        # and its imports can consume the watchdog's real startup budget.
+        # exec preserves the owned PID/group and inherited output pipes.
+        binary.write_text(
+            "#!/bin/bash\nset -eu\nprintf '%s\\n' called >> \"$CALLS\"\n"
+            f"exec {shlex.quote(sys.executable)} {shlex.quote(str(program))} \"$@\"\n")
         binary.chmod(0o755)
 
     def run(body=None, *, seconds="3", code=None, python=True, settle=0):
@@ -113,6 +120,17 @@ def test_timeout_does_not_launch_the_diagnostic_probe_or_finish_later(probe):
     assert_deadline(result)
     assert probe.calls.read_text().splitlines() == ["called"]
     assert not probe.finished.exists()
+
+
+def test_executable_entry_receipt_precedes_slow_python_startup(probe):
+    # Only the synthetic executable imports from this private directory.
+    # Delay a child-only import so the receipt cannot accidentally mean
+    # "the second Python interpreter finished loading". The watchdog's
+    # imports resolve from its own source directory and are not delayed.
+    (probe.temp / "subprocess.py").write_text("import time\ntime.sleep(4)\n")
+    result = probe.run("print('2.1.281')", seconds="1.5")
+    assert_deadline(result)
+    assert probe.calls.read_text().splitlines() == ["called"]
 
 
 @pytest.mark.parametrize("leader_exits", [False, True])
@@ -220,9 +238,12 @@ def test_interrupted_helper_cleans_its_owned_group(probe, interrupt):
                             start_new_session=True, text=True)
     try:
         until = time.monotonic() + 2
-        while not probe.calls.exists() and time.monotonic() < until:
+        # Unlike executable entry, this receipt proves the Python body is
+        # loaded before interruption. Keep that positive cleanup control.
+        while not probe.groups.exists() and time.monotonic() < until:
             time.sleep(0.01)
-        assert probe.calls.exists(), "helper never launched the owned probe"
+        assert probe.calls.exists(), "helper never entered the owned probe"
+        assert probe.groups.exists(), "owned probe never finished loading"
         proc.send_signal(interrupt)  # only this helper PID; it owns the group
         stdout, stderr = proc.communicate(timeout=2)
         time.sleep(4.2)
