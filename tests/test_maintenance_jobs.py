@@ -10,7 +10,7 @@ import os
 import subprocess
 import time
 
-from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, plane_emit_env, read_fleet_events
+from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
@@ -28,10 +28,10 @@ def _signal_root(tmp_path, bots_at="runtime/bots"):
     return root
 
 
-def _run(script, args, root, tmp_path, extra_env=None):
+def _run(script, args, root, tmp_path, extra_env=None, *, scratch_plane_env):
     env = _scrubbed_env(
-        CLAUDLOBBY_ROOT=str(root), TG_CAPTURE=str(tmp_path / "tg-capture"),
-        **plane_emit_env(),          # the host job's receipt lands on the plane under _host
+        TG_CAPTURE=str(tmp_path / "tg-capture"),
+        **scratch_plane_env(root),          # the host job's receipt lands on the plane under _host
     )
     env.update(extra_env or {})
     return subprocess.run(
@@ -74,95 +74,95 @@ class TestDataSweep:
         fresh.write_text("current\n")
         return data
 
-    def test_composed_invocation_purges_old_ephemeral_keeps_fresh(self, tmp_path):
+    def test_composed_invocation_purges_old_ephemeral_keeps_fresh(self, tmp_path, *, scratch_plane_env):
         # The composed unit runs `data-sweep.sh --purge <fleet>` — flags
         # first, positional fleet name appended by the composer.
         root = tmp_path / "root"
         data = self._fleet_data(root)
-        r = _run("data-sweep.sh", ["--purge", "f7"], root, tmp_path)
+        r = _run("data-sweep.sh", ["--purge", "f7"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         for rel in self.EPHEMERAL:
             assert not (data / rel).exists(), f"{rel} should be purged"
         assert (data / "events" / "fresh.jsonl").exists()
 
-    def test_durable_files_survive_purge(self, tmp_path):
+    def test_durable_files_survive_purge(self, tmp_path, *, scratch_plane_env):
         # The recurring incident: operational scripts/ledgers under data/
         # aged out and vanished. Durable files must survive any purge.
         root = tmp_path / "root"
         data = self._fleet_data(root)
-        r = _run("data-sweep.sh", ["--purge", "f7"], root, tmp_path)
+        r = _run("data-sweep.sh", ["--purge", "f7"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         for rel in self.DURABLE:
             assert (data / rel).exists(), f"{rel} must never be swept"
 
-    def test_report_only_deletes_nothing(self, tmp_path):
+    def test_report_only_deletes_nothing(self, tmp_path, *, scratch_plane_env):
         root = tmp_path / "root"
         data = self._fleet_data(root)
-        r = _run("data-sweep.sh", ["f7"], root, tmp_path)
+        r = _run("data-sweep.sh", ["f7"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         for rel in self.EPHEMERAL + self.DURABLE:
             assert (data / rel).exists()
 
-    def test_days_override_spares_younger_files(self, tmp_path):
+    def test_days_override_spares_younger_files(self, tmp_path, *, scratch_plane_env):
         # Retention is fleet-overridable via the job's script line — prove
         # the flag the override carries actually widens the window.
         root = tmp_path / "root"
         data = self._fleet_data(root)
-        r = _run("data-sweep.sh", ["--purge", "--days", "60", "f7"], root, tmp_path)
+        r = _run("data-sweep.sh", ["--purge", "--days", "60", "f7"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         for rel in self.EPHEMERAL:
             assert (data / rel).exists()
 
-    def test_unknown_flag_still_rejected(self, tmp_path):
+    def test_unknown_flag_still_rejected(self, tmp_path, *, scratch_plane_env):
         # Rejected at arg parse — no fixture needed.
-        r = _run("data-sweep.sh", ["--bogus"], tmp_path / "root", tmp_path)
+        r = _run("data-sweep.sh", ["--bogus"], tmp_path / "root", tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 2
 
 
 class TestDiskMonitor:
-    def test_high_usage_raises_disk_high_signal(self, tmp_path):
+    def test_high_usage_raises_disk_high_signal(self, tmp_path, *, scratch_plane_env):
         # --threshold 1 makes any real disk exceed it deterministically.
         root = _signal_root(tmp_path)
-        r = _run("disk-monitor.sh", ["--threshold", "1"], root, tmp_path)
+        r = _run("disk-monitor.sh", ["--threshold", "1"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         assert '"type":"disk_high"' in _events(root)
         cap = _captured(tmp_path)
         assert "FLEET ALERT [disk_high]" in cap
         assert "disk usage" in cap
 
-    def test_ok_usage_is_silent(self, tmp_path):
+    def test_ok_usage_is_silent(self, tmp_path, *, scratch_plane_env):
         root = _signal_root(tmp_path)
-        r = _run("disk-monitor.sh", ["--threshold", "100"], root, tmp_path)
+        r = _run("disk-monitor.sh", ["--threshold", "100"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         assert _captured(tmp_path) == ""
         assert "disk_high" not in _events(root)
 
-    def test_fleetless_reports_bot_data_sizes_across_fleets(self, tmp_path):
+    def test_fleetless_reports_bot_data_sizes_across_fleets(self, tmp_path, *, scratch_plane_env):
         # Host jobs run fleet-less; the sizes report must still find bots
         # under local/*/runtime/bots.
         root = _signal_root(tmp_path, bots_at="local/eng/runtime/bots")
         data = root / "local" / "eng" / "runtime" / "bots" / "tbot" / "data"
         data.mkdir(parents=True)
         (data / "x").write_text("x\n")
-        r = _run("disk-monitor.sh", ["--threshold", "100"], root, tmp_path)
+        r = _run("disk-monitor.sh", ["--threshold", "100"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         log = (root / "lib" / "disk-monitor.log").read_text()
         assert "tbot/data:" in log
 
 
 class TestFleetMemoryCheck:
-    def test_pressure_raises_memory_high_signal(self, tmp_path):
+    def test_pressure_raises_memory_high_signal(self, tmp_path, *, scratch_plane_env):
         # --threshold 1 → reserve floor 99% of RAM → any real host is
         # "below reserve" deterministically.
         root = _signal_root(tmp_path)
-        r = _run("fleet-memory-check.sh", ["--threshold", "1"], root, tmp_path)
+        r = _run("fleet-memory-check.sh", ["--threshold", "1"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         assert '"type":"memory_high"' in _events(root)
         assert "FLEET ALERT [memory_high]" in _captured(tmp_path)
 
-    def test_ok_is_silent_and_exits_zero(self, tmp_path):
+    def test_ok_is_silent_and_exits_zero(self, tmp_path, *, scratch_plane_env):
         root = _signal_root(tmp_path)
-        r = _run("fleet-memory-check.sh", ["--threshold", "99"], root, tmp_path)
+        r = _run("fleet-memory-check.sh", ["--threshold", "99"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         assert "memory_high" not in _events(root)
 
@@ -413,7 +413,7 @@ class TestReloadFailureReasonIsTheRealError:
             env=_scrubbed_env(
                 CLAUDLOBBY_ROOT=str(root),
                 PATH=f"{bindir}:{sysbin or '/usr/bin:/bin:/usr/sbin:/sbin'}",
-                TG_CAPTURE=str(tmp_path / "tg-capture"),
+               TG_CAPTURE=str(tmp_path / "tg-capture"),
                 TMUX_TMPDIR=str(tmp_path / "no-tmux"),
                 **env_extra,
             ),

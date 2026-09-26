@@ -98,8 +98,9 @@ def sent(monkeypatch):
     return calls
 
 
-def test_a_nudge_records_the_fact_and_asks_the_tasks_manager(tmp_path, sent, monkeypatch):
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+def test_a_nudge_records_the_fact_and_asks_the_tasks_manager(tmp_path, sent, monkeypatch, *, scratch_plane_env):
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     _full_capture(tmp_path)
     tid = _seed(tmp_path)
     rc = task_cmd.cmd_task_nudge(_Args(tmp_path, tid, why="any movement?", as_who="chris"))
@@ -137,14 +138,15 @@ def test_a_nudge_records_the_fact_and_asks_the_tasks_manager(tmp_path, sent, mon
     assert f"$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes {tid}" in message
 
 
-def test_the_ask_is_recorded_as_a_communication_and_a_submitted_transmission(tmp_path, sent, monkeypatch):
+def test_the_ask_is_recorded_as_a_communication_and_a_submitted_transmission(tmp_path, sent, monkeypatch, *, scratch_plane_env):
     """FOLD F3. The re-check reached the manager's pane and landed NOWHERE:
     the plane held a nudge with no trace of anyone being asked to act on it,
     so a manager who never answered was indistinguishable from one who was
     never asked. The ask is a communication (id-less — a task_request that
     opens no row) threaded under the work item, and the carrier fact follows
     the send."""
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     _full_capture(tmp_path)
     tid = _seed(tmp_path)
     assert task_cmd.cmd_task_nudge(
@@ -165,13 +167,14 @@ def test_the_ask_is_recorded_as_a_communication_and_a_submitted_transmission(tmp
     assert tx[0]["msg_id"] == ask["msg_id"]
 
 
-def test_a_failed_send_records_the_failure_rather_than_claiming_delivery(tmp_path, monkeypatch, capsys):
+def test_a_failed_send_records_the_failure_rather_than_claiming_delivery(tmp_path, monkeypatch, capsys, *, scratch_plane_env):
     """The fact is written FIRST and a send failure never unwrites it: the
     nudge stands, shows on the card, and M4's timer will carry it. Loud (rc 1),
     not silent, and not a rollback — and the carrier fact is HONEST (F3): a
     `pane_submitted` on a send that returned 1 is exactly the fabrication that
     makes recording the ask worthless."""
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setattr(task_cmd, "send_to_bot",
                         lambda paths, bot, message, fleet=None, **_: (1, "session not found"))
     tid = _seed(tmp_path)
@@ -197,11 +200,12 @@ def test_a_silenced_plane_refuses_and_sends_nothing(tmp_path, sent, monkeypatch,
     assert "nothing was sent" in capsys.readouterr().err
 
 
-def test_an_id_matching_two_open_assignments_is_refused_by_name(tmp_path, sent, monkeypatch, capsys):
+def test_an_id_matching_two_open_assignments_is_refused_by_name(tmp_path, sent, monkeypatch, capsys, *, scratch_plane_env):
     """A wrong nudge sends a manager to chase the wrong worker, so the door
     refuses and names the candidates — `task-act.sh`'s rule, one door over —
     and (fold F5) names a REMEDY the caller can actually run."""
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     tid = _seed(tmp_path)
     _seed(tmp_path, task_id=tid, stem="c" * 32, bot="knuth", mgr="gilfoyle")
     assert task_cmd.cmd_task_nudge(_Args(tmp_path, tid, as_who="chris")) == 2
@@ -212,11 +216,12 @@ def test_an_id_matching_two_open_assignments_is_refused_by_name(tmp_path, sent, 
     assert "--assignment <asg_id>" in err
 
 
-def test_naming_the_assignment_resolves_the_ambiguity(tmp_path, sent, monkeypatch):
+def test_naming_the_assignment_resolves_the_ambiguity(tmp_path, sent, monkeypatch, *, scratch_plane_env):
     """FOLD F5, the other half. `--assignment` NARROWS the task id's own open
     set rather than querying by assignment, so the row acted on provably
     carries the id the caller named."""
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     tid = _seed(tmp_path)
     twin = "asg_" + "c" * 32
     _seed(tmp_path, task_id=tid, stem="c" * 32, bot="knuth", mgr="gilfoyle")
@@ -230,10 +235,11 @@ def test_naming_the_assignment_resolves_the_ambiguity(tmp_path, sent, monkeypatc
         _Args(tmp_path, tid, as_who="chris", assignment="asg_" + "d" * 32)) == 2
 
 
-def test_a_closed_row_and_an_unreachable_plane_are_different_answers(tmp_path, sent, monkeypatch):
+def test_a_closed_row_and_an_unreachable_plane_are_different_answers(tmp_path, sent, monkeypatch, *, scratch_plane_env):
     """unreachable ≠ empty (source_state): rc 3 for a plane that cannot be
     opened, rc 2 for an id with nothing open — the second is an answer."""
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     assert task_cmd.cmd_task_nudge(_Args(tmp_path, "t-1", as_who="chris")) == 3
 
     tid = _seed(tmp_path)
@@ -274,13 +280,14 @@ def test_an_unparseable_instant_reads_age_unknown_never_zero(tmp_path):
     assert task_cmd._age("not-an-instant") == "age unknown"
 
 
-def test_operator_text_is_collapsed_before_it_reaches_a_pane(tmp_path, sent, monkeypatch):
+def test_operator_text_is_collapsed_before_it_reaches_a_pane(tmp_path, sent, monkeypatch, *, scratch_plane_env):
     """FOLD F9. `lib/dispatch.sh` sends through tmux `send-keys`, where a
     NEWLINE in the payload is a RETURN: a `why` containing one submitted
     everything before it and left the rest — here `/exit` — sitting at the
     manager's prompt (reproduced). Collapsed at the door, so no caller has to
     remember."""
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     _full_capture(tmp_path)
     tid = _seed(tmp_path, title="port the\nparser")
     assert task_cmd.cmd_task_nudge(
@@ -292,12 +299,13 @@ def test_operator_text_is_collapsed_before_it_reaches_a_pane(tmp_path, sent, mon
 
 
 @pytest.mark.parametrize("who", ["chris\nrm -rf /", "bot:eng/erlich", "a" * 65, "", "  "])
-def test_an_unusable_as_name_is_refused_before_anything_is_minted(tmp_path, sent, monkeypatch, who):
+def test_an_unusable_as_name_is_refused_before_anything_is_minted(tmp_path, sent, monkeypatch, who, *, scratch_plane_env):
     """FOLD F9. `--as` mints `human:<who>` as a plane identity the registry
     keeps forever, so an arbitrary string is not free text: a newline, a
     forged `bot:` namespace or a whole sentence would each become an actor
     nobody can name again."""
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     tid = _seed(tmp_path)
     args = _Args(tmp_path, tid, as_who=who)
     if who.strip() == "":
@@ -379,7 +387,7 @@ def test_fold_f5_send_to_bot_puts_the_msg_id_on_the_wire_as_plane_msg_id(tmp_pat
     assert "PLANE_WIRE_OUT" not in seen["env"]
 
 
-def test_fold_f5_a_nudge_tags_the_send_with_the_communications_own_msg_id(tmp_path, monkeypatch):
+def test_fold_f5_a_nudge_tags_the_send_with_the_communications_own_msg_id(tmp_path, monkeypatch, scratch_plane_env):
     """fold F5, end to end: `task nudge` must tag its send with the SAME msg_id
     it minted for the communication, so the receiver's `received` pairs with the
     right message in the delivery JOIN. Runs the real door and reads the plane."""
@@ -392,6 +400,8 @@ def test_fold_f5_a_nudge_tags_the_send_with_the_communications_own_msg_id(tmp_pa
         return 0, ""
 
     monkeypatch.setattr(task_cmd, "send_to_bot", fake)
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     assert task_cmd.cmd_task_nudge(_Args(tmp_path, tid, as_who="chris")) == 0
     conn = connect(db_path(tmp_path))
     comm_ids = {r[0] for r in conn.execute(

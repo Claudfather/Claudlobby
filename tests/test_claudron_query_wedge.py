@@ -87,10 +87,10 @@ def _wedge_env(tmp_path: Path, claudron_stdout: str) -> dict:
     }
 
 
-def _run_dispatch(tmp_path: Path, env: dict, task: str = "fix the spotify job"):
+def _run_dispatch(tmp_path: Path, env: dict, task: str = "fix the spotify job", *, scratch_plane_env):
     """Returns (result, the message the transport stub received, the plane's
     row for that dispatch — {} when nothing was recorded)."""
-    libdir, base_env = _fake_lib(tmp_path, CAPTURE_STUB)
+    libdir, base_env = _fake_lib(tmp_path, CAPTURE_STUB, scratch_plane_env=scratch_plane_env)
     r = _bash(
         f'"{libdir}/dispatch-task.sh" --repo kev worker-1 "{task}"',
         env={**base_env, **env},
@@ -100,30 +100,30 @@ def _run_dispatch(tmp_path: Path, env: dict, task: str = "fix the spotify job"):
     return r, sent, row
 
 
-def test_off_by_default(tmp_path):
+def test_off_by_default(tmp_path, *, scratch_plane_env):
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
     env.pop("CLAUDRON_QUERY_BEFORE")
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
     assert "[fleet memory:" not in row["task"]          # the plane records what was sent: no pointers
 
 
-def test_injects_from_0_2_0_envelope(tmp_path):
+def test_injects_from_0_2_0_envelope(tmp_path, *, scratch_plane_env):
     # Regression: claudron 0.2.0's {ok, data:{results}} envelope. Before the
     # parser read data.results, this silently injected NOTHING (a zero-hit
     # lookup) — zero G1 evidence against every 0.2.0 vault.
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS_ENVELOPED))
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory: Spotify API Rate Limits" in sent
     assert "Telegram Formatting Pitfalls" in sent
     assert "Spotify API Rate Limits" in row["task"] and "Telegram Formatting Pitfalls" in row["task"]
 
 
-def test_injects_pointers_and_counts(tmp_path):
+def test_injects_pointers_and_counts(tmp_path, *, scratch_plane_env):
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     vault = env["CLAUDRON_VAULT_PATH"]
     assert "[fleet memory: Spotify API Rate Limits" in sent
@@ -141,35 +141,35 @@ def test_injects_pointers_and_counts(tmp_path):
     assert "\n" not in sent.strip()
 
 
-def test_zero_hits_runs_but_does_not_inject(tmp_path):
+def test_zero_hits_runs_but_does_not_inject(tmp_path, *, scratch_plane_env):
     env = _wedge_env(tmp_path, json.dumps({"query": "q", "results": []}))
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
     assert "fix the spotify job" in row["task"]          # the dispatch still landed, unenriched
 
 
-def test_non_json_output_degrades_to_plain_send(tmp_path):
+def test_non_json_output_degrades_to_plain_send(tmp_path, *, scratch_plane_env):
     # The pinned CLI prints "no vault found" to stdout and exits 0 — the
     # wedge must treat that as a no-op, not a crash.
     env = _wedge_env(tmp_path, "no vault found\n  create one:  claudron init <path>\n")
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
     assert "fix the spotify job" in sent
     assert "fix the spotify job" in row["task"]
 
 
-def test_missing_vault_dir_skips(tmp_path):
+def test_missing_vault_dir_skips(tmp_path, *, scratch_plane_env):
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
     env["CLAUDRON_VAULT_PATH"] = str(tmp_path / "nope")
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
     assert "[fleet memory:" not in row["task"]
 
 
-def test_pipes_in_titles_cannot_break_the_envelope(tmp_path):
+def test_pipes_in_titles_cannot_break_the_envelope(tmp_path, *, scratch_plane_env):
     evil = {
         "query": "q",
         "results": [
@@ -180,7 +180,7 @@ def test_pipes_in_titles_cannot_break_the_envelope(tmp_path):
         ],
     }
     env = _wedge_env(tmp_path, json.dumps(evil))
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory: Rate" in sent                 # the pointer was injected
     # All pipes from claudron-supplied strings are replaced before the
@@ -192,7 +192,7 @@ def test_pipes_in_titles_cannot_break_the_envelope(tmp_path):
     assert row["task"].count("|") == 4, row["task"]      # and the plane holds exactly what was sent
 
 
-def test_newlines_in_titles_cannot_corrupt_the_record(tmp_path):
+def test_newlines_in_titles_cannot_corrupt_the_record(tmp_path, *, scratch_plane_env):
     # Review #528 Major: an embedded newline in a claudron-returned title
     # survived into $TASK; the line-oriented ledger rotation then truncated
     # the row into permanently invalid JSON. The ledger is gone, but the
@@ -210,7 +210,7 @@ def test_newlines_in_titles_cannot_corrupt_the_record(tmp_path):
         ],
     }
     env = _wedge_env(tmp_path, json.dumps(evil))
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory: Rate" in sent                 # the pointer was injected
     assert "\n" not in sent and "\r" not in sent and "\t" not in sent
@@ -218,32 +218,32 @@ def test_newlines_in_titles_cannot_corrupt_the_record(tmp_path):
     assert "\n" not in row["task"] and "Rate limits with tabs" in row["task"]
 
 
-def test_non_dict_json_shapes_degrade_cleanly(tmp_path):
+def test_non_dict_json_shapes_degrade_cleanly(tmp_path, *, scratch_plane_env):
     # Review #528 nit: a non-dict top-level value (or non-dict result item)
     # must exit the parser cleanly, not traceback past the except.
     for i, payload in enumerate(("[1, 2, 3]", '"just a string"', '{"results": [42, null]}')):
         case_dir = tmp_path / f"case{i}"
         case_dir.mkdir()
         env = _wedge_env(case_dir, payload)
-        r, sent, row = _run_dispatch(case_dir, env)
+        r, sent, row = _run_dispatch(case_dir, env, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, (payload, r.stderr)
         assert "[fleet memory:" not in sent
         assert "fix the spotify job" in row["task"], (payload, row)   # the dispatch still landed
 
 
-def test_query_limit_env_overrides_default(tmp_path):
+def test_query_limit_env_overrides_default(tmp_path, *, scratch_plane_env):
     # Review #528 minor: CLAUDRON_QUERY_LIMIT must reach the lookup argv.
     env = _wedge_env(tmp_path, json.dumps({"query": "q", "results": []}))
     env["CLAUDRON_QUERY_LIMIT"] = "7"
-    r, _, _ = _run_dispatch(tmp_path, env)
+    r, _, _ = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     argv = (tmp_path / "claudron-argv.txt").read_text().splitlines()
     assert "--limit" in argv and argv[argv.index("--limit") + 1] == "7", argv
 
 
-def test_task_passed_as_single_quoted_query_arg(tmp_path):
+def test_task_passed_as_single_quoted_query_arg(tmp_path, *, scratch_plane_env):
     env = _wedge_env(tmp_path, json.dumps({"query": "q", "results": []}))
-    r, _, _ = _run_dispatch(tmp_path, env, task="use * wisely")
+    r, _, _ = _run_dispatch(tmp_path, env, task="use * wisely", scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     argv = (tmp_path / "claudron-argv.txt").read_text().splitlines()
     # lookup --json --limit 3 "<whole task>" — no --vault: the CLI reads
@@ -252,7 +252,7 @@ def test_task_passed_as_single_quoted_query_arg(tmp_path):
     assert "--vault" not in argv, argv
 
 
-def test_control_chars_in_titles_sanitize_clean(tmp_path):
+def test_control_chars_in_titles_sanitize_clean(tmp_path, *, scratch_plane_env):
     # #544: a hostile-but-valid YAML "\e" title reaches the wedge as raw ESC.
     # Non-whitespace controls must not survive into the ledger or the send,
     # and CSI sequences must strip WHOLE — collapsing the ESC alone leaves
@@ -267,7 +267,7 @@ def test_control_chars_in_titles_sanitize_clean(tmp_path):
         ],
     }
     env = _wedge_env(tmp_path, json.dumps(evil))
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory: quagga" in sent               # the pointer was injected
     for payload in (sent, row["task"]):
@@ -276,7 +276,7 @@ def test_control_chars_in_titles_sanitize_clean(tmp_path):
     assert "quagga red stripes lore" in row["task"]
 
 
-def test_clean_output_is_fixed_point_of_tmux_sanitizer(tmp_path):
+def test_clean_output_is_fixed_point_of_tmux_sanitizer(tmp_path, *, scratch_plane_env):
     # The plane must record what the worker receives: clean() output must
     # pass the send-side sanitizer unchanged. Widening one sanitizer without
     # the other (e.g. OSC handling) fails here before it desyncs a fleet.
@@ -290,7 +290,7 @@ def test_clean_output_is_fixed_point_of_tmux_sanitizer(tmp_path):
         ],
     }
     env = _wedge_env(tmp_path, json.dumps(evil))
-    r, sent, row = _run_dispatch(tmp_path, env)
+    r, sent, row = _run_dispatch(tmp_path, env, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory: Rate" in sent                 # the pointer was injected
     assert call_lib_fn("sanitize_tmux_input", row["task"]) == row["task"]
@@ -318,21 +318,21 @@ def _query_sent(tmp_path: Path) -> str:
     return argv[-1]
 
 
-def _query_for(tmp_path: Path, task: str, sub: str, **extra) -> str:
+def _query_for(tmp_path: Path, task: str, sub: str, *, scratch_plane_env, **extra) -> str:
     """One dispatch in its OWN directory, returning the query claudron saw.
     Separate dirs because _fake_lib mkdirs without exist_ok, so two runs cannot
     share a root — and comparing two runs is the whole point of the pair below."""
     root = tmp_path / sub
     root.mkdir()
     env = {**_wedge_env(root, json.dumps(TWO_HITS)), **extra}
-    _run_dispatch(root, env, task=task)
+    _run_dispatch(root, env, task=task, scratch_plane_env=scratch_plane_env)
     return _query_sent(root)
 
 
-def test_query_is_capped_not_the_whole_task(tmp_path):
+def test_query_is_capped_not_the_whole_task(tmp_path, *, scratch_plane_env):
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
     long_task = "restore the ranking " * 40  # ~800 chars, one line
-    _run_dispatch(tmp_path, env, task=long_task)
+    _run_dispatch(tmp_path, env, task=long_task, scratch_plane_env=scratch_plane_env)
     sent = _query_sent(tmp_path)
     # THAT a cap applies. WHY it is 30 is derived in
     # test_the_default_cap_is_30_and_the_number_is_derived; changing the number
@@ -341,32 +341,32 @@ def test_query_is_capped_not_the_whole_task(tmp_path):
     assert sent == long_task[:30]
 
 
-def test_short_task_passes_through_whole(tmp_path):
+def test_short_task_passes_through_whole(tmp_path, *, scratch_plane_env):
     # The cap must not perturb the common case.
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
     short = "fix the spotify rate limit job"
-    _run_dispatch(tmp_path, env, task=short)
+    _run_dispatch(tmp_path, env, task=short, scratch_plane_env=scratch_plane_env)
     assert _query_sent(tmp_path) == short
 
 
-def test_same_task_yields_an_identical_query(tmp_path):
+def test_same_task_yields_an_identical_query(tmp_path, *, scratch_plane_env):
     # DETERMINISM half. Without it, "different subjects differ" is satisfied by
     # noise — and a randomly-varying pointer set is worse than a flat one,
     # because at least a flat set is stable enough to learn to ignore.
     task = "investigate the boot strand on pranav " * 12
-    assert _query_for(tmp_path, task, "run1") == _query_for(tmp_path, task, "run2")
+    assert _query_for(tmp_path, task, "run1", scratch_plane_env=scratch_plane_env) == _query_for(tmp_path, task, "run2", scratch_plane_env=scratch_plane_env)
 
 
-def test_different_subjects_yield_different_queries(tmp_path):
+def test_different_subjects_yield_different_queries(tmp_path, *, scratch_plane_env):
     # VARIANCE half. Both tasks exceed the cap, so before truncation both were
     # simply "the whole payload" — long, and topically indistinguishable to a
     # ranker that returns its global ceiling for any paragraph.
-    a = _query_for(tmp_path, "restore the claudron ranking " * 20, "subjA")
-    b = _query_for(tmp_path, "extend the pane verify budget " * 20, "subjB")
+    a = _query_for(tmp_path, "restore the claudron ranking " * 20, "subjA", scratch_plane_env=scratch_plane_env)
+    b = _query_for(tmp_path, "extend the pane verify budget " * 20, "subjB", scratch_plane_env=scratch_plane_env)
     assert a != b
 
 
-def test_the_default_cap_is_30_and_the_number_is_derived(tmp_path):
+def test_the_default_cap_is_30_and_the_number_is_derived(tmp_path, *, scratch_plane_env):
     """PINS THE MAGNITUDE. 30 looks too small until you do the arithmetic.
 
     Claudron sums per-token scores with no normalisation, then clamps at
@@ -388,7 +388,7 @@ def test_the_default_cap_is_30_and_the_number_is_derived(tmp_path):
     scorer; revisit then, and redo the arithmetic when you do.
     """
     task = "restore the claudron ranking behaviour across every fleet " * 8
-    assert len(_query_for(tmp_path, task, "capcheck")) == 30
+    assert len(_query_for(tmp_path, task, "capcheck", scratch_plane_env=scratch_plane_env)) == 30
 
 
 def test_the_cap_keeps_the_weak_path_below_the_score_ceiling(tmp_path):
@@ -428,9 +428,9 @@ def test_the_cap_keeps_the_weak_path_below_the_score_ceiling(tmp_path):
     )
 
 
-def test_cap_is_overridable(tmp_path):
+def test_cap_is_overridable(tmp_path, *, scratch_plane_env):
     env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "40"}
-    _run_dispatch(tmp_path, env, task="restore the ranking " * 40)
+    _run_dispatch(tmp_path, env, task="restore the ranking " * 40, scratch_plane_env=scratch_plane_env)
     assert len(_query_sent(tmp_path)) == 40
 
 
@@ -455,13 +455,13 @@ PREAMBLE = (
 SUBJECT = "restore the claudron ranking for enveloped dispatches"
 
 
-def test_leading_fleet_memory_preamble_is_stripped_before_the_cap(tmp_path):
+def test_leading_fleet_memory_preamble_is_stripped_before_the_cap(tmp_path, *, scratch_plane_env):
     # Pins its OWN cap: this test is about WHERE THE STRIP LANDS, and the
     # default cap (30) would truncate the expectation and make it a cap test
     # wearing a strip test's name. Two properties in one assertion means a
     # change to either reddens it and the message names the wrong one.
     env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
-    _run_dispatch(tmp_path, env, task=PREAMBLE + SUBJECT)
+    _run_dispatch(tmp_path, env, task=PREAMBLE + SUBJECT, scratch_plane_env=scratch_plane_env)
     sent = _query_sent(tmp_path)
     assert sent == SUBJECT, f"expected the subject alone, got {sent!r}"
     # The failure this closes: without the strip the whole 200-char window is
@@ -474,7 +474,7 @@ def test_leading_fleet_memory_preamble_is_stripped_before_the_cap(tmp_path):
         assert hit["title"] not in sent
 
 
-def test_stacked_preambles_are_all_stripped(tmp_path):
+def test_stacked_preambles_are_all_stripped(tmp_path, *, scratch_plane_env):
     # A dispatch composed from an already-rendered one carries two. Stripping
     # only the outermost puts the query straight back at 100% boilerplate, which
     # is the same defect rather than a milder one -- so the strip repeats.
@@ -483,11 +483,11 @@ def test_stacked_preambles_are_all_stripped(tmp_path):
     # wearing a strip test's name. Two properties in one assertion means a
     # change to either reddens it and the message names the wrong one.
     env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
-    _run_dispatch(tmp_path, env, task=PREAMBLE + PREAMBLE + SUBJECT)
+    _run_dispatch(tmp_path, env, task=PREAMBLE + PREAMBLE + SUBJECT, scratch_plane_env=scratch_plane_env)
     assert _query_sent(tmp_path) == SUBJECT
 
 
-def test_preamble_shaped_text_after_the_head_is_left_alone(tmp_path):
+def test_preamble_shaped_text_after_the_head_is_left_alone(tmp_path, *, scratch_plane_env):
     # Only a LEADING block is boilerplate. The same shape further in is the
     # caller talking about a preamble, which is subject matter -- and eating it
     # would be the very failure being fixed, self-inflicted.
@@ -497,12 +497,12 @@ def test_preamble_shaped_text_after_the_head_is_left_alone(tmp_path):
     # change to either reddens it and the message names the wrong one.
     env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
     task = "explain why " + PREAMBLE + "saturates the query"
-    _run_dispatch(tmp_path, env, task=task)
+    _run_dispatch(tmp_path, env, task=task, scratch_plane_env=scratch_plane_env)
     assert _query_sent(tmp_path) == task[:500]
     assert _query_sent(tmp_path).startswith("explain why ")
 
 
-def test_unterminated_preamble_terminates(tmp_path):
+def test_unterminated_preamble_terminates(tmp_path, *, scratch_plane_env):
     # A malformed head has no "] " to strip to, so the expansion is a no-op. The
     # guard is what stops the loop; without it this test does not fail, it HANGS.
     # Pins its OWN cap: this test is about WHERE THE STRIP LANDS, and the
@@ -511,7 +511,7 @@ def test_unterminated_preamble_terminates(tmp_path):
     # change to either reddens it and the message names the wrong one.
     env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
     task = "[fleet memory: never closed and then some subject matter"
-    _run_dispatch(tmp_path, env, task=task)
+    _run_dispatch(tmp_path, env, task=task, scratch_plane_env=scratch_plane_env)
     assert _query_sent(tmp_path) == task
 
 
@@ -524,21 +524,21 @@ def _lookup_ran(tmp_path) -> bool:
     return (tmp_path / "claudron-argv.txt").exists()
 
 
-def test_preamble_only_task_does_not_query_on_empty(tmp_path):
+def test_preamble_only_task_does_not_query_on_empty(tmp_path, *, scratch_plane_env):
     # The over-match case with teeth. A task that was ONLY a preamble strips to
     # nothing, and an EMPTY query is not a degraded lookup -- it is the original
     # defect through the opposite door, because with no subject to rank against
     # whatever sits at the global ceiling comes back. That is precisely the inert
     # pointer set this wedge exists to stop emitting. So: no subject, no lookup.
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
-    _run_dispatch(tmp_path, env, task=PREAMBLE)
+    _run_dispatch(tmp_path, env, task=PREAMBLE, scratch_plane_env=scratch_plane_env)
     assert not _lookup_ran(tmp_path), "queried the vault on an empty string"
 
 
-def test_preamble_plus_whitespace_does_not_query(tmp_path):
+def test_preamble_plus_whitespace_does_not_query(tmp_path, *, scratch_plane_env):
     # Same case, reached via trailing whitespace rather than an exact boundary.
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
-    _run_dispatch(tmp_path, env, task=PREAMBLE + "   ")
+    _run_dispatch(tmp_path, env, task=PREAMBLE + "   ", scratch_plane_env=scratch_plane_env)
     assert not _lookup_ran(tmp_path)
 
 
@@ -569,11 +569,11 @@ def test_preamble_plus_whitespace_does_not_query(tmp_path):
         ),
     ],
 )
-def test_strip_boundary(tmp_path, task, expected, why):
+def test_strip_boundary(tmp_path, task, expected, why, *, scratch_plane_env):
     # Pins its OWN cap: this test is about WHERE THE STRIP LANDS, and the
     # default cap (30) would truncate the expectation and make it a cap test
     # wearing a strip test's name. Two properties in one assertion means a
     # change to either reddens it and the message names the wrong one.
     env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
-    _run_dispatch(tmp_path, env, task=task)
+    _run_dispatch(tmp_path, env, task=task, scratch_plane_env=scratch_plane_env)
     assert _query_sent(tmp_path) == expected, why

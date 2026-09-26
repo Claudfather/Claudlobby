@@ -21,7 +21,6 @@ from tests.conftest import (
     TG_STUB,
     _write_exec,
     constructed_env,
-    plane_emit_env,
     read_fleet_events,
 )
 
@@ -73,7 +72,7 @@ def _home_state(tmp_path: Path, bot: str) -> str:
 # --- the required case: an env chat no bot is in --------------------------------
 
 
-def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path):
+def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path, *, scratch_plane_env):
     root = tmp_path / "root"
     (root / "lib").mkdir(parents=True)
     _write_exec(root / "lib" / "tg-post.sh", TG_STUB)
@@ -82,11 +81,10 @@ def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path):
     capture = tmp_path / "tg-capture"
     env = constructed_env(
         HOME=tmp_path / "home",
-        CLAUDLOBBY_ROOT=root,
         TG_CAPTURE=capture,
         TELEGRAM_GROUP_CHAT_ID=CHAT_A,
         FLEET_EVENT_EMIT_TIMEOUT_S="120",
-        **plane_emit_env(),
+        **scratch_plane_env(root),
     )
     driver = (
         f'. "{LIB}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
@@ -202,8 +200,8 @@ def _token_seen(tmp_path: Path) -> str:
     capture = tmp_path / "tg-capture"
     full = constructed_env(
         HOME=tmp_path / "home",
-        CLAUDLOBBY_ROOT=root,
         TG_CAPTURE=capture,
+        CLAUDLOBBY_ROOT=root,
         TELEGRAM_BOT_TOKEN="ambient-session-token",
         PLANE_EMIT_DISABLED="1",
     )

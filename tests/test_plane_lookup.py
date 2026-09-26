@@ -205,7 +205,7 @@ def test_the_two_doors_call_the_lookup_and_no_door_greps_a_ledger():
         assert subprocess.run(["bash", "-n", str(REPO / "lib" / f)]).returncode == 0
 
 
-def test_supersedes_reaches_the_plane_through_the_real_dispatch_door(tmp_path):
+def test_supersedes_reaches_the_plane_through_the_real_dispatch_door(tmp_path, scratch_plane_env):
     """Drive the REAL lib/dispatch-task.sh (tmux + dispatch.sh mocked, the
     plane emit captured) with --supersedes naming a task the plane holds:
     the batch must carry supersedes_msg_id on the new communication and a
@@ -235,7 +235,7 @@ def test_supersedes_reaches_the_plane_through_the_real_dispatch_door(tmp_path):
                               flags=re.M))
     env = {**os.environ, "PATH": f"{mock}:{os.environ['PATH']}", "TMUX_BIN": str(mock / "tmux"),
            "CLAUDLOBBY_ROOT": str(root), "BOT_NAME": "mgr", "FLEET_NAME": F,
-           "PLANE_EMIT_ENABLED": "1"}
+           **scratch_plane_env(root)}
     # --type task forces the envelope: only an enveloped dispatch mints a task
     # id, and only a task dispatch emits work_item + assignment (a freeform
     # send is a bare communication by design).

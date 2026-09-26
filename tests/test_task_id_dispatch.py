@@ -83,7 +83,7 @@ def _sourced(fn_call: str, env: dict | None = None) -> subprocess.CompletedProce
     return _bash(f'. "{LIB_DIR}/lib-common.sh"; {fn_call}', env=env)
 
 
-def plane_env(root: Path) -> dict:
+def plane_env(root: Path, *, scratch_plane_env) -> dict:
     """The env that makes a door RECORD into <root>/state/plane/plane.db: the
     fleet (a door records nothing without one — plane_armed --require-fleet),
     the venv's real CLI as the shim's cold rung, and a socket path no daemon
@@ -91,14 +91,14 @@ def plane_env(root: Path) -> dict:
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     return {
-        "CLAUDLOBBY_ROOT": str(root),
+        **scratch_plane_env(root),
         "FLEET_NAME": FLEET,
-        "PLANE_EMIT_CLI": str(CLI),
-        "PLANE_SOCKET": str(root / "no-daemon.sock"),
+
+
     }
 
 
-def _fake_lib(tmp_path: Path, dispatch_stub: str) -> tuple[Path, dict]:
+def _fake_lib(tmp_path: Path, dispatch_stub: str, *, scratch_plane_env) -> tuple[Path, dict]:
     """A minimal lib/ for driving the real doors with a stubbed transport and a
     REAL plane: the doors + lib-common + the shim are symlinked (BASH_SOURCE
     resolves LIB_DIR through the symlink dir, so "$LIB_DIR/dispatch.sh" hits
@@ -114,7 +114,7 @@ def _fake_lib(tmp_path: Path, dispatch_stub: str) -> tuple[Path, dict]:
     tmux = tmp_path / "tmux"
     tmux.write_text("#!/bin/bash\nexit 0\n")
     tmux.chmod(0o755)
-    env = plane_env(tmp_path)
+    env = plane_env(tmp_path, scratch_plane_env=scratch_plane_env)
     env.update({
         "TMUX_BIN": str(tmux),
         "OBSERVABILITY_DISPATCH_DEADLINE": "600",
@@ -215,11 +215,11 @@ class TestMintTaskId:
 # --- shell round trip -------------------------------------------------------------
 
 
-def test_dispatch_task_mints_records_on_the_plane_and_envelopes(tmp_path):
+def test_dispatch_task_mints_records_on_the_plane_and_envelopes(tmp_path, *, scratch_plane_env):
     libdir, env = _fake_lib(
         tmp_path,
         f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n',
-    )
+    scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "fix the widget"', env=env)
     assert r.returncode == 0, r.stderr
     row = plane_dispatch_row(tmp_path)
@@ -231,7 +231,7 @@ def test_dispatch_task_mints_records_on_the_plane_and_envelopes(tmp_path):
     assert f"task:{row['task_id']}" in sent, "envelope must carry the minted id"
 
 
-def test_a_clean_dispatch_writes_only_the_shims_disclosure_to_stderr(tmp_path):
+def test_a_clean_dispatch_writes_only_the_shims_disclosure_to_stderr(tmp_path, *, scratch_plane_env):
     """The happy path must be SILENT but for the shim's own voice.
 
     This asserts a channel, not a behaviour, and it exists because the suite was
@@ -257,7 +257,7 @@ def test_a_clean_dispatch_writes_only_the_shims_disclosure_to_stderr(tmp_path):
     Scoped honestly: this closes the channel for ONE path. The shell suite's
     blanket `2>/dev/null` is untouched and still hides the same class elsewhere.
     """
-    libdir, env = _fake_lib(tmp_path, "#!/bin/bash\nexit 0\n")
+    libdir, env = _fake_lib(tmp_path, "#!/bin/bash\nexit 0\n", scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" w1 "fix the widget"', env=env)
     assert r.returncode == 0, r.stderr
     foreign = [ln for ln in r.stderr.splitlines() if not SHIM_STDERR_RE.match(ln)]
@@ -268,17 +268,17 @@ def test_a_clean_dispatch_writes_only_the_shims_disclosure_to_stderr(tmp_path):
     assert plane_dispatch_row(tmp_path) is not None, "and the dispatch was recorded"
 
 
-def test_missing_flag_value_is_a_loud_error(tmp_path):
+def test_missing_flag_value_is_a_loud_error(tmp_path, *, scratch_plane_env):
     # ${2:?} guards exit 0 through the EXIT trap on bash 3.2 — the explicit
     # _flag_val guard must fail loudly instead (review 6b).
-    libdir, env = _fake_lib(tmp_path, "#!/bin/bash\nexit 0\n")
+    libdir, env = _fake_lib(tmp_path, "#!/bin/bash\nexit 0\n", scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --repo', env=env)
     assert r.returncode != 0
     assert "needs a value" in r.stderr
 
 
-def test_report_back_records_the_report_on_the_plane(tmp_path):
-    env = plane_env(tmp_path)
+def test_report_back_records_the_report_on_the_plane(tmp_path, *, scratch_plane_env):
+    env = plane_env(tmp_path, scratch_plane_env=scratch_plane_env)
     env.update({
         "MANAGER_TMUX": "mgr",
         "MANAGER_TMUX_SOCKET": "mgr-sock",

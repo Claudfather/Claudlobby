@@ -58,7 +58,7 @@ def _run(root: Path, path: str, snippet: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=60,
-        env={"CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": path},
+        env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": path},
     )
 
 
@@ -172,7 +172,7 @@ def test_a_read_only_state_dir_never_fails_the_boot(tmp_path: Path):
             capture_output=True,
             text=True,
             timeout=60,
-            env={"CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": SAFE_PATH},
+            env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": SAFE_PATH},
         )
         assert "RC=0" in result.stdout, (result.stdout, result.stderr)
         assert _path_line(result.stdout) == SAFE_PATH, result.stdout
@@ -217,7 +217,7 @@ def test_every_concurrent_boot_gets_the_cli_not_just_the_race_winner(tmp_path: P
             capture_output=True,
             text=True,
             timeout=60,
-            env={"CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": SAFE_PATH},
+            env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": SAFE_PATH},
         )
         lines = [ln for ln in result.stdout.splitlines() if ln in ("OK", "MISS")]
         assert len(lines) == 18, (wave, result.stdout, result.stderr)

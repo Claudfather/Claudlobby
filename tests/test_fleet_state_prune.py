@@ -94,7 +94,7 @@ def _prune(
         ["bash", str(UPDATER), "prune", str(root / yaml), *args],
         capture_output=True,
         text=True,
-        env={
+        env={"PLANE_EMIT_DISABLED": "1",
             "PATH": "/usr/bin:/bin:/usr/local/bin",
             "HOME": str(root),
             "CLAUDLOBBY_ROOT": str(root),
@@ -113,7 +113,7 @@ def test_discover_fleet_manifests_finds_flat_and_nested(tmp_path: Path) -> None:
         ["bash", "-c", f'. "{LIB_COMMON}"; discover_fleet_manifests'],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(root), "CLAUDLOBBY_ROOT": str(root)},
+        env={"PLANE_EMIT_DISABLED": "1", "PATH": "/usr/bin:/bin", "HOME": str(root), "CLAUDLOBBY_ROOT": str(root)},
     )
     found = {line.split("\t")[0] for line in proc.stdout.strip().splitlines() if line}
     assert found == {"f-alpha", "f-beta", "f-gamma"}, proc.stdout

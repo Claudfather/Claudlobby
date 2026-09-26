@@ -55,10 +55,10 @@ def _pulse_lib(tmp_path, capture, *, lookup_stub=None):
     return libdir
 
 
-def _pulse(root, libdir, *, fleet=F, **extra):
-    env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": fleet,
-           "PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_CLI": str(CLI),
-           "PLANE_SOCKET": str(root / "no-daemon.sock"),
+def _pulse(root, libdir, *, fleet=F, scratch_plane_env, **extra):
+    env = {**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": fleet,
+           "PLANE_EMIT_ENABLED": "1",
+
            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
            "TMUX_TMPDIR": str(root / "tmux"),
            "FLEET_PULSE_ESCALATION_CHAT_ID": "-1001234567890",
@@ -108,14 +108,14 @@ def _seen(root: Path, fleet: str = F) -> set[str]:
 
 
 @needs_tmux
-def test_an_open_escalation_pages_the_operator_once(tmp_path):
+def test_an_open_escalation_pages_the_operator_once(tmp_path, *, scratch_plane_env):
     root, paths, wi, asg = _scene(tmp_path)
     _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr",
          question="do we ship without the migration")
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
 
-    r = _pulse(root, libdir)
+    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     paged = _escalation_pages(capture)
     assert len(paged) == 1, _pages(capture) + [r.stderr[-1500:]]
@@ -124,57 +124,57 @@ def test_an_open_escalation_pages_the_operator_once(tmp_path):
     assert asg in _seen(root)
 
     # ...and a second sweep, with the question still open, says nothing new
-    r2 = _pulse(root, libdir)
+    r2 = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r2.returncode == 0, r2.stderr[-2000:]
     assert len(_escalation_pages(capture)) == 1, _pages(capture)
 
 
 @needs_tmux
-def test_an_answered_escalation_is_forgotten_so_a_re_raise_pages_again(tmp_path):
+def test_an_answered_escalation_is_forgotten_so_a_re_raise_pages_again(tmp_path, *, scratch_plane_env):
     """The marker follows the PLANE: any act clears the arm, and a manager who
     raises the question again is a new question."""
     root, paths, wi, asg = _scene(tmp_path)
     _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="q1")
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
-    _pulse(root, libdir)
+    _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert len(_escalation_pages(capture)) == 1
 
     # the human answered and the manager moved the row on
     _act(root, wi, asg, "progress", "2026-09-02T11:00:00Z")
-    r = _pulse(root, libdir)
+    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     assert len(_escalation_pages(capture)) == 1                  # nothing to say
     assert asg not in _seen(root)
 
     _act(root, wi, asg, "escalated", "2026-09-02T12:00:00Z", by="mgr", question="q2")
-    r = _pulse(root, libdir)
+    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     paged = _escalation_pages(capture)
     assert len(paged) == 2 and "q2" in paged[1], paged
 
 
 @needs_tmux
-def test_a_terminal_act_never_pages(tmp_path):
+def test_a_terminal_act_never_pages(tmp_path, *, scratch_plane_env):
     """A withdrawn row is closed; the question died with it."""
     root, paths, wi, asg = _scene(tmp_path)
     _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="q")
     _act(root, wi, asg, "cancelled", "2026-09-02T10:30:00Z", by="mgr", reason="moot")
     capture = tmp_path / "tg.log"
-    r = _pulse(root, _pulse_lib(tmp_path, capture))
+    r = _pulse(root, _pulse_lib(tmp_path, capture), scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     assert _escalation_pages(capture) == [], _pages(capture)
 
 
 @needs_tmux
-def test_a_refused_read_pages_its_own_guard_and_keeps_every_marker(tmp_path):
+def test_a_refused_read_pages_its_own_guard_and_keeps_every_marker(tmp_path, *, scratch_plane_env):
     """Unreachable is not empty (the sweep's standing rule) — and dropping the
     markers on a refusal would re-page the whole backlog on recovery."""
     root, paths, wi, asg = _scene(tmp_path)
     _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="q")
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
-    _pulse(root, libdir)
+    _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert len(_escalation_pages(capture)) == 1
 
     refusing = _pulse_lib(
@@ -182,7 +182,7 @@ def test_a_refused_read_pages_its_own_guard_and_keeps_every_marker(tmp_path):
         lookup_stub=('import sys\n'
                      'print("plane-lookup: UNREACHABLE (stub)", file=sys.stderr)\n'
                      'sys.exit(3)\n'))
-    r = _pulse(root, refusing)
+    r = _pulse(root, refusing, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     assert "escalated reader UNREACHABLE" in r.stderr
     assert any("escalated-task reader for f is UNREACHABLE" in p
@@ -193,7 +193,7 @@ def test_a_refused_read_pages_its_own_guard_and_keeps_every_marker(tmp_path):
 
 
 @needs_tmux
-def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_path):
+def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_path, *, scratch_plane_env):
     """F1: `state_dir` is HOST-GLOBAL (one root, several fleets), so a marker
     keyed by assignment id alone in ONE shared directory meant fleet A's
     "forget" loop — built from A's own read — deleted fleet B's markers too,
@@ -218,9 +218,9 @@ def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_pa
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
 
-    r_f = _pulse(root, libdir)
+    r_f = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r_f.returncode == 0, r_f.stderr[-2000:]
-    r_g = _pulse(root, libdir, fleet=g)
+    r_g = _pulse(root, libdir, fleet=g, scratch_plane_env=scratch_plane_env)
     assert r_g.returncode == 0, r_g.stderr[-2000:]
     paged = _escalation_pages(capture)
     assert len(paged) == 2, paged
@@ -233,6 +233,6 @@ def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_pa
 
     # fleet f's second sweep must page NOTHING new: g's sweep (and its own
     # forget loop) never touched f's per-fleet seen-file.
-    r_f2 = _pulse(root, libdir)
+    r_f2 = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r_f2.returncode == 0, r_f2.stderr[-2000:]
     assert len(_escalation_pages(capture)) == 2, _pages(capture)

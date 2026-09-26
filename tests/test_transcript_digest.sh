@@ -87,7 +87,7 @@ run_digest() {
     printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
         BOT_DIR="$T/botdir" PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude \
         SESSION_DIGEST_ENABLED=1 \
-        PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+        PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
         PLANE_CAPTURE="$T/capture.jsonl" \
         "$@" bash "$DIGEST" >/dev/null 2>"$T/err.txt" || true
     tail -n 1 "$T/capture.jsonl" 2>/dev/null || true
@@ -101,7 +101,7 @@ run_digest_unarmed() {
     pay="$(TX="$1" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
     printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
         BOT_DIR="$T/botdir" PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude \
-        PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+        PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
         PLANE_CAPTURE="$T/capture.jsonl" \
         bash "$DIGEST" >/dev/null 2>&1 || true
     cat "$T/capture.jsonl" 2>/dev/null || true
@@ -267,13 +267,13 @@ pay='{"session_id":"s","transcript_path":"/nonexistent/nope.jsonl","cwd":"/tmp"}
 : > "$T/capture.jsonl"
 printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
     PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 \
-    PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+    PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
     PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>&1; rc=$?
 assert_eq "missing transcript still exits 0 (never blocks session end)" 0 "$rc"
 
 printf '%s' '' | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
     PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 \
-    PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+    PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
     PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>&1; rc=$?
 assert_eq "empty payload still exits 0" 0 "$rc"
 
@@ -287,7 +287,7 @@ stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\"
 pay="$(TX="$T/tx.jsonl" python3 -c 'import json,os;print(json.dumps({"session_id":"s","transcript_path":os.environ["TX"],"cwd":"/tmp"}))')"
 printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
     PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 SESSION_DIGEST_MIN_TURNS=4 \
-    PLANE_EMIT_CLI="bash $T/bin/failcli" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+    PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="bash $T/bin/failcli" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
     PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>"$T/err.txt"; rc=$?
 assert_eq "plane failure: hook still exits 0" 0 "$rc"
 [ ! -s "$T/capture.jsonl" ] && r=yes || r=no

@@ -67,7 +67,7 @@ def _comm(suffix="2", body="over the wire") -> dict:
 
 
 @pytest.fixture()
-def running(tmp_path: Path):
+def running(tmp_path: Path, scratch_plane_env):
     """A live daemon on a short socket; yields (root, sock_path, daemon).
     Capture is armed FULL so round-trip content is assertable — and its being
     honored at all is itself the transport-never-changes-semantics check
@@ -75,7 +75,7 @@ def running(tmp_path: Path):
     cap = tmp_path / "state" / "plane"
     cap.mkdir(parents=True, exist_ok=True)
     (cap / "capture.json").write_text('{"*": "full"}')
-    sdir = _short_sock_dir()
+    sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     t = threading.Thread(
@@ -256,13 +256,13 @@ def test_deep_root_whose_public_path_fits_still_binds(tmp_path: Path):
         shutil.rmtree(deep, ignore_errors=True)
 
 
-def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path):
+def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path, *, scratch_plane_env):
     eid = mint_event_id()
     fin = {**_comm("8"), "event_id": eid,
            "occurred_at": "2026-08-24T00:00:00+00:00",
            "schema_version": PLANE_SCHEMA_VERSION}
     spool_write(tmp_path, [fin], "db was down")
-    sdir = _short_sock_dir()
+    sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     t = threading.Thread(
@@ -331,8 +331,8 @@ def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path):
         shutil.rmtree(sdir, ignore_errors=True)
 
 
-def test_lifecycle_events_recorded(tmp_path: Path):
-    sdir = _short_sock_dir()
+def test_lifecycle_events_recorded(tmp_path: Path, *, scratch_plane_env):
+    sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     t = threading.Thread(
@@ -359,7 +359,7 @@ def test_lifecycle_events_recorded(tmp_path: Path):
     assert (subj["subject_kind"], subj["subject_uid"]) == ("host", host)
 
 
-def test_opted_out_root_drops_body_with_proof_triple(tmp_path: Path):
+def test_opted_out_root_drops_body_with_proof_triple(tmp_path: Path, *, scratch_plane_env):
     """Transport never changes semantics: the daemon path applies the SAME
     capture policy the CLI applies. Proven on the STRIPPING side, which is the
     half with a mechanism to get wrong — an explicit `{"*": "metadata"}` opt-out
@@ -369,7 +369,7 @@ def test_opted_out_root_drops_body_with_proof_triple(tmp_path: Path):
     exercises the stripper at all.)"""
     (tmp_path / "state" / "plane").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "metadata"}')
-    sdir = _short_sock_dir()
+    sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     t = threading.Thread(
@@ -396,10 +396,10 @@ def test_opted_out_root_drops_body_with_proof_triple(tmp_path: Path):
         shutil.rmtree(sdir, ignore_errors=True)
 
 
-def test_unconfigured_root_keeps_the_body_through_the_daemon(tmp_path: Path):
+def test_unconfigured_root_keeps_the_body_through_the_daemon(tmp_path: Path, *, scratch_plane_env):
     """The other half of the same property: with no capture.json the daemon
     stores the body, exactly as the CLI does under the shipped default."""
-    sdir = _short_sock_dir()
+    sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     t = threading.Thread(
@@ -552,7 +552,7 @@ def test_failed_drain_advances_the_deadline(tmp_path: Path, monkeypatch):
     assert len(calls) == 2
 
 
-def test_shim_end_to_end_through_real_daemon(running):
+def test_shim_end_to_end_through_real_daemon(running, *, scratch_plane_env):
     """lib/plane-emit.sh -> lib/plane-socket-client.py -> daemon -> row: the
     whole rung-1 chain, cross-language, on a real db."""
     import subprocess
@@ -562,8 +562,7 @@ def test_shim_end_to_end_through_real_daemon(running):
     batch = json.dumps({"events": [_comm("f", body="via the shim")]})
     r = subprocess.run(
         ["bash", str(shim)], input=batch, capture_output=True, text=True,
-        env={**os.environ, "CLAUDLOBBY_ROOT": str(root),
-             "PLANE_SOCKET": str(sock)},
+        env={**os.environ, **scratch_plane_env(root, socket=sock)},
     )
     assert r.returncode == 0, r.stderr
     eid = r.stdout.strip().splitlines()[0]
@@ -985,7 +984,7 @@ def _until(pred, timeout: float = 15.0):
     raise AssertionError(f"not true within {timeout}s")
 
 
-def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_path: Path):
+def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_path: Path, scratch_plane_env):
     """The shim stages a RAW batch, so the daemon must land it through
     emit_batch, the socket path's own call, for the capture policy to apply.
     The spool's drain() ingests entries as-is (they are stored
@@ -993,7 +992,7 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_
     plane = tmp_path / "state" / "plane"
     plane.mkdir(parents=True)
     (plane / "capture.json").write_text('{"*": "metadata"}')
-    sdir = _short_sock_dir()
+    sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     t = threading.Thread(target=lambda: daemon.serve(install_signals=False), daemon=True)
@@ -1007,8 +1006,8 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_
             ["bash", str(shim)],
             input=json.dumps({"events": [_comm("c", body="secret content")]}),
             capture_output=True, text=True,
-            env={**os.environ, "CLAUDLOBBY_ROOT": str(tmp_path),
-                 "PLANE_SOCKET": str(sock), "PLANE_EMIT_COOLDOWN_STAGE": "1",
+            env={**os.environ, **scratch_plane_env(tmp_path, socket=sock),
+                 "PLANE_EMIT_COOLDOWN_STAGE": "1",
                  "PLANE_EMIT_CLI": "false"},
         )
         assert r.returncode == 6, f"rc={r.returncode} (1 means the cold CLI ran): {r.stderr}"

@@ -44,7 +44,7 @@ def _run(root: Path, snippet: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=60,
-        env={"CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": "/usr/bin:/bin"},
+        env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": "/usr/bin:/bin"},
     )
 
 

@@ -256,7 +256,7 @@ class TestDiscoverFrameworkCheckouts:
         out = _sh(
             "_editable_project_locations() { printf '%s\\n' \"$_LOCS\"; }; "
             "discover_framework_checkouts",
-            env={"CLAUDLOBBY_ROOT": str(root), "_LOCS": locs},
+            env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "_LOCS": locs},
         )
         return [line for line in out.splitlines() if line]
 

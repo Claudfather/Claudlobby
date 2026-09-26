@@ -35,7 +35,7 @@ DOOR_FILES = ("keepalive.sh", "lib-common.sh", "supervisor.sh", "plane-emit.sh",
 
 
 def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
-         fresh_marker: bool = False, armed: bool = True, disabled: bool = False):
+         fresh_marker: bool = False, armed: bool = True, disabled: bool = False, scratch_plane_env):
     # pane default is the ASCII form of the idle glyph class — the ❯ glyph
     # byte-matches unreliably under the rig's minimal (C-locale) env
     libdir = tmp_path / "lib"
@@ -63,15 +63,17 @@ def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     env = {
-        "CLAUDLOBBY_ROOT": str(tmp_path),
+        **scratch_plane_env(tmp_path),
         "TMUX_BIN": str(tmux),
         "HOME": str(tmp_path),
-        "PLANE_EMIT_CLI": str(CLI),
-        "PLANE_SOCKET": str(tmp_path / "no-daemon.sock"),
+
+
         "PATH": "/usr/bin:/bin",
     }
     if armed:
         env["PLANE_EMIT_ENABLED"] = "1"     # ignored since R1; kept for the shape
+    if not armed:
+        env.pop("PLANE_EMIT_DISABLED")  # validated scratch destination, default-on contract
     if disabled:
         env["PLANE_EMIT_DISABLED"] = "1"
     return libdir, bot, env
@@ -111,11 +113,11 @@ def _wait_samples(root: Path, n: int = 1, timeout: float = 20.0):
     return rows
 
 
-def test_idle_tick_records_the_heartbeat_only(tmp_path):
+def test_idle_tick_records_the_heartbeat_only(tmp_path, *, scratch_plane_env):
     """One sample per live tick (r2 volume fold): session-up-ness is
     derivable from heartbeat presence, so the per-tick session_up=true row
     is gone — pinned, because its return would double the lane."""
-    libdir, bot, env = _rig(tmp_path)
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     rows = _wait_samples(tmp_path)
@@ -127,8 +129,8 @@ def test_idle_tick_records_the_heartbeat_only(tmp_path):
     assert rows[0]["subject_uid"].startswith("boti_")
 
 
-def test_busy_marker_tick_carries_marker_age(tmp_path):
-    libdir, bot, env = _rig(tmp_path, fresh_marker=True)
+def test_busy_marker_tick_carries_marker_age(tmp_path, *, scratch_plane_env):
+    libdir, bot, env = _rig(tmp_path, fresh_marker=True, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     hb = next(json.loads(s["value"]) for s in _wait_samples(tmp_path)
@@ -137,8 +139,8 @@ def test_busy_marker_tick_carries_marker_age(tmp_path):
     assert isinstance(hb["marker_age_s"], int) and hb["marker_age_s"] >= 0
 
 
-def test_unknown_pane_records_unknown(tmp_path):
-    libdir, bot, env = _rig(tmp_path, pane="#### garbage ####")
+def test_unknown_pane_records_unknown(tmp_path, *, scratch_plane_env):
+    libdir, bot, env = _rig(tmp_path, pane="#### garbage ####", scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     hb = next(json.loads(s["value"]) for s in _wait_samples(tmp_path)
@@ -146,11 +148,11 @@ def test_unknown_pane_records_unknown(tmp_path):
     assert hb["state"] == "UNKNOWN"
 
 
-def test_dead_session_records_session_down_and_no_heartbeat(tmp_path):
+def test_dead_session_records_session_down_and_no_heartbeat(tmp_path, *, scratch_plane_env):
     """The dead path records the one fact it observed (session_up=false)
     and NO heartbeat — no pane was classified, and a fabricated verdict is
     the lie this lane exists to kill. The restart still runs (stub)."""
-    libdir, bot, env = _rig(tmp_path, has_session=False)
+    libdir, bot, env = _rig(tmp_path, has_session=False, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     rows = _wait_samples(tmp_path)
@@ -159,30 +161,30 @@ def test_dead_session_records_session_down_and_no_heartbeat(tmp_path):
     assert (bot / "start-stub.log").exists()   # the restart ladder ran
 
 
-def test_records_without_any_flag_and_disabled_emits_nothing(tmp_path):
+def test_records_without_any_flag_and_disabled_emits_nothing(tmp_path, *, scratch_plane_env):
     """The always-on contract (F18 closure R1): a tick with NO plane flag in
     its environment records its heartbeat; PLANE_EMIT_DISABLED=1 records
     nothing (the tick itself still runs, rc 0)."""
-    libdir, bot, env = _rig(tmp_path, armed=False)
+    libdir, bot, env = _rig(tmp_path, armed=False, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     rows = _wait_samples(tmp_path)
     assert "bot.heartbeat" in [s["metric"] for s in rows]
     d = tmp_path / "disabled"
     d.mkdir()
-    libdir2, bot2, env2 = _rig(d, disabled=True)
+    libdir2, bot2, env2 = _rig(d, disabled=True, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir2, bot2, env2)
     assert r.returncode == 0, r.stderr
     time.sleep(2)                       # the emit is backgrounded; give a silenced one nothing to do
     assert not db_path(d).is_file()
 
 
-def test_heartbeat_subject_joins_the_registry_keyframe(tmp_path):
+def test_heartbeat_subject_joins_the_registry_keyframe(tmp_path, *, scratch_plane_env):
     """THE join pin: identity resolution lands the sample on the SAME uid
     the registry keyframes use for this instance — presence joins
     equipment/history with no glue. (bot entity_type -> bot_instance kind,
     same alias, one identity.)"""
-    libdir, bot, env = _rig(tmp_path)
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     emit_batch(tmp_path, [{
         "event_type": "registry_snapshot", "emitter": "t", "fleet": "kfleet",
         "payload": {"entity_type": "bot", "entity_alias": "bot:kfleet/b1",
@@ -205,11 +207,11 @@ def test_heartbeat_subject_joins_the_registry_keyframe(tmp_path):
     assert hb_uid == key_uid
 
 
-def test_future_marker_age_clamps_at_zero(tmp_path):
+def test_future_marker_age_clamps_at_zero(tmp_path, *, scratch_plane_env):
     """r2 (probed): an RTC-skewed future mtime recorded a gigantic
     negative marker_age_s verbatim. Age has floor semantics — clamp at 0,
     never a signed delta."""
-    libdir, bot, env = _rig(tmp_path)
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     marker = bot / "data" / ".last-tool-call"
     marker.touch()
     import os
@@ -223,13 +225,13 @@ def test_future_marker_age_clamps_at_zero(tmp_path):
     assert hb["marker_age_s"] == 0
 
 
-def test_wedged_emit_never_stalls_the_tick(tmp_path):
+def test_wedged_emit_never_stalls_the_tick(tmp_path, *, scratch_plane_env):
     """The fold's load-bearing property, pinned by TIME: with the emit
     rung wedged (a 60s-sleeping CLI, no daemon), the tick must return
     promptly — the watchdog can never wait on a record. The row pins
     cannot see this (a synchronous emit passes them too — caught when the
     unbackground mutation came back green)."""
-    libdir, bot, env = _rig(tmp_path)
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     wedge = tmp_path / "wedge-cli"
     wedge.write_text("#!/bin/bash\nsleep 60\n")
     wedge.chmod(0o755)
@@ -241,13 +243,13 @@ def test_wedged_emit_never_stalls_the_tick(tmp_path):
     assert elapsed < 15, f"tick stalled {elapsed:.1f}s behind a wedged emit"
 
 
-def test_pid_guard_honors_fresh_claims_and_ignores_stale_ones(tmp_path):
+def test_pid_guard_honors_fresh_claims_and_ignores_stale_ones(tmp_path, *, scratch_plane_env):
     """Live-found within minutes of deploy: kill -0 alone let a RE-USED
     pid block a bot's emissions indefinitely (takahashi, pid 1543 held by
     an unrelated long-lived process). The claim is honored only while
     FRESH; a stale pidfile — wedge or reuse alike — admits one new emit."""
     import os
-    libdir, bot, env = _rig(tmp_path)
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     holder = subprocess.Popen(["sleep", "300"])
     try:
         pidf = bot / "data" / ".plane-presence.pid"
@@ -266,13 +268,13 @@ def test_pid_guard_honors_fresh_claims_and_ignores_stale_ones(tmp_path):
         holder.kill()
 
 
-def test_wedged_emit_is_reaped_at_the_timeout(tmp_path):
+def test_wedged_emit_is_reaped_at_the_timeout(tmp_path, *, scratch_plane_env):
     """Retro round: under a PERMANENTLY wedged rung the unbounded emit
     made pileup a rate, not a ceiling (~720 stuck procs/day on the
     documented D-state mode). The reaper kills the emit at
     KEEPALIVE_EMIT_TIMEOUT_S; the pin runs a 3s bound against a 300s
     wedge and asserts the wedge process is GONE shortly after."""
-    libdir, bot, env = _rig(tmp_path)
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     wedge = tmp_path / "wedge-cli"
     wedge.write_text("#!/bin/bash\nsleep 300\n")
     wedge.chmod(0o755)

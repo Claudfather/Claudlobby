@@ -47,7 +47,6 @@ import pytest
 from tests.conftest import (
     _write_exec,
     constructed_env,
-    plane_emit_env,
     read_fleet_events,
 )
 from tests.test_maintenance_jobs import _captured, _signal_root
@@ -127,7 +126,8 @@ class Host:
     def __init__(
         self, tmp_path, installed=None, staged=None, npm_rc=0, npm_sleep=None,
         claude_bin=None,
-    ):
+    *, scratch_plane_env):
+        self.scratch_plane_env = scratch_plane_env
         self.tmp = tmp_path
         # A fleet-less host job resolves its alert chat id from a declaring bot;
         # this root declares a fake one and stubs the sender.
@@ -158,7 +158,6 @@ class Host:
         env = constructed_env(
             PATH=self.path,
             SUDO_CALLS=self.sudo_calls,
-            CLAUDLOBBY_ROOT=self.root,
             HOME=self.home,
             TG_CAPTURE=self.capture,
             NPM_CALLS=self.calls,
@@ -169,7 +168,7 @@ class Host:
             # production bound and the event is reaped (forced at 1s, it drops
             # binary_unrunnable). Give the cold rung room.
             FLEET_EVENT_EMIT_TIMEOUT_S="120",
-            **plane_emit_env(),
+            **self.scratch_plane_env(self.root),
             **self.extra,
         )
         return subprocess.run(
@@ -206,8 +205,8 @@ def _assert_alert_path_ran_clean(h):
 @pytest.mark.parametrize("stream", ["stderr", "stdout"])
 def test_positive_control_npm_exit_0_leaving_a_stub_fires_update_failed(
     tmp_path, stream
-):
-    h = Host(tmp_path, installed=healthy("2.1.278"), staged=broken_stub(stream))
+, *, scratch_plane_env):
+    h = Host(tmp_path, installed=healthy("2.1.278"), staged=broken_stub(stream), scratch_plane_env=scratch_plane_env)
     r = h.run()
 
     assert h.calls.exists(), "precondition: the install ran and swapped the binary"
@@ -238,11 +237,11 @@ def test_positive_control_npm_exit_0_leaving_a_stub_fires_update_failed(
 
 def test_a_binary_that_exits_nonzero_is_not_measured_even_when_it_prints_a_version(
     tmp_path,
-):
+*, scratch_plane_env):
     # "RAN" is half the predicate. A parse-only check reads 2.1.281 here and
     # calls it a healthy upgrade.
     staged = '#!/bin/bash\necho "2.1.281 (Claude Code)"\nexit 1\n'
-    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged)
+    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged, scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 1, r.stderr
     assert "exited 1" in h.log()
@@ -250,11 +249,11 @@ def test_a_binary_that_exits_nonzero_is_not_measured_even_when_it_prints_a_versi
     assert "version changed" not in h.log()
 
 
-def test_a_binary_that_runs_but_prints_no_version_is_not_measured(tmp_path):
+def test_a_binary_that_runs_but_prints_no_version_is_not_measured(tmp_path, *, scratch_plane_env):
     # "Parseable version" is the other half. An exit-status-only check passes
     # this binary.
     staged = '#!/bin/bash\necho "Claude Code"\nexit 0\n'
-    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged)
+    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged, scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 1, r.stderr
     assert "printed no parseable version: Claude Code" in h.log()
@@ -264,8 +263,8 @@ def test_a_binary_that_runs_but_prints_no_version_is_not_measured(tmp_path):
 # --- the healthy paths stay quiet ----------------------------------------------
 
 
-def test_a_healthy_upgrade_raises_nothing(tmp_path):
-    h = Host(tmp_path, installed=healthy("2.1.278"), staged=healthy("2.1.281"))
+def test_a_healthy_upgrade_raises_nothing(tmp_path, *, scratch_plane_env):
+    h = Host(tmp_path, installed=healthy("2.1.278"), staged=healthy("2.1.281"), scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 0, r.stderr
     log = h.log()
@@ -278,18 +277,18 @@ def test_a_healthy_upgrade_raises_nothing(tmp_path):
     _assert_alert_path_ran_clean(h)
 
 
-def test_an_already_current_binary_is_a_no_op(tmp_path):
-    h = Host(tmp_path, installed=healthy("2.1.281"))
+def test_an_already_current_binary_is_a_no_op(tmp_path, *, scratch_plane_env):
+    h = Host(tmp_path, installed=healthy("2.1.281"), scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 0, r.stderr
     assert "no-op: already on 2.1.281" in h.log()
     assert h.sent() == []
 
 
-def test_an_npm_failure_reports_what_the_binary_measures_now(tmp_path):
+def test_an_npm_failure_reports_what_the_binary_measures_now(tmp_path, *, scratch_plane_env):
     # The binary is measured after a failed install, never assumed unchanged:
     # a failed install may still have replaced it.
-    h = Host(tmp_path, installed=healthy("2.1.278"), npm_rc=1)
+    h = Host(tmp_path, installed=healthy("2.1.278"), npm_rc=1, scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 1, r.stderr
     assert "npm install returned 1 — the fleet's binary runs 2.1.278" in h.log()
@@ -301,8 +300,8 @@ def test_an_npm_failure_reports_what_the_binary_measures_now(tmp_path):
 
 def test_starting_on_an_unrunnable_binary_is_the_alarm_raised_before_the_install(
     tmp_path,
-):
-    h = Host(tmp_path, installed=broken_stub("stderr"), staged=healthy("2.1.281"))
+*, scratch_plane_env):
+    h = Host(tmp_path, installed=broken_stub("stderr"), staged=healthy("2.1.281"), scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 0, r.stderr
     log = h.log()
@@ -321,8 +320,8 @@ def test_starting_on_an_unrunnable_binary_is_the_alarm_raised_before_the_install
     _assert_alert_path_ran_clean(h)
 
 
-def test_a_reinstall_that_does_not_repair_raises_both_alerts(tmp_path):
-    h = Host(tmp_path, installed=broken_stub("stderr"), staged=broken_stub("stderr"))
+def test_a_reinstall_that_does_not_repair_raises_both_alerts(tmp_path, *, scratch_plane_env):
+    h = Host(tmp_path, installed=broken_stub("stderr"), staged=broken_stub("stderr"), scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 1, r.stderr
     types = _event_types(h.events())
@@ -339,13 +338,13 @@ def _stamp(log: str, marker: str) -> datetime.datetime:
     return datetime.datetime.fromisoformat(line.split(" ", 1)[0])
 
 
-def test_each_log_line_is_stamped_when_it_is_written(tmp_path):
+def test_each_log_line_is_stamped_when_it_is_written(tmp_path, *, scratch_plane_env):
     # Stamped at write time: the install's duration shows in the log. Stamps
     # have whole-second resolution and the gap is at least the npm sleep, so
     # 1s is enough to move the seconds field.
     h = Host(
         tmp_path, installed=healthy("2.1.278"), staged=healthy("2.1.281"), npm_sleep=1
-    )
+    , scratch_plane_env=scratch_plane_env)
     assert h.run().returncode == 0
     log = h.log()
     assert _stamp(log, "UPDATE install finished") > _stamp(log, "UPDATE running"), log
@@ -354,13 +353,13 @@ def test_each_log_line_is_stamped_when_it_is_written(tmp_path):
 # --- the production form, the worst state, and what the version read ignores --
 
 
-def test_a_system_install_updates_through_sudo_and_the_repair_says_so(tmp_path):
+def test_a_system_install_updates_through_sudo_and_the_repair_says_so(tmp_path, *, scratch_plane_env):
     # A fleet binary under /usr is a root-owned install: the update runs through
     # sudo, and the repair must name that same command. The /usr path cannot run
     # (rc 127) and is never written; the sudo stub records its argv.
     absent = "/usr/bin/claude-absent"
     assert not os.path.lexists(absent), "precondition: the /usr path must not exist"
-    h = Host(tmp_path, claude_bin=absent)
+    h = Host(tmp_path, claude_bin=absent, scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 1, r.stderr
     assert h.sudo_calls.read_text().splitlines() == [
@@ -372,10 +371,10 @@ def test_a_system_install_updates_through_sudo_and_the_repair_says_so(tmp_path):
     assert alert and alert[0].endswith(sudo_repair), h.sent()
 
 
-def test_npm_failing_on_an_unrunnable_binary_raises_both_alerts_with_the_repair(tmp_path):
+def test_npm_failing_on_an_unrunnable_binary_raises_both_alerts_with_the_repair(tmp_path, *, scratch_plane_env):
     # The worst state: a host that cannot start a bot, and a reinstall that
     # failed. Nothing is staged, so the binary stays broken.
-    h = Host(tmp_path, installed=broken_stub("stderr"), npm_rc=1)
+    h = Host(tmp_path, installed=broken_stub("stderr"), npm_rc=1, scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 1, r.stderr
     alert = [line for line in h.sent() if "FLEET ALERT [binary_update_failed]" in line]
@@ -387,19 +386,19 @@ def test_npm_failing_on_an_unrunnable_binary_raises_both_alerts_with_the_repair(
     assert "binary_repaired" not in types
 
 
-def test_a_version_printed_only_on_stderr_is_not_measured(tmp_path):
+def test_a_version_printed_only_on_stderr_is_not_measured(tmp_path, *, scratch_plane_env):
     # Only stdout is read for the version, so a semver on stderr (where a
     # warning would be) never counts as one.
     staged = '#!/bin/bash\necho "2.1.281 (Claude Code)" >&2\nexit 0\n'
-    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged)
+    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged, scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 1, r.stderr
     assert "printed no parseable version" in h.log()
 
 
-def test_only_the_first_stdout_line_carries_the_version(tmp_path):
+def test_only_the_first_stdout_line_carries_the_version(tmp_path, *, scratch_plane_env):
     staged = '#!/bin/bash\necho "Claude Code"\necho "2.1.281"\nexit 0\n'
-    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged)
+    h = Host(tmp_path, installed=healthy("2.1.278"), staged=staged, scratch_plane_env=scratch_plane_env)
     r = h.run()
     assert r.returncode == 1, r.stderr
     assert "printed no parseable version: Claude Code" in h.log()

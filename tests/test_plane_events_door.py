@@ -62,22 +62,22 @@ def _land(root, bot, etype, ts, data=None, *, source="pulse", provenance=True):
     return out[0].event_id
 
 
-def _door_env(root, **extra):
+def _door_env(root, *, scratch_plane_env, **extra):
     """The e2e battery's no-daemon convention (`_plane_lib`): the shim's socket
     rung fails, disclosed, and the cold CLI ingests — pointed at this scene.
     Built here rather than borrowed: `_plane_lib` lays a stub lib down under
     the scene and the fleet-pulse test lays its own."""
-    env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F,
-           "PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_CLI": str(CLI),
-           "PLANE_SOCKET": str(root / "no-daemon.sock"), "PATH": "/usr/bin:/bin"}
+    env = {**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": F,
+           "PLANE_EMIT_ENABLED": "1",
+            "PATH": "/usr/bin:/bin"}
     env.update(extra)
     return env
 
 
-def _door(root, args, **extra):
+def _door(root, args, *, scratch_plane_env, **extra):
     """The REAL door: lib-common's emit_fleet_event, sourced as a bot script would."""
     return subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event {args}'],
-                          capture_output=True, text=True, timeout=180, env=_door_env(root, **extra))
+                          capture_output=True, text=True, timeout=180, env=_door_env(root, **extra, scratch_plane_env=scratch_plane_env))
 
 
 def _public(row):
@@ -126,10 +126,10 @@ def test_every_critical_type_is_registered_critical():
 
 # --- the writer: the real door -----------------------------------------------
 
-def test_the_door_lands_the_event_on_the_plane_and_the_reader_renders_the_legacy_row_back(tmp_path):
+def test_the_door_lands_the_event_on_the_plane_and_the_reader_renders_the_legacy_row_back(tmp_path, *, scratch_plane_env):
     root, paths, _, _ = _scene(tmp_path)
     bot_dir = _bot_dir(paths, "w1")
-    r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1')
+    r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1', scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert not (bot_dir / "data" / "events").exists()               # no file, ever (R1)
     assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 1) == 1
@@ -149,9 +149,9 @@ def test_the_door_lands_the_event_on_the_plane_and_the_reader_renders_the_legacy
     assert rows[0]["_severity"] == "critical"
 
 
-def test_a_fleet_level_receipt_anchors_on_the_fleet_and_renders_as_bot_fleet(tmp_path):
+def test_a_fleet_level_receipt_anchors_on_the_fleet_and_renders_as_bot_fleet(tmp_path, *, scratch_plane_env):
     root, paths, _, _ = _scene(tmp_path)
-    r = _door(root, 'fleet_rescue pulse \'{"rescued":2}\' ""')     # an EMPTY bot_dir: the fleet anchor
+    r = _door(root, 'fleet_rescue pulse \'{"rescued":2}\' ""', scratch_plane_env=scratch_plane_env)     # an EMPTY bot_dir: the fleet anchor
     assert r.returncode == 0, r.stderr
     assert not (root / "state" / "events").exists()                # no fleet-level file, ever (R1)
     assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'fleet_rescue'", 1) == 1
@@ -165,14 +165,14 @@ def test_a_fleet_level_receipt_anchors_on_the_fleet_and_renders_as_bot_fleet(tmp
     assert legacy["bot"] == "fleet" and legacy["data"] == {"rescued": 2}
 
 
-def test_a_timer_run_door_names_its_fleet_from_the_units_carrier(tmp_path):
+def test_a_timer_run_door_names_its_fleet_from_the_units_carrier(tmp_path, *, scratch_plane_env):
     """fleet-pulse runs from a timer unit that carries CLAUDLOBBY_FLEET and no
     FLEET_NAME; the door reads the same pair resolve_bots_dir does — measured
     on the live estate: with FLEET_NAME alone the plane branch was skipped
     and a whole sweep's events reached only the JSONL."""
     root, paths, _, _ = _scene(tmp_path)
     bot_dir = _bot_dir(paths, "w1")
-    env = _door_env(root, CLAUDLOBBY_FLEET=F)
+    env = _door_env(root, CLAUDLOBBY_FLEET=F, scratch_plane_env=scratch_plane_env)
     env.pop("FLEET_NAME")
     r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event pane_stuck pulse \'{{"s":1}}\' "{bot_dir}" w1'],
                        capture_output=True, text=True, timeout=180, env=env)
@@ -182,7 +182,7 @@ def test_a_timer_run_door_names_its_fleet_from_the_units_carrier(tmp_path):
         assert conn.execute("SELECT subject_alias FROM events WHERE event = 'pane_stuck'").fetchone()[0] == f"bot:{F}/w1"
 
 
-def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tmp_path):
+def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tmp_path, *, scratch_plane_env):
     """report-back emits its report, then sends through pane_send_verified —
     whose send_miss is a fleet event through THIS door — then asks
     plane_write_retired about ITS emission. The door restores the caller's
@@ -193,12 +193,12 @@ def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tm
     bot_dir = _bot_dir(paths, "w1")
     prog = (f'. "{LIB}/lib-common.sh"; PLANE_EMIT_LAST_RC=4; emit_fleet_event send_miss pane \'{{}}\' "{bot_dir}" w1;'
             ' echo "outer=$PLANE_EMIT_LAST_RC"')
-    r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=180, env=_door_env(root))
+    r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=180, env=_door_env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and "outer=4" in r.stdout, r.stdout + r.stderr
     assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'send_miss'", 1) == 1
 
 
-def test_a_wedged_rung_is_waited_on_only_to_the_bound_and_disclosed(tmp_path):
+def test_a_wedged_rung_is_waited_on_only_to_the_bound_and_disclosed(tmp_path, *, scratch_plane_env):
     """The door runs inside every lib/ hot path (the keepalive tick's ERR trap,
     its send verifier), so a wedged rung must never hold it for a minute —
     measured: a synchronous emission held the keepalive tick 60s per fleet
@@ -209,7 +209,7 @@ def test_a_wedged_rung_is_waited_on_only_to_the_bound_and_disclosed(tmp_path):
     w = _wedge(tmp_path, 60)
     t0 = time.monotonic()
     r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
-              PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2")
+              PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2", scratch_plane_env=scratch_plane_env)
     elapsed = time.monotonic() - t0
     assert r.returncode == 0 and 2 <= elapsed < 8, (elapsed, r.stderr)
     assert "reaped at 2s" in r.stderr, r.stderr
@@ -227,7 +227,7 @@ def test_a_wedged_rung_is_waited_on_only_to_the_bound_and_disclosed(tmp_path):
     assert not _wedge_alive(w)
 
 
-def test_a_reaped_emit_is_COUNTED_where_a_health_door_can_find_it(tmp_path):
+def test_a_reaped_emit_is_COUNTED_where_a_health_door_can_find_it(tmp_path, *, scratch_plane_env):
     """#1657's third defect: a reaped emit's fate was uncounted.
 
     Both disclosures go to the caller's stderr -- the journal for a timer, a tmux
@@ -245,7 +245,7 @@ def test_a_reaped_emit_is_COUNTED_where_a_health_door_can_find_it(tmp_path):
 
     w = _wedge(tmp_path, 60)
     r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
-              PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2")
+              PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2", scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
 
     assert losses.exists(), (
@@ -261,7 +261,7 @@ def test_a_reaped_emit_is_COUNTED_where_a_health_door_can_find_it(tmp_path):
     assert not _wedge_alive(w)
 
 
-def test_the_loss_counter_ages_rows_out_and_keeps_the_recent_ones(tmp_path):
+def test_the_loss_counter_ages_rows_out_and_keeps_the_recent_ones(tmp_path, *, scratch_plane_env):
     """Rotation is by AGE, not size: the question it answers is always `how often
     lately`. Asserted both ways in one call, because a rotation that dropped
     everything would satisfy a stale-rows-gone assertion on its own."""
@@ -276,7 +276,7 @@ def test_the_loss_counter_ages_rows_out_and_keeps_the_recent_ones(tmp_path):
     )
     w = _wedge(tmp_path, 60)
     _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
-          PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2")
+          PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2", scratch_plane_env=scratch_plane_env)
     text = losses.read_text()
     assert "ancient" not in text, "a row past the 24h window must age out"
     assert "recent" in text, (
@@ -286,7 +286,7 @@ def test_the_loss_counter_ages_rows_out_and_keeps_the_recent_ones(tmp_path):
     assert not _wedge_alive(w)
 
 
-def test_a_bot_anchored_door_with_no_fleet_in_its_environment_reads_the_bots_own_conf(tmp_path):
+def test_a_bot_anchored_door_with_no_fleet_in_its_environment_reads_the_bots_own_conf(tmp_path, *, scratch_plane_env):
     """A hand-run pre-stop hook carries the bot dir and nothing else: the fleet
     comes from the bot's own bot.conf (plane_peer_fleet's rule), so the row is
     anchored on the bot — measured on the data flip, where nine such hooks
@@ -294,7 +294,7 @@ def test_a_bot_anchored_door_with_no_fleet_in_its_environment_reads_the_bots_own
     root, paths, _, _ = _scene(tmp_path)
     bot_dir = _bot_dir(paths, "w1")
     (bot_dir / "bot.conf").write_text(f"export FLEET_NAME={F}\nexport BOT_NAME=w1\n")
-    env = _door_env(root); env.pop("FLEET_NAME")
+    env = _door_env(root, scratch_plane_env=scratch_plane_env); env.pop("FLEET_NAME")
     r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event pane_stuck pulse \'{{"s":1}}\' "{bot_dir}" w1; echo rc=$?'],
                        capture_output=True, text=True, timeout=180, env=env)
     assert r.returncode == 0 and "rc=0" in r.stdout, r.stderr
@@ -303,13 +303,13 @@ def test_a_bot_anchored_door_with_no_fleet_in_its_environment_reads_the_bots_own
         assert tuple(conn.execute("SELECT subject_kind, subject_alias FROM events WHERE event = 'pane_stuck'").fetchone()) == ("actor", f"bot:{F}/w1")
 
 
-def test_a_host_job_with_no_fleet_anywhere_anchors_on_the_host(tmp_path):
+def test_a_host_job_with_no_fleet_anywhere_anchors_on_the_host(tmp_path, *, scratch_plane_env):
     """disk-monitor, host-health-check, a sibling pull: no fleet, no bot. The
     state/events/ file used to take their receipts; the plane takes them now,
     anchored on the HOST (the probe's convention) — never silence."""
     import socket
     root, paths, _, _ = _scene(tmp_path)
-    env = _door_env(root); env.pop("FLEET_NAME")
+    env = _door_env(root, scratch_plane_env=scratch_plane_env); env.pop("FLEET_NAME")
     r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event disk_high disk-monitor \'{{"pct":93}}\' ""; echo rc=$?'],
                        capture_output=True, text=True, timeout=180, env=env)
     assert r.returncode == 0 and "rc=0" in r.stdout, r.stderr
@@ -470,18 +470,18 @@ def _pulse_lib(tmp_path, capture):
     return libdir
 
 
-def _pulse(root, libdir, **extra):
+def _pulse(root, libdir, *, scratch_plane_env, **extra):
     env = _door_env(root, TMUX_TMPDIR=str(root / "tmux"),
                     PATH=os.environ.get("PATH", "/usr/bin:/bin"),
                     FLEET_PULSE_ESCALATION_CHAT_ID="-1001234567890",
                     FLEET_PULSE_ESCALATION_STATE_DIR=str(root / "escalation-sender"),
-                    FLEET_PULSE_ESCALATION_THRESHOLD="2", **extra)
+                    FLEET_PULSE_ESCALATION_THRESHOLD="2", **extra, scratch_plane_env=scratch_plane_env)
     return subprocess.run(["bash", str(libdir / "fleet-pulse.sh"), F], capture_output=True, text=True,
                           timeout=300, env=env)
 
 
 @needs_tmux
-def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_path):
+def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_path, *, scratch_plane_env):
     """Two declared bots with no tmux session: the sweep emits session_missing
     for both (through the real door, onto the plane) and its escalation must
     find them from the plane under the flip — no file holds anything now, so
@@ -494,7 +494,7 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     libdir = _pulse_lib(tmp_path, capture)
     page = "FLEET ALERT: session_missing on 2 bots (w1 w2)."
 
-    after = _pulse(root, libdir)                                     # no flag, no declaration: the plane
+    after = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)                                     # no flag, no declaration: the plane
     assert after.returncode == 0, after.stderr[-2000:]
     assert page in capture.read_text(), capture.read_text() + after.stderr[-2000:]
     assert not list(paths.runtime_bots.glob("*/data/events/fleet-*.jsonl"))       # no file, ever (R1)
@@ -514,7 +514,7 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     capture.write_text("")
     _drop_plane(root)
     (root / "state" / "plane" / "plane.db").mkdir()
-    dark = _pulse(root, libdir)
+    dark = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert dark.returncode == 0, dark.stderr[-2000:]
     assert "UNREACHABLE" in dark.stderr and "cannot be judged this pass" in dark.stderr
     # the escalation loop never reaches for a cache no read produced (a read
@@ -534,7 +534,7 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
 # "reaped correctly at the bound" and "reaped a child that would have finished"
 # are the same observation to it.
 
-def test_a_fast_emission_does_not_pay_a_full_second(tmp_path):
+def test_a_fast_emission_does_not_pay_a_full_second(tmp_path, *, scratch_plane_env):
     """#1602's whole deliverable, and nothing asserted it before.
 
     `plane_emit_bounded` polled with `sleep 1` while the socket rung answers in
@@ -557,7 +557,7 @@ def test_a_fast_emission_does_not_pay_a_full_second(tmp_path):
     fast = _wedge(tmp_path, 0)          # a cold rung that exits immediately
     t0 = time.monotonic()
     r = _door(root, f'session_event vitals \'{{"e":"fast"}}\' "{bot_dir}" w1',
-              PLANE_EMIT_CLI=str(fast))
+              PLANE_EMIT_CLI=str(fast), scratch_plane_env=scratch_plane_env)
     elapsed = time.monotonic() - t0
     assert r.returncode == 0, r.stderr
     assert elapsed < 0.90, (
@@ -565,7 +565,7 @@ def test_a_fast_emission_does_not_pay_a_full_second(tmp_path):
         "(#1602). This door runs twice per tool call on every bot.")
 
 
-def test_a_slow_but_SUCCESSFUL_emission_is_not_reaped(tmp_path):
+def test_a_slow_but_SUCCESSFUL_emission_is_not_reaped(tmp_path, *, scratch_plane_env):
     """The bound must be elapsed TIME, not a count of sleeps — the trap that
     makes this change dangerous rather than easy.
 
@@ -585,7 +585,7 @@ def test_a_slow_but_SUCCESSFUL_emission_is_not_reaped(tmp_path):
     slow = _wedge(tmp_path, 2)          # exits on its own, well inside the bound
     t0 = time.monotonic()
     r = _door(root, f'session_event vitals \'{{"e":"slow"}}\' "{bot_dir}" w1',
-              PLANE_EMIT_CLI=str(slow), FLEET_EVENT_EMIT_TIMEOUT_S="10")
+              PLANE_EMIT_CLI=str(slow), FLEET_EVENT_EMIT_TIMEOUT_S="10", scratch_plane_env=scratch_plane_env)
     elapsed = time.monotonic() - t0
     assert r.returncode == 0, r.stderr
     assert "reaped" not in r.stderr, (
@@ -598,7 +598,7 @@ def test_a_slow_but_SUCCESSFUL_emission_is_not_reaped(tmp_path):
     assert not _wedge_alive(slow)
 
 
-def test_a_cooldown_DIVERSION_is_not_counted_as_a_loss(tmp_path):
+def test_a_cooldown_DIVERSION_is_not_counted_as_a_loss(tmp_path, *, scratch_plane_env):
     """The decision, pinned — not just the corrected comment (#1657 review).
 
     An earlier draft of `plane_emit_loss`'s docstring claimed two counted kinds:
@@ -620,7 +620,7 @@ def test_a_cooldown_DIVERSION_is_not_counted_as_a_loss(tmp_path):
     # Arm the breaker so the emit takes the cooldown branch.
     (plane_state / ".socket-wedged").write_text(str(int(time.time())))
 
-    r = _door(root, f'session_event vitals \'{{"e":"diverted"}}\' "{bot_dir}" w1')
+    r = _door(root, f'session_event vitals \'{{"e":"diverted"}}\' "{bot_dir}" w1', scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert "cooldown" in r.stderr, (
         f"the emit did not take the cooldown branch, so this proves nothing: {r.stderr}")
