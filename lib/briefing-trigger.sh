@@ -46,6 +46,21 @@ fi
 LOG="${BRIEFING_TRIGGER_LOG:-$BOT_DIR/logs/briefing-trigger.log}"
 setup_log_dir "$LOG"
 
+# /briefing resolves only through the COMPOSED skill, which the briefing: stanza
+# links. Without it (a hand-built timer, a deleted link) Claude Code rejects the
+# command locally as "Unknown command", the input box still clears, and the send
+# below reads OK with nothing run (#1819). /briefing is a library skill, never a
+# native command, so only "available" sends; and a briefing that can never run
+# is a defect, not a defer.
+_skill_status="$(session_command_status /briefing "$BOT_DIR" || true)"
+if [ "$_skill_status" != available ]; then
+    echo "$TS FAIL $BOT/$SLOT — no briefing skill composed: declare bots.$BOT.briefing and regenerate" \
+        | tee -a "$LOG" >&2
+    emit_fleet_event briefing_failed briefing "$(briefing_data skill_absent)" "$BOT_DIR" "$BOT"
+    missed skill_absent
+    exit 1
+fi
+
 # Session name is the bot name; tmux resolves it to the running session on the
 # bot private socket (the dispatch.sh / tmux_socket_for_session convention).
 SOCKET="$(tmux_socket_for_bot "$BOT_DIR" 2>/dev/null || true)"

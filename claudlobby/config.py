@@ -236,9 +236,10 @@ class SweepConfig:
 class BriefingConfig:
     """Bot-level ``briefing:`` feature stanza (#627).
 
-    Presence equips the bot: the composer expands each slot into a per-(bot,slot)
-    OnCalendar timer (``<prefix>.briefing-<bot>-<slot>``) and emits ``BRIEFING_*``
-    into the bot's bot.conf. Slot names are free identifiers (a bot may run a
+    Presence equips the bot: the composer links the ``briefing`` skill those
+    timers fire (``resolve_effective_skills``), expands each slot into a
+    per-(bot,slot) OnCalendar timer (``<prefix>.briefing-<bot>-<slot>``) and
+    emits ``BRIEFING_*`` into the bot's bot.conf. Slot names are free identifiers (a bot may run a
     custom ``analytics`` slot) but MUST be shell identifiers (known_values
     SHELL_IDENT_RE) — they become the ``BRIEFING_SECTIONS_<SLOT>`` env-var suffix
     — and each value is a systemd OnCalendar expression, never 5-field cron.
