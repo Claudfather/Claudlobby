@@ -227,6 +227,14 @@ val_diag() {
 }
 
 # --- Harness-only diagnostics and owned foreign-tree cleanup -----------------
+# A manager fixture must drain its input. sleep leaves the PTY input queue
+# full after enough notifications on Darwin, so later sends never reach the
+# visible pane. Keep terminal echo (the observation) and discard only cat's
+# duplicate stdout. Teardown still owns this private tmux server.
+val_start_manager() {
+    tmux new-session -d -s "$1" 'exec cat >/dev/null'
+}
+
 # These observations never participate in a delivery assertion. Keep the raw
 # visible pane separate from joined history: history can contain an older send.
 val_diag_file() {
@@ -551,7 +559,7 @@ OBSERVABILITY_BRIDGE_DOWN_GRACE=0
 CONF
 
 # --- Run: stand up a non-idle worker pane + a manager session to receive alerts ---
-tmux new-session -d -s "$MGR" "sleep 600"
+val_start_manager "$MGR"
 tmux new-session -d -s "$BOT" 'printf "\n⠹ Cogitating (esc to interrupt)\n"; sleep 600'
 sleep 1  # let panes render
 
@@ -866,7 +874,7 @@ harness_check "#1481 a later report CLEARS the escalation (no second door, nothi
 # too (`assigned_by` is what the nudge reads), which is also the honest
 # shape: the re-check goes to the row's own manager.
 TA_MGR="valmgr1481"
-tmux new-session -d -s "$TA_MGR" "sleep 600"
+val_start_manager "$TA_MGR"
 sleep 1
 val_seed_dispatch "$ROOT" "$FLEET" "$TA_MGR" "$TA_BOT" t-1481-0004 "$((now - 300))" "$((now + 3600))" "the nudged one"
 # The CLI reaches the send door at <root>/lib/dispatch.sh -- a production root
@@ -935,7 +943,7 @@ TR_BOT="valrcbot1481"
 # with it. The neighbour rule, structurally rather than hopefully.
 TR_FLEET="valrcf"
 val_plane_ready "$ROOT" "$TR_FLEET"
-tmux new-session -d -s "$TR_MGR" "sleep 600"
+val_start_manager "$TR_MGR"
 sleep 1
 val_seed_dispatch "$ROOT" "$TR_FLEET" "$TR_MGR" "$TR_BOT" t-1481-0010 "$((now - 7200))" "$((now - 3600))" "the row that stopped moving"
 # The CLI reaches its send door at <root>/lib/dispatch.sh -- linked for THIS
@@ -2644,8 +2652,8 @@ touch "$BRIEFBUSY_DIR/data/.last-tool-call"
 tmux new-session -d -s "$BRIEFWAIT" "sleep 600"
 touch "$BRIEFWAIT_DIR/data/.last-tool-call"
 # Every bot here names $MGR, so the FLEET NOTICE must land in its pane, which
-# must be alive to take the push: the first scenario's sleep 600 may have ended.
-tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "sleep 600"
+# must be alive to take the push. Recreate its draining reader if it has exited.
+tmux has-session -t "$MGR" 2>/dev/null || val_start_manager "$MGR"
 # Idle briefing bot with no composed skill: the trigger must refuse it.
 tmux new-session -d -s "$BRIEFNOSKILL" "sleep 600"
 # Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
@@ -3762,11 +3770,24 @@ else
     PL_SOCK="$PL_SOCKDIR/s"
     PL_LIB="$PL_ROOT/lib"
     mkdir -p "$PL_LIB"
-    for _f in dispatch-task.sh lib-common.sh supervisor.sh plane-emit.sh plane-socket-client.py dispatch-supersede-hint.py; do
+    for _f in dispatch-task.sh lib-common.sh supervisor.sh plane-emit.sh plane-socket-client.py dispatch-supersede-hint.py plane-lookup.py plane-readers.py dispatch-overdue.py; do
         ln -s "$PL_REPO/lib/$_f" "$PL_LIB/$_f"
     done
     printf '#!/bin/bash\nexit 0\n' > "$PL_LIB/dispatch.sh"; chmod +x "$PL_LIB/dispatch.sh"
     printf '#!/bin/bash\nexit 0\n' > "$PL_ROOT/tmux"; chmod +x "$PL_ROOT/tmux"
+
+    # Resolve a real owned fleet and peer before the daemon-down case. A
+    # missing fleet triggers resolver ERR receipts under redirected stderr,
+    # arming cooldown before the dispatch whose disclosure we observe. Bind
+    # both fleet selectors below: the outer harness exports CLAUDLOBBY_FLEET,
+    # which takes precedence over FLEET_NAME in the production resolvers.
+    mkdir -p "$PL_ROOT/local/vbc-fleet/runtime/bots/w1"
+    cat > "$PL_ROOT/local/vbc-fleet/runtime/bots/w1/bot.conf" <<'PLCONF'
+BOT_NAME="w1"
+BOT_ID="w1"
+FLEET_NAME="vbc-fleet"
+BOT_SERVICE="vbc-w1"
+PLCONF
 
     "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
         > "$PL_ROOT/daemon.log" 2>&1 &
@@ -3788,7 +3809,7 @@ else
             else echo 'wedge before: absent'; fi
         } > "$leg.meta"
         env CLAUDLOBBY_ROOT="$PL_ROOT" TMUX_BIN="$PL_ROOT/tmux" BOT_ID=vbc \
-            BOT_NAME=vbc FLEET_NAME=vbc-fleet PLANE_SOCKET="$PL_SOCK" \
+            BOT_NAME=vbc CLAUDLOBBY_FLEET=vbc-fleet FLEET_NAME=vbc-fleet PLANE_SOCKET="$PL_SOCK" \
             PLANE_EMIT_CLI="$PL_CLI" OBSERVABILITY_DISPATCH_DEADLINE=600 \
             PATH="/usr/bin:/bin" $1 \
             bash "$PL_LIB/dispatch-task.sh" --botcommand w1 "$2" \
