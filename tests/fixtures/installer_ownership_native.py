@@ -217,6 +217,41 @@ def parse_systemd(result):
     return {"present": True, "native": data}
 
 
+def account_absent():
+    """Only a definitive passwd KeyError establishes account absence."""
+    hosted_only()
+    require(sys.platform == "linux", "Linux account check requested on another platform")
+    try:
+        pwd.getpwnam(token())
+    except KeyError:
+        return
+    require(False, "disposable proof account is still present")
+
+
+def parse_stopped_manager(result):
+    state = parse_systemd(result)
+    require(state["present"] and state["native"].get("ActiveState") == "inactive"
+            and state["native"].get("SubState") == "dead",
+            "disposable user manager is not verifiably stopped")
+
+
+def manager_stopped(base):
+    hosted_only()
+    require(sys.platform == "linux", "Linux manager check requested on another platform")
+    created = load(base / "linux-created.json")
+    require(created["user"] == token() and created["home"] == str(base / "home"),
+            "manager cleanup identity journal mismatch")
+    row = pwd.getpwnam(created["user"])
+    require(row.pw_uid == created["uid"] and row.pw_dir == created["home"],
+            "manager cleanup account identity changed")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(base / "home"), "LANG": "C", "LC_ALL": "C"}
+    result = command(["/usr/bin/sudo", "/usr/bin/systemctl", "show", "--no-pager",
+                      "--property=LoadState,ActiveState,SubState,FragmentPath",
+                      f"user@{row.pw_uid}.service"], env,
+                     base / "evidence/linux-manager-postcondition.jsonl", check=False)
+    parse_stopped_manager(result)
+
+
 def launchd_fields(text, label):
     """Read only exact top-level fields from launchctl's nested print format.
 
@@ -742,6 +777,44 @@ def self_check():
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, "blocked\n")
 
+        def test_account_absence_distinguishes_present_unknown_and_missing(self):
+            with patch(__name__ + ".hosted_only"), patch.object(sys, "platform", "linux"), patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}):
+                with patch.object(pwd, "getpwnam", side_effect=KeyError):
+                    account_absent()
+                with patch.object(pwd, "getpwnam", return_value=object()), self.assertRaises(RuntimeError):
+                    account_absent()
+                for error in (PermissionError("lookup denied"), OSError("lookup unavailable")):
+                    with self.subTest(error=error), patch.object(pwd, "getpwnam", side_effect=error), self.assertRaises(OSError):
+                        account_absent()
+
+        def test_retired_manager_requires_explicit_successful_inactive_dead_state(self):
+            good = "LoadState=loaded\nActiveState=inactive\nSubState=dead\nFragmentPath=/usr/lib/systemd/system/user@.service\n"
+            parse_stopped_manager(subprocess.CompletedProcess([], 0, good, ""))
+            bad = [(1, good, ""), (0, good, "Permission denied"), (0, "", ""),
+                   (0, good.replace("inactive", "active"), ""),
+                   (0, good.replace("dead", "running"), ""),
+                   (0, good.replace("loaded", "not-found"), ""),
+                   (0, good + "ActiveState=inactive\n", "")]
+            for rc, out, err in bad:
+                with self.subTest(rc=rc, out=out, err=err), self.assertRaises(RuntimeError):
+                    parse_stopped_manager(subprocess.CompletedProcess([], rc, out, err))
+
+        def test_manager_postcondition_checks_created_identity_before_native_query(self):
+            from types import SimpleNamespace
+            with tempfile.TemporaryDirectory() as directory, patch(__name__ + ".hosted_only"), patch.object(sys, "platform", "linux"), patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}):
+                base = Path(directory)
+                created = {"user": token(), "uid": 12345, "home": str(base / "home")}
+                save(base / "linux-created.json", created)
+                response = subprocess.CompletedProcess([], 0, "LoadState=loaded\nActiveState=inactive\nSubState=dead\nFragmentPath=/usr/lib/systemd/system/user@.service\n", "")
+                with patch.object(pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=12345, pw_dir=created["home"])), patch(__name__ + ".command", return_value=response) as query:
+                    manager_stopped(base)
+                    self.assertEqual(query.call_args.args[0][-1], "user@12345.service")
+                    self.assertEqual(query.call_count, 1)
+                for row in (SimpleNamespace(pw_uid=12346, pw_dir=created["home"]),
+                            SimpleNamespace(pw_uid=12345, pw_dir=created["home"] + "-not-ours")):
+                    with patch.object(pwd, "getpwnam", return_value=row), patch(__name__ + ".command", side_effect=AssertionError("native query before owner check")), self.assertRaises(RuntimeError):
+                        manager_stopped(base)
+
         def test_identity_and_role_are_fixed(self):
             with patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}):
                 self.assertEqual(token(), "i1811123a2")
@@ -822,6 +895,8 @@ if __name__ == "__main__":
     mode.add_argument("--arm", choices=tuple(ROLES))
     mode.add_argument("--cleanup", action="store_true")
     mode.add_argument("--self-check", action="store_true")
+    mode.add_argument("--account-absent", action="store_true")
+    mode.add_argument("--manager-stopped", action="store_true")
     parser.add_argument("--base")
     args = parser.parse_args()
     if args.self_check:
@@ -829,7 +904,11 @@ if __name__ == "__main__":
     base = base_path(args.base)
     if not args.prepare:
         exec(network_guard_source(base), {})
-    if args.prepare:
+    if args.account_absent:
+        account_absent()
+    elif args.manager_stopped:
+        manager_stopped(base)
+    elif args.prepare:
         prepare(base)
     elif args.run:
         raise SystemExit(execute(base))

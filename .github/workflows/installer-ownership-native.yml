@@ -45,7 +45,7 @@ jobs:
           sudo apt-get install -y dbus-user-session
           proof_base="$RUNNER_TEMP/installer-ownership-proof"
           proof_user="i1811${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
-          ! id "$proof_user" >/dev/null 2>&1
+          python "$GITHUB_WORKSPACE/tests/fixtures/installer_ownership_native.py" --account-absent --base "$proof_base"
           sudo useradd --home-dir "$proof_base/home" --shell /bin/bash "$proof_user"
           proof_uid=$(id -u "$proof_user")
           python - "$proof_base" "$proof_user" "$proof_uid" <<'PY'
@@ -111,9 +111,9 @@ jobs:
             )
             sudo loginctl disable-linger "$proof_user"
             sudo systemctl stop "user@$proof_uid.service"
-            ! sudo systemctl is-active --quiet "user@$proof_uid.service"
+            python "$GITHUB_WORKSPACE/tests/fixtures/installer_ownership_native.py" --manager-stopped --base "$proof_base"
             sudo userdel "$proof_user"
-            ! id "$proof_user" >/dev/null 2>&1
+            python "$GITHUB_WORKSPACE/tests/fixtures/installer_ownership_native.py" --account-absent --base "$proof_base"
             printf 'removed disposable user %s uid %s; files retained\n' "$proof_user" "$proof_uid" | sudo tee "$proof_base/evidence/linux-manager-cleanup.txt" >/dev/null
           fi
       - name: Upload source pins, native states, bytes, receipts and cleanup
