@@ -23,7 +23,7 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.path_audit import ExternalDecl
-from tests.conftest import _write_exec, git_isolation_env, install_real_template
+from tests.conftest import _write_exec, call_script_fn, git_isolation_env, install_real_template
 from claudlobby.composer import (
     _BOOT_STAGGER_SECONDS,
     _compose_hooks,
@@ -2637,6 +2637,22 @@ class TestCrossFleetManagerRecognition:
         fleet.teams = {"tl": TeamConfig(name="tl", manager="kev", workers=["todd"])}
         d = self._compose_conf(tmp_path, fleet, "todd")
         assert self._bash_is_manager(d) is False
+
+    def test_the_composed_manager_line_reads_back_as_the_bare_session_name(
+        self, tmp_path
+    ):
+        """#910: the shipped reader returned a manager's own MANAGER_TMUX as
+        `clog  # this bot is a manager`, a session that does not exist."""
+        fleet = self._fleet(clog=["ari", "kev"])
+        d = self._compose_conf(tmp_path, fleet, "clog")
+        got = call_script_fn(
+            self.LIB_COMMON, "bot_conf_get", str(d), "MANAGER_TMUX", ""
+        )
+        assert got == "clog"
+        lines = (d / "bot.conf").read_text().splitlines()
+        assert [ln for ln in lines if ln.startswith("export MANAGER_TMUX=")] == [
+            "export MANAGER_TMUX=clog"
+        ]
 
 
 class TestPluginsBotConf:

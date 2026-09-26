@@ -284,7 +284,7 @@ After `claudlobby generate`, enroll the timer once per host: `lib/install-code-a
 
 ### `bots.<bot>.briefing`
 
-Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` alone: each **slot** becomes a composed per-(bot,slot) `OnCalendar` timer (`<service_prefix>.briefing-<bot>-<slot>`) whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>` — a committed, never-swept trigger that delivers `/briefing <slot>` into the bot's own session through the slash-aware `lib/dispatch.sh`, so the skill actually fires (never hand-install a briefing cron). Presence of the block opts in; omit it and nothing is emitted for that bot.
+Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` alone: the `briefing` skill is linked for it (no `skills:` entry needed), and each **slot** becomes a composed per-(bot,slot) `OnCalendar` timer (`<service_prefix>.briefing-<bot>-<slot>`) whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>` — a committed, never-swept trigger that delivers `/briefing <slot>` into the bot's own session through the slash-aware `lib/dispatch.sh`, so the skill actually fires (never hand-install a briefing cron). Presence of the block opts in; omit it and nothing is emitted for that bot.
 
 ```yaml
 fleet:

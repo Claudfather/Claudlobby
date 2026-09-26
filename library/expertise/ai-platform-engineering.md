@@ -166,7 +166,7 @@ and yours will be the wrong one.
 
 This is not hypothetical. A hand-rolled read of `MANAGER_TMUX` reported **three
 managers unexcluded across three fleets** — a fleet-wide alarm — because the
-composed line carries a trailing `# this bot is a manager` comment that the parse
+composed line carried a trailing `# this bot is a manager` comment that the parse
 swallowed. `bot_is_manager` returns the correct answer for all three. The alarm
 was an artifact of the reader, and nothing would have flagged it.
 
