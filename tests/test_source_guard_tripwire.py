@@ -8,7 +8,7 @@ of a fleet-controlled file (an ``open()`` + ``.read()``, a ``json.load(s)`` /
 smuggle an unguarded absolute path past the guard.
 
 This test AST-scans every file-read call in composer.py, config.py and
-host_guard_lists.py and fails
+host_guard_lists.py/env_scaffold.py and fails
 when the set changes — forcing a conscious decision: route the new source
 through ``path_audit.audit_bot_sources`` (or the grant/fragment choke), or record
 it here as a documented exempt (a tool ``.j2`` body, a prose charter, or
@@ -132,6 +132,12 @@ _BLESSED_RAW_READS = {
     # to fail this fleet's generate, nor silently empty the guard.
     ("host_guard_lists.py", "manifest.read_text(encoding='utf-8')"),
     ("host_guard_lists.py", "yaml.safe_load(manifest.read_text(encoding='utf-8'))"),
+    # Env preview consumes target bytes only in the shared pure merge plan.
+    # Raw values, descriptions and errors never reach its report; the only
+    # output is counts and shell-identifier-validated names. No paths or grants
+    # are derived from these pre-existing runtime values.
+    ("env_scaffold.py", "request.path.read_text()"),
+    ("env_scaffold.py", "dotenv.read(request.path)"),
     # Existing runtime guard-list bytes only feed the read-only diff output,
     # never a path, grant, selector or generated artifact.
     ("host_guard_lists.py", "target.read_text(encoding='utf-8')"),
@@ -139,7 +145,7 @@ _BLESSED_RAW_READS = {
 
 
 def test_no_unguarded_raw_source_reads():
-    found = _scan("config.py") | _scan("composer.py") | _scan("host_guard_lists.py")
+    found = _scan("config.py") | _scan("composer.py") | _scan("host_guard_lists.py") | _scan("env_scaffold.py")
     new = found - _BLESSED_RAW_READS
     gone = _BLESSED_RAW_READS - found
     assert not new, (
