@@ -466,15 +466,17 @@ def main() -> int:
              '#{session_name}:#{pane_pid}:#{pane_current_command}'], check=False)
         run(['tmux', '-L', label, 'capture-pane', '-t', directory.name, '-p'], check=False)
         if system == 'Linux':
-            run(['systemctl', '--user', 'show', label, '--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,MainPID,FragmentPath'], check=False)
-            run(['journalctl', '--user-unit', label, '-n', '80', '--no-pager', '-o', 'cat'], check=False)
+            run(['systemctl', '--user', 'show', label + '.service', '--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,MainPID,FragmentPath'], check=False)
+            run(['journalctl', '--user-unit', label + '.service', '-n', '80', '--no-pager', '-o', 'cat'], check=False)
         else:
             run(['/bin/launchctl', 'print', f'gui/{uid}/{label}'], check=False)
         (evidence / f'{label}-launch.json').write_text(json.dumps(diagnostic, indent=2) + '\n')
 
     def settled(label):
+        # A bot id may itself be a native unit type (the fixture uses target).
+        # Match the installer's exact .service name, never systemctl inference.
         if system == 'Linux':
-            return run(['systemctl', '--user', 'show', '--value', '-p', 'SubState', label], check=False).stdout.strip() == 'exited'
+            return run(['systemctl', '--user', 'show', '--value', '-p', 'SubState', label + '.service'], check=False).stdout.strip() == 'exited'
         probe = run(['/bin/launchctl', 'print', f'gui/{uid}/{label}'], check=False)
         return probe.returncode == 0 and 'state = not running' in probe.stdout and 'last exit code = 0' in probe.stdout
 
@@ -490,7 +492,7 @@ def main() -> int:
         wait(lambda: not pane_pid(directory, label), f'{label} tmux survived teardown')
         assert not (unit_dir / (label + extension)).exists()
         if system == 'Linux':
-            probe = run(['systemctl', '--user', 'show', '--value', '-p', 'LoadState', label], check=False)
+            probe = run(['systemctl', '--user', 'show', '--value', '-p', 'LoadState', label + '.service'], check=False)
             assert probe.stdout.strip() == 'not-found', commands[-1]
         else:
             assert run(['/bin/launchctl', 'print', f'gui/{uid}/{label}'], check=False).returncode != 0

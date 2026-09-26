@@ -45,7 +45,7 @@ jobs:
       - name: macOS prerequisites
         if: runner.os == 'macOS'
         run: |
-          for tool in tmux jq; do
+          for tool in tmux jq node; do
             command -v "$tool" >/dev/null || brew install "$tool"
           done
       - name: Export exact parent and candidate into disposable installations
