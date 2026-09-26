@@ -102,6 +102,7 @@
       "bot 'first': autonomous_runner hook 'echo fixture' is not a /claudna: skill — hooks should be clauDNA skill names",
       "bot 'first': autonomous_runner hook '/wrong:skill' is not a /claudna: skill — hooks should be clauDNA skill names",
       "bot 'later': voice file 'later-voice' not found — bare expertise will be used",
+      "bot 'later': skill 'briefing' not in any library/skills/ — symlink will be skipped",
       "bot 'later': briefing equipped but no integrations/mcp source coverage — sections that read external data will be empty",
       "bot 'later': observability.pulse_interval > 3600s (1h) is unusually long — got 3601",
       "bot 'later': observability.bridge_heal_max_attempts must be 1..10 (got 0)"
@@ -141,7 +142,9 @@
       },
       "later": {
         "integrations": [],
-        "skills": []
+        "skills": [
+          "briefing"
+        ]
       }
     }
   },
