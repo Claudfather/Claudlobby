@@ -1,5 +1,8 @@
 """Falsify the native evidence controller without starting a native service."""
 import os
+from pathlib import Path
+import shutil
+import subprocess
 import shlex
 import signal
 import sys
@@ -100,3 +103,30 @@ def test_permission_failure_with_live_group_is_not_suppressed(monkeypatch):
     monkeypatch.setattr(native.os, "killpg", denied)
     with pytest.raises(PermissionError, match="owned live group"):
         native.signal_live_group(proc, signal.SIGTERM)
+
+
+@pytest.mark.skipif(sys.platform != "linux" or not shutil.which("flock"), reason="Linux consent lock uses flock")
+def test_session_fixture_supplies_the_real_consent_lock_parent(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    source = Path(__file__).resolve().parents[1]
+    script = (
+        '. "$1/lib/lib-common.sh"\n'
+        'write_consent() { printf accepted > "$HOME/.claude/settings.json"; }\n'
+        'with_lock "$HOME/.claude/settings.json.lock" write_consent\n'
+    )
+    env = constructed_env(HOME=home, TMPDIR=tmp_path)
+
+    def run_lock():
+        return subprocess.run(["/bin/bash", "-c", script, "probe", str(source)],
+                              cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10)
+
+    cold = run_lock()
+    assert cold.returncode != 0
+    assert "settings.json.lock" in cold.stderr and "No such file or directory" in cold.stderr
+    assert not (home / ".claude/settings.json").exists()
+    native.prepare_session_home(home)
+    assert not (home / ".claude/settings.json").exists(), "Fixture must leave consent to the launcher"
+    ready = run_lock()
+    assert ready.returncode == 0, ready.stderr
+    assert (home / ".claude/settings.json").read_text() == "accepted"

@@ -180,6 +180,15 @@ def recorded_new_start(directory: Path, pid: str | None, before: list[str]) -> b
     return bool(pid) and start_records(directory) == before + [pid]
 
 
+def prepare_session_home(home: Path) -> None:
+    """Supply the installed-session prerequisite, without pre-accepting consent.
+
+    start-bot locks settings.json before its callback creates the parent. The
+    complete validation harness documents the same empty-HOME prerequisite.
+    """
+    (home / '.claude').mkdir(exist_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
@@ -201,6 +210,7 @@ def main() -> int:
     assert Path(claudlobby.__file__).resolve().is_relative_to(source)
     home = Path.home().resolve()
     assert home.is_relative_to(owned), 'Native HOME must be inside the disposable tree'
+    prepare_session_home(home)
     system = platform.system()
     assert system in ('Linux', 'Darwin')
     uid = os.getuid()
@@ -217,7 +227,7 @@ def main() -> int:
     Path(env['TMUX_TMPDIR']).mkdir(exist_ok=True)
     assert len(str(Path(env['TMUX_TMPDIR']) / f'tmux-{uid}' / ('n' * 45))) < 104
     if system == 'Linux':
-        env.update(XDG_RUNTIME_DIR=f'/run/user/{uid}',
+        env.update(XDG_CONFIG_HOME=str(home / '.config'), XDG_RUNTIME_DIR=f'/run/user/{uid}',
                    DBUS_SESSION_BUS_ADDRESS=f'unix:path=/run/user/{uid}/bus')
     validate_env = dict(env)  # Do not leak the lifecycle fixture's state path into the full harness.
     cancel_trap = scratch / 'cancel-harness.sh'
@@ -257,6 +267,10 @@ def main() -> int:
     if system == 'Linux':
         run(['systemctl', '--user', 'show-environment'])
         assert run(['systemctl', '--user', 'show', '-p', 'Environment', '--value']).returncode == 0
+        # Establish the disposable manager's bus before recording the baseline;
+        # the first unit install activates it otherwise (inactive -> running).
+        run(['systemctl', '--user', 'start', 'dbus.service'])
+        assert run(['systemctl', '--user', 'is-active', 'dbus.service']).stdout.strip() == 'active'
     else:
         # The production scripts address gui/<uid>, so a user/<uid> fallback
         # would certify a different contract and is deliberately refused.
@@ -367,6 +381,27 @@ def main() -> int:
         pid = probe.stdout.strip()
         return pid if probe.returncode == 0 and pid and pid != old_pid else None
 
+    def capture_bot_diagnostics(directory, label):
+        # Capture before purge, while the failed launch's files still exist.
+        # The fixture has no credentials; only its own logs/markers are saved.
+        diagnostic = {'label': label, 'starts': start_records(directory),
+                      'tmux_env_exists': (directory / '.tmux-env').exists(), 'logs': {}}
+        paths = list((directory / 'logs').glob('*.log')) + [
+            source / 'lib/logs' / f'{directory.name}.out.log',
+            source / 'lib/logs' / f'{directory.name}.err.log']
+        for path in paths:
+            if path.is_file():
+                diagnostic['logs'][str(path.relative_to(source))] = path.read_text(errors='replace')[-65536:]
+        run(['tmux', '-L', label, 'list-panes', '-a', '-F',
+             '#{session_name}:#{pane_pid}:#{pane_current_command}'], check=False)
+        run(['tmux', '-L', label, 'capture-pane', '-t', directory.name, '-p'], check=False)
+        if system == 'Linux':
+            run(['systemctl', '--user', 'show', label, '--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,MainPID,FragmentPath'], check=False)
+            run(['journalctl', '--user-unit', label, '-n', '80', '--no-pager', '-o', 'cat'], check=False)
+        else:
+            run(['/bin/launchctl', 'print', f'gui/{uid}/{label}'], check=False)
+        (evidence / f'{label}-launch.json').write_text(json.dumps(diagnostic, indent=2) + '\n')
+
     def settled(label):
         if system == 'Linux':
             return run(['systemctl', '--user', 'show', '--value', '-p', 'SubState', label], check=False).stdout.strip() == 'exited'
@@ -453,6 +488,11 @@ def main() -> int:
                       'unrelated native bot and state key preserved']}
     except Exception:
         result['lifecycle']['error'] = traceback.format_exc()
+        for directory, label in zip(bot_dirs, labels):
+            try:
+                capture_bot_diagnostics(directory, label)
+            except Exception:
+                result.setdefault('diagnostic_errors', []).append(traceback.format_exc())
     finally:
         # Never use a wildcard/native-domain sweep. Reap only labels created
         # above, even when an assertion or boot failed half way through.

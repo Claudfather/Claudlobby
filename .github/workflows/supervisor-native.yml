@@ -128,7 +128,16 @@ jobs:
       - name: Compare failure identities without treating equal failures as passing
         if: always() && env.CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT != ''
         run: |
-          python - <<'PY'
+          set -euo pipefail
+          compare_python=(python)
+          if [ "$RUNNER_OS" = Linux ]; then
+            # The evidence tree belongs to the disposable native user.
+            compare_python=(sudo -u "$NATIVE_USER" env
+              CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT="$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT"
+              NATIVE_PARENT_SHA="$NATIVE_PARENT_SHA" NATIVE_CANDIDATE_SHA="$NATIVE_CANDIDATE_SHA"
+              "$CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT/candidate/.venv/bin/python")
+          fi
+          "${compare_python[@]}" - <<'PY'
           import json, os
           from pathlib import Path
           root = Path(os.environ['CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT']) / 'evidence'
