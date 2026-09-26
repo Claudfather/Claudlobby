@@ -178,4 +178,4 @@ def test_native_launchd_scratch_lifecycle(tmp_path, fail_after_start):
                 raise AssertionError("exercise cleanup")
     else:
         with _native_scratch_job(tmp_path):
-            pass
+            assert False, "phase03 intentional hosted native assertion"
