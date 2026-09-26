@@ -6,8 +6,8 @@ import sys
 
 import pytest
 
-from conftest import constructed_env
-from native_supervisor_evidence import run_owned_session
+from tests.conftest import constructed_env
+from tests.native_supervisor_evidence import run_owned_session
 
 
 @pytest.mark.parametrize("detached", [False, True], ids=["plain-child", "setsid-child"])
