@@ -335,12 +335,12 @@ metric-sample retention.
 |---|---|---|---|---|
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `plane-prune-system-events` | **off** — deletes data — and unlike the sample lane beside it, this one could delete a RECORD rather than a sample, which is why it is an allowlist: a wrongly-pruned type breaks selfstart-snapshot.sh's boot gate, which fails closed on an unreachable receipt read but reads an ABSENT receipt as a certain no-receipt | door | host/root .env | PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in the host or root .env |
-| `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in THIS host's system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
 | `plane-expire` | **on** | host job | host/root .env | PLANE_EXPIRE_ENABLED=0 in the host or root .env |
-| `plane-host-probe` | **on** | host job | system.yaml enroll | host.jobs.plane-host-probe.enroll: false in THIS host's system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-host-probe` | **on** | host job | system.yaml enroll | host.jobs.plane-host-probe.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
 | `plane-prune` | **on** | host job | host/root .env | PLANE_PRUNE_ENABLED=0 in the host or root .env |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
-| `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in THIS host's system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
 | `registry-scan` | **on** | generate | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
 

@@ -482,7 +482,7 @@ here — tracked as #1732.
 
 ## Mechanism 1 — daily live reload (plugins + skills)
 
-`lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled via `lib/install-reload-fleet-systemd.sh`.
+`lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled by `lib/setup-fleet` (the generic timer enroller).
 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
 2. Runs `claudlobby generate` to completion — re-links composed skill symlinks.
@@ -545,10 +545,8 @@ PR #399 added `lib/update-claude-code.sh` with a daily **fleet-wide bounce** —
 | Script | Role |
 |---|---|
 | `lib/reload-fleet.sh` | Mechanism 1: plugin update + generate + mark reload-pending |
-| `lib/install-reload-fleet-systemd.sh` | Enrolls the daily reload timer |
 | `lib/update-claude-code.sh` | Daily binary download only (no restart) |
 | `lib/weekly-worker-restart.sh` | Mechanism 2: weekly worker-only lossless restart |
-| `lib/install-weekly-worker-restart-systemd.sh` | Enrolls the weekly restart timer (dormant by default) |
 | `lib/keepalive.sh` | Consumes `data/.reload-pending` at each idle tick; also the crash-restart entrypoint |
 | `lib/start-bot.sh` | Injects the configured resume command before `STARTUP_PROMPT`, gated on BOTH checkpoint age and resume capability; logs `RESUME SKIP` + `resume_skipped` when either gate closes |
 | `lib/pre-stop-handoff.sh` | Best-effort, non-blocking handoff before an intentional restart |

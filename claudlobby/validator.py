@@ -2269,11 +2269,4 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_env_contracts(paths, report)
     _validate_mcp_packages(fleet, paths, report)
 
-    # bench marker — multi-bot fleets should designate a bench bot
-    if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):
-        report.warnings.append(
-            "fleet has multiple bots but none has bench: true — "
-            "cold-start benchmarking will not know which bot to measure"
-        )
-
     return report
