@@ -79,8 +79,6 @@ _deny() { # <reason>
 
 # --- the vault must exist for this hook to have a subject -------------------
 [ -n "${CLAUDRON_VAULT_PATH:-}" ] || _allow
-VAULT="$(realpath -m "$CLAUDRON_VAULT_PATH" 2>/dev/null || true)"
-[ -n "$VAULT" ] || _allow
 
 command -v jq >/dev/null 2>&1 || _bail "jq not available"
 PY_BIN="$(command -v python3 || true)"
@@ -98,7 +96,10 @@ cmd="$(jq -r '.tool_input.command // empty' <<<"$payload" 2>/dev/null)" || _bail
 [ -n "$cmd" ] || _allow
 cwd="$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null)" || _bail "unparseable hook payload"
 
-verdict="$("$PY_BIN" "$DECIDER" --vault "$VAULT" --cwd "$cwd" --command "$cmd" 2>/dev/null)" \
+# The decider normalizes the vault with its portable stdlib resolver. GNU
+# realpath -m is absent on stock macOS; swallowing its failure disarmed this
+# hook before the decider ran. Equals also preserves a relative leading dash.
+verdict="$("$PY_BIN" "$DECIDER" --vault="$CLAUDRON_VAULT_PATH" --cwd "$cwd" --command "$cmd" 2>/dev/null)" \
     || _bail "decider failed"
 detail="${verdict#*$'\t'}"
 verdict="${verdict%%$'\t'*}"
