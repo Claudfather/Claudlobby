@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -20,9 +21,11 @@ from pathlib import Path
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 
@@ -125,6 +128,22 @@ def hosted_only():
 
 def owned(path, root):
     return Path(path).resolve().is_relative_to(Path(root).resolve())
+
+
+def registered_pytest_root(registry):
+    """Resolve one exact controller allocation, never a /tmp name prefix."""
+    try:
+        record = json.loads(Path(registry).read_text())
+        root = Path(record["path"])
+        info = root.lstat()
+        if (root != root.resolve() or not stat.S_ISDIR(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or info.st_uid != os.getuid()
+                or (info.st_dev, info.st_ino) != (record["device"], record["inode"])):
+            return None
+        return root
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def rows(xml):
@@ -232,7 +251,10 @@ def tmux_passthrough(real, ledger, proof_root, args):
     short = (directory.resolve().parent == Path("/tmp").resolve()
              and directory.name.startswith("p610-") and directory.is_dir()
              and directory.stat().st_uid == os.getuid())
-    assert owned(directory, proof_root) or short, "fixture proof refused unowned tmux socket"
+    pytest_root = registered_pytest_root(Path(proof_root) / "pytest-root.json")
+    assert (owned(directory, proof_root) or short
+            or (pytest_root is not None and owned(directory, pytest_root))), \
+        "fixture proof refused unowned tmux socket"
     assert "-L" in args, "fixture proof refused default tmux server"
     name = args[args.index("-L") + 1]
     assert name in ("pulse610", "pulse610-none"), name
@@ -267,7 +289,7 @@ def inspect_endpoints(real, attempts, env):
         row = {"socket_dir": directory, "socket_name": name,
                "socket_exists": socket.exists(), "pids": [], "query_invalid": False}
         try:
-            query = subprocess.run([real, "-L", name, "list-panes", "-a", "-F", "#{pid} #{pane_pid}"],
+            query = subprocess.run([real, "-S", str(socket), "list-panes", "-a", "-F", "#{pid} #{pane_pid}"],
                 env={**env, "TMUX_TMPDIR": directory}, capture_output=True, text=True, timeout=10)
             row.update(rc=query.returncode, stdout=query.stdout, stderr=query.stderr)
             # rc 1 alone includes permission, path and command failures. None
@@ -291,6 +313,8 @@ def child_pytest(source, state, xml, selection):
     hosted_only()
     import pytest
     source, state = Path(source), Path(state)
+    pytest_root = registered_pytest_root(state / "pytest-root.json")
+    assert pytest_root is not None, "fixture proof refused unregistered pytest root"
     sys.path.insert(0, str(source))
     import claudlobby
     assert Path(claudlobby.__file__).resolve().parent == source / "claudlobby"
@@ -329,7 +353,7 @@ def child_pytest(source, state, xml, selection):
     subprocess.Popen = ObservedPopen
     try:
         return pytest.main([*selection, "-ra", "--tb=short", "--junitxml=" + xml,
-                            "--basetemp=" + str(state / "pytest"),
+                            "--basetemp=" + str(pytest_root / "p"),
                             "-o", "cache_dir=" + str(state / "cache")])
     finally:
         subprocess.Popen = original
@@ -392,7 +416,8 @@ def install_network_guard(python, base):
         "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True).strip())
     guard = site / "_native_fixture_network_guard.py"
     guard.write_text(
-        "import sys\nfrom pathlib import Path\n"
+        "import sys, json, os, stat\nfrom pathlib import Path\n"
+        + inspect.getsource(registered_pytest_root) + "\n"
         + "ROOT = Path(" + repr(str(base)) + ").resolve()\n"
         + "LOG = ROOT / 'evidence' / 'forbidden-network.jsonl'\n"
         + "def check(event, args):\n"
@@ -400,7 +425,9 @@ def install_network_guard(python, base):
         + "    if event not in ('socket.connect', 'socket.connect_ex', 'socket.sendto', 'socket.sendmsg', 'socket.bind') + dns:\n"
         + "        return\n"
         + "    address = None if event in dns else args[-1]\n"
-        + "    if isinstance(address, str) and Path(address).resolve().is_relative_to(ROOT):\n"
+        + "    extra = registered_pytest_root(ROOT / 'pytest-root.json')\n"
+        + "    roots = (ROOT,) if extra is None else (ROOT, extra)\n"
+        + "    if isinstance(address, str) and any(Path(address).resolve().is_relative_to(root) for root in roots):\n"
         + "        return\n"
         + "    with LOG.open('a') as out: out.write(event + '\\n')\n"
         + "    raise PermissionError('fixture proof refused non-private network')\n"
@@ -412,6 +439,42 @@ def install_network_guard(python, base):
 def run_arm(label, source, python, base, selection, real_tmux):
     state = base / "runs" / label
     state.mkdir(parents=True)
+    registry = base / "pytest-root.json"
+    assert not registry.exists(), "a different proof arm still owns the pytest root"
+    root = None
+    try:
+        # Keep the allocation itself intact: pytest may replace its /p child.
+        # A short root applies equally to the historical parent and candidate.
+        with tempfile.TemporaryDirectory(prefix="np-", dir="/tmp") as directory:
+            root = Path(directory).resolve()
+            info = root.stat()
+            record = {"path": str(root), "device": info.st_dev, "inode": info.st_ino}
+            write_json(state / "pytest-root.json", record)
+            write_json(registry, record)
+            try:
+                assert registered_pytest_root(registry) == root
+                # The longest pulse socket name, including pytest's node suffix.
+                endpoint = root / "p/test_pulse_completes_with_no_e0/root/tmux" / (
+                    "tmux-" + str(os.getuid())) / "pulse610-none"
+                assert len(os.fsencode(endpoint)) < 100, "proof pytest endpoint is too long"
+                record["longest_pulse_endpoint"] = str(endpoint)
+                record["endpoint_bytes"] = len(os.fsencode(endpoint))
+                write_json(state / "pytest-root.json", record)
+                return _run_arm(label, source, python, base, selection, real_tmux, state)
+            finally:
+                registry.unlink()
+    finally:
+        if root is not None:
+            receipt = {"path": str(root), "removed": not root.exists(),
+                       "unregistered": not registry.exists()}
+            evidence = base / "evidence" / label
+            evidence.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(state / "pytest-root.json", evidence / "pytest-root.json")
+            write_json(evidence / "pytest-root-cleanup.json", receipt)
+            assert receipt["removed"] and receipt["unregistered"], "pytest root cleanup failed"
+
+
+def _run_arm(label, source, python, base, selection, real_tmux, state):
     tools, native = make_tools(state, python, real_tmux, base)
     env = environment(source, state, tools, base)
     evidence = base / "evidence" / label
@@ -451,7 +514,8 @@ def run_arm(label, source, python, base, selection, real_tmux):
     for endpoint in endpoints:
         if endpoint["pids"] or endpoint["socket_exists"] or endpoint["query_invalid"]:
             try:
-                subprocess.run([real_tmux, "-L", endpoint["socket_name"], "kill-server"],
+                socket = Path(endpoint["socket_dir"]) / ("tmux-" + str(os.getuid())) / endpoint["socket_name"]
+                subprocess.run([real_tmux, "-S", str(socket), "kill-server"],
                     env={**env, "TMUX_TMPDIR": endpoint["socket_dir"]}, timeout=10, check=False)
             except subprocess.TimeoutExpired:
                 endpoint["emergency_cleanup_timed_out"] = True
