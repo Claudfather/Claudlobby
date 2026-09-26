@@ -393,6 +393,7 @@ def test_briefing_trigger_armed_lands_briefing_comm(tmp_path, armed):
     botdir = tmp_path / "local" / "brf-fleet" / "runtime" / "bots" / "w1"
     (botdir / "logs").mkdir(parents=True)
     (botdir / "data").mkdir(parents=True)
+    (botdir / ".claude" / "skills" / "briefing").mkdir(parents=True)  # composed skill
     (botdir / "bot.conf").write_text('export FLEET_NAME="brf-fleet"\n')
     r = _bash(f'"{libdir}/briefing-trigger.sh" brf-fleet w1 morning', env)
     assert r.returncode == 0, r.stderr
