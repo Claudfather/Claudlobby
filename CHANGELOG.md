@@ -17,8 +17,34 @@ another file), read by `config.load_host_jobs`. The override is merged per job
 and per field, so arming one job leaves every other job as shipped. It covers
 `host.jobs` only. A file that cannot take effect (a parse error, a misspelt
 field, a quoted `enroll`) is refused rather than skipped, and a job the install
-does not ship is logged and ignored. The switch table's arming recipe and the
+does not ship is logged and ignored, and while the file is refused
+`doctor --switches` shows every host-job state as unknown, never the shipped
+default. The switch table's arming recipe and the
 docs now name the file.
+
+### Fixed — the send-size probe could not see a paste-framed arrival, and would have called it lost (#1876)
+
+`lib/send-size-probe.sh` now records which bytes of each payload arrive inside
+`<pasted_content>` (a new `pasted` column) and takes `capN` arms for any chunk
+size. Two defects stood in the way. Its receiver is not logged in, so it never
+got the server flag that makes the TUI frame a paste, and nothing was ever
+framed; the probe now seeds that flag. And its reader kept only the first line
+of a record, which for a framed record is empty, so a delivered send would have
+been reported `absent`.
+
+### Fixed — a FLEET ALERT or NOTICE reaches the manager's pane when the manager sorts first (#910)
+
+A manager's composed `MANAGER_TMUX` line carried `# this bot is a manager` on
+the same line, and `bot_conf_get` returned the comment as part of the value.
+The alert nudge takes its target from the fleet's first bot that declares
+`MANAGER_TMUX`, so wherever that bot is the manager itself (two of the four
+fleets on one host) it looked for a session that does not exist and skipped
+the pane without an event; fleet-pulse's pushes about the manager itself
+dropped the same way. The reader now ends an unquoted value at its first
+whitespace, as sourcing the file does, so the `bot.conf` files already on disk
+read clean on the next pull with no regenerate; a quoted value is left as
+read. The composer writes the comment on its own line, and `bot_is_manager`
+no longer keeps its own copy of the strip.
 
 ### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
 

@@ -300,8 +300,7 @@ def _conf_val(conf, key):
         for prefix in (f"export {key}=", f"{key}="):
             if line.startswith(prefix):
                 rhs = line[len(prefix) :]
-                # Drop a trailing inline comment (managers carry one on
-                # MANAGER_TMUX); split() handles quoting.
+                # Drop any trailing inline comment; split() handles quoting.
                 return " ".join(shlex.split(rhs, comments=True))
     return None
 
@@ -330,8 +329,7 @@ class TestComposerSocketFields:
     def test_manager_socket_is_self(self, tmp_path):
         fleet, paths = _fleet(tmp_path)
         conf = compose_bot_conf(fleet.bots["lead"], fleet, paths)
-        # Manager's MANAGER_TMUX is itself (with an inline comment); its socket
-        # is its own BOT_SERVICE.
+        # Manager's MANAGER_TMUX is itself; its socket is its own BOT_SERVICE.
         assert _conf_val(conf, "MANAGER_TMUX") == "lead"
         assert _conf_val(conf, "MANAGER_TMUX_SOCKET") == "com.test.lead"
 
