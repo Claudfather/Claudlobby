@@ -281,7 +281,7 @@ for bot in json.load(open(sys.argv[3])).get("bots", []):
     fi
 done
 # The restarts, judged by what the supervisor reports after the watch -- never
-# by svc_restart_host's rc: systemctl returns 0 for a unit that dies a second
+# by svc_restart_host's rc: a restart command returns 0 for a unit that dies a second
 # later (measured in the #1883 review: rc 0, then NRestarts 0 -> 1 -> 2). A
 # restarted unit is healthy only as active/running with NO restart by systemd
 # since ours, which zeroed the counter (service_is_crash_looping, #1769). A
