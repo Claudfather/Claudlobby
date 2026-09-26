@@ -205,7 +205,8 @@ assert_eq "literal text stuck at the input line -> Enter resent" "3" "$r"
 big="set +H; [BOTCOMMAND] ari | task | $(printf 'filler %.0s' $(seq 1 60))"
 r=$(printf '%s\n' "$(cat "$FIXTURES/input-stuck-collapsed-paste.txt")" | grep -cF "${big:0:60}" || true)
 assert_eq "collapsed-paste pane contains none of the payload text" "0" "$r"
-r=$(run_send "$big" "$FIXTURES/input-stuck-collapsed-paste.txt")
+# One chunk, as this placeholder case was built: an explicit 900, whatever the default.
+r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$big" "$FIXTURES/input-stuck-collapsed-paste.txt")
 assert_eq "collapsed paste stuck at the input line -> Enter resent" "3" "$r"
 
 r=$(run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt")
@@ -364,7 +365,7 @@ assert_eq "never-drawn but the payload shows in the transcript -> NOT resent" "2
 # — even though the box was never confirmed before the send. Three sends, not
 # four: the Enter fires, the payload does not go again.
 big="set +H; [BOTCOMMAND] ari | task | $(printf 'filler %.0s' $(seq 1 60))"
-r=$(run_send "$big" \
+r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$big" \
     $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/input-stuck-collapsed-paste.txt")
 assert_eq "never-drawn but a collapsed paste landed -> Enter resent, not the payload" "3" "$r"
 r=$(grep -cF "$big" "$SENT_LOG" || true)
@@ -489,26 +490,33 @@ chunk_count() { ls "$CHUNK_DIR" 2>/dev/null | wc -l | tr -d ' '; }
 # First byte of a chunk as a decimal, for the character-boundary assertion.
 chunk_first_byte() { od -An -tu1 -N1 < "$1" | tr -d ' '; }
 
+# The DEFAULT cap stays at or under the receiving TUI's paste threshold: a
+# read of more than 800 bytes is framed as <pasted_content>, which costs a
+# dispatch its authority (#1876). 900, the default before, fails this.
+r=$([ "$_PANE_SEND_CHUNK_BYTES_DEFAULT" -le 800 ] && echo under || echo over)
+assert_eq "the default chunk cap is at most 800 bytes (#1876)" "under" "$r"
+
 payload2500=$(printf 'x%.0s' $(seq 1 2500))
 r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
-# ceil(2500/900) = 3 chunks, then exactly one Enter.
-assert_eq "a 2500-byte payload becomes 3 keystroke chunks" "3" "$(chunk_count)"
-assert_eq "a 2500-byte payload is 3 chunks + 1 Enter, no more" "4" "$r"
+# At the default 400: 400, 399, 400, 399, 400, 399, 103 (the tie-break shortens
+# each chunk that would repeat the one before it), then exactly one Enter.
+assert_eq "a 2500-byte payload becomes 7 keystroke chunks" "7" "$(chunk_count)"
+assert_eq "a 2500-byte payload is 7 chunks + 1 Enter, no more" "8" "$r"
 r=$(grep -c '^Enter$' "$SENT_LOG" || true)
 assert_eq "exactly one Enter, after the last chunk (not one per chunk)" "1" "$r"
 # Every chunk goes as `-l --`: -l because a chunk that spells a tmux key name
 # would otherwise be sent as that key, -- because one starting with `-` would be
 # read as a flag.
 r=$(grep -c -- '-l --' "$RAW_LOG" || true)
-assert_eq "every keystroke chunk is sent literally (-l --)" "3" "$r"
+assert_eq "every keystroke chunk is sent literally (-l --)" "7" "$r"
 r=$(grep -c -- '-l' "$RAW_LOG" || true)
-assert_eq "the Enter is NOT sent with -l (it must stay a key name)" "3" "$r"
+assert_eq "the Enter is NOT sent with -l (it must stay a key name)" "7" "$r"
 
 over=0
 for f in "$CHUNK_DIR"/*; do
-    [ "$(chunk_bytes "$f")" -le 900 ] || over=$((over + 1))
+    [ "$(chunk_bytes "$f")" -le 400 ] || over=$((over + 1))
 done
-assert_eq "no chunk exceeds the 900-byte cap" "0" "$over"
+assert_eq "no chunk exceeds the 400-byte default cap" "0" "$over"
 
 # The property that makes the whole thing safe: the pane receives exactly what
 # the caller passed, byte for byte. A chunker that drops or duplicates a byte
@@ -528,7 +536,8 @@ pad899=$(printf 'x%.0s' $(seq 1 899))
 dashes=""
 i=0; while [ $i -lt 800 ]; do dashes="${dashes}—"; i=$((i + 1)); done
 mbpayload="${pad899}${dashes}"
-r=$(run_send "$mbpayload" "$FIXTURES/input-clean-submit.txt")
+# An explicit 900: this payload is built around byte 900, whatever the default.
+r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$mbpayload" "$FIXTURES/input-clean-submit.txt")
 
 # A continuation byte is 0x80-0xBF (128-191). No chunk may START with one: given
 # the byte-exact rejoin below, that is exactly "no chunk ENDS mid-character".
@@ -582,7 +591,7 @@ unset PANE_SEND_CHUNK_BYTES
 # bot.
 export PANE_SEND_CHUNK_BYTES=notanumber
 r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
-assert_eq "a malformed cap falls back to the default (still 3 chunks)" "3" "$(chunk_count)"
+assert_eq "a malformed cap falls back to the default (7 chunks at 400)" "7" "$(chunk_count)"
 unset PANE_SEND_CHUNK_BYTES
 
 # A malformed SETTLE must not be able to strand a bot either, and this one is
@@ -593,7 +602,7 @@ unset PANE_SEND_CHUNK_BYTES
 # never reaches the sleep at all and would pass on a broken guard.
 export PANE_SEND_CHUNK_SETTLE_S=not-a-number
 r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
-assert_eq "a malformed settle falls back to the default (send completes)" "4" "$r"
+assert_eq "a malformed settle falls back to the default (send completes)" "8" "$r"
 export PANE_SEND_CHUNK_SETTLE_S=0
 
 echo "=== the pre-draw repair resends CHUNKED too (#1493) ==="
@@ -603,7 +612,7 @@ echo "=== the pre-draw repair resends CHUNKED too (#1493) ==="
 # pre-draw loss by committing a 1 KB one — and it is the path that carries the
 # BIGGEST payloads, since start-bot's STARTUP_PROMPT is what arms the wait.
 : > "$CAPTURE"
-r=$(run_send "$payload2500" \
+r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$payload2500" \
     $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt")
 assert_eq "repair path: 3 chunks + Enter, twice over" "8" "$r"
 assert_eq "repair path: six keystroke chunks in total, all -l" "6" "$(chunk_count)"
@@ -745,6 +754,7 @@ count_sleeps() { grep -cx "$1" "$SLEEP_LOG" || true; }
 
 export PANE_SEND_CHUNK_SETTLE_S=0.3
 export PANE_SEND_SETTLE_S=0.7          # distinct, so the pre-Enter settle is countable
+export PANE_SEND_CHUNK_BYTES=900       # three chunks, as this block counts them
 : > "$SLEEP_LOG"
 r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
 assert_eq "a 3-chunk payload still sends 3 chunks + 1 Enter" "4" "$r"
@@ -767,6 +777,7 @@ assert_eq "a malformed settle still settles, at the default value" \
     "2" "$(count_sleeps 0.15)"
 
 unset -f sleep count_sleeps
+unset PANE_SEND_CHUNK_BYTES
 export PANE_SEND_CHUNK_SETTLE_S=0
 export PANE_SEND_SETTLE_S=0
 
@@ -788,7 +799,7 @@ run_send_failing() {
 }
 
 : > "$CAPTURE"
-r=$(FAIL_ON_CHUNK=2 run_send_failing "$payload2500" "$FIXTURES/input-clean-submit.txt")
+r=$(PANE_SEND_CHUNK_BYTES=900 FAIL_ON_CHUNK=2 run_send_failing "$payload2500" "$FIXTURES/input-clean-submit.txt")
 assert_eq "a chunk that fails mid-payload fails the send (never a silent partial)" "1" "$r"
 r=$(grep -c 'chunk 2 of 3 failed' "$TMPD/send-stderr.log" || true)
 assert_eq "the door says WHICH chunk failed" "1" "$r"
