@@ -39,6 +39,72 @@ UTILITIES = ("awk", "basename", "bash", "cat", "chmod", "cut", "date", "dirname"
              "env", "find", "grep", "head", "id", "ln", "ls", "mkdir", "mktemp",
              "mv", "printf", "ps", "readlink", "rm", "sed", "sh", "sleep", "sort",
              "stat", "tail", "tee", "touch", "tr", "uname", "wc", "xargs")
+ANCESTRY_CASES = (
+    "test_door_exists_and_is_executable", "test_parses_under_bash",
+    "test_resolves_to_an_ancestor_named_claude", "test_refuses_when_no_claude_ancestor",
+    "test_refusal_is_not_a_number", "test_never_consults_the_process_table",
+    "test_from_walks_the_given_ancestry", "test_rejects_a_non_pid_from", "test_summary_shape",
+    "test_the_prose_control_is_live", "test_ambient_claude_processes_do_not_leak_in",
+    "test_every_lib_path_a_skill_references_exists_on_disk",
+    "test_the_existence_check_rejects_the_shape_that_shipped",
+) + tuple(name + "[" + skill + "]" for name in (
+    "test_skill_uses_the_door", "test_skill_has_no_process_scan_in_executable_lines",
+    "test_the_skill_line_actually_runs") for skill in (
+        "selfcheck", "review-status", "status-personal", "eng-status"))
+
+
+def expected_nodes(role, index):
+    prefix = MODULES[index][:-3].replace("/", ".")
+    if index == 0:
+        first = ("TestTheFixedTemplateWorksOnGnu::test_the_new_template_succeeds_where_the_old_one_failed"
+                 if role == "parent" else
+                 "TestTheTemplateWorksOnTheNativeUtility::test_old_template_semantics_and_working_primary")
+        names = (first,
+            "TestThePrimaryFailingFallsThroughToTheFallback::test_fallback_rescues_when_reachable",
+            "TestBothAttemptsFailingNamesTheHelper::test_env_tiers_names_lc_tmpdir_not_a_bare_exit",
+            "TestBothAttemptsFailingNamesTheHelper::test_lib_common_alone_shows_the_same_diagnostic")
+    elif index == 1:
+        names = ANCESTRY_CASES + (() if role == "parent" else ("test_fixture_ignores_ambient_startup_files",))
+    else:
+        names = ("test_pulse_completes_with_no_events_bot[summary-site]",
+                 "test_pulse_completes_with_no_events_bot[escalation-site]",
+                 "test_a_healthy_bridge_check_fires_no_phantom_script_error",
+                 "test_the_handoff_status_is_captured_without_firing_the_trap")
+    return {prefix + "." + n if "::" in n else prefix + "::" + n for n in names}
+
+
+def inventory_valid(role, index, cases):
+    """Pin exact node IDs, not a total that can hide one missing/duplicate case."""
+    if len(cases) != len(expected_nodes(role, index)) or {c["node"] for c in cases} != expected_nodes(role, index):
+        return False
+    allowed_parent_red = ("test_the_new_template_succeeds_where_the_old_one_failed",
+        "test_env_tiers_names_lc_tmpdir_not_a_bare_exit", "test_lib_common_alone_shows_the_same_diagnostic",
+        "test_resolves_to_an_ancestor_named_claude", "test_from_walks_the_given_ancestry", "test_summary_shape",
+        "test_pulse_completes_with_no_events_bot[summary-site]", "test_pulse_completes_with_no_events_bot[escalation-site]")
+    for case in cases:
+        name = case["node"].rsplit("::", 1)[-1]
+        if case["status"] == "passed":
+            continue
+        if case["status"] == "skipped" and name == "test_ambient_claude_processes_do_not_leak_in" and "no live claude processes on this host" in case["detail"]:
+            continue
+        if role == "parent" and case["status"] in ("failure", "error") and name in allowed_parent_red:
+            continue
+        return False
+    return True
+
+
+def mutant_valid(label, cases):
+    index, suffix, status = {
+        "remove-fallback": (0, "::test_fallback_rescues_when_reachable", "failure"),
+        "remove-failure-guard": (0, ".TestBothAttemptsFailingNamesTheHelper::", "failure"),
+        "raw-comm": (1, "::test_resolves_to_an_ancestor_named_claude", "failure"),
+        "wrong-ancestor": (1, "::test_from_walks_the_given_ancestry", "failure"),
+        "long-socket": (2, "::test_pulse_completes_with_no_events_bot[", "error"),
+        "ambient-startup": (1, "::test_fixture_ignores_ambient_startup_files", "failure"),
+    }[label]
+    expected = {n for n in expected_nodes("candidate", index) if suffix in n}
+    return (len(cases) == len(expected) and {c["node"] for c in cases} == expected
+            and all(c["status"] == status for c in cases))
 
 
 def write_json(path, value):
@@ -161,6 +227,7 @@ def snapshot():
 
 def tmux_passthrough(real, ledger, proof_root, args):
     """Execute native tmux unchanged, recording only our exact server/pane IDs."""
+    hosted_only()
     directory = Path(os.environ.get("TMUX_TMPDIR", "/invalid"))
     short = (directory.resolve().parent == Path("/tmp").resolve()
              and directory.name.startswith("p610-") and directory.is_dir()
@@ -169,6 +236,10 @@ def tmux_passthrough(real, ledger, proof_root, args):
     assert "-L" in args, "fixture proof refused default tmux server"
     name = args[args.index("-L") + 1]
     assert name in ("pulse610", "pulse610-none"), name
+    # Record the endpoint BEFORE creation. Native tmux may create a detached
+    # server and then fail or time out before any PID query succeeds.
+    append(Path(ledger).with_name("tmux-attempts.jsonl"),
+           {"socket_dir": str(directory), "socket_name": name})
     result = subprocess.run([real, *args], timeout=70)
     if "new-session" in args and result.returncode == 0:
         for fmt in ("#{pid}", "#{pane_pid}"):
@@ -177,6 +248,32 @@ def tmux_passthrough(real, ledger, proof_root, args):
             append(ledger, {"kind": fmt, "pid": int(found.stdout.strip()),
                             "socket_dir": str(directory), "socket_name": name})
     return result.returncode
+
+
+def inspect_endpoints(real, attempts, env):
+    """Independently query every attempted private endpoint, not just PID receipts."""
+    found = []
+    for directory, name in sorted({(a["socket_dir"], a["socket_name"]) for a in attempts}):
+        socket = Path(directory) / ("tmux-" + str(os.getuid())) / name
+        row = {"socket_dir": directory, "socket_name": name,
+               "socket_exists": socket.exists(), "pids": [], "query_invalid": False}
+        try:
+            query = subprocess.run([real, "-L", name, "list-panes", "-a", "-F", "#{pid} #{pane_pid}"],
+                env={**env, "TMUX_TMPDIR": directory}, capture_output=True, text=True, timeout=10)
+            row.update(rc=query.returncode, stderr=query.stderr)
+            row["query_invalid"] = query.returncode not in (0, 1) or any(
+                text in query.stderr for text in ("Operation not permitted", "Permission denied"))
+            if query.returncode == 0:
+                parsed = [line.split() for line in query.stdout.splitlines()]
+                if not parsed or any(len(pair) != 2 or not all(p.isdigit() for p in pair) for pair in parsed):
+                    row["query_invalid"] = True
+                else:
+                    row["pids"] = sorted({int(pid) for pair in parsed for pid in pair})
+        except subprocess.TimeoutExpired:
+            row["query_invalid"] = True
+            row["timeout"] = True
+        found.append(row)
+    return found
 
 
 def child_pytest(source, state, xml, selection):
@@ -190,7 +287,8 @@ def child_pytest(source, state, xml, selection):
     original = subprocess.Popen
     ledger = state / "processes.jsonl"
     defaults = {key: os.environ[key] for key in
-                ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "TELEGRAM_STATE_DIR", "TMUX_TMPDIR")}
+                ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "TELEGRAM_STATE_DIR", "TMUX_TMPDIR",
+                 "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "CLAUDLOBBY_NATIVE_FIXTURE_PROOF")}
 
     class ObservedPopen(original):
         def __init__(self, args, *a, **kw):
@@ -288,9 +386,10 @@ def install_network_guard(python, base):
         + "ROOT = Path(" + repr(str(base)) + ").resolve()\n"
         + "LOG = ROOT / 'evidence' / 'forbidden-network.jsonl'\n"
         + "def check(event, args):\n"
-        + "    if event not in ('socket.connect', 'socket.connect_ex', 'socket.getaddrinfo'):\n"
+        + "    dns = ('socket.getaddrinfo', 'socket.gethostbyname', 'socket.gethostbyaddr', 'socket.getnameinfo')\n"
+        + "    if event not in ('socket.connect', 'socket.connect_ex', 'socket.sendto', 'socket.sendmsg', 'socket.bind') + dns:\n"
         + "        return\n"
-        + "    address = args[1] if event != 'socket.getaddrinfo' else None\n"
+        + "    address = None if event in dns else args[-1]\n"
         + "    if isinstance(address, str) and Path(address).resolve().is_relative_to(ROOT):\n"
         + "        return\n"
         + "    with LOG.open('a') as out: out.write(event + '\\n')\n"
@@ -326,6 +425,8 @@ def run_arm(label, source, python, base, selection, real_tmux):
         p = state / name
         if p.exists():
             records.extend(json.loads(line) for line in p.read_text().splitlines())
+    attempts_file = state / "tmux-attempts.jsonl"
+    attempts = [json.loads(line) for line in attempts_file.read_text().splitlines()] if attempts_file.exists() else []
     pids = {r["pid"] for r in records}
     groups = {proc.pid} | {r["pid"] for r in records if r.get("new_group")}
     deadline = time.monotonic() + 3
@@ -334,28 +435,33 @@ def run_arm(label, source, python, base, selection, real_tmux):
         if not survivors or time.monotonic() >= deadline:
             break
         time.sleep(0.05)
+    endpoints = inspect_endpoints(real_tmux, attempts, env)
     # A cleanup defect stays a failure even if this emergency private cleanup
     # succeeds. Never target an ambient server or process selected by name.
-    for r in records:
-        if "socket_dir" in r and any(s["pid"] == r["pid"] for s in survivors):
-            subprocess.run([real_tmux, "-L", r["socket_name"], "kill-server"],
-                env={**env, "TMUX_TMPDIR": r["socket_dir"]}, timeout=10, check=False)
+    for endpoint in endpoints:
+        if endpoint["pids"] or endpoint["socket_exists"] or endpoint["query_invalid"]:
+            try:
+                subprocess.run([real_tmux, "-L", endpoint["socket_name"], "kill-server"],
+                    env={**env, "TMUX_TMPDIR": endpoint["socket_dir"]}, timeout=10, check=False)
+            except subprocess.TimeoutExpired:
+                endpoint["emergency_cleanup_timed_out"] = True
     for group in groups:
         if any(s["pgid"] == group for s in survivors):
             try:
                 os.killpg(group, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-    sockets = sorted({r["socket_dir"] for r in records if "socket_dir" in r})
+    sockets = sorted({r["socket_dir"] for r in attempts})
     socket_residue = [str(p) for directory in sockets for p in Path(directory).rglob("*")
                       if p.is_socket()]
     cases = rows(xml) if xml.exists() else []
     result = {"label": label, "rc": rc, "timed_out": timed_out, "cases": cases,
               "valid_completed": valid_completed(rc, cases, timed_out, log.read_text()),
               "cleanup": {"records": records, "survivors_before_emergency_cleanup": survivors,
+                          "attempted_endpoints_before_emergency_cleanup": endpoints,
                           "socket_residue": socket_residue},
               "forbidden_calls": (state / "forbidden-calls").exists()}
-    for name in ("processes.jsonl", "tmux.jsonl", "native-observations.jsonl", "forbidden-calls"):
+    for name in ("processes.jsonl", "tmux.jsonl", "tmux-attempts.jsonl", "native-observations.jsonl", "forbidden-calls"):
         if (state / name).exists():
             shutil.copyfile(state / name, evidence / name)
     write_json(evidence / "result.json", result)
@@ -366,6 +472,8 @@ def run_arm(label, source, python, base, selection, real_tmux):
 def clean(result):
     return (result["valid_completed"] and not result["forbidden_calls"]
             and not result["cleanup"]["survivors_before_emergency_cleanup"]
+            and not any(e["pids"] or e["socket_exists"] or e["query_invalid"]
+                        for e in result["cleanup"]["attempted_endpoints_before_emergency_cleanup"])
             and not result["cleanup"]["socket_residue"])
 
 
@@ -421,13 +529,13 @@ def main(output):
             failures.append(r["label"] + ": invalid execution or cleanup")
         elif r["label"].startswith("candidate-") and (r["rc"] != 0 or not passed):
             failures.append(r["label"] + ": candidate not green")
-        elif not r["label"].startswith(("parent-", "candidate-")) and (r["rc"] != 1 or passed):
-            failures.append(r["label"] + ": negative control survived")
+        elif not r["label"].startswith(("parent-", "candidate-")) and (
+                r["rc"] != 1 or not mutant_valid(r["label"], r["cases"])):
+            failures.append(r["label"] + ": negative control did not fail its exact assertions")
         if r["label"].startswith(("parent-", "candidate-")):
             role, index = r["label"].split("-")
-            expected = (4, 25 if role == "parent" else 26, 4)[int(index)]
-            if len(r["cases"]) != expected:
-                failures.append(r["label"] + ": incomplete test inventory")
+            if not inventory_valid(role, int(index), r["cases"]):
+                failures.append(r["label"] + ": unexpected node inventory or control status")
     by_label = {r["label"]: r for r in results}
     native_records = by_label["candidate-1"]["cleanup"]["records"]
     if len([r for r in native_records if r["kind"] == "native ancestry"]) != 4:
