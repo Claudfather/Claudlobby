@@ -735,24 +735,48 @@ def _validate_bot_credential_sources(
             )
 
 
+def _validate_bot_markdown_refs(
+    bot_name: str,
+    bot: BotConfig,
+    paths: Paths,
+    report: ValidationReport,
+    *,
+    integrations_only: bool = False,
+) -> None:
+    """Validate the same markdown slots that composition loads.
+
+    Integrations retain their earlier check position and diagnostic wording.
+    Guardrails retain their historical position before protocols; all other
+    fields follow descriptor order. Specialized grants are checked separately.
+    """
+    fields = sorted(MARKDOWN_BOT_REFERENCE_FIELDS, key=lambda kind: kind != "guardrails")
+    for kind in fields:
+        is_integration = kind == "integrations"
+        if is_integration != integrations_only:
+            continue
+        for item in getattr(bot, kind):
+            if item.endswith("/"):
+                if paths.expand_library_folder(kind, item.rstrip("/")):
+                    continue
+                suffix = "skipped" if is_integration else "no items will be loaded"
+                report.warnings.append(
+                    f"bot '{bot_name}': {kind[:-1]} folder '{item}' empty or missing "
+                    f"in any library/{kind}/ — {suffix}"
+                )
+            elif paths.find_library_file(kind, item, ".md") is None:
+                suffix = "skipped" if is_integration else "section will be skipped"
+                report.warnings.append(
+                    f"bot '{bot_name}': {kind[:-1]} '{item}' not in any library/{kind}/ — {suffix}"
+                )
+
+
 def _validate_bot_integrations(
     bot_name: str,
     bot: BotConfig,
     paths: Paths,
     report: ValidationReport,
 ) -> None:
-    # Integrations (warn). Accepts `name`, `dir/name`, or `dir/`.
-    for integ in bot.integrations:
-        if integ.endswith("/"):
-            dir_name = integ.rstrip("/")
-            if not paths.expand_library_folder("integrations", dir_name):
-                report.warnings.append(
-                    f"bot '{bot_name}': integration folder '{integ}' empty or missing in any library/integrations/ — skipped"
-                )
-        elif paths.find_library_file("integrations", integ, ".md") is None:
-            report.warnings.append(
-                f"bot '{bot_name}': integration '{integ}' not in any library/integrations/ — skipped"
-            )
+    _validate_bot_markdown_refs(bot_name, bot, paths, report, integrations_only=True)
 
 
 def _validate_bot_grant_contracts(
@@ -862,26 +886,7 @@ def _validate_bot_briefing_and_library_refs(
             "source coverage — sections that read external data will be empty"
         )
 
-    # Guardrails / protocols / resources / lessons / post_actions (warn).
-    # Each entry can be `name`, `dir/name`, or `dir/` (folder expansion).
-    for ref, kind in [
-        (bot.guardrails, "guardrails"),
-        (bot.protocols, "protocols"),
-        (bot.resources, "resources"),
-        (bot.lessons, "lessons"),
-        (bot.post_actions, "post_actions"),
-    ]:
-        for item in ref:
-            if item.endswith("/"):
-                dir_name = item.rstrip("/")
-                if not paths.expand_library_folder(kind, dir_name):
-                    report.warnings.append(
-                        f"bot '{bot_name}': {kind[:-1]} folder '{item}' empty or missing in any library/{kind}/ — no items will be loaded"
-                    )
-            elif paths.find_library_file(kind, item, ".md") is None:
-                report.warnings.append(
-                    f"bot '{bot_name}': {kind[:-1]} '{item}' not in any library/{kind}/ — section will be skipped"
-                )
+    _validate_bot_markdown_refs(bot_name, bot, paths, report)
 
 
 def _validate_bot_tools(
@@ -2366,31 +2371,6 @@ def _validate_mcp_packages(
         report.warnings.append(finding.message())
 
 
-def _validate_principles_and_permissions(
-    fleet: FleetConfig, paths: Paths, report: ValidationReport,
-) -> None:
-    """Warn for the two markdown slots absent from the older bot loops.
-
-    #773 stays open for migrating those loops to the shared category view.
-    Keep this preflight separate from the concurrently extracted bot checks:
-    existing integrations/guardrails/etc. warnings must not be duplicated.
-    """
-    for bot_name, bot in fleet.bots.items():
-        for kind in MARKDOWN_BOT_REFERENCE_FIELDS:
-            if kind not in {"principles", "permissions"}:
-                continue
-            for ref in getattr(bot, kind):
-                if ref.endswith("/"):
-                    if not paths.expand_library_folder(kind, ref.rstrip("/")):
-                        report.warnings.append(
-                            f"bot '{bot_name}': {kind[:-1]} folder '{ref}' empty or missing "
-                            f"in any library/{kind}/ — no items will be loaded")
-                elif paths.find_library_file(kind, ref, ".md") is None:
-                    report.warnings.append(
-                        f"bot '{bot_name}': {kind[:-1]} '{ref}' not in any library/{kind}/ "
-                        "— section will be skipped")
-
-
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
@@ -2403,7 +2383,6 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     fleet_env = dotenv.read(paths.env_file)
     _warn_dead_flags(fleet_env, paths, report)
     _validate_bots(fleet, paths, fleet_env, report)
-    _validate_principles_and_permissions(fleet, paths, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)
