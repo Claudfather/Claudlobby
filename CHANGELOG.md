@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `claudlobby events --since` works, as the fleet-observability protocol and the fleet-pulse skill tell every manager to run it (#1896)
+
+The flag was never registered, so `events --since 24h` failed with rc 2, while
+the code behind it has read `args.since` since F18 R2b-1. Registering it was not
+enough on its own. The reader takes only an ISO instant, so a bare `24h` came
+back as `UNREACHABLE` at rc 3, blaming the plane for the caller's input. The
+window now uses the grammar `checkins` and `report-back` share (24h, 7d, 30m,
+or an ISO instant) and reaches the reader as an instant. A value outside that
+grammar is refused at rc 2 with the forms it accepts. The coverage line keeps
+the window as typed, so `--since 24h` reads back as the 24h window.
+
 ### Fixed — every bot can verify a dispatch framed as pasted text, not only the 12 that composed the guidance (#1876)
 
 #1882's verify-then-trust check lived in the `dispatch` and `worker-lifecycle`

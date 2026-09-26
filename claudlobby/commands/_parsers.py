@@ -531,6 +531,10 @@ def register_subparsers(sub) -> None:
         default=50,
         help="Show last N events (default: 50)",
     )
+    pev.add_argument(
+        "--since",
+        help="Only events since a window or instant: 24h, 7d, 30m, or an ISO instant",
+    )
     pev.add_argument("--json", action="store_true", help="Output raw JSONL")
 
     from .events import cmd_events  # local import to avoid circular at module top-level
