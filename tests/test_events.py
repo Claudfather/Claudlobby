@@ -21,6 +21,7 @@ the plane is one source, reachable or not.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -245,3 +246,19 @@ class TestTheCommandRefuses:
         _land(root, "w1", "session_missing", "2026-09-03T10:00:00Z", {"session": "w1"})
         rows = _rows(_events_cmd(root, "--json"))
         assert [(r["bot"], r["type"]) for r in rows] == [("w1", "session_missing")]
+
+
+def test_the_window_the_docs_print_is_served(tmp_path):
+    """#1896. The fleet-pulse skill and the fleet-observability protocol tell
+    every manager to run `events --since 24h --json`, and argparse refused the
+    flag (rc 2). Registering it is not enough on its own: the reader takes only
+    an ISO instant, so a bare `24h` reached it as text and came back as
+    UNREACHABLE (rc 3). This is the skill's command, verbatim: the window has
+    to reach the reader as an instant, and the coverage line has to name it."""
+    root, _paths, _, _ = _scene(tmp_path)
+    now = datetime.now(timezone.utc)
+    _land(root, "w1", "session_missing", (now - timedelta(hours=48)).isoformat(), {"session": "w1"})
+    _land(root, "w1", "service_down", (now - timedelta(minutes=10)).isoformat(), {"unit": "w1"})
+    r = _events_cmd(root, "--since", "24h", "--json")
+    assert [e["type"] for e in _rows(r)] == ["service_down"]
+    assert "24h window" in r.stderr
