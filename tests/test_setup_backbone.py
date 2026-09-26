@@ -1,11 +1,13 @@
 """Stub-harness tests for the setup backbone (setup-fleet / setup-fleets /
 install_fleet_timer.sh env overrides / fleet_service_prefix).
 
-The real scripts run against a throwaway CLAUDLOBBY_ROOT with systemctl, tmux,
+The existing systemd fixture explicitly models Linux on every test host. The
+real scripts run against a throwaway CLAUDLOBBY_ROOT with systemctl, tmux,
 spin-up-bot.sh, and reconcile-fleet.sh stubbed (PATH-first binaries or tmp lib
 copies), so cold-start prefix resolution, enrollment fan-out, and skip-healthy
 behavior are asserted on actual execution — without touching the host's
-systemd or tmux state.
+systemd or tmux state. Darwin controls below test backend routing/refusal with
+stubs; native launchd acceptance belongs to test_macos_supervision.py.
 """
 
 import os
@@ -60,6 +62,20 @@ class Harness:
         self.active.write_text("")
         self.start_fail = tmp_path / "start-fail"
         self.start_fail.write_text("")
+        # These fixtures create systemd unit files and state, even on a Mac.
+        # Keep production detect_os intact and make the modeled kernel explicit.
+        _write_exec(
+            self.bin / "uname",
+            '#!/bin/bash\necho "uname $STUB_KERNEL" >> "$STUB_LOG"\n'
+            'printf "%s\\n" "${STUB_KERNEL:?fixture must select a kernel}"\n',
+        )
+        # Any accidental Darwin read must refuse inside the fixture, never ask
+        # the host's service manager. The bounded Darwin routing control below
+        # uses a private enroller and creates no LaunchAgents directory.
+        _write_exec(
+            self.bin / "launchctl",
+            '#!/bin/bash\necho "unexpected launchctl $*" >> "$STUB_LOG"\nexit 97\n',
+        )
         # is-enabled consults $STUB_ENROLLED (drift-audit tests); list-unit-files
         # / is-active / start consult their own state files, and disable removes
         # the unit from the registry like real systemd (keepalive-swap tests);
@@ -193,7 +209,7 @@ class Harness:
         with open(self.active, "a") as f:
             f.write(unit + "\n")
 
-    def run(self, *argv, env_extra=None):
+    def run(self, *argv, env_extra=None, kernel="Linux"):
         # Allowlist, never an os.environ copy — a new isolation-sensitive var
         # is absent by construction (#846; doctrine on constructed_env, gate in
         # TestHarnessEnvIsConstructed). Scenario vars arrive via env_extra.
@@ -202,7 +218,10 @@ class Harness:
             HOME=self.home,
             TMPDIR=self.root,
             CLAUDLOBBY_ROOT=self.root,
+            PLANE_EMIT_DISABLED="1",
+            PLANE_SOCKET=self.root / "no-plane.sock",
             STUB_LOG=self.log,
+            STUB_KERNEL=kernel,
             TMUX_HEALTHY=self.tmux_healthy,
             STUB_ENROLLED=self.enrolled,
             STUB_UNIT_FILES=self.unit_files,
@@ -260,6 +279,8 @@ class TestSetupFleetColdStart:
         assert r.returncode == 0, r.stdout + r.stderr
         assert "service_prefix: test.prefix (from fleet.yaml)" in r.stdout
         log = h.stub_log()
+        assert "uname Linux" in log
+        assert "launchctl" not in log
         assert "systemctl --user enable --now test.prefix.fleet-pulse.timer" in log
         assert "systemctl --user enable --now test.prefix.keepalive.timer" in log
         unit_dir = h.home / ".config" / "systemd" / "user"
@@ -399,6 +420,46 @@ class TestInstallFleetTimerEnvOverrides:
         r = h.run(str(h.root / "lib" / "install_fleet_timer.sh"), "fleet-pulse", "f1")
         assert r.returncode == 0, r.stdout + r.stderr
         assert "enable --now test.prefix.fleet-pulse.timer" in h.stub_log()
+
+
+class TestPlatformBoundaries:
+    def test_darwin_routes_plists_to_private_launchd_enroller(self, h):
+        f = h.fleet("f1", timers=("keepalive",))
+        tdir = f / "runtime" / "fleet" / "timers"
+        legacy = h.legacy_keepalive("f1")
+        _write_exec(
+            h.root / "lib" / "install_fleet_timer_launchd.sh",
+            '#!/bin/bash\nprintf "launchd-enroller %s|%s|%s\\n" '
+            '"$*" "$TIMER_DIR" "$SERVICE_PREFIX" >> "$STUB_LOG"\n',
+        )
+        # No installed LaunchAgents: briefing reconciliation cannot enter its
+        # absolute /bin/launchctl bootout path. Only backend selection is tested.
+        assert not (h.home / "Library").exists()
+        r = h.run(_sf(h), "f1", "--jobs-only", kernel="Darwin")
+        assert r.returncode == 0, r.stdout + r.stderr
+        log = h.stub_log()
+        assert "uname Darwin" in log
+        assert f"launchd-enroller keepalive|{tdir}|test.prefix" in log
+        assert "systemctl" not in log
+        assert "launchctl" not in log
+        assert "spin-up-bot.sh" not in log
+        assert "reconcile-fleet.sh" not in log
+        assert (h.unit_dir / f"{legacy}.timer").is_file()
+        assert (h.unit_dir / f"{legacy}.service").is_file()
+        assert not (h.home / "Library").exists()
+
+    def test_linux_installer_still_refuses_darwin_before_writing_units(self, h):
+        h.fleet("f1", timers=("keepalive",))
+        r = h.run(
+            str(h.root / "lib" / "install_fleet_timer.sh"),
+            "keepalive", "f1", kernel="Darwin",
+        )
+        assert r.returncode == 1
+        assert "Linux only" in r.stderr
+        assert "uname Darwin" in h.stub_log()
+        assert "systemctl" not in h.stub_log()
+        assert "launchctl" not in h.stub_log()
+        assert not (h.home / ".config").exists()
 
 
 class TestFleetServicePrefixHelper:
