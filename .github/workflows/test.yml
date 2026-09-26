@@ -29,3 +29,117 @@ jobs:
         run: |
           .venv/bin/python -m pytest -v \
             --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn
+
+  supported-platforms:
+    name: supported (${{ matrix.os }}, py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: '3.10'}
+          - {os: macos-latest, python: '3.11'}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install macOS prerequisites
+        if: runner.os == 'macOS'
+        run: |
+          for tool in tmux jq node; do
+            command -v "$tool" >/dev/null || brew install "$tool"
+          done
+      - name: Install isolated package and report tool versions
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          .venv/bin/python --version
+          command -v tmux jq node bash
+          tmux -V
+          jq --version
+          node --version
+          /bin/bash --version
+      - name: Run supported-platform suite
+        env:
+          CLAUDLOBBY_CI_NATIVE_SMOKE: ${{ runner.os == 'macOS' && '1' || '0' }}
+        run: |
+          set +e
+          printf 'running\n' > pytest.status
+          printf 'not applicable on %s\n' "$RUNNER_OS" > native-controls.status
+          : > native-controls.log
+          controls_pid=''
+          if [ "$RUNNER_OS" = macOS ]; then
+            # The driver owns a separate git export, HOME, tmp and process paths.
+            # Retain its status even when it finishes before the full suite.
+            printf 'running\n' > native-controls.status
+            (
+              .venv/bin/python tests/fixtures/native_ci_negative_controls.py --output native-controls > native-controls.log 2>&1
+              controls_result=$?
+              printf '%s\n' "$controls_result" > native-controls.rc
+              printf 'completed (exit %s)\n' "$controls_result" > native-controls.status
+              exit "$controls_result"
+            ) &
+            controls_pid=$!
+          fi
+          .venv/bin/python -m pytest -v --junitxml=pytest-results.xml \
+            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn > pytest.log 2>&1
+          result=$?
+          printf '%s\n' "$result" > pytest.rc
+          printf 'completed (exit %s)\n' "$result" > pytest.status
+          cat pytest.log
+          printf '\nFull suite: '
+          cat pytest.status
+          controls_result=0
+          if [ -n "$controls_pid" ]; then
+            # Wait even after a failed suite: both independent arms are required.
+            wait "$controls_pid"
+            controls_result=$?
+            printf '\nNative controls: '
+            cat native-controls.status
+            cat native-controls.log
+          fi
+          if [ "$result" -ne 0 ]; then
+            exit "$result"
+          fi
+          exit "$controls_result"
+      - name: Verify native evidence executed
+        if: always() && runner.os == 'macOS'
+        run: |
+          .venv/bin/python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = list(ET.parse('pytest-results.xml').iter('testcase'))
+          expected = {
+              'test_native_plutil_accepts_composed_plist',
+              'test_native_launchd_scratch_lifecycle[success]',
+              'test_native_launchd_scratch_lifecycle[assertion-failure]',
+              'test_native_host_long_exec_path_reads_up',
+              'test_native_bridge_startup_failure_reaps_tree[no-pidfile]',
+              'test_native_bridge_startup_failure_reaps_tree[early-exit]',
+              'test_native_bridge_startup_failure_reaps_tree[pre-yield]',
+          }
+          for name in sorted(expected):
+              found = [case for case in cases if case.attrib['name'] == name]
+              assert len(found) == 1, f'Native evidence missing or duplicated: {name}'
+              assert not any(found[0].find(tag) is not None for tag in ('skipped', 'failure', 'error')), name
+              print(f'Executed and passed: {name}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            pytest.log
+            pytest.rc
+            pytest.status
+            pytest-results.xml
+            native-controls.log
+            native-controls.rc
+            native-controls.status
+            native-controls/
+          if-no-files-found: error
