@@ -354,9 +354,11 @@ count_send_retries() {
 # the instrument for sweeping chunk size is lib/send-size-probe.sh, which drives
 # the primitive directly against the recipient transcript rather than through a
 # whole boot. Forwarding them here would put a second, unpinned arm axis into a
-# design whose arm identity is already pre-registered.
+# design whose arm identity is already pre-registered. PANE_RECEIPT_WAIT_S
+# (#1099) is here because no boot send calls the receipt gate: it is
+# dispatch-task.sh's.
 _FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS PANE_VERIFY_TRACE"
-_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_CHUNK_BYTES PANE_SEND_CHUNK_SETTLE_S"
+_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_CHUNK_BYTES PANE_SEND_CHUNK_SETTLE_S PANE_RECEIPT_WAIT_S"
 
 # Field separator for the fate records below: ASCII unit separator, NOT a tab.
 # Tab is an IFS-whitespace character, so `IFS=<tab> read` collapses adjacent

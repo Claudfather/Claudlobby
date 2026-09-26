@@ -982,7 +982,10 @@ plane_emit_bounded() {
     # does not reap early (measured), so the worst case is a bounded burst of
     # CPU rather than an emission killed mid-flight.
     _deadline=$(( SECONDS + bound + 1 ))
-    "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
+    # Opted in to cooldown staging (#1657): no caller of this door reads the
+    # result (emit_fleet_event restores PLANE_EMIT_LAST_RC), and it carries
+    # most of the host's traffic, bot-vitals' two per tool call included.
+    PLANE_EMIT_COOLDOWN_STAGE=1 "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
     _pid=$!
     while kill -0 "$_pid" 2>/dev/null && [ "$SECONDS" -lt "$_deadline" ]; do
         # 50ms: the socket rung answers in ~40ms, so a 1s poll spent ~96% of
@@ -2073,7 +2076,7 @@ _session_candidate_dir() {
 # value (the composed MANAGER_TMUX_SOCKET field, however the caller read it),
 # else reverse-look it up from the peer's session name. The single home for the
 # "explicit field, else reverse-lookup" precedence shared by report-back,
-# sprint-trigger, fleet-pulse, evening-audit, and emit_failure_alert.
+# fleet-pulse, evening-audit, and emit_failure_alert.
 resolve_peer_socket() {
     local explicit="$1" session="$2" bots_dir="${3:-}"
     if [ -n "$explicit" ]; then
@@ -3239,6 +3242,46 @@ pane_send_verified() {
     bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
 }
 
+# Seconds pane_await_receipt waits for a receipt, per phase; 0 turns it off
+# (0.0 and 00 too: the switch is read as a number, not a string).
+# Measured on the Pi's plane, 2026-09-20..24: of 247 idle dispatches with a
+# receipt, 193 had it land BEFORE the sender's own pane_submitted row and 237
+# within 10s of it; the ones past 20s were held boxes a human rescued.
+_PANE_RECEIPT_WAIT_DEFAULT=10
+
+# pane_await_receipt <socket> <session> <msg_id>
+# A tracked send was SUBMITTED only once the receiver's UserPromptSubmit hook
+# (plane-dispatch-in.sh) has recorded its `received` row: the one signal a held
+# input box cannot fake. pane_send_verified reads the pane, and a payload held
+# in the box, its Enter turned into a newline, read clean there (#1099, #1236).
+# So: wait for the receipt; none -> ONE more Enter (send_retry) and wait again;
+# still none -> send_miss, loudly, rc 1. Never a loop, never the payload again.
+# No verdict and nothing pressed when the plane cannot answer or the receiver
+# has never recorded a receipt (its hook is not armed). For a send into an IDLE
+# pane only: a busy one queues the prompt, whose receipt lands when the turn
+# ends, if at all. So a receiver found BUSY when its receipt is missing (a turn
+# that began after the door's idle probe, or during the wait) is not a held box
+# either: nothing pressed, no verdict, checked before the Enter and the miss.
+pane_await_receipt() {
+    local socket="$1" session="$2" msg="$3" rc=0 data off='^0*\.?0*$'
+    local wait="${PANE_RECEIPT_WAIT_S:-$_PANE_RECEIPT_WAIT_DEFAULT}"
+    if [[ "$wait" =~ $off ]]; then return 0; fi
+    local ask=(python3 -S -E "$_LIB_COMMON_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}"
+        --received "$msg" --destination "$session" --wait "$wait")
+    "${ask[@]}" || rc=$?
+    [ "$rc" -eq 1 ] || return 0
+    if bot_is_busy "$socket" "$session"; then return 0; fi
+    printf -v data '{"session":"%s","msg_id":"%s","reason":"no-receipt"}' "$(json_escape "$session")" "$msg"
+    emit_fleet_event send_retry dispatch "$data"
+    bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
+    rc=0; "${ask[@]}" || rc=$?
+    [ "$rc" -eq 1 ] || return 0
+    if bot_is_busy "$socket" "$session"; then return 0; fi
+    emit_fleet_event send_miss dispatch "$data"
+    printf 'pane_send: no receipt from %s for %s after one more Enter -- held unsubmitted in its box, or queued behind a turn the busy check did not see\n' "$session" "$msg" >&2
+    return 1
+}
+
 # Base idle-detection regex — single source of truth for keepalive.sh
 # classify_pane and fleet-pulse pane_is_idle. Operators extend at runtime
 # via KEEPALIVE_IDLE_PATTERNS (appended by both consumers).
@@ -3265,7 +3308,7 @@ pane_is_idle() {
 
 # Base busy-detection regex — single source of truth for keepalive.sh
 # classify_pane and every "should I inject keystrokes?" consumer
-# (sprint-trigger, bot-sweep-cron). "esc to interrupt" is drawn during ANY
+# (bot-sweep-cron). "esc to interrupt" is drawn during ANY
 # active turn and is stable across Claude Code releases and
 # prefersReducedMotion; the churning verb lists (Thinking/Running/…) that
 # consumers previously grepped silently degrade on UI changes and must not
@@ -3363,6 +3406,11 @@ marker_age_within() {
 #                 [recipient] [renotify_after_s]
 # Fires the notification on first occurrence, then debounces. Caller clears the
 # marker via debounce_clear when the condition resolves.
+#
+# <notify_fn> gets <message> as its one argument, and its exit status is the
+# delivery verdict: 0 writes the marker, non-zero leaves it as it was, so the
+# next call fires again (#900). A notify_fn that cannot see delivery returns 0
+# and debounces exactly as before.
 #
 # <recipient> is an identity for WHO is being notified. The marker records it as
 # its CONTENT, so a changed recipient re-fires: keying on <bot_id>.<suffix>
@@ -3469,11 +3517,17 @@ debounce_notify() {
     fi
     if [ "$fire" -eq 1 ]; then
         _DEBOUNCE_FIRED=1
-        "$notify_fn" "$message"
         # Written only on fire, deliberately: the marker's MTIME is what
         # marker_age_within reads for the renotify window above, so touching it
         # on a suppressed tick would silently disable that second leg entirely.
-        printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
+        # And only when notify_fn reports success, because the marker is what
+        # buys silence: a send that reached nobody must not buy the window
+        # (#900; the fleet-pulse burst detector's rule). Called as the if
+        # condition, so a failure neither aborts a set -e caller nor fires its
+        # ERR trap.
+        if "$notify_fn" "$message"; then
+            printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
+        fi
     fi
 }
 
@@ -4836,12 +4890,14 @@ repo_newest_tag() {
 # <distinct-value> is passed as debounce_notify's recipient, so the notice
 # re-fires when the SITUATION CHANGES (the distance moved, a release was cut, a
 # different commit landed) and otherwise only after the renotify window. A
-# stalled condition stays quiet; a worsening one speaks up.
+# stalled condition stays quiet; a worsening one speaks up. A rejected notice
+# is not marked, so it also fires again on the next run; one with no Telegram
+# target at all is marked, since no later run could deliver it.
 #
 # Requires BOTS_DIR and STATE_DIR in the caller's scope.
 #
 # Sets _CURRENCY_OUTCOME to the verdict of THIS call: `delivered`,
-# `undelivered` (raised, but the channel rejected it) or `suppressed` (the
+# `undelivered` (raised, but not delivered) or `suppressed` (the
 # debounce fired nothing at all). Three values rather than a boolean because
 # collapsing any two of them re-creates the bug this seam exists to close: a
 # caller that logs "raised" for all three cannot distinguish a healthy fleet
@@ -4856,7 +4912,16 @@ notify_currency() {
     local name="${1:?notify_currency: <repo-name> required}"
     local etype="${2:?notify_currency: <event_type> required}"
     local distinct="${3-}" message="${4:?notify_currency: <message> required}"
-    _nc_emit() { emit_fleet_notice "$BOTS_DIR" "$etype" "$1"; }
+    # Returns the delivery verdict, so debounce_notify leaves an undelivered
+    # notice unmarked. A marked one stays silent until the situation changes or
+    # CURRENCY_RENOTIFY_S passes, 7 days by default (#900). Exit 2, no Telegram
+    # target at all (a new install), counts as sent: no later run can deliver
+    # it, and each retry would nudge the manager again. A rejected send (exit 3)
+    # still retries.
+    _nc_emit() {
+        emit_fleet_notice "$BOTS_DIR" "$etype" "$1"
+        [ "${_ALERT_DELIVERED:-0}" -eq 1 ] || [ "${_ALERT_TG_EXIT:-}" = 2 ]
+    }
     _CURRENCY_OUTCOME=suppressed
     _ALERT_DELIVERED=0
     _DEBOUNCE_FIRED=0
@@ -5288,8 +5353,11 @@ _emit_fleet_signal() {
 
     local data _sig_tmux_ok=0
     # Set for the caller, not for us: gates debounce markers so a FAILED send
-    # cannot buy itself silence for the whole debounce window.
+    # cannot buy itself silence for the whole debounce window. _ALERT_TG_EXIT
+    # is tg-post's exit, 2 when no target resolved at all, so a caller can tell
+    # a host with no Telegram from a send the channel rejected (#1825 review).
     _ALERT_DELIVERED=0
+    _ALERT_TG_EXIT=""
     data=$(printf '{"reason":"%s"}' "$(json_escape "$reason")")
     emit_fleet_event "$event_type" "$ev_source" "$data" "" fleet
 
@@ -5372,6 +5440,7 @@ _emit_fleet_signal() {
         _tg_rc=2
         _tg_err="${_alert_refusal:-no alert chat-id resolved for this fleet}"
     fi
+    _ALERT_TG_EXIT="$_tg_rc"
 
     if [ "$_tg_rc" -eq 0 ]; then
         _ALERT_DELIVERED=1
@@ -5400,7 +5469,7 @@ _emit_fleet_signal() {
     # propagating a delivery failure would abort the watchdog that detected the
     # condition -- on every fleet that has no token, which is most of them. That
     # trades a silent alert for a dead detector, which is worse. Callers that
-    # need to branch read _ALERT_DELIVERED instead.
+    # need to branch read _ALERT_DELIVERED and _ALERT_TG_EXIT instead.
     return 0
 }
 

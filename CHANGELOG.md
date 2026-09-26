@@ -17,6 +17,78 @@ and `briefing-trigger.sh` refuses to send into a bot with no composed skill
 (`briefing_failed`, reason `skill_absent`, exit 1, and a stderr line), so a
 hand-built timer or a lost link fails loudly rather than silently.
 
+### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
+
+A briefing that found its bot busy or its session gone was skipped for the
+day, and a slot that failed to send paged nobody. Both events were severity
+notice, which fleet-pulse and `brief` do not read. Now `briefing-trigger.sh`
+re-checks a deferred slot every 60 s for up to 30 min, counted in polls rather
+than read off the clock, and sends at the first idle check. The slot's own
+timer is no retry, because it next fires a day later. A slot still missed
+after that, or whose dispatch fails, or whose bot dir is gone, sends ONE
+`briefing_missed` FLEET NOTICE through the shared `emit_fleet_notice` path: a
+line on the fleet's Telegram chat, a push into the fleet manager's pane (for a
+manager's own briefing, its own pane), and a plane event registered at notice.
+The per-attempt `briefing_*` events are not reclassified, so a deferral that
+recovers pages nobody. The pane push misses on a fleet whose first
+`MANAGER_TMUX` bot is its manager, until #910 lands.
+
+### Fixed — the harness's boot probe raced its own spawner on a loaded host (#1778)
+
+Each phase of the `#1002` probe unit now ends when `lib/validate-bot-change.sh`
+opens its gate, not on a fixed sleep, so a slow fleet-pulse or keepalive start
+can no longer let the unit settle mid-observation. Its tmux session now lives in
+the harness's socket dir: keepalive could not see it before, so the CONTROL
+passed without killing anything and every run left a server behind. One new
+check: the window held while both consumers judged it.
+
+### Fixed — a rejected currency notice no longer silences itself for a week (#900)
+
+`debounce_notify` writes its marker only when the notify function returns 0, and
+`notify_currency` returns the Telegram verdict. A rejected notice is sent again on
+the next run instead of waiting for the count to change or `CURRENCY_RENOTIFY_S`
+(7 days). A host with no Telegram target at all (tg-post exit 2, as on a new
+install) counts as sent, so its manager is nudged once rather than on every run.
+Every other caller's notify function returns 0, so none of them changes.
+
+### Fixed — the operator's home directory was back in the tree, and nothing caught it (#927)
+
+#1306 replaced the home paths #927 named but added no gate, and four later PRs
+put one back: a cold-start doc, two plan docs, and 24 composed host-timer units
+committed at the repo root (removed: the compositor writes those under
+`runtime/_host/`, which is ignored). `tests/test_boundary_invariants.py` now
+fails on any tracked `/home/<name>` or `/Users/<name>` whose name is not on a
+short placeholder allowlist.
+
+### Fixed — a socket cooldown no longer spawns the cold CLI for fire-and-forget emitters (#1657)
+
+Under load every cooldown emission spawned the package-importing CLI, and
+those spawns kept the host's CPU pegged, so the daemon kept missing its 1 s
+reply limit and the cooldown re-armed itself. The fleet-event door,
+keepalive's heartbeat and the host probe now stage their batch in
+`state/plane/staged/` (rc 6) and the daemon replays it through the same
+`emit_batch()` as a socket request, so the capture policy still applies. A
+host changes nothing until its daemon restarts on the new code: the daemon
+creates that directory, and without it the cold CLI runs as before.
+
+### Fixed — a tracked dispatch into an idle pane waits for the receiver's receipt (#1099)
+
+`pane_send_verified` reads the pane, and a payload held in the input box, its
+Enter turned into a newline, read clean there. After a tracked send its idle
+probe cleared, `dispatch-task.sh` now asks the RECEIVER: `pane_await_receipt`
+waits for the `received` row the recipient's `UserPromptSubmit` hook writes.
+A missing receipt gets ONE more Enter (`send_retry`, reason `no-receipt`);
+still none files `send_miss` and a stderr line, and the door keeps its own rc.
+Nothing is pressed and no verdict is given when the plane cannot answer, when
+the recipient never recorded a receipt (its hook is not armed), or when the
+recipient is busy: a prompt that arrives mid-turn is queued, and its receipt
+lands only when that turn ends.
+
+- `PANE_RECEIPT_WAIT_S` (default 10) is the wait per phase, in seconds; `0`
+  (in any spelling, `0.0` included) turns the gate off.
+- `plane-dispatch-in.sh` drops Claude Code's `<pasted_content>` wrapper before
+  matching the trailer; it had hidden the receipts of 9 submitted prompts.
+
 ### Changed — the validation harness tests keep one test per failure that happened (#1801)
 
 484 of #1796's 761 test lines go. Each kept test fails when its fix is reverted.
