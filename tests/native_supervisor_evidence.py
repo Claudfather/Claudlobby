@@ -13,6 +13,8 @@ import json
 import os
 from pathlib import Path
 import platform
+import plistlib
+import pwd
 import re
 import shlex
 import signal
@@ -180,6 +182,34 @@ def recorded_new_start(directory: Path, pid: str | None, before: list[str]) -> b
     return bool(pid) and start_records(directory) == before + [pid]
 
 
+
+def persistent_launch_agents(directories: list[Path]) -> dict:
+    """Snapshot definitions, not the PIDs of macOS's on-demand services."""
+    files = {}
+    labels = set()
+    for directory in directories:
+        for path in directory.glob('*.plist'):
+            raw = path.read_bytes()
+            files[str(path)] = hashlib.sha256(raw).hexdigest()
+            label = plistlib.loads(raw).get('Label')
+            if isinstance(label, str):
+                labels.add(label)
+    return {'files': files, 'labels': sorted(labels)}
+
+
+
+def verify_launchd_preservation(before: dict, after: dict) -> dict:
+    """Protect persistent jobs while disclosing autonomous ambient liveness."""
+    assert after['persistent_launch_agents'] == before['persistent_launch_agents'], 'persistent launch-agent definitions changed'
+    assert after['launchd_disabled'] == before['launchd_disabled'], 'launchd disabled overrides changed'
+    protected = set(before['persistent_launch_agents']['labels']) & before['registrations'].keys()
+    assert protected <= after['registrations'].keys(), 'preexisting persistent launch agent was unloaded'
+    return {
+        label: {'before': before['registrations'].get(label), 'after': after['registrations'].get(label)}
+        for label in before['registrations'].keys() | after['registrations'].keys()
+        if after['registrations'].get(label) != before['registrations'].get(label)}
+
+
 def prepare_session_home(home: Path) -> None:
     """Supply the installed-session prerequisite, without pre-accepting consent.
 
@@ -310,12 +340,36 @@ def main() -> int:
                 if len(parts := line.strip().split(None, 1)) == 2
                 and parts[1].split('/')[-1] in ('tmux', 'tmux: server')}
 
+    def preservation_snapshot():
+        snapshot = {'unit_files': unit_files(), 'registrations': registrations(), 'tmux': tmux_snapshot()}
+        if system == 'Darwin':
+            # The GUI domain also contains unrelated on-demand Apple jobs.
+            # Their PIDs/exit status are observations, not stable definitions.
+            # Preserve actual agent definitions and loaded persistent labels.
+            account_home = Path(pwd.getpwuid(uid).pw_dir)
+            snapshot['persistent_launch_agents'] = persistent_launch_agents([
+                unit_dir, account_home / 'Library/LaunchAgents',
+                Path('/Library/LaunchAgents'), Path('/System/Library/LaunchAgents')])
+            disabled = run(['/bin/launchctl', 'print-disabled', f'gui/{uid}']).stdout
+            assert 'disabled services = {' in disabled, 'unrecognized launchctl disabled-state output'
+            snapshot['launchd_disabled'] = dict(re.findall(r'"([^"\n]+)"\s*=>\s*(true|false)', disabled))
+        return snapshot
+
     preexisting_tmux_pids = tmux_server_pids()
-    before = {'unit_files': unit_files(), 'registrations': registrations(), 'tmux': tmux_snapshot()}
+    before = preservation_snapshot()
     (evidence / 'before.json').write_text(json.dumps(before, indent=2) + '\n')
     result = {'platform': system, 'source': str(source), 'python': sys.version,
               'bash': run(['/bin/bash', '--version']).stdout.splitlines()[0],
               'lifecycle': {'passed': False}, 'validate': {'passed': False}}
+    result['tooling'] = {}
+    for tool in ('tmux', 'jq', 'realpath', 'setsid', 'flock'):
+        probe = run(['/bin/bash', '-c', 'command -v "$1"', 'probe', tool], check=False)
+        result['tooling'][tool] = {'rc': probe.returncode, 'path': probe.stdout.strip()}
+    if result['tooling']['realpath']['rc'] == 0:
+        realpath_probe = run(['realpath', '-m', scratch / 'not-created'], check=False)
+        result['tooling']['realpath_missing_components'] = {'rc': realpath_probe.returncode, 'stderr': realpath_probe.stderr}
+    else:
+        result['tooling']['realpath_missing_components'] = {'rc': 127, 'stderr': 'realpath unavailable'}
     bot_dirs = []
     labels = []
     prefix = 'n' + uuid.uuid4().hex[:12]
@@ -345,6 +399,7 @@ def main() -> int:
         (source / 'lib/logs').mkdir(exist_ok=True)
         label = f'{prefix}.{name}'
         assert not (unit_dir / (label + extension)).exists()
+        assert label not in before['registrations'], 'fixture label is already registered'
         conf = {**env, 'BOT_DIR': str(directory), 'BOT_NAME': name, 'BOT_ID': name,
                 'BOT_LABEL': name, 'BOT_SERVICE': label, 'TMUX_SOCKET': label,
                 'FLEET_NAME': fleet, 'CLAUDE_BIN': str(stub), 'CLAUDE_FLAGS': '',
@@ -365,6 +420,7 @@ def main() -> int:
         return directory, label
 
     def up(directory, label, old_pid=None):
+        assert (directory, label) in list(zip(bot_dirs, labels)), 'not a fixture-owned native target'
         before_starts = start_records(directory)
         run(['/bin/bash', source / 'lib/spin-up-bot.sh', directory])
         return wait_for_stub(directory, label, before_starts, old_pid)
@@ -409,6 +465,7 @@ def main() -> int:
         return probe.returncode == 0 and 'state = not running' in probe.stdout and 'last exit code = 0' in probe.stdout
 
     def down(directory, label, purge=False):
+        assert (directory, label) in list(zip(bot_dirs, labels)), 'not a fixture-owned native target'
         had_conf = (directory / 'bot.conf').exists()
         teardown = run(['/bin/bash', '-x', source / 'lib/spin-down-bot.sh', directory,
                         '--reason', 'hosted native phase04 evidence', *(['--purge'] if purge else [])])
@@ -526,8 +583,14 @@ def main() -> int:
         failures = re.findall(r'^\s*FAIL\s+(.+)$', output, re.MULTILINE)
         skips = re.findall(r'^\s*SKIP\s+(.+)$', output, re.MULTILINE)
         summary = re.findall(r'^=== (\d+) passed, (\d+) failed ===$', output, re.MULTILINE)
+        aborts = re.findall(r'^=== ABORTED \(rc (\d+)\) after (\d+) checks, before the summary: (.+) ===$', output, re.MULTILINE)
+        scenarios = re.findall(r'^(?:=== validate.*|--- #.*)$', proc.stdout, re.MULTILINE)
         result['validate'] = {'passed': proc.returncode == 0 and bool(summary) and not failures,
-                              'rc': proc.returncode, 'summary': summary, 'failures': failures, 'skips': skips}
+                              'rc': proc.returncode, 'summary': summary, 'failures': failures, 'skips': skips,
+                              'aborted_before_summary': not bool(summary),
+                              'abort_details': [{'rc': int(rc), 'checks': int(count), 'note': note}
+                                                for rc, count, note in aborts],
+                              'last_scenario': scenarios[-1] if scenarios else None}
         if system == 'Linux' and any('#1002' in item for item in skips):
             result['validate']['passed'] = False
             result['validate']['native_bus_missing'] = True
@@ -573,17 +636,26 @@ def main() -> int:
             run(['systemctl', '--user', 'reset-failed', unit.name], check=False)
         run(['systemctl', '--user', 'daemon-reload'])
     try:
-        after = {'unit_files': unit_files(), 'registrations': registrations(), 'tmux': tmux_snapshot()}
+        after = preservation_snapshot()
         (evidence / 'after.json').write_text(json.dumps(after, indent=2) + '\n')
         assert after['unit_files'] == before['unit_files'], 'preexisting user unit files changed or probe files leaked'
-        for label, status in before['registrations'].items():
-            assert after['registrations'].get(label) == status, f'preexisting service changed: {label}'
+        if system == 'Darwin':
+            result['ambient_registration_changes'] = verify_launchd_preservation(before, after)
+            result['preservation_scope'] = ('Exact persistent launch-agent definitions and disabled overrides; '
+                'previously loaded plist-backed agents remain registered. Ambient PID/status changes are disclosed, '
+                'not required to remain fixed. Owned guard PID, tmux, unit files and state key are checked exactly.')
+        else:
+            for label, status in before['registrations'].items():
+                assert after['registrations'].get(label) == status, f'preexisting service changed: {label}'
         assert after['tmux'] == before['tmux'], 'preexisting tmux changed or servers leaked'
         assert json.loads(state.read_text())['bots']['unrelated'] == preserved_key
         result['preserved_existing_state'] = True
     except Exception:
         result['preserved_existing_state'] = False
         result['preservation_error'] = traceback.format_exc()
+    result['mutation_scope'] = {'lifecycle_labels': labels,
+        'lifecycle_bot_dirs': [str(path) for path in bot_dirs],
+        'native_domain': f'gui/{uid}' if system == 'Darwin' else f'systemd-user/{uid}'}
     (evidence / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))
     return 0 if all((result['lifecycle']['passed'], result['validate']['passed'],

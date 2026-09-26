@@ -1,5 +1,6 @@
 """Falsify the native evidence controller without starting a native service."""
 import os
+from copy import deepcopy
 from pathlib import Path
 import shutil
 import subprocess
@@ -130,3 +131,35 @@ def test_session_fixture_supplies_the_real_consent_lock_parent(tmp_path):
     ready = run_lock()
     assert ready.returncode == 0, ready.stderr
     assert (home / ".claude/settings.json").read_text() == "accepted"
+
+
+def _launchd_snapshot():
+    return {"persistent_launch_agents": {"files": {"/owned/guard.plist": "sha"}, "labels": ["guard"]},
+            "launchd_disabled": {"guard": "false"},
+            "registrations": {"guard": ["42", "0"], "transient.apple.job": ["-", "0"]}}
+
+
+def test_launchd_preservation_discloses_ambient_liveness_changes():
+    before = _launchd_snapshot()
+    after = deepcopy(before)
+    after["registrations"]["transient.apple.job"] = ["99", "0"]
+    assert native.verify_launchd_preservation(before, after) == {
+        "transient.apple.job": {"before": ["-", "0"], "after": ["99", "0"]}}
+
+
+@pytest.mark.parametrize("mutation,expected", [
+    ("definition", "definitions changed"),
+    ("disabled", "disabled overrides changed"),
+    ("unloaded", "persistent launch agent was unloaded"),
+])
+def test_launchd_preservation_rejects_persistent_changes(mutation, expected):
+    before = _launchd_snapshot()
+    after = deepcopy(before)
+    if mutation == "definition":
+        after["persistent_launch_agents"]["files"]["/owned/guard.plist"] = "different"
+    elif mutation == "disabled":
+        after["launchd_disabled"]["guard"] = "true"
+    else:
+        del after["registrations"]["guard"]
+    with pytest.raises(AssertionError, match=expected):
+        native.verify_launchd_preservation(before, after)
