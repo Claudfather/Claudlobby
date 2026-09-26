@@ -1,6 +1,6 @@
 # Install Patterns
 
-claudlobby's compositor generates the host-side service definitions for each bot — `<service_prefix>.<bot>.plist` (launchd) and `<service_prefix>.<bot>.service` (systemd) — but you choose how to register and run them. There are three supported patterns. Pick the one that fits your host.
+claudlobby's compositor generates the host-side service definitions for each bot — `<service_prefix>.<bot>.plist` (launchd) and `<service_prefix>.<bot>.service` (systemd) — but you choose how to register and run them. There are two supported patterns. Pick the one that fits your host.
 
 ## When to use which
 
@@ -8,9 +8,8 @@ claudlobby's compositor generates the host-side service definitions for each bot
 |---|---|---|
 | **launchd LaunchAgents** (macOS) | Mac mini / MacBook | Native, integrated with macOS sleep/wake; per-bot `KeepAlive` plus a fleet-wide 60s keepalive timer. Recommended on Mac. |
 | **systemd user services** (Linux) | Raspberry Pi / Linux server | Native, self-restarting (`Restart=on-failure`), structured logging via `journalctl`. Recommended on Linux when you want "real services." Requires `loginctl enable-linger $USER` for persistence past login. |
-| **cron + tmux** (Linux or macOS) | Raspberry Pi / Linux / Mac | Simplest mental model, fewest moving parts. No service supervisor — bots are tmux sessions kept alive by a cron-driven `keepalive.sh`. Trade-off: 30-min keepalive granularity by default vs. 60s for systemd/launchd. |
 
-You can mix patterns across a fleet — e.g., bots on a Pi via cron, bots on a Mac via launchd. The `lib/keepalive.sh` core is identical in all three.
+You can mix patterns across a fleet — e.g., bots on a Pi via systemd, bots on a Mac via launchd. The `lib/keepalive.sh` core is identical in both.
 
 ## Pattern 1 — macOS launchd
 
@@ -53,13 +52,13 @@ Units land in `~/.config/systemd/user/`. View with `systemctl --user list-timers
 
 See [pi-setup-guide.md](./runbooks/pi-setup-guide.md) for full host setup.
 
-## Pattern 3 — cron + tmux (retired)
+## Cron + tmux (retired)
 
 `lib/install-cron.sh` was a third supervision plane that neither first-class host used; it was removed. Supervise with systemd user units (Pattern 2) or launchd (Pattern 1) — `lib/setup-fleet <fleet>` enrolls every composed job on either.
 
-## Generic helpers (used by all patterns)
+## Generic helpers (used by both patterns)
 
-These ship with claudlobby and are referenced by the cron block install above; they're useful standalone too:
+These ship with claudlobby and run under the composed fleet jobs; they're useful standalone too:
 
 - `lib/keepalive.sh <bot-dir>` — restart a bot's service if its tmux session is dead; nudge an idle pane with `Enter`.
 - `lib/keepalive-all.sh [<fleet-name> | <abs-runtime-bots-dir>]` — iterate every declared bot in the fleet and run `keepalive.sh` per bot (composed units pass the fleet name; an absolute path selects a bots dir directly).
@@ -73,5 +72,4 @@ These ship with claudlobby and are referenced by the cron block install above; t
 
 - "I'm on a Mac and following the runbook." → launchd.
 - "I'm on a fresh Linux server and want self-healing services." → systemd.
-- "I'm on a Pi, I want the simplest thing that works, and 30-min keepalive granularity is fine." → cron.
-- "I want to run a few bots quickly without committing to a service supervisor." → cron.
+- "I'm on a Pi, I want the simplest thing that works." → systemd — `lib/setup-fleet <fleet>` enrolls every composed job in one call.
