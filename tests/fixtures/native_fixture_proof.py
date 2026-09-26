@@ -442,6 +442,7 @@ def run_arm(label, source, python, base, selection, real_tmux):
     registry = base / "pytest-root.json"
     assert not registry.exists(), "a different proof arm still owns the pytest root"
     root = None
+    registry_identity = None
     try:
         # Keep the allocation itself intact: pytest may replace its /p child.
         # A short root applies equally to the historical parent and candidate.
@@ -449,9 +450,16 @@ def run_arm(label, source, python, base, selection, real_tmux):
             root = Path(directory).resolve()
             info = root.stat()
             record = {"path": str(root), "device": info.st_dev, "inode": info.st_ino}
-            write_json(state / "pytest-root.json", record)
-            write_json(registry, record)
             try:
+                write_json(state / "pytest-root.json", record)
+                # Exclusive publication makes even a partially written record
+                # ours. Retain its inode before writing so failure cleanup can
+                # remove that record without deleting another arm's replacement.
+                with registry.open("x") as stream:
+                    registry_info = os.fstat(stream.fileno())
+                    registry_identity = (registry_info.st_dev, registry_info.st_ino)
+                    json.dump(record, stream, indent=2)
+                    stream.write("\n")
                 assert registered_pytest_root(registry) == root
                 # The longest pulse socket name, including pytest's node suffix.
                 endpoint = root / "p/test_pulse_completes_with_no_e0/root/tmux" / (
@@ -462,14 +470,24 @@ def run_arm(label, source, python, base, selection, real_tmux):
                 write_json(state / "pytest-root.json", record)
                 return _run_arm(label, source, python, base, selection, real_tmux, state)
             finally:
-                registry.unlink()
+                if registry_identity is not None:
+                    try:
+                        current = registry.lstat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        assert (stat.S_ISREG(current.st_mode)
+                                and (current.st_dev, current.st_ino) == registry_identity), \
+                            "refused cleanup of a replaced pytest registration"
+                        registry.unlink()
     finally:
         if root is not None:
             receipt = {"path": str(root), "removed": not root.exists(),
                        "unregistered": not registry.exists()}
             evidence = base / "evidence" / label
             evidence.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(state / "pytest-root.json", evidence / "pytest-root.json")
+            if (state / "pytest-root.json").exists():
+                shutil.copyfile(state / "pytest-root.json", evidence / "pytest-root.json")
             write_json(evidence / "pytest-root-cleanup.json", receipt)
             assert receipt["removed"] and receipt["unregistered"], "pytest root cleanup failed"
 

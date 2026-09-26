@@ -236,3 +236,54 @@ def test_controller_exception_still_cleans_and_unregisters_short_root(tmp_path, 
     assert not (base / "pytest-root.json").exists()
     receipt = json.loads((base / "evidence/parent-2/pytest-root-cleanup.json").read_text())
     assert receipt["removed"] and receipt["unregistered"]
+
+
+@pytest.mark.parametrize("destination", ["state", "registry"])
+def test_partial_registration_write_preserves_error_and_removes_own_record(tmp_path, monkeypatch, destination):
+    base, source, _, _, _ = stub_arm(monkeypatch, tmp_path)
+    target = (base / "pytest-root.json" if destination == "registry" else
+              base / "runs/parent-2/pytest-root.json")
+    original_open = Path.open
+
+    class InterruptedWrite:
+        def __init__(self, stream):
+            self.stream = stream
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+        def fileno(self):
+            return self.stream.fileno()
+        def write(self, text):
+            self.stream.write(text[:3])
+            self.stream.flush()
+            raise OSError("modeled registration write failure")
+
+    def open_file(path, mode="r", *args, **kwargs):
+        stream = original_open(path, mode, *args, **kwargs)
+        return InterruptedWrite(stream) if path == target and mode in ("w", "x") else stream
+
+    monkeypatch.setattr(Path, "open", open_file)
+    with pytest.raises(OSError, match="modeled registration write failure"):
+        proof.run_arm("parent-2", source, Path("/unused/python"), base, ["fixture"], "/native/tmux")
+    assert not (base / "pytest-root.json").exists()
+    receipt = json.loads((base / "evidence/parent-2/pytest-root-cleanup.json").read_text())
+    assert receipt["removed"] and receipt["unregistered"]
+
+
+def test_cleanup_never_unlinks_a_replacement_registration(tmp_path, monkeypatch):
+    base, source, _, _, _ = stub_arm(monkeypatch, tmp_path)
+    registry = base / "pytest-root.json"
+
+    def replace_then_fail(*args):
+        replacement = base / "other-owner.json"
+        replacement.write_text('{"other": "owner"}\n')
+        replacement.replace(registry)
+        raise OSError("modeled controller failure")
+
+    monkeypatch.setattr(proof, "make_tools", replace_then_fail)
+    with pytest.raises((OSError, AssertionError)):
+        proof.run_arm("parent-2", source, Path("/unused/python"), base, ["fixture"], "/native/tmux")
+    assert registry.read_text() == '{"other": "owner"}\n'
+    receipt = json.loads((base / "evidence/parent-2/pytest-root-cleanup.json").read_text())
+    assert receipt["removed"] and not receipt["unregistered"]
