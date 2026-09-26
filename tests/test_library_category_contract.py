@@ -1,13 +1,14 @@
 """Category metadata reaches composition/listing and missing-reference checks.
 
-The existing validator loops remain separately owned by the phase08 refactor;
-these tests pin the new principles/permissions preflight without duplicating
-legacy warnings or widening required-expertise/skill/requires semantics.
+These tests pin principles/permissions coverage without duplicate warnings or
+widening required-expertise/skill/requires semantics. The shared-loop follow-up
+also exercises every registered category in test_validator_category_registry.
 """
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 import logging
+import shutil
 
 import pytest
 
@@ -27,6 +28,11 @@ def scene(tmp_path, monkeypatch):
     (root / 'library/expertise/demo.md').write_text('# Demo\n\nSpecialist.\n')
     (root / 'templates').mkdir()
     (root / 'templates/claude.md.j2').write_text('{{ expertise_body }}\n')
+    # Public validation can ask the runtime for environment tier ordering.
+    # Keep that instrument available in this private fixture for #1661, too.
+    (root / 'lib').mkdir()
+    for name in ('env-tiers.sh', 'lib-common.sh', 'supervisor.sh'):
+        shutil.copy2(REPO / 'lib' / name, root / 'lib' / name)
     home = tmp_path / 'home'; home.mkdir()
     monkeypatch.setenv('HOME', str(home))
     bot = BotConfig(bot_id='sample', name='Sample', expertise=['demo'])
