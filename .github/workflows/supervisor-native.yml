@@ -177,3 +177,65 @@ jobs:
           name: supervisor-native-${{ matrix.os }}
           path: ${{ env.CLAUDLOBBY_NATIVE_DISPOSABLE_ROOT }}/evidence
           if-no-files-found: error
+
+  parent-suite:
+    name: supervisor parent pytest (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install parent-suite prerequisites
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Prepare the exact parent checkout and isolated environment
+        env:
+          PARENT_REF: ${{ github.event.pull_request.base.sha || inputs.parent_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$PARENT_REF"
+          parent=$(git rev-parse "$PARENT_REF^{commit}")
+          candidate=$(git rev-parse HEAD)
+          parent_root=$(mktemp -d /tmp/clp-XXXXXX)
+          git worktree add --detach "$parent_root/source" "$parent"
+          mkdir -p "$parent_root/home" "$parent_root/tmp" "$parent_root/evidence"
+          printf 'PARENT_SUITE_ROOT=%s\n' "$parent_root" >> "$GITHUB_ENV"
+          printf 'parent=%s\nparent_tree=%s\ncandidate=%s\n' \
+            "$parent" "$(git rev-parse "$parent^{tree}")" "$candidate" \
+            > "$parent_root/evidence/revisions.txt"
+          cat "$parent_root/evidence/revisions.txt"
+          python -m venv "$parent_root/source/.venv" > "$parent_root/evidence/install.log" 2>&1
+          "$parent_root/source/.venv/bin/python" -m pip install -e "$parent_root/source[dev]" \
+            >> "$parent_root/evidence/install.log" 2>&1
+          cat "$parent_root/evidence/install.log"
+          "$parent_root/source/.venv/bin/python" --version > "$parent_root/evidence/versions.txt"
+          /bin/bash --version >> "$parent_root/evidence/versions.txt"
+          tmux -V >> "$parent_root/evidence/versions.txt"
+          cat "$parent_root/evidence/versions.txt"
+      - name: Run the complete parent suite
+        run: |
+          set +e
+          set -uo pipefail
+          cd "$PARENT_SUITE_ROOT/source"
+          env -i HOME="$PARENT_SUITE_ROOT/home" TMPDIR="$PARENT_SUITE_ROOT/tmp" \
+            PATH="$PWD/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            LANG=C.UTF-8 PLANE_EMIT_DISABLED=1 \
+            "$PWD/.venv/bin/python" -m pytest -v -ra \
+            --basetemp="$PARENT_SUITE_ROOT/pytest" \
+            --junitxml="$PARENT_SUITE_ROOT/evidence/pytest-results.xml" \
+            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn \
+            > "$PARENT_SUITE_ROOT/evidence/pytest.log" 2>&1
+          result=$?
+          printf '%s\n' "$result" > "$PARENT_SUITE_ROOT/evidence/pytest.rc"
+          cat "$PARENT_SUITE_ROOT/evidence/pytest.log"
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always() && env.PARENT_SUITE_ROOT != ''
+        with:
+          name: supervisor-parent-pytest-ubuntu-latest
+          path: ${{ env.PARENT_SUITE_ROOT }}/evidence
+          if-no-files-found: error
