@@ -31,6 +31,28 @@ def process_group_members(pgid: int) -> dict[int, str]:
             if len(row := line.split()) == 3 and int(row[1]) == pgid}
 
 
+
+def signal_live_group(proc, sig: int) -> list[int]:
+    """Reap an exited leader; never hide a permission failure for live members."""
+    proc.poll()
+    members = process_group_members(proc.pid)
+    live = [pid for pid, state in members.items() if not state.startswith('Z')]
+    if not live:
+        return []
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Darwin can report EPERM when the shell exits between observation
+        # and signaling, leaving only its unreaped zombie. Absence must be
+        # demonstrated again; EPERM with any live member still propagates.
+        proc.poll()
+        if any(not state.startswith('Z') for state in process_group_members(proc.pid).values()):
+            raise
+    return sorted(live)
+
+
 def tagged_processes(token: str, excluded_group: int) -> dict[int, dict[str, int | str]]:
     """Find only this invocation's detached children; never persist argv/env.
 
@@ -117,13 +139,10 @@ def run_owned_session(argv, *, cwd, env, timeout, stdout_path, stderr_path, grac
                 # them. The harness's setsid scope probe is one such child.
                 detached = reap_detached(token, proc.pid, min(grace, 5))
                 cleanup['detached_terminated'] = detached['terminated']
+                proc.poll()  # Detached-child teardown may have completed the shell's wait/EXIT.
                 members = process_group_members(proc.pid)
                 if members:
-                    cleanup['terminated_children'] = sorted(members)
-                    try:
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                    cleanup['terminated_children'] = signal_live_group(proc, signal.SIGTERM)
                     end = time.monotonic() + (min(grace, 5) if cancelled else grace)
                     while time.monotonic() < end:
                         proc.poll()  # Reap the leader before testing group absence.
@@ -131,10 +150,7 @@ def run_owned_session(argv, *, cwd, env, timeout, stdout_path, stderr_path, grac
                             break
                         time.sleep(.1)
                     else:
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                        signal_live_group(proc, signal.SIGKILL)
                 proc.wait(timeout=5)
                 end = time.monotonic() + 5
                 while process_group_members(proc.pid) and time.monotonic() < end:

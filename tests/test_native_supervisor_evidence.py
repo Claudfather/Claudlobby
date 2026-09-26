@@ -3,10 +3,12 @@ import os
 import shlex
 import signal
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from tests.conftest import constructed_env
+from tests import native_supervisor_evidence as native
 from tests.native_supervisor_evidence import run_owned_session
 
 
@@ -86,3 +88,15 @@ def test_normal_completion_runs_exit_cleanup_without_reaping(tmp_path):
     assert cleanup == {"timed_out": False, "cancelled": False,
                        "terminated_children": [], "remaining": {},
                        "detached_terminated": [], "detached_remaining": {}}
+
+
+def test_permission_failure_with_live_group_is_not_suppressed(monkeypatch):
+    proc = SimpleNamespace(pid=123, poll=lambda: None)
+    monkeypatch.setattr(native, "process_group_members", lambda _pgid: {123: "S"})
+
+    def denied(_pgid, _signal):
+        raise PermissionError("owned live group could not be signaled")
+
+    monkeypatch.setattr(native.os, "killpg", denied)
+    with pytest.raises(PermissionError, match="owned live group"):
+        native.signal_live_group(proc, signal.SIGTERM)
