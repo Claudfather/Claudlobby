@@ -1,8 +1,8 @@
 """Category metadata reaches composition/listing and missing-reference checks.
 
-The existing validator loops remain separately owned by the phase08 refactor;
-these tests pin the new principles/permissions preflight without duplicating
-legacy warnings or widening required-expertise/skill/requires semantics.
+These tests pin principles/permissions coverage without duplicate warnings or
+widening required-expertise/skill/requires semantics. The shared-loop follow-up
+also exercises every registered category in test_validator_category_registry.
 """
 from dataclasses import FrozenInstanceError
 from pathlib import Path
