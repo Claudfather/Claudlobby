@@ -535,7 +535,14 @@ def main() -> int:
     ap.add_argument("--cwd", default="")
     ap.add_argument("--command", required=True)
     a = ap.parse_args()
-    verdict, detail = decide(a.command, a.vault, a.cwd or None)
+    # Match the former shell normalization: a configured relative vault is
+    # relative to the hook process, not the payload command's separate cwd.
+    # Keep normalization at the CLI boundary; scope/verb policy is unchanged.
+    vault = _resolve(a.vault, None)
+    if vault is None:
+        print("could not normalize configured vault path", file=sys.stderr)
+        return 2
+    verdict, detail = decide(a.command, vault, a.cwd or None)
     print(f"{verdict}\t{detail}")
     return 0
 
