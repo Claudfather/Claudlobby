@@ -282,9 +282,6 @@ fleet:
 #     telegram:
 #       chat_id: "-1009999999999"
 #
-#     # bench — marks this bot as the fleet's benchmarking target for cold-start timing.
-#     # Multi-bot fleets should set bench: true on exactly one bot.
-#     bench: true
 #
 #     # Permission model — set AT MOST ONE of the two fields below; they do NOT
 #     # combine. permission_mode wins whenever it is set. With neither set, the

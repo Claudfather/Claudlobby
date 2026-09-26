@@ -4,7 +4,7 @@
 # <prefix>.briefing-<bot>-<slot> unit FIRES (journal + a real trigger event) and
 # that removing the slot PRUNES its units on BOTH platforms (systemd
 # .service/.timer AND the launchd .plist), then DISABLES the live orphan via the
-# enroll-side reconcile. Sibling of rehearse-keepalive-swap.sh; the empirical
+# enroll-side reconcile. The empirical
 # pre-deploy harness in the validate-bot-change.sh mold for the composed-timer
 # plumbing (validate-bot-change.sh covers the delivery behavior).
 #
@@ -21,8 +21,8 @@
 #   3. removes the slot, RECOMPOSES, and asserts the generate-side reconcile
 #      pruned the unit files on BOTH platforms — the launchd .plist half runs
 #      here regardless of host OS. [no systemd]
-#   4. runs the enroll-side reconcile (setup-fleet on the now-botless fleet, the
-#      rehearse-keepalive-swap.sh recipe — no bot spin-up) so the live orphan
+#   4. runs the enroll-side reconcile (setup-fleet on the now-botless fleet —
+#      no bot spin-up) so the live orphan
 #      timer is disabled, and asserts it is gone. [systemd]
 #
 # Steps 1 + 3 (compose + both-platform prune) need no systemd and always run;
@@ -195,7 +195,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
     # The composed dir no longer has the unit, but the timer is still enrolled +
     # live from step 2 — the exact stale orphan reconcile_briefing_timers exists
     # to disable. Drive it via setup-fleet on the botless fleet (no bot spin-up),
-    # the same recipe rehearse-keepalive-swap.sh trusts. Bot dir removed first so
+    # the recipe the keepalive swap was rehearsed with. Bot dir removed first so
     # the audit has nothing on-disk to reconcile.
     rm -rf "$BOT_DIR"
     log "running setup-fleet $FLEET (enroll-side reconcile — disable the live orphan)"
