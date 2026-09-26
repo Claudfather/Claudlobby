@@ -1301,16 +1301,22 @@ def _coerce_model_strategy(raw: dict | None) -> ModelStrategyConfig | None:
     )
 
 
-def _coerce_sandbox(raw: dict | None) -> SandboxConfig:
+def _coerce_sandbox(raw: dict | None, *, where: str = "sandbox") -> SandboxConfig:
     if not raw:
         return SandboxConfig()
     enabled_raw = raw.get("enabled")
     auto_allow_raw = raw.get("auto_allow_bash")
     return SandboxConfig(
-        enabled=bool(enabled_raw) if enabled_raw is not None else None,
+        enabled=(
+            _strict_bool(f"{where}: sandbox.enabled", enabled_raw)
+            if enabled_raw is not None else None
+        ),
         network_allowed_domains=list(raw.get("network_allowed_domains") or []),
         filesystem_allow_write=list(raw.get("filesystem_allow_write") or []),
-        auto_allow_bash=bool(auto_allow_raw) if auto_allow_raw is not None else None,
+        auto_allow_bash=(
+            _strict_bool(f"{where}: sandbox.auto_allow_bash", auto_allow_raw)
+            if auto_allow_raw is not None else None
+        ),
     )
 
 
@@ -1674,6 +1680,15 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             return bool(defaults[key])
         return fallback
 
+    def _control_bool(key: str, fallback: bool) -> bool:
+        # Validate every declared tier, even when a valid bot value shadows an
+        # invalid default; otherwise another bot may later inherit the typo.
+        value = fallback
+        for label, tier in (("fleet defaults", defaults), (f"bot '{name}'", raw)):
+            if key in tier:
+                value = _strict_bool(f"{label}: {key}", tier[key])
+        return value
+
     def _str(key: str, fallback: str) -> str:
         if key in raw:
             return str(raw[key])
@@ -1730,15 +1745,15 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         effort=_parse_enum(
             "effort", raw.get("effort", defaults.get("effort")), KNOWN_EFFORTS
         ),
-        remote_control=_bool("remote_control", True),
-        dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
+        remote_control=_control_bool("remote_control", True),
+        dangerously_skip_permissions=_control_bool("dangerously_skip_permissions", False),
         permission_mode=_parse_enum(
             "permission_mode",
             raw.get("permission_mode") or defaults.get("permission_mode"),
             VALID_PERMISSION_MODES,
         ),
-        skip_auto_permission_prompt=_bool("skip_auto_permission_prompt", True),
-        skip_dangerous_mode_permission_prompt=_bool(
+        skip_auto_permission_prompt=_control_bool("skip_auto_permission_prompt", True),
+        skip_dangerous_mode_permission_prompt=_control_bool(
             "skip_dangerous_mode_permission_prompt", True
         ),
         prompt_suggestions=_bool("prompt_suggestions", False),
@@ -1785,8 +1800,8 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             defaults.get("post_actions"), raw.get("post_actions")
         ),
         sandbox=_merge_sandbox(
-            _coerce_sandbox(defaults.get("sandbox")),
-            _coerce_sandbox(raw.get("sandbox")),
+            _coerce_sandbox(defaults.get("sandbox"), where="fleet defaults"),
+            _coerce_sandbox(raw.get("sandbox"), where=f"bot '{name}'"),
         ),
         tools=_merge_tool_lists(
             _parse_tools_list(defaults.get("tools"), where="defaults"),

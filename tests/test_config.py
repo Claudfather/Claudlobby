@@ -20,6 +20,133 @@ from claudlobby.config import (
 from claudlobby.path_audit import ExternalDecl
 
 
+class TestPermissionControlBooleans:
+    """Six access controls reject truthiness at every declared YAML tier."""
+
+    flat = (
+        "dangerously_skip_permissions", "skip_auto_permission_prompt",
+        "skip_dangerous_mode_permission_prompt", "remote_control",
+    )
+    sandbox = ("sandbox.enabled", "sandbox.auto_allow_bash")
+    controls = flat + sandbox
+
+    @staticmethod
+    def _declaration(field, token, indent):
+        parts = field.split(".")
+        if len(parts) == 2:
+            return f"{indent}{parts[0]}:\n{indent}  {parts[1]}: {token}\n"
+        return f"{indent}{field}: {token}\n"
+
+    def _load(self, tmp_path, field, *, fleet=None, bot=None,
+              system="false", extra_bot=""):
+        # Preserve raw YAML tokens: quoted strings and null are distinct inputs.
+        text = "fleet:\n  name: permission-bool-regression\n"
+        if system is not None:
+            text += f"  system_defaults: {system}\n"
+        if fleet is not None:
+            text += "  defaults:\n" + self._declaration(field, fleet, "    ")
+        text += "  bots:\n    worker:\n      expertise: [eng]\n      channels: []\n"
+        if bot is not None:
+            text += self._declaration(field, bot, "      ")
+        path = tmp_path / "fleet.yaml"
+        path.write_text(text + extra_bot)
+        return load_fleet(path)[0].bots["worker"]
+
+    @staticmethod
+    def _value(bot, field):
+        if field.startswith("sandbox."):
+            return getattr(bot.sandbox, field.split(".")[1])
+        return getattr(bot, field)
+
+    @pytest.mark.parametrize("field", controls)
+    @pytest.mark.parametrize("tier", ["fleet", "bot"])
+    @pytest.mark.parametrize("token", [
+        '"true"', '"false"', '"yes"', '"no"', '"0"', '"1"', '""', '"flase"',
+        "0", "1", "[]", "[true]", "{}", "{value: false}",
+    ])
+    def test_rejects_non_boolean_yaml(self, tmp_path, field, tier, token):
+        import yaml
+
+        label = "fleet defaults" if tier == "fleet" else "bot 'worker'"
+        with pytest.raises(ValueError) as exc:
+            self._load(tmp_path, field, **{tier: token})
+        message = str(exc.value)
+        assert label in message
+        assert field in message
+        assert "YAML boolean" in message
+        assert repr(yaml.safe_load(token)) in message
+
+    @pytest.mark.parametrize("field", controls)
+    @pytest.mark.parametrize("system", ["false", None, "{hooks: true, timers: true}"])
+    def test_rejects_invalid_default_even_when_shadowed(self, tmp_path, field, system):
+        with pytest.raises(ValueError) as exc:
+            self._load(tmp_path, field, fleet='"false"', bot="false", system=system)
+        assert "fleet defaults" in str(exc.value)
+        assert field in str(exc.value)
+
+    @pytest.mark.parametrize("field", flat)
+    @pytest.mark.parametrize("tier", ["fleet", "bot"])
+    @pytest.mark.parametrize("token", ["null", ""])
+    def test_flat_null_is_not_inheritance(self, tmp_path, field, tier, token):
+        with pytest.raises(ValueError) as exc:
+            self._load(tmp_path, field, **{"fleet": "true", tier: token})
+        assert field in str(exc.value)
+        assert "YAML boolean" in str(exc.value)
+
+    @pytest.mark.parametrize("field", controls)
+    @pytest.mark.parametrize("fleet,bot,expected", [
+        (None, "true", True), (None, "false", False),
+        ("true", None, True), ("false", None, False),
+        ("true", "false", False), ("false", "true", True),
+        (None, "yes", True), (None, "no", False),
+    ])
+    def test_real_yaml_booleans_and_precedence(self, tmp_path, field, fleet, bot, expected):
+        parsed = self._load(tmp_path, field, fleet=fleet, bot=bot)
+        assert self._value(parsed, field) is expected
+
+    @pytest.mark.parametrize("field,expected", [
+        ("dangerously_skip_permissions", False), ("skip_auto_permission_prompt", True),
+        ("skip_dangerous_mode_permission_prompt", True), ("remote_control", True),
+        ("sandbox.enabled", None), ("sandbox.auto_allow_bash", None),
+    ])
+    @pytest.mark.parametrize("system", ["false", None, "{hooks: true, timers: true}"])
+    def test_absent_defaults_unchanged(self, tmp_path, field, expected, system):
+        assert self._value(self._load(tmp_path, field, system=system), field) is expected
+
+    @pytest.mark.parametrize("field", sandbox)
+    @pytest.mark.parametrize("fleet,bot,expected", [
+        (None, "null", None), ("null", None, None), ("null", "null", None),
+        ("true", "null", True), ("false", "null", False), ("null", "false", False),
+    ])
+    def test_sandbox_null_preserves_inheritance(self, tmp_path, field, fleet, bot, expected):
+        parsed = self._load(tmp_path, field, fleet=fleet, bot=bot)
+        assert self._value(parsed, field) is expected
+
+    @pytest.mark.parametrize("field", controls)
+    def test_mode_cannot_hide_a_malformed_boolean(self, tmp_path, field):
+        with pytest.raises(ValueError) as exc:
+            self._load(tmp_path, field, bot='"false"', extra_bot="      permission_mode: plan\n")
+        assert field in str(exc.value)
+
+    @pytest.mark.parametrize("field", controls)
+    def test_multiple_bots_inherit_one_default(self, tmp_path, field):
+        self._load(tmp_path, field, fleet="false")
+        path = tmp_path / "fleet.yaml"
+        with path.open("a") as f:
+            f.write("    second:\n      expertise: [eng]\n")
+        fleet, _ = load_fleet(path)
+        assert all(self._value(bot, field) is False for bot in fleet.bots.values())
+
+    @pytest.mark.parametrize("field", controls)
+    def test_direct_parser_rejects_non_boolean(self, field):
+        declaration = {field: "false"}
+        if field.startswith("sandbox."):
+            declaration = {"sandbox": {field.split(".")[1]: "false"}}
+        with pytest.raises(ValueError) as exc:
+            _coerce_bot("worker", {"expertise": ["eng"], **declaration}, {})
+        assert field in str(exc.value)
+
+
 class TestCoercePlugins:
     def test_defaults_applied_when_no_plugins_section(self):
         result = _coerce_plugins(None)
