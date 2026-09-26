@@ -48,6 +48,8 @@ SCRIPTS_REACHING_DOOR = {
     # #1771: a REFUSED alert target is raised through emit_failure_alert (a plane
     # event and the manager's pane, the channels that do not need the target).
     "fleet-pulse", "creds-check",
+    # #1826: a missed briefing slot is raised through emit_fleet_notice.
+    "briefing-trigger",
 }
 
 # Of those, the ones systemd runs with NO fleet TODAY -- the retrofit half.
@@ -75,7 +77,7 @@ CORRECT = {
     "keepalive", "migrate-fleet-to-system", "reload-fleet", "rolling-restart",
     "start-bot", "weekly-worker-restart", "validate-bot-change",
     # fleet jobs: each takes its fleet positionally and resolves in its own bots dir
-    "fleet-pulse", "creds-check",
+    "fleet-pulse", "creds-check", "briefing-trigger",
 }
 
 def _callers() -> set[str]:

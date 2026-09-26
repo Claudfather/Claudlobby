@@ -6,6 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a host's own override for host jobs, outside the tracked tree (#1251)
+
+Arming, disarming or pausing a host job meant editing the package-owned
+`claudlobby/system.yaml`, which left the install's tree dirty: the 2026-09-26
+root pull had to carry one such pause with `--autostash`, and on a collision
+autostash exits 0 with conflict markers in the file. A host now changes its host
+jobs in `~/.config/claudlobby/system.yaml` (`$CLAUDLOBBY_HOST_SYSTEM_YAML` names
+another file), read by `config.load_host_jobs`. The override is merged per job
+and per field, so arming one job leaves every other job as shipped. It covers
+`host.jobs` only. A file that cannot take effect (a parse error, a misspelt
+field, a quoted `enroll`) is refused rather than skipped, and a job the install
+does not ship is logged and ignored, and while the file is refused
+`doctor --switches` shows every host-job state as unknown, never the shipped
+default. The switch table's arming recipe and the
+docs now name the file.
+
+### Fixed — a briefing timer could fire `/briefing` into a bot without the skill (#1819)
+
+A `briefing:` stanza composed the bot's timers but linked the `briefing` skill
+only when `skills:` listed it too, though the schema doc, the skill and
+`BriefingConfig` all say the stanza alone equips the bot. Claude Code rejects
+an unknown slash command locally, the input box still clears, and the send
+read as delivered. The stanza now links the skill (`resolve_effective_skills`),
+and `briefing-trigger.sh` refuses to send into a bot with no composed skill
+(`briefing_failed`, reason `skill_absent`, exit 1, a stderr line, and one
+`briefing_missed` FLEET NOTICE like any other missed slot), so a hand-built
+timer or a lost link fails loudly rather than silently.
+
+### Fixed — the send-size probe could not see a paste-framed arrival, and would have called it lost (#1876)
+
+`lib/send-size-probe.sh` now records which bytes of each payload arrive inside
+`<pasted_content>` (a new `pasted` column) and takes `capN` arms for any chunk
+size. Two defects stood in the way. Its receiver is not logged in, so it never
+got the server flag that makes the TUI frame a paste, and nothing was ever
+framed; the probe now seeds that flag. And its reader kept only the first line
+of a record, which for a framed record is empty, so a delivered send would have
+been reported `absent`.
+
+### Fixed — a FLEET ALERT or NOTICE reaches the manager's pane when the manager sorts first (#910)
+
+A manager's composed `MANAGER_TMUX` line carried `# this bot is a manager` on
+the same line, and `bot_conf_get` returned the comment as part of the value.
+The alert nudge takes its target from the fleet's first bot that declares
+`MANAGER_TMUX`, so wherever that bot is the manager itself (two of the four
+fleets on one host) it looked for a session that does not exist and skipped
+the pane without an event; fleet-pulse's pushes about the manager itself
+dropped the same way. The reader now ends an unquoted value at its first
+whitespace, as sourcing the file does, so the `bot.conf` files already on disk
+read clean on the next pull with no regenerate; a quoted value is left as
+read. The composer writes the comment on its own line, and `bot_is_manager`
+no longer keeps its own copy of the strip.
+
+### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
+
+A briefing that found its bot busy or its session gone was skipped for the
+day, and a slot that failed to send paged nobody. Both events were severity
+notice, which fleet-pulse and `brief` do not read. Now `briefing-trigger.sh`
+re-checks a deferred slot every 60 s for up to 30 min, counted in polls rather
+than read off the clock, and sends at the first idle check. The slot's own
+timer is no retry, because it next fires a day later. A slot still missed
+after that, or whose dispatch fails, or whose bot dir is gone, sends ONE
+`briefing_missed` FLEET NOTICE through the shared `emit_fleet_notice` path: a
+line on the fleet's Telegram chat, a push into the fleet manager's pane (for a
+manager's own briefing, its own pane), and a plane event registered at notice.
+The per-attempt `briefing_*` events are not reclassified, so a deferral that
+recovers pages nobody. The pane push misses on a fleet whose first
+`MANAGER_TMUX` bot is its manager, until #910 lands.
+
 ### Fixed — the harness's boot probe raced its own spawner on a loaded host (#1778)
 
 Each phase of the `#1002` probe unit now ends when `lib/validate-bot-change.sh`
