@@ -226,6 +226,66 @@ val_diag() {
     sed 's/^/    [stderr] /' "$VAL_READ_ERR" 2>/dev/null || true
 }
 
+# --- Harness-only diagnostics and owned foreign-tree cleanup -----------------
+# These observations never participate in a delivery assertion. Keep the raw
+# visible pane separate from joined history: history can contain an older send.
+val_diag_file() {
+    printf '  [%s]\n' "$1"
+    if [ -f "$2" ]; then sed 's/^/    /' "$2"; else echo '    (missing)'; fi
+}
+val_manager_diagnostics() {
+    printf '  [manager at %s; epoch %s; socket %s; namespace %s]\n' \
+        "$(date -u +%FT%TZ)" "$(date +%s)" "$(vsock "$1")" "$TMUX_TMPDIR"
+    tmux list-panes -t "$1" -F 'session=#{session_name} created=#{session_created} pane=#{pane_id} pid=#{pane_pid} command=#{pane_current_command} dead=#{pane_dead} width=#{pane_width} height=#{pane_height}' 2>&1 \
+        | sed 's/^/    /' || true
+    echo '  [manager visible pane]'
+    tmux capture-pane -t "$1" -p 2>&1 | sed 's/^/    /' || true
+    echo '  [manager joined history; diagnostic only]'
+    tmux capture-pane -t "$1" -p -J -S - 2>&1 | sed 's/^/    /' || true
+}
+val_plane_diagnostics() {
+    local f
+    [ -d "${PL_ROOT:-}/dispatch-legs" ] || return 0
+    for f in "$PL_ROOT"/dispatch-legs/*; do
+        [ -f "$f" ] && val_diag_file "plane ${f##*/}" "$f"
+    done
+    return 0
+}
+# The launcher below becomes its own session before exec. Kill only that owned
+# group, including the two real descendants; an abort before setsid also needs
+# the still-owned direct child stopped. Audit executing members, not zombies.
+val_stop_scope_tree() {
+    [ -n "${_SC_ROOT_PID:-}" ] || return 0
+    local stopped=0
+    python3 - "$_SC_ROOT_PID" <<'SCSTOP' || stopped=$?
+import os, signal, subprocess, sys, time
+root = int(sys.argv[1])
+if root <= 1:
+    raise SystemExit("refusing invalid foreign-tree pid")
+def live_members():
+    rows = subprocess.check_output(["ps", "-axo", "pid=,pgid=,stat="], text=True)
+    return [int(pid) for pid, pgid, state in (row.split() for row in rows.splitlines())
+            if (int(pgid) == root or int(pid) == root) and not state.startswith("Z")]
+for _ in range(100):
+    # Retry the group after the direct child: a cancellation can race setsid.
+    for target in (-root, root, -root):
+        try:
+            os.kill(target, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    remaining = live_members()
+    if not remaining:
+        break
+    time.sleep(0.05)
+else:
+    raise SystemExit("foreign-tree cleanup left executing pids: %s" % remaining)
+SCSTOP
+    [ "$stopped" -eq 0 ] || return "$stopped"
+    wait "$_SC_ROOT_PID" 2>/dev/null || true
+    _SC_ROOT_PID=""
+}
+# --- End harness-only helpers ----------------------------------------------
+
 # val_events <root> <fleet> [bot|fleet|""] [type] [since-iso]: the fleet's
 # events rendered as the legacy JSONL rows, oldest first, from the plane — so
 # every grep this harness ever made on a fleet-<day>.jsonl works unchanged on
@@ -397,6 +457,7 @@ cleanup() {
         printf '=== ABORTED (rc %s) after %s checks, before the summary: the command after the last line above failed ===\n' \
             "$rc" "$((${pass:-0} + ${fail:-0}))"
     fi
+    val_stop_scope_tree || rc=1
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
     for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
@@ -437,9 +498,11 @@ cleanup() {
     if [ -n "${PL_STALE_PID:-}" ]; then
         kill "$PL_STALE_PID" 2>/dev/null || true
     fi
+    val_plane_diagnostics
     [ -n "${PL_ROOT:-}" ] && rm -rf "$PL_ROOT" 2>/dev/null
     [ -n "${PL_SOCKDIR:-}" ] && rm -rf "$PL_SOCKDIR" 2>/dev/null
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "${CK2_ROOT2:-}" "$TMUX_TMPDIR"
+    return "$rc"
 }
 trap cleanup EXIT
 
@@ -1145,12 +1208,21 @@ harness_check "reload-fleet marks a running bot with .reload-pending (happy path
 printf '#!/bin/bash\necho boom >&2; exit 1\n' > "$STUB_BIN/claude"
 chmod +x "$STUB_BIN/claude"
 rm -f "$BOT_DIR/data/.reload-pending"
-CLAUDLOBBY_ROOT="$ROOT" PATH="$STUB_BIN:$PATH" "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
+_reload_rc=0
+CLAUDLOBBY_ROOT="$ROOT" PATH="$STUB_BIN:$PATH" "$LIB_DIR/reload-fleet.sh" "$FLEET" \
+    >"$ROOT/reload-failure.stdout" 2>"$ROOT/reload-failure.stderr" || _reload_rc=$?
 val_events "$ROOT" "$FLEET" fleet reload_failed | grep -q '"type":"reload_failed"' && r=yes || r=no
 harness_check "reload-fleet emits reload_failed event on failure (loud, not silent)" "$r"
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
 printf '%s' "$mgr_pane" | grep -q 'reload_failed' && r=yes || r=no
 harness_check "reload-fleet alerts the manager on failure (shared emit_failure_alert)" "$r"
+if [ "$r" != yes ]; then
+    printf '  --- DIAGNOSTIC: reload-fleet manager push (rc %s) ---\n' "$_reload_rc"
+    val_diag_file "reload-fleet stdout" "$ROOT/reload-failure.stdout"
+    val_diag_file "reload-fleet stderr" "$ROOT/reload-failure.stderr"
+    val_manager_diagnostics "$MGR"
+    val_diag val_events "$ROOT" "$FLEET" fleet reload_failed
+fi
 [ ! -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
 harness_check "reload-fleet does not half-reload (no marker when download fails)" "$r"
 
@@ -1844,18 +1916,44 @@ val_scenario "validate-bot-change: session-scoped readiness (#1530)"
 _scope_fail_before=$fail
 _SC_BIN="$RB_ROOT/scopebin"
 mkdir -p "$_SC_BIN"
-cp "$(command -v bash)" "$_SC_BIN/bun"
-cp "$(command -v bash)" "$_SC_BIN/claude"
-chmod +x "$_SC_BIN/bun" "$_SC_BIN/claude"
-cat > "$_SC_BIN/leaf.sh" <<LEAF
-echo \$\$ > "$RB_DIR/state/bot.pid"
-sleep 45
-true
-LEAF
-printf '"%s" "%s" server.ts &\nwait\n' "$_SC_BIN/bun" "$_SC_BIN/leaf.sh" > "$_SC_BIN/wrapper.sh"
-printf '"%s" "%s" start &\nwait\n'     "$_SC_BIN/bun" "$_SC_BIN/wrapper.sh" > "$_SC_BIN/tree.sh"
+# Copies of Apple-signed bash are killed on Darwin, while Python re-execs its
+# framework and loses the executable identity. Native Node copies preserve the
+# real claude -> bun -> bun ancestry that bridge_state inspects (#973 fixture).
+python3 - "$_SC_BIN" "$RB_DIR/state/bot.pid" <<'SCTREE'
+import json, platform, shlex, shutil, sys
+from pathlib import Path
+bindir, pidfile = map(Path, sys.argv[1:])
+native = platform.system() == "Darwin"
+source = shutil.which("node" if native else "bash")
+if source is None:
+    raise SystemExit("foreign-session fixture requires %s" % ("Node on macOS" if native else "bash"))
+for name in ("bun", "claude"):
+    shutil.copy(source, bindir / name)
+    (bindir / name).chmod(0o755)
+if native:
+    # Homebrew Node can use an executable-relative libnode rpath.
+    for library in (Path(source).resolve().parent.parent / "lib").glob("libnode*.dylib"):
+        (bindir / library.name).symlink_to(library)
+    quote = lambda value: json.dumps(str(value))
+    (bindir / "leaf").write_text("require('fs').writeFileSync(%s, String(process.pid));\n"
+                               "setTimeout(() => {}, 45000);\n" % quote(pidfile))
+    for name, child, arg in (("wrapper", "leaf", "server.ts"), ("tree", "wrapper", "start")):
+        (bindir / name).write_text("require('child_process').spawnSync(%s, [%s, %s], "
+                                  "{stdio: 'inherit'});\n" %
+                                  (quote(bindir / "bun"), quote(bindir / child), quote(arg)))
+else:
+    quote = lambda value: shlex.quote(str(value))
+    (bindir / "leaf").write_text("echo $$ > %s\nsleep 45\ntrue\n" % quote(pidfile))
+    for name, child, arg in (("wrapper", "leaf", "server.ts"), ("tree", "wrapper", "start")):
+        (bindir / name).write_text("%s %s %s &\nwait\n" %
+                                  (quote(bindir / "bun"), quote(bindir / child), quote(arg)))
+SCTREE
 rm -f "$RB_DIR/state/bot.pid"
-env TELEGRAM_STATE_DIR="$RB_DIR/state" setsid "$_SC_BIN/claude" "$_SC_BIN/tree.sh" >/dev/null 2>&1 &
+# No external setsid command is required. exec preserves $! as the owned group
+# leader, and the leaf inherits TELEGRAM_STATE_DIR for the real ownership check.
+env TELEGRAM_STATE_DIR="$RB_DIR/state" python3 -c \
+    'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$_SC_BIN/claude" "$_SC_BIN/tree" >"$RB_ROOT/scope-tree.out" 2>&1 &
 _SC_ROOT_PID=$!
 # Wait for the foreign poller to actually hold the slot; without this the run can
 # race and assert against a bot.pid that does not exist yet, which would PASS for
@@ -1889,11 +1987,12 @@ harness_check "  ...and the TIMEOUT names WHY (not-ours, distinct from no-poller
 grep -q 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
 harness_check "  ...and bring-up still escalates BRIDGE_MISSING (no regression)" "$r"
 
-kill -9 -"$_SC_ROOT_PID" 2>/dev/null || kill -9 "$_SC_ROOT_PID" 2>/dev/null || true
+val_stop_scope_tree
 rm -f "$RB_DIR/state/bot.pid"
 
 if [ "$fail" -gt "$_scope_fail_before" ]; then
     echo "  --- DIAGNOSTIC: #1530 session-scope checks failed ---"
+    val_diag_file "foreign tree stdout+stderr" "$RB_ROOT/scope-tree.out"
     echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
     echo "  [start-bot scope stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.scope.out" 2>/dev/null || echo "    (none)"
 fi
@@ -3584,12 +3683,28 @@ else
     [ -S "$PL_SOCK" ] && r=yes || r=no
     harness_check "plane daemon binds its socket on a temp root" "$r"
 
-    _pl_dispatch() {  # $1 = extra env assignments, $2 = task text; stderr -> $PL_ROOT/err
+    _pl_dispatch() {  # $1 = extra env assignments, $2 = task text
+        local rc=0 leg
+        PL_LEG=$((${PL_LEG:-0} + 1))
+        mkdir -p "$PL_ROOT/dispatch-legs"
+        leg="$PL_ROOT/dispatch-legs/$PL_LEG"
+        {
+            printf 'task: %s\nenv: %s\nstart: %s\n' "$2" "$1" "$(date -u +%FT%TZ)"
+            if [ -f "$PL_ROOT/state/plane/.socket-wedged" ]; then
+                printf 'wedge before: '; cat "$PL_ROOT/state/plane/.socket-wedged"
+            else echo 'wedge before: absent'; fi
+        } > "$leg.meta"
         env CLAUDLOBBY_ROOT="$PL_ROOT" TMUX_BIN="$PL_ROOT/tmux" BOT_ID=vbc \
             BOT_NAME=vbc FLEET_NAME=vbc-fleet PLANE_SOCKET="$PL_SOCK" \
             PLANE_EMIT_CLI="$PL_CLI" OBSERVABILITY_DISPATCH_DEADLINE=600 \
             PATH="/usr/bin:/bin" $1 \
-            bash "$PL_LIB/dispatch-task.sh" --botcommand w1 "$2" 2> "$PL_ROOT/err"
+            bash "$PL_LIB/dispatch-task.sh" --botcommand w1 "$2" \
+            > "$leg.stdout" 2> "$leg.stderr" || rc=$?
+        printf '%s\n' "$rc" > "$leg.rc"
+        printf 'end: %s\n' "$(date -u +%FT%TZ)" >> "$leg.meta"
+        cp "$leg.stderr" "$PL_ROOT/err"  # Keep the existing disclosure assertions.
+        cat "$leg.stdout"
+        return "$rc"
     }
     _pl_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM communications"; }
 
@@ -3607,6 +3722,7 @@ else
     harness_check "the row still landed (cold-CLI rung)" "$r"
     grep -q "falling back" "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...and the fallback was DISCLOSED, not silent" "$r"
+    [ "$r" = yes ] || val_plane_diagnostics
 
     _pl_dispatch "PLANE_EMIT_DISABLED=1" "leg three: disabled" >/dev/null && r=yes || r=no
     harness_check "PLANE_EMIT_DISABLED dispatch succeeds" "$r"
@@ -3745,6 +3861,7 @@ c.commit()' "$PL_ROOT/state/plane/plane.db"
         harness_check "  ...and left no socket behind, so every door meets ENOENT and goes cold" "$r"
     fi
 
+    val_plane_diagnostics  # Retain every leg in the captured log before purge.
     rm -rf "$PL_ROOT" "$PL_SOCKDIR"
 fi
 
@@ -4051,7 +4168,9 @@ val_backdate "$F3_BOTS/$SCTL/data/.last-tool-call" 90000
 rm -f "$F3_BOTS/$SCTL/data/.idle"
 touch "$F3_BOTS/$SCTL/data/.spawn"
 
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F3" "$LIB_DIR/fleet-pulse.sh" "$F3" >/dev/null 2>&1 || true
+_s_pulse_rc=0
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F3" "$LIB_DIR/fleet-pulse.sh" "$F3" \
+    >"$ROOT/activity-pulse.stdout" 2>"$ROOT/activity-pulse.stderr" || _s_pulse_rc=$?
 
 s_ctl_ev=$(val_events "$ROOT" "$F3" "$SCTL")
 s_idle_ev=$(val_events "$ROOT" "$F3" "$SIDLE")
@@ -4093,10 +4212,14 @@ elif printf '%s' "$s_nomark_ev" | grep -qE '"type":"(activity_stuck|boot_strande
 else r=yes; fi
 harness_check "#934 S2 RED: an absent .last-tool-call skips Check 5 with no event of either kind" "$r"
 
-if [ "$_s_ctl_ok" != yes ] || \
+if [ "$_s_ctl_ok" != yes ] || [ "$_s_push_ok" != yes ] || \
    printf '%s' "$s_idle_ev" | grep -q '"type":"activity_stuck"' || \
    printf '%s' "$s_nomark_ev" | grep -qE '"type":"(activity_stuck|boot_stranded)"'; then
     echo "  --- DIAGNOSTIC: #934 S1/S2 fixture state ---"
+    printf '  [fleet-pulse rc %s]\n' "$_s_pulse_rc"
+    val_diag_file "fleet-pulse stdout" "$ROOT/activity-pulse.stdout"
+    val_diag_file "fleet-pulse stderr" "$ROOT/activity-pulse.stderr"
+    val_manager_diagnostics "$MGR"
     for b in "$SCTL" "$SIDLE" "$SNOMARK"; do
         echo "    $b:"
         ls -la --time-style=+%s "$F3_BOTS/$b/data" 2>/dev/null \
@@ -4260,8 +4383,8 @@ echo ""
 echo "--- #1720: vault git-state guard ---"
 _VG_ROOT="$(mktemp -d)"
 mkdir -p "$_VG_ROOT/vault" "$_VG_ROOT/projects/repo"
-_VG_VAULT="$(realpath -m "$_VG_ROOT/vault")"
-_VG_PROJ="$(realpath -m "$_VG_ROOT/projects/repo")"
+_VG_VAULT="$(cd "$_VG_ROOT/vault" && pwd -P)"
+_VG_PROJ="$(cd "$_VG_ROOT/projects/repo" && pwd -P)"
 _vg_hook() { # <cwd> <command> -> stdout of the real hook
     printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$2" \
       | CLAUDRON_VAULT_PATH="$_VG_VAULT" bash "$LIB_DIR/vault-git-guard.sh" 2>/dev/null
@@ -4284,7 +4407,7 @@ harness_check "#1720 ALLOW: a read-only git command in the vault is untouched" "
 # nests INSIDE the vault directory (measured at seven segments below it). A
 # prefix-based scope rule refuses git work in every bot's own repo fleet-wide.
 mkdir -p "$_VG_ROOT/vault/.git" "$_VG_ROOT/vault/home/f/bots/b/projects/repo/.git"
-_VG_NESTED="$(realpath -m "$_VG_ROOT/vault/home/f/bots/b/projects/repo")"
+_VG_NESTED="$(cd "$_VG_ROOT/vault/home/f/bots/b/projects/repo" && pwd -P)"
 _vg_nested="$(_vg_hook "$_VG_NESTED" "git switch -c feature")"
 [ -z "$_vg_nested" ] && r=yes || r=no
 harness_check "#1720 NESTED: a checkout inside the vault DIR but its own repo is untouched" "$r"
