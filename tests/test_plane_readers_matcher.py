@@ -56,6 +56,12 @@ def test_the_stdlib_open_sql_is_byte_identical_to_the_package():
     assert _stdlib_readers().OPEN_SQL == queries.OPEN_ASSIGNMENTS_AT_SQL
 
 
+def test_the_delivery_verdict_twin_is_byte_identical():
+    # plane-lookup.py --received --verdict must give the same verdict the plane
+    # view does (#1876); a drifted copy would pass a receiver the view fails.
+    assert _stdlib_readers().DELIVERY_SQL == queries.DELIVERY_STATUS_SQL
+
+
 def test_the_stdlib_report_and_ack_sql_are_byte_identical_to_the_package():
     """Chunk K: a fleet's reports and its read position are defined ONCE
     (queries.py); the stdlib reader's copies cannot drift from them."""
