@@ -554,9 +554,9 @@ def _validate_bots(
         for area in bot.expertise:
             if paths.find_library_file("expertise", area, ".md") is None:
                 suggestion = closest_match(area, avail_expertise)
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.errors.append(
-                    f"bot '{bot_name}': expertise '{area}' not found in overlay or base library{hint}"
+                    f"bot '{bot_name}': expertise '{area}' not found in overlay or base library{suggestion_hint}"
                 )
 
         # Voice (warn)
@@ -638,9 +638,9 @@ def _validate_bots(
             frag_path = paths.find_library_file("mcp", mcp.name, ".json")
             if frag_path is None:
                 suggestion = closest_match(mcp.name, avail_mcp)
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(
-                    f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{hint}"
+                    f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{suggestion_hint}"
                 )
             else:
                 # Migration-gap warning (remove with the P8 _permissions_contract cut):
@@ -652,7 +652,7 @@ def _validate_bots(
                 if contract.get("tools") and not integration_tool_grants(
                     paths, mcp.name
                 ):
-                    hint = (
+                    suggestion_hint = (
                         f"mirror its read_only_tools as exact mcp__{mcp.name}__<tool> entries"
                         if contract.get("read_only_tools") is not None
                         else f'add tool_grants: ["mcp__{mcp.name}__*"]'
@@ -660,7 +660,7 @@ def _validate_bots(
                     report.warnings.append(
                         f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
                         f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
-                        f"won't migrate ({hint})"
+                        f"won't migrate ({suggestion_hint})"
                     )
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
@@ -878,9 +878,9 @@ def _validate_bots(
             tool_dir = paths.find_library_dir("tools", tool_entry.name)
             if tool_dir is None:
                 suggestion = closest_match(tool_entry.name, avail_tools)
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.errors.append(
-                    f"bot '{bot_name}': tool '{tool_entry.name}' not in any library/tools/{hint}"
+                    f"bot '{bot_name}': tool '{tool_entry.name}' not in any library/tools/{suggestion_hint}"
                 )
                 continue
             try:
@@ -1053,9 +1053,9 @@ def _validate_bots(
         # Model validation (warn + pass-through)
         if bot.model and bot.model not in KNOWN_MODELS:
             suggestion = closest_match(bot.model, KNOWN_MODELS)
-            hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
             report.warnings.append(
-                f"bot '{bot_name}': model '{bot.model}' not in known models{hint}. "
+                f"bot '{bot_name}': model '{bot.model}' not in known models{suggestion_hint}. "
                 f"Known: {', '.join(sorted(KNOWN_MODELS))}. "
                 f"Passing through as-is (may be a new model)."
             )
@@ -1068,18 +1068,18 @@ def _validate_bots(
             ]:
                 if val and val not in KNOWN_MODELS:
                     suggestion = closest_match(val, KNOWN_MODELS)
-                    hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                    suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                     report.warnings.append(
-                        f"bot '{bot_name}': model_strategy.{field_name} '{val}' not in known models{hint}"
+                        f"bot '{bot_name}': model_strategy.{field_name} '{val}' not in known models{suggestion_hint}"
                     )
 
         # Hook event keys (warn)
         for event in bot.hooks:
             if event not in KNOWN_HOOK_EVENTS:
                 suggestion = closest_match(event, KNOWN_HOOK_EVENTS)
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(
-                    f"bot '{bot_name}': hook event '{event}' not recognized{hint}. "
+                    f"bot '{bot_name}': hook event '{event}' not recognized{suggestion_hint}. "
                     f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
                     f"This hook will be silently ignored by Claude Code."
                 )
@@ -1200,11 +1200,11 @@ def _validate_bots(
         if ar is not None:
             if ar.skill not in AUTO_ELIGIBLE_SKILLS:
                 suggestion = closest_match(ar.skill, AUTO_ELIGIBLE_SKILLS)
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                suggestion_hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(
                     f"bot '{bot_name}': autonomous_runner.skill '{ar.skill}' is not on the "
                     f"--auto-eligible list — the wrapper will still invoke it, but unknown "
-                    f"clauDNA skills may not emit a structured result{hint}"
+                    f"clauDNA skills may not emit a structured result{suggestion_hint}"
                 )
 
             if not _CADENCE_RE.match(ar.cadence):
