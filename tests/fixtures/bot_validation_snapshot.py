@@ -93,7 +93,7 @@ def _cases(root: Path):
     )
     def bot(name="first", **kwargs):
         return BotConfig(bot_id=name, name=name, expertise=kwargs.pop("expertise", ["engineering"]),
-                         channels=[], remote_control=False, bench=name == "first", **kwargs)
+                         channels=[], remote_control=False, **kwargs)
     dense = bot(
         expertise=["risky", "software-engineering", "enginering"], voice="missing-voice", skills=["bundle/", "risky-skill", "empty/", "missing-skill"],
         mcp=[McpEntry("sample", ["work"]), McpEntry("sampl")], integrations=["bundle/", "risky-integration", "empty/", "missing-integration"],

@@ -1,4 +1,4 @@
-"""Ordered public reports captured at ec5a7c5 before the #1818 extraction."""
+"""Ordered public reports preserved across the #1818 extraction and parent refreshes."""
 from __future__ import annotations
 
 import json
