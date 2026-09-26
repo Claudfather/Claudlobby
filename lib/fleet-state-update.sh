@@ -6,6 +6,8 @@
 # Usage:
 #   fleet-state-update.sh <bot> <status> [<current_task>] [<current_repo>] [<last_completed>]
 #     status: idle | working | blocked | offline
+#     Optional fields: empty/omitted keeps the old value; '-' clears to null;
+#     any other non-empty value replaces it. Each update stamps updated_ts.
 #
 #   fleet-state-update.sh prune <fleet-yaml-path> [--dry-run]
 #     Remove the PRUNING FLEET's own departed bot rows — never another fleet's.
@@ -284,9 +286,13 @@ _update_state() {
       | .bots[$bot] //= {"status":"idle","current_task":null,"current_repo":null,"last_completed":null}
       | (if $fleet != "" then .bots[$bot].fleet = $fleet else . end)
       | .bots[$bot].status = $status
-      | (if $task != "" then .bots[$bot].current_task = $task else . end)
-      | (if $repo != "" then .bots[$bot].current_repo = $repo else . end)
-      | (if $last != "" then .bots[$bot].last_completed = $last else . end)
+      | .bots[$bot].updated_ts = $ts
+      | (if $task == "-" then .bots[$bot].current_task = null
+         elif $task != "" then .bots[$bot].current_task = $task else . end)
+      | (if $repo == "-" then .bots[$bot].current_repo = null
+         elif $repo != "" then .bots[$bot].current_repo = $repo else . end)
+      | (if $last == "-" then .bots[$bot].last_completed = null
+         elif $last != "" then .bots[$bot].last_completed = $last else . end)
     ' "$STATE" > "$tmp" && mv "$tmp" "$STATE" || { echo "fleet-state-update: failed to write $STATE" >&2; rm -f "$tmp"; return 1; }
 }
 with_lock "$STATE.lock" _update_state
