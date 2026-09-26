@@ -716,11 +716,12 @@ class SwitchState:
     source: str  #: "default" | "<tier> .env" | "system.yaml" | "fleet.yaml"
     detail: str = ""
     #: the state could not be READ — ``on`` is the DECLARED default, never a
-    #: measurement. Said, never quietly rendered as fact. Two causes ship, and
+    #: measurement. Said, never quietly rendered as fact. Three causes ship, and
     #: :attr:`unknown_reason` names which: the env resolver was unreachable,
-    #: or this run named no fleet and the switch is fleet-scoped.
+    #: this run named no fleet and the switch is fleet-scoped, or the host's
+    #: jobs could not be read (a malformed host override, #1251).
     unknown: bool = False
-    unknown_reason: str = ""  #: "resolver" | "no-fleet"
+    unknown_reason: str = ""  #: "resolver" | "no-fleet" | "host-override"
     #: overrides the switch's derived arm line when a RUNTIME fact changes it
     #: (today: the [plane-ui] extra being absent).
     arm_override: str = ""
@@ -826,10 +827,19 @@ def resolve(
         except _env_tiers.ResolverUnavailable:
             cascade, unresolved = {}, True
 
+    host_jobs_unread = ""
     try:
         host_jobs = load_host_jobs()
-    except Exception:  # noqa: BLE001 — a broken system.yaml must not kill the table
+    except Exception as exc:  # noqa: BLE001 — a broken system.yaml must not kill the table
+        # ...and must not be rendered as the shipped default either. An empty
+        # dict reads as "every job as shipped", so a refused override that
+        # PAUSED a job would show it on, at rc 0: the opposite of the host's
+        # intended state. Every host-job row is UNKNOWN instead, naming why.
         host_jobs = {}
+        # The error names its file: the override refusal says which host
+        # override, a parse error in the packaged file says that file.
+        host_jobs_unread = (f"host jobs could not be read ({exc}) — no state"
+                            " is shown, not the shipped default")
     fleet_jobs: dict = {}
     sweep_on: bool | None = None
     if fleet is not None:
@@ -878,7 +888,10 @@ def resolve(
         detail = ""
         reason = ""
         unknown = False
-        if unresolved and sw.env:
+        if host_jobs_unread and sw.scope in (HOST_JOB, HOST_SERVICE):
+            detail, reason, unknown = host_jobs_unread, "host-override", True
+            source = "?"
+        elif unresolved and sw.env:
             detail, reason, unknown = RESOLVER_DETAIL, "resolver", True
         elif fleet is None and sw.fleet_scoped:
             detail, reason, unknown = NO_FLEET_DETAIL, "no-fleet", True
@@ -991,6 +1004,9 @@ def summary_line(states: list[SwitchState]) -> str:
                      " defaults, not a reading")
     if any(s.unknown_reason == "no-fleet" for s in unknown):
         parts.append("no fleet named — fleet-tier switches not read")
+    if any(s.unknown_reason == "host-override" for s in unknown):
+        parts.append("host jobs unreadable — host-job states are unknown, not"
+                     " the shipped defaults")
     return " · ".join(parts)
 
 
