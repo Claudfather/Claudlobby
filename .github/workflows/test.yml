@@ -58,6 +58,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install -e '.[dev]'
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/python --version
           command -v tmux jq node bash
           tmux -V
