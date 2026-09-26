@@ -128,7 +128,8 @@ enroll_jobs() {
 # ACTIVE, and has completed a verification run, retire the legacy unit — never
 # the reverse. During the swap supervision coverage is a union (both timers),
 # never zero; every abort path leaves the legacy unit fully untouched.
-# Rehearse first: lib/rehearse-keepalive-swap.sh (gate 1, journal-proven).
+# Rehearsed on real 60s timers before it shipped (Phase 6 gate 1, journal-proven);
+# the rehearsal harness was retired once the swap landed.
 migrate_legacy_keepalive() {
     # Root mode has no fleet name, so the legacy scheme cannot apply. Scope is
     # the systemd spelling only: every live legacy fleet is Linux, and macOS's
