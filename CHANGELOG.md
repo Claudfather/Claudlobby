@@ -18,6 +18,30 @@ and `briefing-trigger.sh` refuses to send into a bot with no composed skill
 `briefing_missed` FLEET NOTICE like any other missed slot), so a hand-built
 timer or a lost link fails loudly rather than silently.
 
+### Fixed — the send-size probe could not see a paste-framed arrival, and would have called it lost (#1876)
+
+`lib/send-size-probe.sh` now records which bytes of each payload arrive inside
+`<pasted_content>` (a new `pasted` column) and takes `capN` arms for any chunk
+size. Two defects stood in the way. Its receiver is not logged in, so it never
+got the server flag that makes the TUI frame a paste, and nothing was ever
+framed; the probe now seeds that flag. And its reader kept only the first line
+of a record, which for a framed record is empty, so a delivered send would have
+been reported `absent`.
+
+### Fixed — a FLEET ALERT or NOTICE reaches the manager's pane when the manager sorts first (#910)
+
+A manager's composed `MANAGER_TMUX` line carried `# this bot is a manager` on
+the same line, and `bot_conf_get` returned the comment as part of the value.
+The alert nudge takes its target from the fleet's first bot that declares
+`MANAGER_TMUX`, so wherever that bot is the manager itself (two of the four
+fleets on one host) it looked for a session that does not exist and skipped
+the pane without an event; fleet-pulse's pushes about the manager itself
+dropped the same way. The reader now ends an unquoted value at its first
+whitespace, as sourcing the file does, so the `bot.conf` files already on disk
+read clean on the next pull with no regenerate; a quoted value is left as
+read. The composer writes the comment on its own line, and `bot_is_manager`
+no longer keeps its own copy of the strip.
+
 ### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
 
 A briefing that found its bot busy or its session gone was skipped for the

@@ -1312,7 +1312,10 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             )
             break
     if bot.bot_id in fleet.manager_bots():
-        lines.append(f"export MANAGER_TMUX={_shq(bot.bot_id)}  # this bot is a manager")
+        # The comment gets its own line: left on the assignment line, a raw
+        # read of MANAGER_TMUX (grep, cut) takes it as part of the session name.
+        lines.append("# this bot is a manager")
+        lines.append(f"export MANAGER_TMUX={_shq(bot.bot_id)}")
         lines.append(f"export MANAGER_TMUX_SOCKET={_shq(bot_service)}")
 
     # Git credential routing — point git at the composed per-org gitconfig. Only
@@ -3548,8 +3551,7 @@ def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
 
     Manager-ness comes from ``FleetConfig.manager_bots`` — the same declaration
     that decides what ``MANAGER_TMUX`` is composed to. It is deliberately not
-    re-derived from the composed value, which carries a trailing comment that a
-    naive parse gets wrong.
+    re-derived from the composed value.
     """
     # Intersected with the bot list so this fleet's tier is sized by the same
     # rule _fleet_manager_worker_counts applies to every sibling: a team naming

@@ -1036,11 +1036,9 @@ val_scenario "validate #1024: reported-but-never-re-dispatched (mirror watchdog)
 ua_iso() { python3 -c "import datetime,sys;print(datetime.datetime.fromtimestamp(int(sys.argv[1]),datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1"; }
 
 # ua_bot <name> <check:1|0> <manager_tmux> [trailing_comment]
-# The composer writes the trailing comment on MANAGER bots only, so only the
-# manager fixture gets one — and it must, because bot_conf_get strips quotes but
-# NOT comments. bot_is_manager does its own stripping; putting the comment on a
-# worker here would instead corrupt _manager_target and silently kill the push
-# this section asserts on.
+# Only the manager fixture gets the trailing comment: it is the line shape an
+# older compose left on the MANAGER_TMUX line of a manager, and bot_conf_get
+# must read it back as the bare name for bot_is_manager to keep that bot quiet.
 ua_bot() {
     local n="$1" chk="$2" mgr="$3" cmt="${4:-}" d="$ROOT/local/$FLEET/runtime/bots/$1"
     mkdir -p "$d/data/events"
