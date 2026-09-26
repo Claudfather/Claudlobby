@@ -77,7 +77,7 @@ def base_path(value):
     base = Path(value).resolve()
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
     require(base != runner_temp and owned(base, runner_temp), "proof must be below RUNNER_TEMP")
-    require(not re.search(r"[\s'\"&<>%]", str(base)), "unsupported renderer proof path")
+    require(not re.search(r"[\s'\"&<>%{};\\]", str(base)), "unsupported renderer proof path")
     return base
 
 
@@ -119,6 +119,39 @@ def verify_source(base, role):
             "immutable source changed")
 
 
+def network_guard_source(base):
+    # This proof needs no Python network sockets, including UNIX sockets.
+    # Native systemctl uses only the dedicated manager bus; launchctl and the
+    # fixed receipt program are bounded native children, outside Python's hook.
+    return ("import sys\nfrom pathlib import Path\n"
+            + "LOG = Path(" + repr(str(base / "evidence/forbidden-network.jsonl")) + ")\n"
+            + "def check(event, args):\n"
+            + "    if not event.startswith('socket.'):\n        return\n"
+            + "    with LOG.open('a') as out: out.write(event + '\\n')\n"
+            + "    raise PermissionError('installer proof refused Python networking')\n"
+            + "sys.addaudithook(check)\n"
+            + "sys._installer_network_guard = True\n")
+
+
+def install_network_guard(python, base, env):
+    """Install after downloads; .pth also covers env-cleared Python children."""
+    result = command([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                     env, base / "evidence/prepare.jsonl")
+    site = Path(result.stdout.strip())
+    require(owned(site, python.parent.parent), "venv site escaped private prefix")
+    (site / "_installer_network_guard.py").write_text(network_guard_source(base))
+    (site / "_installer_network_guard.pth").write_text("import _installer_network_guard\n")
+    command([python, "-c", "import sys; assert sys._installer_network_guard is True"],
+            env, base / "evidence/prepare.jsonl")
+
+
+def install_python_entrypoint(path, python):
+    # A symlink through private bin can lose venv prefix discovery and skip its
+    # .pth network guard. Exec the exact venv spelling instead (do not resolve).
+    path.write_text("#!/bin/bash\nexec " + shlex.quote(str(python)) + ' "$@"\n')
+    path.chmod(0o755)
+
+
 def prepare(value):
     base = base_path(value)
     require(not base.exists(), "proof directory must be fresh")
@@ -146,6 +179,7 @@ def prepare(value):
         command([sys.executable, "-m", "venv", venv], env, evidence / "prepare.jsonl", timeout=60)
         command([venv / "bin/python", "-m", "pip", "install", "-e", str(source)],
                 env, evidence / "prepare.jsonl", timeout=180)
+        install_network_guard(venv / "bin/python", base, env)
     save(base / "prepared.json", manifest)
     save(evidence / "provenance.json", {**manifest, "platform": platform.platform(),
                                        "python": sys.version})
@@ -167,8 +201,13 @@ def private_env(base, role):
 
 
 def parse_systemd(result):
-    require(result.returncode == 0, "systemd query failed; cannot establish absence")
-    data = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    require(result.returncode == 0 and not result.stderr, "systemd query failed; cannot establish absence")
+    data = {}
+    for line in result.stdout.splitlines():
+        require("=" in line, "invalid systemd property")
+        key, value = line.split("=", 1)
+        require(key not in data, "duplicate systemd property")
+        data[key] = value
     required = {"LoadState", "ActiveState", "FragmentPath"}
     require(required <= data.keys(), "incomplete systemd state")
     if data["LoadState"] == "not-found":
@@ -178,15 +217,72 @@ def parse_systemd(result):
     return {"present": True, "native": data}
 
 
+def launchd_fields(text, label):
+    """Read only exact top-level fields from launchctl's nested print format.
+
+    Its human-readable output is not a stable API. Unknown/ambiguous structure
+    is INVALID, never permission to remove a label. Nested fields cannot stand
+    in for the installed job's identity.
+    """
+    lines = text.splitlines()
+    require(lines and lines[0] == f"gui/{os.getuid()}/{label} = {{", "unexpected launchd job header")
+    fields, depth, arguments, in_arguments = {}, 1, [], False
+    for raw in lines[1:]:
+        line = raw.strip()
+        if not line:
+            continue
+        require(depth > 0, "trailing launchd query output")
+        if line == "}":
+            if in_arguments:
+                require(depth == 2, "nested launchd arguments")
+                fields["arguments"] = tuple(arguments)
+                in_arguments = False
+            depth -= 1
+            continue
+        if in_arguments:
+            require("{" not in line and "}" not in line, "unsupported launchd argument")
+            arguments.append(line)
+            continue
+        if depth == 1:
+            require(" = " in line, "invalid launchd field")
+            key, value = line.split(" = ", 1)
+            require(key not in fields, "duplicate launchd field")
+            fields[key] = value
+            if key == "arguments":
+                require(value == "{", "invalid launchd arguments")
+                in_arguments = True
+        # Unrelated nested sections may contain fields and arrows; braces are
+        # structural in this deliberately restricted receipt-only fixture.
+        depth += line.count("{") - line.count("}")
+        require(depth >= 1, "invalid launchd nesting")
+    require(depth == 0 and not in_arguments, "incomplete launchd query")
+    require({"program", "working directory", "arguments", "path"} <= fields.keys(),
+            "incomplete launchd identity")
+    return fields
+
+
 def parse_launchd(result, label):
     if result.returncode == 0:
-        require(label in result.stdout and "program = " in result.stdout, "incomplete launchd state")
+        require(not result.stderr, "launchd success mixed with error")
+        launchd_fields(result.stdout, label)
         return {"present": True, "native": result.stdout}
-    diagnostic = result.stderr
-    require(f'Could not find service "{label}" in domain' in diagnostic
-            and not any(x in diagnostic.lower() for x in ("permission", "not permitted", "denied")),
+    absent = f'Could not find service "{label}" in domain for user gui: {os.getuid()}'
+    known = {absent, absent + "\n", "Bad request.\n" + absent, "Bad request.\n" + absent + "\n"}
+    require(result.returncode == 113 and not result.stdout and result.stderr in known,
             "launchd query failed; cannot establish absence")
-    return {"present": False, "native": diagnostic}
+    return {"present": False, "native": result.stderr}
+
+
+def systemd_exec_identity(value):
+    # systemctl show prints one brace-delimited record per ExecStart command.
+    # The proof's paths/arguments forbid spaces, braces, semicolons and escapes;
+    # there is consequently one unambiguous literal argv serialization.
+    match = re.fullmatch(r"\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; "
+                         r"ignore_errors=no ; start_time=\[[^;{}]*\] ; "
+                         r"stop_time=\[[^;{}]*\] ; pid=[0-9]+ ; "
+                         r"code=[^;{}]+ ; status=[^;{}]+ \}", value)
+    require(match is not None, "unsupported native ExecStart format")
+    return match.group(1), tuple(match.group(2).split(" "))
 
 
 class Proof:
@@ -224,16 +320,26 @@ class Proof:
             return parse_systemd(result)
         return parse_launchd(self.native(["print", f"gui/{os.getuid()}/{label}"], check=False), label)
 
+    def receipt_argv(self, key):
+        return ("/usr/bin/env", "-i", "HOME=" + self.env["HOME"], "PATH=" + self.env["PATH"],
+                "/bin/bash", "--noprofile", "--norc", str(self.receipt_script),
+                self.labels[key], str(self.receipts))
+
     def identity(self, key, state):
         require(state["present"], "expected native label missing: " + key)
         owner = self.other if key == "foreign" else self.bot
+        expected_path = str(self.units / (self.labels[key] + self.ext))
         if sys.platform == "linux":
             native = state["native"]
-            require(native["FragmentPath"] == str(self.units / (self.labels[key] + self.ext)), "manager loaded foreign fragment")
+            require(native["FragmentPath"] == expected_path, "manager loaded foreign fragment")
             require(native.get("WorkingDirectory") == str(owner), "native owner differs")
-            require(str(self.receipt_script) in native.get("ExecStart", ""), "native program differs")
+            program, argv = systemd_exec_identity(native.get("ExecStart", ""))
         else:
-            require(str(owner) in state["native"] and str(self.receipt_script) in state["native"], "native owner/program differs")
+            fields = launchd_fields(state["native"], self.labels[key])
+            require(fields["path"] == expected_path, "manager loaded foreign plist")
+            require(fields["working directory"] == str(owner), "native owner differs")
+            program, argv = fields["program"], fields["arguments"]
+        require(program == "/usr/bin/env" and argv == self.receipt_argv(key), "native program/argv differs")
 
     def healthy(self, state):
         if not state["present"]:
@@ -241,7 +347,11 @@ class Proof:
         if sys.platform == "linux":
             row = state["native"]
             return all(row.get(k) == v for k, v in {"ActiveState": "active", "SubState": "exited", "Result": "success", "MainPID": "0"}.items())
-        return "state = not running" in state["native"] and "last exit code = 0" in state["native"]
+        # query already validated the job header; use exact top-level fields,
+        # never a matching substring inside an unrelated nested section.
+        label = state["native"].splitlines()[0].split("/")[-1].removesuffix(" = {")
+        row = launchd_fields(state["native"], label)
+        return row.get("state") == "not running" and row.get("last exit code") == "0"
 
     def await_state(self, key, present):
         deadline = time.monotonic() + 10
@@ -273,7 +383,8 @@ class Proof:
             target = shutil.which(name, path="/usr/bin:/bin:/usr/sbin:/sbin")
             require(target is not None, "native utility missing: " + name)
             (self.state / "bin" / name).symlink_to(target)
-        (self.state / "bin/python3").symlink_to(sys.executable)
+        install_python_entrypoint(self.state / "bin/python3", Path(sys.executable))
+        self.call([self.state / "bin/python3", "-c", "import sys; assert sys._installer_network_guard is True"])
         if sys.platform == "linux":
             (self.state / "bin/systemctl").symlink_to("/usr/bin/systemctl")
         for name in FORBIDDEN:
@@ -306,9 +417,7 @@ class Proof:
             spec = supervision.SupervisionSpec(
                 label=self.labels[key], description="disposable installer ownership proof",
                 bot_dir=owner, working_dir=owner, launcher=Path("/usr/bin/env"),
-                launcher_args=("-i", "HOME=" + self.env["HOME"], "PATH=" + self.env["PATH"],
-                               "/bin/bash", "--noprofile", "--norc", str(self.receipt_script),
-                               self.labels[key], str(self.receipts)),
+                launcher_args=self.receipt_argv(key)[1:],
                 environment={"PLANE_EMIT_DISABLED": "1"}, launchd_environment_extra={},
                 stop_command="true", stop_post_command="true",
                 stdout_log=owner / "stdout.log", stderr_log=owner / "stderr.log")
@@ -388,6 +497,7 @@ class Proof:
         require(not (self.evidence / "forbidden.log").exists(), "unexpected outbound/model/tool attempt")
         for p in (self.state / "channels", self.state / "sockets", self.state / "root/state/plane"):
             require(not list(p.iterdir()), "unexpected runtime artifact: " + str(p))
+        require(not (self.base / "evidence/forbidden-network.jsonl").exists(), "Python network attempted")
         verify_source(self.base, self.role)
 
     def cleanup(self):
@@ -511,13 +621,126 @@ def self_check():
                 with self.subTest(rc=rc, text=text), self.assertRaises(RuntimeError):
                     parse_systemd(subprocess.CompletedProcess([], rc, text, "query failed"))
 
-        def test_launchd_absence_requires_exact_label(self):
+        def test_launchd_absence_requires_exact_result_shape(self):
             label = "org.example.owned.worker"
-            good = f'Could not find service "{label}" in domain for user gui: 123\n'
-            self.assertFalse(parse_launchd(subprocess.CompletedProcess([], 113, "", good), label)["present"])
-            for err in ("", "Permission denied", good.replace(label, "other"), good + "Operation not permitted"):
-                with self.subTest(err=err), self.assertRaises(RuntimeError):
-                    parse_launchd(subprocess.CompletedProcess([], 1, "", err), label)
+            good = f'Could not find service "{label}" in domain for user gui: {os.getuid()}'
+            for err in (good, good + "\n", "Bad request.\n" + good, "Bad request.\n" + good + "\n"):
+                self.assertFalse(parse_launchd(subprocess.CompletedProcess([], 113, "", err), label)["present"])
+            bad = [(1, "", good), (0, "", good), (113, "unexpected body", good)]
+            bad += [(113, "", err) for err in ("", "Permission denied", good.replace(label, "other"),
+                    good + "\nUnknown query failure\n", good.replace("gui:", "user:"),
+                    good + "\n\n", good + "Operation not permitted", good + "0")]
+            for rc, out, err in bad:
+                with self.subTest(rc=rc, out=out, err=err), self.assertRaises(RuntimeError):
+                    parse_launchd(subprocess.CompletedProcess([], rc, out, err), label)
+
+        def native_state(self, proof, key):
+            owner = proof.other if key == "foreign" else proof.bot
+            argv = proof.receipt_argv(key)
+            if sys.platform == "linux":
+                return {"present": True, "native": {
+                    "FragmentPath": str(proof.units / (proof.labels[key] + proof.ext)),
+                    "WorkingDirectory": str(owner),
+                    "ExecStart": "{ path=/usr/bin/env ; argv[]=" + " ".join(argv)
+                        + " ; ignore_errors=no ; start_time=[Sat 2026-09-26 12:00:00 UTC] ; stop_time=[Sat 2026-09-26 12:00:01 UTC] ; pid=123 ; code=exited ; status=0 }"}}
+            return {"present": True, "native": (
+                f"gui/{os.getuid()}/{proof.labels[key]} = {{\n"
+                + f"\tpath = {proof.units / (proof.labels[key] + proof.ext)}\n"
+                + "\tprogram = /usr/bin/env\n\targuments = {\n"
+                + "".join("\t\t" + arg + "\n" for arg in argv) + "\t}\n"
+                + f"\tworking directory = {owner}\n"
+                + "\tstate = not running\n\tlast exit code = 0\n"
+                + "\tenvironment = {\n\t\tIGNORE => nested\n\t}\n}\n")}
+
+        def test_native_identity_requires_exact_owner_program_and_full_argv(self):
+            for platform_name in ("linux", "darwin"):
+                with self.subTest(platform=platform_name), tempfile.TemporaryDirectory() as directory, patch(__name__ + ".hosted_only"), patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}), patch.object(sys, "platform", platform_name):
+                    proof = Proof(Path(directory), "candidate")
+                    good = self.native_state(proof, "foreign")
+                    proof.identity("foreign", good)
+                    for old, new in ((str(proof.other), str(proof.other) + "-not-ours"),
+                                     ("/usr/bin/env", "/usr/bin/env-not-ours"),
+                                     (str(proof.receipt_script), str(proof.receipt_script) + "-not-ours"),
+                                     (proof.labels["foreign"], proof.labels["foreign"] + "-not-ours"),
+                                     (str(proof.receipts), str(proof.receipts) + "-not-ours")):
+                        bad = json.loads(json.dumps(good).replace(old, new))
+                        with self.subTest(old=old), self.assertRaises(RuntimeError):
+                            proof.identity("foreign", bad)
+                    if platform_name == "linux":
+                        bad = json.loads(json.dumps(good))
+                        bad["native"]["ExecStart"] += " " + bad["native"]["ExecStart"]
+                        with self.assertRaises(RuntimeError): proof.identity("foreign", bad)
+                    else:
+                        text = good["native"]
+                        parse_launchd(subprocess.CompletedProcess([], 0, text, ""), proof.labels["foreign"])
+                        self.assertTrue(proof.healthy(good))
+                        for changed in (text.replace("gui/", "user/", 1),
+                                        text.replace("\tprogram =", "\tprogram = other\n\tprogram ="),
+                                        text.replace("\tworking directory =", "\tworking directory = other\n\tworking directory ="),
+                                        text + "unrecognized trailing text\n",
+                                        text.replace("\targuments = {", "\targuments = not-a-list"),
+                                        text.replace("\tworking directory = " + str(proof.other) + "\n", "")):
+                            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                                proof.identity("foreign", {"present": True, "native": changed})
+                        self.assertFalse(proof.healthy({"present": True, "native": text.replace("last exit code = 0", "last exit code = 01")}))
+
+        def test_replaced_native_identity_blocks_cleanup_and_file_removal(self):
+            for platform_name in ("linux", "darwin"):
+                with self.subTest(platform=platform_name), tempfile.TemporaryDirectory() as directory, patch(__name__ + ".hosted_only"), patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}), patch.object(sys, "platform", platform_name):
+                    proof = self.cleanup_fixture(Path(directory))
+                    bad = json.loads(json.dumps(self.native_state(proof, "foreign")).replace(str(proof.other), str(proof.other) + "-not-ours"))
+                    proof.query = lambda key: bad if key == "foreign" else {"present": False}
+                    calls = []
+                    proof.native = lambda argv: calls.append(argv)
+                    proof.await_state = lambda key, present: {"present": False}
+                    result = proof.cleanup()
+                    self.assertTrue(result["errors"])
+                    self.assertTrue((proof.units / (proof.labels["foreign"] + proof.ext)).exists())
+                    self.assertFalse(any(proof.labels["foreign"] in str(call) for call in calls))
+                    self.assertEqual(result["before_cleanup"]["foreign"], bad)
+
+        def test_python_audit_denies_all_socket_events_before_effect(self):
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory); (base / "evidence").mkdir()
+                scope = {}
+                with patch.object(sys, "addaudithook") as install:
+                    exec(network_guard_source(base), scope)
+                    self.assertEqual(install.call_args.args, (scope["check"],))
+                scope["check"]("subprocess.Popen", ())  # fixed native commands remain available
+                for event in ("socket.__new__", "socket.connect", "socket.connect_ex", "socket.bind",
+                              "socket.sendto", "socket.sendmsg", "socket.getaddrinfo", "socket.gethostbyname",
+                              "socket.gethostbyaddr", "socket.getnameinfo"):
+                    with self.subTest(event=event), self.assertRaises(PermissionError):
+                        scope["check"](event, ())
+                self.assertEqual(len((base / "evidence/forbidden-network.jsonl").read_text().splitlines()), 10)
+
+        def test_private_python_entrypoint_keeps_cold_venv_guard(self):
+            # Offline interpreter startup only: no package download or service.
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory); (base / "evidence").mkdir()
+                env = {"HOME": str(base), "PATH": "/usr/bin:/bin", "TMPDIR": str(base), "PYTHONDONTWRITEBYTECODE": "1"}
+                venv = base / "venv"
+                subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)],
+                               env=env, check=True, capture_output=True, timeout=45)
+                python = venv / "bin/python"
+                def only_python(argv, child_env, log, **kwargs):
+                    self.assertEqual(str(argv[0]), str(python))
+                    return subprocess.run(list(map(str, argv)), env=child_env, text=True,
+                                          capture_output=True, check=True, timeout=15)
+                with patch(__name__ + ".command", side_effect=only_python):
+                    install_network_guard(python, base, env)
+                (base / "bin").mkdir()
+                entry = base / "bin/python3"
+                install_python_entrypoint(entry, python)
+                probe = ("import sys; assert sys._installer_network_guard is True; import socket\n"
+                         "try: socket.getaddrinfo('proof.invalid',80)\n"
+                         "except PermissionError: print('blocked')\n"
+                         "else: raise AssertionError('DNS escaped')\n")
+                for path in (python, entry):
+                    result = subprocess.run([str(path), "-c", probe], env=env, text=True,
+                                            capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "blocked\n")
 
         def test_identity_and_role_are_fixed(self):
             with patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}):
@@ -604,6 +827,8 @@ if __name__ == "__main__":
     if args.self_check:
         raise SystemExit(self_check())
     base = base_path(args.base)
+    if not args.prepare:
+        exec(network_guard_source(base), {})
     if args.prepare:
         prepare(base)
     elif args.run:
