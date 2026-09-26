@@ -12,6 +12,8 @@ cat > "$tmpdir/bot.conf" <<'CONF'
 export BOT_SERVICE=com.test.eng.alpha
 BOT_NAME=alpha
 export SOME_VAR="hello world"
+export MANAGER_TMUX=alpha  # this bot is a manager
+export QUOTED_HASH='a # b'
 CONF
 
 # Test 1: reads exported var
@@ -33,5 +35,16 @@ result=$(bot_conf_get "$tmpdir" SOME_VAR "fallback")
 # Test 5: missing bot.conf returns default
 result=$(bot_conf_get "/nonexistent/path" BOT_SERVICE "fallback")
 [ "$result" = "fallback" ] || { echo "FAIL: missing conf got '$result'"; exit 1; }
+
+# Test 6 (#910): the manager line as composed with its inline comment, still on
+# disk until a regenerate, reads back as the bare session name. It used to read
+# back with the comment: a session that does not exist.
+result=$(bot_conf_get "$tmpdir" MANAGER_TMUX "fallback")
+[ "$result" = "alpha" ] || { echo "FAIL: MANAGER_TMUX got '$result'"; exit 1; }
+
+# Test 7: CONTROL -- a hash inside quotes is data, not a comment. A strip that
+# fires on every hash (the naive fix) would pass Test 6 and fail here.
+result=$(bot_conf_get "$tmpdir" QUOTED_HASH "fallback")
+[ "$result" = "a # b" ] || { echo "FAIL: QUOTED_HASH got '$result'"; exit 1; }
 
 echo "PASS: all bot_conf_get tests passed"
