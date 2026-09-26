@@ -81,7 +81,8 @@ from .emit_api import emit_batch
 from .writer import PlaneWriter
 from .ids import ensure_host_uid
 from .migrations import SCHEMA_USER_VERSION, DowngradeError, migrate
-from .spool import SpoolWriteError, _mkdir_fsynced, drain, quarantine_entry
+from .spool import (SpoolWriteError, _mkdir_fsynced, drain_pass as drain,
+                    quarantine_entry, DrainBudget, RecoveryCursor, _read_claimed_json)
 
 # One line carries one batch; communications bodies cap at 16KiB each, so
 # 4MiB bounds any sane batch while refusing a runaway/hostile writer.
@@ -264,6 +265,11 @@ class PlaneDaemon:
         self._listener: Optional[socket.socket] = None
         self._last_drain = 0.0
         self._next_replay = 0.0
+        self._spool_backlog = False
+        self._stage_backlog = False
+        self._last_recovery = "spool"
+        self._spool_cursor = RecoveryCursor()
+        self._stage_cursor = RecoveryCursor()
         self._own_uid = os.geteuid()
         self._lock_fd: Optional[int] = None
         self._sock_stat: Optional[tuple[int, int]] = None
@@ -329,14 +335,19 @@ class PlaneDaemon:
     def _drain_spool(self, *, reason: str) -> None:
         # Deadline advances at ATTEMPT, not success: stamping only on success
         # made a broken db retry once per accept-timeout tick (~1s) forever,
-        # ignoring the configured interval.
-        self._last_drain = time.monotonic()
+        # ignoring the configured interval. Fast backlog passes do not reset
+        # the retry clock: sustained healthy backlog must not starve retries.
+        if reason != "backlog":
+            self._last_drain = time.monotonic()
+        self._spool_backlog = False
+        if reason != "backlog":
+            self._spool_cursor.clear_deferred_retries()
         try:
             conn = connect(db_path(self.root))
             try:
                 migrate(conn)
                 host = ensure_host_uid(self.root / "state")
-                report = drain(self.root, conn, host)
+                report = drain(self.root, conn, host, cursor=self._spool_cursor)
             finally:
                 conn.close()
         except DowngradeError as exc:
@@ -349,13 +360,21 @@ class PlaneDaemon:
             print(f"plane-daemon: spool drain failed ({reason}): {exc}",
                   file=sys.stderr)
             return
-        if report.ingested or report.duplicates or report.quarantined:
+        # Retry-only envelopes retain the normal interval; an outage must not
+        # spend the retry cap in a fast continuation loop.
+        self._spool_backlog = report.budget_exhausted
+        if report.processed or report.budget_exhausted or report.release_errors:
             self._emit_system("spool_drain_completed", {
                 "reason": reason,
                 "ingested": report.ingested,
                 "duplicates": report.duplicates,
                 "quarantined": report.quarantined,
                 "remaining": report.remaining,
+                "processed": report.processed,
+                "payload_bytes": report.payload_bytes,
+                "budget_exhausted": report.budget_exhausted,
+                "more_work": report.more_work,
+                "release_errors": list(report.release_errors),
             })
 
     def _replay_staged(self) -> None:
@@ -365,30 +384,74 @@ class PlaneDaemon:
         the pre-minted ids). Never through drain(), which ingests spool
         entries as-is because they are stored policy-applied."""
         self._next_replay = time.monotonic() + 1.0
+        self._stage_backlog = False
+        budget = DrainBudget()
+        started = time.monotonic()
         sd = staged_dir(self.root)
+        batches = []
+        payload_bytes = visited = processed = 0
+        exhausted = False
         try:
             if not sd.is_dir():
-                _mkdir_fsynced(sd, 0o700)   # the handshake the client stages on
-            batches = sorted(p for p in sd.iterdir() if p.name.endswith(".batch"))
+                _mkdir_fsynced(sd, 0o700)
+            while visited < budget.max_entries and (visited == 0 or time.monotonic() - started < budget.max_elapsed_s):
+                path = self._stage_cursor.next(sd)
+                if path is None:
+                    exhausted = True
+                    break
+                visited += 1
+                if not path.name.endswith(".batch") or not path.is_file():
+                    continue
+                try:
+                    size = path.stat().st_size
+                except FileNotFoundError:
+                    continue
+                if batches and payload_bytes + size > budget.max_bytes:
+                    self._stage_cursor.defer(path)
+                    break
+                batches.append((path, size))
+                payload_bytes += size
+                if payload_bytes >= budget.max_bytes:
+                    break
         except OSError:
-            return                          # a broken root: the cold rung keeps recording
-        for f in batches:
+            self._stage_cursor.close()
+            return  # broken root: the cold rung keeps recording
+        # Staged filenames carry the producer's time_ns admission clock.
+        # Preserve that existing order within this batch, not across passes.
+        for f, size in sorted(batches):
+            if processed and time.monotonic() - started >= budget.max_elapsed_s:
+                break
             try:
-                emit_batch(self.root, json.loads(f.read_text())["events"],
-                           conn_factory=self.writer.connection)
+                try:
+                    emit_batch(self.root, _read_claimed_json(f, size)["events"],
+                               conn_factory=self.writer.connection)
+                except FileNotFoundError:
+                    pass
+                except (ValueError, KeyError, TypeError) as exc:
+                    why = "contract violation" if isinstance(exc, ContractViolation) else "malformed batch"
+                    quarantine_entry(self.root, f, f"{why} on replay: {exc}", as_name=f.stem + ".json")
+                else:
+                    self.writer.after_batch()
+                    f.unlink()
             except DowngradeError as exc:
                 raise self._downgrade_exit(exc) from None
-            except (ValueError, KeyError, TypeError) as exc:  # ContractViolation is a ValueError
-                why = "contract violation" if isinstance(exc, ContractViolation) else "malformed batch"
-                quarantine_entry(self.root, f, f"{why} on replay: {exc}", as_name=f.stem + ".json")
-                continue
-            except Exception as exc:  # noqa: BLE001 — disclosed; kept for a later tick
-                print(f"plane-daemon: staged replay failed ({f.name}): {exc}",
-                      file=sys.stderr)
+            except Exception as exc:  # disclosed, retained and backed off
+                print(f"plane-daemon: staged replay failed ({f.name}): {exc}", file=sys.stderr)
+                self._stage_cursor.close()
                 self._next_replay = time.monotonic() + 30.0
                 return
-            self.writer.after_batch()
-            f.unlink()
+            processed += 1
+        if processed < len(batches):
+            self._stage_cursor.close()  # revisit selected but unprocessed names
+        self._stage_backlog = not exhausted or processed < len(batches)
+        if self._stage_backlog:
+            self._next_replay = time.monotonic()
+        if processed or self._stage_backlog:
+            self._emit_system("spool_drain_completed", {
+                "reason": "staged", "processed": processed,
+                "payload_bytes": payload_bytes, "remaining": None if self._stage_backlog else 0,
+                "budget_exhausted": self._stage_backlog, "more_work": self._stage_backlog,
+            })
 
     # -- request handling ---------------------------------------------------
     def _handle(self, conn: socket.socket) -> None:
@@ -602,39 +665,56 @@ class PlaneDaemon:
             self._drain_spool(reason="startup")
             self._optimize()
             while not self._stop:
-                if time.monotonic() - self._last_drain >= self.drain_interval:
-                    self._drain_spool(reason="interval")
-                    self._optimize()
-                if time.monotonic() >= self._next_replay:
-                    self._replay_staged()
+                # Every recovery pass, including startup, is followed by an
+                # accept opportunity. Two queues cannot consume two turns first.
+                self._listener.settimeout(0.01 if self._spool_backlog or self._stage_backlog else 1.0)
                 try:
                     conn, _ = self._listener.accept()
                 except socket.timeout:
-                    continue
+                    conn = None
                 except OSError as exc:
                     if exc.errno == errno.EBADF or self._stop:
                         break
                     raise
-                try:
-                    # 5s, not 30: the loop is serial, so one stalled client
-                    # holds every healthy one for the whole read deadline —
-                    # a partial-sender costs the fleet 5s of ingest, not 30.
-                    # This settimeout bounds only accept-to-first-recv; the
-                    # TOTAL read bound lives in _recv_line (trickle defense).
-                    conn.settimeout(5.0)
-                    self._handle(conn)
-                except OSError as exc:
-                    # A slow/vanished/hostile CLIENT (read timeout, reset) is
-                    # that connection's problem, never the daemon's: one bad
-                    # peer must not kill the recorder for every good one.
-                    print(f"plane-daemon: connection dropped: {exc}",
-                          file=sys.stderr)
-                finally:
+                if conn is not None:
                     try:
-                        conn.close()
-                    except OSError:
-                        pass
+                        # 5s, not 30: the loop is serial, so one stalled client
+                        # holds every healthy one for the whole read deadline —
+                        # a partial-sender costs the fleet 5s of ingest, not 30.
+                        # This settimeout bounds only accept-to-first-recv; the
+                        # TOTAL read bound lives in _recv_line (trickle defense).
+                        conn.settimeout(5.0)
+                        self._handle(conn)
+                    except OSError as exc:
+                        # A slow/vanished/hostile CLIENT (read timeout, reset) is
+                        # that connection's problem, never the daemon's: one bad
+                        # peer must not kill the recorder for every good one.
+                        print(f"plane-daemon: connection dropped: {exc}",
+                              file=sys.stderr)
+                    finally:
+                        try:
+                            conn.close()
+                        except OSError:
+                            pass
+                if self._stop:
+                    break
+                now = time.monotonic()
+                retry_due = now - self._last_drain >= self.drain_interval
+                spool_due = self._spool_backlog or retry_due
+                staged_due = now >= self._next_replay
+                if spool_due and (not staged_due or self._last_recovery != "spool"):
+                    continuation = self._spool_backlog and not retry_due
+                    self._drain_spool(reason="backlog" if continuation else "interval")
+                    if not continuation:
+                        self._optimize()
+                    self._last_recovery = "spool"
+                elif staged_due:
+                    self._replay_staged()
+                    self._last_recovery = "staged"
+
         finally:
+            self._spool_cursor.close()
+            self._stage_cursor.close()
             if not self._downgrading:
                 # A stopping receipt cannot commit against a db this process
                 # refuses — attempting it only prints a second, confusing
