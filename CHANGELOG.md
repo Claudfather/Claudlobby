@@ -15,6 +15,24 @@ receive a framed dispatch. The check is now a short fixed section of the
 so there is one copy. It reaches a running bot at its next restart after a
 `generate`.
 
+### Added — `pull-root`: the compositor root pulls itself, and watches what it did (#1251)
+
+A merged framework fix was inert on every host until someone pulled
+`$CLAUDLOBBY_ROOT` by hand, and nothing owned that pull. `lib/pull-root.sh` is
+an opt-in host job (it mutates operator source), daily at 07:00 host-local. It
+fast-forwards to `repo_currency_target` and never past a hold. It refuses any
+dirty tree and names the paths. It restarts the plane daemon and view when
+`claudlobby/` moved. It then watches every fleet on the host for 15 minutes and
+pages once on a regression: a new critical event type, a `script_error` from a
+script the pull changed, a bot that stopped heartbeating, a failed restart, or a
+read that could not run. When the pull added a plane migration, the page carries
+the revert runbook. Every run lands one `source_pull` record on the plane. A
+hold in the host override (`host.jobs.pull-root.hold`) pins the host at a sha,
+readable through the new `claudlobby host-job <name>`. It runs from inside the
+tree it pulls: git replaces a changed file's inode, so a running script
+finishes on its old bytes, and `update-siblings.sh`'s comment claiming
+otherwise is corrected.
+
 ### Fixed — a long dispatch no longer arrives with its envelope framed as pasted text, and a framed one can be verified (#1876)
 
 Dispatches now cross the pane in 400-byte chunks instead of 900. The receiving
