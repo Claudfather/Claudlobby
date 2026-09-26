@@ -2,7 +2,7 @@
 
 Three scripts historically answered "is this bot busy?" with three different
 pane regexes: keepalive.sh (marker-first + `esc to interrupt`), sprint-trigger.sh
-(a spinner-verb list), and bot-sweep-cron.sh (a different verb list). The verb
+(a spinner-verb list; since retired), and bot-sweep-cron.sh (a different verb list). The verb
 lists silently degrade when Claude Code's rendering changes.
 
 This suite pins the single source of truth in lib-common.sh:
@@ -218,12 +218,6 @@ def test_bot_is_busy_unresolvable_session_falls_back_to_pane(tmp_path):
 
 
 # --- cross-script agreement: no private regexes left ----------------------------
-
-
-def test_sprint_trigger_uses_ssot():
-    src = (LIB_DIR / "sprint-trigger.sh").read_text()
-    assert "bot_is_busy" in src
-    assert "Prestidigitating" not in src, "private verb regex must be gone"
 
 
 def test_bot_sweep_cron_uses_ssot():

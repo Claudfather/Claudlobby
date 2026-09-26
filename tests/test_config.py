@@ -250,7 +250,6 @@ class TestCoerceBot:
         assert bot.mcp == []
         assert bot.skills == []
         assert bot.guardrails == []
-        assert bot.bench is False
 
     def test_headless_config_defaults_overridable(self):
         """The 4 headless config defaults are fleet.yaml-overridable per bot."""
@@ -317,20 +316,6 @@ class TestCoerceBot:
         )
         assert bot2.skip_auto_permission_prompt is False
         assert bot2.skip_dangerous_mode_permission_prompt is False
-
-    def test_bench_from_bot(self):
-        bot = _coerce_bot("test", {"expertise": ["eng"], "bench": True}, {})
-        assert bot.bench is True
-
-    def test_bench_from_defaults(self):
-        bot = _coerce_bot("test", {"expertise": ["eng"]}, {"bench": True})
-        assert bot.bench is True
-
-    def test_bench_bot_overrides_defaults(self):
-        bot = _coerce_bot(
-            "test", {"expertise": ["eng"], "bench": False}, {"bench": True}
-        )
-        assert bot.bench is False
 
     def test_defaults_merge(self):
         defaults = {

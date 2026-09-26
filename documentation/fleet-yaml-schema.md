@@ -116,7 +116,6 @@ fleet:
         require_mention: true | false
         chat_id: "<override>"
       startup_prompt: <string>
-      bench: true | false                 # OPTIONAL — benchmarking target (default: false)
       dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
@@ -746,10 +745,6 @@ Composes into `bot.conf` as `export GOOGLE_SERVICE_ACCOUNT_JSON="$FLEET_ROOT/sec
 — the path is derived and migration-safe, but the *file itself* (like any fleet secret) belongs in
 `local/<fleet>/` and is never committed. Fleet-then-bot merged, bot winning, same shape as `env:`.
 
-### `bots.<name>.bench`
-
-Boolean (default `false`). Marks this bot as the fleet's benchmarking target for cold-start timing (`lib/bench-cold-start.sh`). Multi-bot fleets should set `bench: true` on exactly one bot so the benchmarking script knows which bot to measure. The validator warns if a fleet has multiple bots and none has `bench: true`.
-
 ### `bots.<name>.permission_mode`
 
 String (default `null`). Sets the `--permission-mode` flag on the Claude Code CLI, providing more granular control than `dangerously_skip_permissions`. When set, this field takes precedence over `dangerously_skip_permissions`. When **neither** this nor `dangerously_skip_permissions` is set, the compositor emits a conservative default of `--permission-mode acceptEdits` — edits are auto-accepted while the composed allow/deny lists are still enforced.
@@ -965,7 +960,6 @@ does not own.
 - **Warn** — `voice:` path doesn't resolve
 - **Warn** — `telegram.token_env` env var not set
 - **Warn** — `teams.<X>.workers` references a bot not defined in `bots:`
-- **Warn** — fleet has multiple bots but none has `bench: true` — benchmarking won't know which bot to measure
 - **Warn** — `claudron_vault_path` is set but the `claudron` CLI is not on PATH, or the path does not resolve to a vault
 
 Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI use).
