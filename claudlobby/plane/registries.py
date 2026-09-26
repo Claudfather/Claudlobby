@@ -123,6 +123,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "briefing_deferred": "notice",
     "briefing_dispatched": "notice",
     "briefing_failed": "notice",
+    # #1826: a slot that was missed, sent once as a FLEET NOTICE. notice -- the
+    # notice path's own manager push and Telegram line are the page.
+    "briefing_missed": "notice",
     # manager check-in (spec section 5): the beat fired, or it did not and why.
     # Ratelimit and unreachable are deliberately NOT rows -- the first is
     # derivable from checkin_triggered, the second cannot reach the plane.
