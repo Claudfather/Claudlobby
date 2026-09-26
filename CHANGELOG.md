@@ -19,6 +19,22 @@ prints the plane's delivery verdict and the recorded sender. The receiver hook
 also undoes the harness's escaping of a quoted `<pasted_content` tag. Until now
 that escaping made any dispatch that mentions the tag read as altered.
 
+### Added — a host's own override for host jobs, outside the tracked tree (#1251)
+
+Arming, disarming or pausing a host job meant editing the package-owned
+`claudlobby/system.yaml`, which left the install's tree dirty: the 2026-09-26
+root pull had to carry one such pause with `--autostash`, and on a collision
+autostash exits 0 with conflict markers in the file. A host now changes its host
+jobs in `~/.config/claudlobby/system.yaml` (`$CLAUDLOBBY_HOST_SYSTEM_YAML` names
+another file), read by `config.load_host_jobs`. The override is merged per job
+and per field, so arming one job leaves every other job as shipped. It covers
+`host.jobs` only. A file that cannot take effect (a parse error, a misspelt
+field, a quoted `enroll`) is refused rather than skipped, and a job the install
+does not ship is logged and ignored, and while the file is refused
+`doctor --switches` shows every host-job state as unknown, never the shipped
+default. The switch table's arming recipe and the
+docs now name the file.
+
 ### Fixed — a briefing timer could fire `/briefing` into a bot without the skill (#1819)
 
 A `briefing:` stanza composed the bot's timers but linked the `briefing` skill

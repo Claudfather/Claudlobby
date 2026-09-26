@@ -23,6 +23,14 @@ def _isolate_claudlobby_root(monkeypatch):
     monkeypatch.delenv("CLAUDLOBBY_ROOT", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_host_override(monkeypatch):
+    """A host that runs the suite may carry a real host override
+    (~/.config/claudlobby/system.yaml, #1251). Point the loader at a file that
+    does not exist, or every host-job assertion reads that host's pauses."""
+    monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", "/nonexistent/claudlobby-host-override.yaml")
+
+
 # Captures chat id, the (expanded) state dir the caller resolved, and the
 # message — the observation point for the emit_* fleet-signal paths.
 TG_STUB = (
