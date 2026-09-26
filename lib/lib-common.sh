@@ -5504,11 +5504,13 @@ emit_fleet_notice() {
 # the surface it exists to cover (#844). Arming it at the single call site means
 # no caller of this helper can forget it. That binds callers only: a script that
 # hand-rolls its own bare `trap … ERR` instead of calling this is not covered and
-# still has the #844 defect. Safe to arm because
-# errtrace is control-flow neutral (it changes only whether the trap runs, never
-# whether a script aborts) and deliberate tolerance stays silent: bash suppresses
-# the ERR trap in the same contexts it suppresses errexit — `f || true`, `if f`,
-# `f && g` — and that suppression is inherited by callees.
+# still has the #844 defect. Errtrace changes trap inheritance, not errexit.
+# Direct deliberate tolerance stays silent: bash suppresses the ERR trap in
+# `f || true`, `if f`, and `f && g`, including through nested function calls.
+# Command substitutions are a separate boundary: native Bash 3.2 can still emit
+# from `f() { echo "$(fn)"; }; f || true`, unlike the measured Bash 5.2 behavior.
+# Guard an expected failure INSIDE its substitution (`$(fn || true)`) when its
+# silence is required on both interpreters. An outer guard alone is not enough.
 #
 # The handler's stdout is discarded because under errtrace the trap fires INSIDE
 # the failing command substitution, so anything it printed would be captured as
