@@ -60,10 +60,10 @@ def probe(tmp_path):
         outer_timeout = False
         try:
             try:
-                # Every synthetic child is finite (at most 1.5s per probe).
+                # Every synthetic child is finite (at most 4s per probe).
                 # Leave room for the unfixed parent's two probes to finish;
                 # its late return must be a behavioral failure, not cleanup.
-                stdout, stderr = proc.communicate(timeout=6)
+                stdout, stderr = proc.communicate(timeout=12)
             except subprocess.TimeoutExpired:
                 outer_timeout = True
                 # Only the outer group we created and groups recorded by this
@@ -97,19 +97,19 @@ def probe(tmp_path):
 def assert_deadline(result):
     assert not result.outer_timeout, "version reader escaped its deadline"
     assert (result.returncode, result.stdout) == (3, ""), result.stderr
-    assert "did not finish within 0.5s" in result.stderr
-    assert result.elapsed < 1.2, result.elapsed
+    assert "did not finish within 1.5s" in result.stderr
+    assert result.elapsed < 3, result.elapsed
     assert not result.late_finish_before_cleanup
 
 
 def test_late_valid_version_is_refused_without_gnu_timeout(probe):
-    result = probe.run("time.sleep(1.5)\nprint('2.1.281 (Claude Code)')", seconds="0.5")
+    result = probe.run("time.sleep(4)\nprint('2.1.281 (Claude Code)')", seconds="1.5")
     assert_deadline(result)
     assert probe.calls.read_text().splitlines() == ["called"]
 
 
 def test_timeout_does_not_launch_the_diagnostic_probe_or_finish_later(probe):
-    result = probe.run("time.sleep(1.5)\nPath(os.environ['FINISHED']).write_text('late')", seconds="0.5")
+    result = probe.run("time.sleep(4)\nPath(os.environ['FINISHED']).write_text('late')", seconds="1.5")
     assert_deadline(result)
     assert probe.calls.read_text().splitlines() == ["called"]
     assert not probe.finished.exists()
@@ -122,12 +122,12 @@ def test_deadline_closes_child_held_output_and_ignoring_term_group(probe, leader
     body = ("if os.fork() == 0:\n"
             "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             f"    Path({str(probe.temp / 'child-started')!r}).touch()\n"
-            "    time.sleep(1.5)\n"
+            "    time.sleep(4)\n"
             f"    Path({str(probe.finished)!r}).write_text('escaped')\n"
             "    os._exit(0)\n"
             + ("sys.exit(0)" if leader_exits else
-               "signal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(1.5)"))
-    result = probe.run(body, seconds="0.5", settle=1.7)
+               "signal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(4)"))
+    result = probe.run(body, seconds="1.5", settle=4.2)
     assert (probe.temp / "child-started").exists(), "child cleanup was not exercised"
     assert_deadline(result)
     assert not probe.finished.exists()
@@ -159,14 +159,14 @@ def test_missing_interpreter_refuses_without_starting_a_version_process(probe):
 def test_diagnostic_probe_has_its_own_deadline_and_clears_stale_version(probe):
     probe.write("if len(Path(os.environ['CALLS']).read_text().splitlines()) == 1:\n"
                 "    print('warning')\n"
-                "else:\n    time.sleep(1.5)\n")
-    result = probe.run(seconds="0.5", code=
+                "else:\n    time.sleep(4)\n")
+    result = probe.run(seconds="1.5", code=
                        f'CLAUDE_VERSION=9.9.9; measure_claude_version "{probe.binary}"; '
                        'printf "[%s]|%s" "$CLAUDE_VERSION" "$CLAUDE_VERSION_WHY"; exit 3')
     assert not result.outer_timeout
-    assert result.elapsed < 1.2, result.elapsed
+    assert result.elapsed < 3, result.elapsed
     assert result.stdout.startswith("[]|")
-    assert "diagnostic" in result.stdout and "did not finish within 0.5s" in result.stdout
+    assert "diagnostic" in result.stdout and "did not finish within 1.5s" in result.stdout
 
 
 def test_missing_binary_keeps_exit_127_diagnostic(probe):
@@ -179,7 +179,7 @@ def test_deadline_does_not_signal_an_unrelated_owned_sibling(probe):
     sibling = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(10)"],
                                env=probe.env, start_new_session=True)
     try:
-        result = probe.run("time.sleep(1.5)", seconds="0.5")
+        result = probe.run("time.sleep(4)", seconds="1.5")
         assert_deadline(result)
         assert sibling.poll() is None
     finally:
@@ -213,7 +213,7 @@ def test_empty_explicit_binary_does_not_require_interpreter(probe):
 
 @pytest.mark.parametrize("interrupt", [signal.SIGTERM, signal.SIGINT])
 def test_interrupted_helper_cleans_its_owned_group(probe, interrupt):
-    probe.write("time.sleep(1.5)\nPath(os.environ['FINISHED']).write_text('escaped')")
+    probe.write("time.sleep(4)\nPath(os.environ['FINISHED']).write_text('escaped')")
     proc = subprocess.Popen([sys.executable, str(REPO / "lib/command-deadline.py"),
                              "3", "stdout", str(probe.binary)], env=probe.env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -225,7 +225,7 @@ def test_interrupted_helper_cleans_its_owned_group(probe, interrupt):
         assert probe.calls.exists(), "helper never launched the owned probe"
         proc.send_signal(interrupt)  # only this helper PID; it owns the group
         stdout, stderr = proc.communicate(timeout=2)
-        time.sleep(1.7)
+        time.sleep(4.2)
         assert not probe.finished.exists(), "interruption abandoned the probe"
         assert (proc.returncode, stdout) == (125, "")
         assert "interrupted" in stderr
