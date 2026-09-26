@@ -12,7 +12,7 @@
 # Claude Code fires the skill, instead of the old set +H; degraded prose. Skips
 # with a logged briefing_deferred event when the bot is busy or its session is
 # absent — briefings are time-sensitive, so skip-and-log beats queue
-# (sprint-trigger precedent).
+# (skip-and-log precedent).
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -46,7 +46,6 @@ lib/setup-fleet <fleet>
 # Or piecewise, per bot / per timer:
 lib/install-bot-systemd.sh local/<fleet>/runtime/bots/<bot>
 lib/install_fleet_timer.sh keepalive <fleet>     # any composed fleet timer by name
-lib/install-creds-check-systemd.sh <fleet>       # per-timer thin wrappers still work
 lib/install-code-audit-sweep-systemd.sh <fleet>  # nightly code-audit sweep (only if fleet.sweep set)
 ```
 
@@ -54,46 +53,9 @@ Units land in `~/.config/systemd/user/`. View with `systemctl --user list-timers
 
 See [pi-setup-guide.md](./runbooks/pi-setup-guide.md) for full host setup.
 
-## Pattern 3 — cron + tmux
+## Pattern 3 — cron + tmux (retired)
 
-```bash
-# One-time, per fleet — installs everything as crontab entries:
-#   - Per-bot keepalive (every 30 min, staggered)
-#   - Weekly log rotation (Sunday 03:00) — lib/-level logs only, see note below
-#   - Fleet pulse (every 5 min by default, derived from OBSERVABILITY_PULSE_INTERVAL)
-#   - Daily creds-check (09:00) — pass --no-creds-check to skip
-lib/install-cron.sh --fleet <name>
-
-# Inspect what would change without writing:
-lib/install-cron.sh --fleet <name> --dry-run
-```
-
-Bots are still tmux sessions — start them once with `lib/start-bot.sh <bot-dir>` (or via a `@reboot` cron entry — see below). Cron's `keepalive.sh` ticks restart any session that died.
-
-`install-cron.sh` writes a single managed block bracketed by:
-
-```
-# BEGIN claudlobby:<fleet>
-…
-# END claudlobby:<fleet>
-```
-
-Anything outside that block is preserved on re-run. To remove the block entirely, edit `crontab -e` and delete it.
-
-**Scope notes:**
-- The weekly log rotation only targets five `lib/`-level log files (`keepalive.log`, `keepalive-all.log`, `bot-sweep-cron.log`, `disk-monitor.log`, `creds-check.log`) — it does not rotate per-bot logs (`runtime/bots/<bot>/keepalive.log`, `<bot>/logs/startup.log`, `<bot>/data/events/*.jsonl`). For the same comprehensive per-bot coverage Patterns 1/2 get automatically from their composed `log-rotation` timer, add a weekly cron line for `lib/log-rotate-fleet.sh --fleet <name>` yourself.
-- Disk-usage monitoring and the other host-wide jobs (`disk-monitor`, `claude-update`, `notify-behind`, `fleet-memory-check`) are **not** installed by `install-cron.sh` — they're host jobs enrolled once per host by `lib/setup-system` (`disk-monitor` runs daily at 05:00), independent of which bot-supervision pattern you use. Run `lib/setup-system` on this host if you haven't already.
-
-### Adding bot startup at reboot (cron)
-
-Cron does not auto-start tmux sessions on boot. To bring bots up after a Pi reboot:
-
-```bash
-# Add to crontab manually (one entry per bot):
-@reboot sleep 60 && /path/to/lib/start-bot.sh /path/to/runtime/bots/<bot>
-```
-
-The `sleep 60` gives the network and Tailscale time to come up before Claude Code tries to authenticate.
+`lib/install-cron.sh` was a third supervision plane that neither first-class host used; it was removed. Supervise with systemd user units (Pattern 2) or launchd (Pattern 1) — `lib/setup-fleet <fleet>` enrolls every composed job on either.
 
 ## Generic helpers (used by all patterns)
 
