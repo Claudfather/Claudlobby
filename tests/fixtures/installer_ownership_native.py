@@ -1,0 +1,614 @@
+"""Native #1811 evidence, exclusively on opted-in disposable hosted runners.
+
+The historical installers/renderers are unmodified. Labels, installed files,
+HOME and harmless receipt programs are owned by this proof. A distinct Linux
+user manager is mandatory: changing HOME cannot redirect a running manager.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import platform
+import pwd
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import time
+
+PARENT = "5943907f0bd076cb44cd77f4e67d6d6bdfa87467"
+CANDIDATE = "beb4e35dcdfa51b51a17b306f0421d274c701698"
+FORBIDDEN = ("tmux", "claude", "codex", "curl", "wget", "gh", "git", "ssh",
+             "scp", "telegram", "claudlobby", "npm", "npx", "osascript", "open")
+UTILITIES = ("basename", "dirname", "mkdir", "id", "cp", "rm", "grep", "sed",
+             "tr", "awk", "date", "mktemp", "uname", "bash", "cat", "sleep")
+ROLES = {"parent": PARENT, "candidate": CANDIDATE}
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def hosted_only():
+    require(os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+            and os.environ.get("CLAUDLOBBY_INSTALLER_NATIVE_PROOF") == "1",
+            "refused: installer proof requires opted-in disposable GitHub-hosted runner")
+
+
+def owned(path, root):
+    return Path(path).resolve().is_relative_to(Path(root).resolve())
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def load(path):
+    return json.loads(Path(path).read_text())
+
+
+def token():
+    run, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    require(run.isdigit() and attempt.isdigit(), "missing numeric hosted run identity")
+    value = "i1811" + run + "a" + attempt
+    require(len(value) < 31, "run identity too long")
+    return value
+
+
+def base_path(value):
+    hosted_only()
+    base = Path(value).resolve()
+    runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+    require(base != runner_temp and owned(base, runner_temp), "proof must be below RUNNER_TEMP")
+    require(not re.search(r"[\s'\"&<>%]", str(base)), "unsupported renderer proof path")
+    return base
+
+
+def command(argv, env, log, *, timeout=20, check=True, grouped=True):
+    """Bound one owned client process group; never signal manager/service PIDs."""
+    hosted_only()
+    with subprocess.Popen([str(a) for a in argv], env=env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          start_new_session=grouped) as proc:
+        expired = False
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            expired = True
+            if not grouped:
+                require(os.getpid() == os.getpgrp(), "refused non-owned timeout process group")
+                with Path(log).open("a") as stream:
+                    stream.write(json.dumps({"argv": [str(a) for a in argv], "timeout": True, "arm_group": os.getpgrp()}) + "\n")
+                # The outer controller owns this arm group and performs the
+                # persisted-label cleanup even if this entire arm is killed.
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)
+            out, err = proc.communicate(timeout=10)
+        result = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    with Path(log).open("a") as stream:
+        stream.write(json.dumps({"argv": [str(a) for a in argv], "rc": result.returncode,
+                                "stdout": out, "stderr": err, "timeout": expired, "observed_at": time.time()}) + "\n")
+    require(not expired, "native command timed out; evidence INVALID")
+    if check:
+        require(result.returncode == 0, "command failed: " + repr(argv) + "\n" + out + err)
+    return result
+
+
+def verify_source(base, role):
+    manifest = load(base / "prepared.json")
+    source = base / (role + "-source")
+    require(manifest["revisions"][role] == ROLES[role], "source pin mismatch")
+    require(all(digest(source / p) == h for p, h in manifest["hashes"][role].items()),
+            "immutable source changed")
+
+
+def prepare(value):
+    base = base_path(value)
+    require(not base.exists(), "proof directory must be fresh")
+    base.mkdir(mode=0o755)
+    evidence = base / "evidence"
+    evidence.mkdir()
+    (base / "home").mkdir(mode=0o700)
+    # Downloads happen during preparation, before the closed installer phase.
+    env = {"PATH": os.environ["PATH"], "HOME": str(base / "home"),
+           "TMPDIR": str(base), "PYTHONDONTWRITEBYTECODE": "1", "LANG": "C.UTF-8"}
+    manifest = {"revisions": ROLES, "controller": digest(__file__), "token": token(), "hashes": {}}
+    for role, sha in ROLES.items():
+        source = base / (role + "-source")
+        source.mkdir()
+        data = subprocess.check_output(["git", "archive", sha], timeout=30)
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            for item in archive.getmembers():
+                require(owned(source / item.name, source) and not item.isdev(), "unsafe archive member")
+                if item.issym() or item.islnk():
+                    require(owned(source / item.name / ".." / item.linkname, source), "unsafe archive link")
+            archive.extractall(source)
+        manifest["hashes"][role] = {str(p.relative_to(source)): digest(p)
+            for p in source.rglob("*") if p.is_file() and not p.is_symlink()}
+        venv = base / (role + "-venv")
+        command([sys.executable, "-m", "venv", venv], env, evidence / "prepare.jsonl", timeout=60)
+        command([venv / "bin/python", "-m", "pip", "install", "-e", str(source)],
+                env, evidence / "prepare.jsonl", timeout=180)
+    save(base / "prepared.json", manifest)
+    save(evidence / "provenance.json", {**manifest, "platform": platform.platform(),
+                                       "python": sys.version})
+    for role in ROLES:
+        verify_source(base, role)
+
+
+def private_env(base, role):
+    state, home = base / (role + "-state"), base / "home"
+    return {"PATH": str(state / "bin"), "HOME": str(home), "USER": pwd.getpwuid(os.getuid()).pw_name,
+            "LOGNAME": pwd.getpwuid(os.getuid()).pw_name, "LANG": "C", "LC_ALL": "C",
+            "TMPDIR": str(state / "tmp"), "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}" if sys.platform == "linux" else str(state / "xdg"),
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{os.getuid()}/bus" if sys.platform == "linux" else "",
+            "CLAUDLOBBY_ROOT": str(state / "root"), "PLANE_EMIT_DISABLED": "1",
+            "CLAUDLOBBY_TOOL_PREFIXES": "", "TELEGRAM_STATE_DIR": str(state / "channels"),
+            "TMUX_TMPDIR": str(state / "sockets"), "TMUX_BIN": str(state / "bin/tmux"),
+            "PLANE_SOCKET": str(state / "sockets/absent.sock"), "PYTHONDONTWRITEBYTECODE": "1"}
+
+
+def parse_systemd(result):
+    require(result.returncode == 0, "systemd query failed; cannot establish absence")
+    data = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    required = {"LoadState", "ActiveState", "FragmentPath"}
+    require(required <= data.keys(), "incomplete systemd state")
+    if data["LoadState"] == "not-found":
+        require(data["ActiveState"] == "inactive" and not data["FragmentPath"], "contradictory absent state")
+        return {"present": False, "native": data}
+    require(data["LoadState"] == "loaded", "unreadable native unit state")
+    return {"present": True, "native": data}
+
+
+def parse_launchd(result, label):
+    if result.returncode == 0:
+        require(label in result.stdout and "program = " in result.stdout, "incomplete launchd state")
+        return {"present": True, "native": result.stdout}
+    diagnostic = result.stderr
+    require(f'Could not find service "{label}" in domain' in diagnostic
+            and not any(x in diagnostic.lower() for x in ("permission", "not permitted", "denied")),
+            "launchd query failed; cannot establish absence")
+    return {"present": False, "native": diagnostic}
+
+
+class Proof:
+    def __init__(self, base, role, *, arm_group=False):
+        hosted_only()
+        require(role in ROLES, "unknown proof arm")
+        self.base, self.role, self.arm_group = base, role, arm_group
+        self.state, self.source = base / (role + "-state"), base / (role + "-source")
+        self.evidence = base / "evidence" / role
+        self.evidence.mkdir(parents=True, exist_ok=True)
+        self.env = private_env(base, role)
+        self.log = self.evidence / "commands.jsonl"
+        self.ext = ".service" if sys.platform == "linux" else ".plist"
+        self.units = base / "home" / (".config/systemd/user" if sys.platform == "linux" else "Library/LaunchAgents")
+        self.labels = {k: f"org.claudlobby.{token()}.{role}.{k}.worker"
+                       for k in ("old", "current", "foreign", "unknown")}
+        self.bot = self.state / "root/local/alpha/runtime/bots/worker"
+        self.other = self.state / "root/local/beta/runtime/bots/worker"
+        self.receipts = self.state / "receipts.log"
+        self.receipt_script = self.state / "receipt-only.sh"
+        self.journal = self.evidence / "ownership.json"
+
+    def call(self, argv, **kw):
+        return command(argv, self.env, self.log, grouped=not self.arm_group, **kw)
+
+    def native(self, args, **kw):
+        hosted_only()
+        binary = "/usr/bin/systemctl" if sys.platform == "linux" else "/bin/launchctl"
+        return self.call([binary, *( ["--user"] if sys.platform == "linux" else []), *args], **kw)
+
+    def query(self, key):
+        label = self.labels[key]
+        if sys.platform == "linux":
+            result = self.native(["show", "--no-pager", "--property=LoadState,ActiveState,SubState,Result,MainPID,FragmentPath,WorkingDirectory,ExecStart,InvocationID,ExecMainPID,ExecMainCode,ExecMainStatus", label + self.ext], check=False)
+            return parse_systemd(result)
+        return parse_launchd(self.native(["print", f"gui/{os.getuid()}/{label}"], check=False), label)
+
+    def identity(self, key, state):
+        require(state["present"], "expected native label missing: " + key)
+        owner = self.other if key == "foreign" else self.bot
+        if sys.platform == "linux":
+            native = state["native"]
+            require(native["FragmentPath"] == str(self.units / (self.labels[key] + self.ext)), "manager loaded foreign fragment")
+            require(native.get("WorkingDirectory") == str(owner), "native owner differs")
+            require(str(self.receipt_script) in native.get("ExecStart", ""), "native program differs")
+        else:
+            require(str(owner) in state["native"] and str(self.receipt_script) in state["native"], "native owner/program differs")
+
+    def healthy(self, state):
+        if not state["present"]:
+            return False
+        if sys.platform == "linux":
+            row = state["native"]
+            return all(row.get(k) == v for k, v in {"ActiveState": "active", "SubState": "exited", "Result": "success", "MainPID": "0"}.items())
+        return "state = not running" in state["native"] and "last exit code = 0" in state["native"]
+
+    def await_state(self, key, present):
+        deadline = time.monotonic() + 10
+        while True:
+            value = self.query(key)
+            if value["present"] == present and (not present or self.healthy(value)):
+                if present:
+                    self.identity(key, value)
+                return value
+            require(time.monotonic() < deadline, "native state deadline: " + key)
+            time.sleep(0.1)
+
+    def receipt_count(self, key):
+        return self.receipts.read_text().splitlines().count(self.labels[key]) if self.receipts.exists() else 0
+
+    def await_receipt(self, key):
+        deadline = time.monotonic() + 10
+        while not self.receipt_count(key):
+            require(time.monotonic() < deadline, "native receipt deadline: " + key)
+            time.sleep(0.1)
+
+    def setup(self):
+        require(not self.state.exists(), "arm state must be fresh")
+        for p in (self.bot, self.other, self.state / "bin", self.state / "tmp", self.state / "xdg",
+                  self.state / "channels", self.state / "sockets", self.state / "root/state/plane", self.units):
+            p.mkdir(parents=True, exist_ok=True)
+        require(not list(self.units.glob("*" + self.ext)), "private installed-unit directory is not empty")
+        for name in UTILITIES:
+            target = shutil.which(name, path="/usr/bin:/bin:/usr/sbin:/sbin")
+            require(target is not None, "native utility missing: " + name)
+            (self.state / "bin" / name).symlink_to(target)
+        (self.state / "bin/python3").symlink_to(sys.executable)
+        if sys.platform == "linux":
+            (self.state / "bin/systemctl").symlink_to("/usr/bin/systemctl")
+        for name in FORBIDDEN:
+            p = self.state / "bin" / name
+            p.write_text("#!/bin/bash\nprintf '%s\\n' " + shlex.quote(name) + " >> " + shlex.quote(str(self.evidence / "forbidden.log")) + "\nexit 97\n")
+            p.chmod(0o755)
+        if sys.platform == "linux":
+            account = pwd.getpwuid(os.getuid())
+            require(account.pw_name == token() and Path(account.pw_dir).resolve() == (self.base / "home").resolve(), "not the dedicated Linux proof account")
+            runtime = Path(self.env["XDG_RUNTIME_DIR"])
+            require(runtime.stat().st_uid == os.getuid() and (runtime / "bus").stat().st_uid == os.getuid(), "manager bus not owned by proof UID")
+            paths = self.native(["show", "--property=UnitPath", "--value"]).stdout.split()
+            require(str(self.units) in paths, "native manager does not search the proof home")
+            save(self.evidence / "manager-binding.json", {"uid": os.getuid(), "home": account.pw_dir, "bus": str(runtime / "bus"), "unit_paths": paths})
+        else:
+            self.native(["print", f"gui/{os.getuid()}"])
+        for key in self.labels:
+            require(not self.query(key)["present"], "label already present before proof")
+
+        self.receipt_script.write_text('#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$2"\n')
+        self.receipt_script.chmod(0o755)
+        self.bot.joinpath("bot.conf").write_text("export BOT_SERVICE=" + shlex.quote(self.labels["current"]) + "\n")
+        # Each arm imports and invokes the real renderer from its pinned source.
+        sys.path.insert(0, str(self.source))
+        import claudlobby.supervision as supervision
+        require(owned(supervision.__file__, self.source), "renderer import escaped source pin")
+        rendered = {}
+        for key in ("old", "current", "foreign"):
+            owner = self.other if key == "foreign" else self.bot
+            spec = supervision.SupervisionSpec(
+                label=self.labels[key], description="disposable installer ownership proof",
+                bot_dir=owner, working_dir=owner, launcher=Path("/usr/bin/env"),
+                launcher_args=("-i", "HOME=" + self.env["HOME"], "PATH=" + self.env["PATH"],
+                               "/bin/bash", "--noprofile", "--norc", str(self.receipt_script),
+                               self.labels[key], str(self.receipts)),
+                environment={"PLANE_EMIT_DISABLED": "1"}, launchd_environment_extra={},
+                stop_command="true", stop_post_command="true",
+                stdout_log=owner / "stdout.log", stderr_log=owner / "stderr.log")
+            render = supervision.render_systemd_unit if sys.platform == "linux" else supervision.render_launchd_plist
+            rendered[key] = render(spec)
+        rendered["unknown"] = "malformed ownership sentinel\n"
+        hashes = {}
+        for key, text in rendered.items():
+            path = (self.bot if key == "current" else self.units) / (self.labels[key] + self.ext)
+            path.write_text(text)
+            hashes[key] = digest(path)
+            (self.evidence / (key + self.ext)).write_text(text)
+        # Persist BEFORE any enrollment, including an enrollment that errors.
+        save(self.journal, {"labels": self.labels, "hashes": hashes, "attempted": [], "preflight_absent": True, "receipt_program_sha": digest(self.receipt_script)})
+        save(self.evidence / "environment.json", self.env)
+
+    def record_attempt(self, keys):
+        data = load(self.journal)
+        data["attempted"] = sorted(set(data["attempted"]) | set(keys))
+        save(self.journal, data)
+
+    def enroll_seed(self, key):
+        self.record_attempt([key])
+        if sys.platform == "linux":
+            self.native(["daemon-reload"])
+            self.native(["enable", "--now", self.labels[key] + self.ext])
+        else:
+            self.native(["bootstrap", f"gui/{os.getuid()}", self.units / (self.labels[key] + self.ext)])
+        self.await_state(key, True)
+        self.await_receipt(key)
+
+    def install(self):
+        self.record_attempt(["old", "current", "foreign"])
+        script = self.source / "lib" / ("install-bot-systemd.sh" if sys.platform == "linux" else "install-bot.sh")
+        return self.call(["/bin/bash", "--noprofile", "--norc", script, self.bot], timeout=60)
+
+    def observe(self, name):
+        data = {"observed_at": time.time(), "states": {k: self.query(k) for k in ("old", "current", "foreign")},
+                "hashes": {k: digest(p) if p.exists() else None for k in self.labels
+                           for p in [self.units / (self.labels[k] + self.ext)]},
+                "receipts": {k: self.receipt_count(k) for k in self.labels}}
+        save(self.evidence / (name + ".json"), data)
+        return data
+
+    def exercise(self):
+        self.setup()
+        self.enroll_seed("old"); self.enroll_seed("foreign")
+        before = self.observe("before")
+        self.install()
+        self.await_state("current", True); self.await_receipt("current")
+        self.await_state("old", False)
+        after = self.observe("after-first")
+        require(after["hashes"]["old"] is None, "legitimate same-owner rename was not cleaned")
+        require(after["hashes"]["current"] == digest(self.bot / (self.labels["current"] + self.ext)), "installed current bytes differ")
+        if self.role == "parent":
+            require(not after["states"]["foreign"]["present"] and after["hashes"]["foreign"] is None,
+                    "parent did not reproduce destructive foreign de-enrollment")
+        else:
+            self.identity("foreign", after["states"]["foreign"])
+            require(self.healthy(after["states"]["foreign"]), "foreign native service stopped or failed")
+            require(after["hashes"]["foreign"] == before["hashes"]["foreign"]
+                    and after["receipts"]["foreign"] == before["receipts"]["foreign"], "foreign unit changed")
+            require(after["hashes"]["unknown"] == before["hashes"]["unknown"], "unknown owner was removed/rewritten")
+        second = self.install()
+        self.await_state("current", True)
+        last = self.observe("after-second")
+        require(last["hashes"] == after["hashes"], "reinstall changed installed file inventory")
+        require(not last["states"]["old"]["present"], "reinstall resurrected old owner")
+        expected_current = after["receipts"]["current"] + (sys.platform == "darwin")
+        require(last["receipts"]["current"] == expected_current, "current reinstall receipt behavior changed")
+        require(digest(self.receipt_script) == load(self.journal)["receipt_program_sha"], "receipt program changed")
+        if self.role == "candidate":
+            self.identity("foreign", last["states"]["foreign"])
+            require(self.healthy(last["states"]["foreign"]), "reinstall stopped foreign native service")
+            require(last["receipts"]["foreign"] == before["receipts"]["foreign"], "reinstall restarted foreign owner")
+            require("preserving" in second.stderr and self.labels["unknown"] in second.stderr, "unknown-owner diagnostic absent")
+        require(not (self.evidence / "forbidden.log").exists(), "unexpected outbound/model/tool attempt")
+        for p in (self.state / "channels", self.state / "sockets", self.state / "root/state/plane"):
+            require(not list(p.iterdir()), "unexpected runtime artifact: " + str(p))
+        verify_source(self.base, self.role)
+
+    def cleanup(self):
+        """Only exact labels proved absent before this arm may be removed."""
+        if not self.journal.exists():
+            return {"attempted": [], "errors": []}
+        journal = load(self.journal)
+        require(journal["labels"] == self.labels, "cleanup label journal mismatch")
+        require(set(journal["attempted"]) <= {"old", "current", "foreign"}, "unowned cleanup label")
+        require(not journal["attempted"] or journal["preflight_absent"], "cleanup lacks initial absence proof")
+        errors, observed, blocked = [], {}, set()
+        for key in journal["attempted"]:
+            try:
+                value = self.query(key); observed[key] = value
+                if value["present"]:
+                    self.identity(key, value)
+                    if sys.platform == "linux":
+                        self.native(["disable", "--now", self.labels[key] + self.ext])
+                    else:
+                        self.native(["bootout", f"gui/{os.getuid()}/{self.labels[key]}"])
+            except Exception as exc:
+                errors.append(key + ": " + str(exc))
+                blocked.add(key)
+        # Retain exact unit copies under evidence before removing our installed files.
+        for key in self.labels:
+            path = self.units / (self.labels[key] + self.ext)
+            if path.exists() and key not in blocked:
+                if digest(path) == journal["hashes"][key]:
+                    path.unlink()
+                else:
+                    errors.append("cleanup refused changed file: " + key)
+        if sys.platform == "linux" and journal["attempted"]:
+            try:
+                self.native(["daemon-reload"])
+            except Exception as exc:
+                errors.append(str(exc))
+        for key in journal["attempted"]:
+            try:
+                self.await_state(key, False)
+            except Exception as exc:
+                errors.append("residual " + key + ": " + str(exc))
+        result = {"attempted": journal["attempted"], "before_cleanup": observed, "errors": errors, "observed_at": time.time()}
+        serial = len(list(self.evidence.glob("cleanup-*.json")))
+        save(self.evidence / f"cleanup-{serial}.json", result)
+        return result
+
+
+def arm(base, role):
+    require(os.getpid() == os.getpgrp(), "arm requires its own process group")
+    proof = Proof(base, role, arm_group=True)
+    errors = []
+    try:
+        verify_source(base, role)
+        proof.exercise()
+    except Exception as exc:
+        errors.append(str(exc))
+    finally:
+        try:
+            errors.extend(proof.cleanup()["errors"])
+            verify_source(base, role)
+        except Exception as exc:
+            errors.append("cleanup/source verification: " + str(exc))
+    if proof.receipts.exists():
+        shutil.copyfile(proof.receipts, proof.evidence / "receipts.log")
+    save(proof.evidence / "result.json", {"role": role, "revision": ROLES[role],
+        "verdict": "INVALID" if errors else ("PARENT_RED" if role == "parent" else "CANDIDATE_PASS"), "errors": errors})
+    return bool(errors)
+
+
+def execute(base):
+    manifest = load(base / "prepared.json")
+    require(manifest["token"] == token() and manifest["controller"] == digest(__file__), "controller/preparation mismatch")
+    result = 0
+    env = {k: os.environ[k] for k in ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "CLAUDLOBBY_INSTALLER_NATIVE_PROOF", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUNNER_TEMP")}
+    env.update(HOME=str(base / "home"), PATH="/usr/bin:/bin", PYTHONDONTWRITEBYTECODE="1")
+    for role in ROLES:
+        try:
+            completed = command([base / (role + "-venv/bin/python"), Path(__file__).resolve(), "--arm", role, "--base", base], env, base / "evidence/arms.jsonl", timeout=180, check=False)
+            result |= bool(completed.returncode)
+        except Exception as exc:
+            save(base / "evidence" / (role + "-controller-error.json"), {"error": str(exc)})
+            result = 1
+        finally:
+            # Independent cleanup also covers an arm killed before its finally.
+            try:
+                result |= bool(Proof(base, role).cleanup()["errors"])
+            except Exception as exc:
+                save(base / "evidence" / (role + "-cleanup-error.json"), {"error": str(exc)})
+                result = 1
+    save(base / "evidence/summary.json", {"invalid": bool(result), "pins": ROLES})
+    return result
+
+
+def cleanup_all(base):
+    errors = []
+    for role in ROLES:
+        try:
+            errors.extend(Proof(base, role).cleanup()["errors"])
+        except Exception as exc:
+            errors.append(role + ": " + str(exc))
+    save(base / "evidence/final-cleanup.json", {"errors": errors})
+    return bool(errors)
+
+
+def self_check():
+    """Pure parser/refusal controls; no real manager/client execution."""
+    import unittest
+    import tempfile
+    from unittest.mock import patch
+
+    class Controls(unittest.TestCase):
+        def test_local_refuses_before_effect(self):
+            with patch.dict(os.environ, {}, clear=True), patch.object(subprocess, "Popen", side_effect=AssertionError("native called")):
+                with self.assertRaises(RuntimeError):
+                    prepare("/nonexistent-installer-proof")
+
+        def test_systemd_absence_requires_complete_success(self):
+            good = "LoadState=not-found\nActiveState=inactive\nFragmentPath=\n"
+            self.assertFalse(parse_systemd(subprocess.CompletedProcess([], 0, good, ""))["present"])
+            for rc, text in ((1, good), (0, ""), (0, good.replace("inactive", "active")), (0, good.replace("not-found", "error"))):
+                with self.subTest(rc=rc, text=text), self.assertRaises(RuntimeError):
+                    parse_systemd(subprocess.CompletedProcess([], rc, text, "query failed"))
+
+        def test_launchd_absence_requires_exact_label(self):
+            label = "org.example.owned.worker"
+            good = f'Could not find service "{label}" in domain for user gui: 123\n'
+            self.assertFalse(parse_launchd(subprocess.CompletedProcess([], 113, "", good), label)["present"])
+            for err in ("", "Permission denied", good.replace(label, "other"), good + "Operation not permitted"):
+                with self.subTest(err=err), self.assertRaises(RuntimeError):
+                    parse_launchd(subprocess.CompletedProcess([], 1, "", err), label)
+
+        def test_identity_and_role_are_fixed(self):
+            with patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}):
+                self.assertEqual(token(), "i1811123a2")
+            with patch.dict(os.environ, {"GITHUB_RUN_ID": "bad;value", "GITHUB_RUN_ATTEMPT": "2"}):
+                with self.assertRaises(RuntimeError): token()
+            self.assertEqual(set(ROLES), {"parent", "candidate"})
+
+        def cleanup_fixture(self, base):
+            proof = Proof(base, "candidate")
+            proof.units.mkdir(parents=True)
+            hashes = {}
+            for key in proof.labels:
+                path = proof.units / (proof.labels[key] + proof.ext)
+                path.write_text("owned fixture " + key)
+                hashes[key] = digest(path)
+            save(proof.journal, {"labels": proof.labels, "hashes": hashes,
+                                "preflight_absent": True, "attempted": ["old", "foreign", "current"]})
+            return proof
+
+        def test_partial_enrollment_without_success_receipt_is_still_queried(self):
+            with tempfile.TemporaryDirectory() as directory, patch(__name__ + ".hosted_only"), patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}), patch.object(sys, "platform", "linux"):
+                proof = self.cleanup_fixture(Path(directory))
+                queried, calls = [], []
+                def query(key):
+                    queried.append(key)
+                    return {"present": key == "foreign", "native": "modeled"}
+                proof.query = query
+                proof.identity = lambda key, value: None
+                proof.native = lambda argv: calls.append(argv)
+                proof.await_state = lambda key, present: {"present": False}
+                result = proof.cleanup()
+                self.assertEqual(queried, ["old", "foreign", "current"])
+                self.assertEqual(calls[0], ["disable", "--now", proof.labels["foreign"] + proof.ext])
+                self.assertEqual(result["errors"], [])
+                self.assertTrue(result["before_cleanup"]["foreign"]["present"])
+
+        def test_unreadable_state_preserves_file_and_invalidates_cleanup(self):
+            with tempfile.TemporaryDirectory() as directory, patch(__name__ + ".hosted_only"), patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}), patch.object(sys, "platform", "linux"):
+                proof = self.cleanup_fixture(Path(directory))
+                def query(key):
+                    if key == "foreign":
+                        raise RuntimeError("query denied")
+                    return {"present": False}
+                proof.query = query
+                proof.native = lambda argv: None
+                proof.await_state = lambda key, present: {"present": False}
+                result = proof.cleanup()
+                self.assertTrue(result["errors"])
+                self.assertTrue((proof.units / (proof.labels["foreign"] + proof.ext)).exists())
+                proof.cleanup()
+                self.assertTrue((proof.evidence / "cleanup-0.json").exists())
+                self.assertTrue((proof.evidence / "cleanup-1.json").exists())
+
+        def test_cleanup_refuses_unclaimed_labels_before_native_calls(self):
+            with tempfile.TemporaryDirectory() as directory, patch(__name__ + ".hosted_only"), patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}):
+                proof = self.cleanup_fixture(Path(directory))
+                row = load(proof.journal); row["attempted"].append("unknown"); save(proof.journal, row)
+                proof.native = lambda *a, **kw: self.fail("native call before ownership check")
+                with self.assertRaises(RuntimeError): proof.cleanup()
+
+        def test_private_environment_ignores_ambient_startup_and_model_state(self):
+            with patch.dict(os.environ, {"BASH_ENV": "/foreign/startup", "CLAUDE_CONFIG_DIR": "/foreign/account", "PLANE_SOCKET": "/foreign/socket", "HOME": "/foreign/home"}):
+                env = private_env(Path("/private-proof"), "candidate")
+            self.assertNotIn("BASH_ENV", env)
+            self.assertNotIn("CLAUDE_CONFIG_DIR", env)
+            self.assertEqual(env["HOME"], "/private-proof/home")
+            self.assertTrue(env["PLANE_SOCKET"].startswith("/private-proof/"))
+
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Controls)
+    return not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--run", action="store_true")
+    mode.add_argument("--arm", choices=tuple(ROLES))
+    mode.add_argument("--cleanup", action="store_true")
+    mode.add_argument("--self-check", action="store_true")
+    parser.add_argument("--base")
+    args = parser.parse_args()
+    if args.self_check:
+        raise SystemExit(self_check())
+    base = base_path(args.base)
+    if args.prepare:
+        prepare(base)
+    elif args.run:
+        raise SystemExit(execute(base))
+    elif args.arm:
+        raise SystemExit(arm(base, args.arm))
+    else:
+        raise SystemExit(cleanup_all(base))

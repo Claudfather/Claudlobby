@@ -1,0 +1,125 @@
+name: installer ownership native
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/installer-ownership-native.yml'
+      - 'tests/fixtures/installer_ownership_native.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CLAUDLOBBY_INSTALLER_NATIVE_PROOF: '1'
+
+jobs:
+  native:
+    name: installer ownership (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Pure controller checks
+        run: python tests/fixtures/installer_ownership_native.py --self-check
+      - name: Prepare immutable parent and candidate
+        run: |
+          python tests/fixtures/installer_ownership_native.py --prepare --base "$RUNNER_TEMP/installer-ownership-proof"
+      - name: Create isolated Linux user manager
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update
+          sudo apt-get install -y dbus-user-session
+          proof_base="$RUNNER_TEMP/installer-ownership-proof"
+          proof_user="i1811${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
+          ! id "$proof_user" >/dev/null 2>&1
+          sudo useradd --home-dir "$proof_base/home" --shell /bin/bash "$proof_user"
+          proof_uid=$(id -u "$proof_user")
+          python - "$proof_base" "$proof_user" "$proof_uid" <<'PY'
+          import json, sys
+          from pathlib import Path
+          base, user, uid = sys.argv[1:]
+          Path(base, 'linux-created.json').write_text(json.dumps({'user': user, 'uid': int(uid), 'home': base + '/home'}))
+          PY
+          sudo chown --no-dereference -R "$proof_user:$proof_user" "$proof_base"
+          sudo loginctl enable-linger "$proof_user"
+          sudo systemctl start "user@$proof_uid.service"
+      - name: Run exact native installer arms
+        run: |
+          set -euo pipefail
+          proof_base="$RUNNER_TEMP/installer-ownership-proof"
+          proof_driver="$GITHUB_WORKSPACE/tests/fixtures/installer_ownership_native.py"
+          if [ "$RUNNER_OS" = Linux ]; then
+            proof_user="i1811${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
+            sudo -u "$proof_user" env -i \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              CLAUDLOBBY_INSTALLER_NATIVE_PROOF=1 \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              RUNNER_TEMP="$RUNNER_TEMP" HOME="$proof_base/home" PATH=/usr/bin:/bin \
+              "$proof_base/candidate-venv/bin/python" "$proof_driver" --run --base "$proof_base"
+          else
+            python "$proof_driver" --run --base "$proof_base"
+          fi
+      - name: Exact owned label cleanup even after arm interruption
+        if: always()
+        run: |
+          set -euo pipefail
+          proof_base="$RUNNER_TEMP/installer-ownership-proof"
+          proof_driver="$GITHUB_WORKSPACE/tests/fixtures/installer_ownership_native.py"
+          if [ "$RUNNER_OS" = Linux ]; then
+            if [ -f "$proof_base/linux-created.json" ]; then
+              proof_user="i1811${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
+              sudo -u "$proof_user" env -i \
+                GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+                CLAUDLOBBY_INSTALLER_NATIVE_PROOF=1 \
+                GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+                RUNNER_TEMP="$RUNNER_TEMP" HOME="$proof_base/home" PATH=/usr/bin:/bin \
+                "$proof_base/candidate-venv/bin/python" "$proof_driver" --cleanup --base "$proof_base"
+            fi
+          elif [ -f "$proof_base/prepared.json" ]; then
+            python "$proof_driver" --cleanup --base "$proof_base"
+          fi
+      - name: Retire only the created Linux manager and account
+        if: always() && runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          proof_base="$RUNNER_TEMP/installer-ownership-proof"
+          if [ -f "$proof_base/linux-created.json" ]; then
+            proof_user="i1811${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
+            proof_uid=$(python - "$proof_base/linux-created.json" "$proof_user" "$proof_base/home" <<'PY'
+          import json, pwd, sys
+          from pathlib import Path
+          data = json.loads(Path(sys.argv[1]).read_text())
+          assert data['user'] == sys.argv[2] and data['home'] == sys.argv[3]
+          row = pwd.getpwnam(data['user'])
+          assert row.pw_uid == data['uid'] and row.pw_dir == data['home']
+          print(row.pw_uid)
+          PY
+            )
+            sudo loginctl disable-linger "$proof_user"
+            sudo systemctl stop "user@$proof_uid.service"
+            ! sudo systemctl is-active --quiet "user@$proof_uid.service"
+            sudo userdel "$proof_user"
+            ! id "$proof_user" >/dev/null 2>&1
+            printf 'removed disposable user %s uid %s; files retained\n' "$proof_user" "$proof_uid" | sudo tee "$proof_base/evidence/linux-manager-cleanup.txt" >/dev/null
+          fi
+      - name: Upload source pins, native states, bytes, receipts and cleanup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-ownership-${{ matrix.os }}
+          path: ${{ runner.temp }}/installer-ownership-proof/evidence
+          if-no-files-found: error
