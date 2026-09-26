@@ -2,7 +2,7 @@
 
 A bot may edit its own files in runtime/bots/<name>/ during a session.
 `diff` previews the compared artifact families; it does not enumerate every
-live effect of generate (in particular skill/command/agent symlinks). `promote` (interactive) routes
+live effect of generate (link topology is compared, linked contents are not). `promote` (interactive) routes
 drifted content back to library/personas/, library/voices/, or a
 new guardrail/protocol.
 
@@ -302,10 +302,23 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
             else:
                 _json_drift(_access_owned_view(expected_access, chat_id, fleet.human_telegram_id),
                             actual_owned, "access.json", bot_name, parts)
+    from .composer import resolve_effective_skills
+    from .link_diff import link_preview
+
+    try:
+        effective_skills = resolve_effective_skills(
+            bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots())
+        link_changes, link_notes = link_preview(bot, paths, skills=effective_skills)
+        parts.extend("\n=== " + change + " ===" for change in link_changes)
+    except (OSError, ValueError, RuntimeError) as exc:
+        parts.append(f"\n=== link topology unavailable ({type(exc).__name__}) ===")
+        link_notes = []
     coverage = ("coverage: CLAUDE.md, .mcp.json, bot.conf, git configuration, tools, "
-                f"settings.local.json, bot service/plist, {access_note}; "
-                "not compared: skill/command/agent symlinks. "
-                "This preview does not enumerate every live effect of generate.\n")
+                f"settings.local.json, bot service/plist, {access_note}, skill/mount topology; "
+                "not compared: target content, host outputs, env scaffolding, runtime data; "
+                "commands/agents are not current compositor outputs. "
+                "This preview does not enumerate every live effect of generate.\n"
+                + "".join(note + "\n" for note in link_notes))
     if not parts:
         return f"no drift in {bot_name}\n" + coverage
     return "\n".join(parts) + "\n" + coverage

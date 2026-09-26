@@ -45,7 +45,8 @@ def test_clean_compare_is_read_only_and_names_coverage(composed):
     before = _snapshot(paths.root), _snapshot(channel.parents[3])
     output = _diff(composed)
     assert 'no drift in lead' in output
-    assert 'not compared: skill/command/agent symlinks' in output
+    assert 'skill/mount topology' in output
+    assert 'not compared: target content, host outputs, env scaffolding, runtime data' in output
     assert before == (_snapshot(paths.root), _snapshot(channel.parents[3]))
 
 
