@@ -10,6 +10,8 @@ import tempfile
 import time
 import uuid
 
+import pytest
+
 from tests.conftest import constructed_env, read_fleet_events
 
 REPO = Path(__file__).resolve().parents[1]
@@ -74,7 +76,8 @@ def _require_pane_command(env, socket, expected):
     raise AssertionError(f"owned manager pane did not become {expected}: {observed}")
 
 
-def test_actual_manager_fixture_drains_notifications_and_nonreader_control(tmp_path):
+@pytest.mark.parametrize("scenario", ["initial", "briefing-fallback"])
+def test_actual_manager_fixture_drains_notifications_and_nonreader_control(tmp_path, scenario):
     home = tmp_path / "home"
     home.mkdir()
     socket = "observation-" + uuid.uuid4().hex
@@ -82,10 +85,13 @@ def test_actual_manager_fixture_drains_notifications_and_nonreader_control(tmp_p
     with tempfile.TemporaryDirectory(prefix="vbc-observe-", dir="/tmp") as namespace:
         env = constructed_env(HOME=home, TMPDIR=tmp_path, CLAUDLOBBY_ROOT=tmp_path,
                               TMUX_TMPDIR=namespace, SOCKET=socket)
-        # Execute the real main-manager setup call site, with its shipped
-        # helper. The unchanged parent instead starts sleep and goes RED.
-        setup = _between('# --- Run: stand up a non-idle worker pane',
-                         'tmux new-session -d -s "$BOT"')
+        # Exercise the actual initial setup and briefing fallback call sites.
+        # The latter must recreate the same draining reader if it has exited.
+        if scenario == "initial":
+            setup = _between('# --- Run: stand up a non-idle worker pane',
+                             'tmux new-session -d -s "$BOT"')
+        else:
+            setup = _between('tmux has-session -t "$MGR"', '\n') + '\n'
         body = _helpers() + '''
 MGR=manager
 tmux() { command tmux -L "$SOCKET" -f /dev/null "$@"; }
@@ -96,7 +102,14 @@ tmux() { command tmux -L "$SOCKET" -f /dev/null "$@"; }
             prefix = "active-" + uuid.uuid4().hex
             last = _send_notifications(env, socket, prefix)
             assert last in _visible(env, socket), "actual manager fixture stopped receiving notifications"
-            _require_pane_command(env, socket, "cat")
+            reader_pid = _require_pane_command(env, socket, "cat")
+            if scenario == "briefing-fallback":
+                # An existing manager is left running, without replacement or
+                # losing the notification already observed in its transcript.
+                present = _run(body, env, tmp_path)
+                assert present.returncode == 0, present.stderr
+                assert _require_pane_command(env, socket, "cat") == reader_pid
+                assert last in _visible(env, socket)
 
             # Replace only this private pane with the original read-nothing
             # fixture. SIGSTOP is not a valid control: the observed pane did

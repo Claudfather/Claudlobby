@@ -5,7 +5,9 @@ flattens lists, and resolves team membership.
 """
 
 from __future__ import annotations
+import difflib
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -236,9 +238,10 @@ class SweepConfig:
 class BriefingConfig:
     """Bot-level ``briefing:`` feature stanza (#627).
 
-    Presence equips the bot: the composer expands each slot into a per-(bot,slot)
-    OnCalendar timer (``<prefix>.briefing-<bot>-<slot>``) and emits ``BRIEFING_*``
-    into the bot's bot.conf. Slot names are free identifiers (a bot may run a
+    Presence equips the bot: the composer links the ``briefing`` skill those
+    timers fire (``resolve_effective_skills``), expands each slot into a
+    per-(bot,slot) OnCalendar timer (``<prefix>.briefing-<bot>-<slot>``) and
+    emits ``BRIEFING_*`` into the bot's bot.conf. Slot names are free identifiers (a bot may run a
     custom ``analytics`` slot) but MUST be shell identifiers (known_values
     SHELL_IDENT_RE) — they become the ``BRIEFING_SECTIONS_<SLOT>`` env-var suffix
     — and each value is a systemd OnCalendar expression, never 5-field cron.
@@ -1888,14 +1891,89 @@ def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
     return _cache["data"]
 
 
+#: Names a different host override file (the test suite points it at nothing,
+#: so the suite never reads the operator's real one).
+HOST_OVERRIDE_ENV = "CLAUDLOBBY_HOST_SYSTEM_YAML"
+
+
+def host_override_path() -> Path:
+    """Where THIS host's override of ``host.jobs`` lives (#1251).
+
+    ``~/.config/claudlobby/system.yaml`` -- the directory the GitHub App config
+    already uses (``github_app_conf_path`` in lib-common.sh) -- unless
+    ``$CLAUDLOBBY_HOST_SYSTEM_YAML`` names another file. It sits outside every
+    tracked tree on purpose: host-local state inside the install makes the tree
+    dirty, and a pull then has to carry it or refuse.
+    """
+    named = os.environ.get(HOST_OVERRIDE_ENV)
+    return Path(named) if named else Path.home() / ".config" / "claudlobby" / "system.yaml"
+
+
 def load_host_jobs() -> dict:
-    """Return ``host.jobs`` from system.yaml.
+    """Return ``host.jobs`` from system.yaml, with THIS host's override applied.
 
     Host jobs are host-global singletons (one instance per host, fixed
     ``claudlobby-<name>`` unit identity) and deliberately bypass the fleet
-    defaults merge -- a fleet does not override platform equipment.
+    defaults merge -- a fleet does not override platform equipment. A host
+    does, through ``host_override_path()``; every reader of host jobs comes
+    through here, so the override is applied here and not in
+    ``_load_system_defaults``, whose other caller (``load_fleet``) reads only
+    ``defaults`` and should not stop on a host-local file it never uses.
     """
-    return (_load_system_defaults().get("host") or {}).get("jobs") or {}
+    packaged = (_load_system_defaults().get("host") or {}).get("jobs") or {}
+    return _apply_host_override(packaged, host_override_path())
+
+
+def _apply_host_override(packaged: dict, path: Path) -> dict:
+    """Overlay the override's ``host.jobs`` onto *packaged*, per job and per field.
+
+    The override names only what it changes. A job it does not name keeps its
+    packaged config, and a field it does not name keeps its packaged value. A
+    wholesale replacement would let an override that arms one job drop every
+    other host job, and with them the schedules and enroll states the host
+    runs on. Packaged jobs carry no nested mappings, so a field is the unit.
+
+    The file is written by hand, outside review, so a shape this cannot apply
+    is refused (RuntimeError naming the file) rather than skipped: a skipped
+    pause re-enrolls the job it paused. That covers a field no host job has (a
+    misspelt ``enrol`` would otherwise be merged and read by nothing) and an
+    ``enroll`` that is not a boolean: the composer enrolls a timer on anything
+    but a literal False, so ``enroll: "false"`` would enroll the job while the
+    switch table reported it off. A job this install does not ship is logged
+    and ignored, not refused: the file outlives the install it was written
+    against, and a pull that retires a job must not stop every host-timers run.
+    """
+    if not path.is_file():
+        return packaged
+    where = f"{path} (this host's override of system.yaml host.jobs)"
+    try:
+        with path.open() as f:
+            override = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"{where} does not parse: {exc}") from exc
+    host = override.get("host") or {} if isinstance(override, dict) else None
+    if not (isinstance(host, dict) and set(override) <= {"host"} and set(host) <= {"jobs"}):
+        raise RuntimeError(f"{where}: only host.jobs is read, as host: {{jobs: {{<job>: {{<field>: <value>}}}}}}")
+    jobs = host.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        raise RuntimeError(f"{where}: host.jobs must map job names to their fields")
+    fields_known = {"enroll"}.union(*(cfg.keys() for cfg in packaged.values()))
+    merged = {name: dict(cfg) for name, cfg in packaged.items()}
+    for name, fields in jobs.items():
+        if name not in packaged:
+            near = difflib.get_close_matches(str(name), packaged, n=1)
+            log.warning("%s: host.jobs.%s is not a job this install ships -- ignored%s",
+                        where, name, f" (did you mean {near[0]}?)" if near else "")
+            continue
+        if not isinstance(fields, dict):
+            raise RuntimeError(f"{where}: host.jobs.{name} must map fields to values")
+        unknown = sorted(set(fields) - fields_known)
+        if unknown:
+            raise RuntimeError(f"{where}: host.jobs.{name}: no host job has a field {', '.join(unknown)}")
+        if "enroll" in fields and not isinstance(fields["enroll"], bool):
+            raise RuntimeError(f"{where}: host.jobs.{name}.enroll must be true or false, not {fields['enroll']!r}")
+        merged[name].update(fields)
+    return merged
 
 
 def load_host_boot() -> dict:

@@ -5553,6 +5553,9 @@ install_error_trap() {
 # and plain `VAR=val` forms. Strips one layer of surrounding single OR double
 # quotes (the composer emits values via shlex.quote, which single-quotes any
 # value containing a space, e.g. a multi-plugin FLEET_PLUGINS_REQUIRED).
+# An UNQUOTED value ends at its first whitespace, as it does when the file is
+# sourced, so an inline comment never reaches the caller; a quoted value is
+# data and keeps any hash it holds.
 # Returns <default> if the file is missing or the key isn't found.
 bot_conf_get() {
     local bot_dir="$1" key="$2" default="$3" val=""
@@ -5565,6 +5568,8 @@ bot_conf_get() {
         case "$val" in
             \"*\") val=${val#\"}; val=${val%\"} ;;
             \'*\') val=${val#\'}; val=${val%\'} ;;
+            \"*|\'*) ;;  # quoted but not one whole quoted token: left as read
+            *) val=${val%%[[:space:]]*} ;;
         esac
     fi
     printf '%s' "${val:-$default}"
@@ -5772,16 +5777,12 @@ _bot_with_own_chat() {
 
 # bot_is_manager <bot_dir>
 # True (0) if <bot_dir> is a team manager, false (1) otherwise. The composer
-# sets a manager's MANAGER_TMUX to its own BOT_ID with an inline
-# `# this bot is a manager` comment; a worker's MANAGER_TMUX points at a
-# different bot. bot_conf_get does not strip that inline comment, so normalize
-# it (and surrounding whitespace) away before comparing MANAGER_TMUX == BOT_ID.
+# sets a manager's MANAGER_TMUX to its own BOT_ID; a worker's MANAGER_TMUX
+# points at a different bot.
 bot_is_manager() {
     local bot_dir="${1:?Usage: bot_is_manager <bot_dir>}" mgr bid
     mgr=$(bot_conf_get "$bot_dir" MANAGER_TMUX "")
     bid=$(bot_conf_get "$bot_dir" BOT_ID "$(basename "$bot_dir")")
-    mgr=${mgr%%#*}; mgr=${mgr//[[:space:]]/}
-    bid=${bid%%#*}; bid=${bid//[[:space:]]/}
     [ -n "$bid" ] && [ "$mgr" = "$bid" ]
 }
 

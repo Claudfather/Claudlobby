@@ -535,6 +535,25 @@ def test_effective_skills_is_a_no_op_when_no_effective_protocol_declares_require
         )
 
 
+def test_a_briefing_stanza_equips_the_skill_its_timers_fire(fleet_dir):
+    """#1819: the briefing: stanza composes timers that send /briefing into the
+    bot's own session, and presence of the stanza equips the bot -- so the
+    skill those timers invoke comes with it. A stanza alone used to compose the
+    timers and no skill, and Claude Code rejected every /briefing locally while
+    the send read as delivered."""
+    _write_skill(fleet_dir, "briefing")
+    text = (fleet_dir / "fleet.yaml").read_text()
+    marker = "    lead:\n"
+    assert text.count(marker) == 1
+    stanza = "      briefing:\n        slots:\n          morning: '*-*-* 08:30:00'\n"
+    (fleet_dir / "fleet.yaml").write_text(text.replace(marker, marker + stanza))
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    paths = _paths(fleet_dir)
+
+    compose_bot(fleet.bots["lead"], fleet, paths, log=lambda m: None)
+    assert (paths.bot_runtime("lead") / ".claude" / "skills" / "briefing").is_dir()
+
+
 # ---------------------------------------------------------------------------
 # link_skills — keyword-only, required `skills`
 # ---------------------------------------------------------------------------
