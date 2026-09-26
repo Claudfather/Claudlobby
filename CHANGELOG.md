@@ -49,6 +49,13 @@ committed at the repo root (removed: the compositor writes those under
 fails on any tracked `/home/<name>` or `/Users/<name>` whose name is not on a
 short placeholder allowlist.
 
+### Fixed — session-loop arming requires a real YAML Boolean (#1136)
+
+Non-null `claudron_session_loop` declarations now reject strings, numbers and
+containers in both fleet defaults and bot settings. Null and omission still
+inherit, and real Boolean overrides retain the existing hook behavior.
+Permission and sandbox Boolean hardening remains a separate change (#1809).
+
 ### Fixed — a socket cooldown no longer spawns the cold CLI for fire-and-forget emitters (#1657)
 
 Under load every cooldown emission spawned the package-importing CLI, and
