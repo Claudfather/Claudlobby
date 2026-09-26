@@ -2232,7 +2232,7 @@ def _validate_mcp_packages(
 
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
-    report = ValidationReport()
+    report = ValidationReport(warnings=list(fleet.config_warnings))
 
     if not fleet.bots:
         report.errors.append("fleet.bots is empty — nothing to compose")
