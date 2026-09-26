@@ -97,7 +97,7 @@ jobs:
               print(f'Executed and passed: {name}')
           PY
       - name: Prove native bridge negative controls
-        if: runner.os == 'macOS'
+        if: always() && runner.os == 'macOS'
         env:
           CLAUDLOBBY_CI_NATIVE_SMOKE: '1'
         run: .venv/bin/python tests/fixtures/native_ci_negative_controls.py --output native-controls
