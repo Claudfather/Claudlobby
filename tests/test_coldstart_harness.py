@@ -16,6 +16,7 @@ reap. Identity is the wrong grain for this; only content closes it.
 """
 
 import os
+import plistlib
 import subprocess
 from pathlib import Path
 
@@ -43,7 +44,11 @@ def _host_unit(root: str, job: str = "disk-monitor") -> str:
 
 @pytest.fixture
 def host(tmp_path):
-    """Isolated HOME + harness state dir, with stub systemctl/tmux on PATH."""
+    """An explicit Linux fixture on either native test platform.
+
+    The service files below model systemd. Feed that kernel name through the
+    real detect_os door; ambient Darwin would make the harness look elsewhere.
+    """
     home = tmp_path / "home"
     units = home / ".config" / "systemd" / "user"
     units.mkdir(parents=True)
@@ -51,8 +56,15 @@ def host(tmp_path):
     bin_dir.mkdir()
     for tool in ("systemctl", "tmux", "launchctl", "pgrep"):
         p = bin_dir / tool
-        p.write_text("#!/bin/bash\nexit 0\n")
+        p.write_text(
+            "#!/bin/bash\n"
+            f"printf '%s\\t%s\\n' '{tool}' \"$*\" >> \"$COLDSTART_CALLS\"\n"
+            "exit 0\n"
+        )
         p.chmod(0o755)
+    uname = bin_dir / "uname"
+    uname.write_text("#!/bin/bash\nprintf '%s\\n' Linux\n")
+    uname.chmod(0o755)
 
     # Two pre-existing production host units — the population reap must never
     # delete and (after this change) must restore if the run overwrote them.
@@ -65,6 +77,8 @@ def host(tmp_path):
         "home": home,
         "units": units,
         "state": tmp_path / "state",
+        "bin": bin_dir,
+        "calls": tmp_path / "calls.log",
         "path": f"{bin_dir}:{os.environ.get('PATH', '')}",
     }
 
@@ -74,6 +88,7 @@ def _call(host, snippet: str, *args: str) -> subprocess.CompletedProcess:
         HOME=str(host["home"]),
         PATH=host["path"],
         COLDSTART_STATE_DIR=str(host["state"]),
+        COLDSTART_CALLS=str(host["calls"]),
     )
     return subprocess.run(
         ["bash", "-c", f'. "{HARNESS}"; {snippet}', "_", *args],
@@ -185,3 +200,94 @@ class TestReapRestoresCapturedUnits:
         assert born.read_text() == _host_unit(FOREIGN, "brand-new"), (
             "restore touched a unit it never snapshotted"
         )
+
+
+DARWIN_LABEL = "claudlobby-disk-monitor"
+DARWIN_OTHER = "claudlobby-claude-update"
+
+
+def _launch_agent(root: str, label: str = DARWIN_LABEL) -> bytes:
+    return plistlib.dumps({
+        "Label": label,
+        "ProgramArguments": [f"{root}/lib/disk-monitor.sh"],
+        "EnvironmentVariables": {"CLAUDLOBBY_ROOT": root},
+    })
+
+
+@pytest.fixture
+def darwin_host(host):
+    """Exercise the Darwin branch with private files and a logged manager stub.
+
+    Keep the Linux fixture files as decoys: using the wrong unit directory must
+    fail, even when both directories exist. This is a branch contract test,
+    not native launchd lifecycle evidence.
+    """
+    (host["bin"] / "uname").write_text("#!/bin/bash\nprintf '%s\\n' Darwin\n")
+    (host["bin"] / "launchctl").write_text(
+        "#!/bin/bash\n"
+        "printf 'launchctl\\t%s\\n' \"$*\" >> \"$COLDSTART_CALLS\"\n"
+        "[ \"$*\" = list ] || exit 97\n"
+        "printf 'PID\\tStatus\\tLabel\\n'\n"
+        f"printf '%s\\n' '- 0 {DARWIN_LABEL}' '- 0 {DARWIN_OTHER}'\n"
+    )
+    units = host["home"] / "Library" / "LaunchAgents"
+    units.mkdir(parents=True)
+    (units / f"{DARWIN_LABEL}.plist").write_bytes(_launch_agent(OWNED))
+    (units / f"{DARWIN_OTHER}.plist").write_bytes(_launch_agent(OWNED, DARWIN_OTHER))
+    return {**host, "linux_units": host["units"], "units": units}
+
+
+class TestDarwinHostUnitSnapshots:
+    def test_snapshot_uses_private_launch_agents_and_launchctl(self, darwin_host):
+        r = _call(darwin_host, "write_snapshot")
+        assert r.returncode == 0, r.stderr
+        snapshot = darwin_host["state"] / "snapshot"
+        names = sorted([f"{DARWIN_LABEL}.plist", f"{DARWIN_OTHER}.plist"])
+        assert sorted(p.name for p in (snapshot / "hostunits").iterdir()) == names
+        for label in (DARWIN_LABEL, DARWIN_OTHER):
+            assert (snapshot / "hostunits" / f"{label}.plist").read_bytes() == (
+                _launch_agent(OWNED, label)
+            )
+        assert (snapshot / "unitfiles.txt").read_text().splitlines() == names
+        assert (snapshot / "units.txt").read_text().splitlines() == sorted([
+            DARWIN_LABEL, DARWIN_OTHER,
+        ])
+        assert darwin_host["calls"].read_text().splitlines() == ["launchctl\tlist"]
+        assert "2 pre-existing claudlobby-* host unit(s)" in r.stdout
+
+    @pytest.mark.parametrize("change", ["overwrite", "delete"])
+    def test_restore_puts_back_the_original_plist_bytes(self, darwin_host, change):
+        snapshot = _call(darwin_host, "write_snapshot")
+        assert snapshot.returncode == 0, snapshot.stderr
+        target = darwin_host["units"] / f"{DARWIN_LABEL}.plist"
+        if change == "overwrite":
+            target.write_bytes(_launch_agent(FOREIGN))
+        else:
+            target.unlink()
+
+        r = _call(darwin_host, "restore_captured_host_units")
+
+        assert r.returncode == 0, r.stderr
+        assert target.read_bytes() == _launch_agent(OWNED)
+        assert f"{DARWIN_LABEL}.plist" in r.stdout
+        # Restoring files does not mutate the supervisor or the other OS tree.
+        assert darwin_host["calls"].read_text().splitlines() == ["launchctl\tlist"]
+        linux = darwin_host["linux_units"] / "claudlobby-disk-monitor.service"
+        assert linux.read_text() == _host_unit(OWNED)
+
+    def test_restore_leaves_untouched_and_new_plists_alone(self, darwin_host):
+        snapshot = _call(darwin_host, "write_snapshot")
+        assert snapshot.returncode == 0, snapshot.stderr
+        original = darwin_host["units"] / f"{DARWIN_LABEL}.plist"
+        before = original.stat().st_mtime_ns
+        born = darwin_host["units"] / "claudlobby-brand-new.plist"
+        born.write_bytes(_launch_agent(FOREIGN, "claudlobby-brand-new"))
+
+        r = _call(darwin_host, "restore_captured_host_units")
+
+        assert r.returncode == 0, r.stderr
+        assert original.stat().st_mtime_ns == before
+        assert original.read_bytes() == _launch_agent(OWNED)
+        assert born.read_bytes() == _launch_agent(FOREIGN, "claudlobby-brand-new")
+        assert "RESTORED" not in r.stdout + r.stderr
+        assert darwin_host["calls"].read_text().splitlines() == ["launchctl\tlist"]
