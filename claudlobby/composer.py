@@ -41,7 +41,9 @@ from .config import (
     load_host_boot,
     load_host_jobs,
 )
-from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
+from .known_values import (
+    ENV_TIERS, HEADLESS_TRIM_VARS, MARKDOWN_BOT_REFERENCE_FIELDS, SHELL_IDENT_RE,
+)
 from .loader import (
     ExpertisePermissions,
     LibraryItem,
@@ -1920,6 +1922,24 @@ def resolve_effective_skills(
 # ----------------------------------------------------------------------
 
 
+def load_bot_markdown_items(
+    bot: BotConfig, paths: Paths, ctx: dict[str, str], *,
+    protocol_names: list[str], integration_names: list[str],
+) -> dict[str, list[LibraryItem]]:
+    """Load the registry's markdown slots with existing effective references.
+
+    Slot order belongs to the template. Each slot retains declaration/folder
+    order and overlay precedence through the existing loader. Defaults and
+    dependency resolution stay with their specialized resolvers.
+    """
+    effective = {"protocols": protocol_names, "integrations": integration_names}
+    return {
+        kind: [_expand_item(item, ctx) for item in load_library_items_overlay(
+            effective.get(kind, getattr(bot, kind)), paths, kind)]
+        for kind in MARKDOWN_BOT_REFERENCE_FIELDS
+    }
+
+
 def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     """Compose one bot's CLAUDE.md from expertise, voice, protocols, and guardrails; returns the markdown."""
     ctx = _bot_template_context(bot, fleet, paths)
@@ -1933,12 +1953,6 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             voice_item = load_voice(voice_path)
             if voice_item is not None:
                 voice_item = _expand_item(voice_item, ctx)
-
-    def _items(names: list[str], kind: str) -> list[LibraryItem]:
-        return [
-            _expand_item(it, ctx)
-            for it in load_library_items_overlay(names, paths, kind)
-        ]
 
     integration_names = resolve_effective_integrations(bot, paths)
 
@@ -2031,14 +2045,9 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
-        resources=_items(bot.resources, "resources"),
-        integrations=_items(integration_names, "integrations"),
-        principles=_items(bot.principles, "principles"),
-        permissions=_items(bot.permissions, "permissions"),
-        protocols=_items(protocol_names, "protocols"),
-        guardrails=_items(bot.guardrails, "guardrails"),
-        lessons=_items(bot.lessons, "lessons"),
-        post_actions=_items(bot.post_actions, "post_actions"),
+        **load_bot_markdown_items(
+            bot, paths, ctx, protocol_names=protocol_names,
+            integration_names=integration_names),
     )
     # Collapse 3+ blank lines → 2 to keep output tidy.
     while "\n\n\n\n" in rendered:

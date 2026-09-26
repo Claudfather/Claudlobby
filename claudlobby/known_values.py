@@ -8,7 +8,39 @@ for what values the compositor recognizes.
 from __future__ import annotations
 
 import difflib
+from dataclasses import dataclass
 import re
+
+# Library categories describe storage, not a universal reference resolver.
+# Expertise is required and file-only; skills/tools/MCP keep their specialized
+# consumers. A permissions markdown component is prose, not a tool grant.
+@dataclass(frozen=True)
+class LibraryCategory:
+    name: str
+    storage: str
+    reference_forms: tuple[str, ...]
+    bot_markdown: bool = False
+
+
+_MARKDOWN_FORMS = ("file", "nested-file", "folder")
+LIBRARY_CATEGORIES: tuple[LibraryCategory, ...] = (
+    LibraryCategory("expertise", "markdown", ("file", "nested-file")),
+    LibraryCategory("mcp", "mcp-json", ("file", "nested-file")),
+    LibraryCategory("integrations", "markdown", _MARKDOWN_FORMS, True),
+    LibraryCategory("protocols", "markdown", _MARKDOWN_FORMS, True),
+    LibraryCategory("guardrails", "markdown", _MARKDOWN_FORMS, True),
+    LibraryCategory("resources", "markdown", _MARKDOWN_FORMS, True),
+    LibraryCategory("lessons", "markdown", _MARKDOWN_FORMS, True),
+    LibraryCategory("post_actions", "markdown", _MARKDOWN_FORMS, True),
+    LibraryCategory("principles", "markdown", _MARKDOWN_FORMS, True),
+    LibraryCategory("permissions", "markdown", _MARKDOWN_FORMS, True),
+    LibraryCategory("skills", "skill-directory", ("directory", "nested-directory", "folder")),
+    LibraryCategory("tools", "tool-directory", ("directory", "nested-directory")),
+)
+MARKDOWN_BOT_REFERENCE_FIELDS: tuple[str, ...] = tuple(
+    category.name for category in LIBRARY_CATEGORIES if category.bot_markdown
+)
+
 
 # Shell-identifier pattern — the SSOT for anything that becomes a shell variable
 # name (bot.env keys, model-strategy tiers, briefing slot -> BRIEFING_SECTIONS_<SLOT>).
