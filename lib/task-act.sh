@@ -260,7 +260,7 @@ else
 fi
 # source_ref names the DISPATCH the act is about (the same `dispatch-log:<id>`
 # every door on this row stamps), so the act joins the row it retires or
-# raises with no per-door schema -- plane-parity's rule. The task id is
+# raises with no per-door schema -- the source_ref join rule. The task id is
 # ESCAPED like every other caller-supplied value: it arrives from a human
 # typing it, not from the mint.
 printf -v BATCH '{"events":[{"event_type":"task","emitter":"task-act","source_ref":"dispatch-log:%s","fleet":"%s","payload":{"work_item_id":"%s","assignment_id":"%s","event":"%s","actor":"%s","by":"%s",%s,"summary":"%s"}}]}' \
