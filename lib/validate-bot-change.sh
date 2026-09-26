@@ -251,38 +251,66 @@ val_plane_diagnostics() {
     done
     return 0
 }
-# The launcher below becomes its own session before exec. Kill only that owned
-# group, including the two real descendants; an abort before setsid also needs
-# the still-owned direct child stopped. Audit executing members, not zombies.
+# A PID alone is not ownership: the child can exit and its number be reused.
+# Verify the exact per-fixture token before every signal. Inspect only this
+# session/direct child, never select targets by a name or a command substring.
 val_stop_scope_tree() {
     [ -n "${_SC_ROOT_PID:-}" ] || return 0
     local stopped=0
-    python3 - "$_SC_ROOT_PID" <<'SCSTOP' || stopped=$?
-import os, signal, subprocess, sys, time
+    python3 - "$_SC_ROOT_PID" "${_SC_TOKEN:-}" <<'SCSTOP' || stopped=$?
+import os, platform, re, signal, subprocess, sys, time
+from pathlib import Path
 root = int(sys.argv[1])
-if root <= 1:
-    raise SystemExit("refusing invalid foreign-tree pid")
+token = sys.argv[2]
+if root <= 1 or root == os.getpgrp():
+    raise SystemExit("refusing invalid or caller process group for foreign-tree cleanup")
+if not re.fullmatch(r"[0-9a-f]{32}", token):
+    raise SystemExit("refusing foreign-tree cleanup without a valid ownership token")
+marker = "CLAUDLOBBY_VALIDATE_SCOPE_TOKEN=" + token
 def live_members():
     rows = subprocess.check_output(["ps", "-axo", "pid=,pgid=,stat="], text=True)
     return [int(pid) for pid, pgid, state in (row.split() for row in rows.splitlines())
             if (int(pgid) == root or int(pid) == root) and not state.startswith("Z")]
-for _ in range(100):
-    # Retry the group after the direct child: a cancellation can race setsid.
-    for target in (-root, root, -root):
-        try:
-            os.kill(target, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+def owned(pid):
+    try:
+        if platform.system() == "Linux":
+            return marker.encode() in Path("/proc/%s/environ" % pid).read_bytes().split(b"\0")
+        env = subprocess.check_output(["ps", "eww", "-p", str(pid)], text=True,
+                                      stderr=subprocess.DEVNULL)
+        return marker in env.split()
+    except (OSError, subprocess.CalledProcessError):
+        return False
+for attempt in range(100):
     remaining = live_members()
     if not remaining:
         break
+    foreign = [pid for pid in remaining if not owned(pid)]
+    if foreign:
+        # Cancellation can reach a just-forked child before exec exposes its
+        # environment. Observe briefly, but never signal an unverified target.
+        if attempt < 10:
+            time.sleep(0.05)
+            continue
+        raise SystemExit("refusing foreign-tree cleanup of unverified pids: %s" % foreign)
+    for pid in remaining:
+        # Recheck immediately before each individual signal; do not send a
+        # group signal that could reach a newly joined, unverified process.
+        if not owned(pid):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # A surviving live member fails the bounded audit below.
     time.sleep(0.05)
 else:
-    raise SystemExit("foreign-tree cleanup left executing pids: %s" % remaining)
+    remaining = live_members()
+    if remaining:
+        raise SystemExit("foreign-tree cleanup left executing pids: %s" % remaining)
 SCSTOP
     [ "$stopped" -eq 0 ] || return "$stopped"
     wait "$_SC_ROOT_PID" 2>/dev/null || true
     _SC_ROOT_PID=""
+    _SC_TOKEN=""
 }
 # --- End harness-only helpers ----------------------------------------------
 
@@ -504,6 +532,9 @@ cleanup() {
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "${CK2_ROOT2:-}" "$TMUX_TMPDIR"
     return "$rc"
 }
+# Scope ownership starts empty, before the EXIT trap can act on an early abort.
+_SC_ROOT_PID=""
+_SC_TOKEN=""
 trap cleanup EXIT
 
 mkdir -p "$BOT_DIR/data" "$ROOT/state"
@@ -1221,7 +1252,10 @@ if [ "$r" != yes ]; then
     val_diag_file "reload-fleet stdout" "$ROOT/reload-failure.stdout"
     val_diag_file "reload-fleet stderr" "$ROOT/reload-failure.stderr"
     val_manager_diagnostics "$MGR"
-    val_diag val_events "$ROOT" "$FLEET" fleet reload_failed
+    echo '  [fleet signal facts: reload, recipient resolution, send failures]'
+    val_diag val_events "$ROOT" "$FLEET" fleet
+    echo '  [manager facts]'
+    val_diag val_events "$ROOT" "$FLEET" "$MGR"
 fi
 [ ! -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
 harness_check "reload-fleet does not half-reload (no marker when download fails)" "$r"
@@ -1951,7 +1985,8 @@ SCTREE
 rm -f "$RB_DIR/state/bot.pid"
 # No external setsid command is required. exec preserves $! as the owned group
 # leader, and the leaf inherits TELEGRAM_STATE_DIR for the real ownership check.
-env TELEGRAM_STATE_DIR="$RB_DIR/state" python3 -c \
+_SC_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+CLAUDLOBBY_VALIDATE_SCOPE_TOKEN="$_SC_TOKEN" TELEGRAM_STATE_DIR="$RB_DIR/state" python3 -c \
     'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
     "$_SC_BIN/claude" "$_SC_BIN/tree" >"$RB_ROOT/scope-tree.out" 2>&1 &
 _SC_ROOT_PID=$!
@@ -4220,6 +4255,8 @@ if [ "$_s_ctl_ok" != yes ] || [ "$_s_push_ok" != yes ] || \
     val_diag_file "fleet-pulse stdout" "$ROOT/activity-pulse.stdout"
     val_diag_file "fleet-pulse stderr" "$ROOT/activity-pulse.stderr"
     val_manager_diagnostics "$MGR"
+    echo '  [fleet signal facts: recipient resolution and send failures]'
+    val_diag val_events "$ROOT" "$F3" fleet
     for b in "$SCTL" "$SIDLE" "$SNOMARK"; do
         echo "    $b:"
         ls -la --time-style=+%s "$F3_BOTS/$b/data" 2>/dev/null \

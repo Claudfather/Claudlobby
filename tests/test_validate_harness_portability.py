@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -49,7 +50,7 @@ def _run(tmp_path: Path, body: str, **extra: str) -> subprocess.CompletedProcess
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + _helpers() + "\n" + body],
         env=_environment(tmp_path, **extra), cwd=tmp_path, capture_output=True,
-        text=True, timeout=30,
+        text=True, timeout=30, start_new_session=True,
     )
 
 
@@ -89,10 +90,12 @@ def test_activity_push_failure_keeps_assertions_and_prints_diagnostics(tmp_path,
     prefix = f"""
 ROOT={shlex.quote(str(tmp_path))}
 F3_BOTS={shlex.quote(str(bots))}
-MGR=fixture-manager; TMUX_TMPDIR="$TMPDIR"; _s_pulse_rc=7
+MGR=fixture-manager; F3=fixture; TMUX_TMPDIR="$TMPDIR"; _s_pulse_rc=7
 SCTL=control; SIDLE=idle; SNOMARK=nomark
 s_ctl_ev='{{"type":"activity_stuck"}}'; s_idle_ev=''; s_nomark_ev=''
 s_mgr_pane={shlex.quote(pane)}
+val_events() {{ echo 'fixture recipient/send facts'; }}
+val_diag() {{ "$@"; }}
 harness_check() {{ printf 'CHECK %s=%s\\n' "$1" "$2"; }}
 vsock() {{ printf 'tmux-%s' "$1"; }}
 tmux() {{
@@ -113,6 +116,7 @@ tmux() {{
     else:
         assert "DIAGNOSTIC: #934 S1/S2 fixture state" in result.stdout, "push-only failure lost its diagnostics"
         assert "fixture delivery stderr" in result.stdout
+        assert "fixture recipient/send facts" in result.stdout
         assert "fleet-pulse rc 7" in result.stdout
         assert "pid=123 dead=0 width=80 height=24" in result.stdout
         assert "manager visible pane" in result.stdout
@@ -133,7 +137,7 @@ ROOT={shlex.quote(str(tmp_path))}; LIB_DIR={shlex.quote(str(lib))}
 STUB_BIN={shlex.quote(str(stub))}; BOT_DIR={shlex.quote(str(bot))}
 FLEET=fixture; MGR=fixture-manager; TMUX_TMPDIR="$TMPDIR"
 harness_check() {{ printf 'CHECK %s=%s\\n' "$1" "$2"; }}
-val_events() {{ echo '{{"type":"reload_failed"}}'; }}
+val_events() {{ printf '{{"type":"reload_failed","query":"%s"}}\\n' "$*"; }}
 val_diag() {{ "$@"; }}
 vsock() {{ printf 'tmux-%s' "$1"; }}
 tmux() {{ echo 'no manager delivery'; }}
@@ -145,6 +149,8 @@ tmux() {{ echo 'no manager delivery'; }}
     assert "DIAGNOSTIC: reload-fleet manager push (rc 7)" in result.stdout, "reload push failure lost action output"
     assert "reload stdout" in result.stdout
     assert "reload stderr" in result.stdout
+    assert "fleet signal facts: reload, recipient resolution, send failures" in result.stdout
+    assert "manager facts" in result.stdout
     assert "manager visible pane" in result.stdout
 
 def test_plane_dispatch_retains_each_leg_and_its_original_exit_code(tmp_path):
@@ -253,6 +259,7 @@ def test_mid_scenario_abort_reaps_the_owned_foreign_group(tmp_path):
         "time.sleep(45)\n"
     )
     cleanup = _between("cleanup() {", "trap cleanup EXIT")
+    token = uuid.uuid4().hex
     prefix = f"""
 ROOT={shlex.quote(str(rb))}; TMUX_TMPDIR="$TMPDIR/unused-sockets"
 BOT=; MGR=; IBOT=; BUSY=; SBOT=; MBOT=
@@ -260,7 +267,8 @@ pass=1; fail=0
 """
     body = prefix + cleanup + f"""
 trap cleanup EXIT
-{shlex.quote(sys.executable)} -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \\
+_SC_TOKEN={token}
+CLAUDLOBBY_VALIDATE_SCOPE_TOKEN="$_SC_TOKEN" {shlex.quote(sys.executable)} -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \\
     {shlex.quote(sys.executable)} {shlex.quote(str(sleeper))} >/dev/null 2>&1 &
 _SC_ROOT_PID=$!
 printf '%s' "$_SC_ROOT_PID" > {shlex.quote(str(root_pid))}
@@ -280,3 +288,72 @@ exit 42
         assert not _live_group(int(root_pid.read_text())), "EXIT cleanup leaked the owned foreign tree"
     finally:
         _reap_test_group(root_pid)
+
+
+def _foreign_probe(tmp_path: Path, token: str) -> subprocess.Popen:
+    ready = tmp_path / "foreign-probe-ready"
+    process = subprocess.Popen(
+        [sys.executable, "-c", "from pathlib import Path; import sys, time; "
+         "Path(sys.argv[1]).write_text('ready'); time.sleep(45)", str(ready)],
+        env=_environment(tmp_path, CLAUDLOBBY_VALIDATE_SCOPE_TOKEN=token),
+        start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(100):
+            if ready.exists():
+                return process
+            assert process.poll() is None, "foreign control exited before ready"
+            time.sleep(0.05)
+        raise AssertionError("foreign control did not become ready")
+    except BaseException:
+        process.kill()
+        process.wait(timeout=5)
+        raise
+
+
+def test_early_abort_ignores_inherited_scope_identity(tmp_path):
+    token = uuid.uuid4().hex
+    probe = _foreign_probe(tmp_path, token)
+    # This tree belongs to the test, not to the harness invocation. Even a
+    # matching inherited token must not arm teardown before the harness spawn.
+    cleanup = _between("cleanup() {", "trap cleanup EXIT")
+    prefix = 'ROOT="$TMPDIR/empty-root"; mkdir -p "$ROOT"\nTMUX_TMPDIR="$ROOT/socket"\nBOT=; MGR=; IBOT=; BUSY=; SBOT=; MBOT=\n'
+    body = prefix + cleanup + """
+trap cleanup EXIT
+printf 'INITIAL pid=<%s> token=<%s>\n' "${_SC_ROOT_PID:+set}" "${_SC_TOKEN:+set}"
+exit 42
+"""
+    try:
+        result = _run(tmp_path, body, _SC_ROOT_PID=str(probe.pid), _SC_TOKEN=token)
+        assert result.returncode == 42, result.stderr
+        assert "INITIAL pid=<> token=<>" in result.stdout, "inherited identity armed harness cleanup"
+        assert probe.poll() is None, "early harness abort killed a foreign inherited identity"
+    finally:
+        if probe.poll() is None:
+            probe.kill()
+        probe.wait(timeout=5)
+
+
+@pytest.mark.parametrize("token_kind", ["foreign", "missing"])
+def test_scope_cleanup_refuses_unowned_live_child(tmp_path, token_kind):
+    probe = _foreign_probe(tmp_path, uuid.uuid4().hex)
+    token = uuid.uuid4().hex if token_kind == "foreign" else ""
+    try:
+        result = _run(tmp_path, f'_SC_ROOT_PID={probe.pid}; _SC_TOKEN={shlex.quote(token)}\nval_stop_scope_tree\n')
+        assert result.returncode != 0, "unowned cleanup unexpectedly succeeded"
+        assert "refusing foreign-tree cleanup" in result.stderr, result.stderr
+        assert probe.poll() is None, "cleanup signaled an unowned live child"
+    finally:
+        if probe.poll() is None:
+            probe.kill()
+        probe.wait(timeout=5)
+
+
+def test_scope_cleanup_refuses_its_callers_process_group(tmp_path):
+    # _run gives this shell its own disposable session. Even a guard mutant
+    # can only kill this test-owned subprocess group, never the pytest driver.
+    token = uuid.uuid4().hex
+    result = _run(tmp_path, f'_SC_ROOT_PID=$$; _SC_TOKEN={token}\nval_stop_scope_tree\n',
+                  CLAUDLOBBY_VALIDATE_SCOPE_TOKEN=token)
+    assert result.returncode > 0, "cleanup killed its caller process group"
+    assert "refusing invalid or caller process group" in result.stderr, result.stderr
