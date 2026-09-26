@@ -13,7 +13,6 @@
   "lib/reconcile-fleet.sh": 8,
   "lib/rehearse-briefing-timer.sh": 9,
   "lib/rehearse-env-cascade.sh": 3,
-  "lib/rehearse-keepalive-swap.sh": 6,
   "lib/setup-fleet": 11,
   "lib/setup-system": 2,
   "lib/spin-down-bot.sh": 2,
