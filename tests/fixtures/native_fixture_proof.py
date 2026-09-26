@@ -250,6 +250,15 @@ def tmux_passthrough(real, ledger, proof_root, args):
     return result.returncode
 
 
+def tmux_absence(query, socket):
+    """Only an exact owned-socket absence diagnostic establishes no server."""
+    diagnostics = {message for path in (socket, socket.resolve()) for message in (
+        "no server running on " + str(path),
+        "error connecting to " + str(path) + " (No such file or directory)")}
+    return (query.returncode == 1 and not query.stdout
+            and query.stderr.strip() in diagnostics)
+
+
 def inspect_endpoints(real, attempts, env):
     """Independently query every attempted private endpoint, not just PID receipts."""
     found = []
@@ -260,9 +269,10 @@ def inspect_endpoints(real, attempts, env):
         try:
             query = subprocess.run([real, "-L", name, "list-panes", "-a", "-F", "#{pid} #{pane_pid}"],
                 env={**env, "TMUX_TMPDIR": directory}, capture_output=True, text=True, timeout=10)
-            row.update(rc=query.returncode, stderr=query.stderr)
-            row["query_invalid"] = query.returncode not in (0, 1) or any(
-                text in query.stderr for text in ("Operation not permitted", "Permission denied"))
+            row.update(rc=query.returncode, stdout=query.stdout, stderr=query.stderr)
+            # rc 1 alone includes permission, path and command failures. None
+            # of those can prove absence, even when the socket file is gone.
+            row["query_invalid"] = query.returncode != 0 and not tmux_absence(query, socket)
             if query.returncode == 0:
                 parsed = [line.split() for line in query.stdout.splitlines()]
                 if not parsed or any(len(pair) != 2 or not all(p.isdigit() for p in pair) for pair in parsed):
@@ -566,7 +576,16 @@ def self_check():
     assert valid_completed(0, [{"status": "skipped",
         "node": "test::test_ambient_claude_processes_do_not_leak_in",
         "detail": "no live claude processes on this host: control unavailable"}], False, "")
-    print("seven controller validity controls passed; no native execution")
+    socket = Path("/proof-owned/tmux-123/pulse610")
+    for diagnostic in ("no server running on " + str(socket),
+            "error connecting to " + str(socket) + " (No such file or directory)"):
+        assert tmux_absence(subprocess.CompletedProcess([], 1, "", diagnostic), socket)
+        assert not tmux_absence(subprocess.CompletedProcess([], 2, "", diagnostic), socket)
+        assert not tmux_absence(subprocess.CompletedProcess([], 1, "unexpected", diagnostic), socket)
+    for diagnostic in ("", "unknown query failure", "invalid socket path", "Operation not permitted",
+            "operation unsupported", "no server running on /unowned/tmux-123/pulse610"):
+        assert not tmux_absence(subprocess.CompletedProcess([], 1, "", diagnostic), socket)
+    print("controller validity and exact endpoint absence controls passed; no native execution")
 
 
 if __name__ == "__main__":
