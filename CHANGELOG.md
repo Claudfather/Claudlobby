@@ -21,6 +21,15 @@ allowance is `spotify.json`, whose `@modelcontextprotocol/server-spotify` is
 also E404, so there is nothing to pin. A composed `.mcp.json` changes at the
 next `generate` plus a restart.
 
+### Fixed — every bot can verify a dispatch framed as pasted text, not only the 12 that composed the guidance (#1876)
+
+#1882's verify-then-trust check lived in the `dispatch` and `worker-lifecycle`
+protocols, and 9 of the estate's 21 bots compose neither, although any pane can
+receive a framed dispatch. The check is now a short fixed section of the
+`CLAUDE.md` template, which every bot composes; the two protocols point to it,
+so there is one copy. It reaches a running bot at its next restart after a
+`generate`.
+
 ### Added — `pull-root`: the compositor root pulls itself, and watches what it did (#1251)
 
 A merged framework fix was inert on every host until someone pulled
