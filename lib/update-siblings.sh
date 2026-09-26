@@ -29,13 +29,15 @@
 # the scheduled run, and a flag the timer cannot set is scaffolding that only
 # ever desynchronises the reporter from the applier.
 #
-# $CLAUDLOBBY_ROOT IS DELIBERATELY NOT UPDATED HERE. Pulling the compositor
-# itself is root-self-update, which system.yaml states ships "behind explicit
-# toggles via their own plans, never here" — and it is not the same decision as
-# updating a dependency: this script lives IN that repo, bash reads a script
-# incrementally by file offset, so fast-forwarding claudlobby would rewrite
-# update-siblings.sh underneath the running interpreter. notify-behind.sh still
-# REPORTS the root; applying is the operator's.
+# $CLAUDLOBBY_ROOT IS DELIBERATELY NOT UPDATED HERE. Pulling the compositor is
+# not the same decision as updating a dependency, and it has its own opt-in
+# job, lib/pull-root.sh, with a watch and a hold this script has no reason to
+# carry. It is NOT excluded because a pull would rewrite this script under the
+# running interpreter: git's checkout replaces a changed file (a new inode)
+# instead of writing it in place, and bash keeps reading the inode it opened,
+# so a running script finishes on its old bytes. Measured on the Pi (git
+# 2.39.5, ext4), with an in-place write as the positive control that does
+# corrupt a run (#1251 issuecomment-5845912184; grow and shrink re-derived in issuecomment-5846080563). notify-behind.sh still REPORTS the root.
 #
 # ---------------------------------------------------------------------------
 # WHY THIS CLOCK

@@ -100,6 +100,10 @@ def test_exactly_the_categories_that_ship_off():
                       # category, not a new one: armed, vault-sync commits and
                       # pushes the vault on every host it runs on.
                       "vault-sync",
+                      # mutates operator source, the same category again:
+                      # armed, pull-root fast-forwards the install every bot
+                      # on the host runs (#1251).
+                      "pull-root",
                       # model spend — same class as code-audit-sweep /
                       # session-digest, not a new category
                       "manager-checkin",
