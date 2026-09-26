@@ -25,6 +25,7 @@ Two tiers, the tests/test_boot_strand_sampler.py shape:
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -162,6 +163,107 @@ class TestClassifyArrival:
 
 
 # --------------------------------------------------------------------------
+# paste framing (#1876) — which bytes of a payload arrived inside
+# <pasted_content>. Every record shape here is a LIVE capture from the probe's
+# own receiver (claude 2.1.281, framing flag seeded, 2026-09-26) with only the
+# payload bytes and the per-session id replaced.
+# --------------------------------------------------------------------------
+
+OPEN = '<pasted_content id="0a1b">'
+CLOSE = '</pasted_content id="0a1b">'
+
+
+def _framed(text: str) -> str:
+    """One framed block exactly as the receiver records it."""
+    return f"\n\n{OPEN}\n{text}\n{CLOSE}\n"
+
+
+@pytest.fixture(scope="module")
+def pay() -> str:
+    # The real builder: its filler names its own offset, so a framed block is
+    # found at exactly one place in the payload.
+    return _fn("probe_payload", "1800", "TOK")
+
+
+class TestPasteSpans:
+    def test_an_unframed_record_has_no_span(self, pay):
+        assert _fn("paste_spans", pay, pay) == "-"
+
+    def test_a_wholly_framed_burst(self, pay):
+        # live: one 900-byte write -> a 958-byte record
+        assert _fn("paste_spans", pay[:900], _framed(pay[:900])) == "0-900"
+
+    def test_the_first_chunk_framed_and_the_tail_typed(self, pay):
+        # live: 1094 bytes at cap 900 -> a 1153-byte record; the issue's shape
+        p = pay[:1094]
+        rec = _framed(p[:900]) + "\n" + p[900:]
+        assert _fn("paste_spans", p, rec) == "0-900"
+
+    def test_a_typed_head_then_a_framed_burst(self, pay):
+        # live: 1800 typed bytes, then a 3000-byte write -> a 4858-byte record
+        rec = pay[:1000] + _framed(pay[1000:])
+        assert _fn("paste_spans", pay, rec) == "1000-1800"
+
+    def test_every_framed_chunk_is_its_own_span(self, pay):
+        # live: 1800 bytes at cap 900 -> a 1916-byte record. Both chunks cross
+        # the threshold, the second into a box that is NOT empty, and each is
+        # framed on its own.
+        rec = _framed(pay[:900]) + _framed(pay[900:])
+        assert _fn("paste_spans", pay, rec) == "0-900,900-1800"
+
+    def test_a_framed_text_the_payload_does_not_hold_is_disclosed(self, pay):
+        # Never dropped: a block the probe cannot place still says how big it was.
+        assert _fn("paste_spans", pay, _framed("not from this payload")) == "?+21"
+
+
+class TestPasteUnwrap:
+    def test_an_unframed_record_is_unchanged(self, pay):
+        assert _fn("paste_unwrap", pay) == pay
+
+    def test_the_framing_and_its_newlines_are_removed(self, pay):
+        p = pay[:1094]
+        assert _fn("paste_unwrap", _framed(p[:900]) + "\n" + p[900:]) == p
+
+    def test_a_typed_head_survives(self, pay):
+        assert _fn("paste_unwrap", pay[:1000] + _framed(pay[1000:])) == pay
+
+    def test_the_verdict_is_taken_on_the_unframed_bytes(self, pay):
+        # A framed arrival of every byte is WHOLE, not `other`: the framing is
+        # recorded in its own column rather than read as a loss.
+        rec = _framed(pay[:900]) + "\n" + pay[900:]
+        assert _fn("classify_arrival", pay, _fn("paste_unwrap", rec)) == "whole"
+
+
+class TestAwaitRecord:
+    def test_a_framed_record_is_read_whole_not_as_its_first_line(self, tmp_path):
+        # A framed record OPENS with two newlines. The line-oriented read this
+        # replaced returned its empty first line, so a send that HAD arrived was
+        # reported absent: the loss verdict, for a delivery.
+        content = _framed("TOKH filler TTOK")
+        d = tmp_path / "proj" / "slug"
+        d.mkdir(parents=True)
+        (d / "s.jsonl").write_text(
+            json.dumps({"type": "assistant", "message": {"content": "TOKH an echo"}})
+            + "\n"
+            + json.dumps({"type": "user", "message": {"content": content}})
+            + "\n"
+        )
+        got = _fn("await_record", str(tmp_path / "proj"), "TOK", "1")
+        # $( ) drops the trailing newline, which is framing too.
+        assert got == content.rstrip("\n")
+
+
+class TestSeedConfig:
+    def test_the_receiver_is_seeded_with_the_framing_flag(self):
+        # Unseeded, an unauthenticated receiver defaults the flag off and frames
+        # nothing, so every row of the #1876 column would read "-".
+        cfg = json.loads(_fn("probe_seed_config", "/scratch/cwd", "2.1.281"))
+        assert cfg["cachedGrowthBookFeatures"]["tengu_virtual_pancake"] is True
+        assert cfg["projects"]["/scratch/cwd"]["hasTrustDialogAccepted"] is True
+        assert cfg["lastOnboardingVersion"] == "2.1.281"
+
+
+# --------------------------------------------------------------------------
 # via_hook_agrees — chunk P (#1501): the instrument checking the instrument
 # --------------------------------------------------------------------------
 
@@ -236,6 +338,11 @@ ROWS = "\n".join(
         "unchunked\t2100\t1\tabsent\t0",
         "unchunked\t2100\t2\ttail-lost\t900",
         "unchunked\t2100\t3\tother\t1200",
+        # #1876: a sixth column, the framed spans ("-" when none)
+        "cap900\t1800\t1\twhole\t1800\t0-900,900-1800",
+        "cap900\t1800\t2\twhole\t1800\t0-900,900-1800",
+        "cap900\t1800\t3\twhole\t1800\t0-900",
+        "cap900\t300\t1\twhole\t300\t-",
     ]
 )
 
@@ -256,17 +363,22 @@ class TestRenderTable:
 
     def test_only_the_named_arm_is_counted(self, rows):
         out = _fn("render_table", "chunked", str(rows))
-        assert self._row(out, "1100")[1:] == ["2", "2", "0", "0", "0", "0", "-"]
+        assert self._row(out, "1100")[1:] == ["2", "2", "0", "0", "0", "0", "-", "0", "-"]
         assert " 2100 " not in out  # unchunked-only size
 
     def test_each_verdict_lands_in_its_own_column(self, rows):
         out = _fn("render_table", "unchunked", str(rows))
-        # size n whole head-lost tail-lost absent other median
-        assert self._row(out, "2100")[1:] == ["3", "0", "0", "1", "1", "1", "-"]
+        # size n whole head-lost tail-lost absent other median wrapped pasted
+        assert self._row(out, "2100")[1:] == ["3", "0", "0", "1", "1", "1", "-", "0", "-"]
 
     def test_median_arrived_covers_head_lost_only(self, rows):
         out = _fn("render_table", "unchunked", str(rows))
-        assert self._row(out, "1100")[-1] == "78"  # median of 56, 78, 478
+        assert self._row(out, "1100")[7] == "78"  # median of 56, 78, 478
+
+    def test_framed_rows_are_counted_and_the_commonest_span_shown(self, rows):
+        out = _fn("render_table", "cap900", str(rows))
+        assert self._row(out, "1800")[8:] == ["3", "0-900,900-1800"]
+        assert self._row(out, "300")[8:] == ["0", "-"]
 
     def test_sizes_are_ordered_numerically(self, rows):
         out = _fn("render_table", "unchunked", str(rows))
@@ -473,6 +585,17 @@ class TestCli:
         r = self._run("--arm", "sideways")
         assert r.returncode == 2
         assert "--arm must be" in r.stderr
+
+    def test_cap_arms_and_arm_lists_pass_validation(self):
+        # They reach the real-boot gate, the first refusal after the arguments.
+        for arm in ("cap400", "cap900 cap400 cap200 cap0", "chunked,cap200"):
+            r = self._run("--arm", arm)
+            assert r.returncode == 2 and "SEND_PROBE_REAL=1" in r.stderr, (arm, r.stderr)
+
+    def test_a_malformed_cap_arm_is_refused(self):
+        for arm in ("cap", "cap4x", "cap-1", "", "cap900 sideways"):
+            r = self._run("--arm", arm)
+            assert r.returncode == 2 and "--arm must be" in r.stderr, (arm, r.stderr)
 
     def test_a_bad_filler_is_refused(self):
         r = self._run("--filler", "sideways")
