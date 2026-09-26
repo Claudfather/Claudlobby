@@ -2100,7 +2100,7 @@ _session_candidate_dir() {
 # value (the composed MANAGER_TMUX_SOCKET field, however the caller read it),
 # else reverse-look it up from the peer's session name. The single home for the
 # "explicit field, else reverse-lookup" precedence shared by report-back,
-# sprint-trigger, fleet-pulse, evening-audit, and emit_failure_alert.
+# fleet-pulse, evening-audit, and emit_failure_alert.
 resolve_peer_socket() {
     local explicit="$1" session="$2" bots_dir="${3:-}"
     if [ -n "$explicit" ]; then
@@ -3332,7 +3332,7 @@ pane_is_idle() {
 
 # Base busy-detection regex — single source of truth for keepalive.sh
 # classify_pane and every "should I inject keystrokes?" consumer
-# (sprint-trigger, bot-sweep-cron). "esc to interrupt" is drawn during ANY
+# (bot-sweep-cron). "esc to interrupt" is drawn during ANY
 # active turn and is stable across Claude Code releases and
 # prefersReducedMotion; the churning verb lists (Thinking/Running/…) that
 # consumers previously grepped silently degrade on UI changes and must not

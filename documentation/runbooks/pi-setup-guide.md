@@ -444,26 +444,9 @@ journalctl --user -u claudlobby-<job>.service -n 20
 
 Two supported patterns on Linux. Pick the one that fits — both produce a working fleet, neither blocks the other later. Full reference: [install-patterns.md](../install-patterns.md).
 
-### Pattern A — cron + tmux (simplest, what most Pi setups use)
+### Pattern A — cron + tmux (retired)
 
-```bash
-# Compose the fleet first
-claudlobby --fleet <name> generate
-
-# Install cron entries (per-bot keepalive staggered, log rotation, fleet pulse, daily creds-check)
-lib/install-cron.sh --fleet <name>
-
-# Inspect without writing
-lib/install-cron.sh --fleet <name> --dry-run
-```
-
-`install-cron.sh` writes a managed block bracketed by `# BEGIN claudlobby:<fleet>` / `# END claudlobby:<fleet>` markers. Re-run it to update; lines outside the markers are preserved.
-
-Bots themselves are still tmux sessions; bring them up at boot with one `@reboot` entry per bot:
-
-```crontab
-@reboot sleep 60 && /path/to/claudlobby/lib/start-bot.sh /path/to/runtime/bots/<bot>
-```
+The cron plane (`lib/install-cron.sh`) was removed: neither first-class host used it. Use Pattern B.
 
 ### Pattern B — systemd user services (modern, self-restarting)
 
@@ -474,9 +457,8 @@ claudlobby --fleet <name> generate
 # Per bot
 lib/install-bot-systemd.sh local/<name>/runtime/bots/<bot>
 
-# Fleet-wide timers
-lib/install-keepalive-systemd.sh <name>
-lib/install-creds-check-systemd.sh
+# Fleet-wide timers — every composed job, one call
+lib/setup-fleet <name>
 ```
 
 Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `systemctl --user list-timers` and `journalctl --user -u <name> -f`.

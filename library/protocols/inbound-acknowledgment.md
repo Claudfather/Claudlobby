@@ -53,6 +53,6 @@ The human is using the bot through a thin channel (Telegram, Slack). They don't 
 
 Acknowledging closes that loop in 10 seconds. The bot stays trustworthy. The human stays calibrated.
 
-A `UserPromptSubmit` hook can fire a deterministic sub-second receipt before the model has even started thinking — see `lib/telegram-instant-ack.sh` for a reference implementation. The hook handles the fast-ack; this protocol ensures the model's substantive paraphrase + next-step also lands.
+A `UserPromptSubmit` hook can fire a deterministic sub-second receipt before the model has even started thinking — `lib/plane-telegram-in.sh` is the live hook on that path. The hook handles the fast-ack; this protocol ensures the model's substantive paraphrase + next-step also lands.
 
 This protocol pairs with `direct-mention-response` (worker acks for @-mentions even mid-task) and `proactivity-discipline` (manager wait-points; idle silence is recorded, not posted). Same family, different surface area.
