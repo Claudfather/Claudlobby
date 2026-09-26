@@ -12,12 +12,15 @@ import os
 import json
 import shutil
 import signal
+import shlex
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+
+from tests.conftest import constructed_env
 
 DOOR = Path(__file__).resolve().parent.parent / "lib" / "claude-session-pid.sh"
 
@@ -57,6 +60,10 @@ def _fake_tree(tmp_path, script):
     continued past it -- but it silently destroys the fixture, so the fixture
     keeps the parent alive on purpose.
     """
+    home, scratch = tmp_path / "home", tmp_path / "scratch"
+    home.mkdir()
+    scratch.mkdir()
+    env = constructed_env(HOME=home, TMPDIR=scratch, CLAUDLOBBY_ROOT=tmp_path)
     fake = tmp_path / "claude"
     if sys.platform == "darwin":
         node = shutil.which("node")
@@ -68,7 +75,7 @@ def _fake_tree(tmp_path, script):
         tree = tmp_path / "tree.js"
         tree.write_text(
             "const child = require('child_process').spawnSync('/bin/bash', "
-            + json.dumps(["-c", script + "; true"])
+            + json.dumps(["--noprofile", "--norc", "-c", script + "; true"])
             + ", {stdio: 'inherit', timeout: 8000, killSignal: 'SIGKILL', "
             "env: {...process.env, ANCESTOR_PID: String(process.pid)}});\n"
             "if (child.error) { console.error(child.error); process.exit(1); }\n"
@@ -77,13 +84,14 @@ def _fake_tree(tmp_path, script):
         command = [str(fake), str(tree)]
     else:
         fake.write_bytes(Path("/bin/bash").read_bytes())
-        command = [str(fake), "-c", 'export ANCESTOR_PID=$$; ' + script + "; true"]
+        command = [str(fake), "--noprofile", "--norc", "-c",
+                   'export ANCESTOR_PID=$$; ' + script + "; true"]
     fake.chmod(0o755)
     # Start through the already-running Python executable: the deadline then
     # covers exec/startup of the copied binary too, not just its running time.
     launch = [sys.executable, "-c", "import os,sys; os.execv(sys.argv[1], sys.argv[1:])", *command]
     with subprocess.Popen(launch, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True, start_new_session=True) as proc:
+                          text=True, start_new_session=True, env=env) as proc:
         try:
             stdout, stderr = proc.communicate(timeout=15)
             return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
@@ -95,6 +103,30 @@ def _fake_tree(tmp_path, script):
             except ProcessLookupError:
                 pass
             proc.wait(timeout=5)
+
+
+def test_fixture_ignores_ambient_startup_files(tmp_path, monkeypatch):
+    """The native ancestry fixture must not execute the operator's startup code."""
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    marker = tmp_path / "startup-ran"
+    shell = poison / "shell-env"
+    shell.write_text(f"echo shell >> {shlex.quote(str(marker))}\n")
+    (poison / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('python')\n"
+    )
+    node = poison / "node.cjs"
+    node.write_text(
+        "require('fs').writeFileSync(" + json.dumps(str(marker)) + ", 'node');\n"
+    )
+    for name in ("BASH_ENV", "ENV", "PYTHONSTARTUP"):
+        monkeypatch.setenv(name, str(shell))
+    monkeypatch.setenv("PYTHONPATH", str(poison))
+    monkeypatch.setenv("NODE_OPTIONS", f"--require={node}")
+    r = _fake_tree(tmp_path, 'echo fixture-clean')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "fixture-clean"
+    assert not marker.exists(), "fixture loaded ambient startup code"
 
 
 def test_resolves_to_an_ancestor_named_claude(tmp_path):
