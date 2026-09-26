@@ -282,8 +282,11 @@ classify_arrival() {
 # framing the TUI added.
 paste_unwrap() {
     local s="$1"
-    s=${s//'<pasted_content id="'????'">'/}
-    s=${s//'</pasted_content id="'????'">'/}
+    # Bash 3.2 treats the closing tag's inline slash as a substitution
+    # delimiter even inside quotes. Expand the patterns after parsing instead.
+    local opening='<pasted_content id="????">' closing='</pasted_content id="????">'
+    s=${s//$opening/}
+    s=${s//$closing/}
     printf '%s' "${s//$'\n'/}"
     return 0
 }
