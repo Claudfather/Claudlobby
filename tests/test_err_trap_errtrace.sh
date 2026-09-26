@@ -12,8 +12,9 @@
 #
 # It also pins the two properties that make errtrace safe to arm, because both
 # are the kind of premise that silently stops being true:
-#   * suppressed contexts (`f || true`, `if f`) must stay SILENT — errtrace must
-#     instrument real failures without emitting rows for deliberate tolerance
+#   * direct suppressed contexts (`f || true`, `if f`) must stay SILENT; a
+#     command substitution is a version-dependent boundary, so portable silence
+#     requires guarding the expected failure INSIDE the substitution
 #   * the handler must write NOTHING to stdout — under errtrace the trap fires
 #     inside the failing command substitution, so any handler stdout is captured
 #     as the caller's value (`local v=$(fn)` silently becomes the handler's
@@ -28,6 +29,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_COMMON="$SCRIPT_DIR/../lib/lib-common.sh"
+# Use the interpreter running this suite for every case. Selecting expectations
+# from this shell but resolving another bash through PATH would certify a lie.
+CASE_BASH="$BASH"
+CASE_BASH_MINOR="${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {
@@ -62,7 +67,7 @@ run_case() {
         env -i PATH="$PATH" HOME="$T" \
             CLAUDLOBBY_ROOT="$T" BOT_DIR="$BOTDIR" BOT_ID=canary FLEET_NAME=f \
             PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
-            bash -c "
+            "$CASE_BASH" -c "
                 set $opts
                 . '$LIB_COMMON'
                 install_error_trap '$BOTDIR'
@@ -78,6 +83,7 @@ rows_of() { printf '%s' "${1#*|}"; }
 out_of()  { printf '%s' "${1%%|*}"; }
 
 echo "install_error_trap — in-function failure instrumentation (#844)"
+echo "case interpreter: $CASE_BASH ($BASH_VERSION)"
 
 # --- the regression itself -----------------------------------------------------
 # Fails on a bare `trap … ERR`: the trap is not inherited into boom(), so the
@@ -96,10 +102,10 @@ r=$(run_case "-euo pipefail" 'mid() { boom; }; outer() { mid; }; outer')
 assert_eq "failure three frames deep emits exactly one row" "1" "$(rows_of "$r")"
 
 # --- deliberate tolerance must stay silent -------------------------------------
-# Arming errtrace must not turn `lib/`'s 700+ guarded call sites into rows. Bash
-# suppresses the ERR trap in the same contexts it suppresses errexit, and that
-# suppression is inherited by callees — these pin that, since the fix is only
-# safe while it holds.
+# Direct guards suppress the ERR trap, including through nested function calls.
+# These cases pin that contract on both supported CI interpreters. Command
+# substitutions form a separate boundary, characterized below; an outer guard
+# alone does not promise their silence on native macOS Bash 3.2.
 r=$(run_case "-euo pipefail" 'boom || true; echo SURVIVED')
 assert_eq "'f || true' emits nothing" "0" "$(rows_of "$r")"
 assert_eq "'f || true' still runs on" "SURVIVED" "$(out_of "$r")"
@@ -158,8 +164,24 @@ assert_eq "…while still writing its row" "1" "$(rows_of "$r")"
 # one of these should have to say so out loud.
 r=$(run_case "-euo pipefail" 'f() { echo "$(boom)"; }; f')
 assert_eq "failing substitution emits at both frames" "2" "$(rows_of "$r")"
+# Preserve the raw outer-guard shape as an interpreter characterization. Native
+# macOS Bash 3.2.57 still reports twice here; hosted Linux Bash 5.2.21 suppresses
+# both reports. Only 3.2 gets that measured exception; other versions retain
+# the prior zero-receipt expectation, not a claimed measured version threshold.
+# A different result still fails rather than accepting either count.
 r=$(run_case "-euo pipefail" 'f() { echo "$(boom)"; }; f || true')
-assert_eq "…and stays silent when the caller tolerates it" "0" "$(rows_of "$r")"
+case "$CASE_BASH_MINOR" in
+    3.2) outer_guard_rows=2 ;;
+    *) outer_guard_rows=0 ;;
+esac
+assert_eq "outer-guard substitution behavior on Bash $CASE_BASH_MINOR" "$outer_guard_rows" "$(rows_of "$r")"
+
+# Portable deliberate tolerance puts the guard INSIDE the substitution. Keep
+# the outer function call unguarded so removing the inner guard cannot be hidden
+# by modern Bash propagating an outer OR-list into the substitution.
+r=$(run_case "-euo pipefail" 'f() { printf "[%s]" "$(boom || true)"; }; f; echo SURVIVED')
+assert_eq "an inner guard silences the expected substitution failure" "0" "$(rows_of "$r")"
+assert_eq "the inner guard preserves the value and caller continuation" "[]SURVIVED" "$(out_of "$r")"
 
 echo
 echo "  $PASS/$TOTAL passed"
