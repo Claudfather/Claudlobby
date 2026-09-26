@@ -268,7 +268,7 @@ if not re.fullmatch(r"[0-9a-f]{32}", token):
     raise SystemExit("refusing foreign-tree cleanup without a valid ownership token")
 marker = "CLAUDLOBBY_VALIDATE_SCOPE_TOKEN=" + token
 def live_members():
-    rows = subprocess.check_output(["ps", "-axo", "pid=,pgid=,stat="], text=True)
+    rows = subprocess.check_output(["ps", "-axo", "pid=,pgid=,stat="], text=True, timeout=5)
     return [int(pid) for pid, pgid, state in (row.split() for row in rows.splitlines())
             if (int(pgid) == root or int(pid) == root) and not state.startswith("Z")]
 def owned(pid):
@@ -276,7 +276,7 @@ def owned(pid):
         if platform.system() == "Linux":
             return marker.encode() in Path("/proc/%s/environ" % pid).read_bytes().split(b"\0")
         env = subprocess.check_output(["ps", "eww", "-p", str(pid)], text=True,
-                                      stderr=subprocess.DEVNULL)
+                                      stderr=subprocess.DEVNULL, timeout=5)
         return marker in env.split()
     except (OSError, subprocess.CalledProcessError):
         return False
