@@ -95,7 +95,6 @@ def _write_manifest(
         "first": {
             "expertise": [expertise],
             "credential_sources": sources,
-            "bench": True,
         }
     }
     if later_bot:
