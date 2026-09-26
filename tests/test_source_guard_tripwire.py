@@ -7,7 +7,8 @@ of a fleet-controlled file (an ``open()`` + ``.read()``, a ``json.load(s)`` /
 ``yaml.safe_load``, a ``.read_text()``) is a new source surface that could
 smuggle an unguarded absolute path past the guard.
 
-This test AST-scans every file-read call in composer.py + config.py and fails
+This test AST-scans every file-read call in composer.py, config.py and
+host_guard_lists.py and fails
 when the set changes — forcing a conscious decision: route the new source
 through ``path_audit.audit_bot_sources`` (or the grant/fragment choke), or record
 it here as a documented exempt (a tool ``.j2`` body, a prose charter, or
@@ -119,22 +120,26 @@ _BLESSED_RAW_READS = {
     # cannot fail this fleet's generate. Both tests that pin that behaviour —
     # unparseable sibling, and a manifest that is not a mapping — still pass.
     # Two blessed raw-read sites therefore disappear rather than move.
-    # compose_host_bot_handles reads every fleet's manifest to build the GitHub
-    # mention guard's name list (#1019). EXEMPT on the dotenv.read(tier)
-    # precedent: the only thing consumed is the KEYS of fleet.bots, filtered to
+    # host_guard_lists.collect_host_guard_names reads every fleet's manifest
+    # for both host mention-guard writers (#1019). EXEMPT on the
+    # dotenv.read(tier) precedent: only the KEYS of fleet.bots and the declared
+    # github.mention_allowlist strings are consumed, filtered to
     # ^[A-Za-z0-9][A-Za-z0-9_-]*$ before anything downstream sees them. No value
     # from the parsed document reaches a path, a grant, or composed bot output —
     # it reaches a regex alternation, and the charset filter is what makes that
     # safe. Deliberately raw and fail-soft rather than routed through the
     # validating loader: a sibling fleet with a broken manifest must not be able
     # to fail this fleet's generate, nor silently empty the guard.
-    ("composer.py", "manifest.read_text(encoding='utf-8')"),
-    ("composer.py", "yaml.safe_load(manifest.read_text(encoding='utf-8'))"),
+    ("host_guard_lists.py", "manifest.read_text(encoding='utf-8')"),
+    ("host_guard_lists.py", "yaml.safe_load(manifest.read_text(encoding='utf-8'))"),
+    # Existing runtime guard-list bytes only feed the read-only diff output,
+    # never a path, grant, selector or generated artifact.
+    ("host_guard_lists.py", "target.read_text(encoding='utf-8')"),
 }
 
 
 def test_no_unguarded_raw_source_reads():
-    found = _scan("config.py") | _scan("composer.py")
+    found = _scan("config.py") | _scan("composer.py") | _scan("host_guard_lists.py")
     new = found - _BLESSED_RAW_READS
     gone = _BLESSED_RAW_READS - found
     assert not new, (
