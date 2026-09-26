@@ -135,6 +135,12 @@ def test_actual_plane_fixture_records_cold_dispatch_and_discloses_fallback(tmp_p
                PL_SOCK=str(socket))
     setup = _between('    PL_LIB="$PL_ROOT/lib"', '    "$PL_CLI" --root "$PL_ROOT" plane serve')
     dispatch = _between('    _pl_dispatch() {', '    _pl_count()')
+    # Reproduce the complete harness's actual outer unit-style selector.
+    # A clean env with only FLEET_NAME misses its precedence over that name
+    # inside the real dispatch door's fleet resolvers.
+    outer_fleet = (_between('\nFLEET=', '\nBOT=')
+                   + _between('\nexport CLAUDLOBBY_FLEET=', '\n\n') + '\n')
+    dispatch = outer_fleet + dispatch
     result = _run(_helpers() + setup, env, tmp_path)
     assert result.returncode == 0, result.stderr
     env["PL_LIB"] = str(root / "lib")
