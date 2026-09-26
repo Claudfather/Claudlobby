@@ -1876,15 +1876,75 @@ def _resolve_system_yaml(pkg_dir: Path) -> Path | None:
     return None
 
 
+#: Why every torn read of system.yaml refuses instead of answering ``{}``.
+#: One sentence, three raises -- the diagnosis differs (missing / unreadable /
+#: empty) but the reason is identical, and two hand-typed copies of it had
+#: already started to drift.
+_SYSTEM_YAML_REFUSAL = (
+    "this file is package-owned and every default job, hook, host job and boot "
+    "policy comes from it. Refusing to compose from empty defaults: an empty "
+    "result here is indistinguishable from a fleet that declared "
+    "system_defaults: false, and would license deleting that fleet's composed "
+    "job units."
+)
+
+
 def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
-    """Load system.yaml from the package directory (cached)."""
+    """Load system.yaml from the package directory (cached).
+
+    **REFUSES rather than returning ``{}``** when the package's own system.yaml
+    is absent or holds nothing (#1765 review). This file is package-owned, not
+    operator config: there is no install in which "no system defaults" is a
+    legitimate answer, so an empty return is always a torn read — and an empty
+    dict is indistinguishable, three layers downstream, from a fleet that
+    deliberately declared ``system_defaults: false``.
+
+    That collapse had teeth. ``merged_defaults["jobs"]`` goes empty for any
+    fleet with no fleet-level ``defaults.jobs`` of its own (the common case),
+    ``compose_fleet_timers`` reads that as "this fleet composes no job timers",
+    and the #1764 prune deletes every already-composed job unit for the fleet —
+    a silent data-source failure licensing a wholesale delete, which is exactly
+    what #1146 rules out. **Measured, and the route is real rather than
+    theoretical: a built wheel shipped NO system.yaml at all** (it was missing
+    from ``package-data``, fixed in the same change), so every non-editable
+    install produced this state on its first generate.
+
+    Loudness here mirrors :func:`_resolve_system_yaml`'s existing RuntimeError
+    for the adjacent stale-rename case — the rarer failure was already loud
+    while the likelier one, nothing there at all, was silent. The locator keeps
+    returning ``None`` (one caller legitimately asks "is there one?"); it is the
+    LOADER, whose job is to hand back defaults, that must not hand back a void
+    dressed as data. Nothing is cached on refusal, so a repaired install works
+    on the next call rather than inheriting a poisoned cache.
+    """
     if "data" not in _cache:
         path = _resolve_system_yaml(Path(__file__).parent)
         if path is None:
-            _cache["data"] = {}
-        else:
+            raise RuntimeError(
+                f"{Path(__file__).parent / 'system.yaml'} is missing -- "
+                f"{_SYSTEM_YAML_REFUSAL} Likely an incomplete or non-editable "
+                "install, or a pull interrupted mid-write; reinstall the "
+                "package (pip install -e .)."
+            )
+        try:
             with path.open() as f:
-                _cache["data"] = yaml.safe_load(f) or {}
+                data = yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            # Present but unreadable or unparseable. Named like its siblings on
+            # purpose: a bare OSError here would be the one torn-read path that
+            # escapes without the diagnosis the other two give.
+            raise RuntimeError(
+                f"{path} could not be read ({exc.__class__.__name__}: {exc}) -- "
+                f"{_SYSTEM_YAML_REFUSAL} Check the file's permissions and that "
+                "it holds valid YAML."
+            ) from exc
+        if not data:
+            raise RuntimeError(
+                f"{path} is empty or parses to nothing -- "
+                f"{_SYSTEM_YAML_REFUSAL} Likely a truncated write or a corrupted "
+                "checkout; restore the file or reinstall the package."
+            )
+        _cache["data"] = data
     return _cache["data"]
 
 
@@ -1977,7 +2037,20 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
 
     # System defaults tier
     system_defaults_cfg = _coerce_system_defaults(fleet.get("system_defaults"))
-    raw_system = _load_system_defaults()
+    # Only ASK for the package defaults when this fleet actually consumes them.
+    # The loader refuses a torn read rather than answering {} (#1765), and an
+    # unconditional call here would take a fleet that declared
+    # `system_defaults: false` down with a file it asked for nothing from --
+    # breaking `status`, `validate` and `diff` on exactly the broken-install
+    # host an operator is running them to diagnose. Host-scoped readers
+    # (`load_host_jobs`, `load_host_boot`) keep calling it unconditionally,
+    # correctly: no fleet flag can opt a HOST out of its own platform
+    # equipment, so a torn read there must still be fatal.
+    #
+    # This cannot reopen the prune hole it was written for: with `enabled`
+    # false the merged job set is empty BECAUSE the fleet said so, which is the
+    # deliberate teardown `jobs_declaration_torn` is built to let through.
+    raw_system = _load_system_defaults() if system_defaults_cfg.enabled else {}
 
     system_section = raw_system.get("defaults", {}) or {}
     if not system_defaults_cfg.enabled:
