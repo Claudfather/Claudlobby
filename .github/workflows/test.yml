@@ -70,11 +70,44 @@ jobs:
           CLAUDLOBBY_CI_NATIVE_SMOKE: ${{ runner.os == 'macOS' && '1' || '0' }}
         run: |
           set +e
+          printf 'running\n' > pytest.status
+          printf 'not applicable on %s\n' "$RUNNER_OS" > native-controls.status
+          : > native-controls.log
+          controls_pid=''
+          if [ "$RUNNER_OS" = macOS ]; then
+            # The driver owns a separate git export, HOME, tmp and process paths.
+            # Retain its status even when it finishes before the full suite.
+            printf 'running\n' > native-controls.status
+            (
+              .venv/bin/python tests/fixtures/native_ci_negative_controls.py --output native-controls > native-controls.log 2>&1
+              controls_result=$?
+              printf '%s\n' "$controls_result" > native-controls.rc
+              printf 'completed (exit %s)\n' "$controls_result" > native-controls.status
+              exit "$controls_result"
+            ) &
+            controls_pid=$!
+          fi
           .venv/bin/python -m pytest -v --junitxml=pytest-results.xml \
             --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn > pytest.log 2>&1
           result=$?
+          printf '%s\n' "$result" > pytest.rc
+          printf 'completed (exit %s)\n' "$result" > pytest.status
           cat pytest.log
-          exit "$result"
+          printf '\nFull suite: '
+          cat pytest.status
+          controls_result=0
+          if [ -n "$controls_pid" ]; then
+            # Wait even after a failed suite: both independent arms are required.
+            wait "$controls_pid"
+            controls_result=$?
+            printf '\nNative controls: '
+            cat native-controls.status
+            cat native-controls.log
+          fi
+          if [ "$result" -ne 0 ]; then
+            exit "$result"
+          fi
+          exit "$controls_result"
       - name: Verify native evidence executed
         if: always() && runner.os == 'macOS'
         run: |
@@ -96,17 +129,17 @@ jobs:
               assert not any(found[0].find(tag) is not None for tag in ('skipped', 'failure', 'error')), name
               print(f'Executed and passed: {name}')
           PY
-      - name: Prove native bridge negative controls
-        if: always() && runner.os == 'macOS'
-        env:
-          CLAUDLOBBY_CI_NATIVE_SMOKE: '1'
-        run: .venv/bin/python tests/fixtures/native_ci_negative_controls.py --output native-controls
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: pytest-${{ matrix.os }}-py${{ matrix.python }}
           path: |
             pytest.log
+            pytest.rc
+            pytest.status
             pytest-results.xml
+            native-controls.log
+            native-controls.rc
+            native-controls.status
             native-controls/
           if-no-files-found: error
