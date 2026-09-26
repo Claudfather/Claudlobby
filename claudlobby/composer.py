@@ -4390,9 +4390,6 @@ def compose_fleet_timers(
     return timers_dir
 
 
-_HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-
-
 def compose_host_mention_allowlist(
     paths: Paths, *, output_dir: Path | None = None
 ) -> Path:
@@ -4419,25 +4416,14 @@ def compose_host_mention_allowlist(
     lib/mention-rewrite.py. Without that, someone eventually allowlists a bot's
     name meaning our bot and silently re-arms the original bug.
     """
-    names: set[str] = set()
-    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
-        manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():
-            continue
-        try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            continue
-        if isinstance(data, dict):
-            gh = (data.get("fleet") or {}).get("github") or {}
-            if isinstance(gh, dict):
-                names.update(gh.get("mention_allowlist") or [])
+    from .host_guard_lists import collect_host_guard_names, render_host_guard_names
+
+    names = collect_host_guard_names(paths, "mention-allowlist")
 
     base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
     base.mkdir(parents=True, exist_ok=True)
     target = base / "mention-allowlist"
-    safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
-    target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    target.write_text(render_host_guard_names(names), encoding="utf-8")
     return target
 
 
@@ -4464,33 +4450,14 @@ def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) ->
     nothing rather than raising: one fleet's broken config must not stop another
     fleet's generate. The cost is a narrower guard, which the hook reports.
     """
-    names: set[str] = set()
-    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
-        manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():  # a container or a non-fleet dir
-            continue
-        try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            # A sibling fleet's unreadable manifest must not stop this generate.
-            # Narrow ON PURPOSE: the first cut caught bare Exception, so a
-            # missing `import yaml` raised NameError on EVERY fleet and was
-            # swallowed as "all four manifests are broken" — the guard composed
-            # an empty list and would have protected nothing, silently.
-            continue
-        if isinstance(data, dict):
-            names.update((data.get("fleet") or {}).get("bots") or {})
+    from .host_guard_lists import collect_host_guard_names, render_host_guard_names
+
+    names = collect_host_guard_names(paths, "bot-handles")
+
     base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
     base.mkdir(parents=True, exist_ok=True)
     target = base / "bot-handles"
-    # Only names safe to drop into the hook's regex alternation. Deliberately
-    # NOT SHELL_IDENT_RE, which forbids hyphens — `worker-1` is a real bot name
-    # shape (fleet.yaml.example uses it), and excluding it would leave exactly
-    # those bots unguarded while looking covered. This charset carries no regex
-    # metacharacters, and matches the hook's own `grep -Ex` filter so the two
-    # cannot disagree about which names are admissible.
-    safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
-    target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    target.write_text(render_host_guard_names(names), encoding="utf-8")
     return target
 
 
