@@ -81,6 +81,18 @@
 #   other      a record exists and is neither — reported, never folded into any
 #              of the four above, because an unexplained shape is a finding
 #
+# ── paste framing is recorded, not judged (#1876) ────────────────────────────
+# A burst the receiving TUI reads as a paste becomes a [Pasted text #N] ref, and
+# with the server-assigned tengu_virtual_pancake flag on — as it is on the
+# fleet's logged-in sessions — each ref is submitted inside
+# <pasted_content id="…"> tags, which the harness tells the model to treat as
+# text the user may not have written. The verdict is taken on the record with
+# that framing removed, so it still answers "did the bytes arrive"; WHICH bytes
+# arrived framed is the `pasted` column: start-end payload offsets per block, or
+# "-". An unauthenticated session never fetches flags and defaults this one
+# off, so the probe seeds its cached value (probe_seed_config) — unseeded, the
+# receiver frames nothing and the column could only ever read "-".
+#
 # ── arms are interleaved, not run to completion ──────────────────────────────
 # Reps are the outer loop and arms the inner one, so the two arms share the same
 # minutes of ambient load rather than each being assigned its own. It is a race
@@ -88,13 +100,16 @@
 # call the difference a treatment effect (boot-strand-sampler.sh --arms, same
 # reasoning, and the same reason it is not optional).
 #
-# Usage: send-size-probe.sh [--arm chunked|unchunked|both] [--n N]
+# Usage: send-size-probe.sh [--arm chunked|unchunked|both|capN ...] [--n N]
 #                           [--sizes "500 900 ..."] [--deadline SECS]
 #                           [--filler varied|repeat|ident2] [--via-hook]
 #                           [--keep] [--reap]
 #   --arm A          chunked (the shipped default), unchunked
 #                    (PANE_SEND_CHUNK_BYTES=0, the pre-fix control), or both.
-#                    Default both.
+#                    Default both. capN drives the same door at
+#                    PANE_SEND_CHUNK_BYTES=N (cap0 is the unchunked shape), and
+#                    a space- or comma-separated list of arms is interleaved
+#                    the way both is: --arm "cap900 cap400 cap200 cap0" (#1876).
 #   --n N            repetitions per (arm, size). Default 3.
 #   --sizes "..."    payload sizes in BYTES, space- or comma-separated.
 #                    Default "500 900 1100 1500 2100 3100 4200" — two below the
@@ -258,6 +273,46 @@ classify_arrival() {
     return 0
 }
 
+# paste_unwrap <record>
+# The record with the receiver's paste framing removed: every
+# <pasted_content id="…"> and </pasted_content id="…"> tag, and every newline.
+# That is the receiver hook's rule (plane-dispatch-in.sh drops the tags with
+# their adjacent newlines) specialised to a probe payload, which never holds a
+# newline — send-keys would SUBMIT on one — so every newline in a record is
+# framing the TUI added.
+paste_unwrap() {
+    local s="$1"
+    s=${s//'<pasted_content id="'????'">'/}
+    s=${s//'</pasted_content id="'????'">'/}
+    printf '%s' "${s//$'\n'/}"
+    return 0
+}
+
+# paste_spans <payload> <record>
+# Which bytes of <payload> arrived inside a <pasted_content> block: start-end
+# byte offsets (end exclusive), comma-separated in arrival order, or "-" when
+# none did. The id is not matched between tags: it is one per SESSION, not per
+# block (measured, #1876). A block whose text the payload does not hold prints
+# as ?+<bytes> — disclosed, never dropped.
+paste_spans() {
+    local payload="$1" rest="$2" out="" inner pre LC_ALL=C
+    while [[ "$rest" == *'<pasted_content id="'????'">'* ]]; do
+        rest=${rest#*'<pasted_content id="'????'">'}
+        inner=${rest%%'</pasted_content id="'*}
+        rest=${rest#*'</pasted_content id="'}
+        inner=${inner//$'\n'/}
+        if [ -n "$inner" ] && [[ "$payload" == *"$inner"* ]]; then
+            pre=${payload%%"$inner"*}
+            out="$out,${#pre}-$(( ${#pre} + ${#inner} ))"
+        else
+            out="$out,?+${#inner}"
+        fi
+    done
+    out=${out#,}
+    printf '%s' "${out:--}"
+    return 0
+}
+
 # --- chunk P (#1501): the receiver-hook cross-check (--via-hook) --------------
 # via_hook_agrees <verdict> <payload_sha> <payload_bytes> <received_sha> <received_bytes>
 # The instrument checking the instrument: does the RECEIVER hook's `received`
@@ -338,14 +393,17 @@ parse_sizes() {
 }
 
 # render_table <arm> <rows_file>
-# The per-arm table. Rows are TSV: arm<TAB>size<TAB>rep<TAB>verdict<TAB>arrived.
+# The per-arm table. Rows are TSV: arm<TAB>size<TAB>rep<TAB>verdict<TAB>arrived
+# <TAB>pasted (#1876; a five-column row reads as "-"). `wrapped` counts rows
+# with any framed span; `pasted` is the commonest span string for the size.
 # One awk pass rather than a shell loop per cell, and sizes are sorted
 # NUMERICALLY: the whole question is where the cliff is, and a hash-order table
 # hides it.
 render_table() {
     local arm="$1" rows="$2"
-    printf '  %-6s %4s %6s %10s %10s %7s %6s %16s\n' \
-        size n whole head-lost tail-lost absent other "median arrived"
+    printf '  %-6s %4s %6s %10s %10s %7s %6s %16s %8s  %s\n' \
+        size n whole head-lost tail-lost absent other "median arrived" \
+        wrapped pasted
     awk -F'\t' -v arm="$arm" '
         $1 == arm {
             n[$2]++
@@ -355,6 +413,9 @@ render_table() {
             if ($4 == "other")     o[$2]++
             if ($4 == "head-lost") { h[$2]++; arr[$2] = arr[$2] " " $5 }
             if (!($2 in seen)) { seen[$2] = 1; order[++k] = $2 }
+            sp = ($6 == "") ? "-" : $6
+            if (sp != "-") p[$2]++
+            ps[$2 SUBSEP sp]++
         }
         END {
             for (i = 1; i <= k; i++) for (j = i + 1; j <= k; j++)
@@ -370,11 +431,35 @@ render_table() {
                         if (v[y] + 0 < v[x] + 0) { s = v[x]; v[x] = v[y]; v[y] = s }
                     med = v[int((c + 1) / 2)] + 0
                 }
-                printf "  %-6s %4d %6d %10d %10d %7d %6d %16s\n",
-                    sz, n[sz], w[sz] + 0, h[sz] + 0, t[sz] + 0, a[sz] + 0, o[sz] + 0, med
+                best = 0; mode = "-"
+                for (key in ps) {
+                    split(key, kk, SUBSEP)
+                    if (kk[1] == sz && ps[key] > best) { best = ps[key]; mode = kk[2] }
+                }
+                printf "  %-6s %4d %6d %10d %10d %7d %6d %16s %8d  %s\n",
+                    sz, n[sz], w[sz] + 0, h[sz] + 0, t[sz] + 0, a[sz] + 0, o[sz] + 0, med,
+                    p[sz] + 0, mode
             }
         }' "$rows"
     return 0
+}
+
+# probe_seed_config <cwd> <claude_version>
+# The throwaway config the receiver boots with: onboarding done, the scratch cwd
+# trusted, and the paste-framing flag (see "paste framing" above). Measured on
+# 2.1.281: unseeded, a 900-byte paste arrived unframed; seeded, the same send
+# arrived framed byte for byte as a fleet session records it.
+probe_seed_config() {
+    jq -n --arg cwd "$1" --arg ver "$2" '{
+        hasCompletedOnboarding: true,
+        lastOnboardingVersion: $ver,
+        theme: "dark",
+        cachedGrowthBookFeatures: { tengu_virtual_pancake: true },
+        projects: { ($cwd): {
+            hasTrustDialogAccepted: true,
+            hasCompletedProjectOnboarding: true,
+            allowedTools: [], history: [] } }
+    }'
 }
 
 # probe_canonical_dir <path> — the path with every symlink resolved, or the
@@ -572,6 +657,12 @@ send_one() {
 # neither — which would report the very losses being measured as `absent` and
 # erase the distinction the instrument exists to draw.
 #
+# It prints the WHOLE record. It printed the first LINE of it until #1876: a
+# record the receiver framed as a paste opens with two newlines, so the line
+# was empty, the loop ran out its deadline, and a send that had arrived was
+# reported `absent` — the loss verdict, for a delivery. No unframed record holds
+# a newline (a typed one submits), which is why that never showed before.
+#
 # Assistant records are excluded so a model echo can never count (the sampler's
 # rule). Under a dead API base URL there are no assistant turns at all, which is
 # a reason to keep the filter rather than to drop it: the probe must stay correct
@@ -583,9 +674,9 @@ await_record() {
         for f in "$proj"/*/*.jsonl; do
             [ -f "$f" ] || continue
             grep -q -- "$token" "$f" 2>/dev/null || continue
-            hit=$(jq -rc --arg t "$token" \
-                'select(.type=="user") | (.message.content | tostring)
-                 | select(contains($t))' "$f" 2>/dev/null | head -1)
+            hit=$(jq -nj --arg t "$token" \
+                'first(inputs | select(.type=="user") | (.message.content | tostring)
+                 | select(contains($t)))' "$f" 2>/dev/null)
             if [ -n "$hit" ]; then printf '%s' "$hit"; return 0; fi
         done
         sleep 1
@@ -613,10 +704,19 @@ main() {
         esac
     done
 
-    case "$ARM" in chunked|unchunked|both) ;; *)
-        echo "send-size-probe: --arm must be chunked, unchunked or both (got '$ARM')" >&2
-        return 2 ;;
-    esac
+    local a arm_ok=1
+    while read -r a; do
+        case "$a" in
+            chunked|unchunked|both) ;;
+            cap[0-9]*) case "${a#cap}" in *[!0-9]*) arm_ok=0 ;; esac ;;
+            *) arm_ok=0 ;;
+        esac
+    done <<< "$(printf '%s' "$ARM" | tr ', ' '\n\n' | grep -v '^$')"
+    [ -n "$(printf '%s' "$ARM" | tr -d ', ')" ] || arm_ok=0
+    if [ "$arm_ok" != 1 ]; then
+        echo "send-size-probe: --arm must be chunked, unchunked, both or capN, or a list of them (got '$ARM')" >&2
+        return 2
+    fi
     case "$REPS" in ''|*[!0-9]*) echo "send-size-probe: --n must be a count" >&2; return 2 ;; esac
     [ "$REPS" -gt 0 ] || { echo "send-size-probe: --n must be > 0" >&2; return 2; }
     case "$DEADLINE" in ''|*[!0-9]*) echo "send-size-probe: --deadline must be seconds" >&2; return 2 ;; esac
@@ -696,15 +796,7 @@ main() {
     # box; trust so the workspace is not re-asked for. NO credentials are copied:
     # the probe must not be able to spend, and the record it reads is written
     # before the model is reached.
-    jq -n --arg cwd "$cwd" --arg ver "$ver" '{
-        hasCompletedOnboarding: true,
-        lastOnboardingVersion: $ver,
-        theme: "dark",
-        projects: { ($cwd): {
-            hasTrustDialogAccepted: true,
-            hasCompletedProjectOnboarding: true,
-            allowedTools: [], history: [] } }
-    }' > "$cfg/.claude.json" || { echo "send-size-probe: could not seed config" >&2; return 3; }
+    probe_seed_config "$cwd" "$ver" > "$cfg/.claude.json" || { echo "send-size-probe: could not seed config" >&2; return 3; }
 
     echo "send-size-probe (#1493)"
     echo "  claude:   $claude_bin $ver"
@@ -713,6 +805,7 @@ main() {
     echo "  home:     $home (throwaway)"
     echo "  arms:     $ARM   reps: $REPS   deadline: ${DEADLINE}s   filler: $FILLER"
     echo "  sizes:    $(printf '%s ' $sizes)"
+    echo "  receiver: paste framing flag seeded ON, as on the fleet's sessions (#1876)"
     echo "  chunking: cap=$_PANE_SEND_CHUNK_BYTES_DEFAULT settle=${PANE_SEND_CHUNK_SETTLE_S:-$_PANE_SEND_CHUNK_SETTLE_DEFAULT}s"
     echo ""
 
@@ -811,10 +904,10 @@ main() {
     local arms
     case "$ARM" in
         both) arms="chunked unchunked" ;;
-        *)    arms="$ARM" ;;
+        *)    arms=$(printf ' %s ' "$ARM" | tr ',' ' ' | sed 's/ both / chunked unchunked /g') ;;
     esac
 
-    local rep=1 size arm tok payload got verdict arrived cap
+    local rep=1 size arm tok payload got verdict arrived cap pasted unframed
     local vh_msgid vh_root vh_fact vh_psha vh_rsha vh_rbytes vh_agree
     local via_hook_disagree=0 via_hook_checked=0
     while [ "$rep" -le "$REPS" ]; do
@@ -826,10 +919,12 @@ main() {
                     echo "  skip size=$size (too small for the markers)" >&2; continue; }
                 case "$arm" in
                     unchunked) cap=0 ;;
+                    cap*)      cap=${arm#cap} ;;
                     *)         cap="$_PANE_SEND_CHUNK_BYTES_DEFAULT" ;;
                 esac
                 send_one "$PROBE_SOCK" "$PROBE_SESSION" "$payload" "$cap"
                 got=$(await_record "$proj" "$tok" "$DEADLINE")
+                pasted=-
                 if [ -z "$got" ]; then
                     verdict=absent
                     arrived=0
@@ -839,12 +934,17 @@ main() {
                     bot_tmux "$PROBE_SOCK" send-keys -t "$PROBE_SESSION" C-c 2>/dev/null
                     sleep 0.5
                 else
-                    verdict=$(classify_arrival "$payload" "$got")
-                    arrived=$(printf '%s' "$got" | LC_ALL=C wc -c | tr -d ' ')
+                    # The hook below gets the record as recorded, framing and
+                    # all: that is what production hands it, and it strips the
+                    # framing itself.
+                    pasted=$(paste_spans "$payload" "$got")
+                    unframed=$(paste_unwrap "$got")
+                    verdict=$(classify_arrival "$payload" "$unframed")
+                    arrived=$(printf '%s' "$unframed" | LC_ALL=C wc -c | tr -d ' ')
                 fi
-                printf '%s\t%s\t%s\t%s\t%s\n' "$arm" "$size" "$rep" "$verdict" "$arrived" >> "$rows"
-                printf '  rep %d  %-9s %5s bytes -> %-9s arrived %s\n' \
-                    "$rep" "$arm" "$size" "$verdict" "$arrived"
+                printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$arm" "$size" "$rep" "$verdict" "$arrived" "$pasted" >> "$rows"
+                printf '  rep %d  %-9s %5s bytes -> %-9s arrived %-5s pasted %s\n' \
+                    "$rep" "$arm" "$size" "$verdict" "$arrived" "$pasted"
                 # chunk P: the receiver hook cross-check. Only when armed and
                 # when there is an arrival to hand the hook.
                 if [ "$VIA_HOOK" = "1" ] && [ "$verdict" != "absent" ]; then
@@ -874,6 +974,15 @@ main() {
         render_table "$arm" "$rows"
         echo ""
     done
+    # A column of nothing but "-" has two readings and only one is a result: no
+    # burst crossed the receiver's paste threshold, or the seeded flag no longer
+    # reaches this binary. The run cannot tell them apart, so it says so.
+    if ! awk -F'\t' '$6 != "" && $6 != "-" { f = 1 } END { exit !f }' "$rows"; then
+        echo "NOTE: no send arrived inside <pasted_content>. Either no burst crossed the"
+        echo "  receiver's paste threshold, or the seeded framing flag is not in force for"
+        echo "  this binary; the run cannot tell which (#1876)."
+        echo ""
+    fi
     if [ "$VIA_HOOK" = "1" ]; then
         printf 'via-hook cross-check: %s checked, %s disagreed\n' \
             "$via_hook_checked" "$via_hook_disagree"

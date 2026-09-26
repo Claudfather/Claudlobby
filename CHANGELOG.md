@@ -19,6 +19,28 @@ prints the plane's delivery verdict and the recorded sender. The receiver hook
 also undoes the harness's escaping of a quoted `<pasted_content` tag. Until now
 that escaping made any dispatch that mentions the tag read as altered.
 
+### Fixed — a briefing timer could fire `/briefing` into a bot without the skill (#1819)
+
+A `briefing:` stanza composed the bot's timers but linked the `briefing` skill
+only when `skills:` listed it too, though the schema doc, the skill and
+`BriefingConfig` all say the stanza alone equips the bot. Claude Code rejects
+an unknown slash command locally, the input box still clears, and the send
+read as delivered. The stanza now links the skill (`resolve_effective_skills`),
+and `briefing-trigger.sh` refuses to send into a bot with no composed skill
+(`briefing_failed`, reason `skill_absent`, exit 1, a stderr line, and one
+`briefing_missed` FLEET NOTICE like any other missed slot), so a hand-built
+timer or a lost link fails loudly rather than silently.
+
+### Fixed — the send-size probe could not see a paste-framed arrival, and would have called it lost (#1876)
+
+`lib/send-size-probe.sh` now records which bytes of each payload arrive inside
+`<pasted_content>` (a new `pasted` column) and takes `capN` arms for any chunk
+size. Two defects stood in the way. Its receiver is not logged in, so it never
+got the server flag that makes the TUI frame a paste, and nothing was ever
+framed; the probe now seeds that flag. And its reader kept only the first line
+of a record, which for a framed record is empty, so a delivered send would have
+been reported `absent`.
+
 ### Fixed — a FLEET ALERT or NOTICE reaches the manager's pane when the manager sorts first (#910)
 
 A manager's composed `MANAGER_TMUX` line carried `# this bot is a manager` on
