@@ -222,6 +222,7 @@ jobs:
           set -uo pipefail
           cd "$PARENT_SUITE_ROOT/source"
           env -i HOME="$PARENT_SUITE_ROOT/home" TMPDIR="$PARENT_SUITE_ROOT/tmp" \
+            USER="$(id -un)" \
             PATH="$PWD/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
             LANG=C.UTF-8 PLANE_EMIT_DISABLED=1 \
             "$PWD/.venv/bin/python" -m pytest -v -ra \
