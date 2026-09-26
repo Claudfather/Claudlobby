@@ -45,7 +45,7 @@ check_relative() {
     fi
     after=$(python3 -c 'import time; print(time.time())')
     matches=$(python3 - "$before" "$after" "$oracle_zone" "$fmt" "$got" <<'PY'
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import sys
 
@@ -53,7 +53,10 @@ before, after = (int(float(value)) for value in sys.argv[1:3])
 assert after >= before, "wall clock moved backwards during the check"
 zone = ZoneInfo(sys.argv[3])
 expected = {
-    (datetime.fromtimestamp(second, zone) - timedelta(days=7)).strftime(sys.argv[4])
+    # Calendar subtraction can land in a spring-forward gap. Normalize the
+    # imaginary wall time through UTC before asking for its local zone name.
+    (datetime.fromtimestamp(second, zone) - timedelta(days=7))
+    .astimezone(timezone.utc).astimezone(zone).strftime(sys.argv[4])
     for second in range(before, after + 1)
 }
 print("yes" if sys.argv[5] in expected else f"expected one of {sorted(expected)!r}; got {sys.argv[5]!r}")
