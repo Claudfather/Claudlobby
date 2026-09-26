@@ -20,6 +20,31 @@ read clean on the next pull with no regenerate; a quoted value is left as
 read. The composer writes the comment on its own line, and `bot_is_manager`
 no longer keeps its own copy of the strip.
 
+### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
+
+A briefing that found its bot busy or its session gone was skipped for the
+day, and a slot that failed to send paged nobody. Both events were severity
+notice, which fleet-pulse and `brief` do not read. Now `briefing-trigger.sh`
+re-checks a deferred slot every 60 s for up to 30 min, counted in polls rather
+than read off the clock, and sends at the first idle check. The slot's own
+timer is no retry, because it next fires a day later. A slot still missed
+after that, or whose dispatch fails, or whose bot dir is gone, sends ONE
+`briefing_missed` FLEET NOTICE through the shared `emit_fleet_notice` path: a
+line on the fleet's Telegram chat, a push into the fleet manager's pane (for a
+manager's own briefing, its own pane), and a plane event registered at notice.
+The per-attempt `briefing_*` events are not reclassified, so a deferral that
+recovers pages nobody. The pane push misses on a fleet whose first
+`MANAGER_TMUX` bot is its manager, until #910 lands.
+
+### Fixed — the harness's boot probe raced its own spawner on a loaded host (#1778)
+
+Each phase of the `#1002` probe unit now ends when `lib/validate-bot-change.sh`
+opens its gate, not on a fixed sleep, so a slow fleet-pulse or keepalive start
+can no longer let the unit settle mid-observation. Its tmux session now lives in
+the harness's socket dir: keepalive could not see it before, so the CONTROL
+passed without killing anything and every run left a server behind. One new
+check: the window held while both consumers judged it.
+
 ### Fixed — a rejected currency notice no longer silences itself for a week (#900)
 
 `debounce_notify` writes its marker only when the notify function returns 0, and
