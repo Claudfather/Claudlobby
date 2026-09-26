@@ -27,9 +27,9 @@ Restarting a worker tmux session **clears its context**. Workers often have real
 - The worker has reported `context-degraded` AND the current task is demonstrably complete (PR merged, final report received)
 - The human explicitly requests it
 
-## Reviewers are an exception
+## Reviewer context checks
 
-For reviewers (typically Sonnet, lower context budget): **do** restart on the first `context-degraded` report, or after ~3 completed rows in a 24h `claudlobby --fleet {{FLEET_NAME}} report-back` window, because review sessions don't carry PR-level WIP — reviews are stateless between PRs and Sonnet degrades faster than Opus. Still send a one-line "restarting <reviewer>" note to Telegram for visibility.
+For reviewers, **~3 completed rows** in a 24h `claudlobby --fleet {{FLEET_NAME}} report-back` window prompt the `context-management` self-check; **count alone does not justify a restart**. If the reviewer reports `context-degraded`, follow that policy and the three checks above to establish when a restart is safe. Then ask the reviewer to run its own `/restart` if equipped, or complete the canonical self-restart procedure in `{{CLAUDLOBBY_ROOT}}/library/skills/restart/SKILL.md` if not; the reviewer captures the handoff and sends the notification before restarting.
 
 **Count the rows, do not count an empty result.** The plane's rows are per fleet, so `--fleet` is what scopes a `report-back` query; a run that cannot be scoped or cannot reach the plane REFUSES (rc 3, `UNREACHABLE` on stderr) rather than printing an empty result. Before #1216 the flagless form was silent — empty stdout, exit 0 — so "0 completed" and "I could not read the record" were the same output, and the failure direction is *do not restart*, which is the one nobody investigates. **A zero you have not seen the command succeed on is not a zero.**
 
