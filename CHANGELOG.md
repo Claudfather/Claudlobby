@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a host's own override for host jobs, outside the tracked tree (#1251)
+
+Arming, disarming or pausing a host job meant editing the package-owned
+`claudlobby/system.yaml`, which left the install's tree dirty: the 2026-09-26
+root pull had to carry one such pause with `--autostash`, and on a collision
+autostash exits 0 with conflict markers in the file. A host now changes its host
+jobs in `~/.config/claudlobby/system.yaml` (`$CLAUDLOBBY_HOST_SYSTEM_YAML` names
+another file), read by `config.load_host_jobs`. The override is merged per job
+and per field, so arming one job leaves every other job as shipped. It covers
+`host.jobs` only. A file that cannot take effect (a parse error, a misspelt
+field, a quoted `enroll`) is refused rather than skipped, and a job the install
+does not ship is logged and ignored. The switch table's arming recipe and the
+docs now name the file.
+
 ### Fixed — a busy briefing slot gets a bounded retry, and a missed one pages once (#1826)
 
 A briefing that found its bot busy or its session gone was skipped for the

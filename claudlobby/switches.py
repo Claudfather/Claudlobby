@@ -207,10 +207,11 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
         return (
-            f"{key}: true in THIS host's system.yaml (host jobs bypass the"
-            " fleet merge), then generate + lib/setup-system",
-            f"{key}: false in THIS host's system.yaml, then generate (composes"
-            " no unit) + lib/setup-system (walks back the installed one)",
+            f"{key}: true in this host's override, ~/.config/claudlobby/system.yaml"
+            " (host jobs bypass the fleet merge), then generate + lib/setup-system",
+            f"{key}: false in this host's override, ~/.config/claudlobby/system.yaml,"
+            " then generate (composes no unit) + lib/setup-system (walks back"
+            " the installed one)",
         )
     key = sw.config or f"defaults.jobs.{sw.job}.enroll"
     extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
