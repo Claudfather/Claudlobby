@@ -24,6 +24,19 @@ tree it pulls: git replaces a changed file's inode, so a running script
 finishes on its old bytes, and `update-siblings.sh`'s comment claiming
 otherwise is corrected.
 
+### Fixed — a long dispatch no longer arrives with its envelope framed as pasted text, and a framed one can be verified (#1876)
+
+Dispatches now cross the pane in 400-byte chunks instead of 900. The receiving
+Claude Code frames any single read of more than 800 bytes as pasted content,
+which its harness tells the model may not come from the user. At 900 that was
+the first chunk of every long dispatch, envelope and task id included. A
+receiver that falls behind can still merge chunks, so the dispatch and
+worker-lifecycle protocols now say how to verify a framed dispatch before
+trusting it: `plane-lookup.py --received <msg_id> --destination <bot> --verdict`
+prints the plane's delivery verdict and the recorded sender. The receiver hook
+also undoes the harness's escaping of a quoted `<pasted_content` tag. Until now
+that escaping made any dispatch that mentions the tag read as altered.
+
 ### Added — a host's own override for host jobs, outside the tracked tree (#1251)
 
 Arming, disarming or pausing a host job meant editing the package-owned
