@@ -12,9 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 package (E404), so a bot equipping the shared fragment got a dead server. The
 unscoped name was also unclaimed, so whoever published it next would run on
 every such bot's start. The fragment now pins the package it was written for,
-`@tsavo/printify-mcp@0.1.1` (all 19 contracted tools are in its source, and
-0.1.1 is its only published version). A test guards the shipped library with
-#1058's own predicate: no fragment may launch an unpinned npx package. The one
+`@tsavo/printify-mcp@0.1.1` (all 19 contracted tools are in its source; 0.1.1
+is the latest of its three published versions, 0.0.1, 0.1.0 and 0.1.1, all from
+one publisher, and the version the estate's running fork declares). A test
+guards the shipped library with #1058's own predicate: no fragment may launch
+an unpinned npx package. The one
 allowance is `spotify.json`, whose `@modelcontextprotocol/server-spotify` is
 also E404, so there is nothing to pin. A composed `.mcp.json` changes at the
 next `generate` plus a restart.
