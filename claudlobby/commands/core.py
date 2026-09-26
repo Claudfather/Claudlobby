@@ -318,6 +318,27 @@ def cmd_host_timers(args) -> int:
     return 0
 
 
+def cmd_host_job(args) -> int:
+    """Print one host job as THIS host runs it: the packaged config with the
+    host override applied (``config.load_host_jobs``), as JSON.
+
+    The read door for a hold's reason (#865: a reader inspecting the state can
+    recover why a job is held) and the one pull-root reads its hold through,
+    so the job and an operator see the same merge.
+    """
+    from ..config import load_host_jobs
+
+    jobs = load_host_jobs()
+    if args.name not in jobs:
+        print(f"no host job {args.name!r}; this install ships: {', '.join(sorted(jobs))}",
+              file=sys.stderr)
+        return 2
+    # default=str: YAML reads an unquoted `until: 2026-10-03` as a date, the
+    # natural way to write a hold; it renders as the same ISO string.
+    print(_json.dumps(jobs[args.name], sort_keys=True, default=str))
+    return 0
+
+
 def cmd_list_library(args) -> int:
     paths = _resolve_paths(args)
 

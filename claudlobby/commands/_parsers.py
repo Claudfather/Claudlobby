@@ -11,6 +11,7 @@ from .core import (
     cmd_doctor,
     cmd_freshbox,
     cmd_generate,
+    cmd_host_job,
     cmd_host_timers,
     cmd_list_library,
     cmd_promote,
@@ -131,6 +132,13 @@ def register_subparsers(sub) -> None:
         help="Compose host-global timer units from system.yaml host.jobs",
     )
     pht.set_defaults(func=cmd_host_timers)
+
+    phj = sub.add_parser(
+        "host-job",
+        help="Print one host job as this host runs it (packaged + host override), as JSON",
+    )
+    phj.add_argument("name", help="the host job, e.g. pull-root")
+    phj.set_defaults(func=cmd_host_job)
 
     pl = sub.add_parser(
         "list-library",

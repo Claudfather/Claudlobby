@@ -438,6 +438,19 @@ SWITCHES: tuple[Switch, ...] = (
              "ONCE on a state change",
     ),
     Switch(
+        key="pull-root",
+        scope=HOST_JOB,
+        polarity=OPT_IN,
+        carrier=ENROLL_HOST,
+        job="pull-root",
+        why_opt_in="mutates operator source: it fast-forwards the install every "
+                   "bot on the host runs",
+        what="daily 07:00 fast-forward of $CLAUDLOBBY_ROOT, a plane daemon and "
+             "view restart when claudlobby/ moved, a 15-minute watch that pages "
+             "on a regression, one source_pull record per run; a hold in the "
+             "host override pins a commit",
+    ),
+    Switch(
         key="update-siblings",
         scope=HOST_JOB,
         polarity=OPT_IN,
