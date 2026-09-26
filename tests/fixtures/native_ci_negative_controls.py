@@ -28,14 +28,17 @@ CASES = [f"{STARTUP}[{case}]" for case in ("no-pidfile", "early-exit", "pre-yiel
 def _run(export: Path, output: Path, env: dict[str, str], label: str,
          cases: list[str], failure: str | None = None) -> dict:
     junit = output / f"{label}.xml"
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-ra", f"--junitxml={junit}",
-         *[f"{BRIDGE}::{name}" for name in cases]],
-        cwd=export, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        timeout=180,
-    )
-    (output / f"{label}.log").write_text(result.stdout)
-    print(result.stdout, end="", flush=True)
+    log = output / f"{label}.log"
+    # File-backed output survives TimeoutExpired as well as a normal return.
+    # Keep the exception fatal; retained diagnostics are not passing evidence.
+    with log.open("w") as stream:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-ra", f"--junitxml={junit}",
+             *[f"{BRIDGE}::{name}" for name in cases]],
+            cwd=export, env=env, text=True, stdout=stream, stderr=subprocess.STDOUT,
+            timeout=180,
+        )
+    print(log.read_text(), end="", flush=True)
     assert result.returncode == (1 if failure else 0), f"{label}: unexpected pytest exit {result.returncode}"
     actual = list(ET.parse(junit).iter("testcase"))
     assert len(actual) == len(cases), f"{label}: unexpected case count"
