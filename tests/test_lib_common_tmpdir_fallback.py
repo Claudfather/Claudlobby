@@ -6,13 +6,12 @@ tolerates -- so the branch was unreachable in normal conditions (the primary
 `mktemp -d` almost always succeeds) and, on the one platform where it could
 actually run, could never succeed. Three things pinned here:
 
-1. The fixed template succeeds on GNU coreutils (this host). BSD/macOS is not
-   independently verified -- no such host is available here; the fixed
-   template is documented as accepted by both, and adding X's is strictly a
-   widening of what the old (X-less) template already required.
+1. The fixed template succeeds using the host's native mktemp. GNU rejects
+   the old X-less template; BSD/macOS accepts it, so rejection is not a
+   portable precondition for testing the working source-time allocation.
 2. When the primary genuinely fails but a WORKING fallback path exists, the
    fallback actually rescues it. Real OS conditions (a full/read-only /tmp)
-   cannot isolate this branch: measured directly (not assumed) that GNU
+   cannot portably isolate this branch: GNU
    coreutils' bare `mktemp -d` and `mktemp -d -t template` both consult the
    same TMPDIR identically, so a TMPDIR-based failure takes out both forms
    together, never one without the other. Reaching the branch where ONLY the
@@ -31,6 +30,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,6 +40,16 @@ from tests.conftest import constructed_env
 REPO = Path(__file__).resolve().parents[1]
 LIB_COMMON = REPO / "lib" / "lib-common.sh"
 ENV_TIERS = REPO / "lib" / "env-tiers.sh"
+
+
+def _env(tmp_path: Path, **overrides) -> dict:
+    home, scratch = tmp_path / "home", tmp_path / "scratch"
+    home.mkdir(exist_ok=True)
+    scratch.mkdir(exist_ok=True)
+    return constructed_env(
+        HOME=home, TMPDIR=scratch, CLAUDLOBBY_ROOT=tmp_path,
+        **overrides,
+    )
 
 
 def _source_probe(tmp_path: Path, env: dict) -> subprocess.CompletedProcess:
@@ -55,7 +65,7 @@ def _source_probe(tmp_path: Path, env: dict) -> subprocess.CompletedProcess:
         'if [ -d "$_LC_TMPDIR" ]; then _exists=DIR_EXISTS; else _exists=DIR_MISSING; fi\n'
         'printf \'SOURCED _LC_TMPDIR=[%s] %s\\n\' "$_LC_TMPDIR" "$_exists"\n'
     )
-    return subprocess.run(["bash", str(probe)], capture_output=True, text=True, env=env)
+    return subprocess.run(["bash", str(probe)], capture_output=True, text=True, env=env, timeout=10)
 
 
 def _parse(stdout: str) -> tuple[str, str]:
@@ -66,20 +76,30 @@ def _parse(stdout: str) -> tuple[str, str]:
     return path, marker
 
 
-class TestTheFixedTemplateWorksOnGnu:
-    def test_the_new_template_succeeds_where_the_old_one_failed(self, tmp_path: Path):
-        """Direct regression pin on the literal defect: the OLD template
-        (no X's) fails on GNU with 'too few X's in template'; confirm that
-        first (so this test would have failed before the fix), then confirm
-        the mechanism that replaced it -- sourcing lib-common.sh with a
-        genuinely working primary -- produces a real, existing directory."""
-        old = subprocess.run(
-            ["mktemp", "-d", "-t", "lib-common"], capture_output=True, text=True
-        )
-        assert old.returncode != 0
-        assert "too few X" in old.stderr
+class TestTheTemplateWorksOnTheNativeUtility:
+    def test_old_template_semantics_and_working_primary(self, tmp_path: Path):
+        """Keep the GNU defect control without demanding it of BSD mktemp.
 
-        r = _source_probe(tmp_path, constructed_env())
+        The forced-fallback test below exercises the actual production
+        template on both platforms; reverting its X's is caught on GNU.
+        """
+        old = subprocess.run(
+            ["mktemp", "-d", "-p", str(tmp_path / "scratch"), "-t", "lib-common"],
+            capture_output=True, text=True,
+            env=_env(tmp_path), timeout=10,
+        )
+        if old.returncode == 0:
+            directory = Path(old.stdout.strip())
+            try:
+                assert sys.platform == "darwin", "GNU must reject the X-less template"
+                assert directory.is_dir()
+                assert directory.resolve().is_relative_to((tmp_path / "scratch").resolve())
+            finally:
+                directory.rmdir()
+        else:
+            assert "too few X" in old.stderr
+
+        r = _source_probe(tmp_path, _env(tmp_path))
         assert r.returncode == 0, r.stdout + r.stderr
         tmpdir, exists = _parse(r.stdout)
         assert tmpdir, r.stdout
@@ -104,7 +124,9 @@ class TestThePrimaryFailingFallsThroughToTheFallback:
             "# Forces the bare/no-template primary to fail; delegates any\n"
             "# call carrying -t (the fallback shape) to the real mktemp.\n"
             'case " $* " in\n'
-            "  *' -t '*) exec " + real_mktemp + ' "$@" ;;\n'
+            # BSD -t uses the OS temp location unless -p explicitly overrides
+            # it. Keep the real template behavior inside this fixture's root.
+            "  *' -t '*) exec " + real_mktemp + ' -p "$TMPDIR" "$@" ;;\n'
             "  *) echo 'mktemp: STUB forcing primary failure' >&2; exit 1 ;;\n"
             "esac\n"
         )
@@ -119,7 +141,7 @@ class TestThePrimaryFailingFallsThroughToTheFallback:
         primary) produced the result is the directory name itself: the
         fallback's template (`lib-common.XXXXXXXXXX`) is distinct from the
         primary's own default (`tmp.XXXXXXXXXX`)."""
-        env = constructed_env(PATH=f"{stub_bin}:{os.environ['PATH']}")
+        env = _env(tmp_path, PATH=f"{stub_bin}:{os.environ['PATH']}")
         r = _source_probe(tmp_path, env)
         assert r.returncode == 0, r.stdout + r.stderr
         tmpdir, exists = _parse(r.stdout)
@@ -137,31 +159,35 @@ class TestBothAttemptsFailingNamesTheHelper:
     door the issue names, `lib/env-tiers.sh`, not just lib-common.sh alone."""
 
     @pytest.fixture
-    def readonly_tmpdir(self, tmp_path: Path) -> Path:
-        ro = tmp_path / "ro"
-        ro.mkdir()
-        ro.chmod(0o555)
-        yield ro
-        ro.chmod(0o755)  # restore so pytest's own cleanup can remove it
+    def failing_mktemp(self, tmp_path: Path) -> dict:
+        # A chmod'd TMPDIR is not a portable failure injection: BSD can fall
+        # back elsewhere, and root can write through mode 0555. Fail both
+        # actual calls explicitly, recording their shapes for a live control.
+        stub_dir = tmp_path / "failbin"
+        stub_dir.mkdir()
+        log = tmp_path / "mktemp-calls"
+        stub = stub_dir / "mktemp"
+        stub.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$MKTEMP_CALLS"\nexit 1\n')
+        stub.chmod(0o755)
+        env = _env(tmp_path, PATH=f"{stub_dir}:{os.environ['PATH']}", MKTEMP_CALLS=log)
+        yield env
+        assert log.read_text().splitlines() == ["-d", "-d -t lib-common.XXXXXXXXXX"]
 
     def test_env_tiers_names_lc_tmpdir_not_a_bare_exit(
-        self, tmp_path: Path, readonly_tmpdir: Path
+        self, tmp_path: Path, failing_mktemp: dict
     ):
-        env = constructed_env(
-            TMPDIR=str(readonly_tmpdir), CLAUDLOBBY_ROOT=str(tmp_path)
-        )
         r = subprocess.run(
-            ["bash", str(ENV_TIERS)], capture_output=True, text=True, env=env
+            ["bash", str(ENV_TIERS)], capture_output=True, text=True,
+            env=failing_mktemp, timeout=10,
         )
         assert r.returncode == 1
         assert "_LC_TMPDIR" in r.stderr, r.stderr
         assert "lib-common.sh" in r.stderr, r.stderr
 
     def test_lib_common_alone_shows_the_same_diagnostic(
-        self, tmp_path: Path, readonly_tmpdir: Path
+        self, tmp_path: Path, failing_mktemp: dict
     ):
-        env = constructed_env(TMPDIR=str(readonly_tmpdir))
-        r = _source_probe(tmp_path, env)
+        r = _source_probe(tmp_path, failing_mktemp)
         assert r.returncode == 1
         assert "_LC_TMPDIR" in r.stderr, r.stderr
         assert "SOURCED" not in r.stdout, r.stdout

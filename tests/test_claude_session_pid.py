@@ -9,11 +9,18 @@ ancestry, and (b) an unresolvable answer is loud rather than plausible.
 """
 
 import os
+import json
+import shutil
+import signal
+import shlex
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+
+from tests.conftest import constructed_env
 
 DOOR = Path(__file__).resolve().parent.parent / "lib" / "claude-session-pid.sh"
 
@@ -21,7 +28,7 @@ DOOR = Path(__file__).resolve().parent.parent / "lib" / "claude-session-pid.sh"
 def run(args, **kw):
     return subprocess.run(
         ["bash", str(DOOR), *args],
-        capture_output=True, text=True, **kw
+        capture_output=True, text=True, timeout=10, **kw
     )
 
 
@@ -40,9 +47,11 @@ def test_parses_under_bash():
 def _fake_tree(tmp_path, script):
     """Run `script` under a process genuinely named `claude`.
 
-    Uses a COPIED shell binary so `comm` really reads `claude` -- a stub that
+    Uses a COPIED executable so `comm` really reads `claude` -- a stub that
     merely claims the name would not exercise the comm-basename branch the door
-    takes on Linux.
+    takes on Linux and macOS. Apple-signed Bash copies cannot reliably run on
+    macOS; a Node copy preserves its native executable identity there. Node
+    parents a Bash child, so ANCESTOR_PID explicitly names Node, not that shell.
 
     The trailing `; true` is load-bearing. bash applies an exec optimisation to
     the LAST command of a `-c` string, replacing itself in place; the fake
@@ -51,24 +60,88 @@ def _fake_tree(tmp_path, script):
     continued past it -- but it silently destroys the fixture, so the fixture
     keeps the parent alive on purpose.
     """
+    home, scratch = tmp_path / "home", tmp_path / "scratch"
+    home.mkdir()
+    scratch.mkdir()
+    env = constructed_env(HOME=home, TMPDIR=scratch, CLAUDLOBBY_ROOT=tmp_path)
     fake = tmp_path / "claude"
-    fake.write_bytes(Path("/bin/bash").read_bytes())
+    if sys.platform == "darwin":
+        node = shutil.which("node")
+        assert node, "native macOS ancestry fixture requires Node"
+        shutil.copyfile(node, fake)
+        # Homebrew Node may use an executable-relative libnode rpath.
+        for library in (Path(node).resolve().parent.parent / "lib").glob("libnode*.dylib"):
+            (tmp_path / library.name).symlink_to(library)
+        tree = tmp_path / "tree.js"
+        tree.write_text(
+            "const child = require('child_process').spawnSync('/bin/bash', "
+            + json.dumps(["--noprofile", "--norc", "-c", script + "; true"])
+            + ", {stdio: 'inherit', timeout: 8000, killSignal: 'SIGKILL', "
+            "env: {...process.env, ANCESTOR_PID: String(process.pid)}});\n"
+            "if (child.error) { console.error(child.error); process.exit(1); }\n"
+            "process.exit(child.status === null ? 1 : child.status);\n"
+        )
+        command = [str(fake), str(tree)]
+    else:
+        fake.write_bytes(Path("/bin/bash").read_bytes())
+        command = [str(fake), "--noprofile", "--norc", "-c",
+                   'export ANCESTOR_PID=$$; ' + script + "; true"]
     fake.chmod(0o755)
-    return subprocess.run([str(fake), "-c", script + "; true"],
-                          capture_output=True, text=True)
+    # Start through the already-running Python executable: the deadline then
+    # covers exec/startup of the copied binary too, not just its running time.
+    launch = [sys.executable, "-c", "import os,sys; os.execv(sys.argv[1], sys.argv[1:])", *command]
+    with subprocess.Popen(launch, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, start_new_session=True, env=env) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=15)
+            return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+        finally:
+            # This process group belongs only to the disposable fixture,
+            # including a child stuck before it can report its PID.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=5)
+
+
+def test_fixture_ignores_ambient_startup_files(tmp_path, monkeypatch):
+    """The native ancestry fixture must not execute the operator's startup code."""
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    marker = tmp_path / "startup-ran"
+    shell = poison / "shell-env"
+    shell.write_text(f"echo shell >> {shlex.quote(str(marker))}\n")
+    (poison / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('python')\n"
+    )
+    node = poison / "node.cjs"
+    node.write_text(
+        "require('fs').writeFileSync(" + json.dumps(str(marker)) + ", 'node');\n"
+    )
+    for name in ("BASH_ENV", "ENV", "PYTHONSTARTUP"):
+        monkeypatch.setenv(name, str(shell))
+    monkeypatch.setenv("PYTHONPATH", str(poison))
+    monkeypatch.setenv("NODE_OPTIONS", f"--require={node}")
+    r = _fake_tree(tmp_path, 'echo fixture-clean')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "fixture-clean"
+    assert not marker.exists(), "fixture loaded ambient startup code"
 
 
 def test_resolves_to_an_ancestor_named_claude(tmp_path):
     r = _fake_tree(
         tmp_path,
-        f'echo "ANCESTOR=$$"; echo "COMM=$(ps -o comm= -p $$)"; '
+        f'echo "ANCESTOR=$ANCESTOR_PID"; echo "COMM=$(ps -o comm= -p "$ANCESTOR_PID")"; '
         f'echo "GOT=$(bash {DOOR} --pid)"',
     )
     assert r.returncode == 0, r.stderr
     out = dict(
         l.split("=", 1) for l in r.stdout.splitlines() if "=" in l
     )
-    assert out["COMM"].strip() == "claude", (
+    # Linux reports a basename; native macOS reports the executable path.
+    # The control still requires the exact executable name, never a substring.
+    assert Path(out["COMM"].strip()).name == "claude", (
         "fixture control failed: the ancestor is not actually named claude, "
         "so a pass here would prove nothing"
     )
@@ -117,7 +190,7 @@ def test_from_walks_the_given_ancestry(tmp_path):
     """--from is the seam that makes the walk testable without a real session."""
     r = _fake_tree(
         tmp_path,
-        f'echo "ANCESTOR=$$"; echo "GOT=$(bash {DOOR} --from $$)"',
+        f'echo "ANCESTOR=$ANCESTOR_PID"; echo "GOT=$(bash {DOOR} --from "$ANCESTOR_PID")"',
     )
     assert r.returncode == 0, r.stderr
     out = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)

@@ -22,11 +22,12 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import _scrubbed_env, read_fleet_events
+from tests.conftest import constructed_env, read_fleet_events
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FLEET_PULSE = REPO_ROOT / "lib" / "fleet-pulse.sh"
@@ -41,13 +42,24 @@ needs_tmux = pytest.mark.skipif(
 SOCKET = "pulse610"
 
 
-def _tmux_env(root: Path) -> dict:
-    """Pin the tmux rendezvous under the fixture root (per-test private)."""
-    return {**os.environ, "TMUX_TMPDIR": str(root / "tmux")}
+def _tmux_env(root: Path, socket_dir: Path) -> dict:
+    """Pin the rendezvous to the fixture's short, uniquely owned directory."""
+    return constructed_env(HOME=root / "home", TMPDIR=root / "tmp",
+                           CLAUDLOBBY_ROOT=root, TMUX_TMPDIR=socket_dir)
 
 
 @pytest.fixture()
-def pulse_fleet(tmp_path):
+def pulse_socket_dir():
+    # macOS sun_path cannot fit pytest's long default basetemp plus tmux's
+    # uid/socket suffix. Own one short directory, never a shared named socket.
+    with tempfile.TemporaryDirectory(prefix="p610-", dir="/tmp") as directory:
+        path = Path(directory)
+        assert len(os.fsencode(path.resolve() / f"tmux-{os.getuid()}" / SOCKET)) < 100
+        yield path
+
+
+@pytest.fixture()
+def pulse_fleet(tmp_path, pulse_socket_dir):
     """CLAUDLOBBY_ROOT fixture: fleet of two declared bots.
 
     - ``aaa-idle`` — live tmux session (own socket), zero events: the trigger.
@@ -56,6 +68,8 @@ def pulse_fleet(tmp_path):
       session_missing on the plane (the has-events control).
     """
     root = tmp_path / "root"
+    (root / "home").mkdir(parents=True)
+    (root / "tmp").mkdir()
     fleet = "pulsefleet"
     bots = root / "local" / fleet / "runtime" / "bots"
 
@@ -73,32 +87,33 @@ def pulse_fleet(tmp_path):
         "fleet:\n  bots:\n    aaa-idle:\n    zzz-logged:\n"
     )
 
-    (root / "tmux").mkdir()
-    subprocess.run(
-        ["tmux", "-L", SOCKET, "new-session", "-d", "-s", "aaa-idle"],
-        check=True,
-        timeout=20,
-        env=_tmux_env(root),
-    )
     try:
-        yield root, fleet
+        subprocess.run(
+            ["tmux", "-f", "/dev/null", "-L", SOCKET, "new-session", "-d",
+             "-s", "aaa-idle", "/bin/bash --noprofile --norc"],
+            check=True,
+            timeout=20,
+            env=_tmux_env(root, pulse_socket_dir),
+        )
+        yield root, fleet, pulse_socket_dir
     finally:
         subprocess.run(
             ["tmux", "-L", SOCKET, "kill-server"],
             capture_output=True,
             timeout=20,
-            env=_tmux_env(root),
+            env=_tmux_env(root, pulse_socket_dir),
         )
 
 
-def _run_pulse(root: Path, fleet: str, extra_env: dict) -> subprocess.CompletedProcess:
+def _run_pulse(root: Path, fleet: str, socket_dir: Path, extra_env: dict) -> subprocess.CompletedProcess:
     """Run the real fleet-pulse.sh against the fixture root, hermetically:
     no inherited FLEET_*/BOT_*/TELEGRAM* (would reroute socket or chat
     resolution) and HOME pointed away from the real ~/.env."""
-    env = _scrubbed_env(
+    env = constructed_env(
         HOME=str(root / "home"),
+        TMPDIR=str(root / "tmp"),
         CLAUDLOBBY_ROOT=str(root),
-        TMUX_TMPDIR=str(root / "tmux"),
+        TMUX_TMPDIR=str(socket_dir),
         **extra_env,
     )
     return subprocess.run(
@@ -141,8 +156,8 @@ def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
     shape suppresses ``set -e``, and this pin keeps it surviving if that shape
     ever changes.
     """
-    root, fleet = pulse_fleet
-    proc = _run_pulse(root, fleet, extra_env)
+    root, fleet, socket_dir = pulse_fleet
+    proc = _run_pulse(root, fleet, socket_dir, extra_env)
     assert proc.returncode == 0, (
         f"pulse aborted (rc={proc.returncode})\nstdout:\n{proc.stdout}\n"
         f"stderr:\n{proc.stderr}\nscript_error events:\n{_script_errors(root)}"
