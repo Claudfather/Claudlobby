@@ -17,6 +17,8 @@ Provenance of the fixtures below:
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -1121,3 +1123,143 @@ class TestTheTaughtVocabularyIsRead:
         # --json and in the text a manager reads.
         assert [v["said"] for v in result["resolved"].values()] == ["Mechanical fixes"]
         assert '=REQUEST-CHANGES("Mechanical fixes")@' in prs.render([result], False)
+
+
+# ---------------------------------------------------------------------------
+# #1913 — the bracket-tag, anchored header is now taught wherever a reviewer
+# or a manager learns the verdict format, not only in this test file. A doc
+# example that drifted back to the old identity-less, anchor-less shape (or
+# was never wrapped in `**...**` at all, `pr-comment-hygiene.md`'s prior
+# state) would silently stop attributing and anchoring -- exactly the #1699/
+# #1700 class this module exists to name, reached through a doc rather than
+# a live PR. So these tests read the docs straight off disk rather than
+# duplicating their text here: an edit that regresses the taught shape fails
+# THIS test, not a hand-kept copy of it that can drift independently
+# (`test_fixture_is_not_kinder_than_the_documented_command`'s reasoning, one
+# door up -- a fixture that is not the real artifact hides the defect it
+# exists to catch).
+# ---------------------------------------------------------------------------
+
+#: The four files #1913 names, repo-root-relative. Every one of these is
+#: somewhere a reviewer or a manager learns (or teaches) the verdict format.
+DOC_PATHS = [
+    "library/expertise/code-review.md",
+    "library/protocols/review-flow.md",
+    "library/protocols/verify-before-merge.md",
+    "library/protocols/pr-comment-hygiene.md",
+]
+
+#: Every verdict WORD these docs teach, normalized the way `parse_verdict`
+#: itself normalizes before its NORM lookup (`.lower()`, then collapse
+#: `[\s-]+` to one space) -- "keep every verdict word the tool reads" made
+#: executable rather than eyeballed. `approve` is `pr-comment-hygiene.md`'s;
+#: the other four are `review-flow.md` step 5's (#1895), echoed by
+#: `code-review.md` and (ship it / request changes) by
+#: `verify-before-merge.md`.
+TAUGHT_VERDICT_WORDS = {
+    "approve",
+    "ship it",
+    "mechanical fixes",
+    "request changes",
+    "architectural concerns",
+}
+
+
+def _repo_root() -> Path:
+    # This file lives at <repo>/tests/test_pr_review_state.py.
+    return Path(__file__).resolve().parent.parent
+
+
+class TestDocsTeachTheParseableHeader:
+    """Every concrete verdict-header example the four docs carry must parse as
+    BOTH attributed (a header identity) and anchored (a commit sha) through
+    this module's own regexes -- never a reimplementation of them."""
+
+    def _doc_examples(self):
+        """(path, line, verdict) for every line in the four docs that carries
+        a genuine `**[name] [...` header (never a `<bot-name>` placeholder --
+        `HEADER_IDENTITY` requires its bracket to open on `[a-z0-9]`, which a
+        `<` cannot satisfy, so an abstract shape line is excluded by
+        construction, not by a second filter) resolving to a verdict the tool
+        recognizes. `pr-comment-hygiene.md`'s `comment` verdict is not in
+        `NORM`, so it is walked and correctly produces no example -- it is
+        not a verdict this tool gates on, and forcing it to parse would test
+        a claim nobody is making."""
+        found = []
+        for rel in DOC_PATHS:
+            text = (_repo_root() / rel).read_text()
+            for line in text.splitlines():
+                if not prs.HEADER_IDENTITY.search(line):
+                    continue
+                verdict = prs.parse_verdict(line)
+                if verdict is None:
+                    continue
+                found.append((rel, line, verdict))
+        return found
+
+    def test_every_doc_header_example_is_attributed_and_anchored(self):
+        examples = self._doc_examples()
+
+        # A pass over zero examples is not a pass: it means the scan (or the
+        # docs) silently stopped finding anything, the exact failure mode
+        # `test_main_runs_the_selftest` guards one door over -- a control
+        # that is not reached is not a control. Assert it PER FILE, not only
+        # in aggregate: an aggregate count can stay flat while one file's
+        # example count drops to zero and another's happens to rise.
+        by_file: dict[str, int] = {}
+        for rel, _line, _verdict in examples:
+            by_file[rel] = by_file.get(rel, 0) + 1
+        for rel in DOC_PATHS:
+            assert by_file.get(rel, 0) > 0, (
+                f"{rel}: no attributed+anchored verdict-header example found "
+                f"-- the doc regressed to an unparseable shape, or the scan broke"
+            )
+
+        for rel, line, verdict in examples:
+            assert verdict in (prs.APPROVE, prs.BLOCK), (rel, line, verdict)
+            identity = prs.parse_header_identity(line)
+            assert identity, f"{rel}: header carries no identity: {line!r}"
+            anchor = prs.parse_anchor(line)
+            assert anchor, f"{rel}: header carries no SHA anchor: {line!r}"
+
+        # "Keep every verdict word the tool reads" -- executable, not
+        # eyeballed. Same transform `parse_verdict` applies before its NORM
+        # lookup, so `request-changes` and `request changes` count as one.
+        said_words = {
+            re.sub(r"[\s-]+", " ", prs.verdict_words(line).lower())
+            for _rel, line, _verdict in examples
+        }
+        missing = TAUGHT_VERDICT_WORDS - said_words
+        assert not missing, f"taught verdict word(s) no longer demonstrated in any doc: {missing}"
+
+    def test_a_doc_sourced_header_resolves_cleanly_through_the_payload_json_seam(
+        self, tmp_path, capsys
+    ):
+        """Not just the pure parser: one of these headers, embedded in the
+        same surrounding list/prose text the doc actually carries, run
+        through the real CLI entry point exactly as `--payload-json` expects
+        it (`TestOfflineSeam`'s pattern) -- proving the doc's shape survives
+        the full `main()` -> `assess_pr()` -> `--json` path, not only the
+        regexes in isolation."""
+        rel, line, verdict = self._doc_examples()[0]
+        assert verdict == prs.APPROVE, (rel, line)  # code-review.md's "ship it" bullet
+        anchor = prs.parse_anchor(line)
+        head = anchor + "0" * (40 - len(anchor))  # a full sha the anchor is a prefix of
+
+        payload = _payload(
+            [("reviews", "2026-09-27T00:00:00Z", line)],
+            head=head, number=1913, title="doc-sourced fixture",
+        )
+        path = tmp_path / "doc_example.json"
+        path.write_text(json.dumps(payload))
+        rc = prs.main(["o/r", "--payload-json", str(path), "--json"])
+        out = json.loads(capsys.readouterr().out)
+
+        assert rc == prs.RC_OK, out["summary"]
+        result = out["prs"][0]
+        resolved = result["resolved"]["alex"]
+        assert resolved["verdict"] == prs.APPROVE
+        assert resolved["anchor"] == anchor
+        assert result["stale"] == []       # the head we gave it starts with the anchor
+        assert result["unanchored"] == []
+        assert result["blocking"] == []

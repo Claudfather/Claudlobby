@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the bracket-tag, anchored verdict header is taught wherever a reviewer or a manager learns the format (#1913)
+
+`lib/pr-review-state.py` reads `**[name] [VERDICT] x** — reviewed at <sha>` and attributes
+the verdict to its author and anchors it to a commit. The four places a reviewer or a
+manager actually learns the verdict format still taught the older, identity-less,
+anchor-less `**Verdict: x**` shape — and one of them, `pr-comment-hygiene.md`'s `/ironclad`
+verdict format, used no bold at all, so `pr-review-state.py` never parsed it. vera had
+already been writing the bracket-tag header by hand on #1912 and #1914; the docs had not
+caught up.
+
+- `library/expertise/code-review.md`, `library/protocols/review-flow.md` and
+  `library/protocols/verify-before-merge.md` now teach
+  `**[<bot>] [VERDICT] <verdict>** — reviewed at <sha>` for all four taught verdicts (ship
+  it / mechanical fixes / request changes / architectural concerns). The older
+  `**Verdict: x**` form still parses — it carries neither identity nor anchor — and stays
+  documented as such rather than being presented as broken.
+- `library/protocols/pr-comment-hygiene.md`'s `[<bot-name>] [VERDICT] <approve|request-changes|comment>`
+  gains the same bold wrapping and an anchor, so a plan-PR verdict from `/ironclad` is
+  readable by the same tool as a code-PR verdict.
+- No change to `lib/pr-review-state.py` itself — it already read both the old and new
+  header shapes; only the taught vocabulary moved.
+- `tests/test_pr_review_state.py::TestDocsTeachTheParseableHeader` reads all four docs
+  straight off disk (never a hand-kept copy of their text) and asserts every concrete
+  header example parses as attributed AND anchored through the module's own regexes, that
+  every taught verdict word is still recognized, and that one doc-sourced header resolves
+  cleanly through the real `--payload-json` CLI seam.
+
 ### Fixed — the `~/.env` lint no longer lets a negation elsewhere on a line hide an instruction (#1919)
 
 The lint `validate` and `freshbox` run for a bot with shared-config isolation

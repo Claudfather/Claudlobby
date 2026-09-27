@@ -84,10 +84,10 @@ Examples:
 
 ### Verdict
 
-A review bot's overall assessment of the plan:
+A review bot's overall assessment of the plan. **Bold the bracket tag and anchor the commit you reviewed** — this is the same header `lib/pr-review-state.py` reads on a code PR to attribute a verdict and tell whether it's still live; unbolded or unanchored, it is invisible to that tool:
 
 ```
-[<bot-name>] [VERDICT] <approve|request-changes|comment> — <one-line summary>
+**[<bot-name>] [VERDICT] <approve|request-changes|comment>** — reviewed at `<sha>` — <one-line summary>
 ```
 
 | Verdict | Meaning |
@@ -96,14 +96,16 @@ A review bot's overall assessment of the plan:
 | `request-changes` | Critical or major findings exist. Plan needs revision before this lens approves. |
 | `comment` | Observations posted but no blocking judgment. |
 
+`<sha>` is the commit you reviewed (a plan PR's `headRefOid`, same as any other PR) — carry it even on a `comment` verdict, so a later reader can tell whether the plan has moved on since.
+
 Examples:
 
 ```
-[alex] [VERDICT] request-changes — 2 major findings: parallel path in Phase 2b, missing rollback strategy.
+**[alex] [VERDICT] request-changes** — reviewed at a1b2c3d. 2 major findings: parallel path in Phase 2b, missing rollback strategy.
 
-[virgil] [VERDICT] approve — All phases align with PROJECT_MISSION.md. One minor deferral suggestion posted.
+**[virgil] [VERDICT] approve** — reviewed at a1b2c3d. All phases align with PROJECT_MISSION.md. One minor deferral suggestion posted.
 
-[mason] [VERDICT] comment — Cost-benefit analysis posted. No blocking issues, but Phase 3a is the highest-risk item.
+**[mason] [VERDICT] comment** — reviewed at a1b2c3d. Cost-benefit analysis posted. No blocking issues, but Phase 3a is the highest-risk item.
 ```
 
 A verdict is always the last comment a bot posts in a review cycle. Post findings first, verdict last.

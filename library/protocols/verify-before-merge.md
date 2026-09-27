@@ -9,12 +9,12 @@ When a reviewer reports "DONE," that means they've FINISHED reviewing — not th
 
 ### 1. Parse the verdict
 
-Read the latest review body and look for the explicit verdict:
+Read the latest review body and look for the explicit verdict — the bracket-tagged, anchored header `lib/pr-review-state.py` also reads, so its verdict and yours can never silently disagree:
 
-- `**Verdict: Ship it**` → safe to merge
-- `**Verdict: Request Changes**` → bounce to engineer with fix direction; do NOT merge
+- `**[alex] [VERDICT] ship it** — reviewed at a1b2c3d` → safe to merge
+- `**[alex] [VERDICT] request changes** — reviewed at a1b2c3d` → bounce to engineer with fix direction; do NOT merge
 
-CI green + review completion is necessary but not sufficient. The verdict text is the authoritative signal. Make it a gated function: read verdict → if ship-it, merge; else, bounce.
+`alex`/`a1b2c3d` stand in for the reviewer's name and the commit sha they reviewed — check the sha against the PR's current head before trusting an old approval; a mismatch means the verdict may already be stale (`lib/pr-review-state.py` calls this `COMMIT-STALE`). CI green + review completion is necessary but not sufficient. The verdict text is the authoritative signal. Make it a gated function: read verdict → if ship-it, merge; else, bounce.
 
 If a Request Changes verdict was missed and the PR merged, file a follow-up issue and dispatch the fix immediately.
 
