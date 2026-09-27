@@ -162,6 +162,9 @@ def _snapshot(root):
 
 @pytest.fixture
 def estate(tmp_path, monkeypatch):
+    # Dynamic lib imports must not add interpreter cache writes to the output
+    # inventory. Changing only the env var is too late in a running interpreter.
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
     base = (tmp_path / "estate").resolve()
     root, home = base / "root", base / "home"
     root.mkdir(parents=True)
@@ -458,6 +461,45 @@ def test_generate_output_inventory(estate, monkeypatch, selected, stale):
     expected = _expected_operations(selected, stale)
     _assert_inventory(recorder.events, expected)
     _assert_results(base, before, expected, selected, stale)
+
+
+@pytest.mark.parametrize("incoming_disabled", [False, True], ids=["ordinary", "no-bytecode"])
+def test_estate_isolates_cold_import_bytecode(tmp_path, monkeypatch, incoming_disabled):
+    """The fixture owns bytecode isolation even when pytest was not run with -B."""
+    import importlib.util
+    from claudlobby import paths as path_module
+
+    monkeypatch.setattr(sys, "dont_write_bytecode", incoming_disabled)
+    # Use the ordinary adjacent-cache layout for the cold private lib import,
+    # even if an outer runner redirected caches while importing pytest itself.
+    monkeypatch.setattr(sys, "pycache_prefix", None)
+    # Exercise setup and teardown with a distinct patch lifetime so restoration
+    # is observed here, rather than inferred from the next test's process state.
+    with pytest.MonkeyPatch.context() as scoped:
+        fixture = estate.__wrapped__(tmp_path, scoped)
+        base, root, _, scans = next(fixture)
+        try:
+            grammar_path = root / "lib/mcp-package-grammar.py"
+            cached = Path(importlib.util.cache_from_source(str(grammar_path)))
+            assert not cached.exists()
+            assert not any(key[0] == str(grammar_path) for key in path_module._LIB_MODULES)
+            before = _snapshot(base)
+            recorder = Operations(base)
+            with recorder.recording(scoped):
+                assert _generate(root, None) == 0
+            assert any(key[0] == str(grammar_path) for key in path_module._LIB_MODULES)
+            assert sys.dont_write_bytecode is True
+            assert not cached.exists()
+            assert not recorder.refusals
+            assert scans == [(str(root), "sample")]
+            assert not (base / "plane").exists()
+            expected = _expected_operations(None, False)
+            _assert_inventory(recorder.events, expected)
+            _assert_results(base, before, expected, None, False)
+        finally:
+            with pytest.raises(StopIteration):
+                next(fixture)
+    assert sys.dont_write_bytecode is incoming_disabled
 
 
 @pytest.mark.parametrize("relative", [

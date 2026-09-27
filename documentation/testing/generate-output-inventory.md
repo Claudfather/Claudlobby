@@ -68,6 +68,16 @@ outside Python's audit-event count; the final snapshot checks no residue.
 The environment query must return four private rows successfully. Refusals are
 retained even if a best-effort caller catches their exceptions.
 
+The fixture disables bytecode writes in the running interpreter and restores
+the incoming flag at teardown. This is fixture-local: it does not depend on
+starting pytest with `-B` or on a process-wide test policy. Otherwise the cold
+private MCP grammar import adds interpreter-cache operations and triggers the
+strict unknown-descriptor refusal. Two regression controls enter with bytecode
+enabled and disabled, force that real cold import, check the unchanged finite
+generation inventory and absence of a cache file, and observe flag restoration.
+Bytecode caches are excluded by construction, not added to the accepted output
+set; unknown-descriptor and network refusals remain unchanged.
+
 This is an audit-event boundary, not an operating-system network sandbox. In
 particular it does not instrument unaudited native operations or writes through
 preexisting descriptors. The controlled fixture supplies no connected sockets.
