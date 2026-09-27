@@ -682,18 +682,28 @@ _events_readable() {
 # Not a subshell call: a failed read flips the source to unreachable for the
 # rest of the sweep.
 _plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = cache path
-    local _rc=0
+    local _rc=0 _err
+    _err=$(safe_mktemp)
     python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalation \
-        --since "$1" --fleet "$fleet" >"$2" 2>"$state_dir/.events-err" || _rc=$?
+        --since "$1" --fleet "$fleet" >"$2" 2>"$_err" || _rc=$?
     if [ "$_rc" -ne 0 ]; then
         _EVENTS_SOURCE=unreachable
-        _events_why=$(tail -1 "$state_dir/.events-err" 2>/dev/null | cut -c1-200)
+        _events_why=$(tail -1 "$_err" 2>/dev/null | cut -c1-200)
         echo "fleet-pulse: critical-events reader UNREACHABLE (rc=$_rc): ${_events_why} - critical events cannot be judged this pass" >&2
-        rm -f "$state_dir/.events-err" "$2"; return 1
+        rm -f "$_err" "$2"; return 1
     fi
-    rm -f "$state_dir/.events-err"
+    rm -f "$_err"
     return 0
 }
+# The two windows' caches, like every stderr capture in this sweep, are THIS
+# pass's own (safe_mktemp: a private per-process directory lib-common removes
+# at exit), never a fixed name in state_dir. That directory is HOST-GLOBAL and
+# every fleet's pulse timer fires in the same second, so a shared name was
+# rewritten by a sibling pass inside this pass's read loop (its rows replaced,
+# its page silently never sent) or deleted there (the loop's redirect failed
+# and the pass aborted on a script_error) -- #1901.
+_esc_cache=$(safe_mktemp)    # the escalation window
+_rb_cache=$(safe_mktemp)     # the summary's read-back span
 _CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout crash_loop"
 _CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck rc_timeout crash_loop"
 _rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")
@@ -791,23 +801,24 @@ _esc_task_page() { _reader_page task_escalated_reader "$1"; _ESC_TASK_PAGE_FAILE
 _esc_task_seen="$state_dir/${fleet}.escalated"
 _task_escalations() {
     [ -n "$_ESCALATION_CHAT_ID" ] || return 0
-    local _rc=0 _rows _seen _asg _tid _by _at _q _msg _esc_rc _esc_err _why _m _keep
+    local _rc=0 _rows _rows_err _seen _asg _tid _by _at _q _msg _esc_rc _esc_err _why _m _keep
     _rows=$(safe_mktemp)
+    _rows_err=$(safe_mktemp)
     python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalated \
-        --fleet "$fleet" >"$_rows" 2>"$state_dir/.escalated-err" || _rc=$?
+        --fleet "$fleet" >"$_rows" 2>"$_rows_err" || _rc=$?
     if [ "$_rc" -ne 0 ]; then
-        _why=$(tail -1 "$state_dir/.escalated-err" 2>/dev/null | cut -c1-200)
+        _why=$(tail -1 "$_rows_err" 2>/dev/null | cut -c1-200)
         echo "fleet-pulse: escalated reader UNREACHABLE (rc=$_rc): ${_why} - a manager waiting on the human cannot be seen this pass" >&2
         _ESC_TASK_PAGE_FAILED=0
         debounce_notify "$state_dir" fleet escalated_reader_unreachable _esc_task_page \
             "FLEET ALERT: the escalated-task reader for ${fleet} is UNREACHABLE - a manager raising a task for you cannot be seen until the plane is restored. (${_why})" \
             "" 600 || true
         [ "${_ESC_TASK_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet escalated_reader_unreachable
-        rm -f "$_rows" "$state_dir/.escalated-err"
+        rm -f "$_rows" "$_rows_err"
         return 0
     fi
     debounce_clear "$state_dir" fleet escalated_reader_unreachable
-    rm -f "$state_dir/.escalated-err"
+    rm -f "$_rows_err"
     _seen=$(safe_mktemp)
     # TAB-separated by the door, exactly so a question with spaces survives.
     while IFS="$(printf '\t')" read -r _asg _tid _by _at _q; do
@@ -871,7 +882,6 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
         # window is NOT caught here, and nothing re-checks a live-but-RC-dark
         # session (keepalive only heals DEAD ones); the durable-marker parity
         # fix (mirror bridge_down's startup+pulse legs) is the deferred follow-up.
-        _esc_cache="$state_dir/.critical-window"
         _esc_ok=0
         if _events_readable; then
             _plane_critical "$_window_start" "$_esc_cache" && _esc_ok=1
@@ -979,11 +989,11 @@ _summary_tmp=$(safe_mktemp)
             # ONE read for the whole summary (the read-back span), on the first bot
             if [ -z "${_rb_read:-}" ]; then
                 _rb_read=1; _rb_ok=0
-                _plane_critical "$_rb_yesterday" "$state_dir/.critical-readback" && _rb_ok=1
+                _plane_critical "$_rb_yesterday" "$_rb_cache" && _rb_ok=1
             fi
             if [ "${_rb_ok:-0}" -eq 1 ]; then
                 for _s_ct in $_CRITICAL_SUMMARY_TYPES; do
-                    grep -q "^${_s_bid} ${_s_ct} " "$state_dir/.critical-readback" 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
+                    grep -q "^${_s_bid} ${_s_ct} " "$_rb_cache" 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
                 done
             fi
         fi
@@ -1002,6 +1012,5 @@ _summary_tmp=$(safe_mktemp)
     done
 } > "$_summary_tmp" && mv "$_summary_tmp" "$_summary_file"
 _events_reader_guard || true
-rm -f "$state_dir/.critical-window" "$state_dir/.critical-readback"
 
 cat "$_summary_file"
