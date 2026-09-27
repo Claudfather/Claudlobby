@@ -21,7 +21,7 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | What did a manager decide at its last check-in, and why? | The plane (the check-in's `checkin_decision` rows, joined through `checkin_dispatch` to the task's status) | `claudlobby checkins --bot <b> --last` (`--json` for tools) |
 | How is a manager's check-in window distributed: actions, ask rate, what it could not read, dispatch outcomes — by project? | The plane (the decision rows, rolled up) | `claudlobby checkins --summary --since 14d` |
 | Fleet-wide log search | Tail all logs | `lib/tail-fleet.sh --fleet <name> --grep ERROR` |
-| Last pulse snapshot | Pulse summary file | `cat state/pulse/pulse-summary.txt` |
+| Last pulse snapshot | The fleet's pulse summary file | `cat state/pulse/<fleet>.pulse-summary.txt` |
 | Is the observable-plane kernel healthy? | Plane kernel status (db/spool/quarantine) | `claudlobby plane doctor` |
 
 > Every bot runs its own private tmux server (`-L <socket>`, the socket name is the bot's `BOT_SERVICE`/`TMUX_SOCKET`) since per-bot-tmux-socket isolation shipped. A bare `tmux -t <bot>` targets the shared *default* server, which has none of your bots on it, and silently reports no session instead of erroring. The commands above resolve the socket via `tmux_socket_for_bot <bot-dir>` — `source lib/lib-common.sh` first (from the claudlobby repo root) to get it in scope — or skip raw tmux entirely and dispatch through `lib/dispatch.sh` / the `bot_tmux`/`bot_tmux_send` wrappers. See [advanced-patterns.md](../advanced-patterns.md) for the full model.
@@ -35,7 +35,7 @@ Bot activity
   └─► bot-vitals.sh (hook)      ──► emit_fleet_event ──► state/plane/plane.db (source: vitals)
   └─► keepalive.sh (timer)      ──► bot.heartbeat / bot.session_up metric samples + keepalive_* events ──► the plane
   └─► fleet-pulse.sh (cron)     ──► emit_fleet_event ──► the plane (source: pulse)
-                                ──► state/pulse/pulse-summary.txt (human-readable)
+                                ──► state/pulse/<fleet>.pulse-summary.txt (human-readable)
                                 ──► [FLEET-PULSE] notification to manager tmux
   └─► emit_failure_alert / emit_fleet_notice ──► emit_fleet_event ──► the plane (anchored on the fleet, source: alert/notice)
       (start-bot.sh, reload-fleet.sh, …)      ──► [FLEET-ALERT]/[FLEET-NOTICE] nudge to manager tmux

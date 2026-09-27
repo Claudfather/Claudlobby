@@ -236,3 +236,76 @@ def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_pa
     r_f2 = _pulse(root, libdir)
     assert r_f2.returncode == 0, r_f2.stderr[-2000:]
     assert len(_escalation_pages(capture)) == 2, _pages(capture)
+
+
+@needs_tmux
+def test_two_fleets_hit_at_once_each_page_their_own(tmp_path):
+    """#1903: every marker that debounces a fleet-pulse page lives in the
+    HOST-GLOBAL `state/pulse`, so one kept under a name without the fleet was
+    shared by every fleet's sweep. Measured on a same-instant run: two fleets,
+    each with a real session_missing burst, and in 9 of 10 rounds only one
+    paged -- the first page's marker was the second fleet's debounce.
+
+    Two fleets on one root, both with a bot named w1 (#526 allows it), so the
+    fleet named in the page is the only thing telling the two apart. Every
+    step's new pages are recorded and compared whole, so a regression shows
+    every step it moved:
+      * the burst debounce, both ways: a fleet with no burst of a type takes
+        the "condition cleared" branch without clearing the other fleet's
+        marker (which re-paged it every pass), and two fleets bursting the
+        same type in one window both page;
+      * the reader-outage debounce: one outage pages both fleets;
+      * the summary: each fleet keeps its own table."""
+    root, paths, _wi, _asg = _scene(tmp_path)
+    g = "g"
+    (root / "local" / g / "runtime" / "bots" / "w1" / "data").mkdir(parents=True, exist_ok=True)
+    (root / "local" / g / "runtime" / "bots" / "w1" / "bot.conf").write_text(
+        "TMUX_SOCKET=esc-none-g-w1\n")
+    (root / "local" / g / "fleet.yaml").write_text(
+        "fleet:\n  name: g\n  service_prefix: com.test\n  bots:\n"
+        "    w1:\n      expertise: [software-engineering]\n")
+    _live_dispatch(root, "9", "t-1903-g001", ts="2026-09-01T10:00:00Z", bot="w1", fleet=g)
+    # f alone also carries a bridge_down burst, through the real door
+    f_w1 = paths.runtime_bots / "w1"
+    seed = subprocess.run(
+        ["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event bridge_down pulse "{{}}" "{f_w1}" w1'],
+        capture_output=True, text=True, timeout=180,
+        env={"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F,
+             "PLANE_EMIT_CLI": str(CLI), "PLANE_SOCKET": str(root / "no-daemon.sock"),
+             "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    assert seed.returncode == 0, seed.stderr[-1000:]
+
+    capture = tmp_path / "tg.log"
+    libdir = _pulse_lib(tmp_path, capture)
+
+    def sweep(fleet, threshold="1"):
+        n = len(_pages(capture))
+        r = _pulse(root, libdir, fleet=fleet, FLEET_PULSE_ESCALATION_THRESHOLD=threshold,
+                   FLEET_EVENT_EMIT_TIMEOUT_S="120")
+        assert r.returncode == 0, r.stderr[-2000:]
+        return sorted(_pages(capture)[n:])
+
+    def alert(kind, fleet):
+        return f"FLEET ALERT: {kind} on 1 bots (w1). Check {fleet} fleet health immediately."
+
+    got = [sweep(F), sweep(g, threshold="9"), sweep(F), sweep(g)]
+    assert got == [
+        sorted([alert("bridge_down", F), alert("session_missing", F)]),  # f's two bursts
+        [],                  # g below threshold for every type: clears ONLY its own markers...
+        [],                  # ...so f's are still inside their window
+        [alert("session_missing", g)],   # and g's own burst is not silenced by f's marker
+    ], got
+    pulse = root / "state" / "pulse"
+    for fleet in (F, g):
+        assert (pulse / f"{fleet}.pulse-summary.txt").read_text().startswith(f"Fleet pulse: {fleet} ")
+    assert not list(pulse.glob("escalation_*")) and not (pulse / "pulse-summary.txt").exists()
+
+    # one outage, both fleets: the plane made unopenable (a directory), so all three readers refuse
+    for p in (root / "state" / "plane").glob("plane.db*"):
+        p.unlink()
+    (root / "state" / "plane" / "plane.db").mkdir()
+    for fleet in (F, g):
+        paged = sweep(fleet)
+        for reader in ("overdue reader", "escalated-task reader", "events reader"):
+            assert any(f"the {reader} for {fleet} is UNREACHABLE" in x for x in paged), (fleet, reader, paged)
+

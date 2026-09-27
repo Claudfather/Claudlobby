@@ -42,7 +42,11 @@ install_error_trap ""
 
 ts=$(ts_iso)
 
-# State directory for pane hashes (persistent across runs)
+# State directory for the sweep's persistent markers. It is HOST-GLOBAL: every
+# fleet's sweep on this root runs against it, their timers in the same second,
+# so every file kept here names its fleet (`<fleet>.<key>`) or its bot
+# (`<bot>.<key>`). A name without either is one file shared by every fleet's
+# sweep, which let one fleet's page debounce another fleet's (#1903).
 state_dir="${CLAUDLOBBY_ROOT}/state/pulse"
 mkdir -p "$state_dir"
 
@@ -180,7 +184,7 @@ _overdue_page() { _reader_page overdue_reader_unreachable "$1"; _OVERDUE_PAGE_FA
 # emissions would mint the identity in the wrong plane and silence it next pass.
 _overdue_reader_guard() {
     case "${_overdue_reader_rc:-0}" in
-        0) debounce_clear "$state_dir" fleet overdue_reader_unreachable; return 0 ;;
+        0) debounce_clear "$state_dir" "$fleet" overdue_reader_unreachable; return 0 ;;
         3) ;;
         *) echo "fleet-pulse: overdue reader exited ${_overdue_reader_rc}: $(tail -1 "${_overdue_reader_err:-/dev/null}" 2>/dev/null | cut -c1-160)" >&2; return 0 ;;
     esac
@@ -188,10 +192,10 @@ _overdue_reader_guard() {
     _why=$(grep -m1 UNREACHABLE "${_overdue_reader_err:-/dev/null}" 2>/dev/null | cut -c1-200)
     [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: overdue reader UNREACHABLE and no escalation chat - the watchdog is dark for overdue dispatches: ${_why}" >&2; return 0; }
     _OVERDUE_PAGE_FAILED=0
-    debounce_notify "$state_dir" fleet overdue_reader_unreachable _overdue_page \
+    debounce_notify "$state_dir" "$fleet" overdue_reader_unreachable _overdue_page \
         "FLEET ALERT: the overdue reader for ${fleet} is UNREACHABLE - the watchdog cannot see overdue dispatches until the plane is restored. (${_why})" \
         "" 600 || true
-    [ "${_OVERDUE_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet overdue_reader_unreachable
+    [ "${_OVERDUE_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" "$fleet" overdue_reader_unreachable
     return 0
 }
 
@@ -731,10 +735,10 @@ fi
 # holds; cleared the moment the pair resolves.
 _target_refused_page() { emit_failure_alert "$BOTS_DIR" "alert_target_refused" "$1"; }
 if [ -n "${_alert_refusal:-}" ]; then
-    debounce_notify "$state_dir" fleet alert_target_refused _target_refused_page \
+    debounce_notify "$state_dir" "$fleet" alert_target_refused _target_refused_page \
         "fleet-pulse escalation for ${fleet}: ${_alert_refusal}" "" 86400 || true
 else
-    debounce_clear "$state_dir" fleet alert_target_refused
+    debounce_clear "$state_dir" "$fleet" alert_target_refused
 fi
 
 # Phase B twin of _overdue_reader_guard: the events reader that could not be
@@ -744,15 +748,15 @@ fi
 _events_page() { _reader_page events_reader_unreachable "$1"; _EVENTS_PAGE_FAILED=$_READER_PAGE_FAILED; }
 _events_reader_guard() {
     if [ "${_EVENTS_SOURCE:-}" != unreachable ]; then
-        debounce_clear "$state_dir" fleet events_reader_unreachable
+        debounce_clear "$state_dir" "$fleet" events_reader_unreachable
         return 0
     fi
     [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: events reader UNREACHABLE and no escalation chat - the watchdog is dark for critical fleet events: ${_events_why}" >&2; return 0; }
     _EVENTS_PAGE_FAILED=0
-    debounce_notify "$state_dir" fleet events_reader_unreachable _events_page \
+    debounce_notify "$state_dir" "$fleet" events_reader_unreachable _events_page \
         "FLEET ALERT: the events reader for ${fleet} is UNREACHABLE - critical fleet events cannot be judged until the plane is restored. (${_events_why})" \
         "" 600 || true
-    [ "${_EVENTS_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet events_reader_unreachable
+    [ "${_EVENTS_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" "$fleet" events_reader_unreachable
     return 0
 }
 
@@ -799,14 +803,14 @@ _task_escalations() {
         _why=$(tail -1 "$state_dir/.escalated-err" 2>/dev/null | cut -c1-200)
         echo "fleet-pulse: escalated reader UNREACHABLE (rc=$_rc): ${_why} - a manager waiting on the human cannot be seen this pass" >&2
         _ESC_TASK_PAGE_FAILED=0
-        debounce_notify "$state_dir" fleet escalated_reader_unreachable _esc_task_page \
+        debounce_notify "$state_dir" "$fleet" escalated_reader_unreachable _esc_task_page \
             "FLEET ALERT: the escalated-task reader for ${fleet} is UNREACHABLE - a manager raising a task for you cannot be seen until the plane is restored. (${_why})" \
             "" 600 || true
-        [ "${_ESC_TASK_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet escalated_reader_unreachable
+        [ "${_ESC_TASK_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" "$fleet" escalated_reader_unreachable
         rm -f "$_rows" "$state_dir/.escalated-err"
         return 0
     fi
-    debounce_clear "$state_dir" fleet escalated_reader_unreachable
+    debounce_clear "$state_dir" "$fleet" escalated_reader_unreachable
     rm -f "$state_dir/.escalated-err"
     _seen=$(safe_mktemp)
     # TAB-separated by the door, exactly so a question with spaces survives.
@@ -891,8 +895,8 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
             else
                 continue                  # unreachable: not judged this pass (disclosed once, paged below)
             fi
+            _esc_marker="$state_dir/${fleet}.escalation_${_crit_type}"
             if [ "$_affected_count" -ge "$_ESCALATION_THRESHOLD" ]; then
-                _esc_marker="$state_dir/escalation_${_crit_type}"
                 # Debounce: only fire once per 10 minutes
                 _should_fire=1
                 if [ -f "$_esc_marker" ]; then
@@ -900,7 +904,7 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                     [ "$_marker_age" -lt 600 ] && _should_fire=0
                 fi
                 if [ "$_should_fire" -eq 1 ]; then
-                    _msg="FLEET ALERT: $_crit_type on ${_affected_count} bots (${_affected_bots# }). Check fleet health immediately."
+                    _msg="FLEET ALERT: $_crit_type on ${_affected_count} bots (${_affected_bots# }). Check ${fleet} fleet health immediately."
                     _esc_rc=0
                     _esc_err=$(TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
                     TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
@@ -924,14 +928,14 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                 fi
             else
                 # Condition cleared — remove debounce marker
-                rm -f "$state_dir/escalation_${_crit_type}" 2>/dev/null || true
+                rm -f "$_esc_marker" 2>/dev/null || true
             fi
         done
     fi
 fi
 
 # --- Human-readable summary ---------------------------------------------------
-_summary_file="$state_dir/pulse-summary.txt"
+_summary_file="$state_dir/${fleet}.pulse-summary.txt"
 _summary_tmp=$(safe_mktemp)
 {
     printf "Fleet pulse: %s — %s\n" "$fleet" "$ts"
