@@ -338,15 +338,15 @@ def layer0b(
         both(ENV, f"{fleet_dir}/.env", "env_fleet")
         both(ENV, f"{fleet_dir}/.env.*", "env_fleet")
     root_resolved = root.resolve()
-    for b in _unique_by_name([me, *roster.bots]):
-        if not _NAME_SAFE.match(b.name):
+    for name in _unique(b.name for b in [me, *roster.bots]):
+        if not _NAME_SAFE.match(name):
             notes.append(
-                f"'{b.name}' is not a plain path segment, so its .env is"
+                f"'{name}' is not a plain path segment, so its .env is"
                 " named by no rule"
             )
             continue
-        both(ENV, f"{root}/**/runtime/bots/{b.name}/.env", "env_bot", b.name)
-        both(ENV, f"{root}/**/runtime/bots/{b.name}/.env.*", "env_bot", b.name)
+        both(ENV, f"{root}/**/runtime/bots/{name}/.env", "env_bot", name)
+        both(ENV, f"{root}/**/runtime/bots/{name}/.env.*", "env_bot", name)
     for b in [me, *roster.bots]:
         # A bot dir outside the install (a fleet in a vault elsewhere) is
         # beyond the name-keyed pattern, so name its files by path.
@@ -388,9 +388,6 @@ def layer0b(
             unique_rules.append(rule)
     return Layer0b(tuple(unique_rules), tuple(_unique(notes)))
 
-
-def _unique_by_name(bots: Iterable[HostBot]) -> list[HostBot]:
-    return list({b.name: b for b in reversed(list(bots))}.values())[::-1]
 
 
 # ---------------------------------------------------------------------------

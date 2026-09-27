@@ -483,7 +483,7 @@ def test_validate_names_the_file_that_reads_env_only_when_the_switch_is_on(host)
     hits = [
         w for k, w in validate(fleet, paths).categorized() if k == "isolation-env-read"
     ]
-    assert len(hits) == 1 and str(res) in hits[0] and "ravi" in hits[0]
+    assert len(hits) == 1 and f"{res}:9 " in hits[0] and "ravi" in hits[0]
     assert "otis" not in hits[0]  # off for otis, so nothing to break there
     fleet.bots["ravi"].isolation = IsolationConfig()
     assert not [
@@ -570,3 +570,25 @@ def test_the_switch_table_reads_each_bot(host):
         "shared-config-isolation"
     ]
     assert not st.on and st.source == "default" and st.label == "off (opt-in)"
+
+
+def test_the_path_audit_leaves_deny_rules_alone_and_still_catches_wiring(host):
+    """Found by the throwaway-root rehearsal, not by a unit test: the L2 wiring
+    audit read every absolute path in settings.local.json, so a generate of an
+    armed bot died on its own deny rules (they name other fleets on purpose).
+    A deny is a restriction, never wiring; the same path anywhere else in the
+    file must still be caught."""
+    from claudlobby.path_audit import audit_bot_paths
+
+    root, home, fleet, paths = host
+    ravi = fleet.bots["ravi"]
+    target = paths.bot_runtime("ravi") / ".claude" / "settings.local.json"
+    target.parent.mkdir(parents=True)
+    settings = compose_settings_local(ravi, fleet, paths)
+    target.write_text(json.dumps(settings))
+    assert audit_bot_paths(ravi, fleet, paths) == []
+
+    leak = str(root / "local" / "beta" / "runtime" / "bots" / "clog" / "x")
+    settings["permissions"]["allow"] = [f"Read(/{leak})"]
+    target.write_text(json.dumps(settings))
+    assert [f.path for f in audit_bot_paths(ravi, fleet, paths)] == [f"/{leak}"]

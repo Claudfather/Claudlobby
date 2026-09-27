@@ -1982,9 +1982,11 @@ def composed_text_sources(
     ctx = _bot_template_context(bot, fleet, paths)
     is_manager = bot.bot_id in fleet.manager_bots()
     out: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
 
     def _add_file(path: Path | None) -> None:
-        if path is not None and path.is_file():
+        if path is not None and path.is_file() and path not in seen:
+            seen.add(path)
             try:
                 out.append((path, path.read_text(encoding="utf-8")))
             except (OSError, UnicodeDecodeError):
@@ -1997,10 +1999,13 @@ def composed_text_sources(
     protocol_names = resolve_effective_protocols(
         bot, fleet, paths, is_manager=is_manager
     )
+    # The FILE, not the loaded body: a finding must point at the file's own
+    # line, and the loader strips the frontmatter and the H1 above it.
     for items in claude_md_items(
         bot, paths, ctx, protocol_names=protocol_names
     ).values():
-        out.extend((it.source_path, it.body) for it in items if it.source_path)
+        for it in items:
+            _add_file(it.source_path)
     if fleet.mission_file and is_manager:
         _add_file(paths.fleet_config_dir / fleet.mission_file)
     skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
