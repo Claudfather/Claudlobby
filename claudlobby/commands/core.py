@@ -215,14 +215,16 @@ def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
         log.info("wrote warning baseline %s: %s", path,
                  warning_summary(report) if report.warnings else "no warnings")
         return 0
+    probe = probe_source(path)
+    if probe.unreachable:
+        remedy = (f"record one with `claudlobby validate --warn-baseline {path} --write`"
+                  if probe.state == SOURCE_ABSENT else "")
+        log.error("%s", unreachable_line("the warning baseline", probe, remedy=remedy))
+        return 2
     try:
         baseline = _json.loads(path.read_text())
-    except FileNotFoundError:
-        log.error("no warning baseline at %s — record one with "
-                  "`claudlobby validate --warn-baseline %s --write`", path, path)
-        return 2
     except (OSError, ValueError) as e:
-        log.error("warning baseline %s could not be read: %s", path, e)
+        log.error("warning baseline %s could not be parsed: %s", path, e)
         return 2
     if not isinstance(baseline, dict) or not all(
         isinstance(k, str) and type(v) is int and v >= 0 for k, v in baseline.items()

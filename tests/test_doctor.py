@@ -1097,9 +1097,9 @@ def _pin_plugin_manifest(tmp_path: Path, monkeypatch, fleet) -> None:
     `run_doctor`'s first rung runs the whole validator, whose plugins check
     resolves `Path.home() / ".claude" / "plugins" / "installed_plugins.json"`
     — so on a box that has never installed a plugin, `fleet-yaml` warns about
-    the developer's own machine. `fleet-yaml` is a COUNT rung: it aggregates
-    every `validate()` warning and cannot say what any of them is about, so
-    that host fact is indistinguishable from a real finding and lands in the
+    the developer's own machine. `fleet-yaml` aggregates every `validate()`
+    warning into one rung (it names their categories, not which finding is a
+    host fact), so that host fact reads as a real finding and lands in the
     allowlist test below as a phantom. Green here, red on a fresh box or a
     runner — which is the whole failure this file's tripwire exists to catch,
     turned on the tripwire itself.

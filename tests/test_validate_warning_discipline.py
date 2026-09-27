@@ -203,7 +203,7 @@ def test_every_slug_the_validator_passes_is_registered_and_every_registered_one_
     exists. And no site may bypass ``warn`` — a direct append has no category."""
     src = Path(validator_module.__file__).read_text()
     used = set(re.findall(r'(?:report\.warn|shared\.add)\(\s*"([a-z-]+)"', src))
-    used |= set(re.findall(r'\bkind = "([a-z-]+)"', src))
+    used |= set(re.findall(r'\benv_kind = "([a-z-]+)"', src))
     used |= set(re.findall(r'_mp\.[A-Z]+: "([a-z-]+)"', src))
     used |= set(validator_module._REF_MISSING.values())
     assert used - set(WARNING_CATEGORIES) == set(), "unregistered slug(s)"

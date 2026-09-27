@@ -873,7 +873,7 @@ def _validate_bots(
             # carry a pristine `export GITHUB_PAT=` scaffold stub, and under
             # shell assignment semantics that stub WINS over anything upstream.
             if req.name in effective_env:
-                kind = "env-empty"
+                env_kind = "env-empty"
                 remedy = (
                     f"it is SET BUT EMPTY — some tier assigns it the empty "
                     f"string, which under shell sourcing WINS over any value at "
@@ -881,7 +881,7 @@ def _validate_bots(
                     f"adding it again at the same tier changes nothing"
                 )
             else:
-                kind = "env-unset"
+                env_kind = "env-unset"
                 remedy = (
                     f"no .env tier sets it — add it at any tier "
                     f"({', '.join(ENV_TIERS)}); conventionally {req.default_tier}. "
@@ -892,11 +892,11 @@ def _validate_bots(
             )
             if req.name in bot_env:
                 # The bot's OWN .env assigns it: that line is this bot's cause.
-                report.warn(kind, f"bot '{bot_name}': {finding}")
+                report.warn(env_kind, f"bot '{bot_name}': {finding}")
             else:
                 # Assigned above the bot tier, or nowhere: one cause, and one
                 # line fixes it for every bot that equips the server.
-                shared.add(kind, finding, bot_name)
+                shared.add(env_kind, finding, bot_name)
 
         # Per-scope credential source overrides (#1214 F6c). Held to the SAME
         # closed registry as a contract's own `source`, and that is the point:
