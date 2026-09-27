@@ -631,6 +631,18 @@ GITHUB_APP_ENV_VARS: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class IsolationConfig:
+    """``isolation:`` at ``defaults:`` and ``bots.<bot>:`` (#1665 Layer 0b).
+
+    ``shared_config`` arms the Layer 0b deny rules for the bot (opt-in; see
+    ``isolation.py`` for what they name and what they cannot stop). ``exempt``
+    names what the bot may still READ (``isolation.EXEMPTIONS``)."""
+
+    shared_config: bool = False
+    exempt: frozenset[str] = frozenset()
+
+
 @dataclass
 class BotConfig:
     bot_id: str  # dict key — immutable system slug
@@ -746,6 +758,9 @@ class BotConfig:
     # arming is additionally gated at compose time on the installed CLI exposing
     # `brief --boot` (composed settings outlive installs on this estate).
     brief_on_start: bool = False
+    # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
+    # .env tiers and the install's code (composer.compose_settings_local).
+    isolation: IsolationConfig = field(default_factory=IsolationConfig)
 
 
 @dataclass
@@ -1638,6 +1653,48 @@ def _parse_brief(raw: Any) -> bool:
     return _strict_bool("'brief.on_start'", raw.get("on_start", False))
 
 
+_ISOLATION_KEYS = ("shared_config", "exempt")
+
+
+def _parse_isolation(defaults_raw: Any, bot_raw: Any, name: str) -> IsolationConfig:
+    """Parse ``isolation:`` from ``defaults:`` and ``bots.<name>:`` (#1665).
+
+    ``shared_config`` arms deny rules, so it is STRICT (a YAML boolean or an
+    error, the ``brief.on_start`` rule), and the bot's value wins over the
+    fleet's. ``exempt`` is the union of both tiers. Every key and every
+    exemption must be one that ships: a typo silently ignored would leave a
+    bot denied with nothing to say why, and one silently honoured is worse."""
+    from .isolation import EXEMPTIONS
+
+    shared = False
+    exempt: set[str] = set()
+    for where, raw in (
+        ("defaults.isolation", defaults_raw),
+        (f"bots.{name}.isolation", bot_raw),
+    ):
+        if raw is None:
+            continue
+        raw = _shaped(f"'{where}'", raw, dict, "{shared_config: true}")
+        unknown = sorted(str(k) for k in raw if k not in _ISOLATION_KEYS)
+        if unknown:
+            raise ValueError(
+                f"'{where}': unknown key(s) {', '.join(unknown)} — accepted:"
+                f" {', '.join(_ISOLATION_KEYS)}"
+            )
+        if "shared_config" in raw:
+            shared = _strict_bool(f"'{where}.shared_config'", raw["shared_config"])
+        for item in _shaped(f"'{where}.exempt'", raw.get("exempt"), list,
+                            "[account_config]"):
+            if not isinstance(item, str) or item not in EXEMPTIONS:
+                raise ValueError(
+                    f"'{where}.exempt': unknown exemption {item!r} — accepted:"
+                    f" {', '.join(sorted(EXEMPTIONS))} (an exemption only ever"
+                    " restores a read)"
+                )
+            exempt.add(item)
+    return IsolationConfig(shared_config=shared, exempt=frozenset(exempt))
+
+
 def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | None:
     """Validate a string field against a known set. Returns value or raises."""
     if value is None:
@@ -1835,6 +1892,9 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         autonomous_runner=_coerce_autonomous_runner(raw.get("autonomous_runner"), name),
         briefing=_coerce_briefing(raw.get("briefing")),
         brief_on_start=_parse_brief(raw.get("brief", defaults.get("brief"))),
+        isolation=_parse_isolation(
+            defaults.get("isolation"), raw.get("isolation"), name
+        ),
     )
 
 
