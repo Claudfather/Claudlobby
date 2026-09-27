@@ -227,7 +227,7 @@ def _isolation_findings(
     for note in expected.notes:
         findings.append(Finding(bot.bot_id, "isolation_gap", WARN, note))
     for source, text in composed_text_sources(bot, fleet, paths):
-        for number, line in env_reads(text):
+        for number, line in env_reads(text, home=home or Path.home()):
             findings.append(Finding(
                 bot.bot_id, "isolation_env_read", WARN,
                 f"{source}:{number} tells the bot to read ~/.env itself"

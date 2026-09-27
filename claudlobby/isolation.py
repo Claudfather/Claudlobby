@@ -40,6 +40,7 @@ missing fleet fails open.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -394,36 +395,93 @@ def layer0b(
 # text that tells the model to read ~/.env itself
 # ---------------------------------------------------------------------------
 
-#: The home-tier .env in any spelling a shell accepts, quoted or not.
-_HOME_ENV = r"""["']?(?:~|\$HOME|\$\{HOME\})/\.env(?:\.[A-Za-z0-9._-]+)?["']?"""
-
+#: The home directory in each spelling a shell or a person writes it: `~` (or
+#: `~user`), `$HOME` and `${HOME}` (quoted whole, or quoted up to the slash),
+#: and the absolute forms under the conventional roots, a placeholder user
+#: included (`/home/<user>`). Row E denies the file under every one of them.
+_HOME_DIR = (
+    r"(?:~[A-Za-z0-9._-]*|\$HOME|\$\{HOME\}"
+    r"|/home/[^/\s\"'`]+|/Users/[^/\s\"'`]+|/root)"
+)
 #: `source <it>` or `. <it>` at a command position: the start of the line or
 #: span, or after a separator or a keyword that begins a command.
-ENV_READ = re.compile(
-    r"(?:^|[;&|({]|\b(?:then|do|else|exec)\b)\s*(?:source|\.)\s+"
-    + _HOME_ENV
-    + r"(?=$|[\s;&|)}])"
-)
+_COMMAND = r"(?:^|[;&|({]|\b(?:then|do|else|exec)\b)\s*(?:source|\.)\s+[\"']?"
+_ENV_FILE = r"[\"']?/\.env(?:\.[A-Za-z0-9._-]+)?[\"']?(?=$|[\s;&|)}])"
+
+
+@functools.lru_cache(maxsize=8)
+def _env_read_re(home: str | None = None) -> re.Pattern:
+    """The read, recognising *home* by its absolute path too, since a home
+    outside the conventional roots is still the home row E denies."""
+    dirs = _HOME_DIR if not home else f"(?:{_HOME_DIR}|{re.escape(home)})"
+    return re.compile(_COMMAND + dirs + _ENV_FILE)
+
+
+ENV_READ = _env_read_re()
 
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FENCE = re.compile(r"\s*(`{3,}|~{3,})")
-#: A line whose prose negates what its code span says ("Never `source
-#: ~/.env`") mentions the read; it does not instruct it.
+#: Where a clause ends in prose. A negation in another clause of the line
+#: ("If X is not set, run `...`", "Run `...` — without it ...") does not
+#: reach the span.
+_CLAUSE = re.compile(r"[.;:,!?()\[\]—–]|\s-\s")
+_WORDS = re.compile(r"[a-z]+(?:'[a-z]+)?")
+#: How far back a negation reaches: the words directly before the span.
+_NEGATION_REACH = 3
 _NEGATION = re.compile(
-    r"\b(?:never|not|no longer|don't|dont|do not|instead of|avoid|without|"
-    r"rather than|used to)\b"
+    r"\b(?:no longer|do not|does not|instead of|rather than|used to|never|"
+    r"not|no|don't|dont|cannot|can't|avoid|without)\b"
+)
+#: A verb that turns a negation back into an instruction: "Do not skip
+#: `source ~/.env`" asks for the read.
+_REVERSAL = re.compile(r"\b(?:skip|skipping|forget|omit|miss|neglect|fail|overlook)\b")
+#: The span as the subject of a negated predicate ("`source ~/.env` is not
+#: needed") is a mention too: the one negation that follows the span.
+_NEGATED_SUBJECT = re.compile(
+    r"\s*(?:(?:is|are|was|does|do|did|will|should|must|need|needs|can)"
+    r"\s+(?:not|no longer|never)|isn't|aren't|doesn't|don't|won't|shouldn't|"
+    r"mustn't|can't|cannot)\b"
 )
 
 
-def env_reads(text: str) -> list[tuple[int, str]]:
-    """``(line number, line)`` for every line of markdown *text* that tells the
-    model to load the home ``.env`` itself, the read row E denies.
+def _prose(text: str) -> str:
+    """*text* lower-cased, with any code span standing in as one neutral word."""
+    return _SPAN.sub(" code ", text).lower().replace("’", "'")
 
-    A command, not a mention. Every line of a fenced code block is a command.
-    Outside a fence only an inline code span can be one, and a line whose prose
-    negates it ("Never `source ~/.env`") is a mention; so is a span holding just
-    the path, or ``source`` written as a prose word. A command that loads the
-    file some other way (``cat``, ``export $(...)``) is not recognised."""
+
+def _negated_before(before: str) -> bool:
+    """Whether the words directly before a span negate it: only the span's own
+    clause, only its last few words, and a reversal ("Do not skip") undoes it."""
+    words = _WORDS.findall(_CLAUSE.split(_prose(before))[-1])[-_NEGATION_REACH:]
+    near = " ".join(words)
+    last = None
+    for last in _NEGATION.finditer(near):
+        pass
+    return last is not None and not _REVERSAL.search(near[last.end():])
+
+
+def _negated_after(after: str) -> bool:
+    """Whether the span's own clause goes on with a negated verb, making the
+    span its subject: `` `X` is not needed``, `` `X` isn't required``."""
+    return bool(_NEGATED_SUBJECT.match(_CLAUSE.split(_prose(after))[0]))
+
+
+def env_reads(text: str, *, home: Path | str | None = None) -> list[tuple[int, str]]:
+    """``(line number, line)`` for every line of markdown *text* that tells the
+    model to load the home ``.env`` itself, the read row E denies. Pass *home*
+    to recognise its absolute spelling wherever the home lives.
+
+    A command, not a mention. Every line of a fenced code block is a command,
+    unless the read sits in a comment or inside another command's argument
+    (``echo "source ~/.env"``). Outside a fence only an inline code span can
+    be one, and it is a mention when the words DIRECTLY before it negate it
+    ("Never `source ~/.env`") or it is the subject of a negated predicate
+    ("`source ~/.env` is not needed"). A negation elsewhere on the line does not
+    count, and a double negative ("Do not skip `source ~/.env`") is an
+    instruction. A span holding only the path, or ``source`` as a prose word,
+    is a mention. A command that loads the file some other way (``cat``,
+    ``export $(...)``) is not recognised."""
+    read = _env_read_re(str(home) if home is not None else None)
     hits: list[tuple[int, str]] = []
     fence: str | None = None
     for number, line in enumerate(text.splitlines(), 1):
@@ -431,15 +489,17 @@ def env_reads(text: str) -> list[tuple[int, str]]:
         if fence is not None:
             if opener and opener.group(1).startswith(fence):
                 fence = None
-            elif ENV_READ.search(line.strip()):
+            elif read.search(line.strip()):
                 hits.append((number, line.strip()))
             continue
         if opener:
             fence = opener.group(1)
             continue
-        spans = _SPAN.findall(line)
-        if not spans or _NEGATION.search(_SPAN.sub(" ", line).lower()):
-            continue
-        if any(ENV_READ.search(span.strip()) for span in spans):
+        for span in _SPAN.finditer(line):
+            if not read.search(span.group(1).strip()):
+                continue
+            if _negated_before(line[:span.start()]) or _negated_after(line[span.end():]):
+                continue
             hits.append((number, line.strip()))
+            break
     return hits
