@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — two fleets' pulse passes no longer read or delete each other's critical-event window (#1901)
+
+`fleet-pulse.sh` kept four scratch files at fixed names in `state/pulse`, a
+directory every fleet on the host shares: the escalation window
+(`.critical-window`), the summary's read-back (`.critical-readback`) and two
+stderr captures. Every fleet's pulse timer fires in the same second, so passes
+overlap as a matter of routine, and a sibling pass could rewrite the window
+inside this pass's read loop or delete it there. A rewrite sent nothing and
+said nothing: the pass read the other fleet's rows and skipped its own page. A
+deletion failed the loop's redirect and aborted the pass on a `script_error`,
+23 of them from 2026-09-25 to 09-27 on ai-platform and tl-enterprises. Each
+file is now the pass's own temporary file, which lib-common removes when the
+pass exits. A new test interleaves two fleets' passes at both points; the old
+code fails it both ways.
+
 ### Fixed — `pr-review-state.py` read two of the four verdicts reviewers are taught as "not assessed" (#1895)
 
 `library/protocols/review-flow.md` and `library/expertise/code-review.md` teach

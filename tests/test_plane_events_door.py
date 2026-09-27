@@ -519,7 +519,8 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     assert "UNREACHABLE" in dark.stderr and "cannot be judged this pass" in dark.stderr
     # the escalation loop never reaches for a cache no read produced (a read
     # regardless of the verdict would be a bash redirect error on a missing file)
-    assert ".critical-window" not in dark.stderr and "No such file" not in dark.stderr
+    # (the cache is the pass's own temp file, so the check is on the error, not its name)
+    assert "No such file" not in dark.stderr
     paged = capture.read_text()
     assert "events reader for f is UNREACHABLE" in paged and page not in paged, paged
     summary = (root / "state" / "pulse" / f"{F}.pulse-summary.txt").read_text()
