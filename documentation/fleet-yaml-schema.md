@@ -937,6 +937,22 @@ does not own.
 
 Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI use).
 
+### Warning discipline
+
+Warnings are advisory: `validate` and `generate` exit 0 on warnings alone, by design.
+
+- **Every warning carries a category**, printed in front of it: `[env-empty] mcp/github requires GITHUB_PAT but it is SET BUT EMPTY …`. A category is a stable slug for a kind of finding. It is passed where the warning is raised, never derived from the message text, so rewording a warning never moves it to another category. The full list, each slug with a one-line meaning, is `WARNING_CATEGORIES` in `claudlobby/validator.py`. `validate` ends with a count by category, and `claudlobby doctor`'s `fleet-yaml` rung prints that same line instead of a bare total.
+- **A finding with one cause is one line.** Some causes reach every bot that inherits them: a key set under `defaults:`, a variable assigned (or missing) above the bot tier, or a fact about the host such as the `claudron` CLI, a vault path, or the operator gitconfig. Each is reported once, as `… — affects N bot(s): a, b, c, d (+K more)`. A finding caused by one bot's own declaration (its grants, its own stanza, its own `.env`) stays on that bot. Fixing a shared cause therefore cannot hide a separate one.
+- **`--strict` is all-or-nothing**: any warning fails the run. It suits a fleet with no warnings at all.
+- **`--warn-baseline FILE` is the gate for a fleet that has accepted some warnings.** Record the current categories once, then check later runs against them:
+
+  ```bash
+  claudlobby --fleet <fleet> validate --warn-baseline <fleet-dir>/validate-baseline.json --write
+  claudlobby --fleet <fleet> validate --warn-baseline <fleet-dir>/validate-baseline.json
+  ```
+
+  The check exits 1 only when a category is new, or has more warnings than the baseline recorded, and it names that category: `new warning category: skill-missing (0 → 1)`. A category that shrinks or disappears never fails the check; rerun with `--write` to keep the lower count. An absent or unreadable baseline exits 2, because an unreadable baseline is not an unchanged one. The file is a plain `{category: count}` JSON map.
+
 ## Example: minimal 2-bot fleet
 
 ```yaml

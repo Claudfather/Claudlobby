@@ -20,7 +20,7 @@ from ..source_state import (
     scan_dir,
     unreachable_line,
 )
-from ..validator import validate
+from ..validator import WARNING_CATEGORIES, render_warnings, validate, warning_summary
 from ._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
 from ._helpers import refuse_unreachable
 
@@ -194,22 +194,88 @@ def cmd_env_register(args) -> int:
     return 1 if exits_nonzero(reg) else 0
 
 
+def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
+    """``validate --warn-baseline``: fail only on a warning category that is
+    new, or has more warnings than the baseline recorded (#1663).
+
+    ``--strict`` fails on every warning, so a fleet that has accepted some can
+    never switch it on; this is the gate such a fleet can run. It compares
+    category counts, never message text, so rewording a warning cannot trip it,
+    and a category that shrinks or disappears never fails. Returns 0 when
+    nothing grew, 1 when a category is new or grew, and 2 when the baseline
+    cannot be read or written: an unreadable baseline is not an unchanged one.
+    """
+    current = report.warning_categories
+    if write:
+        try:
+            path.write_text(_json.dumps(dict(sorted(current.items())), indent=2) + "\n")
+        except OSError as e:
+            log.error("could not write warning baseline %s: %s", path, e)
+            return 2
+        log.info("wrote warning baseline %s: %s", path,
+                 warning_summary(report) if report.warnings else "no warnings")
+        return 0
+    probe = probe_source(path)
+    if probe.unreachable:
+        remedy = (f"record one with `claudlobby validate --warn-baseline {path} --write`"
+                  if probe.state == SOURCE_ABSENT else "")
+        log.error("%s", unreachable_line("the warning baseline", probe, remedy=remedy))
+        return 2
+    try:
+        baseline = _json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        log.error("warning baseline %s could not be parsed: %s", path, e)
+        return 2
+    if not isinstance(baseline, dict) or not all(
+        isinstance(k, str) and type(v) is int and v >= 0 for k, v in baseline.items()
+    ):
+        log.error("warning baseline %s is not a {category: count} map of "
+                  "non-negative integers", path)
+        return 2
+    grew = False
+    for kind in sorted(set(current) | set(baseline)):
+        before, now = baseline.get(kind, 0), current.get(kind, 0)
+        if now > before:
+            grew = True
+            log.error("%s: %s (%d → %d) — %s; its lines are tagged [%s] above",
+                      "new warning category" if before == 0 else "warning category grew",
+                      kind, before, now,
+                      WARNING_CATEGORIES.get(kind, "not a registered category"), kind)
+        elif now < before:
+            log.info("warning category shrank: %s (%d → %d) — rerun with --write "
+                     "to keep the lower count", kind, before, now)
+    if grew:
+        return 1
+    log.info("warning baseline %s: no category is new or grew", path)
+    return 0
+
+
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
+    baseline = getattr(args, "warn_baseline", None)
+    write = getattr(args, "write", False)
+    if write and not baseline:
+        log.error("--write needs --warn-baseline FILE — it names the file to write")
+        return 2
     _load_env(paths)
     fleet, _ = _load_fleet_or_exit(paths)
     report = validate(fleet, paths)
 
     for e in report.errors:
         log.error("%s", e)
-    for w in report.warnings:
-        log.warning("%s", w)
+    for line in render_warnings(report):
+        log.warning("%s", line)
+    if report.warnings:
+        log.info("%s", warning_summary(report))
+    gate = _warn_baseline_gate(report, Path(baseline), write=write) if baseline else 0
 
     if args.strict and report.has_issues:
         log.error("--strict: warnings count as errors")
         return 1
     if report.has_errors:
         return 1
+    if gate:
+        return gate
     if not report.has_issues:
         log.info("fleet.yaml OK (%d bots, %d teams)", len(fleet.bots), len(fleet.teams))
     return 0
@@ -235,11 +301,11 @@ def cmd_generate(args) -> int:
         return 1
     if args.strict and report.warnings:
         log.error("--strict: warnings count as errors — refusing to generate")
-        for w in report.warnings:
-            log.warning("%s", w)
+        for line in render_warnings(report):
+            log.warning("%s", line)
         return 1
-    for w in report.warnings:
-        log.warning("%s", w)
+    for line in render_warnings(report):
+        log.warning("%s", line)
 
     if args.bot:
         bot = fleet.bots.get(args.bot)

@@ -98,11 +98,11 @@ def _validation_gate(fleet: "FleetConfig", paths: Paths, *, context: str) -> boo
     Warnings are surfaced (not just errors) so did-you-mean hints reach
     the user on these paths too.
     """
-    from ..validator import validate
+    from ..validator import render_warnings, validate
 
     report = validate(fleet, paths)
-    for warning in report.warnings:
-        log.warning("%s", warning)
+    for line in render_warnings(report):
+        log.warning("%s", line)
     if report.has_errors:
         for err in report.errors:
             log.error("%s", err)

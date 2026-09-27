@@ -24,7 +24,7 @@ from .claudron_compat import (
 )
 from .config import FleetConfig
 from .paths import Paths, tmux_socket_for_bot, vault_api_available
-from .validator import validate
+from .validator import validate, warning_summary
 
 log = logging.getLogger(__name__)
 
@@ -1186,10 +1186,12 @@ def check_fleet_validation(
             f"{len(val_report.errors)} error(s): {val_report.errors[0][:100]}",
         )
     elif val_report.warnings:
+        # Named by category, never a bare count: a new KIND of warning landing
+        # inside an unchanged total is exactly what a count cannot show (#1663).
         report.add(
             "fleet-yaml",
             "warn",
-            f"{len(val_report.warnings)} warning(s)",
+            f"{warning_summary(val_report)} — `claudlobby validate` prints each",
         )
     else:
         report.add("fleet-yaml", "pass", "fleet.yaml valid")

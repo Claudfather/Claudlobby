@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — `validate` reports a shared cause once and names what kind each warning is (#1663)
+
+`claudlobby validate` printed dozens of warnings at rc 0, and `doctor` showed
+them as one number. A new kind of warning could arrive inside an unchanged
+total and nothing would show it. Measured on 2026-09-27, crog-eng-team printed
+38 warnings, the same total as when #1663 was filed. Twelve of those lines
+belong to a warning family added after the issue was filed.
+
+- A finding whose cause is shared is now one line ending `affects N bot(s)`:
+  a retired key set under `defaults.observability`, an MCP variable assigned
+  (or missing) above the bot tier, the `claudron` CLI missing from PATH, a
+  vault path, and the operator gitconfig's identity and ssh rewrite. A bot's
+  own `.env` assignment, or a key in its own stanza, stays on that bot. In a
+  clean environment crog-eng-team goes from 48 lines to 28 and ai-platform
+  from 15 to 9.
+- Every warning carries a category slug, passed where it is raised
+  (`ValidationReport.warn`). `validate` prints it in front of each line and
+  ends with a count by category. `doctor`'s `fleet-yaml` rung prints that
+  count instead of a bare total.
+- `validate --warn-baseline FILE --write` records the categories. Later
+  `validate --warn-baseline FILE` runs fail (rc 1) only on a category that is
+  new or has grown, and name it. An unreadable baseline exits 2. `--strict`
+  is unchanged.
+
 ### Fixed — the vault git guard records what it refused where a reader can find it (#1909)
 
 `vault-git-guard.sh` handed each decision's detail (the refused verb, or why a
