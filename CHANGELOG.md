@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the plane daemon replies before it checkpoints, and the checkpoint never waits on a reader (#1693)
+
+Every wedge arm measured in a 30-minute window on 2026-09-26 was the daemon's
+TRUNCATE checkpoint running inside a request, before the reply. In three of the
+four it was waiting on fleet-pulse's readers (1.3-4.5 s, inside its 5 s busy
+timeout); in one it was the checkpoint's own SD-card I/O. The accept loop is
+serial, so each stall became 3-12 missed client deadlines and a 60 s host-wide
+cooldown.
+
+- **Reply, close, then checkpoint.** `_handle` answers and returns whether it
+  committed; `serve()` closes the connection and only then runs the cadence. The
+  comment above the old call said the cadence "must never be what a caller waits
+  on"; the reply waited on it.
+- **The cadence checkpoint never waits.** It runs with the busy handler off for
+  that one call. SQLite still truncates whenever no read-mark and no writer is in
+  the way; otherwise it checkpoints what it can and answers busy, and the next
+  due checkpoint truncates. SQLite's own auto-checkpoint is off on the held
+  connection, because it runs inside COMMIT, which is before the reply.
+- **Measured with the #1693 canary** on a disposable root, 60 s per arm. No
+  reader: 0 of 1,298 acknowledged events lost on main and 0 of 1,486 on this
+  change, WAL peak 1.09 MB and 1.12 MB, under the 4 MB ceiling. A reader held for
+  the whole soak: main acknowledged 21 events, its stalls at the 5 s busy
+  timeout (busy-run p95 5.01 s); this change acknowledged 1,726, 0 lost, longest
+  busy run 1.03 s. The held reader grows the WAL either way (81.8 MB here), and
+  nothing reports the WAL size: #1905.
+- **Not fixed: the checkpoint's own I/O.** It still runs on the serial loop, now
+  after the reply, so a slow one delays the next caller instead of the one it
+  follows. In a synthetic A/B on the same SD card, moving it to a background
+  thread did not fix that: commits that overlapped the background checkpoint
+  took 618-935 ms (median) against about 20 ms, 26 of 264 requests still took
+  over 1 s (27 with the checkpoint on the loop), and the WAL stopped truncating.
+  A checkpoint a quarter the size, still on the loop (every 6 batches instead of
+  22), kept all 42 checkpoints under 0.6 s. That is a recommendation on #1693,
+  not part of this change.
+
 ### Fixed — one fleet's pulse page no longer silences another fleet's (#1903)
 
 `fleet-pulse.sh` keeps its debounce markers in `state/pulse`, a directory

@@ -391,21 +391,23 @@ class PlaneDaemon:
             f.unlink()
 
     # -- request handling ---------------------------------------------------
-    def _handle(self, conn: socket.socket) -> None:
+    def _handle(self, conn: socket.socket) -> bool:
+        """Answer one request. True when a batch was committed: serve() then
+        runs the checkpoint cadence, once this connection is closed (#1693)."""
         peer = _peer_uid(conn)
         if peer is not None and peer != self._own_uid:
             self._reply(conn, {"ok": False, "code": "forbidden",
                                "error": f"peer uid {peer} != {self._own_uid}"})
-            return
+            return False
         try:
             raw = _recv_line(conn)
         except ValueError as exc:
             self._reply(conn, {"ok": False, "code": "bad_request", "error": str(exc)})
-            return
+            return False
         if not raw.strip():
             self._reply(conn, {"ok": False, "code": "bad_request",
                                "error": "empty request"})
-            return
+            return False
         try:
             parsed = json.loads(raw)
             events = parsed["events"]
@@ -414,7 +416,7 @@ class PlaneDaemon:
         except (json.JSONDecodeError, KeyError, TypeError, AssertionError) as exc:
             self._reply(conn, {"ok": False, "code": "bad_request",
                                "error": f"expected {{\"events\": [...]}}: {exc}"})
-            return
+            return False
         try:
             # The connection is BORROWED, never closed here: `writer` owns its
             # lifecycle, reconnects it if the db was replaced underneath, and
@@ -427,10 +429,10 @@ class PlaneDaemon:
             errors = getattr(exc, "errors", None)
             self._reply(conn, {"ok": False, "code": "contract_violation",
                                "error": str(errors[0] if errors else exc)})
-            return
+            return False
         except SpoolWriteError as exc:
             self._reply(conn, {"ok": False, "code": "total_failure", "error": str(exc)})
-            return
+            return False
         except DowngradeError as exc:
             # ANSWER FIRST, then die. The client needs the typed `downgrade`
             # code to disclose the real condition — dying mid-request would
@@ -446,13 +448,7 @@ class PlaneDaemon:
 
             traceback.print_exc()
             self._reply(conn, {"ok": False, "code": "internal", "error": str(exc)})
-            return
-        # AFTER the commit, BEFORE the reply is composed: the cadence must never
-        # be what a caller waits on for its acknowledgment, and it must never be
-        # able to turn an already-committed batch into a failure. `after_batch`
-        # swallows a checkpoint error for exactly that reason -- the rows it
-        # would have folded in are already fsync'd by the commit.
-        self.writer.after_batch()
+            return False
         self._reply(conn, {
             "ok": True,
             "results": [
@@ -461,6 +457,7 @@ class PlaneDaemon:
                 for o in outcomes
             ],
         })
+        return True
 
     @staticmethod
     def _reply(conn: socket.socket, obj: dict) -> None:
@@ -615,6 +612,7 @@ class PlaneDaemon:
                     if exc.errno == errno.EBADF or self._stop:
                         break
                     raise
+                committed = False
                 try:
                     # 5s, not 30: the loop is serial, so one stalled client
                     # holds every healthy one for the whole read deadline —
@@ -622,7 +620,7 @@ class PlaneDaemon:
                     # This settimeout bounds only accept-to-first-recv; the
                     # TOTAL read bound lives in _recv_line (trickle defense).
                     conn.settimeout(5.0)
-                    self._handle(conn)
+                    committed = self._handle(conn)
                 except OSError as exc:
                     # A slow/vanished/hostile CLIENT (read timeout, reset) is
                     # that connection's problem, never the daemon's: one bad
@@ -634,6 +632,15 @@ class PlaneDaemon:
                         conn.close()
                     except OSError:
                         pass
+                if committed:
+                    # AFTER the reply AND the close (#1693). The cadence must
+                    # never be what a caller waits on for its acknowledgment,
+                    # and it was: `_handle` ran it before replying, and every
+                    # wedge arm measured on 2026-09-26 was this checkpoint
+                    # inside a request. Nor may it turn an already-committed
+                    # batch into a failure: `after_batch` swallows a checkpoint
+                    # error, since the commit has already fsync'd those rows.
+                    self.writer.after_batch()
         finally:
             if not self._downgrading:
                 # A stopping receipt cannot commit against a db this process
