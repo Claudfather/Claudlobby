@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the vault git guard records what it refused where a reader can find it (#1909)
+
+`vault-git-guard.sh` handed each decision's detail (the refused verb, or why a
+target could not be read) to `emit_fleet_event` as its second argument, which
+is the event's source. Every `vault_guard_denied` and `vault_guard_unresolved`
+row therefore carried free text such as `checkout` as its source and an empty
+`data`. `claudlobby events --source` could not find the guard's rows, and the
+verb the guard exists to count sat in no field a reader treats as data. The
+source is now `vault-git-guard` and the detail is `data.detail`, built with
+`jq` because a detail can carry quotes. The pinning test's detail contains a
+double quote, and a hand-built JSON string does not just mangle it: that mutant
+recorded no row at all. Rows written before this lands keep the old shape.
+
+### Fixed — a test read the stub mint's counter half-written and failed a merge gate (#1908)
+
+The stub mint in `tests/test_github_app_wrapper.py` rewrote its call counter
+with `>`, which empties the file before the number lands. A test polling the
+counter in that window read `''` and failed with `int('')`, which is how it
+failed #1906's gate. The stub now writes a temp file and renames it into place,
+so a reader sees the old count or the new one, never an empty file. With a
+0.4 s delay injected into the write, the old stub failed 3 of 3 runs with the
+CI error and the new one passed 3 of 3.
+
 ### Fixed — the plane daemon replies before it checkpoints, and the checkpoint never waits on a reader (#1693)
 
 Every wedge arm measured in a 30-minute window on 2026-09-26 was the daemon's

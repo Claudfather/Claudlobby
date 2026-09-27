@@ -67,7 +67,13 @@ _bail() { # <reason> — fail open, but leave a breadcrumb
 _event() { # <event> <detail> — count a fail-open or a denial on the plane
     . "$LIB_DIR/lib-common.sh" 2>/dev/null || true
     if command -v emit_fleet_event >/dev/null 2>&1; then
-        emit_fleet_event "$1" "$2" 2>/dev/null || true
+        # The door is <type> <source> <data_json>: the source names this script,
+        # and the detail is data, built by jq because a detail can carry quotes.
+        # Guarded: sourcing lib-common re-armed set -e, and an exit here would
+        # skip the _deny that follows.
+        local data
+        data=$(jq -nc --arg detail "$2" '{detail: $detail}' 2>/dev/null) || data='{}'
+        emit_fleet_event "$1" vault-git-guard "$data" 2>/dev/null || true
     fi
 }
 
