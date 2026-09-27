@@ -173,6 +173,9 @@ WARNING_CATEGORIES: dict[str, str] = {
     "checkin-role": "the checkin protocol is declared on a bot that is not a leaf manager",
     "topology": "reports_to, manages or a team member names a bot this fleet does not have",
     "name-collision": "a bot name is also used by another fleet on this host",
+    # shared-config isolation (#1665 Layer 0b)
+    "isolation-env-read": "a bot with shared-config isolation on is told to read ~/.env itself, a read its own rules deny",
+    "isolation-gap": "a bot's shared-config isolation rules fall short of the host roster",
     # host facts every bot inherits
     "claudron-path": "a vault is wired but the claudron CLI is not on PATH",
     "vault-path": "claudron_vault_path is not a directory, or does not resolve to a vault",
@@ -2535,5 +2538,41 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_library_requires(paths, report)
     _validate_env_contracts(paths, report)
     _validate_mcp_packages(fleet, paths, report)
+    _validate_isolation(fleet, paths, report)
 
     return report
+
+
+def _validate_isolation(fleet: FleetConfig, paths: Paths, report: ValidationReport) -> None:
+    """For every bot with shared-config isolation on (#1665 Layer 0b): say
+    where its rules fall short, and name every composed file that tells it to
+    read ``~/.env`` itself.
+
+    The second is the failure the switch creates. Row E denies that read, so a
+    skill or overlay that still says ``source ~/.env`` breaks on the day its
+    fleet opts in, and nothing records a denied tool call. The variables are
+    already in the session env, so the fix is to drop the line. A file shared
+    by several bots is ONE cause and reads as one line."""
+    from .composer import composed_text_sources
+    from .isolation import env_reads, host_roster, layer0b
+
+    armed = [b for b in fleet.bots.values() if b.isolation.shared_config]
+    if not armed:
+        return
+    shared = _Fold()
+    home = Path.home()
+    roster = host_roster(fleet, paths, home=home)
+    for bot in armed:
+        for note in layer0b(bot, fleet, paths, home=home, roster=roster).notes:
+            shared.add("isolation-gap", f"shared-config isolation: {note}", bot.bot_id)
+        for source, text in composed_text_sources(bot, fleet, paths):
+            for number, line in env_reads(text):
+                shared.add(
+                    "isolation-env-read",
+                    f"{source}:{number} tells the bot to read ~/.env itself"
+                    f" ({line[:80]}) — shared-config isolation denies that read;"
+                    " the variables are already in the session env, so drop"
+                    " the line",
+                    bot.bot_id,
+                )
+    shared.emit(report)

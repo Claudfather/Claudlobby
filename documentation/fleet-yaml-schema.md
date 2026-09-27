@@ -240,6 +240,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. A generate must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | generate | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `shared-config-isolation` | **off** — no deployment gate: a composed deny binds on the bot's next tool call with no restart in between, and the nightly reload-fleet generate would carry a default-on rule set onto every bot of every fleet with nobody choosing to — the manifest is the only place one bot can go first | generate | fleet.yaml bots.<bot> → generate | bots.<bot>.isolation.shared_config: true in fleet.yaml for ONE bot first, then claudlobby --fleet <fleet> generate --bot <bot> (it binds on that bot's next tool call, no restart); widen to defaults.isolation.shared_config once it has run clean |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
@@ -867,6 +868,36 @@ The compositor auto-derives permission entries in `settings.local.json` from sev
 | **Base tools** | `Read`, `Grep`, `Glob` are always allowed when an allow list is non-empty. |
 
 Layering order (later layers win on conflict): guardrails → expertise → MCP contracts → channels → skills → fleet defaults → bot-level. Bot-level deny always wins. (Sibling-bot directory isolation is a separate, always-on deny layer beneath all of these — see `permissions-model.md`.)
+
+### `isolation` — shared-config isolation (opt-in, #1665)
+
+Layer 0 denies each fleet sibling's bot **directory**. Most cross-bot content is not there: a session transcript lives in the shared Claude config dir, beside the shared prompt history, the OAuth credential and the account config, and none of those, no `.env` tier, and nothing in the install root is named by Layer 0. `isolation.shared_config: true` adds **Layer 0b**, which names them.
+
+```yaml
+defaults:            # or bots.<bot>:, which wins over defaults
+  isolation:
+    shared_config: true          # strict YAML boolean; default false
+    exempt: [account_config]     # union of both tiers; restores a READ only
+```
+
+| Class | What it denies | Tools |
+|---|---|---|
+| `transcripts` | every other bot's transcripts on the host, keyed by bot NAME so a `move-bot` keeps them covered | Read + Edit |
+| `history` | `history.jsonl` in each config dir on the host | Read + Edit |
+| `credentials` | `.credentials.json` in each config dir | Read + Edit |
+| `account_config` | `.config.json*` and `.claude.json*` in each config dir, and `~/.claude.json*` | Read + Edit |
+| `env` | `~/.env*`, the root `.env` and `.env.bak*`, every fleet's `.env*`, and every bot's `.env*` — **its own included** | Read + Edit |
+| `install_root` | the install's `lib/`, `claudlobby/`, `library/`, `templates/`, `voices/`, `bin/` | Edit only |
+| `telegram` | every other bot's Telegram state dir, token included | Read + Edit |
+| `config_surfaces` | `settings.json`, `settings.local.json`, `CLAUDE.md`, `hooks/`, `skills/`, `plugins/`, `agents/`, `commands/` in each config dir | Edit only |
+
+`exempt` accepts `account_config` (a platform bot's trust and flag diagnostics) and `env_host` (a fleet whose own overlay still tells its bot to `source ~/.env`). An exemption restores the class's Read rules and never its Edit rules. Any other key or name is a parse error: a typo in a knob that arms deny rules must not switch anything silently.
+
+**What turning it on buys, and what it does not.** The rules gate Claude Code's own tool calls: the Read tool, and a Bash file command given a literal path. They do not stop `python3 -c "open(...)"`, a path the matcher cannot resolve (`$HOME/…`), or any script, hook, timer or MCP server, and every bot runs as one user. They reduce **accidental** reads; they are not confidentiality (#1408, #1606).
+
+**What turning it off gives up:** nothing a running bot had before #1665. Off is the shipped default; `claudlobby freshbox` prints one line per fleet naming what the bots' deny lists do not cover.
+
+**Rolling it out.** A composed deny binds on the bot's next tool call, with no restart in between, and the nightly `reload-fleet` composes every fleet, so arm **one** bot, run `claudlobby --fleet <fleet> generate --bot <bot>`, drive a real turn, then widen. Before arming, `claudlobby validate` names every composed file (skill, resource, protocol, expertise) that tells the bot to `source ~/.env` or `. ~/.env`, the read the `env` class denies; the variables are already in the session env, so drop the line. After arming, `claudlobby freshbox` compares the bot's composed deny list with what the current install would compose and names any class that falls short, including a bot that joined the host after the last generate. Backout is `shared_config: false` and a generate, in force on the next tool call.
 
 ## Composition order (per bot)
 

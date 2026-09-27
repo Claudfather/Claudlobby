@@ -171,6 +171,71 @@ def _tier_a_findings(bot_id: str, settings: dict) -> list[Finding]:
     return findings
 
 
+def _isolation_findings(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, home: Path | None = None
+) -> list[Finding]:
+    """Shared-config isolation (#1665 Layer 0b) for a bot that has it on.
+
+    Reads the deny list the bot is RUNNING with (its on-disk
+    ``settings.local.json``), never a re-derivation, and compares it class by
+    class with what this install and today's host roster would compose. A
+    missing rule means the file was composed by an older install, or a bot joined
+    the host after it was; either way the fix is a generate, and the finding says
+    which fleet. WARN, never FAIL: a present rule reduces accidental reads through
+    Claude's own tools and is not confidentiality (see isolation.py), so a FAIL
+    would overclaim what fixing it buys. Also names each composed file that tells
+    the bot to read ``~/.env`` itself, the read row E denies."""
+    import json
+
+    from .composer import composed_text_sources
+    from .isolation import CLASSES, EXEMPTIONS, env_reads, layer0b
+
+    if not bot.isolation.shared_config:
+        return []
+    findings: list[Finding] = []
+    expected = layer0b(bot, fleet, paths, home=home or Path.home())
+    target = paths.bot_runtime(bot.bot_id) / ".claude" / "settings.local.json"
+    try:
+        composed = set(json.loads(target.read_text())["permissions"]["deny"])
+    except (OSError, ValueError, KeyError, TypeError):
+        composed = None
+    regen = f"claudlobby --fleet {fleet.name} generate --bot {bot.bot_id}"
+    if composed is None:
+        findings.append(Finding(
+            bot.bot_id, "isolation_not_composed", WARN,
+            f"shared-config isolation is on, but {target} holds no deny list to"
+            f" check — the bot runs without its rules until `{regen}`"))
+    else:
+        for cls, what in CLASSES.items():
+            rules = [r for r in expected.rules if r.cls == cls]
+            missing = [r for r in rules if r.text not in composed]
+            if not missing:
+                continue
+            subjects = sorted({r.subject for r in missing if r.subject})
+            why = (f"no rule yet for {', '.join(subjects)} (on the host roster"
+                   " since this bot was composed)"
+                   if subjects and all(r.subject for r in missing)
+                   else f"{len(missing)} of {len(rules)} rule(s) absent, e.g."
+                        f" {missing[0].text} (composed by an older install?)")
+            findings.append(Finding(
+                bot.bot_id, "isolation_missing", WARN,
+                f"{cls} — {what}: {why}; run `{regen}`"))
+    for name in sorted(bot.isolation.exempt):
+        findings.append(Finding(
+            bot.bot_id, "isolation_exempt", INFO,
+            f"exempt by manifest: {name} — {EXEMPTIONS[name]}"))
+    for note in expected.notes:
+        findings.append(Finding(bot.bot_id, "isolation_gap", WARN, note))
+    for source, text in composed_text_sources(bot, fleet, paths):
+        for number, line in env_reads(text):
+            findings.append(Finding(
+                bot.bot_id, "isolation_env_read", WARN,
+                f"{source}:{number} tells the bot to read ~/.env itself"
+                f" ({line[:80]}); its isolation rules deny that read, and the"
+                " variables are already in the session env — drop the line"))
+    return findings
+
+
 def _path_findings(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]:
     """Improper-path findings — the generate-time guard folded into the audit so
     the same 'no flat/dangling absolute fleet path' contract holds on the emitted
@@ -617,6 +682,7 @@ def audit_bot(
         for kind, sev, grant in triples
     ]
     findings.extend(_tier_a_findings(bot.bot_id, settings))
+    findings.extend(_isolation_findings(bot, fleet, paths, home=home))
     findings.extend(_path_findings(bot, fleet, paths))
     findings.extend(_value_findings(bot, fleet, paths))
     findings.extend(_env_file_findings(bot, fleet, paths, home=home))
@@ -685,7 +751,29 @@ def audit_fleet(
     # bot, so scan them once (#792), not once per bot.
     findings.extend(_env_secret_leak_findings(fleet, paths, home=home))
     findings.extend(_fleet_pulse_env_findings(fleet, paths, home=home))
+    findings.extend(_isolation_off_finding(fleet))
     return findings
+
+
+def _isolation_off_finding(fleet: FleetConfig) -> list[Finding]:
+    """ONE line for the bots with shared-config isolation off, the shipped
+    default: what their deny lists do not name. INFO, since off is a supported
+    state and a warning on every fleet would be scrolled past; but said, because
+    137 correctly-shaped sibling rules otherwise read as "the bots are isolated"
+    while transcripts, the credential and every .env tier are named by none."""
+    from .isolation import CLASSES
+    from .switches import by_key
+
+    off = sorted(b.bot_id for b in fleet.bots.values()
+                 if not b.isolation.shared_config)
+    if not off:
+        return []
+    shown = ", ".join(off[:4]) + (f" (+{len(off) - 4} more)" if len(off) > 4 else "")
+    return [Finding(
+        "(fleet)", "isolation_off", INFO,
+        f"shared-config isolation is off for {len(off)} of {len(fleet.bots)}"
+        f" bot(s) ({shown}): no deny rule names {', '.join(CLASSES)}. Arm:"
+        f" {by_key('shared-config-isolation').arm}")]
 
 
 def has_failures(findings: list[Finding]) -> bool:
@@ -708,12 +796,16 @@ def format_report(fleet: FleetConfig, findings: list[Finding]) -> str:
     lines = [
         f"Fresh-box self-containment audit — {fleet.name} ({len(fleet.bots)} bots)"
     ]
-    if not findings:
+    # INFO is visibility only (it never blocks, even under --strict), so it
+    # must not hide the verdict either: a fleet whose only findings are INFO
+    # lines is still self-contained, and says so above them.
+    if not [f for f in findings if f.severity != INFO]:
         lines.append(
             "  OK — every grant traces to an equipped source; Tier-A settings "
             "composed per-bot. Self-contained."
         )
-        return "\n".join(lines)
+        if not findings:
+            return "\n".join(lines)
 
     by_bot: dict[str, list[Finding]] = {}
     for f in findings:

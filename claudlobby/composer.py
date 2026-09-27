@@ -531,6 +531,14 @@ def _has_telegram_channel(channels: list[str]) -> bool:
     )
 
 
+def account_dir(bot: BotConfig, fleet: FleetConfig) -> str:
+    """The Claude config dir *bot* runs with, as the manifest spells it (often
+    ``~/.claude``): its account's dir, else the fleet's default account. One
+    expression for its two consumers: ``bot.conf``'s ``CLAUDE_CONFIG_DIR`` line
+    and the Layer 0b rules that name the dir (#1665)."""
+    return fleet.accounts.get(bot.account, fleet.accounts.get("default", "~/.claude"))
+
+
 def telegram_channel_rel(handle: str) -> str:
     """A channel bot's Telegram state dir, relative to the home dir: the ONE
     definition behind its three consumers (#1786), which need it in two forms.
@@ -905,9 +913,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 
     ctx = _bot_template_context(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
-    account_dir = fleet.accounts.get(
-        bot.account, fleet.accounts.get("default", "~/.claude")
-    )
+    config_dir = account_dir(bot, fleet)
 
     bot_dir_line = f"BOT_DIR={_root_anchored(bot_dir, paths)}"
     # BOT_SERVICE is the bot's host-wide-unique, fleet-prefixed identity. It
@@ -943,9 +949,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         "# Claude Code config dir (multi-account support)",
     ]
     if bot.account != "default":
-        lines.append(f"CLAUDE_CONFIG_DIR={_shq(account_dir)}")
+        lines.append(f"CLAUDE_CONFIG_DIR={_shq(config_dir)}")
     else:
-        lines.append(f"# CLAUDE_CONFIG_DIR={_shq(account_dir)}  # default account")
+        lines.append(f"# CLAUDE_CONFIG_DIR={_shq(config_dir)}  # default account")
     lines.append("")
 
     # Assemble the full claude CLI flag set. lib/start-bot.sh reads
@@ -1548,7 +1554,15 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
             elif entry.is_dir():
                 shutil.rmtree(entry)
     bot_skills_dir.mkdir(parents=True, exist_ok=True)
+    for leaf, src in resolve_skill_sources(paths, skills, log).items():
+        (bot_skills_dir / leaf).symlink_to(src.resolve())
 
+
+def resolve_skill_sources(paths: Paths, skills: list[str], log) -> dict[str, Path]:
+    """Leaf name -> source dir for every entry of *skills*, the way
+    :func:`link_skills` links them (first wins on a leaf collision, which is
+    logged). One resolution for the linker and for the readers that must see
+    the same files a bot is handed (the Layer 0b ``~/.env`` scan)."""
     linked: dict[str, Path] = {}  # leaf name → source dir, for collision detection
 
     def _add(leaf: str, src: Path) -> None:
@@ -1556,7 +1570,6 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
             log(f"  skill '{leaf}' already linked from {linked[leaf]} — skipping {src}")
             return
         linked[leaf] = src
-        (bot_skills_dir / leaf).symlink_to(src.resolve())
 
     for skill in skills:
         if skill.endswith("/"):
@@ -1573,6 +1586,7 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
                 log(f"  skill '{skill}' missing — skipped")
                 continue
             _add(src.name, src)
+    return linked
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -1928,6 +1942,74 @@ def resolve_effective_skills(
 # ----------------------------------------------------------------------
 
 
+def claude_md_items(
+    bot: BotConfig, paths: Paths, ctx: dict[str, str], *, protocol_names: list[str]
+) -> dict[str, list[LibraryItem]]:
+    """The library items a bot's CLAUDE.md composes, by template slot, each
+    expanded and carrying its ``source_path``. One definition for the render
+    and for :func:`composed_text_sources`, so what the scan reads is what the
+    bot is told."""
+
+    def _items(names: list[str], kind: str) -> list[LibraryItem]:
+        return [
+            _expand_item(it, ctx)
+            for it in load_library_items_overlay(names, paths, kind)
+        ]
+
+    return {
+        "resources": _items(bot.resources, "resources"),
+        "integrations": _items(
+            resolve_effective_integrations(bot, paths), "integrations"
+        ),
+        "principles": _items(bot.principles, "principles"),
+        "permissions": _items(bot.permissions, "permissions"),
+        "protocols": _items(protocol_names, "protocols"),
+        "guardrails": _items(bot.guardrails, "guardrails"),
+        "lessons": _items(bot.lessons, "lessons"),
+        "post_actions": _items(bot.post_actions, "post_actions"),
+    }
+
+
+def composed_text_sources(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths
+) -> list[tuple[Path, str]]:
+    """``(source file, text)`` for everything a bot is TOLD: the expertise,
+    voice and library items its CLAUDE.md composes, the charter a manager
+    composes, and every markdown file of every skill it is linked (the text a
+    skill hands the model). Scripts are left out on purpose: the model runs a
+    script, it does not retype its lines, and a deny rule never gates what a
+    script does itself."""
+    ctx = _bot_template_context(bot, fleet, paths)
+    is_manager = bot.bot_id in fleet.manager_bots()
+    out: list[tuple[Path, str]] = []
+
+    def _add_file(path: Path | None) -> None:
+        if path is not None and path.is_file():
+            try:
+                out.append((path, path.read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):
+                pass
+
+    for area in bot.expertise:
+        _add_file(paths.find_library_file("expertise", area, ".md"))
+    if bot.voice:
+        _add_file(paths.find_voice_file(bot.voice))
+    protocol_names = resolve_effective_protocols(
+        bot, fleet, paths, is_manager=is_manager
+    )
+    for items in claude_md_items(
+        bot, paths, ctx, protocol_names=protocol_names
+    ).values():
+        out.extend((it.source_path, it.body) for it in items if it.source_path)
+    if fleet.mission_file and is_manager:
+        _add_file(paths.fleet_config_dir / fleet.mission_file)
+    skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
+    for src in resolve_skill_sources(paths, skills, lambda _msg: None).values():
+        for md in sorted(src.rglob("*.md")):
+            _add_file(md)
+    return out
+
+
 def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     """Compose one bot's CLAUDE.md from expertise, voice, protocols, and guardrails; returns the markdown."""
     ctx = _bot_template_context(bot, fleet, paths)
@@ -1941,14 +2023,6 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             voice_item = load_voice(voice_path)
             if voice_item is not None:
                 voice_item = _expand_item(voice_item, ctx)
-
-    def _items(names: list[str], kind: str) -> list[LibraryItem]:
-        return [
-            _expand_item(it, ctx)
-            for it in load_library_items_overlay(names, paths, kind)
-        ]
-
-    integration_names = resolve_effective_integrations(bot, paths)
 
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
@@ -2039,14 +2113,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
-        resources=_items(bot.resources, "resources"),
-        integrations=_items(integration_names, "integrations"),
-        principles=_items(bot.principles, "principles"),
-        permissions=_items(bot.permissions, "permissions"),
-        protocols=_items(protocol_names, "protocols"),
-        guardrails=_items(bot.guardrails, "guardrails"),
-        lessons=_items(bot.lessons, "lessons"),
-        post_actions=_items(bot.post_actions, "post_actions"),
+        **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )
     # Collapse 3+ blank lines → 2 to keep output tidy.
     while "\n\n\n\n" in rendered:
@@ -2587,6 +2654,22 @@ def compose_settings_local(
                 f"Edit(/{sibling_dir}/**)",
             )
         )
+
+    # Layer 0b: shared-config isolation (#1665), OPT-IN per bot. The bot dir
+    # Layer 0 names is not where most cross-bot content lives: transcripts,
+    # the prompt history, the credential, the account config, the .env tiers,
+    # the install's code and the shared settings surfaces do. isolation.py
+    # derives the rules and states their bound: they gate Claude's own tool
+    # calls, never a process, so they reduce accidental reads and are not
+    # confidentiality. Every note is a place the set falls short, said here
+    # on every generate and by freshbox and validate.
+    if bot.isolation.shared_config:
+        from .isolation import layer0b
+
+        result = layer0b(bot, fleet, paths)
+        for note in result.notes:
+            _log.warning("bot %s: Layer 0b: %s", bot.bot_id, note)
+        _append_unique(deny_patterns, result.deny)
 
     # Layer 1: Guardrail permissions (deny-capable safety rules; shared expertise
     # schema). Guardrails are usually deny-only; their rare allows join Layer 2.

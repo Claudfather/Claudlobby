@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — shared-config isolation, the Layer 0b deny rules, opt-in per bot (#1665)
+
+Layer 0 denies each fleet sibling's bot directory, and most cross-bot content
+is not there. A transcript is written under the shared Claude config dir,
+beside the shared prompt history, the OAuth credential and the account config;
+none of those, no `.env` tier, and nothing in the install root was named by any
+rule. On the reviewed host 249 correctly shaped sibling rules read as "the bots
+are isolated" while every bot could read every other bot's transcripts.
+
+- `isolation.shared_config: true` (at `defaults:` or `bots.<bot>:`) composes
+  eight classes of deny rule (`claudlobby/isolation.py`): other bots'
+  transcripts, `history.jsonl`, `.credentials.json`, the account config, every
+  `.env` tier (the bot's own included), Edit on the install's code, other bots'
+  Telegram state dirs, and Edit on the shared settings surfaces. Every rule is
+  `//`-anchored on an absolute path.
+- Transcript and bot-tier `.env` rules are keyed on the bot's NAME, so a
+  `move-bot` leaves both homes covered. A name another fleet shares falls back
+  to that bot's path, a name that is a hyphen-prefix of another skips or
+  states the one pattern that would reach the bot's own sessions, and a sibling
+  manifest that cannot be read is named rather than dropped.
+- `isolation.exempt` restores a READ only: `account_config` or `env_host`.
+- Off by default, registered in `switches.py` under the no-deployment-gate
+  category: a composed deny binds on the bot's next tool call with no restart,
+  and the nightly `reload-fleet` would carry a default-on rule set onto every
+  bot. `doctor --switches` shows which bots have it on.
+- `claudlobby validate` (category `isolation-env-read`) and `freshbox` name
+  every composed CLAUDE.md or skill file that tells an armed bot to
+  `source ~/.env` or `. ~/.env`, the read the `env` class denies. A mention in
+  prose is not flagged.
+- `freshbox` compares an armed bot's on-disk deny list with what the current
+  install would compose and names each class that falls short, including a bot
+  that joined the host since the last generate; it prints one line per fleet
+  naming what the unarmed bots' deny lists do not cover.
+- The bound, stated wherever the rules are: they gate Claude's own tools, and a
+  literal path in Bash. `python3 -c "open(...)"`, a `$HOME/...` path and any
+  script or hook are not stopped. They reduce accidental reads; they are not
+  confidentiality.
+- `permissions-model.md` no longer says a deny misses `cat .env` or that
+  sibling isolation blocks Read only, and the `permissions-are-not-a-control`
+  guardrail no longer says denies are ignored.
+
 ### Changed — `finance`, `spending` and `deploy-status` no longer read `~/.env` (#1665)
 
 The three skills told the model to load its credentials with `source ~/.env`

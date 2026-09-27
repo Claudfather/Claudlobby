@@ -220,6 +220,24 @@ fleet:
 #     brief:
 #       on_start: true
 #
+#     # isolation — shared-config isolation, the Layer 0b deny rules (#1665).
+#     # DEFAULT OFF. Layer 0 denies each fleet sibling's bot DIR; that is not
+#     # where most cross-bot content lives. Armed, the composer also denies this
+#     # bot's own tools: other bots' transcripts and Telegram dirs (host-wide,
+#     # keyed by name), the shared history, credential and account config,
+#     # every .env tier (its own included: the values are already in its
+#     # session env), and Edit on the install's code and the shared settings.
+#     # It stops ACCIDENTAL reads through Claude's own tools; a process running
+#     # as the same user (a script, `python3 -c "open(...)"`, a `$HOME/...` path
+#     # the matcher cannot resolve) is not stopped. A composed deny binds on the
+#     # bot's NEXT tool call with no restart, so arm one bot, run a real turn,
+#     # then widen to `defaults:`. `claudlobby freshbox` and `validate` name
+#     # every composed file that still tells the bot to `source ~/.env`.
+#     # `exempt` restores a READ only: account_config | env_host.
+#     isolation:
+#       shared_config: true
+#       exempt: []          # account_config | env_host — each restores a READ only
+#
 #     # briefing — equippable scheduled briefing (#627). Each slot becomes a
 #     # composed per-(bot,slot) OnCalendar timer that dispatches /briefing <slot>
 #     # into THIS bot's session via lib/briefing-trigger.sh — never hand-install
