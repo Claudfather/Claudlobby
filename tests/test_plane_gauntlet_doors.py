@@ -235,13 +235,17 @@ def test_crash_between_intent_and_send_leaves_visible_intent(tmp_path, armed):
                     break
             time.sleep(0.1)
         assert comms, "intent row never appeared — cannot exercise the window"
-        os.killpg(proc.pid, signal.SIGKILL)  # the crash, inside the window
     finally:
+        # Crash the owned group once, immediately after observing the intent.
+        # A second kill can report EPERM on Darwin for an unreaped dead group.
+        # Keep permission errors fatal; they are not proof of successful cleanup.
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait(timeout=10)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        finally:
+            proc.wait(timeout=10)
     tx = _rows(
         tmp_path,
         "SELECT 1 FROM events WHERE kind='transmission' AND msg_id = ?",
