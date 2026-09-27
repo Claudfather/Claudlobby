@@ -33,34 +33,14 @@ which remains usable after the leader exits. The post-readiness case injects an
 exception after the leaf has written its readiness PID but before the fixture
 returns ownership to its caller.
 
-The hosted macOS lane runs
-`python tests/fixtures/native_ci_negative_controls.py --output native-controls`
-concurrently with the full pytest suite, within the existing 30-minute job
-limit. The suite step waits for both independent commands, even when either
-fails, and fails if either exit status is nonzero. The full suite selection,
-native JUnit evidence gate, and Linux execution remain unchanged. Separate
-logs, completion markers and exit-code files are uploaded for both commands,
-and their outcomes are printed in the job log. A marker still reading
-`running` means the command did not record completion; cancellation is never
-passing evidence. The controls remain children of the job shell and subject
-to the runner's cancellation and timeout cleanup.
-
-This command refuses local hosts and exports the exact committed revision into
-an owned temporary directory. It first requires the four native bridge cases
-to pass, then removes startup cleanup and changes the executable guard to read
-the truncated `comm` column in that disposable export. Each mutant must fail
-its specific regression assertion; skip, setup error, unrelated failure or an
-unexpected pass fails the lane. The tests retain their final process-group
-reap, the driver restores each changed file, and the four restored cases must
-pass again. Logs, JUnit reports and a revision-stamped summary are uploaded.
-
-The separate one-time workflow failure control changes only the success arm
-of `test_native_launchd_scratch_lifecycle` to raise an assertion inside
-`_native_scratch_job`. Push that temporary test commit to the PR, record the
-failed macOS check and the intended assertion, then revert the control and
-require a green final-head run. The context manager must still boot out its
-unique job while the assertion propagates. Expected failures caught by the
-bridge-control driver do not substitute for this actual failed PR check.
+The one-time mutation and deliberate-failure checks used to validate this CI
+setup are retained as historical evidence: the [intentional failure run](https://github.com/Claudfather/Claudlobby/actions/runs/36248906539)
+failed on the injected assertion, and the [restored run](https://github.com/Claudfather/Claudlobby/actions/runs/36313493053)
+passed all three lanes at `6ff6ddff4133e2d7dda01a69e3003f6e9dcf037d`.
+The historical mutation driver remains available in that commit; it is not
+part of recurring CI. Each current checkout still runs the complete suite,
+including native cleanup regressions and the seven-case JUnit gate, within
+the existing 30-minute supported-platform limit.
 
 The checks must pass in the PR and then be selected as required checks in the
 repository's default-branch ruleset. Adding jobs alone does not enforce that
