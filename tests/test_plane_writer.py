@@ -186,6 +186,61 @@ class TestTheCheckpointCadence:
         ro.close()
         w.close()
 
+    def _reader_in_the_way(self, tmp_path):
+        """A writer with every cadence trigger armed, and a read-only snapshot
+        taken BEFORE its latest commit, so a checkpoint cannot pass it."""
+        w = PlaneWriter(tmp_path, wal_bytes=1, every_batches=10**6, every_seconds=9999)
+        conn = w.connection()
+        conn.execute("CREATE TABLE _probe(x)")
+        conn.execute("INSERT INTO _probe VALUES(1)")
+        ro = sqlite3.connect(f"file:{db_path(tmp_path)}?mode=ro", uri=True)
+        ro.execute("BEGIN")
+        ro.execute("SELECT COUNT(*) FROM _probe").fetchone()
+        conn.execute("INSERT INTO _probe VALUES(2)")
+        return w, conn, ro
+
+    def test_a_held_reader_does_NOT_make_the_cadence_wait(self, tmp_path):
+        """#1693: 3 of the 4 wedge arms measured on 2026-09-26 were this
+        checkpoint waiting on fleet-pulse's readers. TRUNCATE calls the busy
+        handler, busy_timeout is 5s, and the cadence runs on the serial loop,
+        so every client behind it waited too. A reader must cost it nothing:
+        checkpoint what can be checkpointed, count the busy, move on."""
+        w, conn, ro = self._reader_in_the_way(tmp_path)
+        busy_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        t0 = time.monotonic()
+        w.after_batch()
+        waited = time.monotonic() - t0
+        ro.close()
+        # The reader really was in the way. Without this, the timing below
+        # would also pass against a checkpoint that had nothing to wait for.
+        assert (w.checkpoints, w.checkpoint_busy) == (1, 1)
+        assert waited < busy_ms / 2000, f"the cadence waited {waited:.2f}s on a reader"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == busy_ms, (
+            "the writer's commits must get their busy timeout back")
+        w.close()
+
+    def test_with_the_reader_gone_the_cadence_still_TRUNCATES(self, tmp_path):
+        """Not waiting must not become not bounding. TRUNCATE is what holds
+        the WAL under its ceiling; a cadence that stopped truncating would
+        pass the test above and let the WAL grow for the daemon's life."""
+        w, conn, ro = self._reader_in_the_way(tmp_path)
+        w.after_batch()                                 # busy: the reader
+        ro.close()
+        conn.execute("INSERT INTO _probe VALUES(3)")
+        wal = Path(str(db_path(tmp_path)) + "-wal")
+        assert wal.stat().st_size > 0
+        w.after_batch()
+        assert wal.stat().st_size == 0, "no reader left, and the WAL was not truncated"
+        w.close()
+
+    def test_sqlite_never_checkpoints_inside_the_commit(self, tmp_path):
+        """SQLite's own auto-checkpoint runs inside COMMIT, which is before the
+        daemon can reply. The explicit cadence, after the reply, is the only
+        checkpoint the held connection runs (#1693)."""
+        w = PlaneWriter(tmp_path)
+        assert w.connection().execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 0
+        w.close()
+
 
 class TestTheConnectionIsOpenedLATE:
     """The ordering regression, pinned.
