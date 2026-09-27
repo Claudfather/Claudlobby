@@ -974,7 +974,7 @@ _summary_tmp=$(safe_mktemp)
         # Same boot gate as the main loop, for the same reason and by the same
         # predicate. Without it this run reports two verdicts about one bot: the
         # loop correctly stays silent for a mid-boot bot while this block prints
-        # SESSION DOWN / SERVICE DOWN to the journal and pulse-summary.txt — the
+        # SESSION DOWN / SERVICE DOWN to the journal and <fleet>.pulse-summary.txt — the
         # pre-fix answer, from the file that fixed it. "starting" is its own
         # column value, never folded into "up": a boot is not health.
         # A crash loop is its own column value too (#1769), judged first for
