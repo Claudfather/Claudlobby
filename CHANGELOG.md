@@ -33,13 +33,13 @@ cooldown.
   nothing reports the WAL size: #1905.
 - **Not fixed: the checkpoint's own I/O.** It still runs on the serial loop, now
   after the reply, so a slow one delays the next caller instead of the one it
-  follows. Moving it to a background thread does not help on this storage. In a
-  synthetic A/B on the same SD card, commits that overlapped a background
-  checkpoint took 618-935 ms (median) against about 20 ms, 26 of 264 requests
-  still took over 1 s (27 with the checkpoint on the loop), and the WAL stopped
-  truncating. A checkpoint a quarter the size, still on the loop (every 6
-  batches instead of 22), kept all 42 checkpoints under 0.6 s. That is a
-  recommendation on #1693, not part of this change.
+  follows. In a synthetic A/B on the same SD card, moving it to a background
+  thread did not fix that: commits that overlapped the background checkpoint
+  took 618-935 ms (median) against about 20 ms, 26 of 264 requests still took
+  over 1 s (27 with the checkpoint on the loop), and the WAL stopped truncating.
+  A checkpoint a quarter the size, still on the loop (every 6 batches instead of
+  22), kept all 42 checkpoints under 0.6 s. That is a recommendation on #1693,
+  not part of this change.
 
 ### Fixed — `pr-review-state.py` read two of the four verdicts reviewers are taught as "not assessed" (#1895)
 
