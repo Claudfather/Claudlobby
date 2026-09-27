@@ -2566,7 +2566,7 @@ def _validate_isolation(fleet: FleetConfig, paths: Paths, report: ValidationRepo
         for note in layer0b(bot, fleet, paths, home=home, roster=roster).notes:
             shared.add("isolation-gap", f"shared-config isolation: {note}", bot.bot_id)
         for source, text in composed_text_sources(bot, fleet, paths):
-            for number, line in env_reads(text):
+            for number, line in env_reads(text, home=home):
                 shared.add(
                     "isolation-env-read",
                     f"{source}:{number} tells the bot to read ~/.env itself"

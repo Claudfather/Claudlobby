@@ -429,6 +429,22 @@ READS = [
     "```\nif true; then source ~/.env; fi\n```",
     "1. Always `source ~/.env` before running any finance commands",
     "Load it first: `set -a; . ~/.env; set +a`.",
+    "~~~\nsource ~/.env\n~~~",
+    # #1919, from otis's review of #1918: a negation elsewhere on the line hid
+    # each of these, because the first version tested the WHOLE line.
+    "If `SIMPLEFIN_ACCESS_URL` is not set, run `source ~/.env` first.",
+    "Run `source ~/.env` — without it the scripts fail.",
+    "Do not skip `source ~/.env`.",
+    # a reversal after the negation is still an instruction
+    "Don't forget to `source ~/.env` before the scripts.",
+    # #1919: every spelling row E denies, not only `~`
+    "```\nsource $HOME/.env\n```",
+    '```\n. "$HOME"/.env && run\n```',
+    "```\nsource ~alice/.env\n```",
+    "```bash\nsource /home/<user>/.env\n```",
+    "Run `. /home/alice/.env` before the script.",
+    "```\nsource /Users/alice/.env.local\n```",
+    "```\nsource /root/.env\n```",
 ]
 
 MENTIONS = [
@@ -441,7 +457,81 @@ MENTIONS = [
     '```bash\n# source ~/.env if you must\necho "source ~/.env"\n```',
     "```\nsource .env\nsource ~/.envrc\ncat ~/.env.example\n```",
     "Do not `source ~/.env` here.",
+    # the path inside another command's argument, fenced or inline
+    '```bash\ngrep -rn "source ~/.env" library/\n```',
+    "Find them with `grep -rn \"source ~/.env\" library/`.",
+    "```\ngrep source ~/.env\n```",
+    # #1919: a negation directly before the span, or the span as the subject
+    # of a negated predicate, still makes the line a mention
+    "Never run `source ~/.env`; the variables are already in the session.",
+    "There is no need to `source ~/.env` any more.",
+    "Use the guard instead of `source ~/.env`.",
+    "This skill used to `source ~/.env`.",
+    "`source ~/.env` is not needed: the variables are already there.",
+    "`source ~/.env` isn't required any more.",
+    "`. ~/.env` is no longer needed.",
 ]
+
+
+@pytest.mark.parametrize("line", [
+    "If `SIMPLEFIN_ACCESS_URL` is not set, run `source ~/.env` first.",
+    "Run `source ~/.env` — without it the scripts fail.",
+    "Do not skip `source ~/.env`.",
+])
+def test_otis_three_lines_from_the_1918_review_fire(line):
+    """#1919: pinned verbatim. Each held a negation word, and the first
+    version suppressed a match on ANY negation anywhere on the line."""
+    assert iso.env_reads(line) == [(1, line)]
+
+
+@pytest.mark.parametrize("line", [
+    "`source ~/.env` cannot be skipped.",
+    "`source ~/.env` shouldn't be omitted.",
+    "`source ~/.env` must not be skipped.",
+    "`source ~/.env` should never be forgotten.",
+])
+def test_a_double_negative_after_the_span_is_an_instruction(line):
+    """otis's review of #1920: the negated-subject rule read these as mentions.
+    The first two fired on main, so that was a regression; a reversal after
+    the negation now keeps the span an instruction, as it does before it."""
+    assert iso.env_reads(line) == [(1, line)]
+
+
+def _home_read(host):
+    """(fleet, paths, the overlay file, its line) for a `source <home>/.env`
+    whose home sits outside /home, /Users and /root, so only the composer's
+    own home can name it."""
+    root, home, fleet, paths = host
+    line = f"source {home}/.env"
+    assert iso.env_reads(f"```\n{line}\n```") == []  # the premise
+    return fleet, paths, _overlay_resource(paths, fleet, f"```bash\n{line}\n```")
+
+
+def test_validate_passes_the_composers_home_to_the_lint(host):
+    """otis's mutant on #1920 (drop `home=home` from validate's call) survived
+    every test; this is the one it fails."""
+    from claudlobby.validator import validate
+
+    fleet, paths, res = _home_read(host)
+    hits = [w for k, w in validate(fleet, paths).categorized() if k == "isolation-env-read"]
+    assert len(hits) == 1 and f"{res}:9 " in hits[0]
+
+
+def test_freshbox_passes_the_composers_home_to_the_lint(host):
+    from claudlobby.freshbox import _isolation_findings
+
+    fleet, paths, res = _home_read(host)
+    found = [f for f in _isolation_findings(fleet.bots["ravi"], fleet, paths)
+             if f.kind == "isolation_env_read"]
+    assert len(found) == 1 and f"{res}:9 " in found[0].detail
+
+
+def test_the_composers_own_home_is_recognised_by_its_absolute_path():
+    text = "```\nsource /srv/people/someone/.env\n```"
+    assert iso.env_reads(text) == []  # not a conventional root...
+    assert iso.env_reads(text, home="/srv/people/someone") == [(2, "source /srv/people/someone/.env")]
+    assert iso.env_reads("```\nsource /srv/people/other/.env\n```",
+                         home="/srv/people/someone") == []
 
 
 @pytest.mark.parametrize("text", READS)

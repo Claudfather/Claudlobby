@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the `~/.env` lint no longer lets a negation elsewhere on a line hide an instruction (#1919)
+
+The lint `validate` and `freshbox` run for a bot with shared-config isolation
+on (#1665) dropped a `source ~/.env` span whenever its LINE held a negation
+word, anywhere. So "If `SIMPLEFIN_ACCESS_URL` is not set, run `source ~/.env`
+first", "Run `source ~/.env` — without it the scripts fail" and "Do not skip
+`source ~/.env`" were all missed, and on an armed bot each would have failed
+at run time with no warning (otis's review of #1918).
+
+- A negation now counts only in the span's own clause and within the three
+  words directly before it. A verb that reverses it ("do not skip", "don't
+  forget") keeps the span an instruction.
+- A span that is the subject of a negated predicate ("`source ~/.env` is not
+  needed") is still a mention, as are the cases that were quiet before: prose,
+  a negated span, the path inside `echo` or `grep`, a comment in a fence. A
+  reversal after the negation undoes it there too ("`source ~/.env` cannot be
+  skipped", "shouldn't be omitted"), and the reversal verbs include their past
+  participles.
+- `validate` and `freshbox` each have a test that fails when they stop handing
+  the lint the composer's home.
+- Every spelling row E denies is recognised: `~user/.env`, `"$HOME"/.env`
+  quoted up to the slash, `/home/<user>/.env`, `/Users/<user>/.env`,
+  `/root/.env`, and the composer's own home by its absolute path.
+
 ### Added — shared-config isolation, the Layer 0b deny rules, opt-in per bot (#1665)
 
 Layer 0 denies each fleet sibling's bot directory, and most cross-bot content
