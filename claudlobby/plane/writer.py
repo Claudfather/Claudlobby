@@ -71,7 +71,8 @@ class PlaneWriter:
         self._ident: tuple[int, int] | None = None
         self._since_checkpoint = 0
         self._last_checkpoint = 0.0
-        #: Observability, read by the daemon's status surface and the canary.
+        #: Counted, but nothing reads them yet: no status surface reports them,
+        #: and the canary SIGKILLs the daemon (#1905).
         self.reconnects = 0
         self.checkpoints = 0
         self.checkpoint_busy = 0
