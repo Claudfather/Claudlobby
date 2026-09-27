@@ -28,7 +28,7 @@ resetting the WAL, and nothing on the estate reported the WAL's size. The
   snapshot across it: the heartbeat series behind `status` and the view,
   `report_rows` behind `brief` and `report-back`, the uptime door's entries,
   and the view's fleet list. Measured on the live plane, three interleaved
-  pairs, identical results: longest hold 0.85 → 0.67 s, 0.36 → 0.25 s and
+  pairs, identical row counts: longest hold 0.85 → 0.67 s, 0.36 → 0.25 s and
   2.46 → 1.35 s (the report loop's per-row queries still run back to back,
   now as separate snapshots). `tests/test_plane_reader_snapshots.py` fails any
   loop over a live cursor that queries, yields or writes per row.
