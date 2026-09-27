@@ -596,6 +596,10 @@ function renderOverview(env) {
     facet("host.disk_free_gb", "free disk", (v) => `${v} GB`),
     facet("host.undervoltage", "undervoltage", (v) => v ? "YES" : "no"),
     facet("host.thermal_flags", "thermal", (v) => String(v)),
+    // the WAL (#1905): the ceiling verdict is the API's wal_state
+    sm["host.plane_wal_bytes"] ? `<span class="${h.wal_state === "over" ? "ov-warn" : ""}" title="the recorder's write-ahead log; over 4 MB, a reader is holding a snapshot or the checkpoint is not running — claudlobby plane doctor says which">WAL ${
+      esc(((v) => v >= 1048576 ? `${(v / 1048576).toFixed(1)} MB` : `${Math.round(v / 1024)} KB`)(
+        Number(sm["host.plane_wal_bytes"].value)))}</span>` : null,
   ].filter(Boolean).join(" · ") : `<span class="ov-warn" title="arm the plane-host-probe host timer (PLANE_EMIT_ENABLED=1) to record load, RAM, disk and thermal facets">host probe not armed</span>`;
   const spool = h.spool_state === "unreadable"
     ? `<span class="ov-bad">spool unreadable</span>`

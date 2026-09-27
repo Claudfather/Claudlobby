@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the plane's WAL is reported, a reader holding it is named, and no reader keeps one snapshot across a loop (#1905)
+
+A reader that holds a plane snapshot keeps the daemon's checkpoint from
+resetting the WAL, and nothing on the estate reported the WAL's size. The
+#1693 canary grew it to 81.8 MB in 60 s behind one held reader.
+
+- **Which real readers hold a snapshot, measured on the live Pi**, read-only,
+  from the kernel's lock table (`/proc/locks`, SQLite's read-mark bytes on
+  `plane.db-shm`). In 21 minutes of passive sampling, only fleet-pulse's
+  `dispatch-overdue.py --all` and `--orphans` held one for a second or more:
+  42 holds, up to 7.25 s, eight processes at once per sweep. Run alone, the
+  same call holds about 1.1 s. Run once each on demand: `status` 2.9 s,
+  `brief` 2.4 s, the view's utilization and overview pages 1.9 s and 1.5 s,
+  the view's live stream 10 ms per tick. The WAL peaked at 1.06 MB. At that
+  write rate, crossing the 4 MiB ceiling takes one snapshot held for about two
+  minutes, so no shipped reader grows the WAL without bound. A reader that
+  never lets go does (an interactive `sqlite3` session, a hung process), and
+  that one can only be reported.
+- **Readers fetch their rows before the per-row work.** Four loops held one
+  snapshot across it: the heartbeat series behind `status` and the view,
+  `report_rows` behind `brief` and `report-back`, the uptime door's entries,
+  and the view's fleet list. Measured on the live plane, three interleaved
+  pairs, identical results: longest hold 0.85 → 0.67 s, 0.36 → 0.25 s and
+  2.46 → 1.35 s (the report loop's per-row queries still run back to back,
+  now as separate snapshots). `tests/test_plane_reader_snapshots.py` fails any
+  loop over a live cursor that queries, yields or writes per row.
+- **The WAL is reported.** The host probe records `host.plane_wal_bytes` every
+  minute and the Host card shows it, warning past the ceiling. `plane doctor`
+  has a `wal` rung: ATTENTION past the 4 MiB ceiling accepted on #1693, naming
+  the process holding a snapshot (pid, age, command line) from `/proc/locks`,
+  and saying so where the platform cannot name it.
+- **No cap and no page, decided rather than defaulted.** The daemon cannot end
+  another process's transaction, so a hard cap could only refuse writes. A
+  pushed page waits until the new metric shows an excursion worth one.
+- **The daemon side needed no change.** The #1693 canary gains
+  `--release-after S`: the held reader lets go S seconds in, `plane doctor` is
+  read while it still holds, and the WAL must be back under the ceiling within
+  10 s. Run with this branch's harness on main and on this branch (60 s, reader
+  held 30 s), the reader grew the WAL to 10.3-38.9 MB. The first WAL sample
+  after it let go, 0.3-0.4 s later, was already under the ceiling in all five
+  runs where the reader really held, and the catch-up checkpoint's longest busy
+  run was 0.45-1.23 s. The cadence already checkpoints on every batch while the
+  WAL is over 1 MiB. On main, `plane doctor` had no WAL rung; on this branch it
+  named the held reader and not the daemon. Zero acknowledged events were lost
+  in any run. Running it also found two harness defects, both fixed: the reader
+  could start before the daemon created the db and then held nothing (the run
+  now refuses to start until the snapshot is real), and a pid the checks
+  compared against had been cleared.
+
 ### Fixed — the plane daemon replies before it checkpoints, and the checkpoint never waits on a reader (#1693)
 
 Every wedge arm measured in a 30-minute window on 2026-09-26 was the daemon's

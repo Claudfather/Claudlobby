@@ -33,6 +33,7 @@
 # convention: assert the isolation HELD, never assume it.
 #
 # Usage: CLAUDLOBBY_ROOT=<checkout> bash lib/rehearse-plane-durability.sh [--seconds N]
+#        [--no-reader | --release-after S]   (run it from anywhere: it enters the checkout)
 # Exit:  0 ran · 1 a check FAILED · 2 precondition/dep missing · 3 isolation refused
 set -uo pipefail
 
@@ -41,9 +42,15 @@ SRC="$CLAUDLOBBY_ROOT"
 SECONDS_SOAK=60
 KILL_AFTER_ACKS=40
 HOLD_READER=1
+RELEASE_AFTER=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --seconds) SECONDS_SOAK="$2"; shift 2 ;;
+        # #1905: the held reader lets go of its snapshot after N seconds, so
+        # one run shows both halves -- whether anything REPORTS the WAL while
+        # the reader holds it, and whether the WAL comes back under the
+        # ceiling once it lets go. 0 (the default) holds for the whole soak.
+        --release-after) RELEASE_AFTER="$2"; shift 2 ;;
         --kill-after) KILL_AFTER_ACKS="$2"; shift 2 ;;
         # dara §4 is an ATTRIBUTION question, so it needs two arms. With the
         # reader held, a WAL that never truncates could be the reader blocking
@@ -54,6 +61,10 @@ while [ $# -gt 0 ]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+case "$RELEASE_AFTER" in ''|*[!0-9]*) echo "--release-after takes whole seconds" >&2; exit 2 ;; esac
+if [ "$RELEASE_AFTER" -gt 0 ] && { [ "$HOLD_READER" -eq 0 ] || [ "$RELEASE_AFTER" -lt 6 ] || [ "$RELEASE_AFTER" -gt $((SECONDS_SOAK - 15)) ]; }; then
+    echo "--release-after needs a held reader, at least 6s, and 15s of soak after it" >&2; exit 2
+fi
 
 [ "$(uname -s)" = "Linux" ] || { echo "Linux only (/proc sampling)" >&2; exit 2; }
 
@@ -61,6 +72,17 @@ WORK="$(mktemp -d)"
 ROOT="$WORK/root"
 PASS=0; FAIL=0
 PY="$SRC/.venv/bin/python"; [ -x "$PY" ] || PY="python3"
+# The ARM is the checkout under test, and `python -m claudlobby` resolves the
+# package from the working directory before the venv's editable install. Run
+# from the checkout, and refuse if the interpreter still imports another one:
+# two arms reading one tree report "no difference", which is the answer the
+# mistake produces (#1905).
+cd "$SRC" || { echo "cannot enter $SRC" >&2; exit 2; }
+_prov="$("$PY" -c "import claudlobby, os; print(os.path.realpath(claudlobby.__file__))" 2>/dev/null)"
+case "$_prov" in
+    "$(pwd -P)"/*) : ;;
+    *) echo "REFUSING: $PY imports claudlobby from '${_prov:-nothing}', not the checkout under test ($SRC)" >&2; exit 2 ;;
+esac
 
 say() { printf '%s\n' "$*"; }
 ok()  { PASS=$((PASS+1)); printf '  PASS  %s\n' "$*"; }
@@ -152,16 +174,54 @@ fi
 # us, so their connection patterns are unverified in both directions -- named
 # here rather than quietly folded into the plane-view correction.
 if [ "$HOLD_READER" -eq 1 ]; then
-"$PY" - "$CANARY_DB" >>"$WORK/ro.log" 2>&1 <<'ROEOF' &
+"$PY" - "$CANARY_DB" "$RELEASE_AFTER" "$WORK/release.mono" "$WORK/reader.held" >>"$WORK/ro.log" 2>&1 <<'ROEOF' &
 import sqlite3, sys, time
-conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
-conn.execute("BEGIN")
-conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()   # hold a snapshot
+# The daemon may still be creating the db and its schema: a reader that raised
+# here held nothing, and the run would measure an unblocked WAL as if a reader
+# were in the way (#1905, seen at load 5). Retry until the snapshot is real.
+deadline = time.monotonic() + 20
+while True:
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
+        conn.execute("BEGIN")
+        conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()   # hold a snapshot
+        break
+    except sqlite3.Error:
+        if conn is not None:
+            conn.close()
+        if time.monotonic() > deadline:
+            raise
+        time.sleep(0.2)
+with open(sys.argv[4], "w") as f:
+    f.write("held")
+if float(sys.argv[2]) > 0:
+    time.sleep(float(sys.argv[2]))
+    conn.commit()                    # the snapshot is released; the connection stays open
+    with open(sys.argv[3], "w") as f:
+        f.write(str(time.monotonic_ns()))   # CLOCK_MONOTONIC: the sampler's clock too
 while True:
     time.sleep(1)
 ROEOF
 RO_PID=$!
+# A precondition, checked rather than assumed: every reader-arm number below is
+# read as "with a snapshot held", so a reader that never took one must stop the
+# run, not score it.
+for _i in $(seq 250); do [ -e "$WORK/reader.held" ] && break; sleep 0.1; done
+if [ ! -e "$WORK/reader.held" ]; then
+    echo "the held reader never took its snapshot, so nothing here would be measured against one:" >&2
+    tail -5 "$WORK/ro.log" >&2
+    exit 2
+fi
+# Kept apart from RO_PID, which cleanup blanks before the verdicts: Check 2
+# must match the doctor's rung against THIS pid, and an empty one would make
+# "names the held reader" match any pid at all.
+READER_PID=$RO_PID
+if [ "$RELEASE_AFTER" -gt 0 ]; then
+say "  reader arm: a mode=ro snapshot is HELD for ${RELEASE_AFTER}s, then released (#1905)"
+else
 say "  reader arm: a mode=ro snapshot is HELD for the whole soak (dara §4)"
+fi
 else
 say "  reader arm: NO reader held (control arm for the §4 attribution)"
 fi
@@ -194,6 +254,19 @@ DRIVER_PID=$!
 # exactly that (45s requested, ~4s measured). It still lands "just after an
 # ack" -- the driver is mid-stream and acking continuously at this point.
 _kill_at=$(awk "BEGIN{d=$SECONDS_SOAK-3; if(d<1)d=1; print d}")
+# #1905: while the reader still holds its snapshot, ask the operator's door
+# what it sees -- the WAL's size at that instant, and the doctor's wal rung.
+_doctor_wal=""
+if [ "$HOLD_READER" -eq 1 ]; then
+    if [ "$RELEASE_AFTER" -gt 0 ]; then _doctor_at=$((RELEASE_AFTER - 5)); else _doctor_at=$((SECONDS_SOAK - 10)); fi
+    [ "$_doctor_at" -ge 1 ] || _doctor_at=1
+    sleep "$_doctor_at"
+    _doctor_wal="$(stat -c %s "${CANARY_DB}-wal" 2>/dev/null)"
+    # PLANE_SOCKET pinned to the canary's: the doctor honours it, and an
+    # inherited one would point its daemon probe at a live plane.
+    PLANE_SOCKET="$CANARY_SOCK" "$PY" -m claudlobby --root "$ROOT" plane doctor >"$WORK/doctor.txt" 2>&1
+    _kill_at=$(awk "BEGIN{d=$_kill_at-$_doctor_at; if(d<1)d=1; print d}")
+fi
 sleep "$_kill_at"
 _acks=$(grep -c ' ok ' "$WORK/witness.log" 2>/dev/null | tr -d '\n ' || printf 0)
 [ -n "$_acks" ] || _acks=0
@@ -280,6 +353,59 @@ fi
 
 say ""
 say "--- Check 2: WAL bound ---"
+# 4 MiB is the ceiling accepted on #1693 (issuecomment-5768778429); it is
+# written here rather than imported so the same harness runs against a
+# checkout that predates `claudlobby.plane.wal` (#1905's before arm).
+if [ "$HOLD_READER" -eq 1 ]; then
+    _wal_rung="$(grep -E '^\[(ok|ATTENTION)\] wal' "$WORK/doctor.txt" 2>/dev/null || true)"
+    say "  doctor read   : WAL ${_doctor_wal:-unreadable} bytes, reader pid $READER_PID holding, daemon pid $DAEMON_PID"
+    say "  doctor says   : ${_wal_rung:-<no wal rung>}"
+    if [ -z "$_doctor_wal" ] || [ "$_doctor_wal" -le 4194304 ]; then
+        bad "Check 2 (#1905): the WAL had not passed the 4 MiB ceiling when the doctor read it, so the read proves nothing"
+    elif [ -z "$_wal_rung" ]; then
+        bad "Check 2 (#1905): nothing reports the WAL -- plane doctor has no wal rung"
+    else
+        # The pid is bounded on the right, or pid 12 would match pid 123.
+        case "$_wal_rung" in
+            *"pid $DAEMON_PID,"*|*"pid $DAEMON_PID:"*) bad "Check 2 (#1905): plane doctor names the DAEMON (pid $DAEMON_PID) as a holder" ;;
+            "[ATTENTION] wal"*"pid $READER_PID,"*|"[ATTENTION] wal"*"pid $READER_PID:"*) ok "Check 2 (#1905): plane doctor flags the WAL and names the held reader (pid $READER_PID), not the daemon" ;;
+            "[ATTENTION] wal"*) bad "Check 2 (#1905): plane doctor flags the WAL but does not name the held reader (pid $READER_PID)" ;;
+            *) bad "Check 2 (#1905): plane doctor reads a ${_doctor_wal}-byte WAL as ok" ;;
+        esac
+    fi
+fi
+if [ "$RELEASE_AFTER" -gt 0 ]; then
+    if "$PY" - "$WORK/samples.json" "$WORK/release.mono" <<'REOF'
+import json, sys
+CEIL = 4 * 1024 * 1024
+doc = json.load(open(sys.argv[1]))
+wal, calls = doc["wal"], doc["samples"]
+try:
+    rel = int(open(sys.argv[2]).read())
+except (OSError, ValueError):
+    print("  release      : the reader never recorded letting go"); sys.exit(1)
+held = [s for t, s in wal if t < rel]
+after = [(t, s) for t, s in wal if t >= rel]
+back = next(((t - rel) / 1e9 for t, s in after if s <= CEIL), None)
+print(f"  at release   : {held[-1] if held else 'n/a'} bytes after {len(held)}s held")
+if back is None:
+    print(f"  after release: never back under the ceiling in {len(after)} samples"); sys.exit(1)
+tail = [s for t, s in after if (t - rel) / 1e9 >= back]
+print(f"  after release: under the ceiling within {back:.1f}s (1 Hz samples); max after that {max(tail)} bytes")
+# the catch-up checkpoint: the longest single-syscall run in the 10s after release
+runs, cur, start = [], None, None
+for t, sc in calls:
+    if sc != cur:
+        if cur is not None and cur >= 0 and start is not None and start >= rel and start - rel <= 10e9:
+            runs.append((t - start) / 1e6)
+        cur, start = sc, t
+print(f"  catch-up     : longest busy run in the 10s after release {max(runs) if runs else 0:.0f} ms")
+sys.exit(0 if back <= 10 and max(tail) <= CEIL else 1)
+REOF
+    then ok "Check 2b (#1905): the WAL came back under the ceiling once the reader let go"
+    else bad "Check 2b (#1905): the WAL did not come back under the ceiling within 10s of the release"
+    fi
+fi
 if "$PY" -c "
 import json,sys; v=json.load(open('$WORK/verdict.json'))
 if not v['wal_readable']:

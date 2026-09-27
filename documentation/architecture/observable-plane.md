@@ -224,7 +224,8 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   Composed as the dormant `claudlobby-plane-view` host service; Tailscale Serve
   fronts it.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
-  rungs (schema, provisional actors, tombstone validity, reconciliation).
+  rungs (schema, provisional actors, tombstone validity, reconciliation, the
+  WAL against its ceiling).
   **These RUN
   `migrate()` and are therefore not read-only — and so do `plane registry`,
   `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
@@ -242,6 +243,17 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   query_only` — under the system `python3` the doors run, a read-only URI
   cannot open a WAL database whose writer has closed (it cannot create the
   shared-memory file), which is what a daemon restart looks like.
+- **A read pins the WAL while its statement is open (#1905).** The daemon's
+  checkpoint cannot reset the WAL past a reader's snapshot, and a loop over a
+  live cursor keeps its statement open for the whole loop, so readers fetch
+  their rows first and do the per-row work after
+  (`tests/test_plane_reader_snapshots.py` fails a loop that queries, yields or
+  writes per row). A reader that never lets go, such as an interactive
+  `sqlite3` session or a hung process, still grows the WAL, and the daemon
+  cannot end another process's transaction. So it is reported: the host probe
+  records `host.plane_wal_bytes` every minute (the Host card shows it), and
+  `plane doctor`'s `wal` rung turns ATTENTION past the 4 MiB ceiling accepted
+  on #1693, naming the holding process from `/proc/locks` on Linux.
 
 ## The task loop (#1481) — in the operator's words
 
