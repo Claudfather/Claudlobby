@@ -557,3 +557,49 @@ class TestDiscriminatorReadsTheUnfilteredSet:
             "a fully leaf-manager-gated roster is a real empty compose, not a "
             "torn declaration — the prune is owed and must still run"
         )
+
+
+# ---------------------------------------------------------------------------
+# Review of d6026b9 (2026-09-25): what this fleet OWNS in its timers dir, and
+# how many units it DECLARES
+# ---------------------------------------------------------------------------
+class TestOwnershipAndDeclaredCount:
+    def test_a_nested_prefix_belongs_to_another_fleet(self, tmp_path):
+        # `com.test.child` extends `com.test`, so a bare prefix match read the
+        # other fleet's units, its briefing family included, as this fleet's
+        # retired jobs. Every job name this composer writes is ONE dotless
+        # segment after the prefix.
+        foreign = ("com.test.child.keepalive", "com.test.child.briefing-kev-morning")
+        _seed(tmp_path, "com.test.plane-shadow", *foreign)
+        pruned = _reconcile_fleet_job_units(tmp_path, "com.test", set(), 0)
+        assert pruned == ["com.test.plane-shadow"]
+        for base in foreign:
+            assert (tmp_path / f"{base}.timer").exists(), base
+
+    def test_a_job_declared_twice_is_one_unit(self, tmp_path):
+        # A defaults job named code-audit-sweep and an enabled fleet.sweep both
+        # write <prefix>.code-audit-sweep. Counted per declaration, a complete
+        # compose read as PARTIAL (N of N+1) and the prune never ran.
+        fleet, md = load_fleet(_write(tmp_path / "f", """\
+            fleet:
+              name: test-fleet
+              service_prefix: com.test
+              defaults:
+                jobs:
+                  code-audit-sweep:
+                    script: $CLAUDLOBBY_ROOT/lib/code-audit-sweep.sh
+                    schedule: "*-*-* 03:00:00"
+                    type: oneshot
+              sweep:
+                enabled: true
+              bots:
+                solo:
+                  expertise: [eng]
+        """))
+        assert "code-audit-sweep" in md["jobs"] and fleet.sweep_enabled()
+        paths = _make_paths(tmp_path / "f")
+        timers = paths.runtime_fleet / "timers"
+        _seed(timers, "com.test.plane-shadow")
+        compose_fleet_timers(fleet, paths, md)
+        assert not (timers / "com.test.plane-shadow.timer").exists()
+        assert (timers / "com.test.code-audit-sweep.timer").exists()

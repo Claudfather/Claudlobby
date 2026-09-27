@@ -4282,12 +4282,18 @@ def _reconcile_fleet_job_units(
     """
     if not timers_dir.is_dir():
         return []
+    # Exactly `<prefix>.<job>`, the job ONE dotless segment: a longer dotted
+    # name (`com.review.child.keepalive` under `com.review`) is a unit of a
+    # fleet whose prefix EXTENDS this one, not a job of this fleet (#1765
+    # review). A dotted job name of this fleet's own is never pruned, which
+    # fails safe.
     existing = {
         f.stem
         for f in timers_dir.iterdir()
         if f.is_file()
         and f.suffix.lstrip(".") in _UNIT_EXTS
         and f.name.startswith(f"{prefix}.")
+        and "." not in f.stem[len(prefix) + 1:]
     }
     briefing = {b for b in existing if b.startswith(f"{prefix}.briefing-")}
     return _prune_stale_units(
@@ -4590,8 +4596,15 @@ def compose_fleet_timers(
         )
 
     # Config truth for the job half of the reconcile below: what this fleet
-    # DECLARES, independent of what the write loop managed to produce.
-    n_expected_jobs = (len(timers) if emit_defaults else 0) + (1 if sweep_on else 0)
+    # DECLARES, independent of what the write loop managed to produce. Counted
+    # as unit BASENAMES, not declarations: a defaults job named
+    # `code-audit-sweep` and an enabled `fleet.sweep` both write
+    # `<prefix>.code-audit-sweep`, and counting both read every complete
+    # compose as PARTIAL, so the prune never ran (#1765 review).
+    expected_jobs = {f"{prefix}.{name}" for name in timers} if emit_defaults else set()
+    if sweep_on:
+        expected_jobs.add(f"{prefix}.code-audit-sweep")
+    n_expected_jobs = len(expected_jobs)
     composed_jobs: set[str] = set()
 
     if emit_defaults:

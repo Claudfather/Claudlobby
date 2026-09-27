@@ -738,6 +738,18 @@ using only values derived from that input.
   torn read that escaped as an unwrapped `OSError` with none of the guidance the
   other branches give.
 
+#### Review round 3 — what a fleet owns in its timers dir, and how many units it declares
+
+- **Ownership** — the prune claims only `<prefix>.<job>` with the job ONE dotless
+  segment. A bare `<prefix>.` match read `com.review.child.*` (a fleet whose
+  prefix extends this one, its briefing family included) as `com.review`'s
+  retired jobs. No shipped layout shares a timers dir between fleets
+  (`Paths.runtime` is per overlay fleet, and root mode holds one fleet), so this
+  closes a deletion whose safety rested on that layout alone.
+- **Declared count** — counted as unit basenames, not declarations. A defaults
+  job named `code-audit-sweep` plus an enabled `fleet.sweep` write one file, so
+  every complete compose read as PARTIAL (9 of 10) and the prune never ran.
+
 ### Fixed — a unit that fails every start read as "boot in flight" forever, so a 23 h outage paged no one (#1769)
 
 On 2026-09-23 a broken `claude` install met an unclean reboot, and every bot on
