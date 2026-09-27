@@ -185,28 +185,33 @@ send_reload_command() {
 # ExecStart), which re-touches data/.spawn. The bridge-heal path leans on that —
 # bridge_down_state graces from .spawn, so the touch is what SPACES heal retries.
 # Keep it true for any new restart branch, or retries collapse to once-per-tick.
+_keepalive_before_restart() {
+    local desc="$1"
+    # The callback runs in restart_bot_service's dynamic scope. Its uniquely
+    # named local keeps a reason out of shared/global adapter state.
+    echo "$(ts_iso) RESTART — $_keepalive_restart_reason, $desc" >> "$LOG" || return $?
+    # Keep receipt diagnostics on the caller streams, just as before adoption;
+    # only supervisor output belongs in keepalive.log. The group below saves
+    # those streams in scoped descriptors before redirecting the action.
+    emit_keepalive_event "RESTART" "$_keepalive_restart_reason, $desc" >&3 2>&4
+}
+
 restart_bot_service() {
-    local reason="$1" desc
-    if [ "$_OS" = "Linux" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/.config/systemd/user/$BOT_SERVICE.service" ]; then
-        desc="systemctl --user restart $BOT_SERVICE"
-        echo "$(ts_iso) RESTART — $reason, $desc" >> "$LOG"
-        emit_keepalive_event "RESTART" "$reason, $desc"
-        systemctl --user restart "$BOT_SERVICE.service" >>"$LOG" 2>&1
-    elif [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
-        # Pre-rename unit still installed (fleet not regenerated yet).
-        desc="systemctl --user restart $BOT_NAME (pre-rename)"
-        echo "$(ts_iso) RESTART — $reason, $desc" >> "$LOG"
-        emit_keepalive_event "RESTART" "$reason, $desc"
-        systemctl --user restart "$BOT_NAME.service" >>"$LOG" 2>&1
-    elif [ "$_OS" = "Darwin" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
-        desc="launchctl kickstart $BOT_SERVICE"
-        echo "$(ts_iso) RESTART — $reason, $desc" >> "$LOG"
-        emit_keepalive_event "RESTART" "$reason, $desc"
-        launchctl kickstart -k "gui/$(id -u)/$BOT_SERVICE" >>"$LOG" 2>&1
-    else
-        echo "$(ts_iso) RESTART — $reason, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
-        emit_keepalive_event "RESTART" "$reason, falling back to start-bot.sh"
+    local _keepalive_restart_reason="$1" rc=0 output_rc=0
+    # Distinguish a failed output redirect from the selected action status:
+    # if the log cannot open, svc_kick never ran and must not license fallback.
+    {
+        svc_kick "$BOT_DIR" _keepalive_before_restart "${BOT_SERVICE:-}" "$BOT_NAME" || rc=$?
+    } 3>&1 4>&2 >>"$LOG" 2>&1 || output_rc=$?
+    if [ "$output_rc" -ne 0 ]; then return "$output_rc"; fi
+    if [ "$SVC_KICK_SELECTED" -eq 0 ]; then
+        echo "$(ts_iso) RESTART — $_keepalive_restart_reason, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
+        emit_keepalive_event "RESTART" "$_keepalive_restart_reason, falling back to start-bot.sh"
         "$LIB_DIR/start-bot.sh" "$BOT_DIR" >>"$LOG" 2>&1
+    else
+        # Unguarded return restores the caller's errexit/ERR-trap boundary
+        # after the status capture above; a failed restart remains script_error.
+        return "$rc"
     fi
 }
 
