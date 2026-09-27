@@ -304,3 +304,330 @@ def test_python_entrypoint_keeps_venv_spelling_for_site_guards(tmp_path, monkeyp
     assert lines[0] == "#!/bin/bash"
     assert shlex.split(lines[1]) == ["exec", str(python), "$@"]
     assert stat.S_IMODE(entry.stat().st_mode) == 0o755
+
+
+def inert_parent(monkeypatch, tmp_path):
+    """Model native answers and socket stat modes; never allocate a socket/PID."""
+    root = tmp_path / "private"
+    root.mkdir(mode=0o700)
+    registry = tmp_path / "pytest-root.json"
+    register(root, registry)
+    attempts, modeled = [], set()
+    original_stat = os.stat
+
+    def socket_stat(path, *args, **kwargs):
+        info = original_stat(path, *args, **kwargs)
+        # Placeholder regular files stand in for the native inode type only.
+        if info.st_ino in modeled:
+            fields = list(info)
+            fields[0] = stat.S_IFSOCK | stat.S_IMODE(info.st_mode)
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(os, "stat", socket_stat)
+    original_lstat = os.lstat
+    monkeypatch.setattr(os, "lstat", lambda path, **kw: socket_stat(path, follow_symlinks=False, **kw))
+    for index in range(2):
+        directory = root / f"p/test_pulse_completes_with_no_e{index}/root/tmux"
+        socket = directory / f"tmux-{os.getuid()}" / "pulse610"
+        socket.parent.mkdir(parents=True)
+        socket.write_text("modeled inert socket, not a real endpoint")
+        modeled.add(original_lstat(socket).st_ino)
+        for name in ("pulse610", "pulse610-none"):
+            attempts.append({"socket_dir": str(directory), "socket_name": name})
+    calls = []
+
+    def native(args, **kwargs):
+        calls.append(args)
+        assert args[1] == "-S" and args[3] == "list-panes", "eligible inert sockets must never be killed"
+        socket = Path(args[2])
+        diagnostic = (f"no server running on {socket}" if socket.exists() else
+                      f"error connecting to {socket} (No such file or directory)")
+        return subprocess.CompletedProcess(args, 1, "", diagnostic + "\n")
+
+    monkeypatch.setattr(proof.subprocess, "run", native)
+    monkeypatch.setattr(proof, "snapshot", lambda: [])
+    endpoints = proof.inspect_endpoints("/native/tmux", attempts, {})
+    residue = [str(Path(a['socket_dir']) / f'tmux-{os.getuid()}' / 'pulse610')
+               for a in attempts if a['socket_name'] == 'pulse610']
+    records = [{"kind": kind, "pid": 700 + i, **a}
+               for i, (a, kind) in enumerate((a, k) for a in attempts
+               if a['socket_name'] == 'pulse610' for k in ('#{pid}', '#{pane_pid}'))]
+    result = {"label": "parent-2", "source_commit": proof.PARENT, "rc": 0,
+              "timed_out": False, "valid_completed": True, "forbidden_calls": False,
+              "cases": [{"node": n, "status": "passed", "detail": ""}
+                        for n in sorted(proof.expected_nodes('parent', 2))],
+              "cleanup": {"records": records, "owned_groups": [12345],
+                  "survivors_before_emergency_cleanup": [],
+                  "attempted_endpoints_before_emergency_cleanup": endpoints,
+                  "socket_residue": residue}}
+    return root, registry, attempts, result, calls
+
+
+def test_historical_inert_parent_retains_red_and_requires_final_proof(tmp_path, monkeypatch):
+    root, registry, attempts, result, calls = inert_parent(monkeypatch, tmp_path)
+    plan = proof.historical_parent_socket_plan(result, root, registry)
+    assert plan is not None
+    assert not proof.clean(result)
+    assert not proof.expected_parent_resource_leak(result)
+    proof.retire_parent_sockets(result, plan, root, registry, '/native/tmux', attempts, {})
+    assert not proof.clean(result), "raw historical cleanup RED must survive safe removal"
+    assert not proof.expected_parent_resource_leak(result), "post-root evidence is still missing"
+    assert all(not Path(p).exists() for p in result['cleanup']['socket_residue'])
+    # Model the actual enclosing context removal, then exercise the real final door.
+    import shutil
+    registry.unlink()
+    shutil.rmtree(root)
+    proof.finish_parent_resource_proof(result, root, registry, '/native/tmux', attempts, {})
+    assert proof.expected_parent_resource_leak(result)
+    assert not proof.clean(result)
+    assert len(calls) == 16  # four complete independent inventories
+    assert result['expected_parent_resource_leak']['raw_clean'] is False
+    assert result['expected_parent_resource_leak']['kind'] == 'historical-parent-dead-socket-inodes'
+
+
+@pytest.mark.parametrize('defect', [
+    'candidate', 'mutant', 'other-parent', 'other-source', 'missing-source', 'timeout',
+    'invalid', 'forbidden', 'rc', 'case-missing', 'case-duplicate', 'case-failed',
+    'survivor', 'extra-endpoint', 'missing-endpoint', 'live', 'invalid-query',
+    'denied', 'unknown', 'extra-stdout', 'missing-inode', 'replaced-inode',
+    'wrong-uid', 'wrong-device', 'regular', 'symlink', 'extra-socket',
+    'missing-socket', 'none-socket', 'root-mode', 'root-inode', 'missing-registry',
+    'missing-record', 'extra-record',
+])
+def test_historical_exception_refuses_every_unproved_boundary(tmp_path, monkeypatch, defect):
+    root, registry, attempts, result, calls = inert_parent(monkeypatch, tmp_path)
+    endpoint = result['cleanup']['attempted_endpoints_before_emergency_cleanup'][0]
+    identity = endpoint.get('identity', {})
+    if defect == 'candidate': result['label'] = 'candidate-2'
+    elif defect == 'mutant': result['label'] = 'long-socket'
+    elif defect == 'other-parent': result['label'] = 'parent-1'
+    elif defect == 'other-source': result['source_commit'] = proof.CANDIDATE
+    elif defect == 'missing-source': result.pop('source_commit')
+    elif defect == 'timeout': result['timed_out'] = True
+    elif defect == 'invalid': result['valid_completed'] = False
+    elif defect == 'forbidden': result['forbidden_calls'] = True
+    elif defect == 'rc': result['rc'] = 1
+    elif defect == 'case-missing': result['cases'].pop()
+    elif defect == 'case-duplicate': result['cases'][0] = result['cases'][1]
+    elif defect == 'case-failed': result['cases'][0]['status'] = 'failure'
+    elif defect == 'survivor': result['cleanup']['survivors_before_emergency_cleanup'] = [{'pid': 700}]
+    elif defect == 'extra-endpoint': result['cleanup']['attempted_endpoints_before_emergency_cleanup'].append(dict(endpoint))
+    elif defect == 'missing-endpoint': result['cleanup']['attempted_endpoints_before_emergency_cleanup'].pop()
+    elif defect == 'live': endpoint['pids'] = [700]
+    elif defect == 'invalid-query': endpoint['query_invalid'] = True
+    elif defect == 'denied': endpoint['stderr'] = 'Permission denied'
+    elif defect == 'unknown': endpoint['stderr'] = 'unknown failure'
+    elif defect == 'extra-stdout': endpoint['stdout'] = 'surprise'
+    elif defect == 'missing-inode': endpoint.pop('identity', None)
+    elif defect == 'replaced-inode': identity['inode'] += 1
+    elif defect == 'wrong-uid': identity['uid'] += 1
+    elif defect == 'wrong-device': identity['device'] += 1
+    elif defect == 'regular': identity['mode'] = stat.S_IFREG | 0o600
+    elif defect == 'symlink':
+        path = Path(result['cleanup']['socket_residue'][0]); path.unlink(); path.symlink_to(registry)
+    elif defect == 'extra-socket': result['cleanup']['socket_residue'].append(str(root / 'extra'))
+    elif defect == 'missing-socket': Path(result['cleanup']['socket_residue'][0]).unlink()
+    elif defect == 'none-socket': result['cleanup']['attempted_endpoints_before_emergency_cleanup'][1]['socket_exists'] = True
+    elif defect == 'root-mode': root.chmod(0o755)
+    elif defect == 'root-inode':
+        record = json.loads(registry.read_text()); record['inode'] += 1; proof.write_json(registry, record)
+    elif defect == 'missing-registry': registry.unlink()
+    elif defect == 'missing-record': result['cleanup']['records'].pop()
+    elif defect == 'extra-record': result['cleanup']['records'].append({'pid': 123, 'kind': 'unexpected'})
+    assert proof.historical_parent_socket_plan(result, root, registry) is None
+    assert not proof.expected_parent_resource_leak(result)
+    assert len(calls) == 4, 'classification must never repair or query a native resource'
+
+
+@pytest.mark.parametrize('stage', ['before-unlink', 'after-unlink', 'after-root'])
+@pytest.mark.parametrize('defect', ['live-pid', 'live-group', 'query-invalid'])
+def test_independent_cleanup_observations_cannot_be_skipped(tmp_path, monkeypatch, stage, defect):
+    root, registry, attempts, result, calls = inert_parent(monkeypatch, tmp_path)
+    plan = proof.historical_parent_socket_plan(result, root, registry)
+    native = proof.subprocess.run
+    snapshots = 0
+    def observe():
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == {'before-unlink': 1, 'after-unlink': 2, 'after-root': 3}[stage]:
+            if defect == 'live-pid': return [{'pid': 700, 'pgid': 999}]
+            if defect == 'live-group': return [{'pid': 999, 'pgid': 12345}]
+        return []
+    def query(args, **kw):
+        number = (len(calls) - 4) // 4
+        r = native(args, **kw)
+        if number == {'before-unlink': 0, 'after-unlink': 1, 'after-root': 2}[stage] and defect == 'query-invalid':
+            return subprocess.CompletedProcess(args, 1, '', 'unknown query failure')
+        return r
+    monkeypatch.setattr(proof, 'snapshot', observe)
+    monkeypatch.setattr(proof.subprocess, 'run', query)
+    proof.retire_parent_sockets(result, plan, root, registry, '/native/tmux', attempts, {})
+    import shutil
+    registry.unlink(); shutil.rmtree(root)
+    proof.finish_parent_resource_proof(result, root, registry, '/native/tmux', attempts, {})
+    assert not proof.expected_parent_resource_leak(result)
+    assert not proof.clean(result)
+
+
+@pytest.mark.parametrize('defect', ['inode', 'ancestor-symlink', 'root-registration'])
+def test_unlink_rechecks_identity_after_absence_queries(tmp_path, monkeypatch, defect):
+    root, registry, attempts, result, calls = inert_parent(monkeypatch, tmp_path)
+    plan = proof.historical_parent_socket_plan(result, root, registry)
+    native = proof.subprocess.run
+    socket = Path(result['cleanup']['socket_residue'][0])
+    def query(args, **kw):
+        r = native(args, **kw)
+        if len(calls) == 8:
+            if defect == 'inode':
+                replacement = socket.with_name('replacement'); replacement.write_text('other owner'); replacement.replace(socket)
+            elif defect == 'ancestor-symlink':
+                parent = socket.parent; target = parent.with_name('moved'); parent.rename(target); parent.symlink_to(target, target_is_directory=True)
+            else: registry.unlink()
+        return r
+    monkeypatch.setattr(proof.subprocess, 'run', query)
+    proof.retire_parent_sockets(result, plan, root, registry, '/native/tmux', attempts, {})
+    assert socket.exists(), 'replacement resource must survive refused explicit unlink'
+    assert not proof.expected_parent_resource_leak(result)
+
+
+def test_candidate_residue_never_uses_historical_acceptance(tmp_path, monkeypatch):
+    root, registry, attempts, result, calls = inert_parent(monkeypatch, tmp_path)
+    plan = proof.historical_parent_socket_plan(result, root, registry)
+    proof.retire_parent_sockets(result, plan, root, registry, '/native/tmux', attempts, {})
+    import shutil
+    registry.unlink(); shutil.rmtree(root)
+    proof.finish_parent_resource_proof(result, root, registry, '/native/tmux', attempts, {})
+    assert proof.expected_parent_resource_leak(result)
+    result['label'] = 'candidate-2'
+    assert not proof.expected_parent_resource_leak(result)
+    assert not proof.cleanup_accepted(result), 'candidate cleanup must stay strictly clean'
+
+
+def modeled_pulse_arm(monkeypatch, tmp_path, label='parent-2'):
+    """Exercise run_arm end to end; model only native pytest/process/stat answers."""
+    base, source, _, _, _ = stub_arm(monkeypatch, tmp_path)
+    calls, modeled = [], set()
+    original_stat = os.stat
+    def socket_stat(path, *args, **kwargs):
+        info = original_stat(path, *args, **kwargs)
+        if info.st_ino in modeled:
+            fields = list(info); fields[0] = stat.S_IFSOCK | stat.S_IMODE(info.st_mode)
+            return os.stat_result(fields)
+        return info
+    monkeypatch.setattr(os, 'stat', socket_stat)
+    monkeypatch.setattr(os, 'lstat', lambda path, **kw: socket_stat(path, follow_symlinks=False, **kw))
+    def pytest_main(args):
+        from xml.etree import ElementTree as ET
+        basetemp = Path(next(x.split('=', 1)[1] for x in args if x.startswith('--basetemp=')))
+        state = base / 'runs' / label
+        for index in range(2):
+            directory = basetemp / f'test_pulse_completes_with_no_e{index}/root/tmux'
+            socket = directory / f'tmux-{os.getuid()}' / 'pulse610'
+            socket.parent.mkdir(parents=True); socket.write_text('modeled socket')
+            modeled.add(original_stat(socket).st_ino)
+            for name in ('pulse610', 'pulse610-none'):
+                proof.append(state / 'tmux-attempts.jsonl', {'socket_dir': str(directory), 'socket_name': name})
+            for offset, kind in enumerate(('#{pid}', '#{pane_pid}')):
+                proof.append(state / 'tmux.jsonl', {'socket_dir': str(directory), 'socket_name': 'pulse610',
+                                                  'pid': 700 + index * 2 + offset, 'kind': kind})
+        xml = Path(next(x.split('=', 1)[1] for x in args if x.startswith('--junitxml=')))
+        suite = ET.Element('testsuite')
+        for node in sorted(proof.expected_nodes('parent', 2)):
+            classname, name = node.rsplit('::', 1)
+            ET.SubElement(suite, 'testcase', classname=classname, name=name)
+        ET.ElementTree(suite).write(xml)
+        return 0
+    def native(args, **kwargs):
+        calls.append(args)
+        socket = Path(args[2])
+        assert args[1] == '-S'
+        diagnostic = (f'no server running on {socket}' if socket.exists() else
+                      f'error connecting to {socket} (No such file or directory)')
+        return subprocess.CompletedProcess(args, 1, '', diagnostic + '\n')
+    monkeypatch.setattr(pytest, 'main', pytest_main)
+    monkeypatch.setattr(proof.subprocess, 'run', native)
+    return base, source, calls
+
+
+def test_real_arm_reports_expected_historical_red_only_after_final_cleanup(tmp_path, monkeypatch):
+    import inspect
+    base, source, calls = modeled_pulse_arm(monkeypatch, tmp_path)
+    # Keep this regression executable on exact839, which had no source-pin kwarg.
+    options = {'source_commit': proof.PARENT} if 'source_commit' in inspect.signature(proof.run_arm).parameters else {}
+    result = proof.run_arm('parent-2', source, Path('/unused/python'), base, [proof.MODULES[2]], '/native/tmux', **options)
+    assert result['rc'] == 0 and len(result['cases']) == 4
+    assert not proof.clean(result), 'the original historical cleanup RED is retained'
+    assert result.get('expected_parent_resource_leak'), 'historical dead sockets need explicit independently verified classification'
+    assert proof.expected_parent_resource_leak(result)
+    assert proof.cleanup_accepted(result)
+    assert len(calls) == 16 and all(c[3] == 'list-panes' for c in calls)
+    evidence = base / 'evidence/parent-2'
+    assert json.loads((evidence / 'result.json').read_text()) == result
+    raw = json.loads((evidence / 'pre-cleanup-result.json').read_text())
+    assert not proof.clean(raw) and 'expected_parent_resource_leak' not in raw
+    assert json.loads((evidence / 'pytest-root-cleanup.json').read_text())['removed']
+
+
+def test_real_candidate_arm_keeps_generic_emergency_cleanup_and_refuses_residue(tmp_path, monkeypatch):
+    import inspect
+    base, source, calls = modeled_pulse_arm(monkeypatch, tmp_path, 'candidate-2')
+    options = {'source_commit': proof.CANDIDATE} if 'source_commit' in inspect.signature(proof.run_arm).parameters else {}
+    result = proof.run_arm('candidate-2', source, Path('/unused/python'), base, [proof.MODULES[2]], '/native/tmux', **options)
+    assert not proof.clean(result)
+    assert 'expected_parent_resource_leak' not in result
+    assert len([c for c in calls if c[3] == 'kill-server']) == 2
+    if hasattr(proof, 'cleanup_accepted'):
+        assert not proof.cleanup_accepted(result)
+    assert result['cleanup']['socket_residue'], 'subsequent root removal cannot erase raw candidate failure'
+
+
+def test_replaced_root_is_not_removed_by_context_cleanup(tmp_path, monkeypatch):
+    root = tmp_path / 'allocation'
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(proof.tempfile, 'mkdtemp', lambda **kw: str(root))
+    with pytest.raises(RuntimeError, match='replaced pytest root'):
+        with proof.private_pytest_directory() as allocated:
+            assert allocated == root
+            root.rename(tmp_path / 'original')
+            root.mkdir(mode=0o700)
+            (root / 'other-owner').write_text('preserve')
+    assert (root / 'other-owner').read_text() == 'preserve'
+
+
+@pytest.mark.parametrize('defect', ['root-not-removed', 'root-still-registered',
+    'root-invalid-before-removal', 'post-unlink-residue', 'lost-unlink-receipt',
+    'missing-final-query', 'raw-clean-forged', 'wrong-kind', 'emergency-used',
+    'missing-checked-pid', 'missing-checked-group'])
+def test_typed_resource_proof_requires_every_final_receipt(tmp_path, monkeypatch, defect):
+    root, registry, attempts, result, _ = inert_parent(monkeypatch, tmp_path)
+    plan = proof.historical_parent_socket_plan(result, root, registry)
+    proof.retire_parent_sockets(result, plan, root, registry, '/native/tmux', attempts, {})
+    import shutil
+    registry.unlink(); shutil.rmtree(root)
+    proof.finish_parent_resource_proof(result, root, registry, '/native/tmux', attempts, {})
+    assert proof.expected_parent_resource_leak(result)
+    receipt = result['expected_parent_resource_leak']
+    if defect == 'root-not-removed': receipt['root_removed'] = False
+    elif defect == 'root-still-registered': receipt['root_unregistered'] = False
+    elif defect == 'root-invalid-before-removal': receipt['root_valid_after_unlink'] = False
+    elif defect == 'post-unlink-residue': receipt['socket_inventory_after_unlink'] = ['unexpected']
+    elif defect == 'lost-unlink-receipt': receipt['unlinked'].pop()
+    elif defect == 'missing-final-query': receipt['after_root_cleanup']['endpoints'].pop()
+    elif defect == 'raw-clean-forged': receipt['raw_clean'] = True
+    elif defect == 'wrong-kind': receipt['kind'] = 'generic cleanup waiver'
+    elif defect == 'emergency-used': receipt['emergency_cleanup_skipped'] = False
+    elif defect == 'missing-checked-pid': receipt['after_root_cleanup']['checked_pids'].pop()
+    elif defect == 'missing-checked-group': receipt['after_root_cleanup']['checked_groups'] = []
+    assert not proof.expected_parent_resource_leak(result)
+    assert not proof.cleanup_accepted(result)
+
+
+def test_incomplete_socket_inventory_is_not_absence(tmp_path, monkeypatch):
+    root, registry, _, result, _ = inert_parent(monkeypatch, tmp_path)
+    def unreadable(*args, **kwargs):
+        kwargs['onerror'](PermissionError('modeled inaccessible owned subtree'))
+        return iter(())
+    monkeypatch.setattr(proof.os, 'walk', unreadable)
+    assert proof.historical_parent_socket_plan(result, root, registry) is None
+    assert not proof.expected_parent_resource_leak(result)

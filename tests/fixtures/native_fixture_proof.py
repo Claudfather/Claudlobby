@@ -6,12 +6,18 @@ hashing the entire tracked archive after each arm. Parent failures are evidence
 only when pytest completed; a timeout/denied native operation is INVALID.
 
 The observer records real Popen/tmux results without substituting process rows
-or return codes. Environment defaults and refusing clients form the external
+or return codes. One typed exception records the pinned parent pulse fixture's
+two dead socket inodes as a historical cleanup RED, with identity-checked unlink
+and independent absence evidence before unlink, after unlink and after root
+removal. It never changes clean() or applies to candidates/mutants.
+
+Environment defaults and refusing clients form the external
 isolation boundary; they are identical for parent, candidate and mutants.
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import inspect
 import io
@@ -287,7 +293,8 @@ def inspect_endpoints(real, attempts, env):
     for directory, name in sorted({(a["socket_dir"], a["socket_name"]) for a in attempts}):
         socket = Path(directory) / ("tmux-" + str(os.getuid())) / name
         row = {"socket_dir": directory, "socket_name": name,
-               "socket_exists": socket.exists(), "pids": [], "query_invalid": False}
+               "identity": path_identity(socket), "pids": [], "query_invalid": False}
+        row["socket_exists"] = row["identity"] is not None
         try:
             query = subprocess.run([real, "-S", str(socket), "list-panes", "-a", "-F", "#{pid} #{pane_pid}"],
                 env={**env, "TMUX_TMPDIR": directory}, capture_output=True, text=True, timeout=10)
@@ -306,6 +313,236 @@ def inspect_endpoints(real, attempts, env):
             row["timeout"] = True
         found.append(row)
     return found
+
+
+def inode_identity(info):
+    return {"device": info.st_dev, "inode": info.st_ino,
+            "uid": info.st_uid, "mode": info.st_mode}
+
+
+def path_identity(path):
+    try:
+        return inode_identity(Path(path).lstat())
+    except FileNotFoundError:
+        return None
+
+
+def socket_inventory(root):
+    # Do not follow directory symlinks; eligible endpoints must independently
+    # have canonical, non-symlink ancestors before they can be unlinked.
+    def refuse(error):
+        raise error
+
+    return sorted(str(Path(directory) / name)
+                  for directory, _, names in os.walk(root, followlinks=False, onerror=refuse)
+                  for name in names
+                  if stat.S_ISSOCK((Path(directory) / name).lstat().st_mode))
+
+
+def parent_observation(result, root):
+    """The one historical regression, without blessing it as clean()."""
+    if (result.get("label") != "parent-2" or result.get("source_commit") != PARENT
+            or result.get("rc") != 0 or result.get("timed_out")
+            or not result.get("valid_completed") or result.get("forbidden_calls")
+            or not inventory_valid("parent", 2, result["cases"])
+            or any(c["status"] != "passed" for c in result["cases"])
+            or result["cleanup"]["survivors_before_emergency_cleanup"]):
+        return None
+    directories = [root / f"p/test_pulse_completes_with_no_e{i}/root/tmux" for i in range(2)]
+    expected = {(str(d), name) for d in directories for name in ("pulse610", "pulse610-none")}
+    endpoints = result["cleanup"]["attempted_endpoints_before_emergency_cleanup"]
+    if len(endpoints) != 4 or {(e["socket_dir"], e["socket_name"]) for e in endpoints} != expected:
+        return None
+    sockets = {}
+    for e in endpoints:
+        path = Path(e["socket_dir"]) / ("tmux-" + str(os.getuid())) / e["socket_name"]
+        exists = e["socket_name"] == "pulse610"
+        if (e["pids"] or e["query_invalid"] or e.get("timeout")
+                or e.get("rc") != 1 or e.get("stdout") != ""
+                or e["socket_exists"] != exists):
+            return None
+        diagnostic = (f"no server running on {path}" if exists else
+                      f"error connecting to {path} (No such file or directory)")
+        if e.get("stderr", "").strip() != diagnostic:
+            return None
+        identity = e.get("identity")
+        if exists:
+            if not identity or not stat.S_ISSOCK(identity["mode"]) or identity["uid"] != os.getuid():
+                return None
+            sockets[str(path)] = dict(identity)
+        elif identity is not None:
+            return None
+    if sorted(result["cleanup"]["socket_residue"]) != sorted(sockets):
+        return None
+    records = result["cleanup"]["records"]
+    if (len(records) != 4 or any(type(r.get("pid")) is not int or r["pid"] <= 0 for r in records)
+            or len({r["pid"] for r in records}) != 4
+            or {(r.get("socket_dir"), r.get("socket_name"), r.get("kind")) for r in records}
+                != {(str(d), "pulse610", kind) for d in directories for kind in ("#{pid}", "#{pane_pid}")}
+            or not result["cleanup"].get("owned_groups")
+            or any(type(g) is not int or g <= 0 for g in result["cleanup"]["owned_groups"])):
+        return None
+    return sockets
+
+
+def historical_parent_socket_plan(result, root, registry):
+    """Refuse unless every raw observation and current inode is owned/inert."""
+    try:
+        if registered_pytest_root(registry) != root:
+            return None
+        sockets = parent_observation(result, root)
+        if sockets is None or socket_inventory(root) != sorted(sockets):
+            return None
+        root_identity = path_identity(root)
+        for name, identity in sockets.items():
+            path = Path(name)
+            if (path != path.resolve() or path_identity(path) != identity
+                    or identity["device"] != root_identity["device"]):
+                return None
+        return {"root": str(root), "root_identity": root_identity, "sockets": sockets}
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+
+
+def observe_parent_resources(result, real, attempts, env):
+    pids = sorted({r["pid"] for r in result["cleanup"]["records"]})
+    groups = list(result["cleanup"]["owned_groups"])
+    observation = {"checked_pids": pids, "checked_groups": groups}
+    try:
+        observation["endpoints"] = inspect_endpoints(real, attempts, env)
+        observation["survivors"] = [r for r in snapshot() if r["pid"] in pids or r["pgid"] in groups]
+    except (OSError, subprocess.SubprocessError) as exc:
+        observation["error"] = str(exc)
+    return observation
+
+
+def parent_absence_valid(observation, result, *, sockets_present):
+    """A failed/incomplete observation never means absent."""
+    try:
+        raw = result["cleanup"]["attempted_endpoints_before_emergency_cleanup"]
+        endpoints = observation["endpoints"]
+        if (observation.get("error") or observation["survivors"]
+                or observation["checked_pids"] != sorted({r["pid"] for r in result["cleanup"]["records"]})
+                or observation["checked_groups"] != result["cleanup"]["owned_groups"]
+                or len(endpoints) != len(raw)
+                or {(e["socket_dir"], e["socket_name"]) for e in endpoints}
+                    != {(e["socket_dir"], e["socket_name"]) for e in raw}):
+            return False
+        for e in endpoints:
+            path = Path(e["socket_dir"]) / ("tmux-" + str(os.getuid())) / e["socket_name"]
+            present = sockets_present and e["socket_name"] == "pulse610"
+            if (e["pids"] or e["query_invalid"] or e.get("timeout")
+                    or e["socket_exists"] != present
+                    or not tmux_absence(subprocess.CompletedProcess([], e["rc"], e["stdout"], e["stderr"]), path)):
+                return False
+            if present:
+                prior = next(r for r in raw if (r["socket_dir"], r["socket_name"]) == (e["socket_dir"], e["socket_name"]))
+                if e.get("identity") != prior["identity"] or e["stderr"].strip() != f"no server running on {path}":
+                    return False
+            elif e.get("identity") is not None:
+                return False
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def unlink_parent_socket_inodes(plan, root, registry, receipt):
+    """Pin directory descriptors without following links; unlink exact inodes.
+
+    No fixture children survive this boundary. As with filesystem identity
+    checks elsewhere in this controller, this is not an adversarial same-UID
+    concurrency sandbox; a cooperating hosted runner owns the entire root.
+    """
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        def open_directory(name, *, dir_fd=None):
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            stack.callback(os.close, fd)
+            return fd
+
+        if (registered_pytest_root(registry) != root
+                or path_identity(root) != plan["root_identity"]
+                or socket_inventory(root) != sorted(plan["sockets"])):
+            raise ValueError("historical root or socket inventory changed before unlink")
+        root_fd = open_directory(root)
+        if inode_identity(os.fstat(root_fd)) != plan["root_identity"]:
+            raise ValueError("historical root identity changed")
+        pinned = []
+        for name, identity in plan["sockets"].items():
+            path = Path(name)
+            relative = path.relative_to(root)
+            parent_fd = root_fd
+            for part in relative.parts[:-1]:
+                parent_fd = open_directory(part, dir_fd=parent_fd)
+            current = inode_identity(os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False))
+            if current != identity:
+                raise ValueError("historical socket identity changed before unlink")
+            pinned.append((path, parent_fd, identity))
+        # Both endpoints must pass before the first unlink. Repeat each identity
+        # check at its own operation and verify the named ancestry still matches.
+        for path, parent_fd, identity in pinned:
+            if (registered_pytest_root(registry) != root or path != path.resolve()
+                    or path_identity(root) != plan["root_identity"]
+                    or inode_identity(path.parent.lstat()) != inode_identity(os.fstat(parent_fd))
+                    or inode_identity(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)) != identity):
+                raise ValueError("historical socket ownership changed at unlink")
+            os.unlink(path.name, dir_fd=parent_fd)
+            receipt["unlinked"].append({"path": str(path), "identity": identity})
+
+
+def retire_parent_sockets(result, plan, root, registry, real, attempts, env):
+    receipt = {"kind": "historical-parent-dead-socket-inodes", "raw_clean": clean(result),
+               "plan": plan, "unlinked": [], "emergency_cleanup_skipped": True}
+    result["expected_parent_resource_leak"] = receipt
+    receipt["before_unlink"] = observe_parent_resources(result, real, attempts, env)
+    if (not parent_absence_valid(receipt["before_unlink"], result, sockets_present=True)
+            or historical_parent_socket_plan(result, root, registry) != plan):
+        receipt["refusal"] = "historical resources changed before unlink"
+        return
+    try:
+        unlink_parent_socket_inodes(plan, root, registry, receipt)
+    except (OSError, ValueError) as exc:
+        receipt["refusal"] = str(exc)
+        return
+    receipt["after_unlink"] = observe_parent_resources(result, real, attempts, env)
+    receipt["root_valid_after_unlink"] = (registered_pytest_root(registry) == root
+        and path_identity(root) == plan["root_identity"])
+    receipt["socket_inventory_after_unlink"] = socket_inventory(root)
+
+
+def finish_parent_resource_proof(result, root, registry, real, attempts, env):
+    receipt = result.get("expected_parent_resource_leak")
+    if receipt is None:
+        return
+    receipt["root_removed"] = path_identity(root) is None
+    receipt["root_unregistered"] = path_identity(registry) is None
+    receipt["after_root_cleanup"] = observe_parent_resources(result, real, attempts, env)
+
+
+def expected_parent_resource_leak(result):
+    """Typed historical RED + independently proved cleanup, never clean()."""
+    try:
+        receipt = result["expected_parent_resource_leak"]
+        plan = receipt["plan"]
+        sockets = parent_observation(result, Path(plan["root"]))
+        return (sockets is not None and sockets == plan["sockets"] and not clean(result)
+                and receipt["kind"] == "historical-parent-dead-socket-inodes"
+                and receipt["raw_clean"] is False and not receipt.get("refusal")
+                and receipt["emergency_cleanup_skipped"] is True
+                and receipt["unlinked"] == [{"path": p, "identity": i} for p, i in sockets.items()]
+                and receipt["root_valid_after_unlink"] is True
+                and receipt["socket_inventory_after_unlink"] == []
+                and receipt["root_removed"] is True and receipt["root_unregistered"] is True
+                and parent_absence_valid(receipt["before_unlink"], result, sockets_present=True)
+                and parent_absence_valid(receipt["after_unlink"], result, sockets_present=False)
+                and parent_absence_valid(receipt["after_root_cleanup"], result, sockets_present=False))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def cleanup_accepted(result):
+    return clean(result) or (result.get("label") == "parent-2" and expected_parent_resource_leak(result))
 
 
 def child_pytest(source, state, xml, selection):
@@ -441,17 +678,31 @@ def install_network_guard(python, base):
     (site / "_native_fixture_network_guard.pth").write_text("import _native_fixture_network_guard\n")
 
 
-def run_arm(label, source, python, base, selection, real_tmux):
+@contextmanager
+def private_pytest_directory():
+    """Remove only the allocation whose ownership we still recognize."""
+    root = Path(tempfile.mkdtemp(prefix="np-", dir="/tmp")).resolve()
+    identity = path_identity(root)
+    try:
+        yield root
+    finally:
+        if path_identity(root) != identity:
+            raise RuntimeError("refused cleanup of a replaced pytest root")
+        shutil.rmtree(root)
+
+
+def run_arm(label, source, python, base, selection, real_tmux, *, source_commit=None):
     state = base / "runs" / label
     state.mkdir(parents=True)
     registry = base / "pytest-root.json"
     assert not registry.exists(), "a different proof arm still owns the pytest root"
     root = None
+    result = None
     registry_identity = None
     try:
         # Keep the allocation itself intact: pytest may replace its /p child.
         # A short root applies equally to the historical parent and candidate.
-        with tempfile.TemporaryDirectory(prefix="np-", dir="/tmp") as directory:
+        with private_pytest_directory() as directory:
             root = Path(directory).resolve()
             info = root.stat()
             record = {"path": str(root), "device": info.st_dev, "inode": info.st_ino}
@@ -473,7 +724,7 @@ def run_arm(label, source, python, base, selection, real_tmux):
                 record["longest_pulse_endpoint"] = str(endpoint)
                 record["endpoint_bytes"] = len(os.fsencode(endpoint))
                 write_json(state / "pytest-root.json", record)
-                return _run_arm(label, source, python, base, selection, real_tmux, state)
+                result = _run_arm(label, source, python, base, selection, real_tmux, state, source_commit)
             finally:
                 if registry_identity is not None:
                     try:
@@ -487,17 +738,26 @@ def run_arm(label, source, python, base, selection, real_tmux):
                         registry.unlink()
     finally:
         if root is not None:
-            receipt = {"path": str(root), "removed": not root.exists(),
-                       "unregistered": not registry.exists()}
+            receipt = {"path": str(root), "removed": path_identity(root) is None,
+                       "unregistered": path_identity(registry) is None}
             evidence = base / "evidence" / label
             evidence.mkdir(parents=True, exist_ok=True)
             if (state / "pytest-root.json").exists():
                 shutil.copyfile(state / "pytest-root.json", evidence / "pytest-root.json")
             write_json(evidence / "pytest-root-cleanup.json", receipt)
             assert receipt["removed"] and receipt["unregistered"], "pytest root cleanup failed"
+    if result is not None and "expected_parent_resource_leak" in result:
+        # This is deliberately outside the private allocation context. A root
+        # removal receipt alone is not independent native/process absence.
+        evidence = base / "evidence" / label
+        env = json.loads((evidence / "environment.json").read_text())["env"]
+        attempts = result["cleanup"]["attempted_endpoints_before_emergency_cleanup"]
+        finish_parent_resource_proof(result, root, registry, real_tmux, attempts, env)
+        write_json(evidence / "result.json", result)
+    return result
 
 
-def _run_arm(label, source, python, base, selection, real_tmux, state):
+def _run_arm(label, source, python, base, selection, real_tmux, state, source_commit=None):
     tools, native = make_tools(state, python, real_tmux, base)
     env = environment(source, state, tools, base)
     evidence = base / "evidence" / label
@@ -532,32 +792,51 @@ def _run_arm(label, source, python, base, selection, real_tmux, state):
             break
         time.sleep(0.05)
     endpoints = inspect_endpoints(real_tmux, attempts, env)
-    # A cleanup defect stays a failure even if this emergency private cleanup
-    # succeeds. Never target an ambient server or process selected by name.
-    for endpoint in endpoints:
-        if endpoint["pids"] or endpoint["socket_exists"] or endpoint["query_invalid"]:
-            try:
-                socket = Path(endpoint["socket_dir"]) / ("tmux-" + str(os.getuid())) / endpoint["socket_name"]
-                subprocess.run([real_tmux, "-S", str(socket), "kill-server"],
-                    env={**env, "TMUX_TMPDIR": endpoint["socket_dir"]}, timeout=10, check=False)
-            except subprocess.TimeoutExpired:
-                endpoint["emergency_cleanup_timed_out"] = True
-    for group in groups:
-        if any(s["pgid"] == group for s in survivors):
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
     sockets = sorted({r["socket_dir"] for r in attempts})
     socket_residue = [str(p) for directory in sockets for p in Path(directory).rglob("*")
                       if p.is_socket()]
     cases = rows(xml) if xml.exists() else []
-    result = {"label": label, "rc": rc, "timed_out": timed_out, "cases": cases,
+    result = {"label": label, "source_commit": source_commit, "rc": rc,
+              "timed_out": timed_out, "cases": cases,
               "valid_completed": valid_completed(rc, cases, timed_out, log.read_text()),
-              "cleanup": {"records": records, "survivors_before_emergency_cleanup": survivors,
+              "cleanup": {"records": records, "owned_groups": sorted(groups),
+                          "survivors_before_emergency_cleanup": survivors,
                           "attempted_endpoints_before_emergency_cleanup": endpoints,
                           "socket_residue": socket_residue},
               "forbidden_calls": (state / "forbidden-calls").exists()}
+    # Save raw native evidence before any explicit repair. The historical RED
+    # remains in result.json too; typed proof records are additional evidence.
+    write_json(evidence / "pre-cleanup-result.json", result)
+    root = registered_pytest_root(base / "pytest-root.json")
+    plan = historical_parent_socket_plan(result, root, base / "pytest-root.json") if root else None
+    if plan is not None:
+        retire_parent_sockets(result, plan, root, base / "pytest-root.json", real_tmux, attempts, env)
+    else:
+        # Generic and candidate defects remain invalid even if emergency private
+        # cleanup succeeds. Never target ambient processes/servers by name.
+        result["cleanup"]["emergency_cleanup"] = []
+        for endpoint in endpoints:
+            if endpoint["pids"] or endpoint["socket_exists"] or endpoint["query_invalid"]:
+                socket = Path(endpoint["socket_dir"]) / ("tmux-" + str(os.getuid())) / endpoint["socket_name"]
+                emergency = {"socket": str(socket)}
+                try:
+                    query = subprocess.run([real_tmux, "-S", str(socket), "kill-server"],
+                        env={**env, "TMUX_TMPDIR": endpoint["socket_dir"]}, timeout=10,
+                        check=False, capture_output=True, text=True)
+                    emergency.update(rc=query.returncode, stdout=query.stdout, stderr=query.stderr)
+                except subprocess.TimeoutExpired:
+                    endpoint["emergency_cleanup_timed_out"] = True
+                    emergency["timed_out"] = True
+                result["cleanup"]["emergency_cleanup"].append(emergency)
+        for group in groups:
+            if any(s["pgid"] == group for s in survivors):
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        # Preserve the original post-emergency residue field for generic arms.
+        result["cleanup"]["socket_residue"] = [str(p) for directory in sockets
+            for p in Path(directory).rglob("*") if p.is_socket()]
     for name in ("processes.jsonl", "tmux.jsonl", "tmux-attempts.jsonl", "native-observations.jsonl", "forbidden-calls"):
         if (state / name).exists():
             shutil.copyfile(state / name, evidence / name)
@@ -602,7 +881,7 @@ def main(output):
         install_network_guard(python, base)
         installations[role] = (source, python, hashes)
         for index, module in enumerate(MODULES):
-            results.append(run_arm(role + "-" + str(index), source, python, base, [module], real_tmux))
+            results.append(run_arm(role + "-" + str(index), source, python, base, [module], real_tmux, source_commit=sha))
             verify(source, hashes)
     source, python, hashes = installations["candidate"]
     for name in ("remove-fallback", "remove-failure-guard", "raw-comm", "wrong-ancestor",
@@ -622,7 +901,7 @@ def main(output):
         failures.append("non-private network attempted")
     for r in results:
         passed = all(c["status"] in ("passed", "skipped") for c in r["cases"])
-        if not clean(r):
+        if not cleanup_accepted(r):
             failures.append(r["label"] + ": invalid execution or cleanup")
         elif r["label"].startswith("candidate-") and (r["rc"] != 0 or not passed):
             failures.append(r["label"] + ": candidate not green")
