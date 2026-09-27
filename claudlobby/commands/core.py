@@ -434,6 +434,8 @@ def cmd_diff(args) -> int:
         timer_drift = diff_fleet_timers(fleet, paths, merged_defaults)
         if timer_drift:
             sys.stdout.write(timer_drift)
+    from ..env_scaffold import diff_env_scaffolding
+    sys.stdout.write(diff_env_scaffolding(fleet, paths, bot_name=args.bot or None))
     from ..host_guard_lists import diff_host_guard_lists
     sys.stdout.write(diff_host_guard_lists(paths))
     return 0
