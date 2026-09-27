@@ -39,6 +39,11 @@ are isolated" while every bot could read every other bot's transcripts.
   install would compose and names each class that falls short, including a bot
   that joined the host since the last generate; it prints one line per fleet
   naming what the unarmed bots' deny lists do not cover.
+- The post-compose wiring audit (`path_audit.audit_bot_paths`) no longer reads
+  `permissions.deny` in `settings.local.json`. A deny is a restriction, not
+  wiring, which the source-side guard already ruled; the host-wide rules name
+  other fleets on purpose, and a throwaway-root `generate` of an armed bot
+  failed on them. Every other path in the file is still scanned.
 - The bound, stated wherever the rules are: they gate Claude's own tools, and a
   literal path in Bash. `python3 -c "open(...)"`, a `$HOME/...` path and any
   script or hook are not stopped. They reduce accidental reads; they are not
