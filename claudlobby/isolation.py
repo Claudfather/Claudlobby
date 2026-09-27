@@ -434,7 +434,10 @@ _NEGATION = re.compile(
 )
 #: A verb that turns a negation back into an instruction: "Do not skip
 #: `source ~/.env`" asks for the read.
-_REVERSAL = re.compile(r"\b(?:skip|skipping|forget|omit|miss|neglect|fail|overlook)\b")
+_REVERSAL = re.compile(
+    r"\b(?:skip|skipping|skipped|forget|forgetting|forgotten|omit|omitted|"
+    r"miss|missed|neglect|neglected|fail|failed|overlook|overlooked)\b"
+)
 #: The span as the subject of a negated predicate ("`source ~/.env` is not
 #: needed") is a mention too: the one negation that follows the span.
 _NEGATED_SUBJECT = re.compile(
@@ -462,8 +465,12 @@ def _negated_before(before: str) -> bool:
 
 def _negated_after(after: str) -> bool:
     """Whether the span's own clause goes on with a negated verb, making the
-    span its subject: `` `X` is not needed``, `` `X` isn't required``."""
-    return bool(_NEGATED_SUBJECT.match(_CLAUSE.split(_prose(after))[0]))
+    span its subject: `` `X` is not needed``, `` `X` isn't required``. A
+    reversal in the rest of the clause undoes it, as it does before the span:
+    `` `X` cannot be skipped`` asks for the read."""
+    clause = _CLAUSE.split(_prose(after))[0]
+    negated = _NEGATED_SUBJECT.match(clause)
+    return bool(negated) and not _REVERSAL.search(clause[negated.end():])
 
 
 def env_reads(text: str, *, home: Path | str | None = None) -> list[tuple[int, str]]:

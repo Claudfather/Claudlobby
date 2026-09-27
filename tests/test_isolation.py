@@ -484,6 +484,48 @@ def test_otis_three_lines_from_the_1918_review_fire(line):
     assert iso.env_reads(line) == [(1, line)]
 
 
+@pytest.mark.parametrize("line", [
+    "`source ~/.env` cannot be skipped.",
+    "`source ~/.env` shouldn't be omitted.",
+    "`source ~/.env` must not be skipped.",
+    "`source ~/.env` should never be forgotten.",
+])
+def test_a_double_negative_after_the_span_is_an_instruction(line):
+    """otis's review of #1920: the negated-subject rule read these as mentions.
+    The first two fired on main, so that was a regression; a reversal after
+    the negation now keeps the span an instruction, as it does before it."""
+    assert iso.env_reads(line) == [(1, line)]
+
+
+def _home_read(host):
+    """(fleet, paths, the overlay file, its line) for a `source <home>/.env`
+    whose home sits outside /home, /Users and /root, so only the composer's
+    own home can name it."""
+    root, home, fleet, paths = host
+    line = f"source {home}/.env"
+    assert iso.env_reads(f"```\n{line}\n```") == []  # the premise
+    return fleet, paths, _overlay_resource(paths, fleet, f"```bash\n{line}\n```")
+
+
+def test_validate_passes_the_composers_home_to_the_lint(host):
+    """otis's mutant on #1920 (drop `home=home` from validate's call) survived
+    every test; this is the one it fails."""
+    from claudlobby.validator import validate
+
+    fleet, paths, res = _home_read(host)
+    hits = [w for k, w in validate(fleet, paths).categorized() if k == "isolation-env-read"]
+    assert len(hits) == 1 and f"{res}:9 " in hits[0]
+
+
+def test_freshbox_passes_the_composers_home_to_the_lint(host):
+    from claudlobby.freshbox import _isolation_findings
+
+    fleet, paths, res = _home_read(host)
+    found = [f for f in _isolation_findings(fleet.bots["ravi"], fleet, paths)
+             if f.kind == "isolation_env_read"]
+    assert len(found) == 1 and f"{res}:9 " in found[0].detail
+
+
 def test_the_composers_own_home_is_recognised_by_its_absolute_path():
     text = "```\nsource /srv/people/someone/.env\n```"
     assert iso.env_reads(text) == []  # not a conventional root...
