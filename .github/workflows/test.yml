@@ -27,8 +27,25 @@ jobs:
         # (tracked in the issue thread for #229). The rest of the suite must
         # stay green.
         run: |
-          .venv/bin/python -m pytest -v \
-            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn
+          set +e
+          printf 'running\n' > pytest.status
+          .venv/bin/python -m pytest -v --junitxml=pytest-results.xml \
+            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn > pytest.log 2>&1
+          result=$?
+          printf '%s\n' "$result" > pytest.rc
+          printf 'completed (exit %s)\n' "$result" > pytest.status
+          cat pytest.log
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-ubuntu-latest-py3.11
+          path: |
+            pytest.log
+            pytest.rc
+            pytest.status
+            pytest-results.xml
+          if-no-files-found: error
 
   supported-platforms:
     name: supported (${{ matrix.os }}, py${{ matrix.python }})

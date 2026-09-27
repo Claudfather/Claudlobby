@@ -7,8 +7,9 @@ these additional two combinations and does not expand our support promise.
 The only default-suite deselection remains the existing hook-command case
 tracked by #229. Optional vault/model/auth tests retain their skip reasons.
 
-Each added lane installs the package in a local virtual environment. Its log
-and JUnit report are uploaded even on failure. Run targeted checks in an
+Every lane installs the package in a local virtual environment. Its log,
+JUnit report (including skip reasons), completion marker and exit status are
+uploaded even on failure. Run targeted checks in an
 isolated checkout with scratch HOME and Plane isolation first; this repository
 can also be a live fleet installation, so running an unreviewed full suite in
 that installation is unsafe.
