@@ -2202,7 +2202,7 @@ val_events "$ROOT" "$F2" "$BUSYP" pane_stuck | grep -q '"type":"pane_stuck"' && 
 harness_check "pane_stuck NOT fired for a working bot (esc-to-interrupt pane, active turn)" "$r"
 
 # #611: the summary must show the TMUX_SOCKET-only bot as up, not a false DOWN.
-_sumfile="$ROOT/state/pulse/pulse-summary.txt"
+_sumfile="$ROOT/state/pulse/${F2}.pulse-summary.txt"
 printf '%s' "$(grep "^$SOCKB " "$_sumfile" 2>/dev/null || true)" | awk '{print $2}' | grep -qx up && r=yes || r=no
 harness_check "#611 summary session=up for a bot whose TMUX_SOCKET != BOT_SERVICE" "$r"
 # related: a BOT_SERVICE-less bot must not show a false SERVICE DOWN in the summary.
