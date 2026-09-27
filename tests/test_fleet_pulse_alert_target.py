@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 
 from tests.conftest import read_fleet_events
+from tests.plane_fixtures import F
 from tests.test_fleet_pulse_escalated import _pulse, _pulse_lib, _scene, needs_tmux
 
 CHAT_ESC = "-1003333333333"
@@ -29,7 +30,7 @@ def _events(root, kind):
 
 
 def _marker(root):
-    return root / "state" / "pulse" / "fleet.alert_target_refused"
+    return root / "state" / "pulse" / f"{F}.alert_target_refused"
 
 
 # --- a refused escalation target is loud ------------------------------------------

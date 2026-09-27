@@ -81,7 +81,7 @@ def _two_dead_bots(tmp_path):
 
 
 def _summary(root):
-    return (root / "state" / "pulse" / "pulse-summary.txt").read_text()
+    return (root / "state" / "pulse" / f"{F}.pulse-summary.txt").read_text()
 
 
 @needs_tmux

@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — one fleet's pulse page no longer silences another fleet's (#1903)
+
+`fleet-pulse.sh` keeps its debounce markers in `state/pulse`, a directory
+every fleet on the host shares, and three kinds of file there were named
+without the fleet. The 10-minute burst debounce (`escalation_<type>`) was one
+file per host: when two fleets had the same kind of critical burst, the first
+fleet's page silenced the second's. A fleet with no such burst deleted the
+other fleet's marker on every pass, so that fleet paged every pass instead of
+every 10 minutes. The reader-outage and refused-target debounces were keyed by
+the literal word `fleet`, so one fleet's outage page silenced another's. The
+summary table was one file, holding whichever fleet ran last. All three are now
+keyed by fleet (`<fleet>.<key>`, `<fleet>.pulse-summary.txt`), and the burst
+page names its fleet. In runs with two fleets launched at once and both
+bursting, both fleets paged in 0 of 10 rounds before and 10 of 10 after.
+Markers under the old names are never read again, so a burst or outage in
+progress when this lands pages once more.
+
 ### Fixed — two fleets' pulse passes no longer read or delete each other's critical-event window (#1901)
 
 `fleet-pulse.sh` kept four scratch files at fixed names in `state/pulse`, a
