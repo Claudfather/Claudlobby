@@ -233,6 +233,34 @@ class TestTheCheckpointCadence:
         assert wal.stat().st_size == 0, "no reader left, and the WAL was not truncated"
         w.close()
 
+    def test_a_failed_restore_REOPENS_rather_than_keep_a_writer_that_cannot_wait(
+            self, tmp_path):
+        """The busy timeout is off only for the checkpoint call. If putting it
+        back fails, the writer must not carry on with no timeout: its next
+        commit would fail the moment another process held the lock. It
+        reopens instead, with the timeout db.connect() sets."""
+
+        class RestoreFails:
+            def __init__(self, conn):
+                self._c = conn
+
+            def execute(self, sql, *args):
+                if sql.startswith("PRAGMA busy_timeout = ") and not sql.endswith("= 0"):
+                    raise sqlite3.OperationalError("injected: restore failed")
+                return self._c.execute(sql, *args)
+
+            def close(self):
+                self._c.close()
+
+        w = PlaneWriter(tmp_path, wal_bytes=1, every_batches=10**6, every_seconds=9999)
+        real = w.connection()
+        w._conn = RestoreFails(real)
+        w.after_batch()                                 # must not raise
+        fresh = w.connection()
+        assert w.reconnects == 1 and fresh is not real
+        assert fresh.execute("PRAGMA busy_timeout").fetchone()[0] > 0
+        w.close()
+
     def test_sqlite_never_checkpoints_inside_the_commit(self, tmp_path):
         """SQLite's own auto-checkpoint runs inside COMMIT, which is before the
         daemon can reply. The explicit cadence, after the reply, is the only
