@@ -111,7 +111,7 @@ Readers: claudlobby events / report-back / uptime / status / brief; the plane's 
 | `runtime/bots/<bot>/data/.idle` | Idle marker — touched by keepalive.sh on IDLE, cleared on BUSY. Fleet-pulse reads mtime. | Transient (current state only) |
 | `runtime/bots/<bot>/data/.last-tool-call` | Tool-call marker — touched by bot-vitals.sh on every hook. Stale mtime + no `.idle` = activity_stuck candidate. | Transient (current state only) |
 | `state/fleet-state.json` | Per-bot current status + task | Persistent |
-| `state/pulse/pulse-summary.txt` | Last fleet-pulse human-readable output | Overwritten each run |
+| `state/pulse/<fleet>.pulse-summary.txt` | Last fleet-pulse human-readable output | Overwritten each run |
 | `state/pulse/<bot>.pane_hash` | Pane change detection markers | Persistent |
 
 ## Configuration
