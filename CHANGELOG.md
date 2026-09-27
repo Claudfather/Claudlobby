@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — `finance`, `spending` and `deploy-status` no longer read `~/.env` (#1665)
+
+The three skills told the model to load its credentials with `source ~/.env`
+(`finance`, `spending`) or `set -a; . ~/.env; set +a` (`deploy-status`) before
+a command. The variables they need are already in the session: `start-bot.sh`
+sources the `.env` tiers at boot and every Bash tool call inherits them.
+Measured on the live sessions of the two bots that carry these skills,
+`SIMPLEFIN_ACCESS_URL` and `RAILWAY_PERSONAL_TOKEN` were both present (checked
+by name, never by value). So the read loaded nothing new, while making each
+skill depend on reading a secrets file through the model's own tools, which
+the planned Layer 0b isolation rules deny.
+
+- Each read is replaced by a check that prints nothing when the variable is
+  set and stops the command with a message naming the fix when it is not:
+  `: "${SIMPLEFIN_ACCESS_URL:?not in the session env - ...}"`. It never prints
+  the value.
+- `spending`'s weekly block reads saved snapshots only, so it loses the read
+  and gains no check.
+- A credential rotated in `~/.env` now reaches these skills at the bot's next
+  restart, like every other composed secret.
+
 ### Changed — `validate` reports a shared cause once and names what kind each warning is (#1663)
 
 `claudlobby validate` printed dozens of warnings at rc 0, and `doctor` showed
