@@ -1984,11 +1984,11 @@ def composed_text_sources(
     out: list[tuple[Path, str]] = []
     seen: set[Path] = set()
 
-    def _add_file(path: Path | None) -> None:
-        if path is not None and path.is_file() and path not in seen:
-            seen.add(path)
+    def _add_file(told: Path | None) -> None:
+        if told is not None and told.is_file() and told not in seen:
+            seen.add(told)
             try:
-                out.append((path, path.read_text(encoding="utf-8")))
+                out.append((told, told.read_text(encoding="utf-8")))
             except (OSError, UnicodeDecodeError):
                 pass
 
