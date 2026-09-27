@@ -18,9 +18,11 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 
 PARENT = "5943907f0bd076cb44cd77f4e67d6d6bdfa87467"
@@ -79,6 +81,34 @@ def base_path(value):
     require(base != runner_temp and owned(base, runner_temp), "proof must be below RUNNER_TEMP")
     require(not re.search(r"[\s'\"&<>%{};\\]", str(base)), "unsupported renderer proof path")
     return base
+
+
+def allocate():
+    """Own a traversable parent without changing an existing runner directory.
+
+    Linux's second UID cannot traverse a private RUNNER_TEMP ancestor. Keep
+    the controller and administrator receipts outside the later-chowned base.
+    """
+    hosted_only()
+    parent = Path(tempfile.mkdtemp(prefix=token() + "-", dir=(
+        "/tmp" if sys.platform == "linux" else os.environ["RUNNER_TEMP"]))).resolve()
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        require(info.st_uid == os.getuid() and stat.S_ISDIR(info.st_mode)
+                and stat.S_IMODE(info.st_mode) == 0o700, "allocation ownership differs")
+        os.fchmod(descriptor, 0o755)
+    finally:
+        os.close(descriptor)
+    controller = parent / "controller.py"
+    with controller.open("xb") as stream:
+        stream.write(Path(__file__).read_bytes())
+    controller.chmod(0o644)
+    save(parent / "allocation.json", {"parent": str(parent), "uid": info.st_uid,
+         "device": info.st_dev, "inode": info.st_ino, "mode": "0755",
+         "controller_sha256": digest(controller)})
+    return {"parent": str(parent), "base": str(parent / "installer-ownership-proof"),
+            "controller": str(controller)}
 
 
 def command(argv, env, log, *, timeout=20, check=True, grouped=True):
@@ -248,7 +278,7 @@ def manager_stopped(base):
     result = command(["/usr/bin/sudo", "/usr/bin/systemctl", "show", "--no-pager",
                       "--property=LoadState,ActiveState,SubState,FragmentPath",
                       f"user@{row.pw_uid}.service"], env,
-                     base / "evidence/linux-manager-postcondition.jsonl", check=False)
+                     base.parent / "linux-manager-postcondition.jsonl", check=False)
     parse_stopped_manager(result)
 
 
@@ -649,6 +679,42 @@ def self_check():
                 with self.assertRaises(RuntimeError):
                     prepare("/nonexistent-installer-proof")
 
+        def test_allocation_refuses_local_entry_before_creating_paths(self):
+            with patch.dict(os.environ, {}, clear=True), patch.object(tempfile, "mkdtemp", side_effect=AssertionError("allocation before gate")):
+                with self.assertRaises(RuntimeError):
+                    allocate()
+
+        def test_allocation_owns_only_new_parent_and_copies_exact_controller(self):
+            with tempfile.TemporaryDirectory() as directory:
+                outer = Path(directory).resolve()
+                old = outer / "private-runner-temp"
+                old.mkdir(mode=0o700)
+                new = outer / "new-parent"
+                def private_parent(**kwargs):
+                    self.assertEqual(kwargs["dir"], "/tmp")
+                    new.mkdir(mode=0o700)
+                    return str(new)
+                with patch(__name__ + ".hosted_only"), patch.object(sys, "platform", "linux"), patch.dict(os.environ, {"RUNNER_TEMP": str(old), "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}), patch.object(tempfile, "mkdtemp", side_effect=private_parent):
+                    paths = allocate()
+                self.assertEqual(Path(paths["base"]).parent, new)
+                self.assertFalse(Path(paths["base"]).exists())  # prepare needs a fresh base
+                self.assertEqual(Path(paths["controller"]).parent, new)
+                self.assertEqual(Path(paths["controller"]).read_bytes(), Path(__file__).read_bytes())
+                self.assertEqual(stat.S_IMODE(new.stat().st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE(Path(paths["controller"]).stat().st_mode), 0o644)
+                self.assertEqual(stat.S_IMODE(old.stat().st_mode), 0o700)
+                receipt = load(new / "allocation.json")
+                self.assertEqual((receipt["device"], receipt["inode"]), (new.stat().st_dev, new.stat().st_ino))
+
+        def test_allocation_refuses_nonprivate_existing_directory(self):
+            with tempfile.TemporaryDirectory() as directory:
+                existing = Path(directory)
+                existing.chmod(0o755)
+                with patch(__name__ + ".hosted_only"), patch.dict(os.environ, {"RUNNER_TEMP": str(existing), "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}), patch.object(tempfile, "mkdtemp", return_value=str(existing)):
+                    with self.assertRaises(RuntimeError):
+                        allocate()
+                self.assertFalse((existing / "controller.py").exists())
+
         def test_systemd_absence_requires_complete_success(self):
             good = "LoadState=not-found\nActiveState=inactive\nFragmentPath=\n"
             self.assertFalse(parse_systemd(subprocess.CompletedProcess([], 0, good, ""))["present"])
@@ -809,6 +875,7 @@ def self_check():
                 with patch.object(pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=12345, pw_dir=created["home"])), patch(__name__ + ".command", return_value=response) as query:
                     manager_stopped(base)
                     self.assertEqual(query.call_args.args[0][-1], "user@12345.service")
+                    self.assertEqual(query.call_args.args[2], base.parent / "linux-manager-postcondition.jsonl")
                     self.assertEqual(query.call_count, 1)
                 for row in (SimpleNamespace(pw_uid=12346, pw_dir=created["home"]),
                             SimpleNamespace(pw_uid=12345, pw_dir=created["home"] + "-not-ours")):
@@ -895,12 +962,17 @@ if __name__ == "__main__":
     mode.add_argument("--arm", choices=tuple(ROLES))
     mode.add_argument("--cleanup", action="store_true")
     mode.add_argument("--self-check", action="store_true")
+    mode.add_argument("--allocate", action="store_true")
     mode.add_argument("--account-absent", action="store_true")
     mode.add_argument("--manager-stopped", action="store_true")
     parser.add_argument("--base")
     args = parser.parse_args()
     if args.self_check:
         raise SystemExit(self_check())
+    if args.allocate:
+        for key, value in allocate().items():
+            print(f"{key}={value}")
+        raise SystemExit(0)
     base = base_path(args.base)
     if not args.prepare:
         exec(network_guard_source(base), {})
