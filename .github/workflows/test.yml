@@ -52,12 +52,11 @@ jobs:
             XDG_CONFIG_HOME="$test_scratch/config" XDG_CACHE_HOME="$test_scratch/cache" \
             XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
             PLANE_EMIT_DISABLED=1 \
-            .venv/bin/python -m pytest -v --junitxml=pytest-results.xml \
-            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn > pytest.log 2>&1
-          result=$?
+            .venv/bin/python -m pytest -v --maxfail=20 --junitxml=pytest-results.xml \
+            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn 2>&1 | tee pytest.log
+          result=${PIPESTATUS[0]}
           printf '%s\n' "$result" > pytest.rc
           printf 'completed (exit %s)\n' "$result" > pytest.status
-          cat pytest.log
           exit "$result"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -82,7 +81,9 @@ jobs:
           - {os: ubuntu-latest, python: '3.10'}
           - {os: macos-latest, python: '3.11'}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The first Mac run reached the real tmux harness at 91% before the
+    # 30-minute job cap. Allow that bounded harness to finish and retain traces.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -125,12 +126,11 @@ jobs:
             XDG_CONFIG_HOME="$test_scratch/config" XDG_CACHE_HOME="$test_scratch/cache" \
             XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
             PLANE_EMIT_DISABLED=1 \
-            .venv/bin/python -m pytest -v --junitxml=pytest-results.xml \
-            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn > pytest.log 2>&1
-          result=$?
+            .venv/bin/python -m pytest -v --maxfail=20 --junitxml=pytest-results.xml \
+            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn 2>&1 | tee pytest.log
+          result=${PIPESTATUS[0]}
           printf '%s\n' "$result" > pytest.rc
           printf 'completed (exit %s)\n' "$result" > pytest.status
-          cat pytest.log
           exit "$result"
       - name: Verify native evidence executed
         if: always() && runner.os == 'macOS'
