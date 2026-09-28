@@ -3,7 +3,8 @@
 (cutover chunks 5 + 6a).
 
 The matcher (``dispatch-overdue.py``) is a stdlib script every consumer shells,
-so its plane source cannot import the package (the ``plane-lookup.py`` /
+so importing its plane source must stay dependency-light. The report capability
+alone loads the shared stdlib package report codec lazily (the ``plane-lookup.py`` /
 the retired shadow check's precedent — every stdlib door imports THIS module's ``connect``
 so the read-only open, its schema probe and its transient retry live once).
 This module is the stdlib twin of the package definitions — keep them in step
@@ -530,7 +531,7 @@ LEGACY_STATUS = {"completed": "completed", "failed": "failed",
 # (pinned): the room axis, sent by the fleet or addressed to it.
 FLEET_REPORTS_SQL = (
     "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref,"
-    " c.ingest_seq"
+    " c.ingest_seq, c.privacy, c.truncated, c.work_item_id, c.assignment_id"
     " FROM communications c"
     " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
     " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
@@ -540,16 +541,17 @@ _REPORT_STATUS_EVENT_SQL = (
     "SELECT e.event, e.detail, a.source_ref FROM events e"
     " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
     " WHERE e.kind = 'task' AND e.source_ref = ? AND e.actor_uid = ?"
-    " AND e.event IN ('completed', 'failed', 'returned_blocked', 'progress')"
+    " AND e.event IN ('completed', 'failed', 'returned_blocked', 'blocked_waiting', 'progress')"
     " ORDER BY e.ingest_seq DESC LIMIT 1"
 )
 _REPORT_MARKER_SQL = (
-    "SELECT json_extract(e.detail, '$.status') FROM events e"
+    "SELECT e.detail FROM events e"
     " WHERE e.kind = 'system' AND e.event = 'report_status' AND e.source_ref = ? AND e.subject_uid = ?"
     " ORDER BY e.ingest_seq DESC LIMIT 1"
 )
 REPORT_FIELDS = ("ts", "bot", "task_id", "status", "summary", "pr_url", "issues", "skill",
-                 "progress", "artifact", "task_anomaly", "plane_msg_id")
+                 "progress", "artifact", "task_anomaly", "plane_msg_id", "pr_role",
+                 "work_item_id", "assignment_id", "task_event", "report")
 
 
 def legacy_ts(occurred_at: Optional[str]) -> str:
@@ -589,57 +591,88 @@ def parse_report_body(body: Optional[str]) -> dict:
 def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = None,
                 bot: Optional[str] = None, status: Optional[str] = None,
                 since_seq: Optional[int] = None) -> list[dict]:
-    """The fleet's reports as legacy rows, oldest first. Private keys: `_source`
+    """The fleet's reports, oldest first, with the historical display fields.
+
+    ``report`` exposes the shared decoder's state/reason and exact typed payload
+    (or None, never empty evidence). Canonical links and the recorded task event
+    remain separate from report status: blocked_waiting and returned_blocked
+    both report 'blocked', but have different task effects. Private keys: `_source`
     (`task_event` / `marker` / `body` — which leg named the status) and
     `_body_stripped` (the capture policy kept no body, so a report the plane
     holds only as a communication renders an empty summary — disclosed, never
-    invented)."""
+    invented). The report codec is loaded only by this read capability; other
+    native readers remain dependency-light until their package move."""
+    from dataclasses import asdict
+    from claudlobby.report_payload import decode_report_body
+
     uid = fleet_uid(conn, fleet)
     since = since_form(since)
     prefix = f"bot:{fleet}/"
     out: list[dict] = []
-    for occurred_at, msg_id, sender_uid, sender_alias, body, ref, seq in conn.execute(
+    for occurred_at, msg_id, sender_uid, sender_alias, body, ref, seq, privacy, truncated, work_id, assignment_id in conn.execute(
             FLEET_REPORTS_SQL, (uid, fleet, since, since, since_seq, since_seq)):
         alias = sender_alias or ""
         # a sender on another fleet reads fleet/name — the fleet axis's rule
         name = alias.removeprefix(prefix) if alias.startswith(prefix) else alias.removeprefix("bot:")
         if bot and name.lower() != bot.lower():
             continue
-        parsed = parse_report_body(body)
+        decoded = decode_report_body(body, privacy=privacy, truncated=bool(truncated))
+        parsed = parse_report_body(body) if decoded.state == "legacy" else {}
+        if decoded.payload is not None:
+            payload = decoded.payload
+            parsed = {"status": payload.status, "summary": payload.summary or payload.reason or "",
+                      "pr_url": payload.pr_url or "", "pr_role": payload.pr_role or "",
+                      "progress": str(payload.percent) if payload.percent is not None else "",
+                      "artifact": ", ".join(payload.artifacts), "issues": ", ".join(payload.issues),
+                      "skill": payload.skill or ""}
         row = {k: "" for k in REPORT_FIELDS}
         row.update({"ts": legacy_ts(occurred_at), "bot": name, "plane_msg_id": msg_id or "",
                     "summary": parsed.get("summary", ""), "pr_url": parsed.get("pr_url", ""),
                     "progress": parsed.get("progress", ""), "artifact": parsed.get("artifact", ""),
                     "issues": parsed.get("issues", ""), "skill": parsed.get("skill", ""),
-                    "status": parsed.get("status", ""), "_source": "body" if parsed else "none",
+                    "status": parsed.get("status", ""), "pr_role": parsed.get("pr_role", ""),
+                    "work_item_id": work_id, "assignment_id": assignment_id, "task_event": None,
+                    "report": {"state": decoded.state, "reason": decoded.reason,
+                               "payload": asdict(decoded.payload) if decoded.payload is not None else None},
+                    "_source": "body" if parsed else "none",
                     "_body_stripped": not body,
                     # the plane's ordering authority (§4) — what an ack points at
                     "_seq": seq})
         ev = conn.execute(_REPORT_STATUS_EVENT_SQL, (ref, sender_uid)).fetchone()
         if ev is not None:
             event, detail, dispatch_ref = ev
-            row["status"] = LEGACY_STATUS.get(event, event)
-            try:
-                data = json.loads(detail) if detail else {}
-            except ValueError:
-                data = {}
-            if data.get("summary"):
-                row["summary"] = data["summary"]
-            if data.get("pr_url"):
-                row["pr_url"] = data["pr_url"]
-            if data.get("progress") is not None and data.get("progress") != "":
-                row["progress"] = str(data["progress"])
-            row["task_id"] = _task_id(dispatch_ref) or ""
+            row["status"] = "blocked" if event == "blocked_waiting" else LEGACY_STATUS.get(event, event)
+            data = _report_detail(detail)
+            # Content is never recovered from a companion when capture withheld
+            # the report. Metadata remains independently readable in that case.
+            if privacy == "full" and (data.get("summary") or data.get("reason")):
+                row["summary"] = data.get("summary") or data["reason"]
+            row["task_id"] = _task_id(dispatch_ref) or (
+                work_id if not (dispatch_ref or "").startswith("dispatch-log:") else "") or ""
+            row["task_event"] = event
             row["_source"] = "task_event"
         else:
             marker = conn.execute(_REPORT_MARKER_SQL, (ref, sender_uid)).fetchone()
-            if marker and marker[0]:
-                row["status"] = marker[0]
+            data = _report_detail(marker[0]) if marker else {}
+            if data.get("status"):
+                row["status"] = data["status"]
                 row["_source"] = "marker" if not parsed else "body"
+        for field in ("pr_url", "pr_role", "progress"):
+            if data.get(field) is not None and data[field] != "":
+                row[field] = str(data[field])
         if status and row["status"] != status:
             continue
         out.append(row)
     return out
+
+
+def _report_detail(detail: Optional[str]) -> dict:
+    """Read retained companion metadata; malformed content proves no fields."""
+    try:
+        data = json.loads(detail) if detail else {}
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 # The viewer's newest ack (chunk K, #1467): `brief --ack` records ONE

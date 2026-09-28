@@ -89,7 +89,7 @@ def not_sentinel_sql(col: str = "alias") -> str:
 # (fleet_uid, fleet_alias, since, since, since_seq, since_seq).
 FLEET_REPORTS_SQL = (
     "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref,"
-    " c.ingest_seq"
+    " c.ingest_seq, c.privacy, c.truncated, c.work_item_id, c.assignment_id"
     " FROM communications c"
     " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
     " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
