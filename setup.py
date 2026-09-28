@@ -13,6 +13,7 @@ import hashlib
 import json
 from functools import cache
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 
@@ -23,6 +24,10 @@ from setuptools.errors import SetupError
 
 
 ROOT = Path(__file__).resolve().parent
+# Load only the stdlib version owner, never application/dependency imports.
+RUNTIME_COMPATIBILITY = runpy.run_path(
+    str(ROOT / "claudlobby/runtime_versions.py")
+)["runtime_declaration"]()
 ASSET_DIRS = ("library", "voices", "templates")
 SEEDS = ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
          "missions/fleet.md.seed")
@@ -118,6 +123,8 @@ def _artifact_metadata(sources):
         metadata = json.loads(frozen.read_text())
         if metadata.get("content_sha256") != content_hash:
             raise SetupError("sdist contents differ from their frozen artifact identity")
+        if metadata.get("compatibility") != RUNTIME_COMPATIBILITY:
+            raise SetupError("sdist runtime compatibility differs from its version owner")
         return metadata
     revision = None
     if (ROOT / ".git").exists():
@@ -129,6 +136,7 @@ def _artifact_metadata(sources):
         except (OSError, subprocess.SubprocessError):
             pass
     return {"schema": 1, "source_revision": revision,
+            "compatibility": RUNTIME_COMPATIBILITY,
             "content_sha256": content_hash,
             "resource_sources": list(_resource_sources()),
             "artifact_id": f"{revision or 'source'}-{content_hash}"}
