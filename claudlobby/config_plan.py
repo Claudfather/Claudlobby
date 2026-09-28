@@ -112,7 +112,7 @@ class ConfigPlan:
 
     def blob(self, digest: str) -> bytes:
         """Read one verified staged file, including a file in an owned tree."""
-        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise PlanError("invalid staged content digest")
         content_path = self.directory / "files" / digest
         if not content_path.is_file() or content_path.is_symlink():
@@ -121,6 +121,27 @@ class ConfigPlan:
         if _digest(data) != digest:
             raise PlanError(f"changed staged content: {digest}")
         return data
+
+    def frozen_input(self, item: dict, *, required: bool = False) -> tuple[Path, bytes | None]:
+        """Read retained input bytes, proving the original source fingerprint."""
+        if (not isinstance(item, dict) or set(item) != {"path", "sha256"}
+                or not isinstance(item["path"], str)):
+            raise PlanError("active configuration lacks a frozen source")
+        path = Path(item["path"])
+        if not path.is_absolute() or str(path) not in self.inputs:
+            raise PlanError("frozen source is not a reviewed input")
+        recorded = self.inputs[str(path)]
+        if recorded["follow_links"] is not True:
+            raise PlanError("frozen configuration source did not bind linked content")
+        node = recorded["state"]["node"]
+        while node["kind"] == "symlink":
+            node = node["content"]
+        digest = item["sha256"]
+        if digest is None and not required and node["kind"] == "absent":
+            return path, None
+        if node["kind"] != "file" or digest != node["sha256"]:
+            raise PlanError("frozen source differs from its reviewed input")
+        return path, self.blob(digest)
 
     def check_fresh(self) -> None:
         """Called under the activation lock, before the first live change."""
@@ -162,6 +183,27 @@ class ConfigPlanBuilder:
         if target in self.inputs and self.inputs[target] != state:
             raise PlanError(f"input changed during rendering: {target}")
         self.inputs[target] = state
+
+    def input_content(self, path: Path) -> str | None:
+        """Retain one optional authored file for active runtime interpretation.
+
+        Its fingerprint remains a freshness gate before activation; its sealed
+        bytes remain authoritative after activation, while authoring continues.
+        """
+        self.input(path)
+        recorded = self.inputs[str(_absolute(path))]["state"]["node"]
+        while recorded["kind"] == "symlink":
+            recorded = recorded["content"]
+        if recorded["kind"] == "absent":
+            return None
+        if recorded["kind"] != "file":
+            raise PlanError("runtime configuration source must be a file")
+        content = path.read_bytes()
+        digest = _digest(content)
+        if digest != recorded["sha256"]:
+            raise PlanError(f"configuration input changed while freezing: {path}")
+        self.contents[digest] = content
+        return digest
 
     def _add(self, target: Path, after: dict) -> None:
         target = _absolute(target)
@@ -298,6 +340,15 @@ def read_plan(data_root: Path, plan_id: str) -> ConfigPlan:
             elif change.after.get("kind") == "tree":
                 for entry in change.after["files"].values():
                     plan.blob(entry["sha256"])
+        if "fleet_sources" in plan.effects:
+            sources = plan.effects["fleet_sources"]
+            if not isinstance(sources, dict) or set(sources) != set(plan.fleets):
+                raise PlanError("configuration sources do not cover the planned fleets")
+            for item in sources.values():
+                if not isinstance(item, dict) or set(item) != {"fleet", "projects"}:
+                    raise PlanError("configuration source fields are incomplete")
+                plan.frozen_input(item["fleet"], required=True)
+                plan.frozen_input(item["projects"])
         return plan
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise PlanError(f"cannot read configuration plan {plan_id}: {exc}") from exc

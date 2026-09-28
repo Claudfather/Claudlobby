@@ -173,6 +173,10 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
     builder.fleets = tuple(sorted(names))
     builder.effects = {
         "fleet_manifests": {c.fleet.name: str(c.paths.fleet_yaml) for c in contexts},
+        "fleet_sources": {c.fleet.name: {
+            "fleet": {"path": str(c.paths.fleet_yaml), "sha256": builder.input_content(c.paths.fleet_yaml)},
+            "projects": {"path": str(c.paths.projects_yaml), "sha256": builder.input_content(c.paths.projects_yaml)},
+        } for c in contexts},
         "restart_bots": [f"{c.fleet.name}/{bot}" for c in contexts for bot in c.fleet.bots],
         "reload_supervision": True,
         "coverage": "declared fleets; activation must reconcile enrolled consumers",

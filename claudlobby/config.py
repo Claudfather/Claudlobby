@@ -483,6 +483,10 @@ def load_projects(projects_yaml: Path) -> dict[str, ProjectConfig]:
         return {}
     with projects_yaml.open() as f:
         doc = yaml.safe_load(f)
+    return _project_document(projects_yaml, doc)
+
+
+def _project_document(projects_yaml: Path, doc) -> dict[str, ProjectConfig]:
     if doc is None:
         return {}  # an all-comments file is still an optional file
     if not isinstance(doc, dict) or "projects" not in doc:
@@ -2137,6 +2141,23 @@ def load_fleet(fleet_yaml: Path, *, projects_yaml: Path | None = None) -> tuple[
 
     with fleet_yaml.open() as f:
         doc = yaml.safe_load(f)
+    return _fleet_document(fleet_yaml, doc, lambda: load_projects(
+        projects_yaml if projects_yaml is not None else fleet_yaml.parent / "projects.yaml"))
+
+
+def load_fleet_snapshot(fleet_yaml: Path, fleet_content: bytes,
+                        projects_content: bytes | None) -> tuple[FleetConfig, dict]:
+    """Decode sealed active inputs with the same model/defaults as authoring.
+
+    No mutable source is read. System defaults remain owned by the executing
+    sealed package; callers must bind that package to the active plan.
+    """
+    return _fleet_document(fleet_yaml, yaml.safe_load(fleet_content), lambda: _project_document(
+        fleet_yaml.parent / "projects.yaml",
+        yaml.safe_load(projects_content) if projects_content is not None else None))
+
+
+def _fleet_document(fleet_yaml: Path, doc, projects_reader) -> tuple[FleetConfig, dict]:
 
     if not isinstance(doc, dict) or "fleet" not in doc:
         raise ValueError(f"{fleet_yaml}: top-level key 'fleet' missing")
@@ -2209,8 +2230,7 @@ def load_fleet(fleet_yaml: Path, *, projects_yaml: Path | None = None) -> tuple[
     # wrote one still gets a registry derived from the repos its bots already
     # declare, so the check-in's `dispatch` action (which needs --project) is
     # available. Replacement, never a merge — see derive_projects.
-    projects = load_projects(projects_yaml if projects_yaml is not None
-                             else fleet_yaml.parent / "projects.yaml")
+    projects = projects_reader()
     projects_derived = not projects
     if projects_derived:
         projects = derive_projects(bots)

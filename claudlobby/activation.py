@@ -73,8 +73,7 @@ def _ingest_ready(root, release, *, timeout=30) -> dict:
 
 
 def _roster(plan, declarations, package):
-    from .context import load_context
-    from .paths import Paths
+    from .active_config import context_from_plan
     sources = plan.effects.get("fleet_manifests")
     if not isinstance(sources, dict) or set(sources) != set(plan.fleets):
         raise ActivationError("bootstrap requires the staged fleet manifest coverage")
@@ -84,9 +83,7 @@ def _roster(plan, declarations, package):
         if (source not in plan.inputs or not manifest.is_absolute() or manifest.name != "fleet.yaml"
                 or path_state(manifest, source=plan.inputs[source]["follow_links"]) != plan.inputs[source]["state"]):
             raise ActivationError("fleet source is not bound to the reviewed plan")
-        paths = Paths(plan.data_root, package=package,
-                      fleet_dir=None if manifest.parent == plan.data_root else manifest.parent)
-        context = load_context(paths, fleet=name)
+        context = context_from_plan(plan, name, package=package)
         contexts.append(context)
         fleet = context.fleet
         for bot in fleet.bots:
@@ -161,8 +158,9 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         plan.check_fresh()
         inventory = collect_enrollment(root, (), bootstrap_empty=True, adapter=adapter).require_complete()
         install_directory = Path(install_directory)
+        manager, domain, directories, _, _ = _catalog(inventory.catalog)
         if (not install_directory.is_absolute() or install_directory.resolve() != install_directory
-                or install_directory not in _catalog(inventory.catalog)[2]):
+                or install_directory not in directories):
             raise ActivationError("bootstrap install directory is not an observed native search path")
         declarations = planned_units(plan, inventory.manager)
         starts = {}
@@ -175,6 +173,14 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         rank, _ = _roster(plan, declarations, package)
         if sum(item["phase"] == "ingest" and item["enroll"] for _, item in declarations) != 1:
             raise ActivationError("bootstrap requires exactly one declared ingest unit")
+        # An empty original roster cannot supply the caller checks used by the
+        # upgrade parking owner. Check exact candidate targets before preparing
+        # SQL/config changes; hosted or unknown ancestry is not permission.
+        for declaration, item in declarations:
+            if item["enroll"] and adapter.call("svc_activation_assert_external",
+                    install_directory / declaration.source.name,
+                    enrollment._target(manager, domain, declaration.source), str(os.getpid())).returncode:
+                raise ActivationError("bootstrap caller is hosted or cannot be proved external; use an operator shell")
         store.prepare(activation_id, plan, recovery_release_id=release.release_id,
                       source_release_id=release.release_id, enrollment_digest=inventory.digest)
         config_install.prepare_config(plan, activation_id)

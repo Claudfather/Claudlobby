@@ -7,6 +7,8 @@ from uuid import uuid4
 import pytest
 
 from claudlobby.operation_context import OperationContextError, resolve_task_context
+from claudlobby.active_config import context_from_plan
+from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.plane.identity import resolve
 from claudlobby.plane.ids import ensure_host_uid
 from claudlobby.task_operations import TaskConflictError, _identities, assign
@@ -58,6 +60,23 @@ def estate(tmp_path, monkeypatch):
                 "declared_hash": "fixture", "schema_version": "1"})
     identity("actor", "human:operator", ids["fleet", "origin"])
     conn.execute("UPDATE identity_registry SET provisional=1 WHERE alias='human:operator'")
+    builder = ConfigPlanBuilder(tmp_path, "r-" + "a" * 64, "b" * 64,
+                                ("origin", "target"), effects={"fleet_manifests": {}, "fleet_sources": {}})
+    for name in ("origin", "target"):
+        directory = tmp_path / "local" / name
+        manifest, projects = directory / "fleet.yaml", directory / "projects.yaml"
+        builder.effects["fleet_manifests"][name] = str(manifest)
+        builder.effects["fleet_sources"][name] = {
+            "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
+            "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
+        }
+    plan = builder.seal()
+    # Selection/admission has separate real-journal coverage. Keep the actual
+    # frozen parser and registry here, with an explicit recorded-plan boundary.
+    def active_context(*, root=None, fleet=None, bot=None, package=None):
+        assert root is None or root == tmp_path
+        return context_from_plan(plan, fleet, bot=bot, package=package)
+    monkeypatch.setattr("claudlobby.operation_context.resolve_active_context", active_context)
     yield tmp_path, conn, ids
     conn.close()
 

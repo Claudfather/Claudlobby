@@ -38,6 +38,7 @@ class NativeHost:
         self.bad_enablement = False
         self.registry_failure = None
         self.registry = []
+        self.external_result = 0
         self.fail_bot = None
         self.by_name = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
 
@@ -58,6 +59,7 @@ class NativeHost:
             output += ''.join(f"loaded\t{name}\n" for name in sorted(self.states))
         elif function == "svc_activation_assert_external":
             assert args[-1] == str(os.getpid())
+            rc = self.external_result
         elif function == "svc_inventory_state":
             output = self.states.get(args[1], "not-found not-found inactive")
         elif function == "svc_activation_snapshot":
@@ -168,7 +170,11 @@ def cold(installed, monkeypatch, tmp_path):
                         "  bots:\n    worker: {expertise: [testing]}\n    manager: {expertise: [orchestration]}\n")
     builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("example",),
                                 effects={"fleet_manifests": {"example": str(manifest)}, "units": []})
-    builder.input(manifest)
+    projects = root / "projects.yaml"
+    builder.effects["fleet_sources"] = {"example": {
+        "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
+        "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
+    }}
     env = {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
            "CLAUDLOBBY_RELEASE_ID": release.release_id, "CLAUDLOBBY_CLI": str(release.cli_path),
            "CLAUDLOBBY_NATIVE_DIR": str(release.native_path),
@@ -285,3 +291,14 @@ def test_old_data_and_wrong_executing_interpreter_refuse_before_preparation(cold
     with pytest.raises(state.ActivationError, match="sealed candidate interpreter"):
         activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert not db_file(root).exists() and host.calls == []
+
+
+@pytest.mark.parametrize("caller_result", [1, 3], ids=["self-hosted", "unknown-ancestry"])
+def test_candidate_caller_refuses_before_sql_config_or_activation_prepare(cold, caller_result):
+    root, _, plan, host = cold
+    host.external_result = caller_result
+    with pytest.raises(state.ActivationError, match="caller is hosted or cannot be proved external"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert not db_file(root).exists() and not (root / "runtime/bots").exists()
+    assert not list((root / "state/activations").glob("*/activation.json"))
+    assert host.starts == [] and list(host.directory.iterdir()) == []

@@ -17,7 +17,8 @@ import re
 import sqlite3
 import stat
 
-from .context import Context, generated_selectors, resolve_context
+from .active_config import resolve_active_context
+from .context import Context, generated_selectors
 from .plane.db import connect_ro, db_file
 from .plane.ids import ID_PATTERNS
 from .plane.registry_read import current_entities
@@ -135,7 +136,7 @@ def resolve_task_context(*, root: Path | None = None, fleet: str | None = None,
     if origin_bot is not None:
         if not origin_fleet or not os.environ.get("CLAUDLOBBY_ROOT", "").strip():
             raise OperationContextError("generated bot origin requires its own root and fleet")
-        origin = resolve_context(root=Path(os.environ["CLAUDLOBBY_ROOT"]), fleet=origin_fleet,
+        origin = resolve_active_context(root=Path(os.environ["CLAUDLOBBY_ROOT"]), fleet=origin_fleet,
                                  bot=origin_bot, package=package)
         for key, expected in (("FLEET_ROOT", origin.paths.fleet_config_dir),
                               ("BOT_DIR", origin.paths.bot_runtime(origin_bot))):
@@ -144,6 +145,6 @@ def resolve_task_context(*, root: Path | None = None, fleet: str | None = None,
                 raise OperationContextError(f"generated {key} conflicts with caller origin")
     elif "BOT_DIR" in os.environ:
         raise OperationContextError("generated bot directory has no caller identity")
-    destination = resolve_context(root=root, fleet=fleet if fleet is not None else origin_fleet,
+    destination = resolve_active_context(root=root, fleet=fleet if fleet is not None else origin_fleet,
                                   package=package)
     return bind_task_context(destination, origin=origin, operator_alias=operator_alias)
