@@ -5,6 +5,7 @@ Never create a queue, claim a file, replay data or import producer contracts.
 
 from dataclasses import dataclass
 from pathlib import Path
+import stat
 
 from .db import db_file
 
@@ -39,11 +40,30 @@ class SpoolScan:
     quarantined: list[Path]
 
 
+def scan_queue_dir(path: Path):
+    """A missing queue is empty; a wrong node or redirected queue is not.
+
+    Generic source readers classify ENOTDIR as absence. Queue drain/migration
+    cannot: an existing file at the queue path blocks enumeration and writes.
+    Keep the existing materialized readdir owner after checking that boundary.
+    """
+    from ..source_state import SOURCE_ABSENT, SOURCE_UNREADABLE, SourceProbe, scan_dir
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return SourceProbe(SOURCE_ABSENT, path), []
+    except OSError:
+        return SourceProbe(SOURCE_UNREADABLE, path), []
+    if not stat.S_ISDIR(mode):
+        return SourceProbe(SOURCE_UNREADABLE, path), []
+    return scan_dir(path)
+
+
 def scan_spool(root: Path) -> SpoolScan:
-    from ..source_state import SOURCE_OK, SOURCE_UNREADABLE, scan_dir
+    from ..source_state import SOURCE_OK, SOURCE_UNREADABLE
 
     sp = spool_path(root)
-    probe, entries = scan_dir(sp)
+    probe, entries = scan_queue_dir(sp)
     if probe.state == SOURCE_UNREADABLE:
         spool_state, pending, inflight = "unreadable", [], []
     else:
@@ -51,7 +71,7 @@ def scan_spool(root: Path) -> SpoolScan:
         names = entries if probe.state == SOURCE_OK else []
         pending = sorted(e for e in names if e.name.endswith(".json"))
         inflight = sorted(e for e in names if ".json.inflight." in e.name)
-    qprobe, qentries = scan_dir(sp / "quarantine")
+    qprobe, qentries = scan_queue_dir(sp / "quarantine")
     if qprobe.state == SOURCE_UNREADABLE:
         quarantine_state, quarantined = "unreadable", []
     else:

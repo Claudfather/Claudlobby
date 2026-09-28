@@ -80,7 +80,7 @@ from typing import Optional
 
 from .contracts import ContractViolation
 from .db import connect, connect_ro, db_file, db_path
-from .queue_paths import scan_spool, staged_dir
+from .queue_paths import scan_queue_dir, scan_spool, staged_dir
 from .emit_api import emit_batch
 from .writer import PlaneWriter
 from .ids import ensure_host_uid
@@ -389,9 +389,9 @@ class PlaneDaemon:
             raise
         except Exception as exc:  # Partial work cannot be declared zero or rolled back here.
             reports["error"] = type(exc).__name__
-        from ..source_state import SOURCE_UNREADABLE, scan_dir
+        from ..source_state import SOURCE_UNREADABLE
         spool_state = scan_spool(self.root)
-        staged_state, entries = scan_dir(staged_dir(self.root))
+        staged_state, entries = scan_queue_dir(staged_dir(self.root))
         retained = {"spool": None if spool_state.spool_state == "unreadable" else
                     [p.name for p in spool_state.pending],
                     "inflight": None if spool_state.spool_state == "unreadable" else
