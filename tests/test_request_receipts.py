@@ -152,6 +152,34 @@ def _transmission_fact(event_id):
                            ("emitter", "event_id", "fleet_uid", "host_uid"))
 
 
+def test_linked_report_notification_reserves_operation_attempt_after_recording(receipt_case):
+    root, ident, base = receipt_case
+    intent = replace(base, operation="assignment.progress", route=_message_route(root),
+                     task_id="wi_" + "b" * 32, assignment_id="asg_" + "c" * 32,
+                     stages=(base.stages[0], rr.StagePlan("notification")))
+    event_id = "ev_" + "a" * 32
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        store.prepare(intent)
+        store.begin_attempt()  # The linked report's own recording operation.
+        store.stage(0)
+        store.outcome(0, "committed")
+        reserved = store.begin_native_attempt(event_id)
+        assert reserved.attempt == 2 and len(reserved.message_attempts) == 1
+        assert reserved.message_attempts[0].attempt_no == 2
+        assert reserved.stages[1] == rr.StageOutcome("unknown", 2)
+        store.observe_message_transport(2, rr.TransportObservation("submitted", native_returncode=0))
+        store.prepare_message_transmission(2, _transmission_fact(event_id))
+        store.stage_message_transmission(2)
+        store.message_transmission_outcome(2, "committed")
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        saved = store.load()
+        assert saved.stages[0] == rr.StageOutcome("committed", 1)
+        assert saved.stages[1] == rr.StageOutcome("submitted", 2)
+        assert saved.message_attempts[0].recording_status == "committed"
+        with pytest.raises(rr.ReceiptConflict):
+            store.begin_native_attempt("ev_" + "d" * 32, retry_uncertain=True)
+
+
 def test_message_reservation_survives_missing_post_send_observation(receipt_case, monkeypatch):
     root, ident, intent = receipt_case
     intent = _message_intent(root, intent)
@@ -160,7 +188,7 @@ def test_message_reservation_survives_missing_post_send_observation(receipt_case
         store.prepare(intent)
         with pytest.raises(rr.ReceiptError, match="atomically"):
             store.begin_attempt()
-        reserved = store.begin_message_attempt(event_id)
+        reserved = store.begin_native_attempt(event_id)
         assert reserved.stages[1] == rr.StageOutcome("unknown", 1)
         assert reserved.message_attempts[0].observation is None
         store.stage(0)  # Pre-send intent recording can itself be interrupted.
@@ -175,7 +203,7 @@ def test_message_reservation_survives_missing_post_send_observation(receipt_case
         with pytest.raises(rr.ReceiptError, match="observation"):
             store.prepare_message_transmission(1, _transmission_fact(event_id))
         with pytest.raises(rr.ReceiptConflict, match="explicit"):
-            store.begin_message_attempt("ev_" + "b" * 32)
+            store.begin_native_attempt("ev_" + "b" * 32)
         # Inspection/reopen is not a transport replay or a claim of no send,
         # even if the process died before intent recording finished.
         assert [s.status for s in store.load().stages] == ["unknown", "unknown"]
@@ -188,7 +216,7 @@ def test_retained_native_observation_recovers_exact_transmission_fact(receipt_ca
     observation = rr.TransportObservation("submitted", "sha256:" + "b" * 64, 42, 0)
     with rr.locked_request(root, intent.fleet_uid, ident) as store:
         store.prepare(intent)
-        store.begin_message_attempt(event_id)
+        store.begin_native_attempt(event_id)
         store.stage(0)
         store.outcome(0, "committed")  # Caller-proven exact communication reconciliation.
         assert [s.status for s in store.load().stages] == ["committed", "unknown"]
@@ -213,8 +241,29 @@ def test_retained_native_observation_recovers_exact_transmission_fact(receipt_ca
         store.message_transmission_outcome(1, "committed")
         assert store.load().message_attempts[0].recording_status == "committed"
         with pytest.raises(rr.ReceiptConflict):
-            store.begin_message_attempt("ev_" + "d" * 32, retry_uncertain=True)
+            store.begin_native_attempt("ev_" + "d" * 32, retry_uncertain=True)
         assert b"SECRET" not in store.path.read_bytes()
+
+
+def test_submitted_message_can_restage_absent_communication_without_new_send(receipt_case):
+    root, ident, intent = receipt_case
+    intent = _message_intent(root, intent)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        store.prepare(intent)
+        store.begin_native_attempt("ev_" + "a" * 32)
+        store.stage(0)
+        store.outcome(0, "unrecorded")  # Exact communication fact was proved absent.
+        store.observe_message_transport(1, rr.TransportObservation("submitted", native_returncode=0))
+        before = store.load()
+        assert before.stages[1] == rr.StageOutcome("submitted", 1)
+        assert store.stage(0).stages[0] == rr.StageOutcome("unknown", 1)
+        assert store.outcome(0, "committed").stages[0] == rr.StageOutcome("committed", 1)
+        after = store.load()
+        assert after.attempt == 1
+        assert after.message_attempts == before.message_attempts
+        assert after.stages[1] == before.stages[1]
+        with pytest.raises(rr.ReceiptConflict):
+            store.begin_native_attempt("ev_" + "b" * 32, retry_uncertain=True)
 
 
 def test_explicit_second_attempt_retains_first_event_and_fact(receipt_case):
@@ -223,16 +272,16 @@ def test_explicit_second_attempt_retains_first_event_and_fact(receipt_case):
     first, second = "ev_" + "a" * 32, "ev_" + "b" * 32
     with rr.locked_request(root, intent.fleet_uid, ident) as store:
         store.prepare(intent)
-        store.begin_message_attempt(first)
+        store.begin_native_attempt(first)
         store.observe_message_transport(1, rr.TransportObservation("unknown", native_returncode=-9))
         store.prepare_message_transmission(1, _transmission_fact(first))
         store.stage_message_transmission(1)
         store.message_transmission_outcome(1, "unrecorded")
         with pytest.raises(rr.ReceiptConflict, match="explicit"):
-            store.begin_message_attempt(second)
+            store.begin_native_attempt(second)
         with pytest.raises(rr.ReceiptConflict, match="already reserved"):
-            store.begin_message_attempt(first, retry_uncertain=True)
-        store.begin_message_attempt(second, retry_uncertain=True)
+            store.begin_native_attempt(first, retry_uncertain=True)
+        store.begin_native_attempt(second, retry_uncertain=True)
         store.observe_message_transport(2, rr.TransportObservation("failed"))
     with rr.locked_request(root, intent.fleet_uid, ident) as store:
         saved = store.load()

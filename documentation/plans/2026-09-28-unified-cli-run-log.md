@@ -1,5 +1,40 @@
 # Unified CLI implementation record
 
+### 2026-09-28 — working delegation candidate after CI repair
+
+**M:** repair head `56bc75ffec991d3724d371415d399db7e1d9dc98` is green in
+[tests 36425920693](https://github.com/Claudfather/Claudlobby/actions/runs/36425920693)
+and [conformance 36425920782](https://github.com/Claudfather/Claudlobby/actions/runs/36425920782).
+Linux 3.10/3.11 each passed 6,390 tests with 15 skipped; macOS passed 6,368
+with 37 skipped. Each reported four warnings. All seven native macOS checks
+executed and passed. These results cover the repair head, not this later feature.
+
+**R:** this candidate adds public message/request observations, ordinary send,
+manager assignment delivery, assignee linked reports, withdrawal/reassignment,
+and the default fleet-ops skill with narrow composed grants. One native-attempt
+owner handles ordinary sends and strict notifications. Task/report facts commit
+before transport; final receiver byte proof is separate from submission and
+assignment acceptance. Failures after a known commit retain IDs and disclose
+request-persistence/notification uncertainty. Ordinary recorder-outage behavior
+remains O1; reports tied to tasks never fall back to an unlinked send.
+
+**M:** the existing query suite reproduces the registered `system:task-recheck`
+reader failure (parent 1 failed/7 passed; candidate 8 passed), and the existing
+request-receipt suite passes 9 tests. These were private source exports with
+`--noconftest`, exercising stdlib/SQLite logic rather than full application
+fixtures. The combined staged bootstrap/query/receipt run then passed all 27
+checks in 0.83 seconds; Python syntax and focused Ruff checks passed. The next
+hosted run must validate the complete candidate. Real-agent
+canary delegation/recomposition/permissions and normal-load Pi timing remain
+unrun. A private HOME alone cannot isolate the host-wide user-manager Plane
+unit; the canary needs an isolated OS account/manager domain or another host.
+
+The operator's canary-first direction is now explicit in plan PR #1925 at
+`c74db0a4a139d32bcfa14113648a7a529e514412`. Extra migration witness work remains
+held outside this slice; no new general migration harness was added. Dara's
+bounded waiting-state/usage findings are assigned to C1, not this delegation
+candidate. Production is unchanged; full task/caller cutover is not complete.
+
 ### 2026-09-28 13:03 UTC — remaining bootstrap assertion repaired
 
 **M:** PR #1935 at `84539521` completed all platform jobs with one stale
@@ -25,7 +60,7 @@ Sol implements bounded slices; parent reviews and publishes. Production is uncha
 
 Status: IN PROGRESS. Started 2026-09-28 UTC. Tracks #1747 and the design in
 [PR #1925](https://github.com/Claudfather/Claudlobby/pull/1925), revision
-`1a403962e0845e07e1c9a89b8679f3f1b51addca`.
+`c74db0a4a139d32bcfa14113648a7a529e514412`.
 
 The operator authorized starting implementation while the other fleets await
 quota. External review remains open; later valid findings will be incorporated.
@@ -63,7 +98,7 @@ branch. Merges and production activation remain operator decisions.
 | P0 evidence safety | Linux CI passed | #1846 integrated locally; private HOME/XDG/temp and executable-origin changes in draft [#1928](https://github.com/Claudfather/Claudlobby/pull/1928). Current head `af1cc44d`: 5,812 passed, 13 skipped, 3 warnings; all three checks green. Native macOS remains unverified. |
 | P1 command loading/package | Linux CI passed | Lazy argparse dispatch and canonical resource packaging in draft [#1929](https://github.com/Claudfather/Claudlobby/pull/1929). Current head `c2b8188a`: 5,980 passed, 13 skipped, 3 warnings; all three checks green. Bootstrap and artifact assertions also passed in isolated exports; installed composition and host acceptance remain outstanding. |
 | P2 context/release | P2a and assembly foundation Linux CI passed; activation in progress | [#1930](https://github.com/Claudfather/Claudlobby/pull/1930) `8b8c73b6`: 6,022 passed, 12 skipped. [#1931](https://github.com/Claudfather/Claudlobby/pull/1931) `ca8658c4`: 6,041 passed, 12 skipped. Both have three green checks. Explicit migration [#1932](https://github.com/Claudfather/Claudlobby/pull/1932) repairs are in CI; real installed planning [#1933](https://github.com/Claudfather/Claudlobby/pull/1933) exposed a spaces-in-root validator defect. Full activation/coherent canary remains incomplete. |
-| A0–A4 tasks/messages | Read model/audit foundation implemented; mutation/delivery pending | A0 audit and A1 typed task reducer share legacy/new closure semantics; 31 focused checks and 22 legacy report comparisons passed. Existing ingest has a committed-only mode. Request receipts, typed mutations, messaging/reports and caller cutover remain pending. |
+| A0–A4 tasks/messages | Task/read foundations hosted; working delegation candidate under validation | Admission/assignment/acceptance and read foundations are hosted at green #1935. Message send/delivery, linked reporting, default skill/grants and request/message reads are the current candidate. Reply/unlinked reporting, full caller cutover and real-agent canary remain incomplete. |
 | B lifecycle/setup | Pending | Reuse supervisor consolidation; verify affected native platforms. |
 | C coordination/jobs/plane | Pending | Migrate complete operation/caller bundles. |
 | D completion | Pending | Retired-door scan, full operation coverage, cold onboarding, adoption and acceptance evidence. |

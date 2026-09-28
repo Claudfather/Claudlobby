@@ -24,6 +24,8 @@ allowed = {
     'claudlobby.commands._parsers', 'claudlobby.task_defaults',
     'claudlobby.command_result', 'claudlobby.reference_hints',
     'claudlobby.commands._task_read_parsers', 'claudlobby.commands._task_write_parsers',
+    'claudlobby.commands._message_read_parsers', 'claudlobby.commands._request_read_parsers',
+    'claudlobby.commands._message_write_parsers',
     'claudlobby.commands._release_parsers',
     'claudlobby.commands._orientation_parsers',
 }
@@ -61,6 +63,10 @@ def _run(code, *argv, tmp_path):
     (("--help",), "Compositor for Claude Code agent fleets"),
     (("plane", "view", "--help"), "--host"),
     (("data-migrate", "--help"), "--source"),
+    (("message", "show", "--help"), "MESSAGE_ID"),
+    (("message", "send", "--help"), "--request-id"),
+    (("assignment", "deliver", "--help"), "--file"),
+    (("request", "show", "--help"), "REQUEST_ID"),
 ])
 def test_help_needs_only_stdlib(argv, expected, tmp_path):
     result = _run(PARSE, *argv, tmp_path=tmp_path)

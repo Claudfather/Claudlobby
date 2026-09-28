@@ -31,6 +31,7 @@ from .composer import (
     _resolve_channel_permissions,
     _resolve_default_boot_grant,
     _resolve_expertise_permissions,
+    _resolve_fleet_ops_grants,
     _resolve_guardrail_permissions,
     _resolve_integration_grants,
     _resolve_mcp_permissions,
@@ -84,6 +85,7 @@ def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str
     )
     sourced |= set(_resolve_skill_permissions(effective_skills))
     sourced |= set(_resolve_skill_grants(effective_skills, paths))
+    sourced |= set(_resolve_fleet_ops_grants(bot, fleet))
     sourced |= set(_resolve_default_boot_grant(bot, paths))
     return sourced
 

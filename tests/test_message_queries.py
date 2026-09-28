@@ -19,7 +19,7 @@ HOST = "host_" + "0" * 32
 FLEETS = {name: "fleet_" + char * 32 for name, char in (("a", "a"), ("b", "b"), ("c", "c"))}
 ACTORS = {alias: TaskActor("actor_" + char * 32, alias) for alias, char in (
     ("bot:a/manager", "1"), ("bot:a/worker", "2"), ("bot:b/worker", "3"),
-    ("bot:c/worker", "4"), ("human:operator", "5"))}
+    ("bot:c/worker", "4"), ("human:operator", "5"), ("system:task-recheck", "6"))}
 
 
 def mid(number):
@@ -110,6 +110,22 @@ def test_global_id_then_participation_operator_scope_and_capture(estate):
     assert redacted.body is None and redacted.content == "withheld"
     communication(conn, 3, privacy="preview", truncated=1, body="private")
     assert q.show_message(ctx, mid(3)).content == "partial"
+
+
+def test_framework_sender_is_verified_from_registry_with_recipient_scope(estate):
+    ctx, conn = estate
+    ident = communication(conn, sender="system:task-recheck", recipient="bot:a/manager",
+                          message_class="task_request")
+    transmission(conn, "pane_submitted", fleet="a", destination="bot:a/manager")
+    transmission(conn, "received", fleet="a", destination="bot:a/manager")
+    verified = q.receipt(ctx, ident, destination="a/manager")
+    assert verified.exit_code == 0 and verified.integrity_verdict == "delivered"
+    assert verified.sender == q.MessageIdentity(ACTORS["system:task-recheck"].uid,
+                                                "system:task-recheck", None)
+    with pytest.raises(q.MessageNotFoundError):
+        q.receipt(replace(ctx, caller=ACTORS["bot:a/worker"]), ident)
+    conn.execute("UPDATE communications SET sender_alias='system:forged' WHERE msg_id=?", (ident,))
+    assert q.receipt(ctx, ident).receipt_observation == "unavailable"
 
 
 def test_wrong_fleet_bare_receipt_cannot_corroborate_same_name_or_replace_valid_proof(estate):

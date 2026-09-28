@@ -64,7 +64,7 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     assert [(item["bot_id"], item["role"]) for item in listed["items"]] == [
         ("primary-manager", "manager"), ("primary-worker", "worker")]
     detail = _call(capsys, case.root, "bot", "show", "primary-worker")["bot"]
-    assert detail["effective_configuration"]["equipment"]["skills"] == ["stage-skill"]
+    assert detail["effective_configuration"]["equipment"]["skills"] == ["stage-skill", "fleet-ops"]
     capabilities = _call(capsys, case.root, "bot", "capabilities", "primary-worker")["bot"]
     assert capabilities["permissions"]["enforcement"] == "unknown"
     assert capabilities["runtime_observed"]["session"] == "not_probed"

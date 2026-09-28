@@ -237,9 +237,12 @@ def test_commit_before_receipt_outcome_reconciles_and_pruned_payload_refuses(est
     rid = str(uuid4())
     with monkeypatch.context() as patch:
         patch.setattr(RequestStore, "outcome", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("after commit")))
-        with pytest.raises(OSError, match="after commit"):
+        with pytest.raises(tasks.TaskRecordingError, match="recording committed") as committed:
             tasks.admit(ctx, rid, title="One durable task")
     prior = _receipt(ctx, rid)
+    assert committed.value.recording == "committed"
+    assert committed.value.task_id == prior.intent.task_id
+    assert committed.value.request_persisted is False
     assert prior.stages[0].status == "unknown" and _counts(conn) == (1, 0, 0, 0)
     result = tasks.admit(ctx, rid, title="One durable task")
     assert result.replayed and result.task_id == prior.intent.task_id
@@ -306,9 +309,13 @@ def test_reassign_commit_before_receipt_update_replays_without_retargeting(estat
     rid = str(uuid4())
     with monkeypatch.context() as patch:
         patch.setattr(RequestStore, "outcome", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("after commit")))
-        with pytest.raises(OSError, match="after commit"):
+        with pytest.raises(tasks.TaskRecordingError, match="recording committed") as committed:
             tasks.reassign(ctx, rid, admitted.task_id, bot_id="other", reason="New specialist")
     pending = _receipt(ctx, rid)
+    assert committed.value.recording == "committed"
+    assert committed.value.task_id == admitted.task_id
+    assert committed.value.assignment_id == pending.intent.assignment_id
+    assert committed.value.request_persisted is False
     assert pending.stages[0].status == "unknown" and len(pending.intent.stages[0].facts) == 2
     current = show_task(conn, admitted.task_id, fleet_uid=ctx.fleet_uid)
     successor = current.current_assignment.assignment_id
@@ -420,9 +427,16 @@ def test_committed_report_retry_keeps_original_manager_message_and_evidence(esta
     rid = str(uuid4())
     with monkeypatch.context() as patch:
         patch.setattr(RequestStore, "outcome", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("after commit")))
-        with pytest.raises(OSError, match="after commit"):
+        with pytest.raises(tasks.TaskRecordingError, match="recording committed") as committed:
             tasks.complete(worker, rid, routed.assignment_id, report)
+    assert committed.value.recording == "committed"
+    assert committed.value.task_id == task.task_id
+    assert committed.value.assignment_id == routed.assignment_id
+    assert committed.value.message_id is not None
+    assert committed.value.recipient_uid == ctx.bots["manager"].uid
+    assert committed.value.request_persisted is False
     prior = _receipt(ctx, rid)
+    assert committed.value.message_id == prior.intent.message_id
     changed_manager = replace(worker, context=replace(ctx.context, fleet=replace(ctx.context.fleet, manager="other")))
     result = tasks.complete(changed_manager, rid, routed.assignment_id, report)
     assert result.replayed and result.message_id == prior.intent.message_id

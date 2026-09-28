@@ -140,7 +140,7 @@ def _identity(conn, uid, alias):
         if fleet is None:
             raise MessageUnavailableError("recorded destination fleet identity is unavailable")
         fleet_uid = fleet[0]
-    elif not re.fullmatch(r"human:[^\s:/]+", alias):
+    elif not re.fullmatch(r"(?:human|system):[^\s:/]+", alias):
         raise MessageUnavailableError("recorded message party has no supported canonical identity")
     return MessageIdentity(uid, alias, fleet_uid)
 

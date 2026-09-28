@@ -287,6 +287,13 @@ def register_subparsers(sub) -> None:
     from ._task_write_parsers import register_task_write_subparsers
     register_task_write_subparsers(t_sub, assignment_children)
 
+    from ._message_read_parsers import register_message_read_subparsers
+    message_children = register_message_read_subparsers(sub)
+    from ._message_write_parsers import register_message_write_subparsers
+    register_message_write_subparsers(message_children)
+    from ._request_read_parsers import register_request_read_subparsers
+    register_request_read_subparsers(sub)
+
     pu = sub.add_parser(
         "uptime",
         help="Per-bot uptime, MTBR, and restart-rate from keepalive logs",

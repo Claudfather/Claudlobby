@@ -73,8 +73,15 @@ def _equip(fleet_dir: Path, bot_id: str, **fields: list[str]) -> None:
 
 
 def _paths(fleet_dir: Path) -> Paths:
+    # These tests deliberately replace package.library with their tiny
+    # synthetic library. Carry the real universal skill into that isolated
+    # fixture so the effective-skill resolver can link and grant it.
+    source = source_package()
+    skill = fleet_dir / "library" / "skills" / "fleet-ops" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_bytes((source.library / "skills" / "fleet-ops" / "SKILL.md").read_bytes())
     return Paths(root=fleet_dir, fleet_dir=fleet_dir,
-                 package=replace(source_package(), library=fleet_dir / "library"))
+                 package=replace(source, library=fleet_dir / "library"))
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +201,7 @@ class TestResolveEffectiveSkills:
         )
         # declared entries keep their order and come first; the requirement
         # (already declared) is not appended a second time.
-        assert result == ["widget", "gadget"]
+        assert result == ["widget", "gadget", "fleet-ops"]
 
     def test_opting_out_of_the_protocol_drops_its_requirement(self, tmp_path, monkeypatch):
         root = _make_minimal_root(tmp_path)
@@ -282,6 +289,57 @@ def _write_fleet_yaml(
 
 
 class TestGrantUnion:
+    def test_default_fleet_ops_is_usable_without_worker_admin_grants(self, fleet_dir):
+        text = (fleet_dir / "fleet.yaml").read_text().replace(
+            "  accounts:\n", "  system_defaults: false\n\n  accounts:\n", 1
+        )
+        (fleet_dir / "fleet.yaml").write_text(text)
+        (fleet_dir / "library" / "guardrails" / "no-push-main.md").write_text(
+            '---\ntitle: No push to main\npermissions:\n  deny: ["Bash(git push *)"]\n---\n'
+        )
+        fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _paths(fleet_dir)
+        for bot_id in ("lead", "worker-1"):
+            bot = fleet.bots[bot_id]
+            assert "fleet-ops" not in bot.skills  # no manual equipment
+            compose_bot(bot, fleet, paths, log=lambda m: None)
+            assert (paths.bot_runtime(bot_id) / ".claude" / "skills" / "fleet-ops").is_symlink()
+            settings = json.loads(
+                (paths.bot_runtime(bot_id) / ".claude" / "settings.local.json").read_text()
+            )
+            allow = settings["permissions"]["allow"]
+            deny = settings["permissions"]["deny"]
+            assert {
+                "Skill(fleet-ops)",
+                "Skill(fleet-ops:*)",
+                "Bash(claudlobby --json task list)",
+                "Bash(claudlobby --json task list *)",
+                "Bash(claudlobby --json task admit *)",
+                "Bash(claudlobby --json assignment accept *)",
+                "Bash(claudlobby --json assignment progress *)",
+                "Bash(claudlobby --json assignment block *)",
+                "Bash(claudlobby --json assignment return *)",
+                "Bash(claudlobby --json assignment complete *)",
+                "Bash(claudlobby --json assignment fail *)",
+            } <= set(allow)
+            assert "Bash(git push *)" in deny
+            assert "Bash" not in allow
+            assert not any("systemctl" in grant or "launchctl" in grant for grant in allow)
+            assert not [
+                f for f in audit_bot(bot, fleet, paths)
+                if f.kind in {"orphan_grant", "under_grant"}
+            ], bot_id
+            manager_grants = {
+                "Bash(claudlobby --json task assign *)",
+                "Bash(claudlobby --json assignment deliver *)",
+                "Bash(claudlobby --json task withdraw *)",
+                "Bash(claudlobby --json task reassign *)",
+            }
+            if bot_id == "lead":
+                assert manager_grants <= set(allow)
+            else:
+                assert manager_grants.isdisjoint(allow)
+
     def test_a_required_skill_is_symlinked(self, fleet_dir):
         _write_protocol(fleet_dir, "needs-gadget", requires_skills=["gadget"])
         _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
@@ -475,7 +533,7 @@ def test_freshbox_traces_a_required_skills_grants(fleet_dir):
 
 
 # ---------------------------------------------------------------------------
-# Every existing fleet composes unchanged
+# Existing declared skills keep their order beside the universal default
 # ---------------------------------------------------------------------------
 
 
@@ -489,8 +547,8 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
     This pins the FULL composed permissions.allow LITERALLY instead: no
     protocol in scope declares `requires:` (report-back, the only one this
     fleet composes by default, does not), so every entry below must trace to
-    the two skills declared directly. `channels: []` suppresses the default
-    Telegram plugin grants so the list stays short and exact."""
+    the two declared skills or the universal fleet-ops skill and its role
+    grants. `channels: []` suppresses the default Telegram plugin grants."""
     _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
     _write_skill(fleet_dir, "widget", tool_grants=["Bash(widget-tool *)"])
     _equip(fleet_dir, "lead", skills=["gadget", "widget"], channels=[])
@@ -510,8 +568,51 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Skill(gadget:*)",
         "Skill(widget)",
         "Skill(widget:*)",
+        "Skill(fleet-ops)",
+        "Skill(fleet-ops:*)",
         "Bash(gadget-tool *)",
         "Bash(widget-tool *)",
+        "Bash(claudlobby --help)",
+        "Bash(claudlobby task list --help)",
+        "Bash(claudlobby task show --help)",
+        "Bash(claudlobby task admit --help)",
+        "Bash(claudlobby task assign --help)",
+        "Bash(claudlobby task withdraw --help)",
+        "Bash(claudlobby task reassign --help)",
+        "Bash(claudlobby assignment show --help)",
+        "Bash(claudlobby assignment accept --help)",
+        "Bash(claudlobby assignment deliver --help)",
+        "Bash(claudlobby assignment progress --help)",
+        "Bash(claudlobby assignment block --help)",
+        "Bash(claudlobby assignment return --help)",
+        "Bash(claudlobby assignment complete --help)",
+        "Bash(claudlobby assignment fail --help)",
+        "Bash(claudlobby message show --help)",
+        "Bash(claudlobby message receipt --help)",
+        "Bash(claudlobby message wait --help)",
+        "Bash(claudlobby message send --help)",
+        "Bash(claudlobby request show --help)",
+        "Bash(claudlobby --json context show)",
+        "Bash(claudlobby --json task list)",
+        "Bash(claudlobby --json task list *)",
+        "Bash(claudlobby --json task show *)",
+        "Bash(claudlobby --json assignment show *)",
+        "Bash(claudlobby --json message show *)",
+        "Bash(claudlobby --json message receipt *)",
+        "Bash(claudlobby --json message wait *)",
+        "Bash(claudlobby --json message send *)",
+        "Bash(claudlobby --json request show *)",
+        "Bash(claudlobby --json task admit *)",
+        "Bash(claudlobby --json assignment accept *)",
+        "Bash(claudlobby --json assignment progress *)",
+        "Bash(claudlobby --json assignment block *)",
+        "Bash(claudlobby --json assignment return *)",
+        "Bash(claudlobby --json assignment complete *)",
+        "Bash(claudlobby --json assignment fail *)",
+        "Bash(claudlobby --json task assign *)",
+        "Bash(claudlobby --json assignment deliver *)",
+        "Bash(claudlobby --json task withdraw *)",
+        "Bash(claudlobby --json task reassign *)",
         # #1633: no custom startup_prompt -> the default read-then-act boot
         # prompt names this exact read, and compose_settings_local grants it.
         "Bash(claudlobby --fleet claudlobby brief --bot lead)",
@@ -519,23 +620,21 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
     linked = sorted(
         p.name for p in (paths.bot_runtime("lead") / ".claude" / "skills").iterdir()
     )
-    assert linked == ["gadget", "widget"]
+    assert linked == ["fleet-ops", "gadget", "widget"]
 
 
-def test_effective_skills_is_a_no_op_when_no_effective_protocol_declares_requires(
+def test_effective_skills_adds_only_the_universal_default_without_protocol_requires(
     fleet_dir,
 ):
-    """The identity property underlying the byte-identical proof above,
-    isolated: with no `requires:` anywhere in the effective protocol set,
-    resolve_effective_skills reduces to exactly bot.skills."""
+    """Without protocol requirements, only fleet-ops joins declared skills."""
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = _paths(fleet_dir)
     for bot_id in ("lead", "worker-1"):
         bot = fleet.bots[bot_id]
         is_manager = bot.bot_id in fleet.manager_bots()
-        assert resolve_effective_skills(bot, fleet, paths, is_manager=is_manager) == list(
-            bot.skills
-        )
+        assert resolve_effective_skills(bot, fleet, paths, is_manager=is_manager) == [
+            *bot.skills, "fleet-ops"
+        ]
 
 
 def test_a_briefing_stanza_equips_the_skill_its_timers_fire(fleet_dir):

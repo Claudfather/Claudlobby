@@ -161,6 +161,14 @@ _STATUSES = {"recording": {"prepared", "unknown", "committed", "unrecorded"},
 # These are wire event_type / ingest_ledger.family values, never SQL table names;
 # physical storage mapping remains owned by ingest.CONSTRUCT_TABLES.
 FACT_FAMILIES = frozenset({"communication", "transmission", "work_item", "assignment", "task", "system"})
+_NATIVE_STAGES = {
+    "message.send": "delivery", "message.reply": "delivery",
+    "assignment.deliver": "delivery",
+    **{f"assignment.{verb}": "notification"
+       for verb in ("progress", "block", "return", "complete", "fail")},
+}
+_STRICT_NATIVE = frozenset({"assignment.deliver", "assignment.progress", "assignment.block",
+                            "assignment.return", "assignment.complete", "assignment.fail"})
 
 
 def _id(value, kind):
@@ -237,14 +245,23 @@ def _validate(receipt):
             _id(getattr(intent, field), kind)
     _sha(intent.semantic_sha256)
     is_message = intent.operation in {"message.send", "message.reply"}
-    if is_message:
+    native_stage = _NATIVE_STAGES.get(intent.operation)
+    if is_message or intent.route is not None:
+        if native_stage is None:
+            raise ReceiptError("operation cannot retain a native message route")
         _message_route(intent)
+    if native_stage is not None:
+        if is_message and intent.route is None:
+            raise ReceiptError("ordinary message requires a frozen route")
+        if intent.route is not None and sum(plan.kind == native_stage for plan in intent.stages) != 1:
+            raise ReceiptError("native request requires one delivery or notification stage")
+    if is_message:
         if sum(plan.kind == "delivery" for plan in intent.stages) != 1:
             raise ReceiptError("message request requires one delivery stage")
         if any(fact.family == "transmission" for plan in intent.stages for fact in plan.facts):
             raise ReceiptError("message transmission facts belong to reserved attempts")
-    elif intent.route is not None or receipt.message_attempts:
-        raise ReceiptError("non-message request cannot retain a message route or attempts")
+    elif receipt.message_attempts and (intent.route is None or native_stage is None):
+        raise ReceiptError("native attempts require a frozen message route")
     if type(receipt.attempt) is not int or receipt.attempt < 0 or len(intent.stages) != len(receipt.stages):
         raise ReceiptError("invalid receipt attempt/stages")
     seen = set()
@@ -259,14 +276,17 @@ def _validate(receipt):
             raise ReceiptError("stage outcome lacks an attempt")
         for fact in plan.facts:
             _fact(fact, seen)
-    if is_message:
+    if native_stage is not None and (is_message or receipt.message_attempts):
         delivery = next(outcome for plan, outcome in zip(intent.stages, receipt.stages)
-                        if plan.kind == "delivery")
-        if len(receipt.message_attempts) != receipt.attempt:
+                        if plan.kind == native_stage)
+        if is_message and len(receipt.message_attempts) != receipt.attempt:
             raise ReceiptError("each message attempt must be durably reserved")
-        for number, item in enumerate(receipt.message_attempts, 1):
-            if type(item.attempt_no) is not int or item.attempt_no != number:
-                raise ReceiptError("message attempts must increase without gaps")
+        previous_attempt = 0
+        for item in receipt.message_attempts:
+            if (type(item.attempt_no) is not int or
+                    not previous_attempt < item.attempt_no <= receipt.attempt):
+                raise ReceiptError("native attempts must increase within operation attempts")
+            previous_attempt = item.attempt_no
             _id(item.transmission_event_id, "event")
             if item.transmission_event_id in seen:
                 raise ReceiptError("repeated message transmission event ID")
@@ -305,7 +325,7 @@ def _validate(receipt):
         if receipt.message_attempts:
             latest = receipt.message_attempts[-1]
             if latest.attempt_no != receipt.attempt or delivery.attempt != latest.attempt_no:
-                raise ReceiptError("delivery must refer to latest reserved message attempt")
+                raise ReceiptError("delivery must refer to latest reserved native attempt")
             expected_status = latest.observation.status if latest.observation is not None else "unknown"
             if delivery.status not in ({"submitted", "received"} if expected_status == "submitted"
                                        else {expected_status}):
@@ -445,9 +465,11 @@ class RequestStore:
         receipt = self._required()
         if receipt.intent.operation in {"message.send", "message.reply"}:
             raise ReceiptError("reserve a message attempt and delivery outcome atomically")
+        if receipt.message_attempts:
+            raise ReceiptConflict("a native notification cannot return to the recording stage")
         return self._save(replace(receipt, attempt=receipt.attempt + 1))
 
-    def begin_message_attempt(self, transmission_event_id: str, *, retry_uncertain: bool = False) -> RequestReceipt:
+    def begin_native_attempt(self, transmission_event_id: str, *, retry_uncertain: bool = False) -> RequestReceipt:
         """Reserve an event ID and unknown delivery in one write BEFORE native send.
 
         Communication recording may still be pending after this reservation.
@@ -456,9 +478,11 @@ class RequestStore:
         A prior unknown/failed attempt needs an explicit caller decision. A
         submitted or received attempt never authorizes another send.
         """
-        receipt = self._message_required()
+        receipt = self._native_required()
         _id(transmission_event_id, "event")
-        index = self._message_delivery_index(receipt)
+        index = self._native_stage_index(receipt)
+        if receipt.intent.operation in _STRICT_NATIVE and receipt.stages[0].status != "committed":
+            raise ReceiptConflict("strict notification requires committed recording")
         old = receipt.stages[index]
         if old.status != "prepared" and not (old.status in {"unknown", "failed"} and retry_uncertain):
             raise ReceiptConflict("message send requires an explicit uncertain retry or has already submitted")
@@ -474,7 +498,7 @@ class RequestStore:
 
     def observe_message_transport(self, attempt_no: int, observation: TransportObservation) -> RequestReceipt:
         """First post-send durable write; never revise a retained native result."""
-        receipt = self._message_required()
+        receipt = self._native_required()
         index, item = self._message_attempt(receipt, attempt_no)
         if not isinstance(observation, TransportObservation):
             raise ReceiptError("message transport observation must be typed and nonsecret")
@@ -482,7 +506,7 @@ class RequestStore:
             if item.observation != observation:
                 raise ReceiptConflict("message transport observation is immutable")
             return receipt
-        delivery_index = self._message_delivery_index(receipt)
+        delivery_index = self._native_stage_index(receipt)
         if index != len(receipt.message_attempts) - 1 or receipt.stages[delivery_index].attempt != attempt_no:
             raise ReceiptConflict("a later attempt superseded this delivery stage")
         attempts = self._replace_message_attempt(receipt, index, replace(item, observation=observation))
@@ -492,7 +516,7 @@ class RequestStore:
 
     def prepare_message_transmission(self, attempt_no: int, fact: ExpectedFact) -> RequestReceipt:
         """Freeze the exact observed transmission projection before Plane ingest."""
-        receipt = self._message_required()
+        receipt = self._native_required()
         index, item = self._message_attempt(receipt, attempt_no)
         if item.observation is None or not isinstance(fact, ExpectedFact):
             raise ReceiptError("retained native observation and expected fact are required")
@@ -507,7 +531,7 @@ class RequestStore:
 
     def stage_message_transmission(self, attempt_no: int) -> RequestReceipt:
         """Mark exact-fact recording unknown BEFORE ingest; never sends payload."""
-        receipt = self._message_required()
+        receipt = self._native_required()
         index, item = self._message_attempt(receipt, attempt_no)
         if item.transmission_fact is None or item.recording_status not in {"prepared", "unrecorded"}:
             raise ReceiptConflict("transmission requires a prepared fact and reconciliation")
@@ -516,28 +540,31 @@ class RequestStore:
 
     def message_transmission_outcome(self, attempt_no: int, status: str) -> RequestReceipt:
         """Retain caller-proven exact-fact reconciliation, not transport claims."""
-        receipt = self._message_required()
+        receipt = self._native_required()
         index, item = self._message_attempt(receipt, attempt_no)
         if status not in {"unknown", "committed", "unrecorded"} or item.recording_status != "unknown":
             raise ReceiptConflict("transmission recording needs a staged, reconciled outcome")
         attempts = self._replace_message_attempt(receipt, index, replace(item, recording_status=status))
         return self._save(replace(receipt, message_attempts=attempts))
 
-    def _message_required(self):
+    def _native_required(self):
         receipt = self._required()
-        if receipt.intent.operation not in {"message.send", "message.reply"}:
-            raise ReceiptError("message attempt is only valid for message requests")
+        if receipt.intent.operation not in _NATIVE_STAGES or receipt.intent.route is None:
+            raise ReceiptError("native attempt requires a frozen message route")
         return receipt
 
     @staticmethod
-    def _message_delivery_index(receipt):
-        return next(i for i, plan in enumerate(receipt.intent.stages) if plan.kind == "delivery")
+    def _native_stage_index(receipt):
+        kind = _NATIVE_STAGES[receipt.intent.operation]
+        return next(i for i, plan in enumerate(receipt.intent.stages) if plan.kind == kind)
 
     @staticmethod
     def _message_attempt(receipt, attempt_no):
-        if type(attempt_no) is not int or not 1 <= attempt_no <= len(receipt.message_attempts):
-            raise ReceiptError("unknown message attempt")
-        return attempt_no - 1, receipt.message_attempts[attempt_no - 1]
+        if type(attempt_no) is int:
+            for index, item in enumerate(receipt.message_attempts):
+                if item.attempt_no == attempt_no:
+                    return index, item
+        raise ReceiptError("unknown native attempt")
 
     @staticmethod
     def _replace_message_attempt(receipt, index, value):
@@ -555,7 +582,10 @@ class RequestStore:
         plan, old = self._stage(receipt, index)
         allowed = old.status == "prepared" or (plan.kind == "recording" and old.status == "unrecorded")
         allowed |= plan.kind != "recording" and old.status in {"unknown", "failed"} and retry_uncertain
-        if not allowed or receipt.attempt <= old.attempt:
+        same_message_recording_attempt = (receipt.intent.operation in {"message.send", "message.reply"}
+                                          and plan.kind == "recording" and old.status == "unrecorded"
+                                          and receipt.attempt == old.attempt > 0)
+        if not allowed or (receipt.attempt <= old.attempt and not same_message_recording_attempt):
             raise ReceiptConflict("stage requires reconciliation or an explicit uncertain retry in a new attempt")
         return self._update(receipt, index, StageOutcome("unknown", receipt.attempt))
 

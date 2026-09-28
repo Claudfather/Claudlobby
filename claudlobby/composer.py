@@ -1931,9 +1931,8 @@ def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
 def resolve_effective_skills(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
 ) -> list[str]:
-    """The skills a bot is ACTUALLY composed with: declared, plus ``briefing``
-    when it equips a ``briefing:`` stanza, plus every ``requires.skills`` entry
-    of its EFFECTIVE protocols (spec §10).
+    """The skills a bot is ACTUALLY composed with: declared, the universal
+    ``fleet-ops`` guide, ``briefing`` when equipped, and protocol requirements.
 
     ONE definition, for the reason ``resolve_effective_protocols`` states two
     functions up: the compose path, the validator, freshbox and the plane's
@@ -1943,6 +1942,11 @@ def resolve_effective_skills(
     declared is not duplicated.
     """
     skills = list(bot.skills)
+    # The operating guide is part of every bot's CLI surface, even when the
+    # manifest disables optional system defaults. Explicit equipment stays
+    # first and is never duplicated.
+    if "fleet-ops" not in skills:
+        skills.append("fleet-ops")
     # The stanza's timers fire /briefing into the bot's own session; without the
     # skill Claude Code rejects the command locally and the send reads OK (#1819).
     if bot.briefing and bot.briefing.slots and "briefing" not in skills:
@@ -2468,6 +2472,33 @@ def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
     ]
 
 
+def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
+    """Narrow task and assignment grants for the selected bot's fleet role.
+
+    The CLI resolves generated bot origin and task ownership; these exact
+    command prefixes do not grant an explicit ``--fleet`` target, a host verb,
+    or a general shell. Keep this named resolver visible to freshbox's
+    independent source audit, rather than adding grants only at compose time.
+    """
+    grants = [
+        "Bash(claudlobby --json task admit *)",
+        "Bash(claudlobby --json assignment accept *)",
+        "Bash(claudlobby --json assignment progress *)",
+        "Bash(claudlobby --json assignment block *)",
+        "Bash(claudlobby --json assignment return *)",
+        "Bash(claudlobby --json assignment complete *)",
+        "Bash(claudlobby --json assignment fail *)",
+    ]
+    if bot.bot_id in fleet.manager_bots():
+        grants.extend((
+            "Bash(claudlobby --json task assign *)",
+            "Bash(claudlobby --json assignment deliver *)",
+            "Bash(claudlobby --json task withdraw *)",
+            "Bash(claudlobby --json task reassign *)",
+        ))
+    return grants
+
+
 # Full tool set an ``allow_all`` permission profile expands to.
 ALL_TOOLS = [
     "Read",
@@ -2728,6 +2759,7 @@ def compose_settings_local(
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
     # additive path; Skill(<name>) above only grants invocation.
     _append_unique(allow_patterns, _resolve_skill_grants(effective_skills, paths))
+    _append_unique(allow_patterns, _resolve_fleet_ops_grants(bot, fleet))
 
     # Layer 5c: Claudron session-loop verb grants (L2) — the NARROW allowlist for
     # the model-initiated CLI calls the loop enables (query wedge, /claudna:capture).
