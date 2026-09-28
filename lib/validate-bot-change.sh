@@ -1937,7 +1937,10 @@ rm -f "$RB_DIR/state/bot.pid"
 # macOS has no `setsid` utility. The selected test interpreter creates the
 # owned process group before exec, so cleanup below still targets this fixture
 # and the process names/lineage seen by bridge_state remain unchanged.
-TELEGRAM_STATE_DIR="$RB_DIR/state" "$VAL_PY" -I -B -c \
+# Give this fake tree only its intended process identity. The real classifier
+# reads TELEGRAM_STATE_DIR through macOS `ps eww`; unrelated inherited test
+# variables are not part of the poller fixture.
+env -i PATH="/usr/bin:/bin" TELEGRAM_STATE_DIR="$RB_DIR/state" "$VAL_PY" -I -B -c \
     'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
     "$_SC_BIN/claude" "$_SC_BIN/tree.py" >/dev/null 2>&1 &
 _SC_ROOT_PID=$!
@@ -1973,14 +1976,29 @@ harness_check "  ...and the TIMEOUT names WHY (not-ours, distinct from no-poller
 grep -q 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
 harness_check "  ...and bring-up still escalates BRIDGE_MISSING (no regression)" "$r"
 
-kill -9 -"$_SC_ROOT_PID" 2>/dev/null || kill -9 "$_SC_ROOT_PID" 2>/dev/null || true
-rm -f "$RB_DIR/state/bot.pid"
-
 if [ "$fail" -gt "$_scope_fail_before" ]; then
     echo "  --- DIAGNOSTIC: #1530 session-scope checks failed ---"
+    if [ -s "$RB_DIR/state/bot.pid" ]; then
+        _sc_pid="$(cat "$RB_DIR/state/bot.pid")"
+        echo "  [foreign poller process]"
+        ps -ww -o comm=,ppid=,args= -p "$_sc_pid" 2>/dev/null || echo "    (not visible)"
+        if ps eww -p "$_sc_pid" 2>/dev/null | tr '[:space:]' '\n' | grep -qxF "TELEGRAM_STATE_DIR=$RB_DIR/state"; then
+            echo "    exact TELEGRAM_STATE_DIR visible=yes"
+        else
+            echo "    exact TELEGRAM_STATE_DIR visible=no"
+        fi
+        _sc_parent="$(ps -o ppid= -p "$_sc_pid" 2>/dev/null | tr -d '[:space:]')" || _sc_parent=""
+        for _sc_hop in 1 2 3; do
+            case "$_sc_parent" in ''|*[!0-9]*) break ;; esac
+            echo "    ancestor $_sc_hop: $(ps -o ppid=,comm= -p "$_sc_parent" 2>/dev/null || true)"
+            _sc_parent="$(ps -o ppid= -p "$_sc_parent" 2>/dev/null | tr -d '[:space:]')" || _sc_parent=""
+        done
+    fi
     echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
     echo "  [start-bot scope stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.scope.out" 2>/dev/null || echo "    (none)"
 fi
+kill -9 -"$_SC_ROOT_PID" 2>/dev/null || kill -9 "$_SC_ROOT_PID" 2>/dev/null || true
+rm -f "$RB_DIR/state/bot.pid"
 
 # === Scenario 2c: RC readiness ESCALATION — fleet-pulse pages on an rc_timeout burst (#533) ===
 # 2b proved start-bot EMITS rc_timeout. This proves the downstream half: fleet-pulse reads
