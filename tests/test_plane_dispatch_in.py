@@ -567,7 +567,7 @@ def test_without_verdict_the_received_mode_still_prints_nothing(tmp_path, *, scr
 
 @pytest.mark.parametrize("dest", ["dinesh", f"bot:{FLEET}/dinesh"], ids=["bare", "alias"])
 @pytest.mark.parametrize("extra", [(), ("--verdict",)], ids=["plain", "verdict"])
-def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path, extra, dest, scratch_plane_env):
+def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path, extra, dest, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
     assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
@@ -580,7 +580,7 @@ def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path
 
 
 @pytest.mark.parametrize("dest", [None, ""], ids=["absent", "empty"])
-def test_a_lookup_with_no_destination_says_so_instead_of_naming_one(tmp_path, dest, scratch_plane_env):
+def test_a_lookup_with_no_destination_says_so_instead_of_naming_one(tmp_path, dest, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
     assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
@@ -630,7 +630,7 @@ def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path,
     "msg_" + "g" + MSGID[5:],      # non-hex character
     "t-1234567890-ab12",           # a task id, not a message id, passed by mistake
 ], ids=["missing-prefix", "one-short", "one-long", "uppercase", "non-hex", "wrong-kind"])
-def test_a_received_id_that_is_not_msg_plus_32_hex_is_refused_as_usage(tmp_path, bad, scratch_plane_env):
+def test_a_received_id_that_is_not_msg_plus_32_hex_is_refused_as_usage(tmp_path, bad, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
     assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0

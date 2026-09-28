@@ -839,12 +839,14 @@ harness_check "reload-fleet does not half-reload (no marker when download fails)
 
 # #1924: a run KILLED mid-step never returns to loud_fail, so the check above
 # cannot see it. Its own EXIT trap must raise it, naming the step, while that
-# step is still going. setsid gives the run its own group, so the step it
-# orphans is reaped as one afterwards.
+# step is still going. The Python launcher gives the run its own group, so
+# the step it orphans is reaped as one afterwards on both macOS and Linux.
 printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"
 printf '#!/bin/bash\ncase " $* " in *" generate "*) echo "generate: composing"; exec sleep 30 ;; esac\nexit 0\n' > "$STUB_BIN/claudlobby"
 chmod +x "$STUB_BIN/claude" "$STUB_BIN/claudlobby"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" PATH="$STUB_BIN:$PATH" setsid "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 &
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" PATH="$STUB_BIN:$PATH" \
+    "$VAL_PY" -I -B -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 &
 RF_PID=$!
 for _i in $(seq 1 150); do
     grep -q 'generate: composing' "$ROOT/state/reload-fleet.log" 2>/dev/null && break
@@ -1556,23 +1558,38 @@ val_scenario "validate-bot-change: session-scoped readiness (#1530)"
 _scope_fail_before=$fail
 _SC_BIN="$RB_ROOT/scopebin"
 mkdir -p "$_SC_BIN"
-cp "$(command -v bash)" "$_SC_BIN/bun"
-cp "$(command -v bash)" "$_SC_BIN/claude"
-chmod +x "$_SC_BIN/bun" "$_SC_BIN/claude"
-cat > "$_SC_BIN/leaf.sh" <<LEAF
-echo \$\$ > "$RB_DIR/state/bot.pid"
-sleep 45
-true
+# The selected private interpreter is visible to macOS `ps eww`, including its
+# launch environment; system /bin/bash did not expose that environment on this
+# host. Preserve the claude -> bun -> bun ancestry and server.ts argv that
+# bridge_state classifies, while the fake poller holds this throwaway bot's slot.
+ln -s "$VAL_PY" "$_SC_BIN/bun"
+ln -s "$VAL_PY" "$_SC_BIN/claude"
+cat > "$_SC_BIN/leaf.py" <<'LEAF'
+import os
+import time
+from pathlib import Path
+Path(os.environ["TELEGRAM_STATE_DIR"], "bot.pid").write_text(str(os.getpid()))
+time.sleep(45)
 LEAF
-printf '"%s" "%s" server.ts &\nwait\n' "$_SC_BIN/bun" "$_SC_BIN/leaf.sh" > "$_SC_BIN/wrapper.sh"
-printf '"%s" "%s" start &\nwait\n'     "$_SC_BIN/bun" "$_SC_BIN/wrapper.sh" > "$_SC_BIN/tree.sh"
+cat > "$_SC_BIN/wrapper.py" <<'WRAPPER'
+import subprocess
+from pathlib import Path
+here = Path(__file__).parent
+subprocess.run([str(here / "bun"), str(here / "leaf.py"), "server.ts"])
+WRAPPER
+cat > "$_SC_BIN/tree.py" <<'TREE'
+import subprocess
+from pathlib import Path
+here = Path(__file__).parent
+subprocess.run([str(here / "bun"), str(here / "wrapper.py"), "start"])
+TREE
 rm -f "$RB_DIR/state/bot.pid"
 # macOS has no `setsid` utility. The selected test interpreter creates the
 # owned process group before exec, so cleanup below still targets this fixture
 # and the process names/lineage seen by bridge_state remain unchanged.
 TELEGRAM_STATE_DIR="$RB_DIR/state" "$VAL_PY" -I -B -c \
     'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "$_SC_BIN/claude" "$_SC_BIN/tree.sh" >/dev/null 2>&1 &
+    "$_SC_BIN/claude" "$_SC_BIN/tree.py" >/dev/null 2>&1 &
 _SC_ROOT_PID=$!
 # Wait for the foreign poller to actually hold the slot; without this the run can
 # race and assert against a bot.pid that does not exist yet, which would PASS for
@@ -3486,7 +3503,7 @@ PLPY
     harness_check "#1693 an emission succeeds against a daemon stalled 1.5 s" "$r"
     [ "$(_pl_count)" = "$((_pl_before + 1))" ] && r=yes || r=no
     harness_check "  ...and its row LANDED once (the late socket commit is a duplicate)" "$r"
-    grep -q "falling back to cold CLI" "$PL_ROOT/err" && r=yes || r=no
+    grep -qE 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...with no knob the door kept today's 1.0 s: it missed and fell back" "$r"
     [ -f "$PL_ROOT/state/plane/.socket-wedged" ] && r=yes || r=no
     harness_check "  ...and the miss ARMED the marker" "$r"

@@ -21,6 +21,7 @@ from claudlobby.plane.db import db_path
 from claudlobby.plane.wal import (WAL_CEILING_BYTES, shm_file, snapshot_holders, wal_size,
                                   writer_pids)
 from claudlobby.plane.writer import PlaneWriter
+from tests.plane_setup import initialize_plane
 
 _HOLD = (
     "import sqlite3, sys\n"
@@ -57,8 +58,9 @@ def _batch(writer: PlaneWriter) -> None:
 def test_a_held_reader_is_named_while_the_wal_is_over_the_ceiling(tmp_path):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
+    initialize_plane(root)
     writer = PlaneWriter(root)
-    writer.connection()  # migrate: a real plane db
+    writer.connection()  # open the explicitly initialized real plane
     reader = subprocess.Popen(
         [sys.executable, "-c", _HOLD, str(db_path(root))],
         stdin=subprocess.PIPE,
