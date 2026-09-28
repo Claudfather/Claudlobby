@@ -118,7 +118,8 @@ def test_wrong_directory_and_manifest_tamper_refuse(installed):
         r.read_release(relocated_root, inputs.release_id)
     manifest_file = directory / r.MANIFEST
     raw = json.loads(manifest_file.read_text())
-    raw["compatibility"]["schema"] = {"read": [13], "write": 13}
+    future_schema = _versions["SQL_SCHEMA_VERSION"] + 1
+    raw["compatibility"]["schema"] = {"read": [future_schema], "write": future_schema}
     manifest_file.write_text(json.dumps(raw))
     with pytest.raises(r.ReleaseError, match="manifest digest mismatch"):
         r.read_release(root, inputs.release_id)

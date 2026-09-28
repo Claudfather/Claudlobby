@@ -10,7 +10,7 @@ import pytest
 from claudlobby import activation, context, runtime_admission
 from claudlobby.__main__ import main
 from claudlobby.plane.db import db_file
-from tests.test_activation import cold  # noqa: F401 — shared activation fixture
+from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 
 
@@ -39,7 +39,7 @@ def _counts(root):
         return (*counts, conn.execute("SELECT COUNT(*) FROM events WHERE kind='task'").fetchone()[0])
 
 
-def test_admit_assign_accept_are_distinct_committed_operations(active, monkeypatch, capsys, tmp_path):
+def test_admit_assign_accept_are_distinct_committed_operations(active, monkeypatch, capsys, tmp_path):  # noqa: F811
     root, release = active
     body = tmp_path / "task.txt"
     body.write_text("Review the private evidence", encoding="utf-8")
@@ -107,7 +107,7 @@ def test_admit_assign_accept_are_distinct_committed_operations(active, monkeypat
 
 
 def test_bad_inputs_and_wrong_executable_refuse_before_identity_or_task_writes(active, monkeypatch, capsys,
-                                                                               tmp_path):
+                                                                               tmp_path):  # noqa: F811
     root, release = active
     before = _counts(root)
     _call(capsys, root, "task", "admit", "--title", "Valid", "--request-id", "not-a-uuid",

@@ -22,7 +22,9 @@ sys.path.insert(0, sys.argv.pop(1))
 allowed = {
     'claudlobby', 'claudlobby.__main__', 'claudlobby.commands',
     'claudlobby.commands._parsers', 'claudlobby.task_defaults',
-    'claudlobby.command_result', 'claudlobby.commands._release_parsers',
+    'claudlobby.command_result', 'claudlobby.reference_hints',
+    'claudlobby.commands._task_read_parsers', 'claudlobby.commands._task_write_parsers',
+    'claudlobby.commands._release_parsers',
     'claudlobby.commands._orientation_parsers',
 }
 blocked = []

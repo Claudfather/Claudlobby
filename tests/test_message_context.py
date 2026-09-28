@@ -14,7 +14,7 @@ from claudlobby.plane.db import db_file
 from claudlobby.plane.ids import derive_uid, ensure_host_uid
 from claudlobby.releases import seal_release
 from tests.package_fixtures import source_package
-from tests.test_activation import cold  # noqa: F401 — shared real-activation fixture
+from tests.test_activation import cold, tmp_path  # noqa: F401 — real activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold and two_fleet
 from tests.test_runtime_admission import _active
 

@@ -9,7 +9,7 @@ import pytest
 from claudlobby import activation, context
 from claudlobby.__main__ import main
 from claudlobby.plane.db import db_file
-from tests.test_activation import cold  # noqa: F401 — shared activation fixture
+from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 from tests.test_task_state import _assignment, _task
 
