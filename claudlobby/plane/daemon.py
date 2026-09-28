@@ -77,6 +77,7 @@ from typing import Optional
 
 from .contracts import ContractViolation
 from .db import connect, db_file, db_path
+from .queue_paths import staged_dir
 from .emit_api import emit_batch
 from .writer import PlaneWriter
 from .ids import ensure_host_uid
@@ -91,12 +92,6 @@ MAX_REQUEST_BYTES = 4 * 1024 * 1024
 MAX_SOCKET_PATH_BYTES = 100
 DEFAULT_DRAIN_INTERVAL = 600.0
 
-
-def staged_dir(root: Path) -> Path:
-    """Where the shim leaves batches during a socket cooldown (#1657). The
-    daemon creates it at startup: its existence tells the client a replayer
-    is there, so an older daemon, which never made it, gets none."""
-    return Path(root) / "state" / "plane" / "staged"
 
 # Process exit code for the stale-daemon exit (#1485). 4 rather than a fresh
 # number: `downgrade -> 4` is already the taxonomy's, on the CLI's exits and
