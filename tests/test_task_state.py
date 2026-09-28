@@ -239,7 +239,8 @@ def test_snapshot_is_read_only_keeps_caller_transaction_and_batches_history_quer
     assert len(many.tasks) == 100 and count_many == count_one
     assert conn.in_transaction and conn.total_changes == changes and tuple(conn.iterdump()) == before
     assert many.tasks[0] == one.tasks[0]
-    conn.set_authorizer(None)
+    # Passing None to disable the authorizer is supported only since 3.11.
+    conn.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
     conn.rollback()
     with pytest.raises(ValueError, match="fleet_uid"):
         read_tasks(conn, fleet_uid="")

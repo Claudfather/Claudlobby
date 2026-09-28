@@ -13,11 +13,14 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 
 source = Path(os.environ.get('SUPERVISOR_TEST_SOURCE', sys.argv[1])).resolve()
+sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
+from tests.fixtures.native_admission import admit_watchdog_fixture
 results = {}
 context = os.environ.get('SUPERVISOR_TEST_CONTEXT', 'dead')
 
@@ -42,6 +45,10 @@ with tempfile.TemporaryDirectory(prefix='supervisor-callers-') as temp:
         trace.touch()
         for file in ('supervisor.sh', 'keepalive.sh', 'spin-up-bot.sh', 'spin-down-bot.sh'):
             shutil.copy2(source / 'lib' / file, lib / file)
+        if (source / 'lib/runtime-admission.sh').exists():
+            # This suite characterizes behavior after admission. Its actual
+            # release/lock protocol has dedicated tests; never borrow live state.
+            admit_watchdog_fixture(lib)
         shutil.copy2(source / 'lib/lib-common.sh', lib / 'lib-common-real.sh')
         # Explicit seam in a CHARACTERIZATION COPY. Production still spells
         # /bin/launchctl; the assertion prevents an accidental real invocation.
@@ -156,7 +163,21 @@ fi
         argv = ['/bin/bash', str(lib / f'{door}.sh'), str(bot)]
         if purge:
             argv.append('--purge')
-        proc = subprocess.run(argv, env=env, cwd=root, text=True, capture_output=True, timeout=10)
+        # A timed-out native executable must not outlive its disposable case
+        # through a command-substitution grandchild holding the output pipe.
+        with subprocess.Popen(argv, env=env, cwd=root, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              start_new_session=True) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except BaseException:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise
+            proc = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
         def normalize(value):
             value = value.replace(str(root), '<ROOT>')
             value = re.sub(r'gui/\d+/', 'gui/UID/', value)

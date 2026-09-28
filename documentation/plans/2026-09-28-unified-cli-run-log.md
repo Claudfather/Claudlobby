@@ -50,6 +50,12 @@ created in an unverified team. GitHub #1747 and this record track the work.
 
 ## Evidence so far
 
+The private `lib/runtime-admission.sh` helper admits cold native lifecycle
+entries through the selected release and activation lock. It is sourced by
+native callers, not a public command or a compatibility shim; per-tool hooks
+do not acquire a Python startup through this helper. Native carrier guards and
+their exact-target activation grants have separate focused coverage.
+
 Current hosted results, checked on 2026-09-28:
 
 | Slice | Exact head | Hosted result |
