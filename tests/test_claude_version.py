@@ -500,7 +500,7 @@ def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path):
 # --- the update job measures the binary on its own seam, before and after -----------
 
 
-def test_the_update_job_measures_the_fleet_binary_on_its_launch_path(tmp_path):
+def test_the_update_job_measures_the_fleet_binary_on_its_launch_path(tmp_path, *, scratch_plane_env):
     """Versions no real host has, so the only way the job can report them is by
     measuring the stubs on its launch path (CLAUDE_UPDATE_FLEET_PATH, its seam).
     A job that measured on the real launch PATH instead would report the host's
@@ -508,7 +508,7 @@ def test_the_update_job_measures_the_fleet_binary_on_its_launch_path(tmp_path):
     pass by coincidence."""
     from tests.test_update_claude_code_staged import StagedHost
 
-    h = StagedHost(tmp_path, system=healthy("7.7.7"))
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env, system=healthy("7.7.7"))
     _write_exec(tmp_path / "inplace", healthy("8.8.8"))
     r = h.run(armed=False, NPM_STAGE=tmp_path / "inplace", NPM_STAGE_TARGET=h.system)
     assert r.returncode == 0, (r.stderr, h.log())

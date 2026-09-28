@@ -54,12 +54,12 @@ def _task_events(root, assignment_id):
 
 # --- withdraw ---------------------------------------------------------------
 
-def test_withdraw_closes_the_row_the_matcher_calls_open(tmp_path):
+def test_withdraw_closes_the_row_the_matcher_calls_open(tmp_path, *, scratch_plane_env):
     """M2: a manager could end a row only by getting a report or
     re-dispatching with `--supersedes`; neither fits a send that never
     reached the bot. `cancelled` was already terminal on the plane, so the
     one thing to prove is that the door lands it on the RIGHT assignment."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     _full_capture(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "fix the widget"', env)
     assert r.returncode == 0, r.stderr
@@ -78,12 +78,12 @@ def test_withdraw_closes_the_row_the_matcher_calls_open(tmp_path):
     assert _matcher(tmp_path, libdir, env, "--open", "w1").stdout.strip() == ""
 
 
-def test_withdraw_refuses_an_id_that_matches_two_open_assignments(tmp_path):
+def test_withdraw_refuses_an_id_that_matches_two_open_assignments(tmp_path, *, scratch_plane_env):
     """A task id is unique per dispatch, NOT across bots (#526 lets two
     fleets hold one bot name; a re-dispatch under one id is legal). The door
     cannot scope by assignee the way `--supersedes` does, so it REFUSES and
     names the candidates rather than cancelling the wrong worker's task."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"', env)
     assert r.returncode == 0, r.stderr
     mine = _plane_row(tmp_path)
@@ -96,12 +96,12 @@ def test_withdraw_refuses_an_id_that_matches_two_open_assignments(tmp_path):
     assert _task_events(tmp_path, mine["plane_assignment_id"]) == []   # nothing acted
 
 
-def test_withdraw_separates_nothing_open_from_a_plane_it_cannot_read(tmp_path):
+def test_withdraw_separates_nothing_open_from_a_plane_it_cannot_read(tmp_path, *, scratch_plane_env):
     """source_state's rule at the act door: an id with nothing open is rc 2
     (a real answer, and it names the ambiguity — a CLOSED row answers empty
     too), while a plane that cannot be opened is rc 3. Collapsing them would
     let a wrong root read as "already handled"."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     dark = _bash(f'"{libdir}/task-act.sh" withdraw t-999999-beef --reason "x"', env)
     assert dark.returncode == 3 and "unreachable" in dark.stderr   # no db yet
 
@@ -112,10 +112,10 @@ def test_withdraw_separates_nothing_open_from_a_plane_it_cannot_read(tmp_path):
     assert "no OPEN assignment carries" in act.stderr
 
 
-def test_withdraw_without_a_reason_is_a_usage_error(tmp_path):
+def test_withdraw_without_a_reason_is_a_usage_error(tmp_path, *, scratch_plane_env):
     """A withdrawal nobody can later explain is the shape of row the whole
     chunk exists to remove — required, never defaulted."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"', env)
     assert r.returncode == 0, r.stderr
     row = _plane_row(tmp_path)
@@ -124,11 +124,11 @@ def test_withdraw_without_a_reason_is_a_usage_error(tmp_path):
     assert _task_events(tmp_path, row["plane_assignment_id"]) == []
 
 
-def test_a_silenced_plane_refuses_the_act_rather_than_doing_it_unrecorded(tmp_path):
+def test_a_silenced_plane_refuses_the_act_rather_than_doing_it_unrecorded(tmp_path, *, scratch_plane_env):
     """dispatch-task.sh sends anyway and discloses, because ITS mission is
     the send. An act whose whole content IS the record has nothing left to
     do, so it refuses at rc 3."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"', env)
     assert r.returncode == 0, r.stderr
     row = _plane_row(tmp_path)
@@ -141,13 +141,13 @@ def test_a_silenced_plane_refuses_the_act_rather_than_doing_it_unrecorded(tmp_pa
 
 # --- #1492: close an id-less row by the asg id the digest hands out ----------
 
-def test_an_asg_id_closes_an_open_idless_row(tmp_path):
+def test_an_asg_id_closes_an_open_idless_row(tmp_path, *, scratch_plane_env):
     """#1492: the re-check digest hands the manager `asg_` ids; task-act takes
     one directly. A raw-text send is the id-less shape (no task id, `sha:`
     source_ref), so the asg id is its ONLY handle. Withdrawing by that asg id
     must close the row AND stamp the row's REAL `dispatch-log:sha:` key, never
     a fabricated `dispatch-log:asg_...`."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     _full_capture(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" w1 "just a note"', env)     # raw text: id-less
     assert r.returncode == 0, r.stderr
@@ -170,13 +170,13 @@ def test_an_asg_id_closes_an_open_idless_row(tmp_path):
     assert asg not in after.stdout, after.stdout                        # closed after
 
 
-def test_a_bad_asg_refusal_names_the_sha_form_and_the_close_command(tmp_path):
+def test_a_bad_asg_refusal_names_the_sha_form_and_the_close_command(tmp_path, *, scratch_plane_env):
     """#1492: an `asg_` id that names no OPEN row is refused ACTIONABLY — the
     refusal prints the row's `sha:<hex>` content key and the exact close
     command, not the dead-end pointer at `claudlobby brief` that sent three
     invocations looking. Here the row is already withdrawn, so its asg names a
     CLOSED row whose key the door can still read and name."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     _full_capture(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" w1 "just a note"', env)
     assert r.returncode == 0, r.stderr
@@ -189,10 +189,10 @@ def test_a_bad_asg_refusal_names_the_sha_form_and_the_close_command(tmp_path):
     assert "task-act.sh withdraw sha:" in act.stderr, act.stderr        # the runnable close command
 
 
-def test_an_unknown_asg_id_refuses_without_naming_a_key(tmp_path):
+def test_an_unknown_asg_id_refuses_without_naming_a_key(tmp_path, *, scratch_plane_env):
     """An asg id the plane never saw has no key to name — the refusal says so
     (rc 2) rather than inventing one or pointing at a sha it cannot produce."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "seed the plane"', env)
     assert r.returncode == 0, r.stderr                                  # the db exists now
     act = _bash(f'"{libdir}/task-act.sh" withdraw asg_deadbeef00000000000000000000dead'
@@ -203,12 +203,12 @@ def test_an_unknown_asg_id_refuses_without_naming_a_key(tmp_path):
 
 # --- escalate ---------------------------------------------------------------
 
-def test_escalate_is_non_terminal_and_readable_by_the_watchdog(tmp_path):
+def test_escalate_is_non_terminal_and_readable_by_the_watchdog(tmp_path, *, scratch_plane_env):
     """M3, and the ruling that shapes it: `escalated` keeps the task OPEN
     while the human decides. So the matcher must still list it — and a
     dedicated read is the only way fleet-pulse can see it, which is what
     `plane-lookup --escalated` is for."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     _full_capture(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "port the parser"', env)
     assert r.returncode == 0, r.stderr
@@ -233,11 +233,11 @@ def test_escalate_is_non_terminal_and_readable_by_the_watchdog(tmp_path):
     assert fields[4] == "do we ship without the migration?"
 
 
-def test_a_later_report_clears_the_escalation(tmp_path):
+def test_a_later_report_clears_the_escalation(tmp_path, *, scratch_plane_env):
     """The escalation holds only while it is the assignment's NEWEST task
     event, so the worker reporting — or the manager withdrawing — ends it
     with no second door to remember."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "port the parser"', env)
     assert r.returncode == 0, r.stderr
     row = _plane_row(tmp_path)
@@ -252,18 +252,18 @@ def test_a_later_report_clears_the_escalation(tmp_path):
     assert after.returncode == 0 and after.stdout.strip() == ""
 
 
-def test_the_escalated_read_refuses_an_unreachable_plane(tmp_path):
+def test_the_escalated_read_refuses_an_unreachable_plane(tmp_path, *, scratch_plane_env):
     """source_state's rule: unreachable is not empty. A watchdog that read
     'nothing escalated' off a plane it could not open would go dark in
     silence, which is the exact class #1014 named."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     out = _lookup(tmp_path / "nowhere", libdir, env, "--escalated", "--fleet", F)
     assert out.returncode == 3 and out.stdout == ""
     assert "unreachable" in out.stderr
 
 
-def test_escalate_without_a_question_is_a_usage_error(tmp_path):
-    libdir, env = _plane_lib(tmp_path)
+def test_escalate_without_a_question_is_a_usage_error(tmp_path, *, scratch_plane_env):
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"', env)
     assert r.returncode == 0, r.stderr
     row = _plane_row(tmp_path)
@@ -271,8 +271,8 @@ def test_escalate_without_a_question_is_a_usage_error(tmp_path):
     assert act.returncode == 1 and "needs the question" in act.stderr
 
 
-def test_an_unknown_verb_is_refused_with_the_usage(tmp_path):
-    libdir, env = _plane_lib(tmp_path)
+def test_an_unknown_verb_is_refused_with_the_usage(tmp_path, *, scratch_plane_env):
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     act = _bash(f'"{libdir}/task-act.sh" delete t-1 --reason x', env)
     assert act.returncode == 1 and "task-act.sh withdraw" in act.stderr
 
@@ -304,13 +304,13 @@ def test_cancelled_is_terminal_in_every_matcher_vocabulary():
 
 # --- M1: a deadline by default ----------------------------------------------
 
-def test_the_door_and_the_composer_agree_on_the_default_deadline(tmp_path):
+def test_the_door_and_the_composer_agree_on_the_default_deadline(tmp_path, *, scratch_plane_env):
     """M1: with no composed value the door falls back to its own literal, and
     the two must be the SAME number or a bot.conf composed before M-A pages on
     a different clock than one composed after. 24h, in seconds."""
     from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S
 
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     env = {k: v for k, v in env.items() if k != "OBSERVABILITY_DISPATCH_DEADLINE"}
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "no composed deadline"', env)
     assert r.returncode == 0, r.stderr
@@ -329,10 +329,10 @@ def test_the_door_and_the_composer_agree_on_the_default_deadline(tmp_path):
         (span, row["expected_by"])
 
 
-def test_zero_is_an_open_ended_dispatch_on_either_door(tmp_path):
+def test_zero_is_an_open_ended_dispatch_on_either_door(tmp_path, *, scratch_plane_env):
     """`0` must mint NO deadline. "now + 0" would be overdue in the second it
     was sent — the loudest possible reading of "no deadline please"."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "open ended"',
               {**env, "OBSERVABILITY_DISPATCH_DEADLINE": "0"})
     assert r.returncode == 0, r.stderr
@@ -426,12 +426,12 @@ def test_migration_0010_widens_the_task_check_without_losing_a_row(tmp_path):
 
 # --- the M-A fold, through the real doors (#1481) ----------------------------
 
-def test_a_nudge_does_not_erase_an_escalation_on_the_read(tmp_path):
+def test_a_nudge_does_not_erase_an_escalation_on_the_read(tmp_path, *, scratch_plane_env):
     """FOLD F1, the bash half. `--escalated` is fleet-pulse's only window onto
     a raise that changes no status, and a `nudged` event displaced it: the
     question vanished from the read for good. A nudge is an ask, not an
     answer — only a real act clears an escalation."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     _full_capture(tmp_path)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "port it"',
                  env).returncode == 0
@@ -456,13 +456,13 @@ def test_a_nudge_does_not_erase_an_escalation_on_the_read(tmp_path):
     assert _lookup(tmp_path, libdir, env, "--escalated", "--fleet", F).stdout.strip() == ""
 
 
-def test_an_ambiguous_id_is_answered_by_naming_the_assignment(tmp_path):
+def test_an_ambiguous_id_is_answered_by_naming_the_assignment(tmp_path, *, scratch_plane_env):
     """FOLD F5. The refusal used to say "name the assignment on the plane, or
     close the duplicates first" while NO door took an assignment — a remedy
     the caller could not carry out, leaving "close the other manager's row" as
     the only exit. `--assignment` is that door, and the refusal prints the ids
     to paste into it."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     _full_capture(tmp_path)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"',
                  env).returncode == 0
@@ -496,11 +496,11 @@ def test_an_ambiguous_id_is_answered_by_naming_the_assignment(tmp_path):
     assert json.loads(events[0][1])["question"] == "which one is live?"
 
 
-def test_all_open_honours_the_assignee_it_accepts(tmp_path):
+def test_all_open_honours_the_assignee_it_accepts(tmp_path, *, scratch_plane_env):
     """FOLD F5. `--assignee` was declared on the parser and read by only the
     plain mode, so a caller that thought it had disambiguated got the whole
     ambiguous set back — worse than not offering the flag."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"',
                  env).returncode == 0
     mine = _plane_row(tmp_path)
@@ -515,11 +515,11 @@ def test_all_open_honours_the_assignee_it_accepts(tmp_path):
     assert len(lines) == 1 and lines[0].split()[1] == twin[2]
 
 
-def test_the_act_is_stamped_with_the_rows_fleet_not_the_actors(tmp_path):
+def test_the_act_is_stamped_with_the_rows_fleet_not_the_actors(tmp_path, *, scratch_plane_env):
     """FOLD F4. 44.6% of dispatch traffic is cross-fleet, and the door stamped
     `FLEET_NAME` — the MANAGER's fleet. A withdrawal filed under the actor's
     fleet is invisible to every fleet-scoped read of the task it retired."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     _full_capture(tmp_path)
     tid = "t-1481-crossfleet"
     _seed_assignment(tmp_path, task_id=tid, bot="w9", tag="8")
@@ -537,12 +537,12 @@ def test_the_act_is_stamped_with_the_rows_fleet_not_the_actors(tmp_path):
     assert actor == "bot:some-other-fleet/lead"
 
 
-def test_a_leading_dash_id_is_a_value_and_a_bad_call_is_not_an_unreachable_plane(tmp_path):
+def test_a_leading_dash_id_is_a_value_and_a_bad_call_is_not_an_unreachable_plane(tmp_path, *, scratch_plane_env):
     """FOLD F10, both halves. A task id a human typed can start with `-`, and
     passed as a separate word argparse reads it as a flag; and reporting every
     nonzero lookup rc as "unreachable" sends the caller to check the database
     for what is a typo in the call."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"',
                  env).returncode == 0                  # the db exists
     dash = _bash(f'"{libdir}/task-act.sh" withdraw -weird-id --reason "x"', env)
@@ -573,13 +573,13 @@ def test_the_escalation_window_is_the_same_tuple_on_both_sides():
 
 
 @pytest.mark.parametrize("bad", ["abc", "12-34", "-600", "12.5", ""])
-def test_a_non_integer_deadline_is_refused_loudly_on_both_doors(tmp_path, bad):
+def test_a_non_integer_deadline_is_refused_loudly_on_both_doors(tmp_path, bad, *, scratch_plane_env):
     """FOLD F8. `$(( abc * 60 ))` under `set -u` is an unbound-variable fault
     inside the ERR trap: the dispatch exited 0 having sent NOTHING and
     recorded nothing — a silent total loss from a typo. `12-34` is the second
     half: the old class `*[!0-9-]*` let a dash through into `-le`, which is
     itself an error."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     if bad:
         flag = _bash(f'"{libdir}/dispatch-task.sh" --botcommand --deadline-min {bad}'
                      ' w1 "a task"', env)

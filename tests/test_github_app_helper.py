@@ -28,7 +28,6 @@ from tests.conftest import (
     _write_exec,
     booby_trap_git,
     constructed_env,
-    plane_emit_env,
     read_fleet_events,
 )
 
@@ -102,7 +101,7 @@ esac
 
 
 @pytest.fixture
-def app_env(tmp_path, rsa_key):
+def app_env(tmp_path, rsa_key, *, scratch_plane_env):
     """Scratch root + curl stub + a fully-configured env (config via env vars)."""
     stub = tmp_path / "stub-bin"
     stub.mkdir()
@@ -115,11 +114,11 @@ def app_env(tmp_path, rsa_key):
         PATH=f"{stub}:{os.environ['PATH']}",
         STUB_DIR=str(stub),
         HOME=str(home),
-        CLAUDLOBBY_ROOT=str(root),
+
         GITHUB_APP_ID="999001",
         GITHUB_APP_INSTALLATION_ID="555002",
         GITHUB_APP_PRIVATE_KEY_PATH=str(rsa_key),
-        **plane_emit_env(),          # auth_mint_failed lands on the plane (no fleet: under _host)
+        **scratch_plane_env(root),          # auth_mint_failed lands on the plane (no fleet: under _host)
     )
     return {"env": env, "stub": stub, "root": root, "home": home}
 

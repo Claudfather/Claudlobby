@@ -103,7 +103,7 @@ def test_bench_negative_shim_is_a_usage_error():
     assert "0 or a positive integer" in r.stderr
 
 
-def test_wedge_cooldown_marker_short_circuits_the_socket(tmp_path):
+def test_wedge_cooldown_marker_short_circuits_the_socket(tmp_path, *, scratch_plane_env):
     """Re-verify F5 blocking residual: doors emit twice, so the per-emission
     deadline compounded. A fresh wedge marker sends the SECOND emission
     straight to the CLI rung with disclosure."""
@@ -120,9 +120,9 @@ def test_wedge_cooldown_marker_short_circuits_the_socket(tmp_path):
         input='{"events": [{"event_type": "task", "emitter": "t",'
               ' "fleet": "f", "payload": {}}]}',
         capture_output=True, text=True, timeout=30,
-        env={"PATH": "/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(root),
-             "PLANE_SOCKET": str(root / "no.sock"),
-             "PLANE_EMIT_CLI": str(recorder)},
+        env={"PATH": "/usr/bin:/bin", **scratch_plane_env(root, cli=recorder),
+
+             },
     )
     elapsed = time.monotonic() - t0
     assert r.returncode == 0, r.stderr
@@ -130,7 +130,7 @@ def test_wedge_cooldown_marker_short_circuits_the_socket(tmp_path):
     assert elapsed < 1.5, f"cooldown path must not touch the socket ({elapsed:.1f}s)"
 
 
-def test_expired_wedge_marker_is_cleared(tmp_path):
+def test_expired_wedge_marker_is_cleared(tmp_path, *, scratch_plane_env):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     mark = root / "state" / "plane" / ".socket-wedged"
@@ -143,9 +143,9 @@ def test_expired_wedge_marker_is_cleared(tmp_path):
         input='{"events": [{"event_type": "task", "emitter": "t",'
               ' "fleet": "f", "payload": {}}]}',
         capture_output=True, text=True, timeout=30,
-        env={"PATH": "/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(root),
-             "PLANE_SOCKET": str(root / "no.sock"),
-             "PLANE_EMIT_CLI": str(recorder)},
+        env={"PATH": "/usr/bin:/bin", **scratch_plane_env(root, cli=recorder),
+
+             },
     )
     assert r.returncode == 0, r.stderr
     assert "wedge cooldown" not in r.stderr, "expired marker must not gate"

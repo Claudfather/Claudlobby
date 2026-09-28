@@ -124,8 +124,15 @@ EVENTS="$BOT_DIR/data/events"   # the marker/idle files still live under data/; 
 # that does not exist, at a SHORT path (sun_path is 104 bytes on macOS).
 # ---------------------------------------------------------------------------
 VAL_REPO="$(cd "$LIB_DIR/.." && pwd)"
-VAL_CLI=""
-if [ -x "$VAL_REPO/.venv/bin/claudlobby" ]; then
+# A pytest wrapper supplies its preflighted checkout CLI. Honour an explicit
+# override rather than silently selecting a different repository-local venv.
+VAL_CLI="${PLANE_EMIT_CLI:-}"
+if [ -n "$VAL_CLI" ]; then
+    if [ ! -x "$VAL_CLI" ]; then
+        echo "validate-bot-change: explicit PLANE_EMIT_CLI is not executable: $VAL_CLI" >&2
+        exit 2
+    fi
+elif [ -x "$VAL_REPO/.venv/bin/claudlobby" ]; then
     VAL_CLI="$VAL_REPO/.venv/bin/claudlobby"
 elif command -v claudlobby >/dev/null 2>&1; then
     VAL_CLI="$(command -v claudlobby)"
@@ -135,7 +142,10 @@ if [ -z "$VAL_CLI" ]; then
     exit 2
 fi
 export PLANE_EMIT_CLI="$VAL_CLI"
-export PLANE_SOCKET="/tmp/vbc-nosock-$$"
+# This directory was just allocated by mktemp and belongs to this run. A
+# PID-derived name directly under /tmp could already name another listener.
+export PLANE_SOCKET="$TMUX_TMPDIR/no-plane.sock"
+[ ! -e "$PLANE_SOCKET" ] || { echo "validate-bot-change: scratch Plane socket already exists" >&2; exit 2; }
 # Every door reads its root from the environment (the shim defaults to its own
 # parent dir otherwise — a stub lib dir sourced from this shell would land rows
 # in the checkout). Scenarios with their own root pass theirs inline.

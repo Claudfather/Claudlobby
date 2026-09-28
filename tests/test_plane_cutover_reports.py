@@ -154,7 +154,7 @@ def test_report_back_refuses_when_the_matcher_is_unreachable(tmp_path):
 
 # --- brief: unacked reports + --ack ---------------------------------------------------
 
-def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path):
+def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path, monkeypatch, scratch_plane_env):
     root, paths, d, r = _scene(tmp_path)
     wi2, asg2 = "wi_" + "2".rjust(32, "0"), "asg_" + "2".rjust(32, "0")
     _report(root, wi2, asg2, "2026-09-02T12:00:00Z", event="completed", extra={"summary": "one"})
@@ -162,6 +162,8 @@ def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path):
     before = _reports_section(paths, "mgr", TERMINAL, deg)
     assert before["source"] == "plane"
     assert [(x["task_id"], x["summary"]) for x in before["unacked"]] == [("t-1-aaaa", ""), ("t-2-bbbb", "one")]
+    for key, value in scratch_plane_env(root).items():
+        monkeypatch.setenv(key, value)
     newest = max(before["unacked"], key=lambda x: x["seq"])
     assert record_ack(paths, F, "mgr", acked_through_seq=newest["seq"], acked_through_ts=newest["ts"],
                       count=len(before["unacked"])).recorded                       # the ack, a plane fact

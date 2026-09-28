@@ -51,7 +51,8 @@ exit 0
 class Scene:
     def __init__(
         self, tmp, *, active, sub, nr, age_s=2, marker=False, emit=False,
-    ):
+    scratch_plane_env):
+        self.scratch_plane_env = scratch_plane_env
         self.tmp = Path(tmp)
         self.home = self.tmp / "home"
         self.root = self.tmp / "root"
@@ -108,9 +109,7 @@ class Scene:
             "TELEGRAM_STATE_DIR": str(self.tmp / "tg"),
         }
         if self.emit_dir:
-            del env["PLANE_EMIT_DISABLED"]
-            env["PLANE_EMIT_CLI"] = str(self.bin / "plane-cli")
-            env["PLANE_SOCKET"] = str(self.tmp / "no-daemon.sock")
+            env.update(self.scratch_plane_env(self.root, cli=self.bin / "plane-cli"))
             env["EMIT_DIR"] = str(self.emit_dir)
         return env
 
@@ -161,8 +160,8 @@ class Scene:
 # --- keepalive -----------------------------------------------------------------------------
 
 
-def test_K1_a_loop_is_named_and_never_restarted(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2)
+def test_K1_a_loop_is_named_and_never_restarted(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2, scratch_plane_env=scratch_plane_env)
     r, log = s.keepalive()
     assert "SKIP — crash loop (3 automatic restarts" in log, (log, r.stderr[-400:])
     assert s.restarts() == [], "keepalive stacked a restart on a crash loop"
@@ -170,8 +169,8 @@ def test_K1_a_loop_is_named_and_never_restarted(tmp_path):
     assert r.returncode == 0, (r.returncode, r.stderr[-400:])
 
 
-def test_K4_a_settled_unit_with_a_stale_counter_still_restarts(tmp_path):
-    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000)
+def test_K4_a_settled_unit_with_a_stale_counter_still_restarts(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000, scratch_plane_env=scratch_plane_env)
     r, log = s.keepalive()
     assert "RESTART" in log, (log, r.stderr[-400:])
     assert s.restarts() == ["restart nr_before=1971"], s.restarts()
@@ -180,8 +179,8 @@ def test_K4_a_settled_unit_with_a_stale_counter_still_restarts(tmp_path):
 # --- fleet-pulse ---------------------------------------------------------------------------
 
 
-def test_P1_a_loop_raises_its_own_page_and_replaces_session_missing(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2)
+def test_P1_a_loop_raises_its_own_page_and_replaces_session_missing(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2, scratch_plane_env=scratch_plane_env)
     r, summary = s.pulse()
     assert "b.crashloop_alerted" in s.markers(), (s.markers(), r.stderr[-500:])
     assert not [
@@ -190,21 +189,21 @@ def test_P1_a_loop_raises_its_own_page_and_replaces_session_missing(tmp_path):
     assert "crash-loop" in summary, summary
 
 
-def test_P2_a_settled_unit_clears_the_page(tmp_path):
-    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000, marker=True)
+def test_P2_a_settled_unit_clears_the_page(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000, marker=True, scratch_plane_env=scratch_plane_env)
     s.pulse()
     assert "b.crashloop_alerted" not in s.markers(), s.markers()
 
 
-def test_P4_a_healthy_boot_raises_nothing(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=0, age_s=20)
+def test_P4_a_healthy_boot_raises_nothing(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="start-pre", nr=0, age_s=20, scratch_plane_env=scratch_plane_env)
     r, summary = s.pulse()
     assert "b.crashloop_alerted" not in s.markers(), s.markers()
     assert "crash-loop" not in summary, summary
 
 
-def test_P6_a_loop_records_one_crash_loop_event_with_its_keys(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2, emit=True)
+def test_P6_a_loop_records_one_crash_loop_event_with_its_keys(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2, emit=True, scratch_plane_env=scratch_plane_env)
     s.pulse()
     events = s.emitted("crash_loop")
     assert len(events) == 1, events
@@ -216,8 +215,8 @@ def test_P6_a_loop_records_one_crash_loop_event_with_its_keys(tmp_path):
 
 # --- controls: the AGE plumbing itself (a young phase is a boot in flight) ---
 
-def test_C1_a_young_start_after_one_retry_is_a_boot_in_flight_not_a_restart(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=1, age_s=20)
+def test_C1_a_young_start_after_one_retry_is_a_boot_in_flight_not_a_restart(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="start-pre", nr=1, age_s=20, scratch_plane_env=scratch_plane_env)
     r, log = s.keepalive()
     assert "SKIP — boot in flight" in log, (log, r.stderr[-300:])
     assert s.restarts() == []

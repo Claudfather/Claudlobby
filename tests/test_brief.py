@@ -101,7 +101,9 @@ def root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def paths(root: Path) -> Paths:
+def paths(root: Path, monkeypatch, scratch_plane_env) -> Paths:
+    for key, value in scratch_plane_env(root).items():
+        monkeypatch.setenv(key, value)
     return Paths(root=root, fleet_dir=None)
 
 

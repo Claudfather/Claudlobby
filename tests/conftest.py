@@ -7,6 +7,8 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from textwrap import dedent
 
@@ -15,12 +17,28 @@ import pytest
 from claudlobby.config import DEFAULT_GUARDRAILS
 
 
+def _silence_plane(patch):
+    patch.setenv("PLANE_EMIT_DISABLED", "1")
+    for key in ("CLAUDLOBBY_ROOT", "PLANE_SOCKET", "PLANE_EMIT_CLI"):
+        patch.delenv(key, raising=False)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_plane_session():
+    """Guard session fixtures too; undo only our changes when pytest exits.
+
+    Collection-time subprocesses must use constructed_env themselves: no
+    fixture can protect code that ran before fixture setup.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        _silence_plane(patch)
+        yield
+
+
 @pytest.fixture(autouse=True)
-def _isolate_claudlobby_root(monkeypatch):
-    """Bot sessions and timer jobs export CLAUDLOBBY_ROOT, and Paths.detect()
-    honors it over the cwd walk-up — strip it so hint-less detection in tests
-    is hermetic. Tests that need it set it explicitly via monkeypatch.setenv."""
-    monkeypatch.delenv("CLAUDLOBBY_ROOT", raising=False)
+def _isolate_claudlobby_root(monkeypatch, _isolate_plane_session):
+    """Reset the default for each test; explicit local overrides still win."""
+    _silence_plane(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -66,15 +84,80 @@ def read_fleet_events(root):
         for row in rows)
 
 
-def plane_emit_env():
-    """The two keys that make a driven script RECORD into its CLAUDLOBBY_ROOT's
-    plane through the shim's cold-CLI rung (no daemon listens on the socket):
-    merge into a scrubbed/constructed env. A fleet-less script (a host job)
-    lands under the `_host` anchor; a fleet-scoped one needs FLEET_NAME /
-    CLAUDLOBBY_FLEET or a bot dir beside it."""
-    import sys
-    return {"PLANE_EMIT_CLI": str(Path(sys.executable).parent / "claudlobby"),
-            "PLANE_SOCKET": "/tmp/claudlobby-test-no-daemon.sock"}
+class ScratchPlaneEnv:
+    """Couple a recording opt-in to storage and transports owned by pytest."""
+
+    def __init__(self, base: Path, cli: Path):
+        self.base = base.resolve()
+        self.cli = cli.resolve()
+        self._socket_dirs = []
+
+    def _owned(self, path: Path, label: str, *, sockets=False) -> Path:
+        resolved = Path(path).resolve()
+        owners = [self.base]
+        if sockets:
+            owners.extend(Path(d.name).resolve() for d in self._socket_dirs)
+        if not any(resolved != owner and resolved.is_relative_to(owner) for owner in owners):
+            raise ValueError(f"{label} must be inside a fixture-owned directory: {path}")
+        return resolved
+
+    def socket_dir(self) -> Path:
+        """Allocate and register one short directory for a real Unix daemon.
+
+        macOS sun_path cannot hold pytest's long basetemp paths. This owns
+        exactly the mkdtemp directory, never all of /tmp.
+        """
+        directory = tempfile.TemporaryDirectory(prefix="pe-", dir="/tmp")
+        self._socket_dirs.append(directory)
+        return Path(directory.name)
+
+    def close(self):
+        for directory in self._socket_dirs:
+            directory.cleanup()
+
+    def __call__(self, root: Path, *, socket: Path | None = None,
+                 cli: Path | None = None) -> dict[str, str]:
+        root = self._owned(root, "Plane root")
+        source = Path(__file__).resolve().parent.parent
+        if root == source or root.is_relative_to(source):
+            raise ValueError("Plane root must not be the source checkout")
+        default_socket = socket is None
+        socket = self._owned(socket if socket is not None else root / "no-daemon.sock",
+                             "Plane socket", sockets=True)
+        if default_socket and socket.exists():
+            raise ValueError(f"default Plane socket must be absent: {socket}")
+        if cli is None:
+            cli = self.cli
+        elif Path(cli).resolve() != self.cli:
+            cli = self._owned(cli, "Plane CLI")
+        return {"CLAUDLOBBY_ROOT": str(root), "PLANE_EMIT_DISABLED": "0",
+                "PLANE_SOCKET": str(socket), "PLANE_EMIT_CLI": str(cli)}
+
+
+@pytest.fixture(scope="session")
+def _scratch_plane_cli(_isolate_plane_session, tmp_path_factory):
+    """Refuse a globally installed CLI or an editable install of another tree."""
+    cli = Path(sys.executable).parent / "claudlobby"
+    assert sys.prefix != sys.base_prefix, "recording tests require a dedicated venv"
+    assert cli.is_file(), f"install this checkout in the test venv: {cli}"
+    repo = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", "import claudlobby; print(claudlobby.__file__)"],
+        cwd=tmp_path_factory.mktemp("plane-cli-preflight"),
+        env=constructed_env(), text=True, capture_output=True, check=True,
+    )
+    assert Path(result.stdout.strip()).resolve().parent == repo / "claudlobby"
+    # The console script must use THIS interpreter, not an ambient installation.
+    assert str(Path(sys.executable)) in cli.read_text().splitlines()[0]
+    return cli
+
+
+@pytest.fixture
+def scratch_plane_env(tmp_path_factory, _scratch_plane_cli):
+    """Explicit opt-in for intentional recording; use with constructed_env."""
+    builder = ScratchPlaneEnv(tmp_path_factory.getbasetemp(), _scratch_plane_cli)
+    yield builder
+    builder.close()
 
 
 def _scrubbed_env(**overrides):
@@ -89,9 +172,10 @@ def _scrubbed_env(**overrides):
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET", "BOT_"))
+        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET", "BOT_", "PLANE_"))
     }
-    env.update(overrides)
+    env["PLANE_EMIT_DISABLED"] = "1"
+    env.update({k: str(v) for k, v in overrides.items()})
     return env
 
 
@@ -132,7 +216,8 @@ def constructed_env(**overrides):
     lib-common's pane classifiers flip one verdict (test_keepalive_classify /
     test_pane_is_idle, measured). Values are str()-coerced so Paths pass
     through."""
-    env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8"}
+    env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8",
+           "PLANE_EMIT_DISABLED": "1"}
     env.update({k: str(v) for k, v in overrides.items()})
     return env
 
@@ -182,7 +267,7 @@ SETUP_SYSTEM = Path(__file__).resolve().parent.parent / "lib" / "setup-system"
 
 
 @pytest.fixture(scope="session")
-def setup_system_dry_run():
+def setup_system_dry_run(_isolate_plane_session):
     """One real `setup-system --dry-run` for the whole suite.
 
     The 10-phase script probes real tools (dpkg/brew/node/python3/claude/jq), so

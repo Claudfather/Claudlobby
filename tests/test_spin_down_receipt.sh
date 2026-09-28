@@ -45,7 +45,7 @@ spin_down() {
     env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
         SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
-        PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
+        PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
         bash "$LIB_DIR/spin-down-bot.sh" "$bdir" "$@" 2>&1 || true
 }
 

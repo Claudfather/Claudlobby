@@ -32,7 +32,7 @@ DOOR_FILES = (
 )
 
 
-def _plane_lib(tmp_path: Path) -> tuple[Path, dict]:
+def _plane_lib(tmp_path: Path, *, scratch_plane_env) -> tuple[Path, dict]:
     libdir = tmp_path / "lib"
     libdir.mkdir()
     for name in DOOR_FILES:
@@ -44,18 +44,18 @@ def _plane_lib(tmp_path: Path) -> tuple[Path, dict]:
     tmux.write_text("#!/bin/bash\nexit 0\n")
     tmux.chmod(0o755)
     env = {
-        "CLAUDLOBBY_ROOT": str(tmp_path),
+        **scratch_plane_env(tmp_path),
         "TMUX_BIN": str(tmux),
         "OBSERVABILITY_DISPATCH_DEADLINE": "600",
         "BOT_ID": "lead",
         "BOT_NAME": "lead",
         "FLEET_NAME": "e2e-fleet",
         "PLANE_EMIT_ENABLED": "1",
-        "PLANE_EMIT_CLI": str(CLI),
+
         # No daemon in this harness: the shim's socket rung fails (exit 5,
         # disclosed) and the cold-CLI rung does the real ingest — rung 2 is
         # itself under test here.
-        "PLANE_SOCKET": str(tmp_path / "no-daemon.sock"),
+
         "PATH": "/usr/bin:/bin",
     }
     return libdir, env
@@ -108,8 +108,8 @@ def _seed_assignment(root: Path, *, task_id: str, bot: str, tag: str):
 
 
 @pytest.fixture()
-def armed(tmp_path: Path):
-    return _plane_lib(tmp_path)
+def armed(tmp_path: Path, *, scratch_plane_env):
+    return _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
 
 
 def test_dispatch_task_armed_lands_the_construct_triple(tmp_path, armed):

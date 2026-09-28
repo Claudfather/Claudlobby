@@ -28,8 +28,8 @@ def _matcher(tmp_path, libdir, env, *args):
                           capture_output=True, text=True, env=env, timeout=120)
 
 
-def test_an_idless_progress_report_defers_the_overdue_alarm(tmp_path):
-    libdir, env = _plane_lib(tmp_path)
+def test_an_idless_progress_report_defers_the_overdue_alarm(tmp_path, *, scratch_plane_env):
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     env = {**env, "OBSERVABILITY_DISPATCH_DEADLINE": "1"}       # due in a second
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a long task"', env)
     assert r.returncode == 0, r.stderr
@@ -51,11 +51,11 @@ def test_an_idless_progress_report_defers_the_overdue_alarm(tmp_path):
     assert dead.returncode == 0 and dead.stdout.startswith("w1 "), (dead.stdout, dead.stderr)
 
 
-def test_a_case_variant_alias_still_defers_the_alarm(tmp_path):
+def test_a_case_variant_alias_still_defers_the_alarm(tmp_path, *, scratch_plane_env):
     """`W1` reporting for a dispatch sent to `w1` mints a second actor; the
     grace once bound to the FIRST actor uid alone and paged the live worker
     (the adversarial lens). Every per-bot read spans all of the bot's uids."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     env = {**env, "OBSERVABILITY_DISPATCH_DEADLINE": "1"}
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a long task"', env)
     assert r.returncode == 0, r.stderr
@@ -68,8 +68,8 @@ def test_a_case_variant_alias_still_defers_the_alarm(tmp_path):
     assert late.returncode == 0 and late.stdout == "", (late.stdout, late.stderr)
 
 
-def test_supersedes_retires_this_workers_assignment_not_a_same_id_twin(tmp_path):
-    libdir, env = _plane_lib(tmp_path)
+def test_supersedes_retires_this_workers_assignment_not_a_same_id_twin(tmp_path, *, scratch_plane_env):
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"', env)
     assert r.returncode == 0, r.stderr
     mine = _plane_row(tmp_path)
@@ -82,13 +82,13 @@ def test_supersedes_retires_this_workers_assignment_not_a_same_id_twin(tmp_path)
     assert statuses[twin[2]] != "superseded", "another bot's same-id assignment was retired"
 
 
-def test_a_control_type_supersede_still_retires_its_target(tmp_path):
+def test_a_control_type_supersede_still_retires_its_target(tmp_path, *, scratch_plane_env):
     """#1491 keeps --supersedes working on a CONTROL type: the note retires its
     target even though the note itself mints NO assignment of its own. The plane
     ids stay minted precisely so the `superseded` event's successor_id survives;
     only the note's own triple is withheld. (Pins the else-branch sup_ev: revert
     it and the victim stays open.)"""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "the real task"', env)
     assert r.returncode == 0, r.stderr
     victim = _plane_row(tmp_path)
@@ -103,8 +103,8 @@ def test_a_control_type_supersede_still_retires_its_target(tmp_path):
     assert n_after == n_before, "the query note minted an assignment (#1491)"
 
 
-def test_every_terminal_report_closes_the_bots_open_idless_dispatches(tmp_path):
-    libdir, env = _plane_lib(tmp_path)
+def test_every_terminal_report_closes_the_bots_open_idless_dispatches(tmp_path, *, scratch_plane_env):
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     # a raw-text send is the id-less shape that still mints an assignment after
     # #1491 (a control type mints none), so it is what the id-less closer acts on
     r = _bash(f'"{libdir}/dispatch-task.sh" w1 "what is the retry logic"', env)   # id-less
@@ -119,21 +119,21 @@ def test_every_terminal_report_closes_the_bots_open_idless_dispatches(tmp_path):
     assert statuses[idless["plane_assignment_id"]] == "completed", statuses
 
 
-def test_a_stale_callers_trailing_arguments_are_a_usage_error(tmp_path):
+def test_a_stale_callers_trailing_arguments_are_a_usage_error(tmp_path, *, scratch_plane_env):
     """`--open w1 --source jsonl` once answered at rc 0 (the junk ignored); a
     caller still passing the retired seam or the ledger paths must hear it."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _matcher(tmp_path, libdir, env, "--open", "w1", "--source", "jsonl")
     assert r.returncode == 2 and "takes no '--source'" in r.stderr, (r.returncode, r.stderr)
     r = _matcher(tmp_path, libdir, env, "--all", "1700000000", "/tmp/dispatch-log.jsonl")
     assert r.returncode == 2, (r.returncode, r.stderr)
 
 
-def test_an_empty_fleet_or_root_value_is_refused_not_carried(tmp_path):
+def test_an_empty_fleet_or_root_value_is_refused_not_carried(tmp_path, *, scratch_plane_env):
     """`--fleet ""` fell through to the carrier and answered for ANOTHER fleet
     at rc 0 (the adversarial lens); an empty value is refused like a missing
     one, and so is an empty --bots-dir."""
-    libdir, env = _plane_lib(tmp_path)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
     env = {**env, "CLAUDLOBBY_FLEET": F, "CLAUDLOBBY_ROOT": str(tmp_path)}
     for args in (["--all", "--fleet", ""], ["--all", "--root", ""], ["--orphans", "--bots-dir", ""]):
         r = subprocess.run([sys.executable, str(libdir / "dispatch-overdue.py"), *args],
