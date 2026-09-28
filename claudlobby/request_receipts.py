@@ -62,6 +62,7 @@ class ExpectedFact:
     event_id: str
     family: str
     projection_sha256: str
+    fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,7 @@ _STATUSES = {"recording": {"prepared", "unknown", "committed", "unrecorded"},
 # This operation codec supports task/message facts and report acknowledgements.
 # These are wire event_type / ingest_ledger.family values, never SQL table names;
 # physical storage mapping remains owned by ingest.CONSTRUCT_TABLES.
-_FACT_KINDS = frozenset({"communication", "transmission", "work_item", "assignment", "task", "system"})
+FACT_FAMILIES = frozenset({"communication", "transmission", "work_item", "assignment", "task", "system"})
 
 
 def _id(value, kind):
@@ -153,8 +154,11 @@ def _validate(receipt):
         for fact in plan.facts:
             _id(fact.event_id, "event")
             _sha(fact.projection_sha256)
-            if fact.family not in _FACT_KINDS or fact.event_id in seen:
+            if fact.family not in FACT_FAMILIES or fact.event_id in seen:
                 raise ReceiptError("invalid or repeated expected fact")
+            if (len(set(fact.fields)) != len(fact.fields)
+                    or any(not re.fullmatch(r"[a-z][a-z0-9_]*", field) for field in fact.fields)):
+                raise ReceiptError("invalid expected fact fields")
             seen.add(fact.event_id)
 
 
@@ -162,7 +166,8 @@ def _decode(raw):
     try:
         intent = raw["intent"]
         intent = RequestIntent(**{**intent, "stages": tuple(
-            StagePlan(**{**s, "facts": tuple(ExpectedFact(**f) for f in s["facts"])})
+            StagePlan(**{**s, "facts": tuple(ExpectedFact(**{**f, "fields": tuple(f["fields"])})
+                                             for f in s["facts"])})
             for s in intent["stages"])})
         receipt = RequestReceipt(**{**raw, "intent": intent,
                                    "stages": tuple(StageOutcome(**s) for s in raw["stages"])})
