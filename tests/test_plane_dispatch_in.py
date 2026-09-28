@@ -567,10 +567,10 @@ def test_without_verdict_the_received_mode_still_prints_nothing(tmp_path, *, scr
 
 @pytest.mark.parametrize("dest", ["dinesh", f"bot:{FLEET}/dinesh"], ids=["bare", "alias"])
 @pytest.mark.parametrize("extra", [(), ("--verdict",)], ids=["plain", "verdict"])
-def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path, extra, dest):
+def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path, extra, dest, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
     v = _verdict(root, *extra, dest=dest)   # erlich's hook recorded; dinesh's never has
     # stdout stays empty: the verdict line is the only stdout this mode has.
     assert (v.returncode, v.stdout) == (4, "")
@@ -580,32 +580,32 @@ def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path
 
 
 @pytest.mark.parametrize("dest", [None, ""], ids=["absent", "empty"])
-def test_a_lookup_with_no_destination_says_so_instead_of_naming_one(tmp_path, dest):
+def test_a_lookup_with_no_destination_says_so_instead_of_naming_one(tmp_path, dest, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
     v = _verdict(root, "--verdict", dest=dest)
     assert (v.returncode, v.stdout) == (4, "")
     [line] = v.stderr.splitlines()
     assert "--destination" in line and "None" not in line, line
 
 
-def test_quiet_withholds_the_rc4_note_and_nothing_else(tmp_path):
+def test_quiet_withholds_the_rc4_note_and_nothing_else(tmp_path, *, scratch_plane_env):
     # The dispatch door's receipt gate reads the exit code alone and passes --quiet.
     # It must still hear an unreachable plane: that is a refusal, not an absence.
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
     v = _verdict(root, "--quiet", dest="dinesh")
     assert (v.returncode, v.stdout, v.stderr) == (4, "", "")
     v = _verdict(tmp_path / "no-plane-here", "--quiet")
     assert v.returncode == 3 and "unreachable" in v.stderr, v.stderr
 
 
-def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path):
+def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
     v = _verdict(root, "--verdict", dest=f"bot:{FLEET}/{BOT}")
     assert v.returncode == 0, v.stderr
     assert v.stdout == f"delivered bot:{FLEET}/mgr\n"
@@ -626,20 +626,20 @@ def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path)
     "msg_" + "g" + MSGID[5:],      # non-hex character
     "t-1234567890-ab12",           # a task id, not a message id, passed by mistake
 ], ids=["missing-prefix", "one-short", "one-long", "uppercase", "non-hex", "wrong-kind"])
-def test_a_received_id_that_is_not_msg_plus_32_hex_is_refused_as_usage(tmp_path, bad):
+def test_a_received_id_that_is_not_msg_plus_32_hex_is_refused_as_usage(tmp_path, bad, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
     v = _verdict(root, received=bad)
     assert (v.returncode, v.stdout) == (2, ""), v.stderr
     assert repr(bad) in v.stderr, v.stderr                    # names the bad value
     assert "msg_" in v.stderr and "32" in v.stderr, v.stderr  # names the expected shape
 
 
-def test_a_malformed_received_id_is_refused_before_any_wait(tmp_path):
+def test_a_malformed_received_id_is_refused_before_any_wait(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
     start = time.monotonic()
     v = _verdict(root, "--wait", "5", received=MSGID[len("msg_"):])
     elapsed = time.monotonic() - start
@@ -647,7 +647,7 @@ def test_a_malformed_received_id_is_refused_before_any_wait(tmp_path):
     assert elapsed < 2, f"refused after {elapsed:.2f}s against --wait 5 -- waited instead of refusing"
 
 
-def test_a_freshly_minted_msg_id_is_never_refused_by_the_shape_check(tmp_path):
+def test_a_freshly_minted_msg_id_is_never_refused_by_the_shape_check(tmp_path, *, scratch_plane_env):
     """Drift guard: the local shape check must accept whatever the package's
     OWN minter actually produces, not just a string that happens to look
     right today. The minted id was never sent, so it gets the ordinary
@@ -657,6 +657,6 @@ def test_a_freshly_minted_msg_id_is_never_refused_by_the_shape_check(tmp_path):
     from claudlobby.plane.ids import mint_msg_id
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
     v = _verdict(root, "--wait", "0", received=mint_msg_id(), dest="nobody-armed")
     assert v.returncode == 4, (v.returncode, v.stdout, v.stderr)

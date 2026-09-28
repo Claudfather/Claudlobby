@@ -472,7 +472,10 @@ def test_every_composed_turn_hook_that_emits_is_a_hook():
         if event not in turn:
             continue
         for entry in entries:
-            m = re.search(r"/lib/([\w.-]+\.sh)", entry["command"])
+            # Hooks resolve the script from the activated release at runtime.
+            m = re.search(
+                r"\$CLAUDLOBBY_NATIVE_DIR/([\w.-]+\.sh)(?:\s|$)", entry["command"]
+            )
             if m and EMITS.search(_code(LIB / m.group(1))):
                 seen.add(m.group(1))
                 assert CLASSES.get(m.group(1)) == "hook", m.group(1)

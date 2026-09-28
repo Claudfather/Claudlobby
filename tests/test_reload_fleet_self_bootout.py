@@ -48,6 +48,7 @@ JOBS = ("creds-check", "reload-fleet", "task-recheck")
 LIB_SCRIPTS = (
     "reload-fleet.sh",
     "lib-common.sh",
+    "cli-context.sh",
     "supervisor.sh",
     "setup-fleet",
     "install_fleet_timer_launchd.sh",
@@ -177,6 +178,7 @@ class Host:
             PATH=f"{bindir}:{os.environ['PATH']}",
             HOME=self.home,
             CLAUDLOBBY_ROOT=self.root,
+            CLAUDLOBBY_CLI=bindir / "claudlobby",
             FAKE_UNAME=os_name,
             FAKE_LOG=self.fake_log,
             JOB_PID_FILE=self.job_pid_file,

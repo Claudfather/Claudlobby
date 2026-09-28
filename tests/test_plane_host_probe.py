@@ -240,14 +240,14 @@ def test_empty_hostname_never_poisons_the_whole_batch(tmp_path, *, scratch_plane
     assert s["host.job_ran"]["subject_uid"].startswith("host_")  # batch landed
 
 
-def test_the_wal_size_is_recorded_once_a_plane_exists(tmp_path):
+def test_the_wal_size_is_recorded_once_a_plane_exists(tmp_path, *, scratch_plane_env):
     """#1905: the probe records the plane's WAL size, one stat, so a reader
-    holding a snapshot shows up as a number rather than nowhere. A host with
-    no plane yet has no WAL to report (absent, not 0); once the db exists the
-    sample is the file's size at the probe's instant."""
-    root, env = _rig(tmp_path)
-    assert _run(root, env).returncode == 0          # this run CREATES the db
-    assert "host.plane_wal_bytes" not in _samples(root)
+    holding a snapshot shows up as a number rather than nowhere. A missing WAL
+    beside an initialized plane reports 0; once a writer keeps the WAL on disk
+    the sample is its size at the probe's instant."""
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    assert _run(root, env).returncode == 0
+    assert int(_samples(root)["host.plane_wal_bytes"]["value"]) == 0
     # A held writer connection keeps a WAL on disk, the shape the daemon's
     # long-lived connection leaves between checkpoints.
     held = sqlite3.connect(db_path(root))
@@ -264,4 +264,4 @@ def test_the_wal_size_is_recorded_once_a_plane_exists(tmp_path):
             "SELECT value FROM metric_samples WHERE metric = 'host.plane_wal_bytes'")]
     finally:
         held.close()
-    assert values == [before]
+    assert values == [0, before]
