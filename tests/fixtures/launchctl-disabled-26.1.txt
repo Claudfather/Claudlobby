@@ -1,0 +1,16 @@
+
+	disabled services = {
+		"com.fixture.job1" => enabled
+		"com.fixture.job2" => disabled
+		"com.fixture.job3" => disabled
+		"com.fixture.job4" => enabled
+		"com.fixture.job5" => enabled
+		"com.fixture.job6" => enabled
+		"com.fixture.job7" => enabled
+		"com.fixture.job8" => disabled
+		"com.fixture.job9" => enabled
+		"com.fixture.job10" => enabled
+		"com.fixture.job11" => disabled
+		"com.fixture.job12" => disabled
+		"com.fixture.job13" => enabled
+	}

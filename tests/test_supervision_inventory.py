@@ -1,0 +1,341 @@
+"""Enrollment evidence on private files and recorded manager observations only."""
+
+from dataclasses import replace
+import importlib.util
+from pathlib import Path
+import plistlib
+import shlex
+import subprocess
+
+import pytest
+
+from claudlobby.supervision_inventory import (
+    Adapter, InventoryError, UnitDeclaration, _darwin_disabled, _darwin_print, collect_enrollment,
+)
+from tests.package_fixtures import source_package
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def observed_print(target, source, installed, *, active=True, calendar=False):
+    """Actual macOS 26.1 captures, with private values replaced by test identity.
+
+    Both captures came from read-only exact-domain queries on 2026-09-28. Argument
+    and environment rows retain the observed raw/tab/arrow grammar. No native
+    bootstrap, bootout or enable/disable was used to produce these fixtures.
+    """
+    fixture = "launchctl-print-26.1-calendar.txt" if calendar else "launchctl-print-26.1-active.txt" if active else "launchctl-print-26.1-idle.txt"
+    text = (FIXTURES / fixture).read_text().replace("gui/501/com.fixture.observed", target)
+    values = {"path": str(installed), "program": source["ProgramArguments"][0],
+              "working directory": source["WorkingDirectory"], "domain": "gui/501 [100002]"}
+    for key, value in values.items():
+        text = text.replace(f"\t{key} = <redacted>", f"\t{key} = {value}")
+    start = text.index("\targuments = {\n")
+    end = text.index("\t}\n", start) + len("\t}\n")
+    text = text[:start] + "\targuments = {\n" + "".join("\t\t" + arg + "\n" for arg in source["ProgramArguments"]) + "\t}\n" + text[end:]
+    start = text.index("\tenvironment = {\n")
+    end = text.index("\t}\n", start) + len("\t}\n")
+    env = {**source["EnvironmentVariables"], "OSLogRateLimit": "64", "XPC_SERVICE_NAME": source["Label"]}
+    return text[:start] + "\tenvironment = {\n" + "".join(f"\t\t{key} => {value}\n" for key, value in env.items()) + "\t}\n" + text[end:]
+
+
+class Observations:
+    def __init__(self, tmp_path):
+        self.root = tmp_path / "data"
+        self.root.mkdir()
+        self.installed = tmp_path / "home/config/systemd/user"
+        self.installed.mkdir(parents=True)
+        self.package = source_package()
+        self.declarations, self.properties, self.calls = [], {}, []
+        self.manager, self.domain = "Linux", ""
+        self.disabled = '\n\tdisabled services = {\n\t}\n'
+        self.launchd = {}
+        self.launchd_active = {}
+        self.env = {
+            "CLAUDLOBBY_ROOT": str(self.root), "FLEET_ROOT": str(self.root / "local/alpha"),
+            "CLAUDLOBBY_NATIVE_DIR": str(self.package.native),
+            "CLAUDLOBBY_LIBRARY_DIR": str(self.package.library),
+            "CLAUDLOBBY_CLI": str(tmp_path / "release/bin/claudlobby"),
+            "CLAUDLOBBY_ARTIFACT_ID": "old-artifact",
+        }
+        spec = importlib.util.spec_from_file_location("inventory_owner", self.package.native / "bot-unit-owner.py")
+        self.owner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.owner)
+
+    def add(self, name, scope="host", *, working=None, declared=True, service=None):
+        working = working or (self.root / "runtime/alpha/bots/worker" if scope == "bot" else self.root)
+        working.mkdir(parents=True, exist_ok=True)
+        source = self.root / "generated" / name
+        source.parent.mkdir(exist_ok=True)
+        if name.endswith(".plist"):
+            content = plistlib.dumps({"Label": name[:-6], "WorkingDirectory": str(working),
+                                     "ProgramArguments": [str(self.package.native / "start-bot.sh"), str(working)],
+                                     "EnvironmentVariables": self.env})
+        elif service:
+            content = f"[Timer]\nUnit={service}\n".encode()
+        else:
+            content = (f"[Service]\nWorkingDirectory={working}\nExecStart={self.package.native}/job.sh\n"
+                       + "".join(f"Environment={key}={value}\n" for key, value in self.env.items())).encode()
+        source.write_bytes(content)
+        target = self.installed / name
+        target.write_bytes(content)
+        target.chmod(0o640)
+        if name.endswith(".plist"):
+            self.launchd[name] = observed_print("gui/501/" + name[:-6], plistlib.loads(content), target)
+            self.launchd_active[name] = True
+        self.properties[name] = {
+            "Id": name, "LoadState": "loaded", "ActiveState": "active", "UnitFileState": "enabled",
+            "FragmentPath": str(target), "WorkingDirectory": str(working) if not service else "",
+            "Environment": " ".join(shlex.quote(f"{key}={value}") for key, value in self.env.items()) if not service else "",
+            "ExecStart": f"{{ path={self.package.native}/job.sh ; argv[]={self.package.native}/job.sh ; }}" if not service else "",
+            "DropInPaths": "", "NeedDaemonReload": "no", "Triggers": service or "", "TriggeredBy": "",
+        }
+        declaration = UnitDeclaration(source, scope, working, "reviewed-release", tuple(self.env.items()),
+                                      fleet="alpha" if scope != "host" else None,
+                                      bot="worker" if scope == "bot" else None, service=service)
+        if declared:
+            self.declarations.append(declaration)
+        return target
+
+    def catalog(self):
+        lines = [f"manager\t{self.manager}", f"directory\t{self.installed}"]
+        if self.manager == "Darwin":
+            lines += ["domain\tgui/501", "PID\tStatus\tLabel"]
+            lines += [("710" if self.launchd_active.get(name, True) else "-") + "\t0\t" + name[:-6] for name in sorted(self.launchd)]
+        else:
+            lines += [f"{kind}\t{name}" for kind in ("installed", "loaded") for name in sorted(self.properties)]
+        return "\n".join(lines) + "\n"
+
+    def runner(self, command, **kwargs):
+        assert command[:2] == ["/bin/bash", "-c"]
+        assert command[4] == str(self.package.native)
+        function, args = command[5], command[6:]
+        self.calls.append((function, args))
+        assert function in {"svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled", "svc_bot_unit_owned_by"}
+        if function == "svc_inventory_catalog":
+            output, rc = self.catalog(), 0
+        elif function == "svc_inventory_properties":
+            output = (self.launchd[args[0].split("/")[-1] + ".plist"] if self.manager == "Darwin" else
+                      "".join(f"{key}={value}\n" for key, value in self.properties[args[0]].items()))
+            rc = 0
+        elif function == "svc_inventory_disabled":
+            assert args == ["gui/501"]
+            output, rc = self.disabled, 0
+        else:
+            output, rc = "", self.owner.main(*args)  # actual shared predicate; no cloned parser
+        return subprocess.CompletedProcess(command, rc, output, "")
+
+    def collect(self):
+        return collect_enrollment(self.root, tuple(self.declarations), package=self.package, runner=self.runner)
+
+
+def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):
+    obs = Observations(tmp_path)
+    obs.add("host.service")
+    obs.add("alpha.watch.service", "fleet")
+    obs.add("alpha.watch.timer", "fleet", service="alpha.watch.service")
+    bot = obs.add("alpha.worker.service", "bot")
+    foreign = obs.add("foreign.worker.service", working=tmp_path / "unrelated", declared=False)
+    obs.properties[foreign.name]["Environment"] = f"CLAUDLOBBY_ROOT={tmp_path / 'unrelated'}"
+    # Native timer interfaces omit Service-only properties rather than emitting
+    # empty values. Do not certify a contract native systemd never supplies.
+    for key in ("Environment", "WorkingDirectory", "ExecStart"):
+        del obs.properties["alpha.watch.timer"][key]
+    # An installed symlink is part of the saved source, not a copied file.
+    bot.unlink()
+    bot.symlink_to(obs.declarations[-1].source)
+    inventory = obs.collect().require_complete()
+    assert {unit.declaration.scope for unit in inventory.units} == {"host", "fleet", "bot"}
+    assert inventory.foreign == (str(foreign),)
+    worker = next(unit for unit in inventory.units if unit.target == bot.name)
+    assert worker.installed[0].link == str(obs.declarations[-1].source)
+    assert worker.installed[0].content == worker.generated.content
+    assert inventory.units[0].installed[0].mode == 0o640
+    assert inventory.digest == obs.collect().digest
+    assert inventory.payload()["units"][0]["generated"]["content"]["base64"]
+    recovery = replace(inventory, units=inventory.units[:1])
+    assert {unit.target for unit in inventory.candidate_only(recovery)} == {
+        "alpha.watch.service", "alpha.watch.timer", "alpha.worker.service"}
+    assert foreign.read_bytes()  # inventory never writes or removes
+    bot.unlink()
+    bot.write_text("changed")
+    with pytest.raises(InventoryError, match="changed"):
+        inventory.check_files()
+
+
+@pytest.mark.parametrize("fault, expected", [
+    ("torn", "installed bytes differ"), ("reload", "stale"),
+    ("dropin", "overridden"), ("release", "release identity differs"),
+    ("missing", "lacks installed source"), ("extra", "absent from generated manifest"),
+    ("timer", "different service"), ("empty", "empty generated manifest"),
+    ("unbound", "no declared data-root binding"), ("query", "missing/unknown native unit properties"),
+])
+def test_incomplete_or_foreign_evidence_never_becomes_cleanup_authority(tmp_path, fault, expected):
+    obs = Observations(tmp_path)
+    unit = obs.add("worker.service", "bot")
+    if fault == "torn":
+        unit.write_text(f"[Service]\nWorkingDirectory={tmp_path / 'foreign'}\n")
+    elif fault == "reload":
+        obs.properties[unit.name]["NeedDaemonReload"] = "yes"
+    elif fault == "dropin":
+        obs.properties[unit.name]["DropInPaths"] = "/override.conf"
+    elif fault == "release":
+        obs.properties[unit.name]["Environment"] = obs.properties[unit.name]["Environment"].replace("old-artifact", "new-artifact")
+    elif fault == "missing":
+        unit.unlink()  # still loaded: never read absence as no consumer
+    elif fault == "extra":
+        obs.add("renamed-old-prefix.service", "bot", declared=False)
+    elif fault == "timer":
+        timer = obs.add("worker.timer", "bot", service=unit.name)
+        obs.properties[timer.name]["Triggers"] = "foreign.service"
+    elif fault == "unbound":
+        extra = obs.add("unbound.service", working=tmp_path / "unknown", declared=False)
+        obs.properties[extra.name]["Environment"] = ""
+    elif fault == "query":
+        del obs.properties[unit.name]["Id"]
+    else:
+        obs.declarations.clear()
+    with pytest.raises(InventoryError, match=expected):
+        obs.collect().require_complete()
+
+
+@pytest.mark.parametrize("override", ["enabled", "disabled", "unset"])
+def test_launchd_proves_reviewed_effective_identity_and_disabled_override(tmp_path, override):
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    target = obs.add("alpha.worker.plist", "bot")
+    if override != "unset":
+        obs.disabled = f'\n\tdisabled services = {{\n\t\t"alpha.worker" => {override}\n\t}}\n'
+    inventory = obs.collect().require_complete()
+    props = dict(inventory.units[0].properties)
+    assert props["ActiveState"] == "active"
+    assert props["DisabledOverride"] == override
+    assert props["EnabledState"] == (override if override != "unset" else "enabled")
+    assert props["UnitFileState"] == "unchanged"  # shared pause token preserves overrides
+    assert inventory.units[0].target == "gui/501/alpha.worker"
+    assert props["FragmentPath"] == str(target)
+    source = plistlib.loads(target.read_bytes())
+    obs.launchd[target.name] = observed_print("gui/501/alpha.worker", source, target, active=False)
+    obs.launchd_active[target.name] = False
+    assert dict(obs.collect().require_complete().units[0].properties)["ActiveState"] == "inactive"
+    obs.launchd[target.name] = observed_print("gui/501/alpha.worker", source, target, active=False, calendar=True)
+    assert dict(obs.collect().require_complete().units[0].properties)["ActiveState"] == "inactive"
+    # A genuinely unloaded installed job has a known override/default without
+    # inventing an effective running definition or interpreting print failure.
+    obs.launchd.clear()
+    props = dict(obs.collect().require_complete().units[0].properties)
+    assert props["LoadState"] == "unloaded" and props["ActiveState"] == "inactive"
+    if override == "unset":
+        source["Disabled"] = True
+        target.write_bytes(plistlib.dumps(source))
+        obs.declarations[0].source.write_bytes(target.read_bytes())
+        assert dict(obs.collect().require_complete().units[0].properties)["EnabledState"] == "disabled"
+
+
+def test_launchd_preserves_unrelated_plist_without_working_directory(tmp_path):
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    obs.add("alpha.worker.plist", "bot")
+    other = obs.add("com.fixture.unrelated.plist", working=tmp_path / "other", declared=False)
+    source = {"Label": other.stem, "ProgramArguments": ["/usr/bin/true"], "EnvironmentVariables": {}}
+    other.write_bytes(plistlib.dumps(source))
+    printed = observed_print("gui/501/" + other.stem, {**source, "WorkingDirectory": str(tmp_path / "other")}, other)
+    obs.launchd[other.name] = printed.replace(f"\tworking directory = {tmp_path / 'other'}\n", "")
+    assert obs.collect().require_complete().foreign == (str(other),)
+
+
+@pytest.mark.parametrize("field", ["path", "program", "arguments", "environment", "domain", "unknown", "duplicate"])
+def test_launchd_loaded_drift_or_unknown_shape_never_matches_installed_plist(tmp_path, field):
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    target = obs.add("alpha.worker.plist", "bot")
+    value = obs.launchd[target.name]
+    if field in ("path", "program"):
+        value = value.replace(f"\t{field} = ", f"\t{field} = /foreign", 1)
+    elif field == "arguments":
+        value = value.replace("\targuments = {\n", "\targuments = {\n\t\tunexpected-arg\n")
+    elif field == "environment":
+        value = value.replace("CLAUDLOBBY_ARTIFACT_ID => old-artifact", "CLAUDLOBBY_ARTIFACT_ID => stale-artifact")
+    elif field == "domain":
+        value = value.replace("domain = gui/501", "domain = user/501")
+    elif field == "unknown":
+        value = value.replace("\tprogram = ", "\tnew launch override = unrecognized\n\tprogram = ")
+    else:
+        value = value.replace("\tstate = running", "\tstate = running\n\tstate = not running")
+    obs.launchd[target.name] = value
+    with pytest.raises(InventoryError, match="incomplete enrollment"):
+        obs.collect().require_complete()
+
+
+def test_disabled_capture_uses_observed_enums_and_refuses_duplicate_or_unknown_rows():
+    captured = (FIXTURES / "launchctl-disabled-26.1.txt").read_text()
+    assert set(_darwin_disabled(captured).values()) == {"enabled", "disabled"}
+    with pytest.raises(InventoryError, match="unknown"):
+        _darwin_disabled(captured.replace("=> enabled", "=> false"))
+    with pytest.raises(InventoryError, match="duplicate"):
+        _darwin_disabled('\tdisabled services = {\n\t\t"duplicate" => enabled\n\t\t"duplicate" => disabled\n\t}\n')
+
+
+def test_selected_adapter_catalog_uses_recording_native_functions(tmp_path):
+    # Exercise the real shared shell adapter without installing fake executables
+    # or giving any code a chance to call the host's supervisor.
+    trace = tmp_path / "calls"
+    package = source_package()
+    prologue = f'''
+uname() {{ printf 'Linux\\n'; }}
+systemd-analyze() {{ printf '%s\\n' {shlex.quote(str(tmp_path))}; }}
+systemctl() {{
+    printf '%s\\n' "$*" >> {shlex.quote(str(trace))}
+    case "$2" in
+        list-unit-files) printf 'worker.service enabled enabled\\n' ;;
+        list-units) printf 'worker.service loaded active running Fixture\\n' ;;
+        *) return 99 ;;
+    esac
+}}
+'''
+
+    def recording(command, **kwargs):
+        command[2] = prologue + command[2]
+        return subprocess.run(command, **kwargs)
+
+    adapter = Adapter(package, runner=recording)
+    assert adapter.read("svc_inventory_catalog") == (
+        f"manager\tLinux\ndirectory\t{tmp_path}\ninstalled\tworker.service\nloaded\tworker.service\n")
+    assert trace.read_text().splitlines() == [
+        "--user list-unit-files --no-legend --no-pager --plain",
+        "--user list-units --all --no-legend --no-pager --plain"]
+    with pytest.raises(InventoryError, match="unsupported"):
+        adapter.call("arbitrary_shell")
+
+
+def test_selected_adapter_queries_only_the_proved_launchd_domain(tmp_path):
+    trace = tmp_path / "native-reads"
+    captured = (FIXTURES / "launchctl-print-26.1-active.txt").read_text()
+    disabled = (FIXTURES / "launchctl-disabled-26.1.txt").read_text()
+    prologue = f'''
+uname() {{ printf 'Darwin\\n'; }}
+launchctl() {{
+    printf '%s\\n' "$*" >> {shlex.quote(str(trace))}
+    case "$1" in
+        manageruid) printf '501\\n' ;;
+        managername) printf 'Aqua\\n' ;;
+        print) printf '%s' "$OBSERVED_PRINT" ;;
+        print-disabled) printf '%s' "$OBSERVED_DISABLED" ;;
+        *) return 99 ;;
+    esac
+}}
+'''
+
+    def recording(command, **kwargs):
+        command[2] = prologue + command[2]
+        kwargs["env"].update(OBSERVED_PRINT=captured, OBSERVED_DISABLED=disabled)
+        return subprocess.run(command, **kwargs)
+
+    adapter = Adapter(source_package(), runner=recording)
+    assert adapter.read("svc_inventory_properties", "gui/501/com.fixture.observed") == captured
+    assert adapter.read("svc_inventory_disabled", "gui/501") == disabled
+    assert adapter.call("svc_inventory_properties", "user/501/com.fixture.observed").returncode == 3
+    assert trace.read_text().splitlines() == [
+        "manageruid", "managername", "print gui/501/com.fixture.observed",
+        "manageruid", "managername", "print-disabled gui/501", "manageruid", "managername"]
