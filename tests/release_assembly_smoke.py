@@ -108,8 +108,19 @@ def main() -> None:
     worker:
       expertise: [software-engineering]
 """)
-        output = json.loads(run("config-plan", [release.cli_path, "--root", data,
-                                "config", "plan", "--release", release.release_id, "--json"]))
+        try:
+            output = json.loads(run("config-plan", [release.cli_path, "--root", data,
+                                    "config", "plan", "--release", release.release_id, "--json"]))
+        except RuntimeError:
+            # Only this generated, secret-free fixture may expose the cause.
+            # Public commands intentionally redact authored configuration data.
+            run("config-plan-cause", [release.directory / release.paths.interpreter,
+                "-I", "-B", "-c",
+                "from pathlib import Path; from types import SimpleNamespace; "
+                "from claudlobby.commands.releases import _config_plan; "
+                "import sys; _config_plan(SimpleNamespace(release=sys.argv[2], "
+                "fleet_path=[]), Path(sys.argv[1]))", data, release.release_id])
+            raise
         assert output["ok"] and output["data"]["release_id"] == release.release_id
         results["plan_id"] = output["data"]["plan_id"]
         assert not (data / "runtime").exists()
