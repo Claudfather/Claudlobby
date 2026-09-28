@@ -70,16 +70,19 @@ SEQ=0
 # plane-telegram-in.sh lesson, met again here — every receipt landed as []).
 PLANE_LAND_PROG='
 import json, sys, pathlib
+sys.path.insert(0, str(pathlib.Path(sys.argv[2]).resolve()))
 from claudlobby.plane.emit_api import emit_batch
-root = pathlib.Path(sys.argv[1]); (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+from tests.plane_setup import initialize_plane
+root = pathlib.Path(sys.argv[1])
 events = [json.loads(line) for line in sys.stdin if line.strip()]
 assert events, "plane_land: no events on stdin"
+initialize_plane(root)  # explicit positive fixture setup, including reset_plane
 out = emit_batch(root, events)
 bad = [(o.status, getattr(o, "reason", "")) for o in out if o.status != "committed"]
 assert not bad, bad
 '
 plane_land() {  # plane_land <root>   (stdin: one emit_batch event per line)
-    "$PY" -c "$PLANE_LAND_PROG" "$1"
+    "$PY" -c "$PLANE_LAND_PROG" "$1" "$SCRIPT_DIR/.."
 }
 seed_plane_fleet() {  # seed_plane_fleet <fleet> — the fleet's identity on the current root's plane
     SEQ=$((SEQ + 1))

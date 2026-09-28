@@ -53,7 +53,7 @@ def _rig(tmp_path, *, pi=False, armed=True, disabled=False, scratch_plane_env):
     for f in stub.iterdir():
         f.chmod(0o755)
     env = {
-        **scratch_plane_env(root),
+        **scratch_plane_env(root, initialize=not disabled),
         "HOME": str(tmp_path),
 
 

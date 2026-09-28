@@ -118,7 +118,7 @@ def app_env(tmp_path, rsa_key, *, scratch_plane_env):
         GITHUB_APP_ID="999001",
         GITHUB_APP_INSTALLATION_ID="555002",
         GITHUB_APP_PRIVATE_KEY_PATH=str(rsa_key),
-        **scratch_plane_env(root),          # auth_mint_failed lands on the plane (no fleet: under _host)
+        **scratch_plane_env(root, initialize=True),          # auth_mint_failed lands on the plane (no fleet: under _host)
     )
     return {"env": env, "stub": stub, "root": root, "home": home}
 

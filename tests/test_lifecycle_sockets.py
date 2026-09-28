@@ -261,7 +261,7 @@ class TestSocketWrappers:
         out, err, rc = _run_bash(
             _src('bot_tmux_send "" lead "hello there"'),
             env={"BOT_DIR": str(d), "BOT_ID": "alpha", "FLEET_NAME": "fleet-a",
-                 "CLAUDLOBBY_ROOT": str(tmp_path), **scratch_plane_env(tmp_path)},
+                 "CLAUDLOBBY_ROOT": str(tmp_path), **scratch_plane_env(tmp_path, initialize=True)},
         )
         assert rc != 0
         assert "dropped" in err.lower()

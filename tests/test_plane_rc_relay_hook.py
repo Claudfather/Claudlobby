@@ -15,6 +15,8 @@ path.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import sqlite3
 import subprocess
@@ -105,6 +107,7 @@ def _rows(root, sql):
 
 def test_genuine_rc_relayed_final_answer_is_recorded_honestly(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
+    initialize_plane(root)
     r = _run(tmp_path, root, [_channel_user(), _assistant("All quiet, migration on track.")], scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     comms = _rows(root, "SELECT sender_uid, recipient_raw, body FROM communications")
@@ -163,6 +166,7 @@ def test_records_without_any_flag_and_disabled_silences_it(tmp_path, *, scratch_
     """The always-on contract (F18 closure R1): no plane flag at all → the
     answer is recorded; PLANE_EMIT_DISABLED=1 → nothing, exit 0."""
     root = _root(tmp_path)
+    initialize_plane(root)
     r = _run(tmp_path, root, [_channel_user(), _assistant("hi")], armed=False, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     assert len(_rows(root, "SELECT 1 FROM communications")) == 1
@@ -184,6 +188,7 @@ def test_missing_transcript_is_silent_exit_zero(tmp_path, *, scratch_plane_env):
 
 def test_a_refired_stop_never_double_records(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
+    initialize_plane(root)
     ents = [_channel_user(), _assistant("All quiet.")]
     assert _run(tmp_path, root, ents, scratch_plane_env=scratch_plane_env).returncode == 0
     assert _run(tmp_path, root, ents, scratch_plane_env=scratch_plane_env).returncode == 0
@@ -207,6 +212,7 @@ def test_big_transcript_is_read_bounded_and_fast(tmp_path, *, scratch_plane_env)
     the hook finishes quickly."""
     import time
     root = _root(tmp_path)
+    initialize_plane(root)
     filler = [{"type": "assistant", "uuid": f"f{i}", "sessionId": "s0",
                "message": {"role": "assistant", "stop_reason": "end_turn",
                            "content": [{"type": "text", "text": "x" * 2000}]}}

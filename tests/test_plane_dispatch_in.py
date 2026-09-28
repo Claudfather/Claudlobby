@@ -159,6 +159,7 @@ def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_
     payload = "set +H; " + body                # what dispatch.sh sends for prose
     sha, safe, nbytes = _wire_proof(payload)
     root = _root(tmp_path)
+    initialize_plane(root)
     r = _run(_hookjson(_arrival(safe), ensure_ascii=ensure_ascii), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0
     assert r.stdout == ""                      # THE law: stdout feeds the model
@@ -176,6 +177,7 @@ def test_a_slash_command_briefing_carries_no_prefix_and_still_round_trips(tmp_pa
     `set +H; `), so the hook must round-trip a trailer-only wire form too."""
     sha, safe, nbytes = _wire_proof("/briefing morning")
     root = _root(tmp_path)
+    initialize_plane(root)
     r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     d = json.loads(_received_row(root)[0]["detail"])
@@ -196,6 +198,7 @@ def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path, *
     payload = "set +H; Do X.\n\nThen Y across\nseveral lines."
     sha, safe, nbytes = _wire_proof(payload)
     root = _root(tmp_path)
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "communication", "emitter": "t", "fleet": FLEET,
          "payload": {"msg_id": MSGID, "sender": f"bot:{FLEET}/mgr",
@@ -227,6 +230,7 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
     payload = "set +H; " + BODY
     sha, safe, nbytes = _wire_proof(payload)
     root = _root(tmp_path)
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "communication", "emitter": "t", "fleet": FLEET,
          "payload": {"msg_id": MSGID, "sender": f"bot:{FLEET}/mgr",
@@ -278,6 +282,7 @@ def test_a_trailing_marker_wins_even_if_the_body_quotes_one(tmp_path, *, scratch
     body = "explain ⟦plane:msg_00000000000000000000000000000000⟧ to a new hire"
     sha, safe, nbytes = _wire_proof(body)
     root = _root(tmp_path)
+    initialize_plane(root)
     r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     row = _received_row(root)[0]
@@ -301,6 +306,7 @@ def test_records_with_no_plane_flag_at_all(tmp_path, *, scratch_plane_env):
     """F18 R1 always-on: no PLANE_EMIT_* flag -> still recorded."""
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)
+    initialize_plane(root)
     r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, PLANE_EMIT_DISABLED=None, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     assert len(_received_row(root)) == 1
@@ -333,6 +339,7 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path, *
     the REAL hook on the held prompt, as UserPromptSubmit would -- and the REAL
     plane-lookup.py reads what that hook wrote."""
     root = _root(tmp_path)
+    initialize_plane(root)
     env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3", scratch_plane_env=scratch_plane_env)
     _, safe, _ = _wire_proof("set +H; " + BODY)
     # An earlier dispatch was received, so this recipient's hook is armed.
@@ -372,6 +379,7 @@ def test_a_queued_delivery_is_not_a_miss(tmp_path, *, scratch_plane_env):
     recipient gets no Enter and no send_miss -- checked before the Enter, and again
     before the verdict, since the turn may start while the gate waits."""
     root = _root(tmp_path)
+    initialize_plane(root)
     env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3", scratch_plane_env=scratch_plane_env)
     _, safe, _ = _wire_proof("set +H; " + BODY)
     assert _run(_hookjson(_arrival(safe), ensure_ascii=False), env).returncode == 0  # armed
@@ -402,6 +410,7 @@ def test_a_queued_delivery_is_not_a_miss(tmp_path, *, scratch_plane_env):
 def test_a_zero_wait_in_any_spelling_turns_the_gate_off(tmp_path, *, scratch_plane_env):
     """PANE_RECEIPT_WAIT_S=0 is the off switch; `0.0` must not read as on (#1099 review)."""
     root = _root(tmp_path)
+    initialize_plane(root)
     _, safe, _ = _wire_proof("set +H; " + BODY)
     assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0  # armed
     for zero in ("0", "0.0"):
@@ -434,6 +443,7 @@ def test_a_pasted_arrival_is_received_as_the_wire_form(tmp_path, where, *, scrat
     arrival = _arrival(safe)
     at = len(arrival) - 10 if where == "splits-the-trailer" else len(safe)
     root = _root(tmp_path)
+    initialize_plane(root)
     r = _run(_hookjson(_pasted(arrival, at), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     rows = _received_row(root)
@@ -513,6 +523,7 @@ def test_a_forged_trailer_does_not_verify(tmp_path, *, scratch_plane_env):
     # Anything that reaches a pane can end in a trailer-shaped line, and the hook
     # records a receipt for it. What it cannot fake is a recorded send.
     root = _root(tmp_path)
+    initialize_plane(root)
     r = _run(_hookjson(f"{BODY}\n⟦plane:{MSGID}⟧", ensure_ascii=False),
              _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""

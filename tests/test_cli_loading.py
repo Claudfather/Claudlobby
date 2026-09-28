@@ -22,6 +22,7 @@ sys.path.insert(0, sys.argv.pop(1))
 allowed = {
     'claudlobby', 'claudlobby.__main__', 'claudlobby.commands',
     'claudlobby.commands._parsers', 'claudlobby.task_defaults',
+    'claudlobby.command_result', 'claudlobby.commands._release_parsers',
 }
 blocked = []
 class ImportBoundary:

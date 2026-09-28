@@ -94,7 +94,7 @@ class Harness:
 
     def env(self):
         # a host job: no fleet, so its receipts land on the plane under _host
-        return _scrubbed_env(TG_CAPTURE=self.capture, **self.scratch_plane_env(self.root))
+        return _scrubbed_env(TG_CAPTURE=self.capture, **self.scratch_plane_env(self.root, initialize=True))
 
     def run(self):
         return subprocess.run(
