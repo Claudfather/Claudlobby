@@ -203,6 +203,15 @@ _keepalive_before_restart() {
 
 restart_bot_service() {
     local _keepalive_restart_reason="$1" rc=0 output_rc=0
+    # A concurrent explicit bot stop removes supervision. Even if this tick
+    # began while its unit still existed, it may never convert that absence
+    # into a direct session start on a supervised host.
+    if [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; then
+        if ! svc_is_registered "$BOT_DIR" "${BOT_SERVICE:-}"; then
+            echo "$(ts_iso) SKIP — bot is de-enrolled; explicit bot start required" >> "$LOG"
+            return 0
+        fi
+    fi
     # Distinguish a failed output redirect from the selected action status:
     # if the log cannot open, svc_kick never ran and must not license fallback.
     {
@@ -210,6 +219,10 @@ restart_bot_service() {
     } 3>&1 4>&2 >>"$LOG" 2>&1 || output_rc=$?
     if [ "$output_rc" -ne 0 ]; then return "$output_rc"; fi
     if [ "$SVC_KICK_SELECTED" -eq 0 ]; then
+        if [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; then
+            echo "$(ts_iso) SKIP — bot de-enrolled before restart; explicit bot start required" >> "$LOG"
+            return 0
+        fi
         echo "$(ts_iso) RESTART — $_keepalive_restart_reason, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
         emit_keepalive_event "RESTART" "$_keepalive_restart_reason, falling back to start-bot.sh"
         "$LIB_DIR/start-bot.sh" "$BOT_DIR" >>"$LOG" 2>&1

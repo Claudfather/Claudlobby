@@ -27,7 +27,10 @@
 #   svc_unit_name <bot_dir>       — BOT_SERVICE, or the pre-rename BOT_NAME
 #                                    fallback while a unit/plist by that name
 #                                    exists; prints the bare label.
-#   svc_is_registered <bot_dir>   — rc 0/1: is a unit/plist installed.
+#   svc_is_registered <bot_dir> [loaded_label]
+#                                  — rc 0/1: is a unit/plist installed. An
+#                                    explicit label uses the caller's sourced
+#                                    bot.conf snapshot, including empty.
 #   svc_state <bot_dir>           — prints loaded-active | loaded-inactive |
 #                                    not-loaded | unknown.
 #   svc_kick <bot_dir> [...]      — restart/kickstart; SVC_KICK_SELECTED=0
@@ -143,7 +146,7 @@ svc_unit_name() {
 svc_is_registered() {
     local bot_dir="${1:?Usage: svc_is_registered <bot_dir>}"
     local label
-    label="$(svc_unit_name "$bot_dir")"
+    if [ "$#" -ge 2 ]; then label="$2"; else label="$(svc_unit_name "$bot_dir")"; fi
     [ -n "$label" ] || return 1
     case "$_OS" in
         Linux)  [ -f "$HOME/.config/systemd/user/$label.service" ] ;;
@@ -472,6 +475,129 @@ svc_disenroll() {
     return 0
 }
 
+# Selected-release bot lifecycle. The Python owner supplies the exact source,
+# saved installed placement and target from the active activation journal after
+# checking the complete native inventory. These verbs never discover a label
+# from mutable bot.conf and never remove a differently owned definition.
+svc_bot_enroll_exact() {
+    local source="$1" installed="$2" target="$3" state
+    case "$source" in /*) ;; *) return 3 ;; esac
+    case "$installed" in /*) ;; *) return 3 ;; esac
+    [ "${source##*/}" = "${installed##*/}" ] || return 3
+    [ -d "${installed%/*}" ] && [ ! -L "${installed%/*}" ] || return 3
+    [ -f "$source" ] && [ ! -L "$source" ] || return 3
+    case "$_OS" in
+        Linux) [ "$target" = "${source##*/}" ] && [ "${target##*.}" = service ] || return 3 ;;
+        Darwin) [ "${target##*/}.plist" = "${source##*/}" ] || return 3 ;;
+        *) return 3 ;;
+    esac
+    if [ -e "$installed" ] || [ -L "$installed" ]; then
+        [ -f "$installed" ] && [ ! -L "$installed" ] && cmp -s "$source" "$installed" || return 3
+    else
+        cp -p "$source" "$installed" || return $?
+    fi
+    if [ "$_OS" = Linux ]; then
+            systemctl --user daemon-reload || return $?
+    fi
+    state=$(svc_inventory_state "$installed" "$target") || return 3
+    case "$_OS:$state" in
+        Linux:*' loaded active')
+            systemctl --user enable "$target" || return $?
+            systemctl --user restart "$target" || return $?
+            ;;
+        Linux:*' loaded inactive')
+            systemctl --user enable --now "$target" || return $?
+            ;;
+        Darwin:'unchanged unloaded inactive') launchctl bootstrap "${target%/*}" "$installed" || return $? ;;
+        Darwin:'unchanged loaded inactive') launchctl kickstart -k "$target" || return $? ;;
+        Darwin:'unchanged loaded active') launchctl kickstart -k "$target" || return $? ;;
+        *) return 3 ;;
+    esac
+}
+
+svc_bot_disenroll_exact() {
+    local source="$1" installed="$2" target="$3" bot_dir="$4" socket="$5" tmpdir="$6" state link
+    case "$source" in /*) ;; *) return 3 ;; esac
+    case "$installed" in /*) ;; *) return 3 ;; esac
+    case "$bot_dir" in /*) ;; *) return 3 ;; esac
+    case "$tmpdir" in /*) ;; *) return 3 ;; esac
+    [ "${source##*/}" = "${installed##*/}" ] || return 3
+    [ -d "${installed%/*}" ] && [ ! -L "${installed%/*}" ] || return 3
+    [ -f "$source" ] && [ ! -L "$source" ] || return 3
+    [ -f "$installed" ] && [ ! -L "$installed" ] && cmp -s "$source" "$installed" || return 3
+    case "$socket" in ''|*[!a-zA-Z0-9_.-]*) return 3 ;; esac
+    case "$_OS" in
+        Linux) [ "$target" = "${source##*/}" ] && [ "${target##*.}" = service ] || return 3 ;;
+        Darwin) [ "${target##*/}.plist" = "${source##*/}" ] || return 3 ;;
+        *) return 3 ;;
+    esac
+    svc_activation_assert_external "$installed" "$target" || return 3
+    state=$(svc_inventory_state "$installed" "$target") || return 3
+    case "$_OS:$state" in
+        Linux:*' loaded '*)
+            link="${installed%/*}/default.target.wants/${installed##*/}"
+            if [ -e "$link" ] || [ -L "$link" ]; then
+                [ -L "$link" ] || return 3
+                case "$(readlink "$link")" in "$installed"|"../${installed##*/}") ;; *) return 3 ;; esac
+            fi
+            systemctl --user disable --now "$target" || return $?
+            rm -f "$installed" "$link" || return $?
+            systemctl --user daemon-reload || return $?
+            ;;
+        Darwin:'unchanged loaded '*)
+            launchctl bootout "$target" || return $?
+            rm -f "$installed" || return $?
+            ;;
+        Darwin:'unchanged unloaded inactive') rm -f "$installed" || return $? ;;
+        *) return 3 ;;
+    esac
+    if [ -S "$tmpdir/tmux-$(id -u)/$socket" ]; then
+        svc_activation_stop_private_server "$bot_dir" "$socket" "$tmpdir" || return 3
+    fi
+    rm -f "$bot_dir/.tmux-env" || return $?
+}
+
+# Read-only current-session verdict for an already active exact bot unit.
+# Reuse start-bot's session-scoped bridge readiness predicate; a stale startup
+# marker alone never proves this session is ready. Only a missing private socket
+# proves absence and licenses `bot start` to recover by restarting the unit.
+svc_bot_session_observe() (
+    local bot_dir="$1" expected="$2" tmpdir="$3" actual session socket pane token state declared_tmpdir
+    case "$bot_dir:$tmpdir" in /*:/*) ;; *) return 3 ;; esac
+    case "$expected" in ''|*[!a-zA-Z0-9_.-]*) return 3 ;; esac
+    export TMUX_TMPDIR="$tmpdir"
+    . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    declared_tmpdir=$(bot_conf_get_path "$bot_dir" TMUX_TMPDIR "") || return 3
+    [ -z "$declared_tmpdir" ] || [ "$declared_tmpdir" = "$tmpdir" ] || return 3
+    actual=$(tmux_socket_for_bot "$bot_dir") || return 3
+    [ "$actual" = "$expected" ] || return 3
+    session=$(tmux_session_name "$bot_dir") || return 3
+    socket="$tmpdir/tmux-$(id -u)/$expected"
+    if [ ! -e "$socket" ] && [ ! -L "$socket" ]; then
+        # systemd's active/exited is the existing steady-state signal. During
+        # active/running start-bot may simply not have created its socket yet;
+        # launchd has no equivalent phase proof here, so neither is restarted.
+        if [ "$_OS" = Linux ]; then
+            _unit_start_facts "$expected.service"
+            if [ "$_USF_ACTIVE/$_USF_SUB" = active/exited ]; then
+                printf 'absent\n'; return 0
+            fi
+        fi
+        printf 'unknown\n'; return 0
+    fi
+    [ -S "$socket" ] && [ -O "$socket" ] || { printf 'unknown\n'; return 0; }
+    check_tmux_session "$session" "$expected" || { printf 'unknown\n'; return 0; }
+    pane=$(bot_tmux "$expected" list-panes -t "$session" -F '#{pane_pid}' 2>/dev/null) || {
+        printf 'unknown\n'; return 0;
+    }
+    case "$pane" in ''|*[!0-9]*) printf 'unknown\n'; return 0 ;; esac
+    token=$(resolve_bot_telegram_token "$bot_dir" 2>/dev/null || true)
+    state=$(wait_bridge_ready_state "$bot_dir" 0 "$pane" "$token" "$session" "$expected") || {
+        printf 'unknown\n'; return 0;
+    }
+    case "$state" in up|no_handle|no_token) printf 'ready\n' ;; *) printf 'unknown\n' ;; esac
+)
+
 # Private activation controls. FILE/TARGET come from the verified enrollment
 # manifest, not a label glob. TARGET is a systemd basename (including suffix),
 # or an explicit launchd gui/<uid>/<label> or user/<uid>/<label>.
@@ -774,10 +900,16 @@ EOF
 # Source only inside these cold activation calls, never the per-tool hot path.
 svc_activation_bot_fence() (
     export CLAUDLOBBY_ROOT="$1"
-    local bot_dir="$2" ceiling token
+    local bot_dir="$2" ceiling token override="${3:-}"
     [ -d "$bot_dir" ] && [ -r "$bot_dir/bot.conf" ] || return 3
     . "$_SUPERVISOR_LIB_DIR/rolling-restart.sh" || return 3
-    ceiling=$(rr_bot_ceiling "$bot_dir") || return 3
+    if [ -n "$override" ]; then
+        case "$override" in *[!0-9]*) return 3 ;; esac
+        [ "$override" -gt 0 ] || return 3
+        ceiling="$override"
+    else
+        ceiling=$(rr_bot_ceiling "$bot_dir") || return 3
+    fi
     case "$ceiling" in ''|*[!0-9]*) return 3 ;; esac
     token=$(bridge_fence_write "$bot_dir") || return 3
     [ -n "$token" ] && grep -Fq -- "$token" "$bot_dir/logs/startup.log" || return 3

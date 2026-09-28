@@ -227,6 +227,15 @@ fi
             assert not actions, (name, snapshot)
             assert len(errors) == 1, (name, snapshot)
             return
+        if (door == 'keepalive' and platform in ('Linux', 'Darwin')
+                and shape in ('legacy', 'migration', 'missing', 'empty', 'empty-name')):
+            # On a supported supervisor, an absent exact unit is a deliberate
+            # de-enrollment. The old direct-start / legacy-label fallback would
+            # turn a bot stop into a restart on the next watchdog tick.
+            assert proc.returncode == 0, (name, snapshot)
+            assert not actions, (name, snapshot)
+            assert any('de-enrolled' in line for line in snapshot['log']), (name, snapshot)
+            return
         assert proc.returncode == rc, (name, snapshot)
         assert len(actions) == 1, (name, snapshot)
         canonical = shape in ('canonical', 'expanded', 'duplicate', 'regenerated')

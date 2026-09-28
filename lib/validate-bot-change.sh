@@ -1811,8 +1811,11 @@ chmod +x "$WR_LIB/pre-stop-handoff.sh" "$WR_LIB/spin-up-bot.sh"
 WR_BOTS="$WR_ROOT/local/$FLEET/runtime/bots"
 mkdir -p "$WR_BOTS/wmgr/data" "$WR_BOTS/wworker/data"
 printf 'BOT_ID=wmgr\nMANAGER_TMUX=wmgr  # this bot is a manager\n' > "$WR_BOTS/wmgr/bot.conf"
-printf 'BOT_ID=wworker\nMANAGER_TMUX=wmgr\n' > "$WR_BOTS/wworker/bot.conf"
-CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
+printf 'BOT_ID=wworker\nBOT_SERVICE=wr-wworker\nMANAGER_TMUX=wmgr\n' > "$WR_BOTS/wworker/bot.conf"
+WR_HOME="$WR_ROOT/home"
+mkdir -p "$WR_HOME/.config/systemd/user" "$WR_HOME/Library/LaunchAgents"
+touch "$WR_HOME/.config/systemd/user/wr-wworker.service" "$WR_HOME/Library/LaunchAgents/wr-wworker.plist"
+HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
 wr_log="$WR_ROOT/state/weekly-worker-restart.log"
 wr_events="$(val_events "$WR_ROOT" "$FLEET" fleet restart_failed || true)"
 
@@ -1824,6 +1827,12 @@ grep -q 'worker: wmgr' "$wr_log" 2>/dev/null && r=no || r=yes
 harness_check "manager never entered the worker restart path" "$r"
 printf '%s' "$wr_events" | grep -q '"type":"restart_failed"' && r=yes || r=no
 harness_check "worker restart failure raises a restart_failed alert (shared emit_failure_alert)" "$r"
+
+# The next automatic tick must leave a deliberately de-enrolled worker down.
+rm -f "$WR_HOME/.config/systemd/user/wr-wworker.service" "$WR_HOME/Library/LaunchAgents/wr-wworker.plist"
+HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
+grep -q 'skip (de-enrolled): wworker' "$wr_log" 2>/dev/null && r=yes || r=no
+harness_check "weekly restart skips a de-enrolled worker" "$r"
 
 # === Scenario 4: daily bounce retired from update-claude-code.sh (static) ===
 val_scenario "validate-bot-change: daily bounce retired (download-only)"

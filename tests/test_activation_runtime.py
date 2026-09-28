@@ -106,6 +106,9 @@ TMUX_BIN=fixture_tmux; export TMUX_BIN
     assert fence.returncode == 0, fence.stderr
     ceiling, token = fence.stdout.strip().split("\t")
     assert ceiling == "121"  # actual rr_bot_ceiling, including zero-padded config
+    override = bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "37")
+    assert override.returncode == 0 and override.stdout.split("\t", 1)[0] == "37"
+    assert bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "0").returncode != 0
     log = bot / "logs/startup.log"
     assert token in log.read_text()
     with log.open("a") as out:

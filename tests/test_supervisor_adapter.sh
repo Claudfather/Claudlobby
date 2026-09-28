@@ -63,6 +63,10 @@ cat > "$T/bin/systemctl" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
 if [ "$1" = "--user" ] && [ "$2" = "show" ]; then
+    if [ "${6:-}" = "SubState" ]; then
+        printf 'ActiveState=active\nSubState=%s\n' "${FAKE_SUBSTATE:-exited}"
+        exit 0
+    fi
     case "${FAKE_STATE:-active}" in
         active)   printf 'ActiveState=active\nLoadState=loaded\n' ;;
         inactive) printf 'ActiveState=inactive\nLoadState=loaded\n' ;;
@@ -139,7 +143,7 @@ write_bot_conf() {  # write_bot_conf <bot_dir> <bot_service> <bot_name>
 reset_fakes() {
     : > "$FAKE_LOG"
     : > "$TMUX_LOG"
-    unset FAKE_STATE FAKE_EXIT FAKE_PIDS || true
+    unset FAKE_STATE FAKE_EXIT FAKE_PIDS FAKE_SUBSTATE || true
     rm -f "$HOME/.config/systemd/user"/*.service "$HOME/Library/LaunchAgents"/*.plist 2>/dev/null || true
 }
 
@@ -544,6 +548,34 @@ kill "$SIBLING" 2>/dev/null || true
 wait "$SIBLING" 2>/dev/null || true
 
 echo ""
+echo "=== selected bot lifecycle refuses a foreign installed definition ==="
+reset_fakes
+as_os Linux
+source_unit="$T/generated/svc-owned.service"
+installed_unit="$HOME/.config/systemd/user/svc-owned.service"
+mkdir -p "${source_unit%/*}"
+printf '%s\n' 'selected release unit' > "$source_unit"
+printf '%s\n' 'foreign unit' > "$installed_unit"
+set +e
+svc_bot_enroll_exact "$source_unit" "$installed_unit" svc-owned.service; enroll_rc=$?
+svc_bot_disenroll_exact "$source_unit" "$installed_unit" svc-owned.service "$BOT" svc-owned "$T"; stop_rc=$?
+set -e
+assert_eq "start refuses to replace a foreign unit" "3" "$enroll_rc"
+assert_eq "stop refuses to remove a foreign unit" "3" "$stop_rc"
+assert_eq "foreign installed bytes survive both requests" "foreign unit" "$(cat "$installed_unit")"
+assert_eq "refused lifecycle invoked no native manager action" "" "$(cat "$FAKE_LOG")"
+
+echo "=== selected bot start observes the current private session first ==="
+reset_fakes
+as_os Linux
+assert_eq "steady Linux unit with no socket is recoverably absent" "absent" \
+    "$(FAKE_SUBSTATE=exited svc_bot_session_observe "$BOT" svc-alpha "$T")"
+assert_eq "Linux unit still starting is indeterminate, not dead" "unknown" \
+    "$(FAKE_SUBSTATE=running svc_bot_session_observe "$BOT" svc-alpha "$T")"
+as_os Darwin
+assert_eq "launchd active with no socket needs explicit inspection" "unknown" \
+    "$(svc_bot_session_observe "$BOT" svc-alpha "$T")"
+
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 # A suite that ran zero assertions and never touched FAIL would otherwise
 # read as a clean pass below (final wave item 8) -- the exact shape a

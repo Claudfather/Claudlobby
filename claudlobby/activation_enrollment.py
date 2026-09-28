@@ -392,6 +392,57 @@ def candidate_entries(store: ActivationStore, activation_id: str, phase: str) ->
     return tuple(json.loads(json.dumps(entry)) for entry in entries if entry["phase"] == phase)
 
 
+def selected_bot_entry(root: Path, fleet: str, bot: str, platform: str) -> dict:
+    """Read one active bot's frozen native placement, including after a stop.
+
+    The activation publication journal, rather than the current native search
+    path, is the placement owner: a deliberately stopped bot has no installed
+    file from which a start could rediscover its destination.
+    """
+    selected = read_selection(root)
+    if selected is None:
+        raise ActivationError("bot lifecycle requires a selected activation")
+    record = read_activation(root, selected["activation_id"])
+    if (record.status != "active"
+            or record.body["intent"]["release_id"] != selected["release_id"]
+            or record.body["intent"]["plan_id"] != selected["plan_id"]):
+        raise ActivationError("selected bot activation is incomplete")
+    candidate = read_plan(root, selected["plan_id"])
+    journal = read_config_install(root, journal_id(selected["activation_id"], "bots"))
+    publication = read_plan(root, journal.plan_id)
+    effects = publication.effects
+    if (journal.status != "applied" or publication.release_id != selected["release_id"]
+            or publication.release_seal != candidate.release_seal
+            or effects.get("owner") != _OWNER
+            or effects.get("activation_id") != selected["activation_id"]
+            or effects.get("candidate_plan") != candidate.plan_id
+            or effects.get("phase") != "bots"
+            or effects.get("enrollment_digest") != record.body["intent"]["enrollment_digest"]):
+        raise ActivationError("selected bot publication differs from its activation")
+    entries = effects.get("entries")
+    if not isinstance(entries, list):
+        raise ActivationError("selected bot publication has no entries")
+    _check_publication_changes(publication, entries, "bots")
+    declarations = [(declaration, item) for declaration, item in planned_units(candidate, platform)
+                    if declaration.scope == "bot" and declaration.fleet == fleet
+                    and declaration.bot == bot and item["enroll"]]
+    if len(declarations) != 1:
+        raise ActivationError("selected bot has no unique frozen unit")
+    declaration, item = declarations[0]
+    selected_entries = [entry for entry in entries if entry.get("phase") == "bots"
+                        and entry.get("source") == str(declaration.source)]
+    if len(selected_entries) != 1:
+        raise ActivationError("selected bot has no unique native placement")
+    entry = selected_entries[0]
+    if (entry["after"] != {"kind": "file", "sha256": item["sha256"], "mode": item["mode"]}
+            or entry["working_directory"] != str(declaration.working_directory)
+            or entry["environment"] != dict(declaration.environment)
+            or Path(entry["installed"]).name != Path(entry["source"]).name
+            or not Path(entry["installed"]).is_absolute()):
+        raise ActivationError("selected bot native placement differs from its frozen unit")
+    return json.loads(json.dumps(entry))
+
+
 def verify_candidate_enablement(store: ActivationStore, activation_id: str, phase: str, *, adapter=None) -> str:
     """Verify owned links and effective persistent state after the native reload.
 
