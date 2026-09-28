@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 
 from . import __version__
 from .commands._parsers import register_subparsers
+from .command_result import ResultArgumentParser
 
 log = logging.getLogger("claudlobby")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = ResultArgumentParser(
         prog="claudlobby",
         description="Compositor for Claude Code agent fleets.",
     )

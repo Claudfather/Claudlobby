@@ -39,6 +39,9 @@ def _add_migration_args(parser) -> None:
 def register_subparsers(sub) -> None:
     """Register all CLI subcommands on the given subparsers action."""
 
+    from ._release_parsers import register_release_subparsers
+    register_release_subparsers(sub)
+
     pv = sub.add_parser("validate", help="Validate fleet.yaml against library/")
     pv.add_argument("--strict", action="store_true", help="Fail on warnings")
     pv.add_argument(
