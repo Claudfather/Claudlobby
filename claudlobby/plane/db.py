@@ -43,7 +43,12 @@ def connect_ro(path: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
     """Read-only, and the file must ALREADY exist: ``connect`` auto-creates a
     db, so a read door on a typo'd root would otherwise open an empty plane
     and report everything missing (the J1 exists-before-connect finding).
-    Rows are ``sqlite3.Row``; ``query_only`` makes a stray write a SQL error."""
+    Rows are ``sqlite3.Row``; ``query_only`` makes a stray write a SQL error.
+
+    A read here holds a snapshot of the plane for as long as its statement is
+    open, and while it does the daemon's checkpoint cannot reset the WAL
+    (#1905). A loop over a live cursor keeps the statement open for the whole
+    loop, so fetch the rows first and do the per-row work after."""
     if not Path(path).is_file():
         raise FileNotFoundError(path)
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=timeout)

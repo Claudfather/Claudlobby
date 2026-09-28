@@ -179,6 +179,10 @@ METRIC_NAMES: dict[str, dict] = {
     "host.undervoltage": {"unit": "bool", "description": "Pi undervoltage flag"},
     "host.boot_time": {"unit": "iso8601", "description": "last boot instant"},
     "host.job_ran": {"unit": "run", "description": "one sample per machinery run"},
+    "host.plane_wal_bytes": {"unit": "B",
+                             "description": "size of the plane's WAL; over"
+                                            " 4 MiB means a reader is holding"
+                                            " a snapshot (#1905)"},
     "vault.behind": {"unit": "commits", "description": "behind upstream"},
     "vault.ahead": {"unit": "commits", "description": "ahead of upstream"},
     "vault.last_fetch_age_s": {"unit": "s", "description": "age of last fetch"},
