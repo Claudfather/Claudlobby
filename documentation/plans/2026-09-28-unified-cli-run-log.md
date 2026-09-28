@@ -39,8 +39,8 @@ branch. Merges and production activation remain operator decisions.
 |---|---|---|
 | P0 evidence safety | Linux CI passed | #1846 integrated locally; private HOME/XDG/temp and executable-origin changes in draft [#1928](https://github.com/Claudfather/Claudlobby/pull/1928). Current head `af1cc44d`: 5,812 passed, 13 skipped, 3 warnings; all three checks green. Native macOS remains unverified. |
 | P1 command loading/package | Linux CI passed | Lazy argparse dispatch and canonical resource packaging in draft [#1929](https://github.com/Claudfather/Claudlobby/pull/1929). Current head `c2b8188a`: 5,980 passed, 13 skipped, 3 warnings; all three checks green. Bootstrap and artifact assertions also passed in isolated exports; installed composition and host acceptance remain outstanding. |
-| P2 context/release | Draft; repairing failed suite | P2a package/data/overlay and caller migration in [#1930](https://github.com/Claudfather/Claudlobby/pull/1930), head `5345a1e0`: 5,946 passed, 76 failed, 12 skipped, 3 warnings; both conformance checks green. Remaining fixture/caller repairs in progress. Installed-composition smoke, native macOS, Pi and real-agent canary unverified. P2b release assembly/activation remains pending. |
-| A0–A4 tasks/messages | Pending | Follow the plan's migration audit and ordered semantic cutover. |
+| P2 context/release | P2a and assembly foundation Linux CI passed; activation in progress | [#1930](https://github.com/Claudfather/Claudlobby/pull/1930) `8b8c73b6`: 6,022 passed, 12 skipped. [#1931](https://github.com/Claudfather/Claudlobby/pull/1931) `ca8658c4`: 6,041 passed, 12 skipped. Both have three green checks. Explicit migration [#1932](https://github.com/Claudfather/Claudlobby/pull/1932) repairs are in CI; real installed planning [#1933](https://github.com/Claudfather/Claudlobby/pull/1933) exposed a spaces-in-root validator defect. Full activation/coherent canary remains incomplete. |
+| A0–A4 tasks/messages | Read model/audit foundation implemented; mutation/delivery pending | A0 audit and A1 typed task reducer share legacy/new closure semantics; 31 focused checks and 22 legacy report comparisons passed. Existing ingest has a committed-only mode. Request receipts, typed mutations, messaging/reports and caller cutover remain pending. |
 | B lifecycle/setup | Pending | Reuse supervisor consolidation; verify affected native platforms. |
 | C coordination/jobs/plane | Pending | Migrate complete operation/caller bundles. |
 | D completion | Pending | Retired-door scan, full operation coverage, cold onboarding, adoption and acceptance evidence. |
@@ -56,7 +56,8 @@ Current hosted results, checked on 2026-09-28:
 |---|---|---|
 | P0 / #1928 | `af1cc44d293f4456f2ef49d9d391afd39d974ade` | [All three checks green](https://github.com/Claudfather/Claudlobby/pull/1928/checks); 5,812 passed, 13 skipped, 3 warnings in 1,035.53 s; zero failures/errors. |
 | P1 / #1929 | `c2b8188a6ca974601bcbeba3ef41c61a9396f29f` | [All three checks green](https://github.com/Claudfather/Claudlobby/pull/1929/checks); 5,980 passed, 13 skipped, 3 warnings in 1,047.77 s; zero failures/errors. |
-| P2a / #1930 | `5345a1e04c2eeb02fc50c8c2453eb165d959348a` | [Full suite failed; conformance green](https://github.com/Claudfather/Claudlobby/actions/runs/36383705914/job/108804562749): 5,946 passed, 76 failed, 12 skipped, 3 warnings. |
+| P2a / #1930 | `8b8c73b62b502a6cd719dcf8a3c06ac012ec23d9` | [All checks green](https://github.com/Claudfather/Claudlobby/actions/runs/36385782579/job/108810745124): 6,022 passed, 12 skipped, 3 warnings; zero failures. |
+| Release foundation / #1931 | `ca8658c4f85086e9d2e676b86e3ee863cdcfd22d` | [All checks green](https://github.com/Claudfather/Claudlobby/actions/runs/36387658552/job/108816373238): 6,041 passed, 12 skipped, 3 warnings; zero failures. |
 
 Full P0/P1 logs are `/tmp/claudlobby-cli-evidence-1747/p0-af1-ci.log` and
 `p1-c2b-ci.log`. Both have the same 13 skips:
@@ -186,3 +187,70 @@ descriptions must carry final results before a slice is presented as ready.
   Full hosted log: `/tmp/claudlobby-cli-evidence-1747/p2-5345-ci-failed.log`.
   Eighteen scoped composition/skill-path assertions pass after repairs; actual
   shell/installed CLI callers still require the next full hosted run.
+
+## P2a hosted completion and P2b work in progress
+
+- **M:** `8b8c73b62b502a6cd719dcf8a3c06ac012ec23d9` passed full Linux CI:
+  6,022 passed, 12 skipped, 3 warnings, zero failures/errors (1,070.90 s).
+  [Run](https://github.com/Claudfather/Claudlobby/actions/runs/36385782579).
+  Vault and rename-map conformance passed on the same head. P2a remains a draft
+  dependency; no merge, native canary, Pi measurement or production activation.
+- **M:** P2b private-export checks cover immutable seals/runtime format metadata,
+  configuration proposals/application/rollback, activation state, stale CLI
+  refusal and task audit. Latest combined run: 63 passed, two real diagnostic
+  import cases deselected after a bounded macOS import stall. This is scoped
+  evidence, not full integration acceptance. Separate migration preview/apply
+  and recording-supervisor checks are retained with their implementation commits.
+- **R:** ordinary readers/writers are being changed to require an applied SQL
+  schema; the explicit activation migration owner saves a SQLite API backup and
+  reconciles interrupted SQL against its exact saved inputs. Test recording
+  fixtures now initialize their own scratch schema explicitly. These changes
+  are not part of the green P2a revision above.
+- **R:** generated sealed-release context includes `CLAUDLOBBY_RELEASE_ID`;
+  ordinary mutation admission holds the shared host lock and requires a matching
+  completed activation. These foundations still need wiring into the complete
+  command/caller cutover. Installed unit coverage, real native pause/restoration,
+  candidate startup and real-agent delegation remain required.
+
+### 2026-09-28 07:39 UTC — migration and native activation boundaries
+
+- The initial #1932 full run at `51e5f9b4` failed 165 cases, with 5,972
+  passed and 12 skipped. The follow-up at `baedd4d8` provisions positive private
+  recording fixtures explicitly, preserves absence/disabled controls, classifies
+  inaccessible parent paths as storage failures, and allows first identity only
+  for a schema with no retained ingest/identity history. Full CI is running.
+  Current integrated migration/configuration checks: 78 passed, two application
+  diagnostic cases excluded because this Mac's native loader still stalls.
+- Real Linux offline release assembly, seal verification, repeated assembly,
+  installed help and native parsing succeeded in #1933. Installed configuration
+  planning failed on a data-root path containing spaces. The diagnostic run at
+  `6d4cd9de` identifies `path_audit.improper_fleet_paths` splitting that root;
+  this is being repaired, not a successful end-to-end release rehearsal.
+- Reused native adapter ownership from #1862/#1835 and supported-platform lanes
+  from #1859. Strict native inventory, exact file parking/restoration, staged unit
+  manifests and phase-specific candidate publication are implemented as internal
+  backends. The activation coordinator, complete quiescence proof, readiness,
+  recovery and original/candidate integration remain unfinished.
+- One uniquely named disposable launchd sleep job on macOS 26.1 / Bash 3.2.57
+  was loaded, paused for 12.225 seconds, and restored with original definition,
+  mode and override state. Its hosted caller was refused. Cleanup removed the
+  owned job and both owned processes. This proves the scoped native primitive,
+  not full fleet activation or actual-agent acceptance.
+- Added a durable start gate to generated candidate units: interrupted activation
+  refuses future auto-starts; a coordinator can admit one exact startup phase.
+  The guard does not replace quiescence or grant blanket mutation permission.
+  Real rendered-guard and candidate file publication checks are being joined.
+- Plan review watch at 07:39 UTC found the same two handled Ravi comments and no
+  new formal or inline reviews at `1a403962`. Additional team coverage remains
+  outstanding; no merge or production action is authorized.
+
+### 2026-09-28 07:46 UTC — installed release rehearsal passes
+
+The real Linux offline assembly step at #1933 head
+`f79fd42eedb3a0f3d350894ddc4510a33b997c11` passed after correcting the configured
+root tokenizer. It built/installed the artifact, verified the seal and repeated
+assembly, ran installed help/native parsing, and staged configuration under a
+path containing spaces without activating it. The full Linux/macOS suites
+remain running ([job](https://github.com/Claudfather/Claudlobby/actions/runs/36393261596/job/108833650375)).
+The path audit has parent-RED (2 failures) / candidate-GREEN (22 passed) evidence;
+foreign and cross-fleet paths remain refused.
