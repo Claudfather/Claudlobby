@@ -58,9 +58,18 @@ class TestImproperFleetPaths:
         assert [p for p, _ in bad] == [flat]
 
     def test_nested_correct_absolute_is_ok(self, tmp_path):
-        paths = _paths(tmp_path)
-        good = f"{paths.root}/local/home/tl/.secrets/ga4.json"
-        assert improper_fleet_paths(good, _bot(), paths) == []
+        paths = _paths(tmp_path / "host data with spaces")
+        good = str(paths.bot_runtime("kev"))
+        # The same absolute crosses shell, JSON permission, systemd and XML
+        # boundaries. Whitespace in its configured root is part of the path.
+        for text in (
+            f'BOT_DIR="{good}"',
+            json.dumps({"allow": [f"Read(/{good}/memory/**)"]}),
+            f"WorkingDirectory={good}\nEnvironmentFile={good}/.tmux-env",
+            f"<string>{good}/logs/kev.out.log</string>",
+            "${BOT_DIR}/data",
+        ):
+            assert improper_fleet_paths(text, _bot(), paths) == [], text
 
     def test_fleet_root_token_is_ok(self, tmp_path):
         paths = _paths(tmp_path)
@@ -83,9 +92,9 @@ class TestImproperFleetPaths:
         assert improper_fleet_paths(txt, _bot(), paths) == []
 
     def test_cross_fleet_path_flagged(self, tmp_path):
-        paths = _paths(tmp_path)
+        paths = _paths(tmp_path / "host data with spaces")
         other = f"{paths.root}/local/home/other-fleet/runtime/bots/z/x.js"
-        bad = improper_fleet_paths(other, _bot(), paths)
+        bad = improper_fleet_paths(f'"{paths.bot_runtime("kev")}" "{other}"', _bot(), paths)
         assert [p for p, _ in bad] == [other]
 
     def test_fleet_state_path_style_root_anchor_is_ok(self, tmp_path):

@@ -62,13 +62,14 @@ class PathFinding:
     reason: str
 
 
-# A crude absolute-path token: a run starting with "/" up to whitespace or a
+# An absolute-path token: a run starting with "/" up to whitespace or a
 # common delimiter. `<` and `>` delimit too — they cannot occur in a real path,
 # so they mark the boundary between an XML tag and a path in a launchd plist
 # (``</key><string>/real/path</string>``), keeping the closing tag out of the
-# extracted token. Good enough for the machine-generated wiring files scanned
-# here (bot.conf, .mcp.json, unit files).
-_ABS_TOKEN_RE = re.compile(r"/[^\s'\":;,<>]+")
+# extracted token. Configured roots are recognized before these delimiters in
+# improper_fleet_paths: a root's spaces belong to the path, not to a new token.
+_ABS_TOKEN_CHAR = r"[^\s'\":;,<>]"
+_ABS_TOKEN_RE = re.compile("/" + _ABS_TOKEN_CHAR + "+")
 
 # Bot-dir-relative wiring files whose absolute paths must resolve for the bot to
 # run. Prose (CLAUDE.md) is intentionally excluded — a stale path there does not
@@ -201,7 +202,8 @@ def improper_fleet_paths(
     sanctioned shared parent the fleet belongs to, not a leak. The rule is
     correctness, not "no absolutes".
     """
-    resolved = _resolve_anchor_tokens(text, _anchor_values(bot, paths))
+    anchor_values = _anchor_values(bot, paths)
+    resolved = _resolve_anchor_tokens(text, anchor_values)
     content_roots = _fleet_content_roots(paths)
     layout_needles = _fleet_layout_needles(paths)
     fleet_root = str(paths.fleet_config_dir)
@@ -214,9 +216,23 @@ def improper_fleet_paths(
         for r in (paths.vault_root, bot.claudron_vault_path)
         if r
     }
+    # Preserve the exact configured prefix across shell quotes, JSON strings,
+    # XML text and unit assignments. A generic whitespace-consuming regex would
+    # swallow a second, foreign path into a valid one. Only these known prefixes
+    # may contain delimiters; suffixes and unrelated paths keep token boundaries.
+    # Longest first handles a nested fleet root; extra leading slashes preserve
+    # the permission-rule // spelling normalized below.
+    roots = sorted(
+        {r for r in (*anchor_values.values(), *content_roots, *vault_roots)
+         if os.path.isabs(r)}, key=len, reverse=True,
+    )
+    token_re = re.compile(
+        r"/*(?:" + "|".join(re.escape(r) for r in roots) + ")"
+        + _ABS_TOKEN_CHAR + "*|" + _ABS_TOKEN_RE.pattern
+    ) if roots else _ABS_TOKEN_RE
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
-    for m in _ABS_TOKEN_RE.finditer(resolved):
+    for m in token_re.finditer(resolved):
         p = m.group(0).rstrip("/.,:;\"')}")
         if p in seen:
             continue
