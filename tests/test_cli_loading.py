@@ -71,7 +71,8 @@ def test_help_needs_only_stdlib(argv, expected, tmp_path):
 def test_invalid_arguments_refuse_before_loading_commands(tmp_path):
     result = _run(PARSE, "task", "recheck", "--max-age-h", "bad", tmp_path=tmp_path)
     assert result.returncode == 2, result.stderr
-    assert "invalid float value" in result.stderr
+    assert result.stderr == "invalid argument: command syntax\ninspect claudlobby task --help\n"
+    assert result.stdout == ""
     assert "Traceback" not in result.stderr
 
 
