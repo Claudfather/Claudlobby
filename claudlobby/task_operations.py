@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import fcntl
 import os
 from pathlib import Path
@@ -20,8 +21,9 @@ from types import MappingProxyType
 from typing import Literal, Mapping, TYPE_CHECKING
 
 from .plane.db import connect_ro, db_file
-from .plane.ids import ID_PATTERNS, mint_assignment_id, mint_event_id, mint_work_item_id
+from .plane.ids import ID_PATTERNS, mint_assignment_id, mint_event_id, mint_msg_id, mint_work_item_id
 from .plane.schema_state import PendingMigrationError, require_current_schema
+from .report_payload import ReportLink, ReportPayload, encode_report_facts
 from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import ReceiptConflict, RequestIntent, StagePlan, locked_request, semantic_digest
 from .task_queries import TaskQueryError, show_assignment, show_task
@@ -87,7 +89,9 @@ class TaskOperationResult:
     replayed: bool
     recording: Literal["committed"] = "committed"
     delivery: Literal["not_requested"] = "not_requested"
-    notification: Literal["not_requested"] = "not_requested"
+    notification: Literal["not_requested", "pending", "unknown", "received", "submitted", "failed"] = "not_requested"
+    message_id: str | None = None
+    recipient_uid: str | None = None
 
 
 @contextmanager
@@ -186,15 +190,18 @@ def _scope_links(ctx, conn, project_key, workstream_id, repo):
             raise TaskQueryError("workstream project differs from the selected task project")
 
 
-def _existing(store, ctx, operation, semantic, recipient=None, *, fact_count=1):
+def _existing(store, ctx, operation, semantic, recipient=None, *, fact_count=1, notification=False):
     receipt = store.load()
     if receipt is not None:
         intent = receipt.intent
         if ((intent.operation, intent.operation_version, intent.host_uid, intent.fleet_uid,
              intent.caller_uid, intent.recipient_uid, intent.semantic_sha256)
                 != (operation, 1, ctx.host_uid, ctx.fleet_uid, ctx.caller.uid, recipient, semantic)
-                or len(intent.stages) != 1 or intent.stages[0].kind != "recording"
-                or len(intent.stages[0].facts) != fact_count):
+                or tuple(stage.kind for stage in intent.stages) != (
+                    ("recording", "notification") if notification else ("recording",))
+                or len(intent.stages[0].facts) != fact_count
+                or notification and (intent.message_id is None or intent.recipient_uid is None
+                                     or intent.stages[1].facts)):
             raise ReceiptConflict("request UUID already has different semantics or identities")
     return receipt
 
@@ -227,20 +234,28 @@ def _raw(ctx, request_id, family, payload, receipt, *, fact_index=0):
             "event_id": receipt.intent.stages[0].facts[fact_index].event_id if receipt else mint_event_id()}
 
 
-def _prepare(store, ctx, operation, semantic, raws, task_id, assignment_id=None, recipient=None, actors=()):
+def _prepare(store, ctx, operation, semantic, raws, task_id, assignment_id=None, recipient=None, actors=(),
+             *, message_id=None, notification=False):
     from .plane.emit_api import CONTENT_FIELDS, load_capture_config, validate_item
     modes = load_capture_config(ctx.root) if any(CONTENT_FIELDS.get(r["event_type"]) for r in raws) else {}
     parties = {actor.alias: actor.uid for actor in (ctx.caller, *actors)}
     facts = tuple(expected_fact(validate_item(raw, modes)[0], host_uid=ctx.host_uid,
                                fleet_uid=ctx.fleet_uid, parties=parties) for raw in raws)
+    stages = (StagePlan("recording", facts),) + ((StagePlan("notification"),) if notification else ())
     return store.prepare(RequestIntent(operation, 1, ctx.host_uid, ctx.fleet_uid, ctx.caller.uid,
-                         recipient, semantic, (StagePlan("recording", facts),),
-                         task_id=task_id, assignment_id=assignment_id))
+                         recipient, semantic, stages,
+                         task_id=task_id, assignment_id=assignment_id, message_id=message_id))
 
 
 def _result(ctx, conn, receipt, replayed):
+    notification = "not_requested"
+    if len(receipt.stages) == 2:
+        state = receipt.stages[1].status
+        notification = "pending" if state == "prepared" else state
     return TaskOperationResult(receipt.request_id, receipt.intent.task_id, receipt.intent.assignment_id,
-                               show_task(conn, receipt.intent.task_id, fleet_uid=ctx.fleet_uid), replayed)
+                               show_task(conn, receipt.intent.task_id, fleet_uid=ctx.fleet_uid), replayed,
+                               notification=notification, message_id=receipt.intent.message_id,
+                               recipient_uid=receipt.intent.recipient_uid)
 
 
 def _commit(store, ctx, conn, receipt, raws, check_lock):
@@ -320,17 +335,91 @@ def accept(ctx: TaskOperationContext, request_id: str, assignment_id: str) -> Ta
                 if _replayed(store, previous, conn):
                     return _result(ctx, conn, previous, True)
                 view = show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid)
-                task = view.task.require_resolved()
-                if (view.assignment.assignee_uid != ctx.caller.uid
-                        or not any(_worker(ctx, bot) == ctx.caller for bot in ctx.bots if bot in ctx.context.fleet.bots)):
-                    raise TaskConflictError("only the declared current assignee can accept")
-                if task.state != "assigned" or task.current_assignment != view.assignment:
-                    raise TaskConflictError("assignment is stale, closed or already accepted")
+                task = _current_assignee(ctx, view)
+                if task.state != "assigned":
+                    raise TaskConflictError("assignment is already accepted")
                 _identities(ctx, conn, (ctx.caller,))
                 raw = _raw(ctx, request_id, "task", dict(work_item_id=task.task_id,
                            assignment_id=assignment_id, event="accepted", actor=ctx.caller.alias), previous)
                 receipt = _prepare(store, ctx, "assignment.accept", semantic, (raw,), task.task_id, assignment_id)
                 return _commit(store, ctx, conn, receipt, (raw,), check)
+
+
+def _current_assignee(ctx, view):
+    task = view.task.require_resolved()
+    if (view.assignment.assignee_uid != ctx.caller.uid
+            or not any(_worker(ctx, bot) == ctx.caller for bot in ctx.bots if bot in ctx.context.fleet.bots)):
+        raise TaskConflictError("only the declared current assignee can act")
+    if not task.open or task.current_assignment != view.assignment:
+        raise TaskConflictError("assignment is stale or closed")
+    return task
+
+
+def _assignment_report(ctx, request_id, assignment_id, report, *, verb, status, transition, text_field):
+    _own_fleet(ctx)
+    if not isinstance(report, ReportPayload) or report.status != status or getattr(report, text_field) is None:
+        raise TaskQueryError(f"assignment {verb} requires a {status} report with {text_field}")
+    semantic = semantic_digest(dict(assignment_id=assignment_id, report=report.to_body()))
+    operation = "assignment." + verb
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        frozen = store.load()
+        # Do not consult today's manager for an already-recorded operation.
+        # Its immutable fact projections prove the originally addressed UID.
+        previous = _existing(store, ctx, operation, semantic,
+                             frozen.intent.recipient_uid if frozen else None,
+                             fact_count=2, notification=True)
+        with _reader(ctx) as conn:
+            first = show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                task = _current_assignee(ctx, show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid))
+                manager = _worker(ctx, ctx.context.fleet.manager)
+                if previous and previous.intent.recipient_uid != manager.uid:
+                    raise ReceiptConflict("report manager differs from the frozen recipient")
+                _identities(ctx, conn, (ctx.caller, manager))
+                message_id = previous.intent.message_id if previous else mint_msg_id()
+                event_ids = (tuple(fact.event_id for fact in previous.intent.stages[0].facts)
+                             if previous else (mint_event_id(), mint_event_id()))
+                raws = encode_report_facts(report, fleet=ctx.context.fleet.name, sender=ctx.caller.alias,
+                        recipient=manager.alias, msg_id=message_id, event_ids=event_ids,
+                        occurred_at=datetime.now(timezone.utc).isoformat(),
+                        link=ReportLink(task.task_id, assignment_id, transition))
+                receipt = _prepare(store, ctx, operation, semantic, raws, task.task_id, assignment_id,
+                                   manager.uid, (manager,), message_id=message_id, notification=True)
+                # Only the recording stage is attempted. The notification
+                # stays prepared for the later messaging owner, never sent here.
+                return _commit(store, ctx, conn, receipt, raws, check)
+
+
+def progress(ctx: TaskOperationContext, request_id: str, assignment_id: str,
+             report: ReportPayload) -> TaskOperationResult:
+    return _assignment_report(ctx, request_id, assignment_id, report, verb="progress",
+                              status="progress", transition="progress", text_field="summary")
+
+
+def block(ctx: TaskOperationContext, request_id: str, assignment_id: str,
+          report: ReportPayload) -> TaskOperationResult:
+    return _assignment_report(ctx, request_id, assignment_id, report, verb="block",
+                              status="blocked", transition="blocked_waiting", text_field="reason")
+
+
+def return_assignment(ctx: TaskOperationContext, request_id: str, assignment_id: str,
+                      report: ReportPayload) -> TaskOperationResult:
+    return _assignment_report(ctx, request_id, assignment_id, report, verb="return",
+                              status="blocked", transition="returned_blocked", text_field="reason")
+
+
+def complete(ctx: TaskOperationContext, request_id: str, assignment_id: str,
+             report: ReportPayload) -> TaskOperationResult:
+    return _assignment_report(ctx, request_id, assignment_id, report, verb="complete",
+                              status="completed", transition="completed", text_field="summary")
+
+
+def fail(ctx: TaskOperationContext, request_id: str, assignment_id: str,
+         report: ReportPayload) -> TaskOperationResult:
+    return _assignment_report(ctx, request_id, assignment_id, report, verb="fail",
+                              status="failed", transition="failed", text_field="reason")
 
 
 def withdraw(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: str) -> TaskOperationResult:

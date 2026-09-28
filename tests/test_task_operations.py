@@ -18,6 +18,7 @@ from claudlobby.plane.db import connect, db_file
 from claudlobby.plane.identity import resolve, resolve_party
 from claudlobby.plane.ids import ensure_host_uid
 from claudlobby.request_receipts import ReceiptConflict, locked_request
+from claudlobby.report_payload import ReportPayload, decode_report_body
 from claudlobby.task_queries import WrongTaskReferenceError, show_task
 from tests.package_fixtures import source_package
 from tests.plane_setup import initialize_plane
@@ -281,6 +282,122 @@ def test_reassign_without_current_and_foreign_bot_mutations_refuse_before_prepar
     with pytest.raises(tasks.TaskConflictError, match="origin fleet"):
         tasks.withdraw(foreign, str(uuid4()), tid, reason="Wrong fleet")
     assert _counts(conn) == (1, 0, 0, 0)
+    assert not list((ctx.root / "state/requests").rglob("*.json"))
+
+
+def test_assignment_reports_record_explicit_lifecycle_and_leave_notification_pending(estate):
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Report lifecycle")
+    routed = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    worker = replace(ctx, caller=ctx.bots["worker"])
+    # Progress itself establishes active work; no extra accepted-first rule.
+    results = [tasks.progress(worker, str(uuid4()), routed.assignment_id,
+                             ReportPayload("progress", summary="Started", percent=0))]
+    assert results[-1].task.state == "active"
+    results.append(tasks.block(worker, str(uuid4()), routed.assignment_id,
+                               ReportPayload("blocked", reason="Need input")))
+    assert results[-1].task.state == "blocked"
+    results.append(tasks.return_assignment(worker, str(uuid4()), routed.assignment_id,
+                                           ReportPayload("blocked", reason="Cannot continue")))
+    assert results[-1].task.state == "queued" and results[-1].task.current_assignment is None
+    successor = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="other")
+    with pytest.raises(tasks.TaskConflictError, match="stale"):
+        tasks.progress(worker, str(uuid4()), routed.assignment_id, ReportPayload("progress", summary="Late"))
+    other = replace(ctx, caller=ctx.bots["other"])
+    results.append(tasks.complete(other, str(uuid4()), successor.assignment_id,
+                                  ReportPayload("completed", summary="Finished")))
+    assert results[-1].task.state == "completed"
+    failed_task = tasks.admit(ctx, str(uuid4()), title="Failure is terminal")
+    failed_assignment = tasks.assign(ctx, str(uuid4()), failed_task.task_id, bot_id="worker")
+    results.append(tasks.fail(worker, str(uuid4()), failed_assignment.assignment_id,
+                              ReportPayload("failed", reason="No feasible result")))
+    assert results[-1].task.state == "failed"
+    for result in results:
+        receipt = _receipt(ctx, result.request_id)
+        assert result.recording == "committed" and result.notification == "pending"
+        assert result.delivery == "not_requested" and result.message_id == receipt.intent.message_id
+        assert result.recipient_uid == ctx.bots["manager"].uid
+        assert tuple(s.kind for s in receipt.intent.stages) == ("recording", "notification")
+        assert len(receipt.intent.stages[0].facts) == 2
+        assert receipt.stages[1].status == "prepared" and receipt.stages[1].attempt == 0
+    assert conn.execute("SELECT count(*) FROM communications").fetchone()[0] == len(results)
+    assert conn.execute("SELECT count(*) FROM events WHERE kind='transmission'").fetchone()[0] == 0
+
+
+def test_committed_report_retry_keeps_original_manager_message_and_evidence(estate, monkeypatch):
+    from claudlobby.request_receipts import RequestStore
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Review result")
+    routed = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    worker = replace(ctx, caller=ctx.bots["worker"])
+    report = ReportPayload("completed", summary="Reviewed | carefully", pr_url="https://github.com/o/r/pull/1",
+                           pr_role="reviewed", artifacts=("https://example.org/a", "https://example.org/b"))
+    rid = str(uuid4())
+    with monkeypatch.context() as patch:
+        patch.setattr(RequestStore, "outcome", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("after commit")))
+        with pytest.raises(OSError, match="after commit"):
+            tasks.complete(worker, rid, routed.assignment_id, report)
+    prior = _receipt(ctx, rid)
+    changed_manager = replace(worker, context=replace(ctx.context, fleet=replace(ctx.context.fleet, manager="other")))
+    result = tasks.complete(changed_manager, rid, routed.assignment_id, report)
+    assert result.replayed and result.message_id == prior.intent.message_id
+    assert result.recipient_uid == ctx.bots["manager"].uid and result.notification == "pending"
+    row = conn.execute("SELECT recipient_uid, body FROM communications WHERE msg_id=?", (result.message_id,)).fetchone()
+    assert row[0] == result.recipient_uid and decode_report_body(row[1]).payload == report
+    assert _receipt(ctx, rid).attempt == 1 and _counts(conn) == (1, 1, 1, 1)
+    with pytest.raises(ReceiptConflict):
+        tasks.complete(worker, rid, routed.assignment_id, replace(report, summary="Different"))
+    # Frozen recipient is part of exact fact proof, not only receipt prose.
+    conn.execute("UPDATE communications SET recipient_uid=? WHERE msg_id=?",
+                 (ctx.bots["other"].uid, result.message_id))
+    with pytest.raises(ReceiptConflict):
+        tasks.complete(changed_manager, rid, routed.assignment_id, report)
+
+
+def test_report_rollback_keeps_message_unrecorded_and_retry_cannot_retarget_manager(estate):
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Atomic report")
+    routed = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    worker = replace(ctx, caller=ctx.bots["worker"])
+    report = ReportPayload("progress", summary="Some progress", percent=40)
+    conn.execute("CREATE TRIGGER reject_report BEFORE INSERT ON events "
+                 "WHEN NEW.kind='task' BEGIN SELECT RAISE(ABORT, 'owned report failure'); END")
+    rid = str(uuid4())
+    with pytest.raises(tasks.TaskRecordingError):
+        tasks.progress(worker, rid, routed.assignment_id, report)
+    prior = _receipt(ctx, rid)
+    assert tuple(s.status for s in prior.stages) == ("unknown", "prepared")
+    assert _counts(conn) == (1, 1, 0, 0)
+    for fact in prior.intent.stages[0].facts:
+        assert conn.execute("SELECT 1 FROM ingest_ledger WHERE event_id=?", (fact.event_id,)).fetchone() is None
+    conn.execute("DROP TRIGGER reject_report")
+    changed_manager = replace(worker, context=replace(ctx.context, fleet=replace(ctx.context.fleet, manager="other")))
+    with pytest.raises(ReceiptConflict, match="manager"):
+        tasks.progress(changed_manager, rid, routed.assignment_id, report)
+    assert _receipt(ctx, rid).intent == prior.intent and _counts(conn) == (1, 1, 0, 0)
+    result = tasks.progress(worker, rid, routed.assignment_id, report)
+    assert result.message_id == prior.intent.message_id and result.notification == "pending"
+    assert _receipt(ctx, rid).attempt == 2 and _counts(conn) == (1, 1, 1, 1)
+    assert not list((ctx.root / "state/plane").rglob("*.jsonl"))
+
+
+def test_report_refuses_wrong_assignee_missing_manager_and_wrong_payload_before_preparation(estate):
+    ctx, conn = estate
+    tid, aid = "wi_" + "c" * 32, "asg_" + "d" * 32
+    _insert(conn, "work_items", fleet_uid=ctx.fleet_uid, work_item_id=tid,
+            title="Ready to report", created_by_uid=ctx.caller.uid)
+    _insert(conn, "assignments", fleet_uid=ctx.fleet_uid, assignment_id=aid, work_item_id=tid,
+            assignee_uid=ctx.bots["worker"].uid, assigned_by_uid=ctx.caller.uid)
+    report = ReportPayload("progress", summary="Progress")
+    with pytest.raises(tasks.TaskConflictError, match="assignee"):
+        tasks.progress(ctx, str(uuid4()), aid, report)
+    worker = replace(ctx, caller=ctx.bots["worker"])
+    missing = replace(worker, bots={"worker": ctx.bots["worker"]})
+    with pytest.raises(tasks.TaskQueryError, match="declared member"):
+        tasks.progress(missing, str(uuid4()), aid, report)
+    with pytest.raises(tasks.TaskQueryError, match="completed report"):
+        tasks.complete(worker, str(uuid4()), aid, report)
+    assert _counts(conn) == (1, 1, 0, 0)
     assert not list((ctx.root / "state/requests").rglob("*.json"))
 
 
