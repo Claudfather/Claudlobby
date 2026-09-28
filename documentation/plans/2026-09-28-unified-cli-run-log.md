@@ -388,3 +388,42 @@ fixture. Private vault-hook deny/allow controls and parent syntax/AST/diff check
 passed. These focused probes do not establish a full-suite pass or actual-agent
 acceptance. Local complete dependency environments remain unreliable; the new
 exact-head hosted matrix is required. Feature expansion stays held until green.
+
+## Supported-platform gate cleared — 2026-09-28 10:43 UTC
+
+**Measured:** prerequisite #1933 at `462209d98f8e832959afe123005aa614cdd72046`
+passed Linux 3.11 and 3.10 (6,143 passed, 15 skipped, three warnings per lane),
+and macOS 3.11 (6,121 passed, 37 skipped, three warnings):
+[complete run](https://github.com/Claudfather/Claudlobby/actions/runs/36408134459).
+All 11 previously failing macOS cases now pass by class/name comparison of
+retained JUnit results. All seven native launchd/bridge checks executed and
+passed. Real offline release assembly and installed planning passed on Linux.
+
+**Measured:** integration #1934 at `2d99fe9fc0e649bacb3765bf89e9645cae162654`
+passed [Linux 3.11](https://github.com/Claudfather/Claudlobby/actions/runs/36408144875/job/108881679927)
+(6,338 passed, 15 skipped, four warnings, 876.87s),
+[Linux 3.10](https://github.com/Claudfather/Claudlobby/actions/runs/36408144875/job/108881680166)
+(the same counts, 1,242.52s), and
+[macOS 3.11](https://github.com/Claudfather/Claudlobby/actions/runs/36408144875/job/108881680160)
+(6,316 passed, 37 skipped, four warnings, 1,849.09s). The seven native checks
+executed and passed; release assembly and both conformance checks also passed.
+These are per-platform results, not additive coverage counts. No new exclusion
+was added to clear this gate. The feature hold is lifted on this evidence.
+
+**Read from code / next candidate, not yet hosted validation:** the preserved
+work adds sealed active configuration, cold-only `host activate` and recorded
+`host status`, scoped message/receipt/reply reads, and a bounded single-attempt
+native transport adapter. Active routing must keep the activated manager and
+project policy when authoring files change or disappear; missing/corrupt sealed
+inputs and redirected fleet directories refuse. Host commands retain explicit
+operator/ancestry gates and distinguish recorded state from runtime observation.
+Message reads reuse the delivery proof query and reject wrong-fleet receipts;
+transport preserves the native chunk owner and reports uncertain sends without
+automatic retry. These foundations do not expose the full task/message API.
+
+**Limits:** syntax/diff checks and earlier private collaborator runs are not
+acceptance of this new candidate. Its hosted Linux/macOS matrix remains required.
+The operator Mac's native dependency/interpreter stalls remain unresolved; no
+further local interpreter workaround is planned. Actual-agent canaries,
+upgrade/recovery, O1 public sends/alerts, caller/skill/grant cutover and normal-load
+Pi timing remain outstanding. Production activation has not been performed.
