@@ -283,7 +283,9 @@ def register_subparsers(sub) -> None:
     ptr.set_defaults(func=_command("task", "cmd_task_recheck"))
 
     from ._task_read_parsers import register_task_read_subparsers
-    register_task_read_subparsers(sub, t_sub)
+    assignment_children = register_task_read_subparsers(sub, t_sub)
+    from ._task_write_parsers import register_task_write_subparsers
+    register_task_write_subparsers(t_sub, assignment_children)
 
     pu = sub.add_parser(
         "uptime",

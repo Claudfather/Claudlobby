@@ -26,8 +26,8 @@ _PUBLIC = {("host", "releases"): "host.releases", ("host", "status"): "host.stat
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("context", ("show",)), ("bot", ("list", "show", "capabilities")),
     ("fleet", ("show",)), ("project", ("list", "show")),
-    ("task", ("list", "show")),
-    ("assignment", ("show",))) for verb in verbs})
+    ("task", ("list", "show", "admit", "assign")),
+    ("assignment", ("show", "accept"))) for verb in verbs})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
 
 
