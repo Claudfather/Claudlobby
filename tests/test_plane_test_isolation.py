@@ -133,10 +133,15 @@ def incidental_session(_isolate_plane_session):
 ''')
         (probe / "test_probe.py").write_text('''import os, subprocess
 
-def test_session(incidental_session):
+def test_session(incidental_session, tmp_path_factory, _isolate_claudlobby_root):
     assert os.environ["PLANE_EMIT_DISABLED"] == "1"
+    base = tmp_path_factory.getbasetemp()
+    assert not base.is_relative_to(_isolate_claudlobby_root)
+    (base / "session-lifetime").write_text("survives")
 
-def test_function():
+def test_function(tmp_path, tmp_path_factory):
+    assert (tmp_path_factory.getbasetemp() / "session-lifetime").read_text() == "survives"
+    assert tmp_path.is_dir()
     result = subprocess.run(["bash", os.environ["ISOLATION_SHIM"]],
                             input=os.environ["ISOLATION_BATCH"], text=True,
                             capture_output=True, timeout=30)
@@ -154,7 +159,7 @@ def test_function():
             env["PLANE_EMIT_DISABLED"] = initial_guard
         before = _artifacts(REPO)
         result = subprocess.run([sys.executable, "-m", "pytest", "-v", "--override-ini=addopts=",
-                                 "--basetemp", str(tmp_path / "nested"), str(probe / "test_probe.py")],
+                                 str(probe / "test_probe.py")],
                                 cwd=REPO, env=env, capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, result.stdout + result.stderr
         relative = probe.relative_to(REPO)
