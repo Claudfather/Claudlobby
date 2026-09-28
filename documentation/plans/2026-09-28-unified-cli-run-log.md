@@ -260,3 +260,53 @@ path containing spaces without activating it. The full Linux/macOS suites
 remain running ([job](https://github.com/Claudfather/Claudlobby/actions/runs/36393261596/job/108833650375)).
 The path audit has parent-RED (2 failures) / candidate-GREEN (22 passed) evidence;
 foreign and cross-fleet paths remain refused.
+
+## Integration checkpoint — 2026-09-28 08:24 UTC
+
+**Measured:** first #1934 hosted integration at
+`6def1a15685053388eb7f45257a341cd3226ff19` is RED.
+[Linux 3.11](https://github.com/Claudfather/Claudlobby/actions/runs/36393905425/job/108835701078)
+reported 9 failed, 6,235 passed, 15 skipped and four warnings;
+[Linux 3.10](https://github.com/Claudfather/Claudlobby/actions/runs/36393905425/job/108835701097)
+reported 15 failed, 6,229 passed, 15 skipped and four warnings.
+Corrections cover the stdlib optional Jython import probe, explicit fixture SQL
+initialization, Python 3.10 SQLite/TOML differences, the native-admission test
+collaborator, script documentation and the observed script count. Local focused
+verification passed 45 tests; the remaining lifecycle fixture timed out starting
+an owned stub on this Mac. Its process group is now reaped on timeout. No native
+local pass is claimed. Hosted re-verification is required.
+
+**Measured, incomplete:** the
+[macOS 3.11 job](https://github.com/Claudfather/Claudlobby/actions/runs/36393905425/job/108835700805)
+reached the existing real tmux validation harness at 91% before the 30-minute job
+cap cancelled it. The retained partial log contains 5,617 passed, 79 failed,
+37 skipped and two error outcomes, not a full-suite result. All seven dedicated
+native launchd/bridge cases show PASSED in that partial log; the final XML gate
+could not run successfully without completed XML. CI now stops after 20 failures
+(without skipping any green-path coverage), streams its output, preserves the
+pytest exit status and permits 60 minutes for the supported-platform suite.
+The Mac fixture failures remain under investigation.
+
+**Read from code / private foundations, not public cutover:**
+- `task_queries.py` supplies fleet-scoped canonical reads and recovery hints.
+- `request_receipts.py` retains scoped IDs/digests/outcomes; `request_facts.py`
+  compares committed rows using ingest's existing projection. Neither is a
+  second task-state store or a transport replay queue.
+- `task_operations.py` adds admission, assignment and assigned-bot acceptance
+  through request-then-task locks and committed-only ingestion. Delivery is
+  deliberately a separate, still-unimplemented operation.
+- The daemon exposes its serving identity and a bounded, explicitly reviewed
+  drain through the existing ingest/spool owners. A drain response alone does
+  not prove the host is quiescent or ready to activate.
+- Migration manifests bind observed retained task/receipt formats and exact
+  receipt files; recovery checks every retained version.
+
+**Measured local limits:** receipt codec 4 passed; operational-format/migration
+checks 59 passed, followed by 18 after the recovery-caller integration; native
+start/readiness collaborators 143 passed. These runs overlap and must not be
+summed. The task-operation slice has 2 passed and 5 deselected locally; its five
+real-ingestion cases, the new exact-fact proof cases and daemon runtime cases
+await hosted execution because local Pydantic native loading stalls. AST checks
+are syntax evidence only. Cold bootstrap coordination is still being integrated,
+including durable Linux enablement. No new public task API, production change,
+actual-agent canary, upgrade/recovery acceptance or Pi latency result is claimed.
