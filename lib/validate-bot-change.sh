@@ -744,7 +744,13 @@ ta_amb_events=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments 
     && [ "${ta_amb_events:-1}" -eq 0 ]; } && r=yes || r=no
 harness_check "#1481 an id matching TWO open assignments is REFUSED, naming them, with nothing acted" "$r"
 
-# --- escalate: a fresh id, so the ambiguity above cannot reach it ---
+# Close both deliberately ambiguous rows before the fleet-wide escalation read.
+# The refusal above remains tested; leaving both twins open makes the canonical
+# reader disclose unresolved historical display-ID state for the whole fleet.
+val_seed_report "$ROOT" "$FLEET" "$TA_BOT" t-1481-0002 completed "$now"
+val_seed_report "$ROOT" "$FLEET" "$T835_BOT" t-1481-0002 completed "$now"
+
+# --- escalate: a fresh id in a fleet with resolved task history ---
 val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0003 "$((now - 400))" "$((now + 3600))" "the one with a question"
 CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
     "$LIB_DIR/task-act.sh" escalate t-1481-0003 "do we ship without the migration" \
