@@ -350,8 +350,6 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json assignment return *)",
         "Bash(claudlobby --json assignment complete *)",
         "Bash(claudlobby --json assignment fail *)",
-        "Bash(claudlobby --json workstream list)",
-        "Bash(claudlobby --json workstream show *)",
         "Bash(claudlobby --json task assign *)",
         "Bash(claudlobby --json assignment deliver *)",
         "Bash(claudlobby --json task withdraw *)",
@@ -3418,8 +3416,10 @@ class TestDefaultStartupPromptIgnition:
         result = compose_settings_local(bot, self._fleet(bot), self._paths(tmp_path))
         allow = result["permissions"]["allow"]
         assert "Bash(claudlobby brief --bot worker)" in allow
+        # The universal fleet-ops skill intentionally grants `--json brief *`.
+        # The default boot prompt itself grants only its exact bot read.
         assert not any(
-            p.startswith("Bash(claudlobby") and "brief" in p and p.endswith("*)")
+            p.startswith("Bash(claudlobby brief --bot") and p.endswith("*)")
             for p in allow
         )
 

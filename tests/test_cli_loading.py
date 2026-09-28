@@ -29,6 +29,8 @@ allowed = {
     'claudlobby.commands._report_read_parsers',
     'claudlobby.commands._release_parsers',
     'claudlobby.commands._orientation_parsers',
+    'claudlobby.commands._workstream_parsers',
+    'claudlobby.commands._checkin_parsers',
 }
 blocked = []
 class ImportBoundary:
@@ -75,6 +77,8 @@ def _run(code, *argv, tmp_path):
     (("fleet", "inbox", "--help"), "VIEWER"),
     (("assignment", "deliver", "--help"), "--file"),
     (("request", "show", "--help"), "REQUEST_ID"),
+    (("workstream", "open", "--help"), "--request-id"),
+    (("checkin", "record", "--help"), "--selection-file"),
 ])
 def test_help_needs_only_stdlib(argv, expected, tmp_path):
     result = _run(PARSE, *argv, tmp_path=tmp_path)
@@ -131,3 +135,17 @@ def test_selected_import_failure_is_not_masked(tmp_path):
     """, tmp_path=tmp_path)
     assert result.returncode == 1, result.stderr
     assert "ModuleNotFoundError: blocked CLI dependency: claudlobby.commands.events" in result.stderr
+
+
+@pytest.mark.parametrize(("argv", "module"), [
+    (("workstream", "list"), "claudlobby.commands.workstream"),
+    (("checkin", "list"), "claudlobby.commands.checkin"),
+])
+def test_new_parser_modules_keep_domain_imports_lazy(argv, module, tmp_path):
+    result = _run("""
+        from claudlobby.__main__ import main
+        module = sys.argv.pop()
+        main(sys.argv[1:])
+        assert blocked == [module], blocked
+    """, *argv, module, tmp_path=tmp_path)
+    assert result.returncode == 0, result.stderr
