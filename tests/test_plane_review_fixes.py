@@ -644,10 +644,18 @@ class _FullError(sqlite3.OperationalError):
 def test_f13_emit_under_sqlite_full_spools_by_error_code(tmp_path: Path, monkeypatch):
     from claudlobby.plane import emit_api
 
+    initialize_plane(tmp_path)
+    full = _FullError("synthetic full condition")
+
     def full_ingest(conn, items, *, host_uid):
-        raise _FullError("synthetic full condition")
+        raise full
 
     monkeypatch.setattr(emit_api, "ingest_many", full_ingest)
+    with pytest.raises(_FullError) as refused:
+        emit_batch(tmp_path, [_comm()], require_commit=True)
+    assert refused.value is full, "preserve the storage failure, not an unchanged result"
+    assert not (tmp_path / "state" / "plane" / "spool").exists()
+    assert not (tmp_path / "state" / "plane" / "staged").exists()
     out = emit(tmp_path, _comm())
     assert out.status == "spooled"
     monkeypatch.undo()
@@ -688,11 +696,17 @@ def test_f13_batch_second_item_failure_rolls_back_first(tmp_path: Path):
          "event_id": taken,              # collides AND conflicts cross-family
          "payload": {"work_item_id": mint_work_item_id(), "event": "progress"}},
     ]
-    with pytest.raises((ContractViolation, RuntimeError)):
-        emit_batch(tmp_path, batch)
-    conn = connect(db_path(tmp_path))
-    n = conn.execute(
-        "SELECT COUNT(*) FROM communications WHERE event_id = ?", (fresh,)
-    ).fetchone()[0]
-    conn.close()
-    assert n == 0, "item 1 must roll back when item 2 fails (one transaction)"
+    for require_commit in (False, True):
+        with pytest.raises((ContractViolation, RuntimeError)):
+            emit_batch(tmp_path, batch, require_commit=require_commit)
+        conn = connect(db_path(tmp_path))
+        try:
+            for table in ("communications", "ingest_ledger"):
+                n = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE event_id = ?", (fresh,)
+                ).fetchone()[0]
+                assert n == 0, "item 1 must roll back when item 2 fails (one transaction)"
+        finally:
+            conn.close()
+        assert not (tmp_path / "state" / "plane" / "spool").exists()
+        assert not (tmp_path / "state" / "plane" / "staged").exists()

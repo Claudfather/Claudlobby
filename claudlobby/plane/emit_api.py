@@ -3,7 +3,8 @@
 Failure taxonomy is the contract:
   ContractViolation  -> caller bug: propagate, write NOTHING (not even spool)
   DowngradeError     -> db newer than code: propagate LOUDLY, never spooled
-  OperationalError accepted by is_retryable() -> spool + report spooled;
+  OperationalError accepted by is_retryable() -> spool + report spooled,
+    or propagate when require_commit=True (never queued for replay)
   all other database errors -> propagate loudly
   spool also failed  -> SpoolWriteError (CLI exit 3)
 
@@ -201,7 +202,8 @@ LOCK_RETRY_BACKOFF_S = 0.15
 
 
 def emit_batch(root: Path, raw_requests: list[dict], *,
-               conn_factory: "Callable[[], sqlite3.Connection] | None" = None
+               conn_factory: "Callable[[], sqlite3.Connection] | None" = None,
+               require_commit: bool = False,
                ) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
@@ -217,7 +219,13 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
     family — the T8 comms skip let capture launder malformed wire into valid
     shape. The second (transformed-form) pass runs only when capture actually
     changed the request (_apply_capture's identity contract); communications
-    always change under capture, so they pay both passes."""
+    always change under capture, so they pay both passes.
+
+    ``require_commit`` is for conditional mutations whose preconditions must
+    not be replayed later. It preserves in-process lock retries but never
+    writes a spool or staging entry. Storage failures propagate unchanged;
+    an exception does not prove that a commit did not occur. Callers must
+    reconcile their durable event IDs before deciding whether to retry."""
     captured: list = []
     items = []
     # Capture config loads AT MOST ONCE per batch (gauntlet round): a report
@@ -329,6 +337,8 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
             if is_transient_lock(exc) and attempt < LOCK_RETRY_ATTEMPTS:
                 time.sleep(LOCK_RETRY_BACKOFF_S * attempt)
                 continue
+            if require_commit:
+                raise
             # The spool stores the policy-applied envelope, never a fuller body (§11).
             path = spool_write(root, captured, str(exc))    # raises SpoolWriteError
             return [
@@ -341,5 +351,5 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
     ]
 
 
-def emit(root: Path, raw_request: dict) -> EmitOutcome:
-    return emit_batch(root, [raw_request])[0]
+def emit(root: Path, raw_request: dict, *, require_commit: bool = False) -> EmitOutcome:
+    return emit_batch(root, [raw_request], require_commit=require_commit)[0]
