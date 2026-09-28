@@ -450,10 +450,8 @@ One supported pattern on Linux — systemd user services; the cron + tmux patter
 loginctl enable-linger $USER     # one-time, so user services persist past logout
 claudlobby --fleet <name> generate
 
-# Per bot
-lib/install-bot-systemd.sh local/<name>/runtime/bots/<bot>
-
-# Fleet-wide timers — every composed job, one call
+# Enroll every armed job and spin up every declared bot — one call.
+# Dormant jobs (enroll: false) stay off until the fleet opts in.
 lib/setup-fleet <name>
 ```
 

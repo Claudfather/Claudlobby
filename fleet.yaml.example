@@ -300,7 +300,6 @@ fleet:
 #     telegram:
 #       chat_id: "-1009999999999"
 #
-#
 #     # Permission model — set AT MOST ONE of the two fields below; they do NOT
 #     # combine. permission_mode wins whenever it is set. With neither set, the
 #     # compositor default is --permission-mode acceptEdits.

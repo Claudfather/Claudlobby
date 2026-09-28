@@ -54,7 +54,7 @@ See [pi-setup-guide.md](./runbooks/pi-setup-guide.md) for full host setup.
 
 ## Cron + tmux (retired)
 
-`lib/install-cron.sh` was a third supervision plane that neither first-class host used; it was removed. Supervise with systemd user units (Pattern 2) or launchd (Pattern 1) — `lib/setup-fleet <fleet>` enrolls every composed job on either.
+`lib/install-cron.sh` was a third supervision plane that neither first-class host used; it was removed. Supervise with systemd user units (Pattern 2) or launchd (Pattern 1) — `lib/setup-fleet <fleet>` enrolls every armed job on either.
 
 ## Generic helpers (used by both patterns)
 
@@ -72,4 +72,4 @@ These ship with claudlobby and run under the composed fleet jobs; they're useful
 
 - "I'm on a Mac and following the runbook." → launchd.
 - "I'm on a fresh Linux server and want self-healing services." → systemd.
-- "I'm on a Pi, I want the simplest thing that works." → systemd — `lib/setup-fleet <fleet>` enrolls every composed job in one call.
+- "I'm on a Pi, I want the simplest thing that works." → systemd — `lib/setup-fleet <fleet>` enrolls every armed job in one call.
