@@ -1,6 +1,7 @@
 """Ordinary message effects use a private Plane and injected native carrier."""
 
 from dataclasses import replace
+import json
 import sqlite3
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from claudlobby.paths import Paths
 from claudlobby.plane.db import connect, db_file
 from claudlobby.plane.identity import resolve, resolve_party
 from claudlobby.plane.ids import ensure_host_uid
+from claudlobby.plane.ids import mint_msg_id
 from claudlobby.request_facts import FactProof
 from claudlobby.request_receipts import ReceiptConflict, RequestStore, locked_request
 from claudlobby.report_payload import ReportPayload
@@ -206,6 +208,97 @@ def test_same_uuid_refuses_changed_route_and_semantics_before_native_effect(esta
     changed = replace(route, release_id="release-2")
     with pytest.raises(ReceiptConflict):
         _call(changed, package, request_id, transport=forbidden)
+
+
+def test_reply_freezes_parent_answer_and_replays_without_resend(estate):
+    route, package, conn = estate
+    request_id = str(uuid4())
+    parent_id = mint_msg_id()
+    calls = []
+    def transport(*args, **kwargs):
+        calls.append(kwargs["body"])
+        return TransportOutcome("submitted", native_returncode=0)
+    first = _call(route, package, request_id, kind="answer",
+                  parent_message_id=parent_id, transport=transport)
+    row = conn.execute("SELECT message_class, reply_to_msg_id FROM communications WHERE msg_id=?",
+                       (first.message_id,)).fetchone()
+    assert tuple(row) == ("answer", parent_id)
+    assert f"Reply to: {parent_id}" in calls[0]
+    replay = _call(route, package, request_id, kind="answer",
+                   parent_message_id=parent_id, transport=transport)
+    assert replay.replayed and replay.message_id == first.message_id and len(calls) == 1
+    with pytest.raises(ReceiptConflict):
+        _call(route, package, request_id, kind="answer",
+              parent_message_id=mint_msg_id(), transport=lambda *a, **k: pytest.fail("retargeted"))
+
+
+def test_unlinked_report_records_atomic_marker_without_task_effect(estate):
+    route, package, conn = estate
+    route = replace(route, peer=route.manager, peer_destination=route.manager_destination)
+    report = ReportPayload("progress", summary="Private report evidence", percent=25)
+    request_id = str(uuid4())
+    calls = []
+    def transport(*args, **kwargs):
+        calls.append(kwargs["body"])
+        return TransportOutcome("submitted", native_returncode=0)
+    first = messages.send_unlinked_report(route, package, report, request_id=request_id,
+                                          trusted_tiers={}, transport=transport,
+                                          notify=lambda *a, **k: "alerted",
+                                          clear=lambda *a, **k: None)
+    assert first.recording == "committed" and first.delivery == "submitted"
+    comm = conn.execute("SELECT message_class, body FROM communications WHERE msg_id=?",
+                        (first.message_id,)).fetchone()
+    marker = conn.execute("SELECT detail FROM events WHERE event='report_status'").fetchone()
+    assert comm[0] == "report" and json.loads(comm[1])["summary"] == report.summary
+    assert json.loads(marker[0])["msg_id"] == first.message_id
+    assert conn.execute("SELECT count(*) FROM work_items").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM assignments").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM events WHERE kind='task'").fetchone()[0] == 0
+    assert len(calls) == 1 and "Private report evidence" in calls[0]
+    saved = _receipt(route, request_id)
+    assert saved.intent.operation == "fleet.reports.submit"
+    assert len(saved.intent.stages[0].facts) == 2
+    assert b"Private report evidence" not in (
+        route.selected.paths.root / "state/requests" / route.selected_fleet_uid / (request_id + ".json")
+    ).read_bytes()
+    replay = messages.send_unlinked_report(route, package, report, request_id=request_id,
+                                           trusted_tiers={}, transport=transport,
+                                           notify=lambda *a, **k: "alerted",
+                                           clear=lambda *a, **k: None)
+    assert replay.replayed and replay.message_id == first.message_id and len(calls) == 1
+
+
+def test_unlinked_report_o1_replays_missing_batch_without_second_send(estate, monkeypatch):
+    route, package, conn = estate
+    route = replace(route, peer=route.manager, peer_destination=route.manager_destination)
+    report = ReportPayload("blocked", reason="Private blocker")
+    request_id = str(uuid4())
+    original = messages.emit_batch
+    def outage(root, raws, **kwargs):
+        if raws[0]["event_type"] == "communication":
+            raise sqlite3.OperationalError("private report recorder outage")
+        return original(root, raws, **kwargs)
+    monkeypatch.setattr(messages, "emit_batch", outage)
+    calls = []
+    def transport(*args, **kwargs):
+        calls.append(kwargs["body"])
+        return TransportOutcome("submitted", native_returncode=0)
+    first = messages.send_unlinked_report(route, package, report, request_id=request_id,
+                                          trusted_tiers={}, transport=transport,
+                                          notify=lambda *a, **k: "alerted",
+                                          clear=lambda *a, **k: None)
+    assert first.exit_code == 11 and first.code == "recording_degraded"
+    assert len(calls) == 1 and "Recording degraded" in calls[0]
+    assert conn.execute("SELECT count(*) FROM communications").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM events WHERE event='report_status'").fetchone()[0] == 0
+    monkeypatch.setattr(messages, "emit_batch", original)
+    replay = messages.send_unlinked_report(route, package, report, request_id=request_id,
+                                           trusted_tiers={}, transport=transport,
+                                           notify=lambda *a, **k: "alerted",
+                                           clear=lambda *a, **k: None)
+    assert replay.replayed and replay.recording == "committed" and len(calls) == 1
+    assert conn.execute("SELECT count(*) FROM communications").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM events WHERE event='report_status'").fetchone()[0] == 1
 
 
 def test_linked_report_notifies_after_exact_commit_with_operation_attempt_two(estate, monkeypatch):

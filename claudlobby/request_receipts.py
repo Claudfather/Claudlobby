@@ -163,12 +163,14 @@ _STATUSES = {"recording": {"prepared", "unknown", "committed", "unrecorded"},
 FACT_FAMILIES = frozenset({"communication", "transmission", "work_item", "assignment", "task", "system"})
 _NATIVE_STAGES = {
     "message.send": "delivery", "message.reply": "delivery",
+    "fleet.reports.submit": "delivery",
     "assignment.deliver": "delivery",
     **{f"assignment.{verb}": "notification"
        for verb in ("progress", "block", "return", "complete", "fail")},
 }
 _STRICT_NATIVE = frozenset({"assignment.deliver", "assignment.progress", "assignment.block",
                             "assignment.return", "assignment.complete", "assignment.fail"})
+_O1_NATIVE = frozenset({"message.send", "message.reply", "fleet.reports.submit"})
 
 
 def _id(value, kind):
@@ -244,7 +246,7 @@ def _validate(receipt):
         if getattr(intent, field) is not None:
             _id(getattr(intent, field), kind)
     _sha(intent.semantic_sha256)
-    is_message = intent.operation in {"message.send", "message.reply"}
+    is_message = intent.operation in _O1_NATIVE
     native_stage = _NATIVE_STAGES.get(intent.operation)
     if is_message or intent.route is not None:
         if native_stage is None:
@@ -463,7 +465,7 @@ class RequestStore:
     def begin_attempt(self) -> RequestReceipt:
         """An explicit execution attempt only; inspection/replay lookup never increments."""
         receipt = self._required()
-        if receipt.intent.operation in {"message.send", "message.reply"}:
+        if receipt.intent.operation in _O1_NATIVE:
             raise ReceiptError("reserve a message attempt and delivery outcome atomically")
         if receipt.message_attempts:
             raise ReceiptConflict("a native notification cannot return to the recording stage")
@@ -582,7 +584,7 @@ class RequestStore:
         plan, old = self._stage(receipt, index)
         allowed = old.status == "prepared" or (plan.kind == "recording" and old.status == "unrecorded")
         allowed |= plan.kind != "recording" and old.status in {"unknown", "failed"} and retry_uncertain
-        same_message_recording_attempt = (receipt.intent.operation in {"message.send", "message.reply"}
+        same_message_recording_attempt = (receipt.intent.operation in _O1_NATIVE
                                           and plan.kind == "recording" and old.status == "unrecorded"
                                           and receipt.attempt == old.attempt > 0)
         if not allowed or (receipt.attempt <= old.attempt and not same_message_recording_attempt):

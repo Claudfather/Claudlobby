@@ -49,11 +49,14 @@ from claudlobby.brief import (
     build_brief,
     format_boot_brief,
     format_brief,
-    record_ack,
+    ack_request,
     load_dispatch_doors,
 )
 from claudlobby.config import BotConfig, FleetConfig, ProjectConfig, ScopeConfig
 from tests.package_fixtures import source_package
+from tests.test_activation import cold, tmp_path  # noqa: F401 — selected activation and short paths
+from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
+from tests.test_task_write_cli import active  # noqa: F401 — real selected activation fixture
 from claudlobby.paths import Paths
 
 from tests.conftest import (
@@ -87,7 +90,7 @@ def _fleet(**kw) -> FleetConfig:
 
 
 @pytest.fixture
-def root(tmp_path: Path) -> Path:
+def root(tmp_path: Path) -> Path:  # noqa: F811 — imported short-path fixture
     """A claudlobby root with the REAL dispatch matcher in lib/ (and the
     stdlib plane readers it imports beside itself).
 
@@ -298,7 +301,7 @@ def test_brief_json_schema_v1(paths: Paths):
     json.dumps(brief)
 
 
-def test_mission_carries_pointers_not_inlined_charters(paths: Paths, tmp_path: Path):
+def test_mission_carries_pointers_not_inlined_charters(paths: Paths, tmp_path: Path):  # noqa: F811
     fleet = _fleet(
         mission_file="missions/fleet.md",
         projects={
@@ -413,15 +416,18 @@ def _acked_events(paths: Paths) -> list[tuple]:
 
 
 def _ack(paths: Paths, bot: str, unacked: list[dict]):
+    """Seed a historical ACK fact for read-side tests, without a second writer."""
+    from claudlobby.plane.emit_api import emit_batch
+
     newest = max(unacked, key=lambda r: r["seq"] or 0)
-    return record_ack(paths, FLEET, bot, acked_through_seq=newest["seq"],
+    raw = ack_request(FLEET, bot, acked_through_seq=newest["seq"],
                       acked_through_ts=newest["ts"], count=len(unacked))
+    return emit_batch(paths.root, [raw], require_commit=True)[0]
 
 
 def test_brief_ack_is_a_plane_fact_and_the_unacked_list_shrinks(paths: Paths):
-    """Chunk K (#1467): `--ack` records ONE `reports_acked` system event on the
-    viewer's own actor; the unacked list is what lies past it on the plane's
-    own ordering (`ingest_seq`), and no cursor file exists anywhere."""
+    """A historical `reports_acked` fact advances the shared read position by
+    ingest ordering; no legacy cursor file exists anywhere."""
     _seed_plane(paths)
     for row in (
         _report("vera", "2026-08-08T10:00:00Z", status="completed"),
@@ -439,7 +445,7 @@ def test_brief_ack_is_a_plane_fact_and_the_unacked_list_shrinks(paths: Paths):
     assert brief["reports"]["cursor"] is None
 
     out = _ack(paths, "alex", unacked)
-    assert out.recorded, out
+    assert out.status == "committed", out
     again = build_brief(fleet, paths, "alex", NOW)
     assert again["reports"]["unacked"] == []
     assert again["reports"]["cursor"] == "2026-08-08T11:00:00Z"   # the legacy-form ts, for the render
@@ -463,7 +469,7 @@ def test_ack_is_per_viewer_on_the_plane(paths: Paths):
     _seed_plane(paths)
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
     alex = build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"]
-    assert _ack(paths, "alex", alex).recorded
+    assert _ack(paths, "alex", alex).status == "committed"
 
     assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
     assert len(build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"]) == 1
@@ -488,24 +494,11 @@ def test_a_malformed_ack_is_no_read_position_and_erases_none(paths: Paths):
     reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
     assert len(reports["unacked"]) == 1 and reports["cursor"] is None
 
-    assert _ack(paths, "alex", reports["unacked"]).recorded
+    assert _ack(paths, "alex", reports["unacked"]).status == "committed"
     assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
     assert malformed() == "committed"
     again = build_brief(_fleet(), paths, "alex", NOW)["reports"]
     assert again["unacked"] == [] and again["cursor"] == "2026-08-08T10:00:00Z"
-
-
-def test_a_silenced_plane_is_a_failed_ack(paths: Paths, monkeypatch):
-    """`PLANE_EMIT_DISABLED=1` is the one silencer (the harness exemption): a
-    plane that will not hold the ack marks nothing — failed, said by name,
-    no fact recorded — never a quiet rc 0 that reads as acked."""
-    from claudlobby.brief import record_ack
-
-    _seed_plane(paths)
-    monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
-    out = record_ack(paths, FLEET, "alex", acked_through_seq=3, acked_through_ts="x", count=1)
-    assert out.status == "failed" and "PLANE_EMIT_DISABLED" in out.detail
-    assert _acked_events(paths) == []
 
 
 def test_a_fleets_reports_are_the_room_axis_and_progress_is_never_unacked(paths: Paths):
@@ -530,34 +523,8 @@ def test_a_fleets_reports_are_the_room_axis_and_progress_is_never_unacked(paths:
     reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
     assert [(r["bot"], r["status"]) for r in reports["unacked"]] == [
         ("vera", "completed"), ("other/zed", "completed")]
-    assert _ack(paths, "alex", reports["unacked"]).recorded
+    assert _ack(paths, "alex", reports["unacked"]).status == "committed"
     assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
-
-
-def test_failed_emit_is_a_failed_ack(paths: Paths, monkeypatch, caplog):
-    """A failed emit marks nothing seen: rc 1, said by name, no fact recorded,
-    the reports read unacked again — there is no file to fall back on."""
-    import argparse
-    import logging
-
-    import claudlobby.plane.emit_api as emit_api
-    from claudlobby.commands.core import cmd_brief
-
-    fleet_dir = paths.root / "local" / "f1"
-    (fleet_dir / "runtime").mkdir(parents=True)
-    _write_fleet_yaml(fleet_dir, "f1", ["alex"], manager="alex")
-    _seed_plane_for(paths, "f1")
-    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"), fleet="f1")
-
-    def boom(root, reqs):
-        raise RuntimeError("disk on fire")
-    monkeypatch.setattr(emit_api, "emit_batch", boom)
-    args = argparse.Namespace(fleet="f1", root=str(paths.root), seed=False, bot="alex",
-                              json=False, ack=True, boot=False)
-    with caplog.at_level(logging.ERROR, logger="claudlobby"):
-        assert cmd_brief(args) == 1
-    assert "did NOT record the ack" in caplog.text and "disk on fire" in caplog.text
-    assert _acked_events(paths) == []
 
 
 def test_no_cursor_file_is_written_or_read_anywhere():
@@ -834,7 +801,10 @@ def test_cli_registers_brief_subcommand():
     assert callable(args.func)
     assert args.bot == "alex"
     assert args.json is True
-    assert args.ack is False
+    assert not hasattr(args, "ack")
+    with pytest.raises(SystemExit) as rejected:
+        parser.parse_args(["brief", "--ack"])
+    assert rejected.value.code == 2
 
 
 def test_overdue_honours_the_env_expiry_cap_like_the_cli(paths: Paths, monkeypatch):
@@ -948,66 +918,75 @@ def _write_fleet_yaml(fleet_dir: Path, name: str, bots: list[str], *, manager: s
     )
 
 
-def test_ack_refuses_when_the_report_section_was_not_served(paths: Paths, caplog):
-    """Advancing a cursor past reports nobody could read marks unread work as
-    handled, permanently — the one irreversible thing this command can do.
+def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, monkeypatch, capsys):  # noqa: F811
+    """One selected-activation flow: a later report stays unread, and replay
+    cannot advance the position or write a second ACK event."""
+    from uuid import uuid4
 
-    Asserts the REASON, not just the exit code: `cmd_brief` returns 1 for
-    "bot not found" as well, so a bare `== 1` would pass on a fixture whose
-    fleet.yaml declares no bots at all.
-    """
-    import argparse
-    import logging
+    from claudlobby import brief
+    from claudlobby.__main__ import main
+    from claudlobby.paths import load_lib_module
 
-    from claudlobby.commands.core import cmd_brief
+    root, release = active
+    # The activation fixture seals a minimal native artifact; give the brief
+    # its real shared reader through its existing import seam, not a fake query.
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
+                       "FLEET_NAME": "example", "BOT_ID": "manager",
+                       "BOT_DIR": str(root / "runtime/bots/manager"),
+                       "CLAUDLOBBY_RELEASE_ID": release.release_id}.items():
+        monkeypatch.setenv(key, value)
 
-    assert not (paths.root / "state" / "plane" / "plane.db").exists()  # no plane -> section omitted
+    def call(*argv, expected=0):
+        assert main(["--root", str(root), "--json", *argv]) == expected
+        result = json.loads(capsys.readouterr().out)
+        assert result["ok"] is (expected == 0)
+        return result
 
-    fleet_dir = paths.root / "local" / "f1"
-    (fleet_dir / "runtime").mkdir(parents=True)
-    _write_fleet_yaml(fleet_dir, "f1", ["alex"], manager="alex")
+    _land_report(Paths(root=root, fleet_dir=None, package=source_package()),
+                 _report("worker", "2026-08-08T10:00:00Z"), fleet="example")
+    shown = call("fleet", "reports", "list", "--unacknowledged", "--limit", "1")
+    cursor = shown["data"]["ack_cursor"]
+    first = shown["data"]["items"]
+    assert len(first) == 1 and cursor
+    _land_report(Paths(root=root, fleet_dir=None, package=source_package()),
+                 _report("worker", "2026-08-08T11:00:00Z"), fleet="example")
 
-    # The fixture is load-bearing: prove the bot really resolves, so the exit
-    # code below can only come from the refusal path.
-    from claudlobby.config import load_fleet
+    request_id = str(uuid4())
+    argv = ("fleet", "reports", "ack", "--through", cursor, "--request-id", request_id)
+    acknowledged = call(*argv)
+    assert acknowledged["data"]["recording"] == "committed"
+    assert acknowledged["data"]["count"] == 1
+    assert acknowledged["data"]["request_persisted"] is True
+    assert acknowledged["data"]["replayed"] is False
+    assert len(_acked_events(Paths(root=root, fleet_dir=None, package=source_package()))) == 1
+    remaining = call("fleet", "reports", "list", "--unacknowledged")["data"]["items"]
+    assert len(remaining) == 1 and remaining[0]["message_id"] != first[0]["message_id"]
 
-    assert "alex" in load_fleet(fleet_dir / "fleet.yaml")[0].bots
-
-    args = argparse.Namespace(
-        fleet="f1",
-        root=str(paths.root),
-        seed=False,
-        bot="alex",
-        json=False,
-        ack=True,
-        boot=False,
-    )
-    with caplog.at_level(logging.ERROR, logger="claudlobby"):
-        assert cmd_brief(args) == 1
-    assert "refusing to ack" in caplog.text
-    assert "not found" not in caplog.text
-    assert not (paths.root / "state" / "plane" / "plane.db").exists()   # a refusal records nothing
-
-
-def test_ack_succeeds_when_the_plane_answers(paths: Paths):
-    """The positive control for the test above — same fixture, a plane that
-    answers, so a refusal here would mean the guard fires on the wrong condition."""
-    import argparse
-
-    from claudlobby.commands.core import cmd_brief
-
-    fleet_dir = paths.root / "local" / "f1"
-    (fleet_dir / "runtime").mkdir(parents=True)
-    _write_fleet_yaml(fleet_dir, "f1", ["alex"], manager="alex")
-    _seed_plane_for(paths, "f1")
-    _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"), fleet="f1")
-
-    args = argparse.Namespace(
-        fleet="f1", root=str(paths.root), seed=False, bot="alex", json=False, ack=True
-    )
-    assert cmd_brief(args) == 0
-    (alias, severity, detail), = _acked_events(paths)
-    assert alias == "bot:f1/alex" and json.loads(detail)["count"] == 1
+    replay = call(*argv)
+    assert replay["data"]["replayed"] is True
+    assert len(_acked_events(Paths(root=root, fleet_dir=None, package=source_package()))) == 1
+    stale = call("fleet", "reports", "ack", "--through", cursor,
+                 "--request-id", str(uuid4()), expected=4)
+    assert stale["error"]["code"] == "conflict"
+    monkeypatch.setenv("BOT_ID", "worker")
+    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/worker"))
+    foreign = call("fleet", "reports", "ack", "--through", cursor,
+                   "--request-id", str(uuid4()), expected=4)
+    assert foreign["error"]["code"] == "conflict"
+    monkeypatch.setenv("BOT_ID", "manager")
+    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/manager"))
+    current = call("fleet", "reports", "list", "--unacknowledged")["data"]["ack_cursor"]
+    assert current
+    with monkeypatch.context() as outage:
+        def refused(*args, **kwargs):
+            raise OSError("private Plane unavailable")
+        outage.setattr("claudlobby.plane.emit_api.emit_batch", refused)
+        failed = call("fleet", "reports", "ack", "--through", current,
+                      "--request-id", str(uuid4()), expected=6)
+    assert failed["error"]["code"] == "unavailable"
+    assert len(_acked_events(Paths(root=root, fleet_dir=None, package=source_package()))) == 1
 
 
 # --- the omit suppresses true positives too, and must say how many ------------
@@ -1168,7 +1147,6 @@ class TestBootCLI:
             seed=False,
             bot="alex",
             json=False,
-            ack=False,
             boot=True,
         )
         base.update(kw)
@@ -1187,19 +1165,18 @@ class TestBootCLI:
         from claudlobby.commands.core import cmd_brief
 
         monkeypatch.setenv("CLAUDLOBBY_FLEET", "f1")
-        fleet_dir = self._fleet_dir(paths)
+        self._fleet_dir(paths)
         _seed_plane_for(paths, "f1")
         assert cmd_brief(self._args(paths.root)) == 0
         out = capsys.readouterr().out
         assert "all quiet" in out
         assert "full state: claudlobby brief --bot alex" in out
 
-    def test_boot_is_mutually_exclusive_with_json_and_ack(self, paths: Paths):
+    def test_boot_is_mutually_exclusive_with_json(self, paths: Paths):
         from claudlobby.commands.core import cmd_brief
 
         self._fleet_dir(paths)
         assert cmd_brief(self._args(paths.root, json=True)) == 1
-        assert cmd_brief(self._args(paths.root, ack=True)) == 1
 
 
 class TestUnlistableBotsDir:

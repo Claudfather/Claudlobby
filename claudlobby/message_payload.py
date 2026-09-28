@@ -167,12 +167,31 @@ def native_message_envelope(intent: RequestIntent, body: MessageBody, *, request
     return "\n".join((*lines, "", body.text))
 
 
+def native_unlinked_report_envelope(intent: RequestIntent, body: MessageBody, *, request_id: str,
+                                    recording_degraded: bool = False) -> str:
+    """Render the same native carrier for a typed, unlinked report."""
+    if (not isinstance(intent, RequestIntent) or intent.operation != "fleet.reports.submit"
+            or not isinstance(intent.route, MessageRouteBinding)
+            or not isinstance(body, MessageBody) or type(recording_degraded) is not bool):
+        raise MessagePayloadError("frozen unlinked report and body required")
+    _id(intent.message_id, "msg")
+    _request_id(request_id)
+    route = intent.route
+    if route.recipient_alias != route.manager_alias:
+        raise MessagePayloadError("unlinked report must address the frozen manager")
+    lines = ["[Claudlobby unlinked report]", f"Message: {intent.message_id}",
+             f"From: {route.caller_alias}", f"To: {route.recipient_alias}"]
+    if recording_degraded:
+        lines.append(f"Recording degraded for request {request_id}; report history or request receipt may be incomplete.")
+    return "\n".join((*lines, "", body.text))
+
+
 def encode_transmission(intent: RequestIntent, observation: TransportObservation, *,
                         request_id: str, attempt_no: int, event_id: str,
                         occurred_at: str) -> dict:
     """Record one reserved native result without promoting uncertain effects."""
     if not isinstance(intent, RequestIntent) or intent.operation not in {
-            "message.send", "message.reply", "assignment.deliver",
+            "message.send", "message.reply", "fleet.reports.submit", "assignment.deliver",
             "assignment.progress", "assignment.block", "assignment.return",
             "assignment.complete", "assignment.fail"}:
         raise MessagePayloadError("unsupported native transmission operation")

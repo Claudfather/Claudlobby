@@ -141,20 +141,21 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
   120s, stamped by the API), and the host probe's newest facets (load, RAM, disk,
   thermal, under-voltage) — `null` until `plane-host-probe` has ever recorded.
   A figure whose source is absent is `null` with a reason, never `0`.
-- **Unacked reports (chunk K).** `claudlobby brief --ack` records the viewer's read
-  position as a plane fact — one `reports_acked` system event on the manager's actor,
-  its detail the `ingest_seq` the ack reaches — through the cold emit door (so `--ack`
-  is the one brief door that writes, and it runs `migrate()`). A fleet's reports are ONE
-  definition (`queries.FLEET_REPORTS_SQL`): report-class communications on its room
+- **Unacked reports (chunk K).** A generated viewer runs
+  `claudlobby --json fleet reports list --unacknowledged` and then
+  `claudlobby fleet reports ack --through ACK_CURSOR --request-id UUID`, using the
+  `ack_cursor` returned by the list. The ack records the viewer's read position
+  as one `reports_acked` plane event on its actor; the event detail carries the
+  `ingest_seq` reached. `claudlobby brief` remains a read-only view. A fleet's
+  reports are ONE definition (`queries.FLEET_REPORTS_SQL`): report-class communications on its room
   axis, sent by the fleet or addressed to it. The card counts, through the same rule
   the brief lists (`plane-readers.unacked_rows`: terminal or status-less reports past
   the fleet's newest readable ack by any of its actors; a `progress` note never),
   "N unacked · acked by <bot> 2h ago"; a fleet that has never acked reads
   `no ack recorded` (`null` + reason), never a count of everything ever; a
-  `reports_acked` row with no readable cursor is skipped, not a reset. No cursor file
-  exists any more: a failed emit is a failed ack (rc 1, said on stderr), a spooled one
-  is disclosed and takes effect when the spool drains, and `PLANE_EMIT_DISABLED=1`
-  refuses to ack.
+  `reports_acked` row with no readable cursor is skipped, not a reset. The ack
+  validates the served report prefix before recording and requires a committed
+  plane fact; an uncertain recording must be inspected through its request UUID.
 
 ## The attention rail
 

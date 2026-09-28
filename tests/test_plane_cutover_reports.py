@@ -1,6 +1,6 @@
 """The readers of the report rows serve the PLANE — the only source since
-the F18 closure (R2b): `claudlobby report-back` and brief's unacked reports
-+ `--ack` read `plane-readers.report_rows` with no ledger probe, no
+the F18 closure (R2b): `claudlobby report-back`, brief's unacked reports,
+and the report acknowledgement cursor read `plane-readers.report_rows` with no ledger probe, no
 retirement fact and no file; an unreachable plane REFUSES (rc 3) or OMITS
 the section, never an empty answer. The row shapes are the legacy ones, `ts`
 in the legacy form, so every consumer and every brief cursor keeps working.
@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from claudlobby.brief import _reports_section, record_ack
+from claudlobby.brief import _reports_section, ack_request
 from claudlobby.plane.emit_api import emit_batch
 from tests.plane_fixtures import F, REPO, _env, _report, _scene, _stdlib_readers, ro as _ro
 
@@ -270,7 +270,7 @@ def test_report_back_refuses_when_the_matcher_is_unreachable(tmp_path, monkeypat
     assert rc == 3 and gone.out == "" and "UNREACHABLE" in gone.err
 
 
-# --- brief: unacked reports + --ack ---------------------------------------------------
+# --- brief: unacked reports and the plane acknowledgement fact -------------------
 
 def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path, monkeypatch, scratch_plane_env):
     root, paths, d, r = _scene(tmp_path)
@@ -283,8 +283,10 @@ def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path, m
     for key, value in scratch_plane_env(root).items():
         monkeypatch.setenv(key, value)
     newest = max(before["unacked"], key=lambda x: x["seq"])
-    assert record_ack(paths, F, "mgr", acked_through_seq=newest["seq"], acked_through_ts=newest["ts"],
-                      count=len(before["unacked"])).recorded                       # the ack, a plane fact
+    acked = emit_batch(root, [ack_request(
+        F, "mgr", acked_through_seq=newest["seq"], acked_through_ts=newest["ts"],
+        count=len(before["unacked"]))], require_commit=True)
+    assert len(acked) == 1 and acked[0].status == "committed"                    # the ack, a plane fact
     deg = []
     after = _reports_section(paths, "mgr", TERMINAL, deg)
     assert after["unacked"] == []                                                    # everything acked

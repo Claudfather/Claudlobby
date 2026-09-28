@@ -248,7 +248,7 @@ def test_discover_bot_dirs_is_the_walk_the_grid_gates(tmp_path):
 # --- the strip's unacked figure: the fleet's newest ack (chunk K) --------------
 
 def test_overview_unacked_is_past_the_fleets_newest_ack(tmp_path):
-    """`brief --ack` records a `reports_acked` event on the acking bot; the card
+    """`fleet reports ack` records a `reports_acked` event on the acking bot; the card
     counts report-class communications on the room axis past the fleet's newest
     ack by ANY of its actors; a fleet that never acked reads null + reason —
     never a count of everything ever — and another fleet's ack is not its own."""

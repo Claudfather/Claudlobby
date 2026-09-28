@@ -193,12 +193,6 @@ def register_subparsers(sub) -> None:
     pb.add_argument("--bot", required=True, help="Bot to brief (required in v1)")
     pb.add_argument("--json", action="store_true", help="Schema-1 JSON envelope")
     pb.add_argument(
-        "--ack",
-        action="store_true",
-        help="Advance this bot's report cursor past everything just shown "
-        "(the only write this command performs)",
-    )
-    pb.add_argument(
         "--boot",
         action="store_true",
         help="Render the SessionStart boot payload (#1102 R3/M1): dispatch "

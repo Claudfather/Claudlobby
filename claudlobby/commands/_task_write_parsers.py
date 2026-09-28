@@ -21,6 +21,15 @@ def _route(children, verb, command, help):
     return parser
 
 
+def add_report_flags(parser):
+    parser.add_argument("--percent", type=int, metavar="0..100")
+    parser.add_argument("--pr", metavar="URL")
+    parser.add_argument("--pr-role", choices=("authored", "reviewed"))
+    parser.add_argument("--artifact", action="append", default=[], metavar="URL")
+    parser.add_argument("--issue", action="append", default=[], metavar="URL")
+    parser.add_argument("--skill", metavar="NAME")
+
+
 def register_task_write_subparsers(task_children, assignment_children):
     admitting = _route(task_children, "admit", "task.admit", "Admit unassigned fleet work")
     admitting.add_argument("--title", required=True, metavar="TEXT")
@@ -66,9 +75,4 @@ def register_task_write_subparsers(task_children, assignment_children):
         reporting.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
         reporting.add_argument("--summary" if verb in ("progress", "complete") else "--reason",
                                required=True, metavar="TEXT")
-        reporting.add_argument("--percent", type=int, metavar="0..100")
-        reporting.add_argument("--pr", metavar="URL")
-        reporting.add_argument("--pr-role", choices=("authored", "reviewed"))
-        reporting.add_argument("--artifact", action="append", default=[], metavar="URL")
-        reporting.add_argument("--issue", action="append", default=[], metavar="URL")
-        reporting.add_argument("--skill", metavar="NAME")
+        add_report_flags(reporting)

@@ -675,7 +675,7 @@ def _report_detail(detail: Optional[str]) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-# The viewer's newest ack (chunk K, #1467): `brief --ack` records ONE
+# The viewer's newest ack (chunk K, #1467): `fleet reports ack` records ONE
 # `reports_acked` system event on the viewer's own actor, its detail the
 # `ingest_seq` the ack reaches. Both anchors are matched (subject and actor),
 # spanning EVERY uid the bot's alias variants minted (the R2a rule: a

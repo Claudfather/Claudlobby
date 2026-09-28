@@ -1161,7 +1161,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
     * `newest_report_at` / `reports_24h` — `report`-class communications
       on the room axis (sent by the fleet OR to it).
     * `unacked` — the same axis past the fleet's newest ack (chunk K:
-      `brief --ack` records a `reports_acked` event; the manager is whoever
+      `fleet reports ack` records a `reports_acked` event; the manager is whoever
       acks, the newest ack of any actor wins); None + a reason when the
       fleet has never acked — no read position is a different fact from a
       backlog, and "everything ever" would be a number nobody asked for.
@@ -1251,8 +1251,12 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
             # through the SAME rule brief's list applies (unacked_rows)
             ack = pr.newest_ack(conn, uids)
             if ack is None:
-                unacked_reason = ("no ack recorded — `claudlobby brief --ack` has never"
-                                  " run for this fleet")
+                unacked_reason = (
+                    "no ack recorded — `claudlobby fleet reports ack` has never run for this fleet; "
+                    "run `claudlobby --json fleet reports list --unacknowledged` to get "
+                    "ACK_CURSOR, then `claudlobby fleet reports ack --through ACK_CURSOR "
+                    "--request-id UUID`"
+                )
             else:
                 past = pr.report_rows(conn, alias, since_seq=ack["seq"])
                 unacked = len(pr.unacked_rows(past, ack["seq"], pr.TERMINAL_STATUSES))

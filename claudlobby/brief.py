@@ -1,15 +1,14 @@
 """claudlobby brief — one read door over the state the fleet already writes.
 
-``claudlobby brief --bot X [--json] [--ack]`` composes five sections off the
+``claudlobby brief --bot X [--json]`` composes five sections off the
 plane (once five unrelated files, read by hand-rolled jq against stale schemas):
 mission pointers, dispatches, workstreams, unacked reports, and recent critical
 events. Skills consume THIS, never the plane db by hand — that is the coupling
 the door exists to kill.
 
-Read-only by construction. The whole module performs exactly one EMISSION:
-``--ack`` records a ``reports_acked`` system event on the plane (chunk K,
-#1467) — the viewer's read position is a plane fact, not a cursor file. No
-ledger, registry, or event file is written by any path here.
+Read-only by construction. Report acknowledgements use
+``claudlobby fleet reports ack``; the pure ``ack_request`` encoder remains
+here for the plane event's established shape.
 
 THE TRUST RULE (epic #1102 phase R0)
 ------------------------------------
@@ -297,28 +296,13 @@ def plane_conn(paths: Paths, fleet: str | None = None):
 # `load_lib_module` now lives in `paths.py` — three consumers, one loader.
 
 
-# --- the ack (the module's only emission) --------------------------------------
-
-
-@dataclass
-class AckOutcome:
-    """What became of an ack: `recorded` (the plane holds it — committed, or a
-    duplicate of an earlier attempt), `spooled` (the plane could not take it now
-    and the spool holds it until `plane spool retry`; the reports read unacked
-    until then), or `failed` (nothing holds it — a failed emit is a failed ack)."""
-
-    status: str
-    detail: str = ""
-
-    @property
-    def recorded(self) -> bool:
-        return self.status == "recorded"
+# --- report acknowledgement event encoder -------------------------------------
 
 
 def ack_request(fleet: str, bot: str, *, acked_through_seq: int, acked_through_ts: str,
                 count: int) -> dict:
-    """The ONE event `--ack` records: `reports_acked` on the viewer's own actor
-    (the manager acks from its own session), its detail the plane's ordering
+    """Encode `reports_acked` on the viewer's own actor,
+    with detail containing the plane's ordering
     authority — the `ingest_seq` the ack reaches (§4) — with the legacy-form
     ts riding for the render and the count for the story."""
     return {
@@ -328,31 +312,6 @@ def ack_request(fleet: str, bot: str, *, acked_through_seq: int, acked_through_t
                     "data": {"acked_through_seq": int(acked_through_seq),
                              "acked_through_ts": acked_through_ts, "count": int(count)}},
     }
-
-
-def record_ack(paths: Paths, fleet: str, bot: str, *, acked_through_seq: int,
-               acked_through_ts: str, count: int) -> AckOutcome:
-    """Record the ack through the package's cold emit door — `emit_batch`
-    (validate, one transaction, the spool as its own floor), the door the
-    registry lane, the expiry sweep and `claudlobby emit-batch` use; the daemon
-    runs the same door, so a second writer on the WAL is the designed case. A
-    silenced plane (`PLANE_EMIT_DISABLED=1`, the harness exemption) is a FAILED
-    ack: the plane is the only record, so an ack it will not hold marks
-    nothing. Every verdict or failure is likewise a failed ack, said by name."""
-    if os.environ.get("PLANE_EMIT_DISABLED") == "1":
-        return AckOutcome("failed", "PLANE_EMIT_DISABLED=1 — the plane is silenced, nothing records an ack")
-    from .plane.emit_api import emit_batch
-
-    try:
-        out = emit_batch(paths.root, [ack_request(
-            fleet, bot, acked_through_seq=acked_through_seq,
-            acked_through_ts=acked_through_ts, count=count)])
-    except Exception as exc:  # noqa: BLE001 — every verdict is a failed ack, said by name
-        return AckOutcome("failed", f"{type(exc).__name__}: {exc}")
-    status = out[0].status if out else ""
-    return AckOutcome("recorded" if status in ("committed", "duplicate") else
-                      "spooled" if status == "spooled" else "failed",
-                      out[0].detail if out and out[0].detail else status)
 
 
 # --- sections -----------------------------------------------------------------
@@ -1134,7 +1093,8 @@ def format_brief(brief: dict) -> str:
             )
         out.extend(more)
         if unacked:
-            out.append(f"  -> claudlobby brief --bot {brief['bot']} --ack   to clear")
+            out.append("  -> claudlobby --json fleet reports list --unacknowledged")
+            out.append("     claudlobby fleet reports ack --through ACK_CURSOR --request-id UUID")
     out.append("")
 
     alerts = brief.get("alerts", [])

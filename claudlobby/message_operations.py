@@ -10,23 +10,26 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 import sqlite3
 import sys
 from typing import Callable, Mapping
 from uuid import UUID
 
 from .message_context import MessageRoute
-from .message_payload import MessageBody, encode_communication, encode_transmission, native_message_envelope
+from .message_payload import (MessageBody, encode_communication, encode_transmission,
+                              native_message_envelope, native_unlinked_report_envelope)
 from .message_transport import TransportOutcome, send as native_send
 from .plane.db import connect_ro, db_file
 from .plane.emit_api import _load_capture_config, emit_batch, validate_item
-from .plane.ids import mint_event_id, mint_msg_id
+from .plane.ids import ID_PATTERNS, mint_event_id, mint_msg_id
 from .plane.schema_state import require_current_schema
 from .recording_alerts import (ChannelOutcome, RecordingAlertOutcome,
                                clear_recording_degraded, notify_recording_degraded)
 from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import (ReceiptConflict, RequestIntent, RequestReceipt, RequestStore, StagePlan,
                                TransportObservation, locked_request, semantic_digest)
+from .report_payload import ReportPayload, encode_report_facts
 from .resources import PackageResources
 
 
@@ -110,13 +113,13 @@ def _proof(root: Path, route: MessageRoute, fact) -> str:
     with _reader(root, route) as conn:
         if conn is None:
             return "unknown"
-        status = reconcile_facts(conn, (fact,)).status
+        status = reconcile_facts(conn, fact if isinstance(fact, tuple) else (fact,)).status
     if status == "conflict":
         raise MessageConflict("stored message fact differs from frozen request")
     return status
 
 
-def _record(root: Path, route: MessageRoute, raw: dict, fact, *, store, stage: int | None,
+def _record(root: Path, route: MessageRoute, raw: dict | tuple[dict, ...], fact, *, store, stage: int | None,
             attempt_no: int | None, persistence: list[bool]) -> str:
     """Only exact absence allows another Plane write; duplicate is not proof."""
     status = _proof(root, route, fact)
@@ -135,7 +138,7 @@ def _record(root: Path, route: MessageRoute, raw: dict, fact, *, store, stage: i
             persistence[0] = False
     if status == "unrecorded":
         try:
-            emit_batch(root, [raw], require_commit=True)
+            emit_batch(root, list(raw) if isinstance(raw, tuple) else [raw], require_commit=True)
         except (OSError, sqlite3.Error):
             pass  # Reconciliation below decides whether a commit actually happened.
         status = _proof(root, route, fact)
@@ -330,10 +333,12 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
 
 def send_message(route: MessageRoute, package: PackageResources, body: MessageBody, *,
                  request_id: str, kind: str = "chat", retry_uncertain: bool = False,
+                 parent_message_id: str | None = None,
                  trusted_tiers: Mapping[str, str],
                  transport: Callable = native_send,
                  notify: Callable = notify_recording_degraded,
-                 clear: Callable = clear_recording_degraded) -> MessageSendResult:
+                 clear: Callable = clear_recording_degraded,
+                 _report: ReportPayload | None = None) -> MessageSendResult:
     """Send once under caller-held runtime admission; inspect or explicitly retry later.
 
     ReceiptBusy/ReceiptError/MessageConflict and capture-policy failures are
@@ -357,8 +362,28 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
             raise ValueError("noncanonical")
     except (ValueError, AttributeError) as exc:
         raise MessageConflict("canonical request UUID required") from exc
-    if kind not in {"question", "notice", "chat"}:
-        raise MessageConflict("ordinary send kind must be question, notice or chat")
+    if _report is not None:
+        if (not isinstance(_report, ReportPayload) or body.text != _report.to_body()
+                or parent_message_id is not None or kind != "chat"
+                or route.origin.fleet.name != route.selected.fleet.name
+                or route.caller_fleet_uid != route.selected_fleet_uid
+                or route.peer_fleet_uid != route.selected_fleet_uid
+                or route.peer != route.manager
+                or route.peer_destination != route.manager_destination
+                or route.manager.alias != (
+                    f"bot:{route.selected.fleet.name}/{route.selected.fleet.manager}")
+                or route.manager_destination.session != route.selected.fleet.manager):
+            raise MessageConflict("unlinked report requires its frozen fleet manager and typed body")
+        operation = "fleet.reports.submit"
+    elif parent_message_id is None:
+        if kind not in {"question", "notice", "chat"}:
+            raise MessageConflict("ordinary send kind must be question, notice or chat")
+        operation = "message.send"
+    else:
+        if kind != "answer" or not isinstance(parent_message_id, str) or not re.fullmatch(
+                ID_PATTERNS["msg"], parent_message_id):
+            raise MessageConflict("reply requires an exact parent message ID and answer kind")
+        operation = "message.reply"
     root = route.selected.paths.root
     try:
         if (root / "state/host-uid").read_text().strip() != route.host_uid:
@@ -367,7 +392,14 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         raise MessageConflict("active host identity is unavailable") from exc
 
     modes = _load_capture_config(root)  # Invalid capture policy is a refusal.
-    semantic = semantic_digest({"body": body.text.encode("utf-8"), "kind": kind})
+    if _report is not None:
+        semantic_input = {"report": body.text.encode("utf-8")}
+    elif parent_message_id is not None:
+        semantic_input = {"body": body.text.encode("utf-8"), "kind": kind,
+                          "parent_message_id": parent_message_id}
+    else:
+        semantic_input = {"body": body.text.encode("utf-8"), "kind": kind}
+    semantic = semantic_digest(semantic_input)
     parties = {route.caller.alias: route.caller.uid, route.peer.alias: route.peer.uid}
     persistence = [True]
     at = datetime.now(timezone.utc)
@@ -376,7 +408,7 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         existing = store.load() if store is not None else None
         if existing is not None:
             old = existing.intent
-            if (old.operation != "message.send" or old.operation_version != 1
+            if (old.operation != operation or old.operation_version != 1
                     or old.host_uid != route.host_uid or old.fleet_uid != route.selected_fleet_uid
                     or old.caller_uid != route.caller.uid or old.recipient_uid != route.peer.uid
                     or old.semantic_sha256 != semantic or old.route != route.receipt_binding()):
@@ -386,24 +418,36 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                 # A prepared-only receipt therefore cannot authorize a resend.
                 raise ReceiptConflict("prepared message requires an explicit uncertain retry")
             message_id = old.message_id
-            communication_id = old.stages[0].facts[0].event_id
+            event_ids = tuple(fact.event_id for fact in old.stages[0].facts)
+            if len(event_ids) != (2 if _report is not None else 1):
+                raise ReceiptConflict("frozen message fact count differs from operation")
         else:
-            message_id, communication_id = mint_msg_id(), mint_event_id()
-        intent = RequestIntent("message.send", 1, route.host_uid, route.selected_fleet_uid,
+            message_id = mint_msg_id()
+            event_ids = (mint_event_id(), mint_event_id()) if _report is not None else (mint_event_id(),)
+        intent = RequestIntent(operation, 1, route.host_uid, route.selected_fleet_uid,
                                route.caller.uid, route.peer.uid, semantic,
                                (StagePlan("recording"), StagePlan("delivery")),
                                message_id=message_id, route=route.receipt_binding())
-        raw = encode_communication(intent, body, request_id=request_id,
-                                   event_id=communication_id, occurred_at=at.isoformat(), kind=kind)
-        item, _ = validate_item(raw, modes)
-        fact = expected_fact(item, host_uid=route.host_uid, fleet_uid=route.selected_fleet_uid,
-                             parties=parties)
-        intent = RequestIntent("message.send", 1, route.host_uid, route.selected_fleet_uid,
+        if _report is not None:
+            raw = encode_report_facts(_report, fleet=route.selected.fleet.name,
+                                      sender=route.caller.alias, recipient=route.manager.alias,
+                                      msg_id=message_id, event_ids=event_ids,
+                                      occurred_at=at.isoformat(), link=None)
+        else:
+            raw = encode_communication(intent, body, request_id=request_id,
+                                       event_id=event_ids[0], occurred_at=at.isoformat(),
+                                       kind=None if parent_message_id else kind,
+                                       parent_message_id=parent_message_id)
+        raws = raw if isinstance(raw, tuple) else (raw,)
+        facts = tuple(expected_fact(validate_item(item, modes)[0], host_uid=route.host_uid,
+                                    fleet_uid=route.selected_fleet_uid, parties=parties)
+                      for item in raws)
+        intent = RequestIntent(operation, 1, route.host_uid, route.selected_fleet_uid,
                                route.caller.uid, route.peer.uid, semantic,
-                               (StagePlan("recording", (fact,)), StagePlan("delivery")),
+                               (StagePlan("recording", facts), StagePlan("delivery")),
                                message_id=message_id, route=route.receipt_binding())
         if existing is not None:
-            if existing.intent.stages[0].facts != (fact,):
+            if existing.intent.stages[0].facts != facts:
                 raise ReceiptConflict("capture policy or communication projection changed")
             receipt = existing
         elif store is not None:
@@ -423,12 +467,17 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                                              retry_uncertain=retry_uncertain,
                                              persistence=persistence)
 
-        comm_status = _record(root, route, raw, fact, store=store, stage=0,
+        comm_status = _record(root, route, raw, facts, store=store, stage=0,
                               attempt_no=None, persistence=persistence)
         envelope = RenderedNativeEnvelope(
-            message_id, native_message_envelope(intent, body, request_id=request_id, kind=kind,
-                                                recording_degraded=(comm_status != "committed"
-                                                                    or not persistence[0])))
+            message_id, (native_unlinked_report_envelope(
+                intent, body, request_id=request_id,
+                recording_degraded=(comm_status != "committed" or not persistence[0]))
+                if _report is not None else native_message_envelope(
+                    intent, body, request_id=request_id,
+                    kind=None if parent_message_id else kind,
+                    parent_message_id=parent_message_id,
+                    recording_degraded=(comm_status != "committed" or not persistence[0]))))
         native_result = transmit_native_attempt(route, package, intent, request_id=request_id,
                                                 reservation=reservation, envelope=envelope,
                                                 modes=modes, parties=parties, persistence=persistence,
@@ -441,7 +490,8 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         alert = None
         if degraded:
             component = ("request_receipt" if not persistence[0] else
-                         "message_intent" if comm_status != "committed" else "transmission_record")
+                         ("report_intent" if _report is not None else "message_intent")
+                         if comm_status != "committed" else "transmission_record")
             try:
                 alert = notify(route.selected, package, route.manager_destination,
                                request_id=request_id, component=component, at=at,
@@ -454,7 +504,8 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         elif reservation.new:
             try:
                 clear(route.selected, package, route.manager_destination,
-                      request_id=request_id, component="ordinary_message", at=at)
+                      request_id=request_id,
+                      component="unlinked_report" if _report is not None else "ordinary_message", at=at)
             except Exception:
                 pass
         code = ("recording_degraded" if degraded else
@@ -486,3 +537,17 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
             return run(store)
     finally:
         lock.__exit__(None, None, None)
+
+
+def send_unlinked_report(route: MessageRoute, package: PackageResources, report: ReportPayload, *,
+                         request_id: str, retry_uncertain: bool = False,
+                         trusted_tiers: Mapping[str, str],
+                         transport: Callable = native_send,
+                         notify: Callable = notify_recording_degraded,
+                         clear: Callable = clear_recording_degraded) -> MessageSendResult:
+    """Report to this fleet's manager without consulting or changing task state."""
+    if not isinstance(report, ReportPayload):
+        raise MessageConflict("typed report payload required")
+    return send_message(route, package, MessageBody(report.to_body()), request_id=request_id,
+                        retry_uncertain=retry_uncertain, trusted_tiers=trusted_tiers,
+                        transport=transport, notify=notify, clear=clear, _report=report)

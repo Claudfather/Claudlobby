@@ -704,18 +704,12 @@ def cmd_report_back(args) -> int:
 
 
 def cmd_brief(args) -> int:
-    """The fleet's one read door — composed state for one bot.
-
-    Read-only apart from a single emission: ``--ack`` records that viewer's
-    read position on the plane (a `reports_acked` system event, chunk K).
-    Everything else it touches is the plane, opened read-only.
-    """
+    """The fleet's composed, read-only state for one bot."""
     from ..brief import (
         boot_provenance,
         build_brief,
         format_boot_brief,
         format_brief,
-        record_ack,
     )
 
     paths = _resolve_paths(args)
@@ -731,11 +725,10 @@ def cmd_brief(args) -> int:
     # hand-built test Namespaces across two authors now call cmd_brief
     # directly — the defensive default is cheaper than coordinating them.
     boot = getattr(args, "boot", False)
-    if boot and (args.json or args.ack):
-        # The boot payload is a render mode, not a session: it must never ack
-        # (a hook that advances the cursor marks unread work handled on every
-        # boot), and its JSON is the plain envelope --json already serves.
-        log.error("--boot is mutually exclusive with --json and --ack")
+    if boot and args.json:
+        # The boot payload is a render mode; its JSON is the plain envelope
+        # --json already serves.
+        log.error("--boot is mutually exclusive with --json")
         return 1
 
     now = int(datetime.now(timezone.utc).timestamp())
@@ -750,50 +743,6 @@ def cmd_brief(args) -> int:
     else:
         sys.stdout.write(format_brief(brief))
 
-    if args.ack:
-        reports = brief.get("reports") or {}
-        if not reports:
-            # The section was omitted, so the ledger could not be read. Refusing
-            # is the whole point: advancing a cursor past reports nobody could
-            # see would mark unread work as handled, permanently. "Nothing to
-            # ack" would be a claim we are in no position to make.
-            log.error(
-                "refusing to ack for %s — the report section was not served "
-                "(see the degraded block); nothing was read, so nothing can be "
-                "marked seen",
-                bot_id,
-            )
-            return 1
-        # Ack exactly what was rendered — the newest row the caller was just
-        # shown, by the plane's own ordering — never a row that arrived mid-run.
-        unacked = reports.get("unacked", [])
-        if unacked:
-            newest = unacked[-1]   # sorted by (ts, seq): the last is the newest
-            outcome = record_ack(paths, fleet.name, bot_id,
-                                 acked_through_seq=newest.get("seq") or 0,
-                                 acked_through_ts=newest["ts"], count=len(unacked))
-            if outcome.status == "failed":
-                # A failed emit is a failed ack: the plane is the only record,
-                # so nothing was marked seen — the reports read unacked again.
-                log.error(
-                    "did NOT record the ack for %s (%s) — %d report(s) still"
-                    " read unacked; there is no other record",
-                    bot_id, outcome.detail, len(unacked),
-                )
-                return 1
-            if outcome.status == "spooled":
-                log.warning(
-                    "ack for %s spooled (%s) — the plane holds it after `claudlobby plane"
-                    " spool retry`; until then the %d report(s) still read unacked",
-                    bot_id, outcome.detail, len(unacked),
-                )
-            else:
-                log.info(
-                    "acked %d report(s) for %s — recorded on the plane (%s) through seq %s",
-                    len(unacked), bot_id, outcome.detail, newest.get("seq"),
-                )
-        else:
-            log.info("nothing to ack for %s", bot_id)
     return 0
 
 

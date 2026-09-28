@@ -22,13 +22,16 @@ _EXITS = {"internal_error": 1, "invalid_argument": 2, "not_found": 3,
 _PUBLIC = {("host", "releases"): "host.releases", ("host", "status"): "host.status",
            ("host", "activate"): "host.activate", ("config", "plan"): "config.plan",
            ("config", "diff"): "config.diff", ("migration", "plan"): "migration.plan",
-           ("migration", "status"): "migration.status"}
+           ("migration", "status"): "migration.status",
+           ("fleet", "reports", "submit"): "fleet.reports.submit",
+           ("fleet", "reports", "list"): "fleet.reports.list",
+           ("fleet", "reports", "ack"): "fleet.reports.ack"}
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("context", ("show",)), ("bot", ("list", "show", "capabilities")),
     ("fleet", ("show",)), ("project", ("list", "show")),
     ("task", ("list", "show", "admit", "assign", "withdraw", "reassign")),
     ("assignment", ("show", "deliver", "accept", "progress", "block", "return", "complete", "fail")),
-    ("message", ("show", "receipt", "wait", "send")),
+    ("message", ("show", "receipt", "wait", "send", "reply")),
     ("request", ("show",))) for verb in verbs})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
 
@@ -137,7 +140,8 @@ def _command_from_argv(tokens: list[str]) -> str | None:
             index += 1
             continue
         if token in {part[0] for part in _PUBLIC}:
-            return _PUBLIC.get(tuple(tokens[index:index + 2]), token)
+            return _PUBLIC.get(tuple(tokens[index:index + 3]),
+                               _PUBLIC.get(tuple(tokens[index:index + 2]), token))
         return None
     return None
 

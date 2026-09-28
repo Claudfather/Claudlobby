@@ -14,6 +14,7 @@ from claudlobby.__main__ import main
 from claudlobby.message_queries import MessageIdentity, ReceiptObservation
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
+from claudlobby.plane.ids import mint_msg_id
 from claudlobby.recording_alerts import ChannelOutcome, RecordingAlertOutcome
 from tests.test_activation import cold, tmp_path  # noqa: F401 — short private activation root
 from tests.test_releases import installed  # noqa: F401 — cold dependency
@@ -21,12 +22,12 @@ from tests.package_fixtures import source_package
 from tests.test_task_read_cli import active  # noqa: F401 — active private Plane fixture
 
 
-def _generated(monkeypatch, root, release):
+def _generated(monkeypatch, root, release, *, bot="manager"):
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
     monkeypatch.setenv("FLEET_ROOT", str(root))
-    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/manager"))
+    monkeypatch.setenv("BOT_DIR", str(root / f"runtime/bots/{bot}"))
     monkeypatch.setenv("FLEET_NAME", "example")
-    monkeypatch.setenv("BOT_ID", "manager")
+    monkeypatch.setenv("BOT_ID", bot)
     monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
     monkeypatch.setattr(context, "selected_cli", lambda: release.cli_path)
     package = source_package()
@@ -38,6 +39,14 @@ def _call(capsys, root, *args, expected):
     assert main(["--root", str(root), "--json", "message", "send", *args]) == expected
     output = json.loads(capsys.readouterr().out)
     assert output["command"] == "message.send" and output["schema_version"] == 1
+    assert output["ok"] is (expected == 0)
+    return output
+
+
+def _reply_call(capsys, root, *args, expected):
+    assert main(["--root", str(root), "--json", "message", "reply", *args]) == expected
+    output = json.loads(capsys.readouterr().out)
+    assert output["command"] == "message.reply" and output["schema_version"] == 1
     assert output["ok"] is (expected == 0)
     return output
 
@@ -59,8 +68,8 @@ def _assigned(root):
     return ctx, task, assigned
 
 
-def _native(monkeypatch, calls):
-    real = message_operations.send_message
+def _native(monkeypatch, calls, *, operation="send_message"):
+    real = getattr(message_operations, operation)
     def wrapped(*args, **kwargs):
         def transport(*_, **native):
             calls.append(native["body"])
@@ -69,7 +78,7 @@ def _native(monkeypatch, calls):
                     notify=lambda *a, **k: RecordingAlertOutcome(
                         ChannelOutcome("submitted", True), ChannelOutcome("unconfigured", True)),
                     clear=lambda *a, **k: None, **kwargs)
-    monkeypatch.setattr(message_operations, "send_message", wrapped)
+    monkeypatch.setattr(message_operations, operation, wrapped)
 
 
 def _facts(root):
@@ -152,6 +161,34 @@ def test_recording_outage_keeps_submitted_effect_and_alert_truth(active, monkeyp
     assert "Private O1 body" not in json.dumps(output)
 
 
+def test_reply_requires_recorded_recipient_and_replays_to_parent_sender(active, monkeypatch, capsys):
+    root, host = active
+    _generated(monkeypatch, root, host.release)
+    calls = []
+    _native(monkeypatch, calls)
+    parent = _call(capsys, root, "--to", "worker", "--text", "Private parent",
+                   "--request-id", str(uuid4()), expected=5)["data"]["message_id"]
+    reply_id = str(uuid4())
+    args = (parent, "--text", "Private answer", "--request-id", reply_id)
+    wrong_peer = _reply_call(capsys, root, *args, expected=4)
+    assert wrong_peer["error"]["code"] == "conflict" and len(calls) == 1
+    _generated(monkeypatch, root, host.release, bot="worker")
+    missing = _reply_call(capsys, root, mint_msg_id(), "--text", "Private answer",
+                          "--request-id", str(uuid4()), expected=3)
+    assert missing["error"]["code"] == "not_found" and len(calls) == 1
+    first = _reply_call(capsys, root, *args, expected=5)
+    assert first["data"]["reply_to_message_id"] == parent
+    assert first["data"]["destination"]["alias"] == "bot:example/manager"
+    assert first["data"]["transport"] == "submitted" and len(calls) == 2
+    replay = _reply_call(capsys, root, *args, expected=5)
+    assert replay["data"]["replayed"] and replay["data"]["message_id"] == first["data"]["message_id"]
+    assert len(calls) == 2 and "Private answer" not in json.dumps(replay)
+    with sqlite3.connect(db_file(root)) as conn:
+        row = conn.execute("SELECT message_class, reply_to_msg_id FROM communications WHERE msg_id=?",
+                           (first["data"]["message_id"],)).fetchone()
+    assert row == ("answer", parent)
+
+
 def test_bad_context_release_and_file_refuse_before_native(active, monkeypatch, capsys, tmp_path):  # noqa: F811
     root, host = active
     calls = []
@@ -174,6 +211,36 @@ def test_bad_context_release_and_file_refuse_before_native(active, monkeypatch, 
     assert wrong["error"]["code"] == "release_mismatch" and calls == []
 
 
+def test_unlinked_report_routes_to_own_manager_without_task_effect(active, monkeypatch, capsys):
+    root, host = active
+    _generated(monkeypatch, root, host.release, bot="worker")
+    calls = []
+    _native(monkeypatch, calls, operation="send_unlinked_report")
+    args = ["--root", str(root), "--json", "fleet", "reports", "submit",
+            "--status", "completed", "--summary", "Private unlinked result",
+            "--artifact", "https://example.test/evidence", "--request-id", str(uuid4())]
+    assert main(args + ["--percent", "50"]) == 2
+    invalid = json.loads(capsys.readouterr().out)
+    assert invalid["command"] == "fleet.reports.submit" and calls == []
+    assert main(args) == 5
+    first = json.loads(capsys.readouterr().out)
+    assert first["command"] == "fleet.reports.submit"
+    assert first["data"]["destination"]["alias"] == "bot:example/manager"
+    assert first["data"]["recording"] == "committed"
+    assert first["data"]["report_status"] == "completed"
+    assert first["data"]["task_id"] is first["data"]["assignment_id"] is None
+    assert len(calls) == 1 and "Private unlinked result" not in json.dumps(first)
+    assert main(args) == 5
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["data"]["replayed"] and len(calls) == 1
+    with sqlite3.connect(db_file(root)) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE kind='task'").fetchone()[0] == 0
+        row = conn.execute("SELECT message_class, work_item_id, assignment_id, body FROM communications "
+                           "WHERE msg_id=?", (first["data"]["message_id"],)).fetchone()
+        assert row[:3] == ("report", None, None)
+        assert json.loads(row[3])["artifacts"] == ["https://example.test/evidence"]
+
+
 def test_help_and_syntax_do_not_import_message_effect_owner(monkeypatch, capsys):
     original = builtins.__import__
     def reject(name, *args, **kwargs):
@@ -190,6 +257,11 @@ def test_help_and_syntax_do_not_import_message_effect_owner(monkeypatch, capsys)
         main(["--json", "message", "send", "--bad=private-value"])
     output = json.loads(capsys.readouterr().out)
     assert exited.value.code == 2 and output["command"] == "message.send"
+    assert "private-value" not in json.dumps(output)
+    with pytest.raises(SystemExit) as exited:
+        main(["--json", "fleet", "reports", "submit", "--bad=private-value"])
+    output = json.loads(capsys.readouterr().out)
+    assert exited.value.code == 2 and output["command"] == "fleet.reports.submit"
     assert "private-value" not in json.dumps(output)
 
 

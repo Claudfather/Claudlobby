@@ -18,6 +18,9 @@ def register_orientation_subparsers(sub):
                           ("project", ("list", "show"))):
         group = sub.add_parser(domain, help=f"Read {domain} declarations and available evidence")
         children = group.add_subparsers(dest=f"{domain}_command", required=True)
+        if domain == "fleet":
+            from ._message_write_parsers import register_report_write_subparsers
+            register_report_write_subparsers(children)
         for verb in verbs:
             route = children.add_parser(verb, help=f"{verb.capitalize()} {domain} context")
             route.add_argument("--json", action="store_true", help="One schema-1 result object")

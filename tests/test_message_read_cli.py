@@ -3,6 +3,7 @@
 import builtins
 import json
 import sqlite3
+import stat
 
 import pytest
 
@@ -59,6 +60,104 @@ def _counts(root):
     with sqlite3.connect(db_file(root)) as conn:
         return (conn.execute("SELECT COUNT(*) FROM identity_registry").fetchone()[0],
                 conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
+
+
+def test_report_list_pages_ingest_order_and_discloses_capture(active, monkeypatch, capsys):  # noqa: F811
+    from claudlobby import brief
+    from claudlobby.activation_identity import read_selected_identity_bindings
+    from claudlobby.activation_state import read_selection
+    from claudlobby.paths import load_lib_module
+    from claudlobby.report_cursors import decode_cursor
+    from claudlobby.report_payload import ReportPayload, encode_report_facts
+    from tests.package_fixtures import source_package
+
+    root, host = active
+    # This activation fixture seals only keepalive.sh. Load the installed
+    # source reader through brief's real import seam, as its ACK fixture does.
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    _generated(monkeypatch, root, "manager")
+    capture = root / "state/plane/capture.json"
+    for number, at, privacy, report in (
+        (1, "2026-09-28T12:00:00Z", "full", ReportPayload("completed", summary="Visible result")),
+        (2, "2026-09-27T12:00:00Z", "metadata", ReportPayload(
+            "failed", reason="Private reason", pr_url="https://github.com/o/r/pull/1",
+            pr_role="reviewed")),
+    ):
+        capture.write_text(json.dumps({"*": privacy}))
+        facts = encode_report_facts(
+            report, fleet="example", sender="bot:example/worker",
+            recipient="bot:example/manager", msg_id=f"msg_{number:032x}",
+            event_ids=(f"ev_{number * 2:032x}", f"ev_{number * 2 + 1:032x}"),
+            occurred_at=at)
+        emit_batch(root, facts, require_commit=True)
+    before = _counts(root)
+
+    def listed(*flags, expected=0):
+        assert main(["--root", str(root), "--json", "fleet", "reports", "list", *flags]) == expected
+        result = json.loads(capsys.readouterr().out)
+        assert result["command"] == "fleet.reports.list" and result["request_id"] is None
+        assert result["release_id"] == host.release.release_id
+        return result
+
+    first = listed("--unacknowledged", "--limit", "1")["data"]
+    assert [row["message_id"] for row in first["items"]] == [f"msg_{1:032x}"]
+    first_item = first["items"][0]
+    assert set(first_item) == {"message_id", "author", "occurred_at", "ingest_seq",
+                               "task_id", "historical_task_reference", "assignment_id",
+                               "task_event", "status", "summary", "report", "evidence"}
+    assert (first_item["author"], first_item["task_id"], first_item["status"]) == (
+        "worker", None, "completed")
+    assert first_item["report"]["state"] == "captured"
+    assert first["next_cursor"] == first["ack_cursor"] and first["ack_available"] is True
+    key = root / "state/report-cursor.key"
+    assert key.is_file() and stat.S_IMODE(key.stat().st_mode) == 0o600
+    bindings = read_selected_identity_bindings(root, "example", package=host.package)
+    selected = read_selection(root)
+    identity = {"host_uid": bindings["host_uid"], "fleet_uid": bindings["fleet_uid"],
+                "viewer_uid": first["viewer_uid"], "release_id": host.release.release_id,
+                "activation_id": selected["activation_id"], "plan_id": selected["plan_id"]}
+    second = listed("--unacknowledged", "--limit", "1", "--cursor", first["next_cursor"])["data"]
+    assert [row["message_id"] for row in second["items"]] == [f"msg_{2:032x}"]
+    assert second["items"][0]["report"]["state"] == "withheld"
+    assert second["items"][0]["summary"] == "" and second["next_cursor"] is None
+    assert second["ack_cursor"] and second["ack_available"] is True
+    assert second["items"][0]["historical_task_reference"] is None
+    assert second["items"][0]["evidence"]["pr_url"] == "https://github.com/o/r/pull/1"
+    assert second["items"][0]["evidence"]["pr_role"] == "reviewed"
+    assert "Private reason" not in json.dumps(second)
+    prefix = decode_cursor(root, second["ack_cursor"], identity=identity)
+    assert (prefix.count, prefix.prior_seq, prefix.prior_ack_seq,
+            prefix.through_seq, prefix.through_message_id, prefix.through_ts) == (
+                2, None, None, second["items"][0]["ingest_seq"],
+                second["items"][0]["message_id"], second["items"][0]["occurred_at"])
+    tampered = ("A" if first["ack_cursor"][0] != "A" else "B") + first["ack_cursor"][1:]
+    assert listed("--unacknowledged", "--cursor", tampered,
+                  expected=2)["error"]["code"] == "invalid_argument"
+    assert listed("--unacknowledged", "--status", "failed")["data"]["ack_cursor"] is None
+    assert listed("--status", "failed", "--limit", "1", "--cursor", first["next_cursor"],
+                  expected=2)["error"]["code"] == "invalid_argument"
+
+    for key in ("BOT_ID", "FLEET_NAME", "CLAUDLOBBY_ROOT"):
+        monkeypatch.delenv(key)
+    ordinary_page = listed("--limit", "1")["data"]
+    assert ordinary_page["viewer"] is ordinary_page["viewer_uid"] is None
+    assert ordinary_page["ack_cursor"] is None and ordinary_page["ack_available"] is False
+    assert [row["message_id"] for row in ordinary_page["items"]] == [f"msg_{1:032x}"]
+    assert ordinary_page["next_cursor"]
+    ordinary_next = listed("--limit", "1", "--cursor", ordinary_page["next_cursor"])["data"]
+    assert [row["message_id"] for row in ordinary_next["items"]] == [f"msg_{2:032x}"]
+    ordinary = listed("--status", "failed")["data"]
+    assert ordinary["viewer"] is ordinary["viewer_uid"] is None
+    assert [row["message_id"] for row in ordinary["items"]] == [f"msg_{2:032x}"]
+    assert ordinary["items"][0]["report"]["state"] == "withheld"
+    assert ordinary["ack_cursor"] is None and ordinary["ack_available"] is False
+    refused = listed("--unacknowledged", expected=4)["error"]
+    assert refused["code"] == "conflict" and "generated viewer" in refused["message"]
+    _generated(monkeypatch, root, "manager")
+    assert listed("--unacknowledged", "--cursor", ordinary_page["next_cursor"],
+                  expected=2)["error"]["code"] == "invalid_argument"
+    assert _counts(root) == before
 
 
 def test_cross_fleet_participant_capture_and_receipt_proof(active, monkeypatch, capsys):  # noqa: F811

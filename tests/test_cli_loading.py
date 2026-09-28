@@ -26,6 +26,7 @@ allowed = {
     'claudlobby.commands._task_read_parsers', 'claudlobby.commands._task_write_parsers',
     'claudlobby.commands._message_read_parsers', 'claudlobby.commands._request_read_parsers',
     'claudlobby.commands._message_write_parsers',
+    'claudlobby.commands._report_read_parsers',
     'claudlobby.commands._release_parsers',
     'claudlobby.commands._orientation_parsers',
 }
@@ -65,6 +66,10 @@ def _run(code, *argv, tmp_path):
     (("data-migrate", "--help"), "--source"),
     (("message", "show", "--help"), "MESSAGE_ID"),
     (("message", "send", "--help"), "--request-id"),
+    (("message", "reply", "--help"), "MESSAGE_ID"),
+    (("fleet", "reports", "submit", "--help"), "--summary"),
+    (("fleet", "reports", "list", "--help"), "--unacknowledged"),
+    (("fleet", "reports", "ack", "--help"), "ACK_CURSOR"),
     (("assignment", "deliver", "--help"), "--file"),
     (("request", "show", "--help"), "REQUEST_ID"),
 ])

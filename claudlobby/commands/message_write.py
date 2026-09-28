@@ -1,4 +1,4 @@
-"""First public ordinary send; all recording and native effects stay in their owners."""
+"""Public communication mutations; recording and native effects stay in their owners."""
 
 from __future__ import annotations
 
@@ -53,15 +53,18 @@ def _body(args):
         raise CommandFailure("invalid_argument", "message body is empty, invalid or over the byte cap") from exc
 
 
-def _data(route, outcome) -> dict:
+def _data(route, outcome, *, parent_message_id=None) -> dict:
     alert = asdict(outcome.alert) if is_dataclass(outcome.alert) else None
-    return {"fleet": route.selected.fleet.name, "message_id": outcome.message_id,
+    data = {"fleet": route.selected.fleet.name, "message_id": outcome.message_id,
             "sender": {"uid": route.caller.uid, "alias": route.caller.alias},
             "destination": {"uid": route.peer.uid, "alias": route.peer.alias},
             "recording": outcome.recording, "request_persisted": outcome.request_persisted,
             "transport": outcome.delivery, "delivery": outcome.delivery,
             "receipt_observation": None, "integrity_verdict": None,
             "replayed": outcome.replayed, "alert": alert}
+    if parent_message_id is not None:
+        data["reply_to_message_id"] = parent_message_id
+    return data
 
 
 def _alert_tiers(route):
@@ -82,8 +85,8 @@ def dispatch(args) -> CommandOutput:
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
-    from ..message_operations import MessageConflict, send_message
-    from ..message_queries import MessageQueryError, receipt
+    from ..message_operations import MessageConflict, send_message, send_unlinked_report
+    from ..message_queries import MessageQueryError, receipt, show_message
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      bind_task_context, resolve_operation_scope)
     from ..paths import InvalidPathSelector
@@ -91,6 +94,7 @@ def dispatch(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
+    from ..report_payload import ReportPayload, ReportPayloadError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
     from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
 
@@ -99,29 +103,71 @@ def dispatch(args) -> CommandOutput:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no message mutations")
         request_id = _request_id(args.request_id)
-        body = _body(args)
+        is_report = args.public_command == "fleet.reports.submit"
+        if is_report:
+            report = ReportPayload(args.status, summary=args.summary, percent=args.percent,
+                                   pr_url=args.pr, pr_role=args.pr_role,
+                                   artifacts=tuple(args.artifact), issues=tuple(args.issue), skill=args.skill)
+        else:
+            body = _body(args)
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if selected.paths.seed or origin is None or origin.bot_id is None:
             raise CommandFailure("conflict", "message send requires a generated bot context")
+        if is_report and origin.fleet.name != selected.fleet.name:
+            raise CommandFailure("conflict", "unlinked reports go to the caller's own fleet manager")
         bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
         if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
             raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
         with mutation_admission(selected.paths.root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
             release_id = release.release_id
-            route = resolve_message_route(args.to, root=selected.paths.root,
+            parent_message_id = None
+            target = args.to if args.public_command == "message.send" else None
+            if is_report:
+                target = selected.fleet.manager
+            if args.public_command == "message.reply":
+                parent_message_id = args.message_id
+                parent_ctx = bind_task_context(selected, origin=origin)
+                parent = show_message(parent_ctx, parent_message_id)
+                if (parent.destination is None
+                        or parent.destination.uid != parent_ctx.caller.uid
+                        or parent.destination.alias != parent_ctx.caller.alias
+                        or not parent.sender.alias.startswith("bot:")
+                        or parent.sender.fleet_uid is None):
+                    raise CommandFailure("conflict", "reply requires a recorded bot sender and this caller as recipient",
+                                         release_id=release_id)
+                target = parent.sender.alias.removeprefix("bot:")
+            route = resolve_message_route(target, root=selected.paths.root,
                                           fleet=selected.fleet.name,
                                           package=selected.paths.package)
             if route.release_id != release_id or route.caller.alias != (
                     f"bot:{origin.fleet.name}/{origin.bot_id}"):
                 raise CommandFailure("release_mismatch", "message route differs from selected release",
                                      release_id=release_id)
+            if parent_message_id is not None and (
+                    route.caller.uid != parent.destination.uid
+                    or route.peer.uid != parent.sender.uid
+                    or route.peer.alias != parent.sender.alias
+                    or route.peer_fleet_uid != parent.sender.fleet_uid):
+                raise CommandFailure("conflict", "reply route differs from recorded parent participants",
+                                     release_id=release_id)
             trusted_tiers, tiers_available = _alert_tiers(route)
-            outcome = send_message(route, selected.paths.package, body,
-                                   request_id=request_id, kind=args.kind,
-                                   retry_uncertain=args.retry_uncertain,
-                                   trusted_tiers=trusted_tiers)
-            data = _data(route, outcome)
+            if is_report:
+                outcome = send_unlinked_report(route, selected.paths.package, report,
+                                               request_id=request_id,
+                                               retry_uncertain=args.retry_uncertain,
+                                               trusted_tiers=trusted_tiers)
+            else:
+                outcome = send_message(route, selected.paths.package, body,
+                                       request_id=request_id,
+                                       kind="answer" if parent_message_id is not None else args.kind,
+                                       parent_message_id=parent_message_id,
+                                       retry_uncertain=args.retry_uncertain,
+                                       trusted_tiers=trusted_tiers)
+            data = _data(route, outcome, parent_message_id=parent_message_id)
+            if is_report:
+                data["report_status"] = report.status
+                data["task_id"] = data["assignment_id"] = None
             if outcome.code == "recording_degraded":
                 if not tiers_available:
                     if data["alert"] is not None:
@@ -181,6 +227,9 @@ def dispatch(args) -> CommandOutput:
                                     "delivery=received",))
     except CommandFailure:
         raise
+    except ReportPayloadError as exc:
+        raise CommandFailure("invalid_argument", "invalid report fields; inspect command help",
+                             release_id=release_id) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",
                              hint=exc.hint, release_id=release_id) from exc
@@ -189,6 +238,9 @@ def dispatch(args) -> CommandOutput:
                              release_id=release_id) from exc
     except ReceiptError as exc:
         raise CommandFailure("conflict", "message request receipt is invalid or unsafe",
+                             release_id=release_id) from exc
+    except MessageQueryError as exc:
+        raise CommandFailure(exc.code, "reply parent is not readable in this caller's scope",
                              release_id=release_id) from exc
     except ContractViolation as exc:
         raise CommandFailure("conflict", "message capture or Plane contract is invalid",

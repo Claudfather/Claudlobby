@@ -21,6 +21,10 @@ tool_grants:
   - "Bash(claudlobby message receipt --help)"
   - "Bash(claudlobby message wait --help)"
   - "Bash(claudlobby message send --help)"
+  - "Bash(claudlobby message reply --help)"
+  - "Bash(claudlobby fleet reports submit --help)"
+  - "Bash(claudlobby fleet reports list --help)"
+  - "Bash(claudlobby fleet reports ack --help)"
   - "Bash(claudlobby request show --help)"
   - "Bash(claudlobby --json context show)"
   - "Bash(claudlobby --json task list)"
@@ -31,14 +35,19 @@ tool_grants:
   - "Bash(claudlobby --json message receipt *)"
   - "Bash(claudlobby --json message wait *)"
   - "Bash(claudlobby --json message send *)"
+  - "Bash(claudlobby --json message reply *)"
+  - "Bash(claudlobby --json fleet reports submit *)"
+  - "Bash(claudlobby --json fleet reports list)"
+  - "Bash(claudlobby --json fleet reports list *)"
+  - "Bash(claudlobby --json fleet reports ack *)"
   - "Bash(claudlobby --json request show *)"
 ---
 
 # Fleet operations
 
 Use this guide for task, assignment, message, and request reads; the admitted
-task and assignment lifecycle; and ordinary message send. The generated bot
-context selects your fleet and identity; check it with `claudlobby --json
+task and assignment lifecycle; and ordinary message send and reply. The
+generated bot context selects your fleet and identity; check it with `claudlobby --json
 context show`. Discover exact flags with `claudlobby --help` and `claudlobby
 <group> <verb> --help`.
 
@@ -100,6 +109,32 @@ inspect the returned recording and notification outcomes, and do not submit a
 second report under a new UUID. The `--by` field records provenance; it does
 not grant another actor's authority.
 
+When there is no assignment to report against, submit an explicitly unlinked
+report to your own fleet manager. It sends a report message and does not
+transition a task:
+
+```bash
+claudlobby --json fleet reports submit --status completed --summary "Completed the review" --request-id REPORT_UUID
+claudlobby --json request show REPORT_UUID
+```
+
+Retain that UUID for the same report. If its outcome is uncertain or exit 11,
+inspect the recorded request and transport outcome; do not automatically
+resend or mint a new UUID.
+
+Read recorded reports, including reports without assignments, with
+`claudlobby --json fleet reports list`. Add `--unacknowledged` for your own
+unseen terminal or status-unknown reports. A read does not acknowledge reports
+or change tasks.
+After reading an unfiltered `--unacknowledged` page, pass its `ack_cursor`
+unchanged to `claudlobby --json fleet reports ack --through ACK_CURSOR
+--request-id UUID`. Retain that UUID for the same acknowledgement. Follow
+`next_cursor` to read another page before acknowledging a longer prefix.
+Filtered views do not supply an acknowledgement cursor. An acknowledgement
+only advances your report read position; it never accepts a task or clears
+another bot's reports. Unavailable history is unknown, never proof that no
+worker is waiting.
+
 For an ordinary message to a declared bot, retain a new request UUID and
 inspect its recorded outcome and receiver proof separately:
 
@@ -110,14 +145,23 @@ claudlobby --json message show MESSAGE_ID
 claudlobby --json message receipt MESSAGE_ID
 ```
 
+Reply only to a message addressed to you. The reply goes to the parent's
+recorded sender; do not choose another recipient. Retain a new UUID for this
+reply and use that same UUID to inspect an uncertain outcome:
+
+```bash
+claudlobby --json message reply MESSAGE_ID --text "The requested answer" --request-id REPLY_UUID
+claudlobby --json request show REPLY_UUID
+```
+
 A visible marker or assignment row alone is not delivery proof. A missing or
 unavailable receipt stays unverified. `message wait MESSAGE_ID --for reply
 --timeout SECONDS` is a bounded read, not permission to resend. If `message
-send` reports `recording_degraded` or exit 11, it may already have reached the
-recipient: inspect its returned transport and alert outcomes, and never retry
-it automatically.
+send` or `message reply` reports `recording_degraded` or exit 11, it may already
+have reached the recipient: inspect its returned transport and alert outcomes,
+and never retry it automatically.
 
 Stop on permission, scope, or release errors. Do not substitute raw SQL,
 hand-built plane events, shell dispatch helpers, or tmux keystrokes for a
-refused CLI operation. Stop at an unsupported operation; do not invent an
-unlinked report or another way to deliver work.
+refused CLI operation. Stop at an unsupported operation; do not invent another
+way to deliver work.
