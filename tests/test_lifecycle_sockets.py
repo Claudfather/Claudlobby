@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 import textwrap
+from pathlib import Path
 
 import pytest
 
 from tests.conftest import constructed_env
+from tests.fixtures.native_admission import admit_watchdog_fixture
 
 from claudlobby.composer import (
     compose_bot_conf,
@@ -378,10 +381,18 @@ class TestLifecycleScriptExitGuards:
     @pytest.mark.parametrize("script", ["keepalive.sh", "pre-stop-handoff.sh"])
     def test_fails_fast_on_unresolvable_socket(self, tmp_path, script):
         d = self._misconfigured_bot(tmp_path)
+        native = Path(LIB_DIR)
+        calls = None
+        if script == "keepalive.sh":
+            native = tmp_path / "native"
+            shutil.copytree(LIB_DIR, native)
+            calls = admit_watchdog_fixture(native)
         _, err, rc = _run_bash(
-            f'bash "{LIB_DIR}/{script}" "{d}"',
+            f'bash "{native / script}" "{d}"',
             env={"FLEET_NAME": "test-fleet"},
         )
+        if calls is not None:
+            assert calls.read_text() == "keepalive\n"
         assert rc != 0
         assert "cannot resolve tmux socket" in err.lower()
         assert not list(tmp_path.rglob("plane.db*"))

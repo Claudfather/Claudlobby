@@ -13,7 +13,9 @@ from pathlib import Path
 import plistlib
 
 from .config_plan import ConfigPlan, PlanError
+from .activation_state import ActivationError
 from .supervision_inventory import UnitDeclaration
+from .runtime_admission import parse_unit_argv
 
 
 def unit_family(files: dict[str, tuple[bytes, int]], *, destination: Path,
@@ -32,12 +34,15 @@ def unit_family(files: dict[str, tuple[bytes, int]], *, destination: Path,
         definition = plistlib.loads(files[plist][0])
         environment = definition["EnvironmentVariables"]
         working_directory = definition["WorkingDirectory"]
+        admission = parse_unit_argv(definition["ProgramArguments"])
+        if admission.unit != stem or admission.phase != phase or admission.release_id != release_id:
+            raise ValueError("unbound unit admission")
         if (definition["Label"] != stem or not Path(working_directory).is_absolute()
                 or not isinstance(environment, dict)
                 or not all(isinstance(k, str) and isinstance(v, str) for k, v in environment.items())
                 or environment.get("CLAUDLOBBY_RELEASE_ID") != release_id):
             raise ValueError("unbound native identity")
-    except (ValueError, TypeError, KeyError, plistlib.InvalidFileException) as exc:
+    except (ValueError, TypeError, KeyError, ActivationError, plistlib.InvalidFileException) as exc:
         raise PlanError("staged unit is not bound to its candidate release") from exc
     # Native identity is public location metadata. Other environment values may
     # be credentials; they stay in the private staged bytes, never in summaries.
@@ -48,6 +53,8 @@ def unit_family(files: dict[str, tuple[bytes, int]], *, destination: Path,
     return [{"source": str(destination / name), "scope": scope, "phase": phase,
              "release_id": release_id, "working_directory": working_directory,
              "environment": identity, "fleet": fleet, "bot": bot, "enroll": enroll,
+             "admission": {"kind": "unit-start-v1", "unit": admission.unit,
+                           "argv": list(admission.argv)},
              "service": stem + ".service" if name.endswith(".timer") else None,
              "platform": "Darwin" if name.endswith(".plist") else "Linux",
              "sha256": hashlib.sha256(content).hexdigest(), "mode": mode}

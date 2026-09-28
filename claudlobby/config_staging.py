@@ -21,6 +21,7 @@ from .context import load_context
 from .paths import Paths, _iter_fleet_dirs
 from .releases import ReleaseManifest, read_release
 from .resources import get_resources, selected_cli
+from .runtime_admission import RESIDENT_UNIT_PHASES
 from .validator import validate
 
 
@@ -214,7 +215,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             release_id=release.release_id,
             # This is the declared host ingest service, not a pattern over
             # installed unit names. It must survive until the controlled drain.
-            resident_phases={"claudlobby-plane-daemon": "ingest"}))
+            resident_phases=RESIDENT_UNIT_PHASES))
         builder.tree(root / "runtime/_host/timers", files)
         for render in (compose.compose_host_bot_handles, compose.compose_host_mention_allowlist):
             result = render(paths, output_dir=host, manifests=sorted(manifests))

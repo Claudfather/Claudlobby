@@ -25,6 +25,7 @@ import pytest
 
 from claudlobby.plane.db import db_path
 from claudlobby.plane.emit_api import emit_batch
+from tests.fixtures.native_admission import admit_watchdog_fixture
 
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "lib"
@@ -42,6 +43,7 @@ def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
     libdir.mkdir()
     for name in DOOR_FILES:
         (libdir / name).symlink_to(LIB / name)
+    admit_watchdog_fixture(libdir)
     sb = libdir / "start-bot.sh"
     sb.write_text("#!/bin/bash\necho started >> \"$1/start-stub.log\"\n"
                   "exit 0\n")
@@ -80,9 +82,13 @@ def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
 
 
 def _tick(libdir: Path, bot: Path, env: dict):
-    return subprocess.run(
+    calls = libdir / "admission-fixture.calls"
+    before = calls.read_text() if calls.exists() else ""
+    result = subprocess.run(
         ["bash", str(libdir / "keepalive.sh"), str(bot)],
         capture_output=True, text=True, env=env, timeout=120)
+    assert calls.read_text() == before + "keepalive\n", result.stderr
+    return result
 
 
 def _samples(root: Path):

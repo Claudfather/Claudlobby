@@ -45,8 +45,11 @@ def test_validation_setup_uses_owned_transport_and_preflighted_cli(tmp_path, scr
     (tmp_path / "python").symlink_to(Path(scratch_plane_env.cli).parent / "python")
     env = constructed_env(HOME=tmp_path, TMPDIR=tmp_path,
                           **scratch_plane_env(root, socket=socket_dir / "no-plane.sock", cli=cli))
+    native_guard = (REPO / "lib/runtime-admission.sh").read_bytes()
     result = _run(root, socket_dir, env)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (REPO / "lib/runtime-admission.sh").read_bytes() == native_guard
+    assert (root / "native-fixture/runtime-admission.sh").read_text() == "native_admission() { return 0; }\n"
     assert cli_calls.is_file(), "harness ignored the preflighted CLI"
     assert '"type":"validate_started"' in read_fleet_events(root)
 

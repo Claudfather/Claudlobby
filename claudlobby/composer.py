@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 _log = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
 from .mcp_grammar import grammar
 from .paths import Paths, _iter_fleet_dirs
 from .supervision import build_supervision_spec, render_launchd_plist, render_systemd_unit
+from .runtime_admission import (
+    RESIDENT_UNIT_PHASES, unit_systemd_command, unit_systemd_environment, wrap_unit_argv,
+)
 
 
 # ----------------------------------------------------------------------
@@ -3732,6 +3736,17 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
 _FLEET_PULSE_JOB = "fleet-pulse"
 
 
+def _native_script_argv(script: str, environment: dict[str, str]) -> list[str]:
+    """Tokenize declared syntax before inserting literal selected paths."""
+    argv = shlex.split(script)
+    for index, part in enumerate(argv):
+        for key, value in environment.items():
+            part = part.replace("${" + key + "}", value)
+            part = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, part)
+        argv[index] = part
+    return argv
+
+
 def _write_service_units(
     timers_dir: Path,
     service_name: str,
@@ -3778,10 +3793,15 @@ def _write_service_units(
     if _svc_findings:
         raise source_findings_error(_svc_id, _svc_findings)
 
+    environment = native_environment(paths)
     script_expanded = script
-    for key, value in native_environment(paths).items():
+    for key, value in environment.items():
         script_expanded = script_expanded.replace("${" + key + "}", value)
         script_expanded = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, script_expanded)
+    argv = wrap_unit_argv(environment, unit=service_name,
+                          phase=RESIDENT_UNIT_PHASES.get(service_name, "producers"), mode="exec",
+                          argv=_native_script_argv(script, environment))
+    exec_start = unit_systemd_command(argv) if "CLAUDLOBBY_RELEASE_ID" in environment else script_expanded
     tool_path = _scheduler_tool_path()
 
     # #1485 fold — WHERE THE RELAUNCH LOOP IS VISIBLE. The ingest daemon's
@@ -3808,9 +3828,9 @@ def _write_service_units(
         "[Service]",
         "Type=simple",
         f"WorkingDirectory={paths.root}",
-        *(f"Environment={key}={value}" for key, value in native_environment(paths).items()),
-        f"Environment=PATH={tool_path}",
-        f"ExecStart={script_expanded}",
+        *(unit_systemd_environment(key, value) for key, value in environment.items()),
+        unit_systemd_environment("PATH", tool_path),
+        f"ExecStart={exec_start}",
         "Restart=always",
         "RestartSec=5",
         "",
@@ -3833,24 +3853,24 @@ def _write_service_units(
         "  <array>",
     ]
     plist_lines.extend(
-        f"    <string>{part}</string>" for part in shlex.split(script_expanded)
+        f"    <string>{escape(part)}</string>" for part in argv
     )
     plist_lines.extend(
         [
             "  </array>",
             "  <key>EnvironmentVariables</key>",
             "  <dict>",
-            *(line for key, value in native_environment(paths).items()
-              for line in (f"    <key>{key}</key>", f"    <string>{value}</string>")),
+            *(line for key, value in environment.items()
+              for line in (f"    <key>{escape(key)}</key>", f"    <string>{escape(value)}</string>")),
             "    <key>PATH</key>",
             f"    <string>{tool_path}</string>",
             "  </dict>",
             "  <key>WorkingDirectory</key>",
-            f"  <string>{paths.root}</string>",
+            f"  <string>{escape(str(paths.root))}</string>",
             "  <key>StandardOutPath</key>",
-            f"  <string>{log_path}</string>",
+            f"  <string>{escape(str(log_path))}</string>",
             "  <key>StandardErrorPath</key>",
-            f"  <string>{log_path}</string>",
+            f"  <string>{escape(str(log_path))}</string>",
             "  <key>RunAtLoad</key>",
             "  <true/>",
             "  <key>KeepAlive</key>",
@@ -3917,13 +3937,21 @@ def _write_timer_units(
         raise source_findings_error(_timer_id, _timer_findings)
 
     scope = fleet_name if fleet_name is not None else "host"
+    environment = native_environment(paths)
     script_expanded = script
-    for key, value in native_environment(paths).items():
+    for key, value in environment.items():
         script_expanded = script_expanded.replace("${" + key + "}", value)
         script_expanded = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, script_expanded)
     exec_start = f"{script_expanded} {fleet_name}" if fleet_name else script_expanded
     if exec_args:
         exec_start = f"{exec_start} {' '.join(exec_args)}"
+    argv = _native_script_argv(script, environment)
+    if fleet_name:
+        argv.append(fleet_name)
+    argv.extend(exec_args or [])
+    argv = wrap_unit_argv(environment, unit=service_name, phase="producers", mode="oneshot", argv=argv)
+    if "CLAUDLOBBY_RELEASE_ID" in environment:
+        exec_start = unit_systemd_command(argv)
 
     # Compute the tool PATH once so systemd and launchd emit an identical value
     # (see _scheduler_tool_path, #798); the parity test asserts they match.
@@ -3940,12 +3968,12 @@ def _write_timer_units(
         # Pin cwd to the install root so jobs never depend on the
         # supervisor's spawn cwd.
         f"WorkingDirectory={paths.root}",
-        *(f"Environment={key}={value}" for key, value in native_environment(paths).items()),
+        *(unit_systemd_environment(key, value) for key, value in environment.items()),
         # Carry the fleet tool PATH into the timer env (#798).
-        f"Environment=PATH={tool_path}",
+        unit_systemd_environment("PATH", tool_path),
     ]
     if fleet_name:
-        service_lines.append(f"Environment=CLAUDLOBBY_FLEET={fleet_name}")
+        service_lines.append(unit_systemd_environment("CLAUDLOBBY_FLEET", fleet_name))
     # Fleet timers run in a minimal scheduler env (systemd/launchd start with
     # almost nothing). Carry the fleet Telegram group: it is where a scheduled
     # job's alert goes, rather than the first bot's own chat. The sender is picked
@@ -3953,7 +3981,7 @@ def _write_timer_units(
     # (resolve_alert_target, #1771).
     if fleet_name and telegram_group_chat_id:
         service_lines.append(
-            f"Environment=TELEGRAM_GROUP_CHAT_ID={telegram_group_chat_id}"
+            unit_systemd_environment("TELEGRAM_GROUP_CHAT_ID", telegram_group_chat_id)
         )
     # #1120: the fleet-pulse escalation knobs. Same reasoning as the line above
     # and the same door — a scheduler starts with almost no environment, and
@@ -3963,14 +3991,14 @@ def _write_timer_units(
     # other job consumes them, so a wider grant would buy nothing.
     if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
         for var, value in fleet_pulse_env.items():
-            service_lines.append(f"Environment={var}={value}")
+            service_lines.append(unit_systemd_environment(var, value))
     # Caller-scoped extra env (gauntlet round; first tenant: PLANE_EMIT_ENABLED
     # on briefing timers). Same mechanism as the two blocks above — a scheduler
     # env is closed, so an Environment= line is the only thing the script can
     # read — generalized so the next timer-reachable var is a call-site dict,
     # not a fourth hand-rolled block.
     for var, value in (extra_env or {}).items():
-        service_lines.append(f"Environment={var}={value}")
+        service_lines.append(unit_systemd_environment(var, value))
     if abandon_children:
         # The script backgrounds work that must outlive the job (keepalive's
         # per-bot plane emit, reaped on its own clock). With the default
@@ -4046,19 +4074,15 @@ def _write_timer_units(
     # same argv, flags before the fleet name exactly as systemd would pass them
     # (#969).
     plist_lines.extend(
-        f"    <string>{part}</string>" for part in shlex.split(script_expanded)
+        f"    <string>{escape(part)}</string>" for part in argv
     )
-    if fleet_name:
-        plist_lines.append(f"    <string>{fleet_name}</string>")
-    for arg in exec_args or []:
-        plist_lines.append(f"    <string>{arg}</string>")
     plist_lines.extend(
         [
             "  </array>",
             "  <key>EnvironmentVariables</key>",
             "  <dict>",
-            *(line for key, value in native_environment(paths).items()
-              for line in (f"    <key>{key}</key>", f"    <string>{value}</string>")),
+            *(line for key, value in environment.items()
+              for line in (f"    <key>{escape(key)}</key>", f"    <string>{escape(value)}</string>")),
             # Carry the fleet tool PATH into the timer env (#798).
             "    <key>PATH</key>",
             f"    <string>{tool_path}</string>",
@@ -4096,7 +4120,7 @@ def _write_timer_units(
     plist_lines.extend(
         [
             "  <key>WorkingDirectory</key>",
-            f"  <string>{paths.root}</string>",
+            f"  <string>{escape(str(paths.root))}</string>",
         ]
     )
     if sched["type"] == "interval":

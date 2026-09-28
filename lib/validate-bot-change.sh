@@ -168,6 +168,15 @@ VALINITPY
 }
 val_initialize_plane "$ROOT"
 
+# These legacy behavioral fixtures do not activate a sealed release. Exercise
+# real start/watchdog bodies with an explicit, private admission collaborator;
+# tests/test_native_admission.py and test_unit_admission.py own real refusal.
+# Never overwrite the checked-out or installed guard, even in a source export.
+cp -R "$LIB_DIR" "$ROOT/native-fixture"
+LIB_DIR="$ROOT/native-fixture"
+printf 'native_admission() { return 0; }\n' > "$LIB_DIR/runtime-admission.sh"
+export CLAUDLOBBY_NATIVE_DIR="$LIB_DIR"
+
 # Every plane read below goes through the shipped stdlib doors, and a read that
 # cannot run is REFUSED rather than read as empty: its reason lands in the
 # refusal ledger, and every check after it in its scenario fails naming it
@@ -1285,6 +1294,7 @@ mkdir -p "$HLIB"
 ln -sf "$LIB_DIR/keepalive.sh" "$HLIB/keepalive.sh"
 ln -sf "$LIB_DIR/lib-common.sh" "$HLIB/lib-common.sh"
 ln -sf "$LIB_DIR/supervisor.sh" "$HLIB/supervisor.sh"
+ln -sf "$LIB_DIR/runtime-admission.sh" "$HLIB/runtime-admission.sh"
 val_link_plane_shim "$HLIB"
 cat > "$HLIB/start-bot.sh" <<'REC'
 #!/bin/bash
@@ -3753,6 +3763,7 @@ PLPY
     # verdict as metric_samples (bot.heartbeat + bot.session_up) through the
     # real shim into the real db — the Observe step for presence recording.
     ln -s "$PL_REPO/lib/keepalive.sh" "$PL_LIB/keepalive.sh"
+    ln -s "$LIB_DIR/runtime-admission.sh" "$PL_LIB/runtime-admission.sh"
     printf '#!/bin/bash\nexit 0\n' > "$PL_LIB/start-bot.sh"
     chmod +x "$PL_LIB/start-bot.sh"
     KAB="$PL_ROOT/bots/kbot"

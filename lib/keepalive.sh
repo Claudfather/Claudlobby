@@ -20,6 +20,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BOT_DIR="${1:?Usage: keepalive.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
+# Refuse the whole tick before receipts, markers, reloads or restart work.
+# shellcheck source=runtime-admission.sh
+. "$LIB_DIR/runtime-admission.sh"
+native_admission keepalive
 install_error_trap "$BOT_DIR"
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 # Per-bot tmux server socket (see start-bot.sh) — same SSOT resolver so the

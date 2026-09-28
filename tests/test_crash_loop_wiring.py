@@ -11,10 +11,12 @@ point its cold rung at a recorder, so the events the scripts raise can be read b
 
 import json
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from tests.fixtures.native_admission import admit_watchdog_fixture
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -58,6 +60,9 @@ class Scene:
         self.root = self.tmp / "root"
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
+        self.lib = self.tmp / "native"
+        shutil.copytree(LIB, self.lib)
+        self.admission_calls = admit_watchdog_fixture(self.lib)
         (self.tmp / "tmux").mkdir()
         unit = self.home / ".config/systemd/user/probe1774svc.service"
         unit.parent.mkdir(parents=True)
@@ -115,13 +120,14 @@ class Scene:
 
     def keepalive(self):
         r = subprocess.run(
-            ["bash", str(LIB / "keepalive.sh"), str(self.bot)],
+            ["bash", str(self.lib / "keepalive.sh"), str(self.bot)],
             env=self.env(),
             capture_output=True,
             text=True,
             errors="replace",
             timeout=90,
         )
+        assert self.admission_calls.read_text().endswith("keepalive\n"), r.stderr
         log = (
             (self.bot / "keepalive.log").read_text(errors="replace")
             if (self.bot / "keepalive.log").exists()

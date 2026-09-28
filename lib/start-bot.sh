@@ -8,8 +8,12 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 BOT_DIR="${1:?Usage: start-bot.sh /path/to/bot/dir}"
-install_error_trap "$BOT_DIR"
 load_bot_conf "$BOT_DIR"
+# Refuse before boot locks, receipts, consent/config writes or tmux work.
+# shellcheck source=runtime-admission.sh
+. "$LIB_DIR/runtime-admission.sh"
+native_admission start-bot
+install_error_trap "$BOT_DIR"
 
 # --- Boot-mass mitigation -----------------------------------------------------
 # When the whole fleet is mass-restarted (e.g. reconcile-fleet --enroll, or
