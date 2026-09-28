@@ -28,25 +28,21 @@ const TX = {
 };
 
 const TASK_STATUS = {
-  open: { label: "in flight", cls: "s-open" },
-  pending_unacknowledged: { label: "pending delivery", cls: "s-pend" },
-  dispatch_failed: { label: "dispatch FAILED", cls: "s-bad" },
-  created_not_sent: { label: "not sent", cls: "s-pend" },
+  queued: { label: "queued", cls: "s-pend" },
+  assigned: { label: "assigned", cls: "s-open" },
+  active: { label: "active", cls: "s-open" },
+  blocked: { label: "blocked", cls: "s-pend" },
   completed: { label: "completed", cls: "s-done" },
   failed: { label: "failed", cls: "s-bad" },
   cancelled: { label: "cancelled", cls: "s-done" },
-  returned_blocked: { label: "returned blocked", cls: "s-bad" },
-  superseded: { label: "superseded", cls: "s-done" },
-  reassigned: { label: "reassigned", cls: "s-done" },
-  expired: { label: "expired", cls: "s-bad" },
-  progress: { label: "in progress", cls: "s-open" },
-  accepted: { label: "accepted", cls: "s-open" },
-  blocked_waiting: { label: "blocked (waiting)", cls: "s-pend" },
-  resumed: { label: "resumed", cls: "s-open" },
-  // the task loop's human acts (chunk M-A, #1481) — both NON-terminal, so
-  // both read as live work rather than as an ending
-  escalated: { label: "needs a human", cls: "s-pend" },
-  nudged: { label: "nudged", cls: "s-open" },
+};
+
+// The conversation ladder still displays historical assignment terminal acts;
+// a Task card uses the canonical reducer lifecycle above.
+const THREAD_TERMINAL_STATUS = {
+  completed: "completed", failed: "failed", cancelled: "cancelled",
+  returned_blocked: "returned blocked", superseded: "superseded",
+  reassigned: "reassigned", expired: "expired",
 };
 
 const CLASS_TAGS = new Set(["task_request", "report", "question", "answer",
@@ -158,8 +154,8 @@ function ladder(thread) {
   if (events.includes("accepted")) steps.push({ label: "accepted", on: true });
   if (events.includes("progress")) steps.push({ label: "progress", on: true });
   if (thread.terminal) {
-    const d = TASK_STATUS[thread.terminal] || { label: thread.terminal };
-    steps.push({ label: d.label, on: true });
+    steps.push({ label: THREAD_TERMINAL_STATUS[thread.terminal] || thread.terminal,
+                 on: true });
   } else {
     steps.push({ label: "working…", on: false, now: thread.delivered });
   }
@@ -241,14 +237,12 @@ function renderChannel(env) {
   el.replaceChildren(frag);
 }
 
-// WHY a card needs you, and what clears it — the queue's own arms as the API
-// stamps them (attention_reason / attention_since, from ATTENTION_ARMS_SQL:
-// the query that SELECTED the row also says which arm holds). Reason and
+// WHY a card needs you, and what clears it — assignment arms plus the
+// canonical work-level escalation projected by the server. Reason and
 // remedy are separated by a real dash; every magnitude is the server's
 // instant through ago(), never re-derived here — reading it off the deadline
 // printed "overdue due in 5m" whenever the two clocks disagreed (fold F7).
-// No fallback line: attention IS the disjunction of these arms, so an
-// attention row always carries at least one (pinned server-side).
+// A reducer blocker is rendered separately by taskIssueNote.
 //
 // Each arm dates itself from the server instant that arm is ABOUT: the two
 // send arms from `attention_since` (the dispatch), the deadline arm from the
@@ -263,28 +257,32 @@ const WHY = {
       : "needs you — the question was not recorded",
     `asked by ${r.attention_by || "the manager"} ${ago(r.attention_since)}`],
   send_failed: (r) => [`send failed ${ago(r.attention_since)}`,
-                       "re-send with --supersedes, or withdraw it"
-                       + " (task-act.sh withdraw <id>)"],
+                       "inspect the task and message receipt before an explicit delivery retry;"
+                       + " withdraw with claudlobby --json task withdraw TASK_ID"
+                       + " --reason TEXT --request-id UUID"],
   never_activated: (r) => [`queued ${ago(r.attention_since)}, never delivered`,
-                           "re-send with --supersedes, check the bot is up, or"
-                           + " withdraw it (task-act.sh withdraw <id>)"],
+                           "check the worker and message receipt before an explicit delivery retry;"
+                           + " reassign with claudlobby --json task reassign TASK_ID"
+                           + " --bot BOT --reason TEXT --request-id UUID"],
   // the nudge's own reason, when the operator gave one and the capture kept
   // it: "why did somebody poke this" is the first thing the reader asks, and
   // the server already stamps it for the leading arm (fold F10)
   nudged: (r) => [`nudged ${ago(r.attention_since)} by`
                   + ` ${r.attention_by || "the operator"}, no act yet`
                   + (r.attention_act_reason ? `: ${r.attention_act_reason}` : ""),
-                  "the manager owes a chase, supersede, withdraw or escalate"],
-  overdue: (r) => [`overdue ${ago(r.expected_by || r.attention_since)}`,
-                   "chase the worker, or re-dispatch with a new deadline"],
+                  "the manager should inspect the task, then reassign, withdraw, or escalate"],
+  overdue: (r) => [`overdue ${ago(r.current_assignment?.expected_by || r.attention_since)}`,
+                   "check the worker; reassign with claudlobby --json task reassign TASK_ID"
+                   + " --bot BOT --reason TEXT --request-id UUID"],
   // chunk U — a bot that REPORTED it is blocked and waiting: its newest task
   // event is `blocked_waiting` (non-terminal; the task stays open until the
-  // block clears). `attention_since` is when it blocked. Leads a stale row,
+  // block clears and the worker records progress or completion). `attention_since`
+  // is when it blocked. Leads a stale row,
   // which excludes it — so an aged block reads this, never "no progress".
   blocked_waiting: (r) => [
     `blocked, waiting on you since ${ago(r.attention_since)}`,
-    "clear the block (it resumes on its own), or withdraw it"
-      + " (task-act.sh withdraw <id>)"],
+    "resolve the blocker, then the worker records claudlobby --json assignment"
+      + " progress ASSIGNMENT_ID --summary TEXT --request-id UUID, or completes it"],
   // chunk T — a task the bot is HOLDING but not moving on: open, delivered,
   // aging, no progress, and (the crux) the assignee is not working right now.
   // Tiered by age; `stale_tier` (amber|red) makes the card read louder as it
@@ -292,7 +290,7 @@ const WHY = {
   stale_task: (r) => [
     `no progress — last moved ${ago(r.attention_since)}`
       + (r.stale_tier === "red" ? " (badly stale)" : ""),
-    "chase the worker, or withdraw it (task-act.sh withdraw <id>)"],
+    "check the worker; reassign or withdraw explicitly if the assignment must change"],
 };
 
 function attentionWhy(r) {
@@ -319,10 +317,8 @@ function nudgeNote(r) {
     + ` ${esc(r.nudged_by || "the operator")}</div>`;
 }
 
-// ONE group-by, two callers (fold F6): the attention rail groups the rows the
-// API keyed as one broadcast, the roster groups rows by the fleet the API
-// stamped. A null key is its OWN group — an unkeyed row is a group of one —
-// and order is the input's: a group sits where its first member sat.
+// The roster still groups actors by their server-stamped fleet. Task cards
+// are already one per canonical Task and never infer a broadcast from words.
 function groupBy(rows, keyOf) {
   const out = [], byKey = new Map();
   for (const r of rows) {
@@ -336,72 +332,68 @@ function groupBy(rows, keyOf) {
   return out;
 }
 
-// A note dispatched to N bots is N rows, and the rail rendered N identical
-// cards (item 6, #1479). WHICH rows are one broadcast is the SERVER's fact
-// (`broadcast_key` — one sender, the same stored words, the same state, the
-// same arm, one dispatch instant, one row per recipient): the page groups
-// what the API keyed and derives no key of its own, so it can never group
-// two rows the API considers unrelated.
-function groupBroadcasts(rows) {
-  return groupBy(rows, (r) => r.broadcast_key);
-}
-
-// A card that must be scrolled past has already failed to route attention
-// (brief.py's rule), so a long recipient list elides — the COUNT is always
-// whole, and the full list is the row's hover title.
-const NAMES_SHOWN = 6;
-
-function recipientsLine(g) {
-  const names = g.map((r) => r.assignee_short || r.assignee_uid);
-  const shown = names.slice(0, NAMES_SHOWN).map(esc).join(", ")
-    + (names.length > NAMES_SHOWN ? " …" : "");
-  return `→ ${shown} · ${names.length} bots`;
+function taskIssueNote(r) {
+  if (r.resolved) return "";
+  const codes = (r.issues || []).filter((x) => x.blocking).map((x) => x.code);
+  return `<div class="why">⚠ Task history unresolved: ${esc(codes.join(", ") || "unknown link")}`
+    + ` — inspect ${esc(r.task_id)}</div>`;
 }
 
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
   if (renderState(taskEl, env,
-                  { idleWhenEmpty: (d) => !d.assignments.length })) {
+                  { idleWhenEmpty: (d) => !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
     return;
   }
-  const rows = env.data.assignments;
+  const rows = env.data.tasks;
   const attn = rows.filter((r) => r.attention);
-  badge.hidden = !attn.length;
-  badge.textContent = attn.length;   // ROWS, so the badge and the header agree
-  const card = (g) => {
-    // A group is dated by its WORST member — the earliest instant the server
-    // stamped — so one card for four bots can never under-report the wait it
-    // is showing. Selection over server instants, never a magnitude of ours.
-    const r = g.length === 1 ? g[0] : g.reduce((a, b) =>
-      ((b.attention_since || "") < (a.attention_since || "") ? b : a));
-    const st = TASK_STATUS[r.status] || { label: r.status, cls: "" };
-    // A finished task has no deadline any more: it reads "completed 1m ago"
-    // (the terminal instant the API stamps); the deadline is an OPEN task's
-    // fact only (chunk L, #1479 — "completed · overdue 1h" was one card).
-    // ENDEDNESS is `terminal_at` itself — the server stamps status and
-    // instant from one row, so a copy of its terminal vocabulary here could
-    // only ever disagree with it (fold F4).
-    const when = r.terminal_at
-      ? `${st.label} ${ago(r.terminal_at)}` : dueLabel(r.expected_by);
-    const many = g.length > 1;
-    const who = many ? recipientsLine(g)
-      : esc(r.assignee_short || r.assignee_uid);
-    const hover = many
-      ? ` title="${esc(g.map((m) => m.assignee_short || m.assignee_uid)
-                        .join(", "))}"` : "";
+  const issueCount = env.data.issue_count || 0;
+  badge.hidden = !attn.length && !issueCount && !env.data.truncated;
+  badge.textContent = attn.length || "!";
+  const card = (r) => {
+    const st = TASK_STATUS[r.state] || { label: "state unknown", cls: "s-bad" };
+    const a = r.current_assignment;
+    const ended = r.terminal_event?.occurred_at;
+    const when = ended ? `${st.label} ${ago(ended)}`
+      : a?.expected_by ? dueLabel(a.expected_by)
+      : r.state === "queued" ? `in intake since ${ago(r.created_at)}` : "";
+    const last = r.assignment_history?.at(-1);
+    const who = a ? (a.assignee_short || a.assignee_uid)
+      : r.state === "queued" ? "fleet intake"
+      : last ? `last assigned to ${last.assignee_short || last.assignee_uid}` : "fleet work";
+    const delivered = r.delivery?.integrity;
+    const delivery = a?.dispatch_message_id
+      ? `<div class="note">Message delivery: ${esc(delivered || "unconfirmed")}</div>` : "";
+    const lastAct = r.last_event?.event
+      ? `<div class="note">Last act: ${esc(r.last_event.event)}`
+        + ` ${esc(ago(r.last_event.occurred_at))}</div>` : "";
+    const priorCount = r.assignment_count - (a ? 1 : 0);
+    const prior = priorCount > 0
+      ? `<div class="note">${priorCount} prior assignment(s)</div>` : "";
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
-      <b>${esc(clip(r.title || "", 160) || r.work_item_id)}</b>
-      <div class="sub"${hover}>${who}`
+      <b>${esc(clip(r.title || "", 160) || r.task_id)}</b>
+      <div class="sub">${esc(who)} · task ${esc(r.task_id)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
-      + attentionWhy(r) + nudgeNote(r) + `</div>`;
+      + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
+      + delivery + lastAct + prior + `</div>`;
   };
-  attEl.innerHTML = attn.length ? groupBroadcasts(attn).map(card).join("")
+  const limited = env.data.truncated
+    ? `<div class="card attn"><div class="why">⚠ Showing the newest ${env.data.limit || 200}`
+      + ` tasks. Older work may still need attention.</div></div>` : "";
+  const issues = issueCount
+    ? `<div class="card attn"><div class="why">⚠ ${issueCount} task-history issue(s)`
+      + `${env.data.issues_truncated ? " (first 50 shown)" : ""}`
+      + `${env.data.issue_scope === "displayed_tasks" ? " in displayed tasks" : ""};`
+      + ` inspect Plane state before treating this board as clear.</div></div>`
+    : "";
+  attEl.innerHTML = attn.length || issues || limited
+    ? limited + issues + attn.map(card).join("")
     : stateBlock("idle", null, null, { label: "nothing needs you" });
-  taskEl.innerHTML = rows.filter((r) => !r.attention)
-    .map((r) => card([r])).join("");
+  taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
+    || stateBlock("idle", null, null, { label: "no other tasks" });
 }
 
 function railRow(a) {

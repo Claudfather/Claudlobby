@@ -17,7 +17,7 @@ from __future__ import annotations
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Iterable, Literal
 
 from .plane.queries import TERMINAL_TASK_EVENTS
 from .runtime_versions import SQL_SCHEMA_VERSION
@@ -175,6 +175,23 @@ def _related(conn, table: str, column: str, ids, *, task_events=False):
     return rows
 
 
+def _legacy_companion_ids(conn, source_refs) -> set[str]:
+    """Construct IDs sharing a selected legacy display reference.
+
+    These reads may scan construct tables on historical schemas, but never
+    scan events. Only matching siblings need history for display-group parity.
+    """
+    found = set()
+    values = sorted(set(source_refs))
+    for start in range(0, len(values), _BATCH):
+        batch = values[start:start + _BATCH]
+        placeholders = ",".join("?" for _ in batch)
+        for table in ("work_items", "assignments"):
+            found.update(row[0] for row in conn.execute(
+                f"SELECT work_item_id FROM {table} WHERE source_ref IN ({placeholders})", batch))
+    return found
+
+
 def _fact(row):
     return {name: row[name] for name in Fact.__dataclass_fields__}
 
@@ -238,16 +255,27 @@ def task_closures(events, assignment_rows) -> TaskClosures:
     return TaskClosures(tasks, assignments)
 
 
-def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskSnapshot:
-    """Read all work owned by exactly one stored fleet UID, in one snapshot.
+def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str,
+               task_ids: Iterable[str] | None = None) -> TaskSnapshot:
+    """Read one fleet's work, or an explicit task-ID projection, in one snapshot.
 
     No assigner/name/source-prefix ownership inference. Fetch histories by
     indexed task/assignment ID batches, not a whole-plane scan per row. The
     present schema lacks a work_items fleet index, so its single fleet filter
-    scans that construct table once. Orphan scoped links remain explicit issues.
+    scans that construct table once only for whole-fleet reads. An explicit
+    subset (including empty) uses work-item IDs plus only legacy display
+    siblings needed for faithful selected-task state. Issues in the returned
+    projection name selected tasks; only whole-fleet reads audit unrelated
+    orphan history.
     """
     if not fleet_uid:
         raise ValueError("fleet_uid is required")
+    if isinstance(task_ids, (str, bytes)):
+        raise ValueError("task_ids must be an iterable of task IDs")
+    selected = None if task_ids is None else tuple(task_ids)
+    if selected is not None and any(not isinstance(task_id, str) or not task_id
+                                    for task_id in selected):
+        raise ValueError("task_ids must contain nonempty task IDs")
     own_snapshot = not conn.in_transaction
     if own_snapshot:
         conn.execute("BEGIN")
@@ -255,9 +283,24 @@ def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskSnapshot:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if not 1 <= version <= SQL_SCHEMA_VERSION:
             raise TaskStateError(f"unsupported task schema: {version}")
-        tasks = _rows(conn, "SELECT * FROM work_items WHERE fleet_uid=? ORDER BY ingest_seq",
-                      (fleet_uid,))
+        if selected is None:
+            tasks = _rows(conn, "SELECT * FROM work_items WHERE fleet_uid=? ORDER BY ingest_seq",
+                          (fleet_uid,))
+        else:
+            tasks = sorted((row for row in _related(conn, "work_items", "work_item_id", selected)
+                            if row["fleet_uid"] == fleet_uid), key=lambda row: row["ingest_seq"])
+        requested_ids = {row["work_item_id"] for row in tasks}
         assignments = _related(conn, "assignments", "work_item_id", [r["work_item_id"] for r in tasks])
+        if selected is not None and tasks:
+            refs = {row["source_ref"] for row in (*tasks, *assignments)
+                    if legacy_display_id(row["source_ref"])}
+            companions = _legacy_companion_ids(conn, refs) - requested_ids
+            siblings = [row for row in _related(conn, "work_items", "work_item_id", companions)
+                        if row["fleet_uid"] == fleet_uid]
+            if siblings:
+                tasks = sorted([*tasks, *siblings], key=lambda row: row["ingest_seq"])
+                assignments = _related(conn, "assignments", "work_item_id",
+                                       [row["work_item_id"] for row in tasks])
         events = _related(conn, "events", "work_item_id", [r["work_item_id"] for r in tasks], task_events=True)
         # Also find malformed events naming one of our assignments but another
         # task, so that a wrong-link terminal cannot silently reopen its parent.
@@ -267,16 +310,41 @@ def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskSnapshot:
         missing = {r["assignment_id"] for r in events if r["assignment_id"]} - known_assignments.keys()
         known_assignments.update((r["assignment_id"], r) for r in
                                  _related(conn, "assignments", "assignment_id", missing))
-        orphan_assignments = _rows(conn, "SELECT a.* FROM assignments a LEFT JOIN work_items w"
-                                   " ON w.work_item_id=a.work_item_id WHERE a.fleet_uid=?"
-                                   " AND w.work_item_id IS NULL", (fleet_uid,))
-        orphan_events = _rows(conn, "SELECT e.* FROM events e LEFT JOIN work_items w"
-                              " ON w.work_item_id=e.work_item_id WHERE e.kind='task'"
-                              " AND e.fleet_uid=? AND w.work_item_id IS NULL", (fleet_uid,))
-        orphan_history = _related(conn, "events", "assignment_id",
-                                  [r["assignment_id"] for r in orphan_assignments], task_events=True)
-        return _reduce(version, fleet_uid, tasks, assignments, known_assignments,
-                       events, orphan_assignments, orphan_events, orphan_history)
+        if selected is not None:
+            # A wrong-link event can name an assignment on another same-fleet
+            # task. Its terminal event decides whether that link still blocks.
+            loaded_ids = {row["work_item_id"] for row in tasks}
+            target_ids = {row["work_item_id"] for row in known_assignments.values()} - loaded_ids
+            target_ids = {row["work_item_id"] for row in
+                          _related(conn, "work_items", "work_item_id", target_ids)
+                          if row["fleet_uid"] == fleet_uid}
+            # A v1 task-level cancellation closes the target's assignments
+            # through their construct rows, even when that task is off-page.
+            # Only wrong-link targets are needed; known_assignments already
+            # fetched those exact rows by indexed assignment ID.
+            assignments.extend(row for row in known_assignments.values()
+                               if row["work_item_id"] in target_ids)
+            events += _related(conn, "events", "work_item_id", target_ids, task_events=True)
+            events = sorted({r["event_id"]: r for r in events}.values(),
+                            key=lambda row: row["ingest_seq"])
+        if selected is None:
+            orphan_assignments = _rows(conn, "SELECT a.* FROM assignments a LEFT JOIN work_items w"
+                                       " ON w.work_item_id=a.work_item_id WHERE a.fleet_uid=?"
+                                       " AND w.work_item_id IS NULL", (fleet_uid,))
+            orphan_events = _rows(conn, "SELECT e.* FROM events e LEFT JOIN work_items w"
+                                  " ON w.work_item_id=e.work_item_id WHERE e.kind='task'"
+                                  " AND e.fleet_uid=? AND w.work_item_id IS NULL", (fleet_uid,))
+            orphan_history = _related(conn, "events", "assignment_id",
+                                      [r["assignment_id"] for r in orphan_assignments], task_events=True)
+        else:
+            orphan_assignments = orphan_events = orphan_history = []
+        result = _reduce(version, fleet_uid, tasks, assignments, known_assignments,
+                         events, orphan_assignments, orphan_events, orphan_history)
+        if selected is None:
+            return result
+        return replace(result,
+                       tasks=tuple(task for task in result.tasks if task.task_id in requested_ids),
+                       issues=tuple(issue for issue in result.issues if issue.task_id in requested_ids))
     finally:
         if own_snapshot:
             conn.rollback()

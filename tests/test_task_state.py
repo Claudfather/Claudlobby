@@ -205,6 +205,7 @@ def test_wrong_task_event_link_cannot_certify_mutation_safety(conn):
     _task(conn, "wi_actual")
     _assignment(conn, "asg_actual", "wi_actual")
     _task(conn, "wi_wrong")
+    _task(conn, "wi_foreign", fleet_uid="fleet_b")
     _event(conn, "wi_wrong", "asg_actual", "failed", emitter="report-back")
     snapshot = read_tasks(conn, fleet_uid="fleet_a")
     assert snapshot.get("wi_actual").state is None
@@ -212,6 +213,36 @@ def test_wrong_task_event_link_cannot_certify_mutation_safety(conn):
     for task in snapshot.tasks:
         with pytest.raises(UnresolvedTaskError, match="mismatched_task_event"):
             task.require_resolved()
+    for tid, aid in (("wi_legacy_live", "asg_legacy_live"),
+                     ("wi_legacy_peer", "asg_legacy_peer"),
+                     ("wi_legacy_closed", "asg_legacy_closed")):
+        _task(conn, tid, emitter="dispatch-task", source_ref="dispatch-log:shared")
+        _assignment(conn, aid, tid, emitter="dispatch-task", source_ref="dispatch-log:shared")
+    _event(conn, "wi_legacy_closed", "asg_legacy_closed", "returned_blocked",
+           emitter="report-back")
+    snapshot = read_tasks(conn, fleet_uid="fleet_a")
+    selected = read_tasks(conn, fleet_uid="fleet_a",
+                          task_ids=["wi_actual", "wi_legacy_live", "wi_foreign", "wi_actual"])
+    wanted = {"wi_actual", "wi_legacy_live"}
+    assert selected.tasks == tuple(task for task in snapshot.tasks if task.task_id in wanted)
+    assert selected.issues == tuple(issue for issue in snapshot.issues if issue.task_id in wanted)
+    assert [event.task_id for event in selected.get("wi_actual").assignments[0].history] == ["wi_wrong"]
+    assert {issue.code for issue in selected.get("wi_legacy_live").blockers} == {
+        "legacy_display_closure_disagreement", "ambiguous_active_display_id"}
+    _task(conn, "wi_selected_link")
+    _assignment(conn, "asg_selected_link", "wi_selected_link")
+    _task(conn, "wi_off_page_owner")
+    _assignment(conn, "asg_off_page_owner", "wi_off_page_owner")
+    _event(conn, "wi_selected_link", "asg_off_page_owner", "accepted")
+    _event(conn, "wi_off_page_owner", None, "cancelled")
+    whole = read_tasks(conn, fleet_uid="fleet_a").get("wi_selected_link")
+    subset = read_tasks(conn, fleet_uid="fleet_a", task_ids=["wi_selected_link"]).get("wi_selected_link")
+    assert subset == whole
+    assert subset.state == "assigned"
+    assert any(issue.code == "mismatched_task_event" and not issue.blocking
+               for issue in subset.issues)
+    empty = read_tasks(conn, fleet_uid="fleet_a", task_ids=[])
+    assert empty.tasks == empty.issues == ()
 
 
 def test_snapshot_is_read_only_keeps_caller_transaction_and_batches_history_queries(conn):

@@ -85,7 +85,7 @@ def test_fleet_axis_is_one_case_sensitive_range_on_every_arm(tmp_path):
     c = TestClient(create_app(tmp_path, package=source_package()))
     fleets = {f["alias"]: f["bots"] for f in c.get("/api/fleets").json()["data"]["fleets"]}
     assert fleets == {"Eng": 2, "eng": 2}
-    tasks = c.get("/api/tasks?fleet=Eng").json()["data"]["assignments"]
+    tasks = c.get("/api/tasks?fleet=Eng").json()["data"]["tasks"]
     assert [a["title"] for a in tasks] == ["work for Eng"]
     rail = c.get("/api/identities?fleet=Eng").json()["data"]["identities"]
     assert {r["alias"] for r in rail if r["alias"].startswith("bot:")} == {
@@ -114,7 +114,7 @@ def test_unknown_fleet_is_a_typed_state_on_every_route(tmp_path):
         assert body["state"] == "unknown", route
         assert "data, engineering" in body["remediation"] and "data" not in body, route
     for axis in ("", "all"):
-        assert len(c.get(f"/api/tasks?fleet={axis}").json()["data"]["assignments"]) == 2
+        assert len(c.get(f"/api/tasks?fleet={axis}").json()["data"]["tasks"]) == 2
         assert c.get(f"/api/presence?fleet={axis}").json()["state"] == "ok"
     # a fleet the SAMPLER knows (a bot dir before its first plane row) is not unknown
     assert c.get("/api/grid?fleet=disk-only").json()["data"]["panes"] == [live[1]]
@@ -128,7 +128,7 @@ def test_unknown_fleet_is_a_typed_state_on_every_route(tmp_path):
                                                      "metric": "host.job_ran",
                                                      "value": 1}}])
     fresh = TestClient(create_app(bare, package=source_package())).get("/api/tasks?fleet=anything").json()
-    assert fresh["state"] == "ok" and fresh["data"]["assignments"] == []
+    assert fresh["state"] == "ok" and fresh["data"]["tasks"] == []
 
 
 # --- identity: the sender's own fleet, and qualification where fleets meet ----

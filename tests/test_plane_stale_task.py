@@ -136,8 +136,9 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
 
 
 def _row(root: Path, asg: str) -> dict:
-    rows = {r["assignment_id"]: r for r in
-            TestClient(create_app(root, package=source_package())).get("/api/tasks").json()["data"]["assignments"]}
+    rows = {a["assignment_id"]: r for r in
+            TestClient(create_app(root, package=source_package())).get("/api/tasks").json()["data"]["tasks"]
+            for a in r["assignment_history"]}
     return rows[asg]
 
 
@@ -163,7 +164,7 @@ def test_fires_for_aged_open_no_progress_with_idle_assignee(tmp_path):
     assert r["attention_reason"] == ["stale_task"]
     assert r["stale_tier"] == "amber"
     # dated from the last activity (the dispatch, no progress since)
-    assert r["attention_since"] == r["occurred_at"]
+    assert r["attention_since"] == r["assignment_history"][0]["occurred_at"]
 
 
 def test_fires_for_a_down_assignee_with_no_heartbeat(tmp_path):
@@ -273,7 +274,7 @@ def test_a_terminal_report_clears_it(tmp_path):
                     terminal="completed")
     r = _row(tmp_path, asg)
     assert r["attention"] is False
-    assert r["status"] == "completed"
+    assert r["state"] == "completed"
 
 
 # --- overdue leads (no double-raise) ------------------------------------------
@@ -312,9 +313,9 @@ def test_tier_is_amber_below_the_red_boundary_and_red_past_it(tmp_path):
     amber = _dispatch(tmp_path, "6a", dispatch_age_h=8, heartbeat="IDLE")
     red = _dispatch(tmp_path, "7a", dispatch_age_h=96, heartbeat="IDLE",
                     worker="bot:f/older")
-    rows = {r["assignment_id"]: r for r in
+    rows = {a["assignment_id"]: r for r in
             TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks")
-            .json()["data"]["assignments"]}
+            .json()["data"]["tasks"] for a in r["assignment_history"]}
     assert rows[amber]["stale_tier"] == "amber"
     assert rows[red]["stale_tier"] == "red"
     assert rows[red]["attention_reason"] == ["stale_task"]
@@ -330,7 +331,7 @@ def test_header_need_you_count_and_rail_include_amber_and_red(tmp_path):
               worker="bot:f/busy")                                         # suppressed
     client = TestClient(create_app(tmp_path, package=source_package()))
     # the rail / board: two attention rows, both stale_task, one of each tier
-    rows = client.get("/api/tasks").json()["data"]["assignments"]
+    rows = client.get("/api/tasks").json()["data"]["tasks"]
     stale = [r for r in rows if "stale_task" in r["attention_reason"]]
     assert {r["stale_tier"] for r in stale} == {"amber", "red"}
     # the header's "need you" total is the SERVER's attention count — it counts
@@ -355,7 +356,7 @@ def test_an_unreachable_plane_fires_no_false_stale_task(tmp_path):
     finally:
         db.chmod(0o600)
     assert body["state"] != "ok"
-    assert not body.get("data", {}).get("assignments")
+    assert not body.get("data", {}).get("tasks")
 
 
 # --- the blocked_waiting arm (chunk U) ----------------------------------------

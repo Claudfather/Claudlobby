@@ -159,51 +159,32 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
 
 ## The attention rail
 
-A card says WHY it needs you and what clears it — the arm that put it in the
-queue (`escalated` / `send_failed` / `never_activated` / `nudged` / `overdue`,
-in the operator's priority order), dated by the server's own instant.
+`/api/tasks` shows one card per canonical fleet-owned Task, including queued
+intake. Its task ID, state, and title come from the Task reducer; a current
+assignment may add a deadline. The current assignment, prior assignments, and
+message delivery evidence are shown separately: assignment or delivery status
+is not task completion. Cards are not grouped by similar prose or dispatch
+time. A queued Task has no current assignee and appears as fleet intake.
 
-Two of those arms are HUMAN acts rather than machine faults (chunk M-A,
-#1481). `escalated` is a manager asking you a question — the card reads
-`needs you: <question> — asked by <manager> 5m ago`, and the task stays OPEN
-while you decide, so nothing is lost by taking your time; answer on Telegram
-and the manager's next act (a re-dispatch, a withdrawal, or the worker's next
-report) clears the card by itself. `nudged` is your own nudge gone
-unanswered for half an hour: `nudged 40m ago by chris, no act yet`. Both hold
-only while they are the assignment's newest task event, so there is no
-"un-escalate" button to remember and none to forget. The doors are
-`lib/task-act.sh` (a manager's `withdraw` / `escalate`), `claudlobby task
-nudge <task-id>` and Telegram; **the page stays read-only** until the
-exposure walk lands a write path with a principal on every request. A card
-whose question reads "not recorded" is a fleet on metadata capture, which
-drops authored prose at the door — the arm and the person still stand. **One note dispatched to N bots is one card**: the rows share no
-id (every send mints its own work item), so `/api/tasks` keys a broadcast by
-what it really shares — sender, the words AS STORED, status, arm, and a
-dispatch instant inside a minute — and the card reads `→ jian-yang, issey,
-damodaran, ramanujan · 4 bots` above the one reason line, dated by its worst
-member. Only rows that still need you join a card, so the recipients listed
-are the ones to chase, not everyone the note reached, and **one row per
-recipient**: a second open dispatch of the same words to the same bot is a
-re-dispatch, not a member, and keeps its own card. Anything the API cannot
-show is one broadcast — a different sender, arm, status or instant, a row
-with no words, or two notes told apart only by a trailing `| ref:…` the card
-does not render — stays its own card.
+The rail shows cards with attention reasons, dated by recorded events or
+deadlines. It can show a manager's escalation, failed or never-activated delivery,
+overdue or stale work, a waiting blocker, or an unanswered nudge. Under metadata
+capture a question may be withheld; the recorded attention reason remains.
+Inspect the canonical Task with `claudlobby --json task show TASK_ID` and, when
+a delivery message exists, its proof with
+`claudlobby --json message receipt MESSAGE_ID`. A manager can explicitly
+withdraw or reassign open work through `claudlobby task withdraw` or
+`claudlobby task reassign`, using each command's required reason and fresh
+request UUID. **The page itself is read-only.**
 
-Two things the counts are NOT. The `attention` badge counts ROWS, not cards,
-so it agrees with the header's "N need you" — a four-bot card is four. And
-every count on this page is **per board window and per room**: `/api/tasks`
-reads the newest 200 assignments of the fleet you are in, so a fleet busier
-than that window, or work sitting in another fleet's room, is outside what
-the rail can count. Use `claudlobby brief --bot <manager>` for the fleet's
-whole open set.
-
-The 60s window is measured, not assumed: on the production plane (2026-09-05)
-the widest real multi-recipient spread was 28s and a six-recipient broadcast
-spread 5–6s, about a second per recipient. It is a constant, not a knob. The
-inference retires entirely the day `lib/dispatch-task.sh` reuses one work
-item across a fan-out — the schema already allows N assignments per work item
-— because then the view groups by `work_item_id` and the window goes with the
-guess.
+The attention badge counts Task cards needing attention, not assignment rows
+or inferred broadcasts. `/api/tasks` selects the newest 200 Tasks in the
+selected fleet room (or across fleets in the host view), so the badge and cards
+describe that displayed window. `truncated` warns that older work may still
+need attention. `issue_count` and the labeled `issues` disclose unresolved
+Task history; at most the first 50 issues are shown, and `issue_scope` says
+whether they cover displayed Tasks or the selected fleet. A zero card count
+does not establish that older work or unresolved history is clear.
 
 ## The grid shows raw terminals — operators only (ruling 2026-08-29)
 

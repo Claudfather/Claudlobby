@@ -48,6 +48,8 @@ from pathlib import Path
 from ..context import resolve_paths
 from ..paths import Paths, load_lib_module
 from ..resources import PackageResources
+from ..task_state import TaskStateError, read_tasks
+from ..task_queries import task_escalations_from_snapshot
 
 try:  # §14: optional UI features degrade without disabling the core ledger
     from fastapi import FastAPI, Request
@@ -63,7 +65,6 @@ from ..source_state import (
     SOURCE_ABSENT,
     SOURCE_OK,
     SOURCE_UNREADABLE,
-    probe_dir,
     probe_source,
 )
 from .daemon import probe_daemon, socket_path
@@ -82,10 +83,8 @@ from .queries import (
     ATTENTION_ARMS_SQL,
     HUMAN_ARMS,
     LATEST_HEARTBEAT_SQL,
-    NON_TERMINAL_CLAUSE,
     NUDGE_STATE_SQL,
     STALE_TASK_RED_S,
-    TASK_STATUS_SQL,
     TERMINAL_TASK_EVENTS,
     OPEN_ASSIGNMENTS_AT_SQL, attention_arms_params, fleet_alias_range,
     fleet_range_params, not_sentinel_sql,
@@ -271,7 +270,7 @@ def _envelope(root: Path, fn):
     except UnknownFleet as exc:
         return {"state": "unknown", "provenance": _provenance(root, conn),
                 "remediation": str(exc)}
-    except (sqlite3.Error, OSError) as exc:
+    except (sqlite3.Error, OSError, TaskStateError) as exc:
         return fail(SOURCE_UNREADABLE,
                     f"query failed: {exc} — schema drift? run"
                     " `claudlobby plane doctor`")
@@ -504,103 +503,6 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
     return {"threads": out}
 
 
-# One note dispatched to N bots is N rows, and the attention rail rendered N
-# identical cards (item 6, #1479). What they share is NOT an id: every send
-# mints its own work item (`dispatch-task.sh`: `plane_mint_id wi` per
-# dispatch), so a work-item join groups nothing a real broadcast produces.
-# What a broadcast does share is the sender, the words AS STORED, the state
-# the row is in, the arm that put it in the queue, the instant it went out
-# and one row per recipient — so that is the key, clustered on the dispatch
-# instant inside a one-minute window.
-#
-# The window is MEASURED, not asserted (fold F2). On the production plane,
-# 2026-09-05: 7 multi-recipient dispatch groups, widest spread 28s, and the
-# six-recipient broadcasts spread 5-6s — about a second per recipient, the
-# per-send cost of the tmux fan-out. 60s therefore covers a 21-bot fleet with
-# margin and is a constant rather than a knob: an operator cannot tell which
-# value would be right, and a knob that is never turned is a second copy of
-# this number for the next reader to reconcile.
-_BROADCAST_WINDOW_S = 60.0
-
-
-def _stamp_broadcasts(rows: list[dict],
-                      raw_title: dict[str, str | None]) -> None:
-    """Stamp `broadcast_key` on the rows that are ONE broadcast.
-
-    Only ATTENTION rows cluster, and that is the semantic the card needs: it
-    lists the recipients that need you, never everyone the note reached (2 of
-    4 still queued must not read "4 bots"). `status` is in the key because the
-    card shows one status pill — a group that disagreed about it would
-    fabricate the pill for some members; the arms are in it because the card
-    shows one reason line. A row with no title cannot be shown to be the same
-    NOTE as another, so it never joins a cluster.
-
-    The words are the work item's RAW title, never the rendered one (fold
-    F3): `body_words` strips a trailing `| key:value`, so two reviews of
-    DIFFERENT pull requests render identical words and grouped — one card
-    naming a PR that half its recipients were never sent (reproduced).
-
-    ONE ROW PER RECIPIENT (fold F1). A broadcast has one row per bot, so
-    within a cluster the FIRST row per assignee is the member and a later
-    row for that same assignee is a RE-DISPATCH — the estate's common case,
-    which rendered "→ issey, issey · 2 bots". It is left unkeyed and renders
-    as its own card, which is what a re-dispatch is. A cluster of one
-    DISTINCT recipient is left unkeyed too, so a single-recipient card
-    renders exactly as it did.
-
-    The window is anchored to the cluster's FIRST row, never to its previous
-    one: chaining would let a slow trickle drift arbitrarily far from the
-    dispatch it claims to be part of. An instant that will not parse opens a
-    new cluster: unprovable is not grouped, which is exactly today's
-    rendering. (It cannot fail to COMPARE — `occurred_at` is an
-    `AwareDatetime` in the envelope contract, so a naive stamp never reaches
-    the db; the guard that caught one was unreachable, fold F8.)
-
-    THE EXIT (fold F7): this whole inference retires the day
-    `lib/dispatch-task.sh` reuses ONE work item across a fan-out — the schema
-    already allows N assignments per work item (`idx_assignments_item` is
-    non-unique) — because then the view groups by `work_item_id`, the door
-    says which rows are one broadcast instead of the view guessing, and the
-    window goes with the guess.
-    """
-    groups: dict[tuple, list[dict]] = {}
-    for r in rows:
-        title = raw_title.get(r["assignment_id"])
-        if not r["attention"] or not title:
-            continue
-        groups.setdefault((r["assigned_by_uid"], title, r["status"],
-                           tuple(r["attention_reason"])), []).append(r)
-    for members in groups.values():
-        if len(members) < 2:
-            continue
-        members.sort(key=lambda r: (r["occurred_at"] or "",
-                                    r["assignment_id"]))
-        cluster: list[dict] = []
-        lead: datetime | None = None
-
-        def _close() -> None:      # a cluster of one RECIPIENT is not one
-            first: dict[str, dict] = {}
-            for m in cluster:
-                first.setdefault(m["assignee_uid"], m)
-            if len(first) < 2:
-                return
-            key = "bc:" + cluster[0]["assignment_id"]
-            for m in first.values():
-                m["broadcast_key"] = key
-
-        for r in members:
-            at = _parse_iso(r["occurred_at"])
-            near = (lead is not None and at is not None
-                    and abs((at - lead).total_seconds())
-                    <= _BROADCAST_WINDOW_S)
-            if near:
-                cluster.append(r)
-            else:
-                _close()
-                cluster, lead = [r], at
-        _close()
-
-
 def _stale_tier(arm, now: str) -> str | None:
     """The freshness TIER of a stale_task row (amber → red by age), off the
     arm's OWN `stale_task_at` — the last-activity instant (dispatch, or newest
@@ -617,105 +519,176 @@ def _stale_tier(arm, now: str) -> str | None:
     return "red" if (ref - since).total_seconds() >= STALE_TASK_RED_S else "amber"
 
 
+def _task_issue(issue) -> dict:
+    return {"code": issue.code, "task_id": issue.task_id,
+            "assignment_id": issue.assignment_id, "event_id": issue.event_id,
+            "blocking": issue.blocking}
+
+
+def _task_event(event, aliases: dict[str, str]) -> dict | None:
+    if event is None:
+        return None
+    return {"event": event.event, "event_id": event.event_id,
+            "occurred_at": event.occurred_at, "actor_uid": event.actor_uid,
+            "actor_alias": aliases.get(event.actor_uid),
+            "assignment_id": event.assignment_id}
+
+
+def _task_assignment(assignment, aliases: dict[str, str], labels: dict[str, str]) -> dict:
+    alias = aliases.get(assignment.assignee_uid)
+    return {"assignment_id": assignment.assignment_id, "state": assignment.state,
+            "assignee_uid": assignment.assignee_uid, "assignee_alias": alias,
+            "assignee_short": labels.get(alias) or _short(alias) or assignment.assignee_uid,
+            "assigned_by_uid": assignment.assigned_by_uid,
+            "assigned_by_alias": aliases.get(assignment.assigned_by_uid),
+            "expected_by": assignment.expected_by, "occurred_at": assignment.occurred_at,
+            "dispatch_message_id": assignment.dispatch_message_id,
+            "terminal_event": _task_event(assignment.terminal_event, aliases)}
+
+
 def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
-    # `fleet` scopes the board to that fleet's ASSIGNEES (U1 — the same axis
-    # every per-fleet route filters on); with no fleet the host-wide board
-    # labels a twin-named assignee `fleet/name` (inventory's one rule).
-    where, params = "", []
-    fleet = _fleet_scope(conn, fleet)
-    if fleet:
-        where = (" WHERE a.assignee_uid IN (SELECT uid FROM identity_registry"
-                 f"  WHERE kind = 'actor' AND {fleet_alias_range()})")
-        params = list(fleet_range_params(fleet))
-    rows = [dict(r) for r in conn.execute(
-        "SELECT a.assignment_id, a.work_item_id, a.assignee_uid,"
-        " a.assigned_by_uid, a.expected_by, a.occurred_at, w.title,"
-        " (SELECT alias FROM identity_registry i"
-        "   WHERE i.uid = a.assignee_uid) AS assignee_alias"
-        " FROM assignments a LEFT JOIN work_items w"
-        "   ON w.work_item_id = a.work_item_id"
-        f"{where} ORDER BY a.ingest_seq DESC LIMIT 200", params)]
-    if not rows:
-        return {"assignments": [], "attention_count": 0}
-    labels = ({} if fleet
-              else qualified_labels(r["assignee_alias"] for r in rows))
-    # Derive status/attention for the DISPLAYED ids only (gauntlet,
-    # measured 20x): the unrestricted derivations walked every assignment
-    # ever to render 200. The restriction is APPENDED so queries.py stays
-    # the one definition; output verified byte-identical.
-    ids = [r["assignment_id"] for r in rows]
-    ph = ",".join("?" * len(ids))
-    # status AND the instant it ended, from ONE row (chunk L fold, #1479):
-    # `terminal_at` is the occurred_at of the same first-terminal event
-    # TASK_STATUS_SQL names as the status, so a finished card reads
-    # "completed 1m ago" instead of a deadline it no longer has — and can
-    # never read one event's name over another's instant, which a separate
-    # MIN(occurred_at) did.
-    status = {r["assignment_id"]: (r["status"], r["terminal_at"])
-              for r in conn.execute(
-                  TASK_STATUS_SQL + f" WHERE a.assignment_id IN ({ph})", ids)}
-    now = _now_iso()
-    # WHY a row needs attention — the queue's OWN arms, stamped by the query
-    # that selected the row (ATTENTION_ARMS_SQL is ATTENTION_SQL plus one
-    # column per arm, both built from `queries.ATTENTION_ARMS`): the card says
-    # "send failed 12h ago" / "queued 12h ago, never delivered" / "overdue 2h"
-    # instead of a bare flag, and nothing here re-derives an arm in Python.
-    arms = {r["assignment_id"]: r for r in conn.execute(
-        ATTENTION_ARMS_SQL + f" AND a.assignment_id IN ({ph})",
-        (*attention_arms_params(now), *ids))}
-    # ...and the row's OUTSTANDING NUDGE, grace or no grace (fold F11). The
-    # arm above fires only once the grace has passed; a nudge made two minutes
-    # ago is the single most useful thing the card can say about the row in
-    # those thirty minutes, and it is not an alarm — so it rides its own
-    # columns and the card renders it as information.
-    nudges = {r["assignment_id"]: r for r in conn.execute(
-        NUDGE_STATE_SQL + f" AND a.assignment_id IN ({ph})", ids)}
-    # the RAW titles, before the render form replaces them: the broadcast key
-    # is keyed on what was STORED (fold F3 — `body_words` strips the trailing
-    # `| ref:…` that is the only thing telling two reviews apart)
-    raw_titles = {r["assignment_id"]: r["title"] for r in rows}
-    for r in rows:
-        r["title"] = body_words(r["title"])
-        r["assignee_short"] = (labels.get(r["assignee_alias"])
-                               or _short(r["assignee_alias"]))
-        st, terminal_at = status.get(r["assignment_id"],
-                                     ("created_not_sent", None))
-        r["status"] = st
-        r["terminal_at"] = terminal_at
-        arm = arms.get(r["assignment_id"])
-        r["attention"] = arm is not None
-        # the arms in the operator's priority order
-        reasons = [name for name, _s, _a, _w in ATTENTION_ARMS if arm and arm[name]]
-        # the PRIMARY arm dates the card, and EVERY arm carries its own date
-        # (fold F12): the send arms the dispatch, the deadline arm the
-        # deadline, the human arms the instant the human acted. One lookup,
-        # because a ladder here is a place a new arm can arrive undated.
-        since = arm[reasons[0] + "_at"] if reasons else None
-        r["attention_reason"] = reasons
-        r["attention_since"] = since
-        # the stale_task freshness tier (amber|red), off the arm's own since —
-        # the card renders "held 6h" soft vs a loud "held 3d" (chunk T)
-        r["stale_tier"] = _stale_tier(arm, now)
-        # WHAT the human said, WHO said it and WHY — off the LEADING arm's own
-        # columns (fold F10), which is both a scope and a source fix. One
-        # shared `arm_*` set read the row's newest task event whatever arm
-        # won, so an overdue row carrying an in-grace nudge reported
-        # `attention_by` beside a reason line naming no person, and an
-        # escalation followed by a nudge quoted the NUDGE's words as the
-        # question. Each human arm now carries its own, read in its own
-        # window. Nothing is lost by the narrowing: a nudge that is not the
-        # leading arm rides `nudged_by` below, where it is true.
-        lead = reasons[0] if reasons and reasons[0] in HUMAN_ARMS else None
-        r["attention_question"] = arm[f"{lead}_question"] if lead else None
-        r["attention_by"] = arm[f"{lead}_by"] if lead else None
-        r["attention_act_reason"] = arm[f"{lead}_reason"] if lead else None
-        nudge = nudges.get(r["assignment_id"])
-        r["nudged_at"] = nudge["nudged_at"] if nudge else None
-        r["nudged_by"] = nudge["nudged_by"] if nudge else None
-        r["broadcast_key"] = None
-    _stamp_broadcasts(rows, raw_titles)
-    return {"assignments": rows,
-            "attention_count": sum(1 for r in rows if r["attention"])}
+    """Recent fleet-owned Tasks, with current-assignment evidence kept separate.
+
+    The work-item query enforces the 200-card cap before any board projection;
+    the existing Task reducer then supplies lifecycle for only those IDs. An
+    empty slice still audits the selected fleet for orphan task history.
+    """
+    own_snapshot = not conn.in_transaction
+    if own_snapshot:
+        conn.execute("BEGIN")
+    try:
+        fleet = _fleet_scope(conn, fleet)
+        fleet_names = {row[0]: row[1] for row in conn.execute(
+            "SELECT uid, alias FROM identity_registry WHERE kind='fleet'")}
+        selected_uid = next((uid for uid, name in fleet_names.items() if name == fleet), None)
+        if fleet is not None and selected_uid is None:
+            return {"tasks": [], "attention_count": 0, "issues": [],
+                    "issue_count": 0, "issue_limit": 50, "issue_scope": "fleet",
+                    "limit": 200, "truncated": False}
+        where = " WHERE fleet_uid=?" if selected_uid else ""
+        candidates = conn.execute(
+            "SELECT work_item_id, fleet_uid FROM work_items" + where
+            + " ORDER BY ingest_seq DESC LIMIT 201",
+            (selected_uid,) if selected_uid else ()).fetchall()
+        truncated = len(candidates) > 200
+        candidates = candidates[:200]
+        selected = {row[0] for row in candidates}
+        reducer_fleets = {row[1] for row in candidates if row[1]}
+        if not reducer_fleets and selected_uid:
+            reducer_fleets.add(selected_uid)
+        if not reducer_fleets and fleet is None:
+            reducer_fleets.update(fleet_names)
+        snapshots = {uid: read_tasks(conn, fleet_uid=uid,
+                                    task_ids=tuple(row[0] for row in candidates if row[1] == uid)
+                                    if candidates else None)
+                     for uid in reducer_fleets}
+        escalations = {item.task_id: item for snapshot in snapshots.values()
+                       for item in task_escalations_from_snapshot(snapshot).items}
+        tasks = [task for snapshot in snapshots.values() for task in snapshot.tasks
+                 if task.task_id in selected]
+        by_id = {task.task_id: task for task in tasks}
+        issues = [issue for snapshot in snapshots.values() for issue in snapshot.issues]
+        for task_id, uid in candidates:
+            if uid is None or task_id not in by_id:
+                issues.append({"code": "unresolved_task", "task_id": task_id,
+                               "assignment_id": None, "event_id": None, "blocking": True})
+        actor_ids = {task.created_by_uid for task in tasks}
+        actor_ids.update(event.actor_uid for task in tasks for event in task.history
+                         if event.actor_uid)
+        actor_ids.update(uid for task in tasks for assignment in task.assignments
+                         for uid in (assignment.assignee_uid, assignment.assigned_by_uid))
+        aliases = {}
+        actor_ids = sorted(actor_ids)
+        for start in range(0, len(actor_ids), 400):
+            batch = actor_ids[start:start + 400]
+            aliases.update(conn.execute(
+                "SELECT uid, alias FROM identity_registry WHERE uid IN ("
+                + ",".join("?" * len(batch)) + ")", batch).fetchall())
+        labels = ({} if fleet else qualified_labels(
+            aliases.get(task.current_assignment.assignee_uid)
+            for task in tasks if task.current_assignment))
+        current = {task.current_assignment.assignment_id: task
+                   for task in tasks if task.open and task.current_assignment and not task.blockers}
+        ids = list(current)
+        arms = {}
+        nudges = {}
+        delivery = {}
+        if ids:
+            ph = ",".join("?" * len(ids))
+            now = _now_iso()
+            arms = {row["assignment_id"]: row for row in conn.execute(
+                ATTENTION_ARMS_SQL + f" AND a.assignment_id IN ({ph})",
+                (*attention_arms_params(now), *ids))}
+            nudges = {row["assignment_id"]: row for row in conn.execute(
+                NUDGE_STATE_SQL + f" AND a.assignment_id IN ({ph})", ids)}
+            msg_ids = [task.current_assignment.dispatch_message_id for task in current.values()
+                       if task.current_assignment.dispatch_message_id]
+            if msg_ids:
+                delivery = {row["msg_id"]: row["delivery"] for row in conn.execute(
+                    DELIVERY_STATUS_SQL.format(ph=",".join("?" * len(msg_ids))), msg_ids)}
+        cards = []
+        for task_id, _uid in candidates:
+            task = by_id.get(task_id)
+            if task is None:
+                cards.append({"task_id": task_id, "state": None, "resolved": False,
+                              "issues": [{"code": "unresolved_task", "blocking": True}],
+                              "attention": True, "attention_reason": [],
+                              "current_assignment": None})
+                continue
+            assignment = task.current_assignment if task.open else None
+            aid = assignment.assignment_id if assignment else None
+            arm = arms.get(aid)
+            escalation = escalations.get(task_id)
+            reasons = (["escalated"] if escalation else []) + [
+                name for name, _s, _a, _w in ATTENTION_ARMS
+                if name != "escalated" and arm and arm[name]]
+            lead = reasons[0] if reasons and reasons[0] in HUMAN_ARMS else None
+            nudge = nudges.get(aid)
+            card = {
+                "task_id": task.task_id, "fleet_uid": task.fleet_uid,
+                "fleet": fleet_names.get(task.fleet_uid), "title": body_words(task.title),
+                "state": task.state, "created_at": task.occurred_at,
+                "created_by_uid": task.created_by_uid,
+                "created_by_alias": aliases.get(task.created_by_uid),
+                "repo": task.repo, "project_key": task.project_key,
+                "workstream_id": task.workstream_id,
+                "current_assignment": (_task_assignment(assignment, aliases, labels)
+                                       if assignment else None),
+                "assignment_count": len(task.assignments),
+                "assignment_history": [_task_assignment(a, aliases, labels)
+                                       for a in task.assignments[-5:]],
+                "last_event": _task_event(max(task.history, key=lambda e: e.ingest_seq)
+                                          if task.history else None, aliases),
+                "terminal_event": _task_event(task.terminal_event, aliases),
+                "issues": [_task_issue(issue) for issue in task.issues],
+                "resolved": not task.blockers,
+                "delivery": ({"message_id": assignment.dispatch_message_id,
+                              "integrity": delivery.get(assignment.dispatch_message_id)}
+                             if assignment and assignment.dispatch_message_id else None),
+                "attention": bool(reasons) or bool(task.blockers),
+                "attention_reason": reasons,
+                "attention_since": (escalation.occurred_at if escalation else
+                                    arm[reasons[0] + "_at"] if reasons else None),
+                "attention_question": (escalation.question if escalation else
+                                       arm[f"{lead}_question"] if lead else None),
+                "attention_by": (escalation.by if escalation else
+                                 arm[f"{lead}_by"] if lead else None),
+                "attention_act_reason": arm[f"{lead}_reason"] if lead and not escalation else None,
+                "stale_tier": _stale_tier(arm, now) if arm else None,
+                "nudged_at": nudge["nudged_at"] if nudge else None,
+                "nudged_by": nudge["nudged_by"] if nudge else None,
+            }
+            cards.append(card)
+        rendered_issues = [(_task_issue(issue) if not isinstance(issue, dict) else issue)
+                           for issue in issues]
+        return {"tasks": cards, "attention_count": sum(bool(card["attention"]) for card in cards),
+                "issues": rendered_issues[:50], "issue_count": len(rendered_issues),
+                "issue_limit": 50, "issues_truncated": len(rendered_issues) > 50,
+                "issue_scope": "displayed_tasks" if candidates else "fleet",
+                "limit": 200, "truncated": truncated}
+    finally:
+        if own_snapshot:
+            conn.rollback()
 
 
 # The rail renders PARTICIPANTS. The 2b registry scan mints an identity

@@ -174,7 +174,11 @@ def list_task_escalations(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskEs
     raise and any post-closure stale event cannot hold current attention.
     """
     _scope(fleet_uid)
-    snapshot = read_tasks(conn, fleet_uid=fleet_uid)
+    return task_escalations_from_snapshot(read_tasks(conn, fleet_uid=fleet_uid))
+
+
+def task_escalations_from_snapshot(snapshot: TaskSnapshot) -> TaskEscalations:
+    """Project current raises from a caller's already selected task snapshot."""
     rows = []
     for task in snapshot.tasks:
         if not task.open or task.blockers:
@@ -206,7 +210,7 @@ def list_task_escalations(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskEs
             newest.occurred_at, by if isinstance(by, str) else None,
             question if isinstance(question, str) else None)))
     items = tuple(row for _, row in sorted(rows, key=lambda pair: (pair[0], pair[1].task_id)))
-    return TaskEscalations(snapshot.schema_version, fleet_uid, items, snapshot.issues)
+    return TaskEscalations(snapshot.schema_version, snapshot.fleet_uid, items, snapshot.issues)
 
 
 def _reference_candidates(snapshot: TaskSnapshot, reference: str, kind: str):
