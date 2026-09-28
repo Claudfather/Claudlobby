@@ -487,7 +487,10 @@ here — tracked as #1732.
 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
 2. Runs `claudlobby generate` to completion — re-links composed skill symlinks.
-3. Drops `data/.reload-pending` on every **running** bot. It does not send any keystroke itself.
+3. Runs `lib/setup-fleet --jobs-only` (#1633), non-fatally, so a job this generate composed is enrolled the same day. On launchd it never boots out the job that is running it — reload-fleet's own (#1924): booting that job out stops the run, so an unchanged plist is left loaded, and a changed one is left untouched for the next `setup-fleet` run from a shell, which the log says (`DEFERRED`).
+4. Drops `data/.reload-pending` on every **running** bot. It does not send any keystroke itself.
+
+Every step is announced in `state/reload-fleet.log` before it runs (`reload-fleet[<fleet>] pid N step: …`), and its output streams there as it runs. A run killed or aborted mid-step raises `reload_failed` naming the step: at once on SIGTERM, SIGINT or SIGHUP, from its EXIT trap, and at the next run for a SIGKILL, which runs no trap (each run keeps a record under `state/reload-fleet.inflight/` until it ends).
 
 Activation is consolidated in `lib/keepalive.sh`: on its next idle-classification tick (each watchdog pass), if `data/.reload-pending` exists, keepalive sends `/reload-plugins` then `/reload-skills` and clears the marker. A bot mid-task is never interrupted by *this* path, and there's no separate broadcaster racing the idle check. Convergence lag is bounded by the keepalive tick interval (on the order of a minute), which is immaterial for a daily reload.
 

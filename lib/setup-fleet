@@ -112,12 +112,23 @@ enroll_jobs() {
         fi
         # TIMER_DIR + SERVICE_PREFIX per invocation: one call shape for
         # overlay and root mode (matches setup-system's host-jobs idiom).
-        if TIMER_DIR="$TIMERS_DIR" SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname"; then
-            log "✓ job enrolled: $base"
-        else
-            log "○ job enrollment FAILED: $base (re-run converges)"
-            FAILURES=$((FAILURES + 1))
-        fi
+        local erc=0
+        TIMER_DIR="$TIMERS_DIR" SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname" || erc=$?
+        case "$erc" in
+            0) log "✓ job enrolled: $base" ;;
+            4)
+                # The launchd enroller refused to stop the job running this
+                # very pass (#1924) -- reload-fleet, which calls --jobs-only
+                # nightly -- and that job's composed plist changed. A re-run
+                # from inside it defers again; a run from a shell applies it.
+                log "○ job re-enroll DEFERRED: $base is running this enrollment and its plist changed — apply it with lib/setup-fleet${FLEET:+ $FLEET} --jobs-only from a shell"
+                FAILURES=$((FAILURES + 1))
+                ;;
+            *)
+                log "○ job enrollment FAILED: $base (re-run converges)"
+                FAILURES=$((FAILURES + 1))
+                ;;
+        esac
     done
     [ "$found" = 1 ] || log "no $SERVICE_PREFIX.*.$ext units in $TIMERS_DIR"
 }

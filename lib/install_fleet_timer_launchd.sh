@@ -18,6 +18,11 @@
 #                     (default: <service_prefix>.<timer-name>)
 #   SERVICE_PREFIX  — prefix for the default UNIT_NAME
 #                     (default: derived from the fleet's first bot.conf)
+#
+# Exit: 0 installed + loaded, or already current | 1 failed | 2 usage |
+#   3 refused: another root owns the installed plist (see --adopt) |
+#   4 deferred: the job is running this enrollment and its composed plist
+#     changed, so nothing was touched (svc_enroll_agent, lib/supervisor.sh)
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -74,11 +79,10 @@ else
     guard_unit_capture "$PLIST" "$ENROLLING_ROOT" "$LABEL" || exit $?
 fi
 
-cp "$SRC_PLIST" "$PLIST"
-
-UID_NUM="$(id -u)"
-/bin/launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
-/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST"
-echo "installed + loaded: $LABEL"
+# Copy + (re)load through the adapter, which never stops a job that is
+# running this very enrollment: the nightly reload-fleet enrolls every fleet
+# job, its own included, and the bootout of its own label used to kill the run
+# before the bootstrap after it (#1924). Exit 4 then, with nothing changed.
+svc_enroll_agent "$LABEL" "$SRC_PLIST" || exit $?
 echo "plist:  $PLIST (source: $SRC_PLIST)"
-echo "status: launchctl print gui/$UID_NUM/$LABEL | grep state"
+echo "status: launchctl print gui/$(id -u)/$LABEL | grep state"

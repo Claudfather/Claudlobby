@@ -6,7 +6,9 @@ The gap this module marks, measured rather than assumed:
     all**.
   * `lib/install_fleet_timer_launchd.sh` is named by exactly one assertion
     (`test_setup_system.py:103`), which checks that the STRING appears in
-    another file's text. Nothing runs it.
+    another file's text. Nothing runs it. (Since #1924,
+    `test_reload_fleet_self_bootout.py` runs it end to end against a fake
+    `launchctl`.)
   * Corrupting `compose_launchd_plist` outright fails only 3 of 2268 tests, all
     of them composition assertions — a `.plist` is just text, so those run
     anywhere and are not evidence about launchd.
