@@ -47,19 +47,6 @@ ATTEMPT_STATES = (
     # A tmux/pane fact (see _CARRIER_ONLY_STATES).
     "received",
 )
-#: Who the reporter was TO THE PR they are citing (#1666). A CLOSED vocabulary
-#: rather than free text, and the closure is the point: the consumer of this
-#: field decides whether a bot may merge, so an unrecognised value must be a
-#: refusal at the door rather than a string nobody can classify later.
-#:
-#: **There is deliberately no "unknown" member.** Absent (None) IS the third
-#: state, and it has to stay distinguishable from `reviewed`: 19% of in-epoch
-#: PRs have no citing report at all, and rung 1 must REFUSE for those rather
-#: than read "no role recorded" as "not an author" and pass. A member spelled
-#: `unknown` would invite a writer to record one, which converts an absence the
-#: consumer can refuse on into a value it might accept.
-PR_ROLES = ("authored", "reviewed")
-
 #: How a report's task link was resolved (#1710). A STRING ENUM rather than a
 #: boolean `auto_resolved`, deliberately: absent must stay distinguishable from
 #: "not auto-resolved", and a boolean collapses those two under any falsy test a
@@ -171,7 +158,7 @@ FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission",
 # Field policy lives in plane/registries.py (the design's stated home) and is
 # imported here so validators ENFORCE from it — one SSOT, no duplicated caps
 # (round-5 F8: descriptive-only policy meant editing a cap changed nothing).
-from .registries import CONTENT_FIELDS, FIELD_POLICY  # noqa: E402  (re-export)
+from .registries import CONTENT_FIELDS, FIELD_POLICY, PR_ROLES  # noqa: E402  (re-export)
 
 # BODY_CAP_BYTES retired (round-6): caps are read from FIELD_POLICY at call time.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")

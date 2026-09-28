@@ -8,6 +8,19 @@ SYSTEM_EVENT_TYPES and METRIC_NAMES join in Phase 2b.
 
 from __future__ import annotations
 
+#: Who the reporter was TO THE PR they are citing (#1666). A CLOSED vocabulary
+#: rather than free text, and the closure is the point: the consumer of this
+#: field decides whether a bot may merge, so an unrecognised value must be a
+#: refusal at the door rather than a string nobody can classify later.
+#:
+#: **There is deliberately no "unknown" member.** Absent (None) IS the third
+#: state, and it has to stay distinguishable from `reviewed`: 19% of in-epoch
+#: PRs have no citing report at all, and rung 1 must REFUSE for those rather
+#: than read "no role recorded" as "not an author" and pass. A member spelled
+#: `unknown` would invite a writer to record one, which converts an absence the
+#: consumer can refuse on into a value it might accept.
+PR_ROLES = ("authored", "reviewed")
+
 # (family, field) -> {class: CONTENT|SENSITIVE|DIAGNOSTIC|METADATA,
 #                     cap: bytes, proof: keep sha/bytes triple on drop}
 FIELD_POLICY: dict[tuple[str, str], dict] = {
