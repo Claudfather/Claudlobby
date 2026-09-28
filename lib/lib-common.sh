@@ -276,7 +276,7 @@ fleet_claude_path() {
     case "$c" in
         */*) p="$c" ;;
         # type -P: a PATH search only, where command -v would answer a function's bare name.
-        *) p="$(PATH="${1:-$(fleet_launch_path)}" type -P "$c" 2>/dev/null)" || p="" ;;
+        *) p="$(PATH="${1:-$(fleet_launch_path)}" type -P "$c" 2>/dev/null || true)" ;;
     esac
     printf '%s' "$p"
 }

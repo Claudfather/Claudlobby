@@ -396,6 +396,13 @@ def _inside(path: str, vault: str) -> bool:
 
 def decide(command: str, vault: str, cwd: str | None) -> tuple[str, str]:
     """Return (verdict, detail). verdict is allow | deny | unresolved."""
+    # The hook passes the configured spelling. Resolve it here alongside all
+    # target paths so symlinks and missing final components have the same
+    # semantics on GNU and BSD hosts (without a GNU-only realpath -m fork).
+    canonical_vault = _resolve(vault, None)
+    if canonical_vault is None:
+        return "unresolved", "configured vault path cannot be resolved"
+    vault = canonical_vault
     tokens = _shell_words(command)
 
     last_cd: str | None = None

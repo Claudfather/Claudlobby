@@ -78,6 +78,19 @@ class TestTheHookEndToEnd:
         assert _decision(out) == "deny"
         assert "claudron sync" in out and "projects/" in out
 
+    def test_symlinked_vault_configuration_keeps_the_scope_boundary(self, tree, tmp_path):
+        vault, proj = tree
+        alias = tmp_path / "vault-alias"
+        alias.symlink_to(vault, target_is_directory=True)
+        payload = {"tool_name": "Bash", "cwd": vault,
+                   "tool_input": {"command": "git checkout -b x"}}
+        rc, out = _run(payload, str(alias))
+        assert rc == 0 and _decision(out) == "deny"
+
+        payload["cwd"] = proj
+        rc, out = _run(payload, str(alias))
+        assert rc == 0 and _decision(out) is None
+
     def test_the_same_command_in_a_projects_checkout_is_allowed(self, tree):
         """The twin. A guard that denied this would break every bot's own work."""
         vault, proj = tree
