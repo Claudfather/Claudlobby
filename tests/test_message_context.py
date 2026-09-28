@@ -188,7 +188,7 @@ def test_unknown_or_foreign_target_bad_origin_and_package_skew_refuse(selected, 
     monkeypatch.delenv("BOT_NAME")
     monkeypatch.delenv("BOT_DIR")
     monkeypatch.delenv("FLEET_ROOT")
-    with pytest.raises(MessageContextError, match="generated bot origin"):
+    with pytest.raises(MessageContextError, match="local human messaging requires a bound selected caller"):
         resolve_message_route("worker", package=package)
     monkeypatch.setenv("BOT_ID", "manager")
     with pytest.raises(state.ActivationError, match="executing package differ"):
