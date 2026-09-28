@@ -22,6 +22,8 @@ The two properties the whole chunk rests on:
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import shutil
 from pathlib import Path
 
@@ -91,6 +93,7 @@ def _seed_row(root, *, task_id, bot="ramanujan", mgr="erlich", fleet=F,
                "assignee": f"bot:{fleet}/{bot}", "assigned_by": f"bot:{fleet}/{mgr}"}
     if expected_by:
         payload["expected_by"] = expected_by
+    initialize_plane(root)
     emit_batch(root, [
         {**base, "event_type": "work_item",
          "payload": {"work_item_id": wi, "title": title,
@@ -102,6 +105,7 @@ def _seed_row(root, *, task_id, bot="ramanujan", mgr="erlich", fleet=F,
 
 def _seed_task_event(root, *, task_id, event, at, fleet=F, actor="bot:x/y", **detail):
     stem = _stem(task_id)
+    initialize_plane(root)
     emit_batch(root, [{
         "event_type": "task", "emitter": "t", "fleet": fleet,
         "source_ref": f"dispatch-log:{task_id}", "occurred_at": at,
@@ -388,6 +392,7 @@ def test_a_redispatched_id_with_one_terminal_report_is_not_due(tmp_path, sent):
     called finished)."""
     worker = f"bot:{F}/ramanujan"
     mgr = f"bot:{F}/erlich"
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "t", "fleet": F,
          "source_ref": "dispatch-log:t-redispatch",

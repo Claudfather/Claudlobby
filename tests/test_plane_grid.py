@@ -9,6 +9,8 @@ flat, nested, and root-mode layouts.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import asyncio
 import json
 from pathlib import Path
@@ -142,6 +144,7 @@ def _seed_two_fleets(root: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "capture.json").write_text('{"*": "full"}')
     for fleet, h in (("engineering", "a"), ("data", "b")):
+        initialize_plane(root)
         emit_batch(root, [{
             "event_type": "communication", "emitter": "t", "fleet": fleet,
             "payload": {"msg_id": "msg_" + h * 32,
@@ -299,6 +302,7 @@ def test_room_shows_cross_fleet_threads_from_both_sides(tmp_path):
     (d / "capture.json").write_text('{"*": "full"}')
     wi = "wi_" + "e" * 32
     # eng -> data dispatch, and the data -> eng reply
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
          "payload": {"work_item_id": wi, "title": "cross", "created_by":
@@ -512,6 +516,7 @@ def test_presence_fleet_filter_scopes_both_halves(tmp_path):
              "payload": {"subject_kind": "bot_instance", "subject": alias,
                          "metric": "bot.heartbeat",
                          "value": {"state": "BUSY", "marker_age_s": 3}}}]
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, rows)
 
     class _Sampler:
@@ -560,6 +565,7 @@ def test_overview_presence_is_each_rooms_not_the_hosts(tmp_path):
              "payload": {"subject_kind": "bot_instance", "subject": alias,
                          "metric": "bot.heartbeat",
                          "value": {"state": state, "marker_age_s": 3}}})
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, rows)
 
     class _Sampler:

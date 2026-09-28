@@ -8,6 +8,8 @@ nothing; the launcher self-gates; the composer stamps the arming flag.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +42,7 @@ def _root(tmp_path):
 def _dispatch(root, n, *, expected_by):
     """work_item + assignment — the 6b fixture shape."""
     wi, aid = f"wi_{n:0>32}", f"asg_{n:0>32}"   # ID_PATTERNS: asg_ + 32 hex
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": F,
          "payload": {"work_item_id": wi, "title": "t",

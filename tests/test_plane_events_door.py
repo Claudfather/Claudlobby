@@ -20,6 +20,8 @@ exists to record); the `--declared` lookups and the flag loops went with it.
 """
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import os
 import shutil
@@ -57,6 +59,7 @@ def _land(root, bot, etype, ts, data=None, *, source="pulse", provenance=True):
           **({"source_ref": f"fleet-events:sha:{_N[0]:0>32x}"} if provenance else {}),
           "payload": {"event": etype, "subject_kind": kind, "subject": subj,
                       "data": {"source": source, "legacy_ts": ts, "data": data or {}}}}
+    initialize_plane(root)
     out = emit_batch(root, [ev])
     assert out[0].status == "committed", out
     return out[0].event_id

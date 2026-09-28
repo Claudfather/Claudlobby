@@ -11,6 +11,8 @@ call sites are pinned by shape; their live behaviour is the Mini canary.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import os
 import re
@@ -33,6 +35,7 @@ def _root(tmp_path):
 
 def _dispatch(root, n, task_id, bot="w1"):
     wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F,
          "source_ref": f"dispatch-log:{task_id}",
@@ -87,6 +90,7 @@ def test_two_field_output_for_an_assignment_without_a_dispatch_msg_id(tmp_path):
     msg id. The parse+guard lines are extracted from the shipped script."""
     root = _root(tmp_path)
     wi, asg = f"wi_{'c':0>32}", f"asg_{'c':0>32}"
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F,
          "source_ref": "dispatch-log:t-2-cccc",

@@ -37,7 +37,8 @@ from claudlobby.plane.daemon import (
 )
 from claudlobby.plane.db import connect, db_file, db_path
 from claudlobby.plane.ids import ensure_host_uid, mint_event_id
-from claudlobby.plane.migrations import migrate
+from claudlobby.plane.schema_state import PendingMigrationError
+from tests.plane_setup import initialize_plane
 from claudlobby.plane.spool import spool_dir, spool_write
 
 
@@ -72,6 +73,7 @@ def running(tmp_path: Path, scratch_plane_env):
     Capture is armed FULL so round-trip content is assertable — and its being
     honored at all is itself the transport-never-changes-semantics check
     (an unarmed root drops bodies at the door exactly like the CLI)."""
+    initialize_plane(tmp_path)
     cap = tmp_path / "state" / "plane"
     cap.mkdir(parents=True, exist_ok=True)
     (cap / "capture.json").write_text('{"*": "full"}')
@@ -241,6 +243,7 @@ def test_a_slow_checkpoint_does_not_delay_the_reply(running, monkeypatch):
 
 
 def test_stale_socket_is_recovered(tmp_path: Path):
+    initialize_plane(tmp_path)
     sdir = _short_sock_dir()
     sock = sdir / "s"
     dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -283,6 +286,7 @@ def test_deep_root_whose_public_path_fits_still_binds(tmp_path: Path):
     """Regression: the hidden rename-in name must not push a public path
     that FITS sun_path over the limit — macOS TMPDIR roots did exactly
     that (public 94 bytes, verbose tmp suffix ~120)."""
+    initialize_plane(tmp_path)
     deep = Path("/tmp/claude") / ("d" * (86 - len("/tmp/claude/") - len("/s")))
     deep.mkdir(parents=True, exist_ok=True)
     sock = deep / "s"
@@ -304,6 +308,7 @@ def test_deep_root_whose_public_path_fits_still_binds(tmp_path: Path):
 
 
 def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path, *, scratch_plane_env):
+    initialize_plane(tmp_path)
     eid = mint_event_id()
     fin = {**_comm("8"), "event_id": eid,
            "occurred_at": "2026-08-24T00:00:00+00:00",
@@ -331,12 +336,11 @@ def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path, *, scratch_pla
         # by-feel poll bound #1602 removed; what moved is the PREDICATE, which
         # is now the assertion itself. A daemon that claims and never commits
         # still fails this test, and fails it at the same 10s.
-        # The predicate has to cover EVERY pre-commit state, and there are two
-        # of them -- the daemon creates the schema and then commits into it.
-        # Polling the spool file hid that by reading the db exactly once, late;
-        # reading it in a loop from the start meets a db with no `communications`
-        # table at all. An OperationalError here is "not yet", not a failure:
-        # the only failure is still having nothing to assert at the deadline.
+        # The fixture already applied the schema; only a committed row proves
+        # the daemon completed its startup drain.
+        # Poll the committed row, not the earlier disappearance of the claimed
+        # spool file. A transient SQLite error is "not yet"; the assertion is
+        # still required at the deadline.
         deadline = time.time() + 10
         n = drained = 0
         while True:
@@ -379,6 +383,7 @@ def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path, *, scratch_pla
 
 
 def test_lifecycle_events_recorded(tmp_path: Path, *, scratch_plane_env):
+    initialize_plane(tmp_path)
     sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
@@ -414,6 +419,7 @@ def test_opted_out_root_drops_body_with_proof_triple(tmp_path: Path, *, scratch_
     is `test_unconfigured_root_keeps_the_body_through_the_daemon` below; since
     2026-09-20 the shipped default is `full`, so an unconfigured root no longer
     exercises the stripper at all.)"""
+    initialize_plane(tmp_path)
     (tmp_path / "state" / "plane").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "metadata"}')
     sdir = scratch_plane_env.socket_dir()
@@ -446,6 +452,7 @@ def test_opted_out_root_drops_body_with_proof_triple(tmp_path: Path, *, scratch_
 def test_unconfigured_root_keeps_the_body_through_the_daemon(tmp_path: Path, *, scratch_plane_env):
     """The other half of the same property: with no capture.json the daemon
     stores the body, exactly as the CLI does under the shipped default."""
+    initialize_plane(tmp_path)
     sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
@@ -486,6 +493,8 @@ def test_two_daemons_racing_one_socket_yield_exactly_one_server(tmp_path: Path):
     sock = sdir / "s"
     r2 = tmp_path / "other-root"
     r2.mkdir()
+    initialize_plane(tmp_path)
+    initialize_plane(r2)
     d1 = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     d2 = PlaneDaemon(r2, socket_override=sock, drain_interval=9999)
     outcomes: dict[str, str] = {}
@@ -541,6 +550,7 @@ def test_shutdown_never_unlinks_a_replaced_socket(running):
 
 def test_override_parent_is_never_chmodded(tmp_path: Path):
     """PR-#1345 review F7: --socket must not mutate an operator directory."""
+    initialize_plane(tmp_path)
     sdir = _short_sock_dir()
     os.chmod(sdir, 0o755)
     sock = sdir / "s"
@@ -578,6 +588,7 @@ def test_missing_override_parent_refuses(tmp_path: Path):
 def test_failed_drain_advances_the_deadline(tmp_path: Path, monkeypatch):
     """PR-#1345 review F9: a broken db retried once per accept tick (~1s)
     forever; the deadline now advances at ATTEMPT."""
+    initialize_plane(tmp_path)
     from claudlobby.plane import daemon as daemon_mod
 
     calls = []
@@ -808,6 +819,7 @@ def test_daemon_exits_when_the_db_outruns_it_mid_life(tmp_path: Path):
     under it, the next emit finds the db newer than the loaded code. The
     daemon must ANSWER the refusal (so the shim can name the condition) and
     then EXIT, so its supervisor relaunches it on the current install."""
+    initialize_plane(tmp_path)
     sdir = _short_sock_dir()
     sock = sdir / "s"
     proc = _serve_proc(tmp_path, sock)
@@ -817,7 +829,7 @@ def test_daemon_exits_when_the_db_outruns_it_mid_life(tmp_path: Path):
         # READINESS IS A COMPLETED ROUND TRIP, not a bound socket, and this
         # line is the whole fix for a race that failed 5/5 here and 2/3 in CI.
         # _await_bind returns when the socket appears, but the daemon still has
-        # startup work after that: it migrates the db and emits daemon_started.
+        # startup work after that: it checks the schema and emits daemon_started.
         # A version bump landing inside that window makes the daemon refuse at
         # STARTUP and exit before it ever accepts this connection — so the
         # client sees ConnectionResetError instead of the typed refusal, and
@@ -869,9 +881,7 @@ def test_daemon_starting_up_stale_exits_and_leaves_no_socket(tmp_path: Path):
     never meet is a daemon SITTING there refusing everything, and that is
     what is pinned: past the exit there is no socket, so every door gets a
     plain ENOENT and goes cold."""
-    conn = connect(db_path(tmp_path))
-    migrate(conn)
-    conn.close()
+    initialize_plane(tmp_path)
     _bump_user_version(tmp_path, NEWER)
 
     sdir = _short_sock_dir()
@@ -896,6 +906,7 @@ def test_daemon_starting_up_stale_exits_and_leaves_no_socket(tmp_path: Path):
 def test_a_supported_db_still_serves(tmp_path: Path):
     """The positive control the two negatives need: the startup check must
     not be a daemon that refuses to start. Same rig, unbumped db."""
+    initialize_plane(tmp_path)
     sdir = _short_sock_dir()
     sock = sdir / "s"
     proc = _serve_proc(tmp_path, sock)
@@ -965,44 +976,42 @@ def test_a_serve_refused_by_the_lock_leaves_the_db_version_alone(tmp_path: Path)
         shutil.rmtree(sdir, ignore_errors=True)
 
 
-def test_a_root_whose_state_is_a_regular_file_still_serves(tmp_path: Path):
-    """The other half of the fold. db_path() mkdirs, so a root whose state/ is
-    a regular file raises NotADirectoryError — an OSError, which the first
-    version of the startup check did not catch: the daemon died at startup
-    with a traceback where the old code disclosed and served. Under launchd
-    KeepAlive that is a permanent crash loop on a host whose plane is merely
-    broken.
-
-    "Serves" is the honest, narrow claim: the socket ANSWERS, with a typed
-    refusal it can name, and the process lives. Measured, the answer on this
-    root is `contract_violation` — the capture policy under state/ is
-    unreadable before the db is even reached; a corrupt db answers `internal`.
-    Neither is spooled: the spool covers a RETRYABLE OperationalError, which
-    a root with no state dir is not. What is pinned is the shape (an answer,
-    not a downgrade, not a death), because the exact code is a property of
-    which read fails first."""
-    (tmp_path / "state").write_text("this is a regular file, not a directory\n")
+def test_a_root_whose_state_is_a_regular_file_refuses_before_lifecycle(tmp_path: Path):
+    """An unreadable storage root cannot pass explicit startup admission."""
+    state = tmp_path / "state"
+    content = "this is a regular file, not a directory\n"
+    state.write_text(content)
     sdir = _short_sock_dir()
     sock = sdir / "s"
-    proc = _serve_proc(tmp_path, sock)
     try:
-        _await_bind(proc, sock)
-        reply = send_batch(sock, [_comm("c", body="broken root")])
-        assert reply.get("ok") is False, reply
-        assert reply.get("code") in {"contract_violation", "internal"}, reply
-        assert reply.get("code") != "downgrade", "a broken plane is not a downgrade"
-        assert proc.poll() is None, "the daemon died on a broken root"
+        daemon = PlaneDaemon(tmp_path, socket_override=sock)
+        with pytest.raises(PendingMigrationError):
+            daemon.serve(install_signals=False)
+        assert not sock.exists()
+        assert state.read_text() == content
+        assert list(tmp_path.iterdir()) == [state]
     finally:
-        _out, err = _reap(proc)
         shutil.rmtree(sdir, ignore_errors=True)
-    # Every fault DISCLOSED and none of them fatal — the pre-check posture,
-    # restored. `_optimize` is named because it is the one that actually
-    # killed the daemon here once the check itself stopped calling db_path():
-    # its catch was sqlite3.Error only, one line after the drain had disclosed
-    # the identical OSError and carried on.
-    assert "spool drain failed (startup)" in err, err
-    assert "optimize skipped" in err, err
-    assert "Traceback" not in err, err
+
+
+@pytest.mark.parametrize("schema_version", [None, 1], ids=["absent", "old"])
+def test_startup_requires_explicit_apply_before_identity_or_queue_replay(tmp_path, schema_version):
+    if schema_version is not None:
+        initialize_plane(tmp_path, schema_version=schema_version)
+    staged = tmp_path / "state/plane/staged"
+    _stage(staged, "queued.batch", [_comm("9")])
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    try:
+        daemon = PlaneDaemon(tmp_path, socket_override=sock)
+        with pytest.raises(PendingMigrationError, match="explicit migration apply"):
+            daemon.serve(install_signals=False)
+        assert not sock.exists()
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+        assert not (tmp_path / "state/host-uid").exists()
+    finally:
+        shutil.rmtree(sdir, ignore_errors=True)
 
 
 # --- #1657: batches staged during a socket cooldown ---------------------------
@@ -1036,8 +1045,9 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_
     emit_batch, the socket path's own call, for the capture policy to apply.
     The spool's drain() ingests entries as-is (they are stored
     policy-applied), and would keep a body a metadata fleet must not store."""
+    initialize_plane(tmp_path)
     plane = tmp_path / "state" / "plane"
-    plane.mkdir(parents=True)
+    plane.mkdir(parents=True, exist_ok=True)
     (plane / "capture.json").write_text('{"*": "metadata"}')
     sdir = scratch_plane_env.socket_dir()
     sock = sdir / "s"

@@ -28,6 +28,8 @@ import sqlite3
 
 import pytest
 
+from tests.plane_setup import initialize_plane
+
 from claudlobby.plane.contracts import PR_ROLES, ContractViolation, TaskEvent
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import _apply_capture, emit_batch
@@ -75,6 +77,7 @@ class TestConstraintAMetadataNotContent:
         """The same claim end to end: emit under a metadata-mode capture and
         read the stored row back. The unit test above proves the door; this
         proves nothing downstream un-does it."""
+        initialize_plane(tmp_path)
         cap = tmp_path / "state" / "plane" / "capture.json"
         cap.parent.mkdir(parents=True, exist_ok=True)
         cap.write_text('{"*": "metadata"}')
@@ -111,6 +114,7 @@ class TestConstraintBAbsentIsDistinguishable:
         consumer's "is this field present" test answer yes for a report that
         declared nothing. The detail dict drops None, so absent means the key
         is simply not there."""
+        initialize_plane(tmp_path)
         emit_batch(tmp_path, [{
             "event_type": "task", "emitter": "t", "fleet": "f",
             "payload": {"work_item_id": WI, "event": "completed",
@@ -144,10 +148,9 @@ class TestTheWriter:
     def _details(self, tmp_path, where):
         """Stored details matching *where*.
 
-        A refused report emits nothing, so on that path the db is never created
-        at all — that absence IS the evidence, and it is spelled out here
-        rather than swallowed: the helper returns [] only for a plane that was
-        never written to, and any other sqlite failure still raises.
+        Explicitly initialized fixtures can have an empty event table; a
+        missing database also means no recorded rows. Other SQLite failures
+        remain visible instead of manufacturing an empty result.
         """
         if not db_path(tmp_path).exists():
             return []

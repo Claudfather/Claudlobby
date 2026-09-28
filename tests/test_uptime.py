@@ -8,6 +8,8 @@ the plane cannot answer.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -356,6 +358,7 @@ def _root_mode_plane(root: Path) -> None:
     if not (root / "lib").exists():
         (root / "lib").symlink_to(REPO / "lib")
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    initialize_plane(root)
     out = emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": "rootfleet",
                              "occurred_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
                              "payload": {"subject_kind": "bot_instance", "subject": "bot:rootfleet/somebot",

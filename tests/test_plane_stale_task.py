@@ -17,6 +17,8 @@ ids are faked hex. Timestamps are relative to real `now` (the view's clock).
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +71,7 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
            "assignee": worker, "assigned_by": MGR, "dispatch_msg_id": "msg_" + stem}
     if expected_by:
         asg["expected_by"] = expected_by
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f", "occurred_at": at,
          "payload": {"work_item_id": "wi_" + stem, "title": f"task {h}",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import os
 import subprocess
@@ -429,6 +431,7 @@ class TestCheckWorkstreamResidual:
         root, fleet, paths = self._fleet_and_paths(tmp_path)
         # anchor real identity for the fleet -- plane_workstreams refuses a
         # fleet the plane holds no bot of, same as any other plane door
+        initialize_plane(root)
         emit_batch(
             root,
             [
@@ -473,6 +476,7 @@ class TestCheckWorkstreamResidual:
         from claudlobby.plane.emit_api import emit_batch
 
         root, fleet, paths = self._fleet_and_paths(tmp_path)
+        initialize_plane(root)
         emit_batch(
             root,
             [

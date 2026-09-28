@@ -10,6 +10,8 @@ with dormant-fleet disclosure, and unconfirmed identities.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 from pathlib import Path
 
@@ -28,6 +30,7 @@ def _seed(root: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "capture.json").write_text(
         '{"engineering": "full", "data": "metadata", "ghostfleet": "full"}')
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "communication", "emitter": "dispatch-task",
          "fleet": "engineering",

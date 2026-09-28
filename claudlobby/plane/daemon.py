@@ -81,7 +81,8 @@ from .queue_paths import staged_dir
 from .emit_api import emit_batch
 from .writer import PlaneWriter
 from .ids import ensure_host_uid
-from .migrations import SCHEMA_USER_VERSION, DowngradeError, migrate
+from .schema_state import preflight_schema, require_current_schema
+from .migrations import SCHEMA_USER_VERSION, DowngradeError
 from .spool import SpoolWriteError, _mkdir_fsynced, drain, quarantine_entry
 
 # One line carries one batch; communications bodies cap at 16KiB each, so
@@ -309,8 +310,10 @@ class PlaneDaemon:
         channel's IN-queries degrade to whole-kind-slice scans as the db
         grows. Runs at startup and each interval drain — ~ms, idempotent."""
         try:
-            conn = connect(db_path(self.root))
+            preflight_schema(self.root)
+            conn = connect(db_file(self.root))
             try:
+                require_current_schema(conn)
                 conn.execute("PRAGMA optimize")
             finally:
                 conn.close()
@@ -327,9 +330,10 @@ class PlaneDaemon:
         # ignoring the configured interval.
         self._last_drain = time.monotonic()
         try:
-            conn = connect(db_path(self.root))
+            preflight_schema(self.root)
+            conn = connect(db_file(self.root))
             try:
-                migrate(conn)
+                require_current_schema(conn)
                 host = ensure_host_uid(self.root / "state")
                 report = drain(self.root, conn, host)
             finally:
@@ -575,21 +579,16 @@ class PlaneDaemon:
             signal.signal(signal.SIGTERM, self.stop)
             signal.signal(signal.SIGINT, self.stop)
         print(f"plane-daemon: serving on {self.sock_path}", file=sys.stderr)
+        startup_admitted = False
         try:
-            # Ordering is load-bearing (#1485 fold). Everything that touches
-            # the db runs INSIDE the try, after bind: the lifecycle receipt
-            # and the startup drain both go through migrate(), which REFUSES
-            # a db newer than this code before writing anything — so the
-            # startup drain is the stale-daemon detector at startup (the
-            # interval drain is the same detector on a quiet daemon, _handle
-            # on a busy one), the downgrade exit still unlinks the socket and
-            # drops the lifetime lock on its way out, and every refusal that
-            # precedes bind reaches its refusal without the db being touched.
-            # There is deliberately NO separate pre-check: the first build's
-            # pre-bind migrate() was the act that put the live plane a version
-            # ahead of the daemon serving it (a serve refused for a bad socket
-            # parent still migrated on its way out), and a read-only check
-            # after bind was a second detector the drain already is.
+            # Refuse unapplied/newer schema before receipts, host identity,
+            # optimization or replay. Bind still wins earlier refusal ordering;
+            # this read-only check never initializes or advances the database.
+            try:
+                preflight_schema(self.root)
+            except DowngradeError as exc:
+                raise self._downgrade_exit(exc) from None
+            startup_admitted = True
             self._emit_system("daemon_started")
             self._drain_spool(reason="startup")
             self._optimize()
@@ -637,7 +636,7 @@ class PlaneDaemon:
                     # error, since the commit has already fsync'd those rows.
                     self.writer.after_batch()
         finally:
-            if not self._downgrading:
+            if startup_admitted and not self._downgrading:
                 # A stopping receipt cannot commit against a db this process
                 # refuses — attempting it only prints a second, confusing
                 # "lifecycle emit failed" line under the one that matters.

@@ -3,6 +3,8 @@ plane's rendering of the registry (F18 closure R2b: no file)."""
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 from pathlib import Path
 
 from claudlobby.paths import Paths
@@ -58,6 +60,7 @@ def test_format_show_includes_key_fields():
 def _seed(root: Path, fleet: str) -> None:
     """A plane that knows the fleet (one registry row) but holds no workstream."""
     from claudlobby.plane.emit_api import emit_batch
+    initialize_plane(root)
     out = emit_batch(root, [{
         "event_type": "system", "emitter": "test", "fleet": fleet,
         "payload": {"event": "keepalive_skip", "subject_kind": "actor", "subject": f"bot:{fleet}/alex",
@@ -67,6 +70,7 @@ def _seed(root: Path, fleet: str) -> None:
 
 def _open_ws(root: Path, fleet: str, wid: str) -> None:
     from claudlobby.plane.emit_api import emit_batch
+    initialize_plane(root)
     out = emit_batch(root, [{
         "event_type": "workstream", "emitter": "workstream-update", "fleet": fleet,
         "source_ref": f"workstreams:{wid}", "occurred_at": "2026-07-01T00:00:00Z",

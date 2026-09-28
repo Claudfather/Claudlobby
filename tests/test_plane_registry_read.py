@@ -15,6 +15,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+from tests.plane_setup import initialize_plane
+
 import pytest
 
 from claudlobby.plane import registry_read as rr
@@ -31,6 +33,7 @@ def _root(tmp_path: Path) -> Path:
     root = tmp_path / "emitroot"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     return root
 
 

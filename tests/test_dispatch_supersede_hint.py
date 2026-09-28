@@ -24,6 +24,8 @@ CLAUDLOBBY_ROOT). There is no file to read and no file-based pin left.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import importlib.util
 import sys
 from datetime import datetime, timezone
@@ -64,6 +66,7 @@ def _dispatch(root: Path, bot: str, tid: str, task: str, da: int = 1_800_000_000
     wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
     ref = f"dispatch-log:{tid}"
     ts = _iso(da)
+    initialize_plane(root)
     out = emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": FLEET,
          "source_ref": ref, "occurred_at": ts,

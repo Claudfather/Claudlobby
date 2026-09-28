@@ -17,6 +17,7 @@ import re
 
 from claudlobby.commands import checkins as cmd
 from claudlobby.plane.emit_api import emit_batch
+from tests.plane_setup import initialize_plane
 from tests.test_checkins_cli import F, _Args, _decision, _out, root  # noqa: F401
 
 CK1, CK2, CK3 = ("ck_" + c * 32 for c in "abc")
@@ -181,6 +182,7 @@ def test_summary_json_and_text_agree_on_the_counts(root, capsys):
 def test_summary_over_an_empty_window_answers_at_rc_0(root, capsys):
     # a plane that has SEEN the fleet (one identity row) but holds no decision
     # is EMPTY, not unreachable -- the same shape as PR 1's own rc-0 test
+    initialize_plane(root)
     emit_batch(root, [{"event_type": "system", "emitter": "t", "fleet": F,
                        "payload": {"event": "report_status", "subject_kind": "actor",
                                    "subject": f"bot:{F}/w1", "data": {"status": "progress"}}}])

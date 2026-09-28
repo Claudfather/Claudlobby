@@ -13,6 +13,8 @@ which is the one thing that stays green while the door itself is wrong.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 from dataclasses import replace
 
@@ -43,6 +45,7 @@ def _full_capture(root) -> None:
 def _seed(root, *, task_id="t-1757000000-ab12", stem=STEM, bot="ramanujan",
           mgr="erlich", title="port the parser"):
     base = {"emitter": "t", "fleet": F, "source_ref": f"dispatch-log:{task_id}"}
+    initialize_plane(root)
     emit_batch(root, [
         {**base, "event_type": "work_item",
          "payload": {"work_item_id": "wi_" + stem, "title": title,

@@ -29,7 +29,7 @@ def _matcher(tmp_path, libdir, env, *args):
 
 
 def test_an_idless_progress_report_defers_the_overdue_alarm(tmp_path, *, scratch_plane_env):
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     env = {**env, "OBSERVABILITY_DISPATCH_DEADLINE": "1"}       # due in a second
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a long task"', env)
     assert r.returncode == 0, r.stderr
@@ -55,7 +55,7 @@ def test_a_case_variant_alias_still_defers_the_alarm(tmp_path, *, scratch_plane_
     """`W1` reporting for a dispatch sent to `w1` mints a second actor; the
     grace once bound to the FIRST actor uid alone and paged the live worker
     (the adversarial lens). Every per-bot read spans all of the bot's uids."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     env = {**env, "OBSERVABILITY_DISPATCH_DEADLINE": "1"}
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a long task"', env)
     assert r.returncode == 0, r.stderr
@@ -69,7 +69,7 @@ def test_a_case_variant_alias_still_defers_the_alarm(tmp_path, *, scratch_plane_
 
 
 def test_supersedes_retires_this_workers_assignment_not_a_same_id_twin(tmp_path, *, scratch_plane_env):
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"', env)
     assert r.returncode == 0, r.stderr
     mine = _plane_row(tmp_path)
@@ -88,7 +88,7 @@ def test_a_control_type_supersede_still_retires_its_target(tmp_path, *, scratch_
     ids stay minted precisely so the `superseded` event's successor_id survives;
     only the note's own triple is withheld. (Pins the else-branch sup_ev: revert
     it and the victim stays open.)"""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "the real task"', env)
     assert r.returncode == 0, r.stderr
     victim = _plane_row(tmp_path)
@@ -104,7 +104,7 @@ def test_a_control_type_supersede_still_retires_its_target(tmp_path, *, scratch_
 
 
 def test_every_terminal_report_closes_the_bots_open_idless_dispatches(tmp_path, *, scratch_plane_env):
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     # a raw-text send is the id-less shape that still mints an assignment after
     # #1491 (a control type mints none), so it is what the id-less closer acts on
     r = _bash(f'"{libdir}/dispatch-task.sh" w1 "what is the retry logic"', env)   # id-less

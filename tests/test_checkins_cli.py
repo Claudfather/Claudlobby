@@ -3,6 +3,8 @@
 the real emit spine. The plane session's connection yields tuples (status.py:218);
 the door reads named rows through open_ro."""
 
+from tests.plane_setup import initialize_plane
+
 import json
 import shutil
 from datetime import datetime, timedelta, timezone
@@ -58,6 +60,7 @@ def _record(ck: str, **over) -> dict:
 
 
 def _decision(root, bot: str, ck: str, *, age_h: float, **over):
+    initialize_plane(root)
     emit_batch(root, [{
         "event_type": "system", "emitter": "checkin-record", "fleet": F,
         "source_ref": f"checkin:{ck}", "occurred_at": _ago(hours=age_h),
@@ -116,6 +119,7 @@ def test_a_truncated_record_is_listed_and_marked_never_dropped(root, capsys):
 
 def test_a_row_without_a_record_is_listed_not_a_traceback(root, capsys):
     # contracts.py:418 accepts a system event with no data; the reader must not raise
+    initialize_plane(root)
     emit_batch(root, [{"event_type": "system", "emitter": "t", "fleet": F, "source_ref": f"checkin:{CK1}",
                        "payload": {"event": "checkin_decision", "subject_kind": "actor", "subject": f"bot:{F}/mgr"}}])
     assert cmd.cmd_checkins(_Args(root, json=True)) == 0
@@ -146,6 +150,7 @@ def test_the_text_listing_caps_at_ten_rows_and_says_so(root, capsys):
 def test_an_empty_fleet_plane_answers_no_checkins_at_rc_0(root, capsys):
     # a plane that has SEEN the fleet (one identity row — the roster the session
     # opens on) but holds no decision is EMPTY, not unreachable
+    initialize_plane(root)
     emit_batch(root, [{"event_type": "system", "emitter": "t", "fleet": F,
                        "payload": {"event": "report_status", "subject_kind": "actor",
                                    "subject": f"bot:{F}/w1", "data": {"status": "progress"}}}])
@@ -210,6 +215,7 @@ def test_a_mixed_offset_instant_is_still_inside_the_window(root, capsys):
     # compare against a UTC cutoff the wall-clock digits read hours stale
     tz = timezone(timedelta(hours=-4))
     occurred = (datetime.now(timezone.utc) - timedelta(minutes=10)).astimezone(tz).isoformat()
+    initialize_plane(root)
     emit_batch(root, [{
         "event_type": "system", "emitter": "checkin-record", "fleet": F,
         "source_ref": f"checkin:{CK1}", "occurred_at": occurred,

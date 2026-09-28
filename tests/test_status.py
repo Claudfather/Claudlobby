@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 from pathlib import Path
 
 import json
@@ -136,6 +138,7 @@ def _land_heartbeats(root, fleet: str, bot: str, states: list[str]) -> None:
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     n = len(states)
+    initialize_plane(root)
     out = emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": fleet,
                              "occurred_at": (now - timedelta(minutes=n - i)).isoformat(),
                              "payload": {"subject_kind": "bot_instance", "subject": f"bot:{fleet}/{bot}",
@@ -176,6 +179,7 @@ class TestLatestHeartbeats:
                     "payload": {"subject_kind": "bot_instance", "subject": f"bot:test-fleet/{bot}",
                                 "metric": "bot.heartbeat", "value": {"state": state}}}
 
+        initialize_plane(mock_paths.root)
         out = emit_batch(mock_paths.root, [_sample("alex", "UNKNOWN", 30), _sample("ALEX", "UNKNOWN", 30)])
         assert all(o.status == "committed" for o in out), out
         with ro(mock_paths.root) as conn:
@@ -225,6 +229,7 @@ class TestLatestHeartbeats:
                     "payload": {"subject_kind": "bot_instance", "subject": f"bot:test-fleet/{bot}",
                                 "metric": "bot.heartbeat", "value": {"state": state}}}
 
+        initialize_plane(mock_paths.root)
         emit_batch(mock_paths.root, [_sample("alex", "UNKNOWN", 30), _sample("ALEX", "UNKNOWN", 30)])
         with ro(mock_paths.root) as conn:
             order = [r["alias"].split("/")[-1] for r in conn.execute(LATEST_HEARTBEAT_SQL)

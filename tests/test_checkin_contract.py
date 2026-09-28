@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.plane_setup import initialize_plane
+
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 
@@ -222,6 +224,7 @@ def test_the_cli_is_a_filter():
 
 @pytest.mark.parametrize("kind", ["checkin_decision", "checkin_dispatch"])
 def test_the_two_kinds_carry_notice_severity(tmp_path, kind):
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [{
         "event_type": "system", "emitter": "t", "fleet": "f",
         "payload": {"event": kind, "subject_kind": "actor", "subject": "bot:f/mgr", "data": {"schema": 1}}}])

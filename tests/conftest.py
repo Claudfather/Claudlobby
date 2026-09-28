@@ -147,7 +147,7 @@ class ScratchPlaneEnv:
             directory.cleanup()
 
     def __call__(self, root: Path, *, socket: Path | None = None,
-                 cli: Path | None = None) -> dict[str, str]:
+                 cli: Path | None = None, initialize: bool = False) -> dict[str, str]:
         root = self._owned(root, "Plane root")
         source = Path(__file__).resolve().parent.parent
         if root == source or root.is_relative_to(source):
@@ -161,6 +161,9 @@ class ScratchPlaneEnv:
             cli = self.cli
         elif Path(cli).resolve() != self.cli:
             cli = self._owned(cli, "Plane CLI")
+        if initialize:
+            from tests.plane_setup import initialize_plane
+            initialize_plane(root)
         return {"CLAUDLOBBY_ROOT": str(root), "PLANE_EMIT_DISABLED": "0",
                 "PLANE_SOCKET": str(socket), "PLANE_EMIT_CLI": str(cli)}
 

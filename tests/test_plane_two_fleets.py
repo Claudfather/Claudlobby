@@ -4,6 +4,8 @@ the unknown-fleet refusal, the sender's own fleet, the matcher's open rule,
 the host card's recorded facts, one bot-dir walk."""
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import sqlite3
 from pathlib import Path
 
@@ -33,6 +35,7 @@ def _seed(root: Path, fleets=(("engineering", "a"), ("data", "b")),
                "dispatch_msg_id": "msg_" + h * 32}
         if expected_by:
             asg["expected_by"] = expected_by
+        initialize_plane(root)
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,

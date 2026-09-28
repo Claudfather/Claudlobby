@@ -9,6 +9,8 @@ matcher's open set, and that an escalation does NOT.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import subprocess
 import sys
@@ -59,7 +61,7 @@ def test_withdraw_closes_the_row_the_matcher_calls_open(tmp_path, *, scratch_pla
     re-dispatching with `--supersedes`; neither fits a send that never
     reached the bot. `cancelled` was already terminal on the plane, so the
     one thing to prove is that the door lands it on the RIGHT assignment."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     _full_capture(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "fix the widget"', env)
     assert r.returncode == 0, r.stderr
@@ -83,7 +85,7 @@ def test_withdraw_refuses_an_id_that_matches_two_open_assignments(tmp_path, *, s
     fleets hold one bot name; a re-dispatch under one id is legal). The door
     cannot scope by assignee the way `--supersedes` does, so it REFUSES and
     names the candidates rather than cancelling the wrong worker's task."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"', env)
     assert r.returncode == 0, r.stderr
     mine = _plane_row(tmp_path)
@@ -105,8 +107,9 @@ def test_withdraw_separates_nothing_open_from_a_plane_it_cannot_read(tmp_path, *
     dark = _bash(f'"{libdir}/task-act.sh" withdraw t-999999-beef --reason "x"', env)
     assert dark.returncode == 3 and "unreachable" in dark.stderr   # no db yet
 
+    initialize_plane(tmp_path)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"',
-                 env).returncode == 0                              # the db exists now
+                 env).returncode == 0                              # a recorded assignment now exists
     act = _bash(f'"{libdir}/task-act.sh" withdraw t-999999-beef --reason "x"', env)
     assert act.returncode == 2, (act.returncode, act.stderr)
     assert "no OPEN assignment carries" in act.stderr
@@ -115,7 +118,7 @@ def test_withdraw_separates_nothing_open_from_a_plane_it_cannot_read(tmp_path, *
 def test_withdraw_without_a_reason_is_a_usage_error(tmp_path, *, scratch_plane_env):
     """A withdrawal nobody can later explain is the shape of row the whole
     chunk exists to remove — required, never defaulted."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"', env)
     assert r.returncode == 0, r.stderr
     row = _plane_row(tmp_path)
@@ -128,7 +131,7 @@ def test_a_silenced_plane_refuses_the_act_rather_than_doing_it_unrecorded(tmp_pa
     """dispatch-task.sh sends anyway and discloses, because ITS mission is
     the send. An act whose whole content IS the record has nothing left to
     do, so it refuses at rc 3."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"', env)
     assert r.returncode == 0, r.stderr
     row = _plane_row(tmp_path)
@@ -147,7 +150,7 @@ def test_an_asg_id_closes_an_open_idless_row(tmp_path, *, scratch_plane_env):
     source_ref), so the asg id is its ONLY handle. Withdrawing by that asg id
     must close the row AND stamp the row's REAL `dispatch-log:sha:` key, never
     a fabricated `dispatch-log:asg_...`."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     _full_capture(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" w1 "just a note"', env)     # raw text: id-less
     assert r.returncode == 0, r.stderr
@@ -176,7 +179,7 @@ def test_a_bad_asg_refusal_names_the_sha_form_and_the_close_command(tmp_path, *,
     command, not the dead-end pointer at `claudlobby brief` that sent three
     invocations looking. Here the row is already withdrawn, so its asg names a
     CLOSED row whose key the door can still read and name."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     _full_capture(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" w1 "just a note"', env)
     assert r.returncode == 0, r.stderr
@@ -192,7 +195,7 @@ def test_a_bad_asg_refusal_names_the_sha_form_and_the_close_command(tmp_path, *,
 def test_an_unknown_asg_id_refuses_without_naming_a_key(tmp_path, *, scratch_plane_env):
     """An asg id the plane never saw has no key to name — the refusal says so
     (rc 2) rather than inventing one or pointing at a sha it cannot produce."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "seed the plane"', env)
     assert r.returncode == 0, r.stderr                                  # the db exists now
     act = _bash(f'"{libdir}/task-act.sh" withdraw asg_deadbeef00000000000000000000dead'
@@ -208,7 +211,7 @@ def test_escalate_is_non_terminal_and_readable_by_the_watchdog(tmp_path, *, scra
     while the human decides. So the matcher must still list it — and a
     dedicated read is the only way fleet-pulse can see it, which is what
     `plane-lookup --escalated` is for."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     _full_capture(tmp_path)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "port the parser"', env)
     assert r.returncode == 0, r.stderr
@@ -237,7 +240,7 @@ def test_a_later_report_clears_the_escalation(tmp_path, *, scratch_plane_env):
     """The escalation holds only while it is the assignment's NEWEST task
     event, so the worker reporting — or the manager withdrawing — ends it
     with no second door to remember."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "port the parser"', env)
     assert r.returncode == 0, r.stderr
     row = _plane_row(tmp_path)
@@ -263,7 +266,7 @@ def test_the_escalated_read_refuses_an_unreachable_plane(tmp_path, *, scratch_pl
 
 
 def test_escalate_without_a_question_is_a_usage_error(tmp_path, *, scratch_plane_env):
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"', env)
     assert r.returncode == 0, r.stderr
     row = _plane_row(tmp_path)
@@ -310,7 +313,7 @@ def test_the_door_and_the_composer_agree_on_the_default_deadline(tmp_path, *, sc
     a different clock than one composed after. 24h, in seconds."""
     from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S
 
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     env = {k: v for k, v in env.items() if k != "OBSERVABILITY_DISPATCH_DEADLINE"}
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "no composed deadline"', env)
     assert r.returncode == 0, r.stderr
@@ -332,7 +335,7 @@ def test_the_door_and_the_composer_agree_on_the_default_deadline(tmp_path, *, sc
 def test_zero_is_an_open_ended_dispatch_on_either_door(tmp_path, *, scratch_plane_env):
     """`0` must mint NO deadline. "now + 0" would be overdue in the second it
     was sent — the loudest possible reading of "no deadline please"."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "open ended"',
               {**env, "OBSERVABILITY_DISPATCH_DEADLINE": "0"})
     assert r.returncode == 0, r.stderr
@@ -431,7 +434,7 @@ def test_a_nudge_does_not_erase_an_escalation_on_the_read(tmp_path, *, scratch_p
     a raise that changes no status, and a `nudged` event displaced it: the
     question vanished from the read for good. A nudge is an ask, not an
     answer — only a real act clears an escalation."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     _full_capture(tmp_path)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "port it"',
                  env).returncode == 0
@@ -462,7 +465,7 @@ def test_an_ambiguous_id_is_answered_by_naming_the_assignment(tmp_path, *, scrat
     the caller could not carry out, leaving "close the other manager's row" as
     the only exit. `--assignment` is that door, and the refusal prints the ids
     to paste into it."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     _full_capture(tmp_path)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"',
                  env).returncode == 0
@@ -500,7 +503,7 @@ def test_all_open_honours_the_assignee_it_accepts(tmp_path, *, scratch_plane_env
     """FOLD F5. `--assignee` was declared on the parser and read by only the
     plain mode, so a caller that thought it had disambiguated got the whole
     ambiguous set back — worse than not offering the flag."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"',
                  env).returncode == 0
     mine = _plane_row(tmp_path)
@@ -519,7 +522,7 @@ def test_the_act_is_stamped_with_the_rows_fleet_not_the_actors(tmp_path, *, scra
     """FOLD F4. 44.6% of dispatch traffic is cross-fleet, and the door stamped
     `FLEET_NAME` — the MANAGER's fleet. A withdrawal filed under the actor's
     fleet is invisible to every fleet-scoped read of the task it retired."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     _full_capture(tmp_path)
     tid = "t-1481-crossfleet"
     _seed_assignment(tmp_path, task_id=tid, bot="w9", tag="8")
@@ -542,7 +545,7 @@ def test_a_leading_dash_id_is_a_value_and_a_bad_call_is_not_an_unreachable_plane
     passed as a separate word argparse reads it as a flag; and reporting every
     nonzero lookup rc as "unreachable" sends the caller to check the database
     for what is a typo in the call."""
-    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    libdir, env = _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
     assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"',
                  env).returncode == 0                  # the db exists
     dash = _bash(f'"{libdir}/task-act.sh" withdraw -weird-id --reason "x"', env)
@@ -585,6 +588,8 @@ def test_a_non_integer_deadline_is_refused_loudly_on_both_doors(tmp_path, bad, *
                      ' w1 "a task"', env)
         assert flag.returncode == 1, (flag.returncode, flag.stdout, flag.stderr)
         assert "--deadline-min must be a non-negative integer" in flag.stderr
+    if not bad:
+        initialize_plane(tmp_path)
     composed = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "a task"',
                      {**env, "OBSERVABILITY_DISPATCH_DEADLINE": bad})
     if bad == "":

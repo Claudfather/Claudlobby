@@ -24,6 +24,8 @@ the identifiers are faked (public repo). It is NOT hand-written from the contrac
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import hashlib
 import json
 import os
@@ -461,6 +463,7 @@ def _seed_send(root: Path, payload: str, sender: str = "mgr") -> tuple[str, int]
     from claudlobby.plane.emit_api import emit_batch
 
     sha, safe, nbytes = _wire_proof(payload)
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "communication", "emitter": "t", "fleet": FLEET,
          "payload": {"msg_id": MSGID, "sender": f"bot:{FLEET}/{sender}",

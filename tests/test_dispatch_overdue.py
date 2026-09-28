@@ -83,7 +83,7 @@ class _Plane:
     the live doors would have chosen."""
 
     def __init__(self, tmp_path: Path):
-        self.root = plane_root(tmp_path)
+        self.root = plane_root(tmp_path, initialize=True)
         self.n = 0
         self.by_id: dict[tuple[str, str], tuple[str, str, int]] = {}   # (bot, task_id) -> (wi, asg, at)
         self.idless: list[tuple[str, str, str, int]] = []              # (bot, wi, asg, at)

@@ -14,6 +14,8 @@ this module's namespace is enough for pytest to apply it here too."""
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import pytest
 
 from claudlobby.commands import checkins as cmd
@@ -44,6 +46,7 @@ def _dispatched(root, ck: str, *, task_id, terminal: str | None = None):
     wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
     ref = f"dispatch-log:{ck}-{n}"
     ts = _ago(hours=1)
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F,
          "source_ref": ref, "occurred_at": ts,

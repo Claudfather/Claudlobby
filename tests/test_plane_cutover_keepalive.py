@@ -11,6 +11,8 @@ _events_write_is_retired became test_cmd_uptime_reads_the_plane_and_refuses_with
 """
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import subprocess
 import sys
@@ -139,6 +141,7 @@ def test_uptime_metrics_from_the_plane(tmp_path):
                     "occurred_at": (now - timedelta(minutes=46, seconds=30)).isoformat(),
                     "payload": {"subject_kind": "bot_instance", "subject": f"bot:{FLEET}/b1",
                                 "metric": "bot.session_up", "value": False}})
+    initialize_plane(root)
     out = emit_batch(root, samples)
     assert all(o.status == "committed" for o in out), out
     pr = _stdlib_readers()
@@ -161,6 +164,7 @@ def test_cmd_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
     bot = root / "local" / FLEET / "runtime" / "bots" / "b1"
     bot.mkdir(parents=True); (bot / "bot.conf").write_text('BOT_NAME="b1"\n')
     now = datetime.now(timezone.utc)
+    initialize_plane(root)
     emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": FLEET,
                        "occurred_at": (now - timedelta(minutes=m)).isoformat(),
                        "payload": {"subject_kind": "bot_instance", "subject": f"bot:{FLEET}/b1", "metric": "bot.heartbeat",

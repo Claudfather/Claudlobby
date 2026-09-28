@@ -37,7 +37,7 @@ DOOR_FILES = (
 )
 
 
-def _plane_lib(tmp_path: Path, *, scratch_plane_env) -> tuple[Path, dict]:
+def _plane_lib(tmp_path: Path, *, scratch_plane_env, initialize=False) -> tuple[Path, dict]:
     libdir = tmp_path / "lib"
     libdir.mkdir()
     for name in DOOR_FILES:
@@ -49,7 +49,7 @@ def _plane_lib(tmp_path: Path, *, scratch_plane_env) -> tuple[Path, dict]:
     tmux.write_text("#!/bin/bash\nexit 0\n")
     tmux.chmod(0o755)
     env = {
-        **scratch_plane_env(tmp_path),
+        **scratch_plane_env(tmp_path, initialize=initialize),
         "TMUX_BIN": str(tmux),
         "OBSERVABILITY_DISPATCH_DEADLINE": "600",
         "BOT_ID": "lead",
@@ -80,7 +80,7 @@ def _rows(tmp_path: Path, sql: str, params: tuple = ()):
 
 @pytest.fixture()
 def armed(tmp_path: Path, *, scratch_plane_env):
-    return _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env)
+    return _plane_lib(tmp_path, scratch_plane_env=scratch_plane_env, initialize=True)
 
 
 VALID_BATCH = json.dumps({"events": [{

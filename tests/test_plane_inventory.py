@@ -12,6 +12,8 @@ idle state, never a blank {}.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 from tests.package_fixtures import source_package
 from pathlib import Path
 
@@ -87,6 +89,7 @@ def _done(scan="s1", complete=True):
 
 
 def _seed(root):
+    initialize_plane(root)
     emit_batch(root, [
         _bot(f"bot:{FLEET}/erlich", skills=("dispatch", "pulse"),
              mcp=("github",), guardrails=("no-push-main",),

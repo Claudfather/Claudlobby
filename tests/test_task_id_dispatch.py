@@ -91,7 +91,7 @@ def plane_env(root: Path, *, scratch_plane_env) -> dict:
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     return {
-        **scratch_plane_env(root),
+        **scratch_plane_env(root, initialize=True),
         "FLEET_NAME": FLEET,
 
 

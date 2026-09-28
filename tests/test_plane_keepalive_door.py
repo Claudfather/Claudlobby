@@ -63,7 +63,7 @@ def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     env = {
-        **scratch_plane_env(tmp_path),
+        **scratch_plane_env(tmp_path, initialize=not disabled),
         "TMUX_BIN": str(tmux),
         "HOME": str(tmp_path),
 

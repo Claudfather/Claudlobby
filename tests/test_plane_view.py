@@ -9,6 +9,8 @@ destinations resolved through channels.json); SSE cursor semantics.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 from pathlib import Path
 
@@ -36,6 +38,7 @@ def _seed_conversation(root: Path) -> None:
     reports progress, completes — plus one telegram notice."""
     _full_capture(root)
     mgr, worker = "bot:f/erlich", "bot:f/ramanujan"
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": f"wi_{H}", "title": "Review PR #7768",
@@ -151,6 +154,7 @@ def test_healthz_503_when_absent(client):
 
 def test_ok_with_empty_data_is_ok(tmp_path):
     _full_capture(tmp_path)
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t",
                            "payload": {"event": "daemon_started"}}])
     body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
@@ -267,6 +271,7 @@ def test_stream_at_head_pings_not_replays(tmp_path):
 def _seed_one_sided(root, tagged_side):
     _full_capture(root)
     wi = "wi_" + "e" * 32
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": wi, "title": "One-sided tag",
@@ -460,6 +465,7 @@ def _seed_twins(root: Path) -> None:
     _full_capture(root)
     for fleet, h in (("engineering", "a"), ("data", "b")):
         mgr, worker = f"bot:{fleet}/mgr", f"bot:{fleet}/one"
+        initialize_plane(root)
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
@@ -596,6 +602,7 @@ def _seed_cross_fleet(root: Path) -> None:
     the data -> eng report) plus one INTRA-fleet eng thread."""
     _full_capture(root)
     wi = "wi_" + "e" * 32
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
          "payload": {"work_item_id": wi, "title": "cross",
@@ -679,6 +686,7 @@ def _seed_twins_with_deadlines(root: Path) -> None:
                            "expected_by": due}}
         if fleet == "engineering":
             asg["source_ref"] = "dispatch-log:t-1-aaaa"
+        initialize_plane(root)
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
@@ -893,6 +901,7 @@ def _dispatch(root: Path, h: str, *, expected_by: str | None,
                   "payload": asg}
     if at:
         assignment["occurred_at"] = at
+    initialize_plane(root)
     emit_batch(root, ([] if title is None else [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
          "payload": {"work_item_id": "wi_" + stem, "title": title,
@@ -1085,6 +1094,7 @@ def test_totals_of_a_plane_with_no_fleet_are_zero_fleets_not_four_zeros(tmp_path
     """A host that has recorded nothing under a fleet says so — the header
     reads "no fleet recorded" rather than four confident zeros."""
     _full_capture(tmp_path)
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t",
                            "payload": {"event": "daemon_started"}}])
     body = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()

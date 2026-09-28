@@ -31,10 +31,11 @@ from .contracts import (
     cap_body,
     validate_request,
 )
-from .db import connect, db_path
+from .db import connect, db_file
 from .ids import ensure_host_uid, mint_event_id
 from .ingest import ingest_many
-from .migrations import DowngradeError, migrate
+from .migrations import DowngradeError
+from .schema_state import preflight_schema, require_current_schema
 from .spool import SpoolWriteError, is_retryable, is_transient_lock, spool_write
 
 
@@ -233,7 +234,7 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
         items.append(item)
     # A caller-supplied connection is USED AND NOT CLOSED: its owner holds the
     # lifecycle and the checkpoint cadence (#1693 arm D). Without one this is
-    # byte-for-byte today's behaviour -- connect, migrate, ingest, close -- which
+    # byte-for-byte today's behaviour -- check schema, connect, ingest, close -- which
     # is what the cold CLI needs, being a fresh process per batch whose close is
     # necessarily the last-connection close.
     #
@@ -277,10 +278,12 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
             # send-size-probe.sh lesson). The cold path already fsyncs at its
             # close-checkpoint, so the commit-time fsync buys durability
             # without adding a syscall the rung was not already paying.
-            own = conn_factory() if borrowed else connect(db_path(root),
+            if not borrowed:
+                preflight_schema(root)
+            own = conn_factory() if borrowed else connect(db_file(root),
                                                           synchronous="FULL")
             try:
-                migrate(own)                                # DowngradeError propagates
+                require_current_schema(own)
                 host = ensure_host_uid(Path(root) / "state")
                 results = ingest_many(own, items, host_uid=host)
             finally:

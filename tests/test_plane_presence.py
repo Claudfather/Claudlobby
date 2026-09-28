@@ -17,6 +17,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tests.plane_setup import initialize_plane
+
 from claudlobby.plane.presence import (
     STALE_AFTER_S, derive_presence, presence_counts,
 )
@@ -144,6 +146,7 @@ def test_presence_endpoint_joins_both_halves(tmp_path):
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     # a registry keyframe (so the heartbeat's subject resolves to an alias)
     # + a heartbeat sample for the same instance
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "registry_snapshot", "emitter": "t", "fleet": "f",
          "payload": {"entity_type": "bot", "entity_alias": BOT,
@@ -194,6 +197,7 @@ def test_stale_horizon_follows_the_keepalive_active_window(tmp_path,
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "registry_snapshot", "emitter": "t", "fleet": "f",
          "payload": {"entity_type": "bot", "entity_alias": BOT,
@@ -302,6 +306,7 @@ def test_poison_heartbeat_value_never_crashes_the_panel(tmp_path):
 
     good = "bot:f/good"
     poison = "bot:f/poison"
+    initialize_plane(root)
     emit_batch(root, [_kf(good), _kf(poison),
                       _hbs(good, {"state": "BUSY", "marker_age_s": 1}),
                       _hbs(poison, 42)])          # scalar value — committed
@@ -339,6 +344,7 @@ def test_a_raising_sampler_never_takes_the_recorded_half_down(tmp_path):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "registry_snapshot", "emitter": "t", "fleet": "f",
          "payload": {"entity_type": "bot", "entity_alias": BOT,

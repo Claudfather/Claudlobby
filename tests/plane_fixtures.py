@@ -9,12 +9,15 @@ from pathlib import Path
 
 from claudlobby.plane.db import connect_ro, db_file
 from claudlobby.plane.emit_api import emit_batch
+from tests.plane_setup import initialize_plane
 
 
-def plane_root(tmp_path: Path, *, capture: str = '{"*": "full"}') -> Path:
+def plane_root(tmp_path: Path, *, capture: str = '{"*": "full"}', initialize: bool = False) -> Path:
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text(capture)
+    if initialize:
+        initialize_plane(root)
     return root
 
 
@@ -95,6 +98,7 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
     and, when it resolved an assignment, the task event — both under one
     `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing.)"""
     from claudlobby.plane.emit_api import emit_batch
+    initialize_plane(root)
     _REPORT_SEQ[0] += 1
     msg = f"msg_{'e' * 24}{_REPORT_SEQ[0]:0>8x}"
     ref = f"report-back:{msg}"
@@ -174,6 +178,7 @@ def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=No
     *expected_by* (ISO) mirrors the ledger row's deadline when a test needs
     the watchdog's question answered on both sides; *ref* overrides the
     source_ref (an id-less construct's ``dispatch-log:sha:<key>``)."""
+    initialize_plane(root)
     fl = fleet or F
     wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
     ref = ref or f"dispatch-log:{task_id}"

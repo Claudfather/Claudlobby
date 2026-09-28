@@ -23,6 +23,8 @@ Two tiers, mirroring tests/test_freshbox_boot_harness.py:
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import os
 import re
@@ -1390,6 +1392,7 @@ class TestCountSendRetriesReadsThePlane:
                    "payload": {"event": etype, "subject_kind": "actor", "subject": f"bot:{fleet}/{bot}",
                                "data": {"source": "start-bot", "legacy_ts": f"2026-08-06T12:4{i}:00Z",
                                         "data": {"attempt": i}}}} for i in range(n)]
+        initialize_plane(root)
         out = emit_batch(root, events)
         assert all(o.status == "committed" for o in out), out
 

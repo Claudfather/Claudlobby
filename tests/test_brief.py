@@ -33,6 +33,8 @@ TestAlertsReadThePlane).
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import shutil
 from dataclasses import replace
@@ -189,6 +191,7 @@ def _land_report(paths: Paths, row: dict, *, fleet: str = FLEET) -> None:
                        "source_ref": ref, "occurred_at": row["ts"],
                        "payload": {"event": "report_status", "subject_kind": "actor",
                                    "subject": f"bot:{fleet}/{bot}", "data": {"status": status, "msg_id": msg}}})
+    initialize_plane(paths.root)
     out = emit_batch(paths.root, events)
     assert all(o.status == "committed" for o in out), out
 
@@ -218,6 +221,7 @@ def _land_ws(paths: Paths, wid: str, *, opened_ts: str, last_progress_ts: str | 
         verb("closed", at, disposition="done")
     elif status == "blocked":
         verb("blocked", at, note="blocked")
+    initialize_plane(paths.root)
     out = emit_batch(paths.root, events)
     assert all(o.status == "committed" for o in out), out
 
@@ -236,6 +240,7 @@ def _seed_plane(paths: Paths) -> None:
     """A plane that knows this fleet's bots (the registry rows every emission
     mints) but holds no dispatch — the genuine "nothing open" state."""
     from claudlobby.plane.emit_api import emit_batch
+    initialize_plane(paths.root)
     out = emit_batch(paths.root, [{
         "event_type": "system", "emitter": "test", "fleet": FLEET,
         "payload": {"event": "keepalive_skip", "subject_kind": "actor", "subject": f"bot:{FLEET}/alex",
@@ -249,6 +254,7 @@ def _dispatch_ctx(paths: Paths) -> dict:
 
 def _seed_plane_for(paths: Paths, fleet: str) -> None:
     from claudlobby.plane.emit_api import emit_batch
+    initialize_plane(paths.root)
     out = emit_batch(paths.root, [{
         "event_type": "system", "emitter": "test", "fleet": fleet,
         "payload": {"event": "keepalive_skip", "subject_kind": "actor", "subject": f"bot:{fleet}/alex",
@@ -1287,6 +1293,7 @@ def test_build_brief_opens_the_plane_once_for_every_section(paths: Paths, monkey
 def _land_act(paths: Paths, asg: str, wi: str, event: str, ts: int, **detail) -> None:
     """One task event on a row, as `task-act.sh` / `task nudge` land theirs."""
     from claudlobby.plane.emit_api import emit_batch
+    initialize_plane(paths.root)
     out = emit_batch(paths.root, [{
         "event_type": "task", "emitter": "test", "fleet": FLEET,
         "occurred_at": _iso(ts),

@@ -18,6 +18,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+from tests.plane_setup import initialize_plane
+
 import pytest
 
 from claudlobby.config import load_fleet
@@ -102,9 +104,9 @@ def _db(root: Path) -> sqlite3.Connection:
     return conn
 
 
-def _scan(root: Path, *, scratch_plane_env, package=None):
+def _scan(root: Path, *, scratch_plane_env, package=None, initialize=True):
     fleet, _ = load_fleet(root / "fleet.yaml")
-    env = scratch_plane_env(root)
+    env = scratch_plane_env(root, initialize=initialize)
     with pytest.MonkeyPatch.context() as patch:
         for key, value in env.items():
             patch.setenv(key, value)
@@ -154,6 +156,7 @@ def test_scan_completed_requires_scan_id():
 
 def test_hash_gate_suppresses_unchanged_and_chains_changed(tmp_path):
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     snap = {"event_type": "registry_snapshot", "emitter": "t",
             "fleet": "test-fleet",
             "payload": {"entity_type": "project",
@@ -180,6 +183,7 @@ def test_observation_confirms_instance_and_actor(tmp_path, *, scratch_plane_env)
     """Phase 1's identity loop closes: a bot snapshot flips BOTH the
     instance and the logical actor to provisional=0 (§18)."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     # a door mints the actor lazily first (provisional=1)
     emit_batch(root, [{
         "event_type": "communication", "emitter": "t", "fleet": "test-fleet",
@@ -319,6 +323,7 @@ def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path, *, scratch_plane_e
     invalid tombstone suppressed every later valid deletion. The diff now
     asks the reader's question (still current?) and re-tombstones."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     _scan(root, scratch_plane_env=scratch_plane_env)
     # a crashed scan's leftovers: a tombstone with NO completion
     emit_batch(root, [{
@@ -342,6 +347,7 @@ def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path, *, scratch_plane_e
 
 def test_roster_removal_tombstones_in_scope_only(tmp_path, *, scratch_plane_env):
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     _scan(root, scratch_plane_env=scratch_plane_env)
     # ANOTHER fleet's bot exists in the db (out of scope for this scan)
     emit_batch(root, [{
@@ -418,7 +424,7 @@ def test_empty_but_complete_scan_tombstones_everything_in_scope(
 def test_a_tier_that_says_zero_emits_nothing(tmp_path, *, scratch_plane_env):
     """The opt-OUT half: PLANE_EMIT_ENABLED=0 -> None, zero db."""
     root = _fleet_root(tmp_path, armed=False)
-    assert _scan(root, scratch_plane_env=scratch_plane_env) is None
+    assert _scan(root, scratch_plane_env=scratch_plane_env, initialize=False) is None
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
@@ -445,7 +451,7 @@ def test_an_explicit_zero_beats_an_unreachable_resolver(tmp_path,
 
     monkeypatch.setattr(et, "resolve", boom)
     with caplog.at_level(logging.INFO):
-        assert _scan(root, scratch_plane_env=scratch_plane_env) is None
+        assert _scan(root, scratch_plane_env=scratch_plane_env, initialize=False) is None
     assert not (root / "state" / "plane" / "plane.db").exists()
     assert "PLANE_EMIT_ENABLED=0" in caplog.text
     caplog.clear()
@@ -507,7 +513,7 @@ def test_defaults_env_tier_does_not_arm(tmp_path, *, scratch_plane_env):
     (root / "fleet.yaml").write_text(text)
     # Still None: the defaults tier cannot arm, and post-flip it cannot
     # DISARM either — only the .env tier is consulted, which here says 0.
-    assert _scan(root, scratch_plane_env=scratch_plane_env) is None                       # defaults.env ≠ the tier
+    assert _scan(root, scratch_plane_env=scratch_plane_env, initialize=False) is None                       # defaults.env ≠ the tier
 
 
 def test_vaultless_fleet_never_tombstones_a_vault(tmp_path, *, scratch_plane_env):
@@ -515,6 +521,7 @@ def test_vaultless_fleet_never_tombstones_a_vault(tmp_path, *, scratch_plane_env
     enumeration is fleet-binding-dependent, so a vaultless fleet's COMPLETE
     scan must never tombstone another fleet's vault (the ping-pong)."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     emit_batch(root, [{
         "event_type": "registry_snapshot", "emitter": "t", "fleet": "other",
         "payload": {"entity_type": "vault", "entity_alias": "shared-vault",
@@ -541,6 +548,7 @@ def test_vault_rev_only_change_is_suppressed(tmp_path):
     set. The gate hashes the payload MINUS vault_rev; provenance rides
     revision_seen."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     base = {"event_type": "registry_snapshot", "emitter": "t",
             "fleet": "test-fleet",
             "payload": {"entity_type": "fleet", "entity_alias": "revfleet",
@@ -568,6 +576,7 @@ def test_tombstones_never_confirm_and_double_tombstone_suppresses(tmp_path):
     """Risk r1: a tombstone for a never-seen alias minted-and-confirmed a
     ghost; repeated tombstones each committed a row."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     stone = {"event_type": "registry_snapshot", "emitter": "t",
              "fleet": "test-fleet",
              "payload": {"entity_type": "bot",
@@ -644,6 +653,7 @@ def test_float_in_project_raw_does_not_vaporize_the_scan(tmp_path):
 
 def test_unknown_metric_warns_but_commits(tmp_path, capsys):
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     out = emit_batch(root, [{
         "event_type": "metric_sample", "emitter": "t", "fleet": "test-fleet",
         "payload": {"subject_kind": "host", "subject": "h",
@@ -729,6 +739,7 @@ def test_fleet_with_its_own_vault_never_tombstones_a_siblings(tmp_path, *, scrat
     tombstone a sibling fleet's vault — the ping-pong one fleet over. Scope
     is the EXACT enumerated alias."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     myvault = tmp_path / "myvault"
     myvault.mkdir()
     text = (root / "fleet.yaml").read_text().replace(
@@ -778,6 +789,7 @@ def test_lost_host_uid_skips_the_diff_loudly_never_a_false_clean(
 
 def test_unknown_metric_warns_once_per_process(tmp_path, capsys):
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     for _ in range(3):
         emit_batch(root, [{
             "event_type": "metric_sample", "emitter": "t",

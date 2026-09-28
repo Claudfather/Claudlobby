@@ -20,6 +20,7 @@ from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.retention import prune_metric_samples
 from tests.conftest import constructed_env
+from tests.plane_setup import initialize_plane
 
 REPO = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -33,6 +34,7 @@ def _root(tmp_path: Path) -> Path:
 
 
 def _sample(root: Path, subj_alias="bot:f/erlich", **extra):
+    initialize_plane(root)
     return emit_batch(root, [{
         "event_type": "metric_sample", "emitter": "keepalive", "fleet": "f", **extra,
         "payload": {"subject_kind": "bot_instance", "subject": subj_alias,

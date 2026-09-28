@@ -9,6 +9,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tests.plane_setup import initialize_plane
+
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.orgchart import org_tree
@@ -44,6 +46,7 @@ def _root(tmp_path: Path) -> Path:
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     return root
 
 

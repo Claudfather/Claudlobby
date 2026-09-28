@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.plane.db import connect, db_path
-from claudlobby.plane.migrations import migrate
+from tests.plane_setup import initialize_plane
 
 
 def _run(args: list[str], stdin: str | None = None, cwd: Path | None = None):
@@ -34,6 +34,7 @@ def _intent_json() -> str:
 
 
 def test_emit_commits_and_prints_event_id(tmp_path: Path):
+    initialize_plane(tmp_path)
     r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
              stdin=_intent_json())
     assert r.returncode == 0, r.stderr
@@ -63,6 +64,7 @@ def test_capture_modes_per_family(tmp_path: Path):
     cap = tmp_path / "state" / "plane"
     cap.mkdir(parents=True)
     (cap / "capture.json").write_text('{"*": "metadata"}')
+    initialize_plane(tmp_path)
     # communication: body dropped, proof triple kept
     r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
              stdin=_intent_json())
@@ -117,6 +119,7 @@ def test_capture_modes_per_family(tmp_path: Path):
 
 
 def test_plane_status_reports(tmp_path: Path):
+    initialize_plane(tmp_path)
     _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
          stdin=_intent_json())
     r = _run(["--root", str(tmp_path), "plane", "status"])
@@ -149,7 +152,8 @@ def test_a_spooled_batch_exits_6_not_0(tmp_path: Path):
         d["payload"]["msg_id"] = "msg_" + n * 32     # distinct: a repeat is a
         return _json.dumps(d)                        # UNIQUE violation, not a spool
 
-    # First emit creates the db and the directory tree.
+    # Explicit fixture setup admits the first ordinary emit.
+    initialize_plane(tmp_path)
     r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
              stdin=_intent("a"))
     assert r.returncode == 0, r.stderr
@@ -183,6 +187,7 @@ def test_a_spooled_batch_exits_6_not_0(tmp_path: Path):
 def test_a_committed_batch_still_exits_0(tmp_path: Path):
     """Positive control for the test above. Without it, a change that returns 6
     unconditionally passes the spool test and breaks every door on the host."""
+    initialize_plane(tmp_path)
     r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
              stdin=_intent_json())
     assert r.returncode == 0, r.stderr

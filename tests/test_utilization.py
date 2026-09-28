@@ -8,6 +8,8 @@ fixtures went with the file (test_no_keepalive_log became test_no_samples).
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +59,7 @@ def _series(now: datetime, states: list[str], step: timedelta = timedelta(minute
 def _land_heartbeats(root: Path, fleet: str, bot: str, entries) -> None:
     """The bot's heartbeat samples on a plane under `root`, as keepalive lands them."""
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    initialize_plane(root)
     out = emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": fleet,
                              "occurred_at": ts.isoformat(),
                              "payload": {"subject_kind": "bot_instance", "subject": f"bot:{fleet}/{bot}",

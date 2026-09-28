@@ -19,6 +19,8 @@ selects the rows, so a wrong fleet reads "holds no bot of fleet" instead.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +59,7 @@ def _land(root: Path, fleet: str, bot: str, ts: str, status: str, summary: str) 
     _SEQ[0] += 1
     msg = f"msg_{'d' * 24}{_SEQ[0]:0>8x}"
     ref = f"report-back:{msg}"
+    initialize_plane(root)
     out = emit_batch(root, [
         {"event_type": "communication", "emitter": "report-back", "fleet": fleet,
          "source_ref": ref, "occurred_at": ts,

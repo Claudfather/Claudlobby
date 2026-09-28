@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ._helpers import _load_fleet_or_exit, _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
-from ..plane.db import connect, db_file, db_path, open_ro
+from ..plane.db import connect, connect_ro, db_file, open_ro
 from ..plane.emit_api import (
     emit,
     emit_batch,
@@ -29,7 +29,8 @@ from ..plane.emit_api import (
 )
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
-from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION, migrate
+from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION
+from ..plane.schema_state import PendingMigrationError, preflight_schema, require_current_schema
 from ..plane.spool import (
     SpoolWriteError, drain, oldest_spooled_at, quarantine_dir,
     quarantine_entry, scan_spool, spool_dir, spool_entries,
@@ -56,8 +57,8 @@ RC_SPOOLED = 6
 
 def _guarded(label: str, fn) -> int:
     """THE exception-to-exit mapping (one copy). DowngradeError is caught for
-    every door — plane status and spool retry run migrate() too, and a newer
-    db must refuse at 4 from any of them, never traceback at 1."""
+    every door. Ordinary readers/writers require explicit migration first;
+    they never create or advance the schema while answering a diagnostic."""
     try:
         return fn()
     except ContractViolation as exc:
@@ -68,6 +69,9 @@ def _guarded(label: str, fn) -> int:
     except SpoolWriteError as exc:
         print(f"{label}: TOTAL FAILURE — {exc}", file=sys.stderr)
         return 3
+    except PendingMigrationError as exc:
+        print(f"{label}: REFUSED — {exc}", file=sys.stderr)
+        return 7
     except DowngradeError as exc:
         # Never spooled (round-2 F6): a newer db is an operator condition,
         # not transient infrastructure — retrying it forever helps no one.
@@ -153,12 +157,12 @@ def cmd_plane_status(args) -> int:
     root = _resolve_paths(args).root
 
     def run() -> int:
-        path = db_path(root)
+        path = db_file(root)
         print(f"db: {path} ({'present' if path.exists() else 'absent'})")
         if path.exists():
-            conn = connect(path)
+            conn = connect_ro(path)
             try:
-                migrate(conn)
+                require_current_schema(conn)
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
                 print(f"schema user_version: {version}")
                 top = conn.execute(
@@ -232,9 +236,10 @@ def cmd_plane_spool(args) -> int:
             print(json.dumps(entry, indent=2, sort_keys=True, default=str))
             return 0
         if args.spool_action == "retry":
-            conn = connect(db_path(root))
+            preflight_schema(root)
+            conn = connect(db_file(root))
             try:
-                migrate(conn)
+                require_current_schema(conn)
                 host = ensure_host_uid(root / "state")
                 report = drain(root, conn, host)
             finally:
@@ -302,9 +307,9 @@ def cmd_plane_doctor(args) -> int:
         if not path.exists():
             rung(True, "db", f"absent (not yet used): {path}")
         else:
-            conn = connect(path)
+            conn = connect_ro(path)
             try:
-                migrate(conn)   # DowngradeError -> 4 via the guard
+                require_current_schema(conn)   # DowngradeError -> 4 via the guard
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
                 rung(version == SCHEMA_USER_VERSION, "schema",
                      f"user_version {version} (code supports {SCHEMA_USER_VERSION})")
@@ -416,7 +421,7 @@ def cmd_plane_doctor(args) -> int:
         started = 0
         last_ingest = None
         if path.exists():
-            conn = connect(path)
+            conn = connect_ro(path)
             try:
                 started = conn.execute(
                     "SELECT COUNT(*) FROM events WHERE kind='system'"
@@ -564,9 +569,9 @@ def cmd_plane_registry(args) -> int:
                   " (arm PLANE_EMIT_ENABLED=1 in the fleet-tier .env and"
                   " run generate)", file=sys.stderr)
             return 1
-        conn = connect(path)
+        conn = connect_ro(path)
         try:
-            migrate(conn)
+            require_current_schema(conn)
         except Exception:
             conn.close()
             raise
@@ -717,9 +722,10 @@ def cmd_plane_prune(args) -> int:
             raise ContractViolation(
                 [{"loc": ("days",), "msg": "retention days cannot be"
                   " negative (a future cutoff would delete all samples)"}])
-        conn = connect(path)
+        preflight_schema(root)
+        conn = connect_ro(path) if args.dry_run else connect(path)
         try:
-            migrate(conn)   # DowngradeError -> 4 via the guard
+            require_current_schema(conn)   # DowngradeError -> 4 via the guard
             res = prune_metric_samples(conn, days=days,
                                        dry_run=args.dry_run)
             # #1659, the SECOND lane, OFF unless this host arms it. Inside this
@@ -793,9 +799,9 @@ def cmd_plane_expire(args) -> int:
             raise ContractViolation(
                 [{"loc": ("after_days",), "msg": "expiry horizon cannot be"
                   " negative"}])
-        conn = connect(path)
+        conn = connect_ro(path)
         try:
-            migrate(conn)
+            require_current_schema(conn)
             plan = expirable(conn, after_days=days)
         finally:
             conn.close()

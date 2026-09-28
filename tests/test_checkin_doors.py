@@ -151,7 +151,7 @@ REAL_DOOR_FILES = ("checkin-record.sh", "checkin-contract.py", "lib-common.sh",
 
 
 def _real_rig(tmp_path: Path, *, scratch_plane_env) -> tuple[Path, dict]:
-    root = plane_root(tmp_path)
+    root = plane_root(tmp_path, initialize=True)
     lib = root / "lib"
     lib.mkdir()
     for name in REAL_DOOR_FILES:
@@ -302,7 +302,7 @@ def test_dispatch_checkin_to_a_decision_the_plane_cannot_see_is_disclosed_not_re
     # caller pastes it; a well-formed id can still name nothing (mis-copied by hand, or
     # a record the shim spooled): say so, record the join as given.
     # The plane must EXIST for this to be "cannot see" rather than "cannot answer"
-    # (a fresh rig has no db until the first emit), so one unrelated row seeds it.
+    # (the initialized rig has no fleet identity), so one unrelated row seeds it.
     from claudlobby.plane.emit_api import emit_batch
     libdir, env = _fake_lib(tmp_path, DISPATCH_STUB, scratch_plane_env=scratch_plane_env)
     env["DISPATCH_CAPTURE"] = str(tmp_path / "sent.txt")

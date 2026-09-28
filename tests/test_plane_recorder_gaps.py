@@ -12,6 +12,8 @@ created through the real emit spine so /api/overview has something to open.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,6 +29,7 @@ from claudlobby.plane.view import create_app  # noqa: E402
 
 def _seed_db(root: Path) -> None:
     # one real event so the read-only view has a db to open
+    initialize_plane(root)
     emit_batch(root, [{"event_type": "work_item", "emitter": "t", "fleet": "f",
                        "occurred_at": datetime.now(timezone.utc).isoformat(),
                        "payload": {"work_item_id": "wi_" + "a" * 32,

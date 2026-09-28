@@ -18,6 +18,8 @@ F13 headline claims unpinned (SQLITE_FULL path, fsync spies, batch rollback)
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import os
 import sqlite3
@@ -159,6 +161,7 @@ def test_f3_absent_config_takes_the_shipped_default_full(tmp_path: Path):
     """An ABSENT file is the documented default, and since 2026-09-20 that
     default is `full`: the channel is the product, and a stripped body cannot
     be recovered from an append-only ledger."""
+    initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     conn = connect(db_path(tmp_path))
     row = conn.execute("SELECT body, privacy FROM communications").fetchone()
@@ -170,6 +173,7 @@ def test_f3_star_metadata_is_the_opt_out_and_still_strips(tmp_path: Path):
     """The opt-out an operator reaches for now. Same door, same proof triple —
     only the default moved, never the stripping mechanism."""
     _capture_path(tmp_path).write_text('{"*": "metadata"}')
+    initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     conn = connect(db_path(tmp_path))
     row = conn.execute(
@@ -217,6 +221,7 @@ def test_f3_overcap_work_item_body_rejects(tmp_path: Path):
 # --- F4: versioned wire + spool --------------------------------------------
 
 def test_f4_emit_stamps_and_stores_schema_version(tmp_path: Path):
+    initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     conn = connect(db_path(tmp_path))
     v = conn.execute("SELECT schema_version FROM communications").fetchone()[0]
@@ -284,6 +289,7 @@ def test_f5_dead_pid_inflight_recovered_and_replayed(env):
 
 def test_f6_replay_under_other_family_is_conflict_not_duplicate(tmp_path: Path):
     eid = mint_event_id()
+    initialize_plane(tmp_path)
     emit(tmp_path, {**_comm(), "event_id": eid})
     task = {
         "event_type": "task",
@@ -303,6 +309,7 @@ def test_f6_replay_under_other_family_is_conflict_not_duplicate(tmp_path: Path):
 def test_f6_same_family_replay_still_reports_duplicate(tmp_path: Path):
     eid = mint_event_id()
     req = {**_comm(), "event_id": eid}
+    initialize_plane(tmp_path)
     assert emit(tmp_path, req).status == "committed"
     assert emit(tmp_path, req).status == "duplicate"
 
@@ -340,6 +347,7 @@ def _seed_assignment(root: Path, *, dispatch_msg, tx_events=()) -> str:
              "payload": {"msg_id": dispatch_msg, "attempt_no": attempt_no,
                          "carrier": "tmux", "destination": "w1",
                          "state": state}})
+    initialize_plane(root)
     emit_batch(root, batch)
     return aid
 
@@ -590,6 +598,7 @@ def test_f11_spool_inspect_prints_entry_with_history(env):
 
 
 def test_f11_doctor_healthy_0_quarantine_1(tmp_path: Path):
+    initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
     assert r.returncode == 0, r.stdout + r.stderr
@@ -670,6 +679,7 @@ def test_f13_spool_write_fsyncs_file_and_directory(env, monkeypatch):
 
 def test_f13_batch_second_item_failure_rolls_back_first(tmp_path: Path):
     taken = mint_event_id()
+    initialize_plane(tmp_path)
     emit(tmp_path, {**_comm("3"), "event_id": taken})
     fresh = mint_event_id()
     batch = [
