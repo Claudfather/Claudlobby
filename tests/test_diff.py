@@ -7,6 +7,7 @@ import json
 from claudlobby.config import load_fleet
 from claudlobby.diff import diff_bot, diff_fleet_timers, promote_bot
 from claudlobby.composer import compose_bot
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -17,26 +18,26 @@ from claudlobby.paths import Paths
 
 class TestDiffBot:
     def test_unknown_bot(self, fleet_dir):
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         result = diff_bot("nonexistent", fleet, paths)
         assert "not in fleet.yaml" in result
 
     def test_missing_runtime_dir(self, fleet_dir):
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         result = diff_bot("lead", fleet, paths)
         assert "does not exist" in result
 
     def test_no_drift_after_generate(self, fleet_dir):
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         compose_bot(fleet.bots["lead"], fleet, paths)
         result = diff_bot("lead", fleet, paths)
         assert "no drift" in result
 
     def test_claude_md_drift_detected(self, fleet_dir):
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         compose_bot(fleet.bots["lead"], fleet, paths)
         # Modify the generated CLAUDE.md
@@ -52,7 +53,7 @@ class TestDiffBot:
         show as drift. Without this, `diff` reads "no drift" while runtime
         bot.conf is out of sync — the false signal that hid the #591
         bridge_heal deploy."""
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         compose_bot(fleet.bots["lead"], fleet, paths)
         conf_path = paths.bot_runtime("lead") / "bot.conf"
@@ -70,6 +71,7 @@ class TestDiffBot:
         fleet_yaml.write_text(
             dedent("""\
             fleet:
+              manager: lead
               name: test-fleet
               service_prefix: com.test
               telegram_group_chat_id: "-100999"
@@ -89,7 +91,7 @@ class TestDiffBot:
         """)
         )
         monkeypatch.setenv("GITHUB_PAT", "ghp_test")
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         compose_bot(fleet.bots["lead"], fleet, paths)
 
@@ -110,13 +112,13 @@ class TestDiffBot:
 
 class TestPromoteBot:
     def test_unknown_bot(self, fleet_dir):
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         result = promote_bot("nonexistent", fleet, paths)
         assert "not in fleet.yaml" in result
 
     def test_promote_output_structure(self, fleet_dir):
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         result = promote_bot("lead", fleet, paths)
         assert "Promote workflow" in result
@@ -127,7 +129,7 @@ class TestPromoteBot:
         assert "claudlobby generate" in result
 
     def test_promote_no_voice(self, fleet_dir):
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         result = promote_bot("lead", fleet, paths)
         assert "create a voices/" in result
@@ -139,6 +141,7 @@ class TestPromoteBot:
         fleet_yaml.write_text(
             dedent("""\
             fleet:
+              manager: lead
               name: test-fleet
               service_prefix: com.test
               telegram_group_chat_id: "-100999"
@@ -155,7 +158,7 @@ class TestPromoteBot:
                     token_env: TELEGRAM_TOKEN_LEAD
         """)
         )
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, _md = load_fleet(paths.fleet_yaml)
         result = promote_bot("lead", fleet, paths)
         assert "erlich.md" in result
@@ -175,7 +178,7 @@ class TestDiffFleetTimers:
         timer path grows later AttributeErrors under `claudlobby diff` while
         `claudlobby generate` (real Paths) keeps working — a silent divergence.
         """
-        paths = Paths(root=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         fleet, merged = load_fleet(paths.fleet_yaml)
         # diff_fleet_timers early-returns unless the actual timers dir exists.
         (paths.runtime_fleet / "timers").mkdir(parents=True, exist_ok=True)

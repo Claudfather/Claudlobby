@@ -24,6 +24,6 @@ Reply in-thread first with "Assigning to <Worker>." so the human sees what's hap
 **Posting proactively (no inbound message to reply to):**
 
 1. MCP tool: `mcp__plugin_telegram_telegram__reply` with `chat_id: <GROUP_CHAT_ID>` and your text.
-2. Bash fallback: `$CLAUDLOBBY_ROOT/lib/tg-post.sh "Your message"`.
+2. Bash fallback: `$CLAUDLOBBY_NATIVE_DIR/tg-post.sh "Your message"`.
 
 **Mandatory worker post moments:** completion (+ PR link, tag manager), blocked (+ run `report-back.sh <bot-name> blocked "<reason>"`), unexpected scope change. (No acknowledgement post — a worker's first `[BOTREPORT]` row is the ack; Worker Lifecycle, Step 2.)

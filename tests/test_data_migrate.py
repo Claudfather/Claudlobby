@@ -9,17 +9,18 @@ from unittest.mock import patch
 
 from claudlobby.config import BotConfig, FleetConfig
 from claudlobby.commands.data_migrate import cmd_data_migrate
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
-def _make_fleet(tmp_path: Path, bot_names: list[str]) -> tuple[FleetConfig, Paths]:
+def _make_fleet(tmp_path: Path, bot_names: list[str], *, manager: str) -> tuple[FleetConfig, Paths]:
     """Scaffold a minimal fleet with runtime dirs under tmp_path."""
     bots = {}
     for name in bot_names:
         bots[name] = BotConfig(
             bot_id=name, name=name, expertise=["software-engineering"]
         )
-    fleet = FleetConfig(name="test-fleet", service_prefix="com.test", bots=bots)
+    fleet = FleetConfig(name="test-fleet", service_prefix="com.test", bots=bots, manager=manager)
 
     # Create runtime bot dirs (data-migrate expects these to exist)
     for name in bot_names:
@@ -30,7 +31,7 @@ def _make_fleet(tmp_path: Path, bot_names: list[str]) -> tuple[FleetConfig, Path
     (tmp_path / "templates").mkdir(exist_ok=True)
     (tmp_path / "lib").mkdir(exist_ok=True)
 
-    paths = Paths(root=tmp_path)
+    paths = Paths(root=tmp_path, package=source_package())
     return fleet, paths
 
 
@@ -72,7 +73,7 @@ class TestDataMigrateTopLevelFiles:
     """Verify that top-level files are included in the migration plan and copied."""
 
     def test_files_appear_in_plan(self, tmp_path):
-        fleet, paths = _make_fleet(tmp_path, ["bot1"])
+        fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
         source = _make_source(
             tmp_path,
             "bot1",
@@ -90,7 +91,7 @@ class TestDataMigrateTopLevelFiles:
         assert rc == 0
 
     def test_files_are_copied_on_apply(self, tmp_path):
-        fleet, paths = _make_fleet(tmp_path, ["bot1"])
+        fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
         source = _make_source(
             tmp_path,
             "bot1",
@@ -116,7 +117,7 @@ class TestDataMigrateTopLevelFiles:
         assert (data_dir / "scripts").is_dir()
 
     def test_dotfiles_skipped_by_default(self, tmp_path):
-        fleet, paths = _make_fleet(tmp_path, ["bot1"])
+        fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
         source = _make_source(
             tmp_path,
             "bot1",
@@ -137,7 +138,7 @@ class TestDataMigrateTopLevelFiles:
         assert (data_dir / "visible.txt").exists()
 
     def test_empty_files_skipped(self, tmp_path):
-        fleet, paths = _make_fleet(tmp_path, ["bot1"])
+        fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
         source = _make_source(
             tmp_path,
             "bot1",
@@ -158,7 +159,7 @@ class TestDataMigrateTopLevelFiles:
         assert (data_dir / "nonempty.txt").exists()
 
     def test_existing_destination_file_skipped(self, tmp_path):
-        fleet, paths = _make_fleet(tmp_path, ["bot1"])
+        fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
         source = _make_source(
             tmp_path,
             "bot1",
@@ -182,7 +183,7 @@ class TestDataMigrateTopLevelFiles:
         assert (data_dir / "config.yaml").read_text() == "old content"
 
     def test_exclude_filter_applies_to_files(self, tmp_path):
-        fleet, paths = _make_fleet(tmp_path, ["bot1"])
+        fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
         source = _make_source(
             tmp_path,
             "bot1",
@@ -203,7 +204,7 @@ class TestDataMigrateTopLevelFiles:
         assert not (data_dir / "drop.txt").exists()
 
     def test_include_filter_applies_to_files(self, tmp_path):
-        fleet, paths = _make_fleet(tmp_path, ["bot1"])
+        fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
         source = _make_source(
             tmp_path,
             "bot1",

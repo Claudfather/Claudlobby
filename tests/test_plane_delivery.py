@@ -15,6 +15,7 @@ SHORT by N bytes", UNCONFIRMED -> "sent, not yet confirmed").
 
 from __future__ import annotations
 
+from tests.package_fixtures import source_package
 import hashlib
 import sqlite3
 
@@ -218,7 +219,7 @@ def _channel(root):
     from fastapi.testclient import TestClient
 
     from claudlobby.plane.view import create_app
-    body = TestClient(create_app(root)).get("/api/channel").json()
+    body = TestClient(create_app(root, package=source_package())).get("/api/channel").json()
     msgs = {}
     for t in body["data"]["threads"]:
         for m in t["messages"]:

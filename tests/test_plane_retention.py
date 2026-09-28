@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.retention import prune_metric_samples
+from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -162,30 +162,29 @@ def test_custom_window_and_negative_refused(tmp_path):
 
 # --- CLI door + composition ------------------------------------------------
 
-def _cli(root: Path, *argv, armed=True):
-    import os
-    env = dict(os.environ)
+def _cli(root: Path, *argv, cli, armed=True):
+    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=cli)
     # Opt-OUT since the defaults flip: absence RUNS, only an exact 0 stops it.
     env["PLANE_PRUNE_ENABLED"] = "1" if armed else "0"   # the launcher self-gate
     return subprocess.run(
-        [sys.executable, "-m", "claudlobby", "--root", str(root),
+        [str(cli), "--root", str(root),
          "plane", *argv], capture_output=True, text=True, timeout=120, env=env)
 
 
-def test_cli_prune_ages_out_and_dry_run_is_safe(tmp_path):
+def test_cli_prune_ages_out_and_dry_run_is_safe(tmp_path, test_cli):
     root = _root(tmp_path)
     _sample(root)
     _backdate_all(root, days_old=40)
-    dry = _cli(root, "prune", "--dry-run")
+    dry = _cli(root, "prune", "--dry-run", cli=test_cli)
     assert dry.returncode == 0
     assert "would delete 1" in dry.stdout
     assert _counts(root)[0] == 1              # dry run kept it
-    live = _cli(root, "prune")
+    live = _cli(root, "prune", cli=test_cli)
     assert live.returncode == 0
     assert "deleted 1" in live.stdout
     assert _counts(root)[0] == 0
     # a db that never existed is a no-op, not an error
-    empty = _cli(tmp_path / "nope", "prune")
+    empty = _cli(tmp_path / "nope", "prune", cli=test_cli)
     assert empty.returncode == 0
 
 
@@ -204,12 +203,8 @@ def test_prune_job_ships_enrolled_and_reads_root():
     assert "plane-prune.sh" in job["script"]
 
 
-def _launcher(root: Path, *argv, armed):
-    import os
-    # the throwaway root has no .venv; the launcher resolves the CLI via
-    # its PATH rung, so put the repo venv there (how the estate resolves)
-    env = dict(os.environ, CLAUDLOBBY_ROOT=str(root),
-               PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
+def _launcher(root: Path, *argv, cli, armed):
+    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=cli)
     # Opt-OUT since the defaults flip: absence RUNS, only an exact 0 stops it.
     env["PLANE_PRUNE_ENABLED"] = "1" if armed else "0"
     return subprocess.run(
@@ -217,14 +212,14 @@ def _launcher(root: Path, *argv, armed):
         capture_output=True, text=True, timeout=120, env=env)
 
 
-def test_launcher_runs_by_default_and_its_off_switch_is_LOUD(tmp_path):
+def test_launcher_runs_by_default_and_its_off_switch_is_LOUD(tmp_path, test_cli):
     """Opt-OUT since chunk N. The off half still deletes nothing AND says so:
     a plane growing without bound because a flag was set two months ago and
     forgotten is precisely what a silent skip buys."""
     root = _root(tmp_path)
     _sample(root)
     _backdate_all(root, days_old=40)
-    off = _launcher(root, "--dry-run", armed=False)
+    off = _launcher(root, "--dry-run", cli=test_cli, armed=False)
     assert off.returncode == 0
     # REWRITTEN by the fold (F6): the loud line comes from the shared gate
     # (lib-common `switch_is_on`) now — same three facts, one definition.
@@ -232,32 +227,29 @@ def test_launcher_runs_by_default_and_its_off_switch_is_LOUD(tmp_path):
     assert "PLANE_PRUNE_ENABLED=0" in off.stderr
     assert "accumulate without bound" in off.stderr
     assert _counts(root)[0] == 1              # off touched nothing
-    on = _launcher(root, armed=True)
+    on = _launcher(root, cli=test_cli, armed=True)
     assert on.returncode == 0
     assert _counts(root)[0] == 0              # on pruned
 
 
-def test_launcher_prunes_with_no_flag_at_all(tmp_path):
+def test_launcher_prunes_with_no_flag_at_all(tmp_path, test_cli):
     """Absence is ON — the flip itself. Fails if `${FLAG:-0}` comes back."""
-    import os
     root = _root(tmp_path)
     _sample(root)
     _backdate_all(root, days_old=40)
-    env = {k: v for k, v in os.environ.items() if k != "PLANE_PRUNE_ENABLED"}
-    env.update(CLAUDLOBBY_ROOT=str(root),
-               PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
+    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=test_cli)
     r = subprocess.run(["bash", str(REPO / "lib" / "plane-prune.sh")],
                        capture_output=True, text=True, timeout=120, env=env)
     assert r.returncode == 0, r.stderr
     assert _counts(root)[0] == 0
 
 
-def test_cli_negative_window_is_a_clean_refusal(tmp_path):
+def test_cli_negative_window_is_a_clean_refusal(tmp_path, test_cli):
     """r-gauntlet: --days -1 (a future cutoff that would delete
     EVERYTHING) is a ContractViolation → rc 2, never a raw traceback."""
     root = _root(tmp_path)
     _sample(root)
-    r = _cli(root, "prune", "--days", "-1")
+    r = _cli(root, "prune", "--days", "-1", cli=test_cli)
     assert r.returncode == 2
     assert "Traceback" not in r.stderr
     assert _counts(root)[0] == 1              # nothing deleted
@@ -267,8 +259,8 @@ def test_prune_launcher_is_thin_and_root_flag_precedes_subcommand():
     body = (REPO / "lib" / "plane-prune.sh").read_text()
     # --root is global and MUST precede the subcommand (the plane-daemon
     # smoke caught the inverted order as a real argparse refusal)
-    assert 'ARGS=(--root "$ROOT" plane prune "$@")' in body
-    assert body.count("exec") >= 3            # the venv/PATH/python3 ladder
+    assert 'exec "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" plane prune "$@"' in body
+    assert "_claudlobby_require_cli" in body
 
 
 def test_host_prune_timer_arms_from_the_host_tier(tmp_path, monkeypatch):
@@ -278,6 +270,7 @@ def test_host_prune_timer_arms_from_the_host_tier(tmp_path, monkeypatch):
     plane-prune job only, unarmed by default (the safe default for a
     DELETE door)."""
     from claudlobby.composer import compose_host_timers
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
     import claudlobby.composer as comp
 
@@ -292,7 +285,7 @@ def test_host_prune_timer_arms_from_the_host_tier(tmp_path, monkeypatch):
         "    claude-update:\n"
         "      script: \"$CLAUDLOBBY_ROOT/lib/update-claude-code.sh\"\n"
         "      schedule: \"*-*-* 04:00:00\"\n      type: oneshot\n")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=source_package())
 
     import claudlobby.env_tiers as et
     # armed: the host tier resolves PLANE_PRUNE_ENABLED=1

@@ -10,7 +10,7 @@
 #
 # Defaults: --threshold 90, --mount /
 #
-# Output is written to $CLAUDLOBBY_ROOT/lib/disk-monitor.log (creating the
+# Output is written to $CLAUDLOBBY_ROOT/state/logs/disk-monitor.log (creating the
 # dir if needed). Alerting rides the shared emit_failure_alert primitive, so
 # delivery works fleet-less (host job) via the cross-fleet fallback. Exits 0
 # on OK and on alert — non-fatal.
@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-LOG="$CLAUDLOBBY_ROOT/lib/disk-monitor.log"
+LOG="$CLAUDLOBBY_ROOT/state/logs/disk-monitor.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
 

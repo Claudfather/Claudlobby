@@ -30,8 +30,8 @@ else
     fi
 fi
 
-KEEPALIVE="$CLAUDLOBBY_ROOT/lib/keepalive.sh"
-LOG="$CLAUDLOBBY_ROOT/lib/logs/keepalive-all.log"
+KEEPALIVE="$LIB_DIR/keepalive.sh"
+LOG="$CLAUDLOBBY_ROOT/state/logs/keepalive-all.log"
 
 setup_log_dir "$LOG"
 TS=$(ts_iso)

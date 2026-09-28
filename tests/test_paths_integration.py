@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -35,24 +36,24 @@ def claudlobby_with_vault(tmp_path: Path):
 class TestPathsVaultDetection:
     def test_detect_resolves_through_claudron(self, claudlobby_with_vault):
         cl_root, vault, fleet_dir = claudlobby_with_vault
-        paths = Paths.detect(hint=cl_root, fleet="my-fleet")
+        paths = Paths.detect(hint=cl_root, fleet="my-fleet", package=source_package())
         assert paths.fleet_dir == fleet_dir
         assert paths.vault_root == vault
         assert paths.root == cl_root
 
     def test_fleet_yaml_from_vault(self, claudlobby_with_vault):
         cl_root, vault, fleet_dir = claudlobby_with_vault
-        paths = Paths.detect(hint=cl_root, fleet="my-fleet")
+        paths = Paths.detect(hint=cl_root, fleet="my-fleet", package=source_package())
         assert paths.fleet_yaml == fleet_dir / "fleet.yaml"
 
     def test_runtime_from_vault(self, claudlobby_with_vault):
         cl_root, vault, fleet_dir = claudlobby_with_vault
-        paths = Paths.detect(hint=cl_root, fleet="my-fleet")
+        paths = Paths.detect(hint=cl_root, fleet="my-fleet", package=source_package())
         assert paths.runtime == fleet_dir / "runtime"
 
     def test_shared_docs_from_vault(self, claudlobby_with_vault):
         cl_root, vault, fleet_dir = claudlobby_with_vault
-        paths = Paths.detect(hint=cl_root, fleet="my-fleet")
+        paths = Paths.detect(hint=cl_root, fleet="my-fleet", package=source_package())
         assert paths.shared_docs == fleet_dir / "shared"
 
     def test_falls_back_to_local(self, tmp_path: Path):
@@ -70,7 +71,7 @@ class TestPathsVaultDetection:
         local_fleet = cl_root / "local" / "other-fleet"
         local_fleet.mkdir(parents=True)
 
-        paths = Paths.detect(hint=cl_root, fleet="other-fleet")
+        paths = Paths.detect(hint=cl_root, fleet="other-fleet", package=source_package())
         assert paths.fleet_dir == local_fleet
         assert paths.vault_root is None
 
@@ -89,7 +90,7 @@ class TestPathsVaultDetection:
         local_fleet = cl_root / "local" / "bare-fleet"
         local_fleet.mkdir(parents=True)
 
-        paths = Paths.detect(hint=cl_root, fleet="bare-fleet")
+        paths = Paths.detect(hint=cl_root, fleet="bare-fleet", package=source_package())
         assert paths.fleet_dir == local_fleet
         assert paths.vault_root is None
 
@@ -101,7 +102,7 @@ class TestPathsVaultDetection:
         local_fleet = cl_root / "local" / "normal-fleet"
         local_fleet.mkdir(parents=True)
 
-        paths = Paths.detect(hint=cl_root, fleet="normal-fleet")
+        paths = Paths.detect(hint=cl_root, fleet="normal-fleet", package=source_package())
         assert paths.fleet_dir == local_fleet
         assert paths.vault_root is None
 
@@ -111,7 +112,7 @@ class TestPathsVaultDetection:
         (cl_root / "library").mkdir(parents=True)
         (cl_root / "lib").mkdir()
 
-        paths = Paths.detect(hint=cl_root)
+        paths = Paths.detect(hint=cl_root, package=source_package())
         assert paths.fleet_dir is None
         assert paths.vault_root is None
 
@@ -123,14 +124,14 @@ class TestComposeBotConfVaultMode:
         from claudlobby.config import BotConfig, FleetConfig, TelegramConfig
 
         cl_root, vault, fleet_dir = claudlobby_with_vault
-        paths = Paths(root=cl_root, fleet_dir=fleet_dir, vault_root=vault)
+        paths = Paths(root=cl_root, fleet_dir=fleet_dir, vault_root=vault, package=source_package())
         bot = BotConfig(
             bot_id="testbot",
             name="testbot",
             expertise=["eng"],
             telegram=TelegramConfig(handle="testbot"),
         )
-        fleet = FleetConfig(name="my-fleet", service_prefix="com.test")
+        fleet = FleetConfig(name="my-fleet", service_prefix="com.test", manager="testbot", bots={"testbot": bot})
         conf = compose_bot_conf(bot, fleet, paths)
 
         # BOT_DIR should be absolute (not $CLAUDLOBBY_ROOT-relative) since

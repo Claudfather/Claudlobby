@@ -133,7 +133,7 @@ class Resolution(NamedTuple):
 
 
 def resolver_path(paths: Paths) -> Path:
-    """Where ``env-tiers.sh`` lives for this root."""
+    """Where ``env-tiers.sh`` lives in the selected package."""
     return paths.lib / "env-tiers.sh"
 
 
@@ -143,9 +143,10 @@ def read_tiers(
     """The four tiers in runtime sourcing order, least specific first.
 
     The child's environment is built explicitly rather than inherited. Every
-    var the resolver reads — ``HOME``, ``CLAUDLOBBY_ROOT``, ``FLEET_NAME``,
-    ``BOT_DIR`` — is also a var an ambient bot session exports, so an inherited
-    environment would let the caller's own session silently redirect the answer.
+    var the resolver reads — ``HOME``, ``CLAUDLOBBY_ROOT``, ``FLEET_ROOT``,
+    ``FLEET_NAME``, ``BOT_DIR`` — is also a var an ambient bot session exports,
+    so an inherited environment would let the caller's own session silently
+    redirect the answer.
     That has already happened here once, to a ledger assertion, and it read as
     a clean pass on every arm at once.
     """
@@ -163,6 +164,7 @@ def read_tiers(
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", str(Path.home())),
         "CLAUDLOBBY_ROOT": str(paths.root),
+        "FLEET_ROOT": str(paths.fleet_config_dir),
         "FLEET_NAME": fleet,
         "BOT_DIR": bot_dir,
     }
@@ -199,11 +201,10 @@ def read_tiers(
 def _fleet_name_for(paths: Paths) -> str:
     """The fleet name the runtime would use, or "" in root mode.
 
-    ``Paths`` carries the fleet DIR, not the name; the runtime is given the
-    name and resolves the dir itself (flat or nested). Handing it the directory
-    leaf is what start-bot.sh is handed, so the resolution path is the same one.
+    The resolved directory is supplied separately as ``FLEET_ROOT`` so the
+    native query does not have to rediscover a flat, nested or vault layout.
     """
-    return paths.fleet_dir.name if paths.fleet_dir else ""
+    return paths.fleet_name or ""
 
 
 def cascade(tiers: list[EnvTier]) -> dict[str, Resolution]:

@@ -24,7 +24,7 @@ from setuptools.errors import SetupError
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIRS = ("library", "voices", "templates")
-SEEDS = ("fleet.yaml.seed", "projects.yaml.seed", ".env.seed.example",
+SEEDS = ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
          "missions/fleet.md.seed")
 # Unified CLI plan's complete lib inventory: H dispositions are development
 # instruments, not native production dependencies. Move sources with their

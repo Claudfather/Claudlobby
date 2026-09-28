@@ -24,30 +24,17 @@ set -euo pipefail
 # months ago and forgotten is the failure this line prevents. Only an exact 0
 # disarms — an empty assignment is a win at its tier (#1213) but is not a 0.
 # The comparison is switch_is_on (lib-common) — polarity in one place.
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "${BASH_SOURCE[0]}" in
+    */*) LIB_DIR="${BASH_SOURCE[0]%/*}" ;;
+    *) LIB_DIR="." ;;
+esac
+# shellcheck source=cli-context.sh
+. "$LIB_DIR/cli-context.sh"
+_claudlobby_require_root
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 switch_is_on PLANE_PRUNE_ENABLED plane-prune "metric samples will accumulate without bound" || exit 0
 
-ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
-export CLAUDLOBBY_ROOT="$ROOT"
-
-ARGS=(--root "$ROOT" plane prune "$@")
-
-if [ -x "$ROOT/.venv/bin/claudlobby" ]; then
-    exec "$ROOT/.venv/bin/claudlobby" "${ARGS[@]}"
-fi
-if command -v claudlobby >/dev/null 2>&1; then
-    exec claudlobby "${ARGS[@]}"
-fi
-# python3 existing is not python3 being USABLE (the plane-daemon.sh note):
-# probe the import so an unusable interpreter falls through to the honest
-# 127 rather than an exit-1 that looks like a prune failure.
-if command -v python3 >/dev/null 2>&1 \
-    && (cd "$ROOT" && python3 -c "import claudlobby" >/dev/null 2>&1); then
-    cd "$ROOT"
-    exec python3 -m claudlobby "${ARGS[@]}"
-fi
-printf 'plane-prune.sh: no claudlobby CLI resolvable from %s\n' "$ROOT" >&2
-exit 127
+_claudlobby_require_cli
+exec "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" plane prune "$@"

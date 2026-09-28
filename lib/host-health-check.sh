@@ -21,7 +21,7 @@
 #   host-health-check.sh [--since <systemd-since>]
 #     --since   limit the kernel-log scan window (default: this boot, -b 0)
 #
-# Output goes to $CLAUDLOBBY_ROOT/lib/host-health-check.log ; de-dup fingerprint
+# Output goes to $CLAUDLOBBY_ROOT/state/logs/host-health-check.log ; de-dup fingerprint
 # in host-health-check.state. Exits 0 always -- monitors never abort the fleet.
 set -euo pipefail
 
@@ -39,8 +39,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-LOG="$CLAUDLOBBY_ROOT/lib/host-health-check.log"
-STATE="$CLAUDLOBBY_ROOT/lib/host-health-check.state"
+LOG="$CLAUDLOBBY_ROOT/state/logs/host-health-check.log"
+STATE="$CLAUDLOBBY_ROOT/state/logs/host-health-check.state"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
 FLEET="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"

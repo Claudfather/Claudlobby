@@ -41,8 +41,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 switch_is_on TASK_RECHECK_ENABLED task-recheck "no re-check will be sent" || exit 0
 
-ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
-export CLAUDLOBBY_ROOT="$ROOT"
+ROOT="$CLAUDLOBBY_ROOT"
 
 FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
 [ $# -gt 0 ] && shift
@@ -53,19 +52,6 @@ fi
 
 ARGS=(--root "$ROOT" task recheck --fleet "$FLEET" "$@")
 
-if [ -x "$ROOT/.venv/bin/claudlobby" ]; then
-    exec "$ROOT/.venv/bin/claudlobby" "${ARGS[@]}"
-fi
-if command -v claudlobby >/dev/null 2>&1; then
-    exec claudlobby "${ARGS[@]}"
-fi
-# python3 existing is not python3 being USABLE (the plane-daemon.sh note): probe
-# the import so an unusable interpreter falls through to the honest 127 rather
-# than an exit 1 that looks like a re-check failure.
-if command -v python3 >/dev/null 2>&1 \
-    && (cd "$ROOT" && python3 -c "import claudlobby" >/dev/null 2>&1); then
-    cd "$ROOT"
-    exec python3 -m claudlobby "${ARGS[@]}"
-fi
-printf 'task-recheck.sh: no claudlobby CLI resolvable from %s\n' "$ROOT" >&2
-exit 127
+. "$LIB_DIR/cli-context.sh"
+_claudlobby_require_cli
+exec "$CLAUDLOBBY_CLI" "${ARGS[@]}"

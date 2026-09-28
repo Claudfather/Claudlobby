@@ -787,13 +787,12 @@ def _validate_bots(
                     "checkin-role",
                     f"bot '{bot_name}': protocol 'checkin' declared, but "
                     "checkin is a leaf-manager default and this bot is a "
-                    "coordinator (every in-fleet report is itself a "
-                    "manager), so it does not receive it by default. "
+                    "manager with no local workers, so it does not "
+                    "receive it by default. "
                     "Because it is declared here, the skill links and the "
                     "beat WILL inject into it once the fleet arms "
                     "manager-checkin (the trigger selects manager + "
-                    "equipped), and a coordinator's check-in has only "
-                    "managers to dispatch to."
+                    "equipped), but it has no local workers to dispatch to."
                 )
             else:
                 report.warn(
@@ -2097,8 +2096,8 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         report.warn(
             "job-inert",
             "manager-checkin is armed (defaults.jobs.manager-checkin.enroll: "
-            "true) but this fleet has no leaf manager — a manager with at "
-            "least one in-fleet report that is not itself a manager — so no "
+            "true) but this fleet has no local workers — its declared "
+            "manager is the only bot — so no "
             "unit is composed and nothing will fire."
         )
 

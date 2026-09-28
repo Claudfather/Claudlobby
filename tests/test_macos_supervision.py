@@ -60,6 +60,7 @@ import pytest
 
 from claudlobby.composer import compose_launchd_plist
 from claudlobby.config import BotConfig, FleetConfig
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
@@ -106,10 +107,10 @@ def test_composed_plist_is_structurally_valid(tmp_path):
     a Mac can say launchd would load it, and nothing here claims otherwise.
     """
     bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
-    fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+    fleet = FleetConfig(name="t", service_prefix="p", manager="w", bots={"w": bot})
     (tmp_path / "runtime" / "bots" / "w").mkdir(parents=True)
 
-    text = compose_launchd_plist(bot, fleet, Paths(root=tmp_path, fleet_dir=tmp_path))
+    text = compose_launchd_plist(bot, fleet, Paths(root=tmp_path, fleet_dir=tmp_path, package=source_package()))
     parsed = plistlib.loads(text.encode())
 
     assert parsed["Label"] == "p.w"

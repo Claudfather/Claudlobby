@@ -270,8 +270,9 @@ def promote_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     if not bot:
         return f"bot '{bot_name}' not in fleet.yaml\n"
 
-    expertise_paths = [paths.base_expertise / f"{a}.md" for a in bot.expertise]
-    voice_path = paths.root / bot.voice if bot.voice else None
+    expertise_paths = [paths.overlay_library / "expertise" / f"{a}.md" for a in bot.expertise]
+    voice_path = (paths.overlay_voices / bot.voice.removeprefix("voices/")
+                  if bot.voice else None)
     bot_md = paths.bot_runtime(bot_name) / "CLAUDE.md"
 
     expertise_lines = (
@@ -293,11 +294,11 @@ def promote_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
         )
         + f"   - Mission (one paragraph) → fleet.yaml `bots.{bot_name}.mission`\n"
         f"   - Scope override → fleet.yaml `bots.{bot_name}.scope`\n"
-        f"   - Shared resource → new file under {paths.base_resources}/\n"
-        f"   - Integration / MCP usage doc → new file under {paths.base_integrations}/ (paired with mcp fragment)\n"
-        f"   - Cross-cutting protocol → new file under {paths.base_protocols}/\n"
-        f"   - New guardrail → new file under {paths.base_guardrails}/\n"
-        f"   - Lesson / 'learned the hard way' → new file under {paths.base_lessons}/\n"
+        f"   - Shared resource → new file under {paths.overlay_library / 'resources'}/\n"
+        f"   - Integration / MCP usage doc → new file under {paths.overlay_library / 'integrations'}/ (paired with mcp fragment)\n"
+        f"   - Cross-cutting protocol → new file under {paths.overlay_library / 'protocols'}/\n"
+        f"   - New guardrail → new file under {paths.overlay_library / 'guardrails'}/\n"
+        f"   - Lesson / 'learned the hard way' → new file under {paths.overlay_library / 'lessons'}/\n"
         f"3. After editing library/, run: claudlobby generate\n"
         f"   (Runtime CLAUDE.md is overwritten; library/ is now the source of truth.)\n"
         f"\n"

@@ -50,7 +50,7 @@ F = "f"
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
 NOW_EPOCH = int(datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc).timestamp())
 MATCHER = REPO / "lib" / "dispatch-overdue.py"
-FLEET_YAML = ("fleet:\n  name: f\n  service_prefix: com.test\n  bots:\n"
+FLEET_YAML = ("fleet:\n  manager: w2\n  name: f\n  service_prefix: com.test\n  bots:\n"
               "    w1:\n      expertise: [software-engineering]\n"
               "    w2:\n      expertise: [software-engineering]\n")
 
@@ -59,12 +59,13 @@ def _paths(root):
     """An overlay root whose lib/ IS the repo's lib/ — the matcher a door
     loads is the install's own script, never a copy. `bots:` nests under
     `fleet:` (a top-level `bots:` parses to zero bots, silently)."""
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
     (root / "local" / F / "runtime").mkdir(parents=True, exist_ok=True)
     (root / "local" / F / "fleet.yaml").write_text(FLEET_YAML)
     if not (root / "lib").exists():
         (root / "lib").symlink_to(REPO / "lib")
-    return Paths(root=root, fleet_dir=root / "local" / F)
+    return Paths(root=root, fleet_dir=root / "local" / F, package=source_package())
 
 
 def _epoch(iso):

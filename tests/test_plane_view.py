@@ -18,6 +18,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from claudlobby.plane.emit_api import emit_batch  # noqa: E402
+from tests.package_fixtures import source_package
 from claudlobby.plane.view import create_app  # noqa: E402
 
 H = "a" * 32
@@ -76,7 +77,7 @@ def _seed_conversation(root: Path) -> None:
 
 @pytest.fixture()
 def client(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(tmp_path))
+    return TestClient(create_app(tmp_path, package=source_package()))
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +85,7 @@ def client(tmp_path: Path) -> TestClient:
 # ---------------------------------------------------------------------------
 
 def test_no_write_routes_exist(tmp_path):
-    app = create_app(tmp_path)
+    app = create_app(tmp_path, package=source_package())
     for route in app.routes:
         methods = getattr(route, "methods", None)
         if methods:
@@ -125,7 +126,7 @@ def test_dir_at_db_path_is_absent_not_unreadable(tmp_path):
     gauntlet)."""
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "plane.db").mkdir()  # a dir, not a db
-    body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/summary").json()
     assert body["state"] == "absent"
 
 
@@ -136,7 +137,7 @@ def test_unreadable_db_is_distinct_from_absent(tmp_path):
     db.write_bytes(b"x")
     db.chmod(0)  # exists, cannot be opened
     try:
-        body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+        body = TestClient(create_app(tmp_path, package=source_package())).get("/api/summary").json()
     finally:
         db.chmod(0o600)
     assert body["state"] == "unreadable"
@@ -152,7 +153,7 @@ def test_ok_with_empty_data_is_ok(tmp_path):
     _full_capture(tmp_path)
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t",
                            "payload": {"event": "daemon_started"}}])
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     assert body["state"] == "ok"
     assert body["data"]["threads"] == []  # legitimately idle — UI's word
 
@@ -163,7 +164,7 @@ def test_ok_with_empty_data_is_ok(tmp_path):
 
 def test_channel_threads_the_whole_conversation(tmp_path):
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     assert body["state"] == "ok"
     threads = body["data"]["threads"]
     wi = [t for t in threads if t["work_item_id"] == f"wi_{H}"]
@@ -191,7 +192,7 @@ def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
     _seed_conversation(tmp_path)
     (tmp_path / "state" / "plane" / "channels.json").write_text(
         json.dumps({"-100999": "Engineering group"}))
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     notice = [m for t in body["data"]["threads"] for m in t["messages"]
               if m["message_class"] == "notice"][0]
     assert notice["recipient_short"] == "Engineering group"
@@ -199,7 +200,7 @@ def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
 
 def test_unmapped_telegram_destination_is_generic_not_raw(tmp_path):
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     notice = [m for t in body["data"]["threads"] for m in t["messages"]
               if m["message_class"] == "notice"][0]
     assert notice["recipient_short"] == "Telegram"    # never "-100999"
@@ -211,7 +212,7 @@ def test_unmapped_telegram_destination_is_generic_not_raw(tmp_path):
 
 def test_tasks_carry_status_and_attention(tmp_path):
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/tasks").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks").json()
     rows = body["data"]["assignments"]
     assert rows[0]["status"] == "completed"
     assert rows[0]["attention"] is False
@@ -220,7 +221,7 @@ def test_tasks_carry_status_and_attention(tmp_path):
 
 def test_identities_are_alias_first(tmp_path):
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/identities").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/identities").json()
     shorts = {i["short"] for i in body["data"]["identities"]}
     assert {"erlich", "ramanujan"} <= shorts
 
@@ -240,7 +241,7 @@ def _first_sse_chunk(client, url):
 
 def test_stream_replays_rows_past_cursor(tmp_path):
     _seed_conversation(tmp_path)
-    payload = _first_sse_chunk(TestClient(create_app(tmp_path)),
+    payload = _first_sse_chunk(TestClient(create_app(tmp_path, package=source_package())),
                                "/api/stream?cursor=0&once=1")
     assert payload is not None
     assert payload["rows"][0]["ingest_seq"] == 1
@@ -254,7 +255,7 @@ def test_stream_at_head_pings_not_replays(tmp_path):
     head = conn.execute("SELECT MAX(ingest_seq) FROM ingest_ledger"
                         ).fetchone()[0]
     conn.close()
-    payload = _first_sse_chunk(TestClient(create_app(tmp_path)),
+    payload = _first_sse_chunk(TestClient(create_app(tmp_path, package=source_package())),
                                f"/api/stream?cursor={head}&once=1")
     assert payload is None  # nothing to replay — a ping, never stale rows
 
@@ -288,7 +289,7 @@ def _seed_one_sided(root, tagged_side):
 @pytest.mark.parametrize("tagged_side", ["dispatch", "reply"])
 def test_one_sided_work_item_still_one_thread(tmp_path, tagged_side):
     _seed_one_sided(tmp_path, tagged_side)
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     threads = body["data"]["threads"]
     assert len(threads) == 1, f"{tagged_side}-tagged pair split the story"
     assert threads[0]["work_item_id"] == "wi_" + "e" * 32
@@ -304,7 +305,7 @@ def test_terminal_stamp_is_first_terminal_monotone(tmp_path):
         {"event_type": "task", "emitter": "t", "fleet": "f",
          "payload": {"event": "superseded", "work_item_id": f"wi_{H}",
                      "assignment_id": f"asg_{H}"}}])
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     t = [x for x in body["data"]["threads"]
          if x["work_item_id"] == f"wi_{H}"][0]
     assert t["terminal"] == "completed"  # first terminal wins, always
@@ -333,7 +334,7 @@ def test_tasks_restriction_matches_unrestricted_derivation(tmp_path):
     from claudlobby.plane.queries import attention_params
 
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/tasks").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks").json()
     conn = _sq.connect(tmp_path / "state" / "plane" / "plane.db")
     conn.row_factory = _sq.Row
     unrestricted = {r["assignment_id"]: r["status"]
@@ -355,7 +356,7 @@ def test_spool_count_excludes_quarantine_and_sidecars(tmp_path):
     q.mkdir()
     (q / "ev_b.json").write_text("{}")
     (q / "ev_b.json.reason").write_text("poison")
-    body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/summary").json()
     assert body["data"]["spool_files"] == 1  # pending only, doctor's number
     assert body["data"]["spool_oldest_at"] == "2026-01-01T00:00:00"
 
@@ -365,14 +366,14 @@ def test_summary_honors_plane_socket_override(tmp_path, monkeypatch):
     override = tmp_path / "elsewhere.sock"
     override.write_text("")  # present (a stale FILE — liveness must not lie)
     monkeypatch.setenv("PLANE_SOCKET", str(override))
-    body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/summary").json()
     assert body["data"]["ingest_socket_present"] is True
     assert body["data"]["daemon_serving"] is False  # probe, not presence
 
 
 def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
     _seed_conversation(tmp_path)
-    r = TestClient(create_app(tmp_path)).get("/healthz")
+    r = TestClient(create_app(tmp_path, package=source_package())).get("/healthz")
     assert r.status_code == 200
     data = r.json()["data"]
     from claudlobby.plane.migrations import SCHEMA_USER_VERSION
@@ -382,7 +383,7 @@ def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
 
 
 def test_index_served_from_package_data(tmp_path):
-    r = TestClient(create_app(tmp_path)).get("/")
+    r = TestClient(create_app(tmp_path, package=source_package())).get("/")
     assert r.status_code == 200
     assert "observable plane" in r.text
     assert r.headers.get("cache-control") == "no-store"
@@ -391,7 +392,7 @@ def test_index_served_from_package_data(tmp_path):
 
 
 def test_app_js_import_is_cache_busted(tmp_path):
-    r = TestClient(create_app(tmp_path)).get("/app.js")
+    r = TestClient(create_app(tmp_path, package=source_package())).get("/app.js")
     assert r.status_code == 200
     assert r.headers.get("cache-control") == "no-store"
     assert "/panel-state.js?v=" in r.text  # intra-module import busts too
@@ -401,14 +402,14 @@ def test_stream_defaults_to_head_never_replays(tmp_path):
     """Gauntlet consensus (3 reviewers, measured): a cursor-less connect used
     to replay the ENTIRE ledger per viewer per reconnect."""
     _seed_conversation(tmp_path)
-    payload = _first_sse_chunk(TestClient(create_app(tmp_path)),
+    payload = _first_sse_chunk(TestClient(create_app(tmp_path, package=source_package())),
                                "/api/stream?once=1")
     assert payload is None  # at head: a ping, never a replay
 
 
 def test_stream_honors_last_event_id(tmp_path):
     _seed_conversation(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     with client.stream("GET", "/api/stream?once=1",
                        headers={"Last-Event-ID": "1"}) as r:
         payload = None
@@ -497,7 +498,7 @@ def test_fleets_door_lists_registry_fleets_beyond_the_rail_window(tmp_path):
         "event_type": "metric_sample", "emitter": "probe", "fleet": "_host",
         "payload": {"subject_kind": "host", "subject": "h1",
                     "metric": "host.job_ran", "value": 1}}])
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     rail = client.get("/api/identities").json()["data"]["identities"]
     rail_fleets = {r["alias"] for r in rail if r["kind"] == "fleet"}
     assert "data" not in rail_fleets           # the window dropped it (premise)
@@ -513,7 +514,7 @@ def test_fleets_default_is_the_room_that_moved_last(tmp_path):
     """The first-visit tab: the fleet whose room (sent BY it or TO it)
     carries the newest message — data's human notice landed last."""
     _seed_twins(tmp_path)
-    fl = TestClient(create_app(tmp_path)).get("/api/fleets").json()["data"]
+    fl = TestClient(create_app(tmp_path, package=source_package())).get("/api/fleets").json()["data"]
     assert fl["default"] == "data"
     # silence everywhere: alphabetical, and an empty plane has no default
     empty = tmp_path / "empty"
@@ -526,7 +527,7 @@ def test_fleets_default_is_the_room_that_moved_last(tmp_path):
                         "fleet": "alpha", "payload": {
                             "subject_kind": "host", "subject": "h",
                             "metric": "host.job_ran", "value": 1}}])
-    fl = TestClient(create_app(empty)).get("/api/fleets").json()["data"]
+    fl = TestClient(create_app(empty, package=source_package())).get("/api/fleets").json()["data"]
     assert fl["default"] == "alpha"
     assert all(f["last_comm_at"] is None for f in fl["fleets"])
 
@@ -536,7 +537,7 @@ def test_tasks_and_identities_follow_the_fleet_and_qualify_twins(tmp_path):
     participant's fleet), and the host-wide read labels twins fleet/name
     through inventory's ONE rule."""
     _seed_twins(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     eng = client.get("/api/tasks?fleet=engineering").json()["data"]
     assert [a["title"] for a in eng["assignments"]] == ["work for engineering"]
     assert eng["assignments"][0]["assignee_short"] == "one"   # bare in its room
@@ -633,7 +634,7 @@ def test_channel_stamps_fleets_and_marks_cross_fleet_threads(tmp_path):
     and renders `eng/lead -> data/worker` in EVERY room, while an intra-
     fleet thread keeps short names in its own room."""
     _seed_cross_fleet(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     for room in ("engineering", "data", None):
         x = _threads(client, room)["wi_" + "e" * 32]
         assert x["cross_fleet"] is True, room
@@ -713,7 +714,7 @@ def test_all_tab_never_collapses_twins_in_channel_attention_or_search(tmp_path):
         "payload": {"msg_id": "msg_" + "b" * 32, "attempt_no": 1,
                     "carrier": "tmux", "destination": "one",
                     "state": "failed"}}])
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     host = client.get("/api/tasks").json()["data"]
     attn = sorted(a["assignee_short"] for a in host["assignments"]
                   if a["attention"])
@@ -764,7 +765,7 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     the ONE rule — and a figure whose source is missing is None with a
     reason, never a zero (orphan-ness needs the bot's directory)."""
     _seed_twins_with_deadlines(tmp_path)
-    client = TestClient(create_app(tmp_path, sampler=_TwinSampler()))
+    client = TestClient(create_app(tmp_path, sampler=_TwinSampler(), package=source_package()))
     ov = client.get("/api/overview").json()
     assert ov["state"] == "ok", ov
     rows = {r["alias"]: r for r in ov["data"]["fleets"]}
@@ -821,7 +822,7 @@ def test_overview_discloses_a_missing_live_poll_and_a_malformed_policy(tmp_path)
     class _NoSampler(_TwinSampler):
         available = False
 
-    client = TestClient(create_app(tmp_path, sampler=_NoSampler()))
+    client = TestClient(create_app(tmp_path, sampler=_NoSampler(), package=source_package()))
     rows = {r["alias"]: r
             for r in client.get("/api/overview").json()["data"]["fleets"]}
     assert rows["engineering"]["presence"]["live_poll"] == "unavailable"
@@ -926,7 +927,7 @@ def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_
     _dispatch(tmp_path, "3", expected_by="2020-01-01T00:00:00+00:00",
               tx_state="pane_submitted")                            # delivered, overdue
     rows = {r["assignment_id"]: r for r in
-            TestClient(create_app(tmp_path)).get("/api/tasks").json()["data"]["assignments"]}
+            TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks").json()["data"]["assignments"]}
     done = rows[f"asg_{H}"]
     assert done["status"] == "completed" and done["terminal_at"]
     assert done["attention"] is False and done["attention_reason"] == []
@@ -980,7 +981,7 @@ def test_ui_reads_in_the_operators_language():
 
 def _tasks(root: Path) -> dict:
     return {r["assignment_id"]: r for r in
-            TestClient(create_app(root)).get("/api/tasks")
+            TestClient(create_app(root, package=source_package())).get("/api/tasks")
             .json()["data"]["assignments"]}
 
 
@@ -1063,7 +1064,7 @@ def test_the_header_totals_ship_with_their_disclosures(tmp_path):
     what the page dropped when it summed the cards itself — the unconfirmed
     share of the bot count and the worst live-poll state on the host."""
     _seed_twins_with_deadlines(tmp_path)
-    client = TestClient(create_app(tmp_path, sampler=_TwinSampler()))
+    client = TestClient(create_app(tmp_path, sampler=_TwinSampler(), package=source_package()))
     data = client.get("/api/overview").json()["data"]
     cards, t = data["fleets"], data["totals"]
     assert t["fleets"] == 2
@@ -1075,7 +1076,7 @@ def test_the_header_totals_ship_with_their_disclosures(tmp_path):
     class _NoSampler(_TwinSampler):
         available = False
 
-    degraded = TestClient(create_app(tmp_path, sampler=_NoSampler())) \
+    degraded = TestClient(create_app(tmp_path, sampler=_NoSampler(), package=source_package())) \
         .get("/api/overview").json()["data"]["totals"]
     assert degraded["live_poll"] == "unavailable"   # never swallowed by a sum
 
@@ -1086,7 +1087,7 @@ def test_totals_of_a_plane_with_no_fleet_are_zero_fleets_not_four_zeros(tmp_path
     _full_capture(tmp_path)
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t",
                            "payload": {"event": "daemon_started"}}])
-    body = TestClient(create_app(tmp_path)).get("/api/overview").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()
     assert body["state"] == "ok"
     assert body["data"]["fleets"] == [] and body["data"]["totals"]["fleets"] == 0
 
@@ -1285,13 +1286,13 @@ def test_a_rail_row_carries_the_fleet_the_server_says_it_belongs_to(tmp_path):
     `fleet_of` takes the LAST. A fleet identity is its own fleet; a human
     belongs to none, being a participant of every room."""
     _seed_twins(tmp_path)
-    rail = {r["alias"]: r for r in TestClient(create_app(tmp_path))
+    rail = {r["alias"]: r for r in TestClient(create_app(tmp_path, package=source_package()))
             .get("/api/identities").json()["data"]["identities"]}
     assert rail["bot:data/one"]["fleet"] == "data"
     assert rail["bot:engineering/one"]["fleet"] == "engineering"
     assert rail["data"]["kind"] == "fleet" and rail["data"]["fleet"] == "data"
     assert rail["human:chris"]["fleet"] is None
-    room = TestClient(create_app(tmp_path)) \
+    room = TestClient(create_app(tmp_path, package=source_package())) \
         .get("/api/identities?fleet=data").json()["data"]["identities"]
     assert {r["fleet"] for r in room} == {"data", None}   # the fleet + a human
 
@@ -1488,11 +1489,11 @@ def test_the_overview_counts_the_human_arms_through_the_same_columns(tmp_path):
     """The strip reads attention off ATTENTION_ARMS_SQL, so a new arm reaches
     the header count without a second derivation (the fold's F2)."""
     _dispatch(tmp_path, "f", expected_by=FUTURE, tx_state="pane_submitted")
-    before = TestClient(create_app(tmp_path)).get("/api/overview").json()
+    before = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()
     assert sum(r["attention"] for r in before["data"]["fleets"]) == 0
     _task_event(tmp_path, "f", "escalated", at="2026-01-01T00:00:00+00:00",
                 question="?", by="erlich")
-    after = TestClient(create_app(tmp_path)).get("/api/overview").json()
+    after = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()
     fleets = {r["alias"]: r for r in after["data"]["fleets"]}
     assert fleets["f"]["attention"] == 1 and fleets["f"]["overdue"] == 0
 

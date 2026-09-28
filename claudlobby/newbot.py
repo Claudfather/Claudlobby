@@ -44,6 +44,7 @@ class NewBotInputs:
     name: str
     expertise: list[str]
     voice: str | None = None
+    voice_text: str | None = None  # pending source content; never a fleet.yaml field
     mission: str | None = None
     model: str | None = None
     effort: str | None = None
@@ -277,7 +278,7 @@ def maybe_create_voice(
     if voice_arg:
         return voice_arg
     if voice_text:
-        voice_path = paths.base_voices / f"{name}.md"
+        voice_path = paths.assert_writable(paths.overlay_voices / f"{name}.md")
         voice_path.parent.mkdir(parents=True, exist_ok=True)
         voice_path.write_text(
             f"---\nname: {name.title()}\n---\n\n{voice_text.strip()}\n"
@@ -347,6 +348,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         )
 
     voice_arg = None
+    voice_text = None
     print("\nVoice (personality overlay, optional):")
     print("  1. Pick existing voice file from voices/")
     print("  2. Write a new voice (paste a paragraph)")
@@ -354,7 +356,8 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     choice = _ask("Choice (1/2/3)", default="3")
     if choice == "1":
         existing = (
-            sorted(p.relative_to(paths.root) for p in paths.base_voices.rglob("*.md"))
+            sorted(Path("voices") / p.relative_to(paths.base_voices)
+                   for p in paths.base_voices.rglob("*.md"))
             if paths.base_voices.is_dir()
             else []
         )
@@ -379,10 +382,8 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
             lines.append(line)
         voice_text = "\n\n".join(lines)
         if voice_text.strip():
-            # Materialize the pasted voice now, through the same helper the
-            # --voice-text CLI flag uses, so the interactive path stops
-            # silently dropping it.
-            voice_arg = maybe_create_voice(paths, name, None, voice_text)
+            # Retain the content until the command's dry-run/confirmation gate.
+            voice_arg = f"voices/{name}.md"
 
     mission = _ask("Mission (one-paragraph charter)")
     model = _ask("Model (opus/sonnet/haiku)", default="opus") or None
@@ -452,6 +453,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         name=name,
         expertise=expertise,
         voice=voice_arg,
+        voice_text=voice_text,
         mission=mission or None,
         model=model,
         effort=effort,

@@ -39,7 +39,7 @@
 #
 # Defaults: --max-age-hours 6, the browser basename pattern below.
 #
-# Output is written to $CLAUDLOBBY_ROOT/lib/orphan-browser-reaper.log. A reap
+# Output is written to $CLAUDLOBBY_ROOT/state/logs/orphan-browser-reaper.log. A reap
 # raises a FLEET NOTICE (not an ALERT — reclaiming a leak is routine hygiene,
 # and routine events that page train operators to ignore the channel). Exits 0
 # whether or not anything was reaped: monitoring must never abort a job chain.
@@ -92,7 +92,7 @@ case "$MAX_AGE_HOURS" in
 esac
 MAX_AGE_SECS=$(( MAX_AGE_HOURS * 3600 ))
 
-LOG="$CLAUDLOBBY_ROOT/lib/orphan-browser-reaper.log"
+LOG="$CLAUDLOBBY_ROOT/state/logs/orphan-browser-reaper.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
 

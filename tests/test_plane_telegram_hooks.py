@@ -13,6 +13,7 @@ foreign tool call writes nothing.
 
 from __future__ import annotations
 
+from tests.package_fixtures import source_package
 import json
 import sqlite3
 import subprocess
@@ -346,7 +347,7 @@ def test_fleet_rail_shows_participants_never_registry_entities(tmp_path):
     sys.path.insert(0, str(REPO))
     from fastapi.testclient import TestClient
     from claudlobby.plane.view import create_app
-    kinds = {r["kind"] for r in TestClient(create_app(root)).get(
+    kinds = {r["kind"] for r in TestClient(create_app(root, package=source_package())).get(
         "/api/identities").json()["data"]["identities"]}
     assert "library_item" not in kinds
     assert "actor" in kinds and "fleet" in kinds

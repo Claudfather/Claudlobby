@@ -20,7 +20,7 @@ You orchestrate the fleet via `tmux send-keys` (primary, reliable) with Telegram
 tmux send-keys -t <worker> '<task prompt>' Enter
 ```
 
-**Workers report back** via `{{CLAUDLOBBY_ROOT}}/lib/report-back.sh`, which sends a structured message into your tmux session:
+**Workers report back** via `{{CLAUDLOBBY_NATIVE_DIR}}/report-back.sh`, which sends a structured message into your tmux session:
 
 ```
 [BOTREPORT] <bot> | <status> | <summary> [| pr:<url>] [| issues:<urls>] [| skill:<name>]

@@ -126,8 +126,8 @@ weighed and passed over goes into `inputs_seen.considered` as one line, `<candid
 
 | action | when | through |
 |---|---|---|
-| **dispatch** | an open or backlog item fits an idle worker (step 1b); you choose the worker and the rationale says why | ONE Bash call — the RECORD here-doc with the dispatch appended by `&&` (the block under RECORD before ACT): `bash "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh" --project <key> [--repo <owner/name>] [--ref <issue-url>] --checkin "$ck" <worker> "<task>"` — `--project` is the well-defined bar (a projects.yaml key); `--checkin` joins the dispatch to this decision; `$ck` is the id the record door just printed, captured in the same call |
-| **ask** | the surfacing judgment (below) concludes the operator should hear something — a fork only they can resolve, or the backlog holds nothing worth starting ("ask for tasks") | one Telegram post in the shape chunk 2's protocol will fix (one line, one ask with named options, one pointer): the reply tool when this check-in arrived on Telegram; `bash "$CLAUDLOBBY_ROOT/lib/tg-post.sh" "<the post>"` when it was injected into your pane (there is no chat to reply to). Either way it is recorded as your communication |
+| **dispatch** | an open or backlog item fits an idle worker (step 1b); you choose the worker and the rationale says why | ONE Bash call — the RECORD here-doc with the dispatch appended by `&&` (the block under RECORD before ACT): `bash "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh" --project <key> [--repo <owner/name>] [--ref <issue-url>] --checkin "$ck" <worker> "<task>"` — `--project` is the well-defined bar (a projects.yaml key); `--checkin` joins the dispatch to this decision; `$ck` is the id the record door just printed, captured in the same call |
+| **ask** | the surfacing judgment (below) concludes the operator should hear something — a fork only they can resolve, or the backlog holds nothing worth starting ("ask for tasks") | one Telegram post in the shape chunk 2's protocol will fix (one line, one ask with named options, one pointer): the reply tool when this check-in arrived on Telegram; `bash "$CLAUDLOBBY_NATIVE_DIR/tg-post.sh" "<the post>"` when it was injected into your pane (there is no chat to reply to). Either way it is recorded as your communication |
 | **nothing** | all work in flight, nothing worthwhile — **recorded**, so "checked and chose nothing" is a fact, not silence | — |
 
 **The surfacing judgment.** Its default answer is **no**. Weigh, at minimum: does
@@ -168,7 +168,7 @@ must show the rigor bar was weighed, not only what was picked.
 For `ask` or `nothing`:
 
 ```bash
-bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<'EOF'
+bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<'EOF'
 { ...the decision JSON below... }
 EOF
 ```
@@ -176,7 +176,7 @@ EOF
 For `dispatch`, the record and the act as ONE call:
 
 ```bash
-ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<'EOF'
+ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<'EOF'
 {"prev_checkin_id": <"ck_…" from step 0, or null>,
  "inputs_seen": {"open_tasks": N|null, "stalls": N|null, "unacked": N|null,
                  "issues_seen": N|null, "issues_considered": N|null, "knowledge_hits": N|null,
@@ -188,7 +188,7 @@ ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<'EOF'
  "rationale": "<your words, <= 600 chars: the weighing, the project and its tier, the worker and its observed state, the why>",
  "raise": {"decided": <true for ask, else false>, "reason": "<why it surfaced, or why not, <= 600>", "held": []}}
 EOF
-) && bash "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh" --project <key> --checkin "$ck" <worker> "<task>"
+) && bash "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh" --project <key> --checkin "$ck" <worker> "<task>"
 ```
 
 The `&&` is RECORD-before-ACT made mechanical: the door prints the `checkin_id` alone
@@ -220,7 +220,7 @@ dispatch would go — so the shape itself passes through the permission layer be
 any real run relies on it:
 
 ```bash
-ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" --dry-run <<'EOF'
+ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" --dry-run <<'EOF'
 { ...the same decision JSON... }
 EOF
 ) && claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json

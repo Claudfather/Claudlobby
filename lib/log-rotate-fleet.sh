@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-ROTATE="$CLAUDLOBBY_ROOT/lib/log-rotate.sh"
+ROTATE="$LIB_DIR/log-rotate.sh"
 if [ ! -x "$ROTATE" ]; then
     echo "log-rotate-fleet: missing $ROTATE" >&2
     exit 1
@@ -45,8 +45,8 @@ fi
 
 LOGS=()
 
-# Package-level logs
-for f in "$CLAUDLOBBY_ROOT"/lib/logs/*.log "$CLAUDLOBBY_ROOT"/lib/logs/*.jsonl "$CLAUDLOBBY_ROOT"/lib/*.log "$CLAUDLOBBY_ROOT"/lib/*.jsonl; do
+# Host operation logs live in the data plane, never in immutable package code.
+for f in "$CLAUDLOBBY_ROOT"/state/logs/*.log "$CLAUDLOBBY_ROOT"/state/logs/*.jsonl; do
     [ -f "$f" ] && LOGS+=("$f")
 done
 

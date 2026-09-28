@@ -943,7 +943,8 @@ def cmd_plane_view(args) -> int:
     supervision posture as serve: systemd/launchd own backgrounding). Binds
     LOCALHOST by default — Tailscale Serve fronts it per the design walk;
     --host is the raw-bind dev fallback."""
-    root = _resolve_paths(args).root
+    paths = _resolve_paths(args)
+    root = paths.root
     try:
         from ..plane.view import begin_shutdown, create_app
         import uvicorn
@@ -953,7 +954,7 @@ def cmd_plane_view(args) -> int:
             "install with: pip install -e '.[plane-ui]'"
             f" ({exc})", file=sys.stderr)
         return 1
-    app = create_app(root)
+    app = create_app(root, package=paths.package)
 
     class _ViewServer(uvicorn.Server):
         """Stops when asked. A held SSE connection kept the daemon alive

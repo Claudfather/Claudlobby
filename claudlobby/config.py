@@ -832,6 +832,7 @@ class WorkstreamsConfig:
 class FleetConfig:
     name: str
     service_prefix: str
+    manager: str
     telegram_group_chat_id: str | None = None
     human_telegram_id: str | None = None
     accounts: dict[str, str] = field(default_factory=lambda: {"default": "~/.claude"})
@@ -859,6 +860,20 @@ class FleetConfig:
     # fleet omits the block) so the composer can emit WORKSTREAM_* unconditionally.
     workstreams: WorkstreamsConfig = field(default_factory=WorkstreamsConfig)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.manager, str) or not self.manager.strip():
+            raise ValueError("fleet.manager is required and must be a local bot ID")
+        if self.manager not in self.bots:
+            raise ValueError(
+                f"fleet.manager '{self.manager}' is not in fleet.bots"
+            )
+        for team in self.teams.values():
+            if team.manager != self.manager:
+                raise ValueError(
+                    f"team '{team.name}': manager '{team.manager}' must match "
+                    f"fleet.manager '{self.manager}'"
+                )
+
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
         return bool(self.sweep and self.sweep.enabled)
@@ -868,54 +883,22 @@ class FleetConfig:
         return any(b.briefing and b.briefing.slots for b in self.bots.values())
 
     def manager_bots(self) -> set[str]:
-        """Bot names that manage anyone — a team in this fleet, or bots anywhere.
+        """The declared owner of this fleet's intake, routing and follow-up.
 
-        Two declarations, because a manager's reports are not always in the same
-        fleet. ``teams:`` names a within-fleet manager and answers "does a team
-        here name this bot". ``bots.<id>.manages:`` names the reports directly,
-        and is the only one of the two that can express a CROSS-FLEET report — a
-        top-level coordinator whose reports are themselves managers of other
-        fleets is named by no ``teams:`` block anywhere, and so was invisible
-        here despite the fleet declaring exactly who it manages.
-
-        That is not a stretch of the schema: ``_validate_teams`` already warns
-        rather than errors on a ``manages`` target outside ``fleet.bots``,
-        precisely because "bot_ids may reference other fleets".
-
-        Widely consumed, including by guards where a missing bot silently loses
-        a protection rather than merely being mislabelled — so widen it here,
-        once, rather than special-casing whichever consumer notices first.
+        Teams group workers under this manager. ``manages`` and ``reports_to``
+        retain reporting metadata, including cross-fleet relationships, without
+        granting another bot ownership of this fleet's tasks.
         """
-        from_teams = {team.manager for team in self.teams.values()}
-        # An empty or absent `manages:` list is not a claim to manage anyone.
-        from_manages = {name for name, bot in self.bots.items() if bot.manages}
-        return from_teams | from_manages
+        return {self.manager}
 
     def leaf_manager_bots(self) -> set[str]:
-        """Managers at least one of whose IN-FLEET reports is not itself a manager.
+        """The fleet manager when it has at least one other local bot to route.
 
-        The second detectable role (spec §10). ``manager_bots()`` is true for a
-        coordinator too, and the composed ``MANAGER_TMUX`` self-pointer follows the
-        same set, so ``bot_is_manager`` cannot tell the two apart at runtime either
-        — the distinction has to be made at compose time.
-
-        A CROSS-FLEET ``manages:`` target does NOT make a manager leaf (F5, ruled):
-        ``manages:`` exists precisely to express a coordinator whose reports are
-        managers of other fleets, so an unresolvable target is evidence of a
-        coordinator rather than of a worker. Out-of-fleet names are dropped BEFORE
-        the test, never counted as non-managers; for a money-spending default the
-        conservative direction is not to equip. A manager with no in-fleet report
-        at all is likewise not leaf.
+        Every other local bot belongs to this manager, whether grouped into a
+        team or not. A singleton fleet with only cross-fleet reporting links has
+        no local worker and does not receive the leaf-manager defaults.
         """
-        managers = self.manager_bots()
-        leaf: set[str] = set()
-        for name in managers:
-            reports = {w for t in self.teams.values() if t.manager == name for w in t.workers}
-            reports |= set((self.bots[name].manages or []) if name in self.bots else [])
-            in_fleet = {r for r in reports if r in self.bots}
-            if in_fleet - managers:
-                leaf.add(name)
-        return leaf
+        return {self.manager} if self.bots.keys() - {self.manager} else set()
 
     def teams_for_manager(self, bot_name: str) -> list[TeamConfig]:
         return [team for team in self.teams.values() if team.manager == bot_name]
@@ -2087,7 +2070,7 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
     return merged
 
 
-def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
+def load_fleet(fleet_yaml: Path, *, projects_yaml: Path | None = None) -> tuple[FleetConfig, dict]:
     """Parse fleet.yaml into a FleetConfig; returns (fleet, merged_defaults)."""
     if not fleet_yaml.is_file():
         raise FileNotFoundError(f"fleet.yaml not found at {fleet_yaml}")
@@ -2153,7 +2136,8 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
     # wrote one still gets a registry derived from the repos its bots already
     # declare, so the check-in's `dispatch` action (which needs --project) is
     # available. Replacement, never a merge — see derive_projects.
-    projects = load_projects(fleet_yaml.parent / "projects.yaml")
+    projects = load_projects(projects_yaml if projects_yaml is not None
+                             else fleet_yaml.parent / "projects.yaml")
     projects_derived = not projects
     if projects_derived:
         projects = derive_projects(bots)
@@ -2161,6 +2145,7 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
     fleet_cfg = FleetConfig(
         name=fleet.get("name", "unnamed-fleet"),
         service_prefix=fleet.get("service_prefix", "claudlobby"),
+        manager=fleet.get("manager"),
         telegram_group_chat_id=fleet.get("telegram_group_chat_id"),
         human_telegram_id=fleet.get("human_telegram_id"),
         accounts=fleet.get("accounts", {"default": "~/.claude"})

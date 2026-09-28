@@ -85,10 +85,10 @@ if [ -z "$ENV_FILE" ] && [ -n "$FLEET_ARG" ]; then
     fi
 fi
 ENV_FILE="${ENV_FILE:-$CLAUDLOBBY_ROOT/.env}"
-LOG="${CLAUDLOBBY_CREDS_LOG:-$CLAUDLOBBY_ROOT/lib/creds-check.log}"
+LOG="${CLAUDLOBBY_CREDS_LOG:-$CLAUDLOBBY_ROOT/state/logs/creds-check.log}"
 STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/state/creds-check-state.json}"
 mkdir -p "$(dirname "$STATE")"
-TG_POST="$CLAUDLOBBY_ROOT/lib/tg-post.sh"
+TG_POST="$LIB_DIR/tg-post.sh"
 
 # Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
 # the source of truth for runtime credentials. Parse it safely before any check.

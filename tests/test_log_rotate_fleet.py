@@ -4,7 +4,6 @@ the whole expression with a syntax error (eaten by 2>/dev/null inside a
 process substitution), silently dropping rotation for every data/ log type."""
 
 import os
-import shutil
 import subprocess
 
 from tests.conftest import _scrubbed_env
@@ -18,13 +17,8 @@ DATA_LOGS = ("cron.log", "git-pull.log", "briefing-morning.log", "home-assistant
 
 def _fleet_root(tmp_path):
     root = tmp_path / "root"
-    libdir = root / "lib"
-    libdir.mkdir(parents=True)
-    # The script resolves its rotator from CLAUDLOBBY_ROOT. supervisor.sh is a
-    # required sibling: lib-common.sh unconditionally sources it from its own
-    # directory (#1573 task 6).
-    for script in ("log-rotate.sh", "lib-common.sh", "supervisor.sh"):
-        shutil.copy2(os.path.join(LIB, script), libdir / script)
+    (root / "state" / "logs").mkdir(parents=True)
+    (root / "state" / "logs" / "bot-sweep-cron.log").write_text("line\n" * 600)
     bot = root / "local" / "f" / "runtime" / "bots" / "b1"
     (bot / "logs").mkdir(parents=True)
     (bot / "data").mkdir()
@@ -58,6 +52,7 @@ class TestLogRotateFleet:
         r = _run(root)
         assert r.returncode == 0, r.stderr + r.stdout
         assert _lines(bot / "logs" / "session.log") == 100
+        assert _lines(root / "state" / "logs" / "bot-sweep-cron.log") == 100
         for name in DATA_LOGS:
             assert _lines(bot / "data" / name) == 100, f"{name} not rotated"
 

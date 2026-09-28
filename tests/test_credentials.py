@@ -17,6 +17,7 @@ from claudlobby import credentials as creds
 
 FLEET_YAML = dedent("""\
     fleet:
+      manager: worker
       name: t
       service_prefix: com.t
       accounts:
@@ -50,6 +51,7 @@ def estate(tmp_path: Path, monkeypatch):
     estate — impossible to write.
     """
     from claudlobby.config import load_fleet
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "claudlobby"
@@ -78,7 +80,7 @@ def estate(tmp_path: Path, monkeypatch):
     (fleet_dir / "fleet.yaml").write_text(FLEET_YAML)
 
     fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=fleet_dir)
+    paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
     return root, fleet_dir, fleet, paths
 
 

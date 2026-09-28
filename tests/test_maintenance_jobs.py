@@ -10,6 +10,8 @@ import os
 import subprocess
 import time
 
+import pytest
+
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -180,7 +182,7 @@ class TestReloadFleetNpxPreflight:
         libdir.mkdir(parents=True)
         # supervisor.sh is a required sibling: lib-common.sh unconditionally
         # sources it from its own directory (#1573 task 6).
-        for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh"):
+        for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh", "cli-context.sh"):
             with open(os.path.join(LIB, script)) as f:
                 content = f.read()
             _write_exec(str(libdir / script), content)
@@ -201,6 +203,7 @@ class TestReloadFleetNpxPreflight:
         (bot / "bot.conf").write_text(plugins_line + "\n")
         env = _scrubbed_env(
             CLAUDLOBBY_ROOT=str(root),
+            CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
             CALL_LOG=str(tmp_path / "calls.log"),
             PATH=f"{bindir}:{os.environ['PATH']}",
             TMUX_TMPDIR=str(tmp_path / "no-tmux"),
@@ -262,14 +265,17 @@ class TestReloadFleetNpxPreflight:
         assert "beta@Src'" not in calls  # no stray trailing quote
 
 
-def _source_lib_common(tmp_path, snippet, path):
+def _source_lib_common(tmp_path, snippet, path, **extra_env):
     """Run `snippet` in a bash shell that has sourced lib-common with an exact
     PATH — the only way to assert on tool resolution the way a timer sees it."""
     return subprocess.run(
         ["bash", "-c", f'. "{LIB}/lib-common.sh"\n{snippet}'],
-        env=_scrubbed_env(CLAUDLOBBY_ROOT=str(tmp_path / "clroot"), PATH=path),
+        env=_scrubbed_env(
+            CLAUDLOBBY_ROOT=str(tmp_path / "clroot"), PATH=path, **extra_env
+        ),
         capture_output=True,
         text=True,
+        timeout=10,
     )
 
 
@@ -328,47 +334,39 @@ class TestOwnToolPath:
 
 
 class TestClaudlobbyCli:
-    """getting-started.md supports two invocations — the `claudlobby` console
-    script and `python3 -m claudlobby`. Where pip puts the console script
-    depends on which python installed it, so PATH alone is not a contract."""
+    """The composed entrypoint wins; ambient installs cannot substitute for it."""
 
-    def test_prefers_the_console_script_when_present(self, tmp_path):
+    def test_executes_selected_cli_with_arguments_despite_stale_path(self, tmp_path):
         bindir = tmp_path / "bin"
         bindir.mkdir()
-        _write_exec(str(bindir / "claudlobby"), '#!/bin/bash\necho CONSOLE "$@"\n')
+        _write_exec(str(bindir / "claudlobby"), '#!/bin/bash\necho STALE; exit 99\n')
+        selected = tmp_path / "selected cli"
+        _write_exec(str(selected), '#!/bin/bash\nprintf "ARG:%s\\n" "$@"\nexit 23\n')
         r = _source_lib_common(
-            tmp_path, "claudlobby_cli generate", f"{bindir}:/usr/bin:/bin"
+            tmp_path, "claudlobby_cli --fleet 'example fleet' generate",
+            f"{bindir}:/usr/bin:/bin", CLAUDLOBBY_CLI=str(selected),
         )
-        assert "CONSOLE generate" in r.stdout, r.stdout + r.stderr
+        assert r.returncode == 23, r.stderr
+        assert r.stdout.splitlines() == ["ARG:--fleet", "ARG:example fleet", "ARG:generate"]
 
-    def test_falls_back_to_python_module_from_the_repo_root(self, tmp_path):
-        """No console script anywhere: an importable checkout must still run,
-        and must resolve from CLAUDLOBBY_ROOT rather than the caller's cwd —
-        the systemd units set no WorkingDirectory."""
-        root = tmp_path / "clroot"
-        pkg = root / "claudlobby"
-        pkg.mkdir(parents=True)
-        (pkg / "__init__.py").write_text("")
-        (pkg / "__main__.py").write_text("import sys; print('MODULE', *sys.argv[1:])")
-        # claudlobby_cli probes `import claudlobby.composer` rather than the bare
-        # package, because the bare import succeeds from cwd with no dependencies
-        # installed and so cannot tell a usable checkout from an unusable one.
-        # An empty file satisfies that probe; the fixture stands in for "some
-        # importable checkout", and a real one always has a composer module.
-        (pkg / "composer.py").write_text("")
-        r = subprocess.run(
-            ["bash", "-c", f'. "{LIB}/lib-common.sh"\nclaudlobby_cli generate'],
-            env=_scrubbed_env(CLAUDLOBBY_ROOT=str(root), PATH="/usr/bin:/bin"),
-            capture_output=True,
-            text=True,
-            cwd="/",  # deliberately NOT the repo root
+    @pytest.mark.parametrize("selection", ["unset", "relative", "missing", "nonexecutable"])
+    def test_invalid_selection_refuses_even_with_a_stale_cli(self, tmp_path, selection):
+        bindir = _venv_stub(tmp_path, '#!/bin/bash\necho STALE; exit 99\n')
+        not_executable = tmp_path / "not-executable"
+        not_executable.write_text("#!/bin/bash\necho MUST-NOT-RUN\n")
+        extra = {}
+        if selection != "unset":
+            extra["CLAUDLOBBY_CLI"] = {
+                "relative": "claudlobby",
+                "missing": str(tmp_path / "missing-cli"),
+                "nonexecutable": str(not_executable),
+            }[selection]
+        r = _source_lib_common(
+            tmp_path, "claudlobby_cli generate", f"{bindir}:/usr/bin:/bin", **extra
         )
-        assert "MODULE generate" in r.stdout, r.stdout + r.stderr
-
-    def test_unresolvable_says_so_diagnosably(self, tmp_path):
-        r = _source_lib_common(tmp_path, "claudlobby_cli generate", "/usr/bin:/bin")
         assert r.returncode == 127
-        assert "unresolvable" in r.stderr, r.stderr
+        assert "CLAUDLOBBY_CLI" in r.stderr, r.stderr
+        assert r.stdout == ""
 
 
 class TestReloadFailureReasonIsTheRealError:
@@ -392,7 +390,7 @@ class TestReloadFailureReasonIsTheRealError:
         libdir.mkdir(parents=True)
         # supervisor.sh is a required sibling: lib-common.sh unconditionally
         # sources it from its own directory (#1573 task 6).
-        for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh"):
+        for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh", "cli-context.sh"):
             with open(os.path.join(LIB, script)) as f:
                 _write_exec(str(libdir / script), f.read())
         _write_exec(str(libdir / "check-npx-cache.sh"), "#!/bin/bash\nexit 0\n")
@@ -412,6 +410,7 @@ class TestReloadFailureReasonIsTheRealError:
             ["bash", str(libdir / "reload-fleet.sh")],
             env=_scrubbed_env(
                 CLAUDLOBBY_ROOT=str(root),
+                CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
                 PATH=f"{bindir}:{sysbin or '/usr/bin:/bin:/usr/sbin:/sbin'}",
                TG_CAPTURE=str(tmp_path / "tg-capture"),
                 TMUX_TMPDIR=str(tmp_path / "no-tmux"),

@@ -7,6 +7,7 @@
 ```yaml
 fleet:
   name: <fleet-name>                    # human-readable identifier
+  manager: <bot-id>                     # REQUIRED — exactly one bot declared below
   service_prefix: <reverse-domain>      # e.g. "com.example.claudlobby" — used for service unit names
   telegram_group_chat_id: "<chat-id>"   # default group; bots can override per-bot
   human_telegram_id: "<user-id>"        # OPTIONAL — human's Telegram ID for DM allowlisting
@@ -60,9 +61,9 @@ fleet:
         - command: <shell-command>
           matcher: <tool-pattern>
 
-  teams:                                # OPTIONAL — group bots so managers know their roster
+  teams:                                # OPTIONAL — groups under the fleet manager
     <team-name>:
-      manager: <bot-name>
+      manager: <bot-name>               # must equal fleet.manager
       workers: [<bot-name>, ...]
 
   bots:                                 # REQUIRED — one entry per bot
@@ -71,8 +72,8 @@ fleet:
       expertise: [<list>]               # REQUIRED — area(s) of expertise from library/expertise/
       voice: voices/<file>.md           # OPTIONAL — personality overlay
       mission: <string>                 # OPTIONAL — one-paragraph charter
-      reports_to: <bot-name>            # OPTIONAL — bot_id of manager
-      manages: [<bot-name>, ...]        # OPTIONAL — bot_ids this bot manages
+      reports_to: <bot-name>            # OPTIONAL — organizational reporting metadata
+      manages: [<bot-name>, ...]        # OPTIONAL — organizational reporting metadata
       scope:                            # OPTIONAL — operational boundary
         org: <github-org>
         repos: [<repo>, ...]
@@ -260,11 +261,25 @@ Under an on-by-default rule the stamp matters most for the `0`: an off switch th
 
 Host-scoped switches (`plane-daemon`, `plane-view`, `plane-prune`, `plane-expire`, `plane-host-probe`, `update-siblings`) are **not** reachable from `fleet.yaml` — host jobs bypass the fleet defaults merge. See [`system-yaml-schema.md`'s Defaults section](system-yaml-schema.md#defaults-the-rule).
 
-### `fleet.teams`
+### `fleet.manager` and `fleet.teams`
 
-Optional grouping. The generator uses team membership to inject a "Fleet You Manage" roster into manager personas.
+`manager` is required and names one existing local bot. It owns fleet intake,
+routing and follow-up; changing this field transfers current responsibility.
+Historical actor/assigner records remain unchanged. Missing or ambiguous ownership
+is refused: existing manifests must explicitly name their manager before using
+this release. A single-bot fleet names that bot.
 
-A manager with at least one in-fleet report that is not itself a manager — a `teams:` worker or a `bots.<name>.manages` entry resolving inside this fleet — is a *leaf manager* (`FleetConfig.leaf_manager_bots()`); a coordinator, whose every in-fleet report is itself a manager, is not, and neither is a worker. A cross-fleet `manages:` target never makes a manager leaf (F5, ruled): only in-fleet reports count, because the trigger that injects `/checkin` runs per fleet. A leaf manager is equipped with the `checkin` protocol by default, and the protocol's `requires:` brings the `checkin` skill and its grants along with it; `system_defaults.protocols: false` is the opt-out, and opting out of the protocol also drops the skill it required unless the bot declares the skill directly — and it drops every default protocol for every bot, `shared-documentation` / `shared-documentation-vault` included, since there is no per-bot opt-out. The automatic beat that fires `/checkin` on a schedule is a separate, opt-in switch that stays off until the fleet arms it — `defaults: { jobs: { manager-checkin: { enroll: true } } }` — named in `claudlobby doctor`'s switches table with the line that flips it; a fleet with no leaf manager composes no `manager-checkin` unit at all, and arming the job on one anyway produces a `validate` warning that says why.
+Teams optionally group workers under that same manager. Each team's `manager`
+must equal `fleet.manager`; reporting links cannot introduce another fleet owner.
+The generated organization block always names the fleet manager.
+
+The manager receives the `checkin` protocol default when this fleet has another
+local bot, including workers without team membership. Cross-fleet reporting links
+alone do not qualify a singleton fleet. `system_defaults.protocols: false` removes
+all default protocols (including shared-documentation defaults) and their required
+skills/grants unless explicitly equipped. The scheduled beat remains separately
+opt-in through `defaults.jobs.manager-checkin.enroll: true`. With no local workers,
+no beat unit composes and an armed job produces a validation warning.
 
 ### `fleet.sweep`
 
@@ -353,9 +368,11 @@ One-paragraph charter — why this bot exists, what success looks like. Forces e
 
 ### `bots.<name>.reports_to` / `bots.<name>.manages`
 
-Org structure fields. `reports_to` names the bot_id of this bot's manager. `manages` lists bot_ids this bot manages. Together they generate an `## Org Structure` section in CLAUDE.md showing the reporting hierarchy. Both are optional — bots without either get no org section.
-
-A manager whose `manages:` (or a `teams:` `workers:` list naming it) includes at least one in-fleet bot that is not itself a manager is a *leaf manager* and is equipped with the `checkin` protocol by default (see `fleet.teams`, above, for the full rule and its opt-out). A `manages:` target outside this fleet never counts toward that test (F5) — only in-fleet reports do, because the trigger that injects `/checkin` runs per fleet.
+Optional organizational reporting metadata, including cross-fleet relationships.
+The generated organization section labels these separately from `fleet.manager`.
+They do not grant fleet task ownership, change worker report routing, or promote
+another bot to manager. Check-in defaults follow the explicit fleet manager and
+presence of local workers, as described above.
 
 ### `bots.<name>.scope`
 
@@ -910,7 +927,7 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 5. **Scope** — `## Scope` section if `scope:` is set.
 6. **Shared Documentation** — `## Shared Documentation` section when the fleet has a shared docs directory configured.
 7. **Model strategy** — `## Model Strategy` section if `model_strategy:` is set.
-8. **Org Structure** — `## Org Structure` section if `reports_to` or `manages` is set.
+8. **Org Structure** — the declared fleet manager, plus optional organizational reporting metadata.
 9. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
 10. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
 11. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
@@ -989,6 +1006,7 @@ Warnings are advisory: `validate` and `generate` exit 0 on warnings alone, by de
 ```yaml
 fleet:
   name: starter
+  manager: lead
   service_prefix: com.example.starter
   telegram_group_chat_id: "-1001234567890"
 

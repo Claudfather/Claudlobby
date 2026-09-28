@@ -8,6 +8,7 @@
 
 fleet:
   name: seed
+  manager: claudfather
   service_prefix: com.claudlobby.seed
   telegram_group_chat_id: "REPLACE_ME"       # /setup patches this
   human_telegram_id: "REPLACE_ME"             # /setup patches this

@@ -45,6 +45,10 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..context import resolve_paths
+from ..paths import Paths, load_lib_module
+from ..resources import PackageResources
+
 try:  # §14: optional UI features degrade without disabling the core ledger
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, StreamingResponse
@@ -1089,18 +1093,12 @@ _HOST_SAMPLES_SQL = (
 _INGEST_LAG_WARN_S = 120
 
 
-def _plane_readers(root: Path):
-    """The install's stdlib `lib/plane-readers.py` — the reader brief and
+def _plane_readers(paths: Paths):
+    """The package's native `plane-readers.py` — the reader brief and
     `claudlobby report-back` answer through — so the card counts EXACTLY the
     rows the manager's brief lists (`report_rows` + `unacked_rows`, one rule);
     None when the install carries no readable copy (disclosed on the card)."""
-    from ..paths import load_lib_module
-    # the plane root's own lib/ (the install on a host), else the package's
-    # checkout (an editable install serving a plane under another root)
-    for lib in (Path(root) / "lib", Path(__file__).resolve().parents[2] / "lib"):
-        if (lib / "plane-readers.py").is_file():
-            return load_lib_module(lib, "plane-readers.py")
-    return None
+    return load_lib_module(paths.lib, "plane-readers.py")
 
 
 def _host_samples(conn: sqlite3.Connection) -> dict | None:
@@ -1137,7 +1135,7 @@ def _epoch(iso: str | None) -> float | None:
     return d.timestamp() if d else None
 
 
-def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
+def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
                     live_poll: str) -> dict:
     """The strip's rows. Every figure is a PLANE fact through the doors
     that already define it — never a bare zero where a source is absent:
@@ -1176,6 +1174,7 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
     those rows summed once for the header — with the disclosures a sum
     swallows (`_totals`)."""
     from datetime import datetime, timedelta, timezone
+    root = paths.root
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     day_ago = (now_dt - timedelta(hours=24)).isoformat()
@@ -1188,7 +1187,7 @@ def _fetch_overview(conn: sqlite3.Connection, root: Path, live: list,
     stale_after = _stale_after_s()
     bot_dirs = {(fl, b): d for fl, b, d in discover_bot_dirs(root)}
     actors = _fleet_actors(conn)
-    pr = _plane_readers(root)
+    pr = _plane_readers(paths)
     fl = _fetch_fleets(conn, actors)
     rows = []
     for f in fl["fleets"]:
@@ -1472,13 +1471,17 @@ async def _idle_tick(app, seconds: float) -> bool:
 # App factory
 # --------------------------------------------------------------------------
 
-def create_app(root: Path, sampler: PaneSampler | None = None):
+def create_app(
+    root: Path, sampler: PaneSampler | None = None, *,
+    package: PackageResources | None = None,
+):
     if FastAPI is None:  # pragma: no cover
         raise RuntimeError(
             "the plane UI needs the [plane-ui] extra: "
             f"pip install -e '.[plane-ui]' ({_IMPORT_ERROR})"
         )
-    root = Path(root)
+    paths = resolve_paths(root=root, package=package)
+    root = paths.root
     sampler = sampler or PaneSampler(root)
 
     from contextlib import asynccontextmanager
@@ -1639,7 +1642,7 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
         live_poll = ("unavailable" if not sampler.available
                      else "degraded" if degraded else "ok")
         return JSONResponse(_envelope(
-            root, lambda c: _fetch_overview(c, root, live, live_poll)))
+            root, lambda c: _fetch_overview(c, paths, live, live_poll)))
 
     @app.get("/api/inventory")
     def inventory(fleet: str | None = None):

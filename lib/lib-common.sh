@@ -12,7 +12,7 @@
 #   parse_env_file     — restricted .env parser ([export ]KEY=VALUE only)
 #   own_tool_path      — prepend this repo's tool prefixes (timer PATH is minimal)
 #   claudlobby_cli     — run the claudlobby CLI across every install shape
-#   session_cli_path   — shim the venv-only CLI onto a bot session PATH
+#   session_cli_path   — bind the composed CLI to this bot's session PATH
 #   with_timeout       — run a command under timeout(1) if available, else bare
 #   with_lock          — portable mutex (flock if available, else mkdir spinlock)
 #   setup_log_dir      — mkdir -p for log file's parent directory
@@ -35,7 +35,7 @@
 #   walk_back_uncomposed_host_units — disable host units nothing composes now
 #
 # Variables set on source:
-#   CLAUDLOBBY_ROOT — repo root (auto-detected from this file's location)
+#   CLAUDLOBBY_ROOT — explicit mutable host data root (never the package dir)
 #   _OS          — "Linux" or "Darwin"
 #   _HOMEBREW    — Homebrew prefix (macOS only; empty on Linux)
 #   _TMUX_BIN    — resolved path to tmux binary
@@ -48,10 +48,10 @@ set -euo pipefail
 [ -n "${_LIB_COMMON_LOADED:-}" ] && return 0
 _LIB_COMMON_LOADED=1
 
-# --- Repo root resolution ----------------------------------------------------
-# Derive CLAUDLOBBY_ROOT from this file's location ($CLAUDLOBBY_ROOT/lib/lib-common.sh)
-# unless already set by the environment or the calling script.
-: "${CLAUDLOBBY_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# --- Resolved context --------------------------------------------------------
+# A private native adapter must be invoked by its resolved CLI/unit/bot context.
+# Inferring storage from this installed script could write into release assets.
+: "${CLAUDLOBBY_ROOT:?native adapter requires a resolved CLAUDLOBBY_ROOT data directory}"
 export CLAUDLOBBY_ROOT
 
 # --- OS detection -----------------------------------------------------------
@@ -169,61 +169,15 @@ own_tool_path() {
     export PATH
 }
 
-# claudlobby_cli <args...>
-# Run the claudlobby CLI across every install shape getting-started.md supports.
-# `pip install -e .` yields a console script whose location depends entirely on
-# which python did the installing, so PATH alone is not a reliable contract:
-#   1. `claudlobby` on PATH — pipx, or a --user/venv install own_tool_path found.
-#   2. $CLAUDLOBBY_ROOT/.venv — the venv getting-started.md tells users to make.
-#      PEP 668 makes a venv the only supported install shape on Homebrew macOS
-#      and on Debian/Pi, and a venv console script is NOT on PATH under launchd
-#      or systemd, so this rung is the common supervised case, not an exotic one.
-#   3. `python3 -m claudlobby` — the documented equivalent invocation.
-# Rungs 2 and 3 run from $CLAUDLOBBY_ROOT so an editable/uninstalled checkout
-# resolves on sys.path regardless of the caller cwd — never rely on cwd being the
-# repo (the launchd plists set WorkingDirectory, the systemd units do not).
-# Returns 127 with a diagnosable message when no rung resolves.
-#
-# Usability probe. Two ways to get this wrong, and it has to dodge both:
-#
-#   FALSE POSITIVE — a bare `import claudlobby` succeeds from cwd alone, because
-#   claudlobby/ is a plain package directory at the repo root. On a host with no
-#   dependencies that sends the caller down a rung that dies on a raw
-#   ModuleNotFoundError (jinja2) instead of reaching the diagnosable message
-#   below — precisely the likeliest failure mode (venv install, non-activated
-#   shell, i.e. every supervised run).
-#
-#   FALSE NEGATIVE — demanding claudlobby.composer outright rejects a checkout
-#   that legitimately has no composer module. A minimal package of __init__.py +
-#   __main__.py runs fine under `python3 -m claudlobby`, and refusing it breaks
-#   rung 3 for exactly the uninstalled-checkout case rung 3 exists to serve.
-#
-# So: import the submodule, and treat the failure as fatal ONLY when what went
-# missing is not part of claudlobby itself — i.e. an absent third-party dep.
-_CLAUDLOBBY_USABLE='
-import importlib, sys
-try:
-    importlib.import_module("claudlobby.composer")
-except ModuleNotFoundError as exc:
-    if (exc.name or "").split(".")[0] != "claudlobby":
-        sys.exit(1)          # a dependency is missing -> not usable
-    importlib.import_module("claudlobby")   # no composer -> minimal layout, fine
-'
-
+# claudlobby_cli <args...>: execute the entrypoint selected at composition.
+# PATH, the data root and the caller cwd never select another installation.
+# The same import-free validation serves resident adapters that must exec.
 claudlobby_cli() {
-    local venv_py="$CLAUDLOBBY_ROOT/.venv/bin/python"
-    if command -v claudlobby >/dev/null 2>&1; then
-        claudlobby "$@"
-    elif [ -x "$venv_py" ] && ( cd "$CLAUDLOBBY_ROOT" && "$venv_py" -c "$_CLAUDLOBBY_USABLE" ) >/dev/null 2>&1; then
-        ( cd "$CLAUDLOBBY_ROOT" && "$venv_py" -m claudlobby "$@" )
-    elif ( cd "$CLAUDLOBBY_ROOT" && python3 -c "$_CLAUDLOBBY_USABLE" ) >/dev/null 2>&1; then
-        ( cd "$CLAUDLOBBY_ROOT" && python3 -m claudlobby "$@" )
-    else
-        printf 'claudlobby CLI unresolvable: not on PATH (%s), no usable venv at %s, not importable from %s. Fix: python3 -m venv %s/.venv && %s/.venv/bin/python -m pip install -e %s\n' \
-            "$PATH" "$venv_py" "$CLAUDLOBBY_ROOT" \
-            "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" >&2
-        return 127
-    fi
+    # shellcheck source=cli-context.sh
+    . "$_LIB_COMMON_DIR/cli-context.sh"
+    _claudlobby_require_root || return $?
+    _claudlobby_require_cli || return $?
+    "$CLAUDLOBBY_CLI" "$@"
 }
 
 # Where the OPT-IN staged update (#1768, CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1) keeps
@@ -373,96 +327,79 @@ measure_claude_version() {
 }
 
 # session_cli_path
-# A bot SESSION runs under the PATH start-bot.sh exports on the line above, not
-# an activated venv, so on a host whose install keeps the CLI only inside
-# $CLAUDLOBBY_ROOT/.venv/bin/claudlobby (the PEP 668 venv shape
-# getting-started.md documents) a bare `claudlobby` call — exactly what the
-# shipped skill grants name — resolves to nothing inside the session (#1567).
-# Call once, right after start-bot.sh sets PATH: a no-op when `claudlobby`
-# already resolves, so a host with the CLI on a user bin keeps behavior
-# unchanged byte for byte; otherwise symlink ONE name into a host-local shim
-# dir and append that dir to PATH.
+# Make bare `claudlobby` select the absolute CLI composed into this bot's
+# context, regardless of an older CLI on the launch PATH. Only this name is
+# exposed: prepending the release's whole bin/ would also select its python,
+# pip and other tools for unrelated bot work.
 #
-# One name, not the whole .venv/bin: that directory also holds python, pip and
-# pytest, and appending it would send a bare `pip install ...` run in the
-# session into the environment the compositor itself runs in, on a host with
-# no system pip.
-# Appended, never prepended: nothing a session resolves today may change —
-# the same rule own_tool_path above applies to PATH inside a lib/ script.
+# Each bot owns .cli/bin/claudlobby. A host-global link would let another bot
+# selecting a different release silently change this session's CLI. Refuse
+# missing context before creating anything, and never replace a real file or
+# follow a redirected .cli directory. The compositor guards these directories
+# against escaping its writable scope before producing bot.conf.
 #
-# Whether PATH is extended rests on what is ON DISK, never on whether THIS
-# process won the race to create the link. Eighteen bots can source this at
-# once, and a plain ln -sfn ... || return 0 bails a RACE LOSER out before it
-# ever appends PATH, even though a sibling already produced a perfectly usable
-# link one syscall earlier — PATH is set once per session, so that bot has no
-# bare claudlobby for its whole life (measured: 8 of 18 misses on a cold
-# wave). So a fresh link is created with plain ln -s, never -f: on a cold race
-# every process attempts the SAME symlink, exactly one wins, and the rest fail
-# on an already-correct target rather than unlinking a sibling win. -f is
-# reserved for repointing a STALE target (the install moved), the one case
-# that is a real content change rather than a race, and whether one is needed
-# comes ONLY from the readlink already in hand (cur), never a fresh re-check
-# of the path a moment later — a re-check is its own TOCTOU gap, and a cold
-# process that reads cur empty can find something there by the time it
-# re-checks, purely because a faster sibling won in between, misrouting a
-# genuinely cold create into an unneeded replace that then flickers for
-# everyone else racing at the same time. Either way the gate before touching
-# PATH is a direct -x probe of the path on disk, never the exit status of
-# this process own ln call.
-#
-# The bounded settle guards that FINAL probe, not just the replace call that
-# most often needs it: -f is a non-atomic unlink-then-create on some ln
-# builds, so a process with nothing of its own to retry — its own cur already
-# matched, or its own plain ln -s already won outright — can still land its
-# check inside SOME OTHER process concurrently replacing a stale link, and
-# see a transient absence that is gone a moment later. Scoping the settle to
-# only the replacing process own branch measured 2 of 18 misses despite the
-# race-safe ln split above.
-#
-# The loop below acts on ONE -x check per pass, immediately, rather than
-# using that check as a while CONDITION and asking again afterward: an
-# earlier cut did exactly that, and a traced miss showed the gap it opens —
-# the while condition read -x as true (so the loop ran zero iterations) and
-# the very next line, a separate -x check with nothing else in between, read
-# it as false, because another process own concurrent unlink landed in the
-# microseconds between the two reads. Two independent syscalls answering the
-# same question is its own race even when each syscall alone is correct, so
-# every pass below folds the read and the action it decides into one step,
-# and nothing downstream re-asks a question already answered. The bound is
-# seconds, not one: cheap on the common warm path, where the loop never runs
-# at all, and it is boot-time cost traded against a bot going the rest of its
-# session life with no bare claudlobby.
-#
-# Every step is guarded so a read-only state/ or a failed ln leaves PATH
-# exactly as it was and never fails the boot: install_error_trap arms set -E,
-# and an unguarded nonzero here, even inside a command substitution, would
-# trip it. The readlink below routes its failure through an inner || true so
-# the exempt status is decided INSIDE the command substitution, at the point
-# the ERR trap would otherwise fire, rather than on the assignment outside it.
+# Concurrent starts of the SAME bot may create the same link. Success rests
+# on its exact target and executability on disk, not which process won ln.
+# Only a previously observed symlink is repointed; a cold create uses no -f.
+# A bounded settle covers the unlink/create gap in a concurrent stale-link
+# update. Failure is loud and stops boot rather than selecting an ambient CLI.
 session_cli_path() {
-    command -v claudlobby >/dev/null 2>&1 && return 0
-    local venv_cli="$CLAUDLOBBY_ROOT/.venv/bin/claudlobby"
-    [ -x "$venv_cli" ] || return 0
-    local shim_dir="$CLAUDLOBBY_ROOT/state/bin"
-    mkdir -p "$shim_dir" 2>/dev/null || return 0
+    local cli="${CLAUDLOBBY_CLI:-}" bot_dir="${BOT_DIR:-}"
+    if [[ "$cli" != /* ]] || [ ! -f "$cli" ] || [ ! -x "$cli" ]; then
+        echo "session_cli_path: CLAUDLOBBY_CLI must name an executable absolute CLI path" >&2
+        return 1
+    fi
+    if [[ "$bot_dir" != /* ]] || [ ! -d "$bot_dir" ]; then
+        echo "session_cli_path: BOT_DIR must name an existing absolute bot directory" >&2
+        return 1
+    fi
+    local cli_dir="$bot_dir/.cli/bin" directory entry
+    for directory in "$bot_dir/.cli" "$cli_dir"; do
+        if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
+            echo "session_cli_path: refusing redirected or non-directory CLI path: $directory" >&2
+            return 1
+        fi
+    done
+    if [ -e "$cli_dir/claudlobby" ] && [ ! -L "$cli_dir/claudlobby" ]; then
+        echo "session_cli_path: refusing to replace non-symlink: $cli_dir/claudlobby" >&2
+        return 1
+    fi
+    for entry in "$cli_dir"/* "$cli_dir"/.[!.]* "$cli_dir"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        if [ "$entry" != "$cli_dir/claudlobby" ]; then
+            echo "session_cli_path: refusing to expose unexpected CLI directory entry: $entry" >&2
+            return 1
+        fi
+    done
+    if ! mkdir -p "$cli_dir"; then
+        echo "session_cli_path: could not create CLI directory: $cli_dir" >&2
+        return 1
+    fi
     local cur=""
-    cur="$(readlink "$shim_dir/claudlobby" 2>/dev/null || true)"
-    if [ "$cur" != "$venv_cli" ]; then
+    cur="$(readlink "$cli_dir/claudlobby" 2>/dev/null || true)"
+    if [ "$cur" != "$cli" ]; then
         if [ -n "$cur" ]; then
-            ln -sfn "$venv_cli" "$shim_dir/claudlobby" 2>/dev/null || true
+            ln -sfn "$cli" "$cli_dir/claudlobby" 2>/dev/null || true
         else
-            ln -s "$venv_cli" "$shim_dir/claudlobby" 2>/dev/null || true
+            ln -s "$cli" "$cli_dir/claudlobby" 2>/dev/null || true
         fi
     fi
     local _i=0
     while :; do
-        if [ -x "$shim_dir/claudlobby" ]; then
-            PATH="$PATH:$shim_dir"
+        cur="$(readlink "$cli_dir/claudlobby" 2>/dev/null || true)"
+        if [ "$cur" = "$cli" ] && [ -x "$cli_dir/claudlobby" ]; then
+            case "${PATH:-}" in
+                "$cli_dir"|"$cli_dir":*) ;;
+                *) PATH="$cli_dir${PATH:+:$PATH}" ;;
+            esac
             export PATH
             return 0
         fi
         _i=$((_i + 1))
-        [ "$_i" -ge 50 ] && return 0
+        if [ "$_i" -ge 50 ]; then
+            echo "session_cli_path: could not bind $cli_dir/claudlobby to $cli" >&2
+            return 1
+        fi
         sleep 0.1
     done
 }
@@ -567,24 +504,10 @@ parse_env_file() {
 
 # Requires load_bot_conf to have been called first (CLAUDLOBBY_ROOT, FLEET_NAME, BOT_DIR must be set).
 source_env_tiered() {
-    # Global
-    [ -f "$HOME/.env" ] && parse_env_file "$HOME/.env"
-    # Backward-compat: source legacy location with deprecation warning
-    if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
-        echo "DEPRECATED: $CLAUDLOBBY_ROOT/.env detected — move secrets to ~/.env or local/<fleet>/.env" >&2
-        parse_env_file "$CLAUDLOBBY_ROOT/.env"
-    fi
-    # Fleet — flat local/<fleet>/.env byte-identically, or the nested fleet dir.
-    if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
-        local fleet_dir fleet_env
-        fleet_dir=$(resolve_fleet_dir "$FLEET_NAME") || fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_NAME"
-        fleet_env="$fleet_dir/.env"
-        [ -f "$fleet_env" ] && parse_env_file "$fleet_env"
-    fi
-    # Bot
-    if [ -n "${BOT_DIR:-}" ] && [ -f "$BOT_DIR/.env" ]; then
-        parse_env_file "$BOT_DIR/.env"
-    fi
+    local tier_file
+    while IFS= read -r tier_file; do
+        parse_env_file "$tier_file"
+    done < <(env_tier_present_files)
 }
 
 # --- Log directory -----------------------------------------------------------
@@ -3912,12 +3835,13 @@ fleet_runtime_dir() {
 # Usage: env_tier_rows [bot_dir] [fleet_name]
 env_tier_rows() {
     local bot_dir="${1:-${BOT_DIR:-}}" fleet="${2:-${FLEET_NAME:-}}"
-    local root="${CLAUDLOBBY_ROOT:-}" fleet_dir=""
+    local root="${CLAUDLOBBY_ROOT:-}" fleet_dir="${FLEET_ROOT:-}"
+    [ -n "$fleet" ] || fleet_dir=""
 
     _env_tier_row host "${HOME:-}" ".env"
     _env_tier_row root "$root" ".env"
 
-    if [ -n "$fleet" ] && [ -n "$root" ]; then
+    if [ -z "$fleet_dir" ] && [ -n "$fleet" ] && [ -n "$root" ]; then
         # Flat local/<fleet> byte-identically, or nested local/<system>/<fleet>.
         # Same fallback start-bot.sh has always used: an unresolvable name still
         # names the flat path, so a not-yet-created fleet reports absent (the
@@ -5448,7 +5372,7 @@ _emit_fleet_signal() {
         # diagnosis of an alert that never arrived.
         _tg_err=$(TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
             TELEGRAM_BOT_TOKEN="$_alert_token" \
-            "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" 2>&1) || _tg_rc=$?
+            "${_LIB_COMMON_DIR}/tg-post.sh" "$tg_prefix [$event_type]: $reason" 2>&1) || _tg_rc=$?
     else
         # No resolvable target was ALSO silent: no attempt, no record, nothing to
         # find later. An alert with nowhere to go is a delivery failure, not a

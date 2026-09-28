@@ -15,6 +15,7 @@ from claudlobby.commands.data_migrate import (
     _dir_size_mb,
     _human_size,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -98,7 +99,7 @@ class TestLoadFleetOrExit:
             _load_fleet_or_exit(paths)
 
     def test_valid_fleet_returns_config(self, fleet_dir):
-        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
         config, merged_defaults = _load_fleet_or_exit(paths)
         assert config.name == "test-fleet"
         assert "lead" in config.bots

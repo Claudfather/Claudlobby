@@ -135,6 +135,7 @@ def test_records_without_any_flag_and_disabled_silences_it(tmp_path, *, scratch_
 def test_probe_job_ships_enrolled_and_carries_the_emit_flag(tmp_path,
                                                             monkeypatch):
     from claudlobby.composer import compose_host_timers
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -158,7 +159,7 @@ def test_probe_job_ships_enrolled_and_carries_the_emit_flag(tmp_path,
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EMIT_ENABLED": Resolution(
             name="PLANE_EMIT_ENABLED", value="1", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     svc = (out / "claudlobby-plane-host-probe.service").read_text()
     # The probe has no flag of its OWN — it is gated by the estate silencer
     # (plane_armed / PLANE_EMIT_DISABLED), so the composer stamps it nothing.

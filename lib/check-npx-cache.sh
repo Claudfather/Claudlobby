@@ -25,7 +25,6 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
 
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 NPX_CACHE="${NPX_CACHE_DIR:-$HOME/.npm/_npx}"
 
 # Parse --fleet arg
@@ -40,7 +39,7 @@ done
 # Scan the shared library — the canonical source of npx package names —
 # plus the fleet's local overlay (local/<fleet>/library/mcp/), which can add
 # or override fragments with packages the base library doesn't know about.
-MCP_DIR="$CLAUDLOBBY_ROOT/library/mcp"
+MCP_DIR="${CLAUDLOBBY_LIBRARY_DIR:?resolved package library required}/mcp"
 
 if [ ! -d "$MCP_DIR" ]; then
     echo "check-npx-cache: MCP library not found at $MCP_DIR" >&2
@@ -48,7 +47,10 @@ if [ ! -d "$MCP_DIR" ]; then
 fi
 
 MCP_DIRS=("$MCP_DIR")
-if [ -n "$FLEET" ]; then
+if [ -n "${FLEET_ROOT:-}" ]; then
+    FLEET_MCP_DIR="$FLEET_ROOT/library/mcp"
+    [ -d "$FLEET_MCP_DIR" ] && MCP_DIRS+=("$FLEET_MCP_DIR")
+elif [ -n "$FLEET" ]; then
     _fleet_dir=$(resolve_fleet_dir "$FLEET") || _fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET"
     FLEET_MCP_DIR="$_fleet_dir/library/mcp"
     [ -d "$FLEET_MCP_DIR" ] && MCP_DIRS+=("$FLEET_MCP_DIR")

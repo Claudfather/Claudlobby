@@ -152,7 +152,7 @@ emit_fleet_event "audit_selected" "audit" \
 # bot-sweep-cron.sh owns sanitize + the busy-pane double-dispatch guard +
 # send-keys + bare Enter + logging. We do NOT re-implement any of that.
 DISPATCH="/code-audit-sweep $STALEST_REPO $AUDIT_TYPE"
-SWEEP_LOG="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}/lib/bot-sweep-cron.log"
+SWEEP_LOG="$CLAUDLOBBY_ROOT/state/logs/bot-sweep-cron.log"
 
 # bot-sweep-cron.sh exits 0 on BOTH a real dispatch and a busy-skip, so we
 # diff its log to report the true outcome instead of assuming success.

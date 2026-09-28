@@ -25,7 +25,7 @@ PASS if exit 0. FAIL if validation errors. WARN if warnings but no errors.
 ### 2. Supervision state
 
 ```bash
-{{CLAUDLOBBY_ROOT}}/lib/reconcile-fleet.sh <fleet>
+{{CLAUDLOBBY_NATIVE_DIR}}/reconcile-fleet.sh <fleet>
 ```
 
 PASS if all bots are healthy (0 orphan, 0 missing, 0 unbound). WARN if unbound services exist. FAIL if any bot is missing or orphaned.
@@ -33,7 +33,7 @@ PASS if all bots are healthy (0 orphan, 0 missing, 0 unbound). WARN if unbound s
 ### 3. Credential check
 
 ```bash
-{{CLAUDLOBBY_ROOT}}/lib/creds-check.sh
+{{CLAUDLOBBY_NATIVE_DIR}}/creds-check.sh
 ```
 
 PASS if all tokens are valid. WARN if any token is nearing expiry. FAIL if any token is invalid or missing.
@@ -41,7 +41,7 @@ PASS if all tokens are valid. WARN if any token is nearing expiry. FAIL if any t
 ### 4. Disk usage
 
 ```bash
-{{CLAUDLOBBY_ROOT}}/lib/disk-monitor.sh
+{{CLAUDLOBBY_NATIVE_DIR}}/disk-monitor.sh
 ```
 
 PASS if usage is below 80%. WARN if between 80-90%. FAIL if above 90%.
@@ -49,7 +49,7 @@ PASS if usage is below 80%. WARN if between 80-90%. FAIL if above 90%.
 ### 5. Memory
 
 ```bash
-{{CLAUDLOBBY_ROOT}}/lib/fleet-memory-check.sh
+{{CLAUDLOBBY_NATIVE_DIR}}/fleet-memory-check.sh
 ```
 
 PASS if fleet RSS is within safe bounds. WARN if approaching host limits. FAIL if memory pressure is critical.
@@ -57,7 +57,7 @@ PASS if fleet RSS is within safe bounds. WARN if approaching host limits. FAIL i
 ### 6. NPX cache
 
 ```bash
-{{CLAUDLOBBY_ROOT}}/lib/check-npx-cache.sh --fleet <fleet>
+{{CLAUDLOBBY_NATIVE_DIR}}/check-npx-cache.sh --fleet <fleet>
 ```
 
 PASS if all MCP npx packages are cached. WARN if some are missing (cold starts will be slow). FAIL should not normally occur here.

@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import BotConfig, FleetConfig
+from .context import native_environment
 from .paths import Paths
 
 # Pinned fleet-wide tmux tmpdir. Mirrors claudlobby/composer.py's own
@@ -93,7 +94,7 @@ def build_supervision_spec(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     """The one place `bot`/`fleet`/`paths` get read to build a supervision spec."""
     bot_dir = paths.bot_runtime(bot.bot_id)
     label = f"{fleet.service_prefix}.{bot.bot_id}"
-    log_dir = paths.lib / "logs"
+    log_dir = paths.assert_writable(bot_dir / "logs")
     return SupervisionSpec(
         label=label,
         description=f"claudlobby bot: {bot.name} ({fleet.name})",
@@ -102,7 +103,7 @@ def build_supervision_spec(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
         launcher_args=(str(bot_dir),),
         working_dir=bot_dir,
         environment={
-            "CLAUDLOBBY_ROOT": str(paths.root),
+            **native_environment(paths),
             "TMUX_TMPDIR": _TMUX_TMPDIR,
         },
         launchd_environment_extra={

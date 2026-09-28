@@ -34,7 +34,7 @@ Workers communicate on **two** channels simultaneously:
 | Channel | Audience | Mechanism | Purpose |
 |---------|----------|-----------|---------|
 | Telegram group | Human | `mcp__plugin_telegram_telegram__reply` with `chat_id` from `$TELEGRAM_GROUP_CHAT_ID` | Visibility — the human sees progress without checking tmux |
-| `[BOTREPORT]` | Manager | `$CLAUDLOBBY_ROOT/lib/report-back.sh` | Machine coordination — structured status for the manager's decision framework |
+| `[BOTREPORT]` | Manager | `$CLAUDLOBBY_NATIVE_DIR/report-back.sh` | Machine coordination — structured status for the manager's decision framework |
 
 Both channels fire at lifecycle boundaries. Telegram is prose; `[BOTREPORT]` is structured.
 
@@ -83,7 +83,7 @@ There is **no ack deadline**: what the machinery needs is an id-carrying `[BOTRE
 - If **any other tool call will precede the terminal report** — reading a file, spawning a subagent, a git command — **or you are uncertain**, send the id-carrying progress row first, as the **first tool call**:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> progress "Acked: <summary>" --task <id>
+$CLAUDLOBBY_NATIVE_DIR/report-back.sh <bot-name> progress "Acked: <summary>" --task <id>
 ```
 
 **No Telegram ack.** The group sees your outcome posts; a per-dispatch "On it" is noise the machinery cannot join.
@@ -152,7 +152,7 @@ Done: <one-line summary>. PR: <url>
 Report-back:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> completed "<summary>" --pr <pr-url> --task <id>
+$CLAUDLOBBY_NATIVE_DIR/report-back.sh <bot-name> completed "<summary>" --pr <pr-url> --task <id>
 ```
 
 (`--task <id>` whenever the dispatch carried one.)
@@ -171,7 +171,7 @@ Blocked: <what's wrong and what you tried>
 Report-back:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> blocked "<reason>" --task <id>
+$CLAUDLOBBY_NATIVE_DIR/report-back.sh <bot-name> blocked "<reason>" --task <id>
 ```
 
 (`--task <id>` whenever the dispatch carried one.) Then stop. Do not attempt workarounds that might cause damage. Wait for guidance.

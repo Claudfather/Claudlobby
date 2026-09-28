@@ -268,7 +268,7 @@ def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_pa
         root = tmp_path / f"t{trial}" / "root"
         (root / "state" / "plane").mkdir(parents=True)
         (root / "local" / "f").mkdir(parents=True)
-        (root / "local" / "f" / "fleet.yaml").write_text("fleet:\n  name: f\n  bots:\n    w1:\n")
+        (root / "local" / "f" / "fleet.yaml").write_text("fleet:\n  manager: w1\n  name: f\n  bots:\n    w1:\n")
         files = []
         for i in range(3):
             batch = {"events": [{"event_type": "system", "emitter": "t", "fleet": "f",

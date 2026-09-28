@@ -12,7 +12,7 @@
 # find_stale_ephemeral for the contract); directories are always left
 # intact.
 #
-# Reports sizes to stdout and to $CLAUDLOBBY_ROOT/lib/logs/data-sweep.log.
+# Reports sizes to stdout and to $CLAUDLOBBY_ROOT/state/logs/data-sweep.log.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,7 +45,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-LOG="$CLAUDLOBBY_ROOT/lib/logs/data-sweep.log"
+LOG="$CLAUDLOBBY_ROOT/state/logs/data-sweep.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
 

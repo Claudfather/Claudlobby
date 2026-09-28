@@ -22,6 +22,11 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -e '.[dev]'
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Prepare installed resources for editable test imports
+        # This runner checkout is disposable. Build from indexed source in a
+        # separate temporary tree, then stage only wheel resource/native assets.
+        # The Python package keeps its exact checkout origin for the P0 guard.
+        run: .venv/bin/python tests/prepare_resources.py --disposable-checkout "$GITHUB_WORKSPACE"
       - name: Run tests
         # One pre-existing failure is deselected pending separate triage
         # (tracked in the issue thread for #229). The rest of the suite must

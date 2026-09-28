@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -13,7 +15,6 @@ from claudlobby.paths import Paths
 def base_tree(tmp_path: Path) -> Paths:
     """Root-mode Paths with a populated library/."""
     (tmp_path / "library").mkdir()
-    (tmp_path / "lib").mkdir()
 
     # guardrails/security/  with two .md files and a README
     sec = tmp_path / "library" / "guardrails" / "security"
@@ -32,14 +33,14 @@ def base_tree(tmp_path: Path) -> Paths:
     (claudna / "not-a-skill").mkdir()
     (claudna / "not-a-skill" / "notes.txt").write_text("no SKILL.md here\n")
 
-    return Paths(root=tmp_path)
+    package = replace(source_package(), library=tmp_path / "library")
+    return Paths(root=tmp_path / "data", package=package)
 
 
 @pytest.fixture
 def overlay_tree(tmp_path: Path) -> Paths:
     """Overlay-mode Paths where overlay overrides base."""
     (tmp_path / "library" / "guardrails" / "security").mkdir(parents=True)
-    (tmp_path / "lib").mkdir()
 
     # Base: one guardrail
     base_sec = tmp_path / "library" / "guardrails" / "security"
@@ -47,7 +48,7 @@ def overlay_tree(tmp_path: Path) -> Paths:
     (base_sec / "base-only.md").write_text("base only\n")
 
     # Overlay: overrides no-push-main, adds overlay-only
-    fleet = tmp_path / "local" / "myfleet"
+    fleet = tmp_path / "data" / "local" / "myfleet"
     overlay_sec = fleet / "library" / "guardrails" / "security"
     overlay_sec.mkdir(parents=True)
     (overlay_sec / "no-push-main.md").write_text("overlay version\n")
@@ -67,7 +68,8 @@ def overlay_tree(tmp_path: Path) -> Paths:
     (overlay_skills / "rollback" / "SKILL.md").write_text("overlay rollback\n")
 
     (fleet / "fleet.yaml").write_text("fleet:\n  name: myfleet\n  bots: {}\n")
-    return Paths(root=tmp_path, fleet_dir=fleet)
+    package = replace(source_package(), library=tmp_path / "library")
+    return Paths(root=tmp_path / "data", fleet_dir=fleet, package=package)
 
 
 class TestExpandLibraryFolder:

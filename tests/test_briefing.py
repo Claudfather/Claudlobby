@@ -23,12 +23,13 @@ from claudlobby.composer import (
     compose_fleet_timers,
 )
 from claudlobby.config import BriefingConfig, _coerce_bot, load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _write(root: Path, body: str) -> Path:
@@ -50,6 +51,7 @@ def _env_val(conf: str, key: str) -> str | None:
 # sources, plus an mcp source so the coverage validator stays quiet.
 _BRIEFING_FLEET = """\
     fleet:
+      manager: mason
       name: test-fleet
       service_prefix: com.test
       system_defaults: false
@@ -167,6 +169,7 @@ class TestBriefingConfigCoercion:
     def test_briefing_enabled_false_when_none(self, tmp_path):
         body = """\
             fleet:
+              manager: solo
               name: t
               service_prefix: com.test
               system_defaults: false
@@ -253,6 +256,7 @@ class TestBriefingTimerComposition:
     def test_no_briefing_bots_no_units(self, tmp_path):
         body = """\
             fleet:
+              manager: solo
               name: t
               service_prefix: com.test
               system_defaults: false
@@ -396,6 +400,7 @@ class TestBriefingReconcile:
                 tmp_path / "f",
                 """\
                 fleet:
+                  manager: kev
                   name: t
                   service_prefix: com.test
                   system_defaults: false
@@ -445,6 +450,7 @@ class TestBriefingValidator:
     def test_briefing_without_source_warns(self, tmp_path):
         body = """\
             fleet:
+              manager: kev
               name: t
               service_prefix: com.test
               system_defaults: false

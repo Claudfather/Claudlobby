@@ -4,38 +4,25 @@
 # Thin by rule: env resolution here, everything else in `claudlobby plane
 # serve`. Ends in exec so supervision (systemd Restart=always / launchd
 # KeepAlive) signals the daemon itself, with no bash intermediary to orphan.
-# The exec ladder mirrors lib-common claudlobby_cli (console script from the
-# venv, then PATH, then python3 -m from the root) in an exec-shaped form —
-# claudlobby_cli itself RUNS the CLI, and a launcher must replace itself.
+# Composition selects the absolute executable and data root. Validation uses
+# only shell builtins; no Python or host-tool probe precedes exec.
 
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
-export CLAUDLOBBY_ROOT="$ROOT"
+case "${BASH_SOURCE[0]}" in
+    */*) LIB_DIR="${BASH_SOURCE[0]%/*}" ;;
+    *) LIB_DIR="." ;;
+esac
+# shellcheck source=cli-context.sh
+. "$LIB_DIR/cli-context.sh"
+_claudlobby_require_root
+_claudlobby_require_cli
 
 # --root is a GLOBAL flag: it precedes the subcommand (the smoke run caught
 # the inverted order as an argparse usage error — stubs accept any argv, the
 # real CLI does not).
-ARGS=(--root "$ROOT" plane serve)
+ARGS=(--root "$CLAUDLOBBY_ROOT" plane serve)
 [ -n "${PLANE_SOCKET:-}" ] && ARGS+=(--socket "$PLANE_SOCKET")
 [ -n "${PLANE_DRAIN_INTERVAL:-}" ] && ARGS+=(--drain-interval "$PLANE_DRAIN_INTERVAL")
 
-if [ -x "$ROOT/.venv/bin/claudlobby" ]; then
-    exec "$ROOT/.venv/bin/claudlobby" "${ARGS[@]}"
-fi
-if command -v claudlobby >/dev/null 2>&1; then
-    exec claudlobby "${ARGS[@]}"
-fi
-# python3 existing is not python3 being USABLE: on a bare host (GitHub Linux,
-# a fresh box) /bin/python3 exists and cannot import claudlobby, and
-# `python3 -m claudlobby` then exits 1 — indistinguishable from a daemon
-# failure. Probe the import first; an unusable interpreter falls through to
-# the honest 127. One extra spawn at daemon START only, never per event.
-if command -v python3 >/dev/null 2>&1 \
-    && (cd "$ROOT" && python3 -c "import claudlobby" >/dev/null 2>&1); then
-    cd "$ROOT"
-    exec python3 -m claudlobby "${ARGS[@]}"
-fi
-printf 'plane-daemon.sh: no claudlobby CLI resolvable from %s\n' "$ROOT" >&2
-exit 127
+exec "$CLAUDLOBBY_CLI" "${ARGS[@]}"

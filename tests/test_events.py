@@ -31,6 +31,7 @@ from claudlobby.commands.events import (
     format_event_table,
     plane_events_conn,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.plane_fixtures import F, _scene
@@ -190,13 +191,13 @@ class TestPlaneEventsConn:
 
     def test_no_fleet_named_is_refused(self, scene):
         root, _paths = scene
-        conn, note = plane_events_conn(Paths(root=root, fleet_dir=None))
+        conn, note = plane_events_conn(Paths(root=root, fleet_dir=None, package=source_package()))
         assert conn is None and "no fleet is named" in note
 
     def test_no_db_is_refused(self, tmp_path):
         root = tmp_path / "root"
         (root / "local" / F).mkdir(parents=True)
-        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / F))
+        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / F, package=source_package()))
         assert conn is None and "no plane db" in note
 
     def test_a_schema_less_db_is_refused(self, tmp_path):
@@ -205,12 +206,12 @@ class TestPlaneEventsConn:
         (root / "state" / "plane").mkdir(parents=True)
         with sqlite3.connect(root / "state" / "plane" / "plane.db") as c:
             c.execute("CREATE TABLE x (a)")
-        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / F))
+        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / F, package=source_package()))
         assert conn is None and note
 
     def test_a_fleet_the_plane_never_saw_is_refused_not_quiet(self, scene):
         root, _paths = scene
-        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / "ghost"))
+        conn, note = plane_events_conn(Paths(root=root, fleet_dir=root / "local" / "ghost", package=source_package()))
         assert conn is None and "no bot of fleet 'ghost'" in note
 
     def test_an_empty_plane_root_refuses_rather_than_creating_a_db(self, tmp_path):
@@ -219,7 +220,7 @@ class TestPlaneEventsConn:
         root, _paths, _, _ = _scene(tmp_path)                         # a real plane, then the wrong root
         wrong = tmp_path / "elsewhere"
         (wrong / "local" / F).mkdir(parents=True)
-        conn, note = plane_events_conn(Paths(root=wrong, fleet_dir=wrong / "local" / F))
+        conn, note = plane_events_conn(Paths(root=wrong, fleet_dir=wrong / "local" / F, package=source_package()))
         assert conn is None and "no plane db" in note
         assert not (wrong / "state" / "plane" / "plane.db").exists()
         assert (root / "state" / "plane" / "plane.db").exists()

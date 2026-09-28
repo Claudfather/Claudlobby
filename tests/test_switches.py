@@ -20,12 +20,14 @@ import pytest
 
 from claudlobby import switches as sw
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
 
 _FLEET = """\
     fleet:
+      manager: kev
       name: sw-fleet
       service_prefix: com.sw
       bots:
@@ -51,7 +53,7 @@ def _root(tmp_path: Path, env: str | None = None) -> Path:
 def _resolve(tmp_path: Path, env: str | None = None):
     root = _root(tmp_path, env)
     fleet, _md = load_fleet(root / "fleet.yaml")
-    return sw.resolve(Paths(root=root, fleet_dir=root), fleet)
+    return sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), fleet)
 
 
 def _state(rows, key):
@@ -304,7 +306,7 @@ def _resolve_with_jobs(tmp_path, jobs_yaml: str):
     (root / "fleet.yaml").write_text(
         dedent(_FLEET) + "  defaults:\n    jobs:\n" + jobs_yaml)
     fleet, _md = load_fleet(root / "fleet.yaml")
-    return sw.resolve(Paths(root=root, fleet_dir=root), fleet)
+    return sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), fleet)
 
 
 @pytest.mark.parametrize("key", ["manager-checkin", "weekly-worker-restart"])
@@ -411,7 +413,7 @@ def test_the_doctor_rung_exists_and_never_fails(tmp_path):
     root = _root(tmp_path, "TASK_RECHECK_ENABLED=0\n")
     fleet, _md = load_fleet(root / "fleet.yaml")
     report = DoctorReport()
-    check_switches(fleet, Paths(root=root, fleet_dir=root), report)
+    check_switches(fleet, Paths(root=root, fleet_dir=root, package=source_package()), report)
     rung = next(c for c in report.checks if c.name == "switches")
     assert rung.status == "pass"
     assert "task-recheck" in rung.detail
@@ -458,7 +460,7 @@ def test_host_timer_dormancy_is_COMPOSE_TIME_now(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     names = {p.name for p in out.iterdir()}
     assert not [n for n in names if n.startswith("claudlobby-update-siblings")]
     assert "DORMANT" not in names, "a manifest for units nobody composed"
@@ -474,11 +476,11 @@ def test_an_armed_to_unarmed_host_timer_is_PRUNED(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     stale = out / "claudlobby-update-siblings.timer"
     stale.write_text("[Unit]\n")
     (out / "DORMANT").write_text("claudlobby-update-siblings\n")
-    compose_host_timers(Paths(root=root))
+    compose_host_timers(Paths(root=root, package=source_package()))
     assert not stale.exists()
     assert not (out / "DORMANT").exists()
 
@@ -563,7 +565,7 @@ def test_the_plane_services_compose_by_default(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     names = {p.name for p in out.iterdir()}
     for job in ("plane-daemon", "plane-view"):
         assert f"claudlobby-{job}.service" in names
@@ -589,7 +591,7 @@ def test_the_view_is_NOT_composed_without_its_extra(tmp_path, monkeypatch):
     monkeypatch.setattr(_sw, "extra_available", lambda extra: False)
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     names = {p.name for p in out.iterdir()}
     assert "claudlobby-plane-view.service" not in names
     assert "claudlobby-plane-view.plist" not in names
@@ -598,7 +600,7 @@ def test_the_view_is_NOT_composed_without_its_extra(tmp_path, monkeypatch):
     # ...and a unit composed before the extra was removed is pruned, or the
     # next setup run enrols the crash loop from stale files.
     (out / "claudlobby-plane-view.service").write_text("[Unit]\n")
-    compose_host_timers(Paths(root=root))
+    compose_host_timers(Paths(root=root, package=source_package()))
     assert not (out / "claudlobby-plane-view.service").exists()
 
 
@@ -750,7 +752,7 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
 
     root = _root(tmp_path, "PLANE_EMIT_DISABLED=1\n")
     fleet, merged = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     conf = compose_bot_conf(fleet.bots["kev"], fleet, paths)
     assert [ln for ln in conf.splitlines()
             if ln.startswith("export PLANE_EMIT_DISABLED=")
@@ -762,7 +764,7 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
     # stays the ONE place the answer lives.
     quiet = _root(tmp_path / "q")
     qfleet, qmerged = load_fleet(quiet / "fleet.yaml")
-    qpaths = Paths(root=quiet, fleet_dir=quiet)
+    qpaths = Paths(root=quiet, fleet_dir=quiet, package=source_package())
     assert "PLANE_EMIT_DISABLED" not in compose_bot_conf(
         qfleet.bots["kev"], qfleet, qpaths)
 
@@ -842,7 +844,7 @@ def test_a_host_run_says_UNKNOWN_for_a_fleet_it_never_read(tmp_path):
     scope nobody opened, which is the unreachable-is-not-empty defect wearing
     a table. The host rows are still true; the fleet rows say so."""
     root = _root(tmp_path)
-    rows = sw.resolve(Paths(root=root, fleet_dir=root), None)
+    rows = sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), None)
     st = _state(rows, "task-recheck")
     assert st.unknown and st.unknown_reason == "no-fleet"
     assert st.source == "?" and "no fleet named" in st.detail
@@ -862,7 +864,7 @@ def test_an_unknown_row_prints_BOTH_directions(tmp_path):
     """We do not know which way it is set, so printing one line would be
     picking a side."""
     root = _root(tmp_path)
-    text = sw.format_table(sw.resolve(Paths(root=root, fleet_dir=root), None))
+    text = sw.format_table(sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), None))
     block = text[text.index("task-recheck"):]
     assert "arm: unset TASK_RECHECK_ENABLED" in block
     assert "turn off: TASK_RECHECK_ENABLED=0" in block

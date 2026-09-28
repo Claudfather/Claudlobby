@@ -46,15 +46,16 @@
 # — the send/report/restart itself must already have happened or still happen.
 #
 # Env:
-#   CLAUDLOBBY_ROOT      install root (default: this script's parent)
+#   CLAUDLOBBY_ROOT      explicit absolute mutable data root
+#   CLAUDLOBBY_CLI       composed absolute executable (cold fallback only)
 #   PLANE_SOCKET         socket override (default: $ROOT/state/plane/ingest.sock)
 #   PLANE_EMIT_DISABLED  =1 -> no-op exit 0 (the ruled harness exemption:
 #                        byte-identical legacy behavior, nothing spawned)
 #   PLANE_EMIT_COOLDOWN_STAGE  =1 -> in a wedge cooldown, stage the batch for
 #                        the daemon (rc 6) instead of the cold CLI (#1657). Set
 #                        only by callers that never read the result.
-#   PLANE_EMIT_CLI       fallback command override (tests stub it; default
-#                        resolves through lib-common's claudlobby_cli).
+#   PLANE_EMIT_CLI       explicit fallback command override for harnesses;
+#                        otherwise the cold rung uses CLAUDLOBBY_CLI.
 #                        CONTRACT: a command LINE, whitespace-split — the
 #                        systemd ExecStart convention (#969). An executable
 #                        whose PATH contains spaces is not expressible;
@@ -62,16 +63,26 @@
 
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
 
-# lib-common is NOT sourced on the hot path (T10 budget lever, measured on the
-# Pi): rung 1 needs nothing from it, and sourcing ~3600 lines per emit is a
-# door-felt tax. The fallback rung sources it lazily for claudlobby_cli.
+# The invoked adapter supplies its package location, never its data root.
+# Validation is shell-only; a missing cold CLI must not disable a healthy
+# socket daemon. Do not source lib-common or probe Python package imports.
+case "${BASH_SOURCE[0]}" in
+    */*) LIB_DIR="${BASH_SOURCE[0]%/*}" ;;
+    *) LIB_DIR="." ;;
+esac
+case "${CLAUDLOBBY_ROOT:-}" in
+    /*) ROOT="$CLAUDLOBBY_ROOT" ;;
+    *)
+        printf 'plane-emit: CLAUDLOBBY_ROOT must be an explicit absolute data directory (got %s)\n' \
+            "${CLAUDLOBBY_ROOT:-<unset>}" >&2
+        exit 127
+        ;;
+esac
+
 set +e  # the ladder inspects rcs
 
-ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 SOCK="${PLANE_SOCKET:-$ROOT/state/plane/ingest.sock}"
 
 finalized="$(mktemp "${TMPDIR:-/tmp}/plane-emit.XXXXXX")"
@@ -185,10 +196,9 @@ if [ -s "$finalized" ]; then
     if [ -n "${PLANE_EMIT_CLI:-}" ]; then
         $PLANE_EMIT_CLI --root "$ROOT" emit-batch --json "$finalized"
     else
-        # shellcheck source=lib-common.sh
-        . "$LIB_DIR/lib-common.sh"   # lazy: only this rung needs claudlobby_cli
-        set +e                        # lib-common re-arms set -e at source time
-        claudlobby_cli --root "$ROOT" emit-batch --json "$finalized"
+        # shellcheck source=cli-context.sh
+        . "$LIB_DIR/cli-context.sh" && _claudlobby_require_cli &&
+            "$CLAUDLOBBY_CLI" --root "$ROOT" emit-batch --json "$finalized"
     fi
     rc=$?
     if [ "$rc" -eq 6 ]; then

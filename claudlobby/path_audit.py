@@ -46,6 +46,9 @@ COMPOSER_PROVIDED_PATH_ANCHORS: tuple[str, ...] = (
     "CLAUDLOBBY_ROOT",
     "FLEET_ROOT",
     "BOT_DIR",
+    "CLAUDLOBBY_NATIVE_DIR",
+    "CLAUDLOBBY_LIBRARY_DIR",
+    "CLAUDLOBBY_CLI",
 )
 
 
@@ -87,10 +90,15 @@ _WIRING_STATIC = (
 
 def _anchor_values(bot: BotConfig, paths: Paths) -> dict[str, str]:
     """Map each composer-provided path anchor to its resolved absolute value."""
+    from .resources import selected_cli
+
     return {
+        "CLAUDLOBBY_CLI": str(selected_cli()),
         "CLAUDLOBBY_ROOT": str(paths.root),
         "FLEET_ROOT": str(paths.fleet_config_dir),
         "BOT_DIR": str(paths.bot_runtime(bot.bot_id)),
+        "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
+        "CLAUDLOBBY_LIBRARY_DIR": str(paths.base_library),
     }
 
 

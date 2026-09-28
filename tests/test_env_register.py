@@ -15,12 +15,14 @@ import pytest
 
 from claudlobby import env_register as reg
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 FLEET = dedent("""\
     fleet:
+      manager: solo
       name: acme
       service_prefix: com.acme
       defaults:
@@ -67,7 +69,7 @@ def world(tmp_path: Path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=tmp_path, fleet_dir=fleet_dir)
+    paths = Paths(root=tmp_path, fleet_dir=fleet_dir, package=source_package())
     paths.bot_runtime("solo").mkdir(parents=True)
     return fleet, paths, fleet_dir, home
 

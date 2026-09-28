@@ -719,6 +719,7 @@ def _compose_update_unit(tmp_path, monkeypatch, resolved: dict) -> str:
     import claudlobby.env_tiers as et
     from claudlobby.composer import compose_host_timers
     from claudlobby.env_tiers import Resolution
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     repo = Path(__file__).resolve().parent.parent
@@ -731,7 +732,7 @@ def _compose_update_unit(tmp_path, monkeypatch, resolved: dict) -> str:
     monkeypatch.setattr(et, "read_tiers", lambda paths, bot_name=None, fleet_name=None: [])
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         k: Resolution(name=k, value=v, tier="host", path=None) for k, v in resolved.items()})
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     return (out / "claudlobby-claude-update.service").read_text()
 
 

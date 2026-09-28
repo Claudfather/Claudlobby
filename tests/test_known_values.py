@@ -288,6 +288,7 @@ class TestValidatorModelCheck:
 
     def _make_fleet_and_validate(self, tmp_path, bot_kwargs):
         from claudlobby.config import BotConfig, FleetConfig
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         from claudlobby.validator import ValidationReport, _validate_bots
 
@@ -301,9 +302,9 @@ class TestValidatorModelCheck:
         exp_dir.mkdir()
         (exp_dir / "eng.md").write_text("---\ntitle: eng\n---\n# eng\n")
 
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         bot = BotConfig(bot_id="test", name="test", expertise=["eng"], **bot_kwargs)
-        fleet = FleetConfig(name="test", service_prefix="com.test", bots={"test": bot})
+        fleet = FleetConfig(manager="test", name="test", service_prefix="com.test", bots={"test": bot})
         report = ValidationReport()
         _validate_bots(fleet, paths, {}, report)
         return report
@@ -347,6 +348,7 @@ class TestValidatorHookEventCheck:
 
     def _make_fleet_and_validate(self, tmp_path, hooks):
         from claudlobby.config import BotConfig, FleetConfig
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         from claudlobby.validator import ValidationReport, _validate_bots
 
@@ -359,9 +361,9 @@ class TestValidatorHookEventCheck:
         exp_dir.mkdir()
         (exp_dir / "eng.md").write_text("---\ntitle: eng\n---\n# eng\n")
 
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         bot = BotConfig(bot_id="test", name="test", expertise=["eng"], hooks=hooks)
-        fleet = FleetConfig(name="test", service_prefix="com.test", bots={"test": bot})
+        fleet = FleetConfig(manager="test", name="test", service_prefix="com.test", bots={"test": bot})
         report = ValidationReport()
         _validate_bots(fleet, paths, {}, report)
         return report
@@ -406,6 +408,7 @@ class TestValidatorExpertiseSuggestion:
 
     def test_expertise_typo_suggestion(self, tmp_path):
         from claudlobby.config import BotConfig, FleetConfig
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         from claudlobby.validator import ValidationReport, _validate_bots
 
@@ -418,13 +421,13 @@ class TestValidatorExpertiseSuggestion:
         exp_dir.mkdir()
         (exp_dir / "software-engineering.md").write_text("---\ntitle: SE\n---\n# SE\n")
 
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         bot = BotConfig(
             bot_id="test",
             name="test",
             expertise=["software-enginering"],  # typo
         )
-        fleet = FleetConfig(name="test", service_prefix="com.test", bots={"test": bot})
+        fleet = FleetConfig(manager="test", name="test", service_prefix="com.test", bots={"test": bot})
         report = ValidationReport()
         _validate_bots(fleet, paths, {}, report)
         expertise_errors = [e for e in report.errors if "expertise" in e]

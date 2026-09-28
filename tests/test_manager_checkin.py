@@ -577,6 +577,7 @@ def test_neither_nonzero_expecting_call_runs_in_a_command_substitution():
 #: on purpose — compose_fleet_timers never resolves it.
 _CHECKIN_FLEET = """\
 fleet:
+  manager: lead
   name: checkin-fleet
   service_prefix: com.checkin
   teams:
@@ -598,6 +599,7 @@ def _checkin_timers(tmp_path: Path, extra: str = "") -> Path:
     override (the TestTaskRecheckTimer shape in tests/test_composer.py)."""
     from claudlobby.composer import compose_fleet_timers
     from claudlobby.config import load_fleet
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "r"
@@ -606,7 +608,7 @@ def _checkin_timers(tmp_path: Path, extra: str = "") -> Path:
         (root / "lib").symlink_to(REPO / "lib")
     (root / "fleet.yaml").write_text(_CHECKIN_FLEET + extra)
     fleet, merged = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     return compose_fleet_timers(fleet, paths, merged)
 
 

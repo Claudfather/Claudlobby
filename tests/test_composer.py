@@ -7,6 +7,7 @@ import os
 import re
 import plistlib
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 
@@ -43,11 +44,13 @@ from claudlobby.composer import (
     telegram_handle,
 )
 from claudlobby.diff import diff_bot
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
+from claudlobby.resources import selected_cli
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 class TestScaffoldEnvMerge:
@@ -63,6 +66,7 @@ class TestScaffoldEnvMerge:
             dedent("""\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               bots:
                 worker:
@@ -185,6 +189,7 @@ def _make_bot(handle="test_bot", require_mention=True, chat_id=None):
 
 def _make_fleet(group_chat_id="-1001234567890", human_id="12345"):
     return FleetConfig(
+        manager="test", bots={"test": _make_bot()},
         name="test-fleet",
         service_prefix="com.test",
         telegram_group_chat_id=group_chat_id,
@@ -331,9 +336,9 @@ class TestComposeSettingsLocal:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "runtime" / "bots").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
-    def _make_fleet_with_bots(self, *bot_ids):
+    def _make_fleet_with_bots(self, *bot_ids, manager):
         bots = {}
         for bid in bot_ids:
             bots[bid] = BotConfig(
@@ -343,6 +348,7 @@ class TestComposeSettingsLocal:
                 telegram=TelegramConfig(handle=f"{bid}_bot"),
             )
         return FleetConfig(
+            manager=manager,
             name="test-fleet",
             service_prefix="com.test",
             bots=bots,
@@ -352,7 +358,7 @@ class TestComposeSettingsLocal:
         # channels=[] — a bot with no Telegram channel; see #1107.
         paths = self._make_paths_with_runtime(tmp_path)
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         # #1633: a bot with no startup_prompt now composes exactly one grant
         # — the read its own default boot prompt names — so "no tools" no
@@ -371,7 +377,7 @@ class TestComposeSettingsLocal:
         """The 3 settings.local headless UX keys are always emitted at their defaults."""
         paths = self._make_paths_with_runtime(tmp_path)
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert result["spinnerTipsEnabled"] is False
         assert result["preferredNotifChannel"] == "notifications_disabled"
@@ -388,7 +394,7 @@ class TestComposeSettingsLocal:
             preferred_notif_channel="iterm2",
             prefers_reduced_motion=False,
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert result["spinnerTipsEnabled"] is True
         assert result["preferredNotifChannel"] == "iterm2"
@@ -403,7 +409,7 @@ class TestComposeSettingsLocal:
         """
         paths = self._make_paths_with_runtime(tmp_path)
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert result["sandbox"]["enabled"] is False
 
@@ -418,7 +424,7 @@ class TestComposeSettingsLocal:
             expertise=["eng"],
             sandbox=SandboxConfig(enabled=True),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert result["sandbox"]["enabled"] is True
 
@@ -428,7 +434,7 @@ class TestComposeSettingsLocal:
         permission prompt."""
         paths = self._make_paths_with_runtime(tmp_path)
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert result["skipAutoPermissionPrompt"] is True
         assert result["skipDangerousModePermissionPrompt"] is True
@@ -443,7 +449,7 @@ class TestComposeSettingsLocal:
             skip_auto_permission_prompt=False,
             skip_dangerous_mode_permission_prompt=False,
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert result["skipAutoPermissionPrompt"] is False
         assert result["skipDangerousModePermissionPrompt"] is False
@@ -456,7 +462,7 @@ class TestComposeSettingsLocal:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "solo").mkdir(parents=True)
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         bot = BotConfig(
             bot_id="solo",
             name="solo",
@@ -465,7 +471,7 @@ class TestComposeSettingsLocal:
             skip_auto_permission_prompt=False,
             skip_dangerous_mode_permission_prompt=False,
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         settings = compose_settings_local(bot, fleet, paths)
         conf = compose_bot_conf(bot, fleet, paths)
         # settings.local booleans follow their own (False) values...
@@ -483,7 +489,7 @@ class TestComposeSettingsLocal:
         Write(path) rule without ever consulting it.
         """
         paths = self._make_paths_with_runtime(tmp_path)
-        fleet = self._make_fleet_with_bots("bot-a", "bot-b")
+        fleet = self._make_fleet_with_bots("bot-a", "bot-b", manager="bot-b")
         result = compose_settings_local(fleet.bots["bot-a"], fleet, paths)
         assert "permissions" in result
         deny = result["permissions"]["deny"]
@@ -504,7 +510,7 @@ class TestComposeSettingsLocal:
                 deny=["Write", "Edit", "NotebookEdit"]
             ),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"reviewer": bot})
+        fleet = FleetConfig(manager="reviewer", name="t", service_prefix="p", bots={"reviewer": bot})
         result = compose_settings_local(bot, fleet, paths)
         deny = result["permissions"]["deny"]
         assert "Write" in deny
@@ -519,7 +525,7 @@ class TestComposeSettingsLocal:
             expertise=["eng"],
             tool_permissions=ToolPermissionsConfig(allow=["Read", "Grep", "Glob"]),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"reader": bot})
+        fleet = FleetConfig(manager="reader", name="t", service_prefix="p", bots={"reader": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
         assert "Read" in allow
@@ -536,7 +542,7 @@ class TestComposeSettingsLocal:
                 deny=["Write", "Edit"], allow=["Agent", "Bash"]
             ),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"lead": bot})
+        fleet = FleetConfig(manager="lead", name="t", service_prefix="p", bots={"lead": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "Write" in result["permissions"]["deny"]
         assert "Agent" in result["permissions"]["allow"]
@@ -557,6 +563,7 @@ class TestComposeSettingsLocal:
             telegram=TelegramConfig(handle="b_bot"),
         )
         fleet = FleetConfig(
+            manager="bot-b",
             name="t",
             service_prefix="p",
             bots={"bot-a": bot_a, "bot-b": bot_b},
@@ -582,6 +589,7 @@ class TestComposeBotConfModelStrategy:
             telegram=TelegramConfig(handle="w_bot"),
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -590,7 +598,7 @@ class TestComposeBotConfModelStrategy:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_bot_conf(bot, fleet, paths)
 
     def test_no_model_strategy_no_vars(self, tmp_path):
@@ -664,6 +672,7 @@ class TestComposeBotConfExportedVars:
             telegram=TelegramConfig(handle="w_bot"),
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -672,7 +681,7 @@ class TestComposeBotConfExportedVars:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "astrid").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         conf = compose_bot_conf(bot, fleet, paths)
         assert "export BOT_ID=astrid" in conf
 
@@ -687,6 +696,7 @@ class TestComposeBotConfExportedVars:
                 **kw,
             )
             fleet = FleetConfig(
+                manager=bot.bot_id, bots={bot.bot_id: bot},
                 name="test-fleet",
                 service_prefix="com.test",
                 telegram_group_chat_id="-100999",
@@ -694,7 +704,7 @@ class TestComposeBotConfExportedVars:
             root = tmp_path / "cl"
             (root / "runtime" / "bots" / "w").mkdir(parents=True, exist_ok=True)
             (root / "lib").mkdir(exist_ok=True)
-            return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root))
+            return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root, package=source_package()))
 
         # Default on → the RC-safe granular set, never the umbrella (which
         # silently disables --remote-control — #533).
@@ -718,6 +728,7 @@ class TestComposeBotConfServicePrefix:
             telegram=TelegramConfig(handle="eng_bot"),
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="my-fleet",
             service_prefix="com.myorg.prod",
             telegram_group_chat_id="-100999",
@@ -726,7 +737,7 @@ class TestComposeBotConfServicePrefix:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "eng-1").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         conf = compose_bot_conf(bot, fleet, paths)
         assert "BOT_SERVICE=com.myorg.prod.eng-1" in conf
         assert "export SERVICE_PREFIX=com.myorg.prod" in conf
@@ -740,6 +751,7 @@ class TestComposeBotConfServicePrefix:
             telegram=TelegramConfig(handle="w_bot"),
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="custom",
             service_prefix="io.custom.fleet",
             telegram_group_chat_id="-100999",
@@ -748,7 +760,7 @@ class TestComposeBotConfServicePrefix:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         conf = compose_bot_conf(bot, fleet, paths)
         assert "com.example" not in conf
         assert "com.claudlobby" not in conf
@@ -770,6 +782,7 @@ class TestComposeBotConfFleetRoot:
 
     def _fleet(self):
         return FleetConfig(
+            manager="kev", bots={"kev": self._bot()},
             name="tl",
             service_prefix="com.crog.tl",
             telegram_group_chat_id="-100999",
@@ -780,7 +793,7 @@ class TestComposeBotConfFleetRoot:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         # Root-mode fleet IS the install root — the anchor collapses cleanly.
         assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT"' in conf
@@ -791,7 +804,7 @@ class TestComposeBotConfFleetRoot:
         fleet_dir = root / "local" / "home" / "tl"
         (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        paths = Paths(root=root, fleet_dir=fleet_dir)
+        paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         # Nested overlay — anchored under the install root, so a re-nest of the
         # fleet only moves FLEET_ROOT; every derived path follows.
@@ -803,7 +816,7 @@ class TestComposeBotConfFleetRoot:
         vault_fleet = tmp_path / "vault" / "tl"
         (vault_fleet / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        paths = Paths(root=root, fleet_dir=vault_fleet)
+        paths = Paths(root=root, fleet_dir=vault_fleet, package=source_package())
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         # Fleet outside the install tree (vault) — absolute, no anchor to lean on.
         assert f"export FLEET_ROOT={vault_fleet}" in conf
@@ -813,7 +826,7 @@ class TestComposeBotConfFleetRoot:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         assert "FLEET_ROOT" in conf
 
@@ -826,6 +839,7 @@ class TestComposeBotConfSecretFiles:
 
     def _fleet(self):
         return FleetConfig(
+            manager="kev", bots={"kev": self._bot()},
             name="tl", service_prefix="com.crog.tl", telegram_group_chat_id="-100999"
         )
 
@@ -834,7 +848,7 @@ class TestComposeBotConfSecretFiles:
         fleet_dir = root / "local" / "home" / "tl"
         (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=fleet_dir)
+        return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
 
     def _bot(self, **kw):
         return BotConfig(
@@ -934,13 +948,14 @@ class TestComposerProvidedPathAnchorsExported:
             telegram=TelegramConfig(handle="kev_bot"),
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="tl", service_prefix="com.crog.tl", telegram_group_chat_id="-100999"
         )
         root = tmp_path / "claudlobby"
         fleet_dir = root / "local" / "home" / "tl"
         (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        paths = Paths(root=root, fleet_dir=fleet_dir)
+        paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
         conf = compose_bot_conf(bot, fleet, paths)
         for anchor in COMPOSER_PROVIDED_PATH_ANCHORS:
             assert f"{anchor}=" in conf, f"{anchor} not assigned in bot.conf"
@@ -1043,6 +1058,7 @@ class TestHooksMergeAndSettings:
             dedent("""\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               defaults:
                 hooks:
@@ -1069,12 +1085,12 @@ class TestHooksMergeAndSettings:
         # Bot stanza adds notify.sh on PostToolUse.
         assert "PreToolUse" in bot.hooks
         pre_cmds = [h["command"] for h in bot.hooks["PreToolUse"]]
-        assert "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh" in pre_cmds
+        assert "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh" in pre_cmds
         assert "log-pre.sh" in pre_cmds
 
         assert "PostToolUse" in bot.hooks
         post_cmds = [h["command"] for h in bot.hooks["PostToolUse"]]
-        assert "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh" in post_cmds
+        assert "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh" in post_cmds
         assert "log-post.sh" in post_cmds
         assert "notify.sh" in post_cmds
 
@@ -1093,7 +1109,7 @@ class TestHooksMergeAndSettings:
                 "PostToolUse": [{"command": "check.sh", "matcher": "Bash"}],
             },
         )
-        fleet = FleetConfig(name="test", service_prefix="com.test")
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test", service_prefix="com.test")
 
         settings = compose_settings_local(bot, fleet, paths)
         assert "hooks" in settings
@@ -1116,7 +1132,7 @@ class TestHooksMergeAndSettings:
         paths = _make_paths(root)
 
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="test", service_prefix="com.test")
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test", service_prefix="com.test")
 
         settings = compose_settings_local(bot, fleet, paths)
         assert "hooks" not in settings
@@ -1132,6 +1148,7 @@ class TestHooksMergeAndSettings:
             dedent("""\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               system_defaults: false
               bots:
@@ -1160,6 +1177,7 @@ class TestHooksMergeAndSettings:
             dedent("""\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               system_defaults: false
               defaults:
@@ -1228,14 +1246,14 @@ class TestTelegramHandleDefault:
         """The regression that broke bridge_state and creds-check: the emitted line."""
         paths = _make_paths(tmp_path)
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         conf = compose_bot_conf(bot, fleet, paths)
         assert "export TELEGRAM_BOT_HANDLE=worker" in conf
 
     def test_bot_conf_omits_handle_for_non_channel_bot(self, tmp_path):
         paths = _make_paths(tmp_path)
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         conf = compose_bot_conf(bot, fleet, paths)
         assert "TELEGRAM_BOT_HANDLE" not in conf
 
@@ -1248,7 +1266,7 @@ class TestTelegramHandleDefault:
             expertise=["eng"],
             telegram=TelegramConfig(handle="example_worker_bot"),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         conf = compose_bot_conf(bot, fleet, paths)
         assert "export TELEGRAM_BOT_HANDLE=example_worker_bot" in conf
         assert "export TELEGRAM_BOT_USERNAME=example_worker_bot" in conf
@@ -1257,7 +1275,7 @@ class TestTelegramHandleDefault:
         """A slug is not a username: comparing them false-fails a correct token."""
         paths = _make_paths(tmp_path)
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         conf = compose_bot_conf(bot, fleet, paths)
         assert "export TELEGRAM_BOT_HANDLE=worker" in conf
         assert "TELEGRAM_BOT_USERNAME" not in conf
@@ -1266,7 +1284,7 @@ class TestTelegramHandleDefault:
         """Both sites resolve through one function, so they cannot drift apart again."""
         paths = _make_paths(tmp_path)
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         conf = compose_bot_conf(bot, fleet, paths)
         assert "channels/telegram-worker" in conf
         assert "export TELEGRAM_BOT_HANDLE=worker" in conf
@@ -1369,7 +1387,7 @@ class TestChannelSkillInSettingsLocal:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "runtime" / "bots").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_telegram_tools_in_allow(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -1379,7 +1397,7 @@ class TestChannelSkillInSettingsLocal:
             expertise=["eng"],
             telegram=TelegramConfig(handle="my_bot"),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
         assert "mcp__plugin_telegram_telegram__reply" in allow
@@ -1393,7 +1411,7 @@ class TestChannelSkillInSettingsLocal:
             expertise=["eng"],
             skills=["lifecycle", "prs"],
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
         assert "Skill(lifecycle)" in allow
@@ -1410,7 +1428,7 @@ class TestChannelSkillInSettingsLocal:
             skills=["commit"],
             telegram=TelegramConfig(handle="my_bot"),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
         # Channel tools present
@@ -1430,7 +1448,7 @@ class TestChannelSkillInSettingsLocal:
             telegram=TelegramConfig(handle="my_bot"),
             tool_permissions=ToolPermissionsConfig(deny=["Write"]),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "Write" in result["permissions"]["deny"]
         # Auto-derived still in allow
@@ -1446,7 +1464,7 @@ class TestChannelSkillInSettingsLocal:
         """
         paths = self._make_paths_with_runtime(tmp_path)
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         # BASE_TOOLS insert at 0, so they land REVERSED; fleet_dir.name is
         # "claudlobby" in this fixture, hence --fleet claudlobby.
@@ -1467,7 +1485,7 @@ class TestChannelSkillInSettingsLocal:
             telegram=TelegramConfig(handle="my_bot"),
             tool_permissions=ToolPermissionsConfig(allow=["Bash", "Agent"]),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
         # Auto-derived
@@ -1494,7 +1512,7 @@ class TestResolveMcpPermissions:
         (root / "runtime" / "bots").mkdir(parents=True)
         for name, content in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(content))
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_github_and_notion_emit_wildcards(self, tmp_path):
         """When all tools are allowed, emit mcp__<server>__* wildcards instead of per-tool entries."""
@@ -1639,13 +1657,13 @@ class TestMcpPermissionsInSettingsLocal:
             _write_integration(
                 root, name, tool_grants=[f"mcp__{name}__*"] if tools else []
             )
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_mcp_trust_allowlist_sorted_no_blanket(self, tmp_path):
         """enabledMcpjsonServers = sorted server set; blanket enableAllProjectMcpServers never emitted."""
         paths = self._setup_mcp_library(tmp_path, {})
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths, ["notion", "github"])
         assert result["enabledMcpjsonServers"] == ["github", "notion"]
         assert "enableAllProjectMcpServers" not in result
@@ -1654,7 +1672,7 @@ class TestMcpPermissionsInSettingsLocal:
         """No project MCP servers → neither trust key is emitted (nothing to trust)."""
         paths = self._setup_mcp_library(tmp_path, {})
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         for names in (None, []):
             result = compose_settings_local(bot, fleet, paths, names)
             assert "enabledMcpjsonServers" not in result
@@ -1678,7 +1696,7 @@ class TestMcpPermissionsInSettingsLocal:
             expertise=["eng"],
             mcp=[McpEntry(name="github")],
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         mcp = compose_mcp_json(bot, paths)
         result = compose_settings_local(
             bot, fleet, paths, list(mcp["mcpServers"].keys())
@@ -1706,7 +1724,7 @@ class TestMcpPermissionsInSettingsLocal:
             expertise=["eng"],
             mcp=[McpEntry(name="github")],
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" in result
         allow = result["permissions"]["allow"]
@@ -1734,7 +1752,7 @@ class TestMcpPermissionsInSettingsLocal:
             mcp=[McpEntry(name="notion")],
             tool_permissions=ToolPermissionsConfig(allow=[], deny=[]),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" in result
         assert "mcp__notion__*" in result["permissions"]["allow"]
@@ -1757,7 +1775,7 @@ class TestMcpPermissionsInSettingsLocal:
             mcp=[McpEntry(name="github")],
             tool_permissions=ToolPermissionsConfig(deny=["Write", "Edit"]),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         deny = result["permissions"]["deny"]
         allow = result["permissions"]["allow"]
@@ -1784,7 +1802,7 @@ class TestMcpPermissionsInSettingsLocal:
             expertise=["eng"],
             mcp=[McpEntry(name="gws", instances=["personal", "work"])],
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
         assert "mcp__gws-personal__*" in allow
@@ -1878,7 +1896,7 @@ class TestResolveExpertisePermissions:
         (root / "runtime" / "bots").mkdir(parents=True)
         for name, content in files.items():
             (exp_dir / f"{name}.md").write_text(content)
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_allow_all_expands_to_full_tool_set(self, tmp_path):
         from claudlobby.composer import _resolve_expertise_permissions
@@ -2007,7 +2025,7 @@ class TestExpertisePermissionsInSettingsLocal:
         (root / "runtime" / "bots").mkdir(parents=True)
         for name, content in files.items():
             (exp_dir / f"{name}.md").write_text(content)
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_expertise_allow_in_settings(self, tmp_path):
         paths = self._setup_expertise(
@@ -2017,7 +2035,7 @@ class TestExpertisePermissionsInSettingsLocal:
             },
         )
         bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        fleet = FleetConfig(manager="w", name="t", service_prefix="p", bots={"w": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
         assert "Write" in allow
@@ -2033,7 +2051,7 @@ class TestExpertisePermissionsInSettingsLocal:
             },
         )
         bot = BotConfig(bot_id="r", name="r", expertise=["reviewer"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"r": bot})
+        fleet = FleetConfig(manager="r", name="t", service_prefix="p", bots={"r": bot})
         result = compose_settings_local(bot, fleet, paths)
         deny = result["permissions"]["deny"]
         allow = result["permissions"]["allow"]
@@ -2056,7 +2074,7 @@ class TestExpertisePermissionsInSettingsLocal:
             expertise=["eng"],
             tool_permissions=ToolPermissionsConfig(deny=["Write", "Edit"]),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        fleet = FleetConfig(manager="w", name="t", service_prefix="p", bots={"w": bot})
         result = compose_settings_local(bot, fleet, paths)
         deny = result["permissions"]["deny"]
         allow = result["permissions"]["allow"]
@@ -2095,7 +2113,7 @@ class TestExpertisePermissionsInSettingsLocal:
         )
         _write_integration(root, "github", tool_grants=["mcp__github__*"])
 
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         bot = BotConfig(
             bot_id="w",
             name="w",
@@ -2104,7 +2122,7 @@ class TestExpertisePermissionsInSettingsLocal:
             skills=["commit"],
             telegram=TelegramConfig(handle="my_bot"),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        fleet = FleetConfig(manager="w", name="t", service_prefix="p", bots={"w": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
 
@@ -2140,7 +2158,7 @@ class TestExpertisePermissionsInSettingsLocal:
             },
         )
         bot = BotConfig(bot_id="r", name="r", expertise=["code-review"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"r": bot})
+        fleet = FleetConfig(manager="r", name="t", service_prefix="p", bots={"r": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
         deny = result["permissions"]["deny"]
@@ -2167,10 +2185,10 @@ class TestComposeSystemdUnit:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         (root / "runtime" / "bots" / "w").mkdir(parents=True)
         bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        fleet = FleetConfig(manager="w", name="t", service_prefix="p", bots={"w": bot})
         return bot, fleet, paths
 
     # Anchored to line starts: the unit body documents the boot state machine in
@@ -2223,8 +2241,8 @@ class TestHostBootOffset:
     """Host-global boot ladder: managers first, then workers, one per rung (#1002)."""
 
     # spec shape, shared by every helper below:
-    #   {fleet_name: (n_bots, [indices of bots a team names as manager])}
-    # Manager indices rather than "the first N", so a fleet whose manager is not
+    #   {fleet_name: (n_bots, index of the declared fleet manager)}
+    # An explicit index rather than declaration order, so a manager that is not
     # declared first still exercises the tier split.
 
     @pytest.fixture(autouse=True)
@@ -2244,9 +2262,8 @@ class TestHostBootOffset:
             doc = {
                 "fleet": {
                     "name": name,
-                    "teams": {
-                        f"t{i}": {"manager": f"b{m}"} for i, m in enumerate(mgr_idx)
-                    },
+                    "manager": f"b{mgr_idx}",
+                    "teams": {"t0": {"manager": f"b{mgr_idx}"}},
                     "bots": {f"b{i}": {"expertise": ["eng"]} for i in range(n_bots)},
                 }
             }
@@ -2260,37 +2277,35 @@ class TestHostBootOffset:
             f"b{i}": BotConfig(bot_id=f"b{i}", name=f"b{i}", expertise=["eng"])
             for i in range(n_bots)
         }
-        teams = {
-            f"t{i}": TeamConfig(name=f"t{i}", manager=f"b{m}")
-            for i, m in enumerate(mgr_idx)
-        }
-        return FleetConfig(name=name, service_prefix="p", bots=bots, teams=teams)
+        teams = {"t0": TeamConfig(name="t0", manager=f"b{mgr_idx}")}
+        return FleetConfig(name=name, service_prefix="p", manager=f"b{mgr_idx}",
+                           bots=bots, teams=teams)
 
     def _bases(self, root, local, spec, name, nested: bool = False):
         """This fleet's (manager_base, worker_base), via the real door."""
         d = (local / "sys" / name) if nested else (local / name)
-        own_managers = len(set(spec[name][1]))
-        return _host_boot_rung_bases(Paths(root=root, fleet_dir=d), own_managers)
+        own_managers = 1
+        return _host_boot_rung_bases(Paths(root=root, fleet_dir=d, package=source_package()), own_managers)
 
     def _rungs(self, root, local, spec):
         """Every bot's delay on the host, keyed <fleet>.<bot>, via the real door."""
         out = {}
         for name in spec:
             fleet = self._fleet(name, spec)
-            paths = Paths(root=root, fleet_dir=local / name)
+            paths = Paths(root=root, fleet_dir=local / name, package=source_package())
             for bot in fleet.bots.values():
                 out[f"{name}.{bot.bot_id}"] = bot_boot_delay_s(bot, fleet, paths)
         return out
 
     def test_first_fleet_starts_at_zero(self, tmp_path):
-        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        spec = {"aaa": (3, 0), "bbb": (2, 0)}
         root, local = self._host(tmp_path, spec)
         # 2 managers on the host, so aaa's workers start at rung 2.
         assert self._bases(root, local, spec, "aaa") == (0, 2)
 
     def test_later_fleet_starts_past_the_earlier_ones(self, tmp_path):
         """Managers ladder past earlier managers; workers past ALL managers."""
-        spec = {"aaa": (3, [0]), "bbb": (2, [0]), "ccc": (4, [0])}
+        spec = {"aaa": (3, 0), "bbb": (2, 0), "ccc": (4, 0)}
         root, local = self._host(tmp_path, spec)
         # 3 managers on the host, so every worker block starts at rung 3 or past.
         assert self._bases(root, local, spec, "aaa") == (0, 3)
@@ -2302,7 +2317,7 @@ class TestHostBootOffset:
 
         Manager-first reorders the ladder; it must not perforate or overrun it.
         """
-        spec = {"aaa": (3, [0]), "bbb": (2, [1]), "ccc": (4, [0, 2])}
+        spec = {"aaa": (3, 0), "bbb": (2, 1), "ccc": (4, 2)}
         root, local = self._host(tmp_path, spec)
         rungs = self._rungs(root, local, spec)
         assert len(rungs) == 9
@@ -2314,89 +2329,88 @@ class TestHostBootOffset:
         Not "each fleet's manager leads its own block" — that was already true
         of the contiguous per-fleet ladder. The property asserted is host-global.
         """
-        spec = {"aaa": (3, [0]), "bbb": (2, [1]), "ccc": (4, [0, 2])}
+        spec = {"aaa": (3, 0), "bbb": (2, 1), "ccc": (4, 2)}
         root, local = self._host(tmp_path, spec)
         rungs = self._rungs(root, local, spec)
-        mgrs = {"aaa.b0", "bbb.b1", "ccc.b0", "ccc.b2"}
+        mgrs = {"aaa.b0", "bbb.b1", "ccc.b2"}
         assert max(rungs[k] for k in mgrs) < min(
             v for k, v in rungs.items() if k not in mgrs
         )
-        # 4 managers → the first four rungs, in fleet order.
-        assert sorted(rungs[k] for k in mgrs) == [0, 3, 6, 9]
+        # 3 fleets each contribute one manager, in fleet order.
+        assert sorted(rungs[k] for k in mgrs) == [0, 3, 6]
 
     def test_last_fleets_manager_boots_before_first_fleets_worker(self, tmp_path):
         """The inversion the ordering buys, stated as the case that changed."""
-        spec = {"aaa": (3, [0]), "zzz": (2, [0])}
+        spec = {"aaa": (3, 0), "zzz": (2, 0)}
         root, local = self._host(tmp_path, spec)
         rungs = self._rungs(root, local, spec)
         assert rungs["zzz.b0"] < rungs["aaa.b1"]
 
     def test_manager_declared_last_still_takes_a_manager_rung(self, tmp_path):
-        """Tier membership comes from teams, not from declaration position."""
-        spec = {"aaa": (3, [2])}
+        """Tier membership comes from fleet.manager, not declaration position."""
+        spec = {"aaa": (3, 2)}
         root, local = self._host(tmp_path, spec)
         rungs = self._rungs(root, local, spec)
         assert rungs["aaa.b2"] == 0
         assert sorted(rungs.values()) == [0, 3, 6]
 
     def test_two_teams_one_manager_counts_once(self, tmp_path):
-        """A bot managing two teams occupies one rung, not two."""
-        spec = {"aaa": (3, [0, 0]), "bbb": (2, [0])}
+        """Grouping a manager's workers twice cannot consume a second rung."""
+        spec = {"aaa": (3, 0), "bbb": (2, 0)}
         root, local = self._host(tmp_path, spec)
+        manifest = local / "aaa" / "fleet.yaml"
+        doc = yaml.safe_load(manifest.read_text())
+        doc["fleet"]["teams"]["second"] = {"manager": "b0", "workers": ["b2"]}
+        manifest.write_text(yaml.safe_dump(doc))
         rungs = self._rungs(root, local, spec)
         assert sorted(rungs.values()) == [i * _BOOT_STAGGER_SECONDS for i in range(5)]
 
-    def test_team_naming_an_absent_bot_does_not_shift_the_ladder(self, tmp_path):
-        """Only bots the manifest lists are counted, or later fleets slide off."""
-        spec = {"aaa": (2, []), "bbb": (2, [0])}
+    def test_invalid_sibling_team_manager_contributes_no_rungs(self, tmp_path):
+        """A rejected sibling manifest must not invent a partial fleet roster."""
+        spec = {"aaa": (2, 0), "bbb": (2, 0)}
         root, local = self._host(tmp_path, spec)
         (local / "aaa" / "fleet.yaml").write_text(
-            "fleet:\n  name: aaa\n  teams:\n    t0: {manager: ghost}\n"
+            "fleet:\n  name: aaa\n  manager: b0\n  teams:\n    t0: {manager: ghost}\n"
             "  bots:\n    b0: {expertise: [eng]}\n    b1: {expertise: [eng]}\n",
             encoding="utf-8",
         )
-        # aaa contributes 0 managers and 2 workers; bbb's manager still leads.
-        assert self._bases(root, local, spec, "bbb") == (0, 3)
+        assert self._bases(root, local, spec, "bbb") == (0, 1)
 
-    def test_fleet_with_no_teams_is_all_workers(self, tmp_path):
-        spec = {"aaa": (3, []), "bbb": (2, [0])}
+    def test_fleet_with_no_teams_still_has_its_declared_manager(self, tmp_path):
+        spec = {"aaa": (3, 0), "bbb": (2, 0)}
         root, local = self._host(tmp_path, spec)
-        # Only bbb has a manager, so it owns rung 0 and aaa's bots follow it.
-        assert self._bases(root, local, spec, "aaa") == (0, 1)
-        assert self._bases(root, local, spec, "bbb") == (0, 4)
+        manifest = local / "aaa" / "fleet.yaml"
+        doc = yaml.safe_load(manifest.read_text())
+        del doc["fleet"]["teams"]
+        manifest.write_text(yaml.safe_dump(doc))
+        assert self._bases(root, local, spec, "aaa") == (0, 2)
+        assert self._bases(root, local, spec, "bbb") == (1, 4)
 
     def test_nested_system_container_fleets_are_ordered_too(self, tmp_path):
         """local/<system>/<fleet>/ resolves like the flat layout."""
-        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        spec = {"aaa": (3, 0), "bbb": (2, 0)}
         root, local = self._host(tmp_path, spec, nested=True)
         assert self._bases(root, local, spec, "bbb", nested=True) == (1, 4)
 
     def test_unplaceable_fleet_ladders_standalone_managers_first(self, tmp_path):
         """No host placement is not licence to stack two bots on rung 0."""
-        spec = {"aaa": (3, [1])}
+        spec = {"aaa": (3, 1)}
         root, _ = self._host(tmp_path, spec)
-        paths = Paths(root=root, fleet_dir=None)  # root mode
+        paths = Paths(root=root, fleet_dir=None, package=source_package())  # root mode
         assert _host_boot_rung_bases(paths, 1) == (0, 1)
         fleet = self._fleet("aaa", spec)
         rungs = [bot_boot_delay_s(b, fleet, paths) for b in fleet.bots.values()]
         assert rungs == [3, 0, 6]  # b1 manages, so it leads; b0/b2 follow in order
 
-    def _host_manages_only(self, tmp_path):
-        """Two fleets where the FIRST declares its manager only via ``manages:``.
-
-        The ``spec`` helper above can express a ``teams:`` manager and nothing
-        else, which is precisely what hid this: every existing multi-fleet test
-        declares managers the single way the sibling-counting helper happened
-        to read, so the host walk was never exercised against the other
-        declaration. The only test that used ``manages:`` as a real manager
-        designation runs in ROOT mode, which returns before the sibling walk.
-        """
+    def _host_ungrouped(self, tmp_path):
+        """The first fleet declares a manager without a redundant team block."""
         root = tmp_path / "claudlobby"
         local = root / "local"
         docs = {
-            # No teams: block at all — b0 manages b1 and nothing else says so.
+            # The manager is explicit; manages is reporting metadata only.
             "aaa": {
                 "name": "aaa",
+                "manager": "b0",
                 "bots": {
                     "b0": {"expertise": ["eng"], "manages": ["b1"]},
                     "b1": {"expertise": ["eng"]},
@@ -2404,6 +2418,7 @@ class TestHostBootOffset:
             },
             "bbb": {
                 "name": "bbb",
+                "manager": "b0",
                 "teams": {"t0": {"manager": "b0"}},
                 "bots": {"b0": {"expertise": ["eng"]}, "b1": {"expertise": ["eng"]}},
             },
@@ -2416,10 +2431,11 @@ class TestHostBootOffset:
             )
         return root, local
 
-    def _manages_only_fleets(self):
+    def _ungrouped_fleets(self):
         aaa = FleetConfig(
             name="aaa",
             service_prefix="p",
+            manager="b0",
             bots={
                 "b0": BotConfig(
                     bot_id="b0", name="b0", expertise=["eng"], manages=["b1"]
@@ -2430,6 +2446,7 @@ class TestHostBootOffset:
         bbb = FleetConfig(
             name="bbb",
             service_prefix="p",
+            manager="b0",
             bots={
                 "b0": BotConfig(bot_id="b0", name="b0", expertise=["eng"]),
                 "b1": BotConfig(bot_id="b1", name="b1", expertise=["eng"]),
@@ -2438,7 +2455,7 @@ class TestHostBootOffset:
         )
         return aaa, bbb
 
-    def test_a_manages_only_manager_in_an_earlier_fleet_is_counted(self, tmp_path):
+    def test_an_ungrouped_manager_in_an_earlier_fleet_is_counted(self, tmp_path):
         """A sibling's manager counts however it was DECLARED, not however the
         counting helper happened to look for it.
 
@@ -2446,14 +2463,14 @@ class TestHostBootOffset:
         manager tier shifts every later fleet's rung base, so this asserts on
         the later fleet: it is the one that inherits the shortfall.
         """
-        root, local = self._host_manages_only(tmp_path)
-        bases = _host_boot_rung_bases(Paths(root=root, fleet_dir=local / "bbb"), 1)
+        root, local = self._host_ungrouped(tmp_path)
+        bases = _host_boot_rung_bases(Paths(root=root, fleet_dir=local / "bbb", package=source_package()), 1)
         assert bases == (1, 3), (
-            "bbb's manager must ladder past aaa's; a manages:-only manager that "
+            "bbb's manager must ladder past aaa's; an ungrouped manager that "
             "the sibling count cannot see collapses that gap"
         )
 
-    def test_manages_only_manager_takes_its_own_rung_on_the_host_ladder(self, tmp_path):
+    def test_ungrouped_manager_takes_its_own_rung_on_the_host_ladder(self, tmp_path):
         """The whole ladder, as exact rungs — asserted through
         ``bot_boot_delay_s``, the value a composed unit actually carries.
 
@@ -2476,10 +2493,10 @@ class TestHostBootOffset:
         Rungs below are derived from the invariant, not fitted to output: 2
         managers then 2 workers, in host-walk order, at the 3s stagger.
         """
-        root, local = self._host_manages_only(tmp_path)
-        aaa, bbb = self._manages_only_fleets()
-        p_aaa = Paths(root=root, fleet_dir=local / "aaa")
-        p_bbb = Paths(root=root, fleet_dir=local / "bbb")
+        root, local = self._host_ungrouped(tmp_path)
+        aaa, bbb = self._ungrouped_fleets()
+        p_aaa = Paths(root=root, fleet_dir=local / "aaa", package=source_package())
+        p_bbb = Paths(root=root, fleet_dir=local / "bbb", package=source_package())
         rungs = {
             "aaa.b0": bot_boot_delay_s(aaa.bots["b0"], aaa, p_aaa),  # manager
             "bbb.b0": bot_boot_delay_s(bbb.bots["b0"], bbb, p_bbb),  # manager
@@ -2495,14 +2512,14 @@ class TestHostBootOffset:
 
     def test_unparseable_sibling_does_not_block_generate(self, tmp_path):
         """A broken fleet contributes no rungs; it must never raise here."""
-        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        spec = {"aaa": (3, 0), "bbb": (2, 0)}
         root, local = self._host(tmp_path, spec)
         (local / "aaa" / "fleet.yaml").write_text("fleet: [oops\n", encoding="utf-8")
         assert self._bases(root, local, spec, "bbb") == (0, 1)
 
     def test_manifest_that_is_not_a_mapping_contributes_nothing(self, tmp_path):
         """Shape is checked, not caught — a list manifest must not raise."""
-        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        spec = {"aaa": (3, 0), "bbb": (2, 0)}
         root, local = self._host(tmp_path, spec)
         (local / "aaa" / "fleet.yaml").write_text("- a\n- b\n", encoding="utf-8")
         assert self._bases(root, local, spec, "bbb") == (0, 1)
@@ -2516,9 +2533,9 @@ class TestHostBootOffset:
         this asserts the derivation, not a re-implementation of it in the test
         body.
         """
-        spec = {"aaa": (2, [0]), "bbb": (3, [0])}
+        spec = {"aaa": (2, 0), "bbb": (3, 0)}
         root, local = self._host(tmp_path, spec)
-        paths = Paths(root=root, fleet_dir=local / "bbb")
+        paths = Paths(root=root, fleet_dir=local / "bbb", package=source_package())
         fleet = self._fleet("bbb", spec)
         # 2 managers (aaa.b0 rung 0, bbb.b0 rung 1); workers start at rung 2,
         # and aaa's one worker takes it — so bbb's workers are rungs 3-4.
@@ -2529,22 +2546,14 @@ class TestHostBootOffset:
         ]
 
 
-class TestCrossFleetManagerRecognition:
-    """manager_bots() must see a manager whose reports live in OTHER fleets.
-
-    `teams:` can only name a manager of a team in its own fleet. A top-level
-    coordinator whose reports are themselves managers of other fleets is named
-    by no `teams:` block anywhere, so the predicate missed it — while the same
-    manifest declared `manages: [...]` all along.
-    """
+class TestDeclaredManagerRecognition:
+    """One explicit field controls role and routing, independent of org metadata."""
 
     LIB_COMMON = Path(__file__).resolve().parents[1] / "lib" / "lib-common.sh"
 
-    def _fleet(self, name="crog", **bots):
-        """bots kwargs: name=(manages_list_or_None); teams built separately."""
+    def _fleet(self, *, manager, name="coord-fleet", **bots):
         return FleetConfig(
-            name=name,
-            service_prefix="p",
+            name=name, service_prefix="p", manager=manager,
             bots={
                 b: BotConfig(bot_id=b, name=b, expertise=["eng"], manages=m)
                 for b, m in bots.items()
@@ -2552,106 +2561,91 @@ class TestCrossFleetManagerRecognition:
         )
 
     def _bash_is_manager(self, bot_dir: Path) -> bool:
-        """The real shipped predicate, not a reimplementation of it."""
+        """Exercise the shipped reader of the composed manager pointer."""
         proc = subprocess.run(
-            [
-                "bash",
-                "-c",
-                '. "$1"; bot_is_manager "$2"',
-                "_",
-                str(self.LIB_COMMON),
-                str(bot_dir),
-            ],
-            capture_output=True,
-            text=True,
+            ["bash", "-c", '. "$1"; bot_is_manager "$2"', "_",
+             str(self.LIB_COMMON), str(bot_dir)],
+            capture_output=True, text=True,
+            env={**os.environ, "CLAUDLOBBY_ROOT": str(bot_dir.parent / "claudlobby")},
         )
+        assert not proc.stderr, proc.stderr
         return proc.returncode == 0
 
     def _compose_conf(self, tmp_path, fleet, bot_id):
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
-        d = tmp_path / bot_id
-        d.mkdir()
-        (d / "bot.conf").write_text(
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        directory = tmp_path / bot_id
+        directory.mkdir()
+        (directory / "bot.conf").write_text(
             compose_bot_conf(fleet.bots[bot_id], fleet, paths), encoding="utf-8"
         )
-        return d
+        return directory
 
-    # -- the predicate itself ------------------------------------------------
+    def test_declared_manager_needs_no_team_or_manages_edges(self):
+        fleet = self._fleet(manager="lead", lead=None)
+        assert fleet.manager_bots() == {"lead"}
+        assert fleet.leaf_manager_bots() == set()
 
-    def test_manages_makes_a_manager_with_no_team_at_all(self):
-        """The clog shape: zero teams declared, manages: [...] present."""
-        fleet = self._fleet(clog=["ari", "kev"])
-        assert fleet.manager_bots() == {"clog"}
-
-    def test_manages_targets_outside_this_fleet_still_count(self):
-        """The whole point — the reports are in other fleets.
-
-        _validate_teams warns rather than errors on exactly this, because
-        "bot_ids may reference other fleets". ari/kev are absent from
-        fleet.bots here, and clog is still a manager.
-        """
-        fleet = self._fleet(clog=["ari", "kev"])
-        assert "ari" not in fleet.bots and "kev" not in fleet.bots
-        assert "clog" in fleet.manager_bots()
+    def test_cross_fleet_reporting_metadata_does_not_promote_another_bot(self):
+        fleet = self._fleet(manager="lead", lead=None, coord=["other-fleet-manager"])
+        assert fleet.manager_bots() == {"lead"}
+        assert fleet.bots["coord"].manages == ["other-fleet-manager"]
 
     def test_a_plain_worker_is_still_not_a_manager(self):
-        """CONTROL. A predicate that answers True for everything is not a fix."""
-        fleet = self._fleet(name="tl", todd=None)
-        assert fleet.manager_bots() == set()
+        fleet = self._fleet(manager="lead", lead=None, worker=None)
+        assert "worker" not in fleet.manager_bots()
 
     def test_the_predicate_is_not_unanimous_on_a_mixed_fleet(self):
-        """The unanimity tell, asserted directly rather than hoped for."""
-        fleet = self._fleet(name="mixed", clog=["ari"], todd=None, greg=None)
-        assert fleet.manager_bots() == {"clog"}  # exactly one, not all three
+        fleet = self._fleet(manager="lead", lead=["remote"], worker=None, peer=["worker"])
+        assert fleet.manager_bots() == {"lead"}
 
-    def test_empty_manages_is_not_a_claim_to_manage_anyone(self):
-        assert self._fleet(z=[]).manager_bots() == set()
-        assert self._fleet(z=None).manager_bots() == set()
+    def test_replacing_the_manager_moves_role_and_composed_routing(self, tmp_path):
+        fleet = self._fleet(manager="old", old=["worker"], new=None, worker=None)
+        before = self._compose_conf(tmp_path / "before", fleet, "worker")
+        assert "export MANAGER_TMUX=old" in (before / "bot.conf").read_text()
+        changed = replace(fleet, manager="new")
+        assert changed.manager_bots() == changed.leaf_manager_bots() == {"new"}
+        for bot_id in ("old", "new", "worker"):
+            directory = self._compose_conf(tmp_path / bot_id, changed, bot_id)
+            conf = (directory / "bot.conf").read_text()
+            assert "export MANAGER_TMUX=new\n" in conf
+            assert "export MANAGER_TMUX_SOCKET=p.new\n" in conf
+            assert self._bash_is_manager(directory) is (bot_id == "new")
 
-    def test_teams_only_managers_are_untouched(self):
-        """No regression for the ordinary within-fleet case."""
-        fleet = self._fleet(name="eng", ari=None, alex=None)
-        fleet.teams = {"personal": TeamConfig(name="personal", manager="ari")}
-        assert fleet.manager_bots() == {"ari"}
+    def test_team_grouping_retains_the_declared_manager(self):
+        fleet = self._fleet(manager="lead", lead=None, worker=None)
+        fleet = replace(fleet, teams={
+            "eng": TeamConfig(name="eng", manager="lead", workers=["worker"])
+        })
+        assert fleet.manager_bots() == {"lead"}
 
-    # -- outcome, through real composition and the real bash predicate -------
+    def test_bash_reader_recognizes_a_declared_cross_fleet_coordinator(self, tmp_path):
+        fleet = self._fleet(manager="coord", coord=["remote-lead"])
+        directory = self._compose_conf(tmp_path, fleet, "coord")
+        assert fleet.teams == {}
+        assert self._bash_is_manager(directory) is True
 
-    def test_bash_bot_is_manager_is_true_for_a_manages_only_manager(self, tmp_path):
-        """End to end: no teams block anywhere, and bot_is_manager still says yes.
+    def test_worker_routes_to_fleet_manager_despite_reporting_metadata(self, tmp_path):
+        fleet = self._fleet(manager="lead", lead=None, worker=None)
+        fleet.bots["worker"].reports_to = "remote-coordinator"
+        directory = self._compose_conf(tmp_path, fleet, "worker")
+        conf = (directory / "bot.conf").read_text()
+        assert "export MANAGER_TMUX=lead\n" in conf
+        assert self._bash_is_manager(directory) is False
 
-        This is the assertion that lets the `teams: estate: manager: clog`
-        workaround be deleted rather than merely tolerated.
-        """
-        fleet = self._fleet(clog=["ari", "kev"])
-        assert fleet.teams == {}  # the workaround block is genuinely absent
-        d = self._compose_conf(tmp_path, fleet, "clog")
-        assert "MANAGER_TMUX" in (d / "bot.conf").read_text()
-        assert self._bash_is_manager(d) is True
-
-    def test_bash_bot_is_manager_is_false_for_a_real_worker(self, tmp_path):
-        """CONTROL, through the same composition path."""
-        fleet = self._fleet(name="tl", kev=["todd"], todd=None)
-        fleet.teams = {"tl": TeamConfig(name="tl", manager="kev", workers=["todd"])}
-        d = self._compose_conf(tmp_path, fleet, "todd")
-        assert self._bash_is_manager(d) is False
-
-    def test_the_composed_manager_line_reads_back_as_the_bare_session_name(
-        self, tmp_path
-    ):
-        """#910: the shipped reader returned a manager's own MANAGER_TMUX as
-        `clog  # this bot is a manager`, a session that does not exist."""
-        fleet = self._fleet(clog=["ari", "kev"])
-        d = self._compose_conf(tmp_path, fleet, "clog")
+    def test_the_composed_manager_line_reads_back_as_the_bare_session_name(self, tmp_path):
+        fleet = self._fleet(manager="coord", coord=["remote-lead"])
+        directory = self._compose_conf(tmp_path, fleet, "coord")
         got = call_script_fn(
-            self.LIB_COMMON, "bot_conf_get", str(d), "MANAGER_TMUX", ""
+            self.LIB_COMMON, "bot_conf_get", str(directory), "MANAGER_TMUX", "",
+            env={**os.environ, "CLAUDLOBBY_ROOT": str(directory.parent / "claudlobby")},
         )
-        assert got == "clog"
-        lines = (d / "bot.conf").read_text().splitlines()
-        assert [ln for ln in lines if ln.startswith("export MANAGER_TMUX=")] == [
-            "export MANAGER_TMUX=clog"
+        assert got == "coord"
+        lines = (directory / "bot.conf").read_text().splitlines()
+        assert [line for line in lines if line.startswith("export MANAGER_TMUX=")] == [
+            "export MANAGER_TMUX=coord"
         ]
 
 
@@ -2669,6 +2663,7 @@ class TestPluginsBotConf:
             channels=channels or [],
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -2678,7 +2673,7 @@ class TestPluginsBotConf:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_bot_conf(bot, fleet, paths)
 
     def test_bot_conf_has_sync_env_var(self, tmp_path):
@@ -2778,7 +2773,7 @@ class TestPluginsSettingsLocal:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "runtime" / "bots").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_settings_local_has_enabled_plugins(self, tmp_path):
         from claudlobby.config import PluginsConfig
@@ -2789,6 +2784,7 @@ class TestPluginsSettingsLocal:
             required=["claudna@Claudfather", "telegram@claude-plugins-official"]
         )
         fleet = FleetConfig(
+            manager="worker",
             name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins
         )
         result = compose_settings_local(bot, fleet, paths)
@@ -2812,6 +2808,7 @@ class TestPluginsSettingsLocal:
             required=["claudna@Claudfather"],
         )
         fleet = FleetConfig(
+            manager="worker",
             name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins
         )
         result = compose_settings_local(bot, fleet, paths)
@@ -2829,6 +2826,7 @@ class TestPluginsSettingsLocal:
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
         plugins = PluginsConfig(required=["telegram@claude-plugins-official"])
         fleet = FleetConfig(
+            manager="worker",
             name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins
         )
         result = compose_settings_local(bot, fleet, paths)
@@ -2852,7 +2850,7 @@ class TestChannelPluginInstallEnableCarveout:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
 
         bot = BotConfig(
             bot_id="worker",
@@ -2868,6 +2866,7 @@ class TestChannelPluginInstallEnableCarveout:
             ]
         )
         fleet = FleetConfig(
+            manager="worker",
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -2916,9 +2915,9 @@ class TestComposeBotEventsDir:
         (root / "lib").mkdir()
         (root / "voices").mkdir()
 
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
 
         bot_dir = compose_bot(bot, fleet, paths, log=lambda m: None)
 
@@ -2941,6 +2940,7 @@ class TestComposeBotConfObservability:
             observability=obs,
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -2949,7 +2949,7 @@ class TestComposeBotConfObservability:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_bot_conf(bot, fleet, paths)
 
     def test_default_observability_values(self, tmp_path):
@@ -3016,6 +3016,7 @@ class TestComposeBotConfObservability:
 
         from claudlobby.composer import DEFAULT_DISPATCH_DEADLINE_S, compose_bot_conf
         from claudlobby.config import load_fleet
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         root = tmp_path / "claudlobby"
@@ -3025,6 +3026,7 @@ class TestComposeBotConfObservability:
         (root / "fleet.yaml").write_text(_dedent("""\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               bots:
                 worker:
@@ -3032,7 +3034,7 @@ class TestComposeBotConfObservability:
         """))
         fleet, _md = load_fleet(root / "fleet.yaml")
         conf = compose_bot_conf(fleet.bots["worker"], fleet,
-                                Paths(root=root, fleet_dir=root))
+                                Paths(root=root, fleet_dir=root, package=source_package()))
         assert "export OBSERVABILITY_DISPATCH_DEADLINE=86400" in conf
         assert fleet.bots["worker"].observability.dispatch_deadline == \
             DEFAULT_DISPATCH_DEADLINE_S
@@ -3121,7 +3123,7 @@ class TestComposePermissions:
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
         (root / "voices").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_claude_md, paths
 
     def test_permissions_rendered_in_claude_md(self, tmp_path):
@@ -3137,7 +3139,7 @@ class TestComposePermissions:
             expertise=["eng"],
             permissions=["read-only-db"],
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_claude_md(bot, fleet, paths)
         assert "## Permissions" in result
         assert "### Read-only database access" in result
@@ -3146,7 +3148,7 @@ class TestComposePermissions:
     def test_empty_permissions_omits_section(self, tmp_path):
         compose_claude_md, paths = self._setup(tmp_path, {})
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_claude_md(bot, fleet, paths)
         assert "## Permissions" not in result
 
@@ -3164,7 +3166,7 @@ class TestComposePermissions:
             expertise=["eng"],
             permissions=["no-delete", "prod-readonly"],
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_claude_md(bot, fleet, paths)
         assert "### No destructive writes" in result
         assert "### Production read-only" in result
@@ -3183,6 +3185,7 @@ class TestJinja2Sandbox:
             telegram=TelegramConfig(handle="w_bot"),
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -3196,7 +3199,7 @@ class TestJinja2Sandbox:
         from claudlobby.composer import _render_startup_prompt
 
         bot = BotConfig(bot_id="evil", name="evil", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p")
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="t", service_prefix="p")
         prompt = "{{ ''.__class__.__mro__[1].__subclasses__() }}"
         with pytest.raises(SecurityError):
             _render_startup_prompt(prompt, bot, fleet)
@@ -3206,7 +3209,7 @@ class TestJinja2Sandbox:
         from claudlobby.composer import _render_startup_prompt
 
         bot = BotConfig(bot_id="evil", name="evil", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p")
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="t", service_prefix="p")
         # Attempt to walk from str -> object -> subclasses to find Popen
         prompt = "{{ ''.__class__.__mro__[1].__subclasses__()[100] }}"
         with pytest.raises(SecurityError):
@@ -3220,7 +3223,7 @@ class TestJinja2Sandbox:
         root.mkdir()
         (root / "templates").mkdir()
         (root / "templates" / "claude.md.j2").write_text("{{ bot.name }}")
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         env = _build_jinja_env(paths)
         assert isinstance(env, SandboxedEnvironment)
 
@@ -3234,7 +3237,7 @@ class TestJinja2Sandbox:
         (root / "templates" / "evil.j2").write_text(
             "{{ ''.__class__.__mro__[1].__subclasses__() }}"
         )
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         env = _build_jinja_env(paths)
         tmpl = env.get_template("evil.j2")
         with pytest.raises(SecurityError):
@@ -3261,6 +3264,7 @@ class TestComposeBotConfShellEscaping:
             env=env or {},
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -3269,7 +3273,7 @@ class TestComposeBotConfShellEscaping:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_bot_conf(bot, fleet, paths)
 
     def test_command_substitution_escaped(self, tmp_path):
@@ -3355,13 +3359,13 @@ class TestDefaultStartupPromptIgnition:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        return Paths(root=root, fleet_dir=root if overlay else None)
+        return Paths(root=root, fleet_dir=root if overlay else None, package=source_package())
 
     def _bot(self, bot_id="worker", **kw):
         return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"], **kw)
 
     def _fleet(self, bot):
-        return FleetConfig(name="t", service_prefix="p", bots={bot.bot_id: bot})
+        return FleetConfig(manager=bot.bot_id, name="t", service_prefix="p", bots={bot.bot_id: bot})
 
     def _startup_prompt_line(self, conf: str) -> str:
         return [l for l in conf.splitlines() if l.startswith("STARTUP_PROMPT=")][0]
@@ -3430,13 +3434,13 @@ class TestComposeAutonomousRunner:
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
         (root / "voices").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_claude_md, paths
 
     def test_section_omitted_when_not_configured(self, tmp_path):
         compose_claude_md, paths = self._setup(tmp_path)
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_claude_md(bot, fleet, paths)
         assert "Autonomous Runner" not in result
 
@@ -3454,7 +3458,7 @@ class TestComposeAutonomousRunner:
                 target_repo="org/repo",
             ),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         result = compose_claude_md(bot, fleet, paths)
         assert "## Autonomous Runner — Your Continuous Job" in result
         assert "/claudna:tech-debt" in result
@@ -3503,7 +3507,7 @@ class TestComposeAutonomousRunner:
                 },
             ),
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"dbt-bot": bot})
+        fleet = FleetConfig(manager="dbt-bot", name="t", service_prefix="p", bots={"dbt-bot": bot})
         result = compose_claude_md(bot, fleet, paths)
         assert "/claudna:implement-plan" in result
         assert "example-org/dbt" in result
@@ -3525,11 +3529,15 @@ class TestResolveEffectiveIntegrations:
     def _paths_with_integrations(self, tmp_path: Path, names: list[str]) -> Paths:
         root = tmp_path / "claudlobby"
         root.mkdir()
-        int_dir = root / "library" / "integrations"
+        library = tmp_path / "package" / "library"
+        int_dir = library / "integrations"
         int_dir.mkdir(parents=True)
         for name in names:
             (int_dir / f"{name}.md").write_text(f"# {name}\n")
-        return Paths(root=root, fleet_dir=root)
+        return Paths(
+            root=root, fleet_dir=root,
+            package=replace(source_package(), library=library),
+        )
 
     def test_explicit_integrations_union_mcp_paired(self, tmp_path):
         """Explicit integrations are unioned with auto-paired mcp names, not replaced.
@@ -3594,6 +3602,7 @@ class TestPermissionMode:
             dangerously_skip_permissions=dangerously_skip_permissions,
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -3602,7 +3611,7 @@ class TestPermissionMode:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_bot_conf(bot, fleet, paths)
 
     def test_permission_mode_auto(self, tmp_path):
@@ -3714,9 +3723,13 @@ class TestResolveEffectiveIntegrationsUnion:
     def _setup(self, tmp_path: Path, integration_names: list[str]) -> Paths:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots").mkdir(parents=True)
+        package_root = tmp_path / "package"
         for n in integration_names:
-            _write_integration(root, n)
-        return Paths(root=root, fleet_dir=root)
+            _write_integration(package_root, n)
+        return Paths(
+            root=root, fleet_dir=root,
+            package=replace(source_package(), library=package_root / "library"),
+        )
 
     def test_explicit_integrations_union_auto_paired_mcp(self, tmp_path):
         """A bot with explicit integrations AND an auto-pairable mcp gets BOTH."""
@@ -3820,7 +3833,7 @@ class TestResolveIntegrationGrants:
                 tool_grants=spec.get("tool_grants"),
                 type_=spec.get("type_"),
             )
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_fragment_backed_default_instance(self, tmp_path):
         from claudlobby.composer import _resolve_integration_grants
@@ -3924,18 +3937,22 @@ class TestGrantUnionInSettingsLocal:
     ) -> Paths:
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots").mkdir(parents=True)
-        mcp_dir = root / "library" / "mcp"
+        package_root = tmp_path / "package"
+        mcp_dir = package_root / "library" / "mcp"
         mcp_dir.mkdir(parents=True)
         for name, content in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(content))
         for name, spec in integrations.items():
             _write_integration(
-                root,
+                package_root,
                 name,
                 tool_grants=spec.get("tool_grants"),
                 type_=spec.get("type_"),
             )
-        return Paths(root=root, fleet_dir=root)
+        return Paths(
+            root=root, fleet_dir=root,
+            package=replace(source_package(), library=package_root / "library"),
+        )
 
     _GH_FRAGMENT = {
         "github": {
@@ -3953,7 +3970,7 @@ class TestGrantUnionInSettingsLocal:
         bot = BotConfig(
             bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        fleet = FleetConfig(manager="w", name="t", service_prefix="p", bots={"w": bot})
         allow = compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
         assert allow.count("mcp__github__*") == 1
 
@@ -3978,7 +3995,7 @@ class TestGrantUnionInSettingsLocal:
             integrations=["gmail"],
             mcp=[McpEntry(name="github")],
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        fleet = FleetConfig(manager="w", name="t", service_prefix="p", bots={"w": bot})
         allow = compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
         assert "mcp__github__*" in allow  # legacy grant retained (union)
         assert "mcp__claude_ai_Gmail__*" in allow  # connector addition
@@ -3993,7 +4010,7 @@ class TestGrantUnionInSettingsLocal:
         bot = BotConfig(
             bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        fleet = FleetConfig(manager="w", name="t", service_prefix="p", bots={"w": bot})
         with pytest.raises(ValueError, match="mcp__github__"):
             compose_settings_local(bot, fleet, paths)
 
@@ -4054,7 +4071,7 @@ class TestSourceGuardWiring:
             telegram=TelegramConfig(handle="b_bot"),
             env={"ANCHORED": "${FLEET_ROOT}/mcp/x.py", "PLAINVAR": "${GITHUB_PAT}"},
         )
-        fleet = FleetConfig(name="t", service_prefix="com.t")
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="t", service_prefix="com.t")
         conf = compose_bot_conf(bot, fleet, paths)
         assert 'export ANCHORED="${FLEET_ROOT}/mcp/x.py"' in conf
         assert "export PLAINVAR='${GITHUB_PAT}'" in conf
@@ -4075,7 +4092,7 @@ class TestSourceGuardWiring:
             telegram=TelegramConfig(handle="b_bot"),
             env={"ANCHORED": "${FLEET_ROOT}/$(touch pwned)/x"},
         )
-        fleet = FleetConfig(name="t", service_prefix="com.t")
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="t", service_prefix="com.t")
         conf = compose_bot_conf(bot, fleet, paths)
         # never the injectable double-quoted emission
         assert 'export ANCHORED="${FLEET_ROOT}/$(touch pwned)/x"' not in conf
@@ -4205,7 +4222,7 @@ class TestTimerUnitPath:
             "com.t.reload-fleet",
             "reload-fleet",
             {"type": "calendar", "expression": "*-*-* 03:30:00"},
-            "$CLAUDLOBBY_ROOT/lib/reload-fleet.sh",
+            "$CLAUDLOBBY_NATIVE_DIR/reload-fleet.sh",
             "oneshot",
             "t",
             paths,
@@ -4246,28 +4263,25 @@ class TestTimerUnitPath:
             f"launchd/systemd PATH diverge:\n  systemd={svc_path}\n  launchd={plist_path}"
         )
 
-    def test_path_includes_the_repo_venv_bin(self, tmp_path):
-        """#805 — the user-prefix segments resolve `claude`, but `claudlobby` is
-        a console script that a repo-local venv puts on no system PATH at all.
-        Without this segment a timer fixed for `claude` still died one line
-        later on `claudlobby generate`. Asserted on both platforms."""
+    def test_path_includes_the_selected_release_bin(self, tmp_path):
+        """Both supervisors can resolve the selected release's console script."""
         d = self._emit(tmp_path)
-        venv_bin = f"{tmp_path / 'claudlobby'}/.venv/bin"
+        selected_bin = str(selected_cli().parent)
         for unit, extract in (
             ("com.t.reload-fleet.service", self._systemd_path),
             ("com.t.reload-fleet.plist", self._launchd_path),
         ):
             segs = extract((d / unit).read_text()).split(":")
-            assert venv_bin in segs, f"{venv_bin} missing from {unit} PATH: {segs}"
+            assert selected_bin in segs, f"{selected_bin} missing from {unit} PATH: {segs}"
 
-    def test_venv_bin_is_last_so_it_never_shadows_a_real_install(self, tmp_path):
-        """The venv is a fallback for the console script, not a preference: a
-        system/user install must keep winning."""
+    def test_selected_release_precedes_ambient_installs(self, tmp_path):
+        """Timers use the selected release before any system or user install."""
         d = self._emit(tmp_path)
         segs = self._systemd_path((d / "com.t.reload-fleet.service").read_text()).split(
             ":"
         )
-        assert segs[-1] == f"{tmp_path / 'claudlobby'}/.venv/bin", segs
+        assert segs[0] == str(selected_cli().parent), segs
+        assert f"{tmp_path / 'claudlobby'}/.venv/bin" not in segs
 
 
 def _git_cred_bot(creds=None):
@@ -4371,9 +4385,10 @@ class TestPerOrgGitCredentialRouting:
         (root / "runtime" / "bots" / "kev").mkdir(parents=True)
         (root / "lib").mkdir()
         paths = _make_paths(root)
-        fleet = FleetConfig(name="tl", service_prefix="com.crog.tl")
+        bot = _git_cred_bot()
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="tl", service_prefix="com.crog.tl")
         assert 'export GIT_CONFIG_GLOBAL="$BOT_DIR/.gitconfig"' in compose_bot_conf(
-            _git_cred_bot(), fleet, paths
+            bot, fleet, paths
         )
         assert "GIT_CONFIG_GLOBAL" not in compose_bot_conf(
             _git_cred_bot({}), fleet, paths
@@ -4798,6 +4813,7 @@ class TestFleetEnvStubDoesNotShadowUpstream:
             dedent("""\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               bots:
                 worker:
@@ -4810,7 +4826,8 @@ class TestFleetEnvStubDoesNotShadowUpstream:
             root / "runtime" / "bots" / "worker",
         ):
             d.mkdir(parents=True, exist_ok=True)
-        return root, fleet_dir, Paths(root=root, fleet_dir=fleet_dir)
+        package = replace(source_package(), library=root / "library")
+        return root, fleet_dir, Paths(root=root, fleet_dir=fleet_dir, package=package)
 
     def _scaffold(self, root: Path, fleet_dir: Path, paths: Paths) -> str:
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
@@ -5044,6 +5061,7 @@ class TestComposeBotConfTelegramStateDirExported:
             telegram=TelegramConfig(handle=handle),
         )
         fleet = FleetConfig(
+            manager=bot.bot_id, bots={bot.bot_id: bot},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-100999",
@@ -5052,7 +5070,7 @@ class TestComposeBotConfTelegramStateDirExported:
         root.mkdir(exist_ok=True)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
         (root / "lib").mkdir(exist_ok=True)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_bot_conf(bot, fleet, paths)
 
     def test_state_dir_is_exported(self, tmp_path):
@@ -5100,6 +5118,7 @@ class TestTaskRecheckTimer:
     _FLEET = """\
         fleet:
           name: rc-fleet
+          manager: kev
           service_prefix: com.test
           bots:
             kev:
@@ -5112,6 +5131,7 @@ class TestTaskRecheckTimer:
         from claudlobby.composer import compose_fleet_timers
         from claudlobby.config import load_fleet
         from claudlobby.env_tiers import Resolution
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         root = tmp_path / "f"
@@ -5127,7 +5147,7 @@ class TestTaskRecheckTimer:
             )
         (root / "fleet.yaml").write_text(manifest)
         fleet, md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
 
         import claudlobby.env_tiers as env_tiers_mod
 
@@ -5150,7 +5170,7 @@ class TestTaskRecheckTimer:
         timers = self._compose(tmp_path, monkeypatch)
         service = (timers / "com.test.task-recheck.service").read_text()
         assert (timers / "com.test.task-recheck.timer").is_file()
-        assert "lib/task-recheck.sh rc-fleet" in service
+        assert f"{source_package().native}/task-recheck.sh rc-fleet" in service
 
     def test_it_is_ENROLLED_by_default(self, tmp_path, monkeypatch):
         """The flip: a fresh fleet that declares nothing gets the re-check."""
@@ -5253,7 +5273,7 @@ def working_tree_export(tmp_path_factory) -> Path:
 
 
 class TestNoLeafManagerShapesComposeByteIdentically:
-    _SHAPES = ("solo", "worker-only", "coordinator-only")
+    _SHAPES = ("solo", "cross-fleet-worker", "cross-fleet-coordinator")
 
     def test_no_leaf_manager_shapes_compose_byte_identically(self, tmp_path, working_tree_export):
         """The registry role line (task 3 step 3) is a no-op for a fleet

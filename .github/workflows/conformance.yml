@@ -38,6 +38,8 @@ jobs:
         # bump tracked in #680). Parity holds against the pin; the gate fails if
         # the composer's rendered copy ever drifts from it.
         run: pip install -e '.[dev,vault]'
+      - name: Prepare installed resources in disposable checkout
+        run: python tests/prepare_resources.py --disposable-checkout "$PWD"
       - name: Run the vault-mode gate (snippet parity + contention)
         run: pytest -q -m vault
 

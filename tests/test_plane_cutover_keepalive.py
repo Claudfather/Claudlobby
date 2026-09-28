@@ -31,7 +31,7 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 def _manifest(root: Path):
     (root / "local" / FLEET).mkdir(parents=True, exist_ok=True)
     (root / "local" / FLEET / "fleet.yaml").write_text(
-        f"fleet:\n  name: {FLEET}\n  service_prefix: com.k\n  bots:\n    b1:\n      expertise: [software-engineering]\n")
+        f"fleet:\n  name: {FLEET}\n  manager: b1\n  service_prefix: com.k\n  bots:\n    b1:\n      expertise: [software-engineering]\n")
     if not (root / "lib").exists():
         (root / "lib").symlink_to(LIB)
 

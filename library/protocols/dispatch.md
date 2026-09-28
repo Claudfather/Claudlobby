@@ -88,13 +88,13 @@ gone.
 Each bot runs on its **own** tmux server (a private `-L <socket>`), so a raw `tmux send-keys -t <worker> …` against the default per-user socket no longer reaches it. Dispatch through `lib/dispatch.sh`, which resolves the worker's socket from its session name and does the race-safe two-step send (text, pause, Enter) so Claude Code's TUI never swallows keystrokes during render:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh <worker> '[BOTCOMMAND] <manager> | task | <summary> | repo:<name>'
+$CLAUDLOBBY_NATIVE_DIR/dispatch.sh <worker> '[BOTCOMMAND] <manager> | task | <summary> | repo:<name>'
 ```
 
 Full example:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on repo-a | repo:repo-a | priority:high | ref:https://github.com/org/repo-a/issues/99'
+$CLAUDLOBBY_NATIVE_DIR/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on repo-a | repo:repo-a | priority:high | ref:https://github.com/org/repo-a/issues/99'
 ```
 
 `dispatch.sh` prepends `set +H;` itself (disabling bash history expansion, which silently mangles `!` in prompts), sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
@@ -132,7 +132,7 @@ The same harness puts a backslash into any literal tag in the text (`<\pasted_co
 For ad-hoc prompts that don't fit the structured format (exploratory questions, multi-paragraph context), freeform dispatch still works — any dispatch without a `[BOTCOMMAND]` prefix is treated as a freeform task:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 "Look at the flaky test in tests/test_auth.py -- it passes locally but fails in CI about 30% of the time. Root-cause it and fix."
+$CLAUDLOBBY_NATIVE_DIR/dispatch.sh eng-1 "Look at the flaky test in tests/test_auth.py -- it passes locally but fails in CI about 30% of the time. Root-cause it and fix."
 ```
 
 Prefer `[BOTCOMMAND]` for anything with a clear type, repo, or priority. Use freeform for exploratory or context-heavy dispatches where the overhead of structured fields isn't worth it.
@@ -144,8 +144,8 @@ After dispatch: workers do NOT post a Telegram ack — their first id-carrying `
 For tasks you want tracked, dispatch via `lib/dispatch-task.sh` instead of raw `send-keys` — and pass at least `--botcommand` (or any envelope flag: `--repo`, `--priority`, `--ref`, `--workstream`, `--project`) so the send mints a task id:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --botcommand <worker> "<task>"
-$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> --project <key> <worker> "<task>"
+$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --botcommand <worker> "<task>"
+$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --repo <name> --workstream <ws-id> --project <key> <worker> "<task>"
 ```
 
 ### Sending a peer a message that asks nothing
@@ -153,7 +153,7 @@ $CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> --proje
 **Use `--type` for anything that is not a task, and the envelope stops minting.**
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query <bot> "<question answered inline>"
+$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --type query <bot> "<question answered inline>"
 ```
 
 `--type task|cancel|compact|restart|query` (default `task`) implies `--botcommand` — which is now exactly `--type task`, kept as an alias — so you still get the `[BOTCOMMAND]` format — a finding, a relay, a retraction, a correction all read correctly as fleet messages. **Only `task` mints an id.**
@@ -176,10 +176,10 @@ Every tracked dispatch is a row with a deadline, and a row you never close is a 
 
 | Verb | Command | When |
 |------|---------|------|
-| **chase** | `$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query <worker> "where are you on <task>?"` | You think the worker is alive and just quiet. Costs an untracked message, mints nothing. |
-| **supersede** | `$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes <task-id> <worker> "<the new task>"` | The task was mis-scoped or overtaken. Retires the old row and opens the replacement in one act. |
-| **withdraw** | `$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw <task-id> --reason "…"` | You no longer want it answered — the send never landed, or events overtook it. Terminal (`cancelled`). |
-| **escalate** | `$CLAUDLOBBY_ROOT/lib/task-act.sh escalate <task-id> "<the question>"` | You need a human to decide. **Non-terminal**: the row stays open and yours while they think. |
+| **chase** | `$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --type query <worker> "where are you on <task>?"` | You think the worker is alive and just quiet. Costs an untracked message, mints nothing. |
+| **supersede** | `$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --supersedes <task-id> <worker> "<the new task>"` | The task was mis-scoped or overtaken. Retires the old row and opens the replacement in one act. |
+| **withdraw** | `$CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw <task-id> --reason "…"` | You no longer want it answered — the send never landed, or events overtook it. Terminal (`cancelled`). |
+| **escalate** | `$CLAUDLOBBY_NATIVE_DIR/task-act.sh escalate <task-id> "<the question>"` | You need a human to decide. **Non-terminal**: the row stays open and yours while they think. |
 
 `task-act.sh` resolves the row from the plane and **refuses an ambiguous task id** rather than guessing which worker you meant; the refusal names the rows, and `--assignment <asg_id>` picks one.
 
@@ -195,14 +195,14 @@ Before dispatch, verify the target session exists. If it doesn't, **always bring
 
 ```bash
 # Idiomatic worker spin-up (idempotent: restarts if already enrolled):
-$CLAUDLOBBY_ROOT/lib/spin-up-bot.sh $CLAUDLOBBY_ROOT/local/<fleet>/runtime/bots/<bot>
+$CLAUDLOBBY_NATIVE_DIR/spin-up-bot.sh $CLAUDLOBBY_ROOT/local/<fleet>/runtime/bots/<bot>
 ```
 
 To audit/repair an entire fleet's supervision state in one shot:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet>          # report only
-$CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll orphans AND prune fleet-state — see below
+$CLAUDLOBBY_NATIVE_DIR/reconcile-fleet.sh <fleet>          # report only
+$CLAUDLOBBY_NATIVE_DIR/reconcile-fleet.sh <fleet> --enroll  # enroll orphans AND prune fleet-state — see below
 ```
 
 **`--enroll` also prunes the shared fleet-state, and that prune is scoped.**

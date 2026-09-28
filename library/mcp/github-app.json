@@ -50,7 +50,7 @@
     "command": "/bin/sh",
     "args": [
       "-c",
-      "exec \"${CLAUDLOBBY_ROOT}/lib/github-app-mcp-wrapper.py\""
+      "exec \"${CLAUDLOBBY_NATIVE_DIR}/github-app-mcp-wrapper.py\""
     ]
   }
 }

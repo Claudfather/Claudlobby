@@ -47,6 +47,7 @@ from claudlobby.composer import (
     compose_systemd_unit,
 )
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -56,6 +57,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 # The briefing slot exercises composer.py:2990; the bot itself, composer.py:1075.
 _FLEET = """\
     fleet:
+      manager: kev
       name: test-fleet
       service_prefix: com.test
       system_defaults: true
@@ -89,7 +91,7 @@ def execstarted_scripts(tmp_path_factory) -> set[str]:
     fleet_dir.mkdir(parents=True, exist_ok=True)
     (fleet_dir / "fleet.yaml").write_text(dedent(_FLEET))
     fleet, merged = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
     found: set[str] = set()
 

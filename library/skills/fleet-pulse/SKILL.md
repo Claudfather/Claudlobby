@@ -17,7 +17,7 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 1. **Generate fresh pulse data**
 
    ```bash
-   $CLAUDLOBBY_ROOT/lib/fleet-pulse.sh $FLEET_NAME
+   $CLAUDLOBBY_NATIVE_DIR/fleet-pulse.sh $FLEET_NAME
    ```
 
 2. **Read today's events**
@@ -51,8 +51,8 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 
 | Event type | Action |
 |------------|--------|
-| `session_missing` | Re-enroll: `$CLAUDLOBBY_ROOT/lib/spin-up-bot.sh $BOT_DIR` |
-| `service_down` | Re-enroll: `$CLAUDLOBBY_ROOT/lib/spin-up-bot.sh $BOT_DIR` |
+| `session_missing` | Re-enroll: `$CLAUDLOBBY_NATIVE_DIR/spin-up-bot.sh $BOT_DIR` |
+| `service_down` | Re-enroll: `$CLAUDLOBBY_NATIVE_DIR/spin-up-bot.sh $BOT_DIR` |
 | `pane_stuck` (>5 min) | Capture pane content (`tmux capture-pane -t <session> -p`), inspect for genuine stuck state. If confirmed stuck, restart the bot. If output shows active work, skip. |
 | `wip_uncommitted` | **Read `paths`, not `dirty_files`.** The count cannot tell a mid-edit from a virtualenv — `M lib/foo.py` and `?? .venv/` are both `1`. Any path that is source, config or content: do NOT restart, task in flight. Only artifact paths you recognise (`.venv/`, `node_modules/`, a build dir): not work in flight — say which paths you saw and why you judged them artifacts. `unchanged_for_s` past ~2h on a *source* path is stale WIP: flag to the human. Never read it as a licence to restart, because a brand-new source file is untracked too. |
 

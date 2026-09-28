@@ -25,6 +25,7 @@ from claudlobby.composer import (
     compose_settings_local,
 )
 from claudlobby.config import BotConfig, FleetConfig, McpEntry
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -122,9 +123,13 @@ class TestGrantSupersetSweep:
     def _paths_and_fleet(self, tmp_path: Path):
         root = tmp_path / "claudlobby"
         _build_library(root)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         bots = _representative_bots()
-        fleet = FleetConfig(name="t", service_prefix="p", bots=bots)
+        # Keep every grant-shape subject a worker under one explicit owner.
+        lead = BotConfig(bot_id="lead", name="lead", expertise=["orchestration"])
+        fleet = FleetConfig(
+            name="t", service_prefix="p", manager="lead", bots={"lead": lead, **bots}
+        )
         return paths, fleet, bots
 
     def test_every_bot_composes_and_new_is_superset(self, tmp_path):
@@ -181,7 +186,7 @@ class TestGrantSupersetSweep:
             "---\ntitle: native\ntype: connector\n"
             'tool_grants:\n  - "mcp__claude_ai_Gmail__*"\n---\n\n# native\n'
         )
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         bot = BotConfig(
             bot_id="folder-bot",
             name="folder-bot",
@@ -210,10 +215,16 @@ class TestGrantSupersetGateHasTeeth:
                 }
             )
         )
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         bot = BotConfig(
             bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        fleet = FleetConfig(
+            name="t", service_prefix="p", manager="lead",
+            bots={
+                "lead": BotConfig(bot_id="lead", name="lead", expertise=["orchestration"]),
+                "w": bot,
+            },
+        )
         with pytest.raises(ValueError, match="mcp__github__"):
             compose_settings_local(bot, fleet, paths)

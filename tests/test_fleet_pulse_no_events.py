@@ -70,7 +70,7 @@ def pulse_fleet(tmp_path):
     # Only the 2-space `bots:` block and 4-space bot keys are read
     # (parse_fleet_bots).
     (root / "local" / fleet / "fleet.yaml").write_text(
-        "fleet:\n  bots:\n    aaa-idle:\n    zzz-logged:\n"
+        "fleet:\n  manager: aaa-idle\n  bots:\n    aaa-idle:\n    zzz-logged:\n"
     )
 
     (root / "tmux").mkdir()

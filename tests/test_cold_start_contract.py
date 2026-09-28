@@ -7,8 +7,8 @@ hands you a non-externally-managed environment — so PEP 668 never fires and th
 two blockers a real user hits first are invisible by construction.
 
 These tests encode the contract instead: what the docs are allowed to tell a
-user to run, and what the CLI resolver is allowed to assume. They are fast and
-host-independent, so they run everywhere the rest of the suite does.
+user to run. Selected CLI entrypoint behavior is covered by
+`test_maintenance_jobs.py`; these checks cover onboarding and setup.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -30,7 +29,6 @@ GETTING_STARTED = REPO_ROOT / "documentation" / "getting-started.md"
 # user-facing docs were fixed. Anything that tells a human what to type counts.
 CONTRIBUTOR_GUIDE = REPO_ROOT / "CLAUDE.md"
 SETUP_SKILL = REPO_ROOT / ".claude" / "skills" / "setup" / "SKILL.md"
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
 
 _FENCE_RE = re.compile(r"```(?:bash|sh|console)\n(.*?)```", re.DOTALL)
 
@@ -44,33 +42,6 @@ def _shell_lines(doc: Path) -> list[str]:
             if line:
                 out.append(line)
     return out
-
-
-def _synthetic_root(tmp_path: Path) -> Path:
-    """A CLAUDLOBBY_ROOT where **both** resolver rungs would succeed.
-
-    That is the point: the fixture package imports under any interpreter, so the
-    system-python rung is viable, and a stub `.venv/bin/python` makes the venv
-    rung viable too. With only one rung viable a test cannot tell which one ran,
-    which is how a rung-order mutation survived the previous test.
-
-    The stub venv is a shell wrapper that announces itself and then execs the
-    real interpreter, so its use is observable in stdout. No actual virtualenv
-    is created — that kept the old test skipped on CI and on fresh clones.
-    """
-    root = tmp_path / "clroot"
-    pkg = root / "claudlobby"
-    pkg.mkdir(parents=True)
-    (pkg / "__init__.py").write_text("")
-    (pkg / "composer.py").write_text("")  # satisfies the usability probe
-    (pkg / "__main__.py").write_text("import sys; print('MODULE', *sys.argv[1:])")
-
-    venv_bin = root / ".venv" / "bin"
-    venv_bin.mkdir(parents=True)
-    stub = venv_bin / "python"
-    stub.write_text(f'#!/bin/bash\nprintf "VENVPY\\n"\nexec "{sys.executable}" "$@"\n')
-    stub.chmod(0o755)
-    return root
 
 
 class TestDocumentedInstallPath:
@@ -161,126 +132,6 @@ class TestDocumentedInstallPath:
         )
 
 
-class TestCliResolutionProbe:
-    """`claudlobby_cli` must not mistake an importable package for a usable one."""
-
-    def test_bare_package_import_is_a_false_positive(self, tmp_path: Path):
-        """Demonstrates the trap this guard exists for.
-
-        `claudlobby/` is a plain package directory at the repo root, so
-        `cd <root> && python3 -c 'import claudlobby'` succeeds from cwd alone —
-        with zero dependencies installed. Any resolver probing that way commits
-        to a broken interpreter and dies later on a raw ModuleNotFoundError.
-        """
-        pkg = tmp_path / "claudlobby"
-        pkg.mkdir()
-        (pkg / "__init__.py").write_text("")
-
-        probe = subprocess.run(
-            [sys.executable, "-c", "import claudlobby"],
-            cwd=tmp_path,
-            capture_output=True,
-        )
-        assert probe.returncode == 0, (
-            "expected the bare import to succeed from cwd — if this ever fails, "
-            "the false-positive premise changed and the guard below can relax"
-        )
-
-    def test_lib_common_probes_a_submodule_not_the_bare_package(self):
-        """The resolver must import something that actually pulls the deps."""
-        src = LIB_COMMON.read_text()
-
-        bare = re.findall(r"python3?\s+-c\s+'import claudlobby'", src)
-        assert not bare, (
-            "lib-common.sh probes `import claudlobby`, which succeeds from cwd "
-            "with no dependencies installed. Probe a submodule that imports the "
-            "third-party deps (e.g. claudlobby.composer)."
-        )
-        # Renaming composer.py must fail here rather than silently breaking CLI
-        # resolution on every supervised bot — that CI cost is what makes the
-        # probe's coupling to a module name acceptable.
-        assert "claudlobby.composer" in src, (
-            "expected a submodule probe (claudlobby.composer) in claudlobby_cli — "
-            "if composer.py was renamed, update the probe with it"
-        )
-
-    def test_resolver_prefers_the_repo_local_venv(self):
-        """A venv console script is not on PATH under launchd/systemd.
-
-        That is the common supervised case, not an exotic one — so the resolver
-        has to reach $CLAUDLOBBY_ROOT/.venv itself rather than assuming an
-        activated shell.
-        """
-        src = LIB_COMMON.read_text()
-        assert ".venv/bin/python" in src, (
-            "claudlobby_cli does not prefer $CLAUDLOBBY_ROOT/.venv — supervised "
-            "runs will fall through to a system python without the deps"
-        )
-
-    def test_prefers_the_repo_local_venv_over_system_python(self, tmp_path: Path):
-        """Behavioural rung-order check — asserts WHICH interpreter served the call.
-
-        Replaces a version that was `skipif` on a repo-local `.venv` existing.
-        That guard never fired on CI or on a fresh clone (neither creates one),
-        so the only behavioural test of CLI resolution was dormant exactly where
-        it mattered. Worse, when it *did* run it still passed a mutation that
-        swapped the rung order — it asserted only that the CLI resolved, never
-        that the venv served it, which is the entire property F3 rests on
-        (PR #947 review).
-
-        Here both rungs are deliberately viable: the fixture package imports
-        under any interpreter, and a stub `.venv/bin/python` announces itself.
-        So the assertion can distinguish them.
-        """
-        root = _synthetic_root(tmp_path)
-        result = subprocess.run(
-            ["bash", "-c", f'. "{LIB_COMMON}"\nclaudlobby_cli generate'],
-            env={"PLANE_EMIT_DISABLED": "1",
-                "CLAUDLOBBY_ROOT": str(root),
-                "PATH": "/usr/bin:/bin",  # no console script, no pipx shims
-                "HOME": str(tmp_path),
-                # The reviewer hit a false PASS from an editable claudlobby in
-                # user site-packages, which resolves regardless of cwd. Scrub it.
-                "PYTHONNOUSERSITE": "1",
-            },
-            cwd="/",  # deliberately not the repo root
-            capture_output=True,
-            text=True,
-        )
-        assert "MODULE generate" in result.stdout, result.stdout + result.stderr
-        assert "VENVPY" in result.stdout, (
-            "claudlobby_cli resolved via system python3 rather than "
-            "$CLAUDLOBBY_ROOT/.venv. The venv rung must win: a venv console "
-            "script is not on PATH under launchd/systemd, so preferring the "
-            "system interpreter silently drops the dependencies.\n"
-            + result.stdout
-            + result.stderr
-        )
-
-    def test_falls_through_to_system_python_when_no_venv(self, tmp_path: Path):
-        """The venv preference must not become a venv *requirement*.
-
-        Rung 3 exists for a checkout whose deps are installed system-wide (the
-        Pi/apt case). Removing the stub venv must fall through, not fail.
-        """
-        root = _synthetic_root(tmp_path)
-        shutil.rmtree(root / ".venv")
-        result = subprocess.run(
-            ["bash", "-c", f'. "{LIB_COMMON}"\nclaudlobby_cli generate'],
-            env={"PLANE_EMIT_DISABLED": "1",
-                "CLAUDLOBBY_ROOT": str(root),
-                "PATH": "/usr/bin:/bin",
-                "HOME": str(tmp_path),
-                "PYTHONNOUSERSITE": "1",
-            },
-            cwd="/",
-            capture_output=True,
-            text=True,
-        )
-        assert "MODULE generate" in result.stdout, result.stdout + result.stderr
-        assert "VENVPY" not in result.stdout
-
-
 class TestSeedPlaceholderContract:
     """Keeps the validator's placeholder check meaningful."""
 
@@ -312,10 +163,11 @@ class TestSeedPlaceholderContract:
         pointed at chat id REPLACE_ME.
         """
         from claudlobby.config import load_fleet
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         from claudlobby.validator import validate
 
-        paths = Paths(root=REPO_ROOT, seed=True)
+        paths = Paths(root=REPO_ROOT, seed=True, package=source_package())
         fleet, _meta = load_fleet(paths.fleet_yaml)
         report = validate(fleet, paths)
 

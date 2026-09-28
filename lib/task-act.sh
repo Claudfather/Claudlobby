@@ -185,7 +185,7 @@ case "$TASK_ID" in
                 _key="${_any_sref#dispatch-log:}"
                 echo "task-act: $_asg_id is an assignment id and names no OPEN row (already closed?)." >&2
                 echo "task-act: this row key is $_key -- close an OPEN row by that key with:" >&2
-                echo "  \$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw $_key --reason \"why\"" >&2
+                echo "  \$CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw $_key --reason \"why\"" >&2
             else
                 echo "task-act: no assignment $_asg_id on the plane (a wrong or already-reaped asg id)" >&2
             fi

@@ -14,6 +14,7 @@ which is the one thing that stays green while the door itself is wrong.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -130,12 +131,12 @@ def test_a_nudge_records_the_fact_and_asks_the_tasks_manager(tmp_path, sent, mon
     assert "port the parser" in message and "assignee ramanujan" in message
     for verb in ("chase", "supersede", "withdraw", "escalate"):
         assert verb in message
-    # F7 (M-B fold): the commands are prefixed $CLAUDLOBBY_ROOT/lib/ — a bare
+    # F7 (M-B fold): the commands are prefixed $CLAUDLOBBY_NATIVE_DIR/ — a bare
     # `task-act.sh`/`dispatch-task.sh` is not on a bot's PATH (start-bot.sh's
     # exported PATH has no fleet lib/), so a manager pasting the bare form
     # would have run nothing.
-    assert f"$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw {tid}" in message
-    assert f"$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes {tid}" in message
+    assert f"$CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw {tid}" in message
+    assert f"$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --supersedes {tid}" in message
 
 
 def test_the_ask_is_recorded_as_a_communication_and_a_submitted_transmission(tmp_path, sent, monkeypatch, *, scratch_plane_env):
@@ -328,6 +329,7 @@ def test_the_send_carries_the_rows_fleet_in_the_environment(tmp_path, monkeypatc
     subprocess captured."""
     import subprocess
 
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     (tmp_path / "lib").mkdir()
@@ -343,7 +345,7 @@ def test_the_send_carries_the_rows_fleet_in_the_environment(tmp_path, monkeypatc
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setenv("BOT_DIR", "/nowhere")
-    paths = Paths(tmp_path)
+    paths = Paths(tmp_path, package=replace(source_package(), native=tmp_path / "lib"))
     rc, _ = task_cmd.send_to_bot(paths, "lead", "NUDGE …", fleet="engineering")
     assert rc == 0 and seen["argv"][-2:] == ["lead", "NUDGE …"]
     assert seen["env"]["CLAUDLOBBY_FLEET"] == "engineering"
@@ -359,6 +361,7 @@ def test_fold_f5_send_to_bot_puts_the_msg_id_on_the_wire_as_plane_msg_id(tmp_pat
     (the wire proof channel, fold F1); omitting msg_id leaves the send untagged."""
     import subprocess
 
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     (tmp_path / "lib").mkdir()
@@ -374,7 +377,7 @@ def test_fold_f5_send_to_bot_puts_the_msg_id_on_the_wire_as_plane_msg_id(tmp_pat
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.delenv("PLANE_MSG_ID", raising=False)
-    paths = Paths(tmp_path)
+    paths = Paths(tmp_path, package=replace(source_package(), native=tmp_path / "lib"))
     mid = "msg_" + "a" * 32
     task_cmd.send_to_bot(paths, "lead", "NUDGE …", fleet="eng",
                          msg_id=mid, wire_out="/tmp/wire-proof")

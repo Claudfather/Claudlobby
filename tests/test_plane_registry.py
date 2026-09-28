@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.plane.contracts import (
     ContractViolation,
@@ -106,7 +107,7 @@ def _scan(root: Path, *, scratch_plane_env):
     with pytest.MonkeyPatch.context() as patch:
         for key, value in env.items():
             patch.setenv(key, value)
-        return run_generate_scan(Paths(root=root), fleet)
+        return run_generate_scan(Paths(root=root, package=source_package()), fleet)
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +461,7 @@ def test_assembly_is_deterministic(tmp_path):
 
     root = _fleet_root(tmp_path)
     fleet, _ = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=source_package())
     a = bot_payload(paths, fleet, fleet.bots["lead"], "v1")
     b = bot_payload(paths, fleet, fleet.bots["lead"], "v1")
     assert canonical_hash(a) == canonical_hash(b)
@@ -591,7 +592,7 @@ def test_compat_is_never_a_fabricated_verdict(tmp_path):
         "  defaults:\n    claudron_vault_path: " + str(vault))
     (root / "fleet.yaml").write_text(text)
     fleet, _ = load_fleet(root / "fleet.yaml")
-    vp = vault_payload(Paths(root=root), fleet)
+    vp = vault_payload(Paths(root=root, package=source_package()), fleet)
     assert vp is not None
     assert vp["compat"]["ok"] is None                # no probe ran = no verdict
     assert vp["compat"]["floor"] != "unset"
@@ -608,7 +609,7 @@ def test_declared_fleets_sees_the_nested_vault_layout(tmp_path):
     nested = root / "local" / "sys" / "deep-fleet"
     nested.mkdir(parents=True)
     (nested / "fleet.yaml").write_text("fleet:\n  name: deep-fleet\n")
-    hp = host_payload(Paths(root=root))
+    hp = host_payload(Paths(root=root, package=source_package()))
     assert "deep-fleet" in hp["declared_fleets"]
 
 
@@ -628,7 +629,7 @@ def test_float_in_project_raw_does_not_vaporize_the_scan(tmp_path):
         mission_file = None
         validation = None
         raw = {"validation": {"threshold": 0.8}}
-    p = project_payload(Paths(root=root), fleet, _Proj(), None)
+    p = project_payload(Paths(root=root, package=source_package()), fleet, _Proj(), None)
     assert p["validation_hash"].startswith("sha256:")
 
 
@@ -680,6 +681,7 @@ def test_floor_is_semver_max_never_lexical():
     # assemble against a real vault dir to read the floor the payload ships
     import tempfile
     from claudlobby.config import load_fleet
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths as _P
     with tempfile.TemporaryDirectory() as d:
         root = Path(d) / "claudlobby"
@@ -687,13 +689,13 @@ def test_floor_is_semver_max_never_lexical():
         vault = Path(d) / "v"
         vault.mkdir()
         (root / "fleet.yaml").write_text(
-            "fleet:\n  name: f\n  service_prefix: com.f\n  defaults:\n"
+            "fleet:\n  name: f\n  manager: b\n  service_prefix: com.f\n  defaults:\n"
             f"    claudron_vault_path: {vault}\n"
             "  bots:\n    b:\n      expertise: [x]\n")
         fleet, _ = load_fleet(root / "fleet.yaml")
         vp = __import__("claudlobby.plane.registry_emit",
                         fromlist=["vault_payload"]).vault_payload(
-            _P(root=root), fleet)
+            _P(root=root, package=source_package()), fleet)
     assert vp["compat"]["floor"] == expected
     assert "demand" not in vp["compat"]["floor"]
 
@@ -827,7 +829,7 @@ def test_keyframe_carries_effective_integrations_and_protocols(tmp_path):
         "      reports_to: lead\n", "      reports_to: lead\n      mcp: [github]\n")
     (root / "fleet.yaml").write_text(fy)
     fleet, _ = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=source_package())
     bot = fleet.bots["worker-1"]
     assert not bot.integrations                    # nothing DECLARED
 

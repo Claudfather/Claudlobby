@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -86,40 +88,43 @@ class TestSeedFleetConfig:
 
 
 class TestSeedPaths:
-    def test_seed_paths_resolution(self):
-        """--seed flag resolves correct paths."""
-        paths = Paths(root=REPO_ROOT, seed=True)
-        assert paths.fleet_yaml == REPO_ROOT / "fleet.yaml.seed"
-        assert paths.runtime == REPO_ROOT / "runtime" / "seed"
-        assert paths.runtime_bots == REPO_ROOT / "runtime" / "seed" / "bots"
+    def test_seed_paths_resolution(self, tmp_path):
+        """The package supplies the seed; runtime stays under the data root."""
+        paths = Paths(root=tmp_path, seed=True, package=source_package())
+        assert paths.fleet_yaml == source_package().seeds / "fleet.yaml.seed"
+        assert paths.runtime == tmp_path / "runtime" / "seed"
+        assert paths.runtime_bots == tmp_path / "runtime" / "seed" / "bots"
         assert paths.fleet_dir is None
 
-    def test_seed_no_overlay(self):
-        """Seed mode uses base library only — no overlay."""
-        paths = Paths(root=REPO_ROOT, seed=True)
-        assert paths.overlay_library is None
-        assert paths.overlay_voices is None
+    def test_seed_source_overlay_stays_under_data_root(self, tmp_path):
+        """Selecting a seed does not move writable source into the package."""
+        paths = Paths(root=tmp_path, seed=True, package=source_package())
+        assert paths.overlay_library == tmp_path / "library"
+        assert paths.overlay_voices == tmp_path / "voices"
+        assert paths.base_library == source_package().library
+        assert paths.base_voices == source_package().voices
 
-    def test_seed_env_file_at_root(self):
-        """Seed fleet uses the repo-root .env."""
-        paths = Paths(root=REPO_ROOT, seed=True)
-        assert paths.env_file == REPO_ROOT / ".env"
+    def test_seed_env_file_at_root(self, tmp_path):
+        """Seed fleet credentials belong to the data root."""
+        paths = Paths(root=tmp_path, seed=True, package=source_package())
+        assert paths.env_file == tmp_path / ".env"
 
-    def test_seed_shared_docs_none(self):
+    def test_seed_shared_docs_none(self, tmp_path):
         """Seed fleet has no shared docs."""
-        paths = Paths(root=REPO_ROOT, seed=True)
+        paths = Paths(root=tmp_path, seed=True, package=source_package())
         assert paths.shared_docs is None
 
-    def test_seed_string_root_coerced_to_path(self):
-        """Passing root as a str should be coerced to Path without TypeError."""
-        paths = Paths(root="/tmp/test", seed=True)
-        assert paths.fleet_yaml == Path("/tmp/test/fleet.yaml.seed")
+    def test_seed_string_root_coerced_to_path(self, tmp_path):
+        """A string data root does not redirect the selected package seed."""
+        paths = Paths(root=str(tmp_path), seed=True, package=source_package())
+        assert paths.fleet_yaml == source_package().seeds / "fleet.yaml.seed"
+        assert paths.root == tmp_path
         assert isinstance(paths.root, Path)
 
-    def test_seed_bot_runtime_path(self):
-        paths = Paths(root=REPO_ROOT, seed=True)
+    def test_seed_bot_runtime_path(self, tmp_path):
+        paths = Paths(root=tmp_path, seed=True, package=source_package())
         assert paths.bot_runtime("claudfather") == (
-            REPO_ROOT / "runtime" / "seed" / "bots" / "claudfather"
+            tmp_path / "runtime" / "seed" / "bots" / "claudfather"
         )
 
 
@@ -128,13 +133,13 @@ class TestSeedPaths:
 # ---------------------------------------------------------------------------
 
 
-def _setup_seed_tree(tmp_path: Path) -> Path:
-    """Create a minimal seed fleet directory tree with library stubs."""
-    root = tmp_path / "claudlobby"
-    root.mkdir()
+def _setup_seed_tree(tmp_path: Path) -> Paths:
+    """Create a private package fixture and a separate writable data root."""
+    root = tmp_path / "package"
+    (root / "seeds").mkdir(parents=True)
 
     # Copy real fleet.yaml.seed
-    shutil.copy2(SEED_FLEET_YAML, root / "fleet.yaml.seed")
+    shutil.copy2(SEED_FLEET_YAML, root / "seeds" / "fleet.yaml.seed")
 
     # Minimal library stubs for validation
     for kind in (
@@ -213,18 +218,17 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
         "---\nname: Vito Corleone\n---\n\nVoice stub.\n"
     )
 
-    # Runtime seed dir
-    (root / "runtime" / "seed" / "bots").mkdir(parents=True)
+    package = replace(
+        source_package(), library=root / "library", voices=root / "voices",
+        templates=root / "templates", seeds=root / "seeds",
+    )
+    data_root = tmp_path / "data"
+    (data_root / "runtime" / "seed" / "bots").mkdir(parents=True)
+    return Paths(root=data_root, seed=True, package=package)
 
-    # lib/ directory (for Paths.detect() marker)
-    (root / "lib").mkdir()
 
-    return root
-
-
-def _fill_in_placeholders(root: Path) -> None:
+def _fill_in_placeholders(seed: Path) -> None:
     """Replace the three REPLACE_ME values the seed ships with, as /setup does."""
-    seed = root / "fleet.yaml.seed"
     seed.write_text(
         seed.read_text()
         .replace(
@@ -248,8 +252,7 @@ class TestSeedFleetValidation:
         """
         from claudlobby.validator import validate
 
-        root = _setup_seed_tree(tmp_path)
-        paths = Paths(root=root, seed=True)
+        paths = _setup_seed_tree(tmp_path)
         fleet, _md = load_fleet(paths.fleet_yaml)
         report = validate(fleet, paths)
 
@@ -263,9 +266,8 @@ class TestSeedFleetValidation:
         """Seed fleet passes validate with no errors once the placeholders are real."""
         from claudlobby.validator import validate
 
-        root = _setup_seed_tree(tmp_path)
-        _fill_in_placeholders(root)
-        paths = Paths(root=root, seed=True)
+        paths = _setup_seed_tree(tmp_path)
+        _fill_in_placeholders(paths.fleet_yaml)
         fleet, _md = load_fleet(paths.fleet_yaml)
         report = validate(fleet, paths)
         assert not report.has_errors, f"Validation errors: {report.errors}"
@@ -281,8 +283,7 @@ class TestComposeSeedBot:
         """compose_bot produces a CLAUDE.md for claudfather."""
         from claudlobby.composer import compose_bot
 
-        root = _setup_seed_tree(tmp_path)
-        paths = Paths(root=root, seed=True)
+        paths = _setup_seed_tree(tmp_path)
         fleet, _md = load_fleet(paths.fleet_yaml)
         bot = fleet.bots["claudfather"]
 
@@ -299,8 +300,7 @@ class TestComposeSeedBot:
         """compose_bot produces bot.conf without --dangerously-skip-permissions."""
         from claudlobby.composer import compose_bot
 
-        root = _setup_seed_tree(tmp_path)
-        paths = Paths(root=root, seed=True)
+        paths = _setup_seed_tree(tmp_path)
         fleet, _md = load_fleet(paths.fleet_yaml)
         bot = fleet.bots["claudfather"]
 

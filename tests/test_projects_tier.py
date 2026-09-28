@@ -15,6 +15,7 @@ from tests.conftest import MINIMAL_FLEET_YAML, install_real_template
 
 from claudlobby.composer import compose_bot_conf, compose_claude_md
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
@@ -56,7 +57,7 @@ def _load(fleet_dir: Path):
 
 
 def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
 
 # --- config: loading -----------------------------------------------------------

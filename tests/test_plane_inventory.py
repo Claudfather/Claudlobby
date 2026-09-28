@@ -12,6 +12,7 @@ idle state, never a blank {}.
 
 from __future__ import annotations
 
+from tests.package_fixtures import source_package
 from pathlib import Path
 
 from claudlobby.plane.db import connect, db_path
@@ -181,7 +182,7 @@ def test_inventory_and_equipment_endpoints(tmp_path):
 
     root = _root(tmp_path)
     _seed(root)
-    client = TestClient(create_app(root))
+    client = TestClient(create_app(root, package=source_package()))
     inv = client.get("/api/inventory", params={"fleet": FLEET}).json()
     assert inv["state"] == "ok"
     assert inv["data"]["counts"]["bots"] == 2
@@ -203,7 +204,7 @@ def test_absent_db_is_typed_never_zero(tmp_path):
 
     root = tmp_path / "empty-root"
     root.mkdir()
-    body = TestClient(create_app(root)).get("/api/inventory").json()
+    body = TestClient(create_app(root, package=source_package())).get("/api/inventory").json()
     assert body["state"] == "absent"
     assert "data" not in body
 

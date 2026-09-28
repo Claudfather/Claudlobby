@@ -4,7 +4,7 @@ title: Report-Back Protocol
 
 # Report-Back Protocol
 
-Workers report via `{{CLAUDLOBBY_ROOT}}/lib/report-back.sh`, which sends a structured message into the manager's tmux session:
+Workers report via `{{CLAUDLOBBY_NATIVE_DIR}}/report-back.sh`, which sends a structured message into the manager's tmux session:
 
 ```
 [BOTREPORT] <bot> | <status> | <summary> [| pr:<url>] [| issues:<urls>] [| skill:<name>]

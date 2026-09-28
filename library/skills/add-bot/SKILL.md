@@ -17,10 +17,10 @@ Ask the user (or parse from arguments if provided). Do not dump all questions at
 - **Bot name** — lowercase, alphanumeric + hyphens. Suggest a name based on the described role if the user does not have one.
 - **What should the bot do?** — Map to expertise areas from `library/expertise/`. List available options:
   ```bash
-  ls {{CLAUDLOBBY_ROOT}}/library/expertise/
+  claudlobby list-library
   ```
   Read frontmatter descriptions to help the user choose.
-- **What personality?** — List voices from `{{CLAUDLOBBY_ROOT}}/voices/` if available. Preview a sample line from each voice file so the user can pick. Voice is optional.
+- **What personality?** — Use the voices listed by `claudlobby list-library`, which includes the selected package and fleet overlay. Voice is optional.
 - **What model?** — sonnet for cost-efficiency, opus for complex tasks. Default: inherit from fleet defaults.
 - **What repos should it work on?** — These become `scope.repos` in the bot's fleet.yaml stanza.
 - **Does it need Telegram?** — If yes, guide through @BotFather setup (see Step 3).
@@ -68,7 +68,7 @@ Verify the new bot's directory was created under `runtime/bots/<name>/` (or `loc
 ### Step 5: Enroll and start
 
 ```bash
-{{CLAUDLOBBY_ROOT}}/lib/spin-up-bot.sh <bot-dir>
+{{CLAUDLOBBY_NATIVE_DIR}}/spin-up-bot.sh <bot-dir>
 ```
 
 This is idempotent -- it enrolls the bot as a supervised service and starts it.

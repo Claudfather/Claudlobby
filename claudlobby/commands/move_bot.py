@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from ..composer import compose_bot
+from ..context import native_environment, resolve_paths
 from ..paths import Paths, _find_fleet_dir, _iter_fleet_dirs, tmux_socket_for_bot
 from ._helpers import _load_env, _load_fleet_or_exit, _validation_gate
 
@@ -27,7 +28,9 @@ def cmd_move_bot(args) -> int:
     force: bool = args.force
 
     # --- Resolve claudlobby root ---
-    root = Path(args.root).resolve() if args.root else Paths.detect().root
+    host_paths = resolve_paths(root=Path(args.root) if args.root else None)
+    package = host_paths.package
+    root = host_paths.root
     local_dir = root / "local"
     if not local_dir.is_dir():
         log.error("no local/ directory at %s — nothing to scan", root)
@@ -59,7 +62,7 @@ def cmd_move_bot(args) -> int:
         for fleet_dir in _iter_fleet_dirs(local_dir):
             bot_dir = fleet_dir / "runtime" / "bots" / bot_name
             if bot_dir.is_dir() and (bot_dir / "bot.conf").is_file():
-                candidates.append((fleet_dir.name, bot_dir))
+                candidates.append((fleet_dir.name, fleet_dir, bot_dir))
         if not candidates:
             log.error("bot '%s' not found in any fleet under %s", bot_name, local_dir)
             return 1
@@ -71,10 +74,28 @@ def cmd_move_bot(args) -> int:
                 fleets,
             )
             return 1
-        source_fleet_name, src_bot_dir = candidates[0]
+        source_fleet_name, src_fleet_dir, src_bot_dir = candidates[0]
 
     if source_fleet_name == target_fleet_name:
         log.error("source and target fleet are the same (%s)", source_fleet_name)
+        return 1
+
+    # A move never chooses a successor. Load the source through the same
+    # context/config owner as the target before stopping or copying anything.
+    # The operator may already have removed this bot's source stanza, but the
+    # remaining manifest must explicitly name a valid local manager.
+    source_fleet, _source_md = _load_fleet_or_exit(
+        Paths(root=root, fleet_dir=src_fleet_dir, package=package)
+    )
+    if source_fleet.manager == bot_name:
+        log.error(
+            "bot '%s' is the declared manager of source fleet '%s' — explicitly "
+            "update fleet.manager and any teams to another existing local bot "
+            "in %s before retrying; move-bot cannot choose a replacement",
+            bot_name,
+            source_fleet_name,
+            src_fleet_dir / "fleet.yaml",
+        )
         return 1
 
     # --- Verify target fleet has the bot stanza ---
@@ -95,7 +116,7 @@ def cmd_move_bot(args) -> int:
         log.error("no fleet.yaml in target fleet '%s'", target_fleet_name)
         return 1
     target_fleet, _md = _load_fleet_or_exit(
-        Paths(root=root, fleet_dir=target_fleet_dir)
+        Paths(root=root, fleet_dir=target_fleet_dir, package=package)
     )
     if bot_name not in target_fleet.bots:
         log.error(
@@ -265,11 +286,17 @@ def cmd_move_bot(args) -> int:
         return 0
 
     # --- Pre-apply validation (before any mutation) ---
-    target_paths = Paths(root=root, fleet_dir=target_fleet_dir)
+    target_paths = Paths(root=root, fleet_dir=target_fleet_dir, package=package)
     _load_env(target_paths)
     if not _validation_gate(target_fleet, target_paths, context="re-run move-bot"):
         log.error("target fleet has validation errors — aborted before any changes")
         return 1
+    target_env = {
+        **os.environ,
+        **native_environment(target_paths),
+        "FLEET_NAME": target_fleet.name,
+        "BOT_DIR": str(target_bot_dir),
+    }
 
     # --- Execute ---
 
@@ -419,12 +446,13 @@ def cmd_move_bot(args) -> int:
             return 1
 
     # 6. Re-enroll via spin-up-bot
-    spin_up = root / "lib" / "spin-up-bot.sh"
+    spin_up = target_paths.lib / "spin-up-bot.sh"
     if spin_up.is_file():
         result = subprocess.run(
             [str(spin_up), str(target_bot_dir)],
             capture_output=True,
             text=True,
+            env=target_env,
         )
         if result.returncode == 0:
             log.info("re-enrolled via spin-up-bot.sh")

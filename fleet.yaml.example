@@ -31,6 +31,7 @@
 
 fleet:
   name: example-fleet
+  manager: lead                            # required local bot ID; owns all fleet tasks
   service_prefix: com.example.claudlobby
   telegram_group_chat_id: "-1001234567890"   # replace with your group ID
   # human_telegram_id: "1234567890"          # your Telegram user ID — enables DM allowlisting for all bots
@@ -112,7 +113,7 @@ fleet:
     #   # strand outliving the window goes quiet again — set 0 to refuse that.
     #   unassigned_max_age: 86400    # stop reporting past this age (default 86400 = 24h; <=0 never stops)
 
-  teams:
+  teams:                                    # optional groups; each names the fleet manager
     engineering:
       manager: lead
       workers: [eng-1, reviewer-1]

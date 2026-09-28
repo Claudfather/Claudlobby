@@ -205,7 +205,7 @@ def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_pa
     (root / "local" / g / "runtime" / "bots" / "w1" / "bot.conf").write_text(
         "TMUX_SOCKET=esc-none-g-w1\n")
     (root / "local" / g / "fleet.yaml").write_text(
-        "fleet:\n  name: g\n  service_prefix: com.test\n  bots:\n"
+        "fleet:\n  manager: w1\n  name: g\n  service_prefix: com.test\n  bots:\n"
         "    w1:\n      expertise: [software-engineering]\n")
     wi_g, asg_g, _msg = _live_dispatch(root, "9", "t-esc-g001",
                                        ts="2026-09-01T10:00:00Z", bot="w1", fleet=g)
@@ -260,7 +260,7 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path, *, scratch_plane_e
     (root / "local" / g / "runtime" / "bots" / "w1" / "bot.conf").write_text(
         "TMUX_SOCKET=esc-none-g-w1\n")
     (root / "local" / g / "fleet.yaml").write_text(
-        "fleet:\n  name: g\n  service_prefix: com.test\n  bots:\n"
+        "fleet:\n  manager: w1\n  name: g\n  service_prefix: com.test\n  bots:\n"
         "    w1:\n      expertise: [software-engineering]\n")
     _live_dispatch(root, "9", "t-1903-g001", ts="2026-09-01T10:00:00Z", bot="w1", fleet=g)
     # f alone also carries a bridge_down burst, through the real door

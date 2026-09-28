@@ -18,12 +18,12 @@ def main(argv: list[str] | None = None) -> int:
         description="Compositor for Claude Code agent fleets.",
     )
     parser.add_argument(
-        "--root", help="Path to claudlobby repo root (auto-detected by default)"
+        "--root", help="Mutable host data root (or CLAUDLOBBY_ROOT); package resources come from this CLI's installation"
     )
     parser.add_argument(
         "--fleet",
         help="Fleet overlay name (uses local/<fleet>/ for fleet.yaml, library overlay, voices overlay, runtime/). "
-        "If omitted, runs in root mode (fleet.yaml at repo root). "
+        "If omitted, runs in root mode (fleet.yaml at the data root). "
         "Naming the root manifest's own fleet.name (no overlay) also resolves to root mode.",
     )
     parser.add_argument(

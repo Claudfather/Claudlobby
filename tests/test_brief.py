@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,7 @@ from claudlobby.brief import (
     load_dispatch_doors,
 )
 from claudlobby.config import BotConfig, FleetConfig, ProjectConfig, ScopeConfig
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 from tests.conftest import (
@@ -73,6 +75,7 @@ def _fleet(**kw) -> FleetConfig:
     )
     base = dict(
         name="test-fleet",
+        manager="ari",
         service_prefix="com.test",
         bots={"alex": bot, "ari": BotConfig(bot_id="ari", name="Ari", expertise=[])},
         mission="Ship things that earn their keep.",
@@ -104,7 +107,10 @@ def root(tmp_path: Path) -> Path:
 def paths(root: Path, monkeypatch, scratch_plane_env) -> Paths:
     for key, value in scratch_plane_env(root).items():
         monkeypatch.setenv(key, value)
-    return Paths(root=root, fleet_dir=None)
+    # The missing-matcher case deletes a native file. Select the fixture's
+    # copies explicitly so the shared source package remains immutable.
+    package = replace(source_package(), native=root / "lib")
+    return Paths(root=root, fleet_dir=None, package=package)
 
 
 FLEET = "test-fleet"
@@ -533,7 +539,7 @@ def test_failed_emit_is_a_failed_ack(paths: Paths, monkeypatch, caplog):
 
     fleet_dir = paths.root / "local" / "f1"
     (fleet_dir / "runtime").mkdir(parents=True)
-    _write_fleet_yaml(fleet_dir, "f1", ["alex"])
+    _write_fleet_yaml(fleet_dir, "f1", ["alex"], manager="alex")
     _seed_plane_for(paths, "f1")
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"), fleet="f1")
 
@@ -679,7 +685,8 @@ def test_no_residence_mismatch_label_on_the_plane(root: Path):
     mode too, where it used to fire whenever the section was served."""
     fleet_dir = root / "local" / "f1"
     (fleet_dir / "runtime" / "bots").mkdir(parents=True)
-    overlay = Paths(root=root, fleet_dir=fleet_dir)
+    overlay = Paths(root=root, fleet_dir=fleet_dir,
+                    package=replace(source_package(), native=root / "lib"))
     _land(overlay, _dispatch("alex", NOW - 100, NOW + 100, task_id="t-1"), fleet="f1")
 
     brief = build_brief(_fleet(), overlay, "alex", NOW)
@@ -920,7 +927,7 @@ def test_orphan_label_absent_when_the_bots_dir_exists(paths: Paths):
     assert _find(build_brief(_fleet(), paths, "alex", NOW), "dispatches.orphaned") == []
 
 
-def _write_fleet_yaml(fleet_dir: Path, name: str, bots: list[str]) -> None:
+def _write_fleet_yaml(fleet_dir: Path, name: str, bots: list[str], *, manager: str) -> None:
     """A REAL fleet.yaml — ``bots:`` nests under ``fleet:``.
 
     Spelled out because getting it wrong is silent: a top-level ``bots:`` key
@@ -930,7 +937,7 @@ def _write_fleet_yaml(fleet_dir: Path, name: str, bots: list[str]) -> None:
     """
     fleet_dir.mkdir(parents=True, exist_ok=True)
     (fleet_dir / "fleet.yaml").write_text(
-        f"fleet:\n  name: {name}\n  service_prefix: com.test\n  bots:\n"
+        f"fleet:\n  name: {name}\n  manager: {manager}\n  service_prefix: com.test\n  bots:\n"
         + "".join(f"    {b}:\n      expertise: [software-engineering]\n" for b in bots)
     )
 
@@ -952,7 +959,7 @@ def test_ack_refuses_when_the_report_section_was_not_served(paths: Paths, caplog
 
     fleet_dir = paths.root / "local" / "f1"
     (fleet_dir / "runtime").mkdir(parents=True)
-    _write_fleet_yaml(fleet_dir, "f1", ["alex"])
+    _write_fleet_yaml(fleet_dir, "f1", ["alex"], manager="alex")
 
     # The fixture is load-bearing: prove the bot really resolves, so the exit
     # code below can only come from the refusal path.
@@ -985,7 +992,7 @@ def test_ack_succeeds_when_the_plane_answers(paths: Paths):
 
     fleet_dir = paths.root / "local" / "f1"
     (fleet_dir / "runtime").mkdir(parents=True)
-    _write_fleet_yaml(fleet_dir, "f1", ["alex"])
+    _write_fleet_yaml(fleet_dir, "f1", ["alex"], manager="alex")
     _seed_plane_for(paths, "f1")
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"), fleet="f1")
 
@@ -1165,7 +1172,7 @@ class TestBootCLI:
         fleet_dir = paths_.root / "local" / "f1"
         (fleet_dir / "runtime").mkdir(parents=True)
         (fleet_dir / "fleet.yaml").write_text(
-            "fleet:\n  name: f1\n  service_prefix: com.test\n"
+            "fleet:\n  manager: alex\n  name: f1\n  service_prefix: com.test\n"
             "  bots:\n    alex:\n      expertise: [software-engineering]\n"
         )
         return fleet_dir
@@ -1344,10 +1351,10 @@ def test_the_text_render_prints_the_four_verbs_once(paths: Paths):
     assert len(menu) == 1, "the menu belongs under the section, not on every row"
     for verb in ("chase", "supersede", "withdraw", "escalate"):
         assert verb in menu[0]
-    # F7 (M-B fold): prefixed $CLAUDLOBBY_ROOT/lib/ — a bare `task-act.sh` /
+    # F7 (M-B fold): prefixed $CLAUDLOBBY_NATIVE_DIR/ — a bare `task-act.sh` /
     # `dispatch-task.sh` is not on a bot's PATH
-    assert "$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw <task-id> --reason" in menu[0]
-    assert "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes <task-id>" in menu[0]
+    assert "$CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw <task-id> --reason" in menu[0]
+    assert "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --supersedes <task-id>" in menu[0]
 
 
 def test_the_render_names_an_escalation_on_the_row(paths: Paths):

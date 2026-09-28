@@ -408,7 +408,7 @@ def _alldead_scene(tmp_path, bot_chat):
     )
     (bot / ".env").write_text(f'T_CHAN_TOKEN="{REVOKED_TOKEN}"\n')  # own token dead
     (root / "local" / "f" / "fleet.yaml").write_text(
-        "fleet:\n  name: f\n  bots:\n    chanbot:\n      expertise: [x]\n"
+        "fleet:\n  manager: chanbot\n  name: f\n  bots:\n    chanbot:\n      expertise: [x]\n"
     )
     _write_exec(root / "lib" / "tg-post.sh", TG_STUB)
     capture = root / "tg-capture.log"

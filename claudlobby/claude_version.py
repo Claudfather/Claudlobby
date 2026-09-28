@@ -64,6 +64,7 @@ def measure(paths: Paths, binary: str | None = None) -> Measurement:
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", str(Path.home())),
         "CLAUDLOBBY_ROOT": str(paths.root),
+        "FLEET_ROOT": str(paths.fleet_config_dir),
     }
     if os.environ.get("CLAUDE_BIN"):
         env["CLAUDE_BIN"] = os.environ["CLAUDE_BIN"]

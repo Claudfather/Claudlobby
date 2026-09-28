@@ -22,6 +22,7 @@ from claudlobby.loader import (
     parse_frontmatter,
     parse_guardrail_permissions,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -294,9 +295,10 @@ class TestLoadLibraryItem:
 
 class TestLoadLibraryItemsOverlay:
     def _make_paths(self, root: Path):
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_loads_single_file(self, tmp_path):
         root = tmp_path / "claudlobby"
@@ -548,7 +550,7 @@ class TestLoadVoice:
 
 class TestIntegrationToolGrants:
     def _paths(self, root):
-        return Paths(root=root, fleet_dir=None)
+        return Paths(root=root, fleet_dir=None, package=source_package())
 
     def _write_integration(self, root, rel, body_fm=""):
         p = root / "library" / "integrations" / f"{rel}.md"
@@ -651,9 +653,10 @@ class TestIterExpertisePermissions:
         return tmp_path
 
     def _paths(self, root: Path):
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
-        return Paths(root)
+        return Paths(root, package=source_package())
 
     def test_reads_permissions_per_area(self, tmp_path):
         root = self._lib(

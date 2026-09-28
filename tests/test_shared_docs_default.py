@@ -26,6 +26,7 @@ from pathlib import Path
 from claudlobby import defaults
 from claudlobby.composer import compose_bot
 from claudlobby.config import BotConfig, FleetConfig, SystemDefaultsConfig
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
 
@@ -101,7 +102,7 @@ def _compose(
         # than a second helper: a second helper is what `_root` warns about,
         # and the one written here had already dropped the guardrail control.
         install_real_template(root)
-    paths = Paths(root=root, fleet_dir=None if root_mode else root)
+    paths = Paths(root=root, fleet_dir=None if root_mode else root, package=source_package())
     bot = BotConfig(
         bot_id="worker",
         name="worker",
@@ -110,7 +111,7 @@ def _compose(
         guardrails=list(defaults.resolve("guardrails")),
         claudron_vault_path="/tmp/example-vault" if vault else None,
     )
-    fleet = FleetConfig(
+    fleet = FleetConfig(manager="worker",
         name="t",
         service_prefix="p",
         bots={"worker": bot},

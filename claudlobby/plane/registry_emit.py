@@ -144,13 +144,10 @@ def host_payload(paths) -> dict:
         ram_mb = 0
     # The version the fleet launches, from the runtime's own reader (#1772).
     claude = measure_claude_version(paths)
-    try:
-        clv = subprocess.run(
-            ["git", "-C", str(paths.root), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=10).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        clv = ""
-    system_yaml = paths.root / "claudlobby" / "system.yaml"
+    # The mutable data directory's Git revision says nothing about the package
+    # performing composition. This is artifact provenance, not a host release ID.
+    clv = paths.package.artifact_id
+    system_yaml = paths.package.system_yaml
     # paths._iter_fleet_dirs — the ONE nested-aware fleet walk. The shipped
     # depth-1 glob measured [] on the live nested-vault host (gauntlet r1);
     # spec: "fleet aliases from manifests — NEVER process inference".
@@ -263,7 +260,6 @@ def _mission_file(paths, rel: str | None) -> dict | None:
 
 
 def fleet_payload(paths, fleet, vault_rev: str | None) -> dict:
-    managers = sorted({t.manager for t in fleet.teams.values() if t.manager})
     defaults = fleet.defaults or {}
     tier_lists = {}
     for k in ("skills", "mcp", "guardrails", "protocols", "expertise",
@@ -274,7 +270,7 @@ def fleet_payload(paths, fleet, vault_rev: str | None) -> dict:
         "service_prefix": fleet.service_prefix,
         "mission": fleet.mission,
         "mission_file": _mission_file(paths, fleet.mission_file),
-        "manager": managers[0] if len(managers) == 1 else managers,
+        "manager": fleet.manager,
         "groups": [
             {"name": t.name, "manager": t.manager,
              "members": sorted(t.workers), "mission": None}
@@ -448,12 +444,12 @@ def library_items(paths, fleet_name: str, vault_rev: str | None):
     tombstones)."""
     items: list[tuple[str, dict]] = []
     skipped = 0
-    shared_root = paths.root / "library"
+    shared_root = paths.base_library
     for kind in _library_kinds(paths):
         for base in paths.library_search_dirs(kind):
             if not base.is_dir():
                 continue
-            is_shared = str(base).startswith(str(shared_root))
+            is_shared = base.is_relative_to(shared_root)
             tier = "shared" if is_shared else "fleet-overlay"
             prefix = "shared" if is_shared else fleet_name
             for entry in sorted(base.iterdir()):

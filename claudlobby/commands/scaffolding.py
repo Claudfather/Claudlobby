@@ -34,11 +34,12 @@ def cmd_new_skill(args) -> int:
         )
         return 1
 
-    # Determine target directory (overlay if fleet, else base)
-    if paths.overlay_library:
-        skill_dir = paths.overlay_library / "skills" / name
-    else:
-        skill_dir = paths.base_skills / name
+    try:
+        skill_dir = paths.assert_writable(paths.overlay_library / "skills" / name)
+        paths.assert_writable(skill_dir / "SKILL.md")
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 1
 
     if skill_dir.exists():
         log.error("skill already exists: %s", skill_dir)
@@ -80,11 +81,12 @@ def cmd_new_guardrail(args) -> int:
         )
         return 1
 
-    # Determine target directory (overlay if fleet, else base)
-    if paths.overlay_library:
-        guardrail_path = paths.overlay_library / "guardrails" / f"{name}.md"
-    else:
-        guardrail_path = paths.base_guardrails / f"{name}.md"
+    try:
+        guardrail_path = paths.assert_writable(
+            paths.overlay_library / "guardrails" / f"{name}.md")
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 1
 
     if guardrail_path.exists():
         log.error("guardrail already exists: %s", guardrail_path)
@@ -163,9 +165,9 @@ def cmd_new_bot(args) -> int:
             chat_id=args.chat_id,
             startup_prompt=args.startup_prompt,
         )
-        # If --voice-text passed, write it now.
         if args.voice_text:
-            inp.voice = materialize_voice(paths, inp.name, None, args.voice_text)
+            inp.voice_text = args.voice_text
+            inp.voice = f"voices/{inp.name}.md"
 
     # Validation: required fields
     if not inp.name:
@@ -173,6 +175,16 @@ def cmd_new_bot(args) -> int:
         return 1
     if not inp.expertise:
         log.error("at least one --expertise is required")
+        return 1
+
+    # Validate every authored destination before any write (including voices).
+    try:
+        paths.assert_writable(paths.fleet_yaml)
+        paths.assert_writable(paths.fleet_yaml.with_suffix(".yaml.bak"))
+        if inp.voice_text:
+            paths.assert_writable(paths.overlay_voices / f"{inp.name}.md")
+    except ValueError as exc:
+        log.error("%s", exc)
         return 1
 
     # Render the stanza
@@ -204,6 +216,8 @@ def cmd_new_bot(args) -> int:
 
     # Insert
     new_text = insert_bot_stanza(paths.fleet_yaml, stanza, team=inp.team)
+    if inp.voice_text:
+        materialize_voice(paths, inp.name, None, inp.voice_text)
     paths.fleet_yaml.write_text(new_text)
     log.info("  ✓ Updated %s", paths.fleet_yaml)
 

@@ -38,6 +38,7 @@ REPO = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def mock_paths(tmp_path):
     """Create a minimal Paths-like object."""
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "claudlobby"
@@ -48,7 +49,7 @@ def mock_paths(tmp_path):
     fleet_dir.mkdir(parents=True)
     runtime = fleet_dir / "runtime" / "bots"
     runtime.mkdir(parents=True)
-    return Paths(root=root, fleet_dir=fleet_dir)
+    return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
 
 
 @pytest.fixture
@@ -58,6 +59,7 @@ def mock_fleet():
 
     return FleetConfig(
         name="test-fleet",
+        manager="bob",
         service_prefix="com.test",
         bots={
             "alice": BotConfig(bot_id="alice", name="alice", expertise=["eng"]),
@@ -728,6 +730,7 @@ class TestCollectFleetStatus:
 
         fleet = FleetConfig(
             name="test-fleet",
+            manager="Alex",
             service_prefix="com.test",
             bots={"Alex": BotConfig(bot_id="Alex", name="Alex", expertise=["eng"])},
         )
@@ -773,13 +776,15 @@ class TestCollectFleetStatus:
         record-only one: STATE=idle beside TMUX=down.
         """
         from claudlobby.config import BotConfig, FleetConfig
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         fleet_dir = mock_paths.root / "local" / "Test-Fleet"
         (fleet_dir / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
-        paths = Paths(root=mock_paths.root, fleet_dir=fleet_dir)
+        paths = Paths(root=mock_paths.root, fleet_dir=fleet_dir, package=source_package())
         fleet = FleetConfig(
             name="Test-Fleet",
+            manager="alex",
             service_prefix="com.test",
             bots={"alex": BotConfig(bot_id="alex", name="alex", expertise=["eng"])},
         )

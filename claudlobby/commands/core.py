@@ -490,7 +490,8 @@ def cmd_list_library(args) -> int:
             )
         except ValueError:
             tag = ""
-        log.info("  %s%s", p.relative_to(paths.root), tag)
+        voice_root = paths.overlay_voices if tag else paths.base_voices
+        log.info("  voices/%s%s", p.relative_to(voice_root), tag)
 
     if paths.fleet_dir:
         log.info("[fleet overlay: %s]", paths.fleet_dir.relative_to(paths.root))

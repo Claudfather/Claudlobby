@@ -21,11 +21,13 @@ from __future__ import annotations
 import itertools
 import subprocess
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from claudlobby.env_tiers import EnvTier, ResolverUnavailable, cascade, read_tiers
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -65,7 +67,7 @@ LEGACY_BLOCK = textwrap.dedent(
     """
 )
 
-FLEET_YAML = "fleet:\n  name: {name}\n  bots:\n    solo:\n      expertise: [x]\n"
+FLEET_YAML = "fleet:\n  manager: solo\n  name: {name}\n  bots:\n    solo:\n      expertise: [x]\n"
 
 
 def _bash(snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -363,7 +365,8 @@ def test_ambient_env_cannot_redirect_the_answer(estate: Path, monkeypatch) -> No
     monkeypatch.setenv("FLEET_NAME", "not-acme")
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(decoy))
 
-    paths = Paths(root=estate, fleet_dir=estate / "local" / "acme")
+    paths = Paths(root=estate, fleet_dir=estate / "local" / "acme",
+                  package=replace(source_package(), native=estate / "lib"))
     (estate / "lib" / "env-tiers.sh").write_bytes(RESOLVER.read_bytes())
     (estate / "lib" / "lib-common.sh").write_bytes(LIB.read_bytes())
     (estate / "lib" / "supervisor.sh").write_bytes(SUPERVISOR.read_bytes())
@@ -377,7 +380,8 @@ def test_ambient_env_cannot_redirect_the_answer(estate: Path, monkeypatch) -> No
 def test_a_missing_resolver_raises_rather_than_guessing(estate: Path) -> None:
     """No fallback ordering. A fallback IS the second copy, consulted exactly
     when the two are most likely to have diverged."""
-    paths = Paths(root=estate, fleet_dir=estate / "local" / "acme")
+    paths = Paths(root=estate, fleet_dir=estate / "local" / "acme",
+                  package=replace(source_package(), native=estate / "lib"))
     with pytest.raises(ResolverUnavailable, match="will not substitute"):
         read_tiers(paths, bot_name="solo")
 
@@ -625,7 +629,8 @@ def wired(tmp_path: Path, monkeypatch) -> Path:
 
 
 def _paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root / "local" / "acme")
+    return Paths(root=root, fleet_dir=root / "local" / "acme",
+                 package=replace(source_package(), native=root / "lib"))
 
 
 def test_env_resolved_reads_all_four_tiers(wired: Path) -> None:

@@ -24,6 +24,7 @@ from claudlobby import config, defaults
 from claudlobby.composer import compose_bot, compose_claude_md
 from claudlobby.config import load_fleet
 from claudlobby.defaults import REGISTRY, TIER_TESTS, Disposition, Tier, resolve
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
 
@@ -129,7 +130,7 @@ class TestRegistryIsTheSource:
         f = tmp_path / "fleet.yaml"
         f.write_text(
             yaml.safe_dump(
-                {"fleet": {"name": "probe", "bots": {"b": {"expertise": ["eng"]}}}}
+                {"fleet": {"name": "probe", "manager": "b", "bots": {"b": {"expertise": ["eng"]}}}}
             )
         )
         fleet, _ = load_fleet(f)
@@ -356,15 +357,10 @@ class TestScopeBoundary:
 
 # ---------------------------------------------------------------------------
 # The `checkin` leaf-manager default, end to end (PR4 chunk 4, #1569 task 3).
-# `fleet_dir` (conftest.py) ships lead/worker-1 with lead managing eng —
-# lead is already a leaf manager by that shape alone (test_leaf_manager_role
-# precedent). A `coord` bot is added, managing a team of one (lead), so ONE
-# fleet carries all three roles at once: coord is a coordinator (its only
-# report, lead, is itself a manager — not leaf), lead stays leaf (it still
-# manages eng/worker-1), worker-1 is a plain worker (never a manager). None of
-# the three DECLARES `protocols: [checkin]` — every assertion here is about
-# what the DEFAULT does, not a hand-equipped bot (that is
-# tests/test_checkin_library.py's job).
+# `fleet_dir` supplies lead and worker-1. A separate singleton coordinator
+# fleet reports across fleets to lead. The default reaches the declared
+# manager with local workers, not the coordinator or the worker. None declares
+# checkin: these assertions measure only the role default.
 # ---------------------------------------------------------------------------
 
 
@@ -382,26 +378,20 @@ def _write_checkin_library(fleet_dir: Path) -> None:
     shutil.copytree(LIBRARY / "skills" / "checkin", dst)
 
 
-def _add_coordinator(fleet_dir: Path) -> None:
-    """Add `coord`, managing a team of one (lead) — the same text-surgery
-    convention as test_leaf_manager_role.py's non-leaf validator fixture,
-    minus the explicit `protocols: [checkin]` declaration that test exists to
-    warn about: here nothing is declared, only defaulted."""
-    text = (fleet_dir / "fleet.yaml").read_text()
-    text = text.replace(
-        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n",
-        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n"
-        "    top:\n      manager: coord\n      workers: [lead]\n",
+def _coordinator_fleet(fleet_dir: Path):
+    """Keep the reporting coordinator in its own fleet, without local workers."""
+    directory = fleet_dir.parent / "coordinator"
+    directory.mkdir()
+    manifest = directory / "fleet.yaml"
+    manifest.write_text(
+        "fleet:\n  name: coordinator\n  manager: coord\n  bots:\n"
+        "    coord:\n      expertise: [orchestration]\n      manages: [lead]\n"
     )
-    text = text.replace(
-        "  bots:\n    lead:\n",
-        "  bots:\n    coord:\n      expertise: [orchestration]\n    lead:\n",
-    )
-    (fleet_dir / "fleet.yaml").write_text(text)
+    return load_fleet(manifest)[0], _paths(directory)
 
 
 def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
 
 class TestLeafManagerCheckinDefault:
@@ -412,19 +402,20 @@ class TestLeafManagerCheckinDefault:
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
         install_real_template(fleet_dir)
         _write_checkin_library(fleet_dir)
-        _add_coordinator(fleet_dir)
+        coordinator, coordinator_paths = _coordinator_fleet(fleet_dir)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        assert fleet.leaf_manager_bots() == {"lead"}  # coord is a coordinator
+        assert fleet.leaf_manager_bots() == {"lead"}
+        assert coordinator.leaf_manager_bots() == set()
         paths = _paths(fleet_dir)
 
         lead_md = compose_claude_md(fleet.bots["lead"], fleet, paths)
-        coord_md = compose_claude_md(fleet.bots["coord"], fleet, paths)
+        coord_md = compose_claude_md(coordinator.bots["coord"], coordinator, coordinator_paths)
         worker_md = compose_claude_md(fleet.bots["worker-1"], fleet, paths)
 
         # None of the three DECLARED protocols: [checkin] — this is the
         # default reaching lead alone.
-        for bot_id in ("lead", "coord", "worker-1"):
-            assert "checkin" not in fleet.bots[bot_id].protocols
+        for bot in (fleet.bots["lead"], coordinator.bots["coord"], fleet.bots["worker-1"]):
+            assert "checkin" not in bot.protocols
 
         assert "Silence is the default" in lead_md
         assert "Silence is the default" not in coord_md

@@ -225,6 +225,7 @@ def _composed(tmp_path, monkeypatch, armed: dict[str, str]):
     from claudlobby.composer import compose_bot_conf, compose_fleet_timers
     from claudlobby.config import load_fleet
     from claudlobby.env_tiers import Resolution
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
     from tests.test_composer_briefing_arming import _FLEET
     fl = dedent(_FLEET).replace("system_defaults: false", "system_defaults: true")
@@ -232,7 +233,7 @@ def _composed(tmp_path, monkeypatch, armed: dict[str, str]):
     root.mkdir(parents=True)
     (root / "fleet.yaml").write_text(fl)
     fleet, md = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     res = {k: Resolution(name=k, value=v, tier="fleet", path=None) for k, v in armed.items()}
     monkeypatch.setattr(env_tiers_mod, "read_tiers", lambda paths, fleet_name=None, bot_name=None: [])
     monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: res)

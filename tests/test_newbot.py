@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from textwrap import dedent
+
+import pytest
 
 from claudlobby.newbot import (
     NewBotInputs,
@@ -16,6 +19,7 @@ from claudlobby.newbot import (
     interactive_collect,
     write_token_to_env,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -163,6 +167,7 @@ FLEET_WITH_BOTS = dedent("""\
     fleet:
       name: test
       service_prefix: com.test
+      manager: existing
 
       bots:
         existing:
@@ -185,6 +190,7 @@ class TestInsertBotStanza:
         text = dedent("""\
             fleet:
               name: test
+              manager: existing
               # important comment
               bots:
                 existing:
@@ -200,6 +206,7 @@ class TestInsertBotStanza:
         text = dedent("""\
             fleet:
               name: test
+              manager: lead
               teams:
                 eng:
                   manager: lead
@@ -227,6 +234,7 @@ class TestAddToTeam:
     def test_appends_worker(self):
         text = dedent("""\
             fleet:
+              manager: lead
               teams:
                 eng:
                   manager: lead
@@ -241,12 +249,13 @@ class TestAddToTeam:
     def test_no_duplicate(self):
         text = dedent("""\
             fleet:
+              manager: lead
               teams:
                 eng:
                   manager: lead
                   workers: [a, b]
               bots:
-                x:
+                lead:
                   expertise: [y]
         """)
         result = _add_to_team(text, "eng", "a")
@@ -266,7 +275,7 @@ class TestAddToTeam:
 
 class TestMaybeCreateVoice:
     def test_explicit_path_passthrough(self, tmp_path):
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         result = maybe_create_voice(paths, "bot", "voices/custom.md", None)
         assert result == "voices/custom.md"
 
@@ -274,7 +283,7 @@ class TestMaybeCreateVoice:
         root = tmp_path / "repo"
         root.mkdir()
         (root / "voices").mkdir()
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         result = maybe_create_voice(paths, "jian", None, "Terse and blunt.")
         assert result == "voices/jian.md"
         voice_file = root / "voices" / "jian.md"
@@ -284,7 +293,7 @@ class TestMaybeCreateVoice:
         assert "Terse and blunt." in content
 
     def test_none_when_no_voice(self, tmp_path):
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         assert maybe_create_voice(paths, "bot", None, None) is None
 
 
@@ -298,7 +307,8 @@ def test_interactive_collect_lists_public_base_expertise_only(
     (
         root / "local" / "fleet-a" / "library" / "expertise" / "overlay-only.md"
     ).write_text("overlay")
-    paths = Paths(root=root, fleet_dir=root / "local" / "fleet-a")
+    package = replace(source_package(), library=root / "library")
+    paths = Paths(root=root, fleet_dir=root / "local" / "fleet-a", package=package)
     # Same wizard answer sequence as the opt-in test — one source of truth for the
     # positional prompt order (blank at idx 14 = default the dangerous prompt).
     answers = iter(_wizard_answers(""))
@@ -352,7 +362,7 @@ def test_interactive_collect_dangerous_is_explicit_opt_in(tmp_path, monkeypatch)
     root = tmp_path / "repo"
     (root / "library" / "expertise").mkdir(parents=True)
     (root / "library" / "expertise" / "base-engineering.md").write_text("base")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=replace(source_package(), library=root / "library"))
 
     answers = iter(_wizard_answers("y"))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
@@ -361,14 +371,12 @@ def test_interactive_collect_dangerous_is_explicit_opt_in(tmp_path, monkeypatch)
     assert "dangerously_skip_permissions: true" in render_stanza(result)
 
 
-def test_interactive_collect_paste_voice_is_materialized(tmp_path, monkeypatch):
-    """The 'paste a new voice' branch must materialize the pasted text into a
-    voices/<name>.md file and carry the path on the result. It previously
-    assigned voice_text and dropped it, silently discarding the input (#760)."""
+def test_interactive_collect_retains_pasted_voice_without_writing(tmp_path, monkeypatch):
+    """Keep pasted content for the command's dry-run and confirmation gates."""
     root = tmp_path / "repo"
     (root / "library" / "expertise").mkdir(parents=True)
     (root / "library" / "expertise" / "base-engineering.md").write_text("base")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=replace(source_package(), library=root / "library"))
 
     # Splice the paste answers into the shared wizard sequence: voice choice
     # "2", then one pasted line + a blank line to terminate. Everything after
@@ -381,18 +389,58 @@ def test_interactive_collect_paste_voice_is_materialized(tmp_path, monkeypatch):
     result = interactive_collect(paths)
 
     assert result.voice == "voices/bot-a.md"
-    voice_file = root / "voices" / "bot-a.md"
-    assert voice_file.is_file()
-    assert "Terse and blunt." in voice_file.read_text()
+    assert result.voice_text == "Terse and blunt."
+    assert not (root / "voices").exists()
 
 
-def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys):
-    """End-to-end non-interactive CLI: --dangerously-skip-permissions is a positive
+@pytest.mark.parametrize("mode", ["dry-run", "decline", "confirm"])
+def test_new_bot_materializes_pending_voice_only_after_confirmation(
+    tmp_path, monkeypatch, mode
+):
+    from claudlobby import newbot
+    from claudlobby.__main__ import main
+    from claudlobby.commands import scaffolding
+
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    package_voices = tmp_path / "package" / "voices"
+    package_voices.mkdir(parents=True)
+    packaged_voice = package_voices / "bot-a.md"
+    packaged_voice.write_text("Packaged voice.\n")
+    paths = Paths(root=root, package=replace(source_package(), voices=package_voices))
+    pending = NewBotInputs(name="bot-a", expertise=["software-engineering"],
+                           voice="voices/bot-a.md", voice_text="Terse and blunt.")
+    monkeypatch.setattr(scaffolding, "_resolve_paths", lambda args: paths)
+    monkeypatch.setattr(newbot, "interactive_collect", lambda paths: pending)
+    monkeypatch.setattr("builtins.input", lambda _: "n" if mode == "decline" else "y")
+    argv = ["--root", str(root), "new-bot", "--interactive"]
+    if mode == "dry-run":
+        argv.append("--dry-run")
+
+    assert main(argv) == (1 if mode == "decline" else 0)
+
+    voice = root / "voices" / "bot-a.md"
+    backup = root / "fleet.yaml.bak"
+    if mode == "confirm":
+        assert "Terse and blunt." in voice.read_text()
+        assert "voice: voices/bot-a.md" in (root / "fleet.yaml").read_text()
+        assert backup.read_text() == FLEET_WITH_BOTS
+    else:
+        assert not voice.exists() and not backup.exists()
+        assert (root / "fleet.yaml").read_text() == FLEET_WITH_BOTS
+    assert packaged_voice.read_text() == "Packaged voice.\n"
+
+
+def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys, monkeypatch):
+    """Non-interactive CLI flags: --dangerously-skip-permissions is a positive
     opt-in that renders the flag; omitted, the stanza omits it (safe acceptEdits).
     The old --no- opt-out of the removed dangerous default no longer parses."""
-    import pytest
-
     from claudlobby.__main__ import main
+    from claudlobby.commands import scaffolding
+
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(scaffolding, "_resolve_paths", lambda args: paths)
 
     base = [
         "--root",

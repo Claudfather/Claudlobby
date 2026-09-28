@@ -66,7 +66,7 @@ host:
     # claude resolution), so the unit needs no environment beyond
     # CLAUDLOBBY_ROOT.
     claude-update:
-      script: "$CLAUDLOBBY_ROOT/lib/update-claude-code.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/update-claude-code.sh"
       schedule: "*-*-* 04:00:00"
       type: oneshot
       persistent: true
@@ -90,7 +90,7 @@ host:
     # entirely with PLANE_PRUNE_ENABLED=0 in the host or root .env, which the
     # launcher says out loud on every disarmed run.
     plane-prune:
-      script: "$CLAUDLOBBY_ROOT/lib/plane-prune.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/plane-prune.sh"
       schedule: "*-*-* 05:15:00"
       type: oneshot
       persistent: true
@@ -108,7 +108,7 @@ host:
     # or root .env (the launcher says so on every disarmed run). Horizon:
     # override the script line (e.g. "... --after-days 14").
     plane-expire:
-      script: "$CLAUDLOBBY_ROOT/lib/plane-expire.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/plane-expire.sh"
       schedule: "*-*-* 05:30:00"
       type: oneshot
       persistent: true
@@ -122,7 +122,7 @@ host:
     # read-only emitter with no gate of its own beyond the estate silencer
     # (PLANE_EMIT_DISABLED=1), and the Host card is blank without it.
     plane-host-probe:
-      script: "$CLAUDLOBBY_ROOT/lib/plane-host-probe.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/plane-host-probe.sh"
       interval: 60
       type: oneshot
     # Source-currency REPORT (read-only, never pulls): how far each framework
@@ -132,7 +132,7 @@ host:
     # update-siblings.sh on a weekly clock; the two are split so the signal
     # survives on a host that never enrolled the applier.
     notify-behind:
-      script: "$CLAUDLOBBY_ROOT/lib/notify-behind.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/notify-behind.sh"
       schedule: "*-*-* 08:00:00"
       type: oneshot
       persistent: true
@@ -172,7 +172,7 @@ host:
     # restart, which is the exposure the staged binary already carries.
     update-siblings:
       enroll: false
-      script: "$CLAUDLOBBY_ROOT/lib/update-siblings.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/update-siblings.sh"
       schedule: "Sun *-*-* 04:30:00"
       type: oneshot
       persistent: true
@@ -195,7 +195,7 @@ host:
     # does not pull at boot, unwatched.
     pull-root:
       enroll: false
-      script: "$CLAUDLOBBY_ROOT/lib/pull-root.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/pull-root.sh"
       schedule: "*-*-* 07:00:00"
       type: oneshot
       persistent: false
@@ -222,7 +222,7 @@ host:
     # the same remote at the same instant.
     vault-sync:
       enroll: false
-      script: "$CLAUDLOBBY_ROOT/lib/vault-sync.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/vault-sync.sh"
       schedule: "*:0/15"
       type: oneshot
       persistent: true
@@ -252,7 +252,7 @@ host:
     plane-daemon:
       enroll: true
       unit: service
-      script: "$CLAUDLOBBY_ROOT/lib/plane-daemon.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/plane-daemon.sh"
     # Phase-4 operator plane (read-only UI). Same compose-time dormancy
     # contract as plane-daemon: unarmed composes NO units.
     #
@@ -270,11 +270,11 @@ host:
     plane-view:
       enroll: true
       unit: service
-      script: "$CLAUDLOBBY_ROOT/lib/plane-view.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/plane-view.sh"
     # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
     # north star): daily root-usage check, FLEET ALERT past the threshold.
     disk-monitor:
-      script: "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/disk-monitor.sh"
       schedule: "*-*-* 05:00:00"
       type: oneshot
       persistent: true
@@ -282,7 +282,7 @@ host:
     # OOM guard on constrained hosts: daily fleet RSS vs available-RAM check,
     # FLEET ALERT when the reserve floor is breached.
     fleet-memory-check:
-      script: "$CLAUDLOBBY_ROOT/lib/fleet-memory-check.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/fleet-memory-check.sh"
       schedule: "*-*-* 05:30:00"
       type: oneshot
       persistent: true
@@ -294,7 +294,7 @@ host:
     # first HH:MM out of the expression, so a multi-hour OnCalendar would
     # silently run once a day on macOS while running four times on Linux.
     orphan-browser-reaper:
-      script: "$CLAUDLOBBY_ROOT/lib/orphan-browser-reaper.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/orphan-browser-reaper.sh"
       schedule: "*-*-* 05:45:00"
       type: oneshot
       persistent: true
@@ -305,7 +305,7 @@ host:
     # HOURLY, not daily (a storage stall can wedge the host within the hour, so
     # the daily monitors miss it); de-duped so a standing condition alerts once.
     host-health-check:
-      script: "$CLAUDLOBBY_ROOT/lib/host-health-check.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/host-health-check.sh"
       schedule: "*-*-* *:00:00"
       type: oneshot
       persistent: true
@@ -353,7 +353,7 @@ host:
     # because there are two delivery paths, not for belt and braces.
     boot-capture:
       enroll: false
-      script: "$CLAUDLOBBY_ROOT/lib/boot-capture.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/boot-capture.sh"
       interval: 30
       type: oneshot
 
@@ -390,7 +390,7 @@ host:
 defaults:
   hooks:
     PreToolUse:
-      - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
       # Rewrite `@<botname>` out of GitHub-bound tool calls before they run
       # (#1019). Every fleet bot name is also a real GitHub account -- 19 of 21
       # belong to real people -- so an unguarded teammate reference emails a
@@ -398,7 +398,7 @@ defaults:
       # INSTRUCTED @-mentioning on GitHub; the habit leaks from Telegram, where
       # it is correct, and an instruction cannot catch a correct convention
       # applied mid-prose to the wrong surface. Telegram is untouched.
-      - command: "$CLAUDLOBBY_ROOT/lib/gh-mention-guard.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/gh-mention-guard.sh"
       # No bot rewrites git STATE inside the vault (#1720). A live host's vault
       # clone sat on a side branch for a month -- 59 commits of knowledge off
       # the default branch, 53 on no remote -- and the rebase that tried to
@@ -409,16 +409,16 @@ defaults:
       # because a wrong scope rule would refuse legitimate git work in every
       # bot's projects/ checkout at once. A bot with no CLAUDRON_VAULT_PATH
       # gets no decision. Matcher-scoped to Bash; fails open, loudly.
-      - command: "$CLAUDLOBBY_ROOT/lib/vault-git-guard.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/vault-git-guard.sh"
         matcher: "Bash"
     PostToolUse:
-      - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
       # The OUTBOUND Telegram carrier (#1402): the plugin's MCP reply path
       # was the plane's blind spot -- a bot answering the operator left no
       # record while tg-post notices did. Matcher-scoped to the reply tool;
       # always on (PLANE_EMIT_DISABLED=1 is the one silencer), exit 0
       # on every path.
-      - command: "$CLAUDLOBBY_ROOT/lib/plane-telegram-out.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/plane-telegram-out.sh"
         matcher: "mcp__plugin_telegram_telegram__reply"
         timeout: 15
     # Ingestion layer for the ai-platform fleet-monitor (#785 Phase A): distil
@@ -435,7 +435,7 @@ defaults:
     # Haiku spend watched between. Default-on would have fired across the whole
     # estate at the next generate or daily reload.
     SessionEnd:
-      - command: "$CLAUDLOBBY_ROOT/lib/transcript-digest.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/transcript-digest.sh"
         timeout: 150
     # Observable-plane session identity (PR-B T7, spec §19.6/F12): derives the
     # transcript-stable session_uid + a fresh per-process process_uid and
@@ -443,7 +443,7 @@ defaults:
     # everywhere, always on (PLANE_EMIT_DISABLED=1 is the one silencer), exit
     # 0 on every path (a hook must never break a boot).
     SessionStart:
-      - command: "$CLAUDLOBBY_ROOT/lib/plane-session-start.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/plane-session-start.sh"
         timeout: 15
     # The INBOUND Telegram carrier (#1402): recognizes the plugin's channel
     # injection shape and records the OPERATOR's own message as a first-
@@ -452,7 +452,7 @@ defaults:
     # (UserPromptSubmit stdout is added to the model's context). Same
     # dormancy as the rest of the plane hooks.
     UserPromptSubmit:
-      - command: "$CLAUDLOBBY_ROOT/lib/plane-telegram-in.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/plane-telegram-in.sh"
         timeout: 15
       # Delivery becomes a JOIN (chunk P, #1501): the RECEIVER records what it
       # actually got. A tracked dispatch/report/briefing arrives with a
@@ -463,7 +463,7 @@ defaults:
       # inferring it from the sender's Enter. Matches the trailer ONLY --
       # ordinary prompts exit at a zero-fork prefilter -- and stdout stays empty
       # on every path (UserPromptSubmit stdout feeds the model). Same dormancy.
-      - command: "$CLAUDLOBBY_ROOT/lib/plane-dispatch-in.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/plane-dispatch-in.sh"
         timeout: 15
     # Observable-plane Telegram carrier, the RC-relay OUTBOUND half (#1412):
     # when a bot answers a Telegram-initiated turn with plain final text
@@ -471,7 +471,7 @@ defaults:
     # PostToolUse fires — this Stop hook records that final answer, carrier
     # state `unknown` (delivery unobserved); always on, exit 0 on every path.
     Stop:
-      - command: "$CLAUDLOBBY_ROOT/lib/plane-rc-relay-out.sh"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/plane-rc-relay-out.sh"
         timeout: 15
 
   observability:
@@ -504,11 +504,11 @@ defaults:
 
   jobs:
     fleet-pulse:
-      script: "$CLAUDLOBBY_ROOT/lib/fleet-pulse.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/fleet-pulse.sh"
       interval_from: observability.pulse_interval
       type: oneshot
     keepalive:
-      script: "$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/keepalive-all.sh"
       interval: 60
       type: oneshot
       # The per-bot plane emit is backgrounded and reaped on its own clock;
@@ -517,11 +517,11 @@ defaults:
       # (measured: 1 sample in 7 days vs ~1300 for every sibling).
       abandon_children: true
     log-rotation:
-      script: "$CLAUDLOBBY_ROOT/lib/log-rotate-fleet.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/log-rotate-fleet.sh"
       interval: 86400
       type: oneshot
     creds-check:
-      script: "$CLAUDLOBBY_ROOT/lib/creds-check.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/creds-check.sh"
       schedule: "*-*-* 06:00:00"
       # Desync multi-fleet hosts: every fleet ticks this against one shared
       # state file + the Telegram API (systemd-only; launchd ignores it).
@@ -532,7 +532,7 @@ defaults:
     # bots for a keepalive-driven /reload). No restart, no context loss. Runs
     # before the binary-update window so the plugin cache is warm.
     reload-fleet:
-      script: "$CLAUDLOBBY_ROOT/lib/reload-fleet.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/reload-fleet.sh"
       schedule: "*-*-* 03:30:00"
       type: oneshot
     # Composed-but-dormant: bouncing workers onto the staged binary is
@@ -540,7 +540,7 @@ defaults:
     # fleet.yaml), never a cold-start default.
     weekly-worker-restart:
       enroll: false
-      script: "$CLAUDLOBBY_ROOT/lib/weekly-worker-restart.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/weekly-worker-restart.sh"
       schedule: "Sun *-*-* 05:00:00"
       type: oneshot
     # Weekly per-bot data/ hygiene, analogous to log-rotation. Purges only
@@ -548,7 +548,7 @@ defaults:
     # A fleet changes retention by overriding this job's script line
     # (e.g. "... --purge --days 60").
     data-sweep:
-      script: "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge"
+      script: "$CLAUDLOBBY_NATIVE_DIR/data-sweep.sh --purge"
       schedule: "Sat *-*-* 07:00:00"
       type: oneshot
     # The task loop's re-check trigger (chunk M-B, #1481): hand each manager
@@ -574,7 +574,7 @@ defaults:
     # the host it is off on rather than reading as a broken timer. The
     # self-gate SHAPE is kept for exactly that -- it is an opt-OUT now.
     task-recheck:
-      script: "$CLAUDLOBBY_ROOT/lib/task-recheck.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/task-recheck.sh"
       interval: 21600
       type: oneshot
     # PR 2 of the manager check-in build (chunk 2): every 15 min, inject
@@ -594,6 +594,6 @@ defaults:
     # opts in with defaults.jobs.manager-checkin.enroll: true.
     manager-checkin:
       enroll: false
-      script: "$CLAUDLOBBY_ROOT/lib/manager-checkin.sh"
+      script: "$CLAUDLOBBY_NATIVE_DIR/manager-checkin.sh"
       interval: 900
       type: oneshot

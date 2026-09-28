@@ -25,7 +25,7 @@ from tests.conftest import _write_exec, git_isolation_env, make_paths
 
 
 def _fleet(bot):
-    return FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+    return FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
 
 
 def _bare_bot():

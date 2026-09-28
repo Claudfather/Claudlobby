@@ -43,7 +43,7 @@ Record `email`, `orgName` and `subscriptionType` **now**. This is the only cheap
 # must not follow you into this shell. $sources is deliberately UNQUOTED on the
 # grep line: those are globs and must expand. `/dev/null` keeps grep off stdin
 # if the resolver ever returns nothing.
-sources=$(. "$CLAUDLOBBY_ROOT/lib/lib-common.sh" >/dev/null 2>&1; \
+sources=$(. "$CLAUDLOBBY_NATIVE_DIR/lib-common.sh" >/dev/null 2>&1; \
           host_bots_dirs | sed 's:$:/*/bot.conf:')
 
 # A resolver that returned nothing has queried nothing. That is a TOTAL failure,

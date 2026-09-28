@@ -197,17 +197,17 @@ def verb_commands(task_id: str, assignee: str = "<bot>") -> str:
     task id to name: the caller passes the assignment id, which `--assignment`
     takes on both acts.
 
-    Prefixed `$CLAUDLOBBY_ROOT/lib/` (the fold's F7): `start-bot.sh`'s
+    Prefixed `$CLAUDLOBBY_NATIVE_DIR/` (the fold's F7): `start-bot.sh`'s
     exported PATH does not include the fleet's `lib/`, so a bare
     `task-act.sh`/`dispatch-task.sh` a manager pastes verbatim from this line
     resolves to nothing — every OTHER example in the dispatch protocol already
     prefixes it, and a command a manager cannot run is not really the menu."""
     bot = assignee or "<bot>"
     return (
-        f'chase ($CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query {bot} "…"),'
-        f' supersede ($CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes {task_id} {bot} "…"),'
-        f' withdraw ($CLAUDLOBBY_ROOT/lib/task-act.sh withdraw {task_id} --reason "…")'
-        f' or escalate ($CLAUDLOBBY_ROOT/lib/task-act.sh escalate {task_id} "…")'
+        f'chase ($CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --type query {bot} "…"),'
+        f' supersede ($CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --supersedes {task_id} {bot} "…"),'
+        f' withdraw ($CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw {task_id} --reason "…")'
+        f' or escalate ($CLAUDLOBBY_NATIVE_DIR/task-act.sh escalate {task_id} "…")'
     )
 
 
@@ -254,8 +254,16 @@ def send_to_bot(paths, bot: str, message: str, fleet: str | None = None,
     script = Path(paths.lib) / "dispatch.sh"
     if not script.is_file():
         return 127, f"no {script} — the install has no dispatch door"
-    env = {k: v for k, v in os.environ.items() if k != "BOT_DIR"}
-    env["CLAUDLOBBY_ROOT"] = str(paths.root)
+    from ..context import native_environment, resolve_paths
+
+    try:
+        target_paths = resolve_paths(root=paths.root, fleet=fleet,
+                                     package=paths.package) if fleet else paths
+    except (ValueError, OSError) as exc:
+        return 1, f"cannot resolve destination fleet: {exc}"
+    env = {k: v for k, v in os.environ.items()
+           if k not in {"BOT_DIR", "FLEET_NAME", "FLEET_ROOT", "CLAUDLOBBY_FLEET"}}
+    env.update(native_environment(target_paths))
     if fleet:
         env["CLAUDLOBBY_FLEET"] = fleet
     # chunk P fold F5: carry the plane routing trailer so the RECEIVER records a
@@ -604,7 +612,7 @@ def recheck_row_line(row, *, index: int, now: datetime) -> str:
                     f" {_age(nud.get('at'), now)}")
     line = f"[{index}] task {tid} ({title}) — " + ", ".join(bits)
     if tid != "?":
-        line += (f' — close: $CLAUDLOBBY_ROOT/lib/task-act.sh withdraw {tid}'
+        line += (f' — close: $CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw {tid}'
                  ' --reason "…"')
     return line
 

@@ -65,10 +65,10 @@ def _host(
         "fleet:\n  name: f-alpha\n  bots:\n" + alpha_bots
     )
     (tmp_path / "local" / "sys" / "f-beta" / "fleet.yaml").write_text(
-        "fleet:\n  name: f-beta\n  bots:\n    b1:\n      expertise: [x]\n"
+        "fleet:\n  manager: b1\n  name: f-beta\n  bots:\n    b1:\n      expertise: [x]\n"
     )
     (tmp_path / "local" / "f-gamma" / "fleet.yaml").write_text(
-        "fleet:\n  name: f-gamma\n  bots:\n    g1:\n      expertise: [x]\n"
+        "fleet:\n  manager: g1\n  name: f-gamma\n  bots:\n    g1:\n      expertise: [x]\n"
     )
     return tmp_path
 
@@ -222,7 +222,7 @@ def test_zero_extraction_refuses_and_touches_nothing(tmp_path: Path) -> None:
     """
     root = _host(tmp_path, alpha_bots="    a1:\n      expertise: [x]\n")
     (root / "local" / "f-alpha" / "drift.yaml").write_text(
-        "fleet:\n  name: f-alpha\n  bots:  # my bots\n    a1:\n      expertise: [x]\n"
+        "fleet:\n  manager: a1\n  name: f-alpha\n  bots:  # my bots\n    a1:\n      expertise: [x]\n"
     )
     state = _seed_state(root)
     before = state.read_bytes()
@@ -346,7 +346,7 @@ def _break_sibling(root: Path, how: str) -> Path:
     if how == "crlf":
         man.write_bytes(man.read_text().replace("\n", "\r\n").encode())
     elif how == "indent":
-        man.write_text("fleet:\n    name: f-beta\n    bots:\n        b1:\n            expertise: [x]\n")
+        man.write_text("fleet:\n    manager: b1\n    name: f-beta\n    bots:\n        b1:\n            expertise: [x]\n")
     else:  # pragma: no cover - guard against a typo in a parametrisation
         raise AssertionError(f"unknown fault: {how}")
     return man

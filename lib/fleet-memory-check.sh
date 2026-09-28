@@ -17,7 +17,7 @@
 #                             (default: ~/.claude/channels/telegram)
 #
 # Exits 0 always — monitoring scripts must never abort fleet operations.
-# Output goes to $CLAUDLOBBY_ROOT/lib/fleet-memory-check.log and stdout.
+# Output goes to $CLAUDLOBBY_ROOT/state/logs/fleet-memory-check.log and stdout.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,7 +45,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-LOG="$CLAUDLOBBY_ROOT/lib/fleet-memory-check.log"
+LOG="$CLAUDLOBBY_ROOT/state/logs/fleet-memory-check.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
 

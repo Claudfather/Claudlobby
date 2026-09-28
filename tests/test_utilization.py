@@ -220,8 +220,9 @@ class TestComputeFleetUtilization:
     def _paths(self, tmp_path):
         (tmp_path / "library").mkdir(exist_ok=True)
         (tmp_path / "lib").exists() or (tmp_path / "lib").symlink_to(REPO / "lib")
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
-        return Paths(root=tmp_path)
+        return Paths(root=tmp_path, package=source_package())
 
     def test_discovers_bots_from_dirs_and_reads_their_series_from_the_plane(self, tmp_path):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
@@ -288,9 +289,10 @@ class TestWriteUtilizationJson:
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         (tmp_path / "library").mkdir()
         (tmp_path / "lib").symlink_to(REPO / "lib")
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
 
         results = [
             BotUtilization(
@@ -314,9 +316,10 @@ class TestWriteUtilizationJson:
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         (tmp_path / "library").mkdir()
         (tmp_path / "lib").symlink_to(REPO / "lib")
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
 
         out_path = write_utilization_json([], paths, now=now)
         assert out_path.parent.is_dir()

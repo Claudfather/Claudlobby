@@ -478,7 +478,9 @@ def make_paths(fleet_dir: Path):
     """Paths rooted at a fleet_dir fixture (root == fleet_dir)."""
     from claudlobby.paths import Paths
 
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    from tests.package_fixtures import source_package
+
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
 
 def install_real_template(root: Path) -> None:
@@ -496,6 +498,7 @@ def install_real_template(root: Path) -> None:
 MINIMAL_FLEET_YAML = dedent("""\
     fleet:
       name: test-fleet
+      manager: lead
       service_prefix: com.test
       telegram_group_chat_id: "-100999"
 

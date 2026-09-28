@@ -12,6 +12,7 @@ import pytest
 from claudlobby import validator as validator_module
 from claudlobby.config import load_fleet
 from claudlobby.known_values import _AUTO_ELIGIBLE_RENAMES
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import _grant_wellformed, validate
 
@@ -19,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=None)
+    return Paths(root=root, fleet_dir=None, package=source_package())
 
 
 def _ignition_warnings(report) -> list[str]:
@@ -256,13 +257,12 @@ class TestValidate:
         # Verify the warning was emitted via logging
         assert "skipping" in caplog.text
 
-    def test_empty_bots_is_error(self, fleet_dir):
-        (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: empty\n  bots: {}\n")
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = _make_paths(fleet_dir)
-        report = validate(fleet, paths)
-        assert report.has_errors
-        assert any("empty" in e for e in report.errors)
+    def test_empty_bots_is_rejected_while_loading(self, fleet_dir):
+        (fleet_dir / "fleet.yaml").write_text(
+            "fleet:\n  name: empty\n  manager: lead\n  bots: {}\n"
+        )
+        with pytest.raises(ValueError, match=r"fleet.manager.*not in fleet.bots"):
+            load_fleet(fleet_dir / "fleet.yaml")
 
     def test_reports_to_invalid_ref_is_warning(self, fleet_dir, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
@@ -693,7 +693,7 @@ class TestCrossFleetCollisions:
         (other_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert any(
             "lead" in w and "other-fleet" in w and "collide" in w
@@ -713,7 +713,7 @@ class TestCrossFleetCollisions:
         (other_bots / "bot.conf").write_text("BOT_NAME=unique-bot\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -726,7 +726,7 @@ class TestCrossFleetCollisions:
         (own_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -734,7 +734,7 @@ class TestCrossFleetCollisions:
         """No local/ directory at all — should not crash."""
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=None)
+        paths = Paths(root=fleet_dir, fleet_dir=None, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -1579,7 +1579,10 @@ class TestManagerCheckinArmedLeaflessWarning:
         self, fleet_dir, monkeypatch
     ):
         fleet, paths = self._load(fleet_dir, monkeypatch)
-        fleet.teams = {}  # no team names a manager -> no leaf manager
+        # No other local bot exists for the declared manager to route.
+        fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -1588,9 +1591,8 @@ class TestManagerCheckinArmedLeaflessWarning:
         report = validate(fleet, paths)
         matches = [w for w in report.warnings if "manager-checkin" in w]
         assert len(matches) == 1, report.warnings
-        assert "no leaf manager" in matches[0]
-        # names what WOULD make it fire
-        assert "in-fleet report" in matches[0] and "not itself a manager" in matches[0]
+        assert "no local workers" in matches[0]
+        assert "declared manager is the only bot" in matches[0]
 
     def test_armed_with_a_leaf_manager_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
@@ -1601,13 +1603,15 @@ class TestManagerCheckinArmedLeaflessWarning:
         }
         report = validate(fleet, paths)
         assert not any(
-            "manager-checkin" in w and "no leaf manager" in w
+            "manager-checkin" in w and "no local workers" in w
             for w in report.warnings
         ), report.warnings
 
     def test_unarmed_and_leafless_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -1615,7 +1619,7 @@ class TestManagerCheckinArmedLeaflessWarning:
         }
         report = validate(fleet, paths)
         assert not any(
-            "manager-checkin" in w and "no leaf manager" in w
+            "manager-checkin" in w and "no local workers" in w
             for w in report.warnings
         ), report.warnings
 
@@ -1676,6 +1680,8 @@ class TestManagerCheckinUnarmedLeafWarning:
         # — this one only ever fires when a leaf manager was actually equipped.
         fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -2273,7 +2279,7 @@ class TestGoalBinding:
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        return fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir_path)
+        return fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir_path, package=source_package())
 
     @staticmethod
     def _scope(text: str, bot: str, org: str, repos: list[str]) -> str:
@@ -2343,7 +2349,7 @@ class TestGoalBinding:
         self._sibling(
             fleet_dir,
             "other-fleet",
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: acme\n"
             "        repos: [storefront]\n",
         )
@@ -2365,7 +2371,9 @@ class TestGoalBinding:
             )
         )
         sib = self._sibling(
-            fleet_dir, "other-fleet", "fleet:\n  name: other-fleet\n  bots: {}\n"
+            fleet_dir, "other-fleet",
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n"
+            "    bee:\n      expertise: [x]\n",
         )
         (sib / "projects.yaml").write_text(
             "projects:\n  shop:\n    title: Shop\n    repos: [acme/storefront]\n"
@@ -2383,7 +2391,7 @@ class TestGoalBinding:
         self._sibling(
             fleet_dir,
             "other-fleet",
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: zenith\n"
             "        repos: [something-else]\n",
         )
@@ -2425,7 +2433,7 @@ class TestGoalBinding:
         nested = fleet_dir / "local" / "home" / "other-fleet"
         nested.mkdir(parents=True)
         (nested / "fleet.yaml").write_text(
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: acme\n"
             "        repos: [storefront]\n"
         )

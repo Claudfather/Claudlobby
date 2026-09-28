@@ -23,7 +23,7 @@ Manage and dispatch tasks to engineer bots.
 Send a task to an engineer bot via the socket-aware helper — each bot is on its own tmux server, so a raw `tmux send-keys -t` against the default socket no longer reaches it (reliable, instant):
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh <bot-session> '<task prompt>'
+$CLAUDLOBBY_NATIVE_DIR/dispatch.sh <bot-session> '<task prompt>'
 ```
 
 Before dispatching (each bot is on its own server; the socket is its `BOT_SERVICE`):

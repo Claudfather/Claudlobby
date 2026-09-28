@@ -88,7 +88,7 @@ observability loop the selector opened with `audit_selected`):
 
 ```bash
 # the ONE fleet-event door: the event lands on the plane (nothing lives in a file any more)
-. "{{CLAUDLOBBY_ROOT}}/lib/lib-common.sh"
+. "{{CLAUDLOBBY_NATIVE_DIR}}/lib-common.sh"
 emit_fleet_event audit_completed audit '{"repo":"<org/repo>","audit_type":"<audit-type>","issues":<count>}'
 ```
 

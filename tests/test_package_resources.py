@@ -1,8 +1,4 @@
-"""Installed resource smoke, including the source-distribution rebuild route.
-
-This deliberately does not claim outside-checkout composition or native service
-operation: their callers move to the resource seam together in P2.
-"""
+"""Installed resource, composition and authoring smoke without service operation."""
 
 import hashlib
 import json
@@ -36,13 +32,24 @@ def _wheel_payload(path):
         }
 
 
+def _asset_hashes(package):
+    paths = [package / "system.yaml", package / "_artifact.json"]
+    for directory in ("_resources", "_native"):
+        paths.extend(path for path in (package / directory).rglob("*") if path.is_file())
+    return {
+        path.relative_to(package).as_posix(): (
+            hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mode & 0o111,
+        ) for path in paths
+    }
+
+
 def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     for directory in ("claudlobby", "lib", "library", "voices", "templates", "missions"):
         shutil.copytree(REPO / directory, source / directory,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for name in ("pyproject.toml", "setup.py", "README.md", ".gitignore", "fleet.yaml.seed",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "_artifact.json", "_resources", "_native"))
+    for name in ("pyproject.toml", "setup.py", "README.md", ".gitignore", "fleet.yaml.seed", "fleet.yaml.example",
                  "projects.yaml.seed", ".env.seed.example"):
         shutil.copy2(REPO / name, source / name)
     removed_module = source / "claudlobby/_removed_for_build_smoke.py"
@@ -90,7 +97,7 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         for name, path in expected.items():
             assert payload[prefix + name] == (path.read_bytes(), path.stat().st_mode & 0o111)
         source_inputs.update(expected.values())
-    for name in ("fleet.yaml.seed", "projects.yaml.seed", ".env.seed.example",
+    for name in ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
                  "missions/fleet.md.seed"):
         assert payload["claudlobby/_resources/seeds/" + name][0] == (source / name).read_bytes()
         source_inputs.add(source / name)
@@ -134,9 +141,15 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         assert prefix + "bin/claudlobby" not in archive.getnames()
         assert not any(prefix + name in archive.getnames() for name in ignored)
 
-    installed = tmp_path / "installed"
-    _run([sys.executable, "-m", "pip", "install", "--no-deps", "--no-index",
-          "--no-compile", "--target", installed, wheel], tmp_path)
+    release = tmp_path / "release"
+    _run([sys.executable, "-m", "venv", "--system-site-packages", release], tmp_path)
+    python, cli = release / "bin/python", release / "bin/claudlobby"
+    # Reuse development dependencies, but install this wheel into the private
+    # release even if a host copy exists. Never uninstall or replace that copy.
+    _run([python, "-m", "pip", "install", "--ignore-installed", "--no-deps",
+          "--no-index", "--no-compile", wheel], tmp_path)
+    installed = Path(_run([python, "-I", "-c",
+                          "import sysconfig; print(sysconfig.get_path('purelib'))"], tmp_path).strip())
     _run([sys.executable, "-I", "-S", "-B", "-c", """
 import sys
 sys.path.insert(0, sys.argv[1])
@@ -167,5 +180,67 @@ assert not hasattr(r, 'release_id')
 print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha256}))
 """
     installed_identity = json.loads(_run(
-        [sys.executable, "-I", "-S", "-B", "-c", script, installed], tmp_path))
+        [python, "-I", "-S", "-B", "-c", script, installed], tmp_path))
     assert installed_identity == {key: metadata[key] for key in installed_identity}
+
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    data.mkdir()
+    outside.mkdir()
+    assert not data.resolve().is_relative_to(REPO.resolve())
+    (data / "fleet.yaml").write_text("""fleet:
+  name: installed-smoke
+  manager: manager
+  service_prefix: com.installed-smoke
+  system_defaults: false
+  defaults:
+    channels: []
+  bots:
+    manager:
+      expertise: [orchestration]
+    worker:
+      expertise: [software-engineering]
+      skills: [installed-smoke]
+""")
+    package = installed / "claudlobby"
+    immutable_before = _asset_hashes(package)
+    _run([cli, "--root", data, "new-skill", "--name", "installed-smoke",
+          "--description", "Authored outside the installed package"], outside)
+    authored = data / "library/skills/installed-smoke/SKILL.md"
+    assert "Authored outside the installed package" in authored.read_text()
+    assert not authored.resolve().is_relative_to(package.resolve())
+
+    # No sys.path or resource injection: these imports must come from the
+    # installed wheel while the working directory and data root are unrelated.
+    _run([python, "-I", "-B", "-c", """
+import pathlib, plistlib, shlex, sys
+import claudlobby
+from claudlobby.context import resolve_context
+from claudlobby.composer import compose_fleet
+from claudlobby.resources import get_resources, selected_cli
+root, package, cli = map(pathlib.Path, sys.argv[1:])
+assert pathlib.Path(claudlobby.__file__).resolve().parent == package.resolve()
+resources = get_resources()
+assert resources.native == package / '_native'
+assert selected_cli() == cli
+context = resolve_context(root=root)
+assert context.paths.package == resources
+assert context.fleet.manager == 'manager'
+assert all(bot.channels == [] for bot in context.fleet.bots.values())
+assert context.paths.find_library_file('expertise', 'orchestration') == resources.library / 'expertise/orchestration.md'
+outputs = compose_fleet(context.fleet, context.paths)
+assert set(outputs) == {'manager', 'worker'}
+for bot_id, directory in outputs.items():
+    assert directory.is_relative_to(root)
+    assert (directory / 'CLAUDE.md').stat().st_size > 0
+    conf = (directory / 'bot.conf').read_text()
+    for key, value in {'CLAUDLOBBY_ROOT': root, 'CLAUDLOBBY_NATIVE_DIR': resources.native,
+                       'CLAUDLOBBY_CLI': cli}.items():
+        assert f'export {key}={shlex.quote(str(value))}' in conf
+    unit = plistlib.loads((directory / f'com.installed-smoke.{bot_id}.plist').read_bytes())
+    assert unit['ProgramArguments'] == [str(resources.native / 'start-bot.sh'), str(directory)]
+    assert unit['EnvironmentVariables']['CLAUDLOBBY_CLI'] == str(cli)
+    assert unit['EnvironmentVariables']['CLAUDLOBBY_ROOT'] == str(root)
+assert (outputs['worker'] / '.claude/skills/installed-smoke').resolve() == root / 'library/skills/installed-smoke'
+""", data, package, cli], outside)
+    assert _asset_hashes(package) == immutable_before
+    assert not any((data / name).exists() for name in (".git", "pyproject.toml", "claudlobby", "lib"))

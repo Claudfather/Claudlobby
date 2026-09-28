@@ -24,10 +24,12 @@ from claudlobby.config import (
     _coerce_fleet_pulse,
     load_fleet,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 _FLEET = """\
     fleet:
+      manager: astrid
       name: test-fleet
       service_prefix: com.test
       bots:
@@ -42,6 +44,7 @@ _FLEET = """\
 
 _NO_BLOCK = """\
     fleet:
+      manager: astrid
       name: test-fleet
       service_prefix: com.test
       bots:
@@ -51,7 +54,7 @@ _NO_BLOCK = """\
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _write(root: Path, body: str) -> Path:
@@ -147,6 +150,7 @@ class TestEmissionIntoTheUnit:
         body = dedent(
             """\
             fleet:
+              manager: astrid
               name: test-fleet
               service_prefix: com.test
               bots:

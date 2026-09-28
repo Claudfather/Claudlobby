@@ -27,6 +27,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from claudlobby.plane.emit_api import emit_batch  # noqa: E402
+from tests.package_fixtures import source_package
 from claudlobby.plane.view import create_app  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
@@ -133,7 +134,7 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
 
 def _row(root: Path, asg: str) -> dict:
     rows = {r["assignment_id"]: r for r in
-            TestClient(create_app(root)).get("/api/tasks").json()["data"]["assignments"]}
+            TestClient(create_app(root, package=source_package())).get("/api/tasks").json()["data"]["assignments"]}
     return rows[asg]
 
 
@@ -309,7 +310,7 @@ def test_tier_is_amber_below_the_red_boundary_and_red_past_it(tmp_path):
     red = _dispatch(tmp_path, "7a", dispatch_age_h=96, heartbeat="IDLE",
                     worker="bot:f/older")
     rows = {r["assignment_id"]: r for r in
-            TestClient(create_app(tmp_path)).get("/api/tasks")
+            TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks")
             .json()["data"]["assignments"]}
     assert rows[amber]["stale_tier"] == "amber"
     assert rows[red]["stale_tier"] == "red"
@@ -324,7 +325,7 @@ def test_header_need_you_count_and_rail_include_amber_and_red(tmp_path):
               worker="bot:f/older")                                        # red
     _dispatch(tmp_path, "ba", dispatch_age_h=8, heartbeat="BUSY",
               worker="bot:f/busy")                                         # suppressed
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     # the rail / board: two attention rows, both stale_task, one of each tier
     rows = client.get("/api/tasks").json()["data"]["assignments"]
     stale = [r for r in rows if "stale_task" in r["attention_reason"]]
@@ -347,7 +348,7 @@ def test_an_unreachable_plane_fires_no_false_stale_task(tmp_path):
     db = tmp_path / "state" / "plane" / "plane.db"
     db.chmod(0)
     try:
-        body = TestClient(create_app(tmp_path)).get("/api/tasks").json()
+        body = TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks").json()
     finally:
         db.chmod(0o600)
     assert body["state"] != "ok"

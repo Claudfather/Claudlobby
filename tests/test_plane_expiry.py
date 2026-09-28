@@ -8,9 +8,7 @@ nothing; the launcher self-gates; the composer stamps the arming flag.
 
 from __future__ import annotations
 
-import os
 import subprocess
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -18,6 +16,7 @@ from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.expiry import expirable, expired_events
 from claudlobby.plane.queries import ATTENTION_SQL, TASK_STATUS_SQL, attention_params
+from tests.conftest import constructed_env
 from tests.plane_fixtures import plane_root
 
 REPO = Path(__file__).resolve().parent.parent
@@ -112,16 +111,17 @@ def test_negative_horizon_refused():
         expirable(sqlite3.connect(":memory:"), now=NOW, after_days=-1)
 
 
-def _cli(root, *argv):
+def _cli(root, *argv, cli):
     return subprocess.run(
-        [sys.executable, "-m", "claudlobby", "--root", str(root),
-         "plane", "expire", *argv], capture_output=True, text=True, timeout=120)
+        [str(cli), "--root", str(root), "plane", "expire", *argv],
+        capture_output=True, text=True, timeout=120,
+        env=constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=cli))
 
 
-def test_cli_dry_run_then_live(tmp_path):
+def test_cli_dry_run_then_live(tmp_path, test_cli):
     root = _root(tmp_path)
     _seed(root)
-    dry = _cli(root, "--dry-run")
+    dry = _cli(root, "--dry-run", cli=test_cli)
     assert dry.returncode == 0 and "would expire 1" in dry.stdout
     conn = connect(db_path(root))
     try:
@@ -129,7 +129,7 @@ def test_cli_dry_run_then_live(tmp_path):
             "SELECT 1 FROM events WHERE kind='task' AND event='expired'"))
     finally:
         conn.close()
-    live = _cli(root)
+    live = _cli(root, cli=test_cli)
     assert live.returncode == 0 and "expired 1" in live.stdout
     conn = connect(db_path(root))
     try:
@@ -138,13 +138,12 @@ def test_cli_dry_run_then_live(tmp_path):
     finally:
         conn.close()
     assert n == 1
-    assert _cli(root, "--after-days", "-1").returncode == 2   # clean refusal
-    assert _cli(tmp_path / "nope").returncode == 0            # absent db no-op
+    assert _cli(root, "--after-days", "-1", cli=test_cli).returncode == 2
+    assert _cli(tmp_path / "nope", cli=test_cli).returncode == 0  # absent db no-op
 
 
-def _launcher(root, *argv, armed):
-    env = dict(os.environ, CLAUDLOBBY_ROOT=str(root),
-               PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
+def _launcher(root, *argv, cli, armed):
+    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=cli)
     # Since the defaults flip the flag is an opt-OUT: absence RUNS the sweep,
     # and only an exact 0 stops it. The harness spells both explicitly rather
     # than relying on absence, so the pin reads the same way the door does.
@@ -153,16 +152,16 @@ def _launcher(root, *argv, armed):
                           capture_output=True, text=True, timeout=120, env=env)
 
 
-def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path):
+def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path, test_cli):
     """Opt-OUT since the defaults flip. Two halves, and the second is the one
     the ruling is about: a door turned off must SAY so, because a silent skip
     is indistinguishable from a broken timer and that ambiguity is exactly
     what a dormant-by-default estate taught operators to ignore."""
     root = _root(tmp_path)
     _seed(root)
-    on = _launcher(root, "--dry-run", armed=True)
+    on = _launcher(root, "--dry-run", cli=test_cli, armed=True)
     assert on.returncode == 0 and "would expire 1" in on.stdout
-    off = _launcher(root, "--dry-run", armed=False)
+    off = _launcher(root, "--dry-run", cli=test_cli, armed=False)
     assert off.returncode == 0
     # REWRITTEN by the fold (F6): the loud line is now the SHARED gate's
     # (lib-common `switch_is_on`), not this door's own copy — four launchers
@@ -174,14 +173,12 @@ def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path):
     assert "would expire" not in off.stdout
 
 
-def test_launcher_runs_with_no_flag_at_all(tmp_path):
+def test_launcher_runs_with_no_flag_at_all(tmp_path, test_cli):
     """Absence is ON — the flip itself, pinned. This is the assertion that
     fails if someone restores `${FLAG:-0}` while leaving the comments alone."""
-    import os as _os
     root = _root(tmp_path)
     _seed(root)
-    env = dict(HOME=str(root), CLAUDLOBBY_ROOT=str(root),
-               PATH=f"{REPO / '.venv' / 'bin'}:" + _os.environ.get("PATH", ""))
+    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=test_cli)
     r = subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), "--dry-run"],
                        capture_output=True, text=True, timeout=120, env=env)
     assert r.returncode == 0 and "would expire 1" in r.stdout
@@ -190,6 +187,7 @@ def test_launcher_runs_with_no_flag_at_all(tmp_path):
 def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     import yaml
     from claudlobby.composer import compose_host_timers
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -212,7 +210,7 @@ def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
                                            value="1", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     assert "Environment=PLANE_EXPIRE_ENABLED=1" in (
         out / "claudlobby-plane-expire.service").read_text()
     assert "PLANE_EXPIRE" not in (out / "claudlobby-plane-prune.service").read_text()
@@ -225,6 +223,7 @@ def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
     would keep firing with no way to tell why (#1383's class, inverted)."""
     import yaml  # noqa: F401 — mirrors the fixture above
     from claudlobby.composer import compose_host_timers
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -239,7 +238,7 @@ def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
                                            value="0", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     assert "Environment=PLANE_EXPIRE_ENABLED=0" in (
         out / "claudlobby-plane-expire.service").read_text()
 

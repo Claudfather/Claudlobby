@@ -3,6 +3,7 @@ compose (render/0755/reconcile), validator checks, and diff coverage."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 
@@ -17,6 +18,7 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.diff import diff_bot
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.tool_resolve import (
     RESERVED_TOOL_CONTEXT,
@@ -29,7 +31,7 @@ from claudlobby.validator import validate
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _write_tool(
@@ -210,6 +212,7 @@ class TestComposeTools:
         (root / "fleet.yaml").write_text(
             dedent(f"""\
             fleet:
+              manager: worker
               name: test-fleet
               service_prefix: com.test
               bots:
@@ -317,9 +320,9 @@ class TestComposeTools:
             tmp_path, "                  tools: [greeter]\n"
         )
         overlay = paths.root / "local-overlay"
-        # fleet_dir == root in this fixture, so the overlay library is
-        # root/library — already exercised. Point a second Paths at a real
-        # overlay layout instead.
+        # Select the fixture's original greeter as the package base, then
+        # prove the separate fleet overlay shadows that existing tool.
+        package = replace(source_package(), library=paths.overlay_library)
         (overlay / "library").mkdir(parents=True)
         _write_tool(
             overlay / "library",
@@ -327,7 +330,7 @@ class TestComposeTools:
             "type: script\n",
             "OVERLAY\n",
         )
-        shadow_paths = Paths(root=paths.root, fleet_dir=overlay)
+        shadow_paths = Paths(root=paths.root, fleet_dir=overlay, package=package)
         outputs = compose_tool_outputs(bot, fleet, shadow_paths, bot_dir)
         assert outputs["greeter.py"] == "OVERLAY\n"
 
@@ -343,6 +346,7 @@ class TestToolsValidation:
         (root / "fleet.yaml").write_text(
             dedent(f"""\
             fleet:
+              manager: worker
               name: test-fleet
               service_prefix: com.test
               bots:
@@ -438,6 +442,7 @@ class TestToolsDiff:
         (root / "fleet.yaml").write_text(
             dedent("""\
             fleet:
+              manager: worker
               name: test-fleet
               service_prefix: com.test
               bots:

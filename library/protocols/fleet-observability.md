@@ -219,9 +219,9 @@ bots:
   worker-bot:
     hooks:
       PreToolUse:
-        - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+        - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
       PostToolUse:
-        - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+        - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
 ```
 
 Workers emit events but never read them. Managers read events but hooks are optional on them (useful if the manager also does tool work).

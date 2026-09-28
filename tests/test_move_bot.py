@@ -2,9 +2,70 @@
 
 from __future__ import annotations
 
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from claudlobby.__main__ import main
+from tests.package_fixtures import source_package
+
+
+def _native_dir(root: Path) -> Path:
+    return root.parent / "package" / "native"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_move_runtime(tmp_path: Path, monkeypatch):
+    """Use explicit source assets and a private enrollment stub, never services."""
+    import claudlobby.composer as composer
+    import claudlobby.context as context
+
+    source = source_package()
+    native = _native_dir(tmp_path / "claudlobby")
+    native.mkdir(parents=True)
+    for child in source.native.iterdir():
+        if child.name != "spin-up-bot.sh":
+            (native / child.name).symlink_to(child, target_is_directory=child.is_dir())
+    spin_up = native / "spin-up-bot.sh"
+    spin_up.write_text(
+        "#!/bin/bash\n"
+        'printf "%s\\n" "$1" "$CLAUDLOBBY_ROOT" "$FLEET_ROOT" '
+        '"$CLAUDLOBBY_NATIVE_DIR" > "$CLAUDLOBBY_ROOT/enrollment-call"\n'
+    )
+    spin_up.chmod(0o755)
+    package = replace(source, native=native)
+    monkeypatch.setattr(context, "get_resources", lambda: package)
+
+    cli = tmp_path / "package" / "bin" / "claudlobby"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/bash\nprintf '%s\\n' '--boot'\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(context, "selected_cli", lambda: cli)
+    monkeypatch.setattr(composer, "selected_cli", lambda: cli)
+    composer._brief_cli_probe.cache_clear()
+
+    # Keep config/composition and their read-only query helpers real. Only the
+    # direct supervision calls are intercepted; enrollment runs our own stub.
+    real_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def isolated_run(cmd, *args, **kwargs):
+        argv = [str(arg) for arg in cmd]
+        calls.append(argv)
+        executable = Path(argv[0]).name
+        if executable in {"tmux", "systemctl", "launchctl"}:
+            rc = 1 if executable == "tmux" and "has-session" in argv else 0
+            output = "" if kwargs.get("text") else b""
+            return subprocess.CompletedProcess(cmd, rc, output, output)
+        if executable == "spin-up-bot.sh":
+            assert Path(argv[0]) == spin_up and not spin_up.is_symlink()
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", isolated_run)
+    yield calls
+    composer._brief_cli_probe.cache_clear()
 
 
 def _scaffold_fleet(
@@ -15,26 +76,36 @@ def _scaffold_fleet(
     service_prefix: str = "com.test",
     telegram_group_chat_id: str | None = None,
     create_bot_dirs: bool = True,
+    manager: str | None = None,
 ) -> Path:
-    """Create a minimal fleet overlay with bot dirs."""
+    """Create worker fixtures with an explicit, separate fleet owner."""
     fleet_dir = local_dir / fleet_name
     fleet_dir.mkdir(parents=True, exist_ok=True)
+    manager = manager if manager is not None else f"{fleet_name}-manager"
 
-    bots_yaml = "\n".join(
+    manager_yaml = f"    {manager}:\n      expertise: [eng]\n      channels: []"
+    workers_yaml = "\n".join(
         f"    {b}:\n      expertise: [eng]\n      telegram:\n        handle: {b}"
-        for b in bots
+        for b in bots if b != manager
     )
+    bots_yaml = "\n".join(part for part in (manager_yaml, workers_yaml) if part)
     tg_line = (
         f"\n  telegram_group_chat_id: '{telegram_group_chat_id}'"
         if telegram_group_chat_id
         else ""
     )
     (fleet_dir / "fleet.yaml").write_text(
-        f"fleet:\n  name: {fleet_name}\n  service_prefix: {service_prefix}{tg_line}\n  bots:\n{bots_yaml}\n"
+        f"fleet:\n  name: {fleet_name}\n  manager: {manager}\n"
+        f"  service_prefix: {service_prefix}{tg_line}\n  bots:\n{bots_yaml}\n"
+    )
+    expertise = fleet_dir / "library" / "expertise"
+    expertise.mkdir(parents=True, exist_ok=True)
+    (expertise / "eng.md").write_text(
+        "---\ntitle: Engineering\ndescription: Software engineering\n---\n# Engineering\nBuild software.\n"
     )
 
     if create_bot_dirs:
-        for bot in bots:
+        for bot in dict.fromkeys([manager, *bots]):
             bot_dir = fleet_dir / "runtime" / "bots" / bot
             bot_dir.mkdir(parents=True, exist_ok=True)
             (bot_dir / "bot.conf").write_text(
@@ -45,22 +116,9 @@ def _scaffold_fleet(
 
 
 def _scaffold_root(tmp_path: Path) -> Path:
-    """Create a minimal claudlobby root with a working spin-up-bot.sh stub."""
+    """Create mutable host data separately from the injected package assets."""
     root = tmp_path / "claudlobby"
-    (root / "library" / "expertise").mkdir(parents=True)
-    (root / "library" / "expertise" / "eng.md").write_text(
-        "---\ntitle: Engineering\ndescription: Software engineering\n---\n# Engineering\nBuild software.\n"
-    )
-    lib_dir = root / "lib"
-    lib_dir.mkdir()
-    # Create a stub spin-up-bot.sh that exits 0 (tests enrollment path)
-    stub = lib_dir / "spin-up-bot.sh"
-    stub.write_text("#!/bin/bash\nexit 0\n")
-    stub.chmod(0o755)
-    (root / "voices").mkdir()
-    (root / "templates").mkdir()
-    # Minimal template
-    (root / "templates" / "claude.md.j2").write_text("# {{ bot.name }}\n")
+    root.mkdir()
     return root
 
 
@@ -153,8 +211,6 @@ class TestMoveBotDryRun:
             local / "fleet-a" / "runtime" / "bots" / "mybot" / "projects" / "repo"
         )
         projects.mkdir(parents=True)
-        import subprocess
-
         subprocess.run(["git", "init", str(projects)], capture_output=True)
         subprocess.run(
             ["git", "commit", "--allow-empty", "-m", "init"],
@@ -188,6 +244,46 @@ class TestMoveBotDryRun:
 
 
 class TestMoveBotApply:
+    def test_declared_manager_move_refuses_until_source_config_is_updated(
+        self, tmp_path: Path, caplog, _isolated_move_runtime
+    ):
+        """Even --force/cleanup cannot silently replace the source manager."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        source = _scaffold_fleet(
+            local, "fleet-a", ["mybot", "successor"], manager="mybot"
+        )
+        target = _scaffold_fleet(
+            local, "fleet-b", ["mybot"], create_bot_dirs=False
+        )
+        source_yaml = source / "fleet.yaml"
+        original = source_yaml.read_text()
+        source_bot = source / "runtime" / "bots" / "mybot"
+        (source_bot / ".env").write_text("SECRET=keep-me\n")
+        argv = [
+            "--root", str(root), "move-bot", "mybot", "--to", "fleet-b",
+            "--from", "fleet-a", "--apply", "--force", "--cleanup-source",
+        ]
+
+        assert main(argv) == 1
+        assert "update fleet.manager" in caplog.text
+        assert source_yaml.read_text() == original
+        assert (source_bot / ".env").read_text() == "SECRET=keep-me\n"
+        assert not (target / "runtime").exists()
+        assert not _isolated_move_runtime
+        assert not (root / "enrollment-call").exists()
+
+        # The operator explicitly changes the owner and removes the departing
+        # stanza. move-bot must accept that valid config without rewriting it.
+        _scaffold_fleet(
+            local, "fleet-a", [], manager="successor", create_bot_dirs=False
+        )
+        updated = source_yaml.read_text()
+        assert main(argv) == 0
+        assert source_yaml.read_text() == updated
+        assert not source_bot.exists()
+        assert (source / "runtime" / "bots" / "successor").is_dir()
+
     def test_copies_env_and_memory(self, tmp_path: Path):
         root = _scaffold_root(tmp_path)
         local = root / "local"
@@ -334,6 +430,13 @@ class TestMoveBotApply:
             ]
         )
         assert rc == 0  # stub exits 0
+        target = local / "fleet-b"
+        assert (root / "enrollment-call").read_text().splitlines() == [
+            str(target / "runtime" / "bots" / "mybot"),
+            str(root),
+            str(target),
+            str(_native_dir(root)),
+        ]
 
     def test_enrollment_failure_returns_nonzero_and_warns_orphan(
         self, tmp_path: Path, capsys
@@ -348,7 +451,7 @@ class TestMoveBotApply:
         src_bot = src_fleet / "runtime" / "bots" / "mybot"
 
         # Replace stub with one that fails
-        stub = root / "lib" / "spin-up-bot.sh"
+        stub = _native_dir(root) / "spin-up-bot.sh"
         stub.write_text("#!/bin/bash\necho 'enrollment failed' >&2\nexit 1\n")
 
         rc = main(
@@ -381,7 +484,7 @@ class TestMoveBotApply:
         _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
         src_bot = src_fleet / "runtime" / "bots" / "mybot"
 
-        stub = root / "lib" / "spin-up-bot.sh"
+        stub = _native_dir(root) / "spin-up-bot.sh"
         stub.write_text("#!/bin/bash\nexit 1\n")
 
         rc = main(
@@ -456,7 +559,7 @@ class TestMoveBotApply:
         _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
         src_bot = src_fleet / "runtime" / "bots" / "mybot"
 
-        (root / "lib" / "spin-up-bot.sh").unlink()
+        (_native_dir(root) / "spin-up-bot.sh").unlink()
 
         rc = main(
             [
@@ -525,14 +628,15 @@ class TestMoveBotApply:
         _scaffold_fleet(local, "fleet-a", ["mybot"])
 
         # Target fleet references a nonexistent expertise — validation will fail
-        target = local / "fleet-b"
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "fleet.yaml").write_text(
-            "fleet:\n  name: fleet-b\n"
-            "  service_prefix: com.test\n  bots:\n"
-            "    mybot:\n"
-            "      expertise: [nonexistent_expertise]\n"
-            "      telegram:\n        handle: mybot\n"
+        target = _scaffold_fleet(
+            local, "fleet-b", ["mybot"], create_bot_dirs=False
+        )
+        target_yaml = target / "fleet.yaml"
+        target_yaml.write_text(
+            target_yaml.read_text().replace(
+                "    mybot:\n      expertise: [eng]",
+                "    mybot:\n      expertise: [nonexistent_expertise]",
+            )
         )
 
         rc = main(
@@ -550,7 +654,7 @@ class TestMoveBotApply:
         )
         assert rc == 1  # validation error, no mutation occurred
 
-    def test_kills_source_tmux_server(self, tmp_path: Path, monkeypatch):
+    def test_kills_source_tmux_server(self, tmp_path: Path, _isolated_move_runtime):
         """move-bot --apply tears down the source bot's per-bot tmux server so the
         move doesn't strand an orphaned server on the source host."""
         root = _scaffold_root(tmp_path)
@@ -558,24 +662,6 @@ class TestMoveBotApply:
         _scaffold_fleet(local, "fleet-a", ["mybot"])
         _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
 
-        import claudlobby.commands.move_bot as move_bot_mod
-
-        calls: list[list[str]] = []
-
-        def fake_run(cmd, *a, **k):
-            calls.append(cmd)
-
-            class _R:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-
-            return _R()
-
-        monkeypatch.setattr(move_bot_mod.subprocess, "run", fake_run)
-
-        # --force skips the active-session pre-flight (the mock would otherwise
-        # report a live session and abort before teardown).
         rc = main(
             [
                 "--root",
@@ -591,4 +677,4 @@ class TestMoveBotApply:
             ]
         )
         assert rc == 0
-        assert ["tmux", "-L", "com.test.mybot", "kill-server"] in calls
+        assert ["tmux", "-L", "com.test.mybot", "kill-server"] in _isolated_move_runtime

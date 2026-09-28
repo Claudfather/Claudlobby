@@ -22,6 +22,7 @@ from claudlobby.composer import (
 from claudlobby.config import load_fleet
 from claudlobby.freshbox import audit_bot
 from claudlobby.loader import iter_library_requires, library_requires
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.plane.registry_emit import bot_payload
 from claudlobby.validator import validate
@@ -72,7 +73,7 @@ def _equip(fleet_dir: Path, bot_id: str, **fields: list[str]) -> None:
 
 
 def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
 
 # ---------------------------------------------------------------------------
@@ -140,12 +141,12 @@ class TestIterLibraryRequires:
         (tmp_path / "library" / "protocols" / "sprocket.md").write_text(
             "---\ntitle: Sprocket\nrequires:\n  skills: [gadget]\n---\n\n# Sprocket\n"
         )
-        paths = Paths(root=tmp_path, fleet_dir=None)
+        paths = Paths(root=tmp_path, fleet_dir=None, package=source_package())
         pairs = iter_library_requires(paths, "protocols", ["sprocket"])
         assert pairs == [("sprocket", {"skills": ["gadget"]})]
 
     def test_missing_entry_yields_empty_dict_not_skipped(self, tmp_path):
-        paths = Paths(root=tmp_path, fleet_dir=None)
+        paths = Paths(root=tmp_path, fleet_dir=None, package=source_package())
         assert iter_library_requires(paths, "protocols", ["ghost"]) == [("ghost", {})]
 
     def test_folder_expansion_resolves_members(self, tmp_path):
@@ -155,7 +156,7 @@ class TestIterLibraryRequires:
             "---\ntitle: One\nrequires:\n  skills: [a]\n---\n\n# One\n"
         )
         (d / "two.md").write_text("---\ntitle: Two\n---\n\n# Two\n")
-        paths = Paths(root=tmp_path, fleet_dir=None)
+        paths = Paths(root=tmp_path, fleet_dir=None, package=source_package())
         pairs = dict(iter_library_requires(paths, "protocols", ["pack/"]))
         assert pairs == {"pack/one": {"skills": ["a"]}, "pack/two": {}}
 
@@ -206,7 +207,7 @@ class TestResolveEffectiveSkills:
             "protocols",
             replace(defaults.REGISTRY["protocols"], entries=("needs-gadget",)),
         )
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
 
         fleet_on, _ = load_fleet(_write_fleet_yaml(root, protocols_default=True))
         bot_on = fleet_on.bots["worker"]
@@ -229,7 +230,7 @@ class TestResolveEffectiveSkills:
             "protocols",
             replace(defaults.REGISTRY["protocols"], entries=("needs-gadget",)),
         )
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         fleet_path = _write_fleet_yaml(root, protocols_default=False, worker_skills=["gadget"])
         fleet, _ = load_fleet(fleet_path)
         bot = fleet.bots["worker"]
@@ -262,6 +263,7 @@ def _write_fleet_yaml(
         dedent(f"""\
         fleet:
           name: test-fleet
+          manager: worker
           service_prefix: com.test
           system_defaults:
             protocols: {str(protocols_default).lower()}

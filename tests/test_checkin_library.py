@@ -14,6 +14,7 @@ from pathlib import Path
 from claudlobby.composer import compose_claude_md
 from claudlobby.config import load_fleet
 from claudlobby.loader import parse_frontmatter
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.status import BotStatus, format_json
 from tests.conftest import install_real_template
@@ -33,8 +34,8 @@ DOORS = ['claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json'
          'claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --since 7d --raised --json',
          'claudlobby --fleet "$FLEET_NAME" brief --bot $BOT_ID --json',
          'claudlobby --fleet "$FLEET_NAME" status --json', "claudron lookup --limit 5", "gh issue list",
-         'bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<\'EOF\'', 'ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" <<\'EOF\'', '--checkin "$ck"',
-         'ck=$(bash "$CLAUDLOBBY_ROOT/lib/checkin-record.sh" --dry-run <<\'EOF\'', ') && claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json',
+         'bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<\'EOF\'', 'ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<\'EOF\'', '--checkin "$ck"',
+         'ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" --dry-run <<\'EOF\'', ') && claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json',
          "lib/dispatch-task.sh", "--checkin", "--project", "lib/tg-post.sh", "## Projects", "## Fleet Mission",
          "pane_state", "issues_seen", "DRY-RUN", "checkins[0]", "unavailable"]
 CONTRACT = REPO / "lib" / "checkin-contract.py"
@@ -47,7 +48,7 @@ def test_the_record_template_carries_every_contract_key():
     # the here-doc is the model's only example of the contract; a dropped key would refuse
     # every real check-in at rc 2 and the fallback would keep writing stub rows (cycle-8 devex)
     text = SKILL.read_text()
-    record = re.search(r"```bash\nck=\$\(bash \"\$CLAUDLOBBY_ROOT/lib/checkin-record.sh\" <<'EOF'\n(.*?)\nEOF", text, re.S).group(1)
+    record = re.search(r"```bash\nck=\$\(bash \"\$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh\" <<'EOF'\n(.*?)\nEOF", text, re.S).group(1)
     for key in (*cc.INPUTS_COUNTS, *cc.INPUTS_LISTS, *cc.DELTA_COUNTS, "prev_checkin_id", "project_key", "rationale", "decided", "reason", "held"):
         assert f'"{key}"' in record, f"the RECORD template lost {key}"
 
@@ -135,7 +136,7 @@ def test_the_skill_grants_cover_its_own_commands_and_nothing_forbidden():
     assert cmds, "no command lines found in the skill"
     assert any(c.startswith("gh issue list ") for c in cmds)          # the wrapped span IS collected (cycle-3 R7)
     assert any("--dry-run" in c for c in cmds)                          # the dry run has a runnable invocation
-    assert any(c.startswith('bash "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh"') and '"$ck"' in c for c in cmds)   # the act rides the record call (cycle-7 R1)
+    assert any(c.startswith('bash "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh"') and '"$ck"' in c for c in cmds)   # the act rides the record call (cycle-7 R1)
     for block in re.findall(r"```bash\n(.*?)```", SKILL.read_text(), re.S):                                # …and none hides in a fenced block
         for line in block.splitlines():
             for piece in line.split(" && "):
@@ -165,7 +166,7 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
     (fleet_dir / "fleet.yaml").write_text(text)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     grants = _resolve_skill_grants(
-        fleet.bots["lead"].skills, Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        fleet.bots["lead"].skills, Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
     )
     for g in ("Bash(*checkin-record.sh*)", "Bash(*dispatch-task.sh*)", "Bash(*tg-post.sh*)",
               "Bash(claudlobby --fleet * checkins *)", "Bash(claudlobby --fleet * brief *)",
@@ -201,7 +202,7 @@ def test_both_sections_compose_for_a_hand_equipped_manager(fleet_dir):
         "    lead:\n", "    lead:\n      protocols: [checkin]\n", 1)
     (fleet_dir / "fleet.yaml").write_text(text)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    md = compose_claude_md(fleet.bots["lead"], fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir))
+    md = compose_claude_md(fleet.bots["lead"], fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package()))
     assert "### Manager" in md and "### Worker" in md
     assert "Silence is the default" in md
 

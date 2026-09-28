@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import sys
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,18 @@ class PackageResources:
     artifact_id: str
     source_revision: str | None
     content_sha256: str
+
+
+def selected_cli() -> Path:
+    """Console entrypoint in this interpreter's release, never ambient PATH.
+
+    Keep the venv spelling of sys.executable: resolving its interpreter symlink
+    would select the base Python installation instead of the active release.
+    """
+    executable = Path(sys.executable).absolute().parent / "claudlobby"
+    if not executable.is_file():
+        raise RuntimeError(f"Selected release has no CLI entrypoint: {executable}")
+    return executable
 
 
 def get_resources() -> PackageResources:

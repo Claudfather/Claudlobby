@@ -13,7 +13,7 @@
 #             from <bot-name> (callers that already know the bot's dir pass it)
 #
 # Skips dispatch if the pane appears busy (active spinner). Logs to
-# $CLAUDLOBBY_ROOT/lib/bot-sweep-cron.log.
+# $CLAUDLOBBY_ROOT/state/logs/bot-sweep-cron.log.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,7 +42,7 @@ if [ -z "$BOT_SOCKET" ]; then
 fi
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
-LOG="$CLAUDLOBBY_ROOT/lib/bot-sweep-cron.log"
+LOG="$CLAUDLOBBY_ROOT/state/logs/bot-sweep-cron.log"
 mkdir -p "$(dirname "$LOG")"
 TS=$(date -Iseconds)
 

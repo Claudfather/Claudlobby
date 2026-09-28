@@ -33,6 +33,7 @@ from claudlobby.composer import (
     compose_systemd_unit,
 )
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths, tmux_socket_for_bot
 
 
@@ -276,6 +277,7 @@ class TestSocketWrappers:
 
 _FLEET = """\
     fleet:
+      manager: lead
       name: test-fleet
       service_prefix: com.test
       system_defaults: false
@@ -292,7 +294,7 @@ _FLEET = """\
 
 
 def _make_paths(root):
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _conf_val(conf, key):

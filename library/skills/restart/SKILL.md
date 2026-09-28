@@ -32,7 +32,7 @@ Parse `$ARGUMENTS`:
 
 2. **Notify on the channel.** Send a message confirming the handoff completed and that the restart is happening now. The restart kills this session — the user needs to know it is intentional and that context was saved. Best-effort: if the channel is unavailable, proceed anyway.
 
-3. **Restart.** Run `"$CLAUDLOBBY_ROOT/lib/spin-up-bot.sh" "${BOT_DIR:-$(pwd)}"`. `spin-up-bot.sh` is the cross-platform, idempotent restart primitive — it `systemctl --user restart`s on Linux, `launchctl kickstart -k`s on macOS, and falls back to `start-bot.sh` elsewhere. This will:
+3. **Restart.** Run `"$CLAUDLOBBY_NATIVE_DIR/spin-up-bot.sh" "${BOT_DIR:-$(pwd)}"`. `spin-up-bot.sh` is the cross-platform, idempotent restart primitive — it `systemctl --user restart`s on Linux, `launchctl kickstart -k`s on macOS, and falls back to `start-bot.sh` elsewhere. This will:
    - Kill this session
    - Start a new session via `start-bot.sh`
    - The new session injects a session-resume command as its first keystroke **when a resume capability is installed** (also age-gated: it resumes only from a checkpoint fresher than ~24h, else clean-starts), then runs the bot's `STARTUP_PROMPT`. Resume no longer depends on `STARTUP_PROMPT` carrying it. If no resume capability is installed, `start-bot.sh` logs a `RESUME SKIP` line naming the reason and starts clean — so the handoff you captured is still on disk for a human or a later session, it simply is not replayed automatically.

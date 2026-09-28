@@ -36,6 +36,7 @@ import pytest
 
 from claudlobby.composer import compose_bot_conf, compose_settings_local
 from claudlobby.config import BotConfig, FleetConfig
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -65,11 +66,11 @@ def _paths(tmp_path: Path) -> Paths:
     root = tmp_path / "claudlobby"
     (root / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
     (root / "lib").mkdir(exist_ok=True)
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _fleet(bot: BotConfig) -> FleetConfig:
-    return FleetConfig(name="t", service_prefix="p", bots={bot.bot_id: bot})
+    return FleetConfig(manager=bot.bot_id, name="t", service_prefix="p", bots={bot.bot_id: bot})
 
 
 # ===========================================================================

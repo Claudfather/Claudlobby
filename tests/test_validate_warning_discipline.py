@@ -20,6 +20,7 @@ from claudlobby import validator as validator_module
 from claudlobby.commands.core import cmd_validate
 from claudlobby.config import GithubAppConfig, load_fleet
 from claudlobby.doctor import DoctorReport, check_fleet_validation
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import (
     UNCATEGORIZED,
@@ -34,7 +35,7 @@ WORKERS = ["w2", "w3", "w4", "w5"]
 
 
 def _paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=None)
+    return Paths(root=root, fleet_dir=None, package=source_package())
 
 
 def _env(monkeypatch) -> None:

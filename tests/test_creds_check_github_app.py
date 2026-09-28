@@ -64,7 +64,7 @@ esac
 
     fleet_dir = root / "local" / "f"
     (fleet_dir / "runtime" / "bots").mkdir(parents=True)
-    (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: f\n  bots:\n    b1:\n      expertise: [x]\n")
+    (fleet_dir / "fleet.yaml").write_text("fleet:\n  manager: b1\n  name: f\n  bots:\n    b1:\n      expertise: [x]\n")
     env_lines = []
     if pat:
         env_lines.append(f'GITHUB_PAT="{pat}"')

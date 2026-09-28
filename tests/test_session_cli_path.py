@@ -1,33 +1,23 @@
-"""#1567 -- a bot session resolves the bare `claudlobby` CLI on a venv install.
+"""A bot session selects its composed CLI without exposing a release's tools.
 
-`lib/start-bot.sh` sets a bot session PATH to system dirs, `~/.local/bin`, the
-bun and npm global bins, and Homebrew -- never the compositor's own venv. On a
-host whose install keeps the CLI only at
-`$CLAUDLOBBY_ROOT/.venv/bin/claudlobby` (the PEP 668 venv shape
-getting-started.md documents), a shipped skill grant that names the CLI bare
-(`Bash(claudlobby checkins *)`) cannot resolve inside the session, and the
-path-form fallback a session finds on its own does not match that grant --
-outside auto permission mode an unattended beat stalls on a prompt.
-
-`session_cli_path` (lib/lib-common.sh) is the fix: called once, right after
-start-bot.sh sets PATH, it symlinks the one `claudlobby` name into a
-host-local shim dir and appends that dir to PATH, leaving everything a
-session already resolves unchanged. These tests exercise the REAL function
-the same way tests/test_roster_doors.py exercises `declared_bots_strict` -- a
-subprocess sources the real lib/lib-common.sh under a fake CLAUDLOBBY_ROOT and
-a controlled PATH, calls it, and prints what it needs to assert on.
+Exercise the real session_cli_path function under private data and release
+roots. The per-bot link must win over an ambient CLI, while python/pip retain
+their original PATH resolution. No application imports or live boots occur.
 """
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "lib" / "lib-common.sh"
 START_BOT = REPO_ROOT / "lib" / "start-bot.sh"
 
-MARKER = "VENV_CLI_MARKER"
+MARKER = "SELECTED_CLI_MARKER"
 SAFE_PATH = "/usr/bin:/bin"
 
 
@@ -37,28 +27,37 @@ def _stub(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def _bare_root(tmp_path: Path) -> Path:
-    root = tmp_path / "root"
-    root.mkdir()
-    return root
-
-
-def _venv_root(tmp_path: Path, extra_bins: tuple[str, ...] = ()) -> Path:
-    root = tmp_path / "root"
-    _stub(root / ".venv" / "bin" / "claudlobby", f"echo {MARKER}")
+def _installation(tmp_path: Path, bot_name: str = "solo", extra_bins=()):
+    root = tmp_path / "data"
+    bot_dir = root / "runtime" / "bots" / bot_name
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    cli = tmp_path / "releases" / bot_name / "bin" / "claudlobby"
+    _stub(cli, f"echo {MARKER}_{bot_name}")
     for name in extra_bins:
-        _stub(root / ".venv" / "bin" / name, f"echo {name}")
-    return root
+        _stub(cli.parent / name, f"echo RELEASE_{name}")
+    return root, bot_dir, cli
 
 
-def _run(root: Path, path: str, snippet: str) -> subprocess.CompletedProcess:
-    """Source the real lib-common.sh (relaxed mode) then run snippet."""
+def _env(root: Path, bot_dir: Path | None, cli: Path | None, path: str) -> dict:
+    env = {
+        "PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root),
+        "HOME": str(root), "PATH": path,
+    }
+    if bot_dir is not None:
+        env["BOT_DIR"] = str(bot_dir)
+    if cli is not None:
+        env["CLAUDLOBBY_CLI"] = str(cli)
+    return env
+
+
+def _script(snippet: str) -> str:
+    return f"source {shlex.quote(str(LIB))} >/dev/null 2>&1; set +e; {snippet}"
+
+
+def _run(root, bot_dir, cli, path, snippet) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", "-c", f'set +e; source "{LIB}" >/dev/null 2>&1; set +e; {snippet}'],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": path},
+        ["/bin/bash", "-c", _script(snippet)], capture_output=True, text=True,
+        timeout=15, env=_env(root, bot_dir, cli, path),
     )
 
 
@@ -66,119 +65,131 @@ def _path_line(stdout: str) -> str:
     return next(ln for ln in stdout.splitlines() if ln.startswith("PATH="))[len("PATH="):]
 
 
-def test_a_venv_only_install_resolves_the_bare_cli(tmp_path: Path):
-    root = _venv_root(tmp_path)
+STATUS = 'session_cli_path; rc=$?; printf "RC=%s\\nPATH=%s\\n" "$rc" "$PATH"'
+
+
+def test_selected_install_resolves_the_bare_cli(tmp_path: Path):
+    root, bot_dir, cli = _installation(tmp_path)
     result = _run(
-        root,
-        SAFE_PATH,
-        'session_cli_path; rc=$?; '
-        'printf "RC=%s\\n" "$rc"; '
-        'printf "RESOLVED=%s\\n" "$(command -v claudlobby)"; '
-        'printf "OUTPUT=%s\\n" "$(claudlobby)"',
+        root, bot_dir, cli, SAFE_PATH,
+        STATUS + '; printf "RESOLVED=%s\\nOUTPUT=%s\\n" "$(command -v claudlobby)" "$(claudlobby)"',
     )
+    link = bot_dir / ".cli" / "bin" / "claudlobby"
     assert "RC=0" in result.stdout, (result.stdout, result.stderr)
-    assert f"RESOLVED={root}/state/bin/claudlobby" in result.stdout, result.stdout
-    assert f"OUTPUT={MARKER}" in result.stdout, result.stdout
-    shim = root / "state" / "bin" / "claudlobby"
-    assert shim.is_symlink(), "state/bin/claudlobby must be a symlink"
-    assert shim.resolve() == (root / ".venv" / "bin" / "claudlobby").resolve()
+    assert f"RESOLVED={link}" in result.stdout
+    assert f"OUTPUT={MARKER}_solo" in result.stdout
+    assert link.is_symlink() and link.readlink() == cli
+    assert not (root / "state" / "bin").exists()
 
 
 def test_only_the_one_name_is_exposed(tmp_path: Path):
-    root = _venv_root(tmp_path, extra_bins=("pip", "python"))
-    result = _run(root, SAFE_PATH, 'session_cli_path; printf "RC=%s\\n" "$?"')
-    assert "RC=0" in result.stdout, (result.stdout, result.stderr)
-    shim_dir = root / "state" / "bin"
-    assert sorted(p.name for p in shim_dir.iterdir()) == ["claudlobby"]
-
-
-def test_the_shim_dir_is_appended_never_prepended(tmp_path: Path):
-    root = _venv_root(tmp_path)
-    custom = tmp_path / "custom" / "bin"
-    custom.mkdir(parents=True)
-    original = ["/usr/bin", "/bin", str(custom)]
-    result = _run(root, ":".join(original), 'session_cli_path; printf "PATH=%s\\n" "$PATH"')
-    entries = _path_line(result.stdout).split(":")
-    assert entries[:-1] == original, entries
-    assert entries[-1] == f"{root}/state/bin", entries
-
-
-def test_a_host_with_the_cli_already_on_path_is_untouched(tmp_path: Path):
-    # A root that HAS a venv CLI: with none, the second guard (no venv CLI ->
-    # return) hides the first, and removing the already-resolves guard passed
-    # this test unnoticed (a surviving mutant found it). Only the guard under
-    # test may be what leaves PATH alone here.
-    root = _venv_root(tmp_path)
-    early_bin = tmp_path / "earlybin"
-    _stub(early_bin / "claudlobby", "echo EARLY_MARKER")
-    original = f"{early_bin}:{SAFE_PATH}"
+    root, bot_dir, cli = _installation(tmp_path, extra_bins=("pip", "python"))
+    ambient = tmp_path / "ambient"
+    for name in ("pip", "python"):
+        _stub(ambient / name, f"echo AMBIENT_{name}")
     result = _run(
-        root, original,
-        'session_cli_path; rc=$?; printf "RC=%s\\n" "$rc"; printf "PATH=%s\\n" "$PATH"',
+        root, bot_dir, cli, f"{ambient}:{SAFE_PATH}",
+        STATUS + '; python; pip',
     )
     assert "RC=0" in result.stdout, (result.stdout, result.stderr)
-    assert _path_line(result.stdout) == original, result.stdout
-    assert not (root / "state").exists()
+    assert "AMBIENT_python\nAMBIENT_pip" in result.stdout
+    assert sorted(p.name for p in (bot_dir / ".cli" / "bin").iterdir()) == ["claudlobby"]
+    assert str(cli.parent) not in _path_line(result.stdout).split(":")
 
 
-def test_no_venv_cli_means_no_change_and_no_error(tmp_path: Path):
-    root = _bare_root(tmp_path)
+def test_only_the_bot_cli_directory_is_prepended(tmp_path: Path):
+    root, bot_dir, cli = _installation(tmp_path)
+    original = ["/usr/bin", "/bin", str(tmp_path / "custom")]
+    result = _run(root, bot_dir, cli, ":".join(original), STATUS)
+    assert _path_line(result.stdout).split(":") == [str(bot_dir / ".cli" / "bin"), *original]
+
+
+def test_selected_cli_replaces_stale_path_precedence(tmp_path: Path):
+    root, bot_dir, cli = _installation(tmp_path)
+    ambient = tmp_path / "ambient"
+    _stub(ambient / "claudlobby", "echo STALE_CLI")
     result = _run(
-        root, SAFE_PATH,
-        'session_cli_path; rc=$?; printf "RC=%s\\n" "$rc"; printf "PATH=%s\\n" "$PATH"',
+        root, bot_dir, cli, f"{ambient}:{SAFE_PATH}",
+        'claudlobby; ' + STATUS + '; claudlobby',
     )
+    assert result.stdout.splitlines()[0] == "STALE_CLI"
     assert "RC=0" in result.stdout, (result.stdout, result.stderr)
-    assert _path_line(result.stdout) == SAFE_PATH, result.stdout
-    assert not (root / "state").exists()
+    assert result.stdout.splitlines()[-1] == f"{MARKER}_solo"
 
 
-def test_it_is_idempotent_across_boots(tmp_path: Path):
-    root = _venv_root(tmp_path)
-    snippet = 'session_cli_path; rc=$?; printf "RC=%s\\n" "$rc"; printf "PATH=%s\\n" "$PATH"'
-    first = _run(root, SAFE_PATH, snippet)
-    second = _run(root, SAFE_PATH, snippet)
-    for result in (first, second):
+@pytest.mark.parametrize("failure", ("unset", "missing", "not-executable", "relative"))
+def test_unusable_selected_cli_refuses_before_mutation(tmp_path: Path, failure: str):
+    root, bot_dir, cli = _installation(tmp_path)
+    # Neither an ambient CLI nor a guessed data-root venv licenses success.
+    _stub(root / ".venv" / "bin" / "claudlobby", "echo GUESSED_CLI")
+    selected = cli
+    if failure == "unset":
+        selected = None
+    elif failure == "missing":
+        selected = tmp_path / "absent" / "claudlobby"
+    elif failure == "not-executable":
+        cli.chmod(0o644)
+    else:
+        selected = Path("relative/claudlobby")
+    original = f"{root}/.venv/bin:{SAFE_PATH}"
+    result = _run(root, bot_dir, selected, original, STATUS)
+    assert "RC=1" in result.stdout, (result.stdout, result.stderr)
+    assert "CLAUDLOBBY_CLI" in result.stderr
+    assert _path_line(result.stdout) == original
+    assert not (bot_dir / ".cli").exists()
+
+
+def test_unresolved_bot_dir_refuses_before_mutation(tmp_path: Path):
+    root, bot_dir, cli = _installation(tmp_path)
+    result = _run(root, None, cli, SAFE_PATH, STATUS)
+    assert "RC=1" in result.stdout, (result.stdout, result.stderr)
+    assert "BOT_DIR" in result.stderr
+    assert _path_line(result.stdout) == SAFE_PATH
+    assert not (bot_dir / ".cli").exists()
+    assert not (root / ".cli").exists()
+
+
+def test_it_is_idempotent_across_boots_and_repeated_calls(tmp_path: Path):
+    root, bot_dir, cli = _installation(tmp_path)
+    for _ in range(2):
+        result = _run(root, bot_dir, cli, SAFE_PATH, 'session_cli_path; ' + STATUS)
         assert "RC=0" in result.stdout, (result.stdout, result.stderr)
-        entries = _path_line(result.stdout).split(":")
-        assert entries.count(f"{root}/state/bin") == 1, entries
-    shim_dir = root / "state" / "bin"
-    assert [p.name for p in shim_dir.iterdir()] == ["claudlobby"]
-    assert (shim_dir / "claudlobby").is_symlink()
+        assert _path_line(result.stdout).split(":").count(str(bot_dir / ".cli" / "bin")) == 1
+    assert [p.name for p in (bot_dir / ".cli" / "bin").iterdir()] == ["claudlobby"]
 
 
-def test_a_read_only_state_dir_never_fails_the_boot(tmp_path: Path):
-    root = _venv_root(tmp_path)
-    state_dir = root / "state"
-    state_dir.mkdir()
-    state_dir.chmod(0o555)
-    marker = tmp_path / "trapped"
-    # -E (errtrace) is armed explicitly, the same way install_error_trap arms
-    # it, so the ERR trap actually reaches inside the session_cli_path
-    # function rather than only top-level commands (#844) -- without it this
-    # test could not tell a guarded failure from a trap that never runs at
-    # all.
-    trap_body = f'printf TRAPPED > "{marker}"'
-    script = (
-        f'source "{LIB}" >/dev/null 2>&1; '
-        'set -Eeuo pipefail; '
-        f"trap '{trap_body}' ERR; "
-        'session_cli_path; rc=$?; '
-        'printf "RC=%s\\n" "$rc"; '
-        'printf "PATH=%s\\n" "$PATH"'
-    )
-    try:
-        result = subprocess.run(
-            ["bash", "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": SAFE_PATH},
-        )
-        assert "RC=0" in result.stdout, (result.stdout, result.stderr)
-        assert _path_line(result.stdout) == SAFE_PATH, result.stdout
-        assert not marker.exists(), "ERR trap fired: session_cli_path let a failure propagate"
-    finally:
-        state_dir.chmod(0o755)
+def test_an_operator_file_is_not_overwritten(tmp_path: Path):
+    root, bot_dir, cli = _installation(tmp_path)
+    link = bot_dir / ".cli" / "bin" / "claudlobby"
+    _stub(link, "echo OPERATOR_FILE")
+    before = link.read_bytes()
+    result = _run(root, bot_dir, cli, SAFE_PATH, STATUS)
+    assert "RC=1" in result.stdout, (result.stdout, result.stderr)
+    assert "non-symlink" in result.stderr
+    assert _path_line(result.stdout) == SAFE_PATH
+    assert not link.is_symlink() and link.read_bytes() == before
+
+
+def test_a_redirected_cli_directory_is_not_written(tmp_path: Path):
+    root, bot_dir, cli = _installation(tmp_path)
+    external = tmp_path / "operator"
+    external.mkdir()
+    (bot_dir / ".cli").symlink_to(external, target_is_directory=True)
+    result = _run(root, bot_dir, cli, SAFE_PATH, STATUS)
+    assert "RC=1" in result.stdout, (result.stdout, result.stderr)
+    assert "redirected" in result.stderr
+    assert not list(external.iterdir())
+
+
+def test_extra_cli_directory_tools_are_not_exposed(tmp_path: Path):
+    root, bot_dir, cli = _installation(tmp_path)
+    extra = bot_dir / ".cli" / "bin" / "python"
+    _stub(extra, "echo OPERATOR_PYTHON")
+    result = _run(root, bot_dir, cli, SAFE_PATH, STATUS)
+    assert "RC=1" in result.stdout, (result.stdout, result.stderr)
+    assert "unexpected" in result.stderr
+    assert _path_line(result.stdout) == SAFE_PATH
+    assert not (extra.parent / "claudlobby").exists()
 
 
 def test_the_launcher_calls_it_right_after_it_sets_path():
@@ -190,59 +201,33 @@ def test_the_launcher_calls_it_right_after_it_sets_path():
     assert path_idx < call_idx < tiered_idx, (path_idx, call_idx, tiered_idx)
 
 
-def test_every_concurrent_boot_gets_the_cli_not_just_the_race_winner(tmp_path: Path):
-    """Fix round 1 (#1567) -- 18 REAL concurrent boots, not 18 sequential calls.
-
-    The first cut gated PATH on whether this process's own `ln -sfn` won a
-    filesystem race, so a losing process returned before ever touching PATH
-    even though a sibling had already produced a perfectly usable link one
-    syscall earlier. PATH is set once per session, so a race loser had no
-    bare `claudlobby` for its whole life -- measured 8 of 18 misses on a
-    cold wave. The fix reads the link on disk instead of trusting the exit
-    status of its own `ln` call, so every boot must converge regardless of
-    who wins the race to create it.
-    """
-    root = _venv_root(tmp_path)
-    target = f"{root}/state/bin/claudlobby"
-    driver = (
-        "for i in $(seq 1 18); do "
-        f'( source "{LIB}" >/dev/null 2>&1; set +e; session_cli_path; '
-        f'if [ "$(command -v claudlobby)" = "{target}" ]; then echo OK; else echo MISS; fi ) & '
-        "done; "
-        "wait"
-    )
-    for wave in range(3):
-        result = subprocess.run(
-            ["bash", "-c", driver],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": SAFE_PATH},
+def test_concurrent_bots_keep_their_own_selected_release(tmp_path: Path):
+    installations = [_installation(tmp_path, name) for name in ("first", "second")]
+    # Two starts per bot also cover the cold-link creation race.
+    starts = installations * 2
+    jobs = [
+        subprocess.Popen(
+            ["/bin/bash", "-c", _script('session_cli_path || exit 1; claudlobby')],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=_env(root, bot_dir, cli, SAFE_PATH),
         )
-        lines = [ln for ln in result.stdout.splitlines() if ln in ("OK", "MISS")]
-        assert len(lines) == 18, (wave, result.stdout, result.stderr)
-        misses = lines.count("MISS")
-        assert misses == 0, (
-            f"wave {wave}: {misses} of 18 concurrent boots did not get the CLI on PATH -- "
-            f"stdout={result.stdout!r} stderr={result.stderr!r}"
-        )
-    shim_dir = root / "state" / "bin"
-    assert [p.name for p in shim_dir.iterdir()] == ["claudlobby"]
+        for root, bot_dir, cli in starts
+    ]
+    results = [job.communicate(timeout=15) for job in jobs]
+    for job, (out, err), (_, bot_dir, cli) in zip(jobs, results, starts):
+        assert job.returncode == 0, (out, err)
+        assert out.strip() == f"{MARKER}_{bot_dir.name}"
+        assert (bot_dir / ".cli" / "bin" / "claudlobby").readlink() == cli
+    assert not (installations[0][0] / "state" / "bin").exists()
 
 
 def test_a_stale_link_is_repointed(tmp_path: Path):
-    root = _venv_root(tmp_path)
-    shim_dir = root / "state" / "bin"
-    shim_dir.mkdir(parents=True)
-    stale_target = root / "nonexistent" / "claudlobby"
-    (shim_dir / "claudlobby").symlink_to(stale_target)
-    result = _run(
-        root, SAFE_PATH,
-        'session_cli_path; rc=$?; printf "RC=%s\\n" "$rc"; '
-        'printf "RESOLVED=%s\\n" "$(command -v claudlobby)"',
-    )
+    root, bot_dir, cli = _installation(tmp_path)
+    link = bot_dir / ".cli" / "bin" / "claudlobby"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(tmp_path / "old-release" / "claudlobby")
+    result = _run(root, bot_dir, cli, SAFE_PATH, STATUS + '; claudlobby')
     assert "RC=0" in result.stdout, (result.stdout, result.stderr)
-    assert f"RESOLVED={root}/state/bin/claudlobby" in result.stdout, result.stdout
-    entries = sorted(p.name for p in shim_dir.iterdir())
-    assert entries == ["claudlobby"], entries
-    assert (shim_dir / "claudlobby").resolve() == (root / ".venv" / "bin" / "claudlobby").resolve()
+    assert result.stdout.splitlines()[-1] == f"{MARKER}_solo"
+    assert link.readlink() == cli
+    assert [p.name for p in link.parent.iterdir()] == ["claudlobby"]

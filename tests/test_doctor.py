@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
@@ -24,6 +25,7 @@ from claudlobby.doctor import (
     format_report,
     run_doctor,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
@@ -38,6 +40,7 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
     (root / "fleet.yaml").write_text(
         dedent("""\
         fleet:
+          manager: worker
           name: test-fleet
           service_prefix: com.test
           bots:
@@ -83,7 +86,7 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
     (root / "runtime" / "bots").mkdir(parents=True)
     (root / "lib").mkdir()
 
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     fleet, _md = load_fleet(root / "fleet.yaml")
     return root, fleet, paths
 
@@ -123,6 +126,9 @@ class TestCheckMcpConfigs:
 
     def test_fail_when_fragment_missing(self, doctor_fleet):
         root, fleet, paths = doctor_fleet
+        empty_base = root.parent / "package" / "library"
+        empty_base.mkdir(parents=True)
+        paths = replace(paths, package=replace(source_package(), library=empty_base))
         (root / "library" / "mcp" / "github.json").unlink()
         report = DoctorReport()
         check_mcp_configs(fleet, paths, report)
@@ -776,6 +782,7 @@ def _declare_railway(root: Path) -> "FleetConfig":  # noqa: F821
     (root / "fleet.yaml").write_text(
         dedent("""\
         fleet:
+          manager: worker
           name: test-fleet
           service_prefix: com.test
           bots:
@@ -914,7 +921,7 @@ class TestGoalBindingCheck:
     the check-in beat from producing work."""
 
     def _paths(self, fleet_dir: Path) -> Paths:
-        return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
     def _scope(self, fleet_dir: Path, org: str, repos: list[str]) -> None:
         import re as _re
@@ -998,7 +1005,7 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
     briefing = _BRIEFING_SLOT if armed else ""
     if not manager:
         return (
-            "fleet:\n"
+            "fleet:\nmanager: worker\n"
             "  name: solo-fleet\n"
             "  service_prefix: com.solo\n"
             "  bots:\n"
@@ -1130,7 +1137,7 @@ def _doctor_rungs(tmp_path, monkeypatch, fleet_yaml: str, *, projects: bool = Fa
     monkeypatch.delenv("FLEET_NAME", raising=False)
     fleet, _md = load_fleet(root / "fleet.yaml")
     _pin_plugin_manifest(tmp_path, monkeypatch, fleet)
-    report = run_doctor(fleet, Paths(root=root, fleet_dir=root))
+    report = run_doctor(fleet, Paths(root=root, fleet_dir=root, package=source_package()))
     return {c.name: c for c in report.checks}
 
 
@@ -1146,6 +1153,7 @@ class TestCheckIgnition:
 
     _FLEET_NO_DOOR = """\
         fleet:
+          manager: mgr
           name: ign-fleet
           service_prefix: com.ign
           bots:
@@ -1158,6 +1166,7 @@ class TestCheckIgnition:
 
     _FLEET_BRIEFING_ARMED = """\
         fleet:
+          manager: mgr
           name: ign-fleet
           service_prefix: com.ign
           bots:
@@ -1174,7 +1183,7 @@ class TestCheckIgnition:
     def _check(self, tmp_path, fleet_yaml: str):
         root = _doctor_root(tmp_path, fleet_yaml)
         fleet, _md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         report = DoctorReport()
         check_ignition(fleet, paths, report)
         assert len(report.checks) == 1
@@ -1371,7 +1380,7 @@ class TestIgnitionGapIsTheRungsOwnPredicate:
         root = _doctor_root(tmp_path, _fleet_yaml(manager=manager, armed=armed))
         monkeypatch.delenv("FLEET_NAME", raising=False)
         fleet, _md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         report = DoctorReport()
         check_ignition(fleet, paths, report)
         rung_warns = report.checks[0].status == "warn"

@@ -124,7 +124,7 @@ def test_a_moved_bots_leftover_dir_does_not_send_its_old_fleets_alerts(tmp_path)
     bots = tmp_path / "root" / "runtime" / "bots"
     _bot(bots, "alpha", CHAT_A)  # moved to another fleet; its old dir remains
     _bot(bots, "beta", CHAT_A)
-    (tmp_path / "root" / "fleet.yaml").write_text("fleet:\n  bots:\n    beta:\n")
+    (tmp_path / "root" / "fleet.yaml").write_text("fleet:\n  manager: beta\n  bots:\n    beta:\n")
     got = _resolve(tmp_path, bots, TELEGRAM_GROUP_CHAT_ID=CHAT_A)
     assert got["src"] == "env:TELEGRAM_GROUP_CHAT_ID+bot:beta", got
 

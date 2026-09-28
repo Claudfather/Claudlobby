@@ -170,11 +170,11 @@ def test_a_stale_row_reaches_its_own_manager_with_the_menu(tmp_path, sent):
     assert "deadline passed" in message
     for verb in task_cmd.TASK_VERBS:
         assert verb in message
-    # the exact commands, not advice — prefixed $CLAUDLOBBY_ROOT/lib/ (F7): a
+    # the exact commands, not advice — prefixed $CLAUDLOBBY_NATIVE_DIR/ (F7): a
     # bare `task-act.sh`/`dispatch-task.sh` is not on a bot's PATH
-    assert "$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw <task-id> --reason" in message
-    assert "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes <task-id>" in message
-    assert "$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query" in message
+    assert "$CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw <task-id> --reason" in message
+    assert "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --supersedes <task-id>" in message
+    assert "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh --type query" in message
     assert "\n" not in message                   # tmux reads a newline as RETURN
 
 
@@ -247,14 +247,14 @@ def test_the_row_line_carries_a_runnable_close_command(tmp_path):
            "assignee": f"bot:{F}/ramanujan", "occurred_at": _ago(30),
            "expected_by": _ago(6), "last_progress_at": None}
     line = task_cmd.recheck_row_line(idd, index=1, now=now)
-    assert '$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw t-x --reason "…"' in line
+    assert '$CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw t-x --reason "…"' in line
     # an id-less row has no task id — the close command names the asg id, and
     # #1492's task-act change is what makes that a command the manager can run.
     idless = {"task_id": "", "assignment_id": "asg_note", "title": "a peer note",
               "assignee": f"bot:{F}/ramanujan", "occurred_at": _ago(30),
               "expected_by": None, "last_progress_at": None}
     line2 = task_cmd.recheck_row_line(idless, index=2, now=now)
-    assert '$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw asg_note --reason "…"' in line2
+    assert '$CLAUDLOBBY_NATIVE_DIR/task-act.sh withdraw asg_note --reason "…"' in line2
 
 
 # --- what the re-check records (and how the debounce reads it) ---------------

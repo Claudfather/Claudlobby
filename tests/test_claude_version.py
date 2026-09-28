@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -205,13 +206,14 @@ def test_with_no_argument_the_door_follows_the_staged_fleet_link(tmp_path):
 
 
 def _paths(tmp_path: Path, lib: Path = LIB):
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "proot"
     root.mkdir(exist_ok=True)
     if not (root / "lib").exists():
         (root / "lib").symlink_to(lib)
-    return Paths(root=root)
+    return Paths(root=root, package=replace(source_package(), native=root / "lib"))
 
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))
@@ -544,11 +546,12 @@ def test_start_bot_and_the_update_job_take_the_launch_path_from_the_one_helper()
     assert "fleet_claude_path" in (LIB / "update-claude-code.sh").read_text()
 
 
-def test_the_composer_puts_timers_on_the_same_launch_path():
-    """Composed timer units carry the composer's Python spelling of the order
-    (reload-fleet's `claude plugin update` runs under it), so it is pinned to the
-    bash one byte for byte: a timer and a pane must resolve the same claude."""
-    from claudlobby.composer import _scheduler_tool_path
+def test_the_composer_prepends_selected_release_to_the_same_tool_path(tmp_path, monkeypatch):
+    """The release CLI wins; the remaining tool order matches bot sessions."""
+    import claudlobby.composer as composer
+
+    selected = tmp_path / "release" / "bin" / "claudlobby"
+    monkeypatch.setattr(composer, "selected_cli", lambda: selected)
 
     r = subprocess.run(
         ["bash", "-c", f'. "{LIB}/lib-common.sh"; fleet_launch_path'],
@@ -558,7 +561,7 @@ def test_the_composer_puts_timers_on_the_same_launch_path():
         env=constructed_env(HOME=str(Path.home())),
     )
     assert r.returncode == 0, r.stderr
-    assert _scheduler_tool_path() == r.stdout
+    assert composer._scheduler_tool_path() == f"{selected.parent}:{r.stdout}"
 
 
 def test_a_bare_name_resolves_on_the_launch_path_not_the_callers(tmp_path):

@@ -351,7 +351,7 @@ def _root_mode_plane(root: Path) -> None:
     from tests.plane_fixtures import REPO
 
     (root / "fleet.yaml").write_text(
-        "fleet:\n  name: rootfleet\n  service_prefix: com.test\n  bots:\n"
+        "fleet:\n  manager: somebot\n  name: rootfleet\n  service_prefix: com.test\n  bots:\n"
         "    somebot:\n      expertise: [software-engineering]\n")
     if not (root / "lib").exists():
         (root / "lib").symlink_to(REPO / "lib")

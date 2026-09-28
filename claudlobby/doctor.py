@@ -23,6 +23,7 @@ from .claudron_compat import (
     PROBE_VERB_PREFIX,
 )
 from .config import FleetConfig
+from .context import native_environment
 from .paths import Paths, tmux_socket_for_bot, vault_api_available
 from .validator import validate, warning_summary
 
@@ -251,6 +252,12 @@ def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
             text=True,
             timeout=30,
             cwd=str(paths.root),
+            env={
+                **os.environ,
+                **native_environment(paths),
+                "FLEET_NAME": paths.fleet_name or "",
+                "BOT_DIR": "",
+            },
         )
         if result.returncode == 0:
             report.add("npx-cache", "pass", "all MCP packages cached (npx + uvx)")

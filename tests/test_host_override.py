@@ -11,6 +11,7 @@ import pytest
 from claudlobby import composer as composer_mod
 from claudlobby.config import _load_system_defaults, load_host_jobs
 from claudlobby import switches as sw
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 PAUSE = "host: { jobs: { claude-update: { enroll: false } } }\n"
@@ -25,7 +26,7 @@ def override(tmp_path, monkeypatch) -> Path:
 
 def _units(root: Path, job: str) -> list[str]:
     root.mkdir()
-    out = composer_mod.compose_host_timers(Paths(root=root))
+    out = composer_mod.compose_host_timers(Paths(root=root, package=source_package()))
     return sorted(p.name for p in out.iterdir() if p.name.startswith(f"claudlobby-{job}."))
 
 
@@ -78,7 +79,7 @@ def test_a_malformed_override_renders_unknown_never_the_shipped_default(tmp_path
     # showed every host job at its SHIPPED default at rc 0 -- for a paused job,
     # the exact opposite of the host's intended state.
     override.write_text('host: { jobs: { claude-update: { enroll: "false" } } }\n')
-    rows = sw.resolve(Paths(root=tmp_path), cascade={})
+    rows = sw.resolve(Paths(root=tmp_path, package=source_package()), cascade={})
     host_rows = [r for r in rows if r.switch.scope in (sw.HOST_JOB, sw.HOST_SERVICE)
                  and "extra is not installed" not in r.source]   # that row is its own fact
     assert host_rows

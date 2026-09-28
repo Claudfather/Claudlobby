@@ -197,7 +197,7 @@ def _second_fleet_beside(root):
         (fleet_dir / "runtime" / "bots" / b / "data").mkdir(parents=True, exist_ok=True)
         (fleet_dir / "runtime" / "bots" / b / "bot.conf").write_text(f"TMUX_SOCKET=r1901-none-{b}\n")
     (fleet_dir / "fleet.yaml").write_text(
-        "fleet:\n  name: g\n  service_prefix: com.test\n  bots:\n"
+        "fleet:\n  manager: v2\n  name: g\n  service_prefix: com.test\n  bots:\n"
         "    v1:\n      expertise: [software-engineering]\n"
         "    v2:\n      expertise: [software-engineering]\n")
     _live_dispatch(root, "9", "t-1901-g001", ts="2026-09-01T10:00:00Z", bot="v1", fleet=G)

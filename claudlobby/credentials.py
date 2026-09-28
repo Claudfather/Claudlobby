@@ -247,7 +247,7 @@ def reconcile(
     paths, fleet, library_dir: Path | None = None
 ) -> tuple[list[Finding], dict]:
     """(findings, scope). Shapes 1 and 2 decided; shape 3 reported UNKNOWN."""
-    library_dir = Path(library_dir or (paths.root / "library"))
+    library_dir = Path(library_dir or paths.base_library)
     declarations, integrations = declared_for_fleet(fleet, paths)
 
     label, visible, resolutions = resolved_view(paths)

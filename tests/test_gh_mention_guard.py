@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from claudlobby.composer import compose_host_bot_handles
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -34,7 +35,7 @@ def _host(tmp_path: Path, fleets: dict[str, list[str]]) -> Path:
 
 
 def _handles(tmp_path: Path) -> list[str]:
-    out = compose_host_bot_handles(Paths(root=tmp_path), output_dir=tmp_path / "out")
+    out = compose_host_bot_handles(Paths(root=tmp_path, package=source_package()), output_dir=tmp_path / "out")
     return out.read_text().split()
 
 
@@ -49,7 +50,7 @@ def test_a_new_bot_is_covered_with_no_code_change(tmp_path):
     _host(tmp_path, {"alpha": ["ravi"]})
     assert _handles(tmp_path) == ["ravi"]
     (tmp_path / "local" / "alpha" / "fleet.yaml").write_text(
-        "fleet:\n  name: alpha\n  bots:\n    ravi: {}\n    newbot: {}\n", encoding="utf-8"
+        "fleet:\n  manager: ravi\n  name: alpha\n  bots:\n    ravi: {}\n    newbot: {}\n", encoding="utf-8"
     )
     assert _handles(tmp_path) == ["newbot", "ravi"]
 
@@ -69,7 +70,7 @@ def test_regex_unsafe_names_are_excluded(tmp_path):
     metacharacters or whitespace must never reach it."""
     _host(tmp_path, {"alpha": ["ravi"]})
     (tmp_path / "local" / "alpha" / "fleet.yaml").write_text(
-        'fleet:\n  name: alpha\n  bots:\n    ravi: {}\n    "a.b": {}\n'
+        'fleet:\n  manager: ravi\n  name: alpha\n  bots:\n    ravi: {}\n    "a.b": {}\n'
         '    "x y": {}\n    "-lead": {}\n',
         encoding="utf-8",
     )
@@ -94,5 +95,5 @@ def test_no_fleets_yields_an_empty_but_present_manifest(tmp_path):
     """Present-and-empty is distinguishable by the hook from absent; absent is
     what makes it fail open and complain."""
     (tmp_path / "local").mkdir()
-    out = compose_host_bot_handles(Paths(root=tmp_path), output_dir=tmp_path / "out")
+    out = compose_host_bot_handles(Paths(root=tmp_path, package=source_package()), output_dir=tmp_path / "out")
     assert out.is_file() and out.read_text() == ""
