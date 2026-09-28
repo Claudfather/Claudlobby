@@ -166,18 +166,26 @@ class ActivationStore:
         return read_activation(self.root, record.activation_id)
 
     def prepare(self, activation_id: str, plan: ConfigPlan, *,
-                recovery_release_id: str, enrollment_digest: str) -> ActivationRecord:
+                recovery_release_id: str, enrollment_digest: str,
+                source_release_id: str | None = None) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
             raise ActivationError("activation plan belongs to different or changed host state")
         if not re.fullmatch(r"[0-9a-f]{64}", enrollment_digest):
             raise ActivationError("verified enrollment manifest digest is required")
+        existing = read_activation(self.root, activation_id) if path.exists() else None
+        previous = existing.body["previous_selection"] if existing else read_selection(self.root)
+        source_release_id = source_release_id or (
+            existing.body["intent"]["source_release_id"] if existing else
+            previous["release_id"] if previous else recovery_release_id)
+        if previous is not None and source_release_id != previous["release_id"]:
+            raise ActivationError("activation source differs from the selected release")
         intent = {"plan_id": plan.plan_id, "release_id": plan.release_id,
+                  "source_release_id": source_release_id,
                   "recovery_release_id": recovery_release_id,
                   "enrollment_digest": enrollment_digest}
-        if path.exists():
-            existing = read_activation(self.root, activation_id)
+        if existing is not None:
             if existing.body["intent"] != intent:
                 raise ActivationError("activation id already belongs to a different intent")
             return existing
@@ -187,8 +195,8 @@ class ActivationStore:
                 raise ActivationError(f"unfinished activation must be recovered: {record.activation_id}")
         plan.check_fresh()
         read_release(self.root, plan.release_id)
+        read_release(self.root, source_release_id)
         read_release(self.root, recovery_release_id)
-        previous = read_selection(self.root)
         body = {"schema": 1, "activation_id": activation_id, "root": str(self.root),
                 "intent": intent, "previous_selection": previous, "status": "prepared",
                 "completed": [], "pending": None, "evidence": {}}
