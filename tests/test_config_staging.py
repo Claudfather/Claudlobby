@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudlobby import composer, config_staging, context, env_tiers, releases
+from claudlobby import composer, config, config_staging, context, env_tiers, releases
 from claudlobby.config_plan import PlanError, read_plan
 from claudlobby.config_units import current_declarations, planned_units
 from claudlobby.paths import Paths
@@ -129,6 +129,39 @@ def _files(plan, change):
     assert change.after["kind"] == "tree"
     return {name: plan.blob(entry["sha256"])
             for name, entry in change.after["files"].items()}
+
+
+def test_stage_validates_and_renders_retained_bytes_when_authoring_changes_during_parse(
+        staging_case, monkeypatch):
+    manifest = staging_case.paths.fleet_yaml
+    original = manifest.read_text()
+    changed = original.replace("manager: primary-manager", "manager: primary-worker")
+    assert changed != original
+    real_load = config.load_fleet
+    real_validate = config_staging.validate
+    validated_managers = []
+
+    def alternate_during_mutable_parse(path, *, projects_yaml=None):
+        if path != manifest or validated_managers:
+            return real_load(path, projects_yaml=projects_yaml)
+        manifest.write_text(changed)
+        try:
+            return real_load(path, projects_yaml=projects_yaml)
+        finally:
+            manifest.write_text(original)
+
+    def observe_validation(fleet, paths):
+        validated_managers.append(fleet.manager)
+        return real_validate(fleet, paths)
+
+    monkeypatch.setattr(config, "load_fleet", alternate_during_mutable_parse)
+    monkeypatch.setattr(config_staging, "validate", observe_validation)
+    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    digest = plan.effects["fleet_sources"]["primary"]["fleet"]["sha256"]
+    assert plan.blob(digest) == original.encode()
+    assert validated_managers == ["primary-manager"]
+    worker_conf = plan.content(_changes(plan)[staging_case.paths.bot_runtime("primary-worker") / "bot.conf"])
+    assert b"export MANAGER_TMUX=primary-manager\n" in worker_conf
 
 
 def test_stage_renders_bots_timers_and_host_guards_without_live_writes(staging_case):

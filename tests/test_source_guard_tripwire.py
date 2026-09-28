@@ -64,6 +64,12 @@ _BLESSED_RAW_READS = {
     # config.py — fleet.yaml / system.yaml parse. The parsed BotConfig feeds
     # audit_bot_sources (the dataclass walk); system.yaml is asserted L1-clean below.
     ("config.py", "yaml.safe_load(f)"),
+    # The active parser sees only content-addressed inputs retained by staging.
+    # Staging now validates and renders the SAME captured bytes before sealing;
+    # fleet values pass the existing BotConfig source audit, while projects use
+    # the same _project_document validation as the authoring loader.
+    ("config.py", "yaml.safe_load(fleet_content)"),
+    ("config.py", "yaml.safe_load(projects_content)"),
     # composer.py — MCP fragment loads feed audit_bot_sources(fragments=...);
     # grant/integration frontmatter reads feed the grant choke; template / prose /
     # runtime-state reads are exempt-as-code (tool .j2 → #703) or non-source.
