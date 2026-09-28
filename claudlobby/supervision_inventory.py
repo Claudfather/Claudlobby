@@ -4,6 +4,10 @@ Declarations must come from the reviewed current generated-config manifest,
 not candidate renders substituted for the running release. Exact byte equality
 binds argv and environment to that manifest; the native ownership reader remains
 the sole parser of unit WorkingDirectory. A matching name is never ownership.
+For explicit first adoption, generated and installed snapshots may differ:
+the frozen installed bytes define the original launch binding, while both
+snapshots and the declared owner remain checked. Sealed releases still require
+generated and installed bytes to match.
 
 Unknown observations are blockers, not empty inventories. Darwin print and
 print-disabled grammar is based on read-only macOS 26.1 observations, not a
@@ -408,13 +412,52 @@ def _darwin_print(text: str, target: str) -> dict[str, str]:
             values[match[1]] = match[2]
         environments[block] = values
     effective = {**environments["inherited environment"], **environments["default environment"], **environments["environment"]}
-    known = required | {"working directory", "pid", "arguments", *environments} | _DARWIN_DIAGNOSTICS
+    if "semaphores" in blocks and (len(blocks["semaphores"]) != 1 or not re.fullmatch(
+            r"\t\tsuccessful exit => [0-9]+", blocks["semaphores"][0])):
+        raise InventoryError("unknown launchd semaphore diagnostic")
+    known = required | {"working directory", "pid", "arguments", *environments, "semaphores"} | _DARWIN_DIAGNOSTICS
     return {"Id": target.rsplit("/", 1)[1] + ".plist", "LoadState": "loaded", "ActiveState": active,
             "FragmentPath": scalar["path"], "WorkingDirectory": scalar.get("working directory", ""),
             "Program": scalar["program"], "Arguments": json.dumps(argv),
             "Environment": shlex.join(f"{key}={value}" for key, value in sorted(effective.items())),
             "ConfiguredEnvironment": json.dumps(environments["environment"], sort_keys=True),
             "Type": scalar["type"], "UnknownFields": json.dumps(sorted((scalar.keys() | blocks.keys()) - known))}
+
+
+def _darwin_foreign_print(text: str, target: str, anchors: set[str], owners: set[Path]) -> dict[str, str]:
+    """Accept only sufficient foreign identity when a desktop job has extra grammar.
+
+    The strict managed parser remains authoritative for every declared unit.
+    A foreign print must prove its exact domain and expose no root/release
+    anchor anywhere in its native text; ambiguity about an anchor refuses.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0] != target + " = {" or lines[-1] != "}":
+        raise InventoryError("foreign launchd print identity is incomplete")
+    fields = {}
+    for line in lines[1:-1]:
+        match = re.fullmatch(r"\t([^\t=]+) = (.*)", line)
+        if match and match[1] in {"domain", "path", "type", "state", "program", "working directory",
+                                   "program identifier", "managed_by"}:
+            if match[1] in fields:
+                raise InventoryError("ambiguous foreign launchd identity")
+            fields[match[1]] = match[2]
+    native_domain = target.rsplit("/", 1)[0]
+    execution = ({"program identifier", "managed_by"}
+                 if fields.get("type") == "Submitted" and "program" not in fields else {"program"})
+    if (not {"domain", "path", "type", "state", *execution} <= fields.keys()
+            or any(not fields[key] or any(ord(char) < 32 for char in fields[key]) for key in execution)
+            or not re.fullmatch(re.escape(native_domain) + r"(?: \[[0-9]+\])?", fields["domain"])):
+        raise InventoryError("foreign launchd print domain or execution identity is incomplete")
+    if any(anchor and anchor in text for anchor in anchors):
+        raise InventoryError("foreign launchd print mentions a reviewed root or release")
+    directory = fields.get("working directory", "")
+    if directory:
+        path = Path(directory)
+        if not path.is_absolute() or path.resolve() in owners or any(path.resolve().is_relative_to(owner) for owner in owners):
+            raise InventoryError("foreign launchd working directory ownership is unknown")
+    return {"Id": target.rsplit("/", 1)[1] + ".plist", "LoadState": "loaded",
+            "ActiveState": "unknown", "ObservedDomain": target.rsplit("/", 1)[0]}
 
 
 class _PlistKeys(dict):
@@ -424,7 +467,7 @@ class _PlistKeys(dict):
         super().__setitem__(key, value)
 
 
-def _darwin_source(content: bytes) -> dict:
+def _darwin_source(content: bytes, *, strict: bool = True) -> dict:
     """Read launch identity/policy, not the shared WorkingDirectory predicate."""
     try:
         source = plistlib.loads(content, dict_type=_PlistKeys)
@@ -459,15 +502,23 @@ def _darwin_source(content: bytes) -> dict:
     argv = source.get("ProgramArguments", [])
     env = source.get("EnvironmentVariables", {})
     program = source.get("Program", argv[0] if isinstance(argv, list) and argv else "")
-    if (not isinstance(argv, list) or not all(isinstance(arg, str) and arg and arg.strip() == arg
+    if strict and (not isinstance(argv, list) or not all(isinstance(arg, str) and arg and arg.strip() == arg
             and not any(ord(c) < 32 for c in arg) for arg in argv)
             or not isinstance(program, str) or not Path(program).is_absolute()
             or not isinstance(env, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in env.items())
             or type(source.get("Disabled", False)) is not bool):
         raise InventoryError("unsupported plist program, arguments, environment or disabling")
+    def strings(value):
+        if isinstance(value, str):
+            return (value,)
+        if isinstance(value, dict):
+            return tuple(text for key, item in value.items() for text in (*strings(key), *strings(item)))
+        if isinstance(value, (list, tuple)):
+            return tuple(text for item in value for text in strings(item))
+        return ()
     return {"label": source.get("Label"), "program": program, "arguments": argv, "environment": env,
             "disabled": source.get("Disabled", False), "has_directory": "WorkingDirectory" in source,
-            "directory": source.get("WorkingDirectory")}
+            "directory": source.get("WorkingDirectory"), "strings": strings(source) if not strict else ()}
 
 
 def _darwin_binding(name, content, installed_path, directory, environment, props, loaded, disabled):
@@ -578,6 +629,10 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     names.add(path.name)
     except (OSError, RuntimeError, InventoryError) as exc:
         issues.append(f"installed search-path coverage failed: {exc}")
+    owners = {data_root, *(item.working_directory.resolve() for item in declarations)}
+    anchors = {str(owner) for owner in owners}
+    anchors.update(anchor for declaration in declarations for key, anchor in declaration.environment
+                   if key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI"))
     properties = {}
     disabled = {}
     if manager == "Linux":
@@ -593,15 +648,42 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 issues.append(f"{name}: cannot observe effective definition: {exc}")
     else:
         disabled = _darwin_disabled(adapter.read("svc_inventory_disabled", domain))
+        missing_foreign = set()
+
+        def observe_darwin(name):
+            target = domain + "/" + name.removesuffix(".plist")
+            observed = adapter.call("svc_inventory_properties", target)
+            not_found = observed.returncode == 113 and "Could not find service" in observed.stderr
+            if not_found and name not in expected and domain.startswith("gui/"):
+                # Aqua's list includes same-UID user jobs. A missing service
+                # can also vanish between list and print; only a fresh list
+                # may prove that, never the failed print by itself.
+                target = "user/" + domain.split("/", 1)[1] + "/" + name.removesuffix(".plist")
+                observed = adapter.call("svc_inventory_properties", target)
+                not_found = observed.returncode == 113 and "Could not find service" in observed.stderr
+            if not_found and name not in expected:
+                return None
+            if observed.returncode:
+                raise InventoryError(f"svc_inventory_properties failed ({observed.returncode}): {observed.stderr.strip()}")
+            if name in expected:
+                return _darwin_print(observed.stdout, target)
+            foreign = _darwin_foreign_print(observed.stdout, target, anchors, owners)
+            try:
+                return _darwin_print(observed.stdout, target)
+            except InventoryError:
+                return foreign
+
         for name in sorted(loaded):
             try:
-                properties[name] = _darwin_print(adapter.read("svc_inventory_properties", domain + "/" + name.removesuffix(".plist")),
-                                                 domain + "/" + name.removesuffix(".plist"))
-                if properties[name]["ActiveState"] != loaded[name]:
+                observed_props = observe_darwin(name)
+                if observed_props is None:
+                    missing_foreign.add(name)
+                    continue
+                properties[name] = observed_props
+                if name in expected and observed_props["ActiveState"] != loaded[name]:
                     raise InventoryError("launchd list/print activity changed")
             except (InventoryError, OSError, subprocess.SubprocessError) as exc:
                 issues.append(f"{name}: cannot observe effective definition: {exc}")
-    owners = {data_root, *(item.working_directory.resolve() for item in declarations)}
 
     def related_properties(props):
         env = _environment(props.get("Environment", ""))
@@ -614,8 +696,6 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         if bootstrap_empty and manager == "Linux" and name in loaded and props.get("LoadState") != "loaded":
             issues.append(f"{name}: loaded ownership is unknown")
         related = related_properties(props)
-        anchors = {anchor for declaration in declarations for key, anchor in declaration.environment
-                   if key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI")}
         if bootstrap_empty:
             anchors.add(str(data_root))
             related |= str(data_root) in props.get("ExecStart", "")
@@ -636,35 +716,27 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                         or adapter.call("svc_bot_unit_owned_by", saved.path,
                                         props.get("WorkingDirectory", "")).returncode != 0):
                     issues.append(f"{name}: installed/effective ownership is unknown")
-            if bootstrap_empty and manager == "Darwin":
+            if manager == "Darwin":
                 try:
-                    source = _darwin_source(saved.content)
+                    source = _darwin_source(saved.content, strict=False)
                     if source["has_directory"]:
                         # The shared ownership reader validates the raw plist
-                        # directory before it can establish a nested root link.
+                        # directory once before local comparisons to every
+                        # reviewed owner; unknown parsing remains a refusal.
+                        if not isinstance(source["directory"], str) or not Path(source["directory"]).is_absolute():
+                            raise InventoryError("installed ownership is unknown")
                         if adapter.call("svc_bot_unit_owned_by", saved.path, source["directory"]).returncode != 0:
                             raise InventoryError("installed ownership is unknown")
-                        related |= Path(source["directory"]).resolve().is_relative_to(data_root)
-                    related |= (source["environment"].get("CLAUDLOBBY_ROOT") == str(data_root)
-                                or any(anchor in arg for anchor in anchors
-                                       for arg in [source["program"], *source["arguments"]]))
+                        directory = Path(source["directory"]).resolve()
+                        related |= directory in owners or directory.is_relative_to(data_root)
+                    related |= any(anchor and anchor in value for anchor in anchors for value in source["strings"])
                 except InventoryError as exc:
                     issues.append(f"{name}: {exc}")
-            results = [adapter.call("svc_bot_unit_owned_by", saved.path, owner).returncode for owner in owners]
-            if 0 in results:
-                related = True
-            elif any(code != 1 for code in results):
-                try:
-                    # Unrelated Apple/app plists commonly omit WorkingDirectory.
-                    # Their explicit launch identity can rule out this release;
-                    # a malformed directory is still unknown, never foreign.
-                    source = _darwin_source(saved.content) if manager == "Darwin" else None
-                    if source is None or source["has_directory"]:
-                        raise InventoryError("installed ownership is unknown")
-                    related |= (source["environment"].get("CLAUDLOBBY_ROOT") == str(data_root)
-                                or any(anchor in arg for anchor in anchors
-                                       for arg in [source["program"], *source["arguments"]]))
-                except InventoryError:
+            else:
+                results = [adapter.call("svc_bot_unit_owned_by", saved.path, owner).returncode for owner in owners]
+                if 0 in results:
+                    related = True
+                elif any(code != 1 for code in results):
                     issues.append(f"{name}: installed ownership is unknown")
         if related:
             issues.append(f"{name}: owned consumer is absent from generated manifest")
@@ -674,7 +746,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                       for key, anchor in declaration.environment
                       if key in ("CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI"))):
             issues.append(f"{name}: release consumer has no declared data-root binding")
-        elif name in loaded and not installed.get(name) and manager == "Darwin" and not props:
+        elif name in loaded and not installed.get(name) and manager == "Darwin" and not props and name not in missing_foreign:
             issues.append(f"{name}: loaded job has no observable installed binding")
         else:
             foreign.extend(saved.path for saved in installed.get(name, ()))
@@ -690,7 +762,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
             if adapter.call("svc_bot_unit_owned_by", binding.source, binding.working_directory).returncode != 0:
                 raise InventoryError("generated ownership is foreign or unknown")
             for saved in sources:
-                if saved.content != generated.content:
+                if saved.content != generated.content and not legacy_source:
                     raise InventoryError("installed bytes differ from reviewed generated source")
                 if not declaration.service and adapter.call("svc_bot_unit_owned_by", saved.path, declaration.working_directory).returncode != 0:
                     raise InventoryError("installed ownership is foreign or unknown")
@@ -712,7 +784,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 elif name in loaded or props["LoadState"] != "not-found":
                     raise InventoryError("loaded consumer lacks installed source bytes")
             else:
-                props = _darwin_binding(name, generated.content, sources[0].path if sources else None,
+                reviewed_content = sources[0].content if legacy_source and sources else generated.content
+                props = _darwin_binding(name, reviewed_content, sources[0].path if sources else None,
                                         str(declaration.working_directory), dict(declaration.environment),
                                         props, name in loaded, disabled)
         except (OSError, RuntimeError, InventoryError) as exc:
@@ -725,13 +798,32 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                                  tuple(sorted(foreign)), tuple(issues), bootstrap_empty, legacy_source)
     try:
         result.check_files()
-        if adapter.read("svc_inventory_catalog") != catalog:
+        updated = adapter.read("svc_inventory_catalog")
+        if manager == "Darwin":
+            next_manager, next_domain, next_directories, next_names, next_loaded = _catalog(updated)
+            if (next_manager, next_domain, next_directories) != (manager, domain, directories):
+                raise InventoryError("installed/loaded catalog changed during inventory")
+            for name in sorted(missing_foreign):
+                if name in next_loaded:
+                    issues.append(f"{name}: loaded ownership remained unobservable")
+            for name in expected:
+                if (name in next_loaded) != (name in loaded) or (name in loaded and next_loaded[name] != loaded[name]):
+                    issues.append(f"{name}: declared launchd activity changed during inventory")
+            for name in sorted(set(next_loaded) - set(loaded)):
+                try:
+                    if observe_darwin(name) is None:
+                        fresh_loaded = _catalog(adapter.read("svc_inventory_catalog"))[4]
+                        if name in fresh_loaded:
+                            raise InventoryError("new loaded ownership is unobservable")
+                except (InventoryError, OSError, subprocess.SubprocessError) as exc:
+                    issues.append(f"{name}: new loaded ownership is unknown: {exc}")
+        elif updated != catalog:
             raise InventoryError("installed/loaded catalog changed during inventory")
         if manager == "Darwin" and _darwin_disabled(adapter.read("svc_inventory_disabled", domain)) != disabled:
             raise InventoryError("launchd disabled overrides changed during inventory")
         if bootstrap_empty:
             _require_no_selection(data_root)
     except (InventoryError, OSError, subprocess.SubprocessError) as exc:
-        result = EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,
-                                     tuple(sorted(foreign)), (*issues, str(exc)), bootstrap_empty, legacy_source)
-    return result
+        issues.append(str(exc))
+    return EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,
+                               tuple(sorted(foreign)), tuple(issues), bootstrap_empty, legacy_source)

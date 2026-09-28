@@ -437,7 +437,7 @@ with_timeout() {
 # Kernel mutex on the lockfile. Python locks the inherited shell fd when the
 # flock binary is absent (stock macOS); the lock remains held by the shell and
 # its descendants after Python exits, and the kernel releases it after death.
-# Refuses on unavailable/unknown locking or after the bounded wait.
+# The Python fallback refuses unavailable locking and bounds its wait.
 with_lock() {
     local lockfile="${1:?Usage: with_lock <lockfile> <command...>}"; shift
     local python="${CLAUDLOBBY_NATIVE_PYTHON-python3}"

@@ -845,7 +845,16 @@ svc_inventory_properties() {
             systemctl --user show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath,WorkingDirectory,Environment,ExecStart,DropInPaths,NeedDaemonReload,Triggers,TriggeredBy "$1"
             ;;
         Darwin)
-            _svc_inventory_domain "${1%/*}" || return 3
+            # launchctl list in an Aqua session also reports same-UID user
+            # services. This read-only inventory query may inspect either
+            # domain; activation controls still require the manager domain.
+            if ! _svc_inventory_domain "${1%/*}"; then
+                local uid manager
+                uid=$(launchctl manageruid) || return 3
+                manager=$(launchctl managername) || return 3
+                case "$uid" in ''|*[!0-9]*) return 3 ;; esac
+                [ "$manager" = Aqua ] && [ "${1%/*}" = "user/$uid" ] || return 3
+            fi
             case "${1##*/}" in ''|*[!a-zA-Z0-9_.@:-]*) return 3 ;; esac
             launchctl print "$1"
             ;;

@@ -59,6 +59,108 @@ def test_native_plist_normalization_cannot_erase_duplicate_keys(monkeypatch):
         _darwin_source(raw)
 
 
+def test_foreign_launchd_jobs_use_bounded_identity_and_ignore_pid_churn(tmp_path):
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    obs.add("com.fixture.owned.plist", scope="bot")
+    foreign = obs.installed / "com.fixture.foreign.plist"
+    foreign.write_bytes(plistlib.dumps({"Label": "com.fixture.foreign", "MachServices": {"foreign": True}}))
+    external = obs.installed / "com.fixture.external.plist"
+    external.write_bytes(plistlib.dumps({"Label": "com.fixture.external", "Program": "/Applications/Foreign",
+                                        "WorkingDirectory": str(tmp_path / "external")}))
+    obs.launchd["application.fixture.plist"] = (
+        "gui/501/application.fixture = {\n\tpath = (submitted by runningboardd.1)\n"
+        "\ttype = Submitted\n\tstate = running\n\tprogram = /Applications/Foreign\n"
+        "\tdomain = gui/501 [1]\n\tpid = 123\n}\n")
+    obs.launchd["com.fixture.xpc.plist"] = (
+        "user/501/com.fixture.xpc = {\n\tpath = /Applications/Foreign/XPC\n"
+        "\ttype = XPCService\n\tstate = running\n\tprogram = /Applications/Foreign/XPC\n"
+        "\tdomain = user/501\n\tpid = 124\n}\n")
+    obs.launchd["com.fixture.submitted.plist"] = (
+        "gui/501/com.fixture.submitted = {\n\tpath = (submitted by runningboardd.1)\n"
+        "\ttype = Submitted\n\tmanaged_by = runningboardd\n\tstate = not running\n"
+        "\tprogram identifier = com.fixture.foreign\n\tdomain = gui/501 [1]\n}\n")
+    catalog_reads = 0
+
+    def runner(command, **kwargs):
+        nonlocal catalog_reads
+        if command[5] == "svc_inventory_properties" and command[6] == "gui/501/com.fixture.xpc":
+            return subprocess.CompletedProcess(command, 113, "", 'Could not find service "com.fixture.xpc"')
+        if command[5] == "svc_inventory_catalog":
+            catalog_reads += 1
+            text = obs.catalog()
+            if catalog_reads == 2:
+                text = text.replace("123\t0\tapplication.fixture", "999\t0\tapplication.fixture")
+            return subprocess.CompletedProcess(command, 0, text, "")
+        return obs.runner(command, **kwargs)
+
+    result = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                runner=runner).require_complete()
+    assert str(foreign) in result.foreign
+    assert str(external) in result.foreign
+    assert not any(function == "svc_bot_unit_owned_by" and args[0] == str(foreign)
+                   for function, args in obs.calls)
+    assert sum(function == "svc_bot_unit_owned_by" and args[0] == str(external)
+               for function, args in obs.calls) == 1
+    assert catalog_reads == 2
+    assert any(function == "svc_inventory_properties" and args[0] == "user/501/com.fixture.xpc"
+               for function, args in obs.calls)
+    obs.launchd["application.fixture.plist"] = obs.launchd["application.fixture.plist"].replace(
+        "/Applications/Foreign", str(obs.root / "private-program"))
+    with pytest.raises(InventoryError, match="reviewed root or release"):
+        collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                           runner=runner).require_complete()
+
+
+def test_transient_foreign_names_need_fresh_absence_or_bounded_new_identity(tmp_path):
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    obs.add("com.fixture.owned.plist", scope="bot")
+    for name in ("vanished", "arrived"):
+        obs.launchd[f"com.fixture.{name}.plist"] = (
+            f"user/501/com.fixture.{name} = {{\n\tpath = /Applications/Foreign/XPC\n"
+            "\ttype = XPCService\n\tstate = running\n\tprogram = /Applications/Foreign/XPC\n"
+            "\tdomain = user/501\n\tpid = 124\n}\n")
+    reads = 0
+
+    def runner(command, **kwargs):
+        nonlocal reads
+        function, target = command[5], command[6] if len(command) > 6 else ""
+        if function == "svc_inventory_catalog":
+            reads += 1
+            removed = "arrived" if reads == 1 else "vanished"
+            rows = [row for row in obs.catalog().splitlines() if f"com.fixture.{removed}" not in row]
+            return subprocess.CompletedProcess(command, 0, "\n".join(rows) + "\n", "")
+        if function == "svc_inventory_properties" and target.endswith("com.fixture.vanished"):
+            return subprocess.CompletedProcess(command, 113, "", 'Could not find service "com.fixture.vanished"')
+        if function == "svc_inventory_properties" and target.startswith("gui/501/com.fixture.arrived"):
+            return subprocess.CompletedProcess(command, 113, "", 'Could not find service "com.fixture.arrived"')
+        return obs.runner(command, **kwargs)
+
+    collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                       runner=runner).require_complete()
+    obs.launchd["com.fixture.arrived.plist"] = obs.launchd["com.fixture.arrived.plist"].replace(
+        "/Applications/Foreign/XPC", str(obs.root / "owned"))
+    reads = 0
+    with pytest.raises(InventoryError, match="new loaded ownership is unknown"):
+        collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                           runner=runner).require_complete()
+
+
+def test_managed_launchd_allows_only_observed_semaphore_diagnostic(tmp_path):
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    obs.add("com.fixture.owned.plist", scope="bot")
+    text = obs.launchd["com.fixture.owned.plist"]
+    obs.launchd["com.fixture.owned.plist"] = text.replace(
+        "\n}", "\n\tsemaphores = {\n\t\tsuccessful exit => 0\n\t}\n}")
+    obs.collect().require_complete()
+    obs.launchd["com.fixture.owned.plist"] = obs.launchd["com.fixture.owned.plist"].replace(
+        "successful exit", "unknown signal")
+    with pytest.raises(InventoryError, match="semaphore diagnostic"):
+        obs.collect().require_complete()
+
+
 def test_selected_adapter_ownership_uses_its_interpreter_not_path_python(tmp_path, monkeypatch):
     bot = tmp_path / "bot"
     bot.mkdir()
@@ -258,10 +360,28 @@ def test_unsealed_darwin_source_keeps_exact_unit_ownership_without_release_claim
                                    runner=obs.runner, legacy_source=True).require_complete()
     assert inventory.legacy_source is True
     assert inventory.units[0].installed[0].content == installed.read_bytes()
-    installed.write_bytes(installed.read_bytes() + b"\n")
+    installed_source = plistlib.loads(installed.read_bytes())
+    installed_source["EnvironmentVariables"]["PATH"] = "/reviewed/legacy/bin"
+    installed.write_bytes(plistlib.dumps(installed_source))
+    obs.launchd[installed.name] = observed_print("gui/501/com.legacy.owned", installed_source, installed)
+    sealed_env = {**obs.env, "CLAUDLOBBY_NATIVE_DIR": str(obs.package.native),
+                  "CLAUDLOBBY_LIBRARY_DIR": str(obs.package.library),
+                  "CLAUDLOBBY_CLI": str(tmp_path / "release/bin/claudlobby"),
+                  "CLAUDLOBBY_ARTIFACT_ID": "reviewed", "FLEET_ROOT": str(obs.root / "local/alpha")}
     with pytest.raises(InventoryError, match="installed bytes differ"):
+        collect_enrollment(obs.root, (replace(obs.declarations[0], release_id="reviewed-release",
+                                              environment=tuple(sealed_env.items())),),
+                           package=obs.package, runner=obs.runner).require_complete()
+    inventory = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                   runner=obs.runner, legacy_source=True).require_complete()
+    assert inventory.units[0].generated.content != inventory.units[0].installed[0].content
+    obs.launchd[installed.name] = obs.launchd[installed.name].replace("/reviewed/legacy/bin", "/other/bin")
+    with pytest.raises(InventoryError, match="loaded launchd definition differs"):
         collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
                            runner=obs.runner, legacy_source=True).require_complete()
+    installed.write_bytes(installed.read_bytes() + b"\n")
+    with pytest.raises(InventoryError, match="enrollment file changed"):
+        inventory.check_files()
 
 
 def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):
@@ -443,7 +563,7 @@ systemctl() {{
         adapter.call("arbitrary_shell")
 
 
-def test_selected_adapter_queries_only_the_proved_launchd_domain(tmp_path):
+def test_selected_adapter_queries_only_same_uid_launchd_domains(tmp_path):
     trace = tmp_path / "native-reads"
     captured = (FIXTURES / "launchctl-print-26.1-active.txt").read_text()
     disabled = (FIXTURES / "launchctl-disabled-26.1.txt").read_text()
@@ -469,7 +589,11 @@ launchctl() {{
     adapter = Adapter(source_package(), runner=recording)
     assert adapter.read("svc_inventory_properties", "gui/501/com.fixture.observed") == captured
     assert adapter.read("svc_inventory_disabled", "gui/501") == disabled
-    assert adapter.call("svc_inventory_properties", "user/501/com.fixture.observed").returncode == 3
+    assert adapter.read("svc_inventory_properties", "user/501/com.fixture.observed") == captured
+    assert adapter.call("svc_inventory_properties", "user/502/com.fixture.observed").returncode == 3
+    assert adapter.call("svc_inventory_disabled", "user/501").returncode == 3
     assert trace.read_text().splitlines() == [
         "manageruid", "managername", "print gui/501/com.fixture.observed",
-        "manageruid", "managername", "print-disabled gui/501", "manageruid", "managername"]
+        "manageruid", "managername", "print-disabled gui/501", "manageruid", "managername",
+        "manageruid", "managername", "print user/501/com.fixture.observed",
+        "manageruid", "managername", "manageruid", "managername", "manageruid", "managername"]

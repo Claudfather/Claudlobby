@@ -28,7 +28,6 @@ class RecordedAdapter:
         self.pause_failure = None
         self.resume_failure = None
         self.overrides = {}
-        self.generated = {unit.target: unit.generated for unit in inventory.units}
         self.binding_changed = False
 
     def read(self, function, *args):
@@ -42,7 +41,7 @@ class RecordedAdapter:
             return subprocess.CompletedProcess([function, *args], 0, output, "")
         if function == "svc_inventory_properties":
             target = args[0]
-            source = plistlib.loads(self.generated[target].content)
+            source = plistlib.loads(self.files[target].content)
             output = observed_print(target, source, Path(self.files[target].path))
             if self.binding_changed:
                 output = output.replace("\tprogram = ", "\tprogram = /foreign", 1)
@@ -126,7 +125,8 @@ def enrollment(installed, tmp_path):
 
 
 def _prepare(store, inventory, phases, plan, adapter):
-    store.prepare("cutover", plan, recovery_release_id=plan.release_id, enrollment_digest=inventory.digest)
+    store.prepare("cutover", plan, recovery_release_id=plan.release_id,
+                  enrollment_digest=inventory.digest, legacy_source=inventory.legacy_source)
     return units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
 
 
@@ -314,7 +314,10 @@ def test_fresh_caller_and_native_state_are_rechecked_before_effects(enrollment):
         inventory.check_files()
 
 
-def test_darwin_override_and_effective_binding_drift_refuse_before_park_or_restore(installed, tmp_path):
+@pytest.mark.parametrize("legacy_source", [False, True])
+def test_darwin_override_and_effective_binding_drift_refuse_before_park_or_restore(
+    installed, tmp_path, legacy_source
+):
     root, inputs, paths, _, _ = installed
     release = r.seal_release(root, inputs, paths)
     env = {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
@@ -327,18 +330,27 @@ def test_darwin_override_and_effective_binding_drift_refuse_before_park_or_resto
     directory.mkdir()
     target = directory / "fixture.plist"
     target.write_bytes(source.read_bytes())
-    declaration = UnitDeclaration(source, "host", root, release.release_id, tuple(env.items()))
+    if legacy_source:
+        source.write_bytes(plistlib.dumps({"Label": "fixture", "ProgramArguments": ["/bin/false"],
+                                          "WorkingDirectory": str(root), "EnvironmentVariables": env}))
+        assert source.read_bytes() != target.read_bytes()
+    declaration = UnitDeclaration(source, "host", root,
+                                  "" if legacy_source else release.release_id, tuple(env.items()))
     props = {"UnitFileState": "unchanged", "LoadState": "loaded", "ActiveState": "active",
              "DisabledOverride": "unset", "EnabledState": "enabled"}
     entry = EnrolledUnit(declaration, "gui/501/fixture", FileSnapshot.read(source),
                          (FileSnapshot.read(target),), tuple(props.items()))
     catalog = f"manager\tDarwin\ndomain\tgui/501\ndirectory\t{directory}\nPID\tStatus\tLabel\n710\t0\tfixture\n"
-    inventory = EnrollmentInventory(root, "Darwin", catalog, (entry,), entry.installed, (), ())
+    inventory = EnrollmentInventory(root, "Darwin", catalog, (entry,), entry.installed,
+                                    (), (), legacy_source=legacy_source)
     adapter = RecordedAdapter(inventory)
     plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
     phases = {"producers": [entry.target], "bots": [], "ingest": []}
     with state.locked_activation(root) as store:
-        _prepare(store, inventory, phases, plan, adapter)
+        prepared = _prepare(store, inventory, phases, plan, adapter)
+        if legacy_source:
+            frozen = prepared.enrollment["units"][0]
+            assert frozen["generated"]["sha256"] != frozen["installed"][0]["sha256"]
         store.begin("cutover", "producers_paused")
         adapter.overrides["fixture"] = "enabled"  # same effective value, different persisted override
         with pytest.raises(state.ActivationError, match="Darwin enrollment drift"):
@@ -352,6 +364,9 @@ def test_darwin_override_and_effective_binding_drift_refuse_before_park_or_resto
         adapter.binding_changed = False
         paused = units.pause_phase(store, "cutover", "producers", adapter=adapter)
         store.complete("cutover", "producers_paused", evidence_digest=paused.digest)
+        if legacy_source:
+            assert not target.exists(), "legacy pause must park the actual installed plist"
+            return  # first adoption has no sealed prior release to roll back to
         store.begin_rollback("cutover")
         for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("selection_restored")]:
             _complete(store, step)

@@ -145,8 +145,12 @@ def _darwin_check(adapter, enrollment, targets=None, *, original_load=False):
             continue
         declaration = unit["declaration"]
         try:
+            # First adoption freezes the installed plist as the original
+            # launch definition; its generated source remains a separate
+            # checked snapshot and may differ from the installed bytes.
+            source = unit["installed"][0] if enrollment.get("legacy_source") else unit["generated"]
             validate_darwin_unit(
-                adapter, unit["target"], source=base64.b64decode(unit["generated"]["content"]["base64"], validate=True),
+                adapter, unit["target"], source=base64.b64decode(source["content"]["base64"], validate=True),
                 installed_path=_file(unit), working_directory=declaration["working_directory"],
                 environment=dict(declaration["environment"]), original=dict(unit["properties"]),
                 require_original_load=original_load,
