@@ -41,7 +41,7 @@ def _silence_plane(patch):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _isolate_plane_session():
+def _isolate_plane_session(tmp_path_factory):
     """Guard session fixtures too; undo only our changes when pytest exits.
 
     Collection-time subprocesses must use constructed_env themselves: no
@@ -54,6 +54,9 @@ def _isolate_plane_session():
         base = Path(directory).resolve()
         _isolate_home(patch, base)
         _silence_plane(patch)
+        # Pytest chooses this lazily. Initialize it while TMPDIR belongs to
+        # the session, before a function fixture selects a shorter-lived dir.
+        tmp_path_factory.getbasetemp()
         yield base
 
 
