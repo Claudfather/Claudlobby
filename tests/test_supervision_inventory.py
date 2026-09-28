@@ -7,17 +7,56 @@ from pathlib import Path
 import plistlib
 import shlex
 import subprocess
+import sys
 
 import pytest
 
 from claudlobby import supervision_inventory as inventory
 from claudlobby.supervision_inventory import (
-    Adapter, InventoryError, UnitDeclaration, _darwin_disabled, collect_enrollment,
+    Adapter, InventoryError, UnitDeclaration, _darwin_disabled, _darwin_source, collect_enrollment,
 )
 from tests.package_fixtures import source_package
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _apple_xml(*, duplicate=False):
+    extra = b"<key>Label</key><string>shadow</string>" if duplicate else b""
+    return (b"<?xml version=1.0 encoding=UTF-8?>\n"
+            b"<!DOCTYPE plist PUBLIC -//Apple//DTD PLIST 1.0//EN "
+            b"http://www.apple.com/DTDs/PropertyList-1.0.dtd>\n"
+            b"<plist version=1.0><dict><key>Label</key><string>com.apple.foreign</string>"
+            + extra + b"<key>Program</key><string>/System/Library/foreign</string></dict></plist>")
+
+
+def test_nonstandard_apple_xml_remains_raw_and_classifies_foreign(tmp_path, monkeypatch):
+    raw = _apple_xml()
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    foreign = obs.installed / "com.apple.foreign.plist"
+    foreign.write_bytes(raw)
+    if sys.platform != "darwin":
+        normalized = plistlib.dumps({"Label": "com.apple.foreign", "Program": "/System/Library/foreign"})
+        monkeypatch.setattr(inventory.sys, "platform", "darwin")
+        monkeypatch.setattr(inventory.subprocess, "run", lambda *_, **__: subprocess.CompletedProcess([], 0, normalized, b""))
+    observed = collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                                  bootstrap_empty=True).require_complete()
+    assert observed.foreign == (str(foreign),)
+    assert observed.observed_files[0].content == raw
+    assert foreign.read_bytes() == raw
+    obs.add("com.fixture.owned.plist", scope="bot")
+    assert obs.collect().require_complete().foreign == (str(foreign),)
+
+
+def test_native_plist_normalization_cannot_erase_duplicate_keys(monkeypatch):
+    raw = _apple_xml(duplicate=True)
+    if sys.platform != "darwin":
+        normalized = plistlib.dumps({"Label": "shadow", "Program": "/System/Library/foreign"})
+        monkeypatch.setattr(inventory.sys, "platform", "darwin")
+        monkeypatch.setattr(inventory.subprocess, "run", lambda *_, **__: subprocess.CompletedProcess([], 0, normalized, b""))
+    with pytest.raises(InventoryError, match="lost keys"):
+        _darwin_source(raw)
 
 
 def test_selected_adapter_ownership_uses_its_interpreter_not_path_python(tmp_path, monkeypatch):

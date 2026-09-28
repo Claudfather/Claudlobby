@@ -27,6 +27,7 @@ import signal
 import stat
 import subprocess
 import sys
+from xml.parsers.expat import ExpatError
 
 from .resources import PackageResources, get_resources
 
@@ -427,6 +428,30 @@ def _darwin_source(content: bytes) -> dict:
     """Read launch identity/policy, not the shared WorkingDirectory predicate."""
     try:
         source = plistlib.loads(content, dict_type=_PlistKeys)
+    except ExpatError as exc:
+        # Some Apple system plists use XML that CoreFoundation accepts but
+        # Expat rejects (for example, unquoted declaration/DOCTYPE values).
+        # Normalize only that Darwin XML case through the native parser. The
+        # original bytes remain in FileSnapshot; no converted bytes are sealed.
+        if sys.platform != "darwin" or not content.lstrip().startswith(b"<?xml"):
+            raise InventoryError("unreadable plist launch definition") from exc
+        try:
+            converted = subprocess.run(("/usr/bin/plutil", "-convert", "xml1", "-o", "-", "-"),
+                                       input=content, capture_output=True, timeout=5)
+            if converted.returncode or not converted.stdout:
+                raise InventoryError("native plist normalization failed")
+            # plutil silently keeps the last duplicate dictionary key. Refuse
+            # any conversion that loses a key before _PlistKeys checks the
+            # normalized XML's remaining duplicates and policy fields.
+            key_tag = rb"<key(?=[\s>])"
+            if len(re.findall(key_tag, content)) != len(re.findall(key_tag, converted.stdout)):
+                raise InventoryError("native plist normalization lost keys")
+            source = plistlib.loads(converted.stdout, dict_type=_PlistKeys)
+        except InventoryError:
+            raise
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError,
+                plistlib.InvalidFileException, ExpatError) as native_exc:
+            raise InventoryError("unreadable plist launch definition") from native_exc
     except (ValueError, TypeError, plistlib.InvalidFileException) as exc:
         raise InventoryError("unreadable plist launch definition") from exc
     if not isinstance(source, dict):
