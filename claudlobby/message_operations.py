@@ -1,4 +1,4 @@
-"""One generated-bot ordinary send, with a receipt but no transport replay.
+"""One ordinary send to a bot, with a receipt but no transport replay.
 
 The public caller must hold runtime mutation_admission for the whole operation.
 This owner neither resolves a route nor verifies receiver delivery or idle Enter.
@@ -35,6 +35,10 @@ from .resources import PackageResources
 
 class MessageConflict(ValueError):
     """Frozen scope, request or Plane proof conflicts; no native effect is authorized."""
+
+
+class MessageIdentityUnavailable(RuntimeError):
+    """A local human has no readable identity proof before native transport."""
 
 
 @dataclass(frozen=True)
@@ -79,12 +83,13 @@ class NativeAttemptResult:
 
 
 def _identity_proof(conn, route: MessageRoute) -> None:
-    expected = (("fleet", route.origin.fleet.name, route.caller_fleet_uid, None),
-                ("fleet", route.selected.fleet.name, route.selected_fleet_uid, None),
+    expected = (("fleet", route.selected.fleet.name, route.selected_fleet_uid, None),
                 ("fleet", route.peer_context.fleet.name, route.peer_fleet_uid, None),
                 ("actor", route.caller.alias, route.caller.uid, route.caller_fleet_uid),
                 ("actor", route.peer.alias, route.peer.uid, route.peer_fleet_uid),
                 ("actor", route.manager.alias, route.manager.uid, route.selected_fleet_uid))
+    if route.origin is not None:
+        expected += (("fleet", route.origin.fleet.name, route.caller_fleet_uid, None),)
     for kind, alias, uid, parent in expected:
         row = conn.execute("SELECT uid, parent_uid FROM identity_registry WHERE kind=? AND alias=?",
                            (kind, alias)).fetchone()
@@ -347,7 +352,7 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
     """
     if not isinstance(route, MessageRoute) or not isinstance(body, MessageBody):
         raise MessageConflict("frozen route and validated body required")
-    if (route.selected.paths.root != route.origin.paths.root
+    if (route.origin is not None and route.selected.paths.root != route.origin.paths.root
             or route.selected.paths.root != route.peer_context.paths.root
             or package != route.selected.paths.package):
         raise MessageConflict("message route and package differ")
@@ -355,7 +360,10 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
             or route.manager_destination.root != route.selected.paths.root
             or route.peer_destination.fleet != route.peer_context.fleet.name
             or route.manager_destination.fleet != route.selected.fleet.name
-            or not route.caller.alias.startswith(f"bot:{route.origin.fleet.name}/")):
+            or route.origin is not None and not route.caller.alias.startswith(
+                f"bot:{route.origin.fleet.name}/")
+            or route.origin is None and (not route.caller.alias.startswith("human:")
+                                         or route.caller_fleet_uid is not None)):
         raise MessageConflict("native destination or caller differs from frozen route")
     try:
         if str(UUID(request_id)) != request_id:
@@ -363,7 +371,7 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
     except (ValueError, AttributeError) as exc:
         raise MessageConflict("canonical request UUID required") from exc
     if _report is not None:
-        if (not isinstance(_report, ReportPayload) or body.text != _report.to_body()
+        if (route.origin is None or not isinstance(_report, ReportPayload) or body.text != _report.to_body()
                 or parent_message_id is not None or kind != "chat"
                 or route.origin.fleet.name != route.selected.fleet.name
                 or route.caller_fleet_uid != route.selected_fleet_uid
@@ -390,6 +398,12 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
             raise MessageConflict("active host identity differs from frozen route")
     except OSError as exc:
         raise MessageConflict("active host identity is unavailable") from exc
+    if route.origin is None:
+        # Unlike generated callers, a human has no retained activation UID.
+        # Prove the existing registry binding before creating request state.
+        with _reader(root, route) as conn:
+            if conn is None:
+                raise MessageIdentityUnavailable("local human identity proof is unavailable")
 
     modes = _load_capture_config(root)  # Invalid capture policy is a refusal.
     if _report is not None:
@@ -527,13 +541,17 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
             path.lstat()
         except FileNotFoundError:
             persistence[0] = False
-            with _reader(root, route):
+            with _reader(root, route) as conn:
+                if route.origin is None and conn is None:
+                    raise MessageIdentityUnavailable("local human identity proof is unavailable")
                 return run(None)
         except OSError as exc:
             raise ReceiptConflict("existing request history cannot be inspected") from exc
         raise ReceiptConflict("existing request history cannot be locked")
     try:
-        with _reader(root, route):
+        with _reader(root, route) as conn:
+            if route.origin is None and conn is None:
+                raise MessageIdentityUnavailable("local human identity proof is unavailable")
             return run(store)
     finally:
         lock.__exit__(None, None, None)

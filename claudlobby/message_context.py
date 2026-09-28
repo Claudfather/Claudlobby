@@ -1,4 +1,4 @@
-"""Frozen, recording-independent routes for generated bot communication.
+"""Frozen routes for generated bots and already-bound local human callers.
 
 The public operation holds activation admission. This resolver reads selected
 configuration and activation identities, never Plane, bot.conf or mutable
@@ -20,7 +20,7 @@ from .operation_context import resolve_operation_scope
 from .request_receipts import MessageRouteBinding, NativeDestination
 from .resources import PackageResources
 from .supervision import build_supervision_spec
-from .task_operations import TaskActor
+from .task_operations import TaskActor, TaskOperationContext
 
 
 class MessageContextError(ValueError):
@@ -29,14 +29,14 @@ class MessageContextError(ValueError):
 
 @dataclass(frozen=True)
 class MessageRoute:
-    origin: Context
+    origin: Context | None
     selected: Context
     peer_context: Context
     activation_id: str
     plan_id: str
     release_id: str
     host_uid: str
-    caller_fleet_uid: str
+    caller_fleet_uid: str | None
     selected_fleet_uid: str
     peer_fleet_uid: str
     caller: TaskActor
@@ -89,18 +89,28 @@ def _transport(context: Context, bot_id: str) -> TransportDestination:
 
 
 def resolve_message_route(target: str, *, root: Path | None = None, fleet: str | None = None,
-                          package: PackageResources | None = None) -> MessageRoute:
+                          package: PackageResources | None = None,
+                          caller_context: TaskOperationContext | None = None) -> MessageRoute:
     """Resolve one exact bot and the selected fleet manager without Plane.
 
-    Only a validated generated origin is supported in this slice. Explicit
-    destination selectors never replace that origin; human identity registration
-    belongs to the later public operation. Returned IDs and native targets are
-    observations to freeze in a request before any recording or transport.
+    A human caller must already be bound by the operation identity owner under
+    runtime admission. Explicit destination selectors never replace a generated
+    origin. Returned IDs and native targets are observations to freeze before
+    any recording or transport.
     """
     selected, origin = resolve_operation_scope(root=root, fleet=fleet, package=package)
-    if origin is None or origin.bot_id is None:
-        raise MessageContextError("ordinary messaging requires a generated bot origin")
-    if origin.paths.root != selected.paths.root or origin.paths.package != selected.paths.package:
+    if origin is None:
+        if (not isinstance(caller_context, TaskOperationContext)
+                or not caller_context.caller.alias.startswith("human:")
+                or caller_context.caller_fleet_uid is not None
+                or caller_context.context.fleet.name != selected.fleet.name
+                or caller_context.root != selected.paths.root
+                or caller_context.context.paths.package != selected.paths.package):
+            raise MessageContextError("local human messaging requires a bound selected caller")
+    elif (origin.bot_id is None or caller_context is not None):
+        raise MessageContextError("generated messaging requires its own caller origin")
+    if origin is not None and (origin.paths.root != selected.paths.root
+                               or origin.paths.package != selected.paths.package):
         raise MessageContextError("generated caller and selected fleet belong to different hosts")
     fleet_name, bot_id = _parts(target, selected.fleet.name)
     peer = (selected if fleet_name == selected.fleet.name else
@@ -114,7 +124,7 @@ def resolve_message_route(target: str, *, root: Path | None = None, fleet: str |
     if selection is None:
         raise ActivationError("host has no active configuration")
 
-    contexts = {context.fleet.name: context for context in (origin, selected, peer)}
+    contexts = {context.fleet.name: context for context in (origin, selected, peer) if context is not None}
     bindings = {}
     for name, context in contexts.items():
         item = read_selected_identity_bindings(context.paths.root, name,
@@ -126,18 +136,26 @@ def resolve_message_route(target: str, *, root: Path | None = None, fleet: str |
             or read_selection(selected.paths.root) != selection):
         raise MessageContextError("active host selection changed during message resolution")
 
-    source_ids = bindings[origin.fleet.name]
+    source_ids = bindings[origin.fleet.name] if origin is not None else bindings[selected.fleet.name]
     selected_ids = bindings[selected.fleet.name]
     peer_ids = bindings[peer.fleet.name]
-    caller = TaskActor(source_ids["bots"][origin.bot_id],
-                       f"bot:{origin.fleet.name}/{origin.bot_id}")
+    if origin is None:
+        if (caller_context.host_uid != source_ids["host_uid"]
+                or caller_context.fleet_uid != selected_ids["fleet_uid"]):
+            raise MessageContextError("bound local human differs from selected host or fleet")
+        caller = caller_context.caller
+        caller_fleet_uid = None
+    else:
+        caller = TaskActor(source_ids["bots"][origin.bot_id],
+                           f"bot:{origin.fleet.name}/{origin.bot_id}")
+        caller_fleet_uid = source_ids["fleet_uid"]
     recipient = TaskActor(peer_ids["bots"][bot_id], f"bot:{fleet_name}/{bot_id}")
     manager_id = selected.fleet.manager
     manager = TaskActor(selected_ids["manager_uid"],
                         f"bot:{selected.fleet.name}/{manager_id}")
     return MessageRoute(origin, selected, peer, selection["activation_id"],
                         selection["plan_id"], selection["release_id"],
-                        source_ids["host_uid"], source_ids["fleet_uid"],
+                        source_ids["host_uid"], caller_fleet_uid,
                         selected_ids["fleet_uid"], peer_ids["fleet_uid"], caller,
                         recipient, manager, _transport(peer, bot_id),
                         _transport(selected, manager_id))

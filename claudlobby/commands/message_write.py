@@ -85,10 +85,12 @@ def dispatch(args) -> CommandOutput:
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
-    from ..message_operations import MessageConflict, send_message, send_unlinked_report
+    from ..message_operations import (MessageConflict, MessageIdentityUnavailable,
+                                      send_message, send_unlinked_report)
     from ..message_queries import MessageQueryError, receipt, show_message
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
-                                     bind_task_context, resolve_operation_scope)
+                                     bind_task_context, resolve_operation_scope,
+                                     resolve_task_mutation_context)
     from ..paths import InvalidPathSelector
     from ..plane.contracts import ContractViolation
     from ..plane.migrations import DowngradeError
@@ -111,23 +113,30 @@ def dispatch(args) -> CommandOutput:
         else:
             body = _body(args)
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
-        if selected.paths.seed or origin is None or origin.bot_id is None:
-            raise CommandFailure("conflict", "message send requires a generated bot context")
+        if selected.paths.seed:
+            raise CommandFailure("conflict", "seed configuration has no message mutations")
+        if is_report and (origin is None or origin.bot_id is None):
+            raise CommandFailure("conflict", "unlinked reports require a generated bot caller")
         if is_report and origin.fleet.name != selected.fleet.name:
             raise CommandFailure("conflict", "unlinked reports go to the caller's own fleet manager")
-        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-        if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
+        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID") if origin is not None else None
+        if origin is not None and (origin.bot_id is None or not bound_release
+                                   or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release)):
             raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
         with mutation_admission(selected.paths.root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
             release_id = release.release_id
+            human_ctx = (resolve_task_mutation_context(root=selected.paths.root,
+                         fleet=selected.fleet.name, package=selected.paths.package)
+                         if origin is None else None)
             parent_message_id = None
             target = args.to if args.public_command == "message.send" else None
             if is_report:
                 target = selected.fleet.manager
             if args.public_command == "message.reply":
                 parent_message_id = args.message_id
-                parent_ctx = bind_task_context(selected, origin=origin)
+                parent_ctx = (human_ctx if human_ctx is not None else
+                              bind_task_context(selected, origin=origin))
                 parent = show_message(parent_ctx, parent_message_id)
                 if (parent.destination is None
                         or parent.destination.uid != parent_ctx.caller.uid
@@ -139,8 +148,11 @@ def dispatch(args) -> CommandOutput:
                 target = parent.sender.alias.removeprefix("bot:")
             route = resolve_message_route(target, root=selected.paths.root,
                                           fleet=selected.fleet.name,
-                                          package=selected.paths.package)
-            if route.release_id != release_id or route.caller.alias != (
+                                          package=selected.paths.package,
+                                          caller_context=human_ctx)
+            if (route.release_id != release_id
+                    or human_ctx is not None and route.caller != human_ctx.caller
+                    or origin is not None and route.caller.alias !=
                     f"bot:{origin.fleet.name}/{origin.bot_id}"):
                 raise CommandFailure("release_mismatch", "message route differs from selected release",
                                      release_id=release_id)
@@ -188,7 +200,8 @@ def dispatch(args) -> CommandOutput:
             # A tmux success is only submission. This read owns the final byte
             # integrity verdict and never repairs or resends the native payload.
             try:
-                ctx = bind_task_context(route.selected, origin=route.origin)
+                ctx = (human_ctx if human_ctx is not None else
+                       bind_task_context(route.selected, origin=route.origin))
                 observed = receipt(ctx, outcome.message_id, destination=route.peer.alias,
                                    wait=_RECEIPT_WAIT_S)
             except (OperationContextUnavailableError, OperationContextError,
@@ -251,9 +264,12 @@ def dispatch(args) -> CommandOutput:
     except OperationContextUnavailableError as exc:
         raise CommandFailure("unavailable", "message identity registry is unavailable",
                              release_id=release_id) from exc
+    except MessageIdentityUnavailable as exc:
+        raise CommandFailure("unavailable", "local human identity proof is unavailable",
+                             release_id=release_id) from exc
     except (MessageContextError, OperationContextError, BotNotFoundError,
             ActivationError, PlanError) as exc:
-        raise CommandFailure("conflict", "active generated message scope or destination is invalid",
+        raise CommandFailure("conflict", "active message scope or destination is invalid",
                              release_id=release_id) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched",

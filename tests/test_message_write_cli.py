@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import assignment_delivery, context, message_operations, task_operations
+from claudlobby import assignment_delivery, context, message_operations, operation_context, task_operations
 from claudlobby.__main__ import main
 from claudlobby.message_queries import MessageIdentity, ReceiptObservation
 from claudlobby.message_transport import TransportOutcome
@@ -33,6 +33,17 @@ def _generated(monkeypatch, root, release, *, bot="manager"):
     package = source_package()
     monkeypatch.setattr(context, "get_resources", lambda: replace(
         package, native=release.native_path, artifact_id=release.inputs.artifact_id))
+
+
+def _human(monkeypatch, release):
+    for key in ("CLAUDLOBBY_ROOT", "FLEET_ROOT", "BOT_DIR", "FLEET_NAME", "CLAUDLOBBY_FLEET",
+                "BOT_ID", "BOT_NAME", "CLAUDLOBBY_RELEASE_ID"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(context, "selected_cli", lambda: release.cli_path)
+    package = source_package()
+    monkeypatch.setattr(context, "get_resources", lambda: replace(
+        package, native=release.native_path, artifact_id=release.inputs.artifact_id))
+    monkeypatch.setattr(operation_context, "_local_operator_alias", lambda: "human:operator")
 
 
 def _call(capsys, root, *args, expected):
@@ -161,6 +172,70 @@ def test_recording_outage_keeps_submitted_effect_and_alert_truth(active, monkeyp
     assert "Private O1 body" not in json.dumps(output)
 
 
+def test_local_human_sends_and_replies_only_to_a_bot_sender(active, monkeypatch, capsys):  # noqa: F811
+    root, host = active
+    _human(monkeypatch, host.release)
+    calls = []
+    _native(monkeypatch, calls)
+    from claudlobby.plane import emit_api
+
+    def first_contact_unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("first-contact recorder unavailable")
+    with monkeypatch.context() as outage:
+        outage.setattr(emit_api, "emit_batch", first_contact_unavailable)
+        cold = _call(capsys, root, "--to", "worker", "--text", "Cold human message",
+                     "--request-id", str(uuid4()), expected=6)
+    assert cold["error"]["code"] == "unavailable" and calls == []
+    with sqlite3.connect(db_file(root)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM identity_registry WHERE alias='human:operator'").fetchone()[0] == 0
+
+    request_id = str(uuid4())
+    argv = ("--to", "worker", "--text", "Private human message", "--request-id", request_id)
+    sent = _call(capsys, root, *argv, expected=5)
+    assert sent["data"]["sender"]["alias"] == "human:operator"
+    assert sent["data"]["destination"]["alias"] == "bot:example/worker"
+    assert sent["data"]["recording"] == "committed" and len(calls) == 1
+    receipt_file = next((root / "state/requests").glob(f"*/{request_id}.json"))
+    stored = json.loads(receipt_file.read_text())
+    assert stored["intent"]["route"]["caller_fleet_uid"] is None
+    assert stored["intent"]["caller_uid"] == sent["data"]["sender"]["uid"]
+    replay = _call(capsys, root, *argv, expected=5)
+    assert replay["data"]["replayed"] and len(calls) == 1
+
+    # A historical bot→human parent can be answered through the existing bot
+    # destination. This fixture does not invent a public bot→human carrier.
+    parent = mint_msg_id()
+    from claudlobby.plane.emit_api import emit_batch
+    assert emit_batch(root, [{"event_type": "communication", "emitter": "test",
+                              "fleet": "example", "source_ref": f"test:{parent}",
+                              "payload": {"msg_id": parent, "sender": "bot:example/worker",
+                                          "recipient": "human:operator", "recipient_raw": "human:operator",
+                                          "message_class": "question", "body": "Historical bot question"}}],
+                      require_commit=True)[0].status == "committed"
+    answered = _reply_call(capsys, root, parent, "--text", "Private human answer",
+                           "--request-id", str(uuid4()), expected=5)
+    assert answered["data"]["sender"]["uid"] == sent["data"]["sender"]["uid"]
+    assert answered["data"]["destination"]["alias"] == "bot:example/worker"
+    assert answered["data"]["reply_to_message_id"] == parent and len(calls) == 2
+
+    original = message_operations.emit_batch
+    def recorder(root_path, raws, **kwargs):
+        if raws[0]["event_type"] == "communication":
+            raise sqlite3.OperationalError("private recorder outage")
+        return original(root_path, raws, **kwargs)
+    with monkeypatch.context() as outage:
+        outage.setattr(message_operations, "emit_batch", recorder)
+        degraded = _call(capsys, root, "--to", "worker", "--text", "Human O1 recovery note",
+                         "--request-id", str(uuid4()), expected=11)
+    assert degraded["data"]["sender"]["alias"] == "human:operator"
+    assert degraded["data"]["recording"] == "unrecorded" and len(calls) == 3
+
+    _generated(monkeypatch, root, host.release, bot="worker")
+    unsupported = _reply_call(capsys, root, sent["data"]["message_id"],
+                              "--text", "No human transport", "--request-id", str(uuid4()), expected=4)
+    assert unsupported["error"]["code"] == "conflict" and len(calls) == 3
+
+
 def test_reply_requires_recorded_recipient_and_replays_to_parent_sender(active, monkeypatch, capsys):
     root, host = active
     _generated(monkeypatch, root, host.release)
@@ -193,9 +268,6 @@ def test_bad_context_release_and_file_refuse_before_native(active, monkeypatch, 
     root, host = active
     calls = []
     _native(monkeypatch, calls)
-    no_origin = _call(capsys, root, "--to", "worker", "--text", "Valid",
-                      "--request-id", str(uuid4()), expected=4)
-    assert no_origin["error"]["code"] == "conflict" and calls == []
     _generated(monkeypatch, root, host.release)
     invalid = tmp_path / "invalid-message.txt"
     invalid.write_bytes(b"\xff")

@@ -89,7 +89,7 @@ class MessageRouteBinding:
     activation_id: str
     plan_id: str
     release_id: str
-    caller_fleet_uid: str
+    caller_fleet_uid: str | None
     peer_fleet_uid: str
     caller_alias: str
     recipient_alias: str
@@ -213,10 +213,20 @@ def _message_route(intent):
     for value in (route.activation_id, route.plan_id, route.release_id):
         if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
             raise ReceiptError("invalid message selection stamp")
-    for value in (route.caller_fleet_uid, route.peer_fleet_uid):
-        _id(value, "fleet")
+    _id(route.peer_fleet_uid, "fleet")
+    if not isinstance(route.caller_alias, str):
+        raise ReceiptError("invalid frozen message caller alias")
+    if route.caller_alias.startswith("human:"):
+        if route.caller_fleet_uid is not None or not re.fullmatch(r"human:[^\s:/]+", route.caller_alias):
+            raise ReceiptError("local human route has a foreign caller fleet or alias")
+        if intent.operation not in {"message.send", "message.reply"}:
+            raise ReceiptError("only ordinary messages may use a local human route")
+    else:
+        _id(route.caller_fleet_uid, "fleet")
+        if not re.fullmatch(r"bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", route.caller_alias):
+            raise ReceiptError("invalid frozen bot caller alias")
     _id(route.manager_uid, "actor")
-    for value in (route.caller_alias, route.recipient_alias, route.manager_alias):
+    for value in (route.recipient_alias, route.manager_alias):
         if not isinstance(value, str) or not re.fullmatch(r"bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", value):
             raise ReceiptError("invalid frozen message actor alias")
     for destination in (route.peer_destination, route.manager_destination):
