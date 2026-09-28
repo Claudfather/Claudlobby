@@ -16,6 +16,7 @@ import sys
 import time
 
 from .activation_state import ActivationError, ActivationRecord, locked_activation, read_activation, read_selection
+from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
 from .activation_runtime import start_unit
 from .config_plan import path_state, read_plan
@@ -213,6 +214,9 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started")):
             store.begin(activation_id, step)
             registry = _registry_ready(plan, declarations, package) if phase == "bots" else []
+            if phase == "bots":
+                bindings = identity_bindings_from_registry(plan, registry, package=package)
+                store.record_identity_bindings(activation_id, bindings, package=package)
             publication = enrollment.install_candidate_units(store, activation_id, phase, adapter=adapter)
             entries = enrollment.candidate_entries(store, activation_id, phase)
             if phase == "bots":

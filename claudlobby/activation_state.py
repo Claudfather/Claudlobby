@@ -219,6 +219,22 @@ class ActivationStore:
         body["pending"] = step
         return self._save(record)
 
+    def record_identity_bindings(self, activation_id: str, bindings: dict, *, package) -> ActivationRecord:
+        """Persist verified IDs once, before the first candidate bot can start."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        if record.status != "activating" or record.body["pending"] != "bots_started":
+            raise ActivationError("identity bindings require the pending bot-start step")
+        from .activation_identity import validate_identity_bindings
+        plan = read_plan(self.root, record.body["intent"]["plan_id"])
+        validate_identity_bindings(plan, bindings, package=package)
+        if "identity_bindings" in record.body:
+            if record.body["identity_bindings"] != bindings:
+                raise ActivationError("identity bindings were already recorded")
+            return record
+        record.body["identity_bindings"] = bindings
+        return self._save(record)
+
     def complete(self, activation_id: str, step: str, *, evidence_digest: str) -> ActivationRecord:
         if step in {"selection_switched", "selection_restored"}:
             raise ActivationError("selection completion belongs to the atomic selector")

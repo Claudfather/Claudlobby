@@ -1,5 +1,6 @@
 """Cold-host activation with real durable owners and a private native manager."""
 
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from claudlobby import activation, activation_state as state, runtime_admission as admission
+from claudlobby.activation_identity import read_selected_identity_bindings
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.config_units import planned_units, unit_family
 from claudlobby.migration_apply import read_migration
@@ -243,6 +245,11 @@ def test_cold_bootstrap_uses_real_sql_config_and_serial_starts_before_timers(col
     assert Path(journal["backup"]["path"]).is_file()
     assert (root / "runtime/bots/worker/settings.json").read_bytes() == b'{"permissions":{"deny":["Write"]}}\n'
     assert state.read_selection(root)["release_id"] == release.release_id
+    bindings = read_selected_identity_bindings(root, "example", package=host.package)
+    assert bindings["manager"] == "manager" and bindings["manager_uid"] == bindings["bots"]["manager"]
+    assert set(bindings["bots"]) == {"manager", "worker"}
+    db_file(root).rename(root / "plane-db-removed")
+    assert read_selected_identity_bindings(root, "example", package=host.package) == bindings
     before = list(host.starts)
     with pytest.raises(state.ActivationError, match="existing release selection"):
         activation.bootstrap_activation(root, "again", plan.plan_id, host.directory, adapter=host)
@@ -267,6 +274,17 @@ def test_failed_readiness_keeps_candidate_pending_and_never_starts_producers(col
         assert not (host.directory / "com.example.manager.service").exists()
     record = state.read_activation(root, "cold")
     assert record.status == "activating" and record.body["pending"] == pending
+    if failure == "worker":
+        assert "identity_bindings" in record.body
+        replacement = deepcopy(record.body["identity_bindings"])
+        bot_ids = replacement["fleets"]["example"]["bots"]
+        bot_ids["worker"] = next("actor_" + digit * 32 for digit in "012"
+                                 if "actor_" + digit * 32 not in bot_ids.values())
+        with state.locked_activation(root) as store:
+            with pytest.raises(state.ActivationError, match="already recorded"):
+                store.record_identity_bindings("cold", replacement, package=host.package)
+    elif pending == "bots_started":
+        assert "identity_bindings" not in record.body
     assert "producers_resumed" not in record.body["completed"]
     assert not (host.directory / "claudlobby-keepalive.timer").exists()
     assert read_migration(root, "cold")["result"] is not None
@@ -274,6 +292,45 @@ def test_failed_readiness_keeps_candidate_pending_and_never_starts_producers(col
         assert host.starts == ["claudlobby-plane-daemon.service"]
     else:
         assert host.starts == ["claudlobby-plane-daemon.service", "com.example.manager.service", "com.example.worker.service"]
+
+
+def test_selected_bindings_refuse_loss_foreign_scope_and_ambiguous_actors(cold):
+    root, _, plan, host = cold
+    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    original = state.read_activation(root, "cold").body
+    journal = root / "state/activations/cold/activation.json"
+
+    def replace_body(body):
+        # Keep the outer journal hash valid to exercise binding validation.
+        state._write(journal, {"record": body, "sha256": state._digest(body)})
+
+    missing = deepcopy(original)
+    del missing["identity_bindings"]
+    replace_body(missing)
+    with pytest.raises(state.ActivationError, match="differ from the selected plan"):
+        read_selected_identity_bindings(root, "example", package=host.package)
+
+    foreign = deepcopy(original)
+    actual_host = foreign["identity_bindings"]["host_uid"]
+    foreign["identity_bindings"]["host_uid"] = next(
+        "host_" + digit * 32 for digit in "01" if "host_" + digit * 32 != actual_host)
+    replace_body(foreign)
+    with pytest.raises(state.ActivationError, match="another host"):
+        read_selected_identity_bindings(root, "example", package=host.package)
+
+    foreign_fleet = deepcopy(original)
+    foreign_fleet["identity_bindings"]["fleets"]["other"] = (
+        foreign_fleet["identity_bindings"]["fleets"].pop("example"))
+    replace_body(foreign_fleet)
+    with pytest.raises(state.ActivationError, match="differ from the selected plan"):
+        read_selected_identity_bindings(root, "example", package=host.package)
+
+    ambiguous = deepcopy(original)
+    ambiguous["identity_bindings"]["fleets"]["example"]["bots"]["worker"] = (
+        ambiguous["identity_bindings"]["fleets"]["example"]["bots"]["manager"])
+    replace_body(ambiguous)
+    with pytest.raises(state.ActivationError, match="ambiguous"):
+        read_selected_identity_bindings(root, "example", package=host.package)
 
 
 def test_old_data_and_wrong_executing_interpreter_refuse_before_preparation(cold, monkeypatch):
