@@ -31,15 +31,8 @@ class AutomationStateError(RuntimeError):
 
 @contextmanager
 def _state_lock(path: Path):
-    """Hold both shell lock protocols, even if callers have different PATHs.
-
-    Linux shell writers use `flock` on the lockfile; stock macOS bash 3.2 uses
-    atomic `<lockfile>.d`. Holding both avoids a PATH-dependent mismatch between
-    an operator's CLI and an already running bot service.
-    """
+    """Hold the shell writer's kernel lock on the same host-shared file."""
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    lockdir = Path(f"{path}.d")
-    directory_held = False
     deadline = time.monotonic() + LOCK_WAIT_S
     try:
         while True:
@@ -50,23 +43,10 @@ def _state_lock(path: Path):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("fleet state file lock is busy") from None
                 time.sleep(0.05)
-        while True:
-            try:
-                lockdir.mkdir()
-                directory_held = True
-                break
-            except FileExistsError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("fleet state directory lock is busy") from None
-                time.sleep(0.05)
         yield
     finally:
-        try:
-            if directory_held:
-                lockdir.rmdir()
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _state_file(root: Path) -> Path:

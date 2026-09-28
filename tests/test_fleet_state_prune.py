@@ -25,6 +25,7 @@ CI runs pytest only, so the bash is exercised via subprocess.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -309,11 +310,12 @@ def test_automation_and_shell_status_writers_preserve_each_other_under_shared_lo
 
 def test_portable_lock_timeout_never_executes_an_unlocked_state_write(tmp_path: Path) -> None:
     lock = tmp_path / "fleet-state.json.lock"
-    Path(f"{lock}.d").mkdir()
     touched = tmp_path / "touched"
     script = (f'. "{LIB_COMMON}"; _FLOCK_BIN=; WITH_LOCK_WAIT_S=0; '
               f'with_lock "{lock}" touch "{touched}"')
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    with lock.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert proc.returncode != 0 and "could not acquire" in proc.stderr
     assert not touched.exists(), "timed-out lock ran its callback without exclusion"
 

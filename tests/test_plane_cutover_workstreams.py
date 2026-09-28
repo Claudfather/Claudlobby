@@ -356,68 +356,49 @@ def test_dry_run_against_a_fresh_root_creates_no_plane_db(tmp_path):
     )
 
 
-def test_the_lock_excludes_a_shell_writer_when_flock_is_unavailable(
-    tmp_path, monkeypatch
+def test_the_kernel_lock_excludes_a_shell_writer_when_flock_binary_is_unavailable(
+    tmp_path
 ):
-    """#1748 review, the one that mattered: with_lock's own fallback (no
-    flock binary -- stock macOS) uses an mkdir spinlock on <lockfile>.d, a
-    DIFFERENT mechanism and path than fcntl.flock on the lockfile itself.
-    The importer must resolve the SAME way the shell does and take
-    whichever mechanism a shell writer on this host would take, or the two
-    do not exclude each other at all.
+    """Shell's no-flock-binary fallback and the importer must lock the same
+    file. A stale directory from the retired spinlock must be inert.
 
-    BOTH sides must see the restricted PATH, not just the shell subprocess
-    -- the first version of this test only restricted the holder's env and
-    left the pytest process's own PATH (with a real flock on it) in force,
-    so registry_lock took the flock branch while the shell took mkdir: two
-    mechanisms that never contend for anything, a false pass waiting to
-    happen."""
-    import shutil
+    Force the shell's no-binary path on every host, including Linux CI."""
+    import select
     import subprocess as sp
     import time
 
     from claudlobby.plane.workstream_import import registry_lock
 
-    real_flock = shutil.which("flock")
-    if real_flock is None:
-        pytest.skip("no flock binary on this runner -- cannot construct the contrast")
-
-    isolated = tmp_path / "no-flock-bin"
-    isolated.mkdir()
-    # Everything the real /usr/bin offers, EXCEPT flock -- robust by
-    # construction (mirrors every OTHER binary the shell writer needs),
-    # not a guess at which specific ones lib-common.sh happens to call.
-    for f in Path("/usr/bin").glob("*"):
-        if f.name == "flock":
-            continue
-        try:
-            (isolated / f.name).symlink_to(f)
-        except OSError:
-            pass
-    assert shutil.which("flock", path=str(isolated)) is None
-    monkeypatch.setenv("PATH", str(isolated))  # THIS process too
-
     lockfile = tmp_path / "workstreams.lock"
     lockdir = tmp_path / "workstreams.lock.d"
+    lockdir.mkdir()
     holder = sp.Popen(
         [
             "bash",
             "-c",
-            f'. "{LIB}/lib-common.sh"; with_lock "{lockfile}" '
+            f'. "{LIB}/lib-common.sh"; _FLOCK_BIN=; WITH_LOCK_WAIT_S=2; with_lock "{lockfile}" '
             f'bash -c "echo acquired; sleep 1.2; echo released"',
         ],
         stdout=sp.PIPE,
         stderr=sp.STDOUT,
         text=True,
-        env=dict(os.environ, PATH=str(isolated)),
+        env=os.environ.copy(),
     )
-    time.sleep(0.4)
-    assert lockdir.is_dir(), "the shell holder must be using the mkdir fallback by now"
+    try:
+        readable, _, _ = select.select([holder.stdout], [], [], 5)
+        assert readable, "the shell holder did not report acquiring the lock"
+        assert holder.stdout.readline().strip() == "acquired"
+        assert lockfile.is_file(), "the shell holder must lock the shared file"
 
-    t0 = time.monotonic()
-    with registry_lock(lockfile, wait_s=5):
-        elapsed = time.monotonic() - t0
-    holder.wait(timeout=5)
+        t0 = time.monotonic()
+        with registry_lock(lockfile, wait_s=5):
+            elapsed = time.monotonic() - t0
+        assert holder.wait(timeout=5) == 0
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)
+    assert lockdir.is_dir(), "a stale spinlock directory is inert and left untouched"
     assert elapsed > 0.5, (
         f"acquired after only {elapsed:.2f}s -- the shell holder's lock did not exclude this"
     )

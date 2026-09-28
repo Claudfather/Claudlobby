@@ -95,24 +95,16 @@ LOCK_WAIT_S = 30.0
 
 @contextmanager
 def registry_lock(lock_path: Path, *, wait_s: float = LOCK_WAIT_S):
-    """Exclusive lock on `<fleet runtime>/workstreams.lock` for import and
-    canonical workstream operations. The mechanism remains portable so a
-    selected host's writers exclude each other.
+    """Exclusive lock on `<fleet runtime>/workstreams.lock` during import.
 
-    The existing portable lock selects flock where the host provides it and
-    an atomic mkdir spinlock otherwise. The import and canonical operation
-    use this same helper, including a bounded wait that refuses on timeout.
+    The old `workstream-update.sh` writer is retired; keep the shared lockfile
+    protocol for any shell holder of this path. Refuse after a bounded wait.
 
     The caller is expected to materialize the existing registry AND emit
     its plan's events while holding this — see the module docstring's
     second R1-gauntlet hazard (materialize-before-lock)."""
-    import shutil
-
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if shutil.which("flock"):
-        yield from _flock_lock(lock_path, wait_s)
-    else:
-        yield from _mkdir_lock(lock_path, wait_s)
+    yield from _flock_lock(lock_path, wait_s)
 
 
 def _flock_lock(lock_path: Path, wait_s: float):
@@ -136,31 +128,6 @@ def _flock_lock(lock_path: Path, wait_s: float):
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-
-
-def _mkdir_lock(lock_path: Path, wait_s: float):
-    """Atomic mkdir fallback shared by import and canonical operation."""
-    lockdir = Path(f"{lock_path}.d")
-    deadline = time.monotonic() + wait_s
-    while True:
-        try:
-            lockdir.mkdir()
-            break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"could not acquire {lockdir} within {wait_s}s"
-                    " -- another workstream operation may be running"
-                    " (this host uses the mkdir-spinlock fallback)"
-                ) from None
-            time.sleep(0.05)
-    try:
-        yield
-    finally:
-        try:
-            lockdir.rmdir()
-        except OSError:
-            pass
 
 
 #: The four statuses the writer's own vocabulary recognises

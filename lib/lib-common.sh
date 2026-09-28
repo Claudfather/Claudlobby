@@ -14,7 +14,7 @@
 #   claudlobby_cli     — run the claudlobby CLI across every install shape
 #   session_cli_path   — bind the composed CLI to this bot's session PATH
 #   with_timeout       — run a command under timeout(1) if available, else bare
-#   with_lock          — portable mutex (flock if available, else mkdir spinlock)
+#   with_lock          — kernel mutex (flock binary or Python fcntl fallback)
 #   setup_log_dir      — mkdir -p for log file's parent directory
 #   safe_mktemp        — mktemp with automatic EXIT cleanup
 #   tmux_session_name  — derive tmux session name from bot directory
@@ -434,31 +434,51 @@ with_timeout() {
 }
 
 # with_lock <lockfile> <command> [args...]
-# Portable mutex: uses flock if available, else an atomic mkdir-based spinlock
-# (mkdir is atomic on every POSIX filesystem). Refuses on lock failure or
-# after the bounded wait; proceeding unlocked can lose another writer's state.
+# Kernel mutex on the lockfile. Python locks the inherited shell fd when the
+# flock binary is absent (stock macOS); the lock remains held by the shell and
+# its descendants after Python exits, and the kernel releases it after death.
+# Refuses on unavailable/unknown locking or after the bounded wait.
 with_lock() {
     local lockfile="${1:?Usage: with_lock <lockfile> <command...>}"; shift
-    if [ -n "$_FLOCK_BIN" ]; then
-        ( "$_FLOCK_BIN" -x 200 || return $?; "$@" ) 200>"$lockfile"
-        return $?
-    fi
-    # 30s budget (WITH_LOCK_WAIT_S), not 5: a critical section that reaches
-    # the plane through the cold-CLI rung runs 1-2s, and a waiter that gives up
-    # runs UNLOCKED — measured by the R1 gauntlet with six concurrent opens.
-    local lockdir="${lockfile}.d" i=0 _max=$(( ${WITH_LOCK_WAIT_S:-30} * 20 ))
-    while ! mkdir "$lockdir" 2>/dev/null; do
-        i=$((i + 1))
-        if [ "$i" -ge "$_max" ]; then
-            echo "with_lock: could not acquire $lockdir within ${WITH_LOCK_WAIT_S:-30}s; no action performed" >&2
-            return 1
+    local python="${CLAUDLOBBY_NATIVE_PYTHON-python3}"
+    (
+        if [ -n "$_FLOCK_BIN" ]; then
+            "$_FLOCK_BIN" -x 200 || return $?
+        else
+            if ! command -v "$python" >/dev/null 2>&1; then
+                echo "with_lock: selected Python is unavailable when flock is absent; no action performed" >&2
+                return 1
+            fi
+            # 30s budget (WITH_LOCK_WAIT_S), not 5: a critical section that
+            # reaches the plane through the cold-CLI rung runs 1-2s.
+            "$python" -I -S - "${WITH_LOCK_WAIT_S:-30}" <<'PY' || {
+import fcntl
+import math
+import sys
+import time
+
+try:
+    wait_s = float(sys.argv[1])
+except ValueError:
+    sys.exit(2)
+if not math.isfinite(wait_s) or wait_s < 0:
+    sys.exit(2)
+deadline = time.monotonic() + wait_s
+while True:
+    try:
+        fcntl.flock(200, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit(1)
+        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+PY
+                echo "with_lock: could not acquire $lockfile within ${WITH_LOCK_WAIT_S:-30}s; no action performed" >&2
+                return 1
+            }
         fi
-        sleep 0.05
-    done
-    local rc=0
-    "$@" || rc=$?
-    rmdir "$lockdir" 2>/dev/null || true
-    return $rc
+        "$@"
+    ) 200>"$lockfile"
 }
 
 # --- Bot conf loading -------------------------------------------------------
