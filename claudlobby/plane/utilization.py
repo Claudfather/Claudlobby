@@ -59,7 +59,9 @@ def heartbeat_series(conn, *, now: datetime | None = None,
     since = (now - timedelta(days=days)).isoformat()
     like = None if fleet is None else fleet
     series: dict[str, list] = {}
-    for alias, occ, raw in conn.execute(HEARTBEAT_SERIES_SQL, (since, like, like, like)):
+    # Fetched whole before parsing: over the live cursor, the snapshot would be
+    # held while every one of tens of thousands of rows is parsed (#1905).
+    for alias, occ, raw in conn.execute(HEARTBEAT_SERIES_SQL, (since, like, like, like)).fetchall():
         ts = _parse(occ)
         try:
             state = (json.loads(raw) if isinstance(raw, str) else raw or {}).get("state")

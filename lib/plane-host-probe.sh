@@ -3,7 +3,8 @@
 # spec §2b: the probe loop, cause=probe). Reads the VOLATILE host facets
 # (F12 moved these OUT of the registry keyframe: they change every minute,
 # so they live in metric_samples, not the payload) and emits ONE
-# cause=probe batch per run for the seven seeded host.* metric names.
+# cause=probe batch per run for the seeded host.* metric names
+# (`claudlobby/plane/registries.py` METRIC_NAMES).
 #
 # Subject is the host, keyed by hostname → the SAME uid the registry
 # keyframes the host under, so a facet sample joins the Host card with no
@@ -108,6 +109,18 @@ if [ -n "$_bsec" ]; then
         || date -u -d "@$_bsec" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
 fi
 [ -n "$_boot" ] && _add "$(_metric host.boot_time "\"$_boot\"")"
+
+# host.plane_wal_bytes — the plane's WAL, one stat (#1905). A reader holding a
+# snapshot keeps the daemon's checkpoint from resetting it, and nothing else
+# records how big it got. Only where the db exists: a host with no plane has no
+# WAL (absent, not 0), while a missing -wal beside an existing db IS an empty
+# WAL, because SQLite deletes it on the last clean close.
+_db="$CLAUDLOBBY_ROOT/state/plane/plane.db"
+if [ -f "$_db" ]; then
+    if [ -e "$_db-wal" ]; then _wal="$(stat_size "$_db-wal" 2>/dev/null)"; else _wal=0; fi
+    case "$_wal" in ''|*[!0-9]*) _wal="" ;; esac
+    [ -n "$_wal" ] && _add "$(_metric host.plane_wal_bytes "$_wal")"
+fi
 
 # host.job_ran — one proof-of-run sample per probe, so a silent probe (a
 # facet-less host, an unarmed fleet) is distinguishable from a probe that

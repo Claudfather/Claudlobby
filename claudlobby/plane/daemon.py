@@ -143,6 +143,13 @@ def socket_path(root: Path) -> Path:
     return p
 
 
+def lock_path(sock_path: Path) -> Path:
+    """The daemon's lifetime flock, beside its socket (`_acquire_lock`). Its
+    holder IS the running daemon, which is how `plane doctor` tells the plane's
+    own writer from a reader holding the WAL (#1905)."""
+    return sock_path.with_name(sock_path.name + ".lock")
+
+
 def _check_sun_path(path: Path) -> None:
     if len(str(path).encode()) > MAX_SOCKET_PATH_BYTES:
         raise SocketPathTooLong(
@@ -476,14 +483,14 @@ class PlaneDaemon:
         reach). The lock is held (fd open) for the daemon's life and released
         by the kernel on any death, so a crashed holder never wedges the
         next start."""
-        lock_path = self.sock_path.with_name(self.sock_path.name + ".lock")
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        lock = lock_path(self.sock_path)
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
             raise DaemonAlreadyRunning(
-                f"another plane daemon holds {lock_path}"
+                f"another plane daemon holds {lock}"
             ) from None
         self._lock_fd = fd
 

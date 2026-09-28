@@ -3636,6 +3636,16 @@ stat_mtime() {
     fi
 }
 
+stat_size() {
+    # Print a file's size in bytes, without reading it
+    local file="${1:?Usage: stat_size <file>}"
+    if [ "$_OS" = "Darwin" ]; then
+        stat -f %z "$file"
+    else
+        stat -c %s "$file"
+    fi
+}
+
 iso_to_epoch() {
     # Convert an ISO-8601 UTC timestamp (e.g. 2026-05-15T14:30:00Z) to epoch
     # seconds. Portable across GNU date (Linux) and BSD date (Darwin). Prints
