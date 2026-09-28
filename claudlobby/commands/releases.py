@@ -124,7 +124,26 @@ def _host_releases(args, root: Path) -> CommandOutput:
     try:
         if activation_dir.resolve() != activation_dir:
             raise OSError("redirected activation store")
-        names = {path.name for path in activation_dir.iterdir() if path.is_dir()} if activation_dir.exists() else set()
+        names = set()
+        for path in activation_dir.iterdir() if activation_dir.exists() else ():
+            if not path.is_dir():
+                continue
+            # Parking/publication journals share this store, but are not root
+            # activation records. Only a verified known owner may be excluded;
+            # a missing/torn activation.json at any other name stays visible.
+            if (not (path / "activation.json").exists() and not (path / "activation.json").is_symlink()
+                    and re.fullmatch(r"(?:units|enrollment)-[0-9a-f]{64}", path.name)):
+                from ..config_install import read_config_install
+                from ..config_plan import PlanError, read_plan
+                try:
+                    journal = read_config_install(root, path.name)
+                    plan = read_plan(root, journal.plan_id)
+                    owner = "activation-units-v1" if path.name.startswith("units-") else "activation-enrollment-v1"
+                    if plan.effects.get("owner") == owner:
+                        continue
+                except (PlanError, OSError, ValueError):
+                    pass
+            names.add(path.name)
     except OSError:
         names = set()
         activation_errors.append({"activation_id": None, "error": "activation store cannot be read"})

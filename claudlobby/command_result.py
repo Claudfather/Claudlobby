@@ -16,7 +16,8 @@ _EXITS = {"internal_error": 1, "invalid_argument": 2, "not_found": 3,
           "delivery_unknown": 5, "delivery_failed": 5, "notification_failed": 5,
           "unavailable": 6, "release_mismatch": 7, "timeout": 8,
           "receipt_unobservable": 9, "receipt_mismatch": 10, "recording_degraded": 11}
-_PUBLIC = {("host", "releases"): "host.releases", ("config", "plan"): "config.plan",
+_PUBLIC = {("host", "releases"): "host.releases", ("host", "status"): "host.status",
+           ("host", "activate"): "host.activate", ("config", "plan"): "config.plan",
            ("config", "diff"): "config.diff", ("migration", "plan"): "migration.plan",
            ("migration", "status"): "migration.status"}
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
