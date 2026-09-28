@@ -61,7 +61,7 @@ def _timer_text() -> str:
 
 @pytest.fixture
 def host(tmp_path):
-    """An isolated HOME with a stub systemctl, plus two composed trees.
+    """An isolated Linux/systemd model, plus two composed trees, on any host.
 
     systemctl is stubbed rather than skipped: the guard has to run in the real
     script's control flow, and a real `enable --now` would touch this machine's
@@ -74,6 +74,10 @@ def host(tmp_path):
     stub = bin_dir / "systemctl"
     stub.write_text('#!/bin/bash\nprintf "%s\\n" "systemctl $*" >> "$SYSTEMCTL_LOG"\n')
     stub.chmod(0o755)
+    # Exercise the Linux installer even when pytest itself runs on macOS.
+    uname = bin_dir / "uname"
+    uname.write_text('#!/bin/bash\nprintf "Linux\\n"\n')
+    uname.chmod(0o755)
 
     trees = {}
     for name in ("A", "B"):

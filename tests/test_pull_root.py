@@ -8,6 +8,8 @@ lib/ is the real lib/, so it pulls the tree it runs from, exactly as on a host.
 Only plane-lookup.py is a stub (committed, so the tree stays clean); the
 `claudlobby` CLI and `systemctl` are stubs on PATH; the run's record lands on a
 REAL plane under the scratch root through the shim's cold CLI rung.
+The installed units and restart-state model are explicitly Linux/systemd on
+every test host.
 """
 
 import json
@@ -125,7 +127,10 @@ class Install:
         self.job({"hold": None})
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
+        # The restart checks below model .service files and systemctl state;
+        # keep fresh detect_os calls in sourced helpers on that same platform.
         for name, body in (
+            ("uname", '#!/bin/bash\nprintf "Linux\\n"\n'),
             ("claudlobby", CLI_STUB),
             ("systemctl", SYSTEMCTL_STUB),
         ):
