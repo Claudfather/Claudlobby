@@ -10,7 +10,7 @@ The three properties, each driven through the REAL sweep against a throwaway
 plane (the events-plane suite's rig; one stub, `tg-post.sh`, which captures the
 page instead of sending it):
 
-  * paged ONCE per escalation, keyed by ASSIGNMENT — a question is not a burst,
+  * paged ONCE per escalation, keyed by EVENT ID — a question is not a burst,
     and re-paging it every ten minutes is how a channel gets muted;
   * the marker is dropped when the row LEAVES the read (any act clears the arm),
     so a genuine re-escalation pages again — the state follows the plane rather
@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.plane.emit_api import emit_batch
+from claudlobby.task_state import TASK_EMITTER
 from tests.plane_fixtures import F, REPO, _live_dispatch, _paths, plane_root
 
 LIB = REPO / "lib"
@@ -81,12 +82,13 @@ def _scene(tmp_path):
     return root, paths, wi, asg
 
 
-def _act(root, wi, asg, event, ts, *, fleet=F, **detail):
+def _act(root, wi, asg, event, ts, *, fleet=F, emitter="task-act", **detail):
     out = emit_batch(root, [{
-        "event_type": "task", "emitter": "task-act", "fleet": fleet, "occurred_at": ts,
+        "event_type": "task", "emitter": emitter, "fleet": fleet, "occurred_at": ts,
         "payload": {"work_item_id": wi, "assignment_id": asg, "event": event,
                     "actor": f"bot:{fleet}/mgr", **detail}}])
     assert all(o.status == "committed" for o in out), out
+    return out[0].event_id
 
 
 def _pages(capture: Path) -> list[str]:
@@ -108,8 +110,10 @@ def _seen(root: Path, fleet: str = F) -> set[str]:
 @needs_tmux
 def test_an_open_escalation_pages_the_operator_once(tmp_path, *, scratch_plane_env):
     root, paths, wi, asg = _scene(tmp_path)
-    _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr",
-         question="do we ship without the migration")
+    # A returned task is fleet-owned and queued: a raise has no assignment.
+    _act(root, wi, asg, "returned_blocked", "2026-09-02T09:00:00Z", emitter=TASK_EMITTER)
+    eid = _act(root, wi, None, "escalated", "2026-09-02T10:00:00Z", by="mgr",
+               emitter=TASK_EMITTER, question="do we ship without the migration")
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
 
@@ -117,9 +121,9 @@ def test_an_open_escalation_pages_the_operator_once(tmp_path, *, scratch_plane_e
     assert r.returncode == 0, r.stderr[-2000:]
     paged = _escalation_pages(capture)
     assert len(paged) == 1, _pages(capture) + [r.stderr[-1500:]]
-    assert "task t-esc-0001 escalated by mgr" in paged[0]
+    assert f"task {wi} escalated by mgr" in paged[0]
     assert "do we ship without the migration" in paged[0]
-    assert asg in _seen(root)
+    assert eid in _seen(root)
 
     # ...and a second sweep, with the question still open, says nothing new
     r2 = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
@@ -128,28 +132,23 @@ def test_an_open_escalation_pages_the_operator_once(tmp_path, *, scratch_plane_e
 
 
 @needs_tmux
-def test_an_answered_escalation_is_forgotten_so_a_re_raise_pages_again(tmp_path, *, scratch_plane_env):
-    """The marker follows the PLANE: any act clears the arm, and a manager who
-    raises the question again is a new question."""
+def test_an_answer_and_re_raise_between_sweeps_pages_again(tmp_path, *, scratch_plane_env):
+    """An assignment-ID marker must not silence a later question on that assignment."""
     root, paths, wi, asg = _scene(tmp_path)
-    _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="q1")
+    eid = _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="q1")
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
     _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert len(_escalation_pages(capture)) == 1
 
-    # the human answered and the manager moved the row on
+    # Both events arrive between sweeps; the assignment itself stays the same.
     _act(root, wi, asg, "progress", "2026-09-02T11:00:00Z")
-    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
-    assert r.returncode == 0, r.stderr[-2000:]
-    assert len(_escalation_pages(capture)) == 1                  # nothing to say
-    assert asg not in _seen(root)
-
-    _act(root, wi, asg, "escalated", "2026-09-02T12:00:00Z", by="mgr", question="q2")
+    newer = _act(root, wi, asg, "escalated", "2026-09-02T12:00:00Z", by="mgr", question="q2")
     r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     paged = _escalation_pages(capture)
     assert len(paged) == 2 and "q2" in paged[1], paged
+    assert eid not in _seen(root) and newer in _seen(root)
 
 
 @needs_tmux
@@ -169,7 +168,7 @@ def test_a_refused_read_pages_its_own_guard_and_keeps_every_marker(tmp_path, *, 
     """Unreachable is not empty (the sweep's standing rule) — and dropping the
     markers on a refusal would re-page the whole backlog on recovery."""
     root, paths, wi, asg = _scene(tmp_path)
-    _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="q")
+    eid = _act(root, wi, asg, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="q")
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
     _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
@@ -185,7 +184,7 @@ def test_a_refused_read_pages_its_own_guard_and_keeps_every_marker(tmp_path, *, 
     assert "escalated reader UNREACHABLE" in r.stderr
     assert any("escalated-task reader for f is UNREACHABLE" in p
                for p in _pages(capture)), _pages(capture)
-    assert asg in _seen(root)
+    assert eid in _seen(root)
     # the question itself is not re-paged by the outage
     assert len(_escalation_pages(capture)) == 1
 
@@ -209,8 +208,8 @@ def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_pa
         "    w1:\n      expertise: [software-engineering]\n")
     wi_g, asg_g, _msg = _live_dispatch(root, "9", "t-esc-g001",
                                        ts="2026-09-01T10:00:00Z", bot="w1", fleet=g)
-    _act(root, wi_f, asg_f, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="qf")
-    _act(root, wi_g, asg_g, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="qg",
+    eid_f = _act(root, wi_f, asg_f, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="qf")
+    eid_g = _act(root, wi_g, asg_g, "escalated", "2026-09-02T10:00:00Z", by="mgr", question="qg",
          fleet=g)
 
     capture = tmp_path / "tg.log"
@@ -222,12 +221,12 @@ def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_pa
     assert r_g.returncode == 0, r_g.stderr[-2000:]
     paged = _escalation_pages(capture)
     assert len(paged) == 2, paged
-    assert any("t-esc-0001" in p for p in paged)
-    assert any("t-esc-g001" in p for p in paged)
-    assert asg_f in _seen(root, F) and asg_g in _seen(root, g)
+    assert any(wi_f in p for p in paged)
+    assert any(wi_g in p for p in paged)
+    assert eid_f in _seen(root, F) and eid_g in _seen(root, g)
     # each fleet's marker file holds ONLY its own row — the shared
     # host-global state_dir never let one fleet's file absorb the other's
-    assert asg_g not in _seen(root, F) and asg_f not in _seen(root, g)
+    assert eid_g not in _seen(root, F) and eid_f not in _seen(root, g)
 
     # fleet f's second sweep must page NOTHING new: g's sweep (and its own
     # forget loop) never touched f's per-fleet seen-file.

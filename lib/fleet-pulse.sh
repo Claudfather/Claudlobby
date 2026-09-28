@@ -779,13 +779,13 @@ _overdue_reader_guard || true
 # it. This is the only sweep leg that can, and the operator learns about it
 # here or not at all.
 #
-# ONCE PER ESCALATION, keyed by ASSIGNMENT ID -- not the time-window debounce
+# ONCE PER ESCALATION, keyed by EVENT ID -- not the time-window debounce
 # the burst detectors use. A question is not a burst: it is true until it is
 # answered, so re-paging it every ten minutes would train the operator to mute
 # the channel, while a 6-hour re-notify would tell them nothing new. The marker
-# is dropped when the row LEAVES this read (a report, a supersede, a withdraw
-# or any progress clears the arm), so a genuine re-escalation pages again --
-# the state follows the plane rather than a clock.
+# is dropped when the raise LEAVES the canonical read. A later relevant task
+# act answers it; a nudge does not. A new raise pages even when the answer
+# and re-raise happened between sweeps, including on queued work.
 #
 # A REFUSED READ IS NOT "NOTHING ESCALATED" (the rule the other two readers
 # here already carry): rc != 0 pages the same debounced guard shape and, above
@@ -805,7 +805,7 @@ _esc_task_page() { _reader_page task_escalated_reader "$1"; _ESC_TASK_PAGE_FAILE
 _esc_task_seen="$state_dir/${fleet}.escalated"
 _task_escalations() {
     [ -n "$_ESCALATION_CHAT_ID" ] || return 0
-    local _rc=0 _rows _rows_err _seen _asg _tid _by _at _q _msg _esc_rc _esc_err _why _m _keep
+    local _rc=0 _rows _rows_err _seen _eid _tid _by _at _q _msg _esc_rc _esc_err _why _m _keep
     _rows=$(safe_mktemp)
     _rows_err=$(safe_mktemp)
     python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalated \
@@ -824,11 +824,12 @@ _task_escalations() {
     debounce_clear "$state_dir" "$fleet" escalated_reader_unreachable
     rm -f "$_rows_err"
     _seen=$(safe_mktemp)
+    # Event IDs identify each raise, including queued tasks with no assignment.
     # TAB-separated by the door, exactly so a question with spaces survives.
-    while IFS="$(printf '\t')" read -r _asg _tid _by _at _q; do
-        [ -n "$_asg" ] || continue
-        printf '%s\n' "$_asg" >> "$_seen"
-        grep -qxF "$_asg" "$_esc_task_seen" 2>/dev/null && continue
+    while IFS="$(printf '\t')" read -r _eid _tid _by _at _q; do
+        [ -n "$_eid" ] || continue
+        printf '%s\n' "$_eid" >> "$_seen"
+        grep -qxF "$_eid" "$_esc_task_seen" 2>/dev/null && continue
         # The question is CONTENT: a metadata-mode capture legitimately strips
         # it, and saying so is the honest page -- an empty quote would read as
         # a manager who raised a task and asked nothing.
@@ -843,7 +844,7 @@ _task_escalations() {
             TELEGRAM_BOT_TOKEN="${_ESCALATION_TOKEN:-}" \
             "$LIB_DIR/tg-post.sh" "$_msg" 2>&1) || _esc_rc=$?
         if [ "$_esc_rc" -eq 0 ]; then
-            printf '%s\n' "$_asg" >> "$_esc_task_seen"
+            printf '%s\n' "$_eid" >> "$_esc_task_seen"
         else
             # Never mark a page that reached nobody: the marker is what buys
             # silence, and an escalation silenced by a failed send is a

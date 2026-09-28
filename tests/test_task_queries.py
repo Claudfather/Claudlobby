@@ -13,6 +13,7 @@ from claudlobby.task_queries import (
     TaskQueryError,
     WrongTaskReferenceError,
     list_tasks,
+    list_task_escalations,
     show_assignment,
     show_task,
 )
@@ -128,19 +129,59 @@ def test_ambiguous_reference_keeps_closed_candidates_and_bounds_hints(conn):
         (r.task_id, r.assignment_id) for r in expected.candidates}
 
 
-def test_unknown_and_broken_history_stays_visible_without_guessing_current_work(conn):
+def test_escalations_follow_current_work_and_expose_broken_history(conn):
     _task(conn, "wi_future", emitter="claudlobby.tasks.v2")
     _task(conn, "wi_double")
     _assignment(conn, "asg_one", "wi_double")
     _assignment(conn, "asg_two", "wi_double")
+    _event(conn, "wi_double", None, "escalated", detail='{"question":"unresolved"}')
     _assignment(conn, "asg_orphan", "wi_missing")
     _task(conn, "wi_cross")
     _assignment(conn, "asg_cross", "wi_cross", fleet_uid="fleet_b")
+    _task(conn, "wi_queued")
+    queued_raise = _event(conn, "wi_queued", None, "escalated", actor_uid="actor_manager",
+                          detail='{"by":"manager","question":"Which priority?"}')
+    _event(conn, "wi_queued", None, "nudged")
+
+    escalations = list_task_escalations(conn, fleet_uid="fleet_a")
+    assert [(row.task_id, row.assignment_id) for row in escalations.items] == [("wi_queued", None)]
+    queued = escalations.items[0]
+    assert (queued.event_id, queued.actor_uid, queued.by, queued.question) == (
+        queued_raise, "actor_manager", "manager", "Which priority?")
+    assert queued.occurred_at == "2026-09-01T00:00:00Z"
+
+    _task(conn, "wi_linked")
+    _assignment(conn, "asg_old", "wi_linked")
+    linked_raise = _event(conn, "wi_linked", "asg_old", "escalated",
+                          detail='{"question":"Need review"}')
+    assert [(row.task_id, row.event_id) for row in list_task_escalations(
+        conn, fleet_uid="fleet_a").items] == [("wi_queued", queued_raise), ("wi_linked", linked_raise)]
+    _assignment(conn, "asg_queued", "wi_queued")
+    assert [row.task_id for row in list_task_escalations(conn, fleet_uid="fleet_a").items] == [
+        "wi_queued", "wi_linked"]
+    _event(conn, "wi_queued", "asg_queued", "progress")
+    assert [row.task_id for row in list_task_escalations(conn, fleet_uid="fleet_a").items] == ["wi_linked"]
+    _event(conn, "wi_queued", "asg_queued", "returned_blocked")
+    assert [row.task_id for row in list_task_escalations(conn, fleet_uid="fleet_a").items] == ["wi_linked"]
+    _event(conn, "wi_linked", "asg_old", "superseded")
+    _assignment(conn, "asg_new", "wi_linked")
+    _event(conn, "wi_linked", "asg_old", "escalated", detail='{"question":"stale"}')
+    assert list_task_escalations(conn, fleet_uid="fleet_a").items == ()
+    replacement_raise = _event(conn, "wi_linked", "asg_new", "escalated")
+    replacement = list_task_escalations(conn, fleet_uid="fleet_a").items[0]
+    assert (replacement.task_id, replacement.assignment_id, replacement.event_id,
+            replacement.by, replacement.question) == ("wi_linked", "asg_new", replacement_raise, None, None)
+    _event(conn, "wi_linked", "asg_old", "progress")  # late stale history cannot answer the current raise
+    assert list_task_escalations(conn, fleet_uid="fleet_a").items == (replacement,)
+
     page = list_tasks(conn, fleet_uid="fleet_a")
-    assert page.items == ()
+    assert _ids(page) == ["wi_queued", "wi_linked"]
     assert {issue.code for issue in page.issues} == {
         "unknown_task_producer", "multiple_current_assignments", "dangling_assignment", "cross_fleet_assignment"}
-    assert _ids(list_tasks(conn, fleet_uid="fleet_a", state="all")) == ["wi_future", "wi_double", "wi_cross"]
+    assert {issue.code for issue in list_task_escalations(conn, fleet_uid="fleet_a").issues} == {
+        "unknown_task_producer", "multiple_current_assignments", "dangling_assignment", "cross_fleet_assignment"}
+    assert _ids(list_tasks(conn, fleet_uid="fleet_a", state="all")) == [
+        "wi_future", "wi_double", "wi_cross", "wi_queued", "wi_linked"]
     future = show_task(conn, "wi_future", fleet_uid="fleet_a")
     assert future.state is None and future.blockers[0].code == "unknown_task_producer"
     view = show_assignment(conn, "asg_one", fleet_uid="fleet_a")
@@ -160,6 +201,7 @@ def test_queries_preserve_read_only_connection_and_validate_bounds(conn):
     conn.execute("PRAGMA query_only=ON")
     conn.execute("BEGIN")
     list_tasks(conn, fleet_uid="fleet_a", limit=1000)
+    list_task_escalations(conn, fleet_uid="fleet_a")
     show_task(conn, "wi_read", fleet_uid="fleet_a")
     show_assignment(conn, "asg_read", fleet_uid="fleet_a")
     assert conn.in_transaction and conn.total_changes == before
@@ -170,3 +212,5 @@ def test_queries_preserve_read_only_connection_and_validate_bounds(conn):
                     {"state": "unknown"}, {"fleet_uid": ""}, {"bot_uid": ""}):
         with pytest.raises(TaskQueryError):
             list_tasks(conn, **{"fleet_uid": "fleet_a", **invalid})
+    with pytest.raises(TaskQueryError):
+        list_task_escalations(conn, fleet_uid="")

@@ -16,6 +16,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Literal, NoReturn
 
+from .plane.queries import ESCALATION_IGNORED
 from .reference_hints import ReferenceCandidate, ReferenceHint
 from .task_state import Assignment, Task, TaskIssue, TaskSnapshot, legacy_display_id, read_tasks
 
@@ -64,6 +65,27 @@ class TaskPage:
 class AssignmentView:
     assignment: Assignment
     task: Task
+
+
+@dataclass(frozen=True)
+class TaskEscalation:
+    task_id: str
+    # Recorded link on the raise, which stays None for an intake raise even
+    # when the work is later assigned.
+    assignment_id: str | None
+    event_id: str
+    actor_uid: str | None
+    occurred_at: str
+    by: str | None
+    question: str | None
+
+
+@dataclass(frozen=True)
+class TaskEscalations:
+    schema_version: int
+    fleet_uid: str
+    items: tuple[TaskEscalation, ...]
+    issues: tuple[TaskIssue, ...]
 
 
 def _scope(fleet_uid: str, bot_uid: str | None = None) -> None:
@@ -142,6 +164,49 @@ def list_tasks(conn: sqlite3.Connection, *, fleet_uid: str, state: ListState = "
     items = tuple(matches[:limit])
     token = _cursor(scope, _key(items[-1])) if len(matches) > limit else None
     return TaskPage(snapshot.schema_version, fleet_uid, items, token, snapshot.issues)
+
+
+def list_task_escalations(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskEscalations:
+    """Current fleet-owned raises, oldest event first, with unresolved issues.
+
+    Assignment creation alone does not answer a work-level raise. A later
+    event on that assignment remains an answer after it closes, but its own
+    raise and any post-closure stale event cannot hold current attention.
+    """
+    _scope(fleet_uid)
+    snapshot = read_tasks(conn, fleet_uid=fleet_uid)
+    rows = []
+    for task in snapshot.tasks:
+        if not task.open or task.blockers:
+            continue
+        assignment_id = task.current_assignment.assignment_id if task.current_assignment else None
+        relevant = (event for event in task.history
+                    if event.assignment_id in (None, assignment_id)
+                    and event.event not in ESCALATION_IGNORED)
+        newest = max(relevant, key=lambda event: event.ingest_seq, default=None)
+        if newest is None or newest.event != "escalated":
+            continue
+        if newest.assignment_id is None and any(
+            event.assignment_id == assignment.assignment_id
+            and newest.ingest_seq < event.ingest_seq <= assignment.terminal_event.ingest_seq
+            and event.event not in (*ESCALATION_IGNORED, "escalated")
+            for assignment in task.assignments if assignment.terminal_event
+            for event in assignment.history
+        ):
+            continue
+        try:
+            detail = json.loads(newest.detail) if newest.detail else None
+        except (ValueError, TypeError):
+            detail = None
+        detail = detail if isinstance(detail, dict) else {}
+        by = detail.get("by")
+        question = detail.get("question")
+        rows.append((newest.ingest_seq, TaskEscalation(
+            task.task_id, newest.assignment_id, newest.event_id, newest.actor_uid,
+            newest.occurred_at, by if isinstance(by, str) else None,
+            question if isinstance(question, str) else None)))
+    items = tuple(row for _, row in sorted(rows, key=lambda pair: (pair[0], pair[1].task_id)))
+    return TaskEscalations(snapshot.schema_version, fleet_uid, items, snapshot.issues)
 
 
 def _reference_candidates(snapshot: TaskSnapshot, reference: str, kind: str):

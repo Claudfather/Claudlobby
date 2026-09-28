@@ -44,6 +44,50 @@ class PlaneUnreachable(RuntimeError):
     pass
 
 
+def _selected_package_module(name: str):
+    """Load a stdlib-only sibling module from this native script's own build.
+
+    Shell readers use ``-S -E``: neither site packages nor PYTHONPATH can
+    select the package. Source has ``lib/`` beside ``claudlobby/``; a built
+    release has ``claudlobby/_native/`` inside its package. No other layout is
+    a valid fallback for these readers.
+    """
+    import importlib
+    import sys
+
+    if name not in {"report_payload", "task_queries"}:
+        raise PlaneUnreachable("unsupported native package reader")
+    native = os.path.dirname(os.path.realpath(__file__))
+    if os.path.basename(native) == "lib":
+        package = os.path.join(os.path.dirname(native), "claudlobby")
+    elif os.path.basename(native) == "_native" and os.path.basename(os.path.dirname(native)) == "claudlobby":
+        package = os.path.dirname(native)
+    else:
+        raise PlaneUnreachable("native reader is outside a selected Claudlobby layout")
+    package = os.path.realpath(package)
+    target = os.path.join(package, f"{name}.py")
+    if not os.path.isfile(os.path.join(package, "__init__.py")) or not os.path.isfile(target):
+        raise PlaneUnreachable(f"selected Claudlobby package lacks {name}")
+    parent = os.path.dirname(package)
+    if sys.path[:1] != [parent]:
+        sys.path.insert(0, parent)
+    try:
+        selected = importlib.import_module("claudlobby")
+    except ImportError as exc:
+        raise PlaneUnreachable(f"selected Claudlobby package cannot load {name}: {exc}") from exc
+    if (not isinstance(getattr(selected, "__file__", None), str)
+            or os.path.realpath(selected.__file__) != os.path.join(package, "__init__.py")):
+        raise PlaneUnreachable(f"{name} came from outside the selected Claudlobby package")
+    try:
+        module = importlib.import_module(f"claudlobby.{name}")
+    except ImportError as exc:
+        raise PlaneUnreachable(f"selected Claudlobby package cannot load {name}: {exc}") from exc
+    if (not isinstance(getattr(module, "__file__", None), str)
+            or os.path.realpath(module.__file__) != target):
+        raise PlaneUnreachable(f"{name} came from outside the selected Claudlobby package")
+    return module
+
+
 def db_file(root: str) -> str:
     return os.path.join(root, "state", "plane", "plane.db")
 
@@ -416,6 +460,32 @@ def assignment_by_id(conn: sqlite3.Connection, asg_id: str, *, open_only: bool =
     return dict(zip(_ASG_ROW_COLS, row)) if row is not None else None
 
 
+def last_progress_epoch(conn: sqlite3.Connection, uids: list[str], now: int) -> Optional[int]:
+    """The watchdog's last per-bot progress, including id-less report markers."""
+    if not uids:
+        return None
+    # Read to the end of now's second; stored instants may carry microseconds (#1789).
+    at = datetime.fromtimestamp(now, timezone.utc).replace(microsecond=999999).isoformat()
+    marks = ",".join("?" * len(uids))
+    row = conn.execute(LAST_PROGRESS_SQL % (marks, marks), (*uids, at, *uids, at)).fetchone()
+    return _epoch(row[0]) if row and row[0] else None
+
+
+def deadline_status(now: int, dispatched_at: int, expected_by: Optional[int],
+                    last_progress: Optional[int], max_age: int, progress_grace: int) -> str:
+    """Shared watchdog clock decision; caller owns lifecycle and orphan evidence."""
+    if expected_by is None:
+        return "no_deadline"
+    if now <= expected_by:
+        return "not_due"
+    if max_age > 0 and now - dispatched_at > max_age:
+        return "max_age_cap"
+    if (progress_grace > 0 and last_progress is not None and dispatched_at < last_progress <= now
+            and now - last_progress <= progress_grace):
+        return "progress_grace"
+    return "overdue"
+
+
 def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, max_age: int,
                  progress_grace: int, entry: Optional[dict] = None
                  ) -> list[tuple[int, int, int, Optional[str]]]:
@@ -423,25 +493,14 @@ def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, ma
     task_id) — from the plane, the watchdog's rules mirrored; task_id None
     for an id-less row (the caller prints ``-``)."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    # Read to the end of now's second; stored instants may carry microseconds (#1789).
     at = datetime.fromtimestamp(now, timezone.utc).replace(microsecond=999999).isoformat()
     rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=False)
-    last_progress = None
     uids = (entry or {}).get("uids", [])
-    if progress_grace > 0 and uids:
-        marks = ",".join("?" * len(uids))
-        row = conn.execute(LAST_PROGRESS_SQL % (marks, marks), (*uids, at, *uids, at)).fetchone()
-        last_progress = _epoch(row[0]) if row and row[0] else None
+    last_progress = last_progress_epoch(conn, uids, now) if progress_grace > 0 else None
     out: list[tuple[int, int, int, Optional[str]]] = []
     for da, exp, tid in rows:
-        if exp is None or now <= exp:
-            continue
-        if max_age > 0 and (now - da) > max_age:
-            continue
-        if last_progress is not None and da < last_progress <= now \
-                and (now - last_progress) <= progress_grace:
-            continue
-        out.append((da, exp, now - exp, tid))
+        if deadline_status(now, da, exp, last_progress, max_age, progress_grace) == "overdue":
+            out.append((da, exp, now - exp, tid))
     return out
 
 
@@ -603,7 +662,7 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
     invented). The report codec is loaded only by this read capability; other
     native readers remain dependency-light until their package move."""
     from dataclasses import asdict
-    from claudlobby.report_payload import decode_report_body
+    decode_report_body = _selected_package_module("report_payload").decode_report_body
 
     uid = fleet_uid(conn, fleet)
     since = since_form(since)
@@ -1127,55 +1186,25 @@ def escalation(conn: sqlite3.Connection, fleet: str, window_start: Optional[str]
             if alias and alias.startswith(prefix)}
 
 
-# --- the OPEN escalations of a fleet (chunk M-A, #1481) -----------------------
-# `escalated` is NON-TERMINAL by ruling — the task stays open while the human
-# decides — so nothing in the open set or the status ladder distinguishes it,
-# and fleet-pulse needs its own read to page the operator. An escalation holds
-# only while it is the assignment's NEWEST task event, the same rule
-# `queries.ATTENTION_ARMS` applies: a manager who re-dispatches, withdraws or
-# whose worker reports progress has answered it, and the card and the page
-# must go quiet together rather than on two different rules.
-#
-# Scoped by the EVENT's fleet, not the assignment's assignee: the escalation is
-# the MANAGER's act, and it is that fleet's operator who owes the answer, even
-# where the work sits on another fleet's bot (44.6% of dispatch traffic is
-# cross-fleet).
-#
-# `ESCALATION_IGNORED` is the fold's F1 and the byte-identical twin of
-# `queries.ESCALATION_IGNORED` (pinned): a NUDGE is an ask, not an answer, so
-# it must not displace a raise. Left in the window, escalate → nudge deleted
-# the escalation from this read and from the card at once, permanently,
-# because nothing re-raises it.
-ESCALATION_IGNORED = ("supplied_id_not_open", "nudged")
-_ESC_SKIP = ",".join(f"'{e}'" for e in ESCALATION_IGNORED)
-ESCALATED_SQL = (
-    "SELECT e.assignment_id, a.source_ref,"
-    " json_extract(e.detail, '$.by'), e.occurred_at,"
-    " json_extract(e.detail, '$.question')"
-    " FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id"
-    " WHERE e.kind = 'task' AND e.event = 'escalated' AND e.fleet_uid = ?"
-    " AND e.ingest_seq = (SELECT n.ingest_seq FROM events n WHERE n.kind = 'task'"
-    "   AND n.assignment_id = e.assignment_id AND n.event NOT IN (" + _ESC_SKIP + ")"
-    "   ORDER BY n.ingest_seq DESC LIMIT 1)"
-    " AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind = 'task'"
-    "   AND t.event IN " + _TERMINAL + " AND t.assignment_id = e.assignment_id)"
-    " ORDER BY e.occurred_at, e.ingest_seq"
-)
-
-
+# --- the OPEN escalations of a fleet ------------------------------------------
 def escalated_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
-    """The fleet's OPEN escalations, oldest first — one dict per assignment
-    whose newest task event is `escalated`: {assignment_id, task_id, by,
-    occurred_at, question}. `task_id` is `-` for an id-less dispatch (nothing
-    to name it by), and a missing `by` / `question` renders empty rather than
-    fabricated — a capture mode may legitimately have stripped the text."""
+    """Canonical open raises, including queued work with no assignment yet.
+
+    The Task reducer and query own lifecycle and escalation selection. A
+    blocking reducer issue is unavailable evidence, never an empty page.
+    """
     uid = fleet_uid(conn, fleet)
-    out = []
-    for asg, ref, by, at, question in conn.execute(ESCALATED_SQL, (uid,)):
-        out.append({"assignment_id": asg, "task_id": _task_id(ref) or "-",
-                    "by": by or "-", "occurred_at": at or "",
-                    "question": question or ""})
-    return out
+    queries = _selected_package_module("task_queries")
+    try:
+        page = queries.list_task_escalations(conn, fleet_uid=uid)
+    except ValueError as exc:
+        raise PlaneUnreachable(f"task escalation state unreadable: {exc}") from exc
+    if any(issue.blocking for issue in page.issues):
+        raise PlaneUnreachable("task escalation state has unresolved blocking history")
+    return [{"event_id": item.event_id, "assignment_id": item.assignment_id,
+             "task_id": item.task_id, "by": item.by or "-",
+             "occurred_at": item.occurred_at, "question": item.question or ""}
+            for item in page.items]
 
 
 # --- the task loop's MENU and its re-check debounce (chunk M-B, #1481) --------

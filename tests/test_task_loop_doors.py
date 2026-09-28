@@ -230,8 +230,11 @@ def test_escalate_is_non_terminal_and_readable_by_the_watchdog(tmp_path, *, scra
     out = _lookup(tmp_path, libdir, env, "--escalated", "--fleet", F)
     assert out.returncode == 0, out.stderr
     fields = out.stdout.strip().split("\t")
-    assert fields[0] == row["plane_assignment_id"]
-    assert fields[1] == row["task_id"]
+    escalation_id = _rows(
+        tmp_path, "SELECT event_id FROM events WHERE kind='task' AND event='escalated'"
+                  " AND assignment_id = ?", (row["plane_assignment_id"],))[0][0]
+    assert fields[0] == escalation_id
+    assert fields[1] == row["plane_work_item_id"]
     assert fields[2] == "lead"
     assert fields[4] == "do we ship without the migration?"
 
@@ -452,7 +455,7 @@ def test_a_nudge_does_not_erase_an_escalation_on_the_read(tmp_path, *, scratch_p
     after = _lookup(tmp_path, libdir, env, "--escalated", "--fleet", F)
     assert after.returncode == 0, after.stderr
     fields = after.stdout.strip().split("\t")
-    assert fields[1] == row["task_id"] and fields[4] == "which repo?"
+    assert fields[1] == row["plane_work_item_id"] and fields[4] == "which repo?"
     # ...and a real act still clears it
     assert _bash(f'"{libdir}/report-back.sh" w1 progress "on it" --progress 20'
                  f' --task {row["task_id"]}', env).returncode == 0
@@ -564,15 +567,6 @@ def test_the_stdlib_open_by_task_sql_is_byte_identical_to_the_package():
     from claudlobby.plane.queries import OPEN_BY_TASK_REF_SQL
 
     assert load_lib_module("plane-readers").TASK_OPEN_SQL == OPEN_BY_TASK_REF_SQL
-
-
-def test_the_escalation_window_is_the_same_tuple_on_both_sides():
-    """FOLD F1: the package's arms and the stdlib read must ignore the SAME
-    tokens, or the card and fleet-pulse go quiet on different rules."""
-    from claudlobby.plane.queries import ESCALATION_IGNORED
-
-    assert load_lib_module("plane-readers").ESCALATION_IGNORED == ESCALATION_IGNORED
-    assert "nudged" in ESCALATION_IGNORED
 
 
 @pytest.mark.parametrize("bad", ["abc", "12-34", "-600", "12.5", ""])

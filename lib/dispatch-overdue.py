@@ -84,7 +84,6 @@ import functools
 import os
 import sqlite3
 import sys
-import time
 
 # The legacy report statuses that END a task. `cancelled` joined them with the
 # withdraw door (chunk M-A, #1481): the plane's terminal task events have
@@ -200,7 +199,7 @@ class _Plane:
 
 def open_plane(fleet: str | None = None, root: str | None = None) -> _Plane:
     """The plane session every provider below reads from. A caller that asks
-    several questions in one breath (brief's dispatches section, the
+    several questions in one breath (brief's work attention, the
     supersede hint) opens ONE — ``with open_plane(...) as p:`` — and passes
     it as ``plane=``; a provider closes only what it opened itself."""
     return _Plane(fleet, root)
@@ -227,6 +226,12 @@ def _spawn_epoch(bots_dir: str, bot: str) -> int | None:
         return int(os.path.getmtime(os.path.join(bots_dir, bot, "data", ".spawn")))
     except OSError:
         return None
+
+
+def _cached_spawn(bots_dir: str, bot: str, cache: dict[str, int | None]) -> int | None:
+    if bot not in cache:
+        cache[bot] = _spawn_epoch(bots_dir, bot)
+    return cache[bot]
 
 
 class _session:
@@ -313,14 +318,91 @@ def _classify_all(
                 # dispatch closes on ANY later terminal report, so a respawned
                 # worker's next report still retires it.
                 if tid and bots_dir:
-                    if bot not in spawn_cache:
-                        spawn_cache[bot] = _spawn_epoch(bots_dir, bot)
-                    spawn = spawn_cache[bot]
+                    spawn = _cached_spawn(bots_dir, bot, spawn_cache)
                     if spawn is not None and spawn > da:
                         orphans.setdefault(bot, []).append(row)
                         continue
                 out.setdefault(bot, []).append(row)
         return out, orphans
+
+
+def assignment_attention(plane: _Plane, tasks, *, now: int, max_age: int,
+                         bots_dir: str | None) -> dict[str, dict]:
+    """Watchdog evidence for supplied resolved open tasks, keyed by assignment ID.
+
+    The task reducer owns lifecycle and current-assignment selection. This read
+    only applies the watchdog's clock, per-bot progress and spawn rules; a
+    missing piece of evidence is explicit rather than a clean overdue count.
+    """
+    grace = _resolve_progress_grace()
+    spawn_cache: dict[str, int | None] = {}
+    progress_cache: dict[str, int | None] = {}
+    with _session(plane, None, None) as p:
+        fleet_uid = p.pr.fleet_uid(p.conn, p.fleet)
+        prefix = f"bot:{p.fleet}/"
+        assignees = {}
+        for uid, alias in p.conn.execute(
+                "SELECT uid, alias FROM identity_registry WHERE kind='actor' AND alias LIKE ?",
+                (prefix + "%",)):
+            if alias.startswith(prefix):
+                bot = alias[len(prefix):].lower()
+                if bot in p.roster and uid in p.roster[bot]["uids"]:
+                    assignees[uid] = bot
+        out = {}
+        for task in tasks:
+            if task.fleet_uid != fleet_uid:
+                raise ValueError("supplied attention task belongs to another fleet")
+            assignment = task.current_assignment if task.open else None
+            if assignment is None:
+                continue
+            if assignment.fleet_uid != fleet_uid:
+                raise ValueError("supplied attention assignment belongs to another fleet")
+            aid = assignment.assignment_id
+            bot = assignees.get(assignment.assignee_uid)
+            dispatched = p.pr._epoch(assignment.occurred_at)
+            deadline = p.pr._epoch(assignment.expected_by)
+            past_due = None if assignment.expected_by is None or deadline is None else now > deadline
+            item = {"task_id": task.task_id, "assignment_id": aid,
+                    "assignee_uid": assignment.assignee_uid, "bot": bot,
+                    "dispatched_at": dispatched, "expected_by": deadline,
+                    "last_progress_at": None, "spawn_at": None, "past_due": past_due,
+                    "elapsed_past_deadline_s": now - deadline if past_due else None,
+                    "status": "unknown", "reason": "missing_roster"}
+            out[aid] = item
+            if bot is None:
+                continue
+            if dispatched is None:
+                item["reason"] = "invalid_dispatch_time"
+                continue
+            if assignment.expected_by is not None and deadline is None:
+                item["reason"] = "invalid_deadline"
+                continue
+            if bot not in progress_cache:
+                progress_cache[bot] = (p.pr.last_progress_epoch(p.conn, p.roster[bot]["uids"], now)
+                                       if grace > 0 else None)
+            progress = progress_cache[bot]
+            item["last_progress_at"] = progress
+            clock = p.pr.deadline_status(now, dispatched, deadline, progress, max_age, grace)
+            if clock in {"no_deadline", "not_due"}:
+                item.update(status="not_due", reason="no_deadline" if clock == "no_deadline" else "none")
+            elif clock in {"max_age_cap", "progress_grace"}:
+                item.update(status="past_due", reason=clock)
+            elif assignment.source_ref and assignment.source_ref.startswith(p.pr.IDLESS):
+                # Legacy id-less dispatches close on a later terminal report;
+                # their worker's respawn does not orphan them.
+                item.update(status="overdue", reason="none")
+            elif bots_dir is None:
+                item["reason"] = "spawn_unavailable"
+            else:
+                spawn = _cached_spawn(bots_dir, bot, spawn_cache)
+                item["spawn_at"] = spawn
+                if spawn is None:
+                    item["reason"] = "spawn_unavailable"
+                elif spawn > dispatched:
+                    item.update(status="orphaned", reason="respawned_after_dispatch")
+                else:
+                    item.update(status="overdue", reason="none")
+        return out
 
 
 def overdue_all(

@@ -148,6 +148,98 @@ def test_the_orphan_split_holds_on_the_plane(tmp_path):
     assert blind.returncode == 3 and blind.stdout == "" and "cannot determine orphans" in blind.stderr
 
 
+def test_canonical_assignment_attention_keeps_same_second_rows_and_watchdog_rules(tmp_path):
+    from claudlobby.task_state import TASK_EMITTER, read_tasks
+    from tests.conftest import load_lib_module
+
+    root = plane_root(tmp_path, initialize=True)
+    doors = load_lib_module("dispatch-overdue")
+    dispatched = NOW_EPOCH - 600
+    deadline = NOW_EPOCH - 300
+    at = datetime.fromtimestamp(dispatched, timezone.utc).isoformat()
+    due = datetime.fromtimestamp(deadline, timezone.utc).isoformat()
+    ids = [(f"wi_{n:0>32}", f"asg_{n:0>32}", bot)
+           for n, bot in ((11, "w1"), (12, "w2"))]
+    raws = []
+    for wi, aid, bot in ids:
+        raws.extend((
+            {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": F,
+             "source_ref": "request:shared-second", "occurred_at": at,
+             "payload": {"work_item_id": wi, "title": "One canonical task",
+                         "created_by": f"bot:{F}/w2"}},
+            {"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": F,
+             "source_ref": "request:shared-second", "occurred_at": at,
+             "payload": {"assignment_id": aid, "work_item_id": wi,
+                         "assignee": f"bot:{F}/{bot}", "assigned_by": f"bot:{F}/w2",
+                         "expected_by": due}},
+        ))
+    progress_at = datetime.fromtimestamp(NOW_EPOCH - 60, timezone.utc).isoformat()
+    raws.append({"event_type": "system", "emitter": "report-back", "fleet": F,
+                 "occurred_at": progress_at,
+                 "payload": {"event": "report_status", "subject_kind": "actor",
+                             "subject": f"bot:{F}/w1", "data": {"status": "progress"}}})
+    assert all(result.status == "committed" for result in emit_batch(root, raws, require_commit=True))
+    legacy_wi, legacy_aid, _ = _live_dispatch(root, "13", "unused", ts=at, bot="w2",
+                                               expected_by=due, ref="dispatch-log:sha:legacy")
+    bots = root / "bots"
+    for bot, spawn_at in (("w1", dispatched - 60), ("w2", dispatched + 60)):
+        marker = bots / bot / "data" / ".spawn"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("")
+        os.utime(marker, (spawn_at, spawn_at))
+
+    with doors.open_plane(F, str(root)) as plane:
+        fleet_uid = plane.pr.fleet_uid(plane.conn, F)
+        tasks = read_tasks(plane.conn, fleet_uid=fleet_uid).tasks
+        observed = doors.assignment_attention(plane, tasks, now=NOW_EPOCH,
+                                              max_age=86400, bots_dir=str(bots))
+        assert observed[ids[0][1]]["task_id"] == ids[0][0]
+        assert observed[ids[0][1]]["status"] == "past_due"
+        assert observed[ids[0][1]]["reason"] == "progress_grace"
+        assert observed[ids[1][1]]["task_id"] == ids[1][0]
+        assert observed[ids[1][1]]["status"] == "orphaned"
+        assert observed[ids[1][1]]["reason"] == "respawned_after_dispatch"
+        assert observed[legacy_aid]["task_id"] == legacy_wi
+        assert observed[legacy_aid]["status"] == "overdue"  # id-less never orphans
+        assert all(observed[aid]["past_due"] for aid in (ids[0][1], ids[1][1], legacy_aid))
+        no_spawn = doors.assignment_attention(plane, tasks, now=NOW_EPOCH,
+                                              max_age=86400, bots_dir=None)
+        assert no_spawn[ids[0][1]]["status"] == "past_due"  # grace needs no spawn
+        assert (no_spawn[ids[1][1]]["status"], no_spawn[ids[1][1]]["reason"]) == (
+            "unknown", "spawn_unavailable")
+        assert no_spawn[legacy_aid]["status"] == "overdue"
+
+
+def test_stdlib_escalation_projection_keeps_queued_canonical_task(tmp_path):
+    from claudlobby.task_state import TASK_EMITTER
+
+    root = plane_root(tmp_path, initialize=True)
+    task_id = "wi_" + "4" * 32
+    at = datetime.fromtimestamp(NOW_EPOCH - 60, timezone.utc).isoformat()
+    actor = f"bot:{F}/w2"
+    raws = (
+        {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": F,
+         "occurred_at": at,
+         "payload": {"work_item_id": task_id, "title": "Needs operator guidance",
+                     "created_by": actor}},
+        {"event_type": "task", "emitter": TASK_EMITTER, "fleet": F,
+         "occurred_at": at,
+         "payload": {"work_item_id": task_id, "assignment_id": None,
+                     "event": "escalated", "actor": actor, "by": actor,
+                     "question": "Which priority?"}},
+    )
+    assert all(result.status == "committed" for result in emit_batch(root, raws, require_commit=True))
+    reader = _stdlib_readers()
+    conn = reader.connect(str(root))
+    try:
+        rows = reader.escalated_rows(conn, F)
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == task_id and rows[0]["assignment_id"] is None
+    assert rows[0]["event_id"] and rows[0]["question"] == "Which priority?"
+
+
 def test_another_fleets_bot_never_leaks_into_the_overdue_set(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     _live_dispatch(root, "9", "t-9-zzzz", ts="2026-09-02T09:00:00Z", bot="w9", fleet="g",

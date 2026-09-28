@@ -7,8 +7,8 @@ thing the name still means — and two doors resolve through it:
 ``report-back.sh`` recovers the work_item / assignment ids for its own
 emission, and ``dispatch-task.sh --supersedes`` needs the superseded
 dispatch's plane ids to set ``supersedes_msg_id`` and emit a terminal
-``superseded`` event, and ``task-act.sh`` resolves the row a manager is
-withdrawing or escalating (``--all-open``, which refuses to pick for it).
+``superseded`` event. Canonical task mutations use the public CLI; this
+native reader also supplies fleet-pulse's current escalation projection.
 
 Stdlib-only, like ``dispatch-overdue.py`` — a bash door must not pay the
 package import on every call. Read-only (``mode=ro`` + ``query_only``).
@@ -231,14 +231,15 @@ def _received(a) -> int:
 
 
 def _escalated(a) -> int:
-    """`--escalated --fleet F`: `<assignment_id> <task_id> <by> <occurred_at>
+    """`--escalated --fleet F`: `<event_id> <task_id> <by> <occurred_at>
     <question>` per OPEN escalation, oldest first, TAB-separated so a question
     containing spaces survives the read; newlines are stripped for the same
     reason. Empty = nothing escalated (rc 0); unreachable = rc 3."""
     def fn(pr, conn):
         for row in pr.escalated_rows(conn, a.fleet):
             question = " ".join((row["question"] or "").split())
-            print("\t".join((row["assignment_id"], row["task_id"], row["by"],
+            by = " ".join((row["by"] or "-").split()) or "-"
+            print("\t".join((row["event_id"], row["task_id"], by,
                              row["occurred_at"], question)))
         return 0
     return _with_plane(a.root, fn)
@@ -257,7 +258,7 @@ def main(argv=None) -> int:
     ap.add_argument("--escalated", action="store_true",
                     help="print the fleet's OPEN escalations, tab-separated (needs --fleet) —"
                     " fleet-pulse.sh's `_task_escalations` reads this for the `escalated` task"
-                    " event and pages the operator once per assignment (chunk M-B)")
+                    " event and pages the operator once per escalation event")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
     ap.add_argument("--by-assignment", default=None,
