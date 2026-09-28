@@ -1,0 +1,318 @@
+"""Original-unit pause/recovery with private files and a recording adapter."""
+
+import os
+from pathlib import Path
+import plistlib
+import subprocess
+
+import pytest
+
+from claudlobby import activation_state as state
+from claudlobby import activation_units as units
+from claudlobby import config_install
+from claudlobby.config_plan import ConfigPlanBuilder
+from claudlobby.supervision_inventory import EnrollmentInventory, EnrolledUnit, FileSnapshot, UnitDeclaration
+from tests.test_releases import installed, r
+from tests.test_supervision_inventory import observed_print
+
+
+class RecordedAdapter:
+    def __init__(self, inventory):
+        self.manager = inventory.manager
+        self.original = {unit.target: " ".join(dict(unit.properties)[key] for key in
+                         ("UnitFileState", "LoadState", "ActiveState")) for unit in inventory.units}
+        self.states = dict(self.original)
+        self.files = {unit.target: unit.installed[0] for unit in inventory.units}
+        self.calls = []
+        self.refusal = {}
+        self.pause_failure = None
+        self.resume_failure = None
+        self.overrides = {}
+        self.generated = {unit.target: unit.generated for unit in inventory.units}
+        self.binding_changed = False
+
+    def read(self, function, *args):
+        result = self.call(function, *args)
+        assert result.returncode == 0
+        return result.stdout
+
+    def call(self, function, *args):
+        if function == "svc_inventory_disabled":
+            output = '\n\tdisabled services = {\n' + ''.join(f'\t\t"{key}" => {value}\n' for key, value in self.overrides.items()) + '\t}\n'
+            return subprocess.CompletedProcess([function, *args], 0, output, "")
+        if function == "svc_inventory_properties":
+            target = args[0]
+            source = plistlib.loads(self.generated[target].content)
+            output = observed_print(target, source, Path(self.files[target].path))
+            if self.binding_changed:
+                output = output.replace("\tprogram = ", "\tprogram = /foreign", 1)
+            return subprocess.CompletedProcess([function, *args], 0, output, "")
+        file, target = Path(args[0]), args[1]
+        self.calls.append((function, target))
+        rc, output = 0, ""
+        if function == "svc_activation_assert_external":
+            assert args[2] == str(os.getpid())
+            rc = self.refusal.get(target, 0)
+        elif function in ("svc_activation_snapshot", "svc_inventory_state"):
+            if function == "svc_activation_snapshot":
+                assert file.is_file()
+            output = self.states[target] + "\n"
+        elif function == "svc_activation_pause":
+            assert not file.exists() and not file.is_symlink(), "adapter saw unparked installed source"
+            assert args[2] == self.original[target]
+            if target == self.pause_failure:
+                rc = 3
+            else:
+                self.states[target] = "unchanged unloaded inactive" if self.manager == "Darwin" else "masked-runtime masked inactive"
+        elif function == "svc_activation_resume":
+            assert FileSnapshot.read(file) == self.files[target], "resume happened before exact restoration"
+            assert args[2] == self.original[target]
+            if target == self.resume_failure:
+                rc = 3
+            else:
+                self.states[target] = self.original[target]
+        else:
+            raise AssertionError(f"unexpected native operation: {function}")
+        return subprocess.CompletedProcess([function, *args], rc, output, "recorded unknown" if rc else "")
+
+
+@pytest.fixture
+def enrollment(installed, tmp_path):
+    root, inputs, paths, _, _ = installed
+    release = r.seal_release(root, inputs, paths)
+    directory = tmp_path / "private-home/.config/systemd/user"
+    directory.mkdir(parents=True)
+    generated = root / "runtime/generated"
+    generated.mkdir(parents=True)
+    native_env = tuple({"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root / "local/alpha"),
+                        "CLAUDLOBBY_NATIVE_DIR": str(release.native_path),
+                        "CLAUDLOBBY_LIBRARY_DIR": str(release.directory / "library"),
+                        "CLAUDLOBBY_CLI": str(release.cli_path),
+                        "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id}.items())
+    entries = []
+    phases = {"producers": ["clock.timer", "scheduled.service"],
+              "bots": ["member.service"], "ingest": ["collector.service"]}
+    for name, scope in (("clock.timer", "fleet"), ("scheduled.service", "fleet"),
+                        ("member.service", "bot"), ("collector.service", "host")):
+        source = generated / name
+        source.write_text(f"reviewed original {name}\n")
+        source.chmod(0o640)
+        target = directory / name
+        if scope == "bot":
+            target.symlink_to(os.path.relpath(source, target.parent))
+        else:
+            target.write_bytes(source.read_bytes())
+            target.chmod(0o640)
+        properties = {"UnitFileState": "disabled" if scope == "bot" else "enabled",
+                      "LoadState": "loaded", "ActiveState": "inactive" if scope == "bot" else "active"}
+        declaration = UnitDeclaration(source, scope, root, release.release_id, native_env,
+                                      "alpha" if scope != "host" else None,
+                                      "member" if scope == "bot" else None,
+                                      "scheduled.service" if name.endswith(".timer") else None)
+        entries.append(EnrolledUnit(declaration, name, FileSnapshot.read(source),
+                                    (FileSnapshot.read(target),), tuple(properties.items())))
+    foreign = directory / "foreign.service"
+    foreign.write_text("unrelated unit remains untouched\n")
+    wants = directory / "default.target.wants"
+    wants.mkdir()
+    (wants / "collector.service").symlink_to("../collector.service")
+    catalog = f"manager\tLinux\ndirectory\t{directory}\n" + "".join(
+        f"loaded\t{unit.target}\ninstalled\t{unit.target}\n" for unit in entries)
+    inventory = EnrollmentInventory(root, "Linux", catalog, tuple(entries),
+        tuple(unit.installed[0] for unit in entries) + (FileSnapshot.read(foreign),),
+        (str(foreign),), ())
+    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("alpha",), effects={}).seal()
+    return inventory, phases, plan, RecordedAdapter(inventory), foreign, wants
+
+
+def _prepare(store, inventory, phases, plan, adapter):
+    store.prepare("cutover", plan, recovery_release_id=plan.release_id, enrollment_digest=inventory.digest)
+    return units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
+
+
+def _complete(store, step, evidence="a" * 64):
+    store.begin("cutover", step)
+    store.complete("cutover", step, evidence_digest=evidence)
+
+
+def _pause_all(store, adapter):
+    for phase, intermediate in (("producers", None), ("bots", "sessions_handed_off"),
+                                ("ingest", "queues_classified")):
+        if intermediate:
+            _complete(store, intermediate)
+        step = {"producers": "producers_paused", "bots": "sessions_quiesced", "ingest": "ingest_quiesced"}[phase]
+        store.begin("cutover", step)
+        result = units.pause_phase(store, "cutover", phase, adapter=adapter)
+        assert state.read_activation(store.root, "cutover").body["pending"] == step
+        store.complete("cutover", step, evidence_digest=result.digest)
+
+
+def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollment):
+    inventory, phases, plan, adapter, foreign, wants = enrollment
+    before_foreign = foreign.read_bytes()
+    with state.locked_activation(inventory.data_root) as store:
+        prepared = _prepare(store, inventory, phases, plan, adapter)
+        assert units.load_unit_pause(store, "cutover") == prepared
+        inventory.check_files()  # prepare never removes an installed node
+        with pytest.raises(state.ActivationError, match="not the admitted"):
+            units.pause_phase(store, "cutover", "bots", adapter=adapter)
+        _pause_all(store, adapter)
+        assert [target for function, target in adapter.calls if function == "svc_activation_pause"] == [
+            "clock.timer", "scheduled.service", "member.service", "collector.service"]
+        assert all(not Path(unit.installed[0].path).exists() for unit in inventory.units)
+        assert foreign.read_bytes() == before_foreign
+        assert os.readlink(wants / "collector.service") == "../collector.service"
+        with pytest.raises(state.ActivationError, match="not the admitted rollback"):
+            units.restore_phase(store, "cutover", "ingest", adapter=adapter)
+        store.begin_rollback("cutover")
+        for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("selection_restored")]:
+            _complete(store, step)
+        store.begin("cutover", "selection_restored")
+        store.restore_selection("cutover")
+        for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started"),
+                            ("producers", "producers_resumed")):
+            if phase == "producers":
+                _complete(store, "verified")
+            store.begin("cutover", step)
+            if phase == "ingest":
+                adapter.resume_failure = "collector.service"
+                with pytest.raises(state.ActivationError, match="refused.*3"):
+                    units.restore_phase(store, "cutover", phase, adapter=adapter)
+                assert config_install.read_config_install(store.root, units.journal_id("cutover", phase)).status == "rolled_back"
+                assert state.read_activation(store.root, "cutover").body["pending"] == step
+                adapter.resume_failure = None
+            result = units.restore_phase(store, "cutover", phase, adapter=adapter)
+            store.complete("cutover", step, evidence_digest=result.digest)
+        assert state.read_activation(store.root, "cutover").status == "rolled_back"
+    inventory.check_files()
+    assert adapter.states == adapter.original  # disabled/inactive bot stays so
+    assert foreign.read_bytes() == before_foreign
+    assert os.readlink(wants / "collector.service") == "../collector.service"
+
+
+@pytest.mark.parametrize("fault", ["missing", "overlap", "digest", "self-hosted", "unknown"])
+def test_invalid_coverage_or_late_caller_refuses_before_any_parking(enrollment, fault):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    with state.locked_activation(inventory.data_root) as store:
+        store.prepare("cutover", plan, recovery_release_id=plan.release_id,
+                      enrollment_digest="0" * 64 if fault == "digest" else inventory.digest)
+        if fault == "missing":
+            phases["bots"] = []
+        elif fault == "overlap":
+            phases["ingest"].append(phases["bots"][0])
+        elif fault in ("self-hosted", "unknown"):
+            adapter.refusal["collector.service"] = 1 if fault == "self-hosted" else 3
+        with pytest.raises(state.ActivationError):
+            units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
+        inventory.check_files()
+        assert not list((store.root / "state/activations").glob("units-*/config"))
+        assert not any(function in ("svc_activation_pause", "svc_activation_resume") for function, _ in adapter.calls)
+
+
+def test_interrupted_parking_and_partial_native_pause_resume_from_existing_owners(enrollment, monkeypatch):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    with state.locked_activation(root) as store:
+        prepared = _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        original_replace = config_install._replace
+        first = Path(inventory.units[0].installed[0].path)
+
+        def crash_after_parking(source, target):
+            original_replace(source, target)
+            if source == first:
+                raise InterruptedError("power loss after owned node was parked")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(config_install, "_replace", crash_after_parking)
+            with pytest.raises(InterruptedError, match="power loss"):
+                units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        assert not first.exists()
+        assert not any(function == "svc_activation_pause" for function, _ in adapter.calls)
+    with state.locked_activation(root) as store:
+        assert units.load_unit_pause(store, "cutover") == prepared
+        adapter.pause_failure = "scheduled.service"
+        with pytest.raises(state.ActivationError, match="refused.*3"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        assert adapter.states["clock.timer"] == "masked-runtime masked inactive"
+        assert state.read_activation(root, "cutover").body["pending"] == "producers_paused"
+        adapter.pause_failure = None
+        result = units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        assert result.plan_id == prepared.plan("producers").plan_id
+        assert config_install.read_config_install(root, result.journal_id).status == "applied"
+        store.complete("cutover", "producers_paused", evidence_digest=result.digest)
+        # Later-phase source remains intact throughout the interrupted producer pause.
+        assert Path(inventory.units[2].installed[0].path).is_file()
+        assert Path(inventory.units[3].installed[0].path).is_file()
+
+
+def test_fresh_caller_and_native_state_are_rechecked_before_effects(enrollment):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    with state.locked_activation(inventory.data_root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        adapter.refusal["collector.service"] = 3
+        with pytest.raises(state.ActivationError, match="refused"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        inventory.check_files()
+        adapter.refusal.clear()
+        adapter.states["member.service"] = "enabled loaded active"
+        with pytest.raises(state.ActivationError, match="changed before parking"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        inventory.check_files()
+
+
+def test_darwin_override_and_effective_binding_drift_refuse_before_park_or_restore(installed, tmp_path):
+    root, inputs, paths, _, _ = installed
+    release = r.seal_release(root, inputs, paths)
+    env = {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
+           "CLAUDLOBBY_NATIVE_DIR": str(release.native_path), "CLAUDLOBBY_CLI": str(release.cli_path),
+           "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id}
+    source = root / "original.plist"
+    source.write_bytes(plistlib.dumps({"Label": "fixture", "ProgramArguments": ["/bin/sleep", "60"],
+                                      "WorkingDirectory": str(root), "EnvironmentVariables": env}))
+    directory = tmp_path / "LaunchAgents"
+    directory.mkdir()
+    target = directory / "fixture.plist"
+    target.write_bytes(source.read_bytes())
+    declaration = UnitDeclaration(source, "host", root, release.release_id, tuple(env.items()))
+    props = {"UnitFileState": "unchanged", "LoadState": "loaded", "ActiveState": "active",
+             "DisabledOverride": "unset", "EnabledState": "enabled"}
+    entry = EnrolledUnit(declaration, "gui/501/fixture", FileSnapshot.read(source),
+                         (FileSnapshot.read(target),), tuple(props.items()))
+    catalog = f"manager\tDarwin\ndomain\tgui/501\ndirectory\t{directory}\nPID\tStatus\tLabel\n710\t0\tfixture\n"
+    inventory = EnrollmentInventory(root, "Darwin", catalog, (entry,), entry.installed, (), ())
+    adapter = RecordedAdapter(inventory)
+    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
+    phases = {"producers": [entry.target], "bots": [], "ingest": []}
+    with state.locked_activation(root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        adapter.overrides["fixture"] = "enabled"  # same effective value, different persisted override
+        with pytest.raises(state.ActivationError, match="Darwin enrollment drift"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        inventory.check_files()
+        adapter.overrides.clear()
+        adapter.binding_changed = True
+        with pytest.raises(state.ActivationError, match="Darwin enrollment drift"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        inventory.check_files()
+        adapter.binding_changed = False
+        paused = units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        store.complete("cutover", "producers_paused", evidence_digest=paused.digest)
+        store.begin_rollback("cutover")
+        for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("selection_restored")]:
+            _complete(store, step)
+        store.begin("cutover", "selection_restored")
+        store.restore_selection("cutover")
+        for step in ("ingest_started", "bots_started", "verified"):
+            _complete(store, step)
+        store.begin("cutover", "producers_resumed")
+        adapter.overrides["fixture"] = "disabled"
+        with pytest.raises(state.ActivationError, match="Darwin enrollment drift"):
+            units.restore_phase(store, "cutover", "producers", adapter=adapter)
+        assert not target.exists(), "override drift restored files before refusal"
+        adapter.overrides.clear()
+        restored = units.restore_phase(store, "cutover", "producers", adapter=adapter)
+        assert restored.operation == "restored"
+        inventory.check_files()
