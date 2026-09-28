@@ -42,6 +42,7 @@ def test_validation_setup_uses_owned_transport_and_preflighted_cli(tmp_path, scr
         f'exec {shlex.quote(str(scratch_plane_env.cli))} "$@"\n'
     )
     cli.chmod(0o755)
+    (tmp_path / "python").symlink_to(Path(scratch_plane_env.cli).parent / "python")
     env = constructed_env(HOME=tmp_path, TMPDIR=tmp_path,
                           **scratch_plane_env(root, socket=socket_dir / "no-plane.sock", cli=cli))
     result = _run(root, socket_dir, env)
@@ -59,5 +60,5 @@ def test_validation_setup_refuses_unexecutable_explicit_cli(tmp_path, scratch_pl
                                               cli=tmp_path / "missing-cli"))
     result = _run(root, socket_dir, env)
     assert result.returncode == 2, result.stdout + result.stderr
-    assert "explicit PLANE_EMIT_CLI is not executable" in result.stderr
+    assert "executable absolute test CLI path" in result.stderr
     assert not (root / "state/plane/plane.db").exists()

@@ -14,6 +14,10 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("selected_test_cli")
+
 
 from tests.conftest import load_lib_module
 

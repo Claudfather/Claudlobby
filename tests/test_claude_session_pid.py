@@ -151,7 +151,7 @@ def test_skill_uses_the_door(skill):
     # Anchored, NOT a bare substring: `claude-claude-session-pid.sh` contains
     # `claude-session-pid.sh`, so the loose form passed for a full review round
     # while every shipped caller was rc 127 (#1531 round 2).
-    assert "/lib/claude-session-pid.sh" in text, f"{skill} does not consume the door"
+    assert "$CLAUDLOBBY_NATIVE_DIR/claude-session-pid.sh" in text, f"{skill} does not consume the door"
     assert "claude-claude-session-pid.sh" not in text, f"{skill} carries the doubled-prefix path"
 
 
@@ -216,7 +216,7 @@ def test_ambient_claude_processes_do_not_leak_in():
 import re as _re
 
 _LIB_REF = _re.compile(
-    r'(?:\$CLAUDLOBBY_ROOT|\{\{CLAUDLOBBY_ROOT\}\})/(lib/[A-Za-z0-9._-]+)'
+    r'(?:\$CLAUDLOBBY_NATIVE_DIR|\{\{CLAUDLOBBY_NATIVE_DIR\}\})/([A-Za-z0-9._-]+)'
 )
 
 
@@ -226,7 +226,7 @@ def _skill_lib_refs():
     for path in sorted(skills.glob("*/SKILL.md")):
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             for m in _LIB_REF.finditer(line):
-                yield path, lineno, m.group(1), line
+                yield path, lineno, "lib/" + m.group(1), line
 
 
 def test_every_lib_path_a_skill_references_exists_on_disk():
@@ -274,7 +274,7 @@ def test_the_skill_line_actually_runs(skill):
     path = repo / "library" / "skills" / skill / "SKILL.md"
     lines = [
         l.strip() for l in path.read_text().splitlines()
-        if "CLAUDLOBBY_ROOT" in l and "claude-session-pid" in l and l.strip().startswith('"')
+        if "CLAUDLOBBY_NATIVE_DIR" in l and "claude-session-pid" in l and l.strip().startswith('"')
     ]
     assert lines, f"{skill}: no executable door line found to run"
 
@@ -282,7 +282,7 @@ def test_the_skill_line_actually_runs(skill):
         r = subprocess.run(
             ["bash", "-c", line],
             capture_output=True, text=True,
-            env={**os.environ, "CLAUDLOBBY_ROOT": str(repo)},
+            env={**os.environ, "CLAUDLOBBY_NATIVE_DIR": str(repo / "lib")},
         )
         assert r.returncode != 127, (
             f"{skill}: the shipped line is not executable (rc 127): {line}\n{r.stderr}"

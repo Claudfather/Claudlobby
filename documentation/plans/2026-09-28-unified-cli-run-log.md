@@ -39,7 +39,7 @@ branch. Merges and production activation remain operator decisions.
 |---|---|---|
 | P0 evidence safety | Linux CI passed | #1846 integrated locally; private HOME/XDG/temp and executable-origin changes in draft [#1928](https://github.com/Claudfather/Claudlobby/pull/1928). Current head `af1cc44d`: 5,812 passed, 13 skipped, 3 warnings; all three checks green. Native macOS remains unverified. |
 | P1 command loading/package | Linux CI passed | Lazy argparse dispatch and canonical resource packaging in draft [#1929](https://github.com/Claudfather/Claudlobby/pull/1929). Current head `c2b8188a`: 5,980 passed, 13 skipped, 3 warnings; all three checks green. Bootstrap and artifact assertions also passed in isolated exports; installed composition and host acceptance remain outstanding. |
-| P2 context/release | Draft; repairing failed suite | P2a package/data/overlay and caller migration in [#1930](https://github.com/Claudfather/Claudlobby/pull/1930), head `50ad5acd`: 5,550 passed, 472 failed, 12 skipped, 3 warnings; both conformance checks green. Fixes in progress. Installed-composition smoke, native macOS, Pi and real-agent canary unverified. P2b release assembly/activation remains pending. |
+| P2 context/release | Draft; repairing failed suite | P2a package/data/overlay and caller migration in [#1930](https://github.com/Claudfather/Claudlobby/pull/1930), head `5345a1e0`: 5,946 passed, 76 failed, 12 skipped, 3 warnings; both conformance checks green. Remaining fixture/caller repairs in progress. Installed-composition smoke, native macOS, Pi and real-agent canary unverified. P2b release assembly/activation remains pending. |
 | A0–A4 tasks/messages | Pending | Follow the plan's migration audit and ordered semantic cutover. |
 | B lifecycle/setup | Pending | Reuse supervisor consolidation; verify affected native platforms. |
 | C coordination/jobs/plane | Pending | Migrate complete operation/caller bundles. |
@@ -56,7 +56,7 @@ Current hosted results, checked on 2026-09-28:
 |---|---|---|
 | P0 / #1928 | `af1cc44d293f4456f2ef49d9d391afd39d974ade` | [All three checks green](https://github.com/Claudfather/Claudlobby/pull/1928/checks); 5,812 passed, 13 skipped, 3 warnings in 1,035.53 s; zero failures/errors. |
 | P1 / #1929 | `c2b8188a6ca974601bcbeba3ef41c61a9396f29f` | [All three checks green](https://github.com/Claudfather/Claudlobby/pull/1929/checks); 5,980 passed, 13 skipped, 3 warnings in 1,047.77 s; zero failures/errors. |
-| P2a / #1930 | `50ad5acd8940dea2030078c768893ff2a10092dc` | [Full suite failed; conformance green](https://github.com/Claudfather/Claudlobby/pull/1930/checks): 5,550 passed, 472 failed, 12 skipped, 3 warnings. |
+| P2a / #1930 | `5345a1e04c2eeb02fc50c8c2453eb165d959348a` | [Full suite failed; conformance green](https://github.com/Claudfather/Claudlobby/actions/runs/36383705914/job/108804562749): 5,946 passed, 76 failed, 12 skipped, 3 warnings. |
 
 Full P0/P1 logs are `/tmp/claudlobby-cli-evidence-1747/p0-af1-ci.log` and
 `p1-c2b-ci.log`. Both have the same 13 skips:
@@ -176,3 +176,13 @@ descriptions must carry final results before a slice is presented as ready.
   passed locally; 52 pure cases passed, three composition cases were excluded.
   Direct CLI execution then hit the same bounded macOS stall; full composition
   and the complete repaired suite still require hosted confirmation.
+
+- P2a full-suite repair checkpoint `5345a1e0`: 76 failed versus the prior
+  472. Remaining failures include source harnesses without explicit managers or
+  selected CLI, native-sibling stubs left under data-root/lib, obsolete source
+  path assertions and a registry fixture using a different artifact identity
+  than its CLI verification. The example lost its authored sync marker; the
+  marker/introduction are restored without weakening the byte-parity assertion.
+  Full hosted log: `/tmp/claudlobby-cli-evidence-1747/p2-5345-ci-failed.log`.
+  Eighteen scoped composition/skill-path assertions pass after repairs; actual
+  shell/installed CLI callers still require the next full hosted run.

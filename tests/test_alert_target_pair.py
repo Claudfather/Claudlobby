@@ -18,11 +18,11 @@ import subprocess
 from pathlib import Path
 
 from tests.conftest import (
-    TG_STUB,
     _write_exec,
     constructed_env,
     read_fleet_events,
 )
+from tests.test_maintenance_jobs import _native_fixture
 
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "lib"
@@ -74,8 +74,7 @@ def _home_state(tmp_path: Path, bot: str) -> str:
 
 def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path, *, scratch_plane_env):
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True)
-    _write_exec(root / "lib" / "tg-post.sh", TG_STUB)
+    native = _native_fixture(tmp_path)
     bots = root / "runtime" / "bots"
     _bot(bots, "alpha", CHAT_B)
     capture = tmp_path / "tg-capture"
@@ -87,7 +86,7 @@ def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path, *, scratch_pla
         **scratch_plane_env(root),
     )
     driver = (
-        f'. "{LIB}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
+        f'. "{native}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
     )
     r = subprocess.run(
         ["bash", "-c", driver], env=env, capture_output=True, text=True, timeout=300
@@ -192,8 +191,8 @@ TOKEN_STUB = (
 
 def _token_seen(tmp_path: Path) -> str:
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True, exist_ok=True)
-    _write_exec(root / "lib" / "tg-post.sh", TOKEN_STUB)
+    native = _native_fixture(tmp_path)
+    _write_exec(native / "tg-post.sh", TOKEN_STUB)
     bots = root / "runtime" / "bots"
     if not bots.exists():
         _bot(bots, "alpha", CHAT_B)
@@ -206,7 +205,7 @@ def _token_seen(tmp_path: Path) -> str:
         PLANE_EMIT_DISABLED="1",
     )
     driver = (
-        f'. "{LIB}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
+        f'. "{native}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
     )
     r = subprocess.run(
         ["bash", "-c", driver], env=full, capture_output=True, text=True, timeout=120

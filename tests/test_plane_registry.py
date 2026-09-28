@@ -102,13 +102,13 @@ def _db(root: Path) -> sqlite3.Connection:
     return conn
 
 
-def _scan(root: Path, *, scratch_plane_env):
+def _scan(root: Path, *, scratch_plane_env, package=None):
     fleet, _ = load_fleet(root / "fleet.yaml")
     env = scratch_plane_env(root)
     with pytest.MonkeyPatch.context() as patch:
         for key, value in env.items():
             patch.setenv(key, value)
-        return run_generate_scan(Paths(root=root, package=source_package()), fleet)
+        return run_generate_scan(Paths(root=root, package=package or source_package()), fleet)
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +302,8 @@ def test_cli_verify_door_matches_a_fresh_scan(tmp_path, *, scratch_plane_env):
     import subprocess
     import sys
     root = _fleet_root(tmp_path)
-    _scan(root, scratch_plane_env=scratch_plane_env)
+    from claudlobby.resources import get_resources
+    _scan(root, scratch_plane_env=scratch_plane_env, package=get_resources())
     r = subprocess.run(
         [sys.executable, "-m", "claudlobby", "--root", str(root),
          "plane", "registry", "--verify"],

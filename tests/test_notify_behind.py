@@ -13,6 +13,7 @@ import shutil
 import subprocess
 
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
+from tests.test_maintenance_jobs import _native_fixture
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "lib", "notify-behind.sh")
@@ -82,8 +83,7 @@ class Harness:
         if tag_after:
             _git(self.origin, "tag", tag_after)
 
-        os.makedirs(os.path.join(self.root, "lib"), exist_ok=True)
-        _write_exec(os.path.join(self.root, "lib", "tg-post.sh"), TG_STUB)
+        self.native = _native_fixture(tmp_path, "notify-behind.sh")
         bot_dir = os.path.join(self.root, bots_at, "tbot")
         os.makedirs(bot_dir, exist_ok=True)
         with open(os.path.join(bot_dir, "bot.conf"), "w") as f:
@@ -96,9 +96,10 @@ class Harness:
         # a host job: no fleet, so its receipts land on the plane under _host
         return _scrubbed_env(TG_CAPTURE=self.capture, **self.scratch_plane_env(self.root))
 
-    def run(self, script=SCRIPT):
+    def run(self):
         return subprocess.run(
-            ["bash", script], env=self.env(), capture_output=True, text=True
+            ["bash", str(self.native / "notify-behind.sh")],
+            env=self.env(), capture_output=True, text=True
         )
 
     def head(self):
@@ -306,7 +307,7 @@ class TestFleetSignalPrimitives:
             [
                 "bash",
                 "-c",
-                f'. "{LIB_COMMON}" && {fn} "{bots_dir}" "{event_type}" "{msg}"',
+                f'. "{h.native}/lib-common.sh" && {fn} "{bots_dir}" "{event_type}" "{msg}"',
             ],
             env=h.env(),
             capture_output=True,
@@ -362,7 +363,7 @@ class TestCurrencyOutcomeIsLogged:
     """
 
     def _reject(self, h):
-        _write_exec(os.path.join(h.root, "lib", "tg-post.sh"), TG_STUB_REJECTED)
+        _write_exec(h.native / "tg-post.sh", TG_STUB_REJECTED)
 
     def _log(self, h):
         p = os.path.join(h.root, "state", "notify-behind.log")
@@ -445,7 +446,7 @@ class TestCurrencyOutcomeDoesNotLeak:
         state_dir = os.path.join(h.root, "state", "currency")
         os.makedirs(state_dir, exist_ok=True)
         body = (
-            f'. "{LIB_COMMON}"\n'
+            f'. "{h.native}/lib-common.sh"\n'
             f'BOTS_DIR="{bots_dir}"\nSTATE_DIR="{state_dir}"\n' + script
         )
         r = subprocess.run(
@@ -484,7 +485,7 @@ class TestUndeliveredNoticeIsRetried:
 
     def test_rejected_notice_leaves_no_marker_and_the_next_run_sends_again(self, tmp_path, scratch_plane_env):
         h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
-        tg_post = os.path.join(h.root, "lib", "tg-post.sh")
+        tg_post = h.native / "tg-post.sh"
         marker = os.path.join(h.root, "state", "currency", "root.source_behind")
         _write_exec(tg_post, TG_STUB_REJECTED)
         assert h.run().returncode == 0

@@ -15,7 +15,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/../lib"
-REAPER="$LIB_DIR/orphan-browser-reaper.sh"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {
@@ -28,9 +27,13 @@ assert_eq() {
 }
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/bin" "$T/root/lib"
+mkdir -p "$T/bin" "$T/native" "$T/root/state/logs"
+for helper in orphan-browser-reaper.sh lib-common.sh supervisor.sh cli-context.sh plane-emit.sh plane-socket-client.py; do
+    cp "$LIB_DIR/$helper" "$T/native/$helper"
+done
+REAPER="$T/native/orphan-browser-reaper.sh"
 ROOT="$T/root"
-LOG="$ROOT/lib/orphan-browser-reaper.log"
+LOG="$ROOT/state/logs/orphan-browser-reaper.log"
 
 # Stub ps. Two call shapes must be told apart:
 #   ps -o ppid= -p <pid>                       (ancestor walk) -> empty, ends the walk
@@ -44,8 +47,8 @@ printf '%s\n' "${PSTABLE:-}"
 STUB
 # Stub the alert path so a regression can never reach a real session/token.
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
-printf '#!/bin/bash\nexit 0\n' > "$T/bin/tg-post.sh"
-chmod +x "$T/bin/ps" "$T/bin/tmux" "$T/bin/tg-post.sh"
+printf '#!/bin/bash\nexit 0\n' > "$T/native/tg-post.sh"
+chmod +x "$T/bin/ps" "$T/bin/tmux" "$T/native/tg-post.sh"
 
 # run_case <ps-table> [extra args...] -> log text on stdout
 run_case() {

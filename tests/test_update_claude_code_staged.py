@@ -35,9 +35,8 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import _write_exec, constructed_env
-from tests.test_maintenance_jobs import _captured, _signal_root
+from tests.test_maintenance_jobs import _captured, _native_fixture, _signal_root
 from tests.test_update_claude_code_verify import (
-    SCRIPT,
     SUDO_STUB,
     _event_types,
     _path_without,
@@ -104,6 +103,7 @@ class StagedHost:
         self.scratch_plane_env = scratch_plane_env
         self.tmp = tmp_path
         self.root = _signal_root(tmp_path)
+        self.script = _native_fixture(tmp_path, "update-claude-code.sh") / "update-claude-code.sh"
         self.home = tmp_path / "home"
         (self.home / ".local" / "bin").mkdir(parents=True)
         _write_exec(self.home / ".local" / "bin" / "npm", NPM_STUB)
@@ -162,7 +162,7 @@ class StagedHost:
 
     def run(self, latest="2.1.281", armed=True, **extra):
         return subprocess.run(
-            ["bash", str(SCRIPT)],
+            ["bash", str(self.script)],
             env=self.env(latest, armed, **extra),
             capture_output=True,
             text=True,
@@ -670,7 +670,7 @@ def test_a_concurrent_run_waits_rather_than_deleting_the_first_runs_staging(tmp_
     h.body("2.1.281", healthy_big("2.1.281"))
     started = tmp_path / "npm-started"
     first = subprocess.Popen(
-        ["bash", str(SCRIPT)],
+        ["bash", str(h.script)],
         env=h.env(NPM_SLEEP="4", NPM_STARTED=started),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

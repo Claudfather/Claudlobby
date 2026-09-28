@@ -20,7 +20,7 @@ Hermetic by construction, because this module FIRES the alert path:
   - a CONSTRUCTED env, never an os.environ copy — a bot session carries the
     real Telegram chat id and token, and an alert fired from inside one would
     post to the real group;
-  - tg-post stubbed under a throwaway root (`_signal_root`, shared with
+  - tg-post stubbed beside private native helpers (`_signal_root`, shared with
     test_maintenance_jobs; the alert path resolves it through CLAUDLOBBY_ROOT),
     recording what would have been sent;
   - npm and sudo stubbed in $HOME/.local/bin, which the script PREPENDS to
@@ -49,7 +49,7 @@ from tests.conftest import (
     constructed_env,
     read_fleet_events,
 )
-from tests.test_maintenance_jobs import _captured, _signal_root
+from tests.test_maintenance_jobs import _captured, _native_fixture, _signal_root
 
 SCRIPT = Path(__file__).resolve().parent.parent / "lib" / "update-claude-code.sh"
 
@@ -132,6 +132,7 @@ class Host:
         # A fleet-less host job resolves its alert chat id from a declaring bot;
         # this root declares a fake one and stubs the sender.
         self.root = _signal_root(tmp_path)
+        self.script = _native_fixture(tmp_path, "update-claude-code.sh") / "update-claude-code.sh"
         self.home = tmp_path / "home"
         self.capture = tmp_path / "tg-capture"
         self.calls = tmp_path / "npm.calls"
@@ -172,7 +173,7 @@ class Host:
             **self.extra,
         )
         return subprocess.run(
-            ["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=300
+            ["bash", str(self.script)], env=env, capture_output=True, text=True, timeout=300
         )
 
     def log(self) -> str:

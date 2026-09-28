@@ -22,6 +22,7 @@ from claudlobby.config import (
     _parse_github_app,
 )
 from tests.conftest import _write_exec, git_isolation_env, make_paths
+from dataclasses import replace
 
 
 def _fleet(bot):
@@ -130,7 +131,7 @@ class TestGithubAppComposedText:
 
     def test_app_helper_is_a_baked_absolute_path(self, tmp_path, monkeypatch):
         out = self._render(tmp_path, monkeypatch, _app_bot())
-        assert f"{tmp_path}/lib/git-credential-github-app" in out
+        assert str(make_paths(tmp_path).lib / "git-credential-github-app") in out
         assert "$CLAUDLOBBY_ROOT" not in out, "gitconfig files do not expand env vars"
 
     def test_app_block_scoped_per_org_when_orgs_declared(self, tmp_path, monkeypatch):
@@ -288,6 +289,7 @@ class TestGhShim:
             env={
                 "PATH": f"{shim_dir}:{real_dir}:{os.environ['PATH']}",
                 "CLAUDLOBBY_ROOT": str(tmp_path),
+                "CLAUDLOBBY_NATIVE_DIR": str(tmp_path / "lib"),
             },
             capture_output=True,
             text=True,
@@ -305,6 +307,7 @@ class TestGhShim:
             env={
                 "PATH": f"{shim_dir}:{os.environ['PATH']}",
                 "CLAUDLOBBY_ROOT": str(tmp_path),
+                "CLAUDLOBBY_NATIVE_DIR": str(tmp_path / "lib"),
             },
             capture_output=True,
             text=True,
@@ -343,7 +346,9 @@ class TestGithubAppRoutingResolvesForReal:
         monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: str(gh_stub))
         monkeypatch.setattr(comp, "_operator_gitconfig", lambda: user_cfg)
         cfg = tmp_path / "composed.gitconfig"
-        cfg.write_text(comp.compose_bot_gitconfig(bot, make_paths(tmp_path)))
+        paths = make_paths(tmp_path)
+        paths = replace(paths, package=replace(paths.package, native=lib))
+        cfg.write_text(comp.compose_bot_gitconfig(bot, paths))
         return cfg
 
     def _env(self, tmp_path, cfg, extra=None):

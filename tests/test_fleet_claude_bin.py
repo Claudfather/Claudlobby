@@ -224,7 +224,7 @@ def test_reload_fleet_updates_plugins_through_the_staged_link(tmp_path):
     root = tmp_path / "root"
     libdir = root / "lib"
     libdir.mkdir(parents=True)
-    for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh"):
+    for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh", "cli-context.sh"):
         _write_exec(libdir / script, (LIB / script).read_text())
     _write_exec(libdir / "check-npx-cache.sh", "#!/bin/bash\nexit 0\n")
     bindir = tmp_path / "bin"
@@ -244,6 +244,7 @@ def test_reload_fleet_updates_plugins_through_the_staged_link(tmp_path):
     env = _scrubbed_env(
         CLAUDLOBBY_ROOT=str(root),
         CALL_LOG=str(tmp_path / "calls.log"),
+        CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
         PATH=f"{bindir}:{os.environ['PATH']}",
         TMUX_TMPDIR=str(tmp_path / "no-tmux"),
     )

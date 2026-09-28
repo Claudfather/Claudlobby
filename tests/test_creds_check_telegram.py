@@ -22,9 +22,9 @@ import subprocess
 from pathlib import Path
 
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec
+from tests.test_maintenance_jobs import _native_fixture
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_ROOT / "lib" / "creds-check.sh"
 
 VALID_TOKEN = "111111:validAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 WRONGBOT_TOKEN = "222222:wrongbotAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -96,20 +96,17 @@ def _fleet(
     roster: list[tuple] | None = None,
 ) -> dict:
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True)
-    (root / "state").mkdir()
+    native = _native_fixture(tmp_path, "creds-check.sh")
+    (root / "state").mkdir(parents=True)
     tg_log = root / "tg-posts.log"
     if real_tgpost:
         # Real delivery path: creds-check resolves + exports the delivery
         # token, the real tg-post.sh posts under it, the curl stub records
         # the sendMessage URL (which embeds the token) in send.log.
-        # supervisor.sh is a required sibling: lib-common.sh unconditionally
-        # sources it from its own directory (#1573 task 6).
-        for helper in ("tg-post.sh", "lib-common.sh", "supervisor.sh"):
-            shutil.copy(REPO_ROOT / "lib" / helper, root / "lib" / helper)
+        shutil.copy2(REPO_ROOT / "lib" / "tg-post.sh", native / "tg-post.sh")
     else:
         _write_exec(
-            root / "lib" / "tg-post.sh", f'#!/bin/bash\necho "$*" >> "{tg_log}"\n'
+            native / "tg-post.sh", f'#!/bin/bash\necho "$*" >> "{tg_log}"\n'
         )
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -196,6 +193,7 @@ def _fleet(
     (tmp_path / "home").mkdir()
     return {
         "root": root,
+        "native": native,
         "env": env,
         "state": state,
         "tg_log": tg_log,
@@ -206,7 +204,7 @@ def _fleet(
 def _run(f: dict) -> dict:
     # Positional fleet arg — the composed-timer contract.
     r = subprocess.run(
-        ["bash", str(SCRIPT), "f"],
+        ["bash", str(f["native"] / "creds-check.sh"), "f"],
         capture_output=True,
         text=True,
         env=f["env"],
@@ -388,8 +386,8 @@ def _alldead_scene(tmp_path, bot_chat):
     timer env carrying the fleet chat, and a tg-post stub recording the chat,
     the state dir and the message creds-check handed it."""
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True)
-    (root / "state").mkdir()
+    native = _native_fixture(tmp_path, "creds-check.sh")
+    (root / "state").mkdir(parents=True)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _curl_stub(bindir)
@@ -410,7 +408,7 @@ def _alldead_scene(tmp_path, bot_chat):
     (root / "local" / "f" / "fleet.yaml").write_text(
         "fleet:\n  manager: chanbot\n  name: f\n  bots:\n    chanbot:\n      expertise: [x]\n"
     )
-    _write_exec(root / "lib" / "tg-post.sh", TG_STUB)
+    _write_exec(native / "tg-post.sh", TG_STUB)
     capture = root / "tg-capture.log"
     state = root / "state" / "creds-check-state.json"
     env = _scrubbed_env()
@@ -438,7 +436,7 @@ def _alldead_scene(tmp_path, bot_chat):
         }
     )
     (tmp_path / "home").mkdir()
-    _run({"env": env, "state": state})
+    _run({"native": native, "env": env, "state": state})
     log = (root / "creds-check.log").read_text()
     assert "alert delivery token resolved" not in log, "a live token would mask the gap"
     return root, channel, capture, state

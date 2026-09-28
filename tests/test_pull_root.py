@@ -157,6 +157,7 @@ class Install:
             PATH=f"{self.bin}:/usr/bin:/bin",
             HOME=self.home,
             PULL_ROOT_STUB=self.stub,
+            CLAUDLOBBY_CLI=self.bin / "claudlobby",
             PULL_ROOT_WATCH_S="1",
             FLEET_EVENT_EMIT_TIMEOUT_S="60",
             **self.plane_env,

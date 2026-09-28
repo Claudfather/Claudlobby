@@ -273,7 +273,7 @@ _link_library_tree() {
 
 # _generate_or_die <root> <label> — the compose-or-fail block, once.
 _generate_or_die() {
-    if ! CLAUDLOBBY_ROOT="$1" PYTHONPATH="$SRC" python3 -m claudlobby generate >"$1/generate.out" 2>&1; then
+    if ! CLAUDLOBBY_ROOT="$1" claudlobby_cli --root "$1" generate >"$1/generate.out" 2>&1; then
         cat "$1/generate.out" >&2
         die "claudlobby generate failed for $2"
     fi
@@ -329,6 +329,7 @@ cov_setup_variants() {
         cat > "$sub/fleet.yaml" <<YAML
 fleet:
   name: cov-ab
+  manager: cov-probe
   service_prefix: covab
   accounts:
     default: ~/.claude
@@ -637,6 +638,7 @@ suc_setup_variants() {
         cat > "$sub/fleet.yaml" <<YAML
 fleet:
   name: suc-ab
+  manager: suc-probe
   service_prefix: sucab
   accounts:
     default: ~/.claude
@@ -964,6 +966,7 @@ MD
     cat > "$ROOT/fleet.yaml" <<YAML
 fleet:
   name: abeval
+  manager: ab-manager
   service_prefix: abev
   accounts:
     default: ~/.claude
@@ -972,6 +975,9 @@ fleet:
   plugins:
     include_defaults: false
   bots:
+    ab-manager:
+      expertise: [orchestration]
+      channels: []
     ab-without:
       name: ab-without
       account: without

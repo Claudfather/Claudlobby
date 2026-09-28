@@ -36,7 +36,7 @@ def _isolate_home(patch, base):
 
 def _silence_plane(patch):
     patch.setenv("PLANE_EMIT_DISABLED", "1")
-    for key in ("CLAUDLOBBY_ROOT", "PLANE_SOCKET", "PLANE_EMIT_CLI"):
+    for key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_CLI", "PLANE_SOCKET", "PLANE_EMIT_CLI"):
         patch.delenv(key, raising=False)
 
 
@@ -181,6 +181,13 @@ def test_cli(_isolate_plane_session, tmp_path_factory):
     # The console script must use THIS interpreter, not an ambient installation.
     assert str(Path(sys.executable)) in cli.read_text().splitlines()[0]
     return cli
+
+
+@pytest.fixture
+def selected_test_cli(test_cli, monkeypatch, _isolate_claudlobby_root):
+    """Explicit CLI selection for non-recording source harnesses (#1316)."""
+    monkeypatch.setenv("CLAUDLOBBY_CLI", str(test_cli))
+    return test_cli
 
 
 @pytest.fixture

@@ -7,6 +7,8 @@ Real scripts run against throwaway CLAUDLOBBY_ROOTs; tg-post.sh is stubbed
 to capture signal delivery (the notify-behind harness pattern)."""
 
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import time
 
@@ -18,12 +20,23 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
 
 
+def _native_fixture(tmp_path, *scripts):
+    """Real private native peers with one owned Telegram transport stub."""
+    native = tmp_path / "native"
+    native.mkdir(exist_ok=True)
+    for name in ("lib-common.sh", "supervisor.sh", "cli-context.sh", "plane-emit.sh",
+                 "plane-socket-client.py", *scripts):
+        shutil.copy2(Path(LIB) / name, native / name)
+    if not (native / "tg-post.sh").exists():
+        _write_exec(native / "tg-post.sh", TG_STUB)
+    return native
+
+
 def _signal_root(tmp_path, bots_at="runtime/bots"):
-    """Throwaway CLAUDLOBBY_ROOT with a tg-post stub + a chat-declaring bot,
+    """Throwaway data root with private native peers + a chat-declaring bot,
     so emit_failure_alert's Telegram leg is observable."""
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True)
-    _write_exec(str(root / "lib" / "tg-post.sh"), TG_STUB)
+    _native_fixture(tmp_path)
     bot = root / bots_at / "tbot"
     bot.mkdir(parents=True)
     (bot / "bot.conf").write_text('export TELEGRAM_GROUP_CHAT_ID="-100123"\n')
@@ -31,13 +44,14 @@ def _signal_root(tmp_path, bots_at="runtime/bots"):
 
 
 def _run(script, args, root, tmp_path, extra_env=None, *, scratch_plane_env):
+    native = _native_fixture(tmp_path, script)
     env = _scrubbed_env(
         TG_CAPTURE=str(tmp_path / "tg-capture"),
         **scratch_plane_env(root),          # the host job's receipt lands on the plane under _host
     )
     env.update(extra_env or {})
     return subprocess.run(
-        ["bash", os.path.join(LIB, script), *args],
+        ["bash", str(native / script), *args],
         env=env,
         capture_output=True,
         text=True,
@@ -148,7 +162,7 @@ class TestDiskMonitor:
         (data / "x").write_text("x\n")
         r = _run("disk-monitor.sh", ["--threshold", "100"], root, tmp_path, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
-        log = (root / "lib" / "disk-monitor.log").read_text()
+        log = (root / "state" / "logs" / "disk-monitor.log").read_text()
         assert "tbot/data:" in log
 
 
@@ -280,8 +294,7 @@ def _source_lib_common(tmp_path, snippet, path, **extra_env):
 
 
 def _venv_stub(tmp_path, body="#!/bin/bash\necho venv\n"):
-    """A `claudlobby` console script in the repo-local venv — the install shape
-    that is invisible to every system PATH."""
+    """An unselected data-root venv lookalike, never an implicit CLI choice."""
     venv_bin = tmp_path / "clroot" / ".venv" / "bin"
     venv_bin.mkdir(parents=True, exist_ok=True)
     _write_exec(str(venv_bin / "claudlobby"), body)
@@ -290,37 +303,50 @@ def _venv_stub(tmp_path, body="#!/bin/bash\necho venv\n"):
 
 class TestOwnToolPath:
     """#805: systemd/launchd hand a script a minimal PATH, so a timer-invoked
-    lib/ script resolves neither `claude` nor `claudlobby` and dies with a bare
-    command-not-found. own_tool_path is the fallback resolution that fixes it."""
+    script must add actual tool prefixes; Claudlobby has an explicit selection."""
 
     MINIMAL = "/usr/bin:/bin:/usr/sbin:/sbin"
 
     def test_resolves_a_tool_a_minimal_path_cannot_see(self, tmp_path):
-        """The bug itself: a repo-venv console script is invisible to a timer."""
-        venv_bin = _venv_stub(tmp_path)
+        """User tools resolve, while a data-root venv cannot select the CLI."""
+        _venv_stub(tmp_path)
+        home = tmp_path / "home"
+        prefix = home / ".local" / "bin"
+        prefix.mkdir(parents=True)
+        _write_exec(prefix / "claude", "#!/bin/bash\necho tool\n")
+        selected = tmp_path / "selected-cli"
+        _write_exec(selected, "#!/bin/bash\necho selected\n")
         r = _source_lib_common(
             tmp_path,
-            "command -v claudlobby >/dev/null 2>&1 && echo BEFORE_FOUND || echo BEFORE_MISSING\n"
+            "command -v claude >/dev/null 2>&1 && echo BEFORE_FOUND || echo BEFORE_MISSING\n"
             "own_tool_path\n"
-            "command -v claudlobby",
-            self.MINIMAL,
+            "command -v claude\n"
+            "command -v claudlobby >/dev/null 2>&1 || echo NO_AMBIENT_CLI\n"
+            "claudlobby_cli",
+            self.MINIMAL, HOME=str(home), CLAUDLOBBY_CLI=str(selected),
         )
+        assert r.returncode == 0, r.stderr
         assert "BEFORE_MISSING" in r.stdout, r.stdout
-        assert str(venv_bin / "claudlobby") in r.stdout, r.stdout + r.stderr
+        assert str(prefix / "claude") in r.stdout, r.stdout + r.stderr
+        assert "NO_AMBIENT_CLI" in r.stdout and r.stdout.endswith("selected\n")
 
     def test_appends_so_it_never_shadows_the_callers_path(self, tmp_path):
         """APPEND, not prepend. An operator-pinned (or test-stubbed) binary must
         keep winning: prepending would silently re-point a job at a shadow user
         copy while the fleet runs the system one — the #635 failure class."""
-        venv_bin = _venv_stub(tmp_path)
+        home = tmp_path / "home"
+        prefix = home / ".local" / "bin"
+        prefix.mkdir(parents=True)
+        _write_exec(prefix / "claude", "#!/bin/bash\necho fallback\n")
         pinned = tmp_path / "pinned"
         pinned.mkdir()
-        _write_exec(str(pinned / "claudlobby"), "#!/bin/bash\necho pinned\n")
+        _write_exec(str(pinned / "claude"), "#!/bin/bash\necho pinned\n")
         r = _source_lib_common(
-            tmp_path, "own_tool_path\ncommand -v claudlobby", f"{pinned}:{self.MINIMAL}"
+            tmp_path, "own_tool_path\ncommand -v claude", f"{pinned}:{self.MINIMAL}",
+            HOME=str(home),
         )
-        assert str(pinned / "claudlobby") in r.stdout, r.stdout
-        assert str(venv_bin) not in r.stdout.strip().splitlines()[-1]
+        assert str(pinned / "claude") in r.stdout, r.stdout
+        assert str(prefix) not in r.stdout.strip().splitlines()[-1]
 
     def test_is_idempotent(self, tmp_path):
         """keepalive-style repeat invocation must not grow PATH without bound."""

@@ -19,6 +19,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("selected_test_cli")
+
 REPO_DIR = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_DIR / "lib" / "ab-comms-eval.sh"
 
