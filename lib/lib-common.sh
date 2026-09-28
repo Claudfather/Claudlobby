@@ -774,10 +774,15 @@ plane_mint_id() {
 # Feed it through a here-string (`plane_emit_events door <<<"$batch"`), never a
 # pipeline, wherever the caller needs PLANE_EMIT_LAST_RC afterwards: a pipeline
 # runs the function in a subshell and the result never comes back.
+# PLANE_EMIT_CLASS (#1693) sets the socket deadline (lib/plane-emit.sh). A
+# caller assigns it WITHOUT export, once, at the top of its script; this helper
+# and plane_emit_bounded hand it to the shim, and nothing else the caller runs
+# inherits it (keepalive restarts bots, and a restarted session must not start
+# life as `background`).
 PLANE_EMIT_LAST_RC=0
 plane_emit_events() {
     local door="$1" _rc=0
-    "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || _rc=$?
+    PLANE_EMIT_CLASS="${PLANE_EMIT_CLASS:-}" "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || _rc=$?
     PLANE_EMIT_LAST_RC=$_rc
     if [ "$_rc" -eq 6 ]; then
         # #1711. SPOOLED is not failed and must never be worded as one: the
@@ -918,7 +923,10 @@ plane_emit_bounded() {
     # Opted in to cooldown staging (#1657): no caller of this door reads the
     # result (emit_fleet_event restores PLANE_EMIT_LAST_RC), and it carries
     # most of the host's traffic, bot-vitals' two per tool call included.
-    PLANE_EMIT_COOLDOWN_STAGE=1 "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
+    # For the same reason its class is `background` unless the caller named
+    # one (#1693): bot-vitals names `hook`, because a turn waits on it.
+    PLANE_EMIT_CLASS="${PLANE_EMIT_CLASS:-background}" PLANE_EMIT_COOLDOWN_STAGE=1 \
+        "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
     _pid=$!
     while kill -0 "$_pid" 2>/dev/null && [ "$SECONDS" -lt "$_deadline" ]; do
         # 50ms: the socket rung answers in ~40ms, so a 1s poll spent ~96% of
@@ -3207,7 +3215,9 @@ _PANE_RECEIPT_WAIT_DEFAULT=10
 # So: wait for the receipt; none -> ONE more Enter (send_retry) and wait again;
 # still none -> send_miss, loudly, rc 1. Never a loop, never the payload again.
 # No verdict and nothing pressed when the plane cannot answer or the receiver
-# has never recorded a receipt (its hook is not armed). For a send into an IDLE
+# has never recorded a receipt (its hook is not armed); --quiet keeps the
+# lookup from explaining the second, so a clean dispatch stays silent but for
+# the plane shim. For a send into an IDLE
 # pane only: a busy one queues the prompt, whose receipt lands when the turn
 # ends, if at all. So a receiver found BUSY when its receipt is missing (a turn
 # that began after the door's idle probe, or during the wait) is not a held box
@@ -3217,7 +3227,7 @@ pane_await_receipt() {
     local wait="${PANE_RECEIPT_WAIT_S:-$_PANE_RECEIPT_WAIT_DEFAULT}"
     if [[ "$wait" =~ $off ]]; then return 0; fi
     local ask=(python3 -S -E "$_LIB_COMMON_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}"
-        --received "$msg" --destination "$session" --wait "$wait")
+        --received "$msg" --destination "$session" --wait "$wait" --quiet)
     "${ask[@]}" || rc=$?
     [ "$rc" -eq 1 ] || return 0
     if bot_is_busy "$socket" "$session"; then return 0; fi
@@ -3565,6 +3575,16 @@ stat_mtime() {
         stat -f %m "$file"
     else
         stat -c %Y "$file"
+    fi
+}
+
+stat_size() {
+    # Print a file's size in bytes, without reading it
+    local file="${1:?Usage: stat_size <file>}"
+    if [ "$_OS" = "Darwin" ]; then
+        stat -f %z "$file"
+    else
+        stat -c %s "$file"
     fi
 }
 

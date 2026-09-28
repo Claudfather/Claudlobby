@@ -31,6 +31,7 @@ fi
 command -v jq >/dev/null 2>&1 || exit 0
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on its plane record: its socket deadline (#1693, lib/plane-emit.sh)
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 set +e  # lib-common re-arms set -e at source time; a hook must not die

@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
 
+# Linux 3.11 splits the existing harness into its own lane. The other
+# supported-platform lanes retain it; every required lane excludes quarantine.
 jobs:
   pytest:
     runs-on: ubuntu-latest
@@ -40,9 +42,8 @@ jobs:
         # The Python package keeps its exact checkout origin for the P0 guard.
         run: .venv/bin/python tests/prepare_resources.py --disposable-checkout "$GITHUB_WORKSPACE"
       - name: Run tests
-        # One pre-existing failure is deselected pending separate triage
-        # (tracked in the issue thread for #229). The rest of the suite must
-        # stay green.
+        # Quarantined cases retain their visible non-required lane. The
+        # existing Linux3.11 harness runs separately below.
         run: |
           printf 'running\n' > pytest.status
           test_scratch="$(mktemp -d)"
@@ -53,7 +54,7 @@ jobs:
             XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
             PLANE_EMIT_DISABLED=1 \
             .venv/bin/python -m pytest -v --maxfail=20 --junitxml=pytest-results.xml \
-            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn 2>&1 | tee pytest.log
+            -m "not quarantine and not harness" 2>&1 | tee pytest.log
           result=${PIPESTATUS[0]}
           printf '%s\n' "$result" > pytest.rc
           printf 'completed (exit %s)\n' "$result" > pytest.status
@@ -129,7 +130,7 @@ jobs:
             XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
             PLANE_EMIT_DISABLED=1 \
             .venv/bin/python -m pytest -v --maxfail=20 --junitxml=pytest-results.xml \
-            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn 2>&1 | tee pytest.log
+            -m "not quarantine" 2>&1 | tee pytest.log
           result=${PIPESTATUS[0]}
           printf '%s\n' "$result" > pytest.rc
           printf 'completed (exit %s)\n' "$result" > pytest.status
@@ -159,6 +160,50 @@ jobs:
         if: always()
         with:
           name: pytest-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            pytest.log
+            pytest.rc
+            pytest.status
+            pytest-results.xml
+          if-no-files-found: error
+
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install isolated package
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Prepare installed resources in disposable checkout
+        run: .venv/bin/python tests/prepare_resources.py --disposable-checkout "$GITHUB_WORKSPACE"
+      - name: Run the existing validation harness
+        run: |
+          printf 'running\n' > pytest.status
+          test_scratch="$(mktemp -d)"
+          mkdir -p "$test_scratch"/{home,tmp,config,cache,state,data}
+          set +e
+          env HOME="$test_scratch/home" TMPDIR="$test_scratch/tmp" \
+            XDG_CONFIG_HOME="$test_scratch/config" XDG_CACHE_HOME="$test_scratch/cache" \
+            XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
+            PLANE_EMIT_DISABLED=1 \
+            .venv/bin/python -m pytest -v -m "harness and not quarantine" \
+            --junitxml=pytest-results.xml 2>&1 | tee pytest.log
+          result=${PIPESTATUS[0]}
+          printf '%s\n' "$result" > pytest.rc
+          printf 'completed (exit %s)\n' "$result" > pytest.status
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-harness-ubuntu-latest-py3.11
           path: |
             pytest.log
             pytest.rc

@@ -80,7 +80,7 @@ from typing import Optional
 
 from .contracts import ContractViolation
 from .db import connect, connect_ro, db_file, db_path
-from .queue_paths import scan_queue_dir, scan_spool, staged_dir
+from .queue_paths import scan_queue_dir, scan_spool, staged_dir, staged_payload
 from .emit_api import emit_batch
 from .writer import PlaneWriter
 from .ids import ensure_host_uid
@@ -132,6 +132,29 @@ def _serving_identity(root: Path) -> dict:
     return result
 
 
+
+# A stage killed between its write and its rename leaves `.<event id>.tmp`,
+# and until #1657's follow-up nothing read one: measured on the Pi, 21 in two
+# days, none of their events on the plane, each written a few seconds before a
+# counted 10 s reap (plane_emit_bounded kills a stage stuck in its fsync). The
+# file is a finished batch with pre-minted ids, so it is replayed like a staged
+# one, never deleted. Only once it is this old: a younger one may still be
+# inside its stager's fsync, and every stager is reaped long before an hour.
+STAGED_ORPHAN_AGE_S = 3600.0
+
+
+def _orphaned_stages(entries: list) -> list:
+    cutoff = time.time() - STAGED_ORPHAN_AGE_S
+    out = []
+    for p in entries:
+        if p.name.startswith(".") and p.name.endswith(".tmp"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    out.append(p)
+            except OSError:
+                pass    # renamed or removed since the listing: not an orphan
+    return sorted(out)
+
 # Process exit code for the stale-daemon exit (#1485). 4 rather than a fresh
 # number: `downgrade -> 4` is already the taxonomy's, on the CLI's exits and
 # in the wire protocol above, so the daemon's own exit says the same thing in
@@ -175,6 +198,13 @@ class SocketOverrideInvalid(RuntimeError):
 def socket_path(root: Path) -> Path:
     p = db_path(Path(root)).parent / "ingest.sock"   # 0700 dir, beside the db
     return p
+
+
+def lock_path(sock_path: Path) -> Path:
+    """The daemon's lifetime flock, beside its socket (`_acquire_lock`). Its
+    holder IS the running daemon, which is how `plane doctor` tells the plane's
+    own writer from a reader holding the WAL (#1905)."""
+    return sock_path.with_name(sock_path.name + ".lock")
 
 
 def _check_sun_path(path: Path) -> None:
@@ -399,7 +429,7 @@ class PlaneDaemon:
                     "quarantine": None if spool_state.quarantine_state == "unreadable" else
                     [p.name for p in spool_state.quarantined],
                     "staged": None if staged_state.state == SOURCE_UNREADABLE else
-                    sorted(p.name for p in entries if p.name.endswith(".batch"))}
+                    sorted(p.name for p in entries if staged_payload(p))}
         for queue in ("spool", "staged"):
             if queue in reports:
                 reports[queue]["remaining"] = None if retained[queue] is None else len(retained[queue])
@@ -514,7 +544,9 @@ class PlaneDaemon:
         try:
             if not sd.is_dir():
                 _mkdir_fsynced(sd, 0o700)   # the handshake the client stages on
-            batches = sorted(p for p in sd.iterdir() if p.name.endswith(".batch"))
+            entries = list(sd.iterdir())
+            batches = sorted(p for p in entries if p.name.endswith(".batch"))
+            batches += _orphaned_stages(entries)
         except OSError as exc:
             report.error = type(exc).__name__
             return report                   # a broken root: the cold rung keeps recording
@@ -543,7 +575,9 @@ class PlaneDaemon:
                 raise self._downgrade_exit(exc) from None
             except (ValueError, KeyError, TypeError) as exc:  # ContractViolation is a ValueError
                 why = "contract violation" if isinstance(exc, ContractViolation) else "malformed batch"
-                quarantine_entry(self.root, f, f"{why} on replay: {exc}", as_name=f.stem + ".json")
+                # lstrip: an orphan's name is a dotfile, which a listing hides
+                quarantine_entry(self.root, f, f"{why} on replay: {exc}",
+                                 as_name=f.stem.lstrip(".") + ".json")
                 report.quarantined += 1
                 continue
             except Exception as exc:  # noqa: BLE001 — disclosed; kept for a later tick
@@ -559,7 +593,7 @@ class PlaneDaemon:
             else:
                 report.committed += 1
             self.writer.after_batch()
-            f.unlink()
+            f.unlink(missing_ok=True)       # an orphan's stager may have renamed it after all
         return report
 
     # -- request handling ---------------------------------------------------
@@ -660,14 +694,14 @@ class PlaneDaemon:
         reach). The lock is held (fd open) for the daemon's life and released
         by the kernel on any death, so a crashed holder never wedges the
         next start."""
-        lock_path = self.sock_path.with_name(self.sock_path.name + ".lock")
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        lock = lock_path(self.sock_path)
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
             raise DaemonAlreadyRunning(
-                f"another plane daemon holds {lock_path}"
+                f"another plane daemon holds {lock}"
             ) from None
         self._lock_fd = fd
 
@@ -720,8 +754,13 @@ class PlaneDaemon:
                 listener.bind(str(tmp))
                 os.chmod(tmp, 0o600)
                 listener.listen(64)
+                # The identity is read from the hidden name, before the rename
+                # publishes it. Read back from the public path, it would be
+                # whatever sits there at that instant: a replacement landing
+                # between the rename and the read was recorded as ours and
+                # deleted at shutdown. The rename keeps the inode.
+                st = os.stat(tmp)
                 os.replace(tmp, self.sock_path)
-                st = os.stat(self.sock_path)
                 self._sock_stat = (st.st_dev, st.st_ino)
             except BaseException:
                 listener.close()

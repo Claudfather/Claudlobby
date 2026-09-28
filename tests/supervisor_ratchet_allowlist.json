@@ -6,7 +6,7 @@
   "lib/install-bot.sh": 4,
   "lib/install-host-service-systemd.sh": 5,
   "lib/install_fleet_timer.sh": 3,
-  "lib/install_fleet_timer_launchd.sh": 3,
+  "lib/install_fleet_timer_launchd.sh": 1,
   "lib/keepalive.sh": 3,
   "lib/lib-common.sh": 15,
   "lib/migrate-fleet-to-system.sh": 4,

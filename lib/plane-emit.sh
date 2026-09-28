@@ -54,8 +54,19 @@
 #   PLANE_EMIT_COOLDOWN_STAGE  =1 -> in a wedge cooldown, stage the batch for
 #                        the daemon (rc 6) instead of the cold CLI (#1657). Set
 #                        only by callers that never read the result.
-#   PLANE_EMIT_CLI       explicit fallback command override for harnesses;
-#                        otherwise the cold rung uses CLAUDLOBBY_CLI.
+#   PLANE_EMIT_CLASS     who waits on this emission (#1693), which sets how
+#                        long the socket rung may take: hook (a live Claude
+#                        Code turn), background (nothing reads the result),
+#                        door (a door whose outcome turns on it). Callers set
+#                        it; unset keeps the default deadline.
+#   PLANE_SOCKET_DEADLINE_HOOK_S / _BACKGROUND_S / _DOOR_S
+#                        that class's total socket deadline, in seconds. Each
+#                        is unset by default, which is today's 1.0 s: lib/ is
+#                        read on demand, so a root pull reaches every bot at
+#                        once, and a knob in one bot's bot.conf is how a new
+#                        value is tried on one bot first.
+#   PLANE_EMIT_CLI       fallback command override (tests stub it; default
+#                        uses CLAUDLOBBY_CLI).
 #                        CONTRACT: a command LINE, whitespace-split — the
 #                        systemd ExecStart convention (#969). An executable
 #                        whose PATH contains spaces is not expressible;
@@ -136,10 +147,35 @@ if [ "$skip_socket" = "1" ]; then
         --socket "$SOCK" --finalize-to "$finalized" --finalize-only --stage-to "$_stage"
     rc=$?
 else
+    # The deadline follows WHO WAITS (#1693). On the Pi's SD card an ordinary
+    # commit can outlast 1.0 s, and each miss arms the marker for every door on
+    # the host, so a caller that can afford to wait longer should. A knob the
+    # client would refuse is ignored OUT LOUD, never passed on: the client's
+    # refusal is rc 2, a verdict, and the record would be dropped with no
+    # fallback on every emission, from a typo.
+    _knob=""; deadline=""
+    case "${PLANE_EMIT_CLASS:-}" in
+        hook)       _knob=PLANE_SOCKET_DEADLINE_HOOK_S; deadline="${PLANE_SOCKET_DEADLINE_HOOK_S:-}" ;;
+        background) _knob=PLANE_SOCKET_DEADLINE_BACKGROUND_S; deadline="${PLANE_SOCKET_DEADLINE_BACKGROUND_S:-}" ;;
+        door)       _knob=PLANE_SOCKET_DEADLINE_DOOR_S; deadline="${PLANE_SOCKET_DEADLINE_DOOR_S:-}" ;;
+        '')         ;;
+        *)          printf 'plane-emit: unknown PLANE_EMIT_CLASS=%s (hook, background or door) — using the default deadline\n' "$PLANE_EMIT_CLASS" >&2 ;;
+    esac
+    if [ -n "$deadline" ]; then
+        _num='^([0-9]+(\.[0-9]*)?|\.[0-9]+)$'; _zero='^[0.]+$'; _int="${deadline%%.*}"
+        if ! [[ $deadline =~ $_num ]] || [[ $deadline =~ $_zero ]] \
+           || [ "${#_int}" -gt 4 ] || [ "${_int:-0}" -ge 3600 ]; then
+            printf 'plane-emit: ignoring %s=%s (want seconds, above 0 and below 3600) — using the default deadline\n' "$_knob" "$deadline" >&2
+            deadline=""
+        fi
+    fi
     # -S -E: skip site/pyvenv machinery — the client is minimal-stdlib by
     # contract (measured: 45ms -> 12ms interpreter spawn on the Pi).
+    # --arm-log: the client names WHO missed and why on every rc 5 it returns
+    # here, which is every arm of the marker below (#1693).
     python3 -S -E "$LIB_DIR/plane-socket-client.py" \
-        --socket "$SOCK" --finalize-to "$finalized"
+        --socket "$SOCK" --finalize-to "$finalized" \
+        --arm-log "$ROOT/state/plane/.socket-arms" ${deadline:+--timeout "$deadline"}
     rc=$?
     if [ "$rc" -eq 5 ]; then
         { date +%s > "$WEDGE_MARK"; } 2>/dev/null || true

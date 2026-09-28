@@ -128,7 +128,23 @@ would skip the capture policy for a raw batch. The client stages only when that
 directory exists (the daemon creates it at startup, so an older daemon never
 gets one) and a connect probe finds a listener; otherwise it takes the cold
 rung as before. Doors that read a non-zero rc as "not recorded" never opt in.
-Staged depth is not yet a `plane doctor` rung.
+Staged depth is not yet a `plane doctor` rung. A stage killed before its rename
+leaves `.<event id>.tmp` (plane_emit_bounded's 10 s reaper, inside the stage's
+fsync), and the daemon replays one once it is an hour old: it is a finished
+batch with pre-minted ids (#1657).
+
+**The deadline follows who waits (#1693).** The client's total deadline is
+1.0 s unless the caller's class says otherwise. `PLANE_EMIT_CLASS` is `hook`
+(a live turn waits), `background` (nothing reads the result;
+`plane_emit_bounded`'s default) or `door` (the outcome turns on the result),
+and `PLANE_SOCKET_DEADLINE_HOOK_S`, `_BACKGROUND_S` and `_DOOR_S` set that
+class's deadline; all three are unset by default. On one SD card both rungs'
+commits wait for the same device, so a caller that misses during a stall gains
+nothing from the cold rung but a process spawn, and costs every other door on
+the host 60 s of cooldown. A caller that can afford to wait should. Every
+exit 5 from a socket attempt is recorded in `state/plane/.socket-arms` with
+its class, deadline, elapsed time, caller and cause: the marker itself holds
+only a time.
 
 There is no separate startup check: the daemon's first writes after bind —
 the lifecycle receipt and the startup spool drain — go through `migrate()`,
@@ -224,7 +240,8 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   Composed as the dormant `claudlobby-plane-view` host service; Tailscale Serve
   fronts it.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
-  rungs (schema, provisional actors, tombstone validity, reconciliation).
+  rungs (schema, provisional actors, tombstone validity, reconciliation, the
+  WAL against its ceiling).
   **These RUN
   `migrate()` and are therefore not read-only — and so do `plane registry`,
   `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
@@ -242,6 +259,17 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   query_only` — under the system `python3` the doors run, a read-only URI
   cannot open a WAL database whose writer has closed (it cannot create the
   shared-memory file), which is what a daemon restart looks like.
+- **A read pins the WAL while its statement is open (#1905).** The daemon's
+  checkpoint cannot reset the WAL past a reader's snapshot, and a loop over a
+  live cursor keeps its statement open for the whole loop, so readers fetch
+  their rows first and do the per-row work after
+  (`tests/test_plane_reader_snapshots.py` fails a loop that queries, yields or
+  writes per row). A reader that never lets go, such as an interactive
+  `sqlite3` session or a hung process, still grows the WAL, and the daemon
+  cannot end another process's transaction. So it is reported: the host probe
+  records `host.plane_wal_bytes` every minute (the Host card shows it), and
+  `plane doctor`'s `wal` rung turns ATTENTION past the 4 MiB ceiling accepted
+  on #1693, naming the holding process from `/proc/locks` on Linux.
 
 ## The task loop (#1481) — in the operator's words
 

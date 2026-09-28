@@ -38,7 +38,12 @@ packages = ["claudlobby", "claudlobby.commands", "claudlobby.plane"]
 include-package-data = false
 
 [tool.setuptools.package-data]
-claudlobby = ["system.yaml"]
+# system.yaml is package-owned data, not operator config: every default job,
+# hook, host job and boot policy is read from it. It was never listed here, so
+# a built wheel shipped WITHOUT it (measured) and a non-editable install read
+# empty system defaults on every generate -- which `_load_system_defaults` now
+# refuses outright rather than passing off as "this fleet wants nothing".
+"claudlobby" = ["system.yaml"]
 "claudlobby.plane" = ["migrations/*.sql", "ui/*"]
 
 [tool.pytest.ini_options]
@@ -65,10 +70,16 @@ testpaths = ["tests"]
 # ways, and pinned by tests/test_pytest_reportchars.py so a future -r edit
 # cannot silently blank the names again.
 addopts = "-rsfE"
-# Registered so `pytest -m vault` selects the vault-mode gate and unknown-marker
-# warnings stay quiet. These tests importorskip/skipif on the [vault] extra, so
-# they SKIP in the default `.[dev]` lane and RUN in the dedicated vault-tests CI
+# The markers that decide which CI lane runs a test (pinned by
+# tests/test_ci_lanes.py). `vault` tests importorskip/skipif on the [vault]
+# extra, so they SKIP in the default `.[dev]` lane and RUN in the vault-tests
 # lane that installs pinned claudron (boundary phase L4 / issue #682).
+# `harness` runs in test.yml's own `harness` job, beside `pytest`. A
+# `quarantine` test is left out of every required lane and runs in the
+# non-required quarantine workflow, and collection refuses one that names no
+# tracking issue (tests/conftest.py).
 markers = [
     "vault: requires the [vault] extra (pinned claudron); run in the vault-tests CI lane",
+    "harness: the end-to-end validation harness; runs in its own CI job (test.yml harness)",
+    "quarantine(issue): a known-flaky test out of CI's required lanes until its tracking issue is fixed; still runs in the quarantine workflow",
 ]

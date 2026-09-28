@@ -512,6 +512,28 @@ def cmd_plane_doctor(args) -> int:
                      " expires. Recorded, not lost; see #1693 for the cause")
             except OSError as exc:
                 rung(False, "socket breaker", f"UNREADABLE — {exc}")
+        # The WAL (#1905). A reader holding a snapshot keeps the daemon's
+        # checkpoint from resetting it: the #1693 canary grew it to 81.8 MB in
+        # 60 s behind one held reader, and no surface reported the file's size.
+        # Over the ceiling is ATTENTION, and the holder is named from the
+        # kernel's lock table where the platform has one, so the answer is a
+        # process to go and look at.
+        if path.exists():
+            from ..plane import wal as _wal
+            try:
+                wal_bytes = _wal.wal_size(root)
+            except OSError as exc:
+                rung(False, "wal", f"UNREADABLE — {exc} (a gap, not a zero)")
+            else:
+                ceiling = _wal.human_bytes(_wal.WAL_CEILING_BYTES)
+                if wal_bytes <= _wal.WAL_CEILING_BYTES:
+                    rung(True, "wal", f"{_wal.human_bytes(wal_bytes)} (ceiling {ceiling})")
+                else:
+                    from ..plane.daemon import lock_path
+                    holders = _wal.snapshot_holders(
+                        root, exclude=_wal.writer_pids(lock_path(sock)))
+                    rung(False, "wal", f"{_wal.human_bytes(wal_bytes)}, over the {ceiling}"
+                         " ceiling — " + _wal.holders_detail(holders))
         # Composed-hash-drift rung (chunk: doctor IOUs — closes the chunk-B
         # disclosure that the --verify capability existed but doctor never
         # surfaced it). Doctor SURFACES the check; it does NOT re-run it.

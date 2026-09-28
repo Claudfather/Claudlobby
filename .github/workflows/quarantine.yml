@@ -1,0 +1,36 @@
+name: quarantine
+
+# Tests marked @pytest.mark.quarantine(issue=N): known-flaky tests taken out of
+# the required lanes (tests: pytest and harness; conformance: vault-tests) until
+# their tracking issue is fixed. They still run here, on every PR and every push
+# to main, so a quarantined test stays visible: this check goes red when one
+# fails, and no ruleset should require it. A separate workflow, so that a
+# quarantined failure never turns the `tests` workflow red. Lanes are pinned by
+# tests/test_ci_lanes.py.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quarantine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install isolated package
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Prepare installed resources in disposable checkout
+        run: .venv/bin/python tests/prepare_resources.py --disposable-checkout "$GITHUB_WORKSPACE"
+      - name: Run the quarantined tests
+        # pytest exits 5 when nothing is selected: an empty quarantine is the
+        # goal, not a failure.
+        run: pytest -v -m quarantine || [ $? -eq 5 ]

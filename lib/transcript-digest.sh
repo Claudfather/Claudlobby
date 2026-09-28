@@ -69,6 +69,7 @@ trap 'exit 0' ERR
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLANE_EMIT_CLASS=background   # a SessionEnd hook, but no turn waits on it: its socket deadline (#1693, lib/plane-emit.sh)
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 

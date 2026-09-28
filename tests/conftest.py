@@ -80,6 +80,9 @@ def _isolate_host_override(monkeypatch):
     monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", "/nonexistent/claudlobby-host-override.yaml")
 
 
+from tests.quarantine_policy import pytest_collection_modifyitems  # noqa: F401
+
+
 # Captures chat id, the (expanded) state dir the caller resolved, and the
 # message — the observation point for the emit_* fleet-signal paths.
 TG_STUB = (

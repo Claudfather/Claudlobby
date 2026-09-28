@@ -29,6 +29,7 @@
 set -uo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on its plane record: its socket deadline (#1693, lib/plane-emit.sh)
 
 _allow() { exit 0; }   # no decision — normal permission flow applies
 

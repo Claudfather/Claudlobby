@@ -115,7 +115,11 @@ def connect(root: str, *, retries: int = 1) -> sqlite3.Connection:
     a CANTOPEN falls back to a normal connection held read-only by
     `PRAGMA query_only` (SQLite may create the WAL side files; the pragma
     refuses every write). Anything else is retried once after a short
-    pause, then raised: refuse, never answer empty."""
+    pause, then raised: refuse, never answer empty.
+
+    Each read holds a snapshot for as long as its statement is open, and the
+    daemon's checkpoint cannot reset the WAL past it (#1905). So a loop that
+    queries or parses per row fetches its rows first."""
     path = db_file(root)
     if not os.path.isfile(path):
         raise PlaneUnreachable(f"no plane db at {path}")
@@ -668,8 +672,10 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
     since = since_form(since)
     prefix = f"bot:{fleet}/"
     out: list[dict] = []
+    # Fetched whole first (#1905): every row runs one or two more queries, and
+    # over a live cursor the whole loop would share ONE snapshot.
     for occurred_at, msg_id, sender_uid, sender_alias, body, ref, seq, privacy, truncated, work_id, assignment_id in conn.execute(
-            FLEET_REPORTS_SQL, (uid, fleet, since, since, since_seq, since_seq)):
+            FLEET_REPORTS_SQL, (uid, fleet, since, since, since_seq, since_seq)).fetchall():
         alias = sender_alias or ""
         # a sender on another fleet reads fleet/name — the fleet axis's rule
         name = alias.removeprefix(prefix) if alias.startswith(prefix) else alias.removeprefix("bot:")
@@ -908,7 +914,8 @@ def keepalive_entries(conn: sqlite3.Connection, fleet: str, bot: str,
     alias = f"bot:{fleet}/{bot}"
     since = since_form(since) or ""
     out: list[tuple[str, str]] = []
-    for at, metric, value in conn.execute(HEARTBEAT_ENTRIES_SQL, (alias, since)):
+    # fetched whole before parsing, the heartbeat_series rule (#1905)
+    for at, metric, value in conn.execute(HEARTBEAT_ENTRIES_SQL, (alias, since)).fetchall():
         if metric == "bot.session_up":
             state = "DOWN"
         else:
