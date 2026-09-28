@@ -91,12 +91,13 @@ def test_identity_is_stable_and_binds_assembly_inputs(installed):
     assert sealed.inventory == first
     assert sealed.compatibility == compatibility
     assert compatibility.write_versions == {
-        "schema": 12, "envelope": "1.0.0", "protocol": 0, "pending_format": 0,
+        "schema": _versions["SQL_SCHEMA_VERSION"], "envelope": "1.0.0", "protocol": 0, "pending_format": 0,
         "receipt_format": 1, "task_model": 1, "config_plan": 1,
     }
     assert compatibility.blockers(compatibility.write_versions) == ()
-    assert compatibility.blockers({**compatibility.write_versions, "schema": 13}) == (
-        "unsupported schema: 13",)
+    future_schema = _versions["SQL_SCHEMA_VERSION"] + 1
+    assert compatibility.blockers({**compatibility.write_versions, "schema": future_schema}) == (
+        f"unsupported schema: {future_schema}",)
     assert sealed.seal_sha256 == json.loads(
         (directory / r.MANIFEST).read_text()
     )["seal_sha256"]

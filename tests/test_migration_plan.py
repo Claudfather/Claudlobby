@@ -11,7 +11,7 @@ import pytest
 
 from claudlobby.migration_plan import build_migration_manifest, verify_pending_queues
 from claudlobby.plane.db import db_file
-from claudlobby.plane.migrations import _migration_files, migrate
+from claudlobby.plane.migrations import SCHEMA_USER_VERSION, _migration_files, migrate
 from claudlobby.plane.queue_paths import spool_path, staged_dir
 from claudlobby.releases import ReleaseError
 from claudlobby import request_receipts as rr
@@ -28,7 +28,7 @@ def releases(installed, request):
     target_dir = r.release_path(root, target_inputs.release_id)
     shutil.copytree(directory, target_dir)
     sql_dir = Path(__file__).resolve().parents[1] / "claudlobby/plane/migrations"
-    for dest, assembly, version in ((directory, inputs, 1), (target_dir, target_inputs, 12)):
+    for dest, assembly, version in ((directory, inputs, 1), (target_dir, target_inputs, SCHEMA_USER_VERSION)):
         metadata = json.loads((dest / paths.artifact).read_text())
         metadata.update(source_revision=assembly.source_revision, artifact_id=assembly.artifact_id)
         metadata["compatibility"]["schema"] = {"read": [version], "write": version}
@@ -96,10 +96,11 @@ def test_old_schema_preview_binds_sql_task_blockers_and_recovery_floor(releases)
     assert any("task audit: unscoped_task" in value for value in plan.blockers)
     assert plan.source["release_id"] == source.release_id
     assert plan.target["seal_sha256"] == target.seal_sha256
-    assert [item["version"] for item in plan.migrations if item["proposed"]] == list(range(2, 13))
+    assert [item["version"] for item in plan.migrations if item["proposed"]] == list(
+        range(2, SCHEMA_USER_VERSION + 1))
     assert all(item["sha256"] == hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest()
                for item in plan.migrations)
-    assert plan.rollback["source_after_sql_blockers"] == ("unsupported schema: 12",)
+    assert plan.rollback["source_after_sql_blockers"] == (f"unsupported schema: {SCHEMA_USER_VERSION}",)
     assert plan.rollback["compatible_recovery_release_required_before_sql"]
     assert "name a state-compatible recovery release before irreversible SQL" in plan.proposed_steps
     assert not any("recovery release" in blocker for blocker in plan.blockers)
@@ -145,7 +146,7 @@ def test_absent_and_empty_databases_are_distinct_and_never_initialized(releases)
     empty = build_migration_manifest(root, source, target)
     assert empty.database["state"] == "ok" and empty.database["user_version"] == 0
     assert empty.task_audit["counts"]["tasks"] == 0
-    assert len([item for item in empty.migrations if item["proposed"]]) == 12
+    assert len([item for item in empty.migrations if item["proposed"]]) == SCHEMA_USER_VERSION
     assert _snapshot(root) == before
     assert not spool_path(root).exists() and not staged_dir(root).exists()
     verify_pending_queues(root, empty)

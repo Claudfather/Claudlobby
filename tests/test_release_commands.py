@@ -11,6 +11,7 @@ from claudlobby import activation_state, migration_apply, resources
 from claudlobby.commands import releases as commands
 from claudlobby.config_plan import ConfigPlanBuilder, read_plan
 from claudlobby.migration_plan import build_migration_manifest
+from claudlobby.plane.migrations import SCHEMA_USER_VERSION
 from tests.test_config_staging import staging_case, _fleet, _tree
 from tests.test_migration_plan import releases, _database, _snapshot
 from tests.test_releases import installed, r
@@ -184,8 +185,8 @@ def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progre
         migration_apply.apply_migration(store, "upgrade", manifest)
     before = _snapshot(root)
     complete, _ = _call(capsys, status_argv)
-    assert complete["data"]["database"]["user_version"] == 12
-    assert complete["data"]["items"][0]["recorded"]["result"]["user_version"] == 12
+    assert complete["data"]["database"]["user_version"] == SCHEMA_USER_VERSION
+    assert complete["data"]["items"][0]["recorded"]["result"]["user_version"] == SCHEMA_USER_VERSION
     assert complete["data"]["items"][0]["migration_step_completed"]
     assert complete["data"]["items"][0]["activation_status"] == "activating"
     after = _snapshot(root)

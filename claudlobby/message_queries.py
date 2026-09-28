@@ -25,6 +25,13 @@ if TYPE_CHECKING:
     from .task_operations import TaskOperationContext
 
 
+DIRECT_REPLY_SQL = (
+    "SELECT msg_id FROM communications WHERE reply_to_msg_id=?"
+    " AND sender_uid=? AND recipient_uid=? AND host_uid=?"
+    " ORDER BY ingest_seq, msg_id LIMIT 1"
+)
+
+
 class MessageQueryError(ValueError):
     code = "invalid_argument"
     exit_code = 2
@@ -255,9 +262,7 @@ def wait_for_reply(ctx: TaskOperationContext, message_id: str, *, timeout: float
                 if parent.destination is None:
                     raise MessageQueryError("reply wait requires a recorded recipient identity")
                 row = conn.execute(
-                    "SELECT msg_id FROM communications WHERE reply_to_msg_id=?"
-                    " AND sender_uid=? AND recipient_uid=? AND host_uid=?"
-                    " ORDER BY ingest_seq, msg_id LIMIT 1",
+                    DIRECT_REPLY_SQL,
                     (message_id, parent.destination.uid, parent.sender.uid, ctx.host_uid)).fetchone()
                 if row:
                     return ReplyObservation(message_id, _show(conn, ctx, row[0]), 0, None, None)

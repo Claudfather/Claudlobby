@@ -11,7 +11,7 @@ import pytest
 
 from claudlobby import message_queries as q
 from claudlobby.plane.db import db_file
-from claudlobby.plane.migrations import migrate
+from claudlobby.plane.migrations import SCHEMA_USER_VERSION, _migration_files, migrate
 from claudlobby.task_operations import TaskActor, TaskOperationContext
 
 
@@ -187,6 +187,52 @@ def test_reply_wait_ignores_wrong_peer_and_descendants_then_returns_first_direct
     clock.callback = replies
     reply = q.wait_for_reply(ctx, ident, timeout=1)
     assert reply.exit_code == 0 and reply.reply.message_id == mid(5) and clock.now == 1.25
+
+
+def test_v12_direct_reply_index_upgrade_preserves_history_and_order(tmp_path):
+    path = db_file(tmp_path)
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path, isolation_level=None) as conn:
+        conn.row_factory = sqlite3.Row
+        for number, sql in _migration_files():
+            if number <= 12:
+                conn.executescript(sql)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_intents_reply'").fetchone() is None
+        conn.execute("BEGIN IMMEDIATE")
+        for alias, uid in FLEETS.items():
+            conn.execute("INSERT INTO identity_registry VALUES (?, 'fleet', ?, NULL, 0, 't', 't')",
+                         (uid, alias))
+        for actor in ACTORS.values():
+            conn.execute("INSERT INTO identity_registry VALUES (?, 'actor', ?, NULL, 0, 't', 't')",
+                         (actor.uid, actor.alias))
+        parent = communication(conn)
+        for number in range(2, 4098):
+            communication(conn, number, sender="bot:b/worker", recipient="bot:a/manager")
+        first = communication(conn, 4098, sender="bot:b/worker", recipient="bot:a/manager",
+                              reply_to_msg_id=parent, occurred_at="2026-09-29T00:00:00Z")
+        communication(conn, 4099, sender="bot:b/worker", recipient="bot:a/manager",
+                      reply_to_msg_id=parent, occurred_at="2026-09-27T00:00:00Z")
+        conn.execute("COMMIT")
+        rows = [tuple(row) for row in conn.execute(
+            "SELECT ingest_seq, event_id, msg_id, reply_to_msg_id FROM communications ORDER BY ingest_seq")]
+        ledger = [tuple(row) for row in conn.execute(
+            "SELECT ingest_seq, event_id FROM ingest_ledger ORDER BY ingest_seq")]
+        cursor = conn.execute("SELECT seq FROM sqlite_sequence WHERE name='ingest_ledger'").fetchone()[0]
+        assert migrate(conn) == SCHEMA_USER_VERSION
+        assert migrate(conn) == SCHEMA_USER_VERSION  # repeated explicit apply is a no-op
+        assert [tuple(row) for row in conn.execute(
+            "SELECT ingest_seq, event_id, msg_id, reply_to_msg_id FROM communications ORDER BY ingest_seq")] == rows
+        assert [tuple(row) for row in conn.execute(
+            "SELECT ingest_seq, event_id FROM ingest_ledger ORDER BY ingest_seq")] == ledger
+        assert conn.execute("SELECT seq FROM sqlite_sequence WHERE name='ingest_ledger'").fetchone()[0] == cursor
+        params = (parent, ACTORS["bot:b/worker"].uid, ACTORS["bot:a/manager"].uid, HOST)
+        plan = conn.execute("EXPLAIN QUERY PLAN " + q.DIRECT_REPLY_SQL, params).fetchall()
+        assert any("idx_intents_reply" in row[3] for row in plan)
+        context = SimpleNamespace(paths=SimpleNamespace(root=tmp_path))
+        ctx = TaskOperationContext(context, HOST, FLEETS["a"], ACTORS["bot:a/manager"], {})
+        reply = q.wait_for_reply(ctx, parent, timeout=1)
+        assert reply.exit_code == 0 and reply.reply.message_id == first
 
 
 def test_absent_pending_storage_and_invalid_waits_never_initialize(estate, tmp_path):

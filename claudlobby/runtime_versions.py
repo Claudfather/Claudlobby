@@ -6,11 +6,11 @@ and legacy task semantics. Receipt zero means absence only, never a serialized
 v0 receipt decoder. Receipt v1 uses request_receipts; task v1 uses task_state's
 emitter-aware reducer, which also preserves legacy history without rewriting it.
 Schema migrations are separate from runtime readability: ordinary runtime
-entrypoints require schema 12 even though explicit migration can upgrade older
+entrypoints require schema 13 even though explicit migration can upgrade older
 databases. Add readable versions only alongside their implemented decoders.
 """
 
-SQL_SCHEMA_VERSION = 12
+SQL_SCHEMA_VERSION = 13
 SUPPORTED_SQL_SCHEMA_VERSIONS = frozenset({SQL_SCHEMA_VERSION})
 PLANE_SCHEMA_VERSION = "1.0.0"
 SUPPORTED_PLANE_SCHEMA_VERSIONS = frozenset({PLANE_SCHEMA_VERSION})

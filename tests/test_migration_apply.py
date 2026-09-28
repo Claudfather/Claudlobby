@@ -12,7 +12,7 @@ from claudlobby import migration_apply as apply
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.migration_plan import build_migration_manifest
 from claudlobby.plane.db import db_file
-from claudlobby.plane.migrations import _migration_files
+from claudlobby.plane.migrations import SCHEMA_USER_VERSION, _migration_files
 from claudlobby.plane.queue_paths import staged_dir
 from claudlobby.releases import seal_release
 from tests.test_migration_plan import _database, _event_request, _pending, releases
@@ -77,7 +77,7 @@ def test_wal_backup_preserves_ids_cursor_and_retry_is_read_only(candidate):
                 assert saved.execute("SELECT assignment_id FROM assignments").fetchall() == [("asg_original",)]
                 assert saved.execute("SELECT detail FROM events WHERE event='reports_acked'").fetchone()[0] == '{"acked_through_seq":17}'
             assert backup.stat().st_mode & 0o777 == 0o600
-            assert _version(db_file(root)) == 12
+            assert _version(db_file(root)) == SCHEMA_USER_VERSION
             assert conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0] == 4
             original = {p: p.read_bytes() for p in (backup, backup.with_name("migration.json"),
                                                     backup.with_name("activation.json"))}
@@ -98,7 +98,7 @@ def test_only_explicit_empty_initialization_can_create_database(candidate):
         _quiesce(store, plan, manifest)
         result = apply.apply_migration(store, "upgrade", manifest)
         assert result["source_version"] is None and result["backup"]["user_version"] == 0
-        assert _version(db_file(root)) == 12
+        assert _version(db_file(root)) == SCHEMA_USER_VERSION
         assert apply.apply_migration(store, "upgrade", manifest) == result
     with pytest.raises(activation.ActivationError, match="lock is not held"):
         apply.apply_migration(store, "upgrade", manifest)
@@ -141,7 +141,7 @@ def test_initial_cutover_binds_old_source_and_distinct_compatible_recovery(relea
         assert activation.read_activation(root, "upgrade").body["previous_selection"] is None
         result = apply.apply_migration(store, "upgrade", manifest)
         assert result["manifest"]["source"]["release_id"] == source.release_id
-        assert result["backup"]["user_version"] == 1 and _version(db_file(root)) == 12
+        assert result["backup"]["user_version"] == 1 and _version(db_file(root)) == SCHEMA_USER_VERSION
 
 
 def test_preconditions_refuse_before_backup_or_database_writes(candidate):
@@ -155,7 +155,7 @@ def test_preconditions_refuse_before_backup_or_database_writes(candidate):
             apply.apply_migration(store, "upgrade", manifest)
         _quiesce(store, plan, manifest)
         altered = replace(manifest, migrations=tuple(
-            {**item, "sha256": "0" * 64} if item["version"] == 12 else item
+            {**item, "sha256": "0" * 64} if item["version"] == SCHEMA_USER_VERSION else item
             for item in manifest.migrations))
         # A recorded manifest is still refused if its reviewed SQL is not the
         # existing runner's exact SQL; caller flags cannot select another DDL.
@@ -227,7 +227,7 @@ def test_interrupted_script_resumes_from_exact_backup_and_rejects_extra_work(can
             changed.execute("DELETE FROM ingest_ledger")
             changed.execute("DELETE FROM sqlite_sequence")
         result = apply.apply_migration(store, "upgrade", manifest)
-        assert result["result"]["user_version"] == 12
+        assert result["result"]["user_version"] == SCHEMA_USER_VERSION
         assert Path(result["backup"]["path"]).read_bytes() == backup_bytes
 
 
@@ -248,10 +248,10 @@ def test_commit_before_result_record_is_reconciled_without_duplicate_sql(candida
             patch.setattr(apply, "_save", interrupted)
             with pytest.raises(OSError, match="result journal"):
                 apply.apply_migration(store, "upgrade", manifest)
-        assert _version(db_file(root)) == 12
+        assert _version(db_file(root)) == SCHEMA_USER_VERSION
         assert apply.read_migration(root, "upgrade")["result"] is None
         result = apply.apply_migration(store, "upgrade", manifest)
-        assert result["result"]["user_version"] == 12
+        assert result["result"]["user_version"] == SCHEMA_USER_VERSION
         store.begin_rollback("upgrade")
         before = db_file(root).read_bytes()
         with pytest.raises(apply.MigrationApplyError, match="recorded quiescence"):

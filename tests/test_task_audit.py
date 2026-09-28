@@ -6,12 +6,12 @@ import sqlite3
 import pytest
 
 from claudlobby.plane.db import db_file
-from claudlobby.plane.migrations import _migration_files, migrate
+from claudlobby.plane.migrations import SCHEMA_USER_VERSION, _migration_files, migrate
 from claudlobby.task_audit import TaskAuditError, audit_root, audit_tasks
 from claudlobby.task_state import TASK_EMITTER, read_tasks
 
 
-@pytest.fixture(params=[1, 12], ids=["original-kernel", "current-schema"])
+@pytest.fixture(params=[1, SCHEMA_USER_VERSION], ids=["original-kernel", "current-schema"])
 def conn(request):
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
@@ -227,10 +227,11 @@ def test_empty_and_unrecognized_formats_are_not_migrated():
         assert empty.schema_version == 0 and empty.counts["tasks"] == 0
         assert not connection.in_transaction
         assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
-        connection.execute("PRAGMA user_version=13")
-        with pytest.raises(TaskAuditError, match="schema: 13"):
+        future_schema = SCHEMA_USER_VERSION + 1
+        connection.execute(f"PRAGMA user_version={future_schema}")
+        with pytest.raises(TaskAuditError, match=f"schema: {future_schema}"):
             audit_tasks(connection)
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == future_schema
 
 
 def test_future_producer_is_not_reinterpreted_as_historical_terminal_work(conn):
