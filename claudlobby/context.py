@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,12 +14,43 @@ if TYPE_CHECKING:
     from .config import FleetConfig
 
 
+class BotNotFoundError(ValueError):
+    """The selected fleet has no declaration for the requested bot."""
+
+
 @dataclass(frozen=True)
 class Context:
     paths: Paths
     fleet: FleetConfig
     merged_defaults: dict
     bot_id: str | None = None
+
+
+def generated_selectors(*, fleet: str | None = None, bot: str | None = None,
+                        include_bot: bool = False, seed: bool = False) -> tuple[str | None, str | None]:
+    """Explicit selectors precede generated session defaults for scoped reads.
+
+    Host-wide preparation deliberately does not call this helper. A present
+    empty generated selector refuses; it must not quietly select the root fleet
+    or another identity. BOT_ID is authoritative when present, including when
+    malformed; BOT_NAME serves only older generated contexts that lack BOT_ID.
+    The existing path resolver and config loader validate the selected names.
+    """
+    def first(*names):
+        for name in names:
+            if name in os.environ:
+                value = os.environ[name]
+                if not value.strip() or Path(value).name != value or value in (".", ".."):
+                    raise ValueError(f"invalid generated selector {name}; supply an explicit selector")
+                return value
+        return None
+
+    if not seed:
+        if fleet is None:
+            fleet = first("FLEET_NAME", "CLAUDLOBBY_FLEET")
+        if include_bot and bot is None:
+            bot = first("BOT_ID", "BOT_NAME")
+    return fleet, bot
 
 
 def native_environment(paths: Paths) -> dict[str, str]:
@@ -77,7 +109,7 @@ def load_context(
             f"{config.name!r}; select the correct --root and --fleet"
         )
     if bot is not None and bot not in config.bots:
-        raise ValueError(f"bot {bot!r} is not declared in fleet {config.name!r}")
+        raise BotNotFoundError(f"bot {bot!r} is not declared in fleet {config.name!r}")
     return Context(paths, config, merged_defaults, bot)
 
 

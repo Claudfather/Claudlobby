@@ -23,6 +23,7 @@ allowed = {
     'claudlobby', 'claudlobby.__main__', 'claudlobby.commands',
     'claudlobby.commands._parsers', 'claudlobby.task_defaults',
     'claudlobby.command_result', 'claudlobby.commands._release_parsers',
+    'claudlobby.commands._orientation_parsers',
 }
 blocked = []
 class ImportBoundary:

@@ -41,6 +41,8 @@ def register_subparsers(sub) -> None:
 
     from ._release_parsers import register_release_subparsers
     register_release_subparsers(sub)
+    from ._orientation_parsers import register_orientation_subparsers
+    register_orientation_subparsers(sub)
 
     pv = sub.add_parser("validate", help="Validate fleet.yaml against library/")
     pv.add_argument("--strict", action="store_true", help="Fail on warnings")

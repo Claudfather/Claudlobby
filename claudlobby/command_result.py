@@ -19,6 +19,9 @@ _EXITS = {"internal_error": 1, "invalid_argument": 2, "not_found": 3,
 _PUBLIC = {("host", "releases"): "host.releases", ("config", "plan"): "config.plan",
            ("config", "diff"): "config.diff", ("migration", "plan"): "migration.plan",
            ("migration", "status"): "migration.status"}
+_PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
+    ("context", ("show",)), ("bot", ("list", "show", "capabilities")),
+    ("fleet", ("show",)), ("project", ("list", "show"))) for verb in verbs})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
 
 
@@ -109,7 +112,7 @@ def _command_from_argv(tokens: list[str]) -> str | None:
             index += 2
             continue
         if token.startswith(("--root=", "--fleet=")) or token in (
-                "--seed", "-v", "--verbose"):
+                "--seed", "-v", "--verbose", "--json"):
             index += 1
             continue
         if token in {part[0] for part in _PUBLIC}:

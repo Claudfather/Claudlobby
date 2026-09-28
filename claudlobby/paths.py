@@ -40,6 +40,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+class InvalidPathSelector(ValueError):
+    """Invalid selector syntax, distinguished from stored configuration errors."""
+
+    def __init__(self, selector: str, message: str):
+        super().__init__(message)
+        self.selector = selector
+
+
 try:
     from claudron.vault import detect as _claudron_detect
 
@@ -681,14 +690,14 @@ class Paths:
         existing host layout, not a nearby checkout or a lone fleet manifest.
         """
         if seed and fleet:
-            raise ValueError("--seed and --fleet are mutually exclusive")
+            raise InvalidPathSelector("seed", "--seed and --fleet are mutually exclusive")
         if fleet is not None and (
             not fleet or fleet in (".", "..") or Path(fleet).name != fleet
         ):
-            raise ValueError("--fleet must name one fleet, not a filesystem path")
+            raise InvalidPathSelector("fleet", "--fleet must name one fleet, not a filesystem path")
         if hint is not None:
             if str(hint) == "":
-                raise ValueError("--root is empty; supply --root DATA_ROOT")
+                raise InvalidPathSelector("root", "--root is empty; supply --root DATA_ROOT")
             root = Path(hint).expanduser().resolve()
         elif "CLAUDLOBBY_ROOT" in os.environ:
             value = os.environ["CLAUDLOBBY_ROOT"]
@@ -705,7 +714,7 @@ class Paths:
                 )
             root = candidates[0]
         if root.exists() and not root.is_dir():
-            raise ValueError(f"data root {root} is not a directory; supply --root DATA_ROOT")
+            raise InvalidPathSelector("root", f"data root {root} is not a directory; supply --root DATA_ROOT")
 
         fleet_dir = None
         vault_root = None

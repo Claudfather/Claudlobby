@@ -38,11 +38,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument("--json", dest="global_json", action="store_true",
+                        help="Schema-1 result for migrated public operations")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
     register_subparsers(sub)
 
     args = parser.parse_args(argv)
+    if args.global_json:
+        if not hasattr(args, "public_command"):
+            parser.error("this operation has not adopted the common JSON result")
+        args.json = True
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-8s %(message)s",
