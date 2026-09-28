@@ -41,7 +41,7 @@ def _stub_mint(bindir: Path) -> Path:
 n=0
 [ -f "$STUB_DIR/mint-count" ] && n=$(cat "$STUB_DIR/mint-count")
 n=$((n + 1))
-printf '%s' "$n" > "$STUB_DIR/mint-count"
+printf '%s' "$n" > "$STUB_DIR/mint-count.tmp.$$" && mv -f "$STUB_DIR/mint-count.tmp.$$" "$STUB_DIR/mint-count"
 if [ "$n" -le "${FAIL_FIRST:-0}" ]; then
   printf 'mint-stub: simulated failure %s\\n' "$n" >&2
   exit 1

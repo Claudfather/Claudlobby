@@ -123,7 +123,7 @@ Read(//Users/alice/file)  — absolute filesystem path (double-slash prefix)
 - **Allow rules:** apply only when BOTH symlink path AND target match
 - **Deny rules:** apply when EITHER symlink path OR target matches (more restrictive, safer)
 
-**Critical limitation:** Read/Edit deny rules only block the Read/Edit tools. They do NOT block `cat .env` via Bash. For OS-level enforcement, use `sandbox.filesystem.denyRead`.
+**What a Read/Edit deny reaches, measured (#1408).** It blocks the Read and Edit tools, and the file commands Claude Code recognizes in Bash when the path is **literal**: `cat <denied path>` was refused (#1408), so were `ls` and `wc -l` on a live host (2026-09-27), and the Claude Code docs list `head`, `tail`, `sed`, `tee` and redirection targets the same way (documented, not measured here). It does **not** block an interpreter that opens the file itself (`python3 -c "open(...)"`, `node`, `perl`), or a path the matcher cannot resolve (`$HOME/…`, `${HOME}/…`): both were measured past a correctly formed `//`-anchored deny. A script, hook, timer or MCP server is a process, not a tool call, and no rule reaches it. So a deny reduces **accidental** reads and is not confidentiality. The OS-level lever is `sandbox.filesystem.denyRead`, which needs `sandbox.enabled: true` (off by default, #1667). An earlier version of this line said a deny does not block `cat .env` at all; #1408 measured the opposite for a literal path.
 
 ### WebFetch domain patterns
 
@@ -287,33 +287,37 @@ These are the patterns from the current global settings.json. A "base" set that 
 
 ## Path-Scoped Patterns
 
-Used for sibling bot isolation (deny reading other bots' dirs):
+Used for sibling bot isolation (deny reading or editing other bots' dirs):
 
 ```json
 {
   "deny": [
-    "Read(/home/user/claudlobby/local/fleet/runtime/bots/sibling-a/**)",
-    "Read(/home/user/claudlobby/local/fleet/runtime/bots/sibling-b/**)"
+    "Read(//home/user/claudlobby/local/fleet/runtime/bots/sibling-a/**)",
+    "Edit(//home/user/claudlobby/local/fleet/runtime/bots/sibling-a/**)"
   ]
 }
 ```
 
-**Current compositor behavior** (from `compose_settings_local()`):
+**Current compositor behavior** (from `compose_settings_local()`), Layer 0:
 
 ```python
 for sibling in siblings:
     sibling_dir = str(paths.bot_runtime(sibling))
-    deny_patterns.append(f"Read({sibling_dir}/**)")
+    deny_patterns.extend((f"Read(/{sibling_dir}/**)", f"Edit(/{sibling_dir}/**)"))
 ```
 
-This only blocks the `Read` tool. To also block `Edit`, `Write`, and Bash access, the compositor should also emit:
+`sibling_dir` is absolute, so each rule is `//`-anchored: a single leading slash anchors at the settings source and names a path that never exists (#1312). There is no `Write(...)` rule: Claude Code never consults one, and the Edit rule covers every file-editing tool (#873).
 
-```
-Edit({sibling_dir}/**)
-Write({sibling_dir}/**)
-```
+### Layer 0b — shared-config isolation (opt-in, #1665)
 
-And for full OS-level isolation, use sandbox `filesystem.denyRead`/`denyWrite` paths (these are merged from all scopes, not replaced).
+Layer 0 names a sibling's bot dir, and most cross-bot content is not there. A transcript is written under the shared config dir (`<config>/projects/<cwd-slug>/`), beside the shared prompt history, the OAuth credential and the account config; the `.env` tiers and the install's code sit elsewhere again. With `isolation.shared_config: true` on a bot (`fleet-yaml-schema.md`, `isolation`), `claudlobby/isolation.py` adds deny rules for eight classes: other bots' transcripts, `history.jsonl`, `.credentials.json`, the account config, every `.env` tier (the bot's own included), Edit on the install's code, other bots' Telegram state dirs, and Edit on the shared settings surfaces.
+
+- **Keyed on the bot's name**, not its path, where a move would change the path: `<config>/projects/<slug(root)>*-runtime-bots-<name>/**` and its `-*` subdirectory form, and `<root>/**/runtime/bots/<name>/.env*`. A path-keyed rule leaves a moved bot's new home open until every fleet regenerates, and the regeneration then drops the rule on its old one.
+- **Per bot, never a blanket `projects/**`.** Deny always wins, and a `!` negation cannot reach a `//`-anchored rule, so "everything but mine" cannot be written. The same fact means no deny list covers sessions nobody can name in advance (the operator's own, harness runs); only a separate config dir does (#932, #1606).
+- **The bound is the one stated above**: Claude's own tools, literal paths. On a single-operator host that covers the likely failure, an accidental read, and nothing more. Every rule's documentation says so, and nothing that composes these rules may call them confidentiality.
+- **Opt-in**, registered in `switches.py`: a composed deny binds on the next tool call with no restart, and the nightly `reload-fleet` generate would carry a default-on rule set onto every bot with no canary.
+
+For OS-level isolation, `sandbox.filesystem.denyRead`/`denyWrite` paths (merged from all scopes, not replaced) are the lever, and they need `sandbox.enabled: true`.
 
 ---
 
@@ -515,4 +519,4 @@ Same 22 tools, namespaced under `mcp__gws-work__`.
 
 6. **Not separately verified** — sandbox path merge behavior is a Claude Code platform fact, not compositor-specific; treat as still accurate.
 
-7. **Shipped**, with one known gap: the Edit/Write sibling-deny enhancement this doc proposed (extending sibling-dir denial beyond `Read`) was never adopted — sibling isolation still only blocks `Read`.
+7. **Shipped.** Sibling isolation emits a `Read` and an `Edit` rule per sibling (#873), both `//`-anchored (#1312). There is no `Write` rule, because Claude Code never consults one and `Edit` covers every file-editing tool. Layer 0b (#1665, opt-in) extends the named paths past bot dirs; see Path-Scoped Patterns.

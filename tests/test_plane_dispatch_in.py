@@ -359,8 +359,11 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
         "SELECT event, json_extract(detail, '$.data.msg_id') FROM events"
         " WHERE kind = 'system' AND event IN ('send_retry', 'send_miss') ORDER BY ingest_seq"))] \
         == [("send_retry", held), ("send_retry", stuck), ("send_miss", stuck)]
-    # A recipient that never recorded a receipt has no hook armed: no verdict, nothing pressed.
-    assert gate(stuck, "holds", dest="dinesh")[:2] == (0, [])
+    # A recipient that never recorded a receipt has no hook armed: no verdict, nothing
+    # pressed, and nothing said. The gate passes --quiet, so a clean dispatch stays
+    # silent but for the plane shim (#1922).
+    rc, keys, err = gate(stuck, "holds", dest="dinesh")
+    assert (rc, keys) == (0, []) and "plane-lookup" not in err, err
 
 
 def test_a_queued_delivery_is_not_a_miss(tmp_path):
@@ -475,10 +478,11 @@ def _seed_send(root: Path, payload: str, sender: str = "mgr") -> tuple[str, int]
     return safe, nbytes
 
 
-def _verdict(root: Path, *extra: str) -> subprocess.CompletedProcess:
+def _verdict(root: Path, *extra: str, dest: str | None = BOT) -> subprocess.CompletedProcess:
+    where = ("--destination", dest) if dest is not None else ()
     return subprocess.run(
         ["python3", str(LOOKUP), "--root", str(root), "--received", MSGID,
-         "--destination", BOT, *extra], capture_output=True, text=True, timeout=60)
+         *where, *extra], capture_output=True, text=True, timeout=60)
 
 
 @pytest.mark.parametrize("trailer_framed", [False, True],
@@ -533,3 +537,56 @@ def test_without_verdict_the_received_mode_still_prints_nothing(tmp_path):
     _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
     v = _verdict(root)
     assert (v.returncode, v.stdout) == (0, "")
+
+
+# --- rc 4 says why, and the receiver's plane alias finds its receipt (#1922) ----
+# rc 4 = this destination has never recorded a receipt, so an absence proves
+# nothing. It printed NOTHING, and a lookup that could never match (the bot's
+# `bot:<fleet>/<name>` alias, where the hook records the bare BOT_ID, or a plane
+# under another root) read exactly like a receipt hook that is not armed.
+
+
+@pytest.mark.parametrize("dest", ["dinesh", f"bot:{FLEET}/dinesh"], ids=["bare", "alias"])
+@pytest.mark.parametrize("extra", [(), ("--verdict",)], ids=["plain", "verdict"])
+def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path, extra, dest):
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    v = _verdict(root, *extra, dest=dest)   # erlich's hook recorded; dinesh's never has
+    # stdout stays empty: the verdict line is the only stdout this mode has.
+    assert (v.returncode, v.stdout) == (4, "")
+    [line] = v.stderr.splitlines()
+    assert "'dinesh'" in line and str(root) in line, line   # the id actually matched
+    assert "not armed" in line and "BOT_ID" in line, line   # both causes, named
+
+
+@pytest.mark.parametrize("dest", [None, ""], ids=["absent", "empty"])
+def test_a_lookup_with_no_destination_says_so_instead_of_naming_one(tmp_path, dest):
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    v = _verdict(root, "--verdict", dest=dest)
+    assert (v.returncode, v.stdout) == (4, "")
+    [line] = v.stderr.splitlines()
+    assert "--destination" in line and "None" not in line, line
+
+
+def test_quiet_withholds_the_rc4_note_and_nothing_else(tmp_path):
+    # The dispatch door's receipt gate reads the exit code alone and passes --quiet.
+    # It must still hear an unreachable plane: that is a refusal, not an absence.
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    v = _verdict(root, "--quiet", dest="dinesh")
+    assert (v.returncode, v.stdout, v.stderr) == (4, "", "")
+    v = _verdict(tmp_path / "no-plane-here", "--quiet")
+    assert v.returncode == 3 and "unreachable" in v.stderr, v.stderr
+
+
+def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path):
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    v = _verdict(root, "--verdict", dest=f"bot:{FLEET}/{BOT}")
+    assert v.returncode == 0, v.stderr
+    assert v.stdout == f"delivered bot:{FLEET}/mgr\n"

@@ -240,6 +240,15 @@ def cmd_move_bot(args) -> int:
 
     for i, step in enumerate(steps, 1):
         print(f"  {i}. {step}")
+    # Not a step this command takes: the target fleet's other bots name a
+    # sibling by its DIR (Layer 0), so they deny the arriving bot only after
+    # their own generate; the nightly reload-fleet runs it within a day.
+    # Layer 0b's host-wide rules are keyed on the name, which a move keeps.
+    print(
+        f"\n  Then, by hand: claudlobby --fleet {target_fleet_name} generate,"
+        f" so {target_fleet_name}'s other bots deny '{bot_name}' at its new"
+        " home (until then, or the nightly reload-fleet, they do not)."
+    )
     print()
 
     if not apply:

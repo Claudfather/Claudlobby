@@ -23,7 +23,7 @@ The manager auto-merges PRs when ALL of:
 
    This rung is a **mechanism, not a reminder**: telling an operator to anchor their evidence to a head cannot help when the surface they are told to read reports the head wrongly.
 
-1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict (or `COMMENT` with `**Approve**` verdict line under same-identity fallback).
+1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict (or `COMMENT` with a `**[<bot>] [VERDICT] approve**` verdict line under same-identity fallback; the bracket-tag, anchored header `lib/pr-review-state.py` reads).
 
    **MULTIPLE VERDICTS RESOLVE PER REVIEWER, NEVER GLOBAL-LATEST.** Each reviewer's own latest verdict stands, and the PR is blocked while **any** reviewer's latest is `REQUEST-CHANGES`.
 

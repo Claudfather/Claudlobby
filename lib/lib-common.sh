@@ -3273,7 +3273,9 @@ _PANE_RECEIPT_WAIT_DEFAULT=10
 # So: wait for the receipt; none -> ONE more Enter (send_retry) and wait again;
 # still none -> send_miss, loudly, rc 1. Never a loop, never the payload again.
 # No verdict and nothing pressed when the plane cannot answer or the receiver
-# has never recorded a receipt (its hook is not armed). For a send into an IDLE
+# has never recorded a receipt (its hook is not armed); --quiet keeps the
+# lookup from explaining the second, so a clean dispatch stays silent but for
+# the plane shim. For a send into an IDLE
 # pane only: a busy one queues the prompt, whose receipt lands when the turn
 # ends, if at all. So a receiver found BUSY when its receipt is missing (a turn
 # that began after the door's idle probe, or during the wait) is not a held box
@@ -3283,7 +3285,7 @@ pane_await_receipt() {
     local wait="${PANE_RECEIPT_WAIT_S:-$_PANE_RECEIPT_WAIT_DEFAULT}"
     if [[ "$wait" =~ $off ]]; then return 0; fi
     local ask=(python3 -S -E "$_LIB_COMMON_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}"
-        --received "$msg" --destination "$session" --wait "$wait")
+        --received "$msg" --destination "$session" --wait "$wait" --quiet)
     "${ask[@]}" || rc=$?
     [ "$rc" -eq 1 ] || return 0
     if bot_is_busy "$socket" "$session"; then return 0; fi

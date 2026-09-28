@@ -129,6 +129,13 @@ _BLESSED_RAW_READS = {
     # validating loader: a sibling fleet with a broken manifest must not be able
     # to fail this fleet's generate, nor silently empty the guard.
     ("composer.py", "manifest.read_text(encoding='utf-8')"),
+    # composer.py — the Layer 0b ~/.env lint (#1665). composed_text_sources
+    # reads the markdown a bot is TOLD (library items, expertise, voice, the
+    # charter, skill .md files) so validate and freshbox can name a line that
+    # runs `source ~/.env`. A lint over prose, the charter read's category:
+    # nothing read becomes a path, a grant or composed output. The variable
+    # name is site-specific on purpose, since this set keys on the expression.
+    ("composer.py", "told.read_text(encoding='utf-8')"),
     ("composer.py", "yaml.safe_load(manifest.read_text(encoding='utf-8'))"),
 }
 

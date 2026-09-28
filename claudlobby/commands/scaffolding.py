@@ -256,4 +256,13 @@ def cmd_new_bot(args) -> int:
         paths.bot_runtime(inp.name),
         inp.name,
     )
+    # The other bots' composed deny rules name this one only once THEIR fleet
+    # regenerates: Layer 0 for this fleet, Layer 0b's host roster for every
+    # fleet that arms it (#1665). The nightly reload-fleet does it within a day.
+    log.info(
+        "  6. Run: claudlobby generate (this fleet), and generate each other"
+        " fleet that arms isolation.shared_config, so their bots' deny rules"
+        " name '%s'",
+        inp.name,
+    )
     return 0

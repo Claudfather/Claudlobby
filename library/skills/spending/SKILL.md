@@ -13,9 +13,9 @@ Analyze spending patterns, track subscriptions, and surface trends from transact
 Transaction snapshots saved daily at `<ASSISTANT_TOOLS_DIR>/finances/transaction-snapshots/YYYY-MM-DD.json`
 Portfolio snapshots saved daily at `<ASSISTANT_TOOLS_DIR>/finances/portfolio-snapshots/YYYY-MM-DD.json`
 
-Requires `SIMPLEFIN_ACCESS_URL` env var:
+Reading saved snapshots needs no credential. Refreshing one runs the `/finance` scripts, which need `SIMPLEFIN_ACCESS_URL` — already in the session env, so never read `~/.env` for it (`/finance`, Environment Setup, says why). Check it before a refresh:
 ```bash
-source ~/.env
+: "${SIMPLEFIN_ACCESS_URL:?not in the session env - declare it with export in a .env tier, then restart the bot}"
 ```
 
 ## Operations
@@ -25,7 +25,6 @@ source ~/.env
 Read the last 7 days of transaction snapshots and aggregate:
 
 ```bash
-source ~/.env
 for f in $(ls <ASSISTANT_TOOLS_DIR>/finances/transaction-snapshots/ | tail -7); do echo "=== $f ===" && python3 -c "
 import json
 data = json.load(open('finances/transaction-snapshots/$f'))
@@ -112,7 +111,7 @@ Income:
 
 ## Instructions
 
-1. Always `source ~/.env` before running any finance commands
+1. Never `source ~/.env`. Saved snapshots need no credential; a refresh needs `SIMPLEFIN_ACCESS_URL`, which is already in the session — run the check above first
 2. Read snapshot JSON files directly with the Read tool for analysis
 3. For subscription detection, need at least 60 days of data
 4. When comparing periods, note if snapshots are missing for some days

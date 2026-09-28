@@ -531,6 +531,14 @@ def _has_telegram_channel(channels: list[str]) -> bool:
     )
 
 
+def account_dir(bot: BotConfig, fleet: FleetConfig) -> str:
+    """The Claude config dir *bot* runs with, as the manifest spells it (often
+    ``~/.claude``): its account's dir, else the fleet's default account. One
+    expression for its two consumers: ``bot.conf``'s ``CLAUDE_CONFIG_DIR`` line
+    and the Layer 0b rules that name the dir (#1665)."""
+    return fleet.accounts.get(bot.account, fleet.accounts.get("default", "~/.claude"))
+
+
 def telegram_channel_rel(handle: str) -> str:
     """A channel bot's Telegram state dir, relative to the home dir: the ONE
     definition behind its three consumers (#1786), which need it in two forms.
@@ -905,9 +913,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 
     ctx = _bot_template_context(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
-    account_dir = fleet.accounts.get(
-        bot.account, fleet.accounts.get("default", "~/.claude")
-    )
+    config_dir = account_dir(bot, fleet)
 
     bot_dir_line = f"BOT_DIR={_root_anchored(bot_dir, paths)}"
     # BOT_SERVICE is the bot's host-wide-unique, fleet-prefixed identity. It
@@ -943,9 +949,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         "# Claude Code config dir (multi-account support)",
     ]
     if bot.account != "default":
-        lines.append(f"CLAUDE_CONFIG_DIR={_shq(account_dir)}")
+        lines.append(f"CLAUDE_CONFIG_DIR={_shq(config_dir)}")
     else:
-        lines.append(f"# CLAUDE_CONFIG_DIR={_shq(account_dir)}  # default account")
+        lines.append(f"# CLAUDE_CONFIG_DIR={_shq(config_dir)}  # default account")
     lines.append("")
 
     # Assemble the full claude CLI flag set. lib/start-bot.sh reads
@@ -1548,7 +1554,15 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
             elif entry.is_dir():
                 shutil.rmtree(entry)
     bot_skills_dir.mkdir(parents=True, exist_ok=True)
+    for leaf, src in resolve_skill_sources(paths, skills, log).items():
+        (bot_skills_dir / leaf).symlink_to(src.resolve())
 
+
+def resolve_skill_sources(paths: Paths, skills: list[str], log) -> dict[str, Path]:
+    """Leaf name -> source dir for every entry of *skills*, the way
+    :func:`link_skills` links them (first wins on a leaf collision, which is
+    logged). One resolution for the linker and for the readers that must see
+    the same files a bot is handed (the Layer 0b ``~/.env`` scan)."""
     linked: dict[str, Path] = {}  # leaf name → source dir, for collision detection
 
     def _add(leaf: str, src: Path) -> None:
@@ -1556,7 +1570,6 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
             log(f"  skill '{leaf}' already linked from {linked[leaf]} — skipping {src}")
             return
         linked[leaf] = src
-        (bot_skills_dir / leaf).symlink_to(src.resolve())
 
     for skill in skills:
         if skill.endswith("/"):
@@ -1573,6 +1586,7 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
                 log(f"  skill '{skill}' missing — skipped")
                 continue
             _add(src.name, src)
+    return linked
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -1928,6 +1942,79 @@ def resolve_effective_skills(
 # ----------------------------------------------------------------------
 
 
+def claude_md_items(
+    bot: BotConfig, paths: Paths, ctx: dict[str, str], *, protocol_names: list[str]
+) -> dict[str, list[LibraryItem]]:
+    """The library items a bot's CLAUDE.md composes, by template slot, each
+    expanded and carrying its ``source_path``. One definition for the render
+    and for :func:`composed_text_sources`, so what the scan reads is what the
+    bot is told."""
+
+    def _items(names: list[str], kind: str) -> list[LibraryItem]:
+        return [
+            _expand_item(it, ctx)
+            for it in load_library_items_overlay(names, paths, kind)
+        ]
+
+    return {
+        "resources": _items(bot.resources, "resources"),
+        "integrations": _items(
+            resolve_effective_integrations(bot, paths), "integrations"
+        ),
+        "principles": _items(bot.principles, "principles"),
+        "permissions": _items(bot.permissions, "permissions"),
+        "protocols": _items(protocol_names, "protocols"),
+        "guardrails": _items(bot.guardrails, "guardrails"),
+        "lessons": _items(bot.lessons, "lessons"),
+        "post_actions": _items(bot.post_actions, "post_actions"),
+    }
+
+
+def composed_text_sources(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths
+) -> list[tuple[Path, str]]:
+    """``(source file, text)`` for everything a bot is TOLD: the expertise,
+    voice and library items its CLAUDE.md composes, the charter a manager
+    composes, and every markdown file of every skill it is linked (the text a
+    skill hands the model). Scripts are left out on purpose: the model runs a
+    script, it does not retype its lines, and a deny rule never gates what a
+    script does itself."""
+    ctx = _bot_template_context(bot, fleet, paths)
+    is_manager = bot.bot_id in fleet.manager_bots()
+    out: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+
+    def _add_file(told: Path | None) -> None:
+        if told is not None and told.is_file() and told not in seen:
+            seen.add(told)
+            try:
+                out.append((told, told.read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):
+                pass
+
+    for area in bot.expertise:
+        _add_file(paths.find_library_file("expertise", area, ".md"))
+    if bot.voice:
+        _add_file(paths.find_voice_file(bot.voice))
+    protocol_names = resolve_effective_protocols(
+        bot, fleet, paths, is_manager=is_manager
+    )
+    # The FILE, not the loaded body: a finding must point at the file's own
+    # line, and the loader strips the frontmatter and the H1 above it.
+    for items in claude_md_items(
+        bot, paths, ctx, protocol_names=protocol_names
+    ).values():
+        for it in items:
+            _add_file(it.source_path)
+    if fleet.mission_file and is_manager:
+        _add_file(paths.fleet_config_dir / fleet.mission_file)
+    skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
+    for src in resolve_skill_sources(paths, skills, lambda _msg: None).values():
+        for md in sorted(src.rglob("*.md")):
+            _add_file(md)
+    return out
+
+
 def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     """Compose one bot's CLAUDE.md from expertise, voice, protocols, and guardrails; returns the markdown."""
     ctx = _bot_template_context(bot, fleet, paths)
@@ -1941,14 +2028,6 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             voice_item = load_voice(voice_path)
             if voice_item is not None:
                 voice_item = _expand_item(voice_item, ctx)
-
-    def _items(names: list[str], kind: str) -> list[LibraryItem]:
-        return [
-            _expand_item(it, ctx)
-            for it in load_library_items_overlay(names, paths, kind)
-        ]
-
-    integration_names = resolve_effective_integrations(bot, paths)
 
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
@@ -2039,14 +2118,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
-        resources=_items(bot.resources, "resources"),
-        integrations=_items(integration_names, "integrations"),
-        principles=_items(bot.principles, "principles"),
-        permissions=_items(bot.permissions, "permissions"),
-        protocols=_items(protocol_names, "protocols"),
-        guardrails=_items(bot.guardrails, "guardrails"),
-        lessons=_items(bot.lessons, "lessons"),
-        post_actions=_items(bot.post_actions, "post_actions"),
+        **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )
     # Collapse 3+ blank lines → 2 to keep output tidy.
     while "\n\n\n\n" in rendered:
@@ -2587,6 +2659,22 @@ def compose_settings_local(
                 f"Edit(/{sibling_dir}/**)",
             )
         )
+
+    # Layer 0b: shared-config isolation (#1665), OPT-IN per bot. The bot dir
+    # Layer 0 names is not where most cross-bot content lives: transcripts,
+    # the prompt history, the credential, the account config, the .env tiers,
+    # the install's code and the shared settings surfaces do. isolation.py
+    # derives the rules and states their bound: they gate Claude's own tool
+    # calls, never a process, so they reduce accidental reads and are not
+    # confidentiality. Every note is a place the set falls short, said here
+    # on every generate and by freshbox and validate.
+    if bot.isolation.shared_config:
+        from .isolation import layer0b
+
+        result = layer0b(bot, fleet, paths)
+        for note in result.notes:
+            _log.warning("bot %s: Layer 0b: %s", bot.bot_id, note)
+        _append_unique(deny_patterns, result.deny)
 
     # Layer 1: Guardrail permissions (deny-capable safety rules; shared expertise
     # schema). Guardrails are usually deny-only; their rare allows join Layer 2.
@@ -4010,6 +4098,85 @@ def _write_timer_units(
     (timers_dir / f"{service_name}.plist").write_text("\n".join(plist_lines) + "\n")
 
 
+#: The three files one composed unit basename owns. One tuple, because a prune
+#: that deletes two of the three leaves a unit the next reader still finds.
+_UNIT_EXTS: tuple[str, ...] = ("service", "timer", "plist")
+
+
+def _prune_stale_units(
+    timers_dir: Path,
+    stale: set[str],
+    composed: set[str],
+    n_expected: int,
+    family: str,
+    *,
+    declaration_torn: bool = False,
+) -> list[str]:
+    """Delete each basename in *stale* — unless the compose looks TORN, in which
+    case delete nothing and say so.
+
+    The shared tail of both reconcilers in this file. What differs between the
+    briefing family and the named-job family is only how each derives its own
+    ``stale`` set (a glob it cannot enumerate in advance, versus a directory
+    scan minus that family); the guard and the unlink are one rule, and the two
+    hand-typed copies this replaces had already drifted in their warning text.
+
+    The guard (modeled on ``migrate_legacy_keepalive``'s verify-before-disable):
+    if fewer units composed than the config declares, a bug or an interrupted
+    generate dropped part of the set — SKIP the prune entirely and warn, so a
+    compose shortfall can never wholesale-delete live timers. A legitimate full
+    removal passes ``n_expected == 0`` and prunes everything; the fully-empty
+    composed set is its limit case, not its trigger.
+
+    *declaration_torn* is the SECOND reason to refuse, and it lives here rather
+    than in the caller for the reason this function exists at all: a refusal is
+    a guard, a warning and a ``return []``, and a hand-typed second copy of that
+    shape one frame up is exactly the drift the extraction retired. The guard
+    below cannot see this case — ``len(composed)`` and ``n_expected`` both derive
+    from the declared set, so emptying that set makes them agree at zero, which
+    is the signature of a legitimate full removal. Only the caller can know its
+    declaration is torn, so it passes the fact and this function owns the
+    response. The briefing family never sets it (its declared set is the bots'
+    own stanzas, which cannot be torn by an upstream read).
+
+    *family* names the caller in the warning, so an operator reading a skipped
+    prune knows which half of the directory refused.
+    """
+    if not stale:
+        return []
+    if declaration_torn:
+        _log.warning(
+            "%s reconcile: the declared set is EMPTY while the fleet still asks "
+            "for these units — a torn declaration, not a teardown. SKIPPING "
+            "prune of %d existing unit(s); a fleet that means to compose none "
+            "says so at the source (system_defaults.timers: false). Check that "
+            "the install's system.yaml is intact.",
+            family,
+            len(stale),
+        )
+        return []
+    if len(composed) < n_expected:
+        _log.warning(
+            "%s reconcile: PARTIAL composed set (%d of %d declared unit(s)) "
+            "— SKIPPING prune of %d existing unit(s) to avoid a compose-shortfall "
+            "wholesale delete; units left untouched (re-run once composition is "
+            "fixed)",
+            family,
+            len(composed),
+            n_expected,
+            len(stale),
+        )
+        return []
+    pruned: list[str] = []
+    for base in sorted(stale):
+        for ext in _UNIT_EXTS:
+            f = timers_dir / f"{base}.{ext}"
+            if f.exists():
+                f.unlink()
+        pruned.append(base)
+    return pruned
+
+
 def _reconcile_briefing_units(
     timers_dir: Path, prefix: str, composed: set[str], n_expected: int
 ) -> list[str]:
@@ -4038,32 +4205,101 @@ def _reconcile_briefing_units(
     if not timers_dir.is_dir():
         return []
     existing = {p.stem for p in timers_dir.glob(f"{prefix}.briefing-*")}
-    stale = existing - composed
-    if not stale:
+    return _prune_stale_units(
+        timers_dir, existing - composed, composed, n_expected, "briefing"
+    )
+
+
+def _reconcile_fleet_job_units(
+    timers_dir: Path,
+    prefix: str,
+    composed: set[str],
+    n_expected: int,
+    *,
+    declaration_torn: bool = False,
+) -> list[str]:
+    """Prune stale ``<prefix>.<job>`` unit files for a job this fleet no longer
+    composes — the named-job half of what :func:`_reconcile_briefing_units`
+    does for the per-(bot,slot) family.
+
+    Until this existed, ``compose_fleet_timers`` only ever WROTE: a job removed
+    from ``system.yaml`` (or a fleet that turned ``system_defaults.timers``
+    off, or dropped ``fleet.sweep``) left its units on disk forever, and the
+    setup backbone enrolls what it finds in this directory. Measured, #1764:
+    ``plane-shadow`` was deleted from ``system.yaml`` at the F18 R2a closure
+    together with the ``lib/plane-shadow.sh`` it execs, and eighteen days later
+    the nightly ``reload-fleet`` was still re-creating its LaunchAgent from the
+    stale composed plist — a unit whose script does not exist, exiting 78
+    (``EX_CONFIG``) every night, sitting beside the ``.retired-*`` copy of
+    itself an operator had already walked back by hand.
+
+    ``composed`` is the set of unit basenames just written this generate;
+    ``n_expected`` is how many the fleet config declares — the config truth a
+    composition bug cannot fake. Guard and limit case are
+    :func:`_reconcile_briefing_units`'s, deliberately, so the two halves of
+    this directory answer "is this a teardown or a torn generate?" the same
+    way: fewer composed than declared means an interrupted or buggy run, so
+    SKIP the prune entirely and warn; ``n_expected == 0`` is a legitimate full
+    removal and prunes everything.
+
+    **The briefing family is carved out explicitly**, and that carve-out is
+    the whole reason this is not a two-line sweep. A naive "delete every
+    ``<prefix>.*`` not written this run" would eat the per-(bot,slot) briefing
+    units, whose basenames the composer cannot enumerate in advance and whose
+    prune is guarded by its OWN independent count (``BRIEFING_EXPECTED``).
+    Letting this function touch them would route those files past that guard
+    using a count that knows nothing about them — the exact wholesale-delete
+    the briefing guard exists to refuse. They are owned by
+    :func:`_reconcile_briefing_units` and skipped here by name.
+
+    **A torn DECLARATION refuses, and the shared guard cannot see that case**
+    (#1765 review). ``len(composed) < n_expected`` compares two numbers that
+    BOTH derive from the merged job set, so it discriminates a torn write loop
+    and is structurally blind to a torn declared COUNT: empty it, and
+    ``n_expected`` is 0, which is the documented signature of a legitimate full
+    removal. Reproduced end to end — a fleet still declaring
+    ``system_defaults.timers`` had every composed job unit deleted, no
+    exception raised anywhere, on BOTH call sites (the reviewer found the
+    early-return one; the write path reaches it too whenever briefing or sweep
+    keeps the function past that branch). So the caller passes
+    ``declaration_torn``, computed from the one fact that does NOT come from
+    the merged set: the fleet's own manifest still asking for these timers. A
+    real teardown says so at the source (``system_defaults: false``, or
+    ``timers: false``), where that flag is False and this is False with it.
+
+    **It overlaps :func:`_prune_leaf_manager_gated_units` and that one still
+    stays**, which is a narrower guarantee rather than a forked one. A fleet
+    with no leaf manager has `manager-checkin` filtered out of `timers` before
+    `composed` is built, so on an ORDINARY generate this function removes its
+    units too and the older helper finds nothing left to unlink. The two part
+    on exactly one case: this one refuses to prune anything on a torn compose,
+    while that one runs unconditionally — correctly, because its removal reason
+    (`FleetConfig.leaf_manager_bots()` is empty) is derived from config alone
+    and is unaffected by some OTHER job failing to write. Collapsing them would
+    put a job whose eligibility cannot be torn behind a torn-compose guard.
+
+    Returns the pruned unit basenames.
+    """
+    if not timers_dir.is_dir():
         return []
-    # Partial/degenerate: config declares n_expected (bot,slot) units but fewer
-    # composed — a torn or interrupted compose, not an intended teardown. Refuse
-    # the prune so a shortfall can never wholesale-delete live timers. Empty is
-    # the limit case (0 < n_expected); a real full removal passes n_expected == 0.
-    if len(composed) < n_expected:
-        _log.warning(
-            "briefing reconcile: PARTIAL composed set (%d of %d declared unit(s)) "
-            "— SKIPPING prune of %d existing unit(s) to avoid a compose-shortfall "
-            "wholesale delete; units left untouched (re-run once composition is "
-            "fixed)",
-            len(composed),
-            n_expected,
-            len(stale),
-        )
-        return []
-    pruned: list[str] = []
-    for base in sorted(stale):
-        for ext in ("service", "timer", "plist"):
-            f = timers_dir / f"{base}.{ext}"
-            if f.exists():
-                f.unlink()
-        pruned.append(base)
-    return pruned
+    # Exactly `<prefix>.<job>`, the job ONE dotless segment: a longer dotted
+    # name (`com.review.child.keepalive` under `com.review`) is a unit of a
+    # fleet whose prefix EXTENDS this one, not a job of this fleet (#1765
+    # review). A dotted job name of this fleet's own is never pruned, which
+    # fails safe.
+    existing = {
+        f.stem
+        for f in timers_dir.iterdir()
+        if f.is_file()
+        and f.suffix.lstrip(".") in _UNIT_EXTS
+        and f.name.startswith(f"{prefix}.")
+        and "." not in f.stem[len(prefix) + 1:]
+    }
+    briefing = {b for b in existing if b.startswith(f"{prefix}.briefing-")}
+    return _prune_stale_units(
+        timers_dir, existing - composed - briefing, composed, n_expected,
+        "fleet job", declaration_torn=declaration_torn,
+    )
 
 
 #: Fleet jobs whose composition depends on the fleet having at least one
@@ -4246,6 +4482,21 @@ def compose_fleet_timers(
     ]
     briefing_on = bool(briefing_bots)
 
+    # The one fact about the job set that does NOT come from the job set
+    # (#1765 review): this fleet's own manifest still asks for system-default
+    # job timers while the merged set is empty. That is a torn read upstream —
+    # a missing/empty package system.yaml is the measured route — never an
+    # intended teardown, which is spelled `system_defaults: false` (or
+    # `timers: false`) and lands here with `sd.timers` already False.
+    # NB `merged_defaults`, not the local `timers`: that name has already had
+    # LEAF_MANAGER_GATED_JOBS stripped from it above, so on a fleet with no leaf
+    # manager a shrinking job roster could empty it legitimately and make this
+    # misfire — refusing a prune that was owed. The raw merged set is the thing
+    # a torn read empties, and it is immune to that filter.
+    jobs_declaration_torn = (
+        bool(sd.enabled and sd.timers) and not merged_defaults.get("jobs")
+    )
+
     base_dir = output_dir if output_dir is not None else paths.runtime_fleet
     timers_dir = base_dir / "timers"
     if not has_leaf_manager:
@@ -4266,10 +4517,22 @@ def compose_fleet_timers(
                 removed, fleet.name,
             )
     if not emit_defaults and not sweep_on and not briefing_on:
-        # Nothing to emit — but a prior generate may have left briefing units a
-        # now-removed stanza should prune. Reconcile only if the dir exists, and
-        # record zero declared units so setup-fleet confirms the teardown is
-        # intended (config truth) rather than a torn compose.
+        # Nothing to emit — but a prior generate may have left units a
+        # now-removed stanza should prune, in EITHER family. Reconcile only if
+        # the dir exists, and record zero declared units so setup-fleet
+        # confirms the teardown is intended (config truth) rather than a torn
+        # compose. The job half runs here too, not only on the write path
+        # below: a fleet that turns `system_defaults.timers` off never reaches
+        # that path again, so its job units would otherwise be stranded on
+        # disk forever for the setup backbone to keep enrolling.
+        for removed in _reconcile_fleet_job_units(
+            timers_dir, fleet.service_prefix, set(), 0,
+            declaration_torn=jobs_declaration_torn,
+        ):
+            _log.info(
+                "pruned stale fleet job unit %s (%s composes no fleet timers)",
+                removed, fleet.name,
+            )
         _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0)
         _write_briefing_manifest(timers_dir, set())
         return timers_dir
@@ -4332,6 +4595,18 @@ def compose_fleet_timers(
             exc,
         )
 
+    # Config truth for the job half of the reconcile below: what this fleet
+    # DECLARES, independent of what the write loop managed to produce. Counted
+    # as unit BASENAMES, not declarations: a defaults job named
+    # `code-audit-sweep` and an enabled `fleet.sweep` both write
+    # `<prefix>.code-audit-sweep`, and counting both read every complete
+    # compose as PARTIAL, so the prune never ran (#1765 review).
+    expected_jobs = {f"{prefix}.{name}" for name in timers} if emit_defaults else set()
+    if sweep_on:
+        expected_jobs.add(f"{prefix}.code-audit-sweep")
+    n_expected_jobs = len(expected_jobs)
+    composed_jobs: set[str] = set()
+
     if emit_defaults:
         for name, cfg in timers.items():
             sched = _resolve_timer_schedule(cfg, merged_defaults)
@@ -4355,6 +4630,7 @@ def compose_fleet_timers(
                 ),
                 extra_env=({**job_baseline_env, **job_extra_env.get(name, {})} or None),
             )
+            composed_jobs.add(f"{prefix}.{name}")
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
         ]
@@ -4380,6 +4656,19 @@ def compose_fleet_timers(
             fleet.name,
             paths,
             telegram_group_chat_id=fleet.telegram_group_chat_id,
+        )
+        composed_jobs.add(f"{prefix}.code-audit-sweep")
+
+    # Every named job this fleet still composes is now on disk, so anything
+    # else carrying this prefix — bar the briefing family, which owns its own
+    # guarded prune — is a job the config no longer declares (#1764).
+    for removed in _reconcile_fleet_job_units(
+        timers_dir, prefix, composed_jobs, n_expected_jobs,
+        declaration_torn=jobs_declaration_torn,
+    ):
+        _log.info(
+            "pruned stale fleet job unit %s (%s no longer declares it)",
+            removed, fleet.name,
         )
 
     # Equippable briefing (bots.<bot>.briefing) — the first dynamic

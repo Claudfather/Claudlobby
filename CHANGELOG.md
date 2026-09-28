@@ -55,6 +55,210 @@ resetting the WAL, and nothing on the estate reported the WAL's size. The
   now refuses to start until the snapshot is real), and a pid the checks
   compared against had been cleared.
 
+### Changed — the bracket-tag, anchored verdict header is taught wherever a reviewer or a manager learns the format (#1913)
+
+`lib/pr-review-state.py` reads `**[name] [VERDICT] x** — reviewed at <sha>` and attributes
+the verdict to its author and anchors it to a commit. The four places a reviewer or a
+manager actually learns the verdict format still taught the older, identity-less,
+anchor-less `**Verdict: x**` shape — and one of them, `pr-comment-hygiene.md`'s `/ironclad`
+verdict format, used no bold at all, so `pr-review-state.py` never parsed it. Four more
+docs taught or looked for a bare `**Approve**` / `**Request Changes**`, which carries no
+identity or anchor either: the same-identity fallback in `github.md` and
+`same-identity-fallback.md`, and the peer-review rung of both merge guardrails. vera had
+already been writing the bracket-tag header by hand on #1912 and #1914; the docs had not
+caught up.
+
+- `library/expertise/code-review.md`, `library/protocols/review-flow.md` and
+  `library/protocols/verify-before-merge.md` now teach
+  `**[<bot>] [VERDICT] <verdict>** — reviewed at <sha>` for all four taught verdicts (ship
+  it / mechanical fixes / request changes / architectural concerns). The older
+  `**Verdict: x**` form still parses — it carries neither identity nor anchor — and stays
+  documented as such rather than being presented as broken. `verify-before-merge.md` also
+  tells a manager to read each reviewer's own latest verdict, never just the newest comment
+  on the PR, which is how `pr-review-state.py` resolves them.
+- `library/protocols/pr-comment-hygiene.md`'s `[<bot-name>] [VERDICT] <approve|request-changes|comment>`
+  gains the same bold wrapping and an anchor, so a plan-PR verdict from `/ironclad` is
+  readable by the same tool as a code-PR verdict. It also records a known limitation: the
+  tool reads a bracket-tagged `comment` as vocabulary drift (`UNPARSED-HEADER`, exit 3)
+  until #1923 teaches it a neutral verdict.
+- `library/integrations/github.md` and `library/protocols/same-identity-fallback.md` now
+  teach `**[<bot>] [VERDICT] approve**` or `**[<bot>] [VERDICT] request changes**`, with
+  `— reviewed at <sha>`, for a same-identity verdict comment. `same-identity-fallback.md`
+  keeps a plain `**Comment**` (no verdict) bare: bracket-tagged, the tool would read it as
+  vocabulary drift.
+- `library/guardrails/merge-policy-auto-admin.md` and
+  `library/guardrails/merge-policy-auto-after-review.md` now tell a manager to look for a
+  `**[<bot>] [VERDICT] approve**` verdict line under same-identity fallback, the header
+  `pr-review-state.py` reads, in place of `**Approve**`.
+- No change to `lib/pr-review-state.py` itself — it already read both the old and new
+  header shapes; only the taught vocabulary moved.
+- `tests/test_pr_review_state.py::TestDocsTeachTheParseableHeader` reads the four docs in
+  the first two bullets straight off disk (never a hand-kept copy of their text), pins each
+  file's example count, and asserts every concrete header example parses as attributed AND
+  anchored through the module's own regexes, that every taught verdict word is still
+  recognized, and that one doc-sourced header resolves cleanly through the real
+  `--payload-json` CLI seam.
+
+### Fixed — `plane-lookup.py --received` says why at rc 4, and finds a receipt by the receiver's plane alias (#1922)
+
+`--received <msg_id> --destination <bot>` exits 4 when the destination has
+never recorded a receipt, which proves nothing either way. It printed nothing,
+and the match was exact, so a lookup that could never match (the receiver's
+`bot:<fleet>/<name>` alias, where the receipt hook records the bare `BOT_ID`,
+or a plane under another root) read exactly like a receipt hook that is not
+armed. Another fleet's manager lost time to it.
+
+- rc 4 now prints one line to stderr naming the destination, the root and both
+  causes: the receipt hook is not armed, or this lookup cannot reach what it
+  records. A lookup with no `--destination` says that instead. Stdout stays
+  empty and the exit code is still 4.
+- A `bot:<fleet>/<name>` destination is matched on its name, the way the
+  delivery join already keys receipts. The fleet part is dropped, not checked.
+- The new `--quiet` withholds that line and nothing else: an unreachable plane
+  still says so. The dispatch door's receipt gate passes it, so a clean
+  dispatch stays silent but for the plane shim
+  (`test_a_clean_dispatch_writes_only_the_shims_disclosure_to_stderr`).
+- The verify-then-trust check every bot carries (#1876) already passes the bare
+  `$BOT_ID` and treats any non-zero exit as unverified, so it is unchanged.
+
+### Fixed — the `~/.env` lint no longer lets a negation elsewhere on a line hide an instruction (#1919)
+
+The lint `validate` and `freshbox` run for a bot with shared-config isolation
+on (#1665) dropped a `source ~/.env` span whenever its LINE held a negation
+word, anywhere. So "If `SIMPLEFIN_ACCESS_URL` is not set, run `source ~/.env`
+first", "Run `source ~/.env` — without it the scripts fail" and "Do not skip
+`source ~/.env`" were all missed, and on an armed bot each would have failed
+at run time with no warning (otis's review of #1918).
+
+- A negation now counts only in the span's own clause and within the three
+  words directly before it. A verb that reverses it ("do not skip", "don't
+  forget") keeps the span an instruction.
+- A span that is the subject of a negated predicate ("`source ~/.env` is not
+  needed") is still a mention, as are the cases that were quiet before: prose,
+  a negated span, the path inside `echo` or `grep`, a comment in a fence. A
+  reversal after the negation undoes it there too ("`source ~/.env` cannot be
+  skipped", "shouldn't be omitted"), and the reversal verbs include their past
+  participles.
+- `validate` and `freshbox` each have a test that fails when they stop handing
+  the lint the composer's home.
+- Every spelling row E denies is recognised: `~user/.env`, `"$HOME"/.env`
+  quoted up to the slash, `/home/<user>/.env`, `/Users/<user>/.env`,
+  `/root/.env`, and the composer's own home by its absolute path.
+
+### Added — shared-config isolation, the Layer 0b deny rules, opt-in per bot (#1665)
+
+Layer 0 denies each fleet sibling's bot directory, and most cross-bot content
+is not there. A transcript is written under the shared Claude config dir,
+beside the shared prompt history, the OAuth credential and the account config;
+none of those, no `.env` tier, and nothing in the install root was named by any
+rule. On the reviewed host 249 correctly shaped sibling rules read as "the bots
+are isolated" while every bot could read every other bot's transcripts.
+
+- `isolation.shared_config: true` (at `defaults:` or `bots.<bot>:`) composes
+  eight classes of deny rule (`claudlobby/isolation.py`): other bots'
+  transcripts, `history.jsonl`, `.credentials.json`, the account config, every
+  `.env` tier (the bot's own included), Edit on the install's code, other bots'
+  Telegram state dirs, and Edit on the shared settings surfaces. Every rule is
+  `//`-anchored on an absolute path.
+- Transcript and bot-tier `.env` rules are keyed on the bot's NAME, so a
+  `move-bot` leaves both homes covered. A name another fleet shares falls back
+  to that bot's path, a name that is a hyphen-prefix of another skips or
+  states the one pattern that would reach the bot's own sessions, and a sibling
+  manifest that cannot be read is named rather than dropped.
+- `isolation.exempt` restores a READ only: `account_config` or `env_host`.
+- Off by default, registered in `switches.py` under the no-deployment-gate
+  category: a composed deny binds on the bot's next tool call with no restart,
+  and the nightly `reload-fleet` would carry a default-on rule set onto every
+  bot. `doctor --switches` shows which bots have it on.
+- `claudlobby validate` (category `isolation-env-read`) and `freshbox` name
+  every composed CLAUDE.md or skill file that tells an armed bot to
+  `source ~/.env` or `. ~/.env`, the read the `env` class denies. A mention in
+  prose is not flagged.
+- `freshbox` compares an armed bot's on-disk deny list with what the current
+  install would compose and names each class that falls short, including a bot
+  that joined the host since the last generate; it prints one line per fleet
+  naming what the unarmed bots' deny lists do not cover.
+- The post-compose wiring audit (`path_audit.audit_bot_paths`) no longer reads
+  `permissions.deny` in `settings.local.json`. A deny is a restriction, not
+  wiring, which the source-side guard already ruled; the host-wide rules name
+  other fleets on purpose, and a throwaway-root `generate` of an armed bot
+  failed on them. Every other path in the file is still scanned.
+- The bound, stated wherever the rules are: they gate Claude's own tools, and a
+  literal path in Bash. `python3 -c "open(...)"`, a `$HOME/...` path and any
+  script or hook are not stopped. They reduce accidental reads; they are not
+  confidentiality.
+- `permissions-model.md` no longer says a deny misses `cat .env` or that
+  sibling isolation blocks Read only, and the `permissions-are-not-a-control`
+  guardrail no longer says denies are ignored.
+
+### Changed — `finance`, `spending` and `deploy-status` no longer read `~/.env` (#1665)
+
+The three skills told the model to load its credentials with `source ~/.env`
+(`finance`, `spending`) or `set -a; . ~/.env; set +a` (`deploy-status`) before
+a command. The variables they need are already in the session: `start-bot.sh`
+sources the `.env` tiers at boot and every Bash tool call inherits them.
+Measured on the live sessions of the two bots that carry these skills,
+`SIMPLEFIN_ACCESS_URL` and `RAILWAY_PERSONAL_TOKEN` were both present (checked
+by name, never by value). So the read loaded nothing new, while making each
+skill depend on reading a secrets file through the model's own tools, which
+the planned Layer 0b isolation rules deny.
+
+- Each read is replaced by a check that prints nothing when the variable is
+  set and stops the command with a message naming the fix when it is not:
+  `: "${SIMPLEFIN_ACCESS_URL:?not in the session env - ...}"`. It never prints
+  the value.
+- `spending`'s weekly block reads saved snapshots only, so it loses the read
+  and gains no check.
+- A credential rotated in `~/.env` now reaches these skills at the bot's next
+  restart, like every other composed secret.
+
+### Changed — `validate` reports a shared cause once and names what kind each warning is (#1663)
+
+`claudlobby validate` printed dozens of warnings at rc 0, and `doctor` showed
+them as one number. A new kind of warning could arrive inside an unchanged
+total and nothing would show it. Measured on 2026-09-27, crog-eng-team printed
+38 warnings, the same total as when #1663 was filed. Twelve of those lines
+belong to a warning family added after the issue was filed.
+
+- A finding whose cause is shared is now one line ending `affects N bot(s)`:
+  a retired key set under `defaults.observability`, an MCP variable assigned
+  (or missing) above the bot tier, the `claudron` CLI missing from PATH, a
+  vault path, and the operator gitconfig's identity and ssh rewrite. A bot's
+  own `.env` assignment, or a key in its own stanza, stays on that bot. In a
+  clean environment crog-eng-team goes from 48 lines to 28 and ai-platform
+  from 15 to 9.
+- Every warning carries a category slug, passed where it is raised
+  (`ValidationReport.warn`). `validate` prints it in front of each line and
+  ends with a count by category. `doctor`'s `fleet-yaml` rung prints that
+  count instead of a bare total.
+- `validate --warn-baseline FILE --write` records the categories. Later
+  `validate --warn-baseline FILE` runs fail (rc 1) only on a category that is
+  new or has grown, and name it. An unreadable baseline exits 2. `--strict`
+  is unchanged.
+
+### Fixed — the vault git guard records what it refused where a reader can find it (#1909)
+
+`vault-git-guard.sh` handed each decision's detail (the refused verb, or why a
+target could not be read) to `emit_fleet_event` as its second argument, which
+is the event's source. Every `vault_guard_denied` and `vault_guard_unresolved`
+row therefore carried free text such as `checkout` as its source and an empty
+`data`. `claudlobby events --source` could not find the guard's rows, and the
+verb the guard exists to count sat in no field a reader treats as data. The
+source is now `vault-git-guard` and the detail is `data.detail`, built with
+`jq` because a detail can carry quotes. The pinning test's detail contains a
+double quote, and a hand-built JSON string does not just mangle it: that mutant
+recorded no row at all. Rows written before this lands keep the old shape.
+
+### Fixed — a test read the stub mint's counter half-written and failed a merge gate (#1908)
+
+The stub mint in `tests/test_github_app_wrapper.py` rewrote its call counter
+with `>`, which empties the file before the number lands. A test polling the
+counter in that window read `''` and failed with `int('')`, which is how it
+failed #1906's gate. The stub now writes a temp file and renames it into place,
+so a reader sees the old count or the new one, never an empty file. With a
+0.4 s delay injected into the write, the old stub failed 3 of 3 runs with the
+CI error and the new one passed 3 of 3.
+
 ### Fixed — the plane daemon replies before it checkpoints, and the checkpoint never waits on a reader (#1693)
 
 Every wedge arm measured in a 30-minute window on 2026-09-26 was the daemon's
@@ -535,6 +739,131 @@ Rung 4 of both merge guardrails keeps the branch while any open PR is based on
 it, when that listing fails, or when the branch name is empty; it edits no PR.
 The merge block refuses unless `REPO`, `N` and `PH` are set, since `gh pr merge`
 run alone accepted empty ones and went straight to the API.
+
+### Fixed — a fleet job removed from system.yaml was re-enrolled forever (#1764)
+
+`compose_fleet_timers` only ever WROTE. A job deleted from `system.yaml` left its
+composed `.service`/`.timer`/`.plist` in `runtime/fleet/timers/`, and the setup
+backbone enrolls what it finds there — `lib/setup-fleet`'s job leg is an additive
+glob-enroll that never disables, by design.
+
+Measured on this host: `plane-shadow` went from `system.yaml` at the F18 R2a
+closure (a299272) **together with the `lib/plane-shadow.sh` it execs**, and
+eighteen days later the nightly `reload-fleet` was still re-creating
+`~/Library/LaunchAgents/com.artemis.engineering.plane-shadow.plist` — a unit whose
+script does not exist, exiting 78 (`EX_CONFIG`) every night, sitting beside the
+`.retired-20260922` copy of itself an operator had already walked back by hand.
+The second fleet on the same host held the same stale composed units, one reload
+away from the same resurrection.
+
+- **The prune is DECLARATION-DERIVED, not a hardcoded name list.** The precedent
+  beside it, `_prune_leaf_manager_gated_units`, is exact-path bounded by a
+  frozenset of job names, and copying that shape would have fixed `plane-shadow`
+  and nothing else: the next job deleted from `system.yaml` resurrects the same
+  way, and the issue is about the class. So `_reconcile_fleet_job_units` keeps
+  what this generate composed and prunes every other `<prefix>.*` unit in the
+  directory.
+- **The briefing family is carved out explicitly, and that is the whole care in
+  this change.** A naive "delete every `<prefix>.*` not written this run" eats the
+  per-(bot,slot) briefing units, whose basenames the composer cannot enumerate in
+  advance and whose prune is guarded by its own independent count
+  (`BRIEFING_EXPECTED`). Sweeping them here would route those files past that
+  guard on a count that knows nothing about them — the exact wholesale-delete the
+  briefing guard exists to refuse. They stay owned by `_reconcile_briefing_units`
+  and are skipped by name.
+- **Guard and limit case are the briefing reconciler's, byte for byte**, so the
+  two halves of one directory answer "teardown or torn generate?" the same way:
+  fewer composed than the config declares means an interrupted or buggy run, so
+  the prune is SKIPPED entirely and warned about; `n_expected == 0` is a
+  legitimate full removal and prunes everything.
+- **It also runs on the early-return path** (`system_defaults.timers: false`, no
+  sweep, no briefing). That fleet never reaches the write path again, so without
+  this its job units would sit on disk forever for the setup backbone to keep
+  enrolling — the same bug by a different route.
+
+**Rollout gate: this is a composer change, so it takes effect at the next
+`generate` and reaches nothing before then.** It stops FUTURE enrollment only —
+an ALREADY-INSTALLED unit is walked back by nothing on the fleet side, the way
+`walk_back_uncomposed_host_units` does for host units, so the live agent had to
+be booted out by hand. That gap is real and is not closed here.
+
+#### Review round 2 — the prune had to learn that a torn DECLARATION is not a teardown
+
+Review found the shape above could delete, not refuse, on a torn input, and it
+was right. **A missing or empty package-owned `system.yaml` made
+`_load_system_defaults()` return `{}` silently** — no exception, no log — so
+`merged_defaults["jobs"]` went empty for any fleet without fleet-level
+`defaults.jobs` of its own (the common case) while that fleet's own
+`system_defaults.timers` was still `true`. `compose_fleet_timers` read the empty
+set as "this fleet composes no job timers" and the new prune deleted every
+already-composed job unit for it. Reproduced end to end through the real
+`load_fleet` → `compose_fleet_timers` with no exception raised anywhere, on
+**both** call sites — the review found the early-return one; the write path
+reaches it too whenever briefing or sweep keeps the function past that branch.
+
+**The route is live rather than theoretical: a built wheel shipped no
+`system.yaml` at all.** It was never listed in `package-data`, so every
+non-editable install would have hit exactly this state on its first generate.
+That is fixed here too, and pinned.
+
+**The existing guard could not have caught it, which is the instructive part.**
+`len(composed) < n_expected` compares two numbers that both derive from the
+merged job set; empty that set and `n_expected` is `0`, which is the documented
+signature of a legitimate full removal. A guard cannot discriminate a torn input
+using only values derived from that input.
+
+- **Source** — `_load_system_defaults` now REFUSES rather than returning `{}`.
+  This file is package-owned, not operator config: there is no install in which
+  "no system defaults" is a legitimate answer, and everything downstream (jobs,
+  hooks, host jobs, boot policy) was degrading silently, not just timers.
+  Loudness mirrors `_resolve_system_yaml`'s existing `RuntimeError` for the
+  adjacent stale-rename case — the rarer failure was already loud while the
+  likelier one was silent. The LOCATOR keeps returning `None` (one caller
+  legitimately asks "is there one?"); it is the LOADER that must not hand back
+  a void dressed as data. Nothing is cached on refusal, so a repaired install
+  works on the next call.
+- **Door** — the prune takes `declaration_torn`, computed from the one fact that
+  does *not* come from the merged set: the fleet's own manifest still asking for
+  these timers. It is not redundant with the source fix — it holds however the
+  data got torn, including routes not yet known — and a real teardown says so at
+  the source (`system_defaults: false`, or `timers: false`), where the flag is
+  already False and this is False with it. Both spellings are driven as positive
+  controls, because they switch off different fields and a guard reading either
+  one alone would pass one case while deleting nothing in the other.
+  The refusal lives inside `_prune_stale_units` rather than one frame up: a
+  refusal is a guard, a warning and a `return []`, and a second hand-typed copy
+  of that shape is the drift that function was extracted to retire.
+  It also reads the merged job set rather than the local `timers`, which has
+  already had the leaf-manager-gated jobs stripped — swapping the two passes
+  every other test today (only `manager-checkin` is gated, so the filtered set
+  cannot reach empty), and is pinned by a test that builds the roster where it
+  can, because an inert mutant leaves nothing recording why the line is written
+  that way.
+- **Blast radius** — `_load_system_defaults` is now called only when the fleet
+  actually consumes it. Refusing in the loader is right; calling it
+  unconditionally was not: `load_fleet` also backs `status`, `validate` and
+  `diff`, so a fleet that declared `system_defaults: false` — wanting nothing
+  from the file — was failing on it, taking the diagnostic commands down on
+  exactly the broken-install host an operator runs them to diagnose. Verified
+  both ways through the real CLI. The host-scoped readers (`load_host_jobs`,
+  `load_host_boot`) keep asking unconditionally, and that is pinned too: no
+  fleet flag opts a HOST out of its own platform equipment.
+- **A present but unreadable file** gets the same named refusal. The first cut
+  left a bare `path.open()`, so a permissions or YAML-syntax failure was the one
+  torn read that escaped as an unwrapped `OSError` with none of the guidance the
+  other branches give.
+
+#### Review round 3 — what a fleet owns in its timers dir, and how many units it declares
+
+- **Ownership** — the prune claims only `<prefix>.<job>` with the job ONE dotless
+  segment. A bare `<prefix>.` match read `com.review.child.*` (a fleet whose
+  prefix extends this one, its briefing family included) as `com.review`'s
+  retired jobs. No shipped layout shares a timers dir between fleets
+  (`Paths.runtime` is per overlay fleet, and root mode holds one fleet), so this
+  closes a deletion whose safety rested on that layout alone.
+- **Declared count** — counted as unit basenames, not declarations. A defaults
+  job named `code-audit-sweep` plus an enabled `fleet.sweep` write one file, so
+  every complete compose read as PARTIAL (9 of 10) and the prune never ran.
 
 ### Fixed — a unit that fails every start read as "boot in flight" forever, so a 23 h outage paged no one (#1769)
 

@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import constructed_env, plane_emit_env, read_fleet_events
+
 REPO = Path(__file__).resolve().parent.parent
 GUARD = REPO / "lib" / "vault-git-guard.sh"
 
@@ -133,6 +135,52 @@ class TestTheHookEndToEnd:
         _, out = _run({"tool_name": "Bash", "cwd": vault,
                        "tool_input": {"command": "ls -la"}}, vault)
         assert _decision(out) is None
+
+
+# --- the decision is recorded as data ---------------------------------------
+
+class TestTheDecisionIsRecordedAsData:
+    """A denial the plane can be asked about (#1909). The event door is
+    `<type> <source> <data_json>`, and the guard handed it the detail as the
+    SOURCE, so every row read `source: "checkout"` with `data: {}`: a reader
+    filtering by script found none of them, and the verb the guard exists to
+    count sat in a field no reader treats as data.
+
+    Read back from the plane the real door writes, under a throwaway root. The
+    detail carries a double quote, so a JSON string built by hand breaks here
+    where jq's does not.
+    """
+
+    def test_the_source_is_the_script_and_the_detail_is_data(self, tree, tmp_path):
+        vault, _ = tree
+        root = tmp_path / "root"
+        bot = root / "runtime" / "bots" / "tbot"
+        bot.mkdir(parents=True)
+        env = constructed_env(
+            HOME=tmp_path / "home",
+            CLAUDLOBBY_ROOT=root,
+            FLEET_NAME="testfleet",
+            BOT_ID="tbot",
+            BOT_DIR=bot,
+            CLAUDRON_VAULT_PATH=vault,
+            # A cold emit with no daemon; a loaded host can outrun the 10s
+            # production bound and reap the row this test reads.
+            FLEET_EVENT_EMIT_TIMEOUT_S="120",
+            **plane_emit_env(),
+        )
+        cmd = "git '--some\"flag' checkout main"
+        verdict, detail = D.decide(cmd, vault, vault)
+        assert (verdict, '"' in detail) == ("deny", True), detail
+        p = subprocess.run(["bash", str(GUARD)], env=env, capture_output=True,
+                           text=True, timeout=300,
+                           input=json.dumps({"tool_name": "Bash", "cwd": vault,
+                                             "tool_input": {"command": cmd}}))
+        assert _decision(p.stdout) == "deny", p.stderr
+        rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
+        denied = [r for r in rows if r["type"] == "vault_guard_denied"]
+        assert len(denied) == 1, (rows, p.stderr)
+        assert denied[0]["source"] == "vault-git-guard", denied[0]
+        assert denied[0]["data"] == {"detail": detail}, denied[0]
 
 
 # --- the decision rule, unit level ------------------------------------------
