@@ -98,6 +98,29 @@ def staged_dir(root: Path) -> Path:
     is there, so an older daemon, which never made it, gets none."""
     return Path(root) / "state" / "plane" / "staged"
 
+
+# A stage killed between its write and its rename leaves `.<event id>.tmp`,
+# and until #1657's follow-up nothing read one: measured on the Pi, 21 in two
+# days, none of their events on the plane, each written a few seconds before a
+# counted 10 s reap (plane_emit_bounded kills a stage stuck in its fsync). The
+# file is a finished batch with pre-minted ids, so it is replayed like a staged
+# one, never deleted. Only once it is this old: a younger one may still be
+# inside its stager's fsync, and every stager is reaped long before an hour.
+STAGED_ORPHAN_AGE_S = 3600.0
+
+
+def _orphaned_stages(entries: list) -> list:
+    cutoff = time.time() - STAGED_ORPHAN_AGE_S
+    out = []
+    for p in entries:
+        if p.name.startswith(".") and p.name.endswith(".tmp"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    out.append(p)
+            except OSError:
+                pass    # renamed or removed since the listing: not an orphan
+    return sorted(out)
+
 # Process exit code for the stale-daemon exit (#1485). 4 rather than a fresh
 # number: `downgrade -> 4` is already the taxonomy's, on the CLI's exits and
 # in the wire protocol above, so the daemon's own exit says the same thing in
@@ -376,7 +399,9 @@ class PlaneDaemon:
         try:
             if not sd.is_dir():
                 _mkdir_fsynced(sd, 0o700)   # the handshake the client stages on
-            batches = sorted(p for p in sd.iterdir() if p.name.endswith(".batch"))
+            entries = list(sd.iterdir())
+            batches = sorted(p for p in entries if p.name.endswith(".batch"))
+            batches += _orphaned_stages(entries)
         except OSError:
             return                          # a broken root: the cold rung keeps recording
         for f in batches:
@@ -387,7 +412,9 @@ class PlaneDaemon:
                 raise self._downgrade_exit(exc) from None
             except (ValueError, KeyError, TypeError) as exc:  # ContractViolation is a ValueError
                 why = "contract violation" if isinstance(exc, ContractViolation) else "malformed batch"
-                quarantine_entry(self.root, f, f"{why} on replay: {exc}", as_name=f.stem + ".json")
+                # lstrip: an orphan's name is a dotfile, which a listing hides
+                quarantine_entry(self.root, f, f"{why} on replay: {exc}",
+                                 as_name=f.stem.lstrip(".") + ".json")
                 continue
             except Exception as exc:  # noqa: BLE001 — disclosed; kept for a later tick
                 print(f"plane-daemon: staged replay failed ({f.name}): {exc}",
@@ -395,7 +422,7 @@ class PlaneDaemon:
                 self._next_replay = time.monotonic() + 30.0
                 return
             self.writer.after_batch()
-            f.unlink()
+            f.unlink(missing_ok=True)       # an orphan's stager may have renamed it after all
 
     # -- request handling ---------------------------------------------------
     def _handle(self, conn: socket.socket) -> bool:

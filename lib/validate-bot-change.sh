@@ -419,6 +419,9 @@ cleanup() {
     # kill would leak it until reboot. Trap-owned teardown, same rule as the
     # boot probe above: the trap and ONLY the trap guarantees it.
     if [ -n "${PL_DPID:-}" ]; then
+        # CONT first: the #1693 legs stop it, and a stopped process holds a
+        # SIGTERM until it runs again.
+        kill -CONT "$PL_DPID" 2>/dev/null || true
         kill "$PL_DPID" 2>/dev/null || true
     fi
     # Same rule for the #1485 fake stale daemon: a plain background python
@@ -3672,12 +3675,21 @@ else
     harness_check "  ...via rung 1 (no fallback disclosure on stderr)" "$r"
 
     kill "$PL_DPID" 2>/dev/null || true; wait "$PL_DPID" 2>/dev/null || true
+    # A leg-one miss (#1693: a freshly started daemon can answer late on a
+    # loaded host) arms the marker, and this leg would then take the cooldown
+    # path, which never says "falling back": the check would test the
+    # cooldown while claiming the fallback. Cleared as before leg four.
+    rm -f "$PL_ROOT/state/plane/.socket-wedged"
     _pl_dispatch "PLANE_EMIT_ENABLED=0" "leg two: daemon down" >/dev/null && r=yes || r=no
     harness_check "dispatch still succeeds with the daemon DEAD (and PLANE_EMIT_ENABLED=0 is ignored)" "$r"
     [ "$(_pl_count)" = "2" ] && r=yes || r=no
     harness_check "the row still landed (cold-CLI rung)" "$r"
     grep -q "falling back" "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...and the fallback was DISCLOSED, not silent" "$r"
+    tail -1 "$PL_ROOT/state/plane/.socket-arms" 2>/dev/null \
+        | awk -F'\t' '$2 == "door" && $5 == "bot:vbc-fleet/vbc" && $6 == "unreachable" { ok = 1 } END { exit !ok }' \
+        && r=yes || r=no
+    harness_check "  ...and the arm log names who armed the marker: the door, the bot, a dead socket (#1693)" "$r"
 
     _pl_dispatch "PLANE_EMIT_DISABLED=1" "leg three: disabled" >/dev/null && r=yes || r=no
     harness_check "PLANE_EMIT_DISABLED dispatch succeeds" "$r"
@@ -3732,6 +3744,87 @@ PLPY
     harness_check "  ...naming the stale daemon rather than a dead socket" "$r"
     kill "$PL_STALE_PID" 2>/dev/null || true; wait "$PL_STALE_PID" 2>/dev/null || true
     PL_STALE_PID=""
+    rm -f "$PL_SOCK" "$PL_SOCK.ready" "$PL_ROOT/state/plane/.socket-wedged"
+
+    # -- #1693: the socket deadline follows the caller's class ---------------
+    # A REAL daemon, stopped (SIGSTOP) while the dispatch door's first
+    # emission waits on it: the late answer the Pi's SD card gives. The stall
+    # starts before the door runs and ends 1.5 s after the door's socket
+    # client appears, so the client has waited that long whatever load did to
+    # the door's own start. With no knob the door keeps today's 1.0 s: it
+    # misses, falls to the cold rung, arms the marker, and the arm log names
+    # it. With its class knob at 6 s it waits, and the socket records it
+    # (6, not 4: the Pi's SD card has stalled past 3 s on its own).
+    PL_ARMS="$PL_ROOT/state/plane/.socket-arms"
+    "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
+        >> "$PL_ROOT/daemon.log" 2>&1 &
+    PL_DPID=$!
+    _pl_i=0
+    while [ "$_pl_i" -lt 100 ] && [ ! -S "$PL_SOCK" ]; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
+    [ -S "$PL_SOCK" ] && r=yes || r=no
+    harness_check "#1693 a fresh daemon binds for the stall legs" "$r"
+    _pl_stalled() {  # $1 = extra env assignments, $2 = task text
+        local _d _i=0
+        rm -f "$PL_ROOT/state/plane/.socket-wedged"
+        kill -STOP "$PL_DPID" 2>/dev/null || true
+        _pl_dispatch "$1" "$2" >/dev/null &
+        _d=$!
+        while [ "$_i" -lt 200 ] && ! pgrep -f "plane-socket-client.py --socket $PL_SOCK" >/dev/null 2>&1; do
+            sleep 0.05; _i=$((_i + 1))
+        done
+        sleep 1.5
+        kill -CONT "$PL_DPID" 2>/dev/null || true
+        wait "$_d"
+    }
+    _pl_arms() { if [ -f "$PL_ARMS" ]; then wc -l < "$PL_ARMS" | tr -d ' '; else echo 0; fi; }
+
+    _pl_before=$(_pl_count)
+    _pl_stalled "" "leg five: a stalled daemon, no knob" && r=yes || r=no
+    harness_check "#1693 a dispatch succeeds against a daemon stalled 1.5 s" "$r"
+    [ "$(_pl_count)" = "$((_pl_before + 1))" ] && r=yes || r=no
+    harness_check "  ...and its row LANDED once (the late socket commit is a duplicate)" "$r"
+    grep -q "falling back to cold CLI" "$PL_ROOT/err" && r=yes || r=no
+    harness_check "  ...with no knob the door kept today's 1.0 s: it missed and fell back" "$r"
+    [ -f "$PL_ROOT/state/plane/.socket-wedged" ] && r=yes || r=no
+    harness_check "  ...and the miss ARMED the marker" "$r"
+    tail -1 "$PL_ARMS" 2>/dev/null \
+        | awk -F'\t' '$2 == "door" && $3 == "1.0" && $5 == "bot:vbc-fleet/vbc" && $6 == "timeout" { ok = 1 } END { exit !ok }' \
+        && r=yes || r=no
+    harness_check "  ...and the arm log names it: the door, 1.0 s, the bot, a timeout" "$r"
+
+    _pl_before=$(_pl_count)
+    _pl_arms_before=$(_pl_arms)
+    _pl_stalled "PLANE_SOCKET_DEADLINE_DOOR_S=6" "leg six: a stalled daemon, door knob 6 s" && r=yes || r=no
+    harness_check "#1693 with PLANE_SOCKET_DEADLINE_DOOR_S=6 the same dispatch succeeds" "$r"
+    [ "$(_pl_count)" = "$((_pl_before + 1))" ] && r=yes || r=no
+    harness_check "  ...and its row LANDED" "$r"
+    grep -qE "falling back|wedge cooldown" "$PL_ROOT/err" && r=no || r=yes
+    harness_check "  ...through the socket: it waited out the stall, no fallback" "$r"
+    [ -f "$PL_ROOT/state/plane/.socket-wedged" ] && r=no || r=yes
+    harness_check "  ...and armed nothing" "$r"
+    [ "$(_pl_arms)" = "$_pl_arms_before" ] && r=yes || r=no
+    harness_check "  ...and wrote no arm record" "$r"
+
+    # -- #1657: the daemon replays a stage killed before its rename ----------
+    # What the 10 s reaper leaves when it kills a stage inside its fsync: a
+    # finished one-event batch under its temp name. Past the orphan age the
+    # daemon replays it; before this it read only *.batch and the event was
+    # lost (21 on the Pi in two days).
+    _pl_ev=$(plane_mint_id ev)
+    _pl_orphan="$PL_ROOT/state/plane/staged/.$_pl_ev.tmp"
+    mkdir -p "$PL_ROOT/state/plane/staged"
+    printf '{"events": [{"event_id": "%s", "event_type": "communication", "emitter": "vbc-orphan", "fleet": "vbc-fleet", "payload": {"msg_id": "%s", "sender": "bot:vbc-fleet/vbc", "message_class": "notice", "body": "an orphaned stage", "privacy": "full"}}]}\n' \
+        "$_pl_ev" "$(plane_mint_id msg)" > "$_pl_orphan"
+    val_backdate "$_pl_orphan" 7200
+    _pl_orph=$(val_poll 100 0.2 val_sql "$PL_ROOT" "SELECT COUNT(*) FROM communications WHERE event_id = '$_pl_ev'")
+    [ "${_pl_orph:-0}" = "1" ] && r=yes || r=no
+    harness_check "#1657 an orphaned stage two hours old is REPLAYED into the plane, not lost" "$r"
+    [ -e "$_pl_orphan" ] && r=no || r=yes
+    harness_check "  ...and its temp file is gone" "$r"
+
+    kill -CONT "$PL_DPID" 2>/dev/null || true
+    kill "$PL_DPID" 2>/dev/null || true; wait "$PL_DPID" 2>/dev/null || true
+    PL_DPID=""
     rm -f "$PL_SOCK" "$PL_SOCK.ready" "$PL_ROOT/state/plane/.socket-wedged"
 
     # -- keepalive presence door (chunk: keepalive-as-a-door) ---------------

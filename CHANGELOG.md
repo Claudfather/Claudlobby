@@ -6,6 +6,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the plane socket deadline follows who waits, behind knobs that default to today's 1.0 s (#1693); a stage killed before its rename is replayed, not lost (#1657)
+
+The socket client gave every caller one 1.0 s total deadline, and on the Pi's
+SD card an ordinary commit can take longer. The 2026-09-28 traced window on
+#1693 found every remaining wedge arm was SD-card I/O, and 14 of the 29
+clients that missed were waiting through a plain commit, not a checkpoint.
+Each miss arms the host-wide marker, which sends every door on the host to the
+cold rung for 60 s. The deadline is the one lever that covers both halves.
+
+- **A caller names its class** in `PLANE_EMIT_CLASS`: `hook` (a live Claude
+  Code turn waits: bot-vitals twice per tool call, the Telegram and dispatch
+  hooks, the Stop relay, the vault guard), `background` (nothing reads the
+  result: keepalive, the host probe, tg-post, briefing-trigger, vault-sync,
+  transcript-digest, and every `emit_fleet_event` outside a hook, which
+  `plane_emit_bounded` defaults to it) or `door` (the outcome turns on the
+  result: task-act, checkin-record and workstream-update refuse on a non-zero
+  rc; dispatch-task and report-back disclose it). Each caller sets it once,
+  un-exported, and `plane_emit_events` and `plane_emit_bounded` forward it to
+  the shim, so nothing else a script runs inherits it.
+  `tests/test_plane_emit_class.py` pins the table and fails any new caller
+  that does not choose.
+- **`PLANE_SOCKET_DEADLINE_HOOK_S`, `_BACKGROUND_S` and `_DOOR_S` set a
+  class's deadline, and all three are unset by default: today's 1.0 s.** `lib/`
+  is read on demand, so a root pull reaches every bot at once; a knob in one
+  bot's `fleet.yaml` `env:` is how a value is tried on one bot first. A value
+  the client would refuse (not plain seconds, zero, 3600 or more) is named on
+  stderr and ignored, never passed on: the client's refusal is rc 2, a
+  verdict, and the record would be dropped with no fallback on every emission,
+  from a typo. An unknown class is named too.
+- **The arm log, `state/plane/.socket-arms`.** The marker holds only a time,
+  so arms could be counted per host and never per caller, and a one-bot
+  canary is invisible in a host count. The shim now passes `--arm-log`, and
+  every exit 5 from a socket attempt appends
+  `<epoch> <class> <deadline s> <elapsed ms> <caller> <cause>`, the cause one
+  of `timeout`, `unreachable`, `downgrade`, `code:<x>` or an exception's
+  name. Kept 7 days and rewritten about daily. The client's own
+  between-operations deadline check now raises `TimeoutError`, so it is
+  recorded as a timeout rather than as `OSError`.
+- **#1657: the daemon replays `.<event id>.tmp` files more than an hour old**
+  from `state/plane/staged/`, through the same `emit_batch()` as a staged
+  batch. Each is a finished batch with pre-minted ids, so replaying one that
+  did land is a duplicate, never a second row. Measured on the Pi: 21 such
+  files in two days, none of their events on the plane, and each of the 10
+  inside `.emit-losses`' 24 h window written 1.6 to 10.5 s before a counted
+  `emit_fleet_event` reap: `plane_emit_bounded` kills a cooldown stage that is
+  stuck in its fsync. One that is not a batch is quarantined, under a name a
+  listing shows.
+- `validate-bot-change.sh`'s plane leg now stalls a real daemon (SIGSTOP)
+  under the dispatch door. With no knob it misses, falls back and arms, and
+  the arm log names it; with `PLANE_SOCKET_DEADLINE_DOOR_S=6` the socket
+  records it. The leg also replays an orphaned stage on a real daemon, and it
+  clears the marker before leg two, where a leg-one miss used to send that leg
+  down the cooldown path.
+
 ### Fixed — a flaky test is quarantined, never deselected, and the last live flake #1945 named is fixed (#1947)
 
 CI's lanes are chosen by marker, and each test runs in exactly one of them

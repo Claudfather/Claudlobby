@@ -22,6 +22,7 @@
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLANE_EMIT_CLASS=door   # this door's outcome turns on its plane record: its socket deadline (#1693, lib/plane-emit.sh)
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""

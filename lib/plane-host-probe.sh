@@ -23,6 +23,7 @@
 set -uo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLANE_EMIT_CLASS=background   # nothing reads its plane record's result: its socket deadline (#1693, lib/plane-emit.sh)
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 set +e   # lib-common re-arms set -e; a probe must never die mid-run
