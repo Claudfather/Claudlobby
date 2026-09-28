@@ -16,16 +16,13 @@ import re
 import os
 import shutil
 import subprocess
-import sys
 import time
-from pathlib import Path
 
 import pytest
 
 from tests.plane_fixtures import F, REPO, _live_dispatch, _scene, ro
 
 LIB = REPO / "lib"
-CLI = Path(sys.executable).parent / "claudlobby"
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="fleet-pulse needs tmux")
 PAGE = "FLEET ALERT: session_missing on 2 bots (w1 w2)."
 
@@ -207,7 +204,9 @@ def _second_fleet_beside(root):
 
 
 @needs_tmux
-def test_two_fleets_passes_at_once_never_read_or_delete_each_others_window(tmp_path):
+def test_two_fleets_passes_at_once_never_read_or_delete_each_others_window(
+    tmp_path, *, scratch_plane_env
+):
     """`state/pulse` is HOST-GLOBAL and every fleet's pulse timer fires in the
     same second, so passes overlap as a matter of routine. The critical-window
     cache once sat at one fixed path there: a sibling's write landing inside
@@ -221,9 +220,8 @@ def test_two_fleets_passes_at_once_never_read_or_delete_each_others_window(tmp_p
     f's pass ended is the pin that f's cleanup never deleted g's."""
     root, paths = _two_dead_bots(tmp_path)
     _second_fleet_beside(root)
-    env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F,
-           "PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_CLI": str(CLI),
-           "PLANE_SOCKET": str(root / "no-daemon.sock"), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    env = {**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": F,
+           "PLANE_EMIT_ENABLED": "1", "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
     for b in ("w1", "w2"):
         seed = subprocess.run(
             ["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event bridge_down pulse "{{}}" "{paths.runtime_bots / b}" {b}'],
@@ -237,7 +235,8 @@ def test_two_fleets_passes_at_once_never_read_or_delete_each_others_window(tmp_p
     (libdir / "tg-post.sh").write_text(_INTERLEAVE_STUB.format(capture=capture, lib=libdir, sync=sync))
     try:
         # a cold emit reaped under two concurrent passes would starve g of its rows
-        r_f = _pulse(root, libdir, FLEET_EVENT_EMIT_TIMEOUT_S="120")
+        r_f = _pulse(root, libdir, FLEET_EVENT_EMIT_TIMEOUT_S="120",
+                     scratch_plane_env=scratch_plane_env)
     finally:
         (sync / "f.done").touch()
     deadline = time.monotonic() + 300
