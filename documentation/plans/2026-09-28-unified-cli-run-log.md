@@ -310,3 +310,48 @@ await hosted execution because local Pydantic native loading stalls. AST checks
 are syntax evidence only. Cold bootstrap coordination is still being integrated,
 including durable Linux enablement. No new public task API, production change,
 actual-agent canary, upgrade/recovery acceptance or Pi latency result is claimed.
+
+## Integration checkpoint — 2026-09-28 08:53 UTC
+
+**Measured:** #1932 at `d8706d16` passed 6,138 tests, with 12 skipped and
+three warnings ([Linux job](https://github.com/Claudfather/Claudlobby/actions/runs/36396017194/job/108842476433)).
+#1933 at `e2390a67` passed 6,141 tests on Python 3.11; Python 3.10 had one
+fixture failure assuming `sqlite_errorcode` exists. Its Mac run stopped at the
+20-failure limit (18 failed, two errors, 4,296 passed, 33 skipped), exposing
+platform-specific fixture assumptions and an unbounded version probe.
+
+**Measured:** #1934 at `783f7c92` remains RED:
+[Linux 3.11](https://github.com/Claudfather/Claudlobby/actions/runs/36397351950/job/108846781273)
+had one failure, 6,282 passed and 15 skipped;
+[Linux 3.10](https://github.com/Claudfather/Claudlobby/actions/runs/36397351950/job/108846781578)
+had two failures, 6,281 passed and 15 skipped. Both had four warnings. The
+new committed task/fact and controlled-drain cases ran; the drain case found a
+real defect: a file at a queue directory path was classified as empty. Queue
+inventory now refuses wrong/redirected nodes without changing generic source
+reader semantics. The additional Python 3.10 assertion is corrected.
+The [Mac run](https://github.com/Claudfather/Claudlobby/actions/runs/36397351950/job/108846781535)
+stopped with 18 failed, two errors, 4,370 passed and 33 skipped; later cases did
+not run. Repairs select Linux explicitly for systemd fixtures, use a short
+private tmux socket path, avoid duplicate process-group kills, and exercise
+mktemp failures without assuming GNU behavior. CI now supplies GNU timeout on
+macOS; version measurement refuses if no bounded runner exists. Reverification
+on the next integrated head is required.
+
+**Read from code:** cold bootstrap now orders empty-host proof, migration,
+selection, journaled configuration/unit publication, ingest readiness, committed
+registry seeding, exact identity binding, serial manager/worker startup and
+producer enablement. It is an internal cold-only coordinator, not upgrade or
+recovery support. Linux persistent enablement uses owned journaled links.
+Task withdrawal/reassignment and linked assignment reports reuse the same
+request/task locks and atomic ingest. Reports freeze manager/message IDs and
+leave notification pending. The shared report reader preserves typed repeated
+evidence and explicit capture states. No public message/task cutover has landed.
+
+**Measured local limits:** 46 bootstrap/configuration/migration collaborator
+checks passed; 11 registry controls passed with an explicit emit collaborator;
+8 linked-report/codec checks passed; 10 report-reader/codec checks passed using
+real SQLite but no ingest; 24 queue/source-state checks passed. These overlapping
+selections are not additive. One native mktemp control passed before the
+next owned stub stalled; the bounded runner reaped it. No local fallback-rescue
+or full native-suite pass is claimed. New real-ingest report/registry and actual
+native activation acceptance remain hosted/canary work.
