@@ -26,6 +26,7 @@ import shlex
 import signal
 import stat
 import subprocess
+import sys
 
 from .resources import PackageResources, get_resources
 
@@ -83,6 +84,10 @@ class Adapter:
         env.pop("BASH_ENV", None)
         env.pop("ENV", None)
         env["LC_ALL"] = "C"
+        # The installed CLI's sys.executable is its release-owned interpreter.
+        # Native stdlib readers must not select an unrelated python3 from PATH.
+        # Preserve the exact venv spelling; an invalid binding must fail closed.
+        env["CLAUDLOBBY_NATIVE_PYTHON"] = sys.executable
         # Functions inherited through the environment must not replace uname or
         # the actual manager. Tests use the explicit runner seam instead.
         env = {key: value for key, value in env.items() if not key.startswith("BASH_FUNC_")}

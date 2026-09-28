@@ -10,13 +10,41 @@ import subprocess
 
 import pytest
 
+from claudlobby import supervision_inventory as inventory
 from claudlobby.supervision_inventory import (
-    Adapter, InventoryError, UnitDeclaration, _darwin_disabled, _darwin_print, collect_enrollment,
+    Adapter, InventoryError, UnitDeclaration, _darwin_disabled, collect_enrollment,
 )
 from tests.package_fixtures import source_package
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_selected_adapter_ownership_uses_its_interpreter_not_path_python(tmp_path, monkeypatch):
+    bot = tmp_path / "bot"
+    bot.mkdir()
+    unit = tmp_path / "private.plist"
+    unit.write_bytes(plistlib.dumps({"Label": "private", "WorkingDirectory": str(bot)}))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invoked = tmp_path / "ambient-python-invoked"
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(f"#!/bin/sh\ntouch '{invoked}'\nexit 88\n")
+    fake_python.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    adapter = Adapter(source_package())
+
+    assert adapter.call("svc_bot_unit_owned_by", unit, bot).returncode == 0
+    other = tmp_path / "other"
+    other.mkdir()
+    assert adapter.call("svc_bot_unit_owned_by", unit, other).returncode == 1
+    assert not invoked.exists()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(inventory.sys, "executable", str(tmp_path / "missing-selected-python"))
+        result = adapter.call("svc_bot_unit_owned_by", unit, bot)
+    assert result.returncode == 3
+    assert not invoked.exists()
 
 
 def observed_print(target, source, installed, *, active=True, calendar=False):

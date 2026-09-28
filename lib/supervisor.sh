@@ -90,8 +90,9 @@ esac
 # and reads WorkingDirectory; no unit content is sourced or executed.
 svc_bot_unit_owned_by() {
     local unit="${1:?unit file required}" bot_dir="${2:?bot directory required}" rc=0 output=""
-    if command -v python3 >/dev/null 2>&1; then
-        output="$(python3 "$_SUPERVISOR_LIB_DIR/bot-unit-owner.py" "$unit" "$bot_dir" 2>&1)" || rc=$?
+    local python="${CLAUDLOBBY_NATIVE_PYTHON-python3}"
+    if command -v "$python" >/dev/null 2>&1; then
+        output="$("$python" "$_SUPERVISOR_LIB_DIR/bot-unit-owner.py" "$unit" "$bot_dir" 2>&1)" || rc=$?
         # The reader has no output protocol. A traceback from a failed reader
         # must not be mistaken for its rc 1 (a known foreign owner).
         if [ -z "$output" ]; then
@@ -612,18 +613,19 @@ svc_activation_snapshot() {
 # Kernel ancestry/control-group data only: never BOT_SERVICE/env or argv text.
 svc_activation_assert_external() {
     local file="$1" target="$2" caller="${3:-$$}" rc=0
+    local python="${CLAUDLOBBY_NATIVE_PYTHON-python3}"
     _svc_activation_read "$file" "$target" || { _svc_activation_unknown "$target state/domain"; return 3; }
     case "$_OS" in
         Linux)
             if [ -n "$SVC_ACT_GROUP" ]; then
-                python3 "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" cgroup "$caller" "$SVC_ACT_GROUP" || rc=$?
+                "$python" "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" cgroup "$caller" "$SVC_ACT_GROUP" || rc=$?
             elif [ "$SVC_ACT_ACTIVE" = active ] && [ "${target##*.}" = service ]; then rc=3
             fi
             ;;
         Darwin)
             # A detached/reparented child can lack the target's current PID in
             # its chain. Prove a different loaded job owns the chain, or block.
-            python3 "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" launchd "$caller" "$SVC_ACT_PID:$SVC_ACT_JOB_PIDS" || rc=$?
+            "$python" "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" launchd "$caller" "$SVC_ACT_PID:$SVC_ACT_JOB_PIDS" || rc=$?
             ;;
         *) rc=3 ;;
     esac
