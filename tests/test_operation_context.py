@@ -10,6 +10,7 @@ import pytest
 from claudlobby.operation_context import (
     OperationContextError, OperationContextUnavailableError,
     canonical_task_provenance_alias, resolve_task_context, resolve_task_mutation_context,
+    resolve_operation_scope,
 )
 from claudlobby.active_config import context_from_plan
 from claudlobby.config_plan import ConfigPlanBuilder
@@ -95,6 +96,25 @@ def _generated(monkeypatch, root):
 def _tree(root):
     return {str(p.relative_to(root)): (p.read_bytes(), p.stat().st_mode)
             for p in root.rglob("*") if p.is_file()}
+
+
+def test_generated_fleet_timer_binds_scope_without_inventing_bot_origin(estate, monkeypatch):
+    root, _, _ = estate
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
+    monkeypatch.setenv("CLAUDLOBBY_FLEET", "origin")
+    monkeypatch.setenv("FLEET_ROOT", str(root / "local/origin"))
+    selected, origin = resolve_operation_scope(root=root, fleet="origin", package=source_package())
+    assert selected.fleet.name == "origin" and origin is None
+    for bad in ("", str(root / "local/target")):
+        monkeypatch.setenv("FLEET_ROOT", bad)
+        with pytest.raises(OperationContextError, match="FLEET_ROOT"):
+            resolve_operation_scope(root=root, fleet="origin", package=source_package())
+    monkeypatch.setenv("FLEET_ROOT", str(root / "local/origin"))
+    with pytest.raises(OperationContextError, match="carrier conflicts"):
+        resolve_operation_scope(root=root, fleet="target", package=source_package())
+    monkeypatch.setenv("BOT_DIR", str(root / "local/origin/runtime/bots/worker"))
+    with pytest.raises(OperationContextError, match="generated bot paths"):
+        resolve_operation_scope(root=root, fleet="origin", package=source_package())
 
 
 def test_cross_fleet_destination_preserves_frozen_origin_without_writes(estate, monkeypatch):

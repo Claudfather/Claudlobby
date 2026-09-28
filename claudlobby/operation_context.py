@@ -194,8 +194,26 @@ def _selected_task_contexts(*, root: Path | None, fleet: str | None,
             if key in os.environ and (not os.environ[key].strip()
                     or Path(os.environ[key]).expanduser().resolve() != expected.resolve()):
                 raise OperationContextError(f"generated {key} conflicts with caller origin")
-    elif "BOT_DIR" in os.environ or "FLEET_ROOT" in os.environ:
+    elif "BOT_DIR" in os.environ:
         raise OperationContextError("generated bot paths have no caller identity")
+    elif "FLEET_ROOT" in os.environ:
+        # A generated fleet timer has a fleet/root carrier but no bot actor.
+        # Bind that carrier to its recorded active fleet before selecting the
+        # destination; it cannot claim a different fleet through CLI flags.
+        if not origin_fleet or not os.environ.get("CLAUDLOBBY_ROOT", "").strip():
+            raise OperationContextError("generated fleet path requires its own root and fleet")
+        fleet_origin = resolve_active_context(root=Path(os.environ["CLAUDLOBBY_ROOT"]),
+                                              fleet=origin_fleet, package=package)
+        declared = os.environ["FLEET_ROOT"]
+        if (not declared.strip() or Path(declared).expanduser().resolve()
+                != fleet_origin.paths.fleet_config_dir.resolve()):
+            raise OperationContextError("generated FLEET_ROOT conflicts with caller fleet")
+        destination = resolve_active_context(root=root, fleet=fleet if fleet is not None else origin_fleet,
+                                             package=package)
+        if (destination.paths.root != fleet_origin.paths.root
+                or destination.fleet.name != fleet_origin.fleet.name):
+            raise OperationContextError("generated fleet carrier conflicts with destination")
+        return destination, None
     destination = resolve_active_context(root=root, fleet=fleet if fleet is not None else origin_fleet,
                                   package=package)
     return destination, origin
