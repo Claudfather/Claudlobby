@@ -64,11 +64,11 @@ def _await(root: Path, sql: str, want, *, timeout=30):
 
 # --- the keepalive tick ------------------------------------------------------------
 
-def test_a_dead_session_restart_lands_as_a_fleet_event_and_no_file_is_written(tmp_path):
+def test_a_dead_session_restart_lands_as_a_fleet_event_and_no_file_is_written(tmp_path, *, scratch_plane_env):
     """The tick under a dead session restarts the bot (the start-bot stub) and
     the RESTART transition is a `keepalive_restart` fleet event on the plane
     with provenance; no keepalive-<day>.jsonl, no fleet-<day>.jsonl (R1)."""
-    libdir, bot, env = _rig(tmp_path, has_session=False)
+    libdir, bot, env = _rig(tmp_path, has_session=False, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     assert (bot / "start-stub.log").exists()                                       # restarted through the stub
@@ -80,8 +80,8 @@ def test_a_dead_session_restart_lands_as_a_fleet_event_and_no_file_is_written(tm
     assert ref.startswith("fleet-events:sha:") and alias == f"bot:{FLEET}/b1" and sev == "notice"
 
 
-def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp_path):
-    libdir, bot, env = _rig(tmp_path)
+def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp_path, *, scratch_plane_env):
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     assert _await(tmp_path, "SELECT COUNT(*) FROM metric_samples WHERE metric = 'bot.heartbeat'", 1) == 1
@@ -92,8 +92,8 @@ def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp
 
 # --- the vitals hook ---------------------------------------------------------------
 
-def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path):
-    libdir, bot, env = _rig(tmp_path)
+def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path, *, scratch_plane_env):
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     (libdir / "bot-vitals.sh").symlink_to(LIB / "bot-vitals.sh")
     env = {**env, "BOT_DIR": str(bot), "BOT_ID": "b1", "FLEET_NAME": FLEET}
     payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": "s-1"})

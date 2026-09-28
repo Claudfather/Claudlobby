@@ -40,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_DIR = REPO_ROOT / "lib"
 
 
-def _run(tmp_path: Path, args: str):
+def _run(tmp_path: Path, args: str, *, scratch_plane_env):
     # The sibling's harness, not a third copy of it. It already takes the one
     # thing that differs — the transport stub — as a parameter, and the copies
     # have a real cost: none of them symlinks `dispatch-supersede-hint.py`, and
@@ -49,7 +49,7 @@ def _run(tmp_path: Path, args: str):
     # stays green while testing less than it appears to.
     libdir, env = _fake_lib(
         tmp_path, f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n'
-    )
+    , scratch_plane_env=scratch_plane_env)
     r = subprocess.run(
         ["bash", "-c", f'"{libdir}/dispatch-task.sh" {args}'],
         capture_output=True,
@@ -64,10 +64,10 @@ def _run(tmp_path: Path, args: str):
 
 
 class TestOnlyTaskMints:
-    def test_task_type_still_mints(self, tmp_path):
+    def test_task_type_still_mints(self, tmp_path, *, scratch_plane_env):
         # The half that must NOT change. Every existing id'd call site routes
         # through here; if this breaks, tracked dispatch is gone.
-        r, row, sent = _run(tmp_path, '--type task w1 "fix the widget"')
+        r, row, sent = _run(tmp_path, '--type task w1 "fix the widget"', scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         assert TASK_ID_RE.match(row["task_id"]), row
         assert f"task:{row['task_id']}" in sent
@@ -75,45 +75,45 @@ class TestOnlyTaskMints:
         counts = plane_construct_counts(tmp_path)
         assert counts == {"communications": 1, "work_items": 1, "assignments": 1}, counts
 
-    def test_query_does_not_mint_but_still_sends_and_still_ledgers(self, tmp_path):
+    def test_query_does_not_mint_but_still_sends_and_still_ledgers(self, tmp_path, *, scratch_plane_env):
         # Three assertions because three things could regress independently:
         # the id must be absent, the message must STILL be delivered, and the
         # row must STILL be written. A fix that stopped minting by dropping the
         # send or the row would pass a weaker test and lose the audit trail.
-        r, row, sent = _run(tmp_path, '--type query w1 "did the sweep run?"')
+        r, row, sent = _run(tmp_path, '--type query w1 "did the sweep run?"', scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         assert row is not None, "a non-task send must still be recorded on the plane"
         assert row["task_id"] == "", row
         assert "did the sweep run?" in sent, "the message must still be delivered"
 
     @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
-    def test_a_control_type_records_the_communication_alone(self, tmp_path, t):
+    def test_a_control_type_records_the_communication_alone(self, tmp_path, t, *, scratch_plane_env):
         # THE #1491 pin: a control type records exactly one communication and
         # NO work_item / assignment. Minting an open assignment for a note that
         # asks nothing was a row no report could close (38 in 14 days on one
         # host) that also blanked the resolver head (#1418). The gate is the
         # TYPE, so all four control verbs are covered, not just `query`.
-        r, _row, sent = _run(tmp_path, f'--type {t} w1 "a peer note"')
+        r, _row, sent = _run(tmp_path, f'--type {t} w1 "a peer note"', scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         assert "a peer note" in sent, "the message must still be delivered"
         counts = plane_construct_counts(tmp_path)
         assert counts == {"communications": 1, "work_items": 0, "assignments": 0}, (t, counts)
 
-    def test_a_non_task_envelope_carries_no_empty_task_field(self, tmp_path):
+    def test_a_non_task_envelope_carries_no_empty_task_field(self, tmp_path, *, scratch_plane_env):
         # An unguarded append emits a bare `| task:` — a field with no value,
         # which reads as a truncated message rather than a deliberate absence,
         # and which a worker would echo back as nothing.
-        _r, _row, sent = _run(tmp_path, '--type query w1 "ping"')
+        _r, _row, sent = _run(tmp_path, '--type query w1 "ping"', scratch_plane_env=scratch_plane_env)
         assert "task:" not in sent, f"empty task field transmitted: {sent!r}"
 
     # Parametrized rather than looped: each case gets its own tmp_path and its
     # own name in the failure summary, which is what the regression-diff recipe
     # in CLAUDE.md actually reads.
     @pytest.mark.parametrize("t", ["cancel", "compact", "restart", "query"])
-    def test_the_type_reaches_the_envelope(self, tmp_path, t):
+    def test_the_type_reaches_the_envelope(self, tmp_path, t, *, scratch_plane_env):
         # Before #1187 the type was hardcoded `task` at the emit site, so every
         # message a manager sent claimed to be a task whatever it was.
-        _r, _row, sent = _run(tmp_path, f'--type {t} w1 "x"')
+        _r, _row, sent = _run(tmp_path, f'--type {t} w1 "x"', scratch_plane_env=scratch_plane_env)
         assert f"| {t} |" in sent, (t, sent)
 
 
@@ -128,24 +128,24 @@ class TestTheDeadlineIsGatedToo:
     to stop minting.
     """
 
-    def test_a_non_task_row_records_no_deadline(self, tmp_path):
-        _r, row, _sent = _run(tmp_path, '--type query w1 "peer note"')
+    def test_a_non_task_row_records_no_deadline(self, tmp_path, *, scratch_plane_env):
+        _r, row, _sent = _run(tmp_path, '--type query w1 "peer note"', scratch_plane_env=scratch_plane_env)
         assert row["expected_by"] is None, row
 
-    def test_a_task_row_still_records_one(self, tmp_path):
-        _r, row, _sent = _run(tmp_path, '--type task w1 "real work"')
+    def test_a_task_row_still_records_one(self, tmp_path, *, scratch_plane_env):
+        _r, row, _sent = _run(tmp_path, '--type task w1 "real work"', scratch_plane_env=scratch_plane_env)
         assert isinstance(row["expected_by"], int), row
 
-    def test_a_raw_text_send_keeps_its_deadline(self, tmp_path):
+    def test_a_raw_text_send_keeps_its_deadline(self, tmp_path, *, scratch_plane_env):
         # The gate is the TYPE, never the emptiness of the id. Raw sends are
         # id-less too but are matched by bot+time on purpose — documented
         # behaviour and a live call pattern, so gating on id-lessness would have
         # silently untracked them.
-        _r, row, _sent = _run(tmp_path, 'w1 "just a note"')
+        _r, row, _sent = _run(tmp_path, 'w1 "just a note"', scratch_plane_env=scratch_plane_env)
         assert row["task_id"] == "", row
         assert isinstance(row["expected_by"], int), row
 
-    def test_the_watchdog_does_not_page_a_non_task_row(self, tmp_path):
+    def test_the_watchdog_does_not_page_a_non_task_row(self, tmp_path, *, scratch_plane_env):
         # End to end through the REAL matcher, because the unit above asserts a
         # field while the harm is an alert. The plane's overdue reader skips an
         # assignment with no deadline; this pins that the two agree — with a
@@ -155,8 +155,8 @@ class TestTheDeadlineIsGatedToo:
         import subprocess as sp
         import time
 
-        _r, note, _sent = _run(tmp_path, '--type query w1 "peer note"')
-        _r, task, _sent = _run(tmp_path, '--type task w1 "real work"')
+        _r, note, _sent = _run(tmp_path, '--type query w1 "peer note"', scratch_plane_env=scratch_plane_env)
+        _r, task, _sent = _run(tmp_path, '--type task w1 "real work"', scratch_plane_env=scratch_plane_env)
         assert note["expected_by"] is None and isinstance(task["expected_by"], int)
         out = sp.run(
             [
@@ -183,8 +183,8 @@ class TestTheDeadlineIsGatedToo:
 class TestNoSilentChangeToExistingCallSites:
     """The constraint dara set: existing id-minting callers must be untouched."""
 
-    def test_botcommand_alone_still_mints(self, tmp_path):
-        r, row, sent = _run(tmp_path, '--botcommand w1 "fix the widget"')
+    def test_botcommand_alone_still_mints(self, tmp_path, *, scratch_plane_env):
+        r, row, sent = _run(tmp_path, '--botcommand w1 "fix the widget"', scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr
         assert TASK_ID_RE.match(row["task_id"]), (
             "--botcommand with no --type must behave exactly as before"
@@ -194,34 +194,34 @@ class TestNoSilentChangeToExistingCallSites:
     @pytest.mark.parametrize(
         "flag", ["--repo r", "--priority high", "--ref http://x", "--workstream w"]
     )
-    def test_envelope_field_flags_still_mint_without_botcommand(self, tmp_path, flag):
-        _r, row, sent = _run(tmp_path, f'{flag} w1 "x"')
+    def test_envelope_field_flags_still_mint_without_botcommand(self, tmp_path, flag, *, scratch_plane_env):
+        _r, row, sent = _run(tmp_path, f'{flag} w1 "x"', scratch_plane_env=scratch_plane_env)
         assert TASK_ID_RE.match(row["task_id"]), (flag, row)
         assert f"task:{row['task_id']}" in sent, flag
 
-    def test_a_raw_text_send_is_still_id_less_and_unenveloped(self, tmp_path):
-        _r, row, sent = _run(tmp_path, 'w1 "just a note"')
+    def test_a_raw_text_send_is_still_id_less_and_unenveloped(self, tmp_path, *, scratch_plane_env):
+        _r, row, sent = _run(tmp_path, 'w1 "just a note"', scratch_plane_env=scratch_plane_env)
         assert row["task_id"] == "", row
         assert "[BOTCOMMAND]" not in sent, sent
 
 
 class TestUnknownTypeFailsLoud:
-    def test_a_typo_is_refused_rather_than_defaulted(self, tmp_path):
+    def test_a_typo_is_refused_rather_than_defaulted(self, tmp_path, *, scratch_plane_env):
         # THE FAILURE THIS FLAG EXISTS TO PREVENT, one layer up. Falling back to
         # `task` would mint a tracked row for a message that asks nothing and
         # give the caller no signal — the exact defect, re-created inside its fix.
-        r, row, sent = _run(tmp_path, '--type quiery w1 "x"')
+        r, row, sent = _run(tmp_path, '--type quiery w1 "x"', scratch_plane_env=scratch_plane_env)
         assert r.returncode != 0, "unknown type must not be accepted"
         assert "unknown --type" in r.stderr, r.stderr
         assert row is None, "a refused dispatch must not be recorded"
         assert sent == "", "a refused dispatch must not be transmitted"
 
-    def test_missing_type_value_is_a_loud_error(self, tmp_path):
+    def test_missing_type_value_is_a_loud_error(self, tmp_path, *, scratch_plane_env):
         # `--type` with NOTHING after it — the `_flag_val` guard. Deliberately
         # not `--type w1 "x"`: that consumes w1 as the value and lands on the
         # unknown-type branch above, so it would restate that test with weaker
         # assertions while leaving this guard unexercised.
-        r, _row, _sent = _run(tmp_path, "--type")
+        r, _row, _sent = _run(tmp_path, "--type", scratch_plane_env=scratch_plane_env)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "needs a value" in r.stderr, r.stderr
 
@@ -279,7 +279,7 @@ class TestVocabularyMatchesTheProtocols:
 # and so keeps shielding — the gate is the TYPE, never id-lessness.
 
 
-def _roundtrip_lib(tmp_path: Path):
+def _roundtrip_lib(tmp_path: Path, *, scratch_plane_env):
     """`_fake_lib` plus the receive side. Same harness, one more leg.
 
     report-back.sh and dispatch-overdue.py are what the resolver needs (both
@@ -291,7 +291,7 @@ def _roundtrip_lib(tmp_path: Path):
     """
     libdir, env = _fake_lib(
         tmp_path, f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n'
-    )
+    , scratch_plane_env=scratch_plane_env)
     env["MANAGER_TMUX"] = "lead"
     (tmp_path / "state").mkdir(exist_ok=True)
     return libdir, env
@@ -362,12 +362,12 @@ class TestAControlNoteIsInvisibleToTheResolver:
     """
 
     @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
-    def test_a_control_note_does_not_blank_the_resolver_head(self, tmp_path, t):
+    def test_a_control_note_does_not_blank_the_resolver_head(self, tmp_path, t, *, scratch_plane_env):
         # The brief's pin, read straight off the resolver: after a control note
         # the bot's newest OPEN assignment is still the real id'd task, so
         # `--open-task` hands it back rather than the "" a raw-text note yields.
         # On main this FAILS — the note's own id-less assignment blanks the head.
-        libdir, env = _roundtrip_lib(tmp_path)
+        libdir, env = _roundtrip_lib(tmp_path, scratch_plane_env=scratch_plane_env)
         real_id = _seed_open_task(libdir, tmp_path, env)
         _door(libdir, f'dispatch-task.sh" --type {t} w1 "a peer note"', env)
         assert _open_task(libdir, tmp_path, env) == real_id, (
@@ -375,12 +375,12 @@ class TestAControlNoteIsInvisibleToTheResolver:
         )
 
     @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
-    def test_a_no_id_report_after_a_control_note_resolves_the_real_row(self, tmp_path, t):
+    def test_a_no_id_report_after_a_control_note_resolves_the_real_row(self, tmp_path, t, *, scratch_plane_env):
         # The end-to-end consequence, all four types. `restart` and `cancel`
         # route to a terminal report the same way `query` does. Before #1491 the
         # note's id-less assignment absorbed this report and the real task stayed
         # open; now the note is invisible, so #835 FIFO closes the real row.
-        libdir, env = _roundtrip_lib(tmp_path)
+        libdir, env = _roundtrip_lib(tmp_path, scratch_plane_env=scratch_plane_env)
         real_id = _seed_open_task(libdir, tmp_path, env)
         _door(libdir, f'dispatch-task.sh" --type {t} w1 "a peer note"', env)
         rb = _door(libdir, 'report-back.sh" w1 completed "answered inline"', env)
@@ -389,23 +389,23 @@ class TestAControlNoteIsInvisibleToTheResolver:
             f"a `{t}` note shielded the real row from resolving (#1491)"
         )
 
-    def test_a_raw_text_note_still_shields_the_real_row(self, tmp_path):
+    def test_a_raw_text_note_still_shields_the_real_row(self, tmp_path, *, scratch_plane_env):
         # UNCHANGED by #1491: raw text is id-less too but mints an assignment
         # with a deadline, so it blanks the head and the first no-id report
         # closes IT, not the real task. The gate is the TYPE, never id-lessness —
         # this is what keeps the documented "one report closes all open
         # dispatches for that bot" path working.
-        libdir, env = _roundtrip_lib(tmp_path)
+        libdir, env = _roundtrip_lib(tmp_path, scratch_plane_env=scratch_plane_env)
         real_id = _seed_open_task(libdir, tmp_path, env)
         _door(libdir, 'dispatch-task.sh" w1 "a peer note"', env)
         _door(libdir, 'report-back.sh" w1 completed "answered inline"', env)
         assert real_id in _still_open(libdir, tmp_path, env)
 
-    def test_a_raw_text_note_releases_after_it_is_answered(self, tmp_path):
+    def test_a_raw_text_note_releases_after_it_is_answered(self, tmp_path, *, scratch_plane_env):
         # The shield is scoped to an UNANSWERED raw-text note, not to the bot: a
         # single note must not strand every later report. The first report
         # discharges the note, the second resolves the real row.
-        libdir, env = _roundtrip_lib(tmp_path)
+        libdir, env = _roundtrip_lib(tmp_path, scratch_plane_env=scratch_plane_env)
         real_id = _seed_open_task(libdir, tmp_path, env)
         _door(libdir, 'dispatch-task.sh" w1 "a peer note"', env)
         for _ in range(2):
@@ -414,13 +414,13 @@ class TestAControlNoteIsInvisibleToTheResolver:
             "the note was discharged by the first report; the second should resolve"
         )
 
-    def test_an_id_dispatch_still_resolves_without_an_echo(self, tmp_path):
+    def test_an_id_dispatch_still_resolves_without_an_echo(self, tmp_path, *, scratch_plane_env):
         # THE POSITIVE CONTROL, and it is what stops the fix being "never
         # resolve". #835 exists because workers routinely omit the id; a guard
         # that suppressed unconditionally would pass every test above while
         # silently reverting it. Here the latest dispatch IS id'd, so the
         # resolver must still fire and close that row.
-        libdir, env = _roundtrip_lib(tmp_path)
+        libdir, env = _roundtrip_lib(tmp_path, scratch_plane_env=scratch_plane_env)
         real_id = _seed_open_task(libdir, tmp_path, env)
         _door(libdir, 'dispatch-task.sh" --type task w1 "real work"', env)
         _door(libdir, 'report-back.sh" w1 completed "did the work"', env)

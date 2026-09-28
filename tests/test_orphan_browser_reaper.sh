@@ -51,7 +51,7 @@ chmod +x "$T/bin/ps" "$T/bin/tmux" "$T/bin/tg-post.sh"
 run_case() {
     local table="$1"; shift
     : > "$LOG"
-    env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" CLAUDLOBBY_ROOT="$ROOT" \
+    env -i PLANE_EMIT_DISABLED=1 HOME="$T" PATH="$T/bin:/usr/bin:/bin" CLAUDLOBBY_ROOT="$ROOT" \
         PSTABLE="$table" \
         bash "$REAPER" --dry-run "$@" >/dev/null 2>&1 || true
     cat "$LOG"

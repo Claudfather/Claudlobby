@@ -154,7 +154,7 @@ def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
     assert _script_errors(root) == ""
 
 
-def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
+def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path, *, scratch_plane_env):
     """Live-found 2026-09-03/04 (~2,500 rows a day on a 9-bot fleet, one per
     live bot per sweep, every one `non-zero exit at line 387`): on bash 3.2
     a function that returns 1 as the LAST command inside a `$( )` fires the
@@ -185,9 +185,9 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
         stub = root / "cli"
         stub.write_text("#!/bin/bash\nf=\"${@: -1}\"; cat \"$f\" >> \"" + str(seen) + "\"; echo >> \"" + str(seen) + "\"\n")
         stub.chmod(0o755)
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(root), "CLAUDLOBBY_ROOT": str(root),
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(root), **scratch_plane_env(root, cli=stub),
                "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "FLEET_NAME": "f",
-               "PLANE_EMIT_CLI": str(stub), "PLANE_SOCKET": str(root / "no.sock")}
+                }
         r = subprocess.run(["/bin/bash", "-c",
                             f'. "{REPO_ROOT}/lib/lib-common.sh"; install_error_trap "";'
                             f' healthy() {{ return 1; }}; {body}; echo done'],

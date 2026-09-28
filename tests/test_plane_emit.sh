@@ -31,6 +31,7 @@ for a in "$@"; do [ "$prev" = "--json" ] && json="$a"; prev="$a"; done
 exit "${RECORDER_EXIT:-0}"
 REC
 chmod +x "$recorder"
+export PLANE_EMIT_DISABLED=0
 export RECORDER_LOG="$tmpdir/rec.log" RECORDER_COPY="$tmpdir/rec.json"
 
 # --- fake daemon: replies with $RESP_FILE content per connection -------------

@@ -24,7 +24,6 @@ import pytest
 from tests.conftest import (
     _write_exec,
     constructed_env,
-    plane_emit_env,
     read_fleet_events,
 )
 
@@ -36,7 +35,7 @@ CURL_REJECTS = (
 )
 
 
-def _host(tmp_path):
+def _host(tmp_path, *, scratch_plane_env):
     root = tmp_path / "root"
     root.mkdir()
     # The real lib, never written to: the alert path runs ${CLAUDLOBBY_ROOT}/lib/tg-post.sh.
@@ -56,11 +55,10 @@ def _host(tmp_path):
     env = constructed_env(
         PATH=f"{stubs}{os.pathsep}{os.environ['PATH']}",
         HOME=tmp_path / "home",
-        CLAUDLOBBY_ROOT=root,
         # Every event is a cold emit with no daemon; a loaded host can outrun
         # the 10s production bound and reap the row this test reads.
         FLEET_EVENT_EMIT_TIMEOUT_S="120",
-        **plane_emit_env(),
+        **scratch_plane_env(root),
     )
     return root, env
 
@@ -75,8 +73,8 @@ def _fire(root, env):
     )
 
 
-def test_the_rejection_leads_the_recorded_detail(tmp_path):
-    root, env = _host(tmp_path)
+def test_the_rejection_leads_the_recorded_detail(tmp_path, *, scratch_plane_env):
+    root, env = _host(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _fire(root, env)
     assert r.returncode == 0, r.stderr
 
@@ -101,11 +99,11 @@ def _failed_row(root):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
-def test_an_unreadable_token_file_is_a_verdict_not_a_script_error(tmp_path):
+def test_an_unreadable_token_file_is_a_verdict_not_a_script_error(tmp_path, *, scratch_plane_env):
     # The shared parser returns non-zero when it cannot open the file; unguarded
     # inside tg-post's command substitution that tripped the ERR trap, landing
     # critical script_error rows for what is simply a missing token.
-    root, env = _host(tmp_path)
+    root, env = _host(tmp_path, scratch_plane_env=scratch_plane_env)
     token_file = tmp_path / "chan" / ".env"
     token_file.chmod(0)
     try:

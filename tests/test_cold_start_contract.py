@@ -235,7 +235,7 @@ class TestCliResolutionProbe:
         root = _synthetic_root(tmp_path)
         result = subprocess.run(
             ["bash", "-c", f'. "{LIB_COMMON}"\nclaudlobby_cli generate'],
-            env={
+            env={"PLANE_EMIT_DISABLED": "1",
                 "CLAUDLOBBY_ROOT": str(root),
                 "PATH": "/usr/bin:/bin",  # no console script, no pipx shims
                 "HOME": str(tmp_path),
@@ -267,7 +267,7 @@ class TestCliResolutionProbe:
         shutil.rmtree(root / ".venv")
         result = subprocess.run(
             ["bash", "-c", f'. "{LIB_COMMON}"\nclaudlobby_cli generate'],
-            env={
+            env={"PLANE_EMIT_DISABLED": "1",
                 "CLAUDLOBBY_ROOT": str(root),
                 "PATH": "/usr/bin:/bin",
                 "HOME": str(tmp_path),
@@ -415,7 +415,7 @@ class TestSetupSystemHonesty:
             capture_output=True,
             text=True,
             timeout=120,
-            env={
+            env={"PLANE_EMIT_DISABLED": "1",
                 "PATH": str(mirror),
                 "HOME": os.environ.get("HOME", "/tmp"),
                 # phase_systemd dereferences $USER under `set -u`; without it the

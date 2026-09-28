@@ -52,12 +52,12 @@ def test_exotic_control_characters_roundtrip():
         assert _roundtrip(value) == value
 
 
-def test_dispatch_record_survives_newline_in_task(tmp_path):
+def test_dispatch_record_survives_newline_in_task(tmp_path, *, scratch_plane_env):
     # End-to-end: operator-supplied task text with an embedded newline must
     # land as one valid record — on the plane since F18 R1 (the work item's
     # title is the task text the door escaped; the wedge fixed the
     # claudron-supplied vector in #529; this is the caller-supplied one).
-    libdir, env = _fake_lib(tmp_path, "#!/bin/bash\nexit 0\n")
+    libdir, env = _fake_lib(tmp_path, "#!/bin/bash\nexit 0\n", scratch_plane_env=scratch_plane_env)
     r = subprocess.run(
         ["bash", "-c", f'"{libdir}/dispatch-task.sh" --repo kev worker-1 "line one\nline two"'],
         capture_output=True, text=True, env=env, timeout=120)

@@ -142,8 +142,9 @@ def sent(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _armed(monkeypatch):
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+def _armed(monkeypatch, tmp_path, scratch_plane_env, _isolate_claudlobby_root):
+    for key, value in scratch_plane_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
 
 
 # --- what the re-check sends -------------------------------------------------
