@@ -15,9 +15,11 @@ idempotent, so reprocessing a recovered entry classifies as duplicate.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -241,6 +243,9 @@ class DrainReport:
     duplicates: int = 0
     quarantined: int = 0
     remaining: int = 0
+    attempted: int = 0  # batches read/validated, not individual facts
+    refused: tuple[str, ...] = ()
+    limited: bool = False
 
 
 def _spool_envelope_problem(data) -> str | None:
@@ -305,19 +310,55 @@ def _recover_stale_inflight(sd: Path) -> None:
     _fsync_dir(sd)
 
 
-def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
+def _unclaim(claimed: Path, original: Path) -> None:
+    """Preserve both nodes on a collision; an inflight claim remains visible."""
+    try:
+        os.link(claimed, original)
+    except FileExistsError:
+        return
+    claimed.unlink()
+    _fsync_dir(original.parent)
+
+
+def drain(root: Path, conn: sqlite3.Connection, host_uid: str, *,
+          approved: dict[str, str] | None = None, max_batches: int | None = None,
+          deadline: float | None = None) -> DrainReport:
+    """Replay through the existing ingest owner. Optional activation bounds admit
+    only reviewed filename/content hashes and stop STARTING work at the deadline;
+    an atomic ingest/fsync already in progress is never reported cancelled.
+    """
     sd = spool_dir(root)
     _recover_stale_inflight(sd)
     ingested = duplicates = quarantined = 0
+    attempted, refused, limited = 0, [], False
     claims: list[tuple[str, Path]] = []
-    for f in sorted(sd.glob("*.json")):
+    candidates = sorted(sd.glob("*.json"))
+    if approved is not None:
+        refused.extend(sorted(set(approved) - {f.name for f in candidates}))
+    for f in candidates:
+        if approved is not None and f.name not in approved:
+            continue
+        if (max_batches is not None and len(claims) >= max_batches
+                or deadline is not None and time.monotonic() >= deadline):
+            limited = True
+            break
         claimed = _claim(f)
         if claimed is not None:
             claims.append((f.name, claimed))
     entries = []
     for orig_name, claimed in claims:
+        if deadline is not None and time.monotonic() >= deadline:
+            _unclaim(claimed, sd / orig_name)
+            limited = True
+            continue
+        attempted += 1
         try:
-            data = json.loads(claimed.read_text())
+            content = claimed.read_bytes()
+            if approved is not None and hashlib.sha256(content).hexdigest() != approved[orig_name]:
+                _unclaim(claimed, sd / orig_name)
+                refused.append(orig_name)
+                continue
+            data = json.loads(content)
         except (json.JSONDecodeError, OSError) as exc:
             quarantine_entry(root, claimed, f"malformed spool file: {exc}", as_name=orig_name)
             quarantined += 1
@@ -329,6 +370,10 @@ def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
             continue
         entries.append((data.get("spooled_at") or "", orig_name, claimed, data))
     for _, orig_name, claimed, entry in sorted(entries, key=lambda e: (e[0], e[1])):
+        if deadline is not None and time.monotonic() >= deadline:
+            _unclaim(claimed, sd / orig_name)
+            limited = True
+            continue
         try:
             items = [validate_request(r) for r in entry["requests"]]
         except ContractViolation as exc:
@@ -369,4 +414,5 @@ def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
             ingested += 1
         claimed.unlink()  # only after committed ingestion
     remaining = len(list(sd.glob("*.json")))
-    return DrainReport(ingested, duplicates, quarantined, remaining)
+    return DrainReport(ingested, duplicates, quarantined, remaining,
+                       attempted, tuple(refused), limited)

@@ -9,6 +9,7 @@ root stays on tmp_path (no length limit there).
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -138,7 +139,7 @@ def test_contract_violation_mirrors_exit_2_and_writes_nothing(running):
 
 
 def test_malformed_and_empty_requests_are_bad_request(running):
-    _, sock, _ = running
+    root, sock, daemon = running
     for payload in (b"not json\n", b"\n", b'{"nope": 1}\n', b'{"events": []}\n',
                     b'{"events": [42]}\n'):
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -158,6 +159,11 @@ def test_malformed_and_empty_requests_are_bad_request(running):
         client.close()
         resp = json.loads(buf)
         assert resp["ok"] is False and resp["code"] == "bad_request", payload
+        if payload == b"\n":
+            from claudlobby.plane.migrations import SCHEMA_USER_VERSION
+            assert resp["serving"] == daemon.serving_info()
+            assert resp["serving"]["root"] == str(root.resolve())
+            assert resp["serving"]["sql_schema"] == SCHEMA_USER_VERSION
 
 
 def test_oversize_request_refused_not_fatal(running):
@@ -1116,3 +1122,80 @@ def test_a_refused_staged_batch_is_quarantined_not_retried(running):
     reasons = list((root / "state" / "plane" / "spool" / "quarantine").glob("*.reason"))
     assert len(reasons) == 1 and "contract" in reasons[0].read_text()
     assert send_batch(sock, [_comm("f")])["ok"] is True
+
+
+def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_evidence(tmp_path, monkeypatch):
+    from claudlobby.plane import daemon as dm
+    from claudlobby.plane.emit_api import _finalize
+
+    initialize_plane(tmp_path)
+    # Identity binding is the existing sealed-release owner. This fixture only
+    # substitutes its observation; queue replay/validation/ingest are real.
+    identity = dm._serving_identity(tmp_path)
+    identity.update(release_id="r-" + "a" * 64, seal_sha256="b" * 64)
+    monkeypatch.setattr(dm, "_serving_identity", lambda _: identity)
+    daemon = PlaneDaemon(tmp_path)
+    expected = daemon.serving_info()
+    monkeypatch.setattr(dm, "_serving_identity", lambda _: {**identity, "release_id": "r-" + "c" * 64})
+    assert daemon.serving_info() == expected  # selection changes cannot relabel a serving process
+    staged = tmp_path / "state/plane/staged"
+
+    def work(suffix):
+        return _finalize({"event_type": "work_item", "emitter": "old-task-writer", "fleet": "example-fleet",
+                          "payload": {"work_item_id": "wi_" + suffix * 32, "title": "old conditional work",
+                                      "created_by": "bot:example-fleet/alpha"}})
+
+    spool = spool_write(tmp_path, [work("1")], "previous outage")
+    _stage(staged, "approved.batch", [work("2")])
+    _stage(staged, "retained.batch", [work("3")])
+    _stage(staged, "poison.batch", [{**work("4"), "payload": {}}])
+    approved = {"spool": {spool.name: hashlib.sha256(spool.read_bytes()).hexdigest()},
+                "staged": {"approved.batch": hashlib.sha256((staged / "approved.batch").read_bytes()).hexdigest()}}
+    try:
+        refused = daemon.drain_pending(expected={**expected, "release_id": "r-" + "d" * 64}, approved=approved)
+        assert refused["code"] == "release_mismatch" and not daemon._controlled_drain
+        frozen = daemon.drain_pending(expected=expected, approved={"spool": {}, "staged": {}})
+        assert frozen["ok"] and daemon._controlled_drain and spool.exists()
+        first = daemon.drain_pending(expected=expected, approved=approved, max_batches=1)
+        assert first["reports"]["spool"]["attempted"] == first["reports"]["spool"]["committed"] == 1
+        assert first["reports"]["staged"]["attempted"] == 0 and first["reports"]["staged"]["limited"]
+        assert first["retained"]["staged"] == ["approved.batch", "poison.batch", "retained.batch"]
+        approved["spool"] = {}  # its committed result was observed, not inferred from absence
+
+        path = staged / "approved.batch"
+        original = path.read_bytes()
+        path.write_bytes(original + b" ")
+        changed = daemon.drain_pending(expected=expected, approved=approved)
+        assert not changed["ok"] and changed["reports"]["staged"]["refused"] == (path.name,)
+        assert path.read_bytes() == original + b" "
+        approved["staged"][path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        approved["staged"]["poison.batch"] = hashlib.sha256((staged / "poison.batch").read_bytes()).hexdigest()
+        last = daemon.drain_pending(expected=expected, approved=approved)
+        assert last["reports"]["staged"]["committed"] == last["reports"]["staged"]["quarantined"] == 1
+        assert last["retained"]["staged"] == ["retained.batch"]
+        assert last["retained"]["quarantine"] == ["poison.json"]
+        assert last["conditional_resolution"] == "requires_coordinator_inventory"
+
+        # A queue that becomes unreadable must never appear empty/safe.
+        (staged / "retained.batch").unlink()
+        staged.rmdir()
+        staged.write_text("unreadable queue node")
+        blocked = daemon.drain_pending(expected=expected, approved={"spool": {}, "staged": {}})
+        assert not blocked["ok"] and blocked["retained"]["staged"] is None
+
+        # PlaneDowngradeExit subclasses DowngradeError: the control boundary
+        # must reply with the existing taxonomy and propagate it to serve().
+        def stale(**_):
+            raise daemon._downgrade_exit(dm.DowngradeError("schema changed during drain"))
+        monkeypatch.setattr(daemon, "_replay_staged", stale)
+        control = {"control": "drain-v1", "expected": expected, "approved": approved,
+                   "max_batches": 1, "timeout": 1.0}
+        monkeypatch.setattr(dm, "_peer_uid", lambda _: None)
+        monkeypatch.setattr(dm, "_recv_line", lambda _: json.dumps(control).encode())
+        replies = []
+        monkeypatch.setattr(daemon, "_reply", lambda _, reply: replies.append(reply))
+        with pytest.raises(dm.PlaneDowngradeExit):
+            daemon._handle(object())
+        assert replies[-1]["code"] == "downgrade"
+    finally:
+        daemon.writer.close()

@@ -63,9 +63,12 @@ elsewhere, honestly.
 from __future__ import annotations
 
 import errno
+from dataclasses import asdict, dataclass
 import fcntl
+import hashlib
 import json
 import os
+import re
 import signal
 import socket
 import sqlite3
@@ -76,14 +79,14 @@ from pathlib import Path
 from typing import Optional
 
 from .contracts import ContractViolation
-from .db import connect, db_file, db_path
-from .queue_paths import staged_dir
+from .db import connect, connect_ro, db_file, db_path
+from .queue_paths import scan_spool, staged_dir
 from .emit_api import emit_batch
 from .writer import PlaneWriter
 from .ids import ensure_host_uid
 from .schema_state import preflight_schema, require_current_schema
 from .migrations import SCHEMA_USER_VERSION, DowngradeError
-from .spool import SpoolWriteError, _mkdir_fsynced, drain, quarantine_entry
+from .spool import DrainReport, SpoolWriteError, _mkdir_fsynced, drain, quarantine_entry
 
 # One line carries one batch; communications bodies cap at 16KiB each, so
 # 4MiB bounds any sane batch while refusing a runaway/hostile writer.
@@ -92,6 +95,41 @@ MAX_REQUEST_BYTES = 4 * 1024 * 1024
 # letting bind() truncate or fail obscurely.
 MAX_SOCKET_PATH_BYTES = 100
 DEFAULT_DRAIN_INTERVAL = 600.0
+
+
+@dataclass
+class ReplayReport:
+    attempted: int = 0
+    committed: int = 0
+    duplicates: int = 0
+    spooled: int = 0
+    quarantined: int = 0
+    limited: bool = False
+    refused: tuple[str, ...] = ()
+    error: str | None = None
+
+
+def _serving_identity(root: Path) -> dict:
+    """Capture the executing install once; a changed selector cannot relabel it."""
+    from ..runtime_versions import runtime_declaration
+    from ..runtime_admission import RuntimeIdentity, _match_identity
+    from ..commands.releases import _executing_release
+    from ..releases import read_release
+
+    result = {"probe_version": 1, "root": str(root.resolve()), "pid": os.getpid(),
+              "release_id": None, "seal_sha256": None, "artifact_id": None,
+              "cli": None, "runtime": runtime_declaration()}
+    try:
+        identity = RuntimeIdentity.current()
+        result.update(artifact_id=identity.artifact_id, cli=str(identity.cli))
+        release_id = _executing_release(root)
+        if release_id is not None:
+            release = read_release(root, release_id, verify_files=False)
+            _match_identity(root, release, identity)
+            result.update(release_id=release_id, seal_sha256=release.seal_sha256)
+    except (OSError, ValueError, RuntimeError):
+        pass  # An unverified install may be diagnosed, never admitted for drain.
+    return result
 
 
 # Process exit code for the stale-daemon exit (#1485). 4 rather than a fresh
@@ -179,7 +217,7 @@ def _probe_live(path: Path) -> bool:
         probe.close()
 
 
-def probe_daemon(path: Path, timeout: float = 2.0) -> bool:
+def _probe_reply(path: Path, timeout: float = 2.0, *, request: dict | None = None) -> dict | None:
     """TYPED handshake (#1372 review F15 + re-verify residuals): connect-
     succeeds proves only that SOMETHING listens. Send an empty request and
     require the daemon's own bad_request verdict shape back — where the reply
@@ -191,25 +229,51 @@ def probe_daemon(path: Path, timeout: float = 2.0) -> bool:
     try:
         probe.settimeout(timeout)
         probe.connect(str(path))
-        probe.sendall(b"\n")
+        probe.sendall(b"\n" if request is None else json.dumps(request).encode() + b"\n")
         buf = b""
         while b"\n" not in buf:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or len(buf) > 65536:
-                return False
+                return None
             probe.settimeout(remaining)
             chunk = probe.recv(65536)
             if not chunk:
                 break
             buf += chunk
+            if len(buf) > 65536:
+                return None
         reply = json.loads(buf)
         if not isinstance(reply, dict):
-            return False
-        return reply.get("ok") is False and reply.get("code") == "bad_request"
+            return None
+        return reply
     except (OSError, ValueError):
-        return False
+        return None
     finally:
         probe.close()
+
+
+def probe_daemon(path: Path, timeout: float = 2.0) -> bool:
+    """Preserve the native/doctor boolean empty-request handshake."""
+    reply = _probe_reply(path, timeout)
+    return bool(reply and reply.get("ok") is False and reply.get("code") == "bad_request")
+
+
+def probe_daemon_info(path: Path, timeout: float = 2.0) -> dict | None:
+    reply = _probe_reply(path, timeout)
+    info = reply.get("serving") if reply else None
+    return info if (reply and reply.get("ok") is False and reply.get("code") == "bad_request"
+                    and isinstance(info, dict) and info.get("probe_version") == 1
+                    and set(info) == {"probe_version", "root", "pid", "release_id", "seal_sha256",
+                                     "artifact_id", "cli", "runtime", "sql_schema", "schema_state"}) else None
+
+
+def drain_daemon(path: Path, *, expected: dict, approved: dict,
+                 max_batches: int = 100, timeout: float = 5.0) -> dict | None:
+    """Private activation control. A missing/timed-out reply means UNKNOWN work,
+    never an empty queue or permission to switch writers. No automatic retry.
+    """
+    return _probe_reply(path, timeout + 6.0, request={"control": "drain-v1", "expected": expected,
+                        "approved": approved, "max_batches": max_batches, "timeout": timeout})
 
 
 def _recv_line(conn: socket.socket, timeout: float = 5.0) -> bytes:
@@ -264,6 +328,86 @@ class PlaneDaemon:
         self._lock_fd: Optional[int] = None
         self._sock_stat: Optional[tuple[int, int]] = None
         self._downgrading = False
+        self._serving = _serving_identity(self.root)
+        self._controlled_drain = False
+
+    def serving_info(self) -> dict:
+        result = {**json.loads(json.dumps(self._serving)), "sql_schema": None, "schema_state": "unavailable"}
+        try:
+            conn = connect_ro(db_file(self.root), timeout=0.2)
+            try:
+                result.update(sql_schema=conn.execute("PRAGMA user_version").fetchone()[0], schema_state="read")
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error):
+            pass
+        return result
+
+    def drain_pending(self, *, expected: dict, approved: dict,
+                      max_batches: int = 100, timeout: float = 5.0) -> dict:
+        """Caller MUST hold activation EX and have quiesced producers/sessions.
+        Restart admission must be fenced before entering this per-process mode.
+        Limits stop starting batches, not an in-flight atomic commit/fsync.
+        Remaining/quarantined names need the coordinator's existing conditional
+        classification and reviewed decision; this is not a cutover-safe verdict.
+        """
+        serving = self.serving_info()
+        if (not serving["release_id"] or expected != serving
+                or serving["sql_schema"] != SCHEMA_USER_VERSION):
+            return {"ok": False, "code": "release_mismatch", "serving": serving}
+        if (type(max_batches) is not int or not 1 <= max_batches <= 1000
+                or type(timeout) not in (int, float) or not 0 < timeout <= 30
+                or not isinstance(approved, dict) or set(approved) != {"spool", "staged"}):
+            raise ValueError("invalid drain bounds or approval sets")
+        for queue, suffix in (("spool", ".json"), ("staged", ".batch")):
+            if not isinstance(approved[queue], dict) or any(
+                not isinstance(name, str) or Path(name).name != name or not name.endswith(suffix)
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                for name, digest in approved[queue].items()):
+                raise ValueError("invalid reviewed queue filename/digest")
+        self._controlled_drain = True
+        deadline = time.monotonic() + timeout
+        reports = {}
+        try:
+            preflight_schema(self.root)
+            spool = DrainReport()
+            if approved["spool"]:
+                conn = connect(db_file(self.root))
+                try:
+                    require_current_schema(conn)
+                    host = ensure_host_uid(self.root / "state")
+                    spool = drain(self.root, conn, host, approved=approved["spool"],
+                                  max_batches=max_batches, deadline=deadline)
+                finally:
+                    conn.close()
+            reports["spool"] = asdict(spool)
+            reports["spool"]["committed"] = reports["spool"].pop("ingested")
+            reports["staged"] = asdict(self._replay_staged(
+                approved=approved["staged"], max_batches=max(0, max_batches - spool.attempted),
+                deadline=deadline) if approved["staged"] else ReplayReport())
+        except DowngradeError:
+            raise
+        except Exception as exc:  # Partial work cannot be declared zero or rolled back here.
+            reports["error"] = type(exc).__name__
+        from ..source_state import SOURCE_UNREADABLE, scan_dir
+        spool_state = scan_spool(self.root)
+        staged_state, entries = scan_dir(staged_dir(self.root))
+        retained = {"spool": None if spool_state.spool_state == "unreadable" else
+                    [p.name for p in spool_state.pending],
+                    "inflight": None if spool_state.spool_state == "unreadable" else
+                    [p.name for p in spool_state.inflight],
+                    "quarantine": None if spool_state.quarantine_state == "unreadable" else
+                    [p.name for p in spool_state.quarantined],
+                    "staged": None if staged_state.state == SOURCE_UNREADABLE else
+                    sorted(p.name for p in entries if p.name.endswith(".batch"))}
+        for queue in ("spool", "staged"):
+            if queue in reports:
+                reports[queue]["remaining"] = None if retained[queue] is None else len(retained[queue])
+        return {"ok": "error" not in reports and all(v is not None for v in retained.values())
+                and not reports.get("staged", {}).get("error")
+                and not any(reports.get(q, {}).get("refused") for q in ("spool", "staged")), "serving": serving,
+                "controlled_drain": True, "counts_unit": "batches", "reports": reports,
+                "retained": retained, "conditional_resolution": "requires_coordinator_inventory"}
 
     # -- the stale-daemon exit (#1485) ---------------------------------------
     def _downgrade_exit(self, exc: BaseException) -> "PlaneDowngradeExit":
@@ -357,37 +501,66 @@ class PlaneDaemon:
                 "remaining": report.remaining,
             })
 
-    def _replay_staged(self) -> None:
+    def _replay_staged(self, *, approved: dict[str, str] | None = None,
+                       max_batches: int | None = None, deadline: float | None = None) -> ReplayReport:
         """Batches the shim STAGED during a socket cooldown, instead of spawning
         the cold CLI (#1657). They are raw, so each goes through emit_batch
         exactly as a socket request does (capture, validation, idempotency on
         the pre-minted ids). Never through drain(), which ingests spool
         entries as-is because they are stored policy-applied."""
         self._next_replay = time.monotonic() + 1.0
+        report = ReplayReport()
         sd = staged_dir(self.root)
         try:
             if not sd.is_dir():
                 _mkdir_fsynced(sd, 0o700)   # the handshake the client stages on
             batches = sorted(p for p in sd.iterdir() if p.name.endswith(".batch"))
-        except OSError:
-            return                          # a broken root: the cold rung keeps recording
+        except OSError as exc:
+            report.error = type(exc).__name__
+            return report                   # a broken root: the cold rung keeps recording
+        if approved is not None:
+            report.refused = tuple(sorted(set(approved) - {f.name for f in batches}))
         for f in batches:
+            if approved is not None and f.name not in approved:
+                continue
+            if (max_batches is not None and report.attempted >= max_batches
+                    or deadline is not None and time.monotonic() >= deadline):
+                report.limited = True
+                break
+            report.attempted += 1
             try:
-                emit_batch(self.root, json.loads(f.read_text())["events"],
-                           conn_factory=self.writer.connection)
+                content = f.read_bytes()
+                if approved is not None and hashlib.sha256(content).hexdigest() != approved[f.name]:
+                    report.refused += (f.name,)
+                    continue
+                events = json.loads(content)["events"]
+                if not isinstance(events, list) or not events:
+                    raise ValueError("staged events must be a non-empty list")
+                outcomes = emit_batch(self.root, events,
+                                      conn_factory=self.writer.connection,
+                                      **({"require_commit": True} if approved is not None else {}))
             except DowngradeError as exc:
                 raise self._downgrade_exit(exc) from None
             except (ValueError, KeyError, TypeError) as exc:  # ContractViolation is a ValueError
                 why = "contract violation" if isinstance(exc, ContractViolation) else "malformed batch"
                 quarantine_entry(self.root, f, f"{why} on replay: {exc}", as_name=f.stem + ".json")
+                report.quarantined += 1
                 continue
             except Exception as exc:  # noqa: BLE001 — disclosed; kept for a later tick
                 print(f"plane-daemon: staged replay failed ({f.name}): {exc}",
                       file=sys.stderr)
                 self._next_replay = time.monotonic() + 30.0
-                return
+                report.error = type(exc).__name__
+                return report
+            if any(o.status == "spooled" for o in outcomes):
+                report.spooled += 1
+            elif all(o.status == "duplicate" for o in outcomes):
+                report.duplicates += 1
+            else:
+                report.committed += 1
             self.writer.after_batch()
             f.unlink()
+        return report
 
     # -- request handling ---------------------------------------------------
     def _handle(self, conn: socket.socket) -> bool:
@@ -405,14 +578,26 @@ class PlaneDaemon:
             return False
         if not raw.strip():
             self._reply(conn, {"ok": False, "code": "bad_request",
-                               "error": "empty request"})
+                               "error": "empty request", "serving": self.serving_info()})
             return False
         try:
             parsed = json.loads(raw)
+            if isinstance(parsed, dict) and parsed.get("control") == "drain-v1":
+                if set(parsed) != {"control", "expected", "approved", "max_batches", "timeout"}:
+                    raise ValueError("invalid drain control fields")
+                try:
+                    report = self.drain_pending(**{k: v for k, v in parsed.items() if k != "control"})
+                except DowngradeError as exc:
+                    self._reply(conn, {"ok": False, "code": "downgrade", "error": "drain schema changed"})
+                    if self._downgrading:
+                        raise
+                    raise self._downgrade_exit(exc) from None
+                self._reply(conn, report)
+                return False
             events = parsed["events"]
             assert isinstance(events, list) and events
             assert all(isinstance(e, dict) for e in events)
-        except (json.JSONDecodeError, KeyError, TypeError, AssertionError) as exc:
+        except (ValueError, KeyError, TypeError, AssertionError) as exc:
             self._reply(conn, {"ok": False, "code": "bad_request",
                                "error": f"expected {{\"events\": [...]}}: {exc}"})
             return False
@@ -593,10 +778,10 @@ class PlaneDaemon:
             self._drain_spool(reason="startup")
             self._optimize()
             while not self._stop:
-                if time.monotonic() - self._last_drain >= self.drain_interval:
+                if not self._controlled_drain and time.monotonic() - self._last_drain >= self.drain_interval:
                     self._drain_spool(reason="interval")
                     self._optimize()
-                if time.monotonic() >= self._next_replay:
+                if not self._controlled_drain and time.monotonic() >= self._next_replay:
                     self._replay_staged()
                 try:
                     conn, _ = self._listener.accept()
