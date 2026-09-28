@@ -27,14 +27,27 @@ def native_environment(paths: Paths) -> dict[str, str]:
     Native hot paths consume this context without starting Python or guessing
     mutable storage from their installed script directory.
     """
-    return {
+    cli = selected_cli()
+    result = {
         "CLAUDLOBBY_ROOT": str(paths.root),
         "FLEET_ROOT": str(paths.fleet_config_dir),
         "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
         "CLAUDLOBBY_LIBRARY_DIR": str(paths.base_library),
-        "CLAUDLOBBY_CLI": str(selected_cli()),
+        "CLAUDLOBBY_CLI": str(cli),
         "CLAUDLOBBY_ARTIFACT_ID": paths.package.artifact_id,
     }
+    # Composition can run from an explicit development package, but a sealed
+    # candidate binds generated callers to its complete release (dependencies
+    # included), not merely the source/resource artifact identity.
+    if cli.is_relative_to(paths.release_store):
+        from .releases import read_release
+        release_id = cli.relative_to(paths.release_store).parts[0]
+        release = read_release(paths.root, release_id, verify_files=False)
+        if (release.cli_path != cli or release.native_path != paths.lib
+                or release.inputs.artifact_id != paths.package.artifact_id):
+            raise ValueError("selected CLI and package do not belong to the same sealed release")
+        result["CLAUDLOBBY_RELEASE_ID"] = release_id
+    return result
 
 
 def resolve_paths(

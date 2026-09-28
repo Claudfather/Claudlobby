@@ -1593,6 +1593,18 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
         if entry.is_symlink() and entry.name not in bot.mounts:
             entry.unlink()
 
+    for name, target_path in resolve_mount_sources(bot, bot_dir, log).items():
+        link = mounts_dir / name
+        if link.is_symlink():
+            if link.resolve() == target_path.resolve():
+                continue
+            link.unlink()
+        link.symlink_to(target_path)
+
+
+def resolve_mount_sources(bot: BotConfig, bot_dir: Path, log) -> dict[str, Path]:
+    """Return allowed mount targets without changing links or creating directories."""
+    sources: dict[str, Path] = {}
     for name, target in bot.mounts.items():
         target_path = Path(target).expanduser()
         try:
@@ -1607,11 +1619,11 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
         except (ValueError, OSError):
             log(f"  mount '{name}': could not resolve target {target_path} — skipping")
             continue
-        link = mounts_dir / name
+        link = bot_dir / "mounts" / name
         if link.is_symlink():
             if link.resolve() == target_path.resolve():
+                sources[name] = target_path
                 continue  # already correct
-            link.unlink()
         elif link.exists():
             log(f"  mount '{name}': non-symlink already exists at {link} — skipping")
             continue
@@ -1619,11 +1631,20 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
             log(
                 f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink"
             )
-        link.symlink_to(target_path)
+        sources[name] = target_path
+    return sources
 
 
 # ----------------------------------------------------------------------
 # Tools — composited scripts (library/tools/<name>/ → bot_dir/tools/)
+
+
+@dataclass(frozen=True)
+class RenderedFile:
+    """One generated artifact's complete content and intended permission mode."""
+
+    content: str
+    mode: int = 0o644
 
 
 def compose_tool_outputs(
@@ -1739,14 +1760,22 @@ def compose_tools(
     detached tools are removed on every generate; a tool's runtime outputs
     (snapshots, ledgers) belong in data/, which this never touches.
     """
-    outputs = compose_tool_outputs(bot, fleet, paths, bot_dir)
+    outputs = {
+        name: RenderedFile(content, 0o755)
+        for name, content in compose_tool_outputs(bot, fleet, paths, bot_dir).items()
+    }
+    _write_tool_outputs(bot_dir, outputs)
+
+
+def _write_tool_outputs(bot_dir: Path, outputs: dict[str, RenderedFile]) -> None:
+    """Write and reconcile already-rendered tools; never render against a staging path."""
     tools_dir = bot_dir / "tools"
     if outputs:
         tools_dir.mkdir(exist_ok=True)
-    for target_name, content in outputs.items():
+    for target_name, rendered in outputs.items():
         target = tools_dir / target_name
-        target.write_text(content)
-        target.chmod(0o755)
+        target.write_text(rendered.content)
+        target.chmod(rendered.mode)
     if tools_dir.is_dir():
         for existing in sorted(tools_dir.iterdir()):
             if existing.is_file() and existing.name not in outputs:
@@ -2897,25 +2926,106 @@ def _reconcile_access_json(
             log(msg)
         return
 
+    reconciled = reconcile_access_content(existing, fresh, bot, fleet)
+    access_path.write_text(json.dumps(reconciled, indent=2) + "\n")
+
+
+def reconcile_access_content(
+    existing: dict, fresh: dict, bot: BotConfig, fleet: FleetConfig,
+) -> dict:
+    """Reconcile fleet-controlled Telegram fields without mutating either input."""
+    reconciled = copy.deepcopy(existing)
     chat_id = bot.telegram.chat_id or fleet.telegram_group_chat_id
-    existing["dmPolicy"] = fresh["dmPolicy"]
+    reconciled["dmPolicy"] = fresh["dmPolicy"]
 
     if chat_id:
-        existing.setdefault("groups", {})
-        if chat_id in existing["groups"]:
-            existing["groups"][chat_id]["requireMention"] = bot.telegram.require_mention
+        reconciled.setdefault("groups", {})
+        if chat_id in reconciled["groups"]:
+            reconciled["groups"][chat_id]["requireMention"] = bot.telegram.require_mention
         else:
-            existing["groups"][chat_id] = {
+            reconciled["groups"][chat_id] = {
                 "requireMention": bot.telegram.require_mention,
                 "allowFrom": [],
             }
 
     if fleet.human_telegram_id:
-        allow = existing.setdefault("allowFrom", [])
+        allow = reconciled.setdefault("allowFrom", [])
         if fleet.human_telegram_id not in allow:
             allow.append(fleet.human_telegram_id)
 
-    access_path.write_text(json.dumps(existing, indent=2) + "\n")
+    return reconciled
+
+
+def render_bot_files(
+    bot: BotConfig,
+    fleet: FleetConfig,
+    paths: Paths,
+    *,
+    boot_delay_s: int | None = None,
+    cascade: dict | None = None,
+) -> dict[str, RenderedFile | None]:
+    """Render and validate bot-relative artifacts without changing files or config.
+
+    Paths describe the real destination even when a caller will stage the bytes
+    elsewhere. None means an optional git artifact must be absent. Links and
+    Telegram state are reconciled separately by their owners.
+    """
+    from .path_audit import (
+        _wiring_files, _without_deny_rules, assert_bot_sources, improper_fleet_paths,
+    )
+
+    bot_dir = paths.assert_writable(paths.bot_runtime(bot.bot_id))
+    for name in (".claude", ".claude/skills", ".cli", ".cli/bin", "memory", "projects",
+                 "data", "data/events", "logs", "tools"):
+        paths.assert_writable(bot_dir / name)
+    assert_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths))
+    if boot_delay_s is None:
+        boot_delay_s = bot_boot_delay_s(bot, fleet, paths)
+
+    mcp = compose_mcp_json(bot, paths)
+    files: dict[str, RenderedFile | None] = {
+        "CLAUDE.md": RenderedFile(compose_claude_md(bot, fleet, paths)),
+        ".mcp.json": RenderedFile(json.dumps(mcp, indent=2) + "\n"),
+        "bot.conf": RenderedFile(compose_bot_conf(bot, fleet, paths, cascade=cascade)),
+        ".claude/settings.local.json": RenderedFile(json.dumps(
+            compose_settings_local(bot, fleet, paths, list(mcp["mcpServers"])),
+            indent=2,
+        ) + "\n"),
+        f"{fleet.service_prefix}.{bot.bot_id}.service": RenderedFile(
+            compose_systemd_unit(bot, fleet, paths, boot_delay_s=boot_delay_s)),
+        f"{fleet.service_prefix}.{bot.bot_id}.plist": RenderedFile(
+            compose_launchd_plist(bot, fleet, paths)),
+    }
+    for name, content in (
+        (GITCONFIG_FILENAME, compose_bot_gitconfig(bot, paths)),
+        (GH_APP_IDENTITY_FILENAME, compose_bot_gitconfig_app_identity(bot)),
+    ):
+        files[name] = RenderedFile(content) if content is not None else None
+    files.update({
+        f"tools/{name}": RenderedFile(content, 0o755)
+        for name, content in compose_tool_outputs(bot, fleet, paths, bot_dir).items()
+    })
+    for name in files:
+        paths.assert_writable(bot_dir / name)
+
+    # The same L2 predicate and exclusions as the postwrite audit, applied to
+    # rendered bytes so staging cannot approve wiring that generate would reject.
+    findings: list[str] = []
+    for name in (*_wiring_files(bot, fleet), *(n for n in files if n.startswith("tools/"))):
+        rendered = files.get(name)
+        if rendered is None:
+            continue
+        text = rendered.content
+        if name == ".claude/settings.local.json":
+            text = _without_deny_rules(text)
+        for path, reason in improper_fleet_paths(text, bot, paths):
+            findings.append(f"  {name}: {path}\n      {reason}")
+    if findings:
+        raise ValueError(
+            f"bot {bot.bot_id!r}: improper absolute fleet path(s) in rendered wiring:\n"
+            + "\n".join(findings)
+        )
+    return files
 
 
 def compose_bot(
@@ -2936,24 +3046,8 @@ def compose_bot(
     re-creating the collision the ladder exists to prevent (#1002). Pass an
     explicit value only to compose a unit off the host ladder, e.g. in tests.
     """
-    if boot_delay_s is None:
-        boot_delay_s = bot_boot_delay_s(bot, fleet, paths)
+    files = render_bot_files(bot, fleet, paths, boot_delay_s=boot_delay_s, cascade=cascade)
     bot_dir = paths.assert_writable(paths.bot_runtime(bot.bot_id))
-    # Refuse aliased output files before the first mutation. Skill/mount links
-    # are replaced as links by their owners; generated files are written here.
-    for name in (".claude", ".claude/skills", ".cli", ".cli/bin", "memory", "projects", "data",
-                 "data/events", "logs", "tools", "CLAUDE.md", ".mcp.json",
-                 "bot.conf", GITCONFIG_FILENAME, GH_APP_IDENTITY_FILENAME,
-                 ".claude/settings.local.json",
-                 f"{fleet.service_prefix}.{bot.bot_id}.service",
-                 f"{fleet.service_prefix}.{bot.bot_id}.plist"):
-        paths.assert_writable(bot_dir / name)
-    # L1 source guard (#702) — deny an unanchored, undeclared absolute path in any
-    # compose source (bot config leaves + loaded MCP fragments) BEFORE the first
-    # disk write, so a failing bot leaves no partial wiring behind.
-    from .path_audit import assert_bot_sources
-
-    assert_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths))
 
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / ".claude").mkdir(exist_ok=True)
@@ -2963,40 +3057,15 @@ def compose_bot(
     (bot_dir / "data" / "events").mkdir(exist_ok=True)
     (bot_dir / "logs").mkdir(exist_ok=True)
 
-    (bot_dir / "CLAUDE.md").write_text(compose_claude_md(bot, fleet, paths))
-
-    mcp = compose_mcp_json(bot, paths)
-    (bot_dir / ".mcp.json").write_text(json.dumps(mcp, indent=2) + "\n")
-
-    (bot_dir / "bot.conf").write_text(
-        compose_bot_conf(bot, fleet, paths, cascade=cascade))
-
-    # Per-org git credential routing. None ⇒ the bot declares no credentials, so
-    # remove any file a previous compose left behind rather than stranding stale
-    # routing after the fleet.yaml declaration is dropped.
-    gitconfig = compose_bot_gitconfig(bot, paths)
-    gitconfig_path = bot_dir / GITCONFIG_FILENAME
-    if gitconfig is None:
-        gitconfig_path.unlink(missing_ok=True)
-    else:
-        gitconfig_path.write_text(gitconfig)
-
-    # Sibling App-identity fragment (#1300), pulled in by a per-org includeIf.
-    # Written only for an org-scoped App identity; reaped otherwise, same
-    # lifecycle as the gitconfig itself.
-    app_id_fragment = compose_bot_gitconfig_app_identity(bot)
-    app_id_path = bot_dir / GH_APP_IDENTITY_FILENAME
-    if app_id_fragment is None:
-        app_id_path.unlink(missing_ok=True)
-    else:
-        app_id_path.write_text(app_id_fragment)
-
-    settings_local = compose_settings_local(
-        bot, fleet, paths, list(mcp["mcpServers"].keys())
-    )
-    (bot_dir / ".claude" / "settings.local.json").write_text(
-        json.dumps(settings_local, indent=2) + "\n"
-    )
+    for name, rendered in files.items():
+        if name.startswith("tools/"):
+            continue
+        target = bot_dir / name
+        if rendered is None:
+            target.unlink(missing_ok=True)
+        else:
+            target.write_text(rendered.content)
+            target.chmod(rendered.mode)
 
     _emit = log if log is not None else _log.info
     link_skills(
@@ -3008,7 +3077,11 @@ def compose_bot(
         ),
     )
     link_mounts(bot, bot_dir, _emit)
-    compose_tools(bot, fleet, paths, bot_dir)
+    _write_tool_outputs(bot_dir, {
+        name.removeprefix("tools/"): rendered
+        for name, rendered in files.items()
+        if name.startswith("tools/") and rendered is not None
+    })
 
     # Telegram access.json — write to channel state dir so the plugin
     # picks up correct requireMention/dmPolicy on first boot.
@@ -3034,13 +3107,6 @@ def compose_bot(
                 _reconcile_access_json(access_path, access, bot, fleet, log)
             else:
                 access_path.write_text(json.dumps(access, indent=2) + "\n")
-
-    (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.service").write_text(
-        compose_systemd_unit(bot, fleet, paths, boot_delay_s=boot_delay_s)
-    )
-    (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.plist").write_text(
-        compose_launchd_plist(bot, fleet, paths)
-    )
 
     # Path-ownership guarantee: fail loud if any composed wiring file carries a
     # flat/dangling/improper absolute fleet path (a hand-typed path that would not
@@ -3609,7 +3675,8 @@ def _host_boot_rung_bases(paths: Paths, own_managers: int) -> tuple[int, int]:
     return managers_before, managers_total + workers_before
 
 
-def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
+def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths,
+                     *, bases: tuple[int, int] | None = None) -> int:
     """This bot's rung on the host-global boot ladder, in seconds.
 
     Derived from (manager or worker, fleet position on the host, position among
@@ -3630,7 +3697,8 @@ def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
         index = tier.index(bot.bot_id)
     except ValueError:  # composing a bot the fleet does not list (scaffolding)
         index = 0
-    manager_base, worker_base = _host_boot_rung_bases(paths, len(managers))
+    manager_base, worker_base = (bases if bases is not None else
+                                 _host_boot_rung_bases(paths, len(managers)))
     base = manager_base if is_manager else worker_base
     return (base + index) * _BOOT_STAGGER_SECONDS
 
@@ -3670,6 +3738,7 @@ def _write_service_units(
     name: str,
     script: str,
     paths: Paths,
+    *, create_runtime_dirs: bool = True,
 ) -> None:
     """Write the .service/.plist for a RESIDENT host service — no .timer
     (nothing schedules it; supervision restarts it). systemd Restart=always /
@@ -3728,7 +3797,8 @@ def _write_service_units(
     # (`journalctl --user -u claudlobby-<name>`), which is why the .service
     # below carries no StandardOutput=/StandardError= of its own.
     log_path = paths.assert_writable(paths.root / "state" / f"{name}.log")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if create_runtime_dirs:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
     service_lines = [
         "# Generated by claudlobby — do not hand-edit.",
@@ -4714,8 +4784,25 @@ def compose_fleet_timers(
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
+def _host_guard_manifests(paths: Paths, manifests: Iterable[Path] | None):
+    explicit = manifests is not None
+    if manifests is None:
+        manifests = (directory / "fleet.yaml"
+                     for directory in _iter_fleet_dirs(paths.root / "local"))
+    for manifest in manifests:
+        try:
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            if explicit:
+                raise  # a staged host plan must cover every selected fleet
+            continue
+        if isinstance(data, dict):
+            yield data
+
+
 def compose_host_mention_allowlist(
-    paths: Paths, *, output_dir: Path | None = None
+    paths: Paths, *, output_dir: Path | None = None,
+    manifests: Iterable[Path] | None = None,
 ) -> Path:
     """Handles a bot MAY @-mention on GitHub. Everything else is rewritten.
 
@@ -4741,18 +4828,10 @@ def compose_host_mention_allowlist(
     name meaning our bot and silently re-arms the original bug.
     """
     names: set[str] = set()
-    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
-        manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():
-            continue
-        try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            continue
-        if isinstance(data, dict):
-            gh = (data.get("fleet") or {}).get("github") or {}
-            if isinstance(gh, dict):
-                names.update(gh.get("mention_allowlist") or [])
+    for data in _host_guard_manifests(paths, manifests):
+        gh = (data.get("fleet") or {}).get("github") or {}
+        if isinstance(gh, dict):
+            names.update(gh.get("mention_allowlist") or [])
 
     base = paths.assert_writable(
         output_dir if output_dir is not None else paths.root / "runtime" / "_host",
@@ -4764,7 +4843,10 @@ def compose_host_mention_allowlist(
     return target
 
 
-def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) -> Path:
+def compose_host_bot_handles(
+    paths: Paths, *, output_dir: Path | None = None,
+    manifests: Iterable[Path] | None = None,
+) -> Path:
     """Write every bot name on the HOST, one per line, for the mention guard.
 
     Consumed by ``lib/gh-mention-guard.sh`` (#1019), which rewrites ``@<name>``
@@ -4788,21 +4870,8 @@ def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) ->
     fleet's generate. The cost is a narrower guard, which the hook reports.
     """
     names: set[str] = set()
-    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
-        manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():  # a container or a non-fleet dir
-            continue
-        try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            # A sibling fleet's unreadable manifest must not stop this generate.
-            # Narrow ON PURPOSE: the first cut caught bare Exception, so a
-            # missing `import yaml` raised NameError on EVERY fleet and was
-            # swallowed as "all four manifests are broken" — the guard composed
-            # an empty list and would have protected nothing, silently.
-            continue
-        if isinstance(data, dict):
-            names.update((data.get("fleet") or {}).get("bots") or {})
+    for data in _host_guard_manifests(paths, manifests):
+        names.update((data.get("fleet") or {}).get("bots") or {})
     base = paths.assert_writable(
         output_dir if output_dir is not None else paths.root / "runtime" / "_host",
         output_root=output_dir)
@@ -4910,6 +4979,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             _write_service_units(
                 timers_dir, f"claudlobby-{name}", name,
                 cfg.get("script", ""), paths,
+                create_runtime_dirs=output_dir is None,
             )
             continue
         sched = _resolve_timer_schedule(cfg, {})
