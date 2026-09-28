@@ -104,6 +104,31 @@ def test_only_explicit_empty_initialization_can_create_database(candidate):
         apply.apply_migration(store, "upgrade", manifest)
 
 
+def test_final_manifest_follows_ingest_shutdown_writes(candidate):
+    # Shutdown may record an event/checkpoint after queue draining. Freezing
+    # the DB/WAL manifest before that point makes an otherwise safe apply stale.
+    root, release, plan = candidate
+    conn = _database(root)
+    before_shutdown = _preview(candidate)
+    with activation.locked_activation(root) as store:
+        store.prepare("upgrade", plan, source_release_id=release.release_id,
+                      recovery_release_id=release.release_id, enrollment_digest="1" * 64)
+        for step in activation.STEPS[:activation.STEPS.index("ingest_quiesced")]:
+            store.begin("upgrade", step)
+            store.complete("upgrade", step, evidence_digest="2" * 64)
+        with pytest.raises(activation.ActivationError, match="out of order"):
+            store.begin("upgrade", "queues_classified")
+        store.begin("upgrade", "ingest_quiesced")
+        _insert(conn, "events", kind="system", event="daemon_stopped")
+        conn.close()
+        store.complete("upgrade", "ingest_quiesced", evidence_digest="3" * 64)
+        manifest = _preview(candidate)
+        assert manifest.manifest_id != before_shutdown.manifest_id
+        store.begin("upgrade", "queues_classified")
+        store.complete("upgrade", "queues_classified", evidence_digest=manifest.manifest_id[2:])
+        assert apply.apply_migration(store, "upgrade", manifest)["source_version"] == 1
+
+
 def test_initial_cutover_binds_old_source_and_distinct_compatible_recovery(releases):
     root, source, target = releases
     _database(root).close()

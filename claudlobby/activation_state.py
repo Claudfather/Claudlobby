@@ -25,7 +25,9 @@ from .releases import read_release
 
 STEPS = (
     "producers_paused", "sessions_handed_off", "sessions_quiesced",
-    "queues_classified", "ingest_quiesced", "backup_saved", "migration_applied",
+    # Final queue/DB inventory follows ingest shutdown: draining, the shutdown
+    # receipt and SQLite's last-connection checkpoint can still change WAL.
+    "ingest_quiesced", "queues_classified", "backup_saved", "migration_applied",
     "selection_switched", "configuration_applied", "ingest_started",
     "bots_started", "verified", "producers_resumed",
 )
