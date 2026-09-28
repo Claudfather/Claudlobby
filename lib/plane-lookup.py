@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -88,6 +89,14 @@ def _assignee_key(alias):
         return None
     fl, _, name = alias.rpartition("/")
     return (fl.lower(), name.lower())
+
+
+# The shape a msg id is minted in (claudlobby/plane/ids.py's own
+# ID_PATTERNS["msg"]). This stdlib door runs under `python3 -S -E` (#1922's
+# _bare_destination precedent) and cannot import the package, so the pattern
+# is a local, anchored copy -- keep it byte-identical to ids.py's if that ever
+# moves (#1946).
+_MSG_ID_RE = re.compile(r"^msg_[0-9a-f]{32}$")
 
 
 def _bare_destination(dest):
@@ -206,12 +215,15 @@ def _received(a) -> int:
     addressed to <bot> (fold F3, queries.DELIVERY_STATUS_SQL's rule: a prompt
     that merely QUOTES the trailer files it under another bot), rc 1 when none
     has by then, rc 4 when <bot> has never recorded a receipt at all, rc 3
-    unreachable. rc 4 proves nothing either way (the hook is not armed, or
-    this lookup cannot reach what it records), so it names the destination
-    and the root in one stderr line (#1922), unless --quiet: the dispatch
-    door's receipt gate passes it, since a clean dispatch is silent but for
-    the plane shim. <bot> is the bare BOT_ID the hook records; its plane
-    alias `bot:<fleet>/<name>` is matched on the name.
+    unreachable, rc 2 (main(), before this function even runs) when <msg_id>
+    itself is not msg_ + 32 hex -- refused rather than waited out, since that
+    shape can never match anything (#1946). rc 4 proves nothing either way
+    (the hook is not armed, or this lookup cannot reach what it records), so
+    it names the destination and the root in one stderr line (#1922), unless
+    --quiet: the dispatch door's receipt gate passes it, since a clean
+    dispatch is silent but for the plane shim. <bot> is the bare BOT_ID the
+    hook records; its plane alias `bot:<fleet>/<name>` is matched on the
+    name.
 
     --verdict (#1876) also prints `<verdict> <sender>` once the receipt is
     found: the plane's delivery verdict for this msg id and the alias that
@@ -319,7 +331,8 @@ def main(argv=None) -> int:
     ap.add_argument("--received", default=None,
                     help="rc 0 once the receiver's `received` row for this msg id is on the plane, rc 1"
                     " when none by --wait, rc 4 (said on stderr) when --destination never"
-                    " recorded one (#1099)")
+                    " recorded one (#1099); rc 2 when the id itself is not msg_ + 32 hex,"
+                    " refused before any wait (#1946)")
     ap.add_argument("--destination", default=None,
                     help="--received: the receiver's BOT_ID, as its receipt hook records it;"
                     " bot:<fleet>/<name> is matched on <name>")
@@ -341,6 +354,9 @@ def main(argv=None) -> int:
     if a.checkin_id:
         return _checkin_id(a)
     if a.received:
+        if not _MSG_ID_RE.fullmatch(a.received):
+            ap.error(f"--received must be msg_ followed by 32 lowercase hex characters,"
+                     f" got {a.received!r} (#1946)")
         return _received(a)   # no --destination matches no receipt: rc 4, no verdict
     if a.escalated:
         if not a.fleet:
