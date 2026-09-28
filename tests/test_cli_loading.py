@@ -27,6 +27,10 @@ allowed = {
 blocked = []
 class ImportBoundary:
     def find_spec(self, fullname, path=None, target=None):
+        # CPython 3.11 copy.py probes Jython's optional type and catches its
+        # ImportError. This stdlib probe is not a CLI command dependency.
+        if fullname in {'org', 'org.python', 'org.python.core'}:
+            return None
         root = fullname.split('.')[0]
         if ((root == 'claudlobby' and fullname not in allowed)
                 or (root != 'claudlobby' and root not in sys.stdlib_module_names)):
