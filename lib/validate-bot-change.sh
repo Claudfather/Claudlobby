@@ -470,7 +470,11 @@ OBSERVABILITY_BRIDGE_DOWN_GRACE=0
 CONF
 
 # --- Run: stand up a non-idle worker pane + a manager session to receive alerts ---
-tmux new-session -d -s "$MGR" "sleep 600"
+# The manager receives many injected notices across this harness. A sleeping
+# process never drains its tty input; after the canonical input queue fills,
+# tmux reports successful sends that never appear in capture-pane. `cat` reads
+# each line while the tty still echoes it for the pane assertions below.
+tmux new-session -d -s "$MGR" 'cat >/dev/null'
 tmux new-session -d -s "$BOT" 'printf "\n⠹ Cogitating (esc to interrupt)\n"; sleep 600'
 sleep 1  # let panes render
 
@@ -1865,7 +1869,12 @@ LEAF
 printf '"%s" "%s" server.ts &\nwait\n' "$_SC_BIN/bun" "$_SC_BIN/leaf.sh" > "$_SC_BIN/wrapper.sh"
 printf '"%s" "%s" start &\nwait\n'     "$_SC_BIN/bun" "$_SC_BIN/wrapper.sh" > "$_SC_BIN/tree.sh"
 rm -f "$RB_DIR/state/bot.pid"
-env TELEGRAM_STATE_DIR="$RB_DIR/state" setsid "$_SC_BIN/claude" "$_SC_BIN/tree.sh" >/dev/null 2>&1 &
+# macOS has no `setsid` utility. The selected test interpreter creates the
+# owned process group before exec, so cleanup below still targets this fixture
+# and the process names/lineage seen by bridge_state remain unchanged.
+TELEGRAM_STATE_DIR="$RB_DIR/state" "$VAL_PY" -I -B -c \
+    'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$_SC_BIN/claude" "$_SC_BIN/tree.sh" >/dev/null 2>&1 &
 _SC_ROOT_PID=$!
 # Wait for the foreign poller to actually hold the slot; without this the run can
 # race and assert against a bot.pid that does not exist yet, which would PASS for
@@ -2535,9 +2544,9 @@ touch "$BRIEFBUSY_DIR/data/.last-tool-call"
 # Retry bot: busy the same way, until its marker is removed mid-window below.
 tmux new-session -d -s "$BRIEFWAIT" "sleep 600"
 touch "$BRIEFWAIT_DIR/data/.last-tool-call"
-# Every bot here names $MGR, so the FLEET NOTICE must land in its pane, which
-# must be alive to take the push: the first scenario's sleep 600 may have ended.
-tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "sleep 600"
+# Every bot here names $MGR, so the FLEET NOTICE must land in its pane. Reopen
+# the draining fixture if an earlier scenario stopped its private server.
+tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" 'cat >/dev/null'
 # Idle briefing bot with no composed skill: the trigger must refuse it.
 tmux new-session -d -s "$BRIEFNOSKILL" "sleep 600"
 # Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
@@ -3688,7 +3697,9 @@ else
     harness_check "a dispatch with NO plane flag in its environment succeeds with the daemon up (always-on, F18 R1)" "$r"
     [ "$(_pl_count)" = "1" ] && r=yes || r=no
     harness_check "the communication row LANDED (real db, real shim)" "$r"
-    grep -q "falling back" "$PL_ROOT/err" && r=no || r=yes
+    # Both documented cold routes must be absent while the daemon serves:
+    # a transport failure falls back, and a prior wedge takes cooldown.
+    grep -Eq 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=no || r=yes
     harness_check "  ...via rung 1 (no fallback disclosure on stderr)" "$r"
 
     kill "$PL_DPID" 2>/dev/null || true; wait "$PL_DPID" 2>/dev/null || true
@@ -3696,8 +3707,12 @@ else
     harness_check "dispatch still succeeds with the daemon DEAD (and PLANE_EMIT_ENABLED=0 is ignored)" "$r"
     [ "$(_pl_count)" = "2" ] && r=yes || r=no
     harness_check "the row still landed (cold-CLI rung)" "$r"
-    grep -q "falling back" "$PL_ROOT/err" && r=yes || r=no
+    # A two-emission dispatch can hit the dead socket on intent, then emit its
+    # transmission during the wedge cooldown. Each cold route discloses itself;
+    # the assertion still requires an explicit disclosure on stderr.
+    grep -Eq 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...and the fallback was DISCLOSED, not silent" "$r"
+    [ "$r" = yes ] || { echo "  --- DIAGNOSTIC: cold-rung stderr ---"; sed 's/^/    /' "$PL_ROOT/err"; }
 
     _pl_dispatch "PLANE_EMIT_DISABLED=1" "leg three: disabled" >/dev/null && r=yes || r=no
     harness_check "PLANE_EMIT_DISABLED dispatch succeeds" "$r"
@@ -4350,8 +4365,8 @@ echo ""
 echo "--- #1720: vault git-state guard ---"
 _VG_ROOT="$(mktemp -d)"
 mkdir -p "$_VG_ROOT/vault" "$_VG_ROOT/projects/repo"
-_VG_VAULT="$(realpath -m "$_VG_ROOT/vault")"
-_VG_PROJ="$(realpath -m "$_VG_ROOT/projects/repo")"
+_VG_VAULT="$(realpath "$_VG_ROOT/vault")"
+_VG_PROJ="$(realpath "$_VG_ROOT/projects/repo")"
 _vg_hook() { # <cwd> <command> -> stdout of the real hook
     printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$2" \
       | CLAUDRON_VAULT_PATH="$_VG_VAULT" bash "$LIB_DIR/vault-git-guard.sh" 2>/dev/null
@@ -4374,7 +4389,7 @@ harness_check "#1720 ALLOW: a read-only git command in the vault is untouched" "
 # nests INSIDE the vault directory (measured at seven segments below it). A
 # prefix-based scope rule refuses git work in every bot's own repo fleet-wide.
 mkdir -p "$_VG_ROOT/vault/.git" "$_VG_ROOT/vault/home/f/bots/b/projects/repo/.git"
-_VG_NESTED="$(realpath -m "$_VG_ROOT/vault/home/f/bots/b/projects/repo")"
+_VG_NESTED="$(realpath "$_VG_ROOT/vault/home/f/bots/b/projects/repo")"
 _vg_nested="$(_vg_hook "$_VG_NESTED" "git switch -c feature")"
 [ -z "$_vg_nested" ] && r=yes || r=no
 harness_check "#1720 NESTED: a checkout inside the vault DIR but its own repo is untouched" "$r"
