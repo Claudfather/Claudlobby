@@ -342,3 +342,276 @@ svc_disenroll() {
     rm -f "$bot_dir/.tmux-env" 2>/dev/null || true
     return 0
 }
+
+# Private activation controls. FILE/TARGET come from the verified enrollment
+# manifest, not a label glob. TARGET is a systemd basename (including suffix),
+# or an explicit launchd gui/<uid>/<label> or user/<uid>/<label>.
+# Snapshot stdout is three atoms: unit-file state, load state, active state.
+# The activation owner journals it BEFORE parking installed systemd files; pause
+# accepts a parked FILE, resume requires it restored. This adapter never removes
+# source files or enablement links. Runtime masks do NOT survive reboot: durable
+# activation/start admission belongs to the activation owner, not this adapter.
+# Preflight EVERY target before parking any. Pause rechecks caller membership.
+_svc_activation_unknown() {
+    printf 'activation supervision unknown: %s\n' "$*" >&2
+    return 3
+}
+
+_svc_activation_read() {
+    local file="$1" target="$2" output key value seen=" " uid manager pid status label extra count=0
+    case "$file" in /*) ;; *) _svc_activation_unknown "installed path is not absolute"; return 3 ;; esac
+    SVC_ACT_FILE_STATE=""; SVC_ACT_LOAD=""; SVC_ACT_ACTIVE=""; SVC_ACT_GROUP=""; SVC_ACT_PID="-"; SVC_ACT_JOB_PIDS=""
+    case "$_OS" in
+        Linux)
+            case "$target" in *[!a-zA-Z0-9_.@-]*|'') return 3 ;; esac
+            case "$target" in *.service|*.timer|*.socket|*.path) ;; *) return 3 ;; esac
+            [ "${file##*/}" = "$target" ] || return 3
+            output=$(systemctl --user show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath,ControlGroup "$target") || return 3
+            local identity="" fragment=""
+            while IFS='=' read -r key value; do
+                case "$seen" in *" $key "*) return 3 ;; esac
+                seen="$seen$key "
+                case "$key" in
+                    Id) identity="$value" ;;
+                    LoadState) SVC_ACT_LOAD="$value" ;;
+                    ActiveState) SVC_ACT_ACTIVE="$value" ;;
+                    UnitFileState) SVC_ACT_FILE_STATE="$value" ;;
+                    FragmentPath) fragment="$value" ;;
+                    ControlGroup) SVC_ACT_GROUP="$value" ;;
+                    *) return 3 ;;
+                esac
+            done <<EOF
+$output
+EOF
+            [ "$identity" = "$target" ] || return 3
+            for key in Id LoadState ActiveState UnitFileState FragmentPath; do
+                case "$seen" in *" $key "*) ;; *) return 3 ;; esac
+            done
+            if [ "${target##*.}" = service ]; then
+                case "$seen" in *' ControlGroup '*) ;; *) return 3 ;; esac
+            fi
+            case "$SVC_ACT_LOAD" in
+                loaded) [ "$fragment" = "$file" ] || return 3 ;;
+                masked) [ "$fragment" = /dev/null ] || return 3 ;;
+                not-found) [ ! -e "$file" ] || return 3; SVC_ACT_FILE_STATE=not-found ;;
+                *) return 3 ;;
+            esac
+            ;;
+        Darwin)
+            local domain="${target%/*}" name="${target##*/}"
+            [ "${file##*/}" = "$name.plist" ] || return 3
+            case "$name" in *[!a-zA-Z0-9_.-]*|'') return 3 ;; esac
+            uid=$(launchctl manageruid) || return 3
+            case "$uid" in ''|*[!0-9]*) return 3 ;; esac
+            manager=$(launchctl managername) || return 3
+            case "$domain:$manager" in "gui/$uid:Aqua"|"user/$uid:Background") ;; *) return 3 ;; esac
+            # Unlike print/procinfo, list has a documented three-column format.
+            # It queries the caller's domain, hence the explicit context proof.
+            output=$(launchctl list) || return 3
+            SVC_ACT_FILE_STATE=unchanged; SVC_ACT_LOAD=unloaded; SVC_ACT_ACTIVE=inactive
+            while read -r pid status label extra; do
+                if [ "$count" -eq 0 ]; then
+                    [ "$pid $status $label $extra" = 'PID Status Label ' ] || return 3
+                else
+                    [ -z "$extra" ] && [ -n "$label" ] || return 3
+                    case "$pid" in -) ;; ''|*[!0-9]*) return 3 ;; esac
+                    case "${status#-}" in ''|*[!0-9]*) return 3 ;; esac
+                    if [ "$pid" != - ]; then
+                        [ "$pid" -gt 1 ] || return 3
+                        SVC_ACT_JOB_PIDS="$SVC_ACT_JOB_PIDS $pid"
+                    fi
+                    if [ "$label" = "$name" ]; then
+                        [ "$SVC_ACT_LOAD" = unloaded ] || return 3
+                        SVC_ACT_LOAD=loaded
+                        if [ "$pid" != - ]; then
+                            [ "$pid" -gt 1 ] || return 3
+                            SVC_ACT_PID="$pid"; SVC_ACT_ACTIVE=active
+                        fi
+                    fi
+                fi
+                count=$((count + 1))
+            done <<EOF
+$output
+EOF
+            ;;
+        *) return 3 ;;
+    esac
+    case "$SVC_ACT_ACTIVE" in active|inactive) ;; *) return 3 ;; esac
+}
+
+svc_activation_snapshot() {
+    [ -f "$1" ] || { _svc_activation_unknown "missing installed file: $1"; return 3; }
+    _svc_activation_read "$1" "$2" || { _svc_activation_unknown "$2 state"; return 3; }
+    case "$SVC_ACT_FILE_STATE" in enabled|enabled-runtime|disabled|static|masked|masked-runtime|unchanged) ;; *) return 3 ;; esac
+    printf '%s %s %s\n' "$SVC_ACT_FILE_STATE" "$SVC_ACT_LOAD" "$SVC_ACT_ACTIVE"
+}
+
+# rc 0 external, 1 hosted by this unit, 3 unable to establish either fact.
+# Kernel ancestry/control-group data only: never BOT_SERVICE/env or argv text.
+svc_activation_assert_external() {
+    local file="$1" target="$2" caller="${3:-$$}" rc=0
+    _svc_activation_read "$file" "$target" || { _svc_activation_unknown "$target state/domain"; return 3; }
+    case "$_OS" in
+        Linux)
+            if [ -n "$SVC_ACT_GROUP" ]; then
+                python3 "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" cgroup "$caller" "$SVC_ACT_GROUP" || rc=$?
+            elif [ "$SVC_ACT_ACTIVE" = active ] && [ "${target##*.}" = service ]; then rc=3
+            fi
+            ;;
+        Darwin)
+            # A detached/reparented child can lack the target's current PID in
+            # its chain. Prove a different loaded job owns the chain, or block.
+            python3 "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" launchd "$caller" "$SVC_ACT_PID:$SVC_ACT_JOB_PIDS" || rc=$?
+            ;;
+        *) rc=3 ;;
+    esac
+    case "$rc" in
+        0) return 0 ;;
+        1) printf 'activation refused: %s hosts the caller ancestry\n' "$target" >&2; return 1 ;;
+        *) _svc_activation_unknown "$target caller ancestry"; return 3 ;;
+    esac
+}
+
+_svc_activation_saved() {
+    local extra=""
+    read -r SVC_ACT_OLD_FILE SVC_ACT_OLD_LOAD SVC_ACT_OLD_ACTIVE extra <<EOF
+$1
+EOF
+    [ -z "$extra" ] || return 3
+    case "$_OS:$SVC_ACT_OLD_FILE:$SVC_ACT_OLD_LOAD" in
+        Linux:enabled:loaded|Linux:enabled-runtime:loaded|Linux:disabled:loaded|Linux:static:loaded|Linux:masked:masked|Linux:masked-runtime:masked|Darwin:unchanged:loaded|Darwin:unchanged:unloaded) ;;
+        *) return 3 ;;
+    esac
+    case "$SVC_ACT_OLD_ACTIVE" in active|inactive) ;; *) return 3 ;; esac
+    case "$SVC_ACT_OLD_LOAD:$SVC_ACT_OLD_ACTIVE" in masked:active|unloaded:active) return 3 ;; esac
+}
+
+svc_activation_pause() {
+    local file="$1" target="$2" saved="$3"
+    _svc_activation_saved "$saved" || return 3
+    svc_activation_assert_external "$file" "$target" "${4:-$$}" || return $?
+    case "$_OS" in
+        Linux)
+            # The enrollment owner parks higher-priority installed bytes first.
+            # A successful command alone is not evidence that its mask won.
+            case "$SVC_ACT_OLD_FILE" in masked|masked-runtime) ;;
+                *) systemctl --user mask --runtime "$target" || return $? ;;
+            esac
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_LOAD" = masked ] || { _svc_activation_unknown "$target mask did not take precedence"; return 3; }
+            systemctl --user stop "$target" || return $?
+            ;;
+        Darwin)
+            [ "$SVC_ACT_LOAD" = unloaded ] || launchctl bootout "$target" || return $?
+            ;;
+    esac
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_ACTIVE" = inactive ] || return 3
+    case "$_OS:$SVC_ACT_LOAD" in Linux:masked|Darwin:unloaded) return 0 ;; *) return 3 ;; esac
+}
+
+svc_activation_resume() {
+    local file="$1" target="$2" saved="$3"
+    [ -f "$file" ] || { _svc_activation_unknown "restore installed file before resume: $file"; return 3; }
+    _svc_activation_saved "$saved" || return 3
+    _svc_activation_read "$file" "$target" || return 3
+    case "$_OS" in
+        Linux)
+            case "$SVC_ACT_OLD_FILE" in masked|masked-runtime) ;;
+                *) systemctl --user unmask --runtime "$target" || return $? ;;
+            esac
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_FILE_STATE $SVC_ACT_LOAD" = "$SVC_ACT_OLD_FILE $SVC_ACT_OLD_LOAD" ] || return 3
+            if [ "$SVC_ACT_OLD_ACTIVE" = active ]; then systemctl --user start "$target" || return $?; fi
+            ;;
+        Darwin)
+            if [ "$SVC_ACT_OLD_LOAD" = loaded ] && [ "$SVC_ACT_LOAD" = unloaded ]; then
+                launchctl bootstrap "${target%/*}" "$file" || return $?
+            fi
+            ;;
+    esac
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_LOAD" = "$SVC_ACT_OLD_LOAD" ] || return 3
+    # Restoring a launchd definition also restores its normal launch policy;
+    # the activation owner sequences those starts and owns readiness checks.
+    [ "$_OS" = Darwin ] || [ "$SVC_ACT_ACTIVE" = "$SVC_ACT_OLD_ACTIVE" ]
+}
+
+# Read-only enrollment observations. Catalog rows are tab-separated; native
+# property output remains native output, parsed strictly by the inventory owner.
+# List both search paths and loaded names: either list alone misses consumers.
+svc_inventory_catalog() {
+    local output path name rest uid manager domain
+    printf 'manager\t%s\n' "$_OS"
+    case "$_OS" in
+        Linux)
+            output=$(systemd-analyze --user unit-paths) || return 3
+            while IFS= read -r path; do
+                case "$path" in /*) printf 'directory\t%s\n' "$path" ;; *) return 3 ;; esac
+            done <<EOF
+$output
+EOF
+            output=$(systemctl --user list-unit-files --no-legend --no-pager --plain) || return 3
+            while read -r name rest; do
+                [ -z "$name" ] || printf 'installed\t%s\n' "$name"
+            done <<EOF
+$output
+EOF
+            output=$(systemctl --user list-units --all --no-legend --no-pager --plain) || return 3
+            while read -r name rest; do
+                [ -z "$name" ] || printf 'loaded\t%s\n' "$name"
+            done <<EOF
+$output
+EOF
+            ;;
+        Darwin)
+            uid=$(launchctl manageruid) || return 3
+            case "$uid" in ''|*[!0-9]*) return 3 ;; esac
+            manager=$(launchctl managername) || return 3
+            case "$manager" in Aqua) domain="gui/$uid" ;; Background) domain="user/$uid" ;; *) return 3 ;; esac
+            printf 'domain\t%s\n' "$domain"
+            printf 'directory\t%s\n' "$HOME/Library/LaunchAgents" /Library/LaunchAgents /System/Library/LaunchAgents
+            launchctl list || return 3
+            ;;
+        *) return 3 ;;
+    esac
+}
+
+svc_inventory_properties() {
+    case "$_OS" in
+        Linux)
+            case "$1" in ''|*[!a-zA-Z0-9_.@:-]*) return 3 ;; esac
+            systemctl --user show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath,WorkingDirectory,Environment,ExecStart,DropInPaths,NeedDaemonReload,Triggers,TriggeredBy "$1"
+            ;;
+        Darwin)
+            _svc_inventory_domain "${1%/*}" || return 3
+            case "${1##*/}" in ''|*[!a-zA-Z0-9_.@:-]*) return 3 ;; esac
+            launchctl print "$1"
+            ;;
+        *) return 3 ;;
+    esac
+}
+
+# Exact caller-domain proof is required for both observations. print output is
+# not an Apple API: the inventory owner validates the observed macOS grammar and
+# refuses unknown shapes. These queries neither load nor alter a launchd job.
+_svc_inventory_domain() {
+    [ "$_OS" = Darwin ] || return 3
+    local uid manager
+    uid=$(launchctl manageruid) || return 3
+    case "$uid" in ''|*[!0-9]*) return 3 ;; esac
+    manager=$(launchctl managername) || return 3
+    case "$1:$manager" in "gui/$uid:Aqua"|"user/$uid:Background") return 0 ;; *) return 3 ;; esac
+}
+
+svc_inventory_disabled() {
+    _svc_inventory_domain "$1" || return 3
+    launchctl print-disabled "$1"
+}
+
+# A parked file is legitimate during activation recovery. Unlike snapshot,
+# this query does not require source bytes to remain at the installed path.
+svc_inventory_state() {
+    _svc_activation_read "$1" "$2" || return 3
+    printf '%s %s %s\n' "$SVC_ACT_FILE_STATE" "$SVC_ACT_LOAD" "$SVC_ACT_ACTIVE"
+}
