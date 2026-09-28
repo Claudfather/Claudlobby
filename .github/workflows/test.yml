@@ -22,6 +22,18 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -e '.[dev]'
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Rehearse real offline release assembly
+        # Network access only obtains the inputs. Assembly itself uses the
+        # generated hash lock with --no-index, then invokes its installed CLI.
+        run: |
+          release_work="$RUNNER_TEMP/claudlobby-release-assembly"
+          mkdir -p "$release_work/dist" "$release_work/wheelhouse"
+          .venv/bin/python -m build --wheel --no-isolation --outdir "$release_work/dist"
+          .venv/bin/python -m pip download --only-binary=:all: \
+            --dest "$release_work/wheelhouse" "$release_work/dist/"*.whl
+          .venv/bin/python tests/release_assembly_smoke.py \
+            --wheel "$release_work/dist/"*.whl --wheelhouse "$release_work/wheelhouse" \
+            --disposable-root "$release_work/rehearsal"
       - name: Prepare installed resources for editable test imports
         # This runner checkout is disposable. Build from indexed source in a
         # separate temporary tree, then stage only wheel resource/native assets.
@@ -56,6 +68,9 @@ jobs:
             pytest.rc
             pytest.status
             pytest-results.xml
+            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/result.json
+            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/dependency.lock
+            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/*.log
           if-no-files-found: error
 
   supported-platforms:
