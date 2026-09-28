@@ -5460,11 +5460,14 @@ emit_fleet_notice() {
 # the surface it exists to cover (#844). Arming it at the single call site means
 # no caller of this helper can forget it. That binds callers only: a script that
 # hand-rolls its own bare `trap … ERR` instead of calling this is not covered and
-# still has the #844 defect. Safe to arm because
-# errtrace is control-flow neutral (it changes only whether the trap runs, never
-# whether a script aborts) and deliberate tolerance stays silent: bash suppresses
-# the ERR trap in the same contexts it suppresses errexit — `f || true`, `if f`,
-# `f && g` — and that suppression is inherited by callees.
+# still has the #844 defect. Errtrace is control-flow neutral (it changes only
+# whether the trap runs, never whether a script aborts). Ordinary deliberate
+# tolerance stays silent: bash suppresses ERR with errexit in `f || true`,
+# `if f`, and `f && g`, including their ordinary function callees. macOS Bash
+# 3.2 is an exception for a failing command substitution nested inside a
+# tolerated function: `f() { echo "$(boom)"; }; f || true` emits two diagnostic
+# rows. The child cannot observe its parent's tolerance; the shell test pins
+# this known diagnostic limitation without changing the script's exit status.
 #
 # The handler's stdout is discarded because under errtrace the trap fires INSIDE
 # the failing command substitution, so anything it printed would be captured as

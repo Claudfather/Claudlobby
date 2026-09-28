@@ -281,9 +281,11 @@ classify_arrival() {
 # newline — send-keys would SUBMIT on one — so every newline in a record is
 # framing the TUI added.
 paste_unwrap() {
-    local s="$1"
-    s=${s//'<pasted_content id="'????'">'/}
-    s=${s//'</pasted_content id="'????'">'/}
+    local s="$1" open='<pasted_content id="????">' close='</pasted_content id="????">'
+    # Keep the wildcard in one pattern variable: macOS Bash 3.2 treats the
+    # quoted literal pieces around ???? as literal in ${s//pattern/}.
+    s=${s//$open/}
+    s=${s//$close/}
     printf '%s' "${s//$'\n'/}"
     return 0
 }

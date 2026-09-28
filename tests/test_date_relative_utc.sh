@@ -35,10 +35,27 @@ assert_eq() {
 # the bug in the direction that merely over-retains.
 ZONES="Pacific/Auckland UTC America/New_York"
 
+# The expected instant uses the host date implementation directly with an
+# explicit zone. The helper under test decides whether the format requests UTC.
+expected_date() {
+    local zone="$1" mode="$2" fmt="$3"
+    if [ "$_OS" = "Darwin" ]; then
+        if [ "$mode" = "utc" ]; then
+            TZ="$zone" date -u -v-7d +"$fmt"
+        else
+            TZ="$zone" date -v-7d +"$fmt"
+        fi
+    elif [ "$mode" = "utc" ]; then
+        TZ="$zone" date -u -d "-7 days" +"$fmt"
+    else
+        TZ="$zone" date -d "-7 days" +"$fmt"
+    fi
+}
+
 echo "=== a Z format resolves to real UTC in every zone ==="
 for z in $ZONES; do
     got=$(TZ="$z" date_relative "-7 days" "%Y-%m-%dT%H:%M:%SZ")
-    want=$(TZ="$z" date -u -d "-7 days" +%Y-%m-%dT%H:%M:%SZ)
+    want=$(expected_date "$z" utc "%Y-%m-%dT%H:%M:%SZ")
     assert_eq "TZ=$z Z-format equals true UTC" "$want" "$got"
 done
 
@@ -56,14 +73,14 @@ echo "=== a format WITHOUT Z is still local, unchanged ==="
 # for a local calendar date and must keep getting one.
 for z in $ZONES; do
     got=$(TZ="$z" date_relative "-7 days")
-    want=$(TZ="$z" date -d "-7 days" +%Y-%m-%d)
+    want=$(expected_date "$z" local "%Y-%m-%d")
     assert_eq "TZ=$z no-Z format stays local" "$want" "$got"
 done
 
 echo "=== %Z is the zone NAME directive, not a UTC request ==="
 # The discriminator that stops the detection being a naive substring test.
 got=$(TZ=America/New_York date_relative "-7 days" "%Z")
-want=$(TZ=America/New_York date -d "-7 days" +%Z)
+want=$(expected_date America/New_York local "%Z")
 assert_eq "%Z stays the local zone name" "$want" "$got"
 
 # (rotate_jsonl_by_ts — the consumer that carried the defect into production —

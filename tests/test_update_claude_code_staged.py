@@ -118,6 +118,15 @@ class StagedHost:
         self.bodies.mkdir()
         self.calls = tmp_path / "npm.calls"
         self.sudo_calls = tmp_path / "sudo.calls"
+        self.proc_dir = None
+        if not Path("/proc/self/exe").exists():
+            # Exercise the prune planner on hosts without procfs. This models
+            # readable process evidence; it does not prove native macOS pruning.
+            self.proc_dir = tmp_path / "proc"
+            (self.proc_dir / "self").mkdir(parents=True)
+            (self.proc_dir / "self" / "exe").symlink_to("/bin/bash")
+            (self.proc_dir / "4242").mkdir()
+            (self.proc_dir / "4242" / "exe").symlink_to("/bin/bash")
 
     # --- layout ---------------------------------------------------------------
     @property
@@ -157,6 +166,8 @@ class StagedHost:
         )
         if armed:
             base["CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED"] = "1"
+        if self.proc_dir is not None:
+            base["CLAUDE_UPDATE_PROC_DIR"] = self.proc_dir
         base.update(extra)
         return constructed_env(**base)
 
