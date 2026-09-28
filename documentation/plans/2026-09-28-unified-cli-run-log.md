@@ -452,3 +452,54 @@ validated manager and rendered manager together; its runtime parent/candidate
 outcome is **not measured locally**. Hosted execution remains required.
 The additional identity/index commits and operator/read/alert work are held
 in the separate feature checkout and are not part of this repair publication.
+
+## Operations candidate — 2026-09-28 12:00 UTC
+
+**Measured:** repair #1934 at `296c5e1989c64c4c1ac500a1a0e817978aacf24f`
+passed [Linux 3.11](https://github.com/Claudfather/Claudlobby/actions/runs/36414595473/job/108902571220)
+and [Linux 3.10](https://github.com/Claudfather/Claudlobby/actions/runs/36414595473/job/108902571034)
+with 6,363 passed, 15 skipped and four warnings per lane, and
+[macOS 3.11](https://github.com/Claudfather/Claudlobby/actions/runs/36414595473/job/108902571284)
+with 6,341 passed, 37 skipped and four warnings. All seven native macOS checks,
+both conformance checks, the source-safety tripwire and the retained-input
+regression passed. The previous macOS `0edbe217` run also completed with the
+same sole source-safety failure as Linux. The repair gate is now clear.
+
+**Read from code, awaiting candidate CI:** this separate operations draft
+retains activation-verified identities, exposes canonical task reads and
+admit/assign/accept commands, registers a cold local human through committed
+ingest, and keeps `--by` provenance separate from caller authority. Check-in
+assignment links commit atomically and their reader scopes current events by
+recorded fleet identity. Wrong-kind references retain the scoped canonical
+recovery hint; no legacy argument is silently converted or acted on.
+
+**Read from code, awaiting candidate CI:** message routes use sealed active
+configuration and retained identities, including same-host cross-fleet targets.
+Version-1 request receipts reserve each native attempt before sending and
+retain its nonsecret observation before transmission-fact recording. Submitted
+attempts cannot authorize another send. This is the unshipped receipt format,
+not a compatibility decoder. The recording-alert adapter uses existing carriers
+and debounce behavior under an owned kernel lock, with bounded waits and no
+Plane callbacks. Unusable debounce state is disclosed, never promised durable.
+The public O1 send owner is still pending; these pieces alone do not deliver it.
+
+**Measured narrow evidence:** an isolated receipt-owner unit export passed
+seven tests in 0.23s, including interrupted persistence and explicit retry.
+An exact-files stdlib-only CLI smoke passed task/assignment help and structured
+syntax refusal. AST/native-script syntax and diff checks passed; Ruff found no
+new findings against the parent (15 inherited findings in two existing files).
+These checks do not exercise Pydantic, real activation or native carriers.
+
+**Measured query evidence:** the actual old check-in join missed a human
+dispatcher and included a local-looking alias with a foreign recorded fleet;
+the candidate returns the human and historical null-fleet rows while excluding
+the foreign row. The direct-reply query over a private 4,096-unrelated-row fixture
+required 20,536 SQLite VM steps before the partial reply index and 68 after it,
+with the same result. These are query-work measurements, not Pi latency.
+Migration 13 adds that index and preserves existing rows/IDs; rollback after
+new writes requires a schema-compatible release, not a schema-12 binary.
+
+**Limits:** the new full matrix remains required. Local native/dependency stalls
+are unresolved. Upgrade/recovery, ordinary sends and replies, reporting,
+caller/skill/grant cutover, remaining operations, actual-agent canary acceptance
+and normal-load Pi timing remain incomplete. No production activation occurred.
