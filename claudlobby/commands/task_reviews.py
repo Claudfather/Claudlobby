@@ -22,6 +22,7 @@ def _read(args) -> CommandOutput:
     from ..paths import InvalidPathSelector
     from ..plane.db import connect_ro, db_file
     from ..plane.migrations import DowngradeError
+    from ..plane.registry_read import current_entities
     from ..plane.schema_state import PendingMigrationError, require_current_schema
     from ..releases import ReleaseError
     from .. import review_queries, review_rules
@@ -62,9 +63,10 @@ def _read(args) -> CommandOutput:
         with closing(connect_ro(db_file(destination.paths.root))) as conn:
             conn.execute("BEGIN")
             require_current_schema(conn)
-            host = conn.execute("SELECT uid FROM identity_registry WHERE kind='host' AND uid=?",
-                                (bindings["host_uid"],)).fetchone()
-            if host is None:
+            fleets = [row for row in current_entities(conn, entity_type="fleet")
+                      if row["entity_alias"] == destination.fleet.name]
+            if (len(fleets) != 1 or fleets[0]["host_uid"] != bindings["host_uid"]
+                    or fleets[0]["entity_uid"] != bindings["fleet_uid"]):
                 raise CommandFailure("conflict", "Plane host differs from active review scope",
                                      release_id=release_id)
             data = review_queries.assess_payloads(conn, payloads, args.repo)

@@ -173,6 +173,27 @@ def test_task_reviews_reads_host_evidence_without_writing_and_refuses_plane_outa
         after = (conn.execute("SELECT COUNT(*) FROM identity_registry").fetchone()[0],
                  conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
     assert after == before
+    with sqlite3.connect(db_file(root)) as conn:
+        changed = conn.execute(
+            "UPDATE registry_snapshots SET host_uid=?"
+            " WHERE entity_type='fleet' AND entity_alias='example'",
+            ("host_" + "f" * 32,))
+        assert changed.rowcount == 1
+    mismatch = _call(capsys, root, "task", "reviews", "org/repo", "--pr", "1046",
+                     expected=4)["error"]
+    assert mismatch["code"] == "conflict" and "host" in mismatch["message"]
+    with sqlite3.connect(db_file(root)) as conn:
+        conn.execute("UPDATE registry_snapshots SET host_uid=?"
+                     " WHERE entity_type='fleet' AND entity_alias='example'",
+                     (data["host_uid"],))
+        conn.execute("UPDATE registry_snapshots SET entity_alias='other'"
+                     " WHERE entity_type='fleet' AND entity_alias='example'")
+    mismatch = _call(capsys, root, "task", "reviews", "org/repo", "--pr", "1046",
+                     expected=4)["error"]
+    assert mismatch["code"] == "conflict"
+    with sqlite3.connect(db_file(root)) as conn:
+        conn.execute("UPDATE registry_snapshots SET entity_alias='example'"
+                     " WHERE entity_type='fleet' AND entity_alias='other'")
     db_file(root).rename(root / "plane-db-offline")
     assert _call(capsys, root, "task", "reviews", "org/repo", "--pr", "1046",
                  expected=6)["error"]["code"] == "unavailable"
