@@ -6,6 +6,15 @@ stubbed transports; a Plane silencer does not isolate launchd, systemd, tmux,
 notifications, credentials, or network access. Do not run a full suite on a
 live fleet installation merely because the emission sentinels pass.
 
+The shared session and per-test fixtures provide private HOME, XDG config/cache/
+state/data, and temporary directories. Child builders carry those directories unless
+a test explicitly replaces one. Collection must still start in a constructed
+outer environment, before fixtures exist. The package-origin check runs before
+the conftest imports application configuration; `test_cli` additionally verifies
+the dedicated venv console script and its installed import from outside the tree.
+CLI tests use that absolute executable, never an ambient PATH command. The
+recording sentinel also puts a stale CLI first on PATH and proves it is untouched.
+
 Use `constructed_env(...)` for child processes. Its PATH and UTF-8 locale are
 intentional, and `PLANE_EMIT_DISABLED=1` is always present unless explicitly
 overridden. The compatibility helper `_scrubbed_env` removes inherited

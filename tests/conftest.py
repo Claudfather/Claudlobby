@@ -14,7 +14,24 @@ from textwrap import dedent
 
 import pytest
 
+import claudlobby
+
+_TEST_TREE = Path(__file__).resolve().parent.parent
+if Path(claudlobby.__file__).resolve().parent != _TEST_TREE / "claudlobby":
+    raise pytest.UsageError("test package origin does not match the tree under test")
+
 from claudlobby.config import DEFAULT_GUARDRAILS
+
+
+_HOME_KEYS = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "TMPDIR")
+
+
+def _isolate_home(patch, base):
+    for key, name in zip(_HOME_KEYS, ("home", "config", "cache", "state", "data", "tmp")):
+        directory = base / name
+        directory.mkdir(parents=True, exist_ok=True)
+        patch.setenv(key, str(directory))
+    patch.setattr(tempfile, "tempdir", str(base / "tmp"))
 
 
 def _silence_plane(patch):
@@ -24,20 +41,22 @@ def _silence_plane(patch):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _isolate_plane_session():
+def _isolate_plane_session(tmp_path_factory):
     """Guard session fixtures too; undo only our changes when pytest exits.
 
     Collection-time subprocesses must use constructed_env themselves: no
     fixture can protect code that ran before fixture setup.
     """
     with pytest.MonkeyPatch.context() as patch:
+        _isolate_home(patch, tmp_path_factory.mktemp("session-environment"))
         _silence_plane(patch)
         yield
 
 
 @pytest.fixture(autouse=True)
-def _isolate_claudlobby_root(monkeypatch, _isolate_plane_session):
+def _isolate_claudlobby_root(monkeypatch, tmp_path, _isolate_plane_session):
     """Reset the default for each test; explicit local overrides still win."""
+    _isolate_home(monkeypatch, tmp_path / "test-environment")
     _silence_plane(monkeypatch)
 
 
@@ -135,10 +154,10 @@ class ScratchPlaneEnv:
 
 
 @pytest.fixture(scope="session")
-def _scratch_plane_cli(_isolate_plane_session, tmp_path_factory):
+def test_cli(_isolate_plane_session, tmp_path_factory):
     """Refuse a globally installed CLI or an editable install of another tree."""
     cli = Path(sys.executable).parent / "claudlobby"
-    assert sys.prefix != sys.base_prefix, "recording tests require a dedicated venv"
+    assert sys.prefix != sys.base_prefix, "CLI tests require a dedicated venv"
     assert cli.is_file(), f"install this checkout in the test venv: {cli}"
     repo = Path(__file__).resolve().parent.parent
     result = subprocess.run(
@@ -153,9 +172,9 @@ def _scratch_plane_cli(_isolate_plane_session, tmp_path_factory):
 
 
 @pytest.fixture
-def scratch_plane_env(tmp_path_factory, _scratch_plane_cli):
+def scratch_plane_env(tmp_path_factory, test_cli):
     """Explicit opt-in for intentional recording; use with constructed_env."""
-    builder = ScratchPlaneEnv(tmp_path_factory.getbasetemp(), _scratch_plane_cli)
+    builder = ScratchPlaneEnv(tmp_path_factory.getbasetemp(), test_cli)
     yield builder
     builder.close()
 
@@ -210,14 +229,17 @@ def constructed_env(**overrides):
     production-pointing variable (FLEET_STATE_PATH, escalation chat ids,
     BOT_DIR) must be remembered and subtracted, and the one nobody thought of
     is the one that leaks. Built minimal, a new isolation-sensitive variable
-    is absent by construction. PATH is the one deliberate inheritance (host
-    tools); pass PATH=... to prepend stub dirs. LANG pins UTF-8 semantics: with
+    is absent by construction. PATH deliberately inherits host tools; pass
+    PATH=... to prepend stub dirs. HOME/XDG/TMPDIR carry the
+    shared fixtures' private directories; explicit overrides still win.
+    LANG pins UTF-8 semantics: with
     no locale at all, grep/awk match the UTF-8 pane-fixture glyphs bytewise and
     lib-common's pane classifiers flip one verdict (test_keepalive_classify /
     test_pane_is_idle, measured). Values are str()-coerced so Paths pass
     through."""
     env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8",
            "PLANE_EMIT_DISABLED": "1"}
+    env.update({key: os.environ[key] for key in _HOME_KEYS if key in os.environ})
     env.update({k: str(v) for k, v in overrides.items()})
     return env
 
