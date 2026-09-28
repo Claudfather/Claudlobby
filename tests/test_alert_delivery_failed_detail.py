@@ -58,7 +58,7 @@ def _host(tmp_path, *, scratch_plane_env):
         # Every event is a cold emit with no daemon; a loaded host can outrun
         # the 10s production bound and reap the row this test reads.
         FLEET_EVENT_EMIT_TIMEOUT_S="120",
-        **scratch_plane_env(root),
+        **scratch_plane_env(root, initialize=True),
     )
     return root, env
 

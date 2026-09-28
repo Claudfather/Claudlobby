@@ -47,7 +47,7 @@ def _run(script, args, root, tmp_path, extra_env=None, *, scratch_plane_env):
     native = _native_fixture(tmp_path, script)
     env = _scrubbed_env(
         TG_CAPTURE=str(tmp_path / "tg-capture"),
-        **scratch_plane_env(root),          # the host job's receipt lands on the plane under _host
+        **scratch_plane_env(root, initialize=True),          # the host job's receipt lands on the plane under _host
     )
     env.update(extra_env or {})
     return subprocess.run(

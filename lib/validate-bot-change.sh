@@ -154,6 +154,20 @@ export CLAUDLOBBY_ROOT="$ROOT"
 # socket-fallback contract above needs FLEET_NAME unset).
 export CLAUDLOBBY_FLEET="$FLEET"
 
+# Only this source harness initializes its private recording databases.
+# Ordinary emitters and daemon startup require an already applied schema.
+# Keep this after CLI validation so a refused selection creates no database.
+val_initialize_plane() {
+    "$VAL_PY" -I -B - "$VAL_REPO" "$1" <<'VALINITPY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from tests.plane_setup import initialize_plane
+initialize_plane(Path(sys.argv[2]))
+VALINITPY
+}
+val_initialize_plane "$ROOT"
+
 # Every plane read below goes through the shipped stdlib doors, and a read that
 # cannot run is REFUSED rather than read as empty: its reason lands in the
 # refusal ledger, and every check after it in its scenario fails naming it
@@ -296,14 +310,15 @@ val_backdate() {
     [ -e "$f" ] || : > "$f"
     touch -t "$stamp" "$f"
 }
-# val_plane_ready <root> <fleet>: the plane db exists (a first fleet-level
-# receipt through the real door creates it). A fleet with no manifest gets a
+# val_plane_ready <root> <fleet>: initialize a private plane, then seed its
+# first fleet-level receipt through the real door. A fleet with no manifest gets a
 # deliberately EMPTY low-level fixture (not a loadable FleetConfig):
 # parse_fleet_bots reads an empty bots map exactly like a missing
 # file — every dir is scanned, as before). Nothing is declared: since the F18
 # closure (R3) every reader reads the plane alone, no flag, no declaration.
 val_plane_ready() {
     local root="$1" fleet="$2" fdir
+    val_initialize_plane "$root"
     fdir="$(CLAUDLOBBY_ROOT="$root" resolve_fleet_dir "$fleet" 2>/dev/null || true)"
     [ -n "$fdir" ] || fdir="$root/local/$fleet"
     mkdir -p "$fdir"
@@ -3635,6 +3650,7 @@ if false; then
     :   # the CLI is a prerequisite of the whole harness now (F18 R1) — never a skipped leg
 else
     PL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/vbcplane.XXXXXX")"
+    val_initialize_plane "$PL_ROOT"
     PL_SOCKDIR="$(mktemp -d /tmp/vbcpl.XXXXXX 2>/dev/null || mktemp -d)"
     PL_SOCK="$PL_SOCKDIR/s"
     PL_LIB="$PL_ROOT/lib"

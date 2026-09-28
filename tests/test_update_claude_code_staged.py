@@ -153,7 +153,7 @@ class StagedHost:
             CLAUDE_UPDATE_FLEET_PATH=self.sysdir,
             CLAUDE_MIN_BINARY_BYTES=str(FLOOR),
             FLEET_EVENT_EMIT_TIMEOUT_S="120",
-            **self.scratch_plane_env(self.root),
+            **self.scratch_plane_env(self.root, initialize=True),
         )
         if armed:
             base["CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED"] = "1"

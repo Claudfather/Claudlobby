@@ -179,14 +179,14 @@ def test_owned_recording_reaches_real_cold_cli(tmp_path, scratch_plane_env, sent
     stale = tmp_path / "stale-bin"
     stale.mkdir()
     (stale / "claudlobby").symlink_to(sentinel["cli"])
-    env = constructed_env(PATH=f"{stale}:{os.environ['PATH']}", **scratch_plane_env(root))
+    env = constructed_env(PATH=f"{stale}:{os.environ['PATH']}", **scratch_plane_env(root, initialize=True))
     assert shutil.which("claudlobby", path=env["PATH"]) == str(stale / "claudlobby")
     if default_on:
         env.pop("PLANE_EMIT_DISABLED")
     result = _emit(env)
     assert result.returncode == 0, result.stderr
     from claudlobby.plane.db import connect_ro, db_path
-    assert db_path(root).is_file(), "intentional scratch emission did not create its database"
+    assert db_path(root).is_file(), "explicitly initialized recording database disappeared"
     with connect_ro(db_path(root)) as conn:
         rows = conn.execute("SELECT msg_id, sender_alias, message_class FROM communications").fetchall()
     assert [tuple(row) for row in rows] == [(MSG_ID, "bot:scratch/test", "notice")]

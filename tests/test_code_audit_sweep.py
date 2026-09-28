@@ -316,7 +316,7 @@ class TestSweepSelector:
         env["CLAUDLOBBY_FLEET"] = "tf"          # the fleet job's carrier: the sweep's events anchor on bot:tf/owner
         env["PATH"] = f"{bindir}:{env['PATH']}"
         env["TMUX_BIN"] = str(tmux)
-        env.update(scratch_plane_env(root))
+        env.update(scratch_plane_env(root, initialize=True))
         proc = subprocess.run(
             ["bash", str(selector), "tf"],
             env=env,

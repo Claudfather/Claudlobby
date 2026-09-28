@@ -574,6 +574,20 @@ def assemble_entities(paths, fleet, vault_rev):
     return entities, not skipped
 
 
+def _has_ingest_history(conn) -> bool:
+    """An empty family is not a new database: retention keeps the ledger.
+
+    Its AUTOINCREMENT watermark and identities also forbid treating removed
+    ledger rows as a fresh host. This probe never creates a host identity.
+    """
+    return bool(conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM ingest_ledger)"
+        " OR EXISTS(SELECT 1 FROM sqlite_sequence"
+        " WHERE name = 'ingest_ledger' AND seq > 0)"
+        " OR EXISTS(SELECT 1 FROM identity_registry)"
+    ).fetchone()[0])
+
+
 def run_generate_scan(paths, fleet) -> dict | None:
     """Emit one generate-cause registry scan for *fleet*. Returns the summary
     dict, or None when a tier has turned the scan OFF. Raises only upward
@@ -665,18 +679,22 @@ def run_generate_scan(paths, fleet) -> dict | None:
                 # ensure_ MINTS on absence (mkdir+write — a write this read
                 # path must not carry, r2 probed), and a fresh uid would
                 # filter every row into a FALSE CLEAN. Absent/invalid file
-                # -> the diff is skipped LOUDLY, never silently empty.
+                # -> the diff is skipped LOUDLY, never silently empty, unless
+                # explicit SQL initialization left a genuinely new database.
                 uid_file = Path(root) / "state" / "host-uid"
                 try:
                     this_host = uid_file.read_text().strip()
                 except OSError:
                     this_host = ""
-                if not this_host:
+                if not this_host and _has_ingest_history(conn):
                     log.warning(
                         "registry scan: host-uid unreadable at %s —"
                         " tombstone diff SKIPPED (cannot scope rows to this"
                         " host)", uid_file)
                     raise sqlite3.Error("host-uid unreadable")
+                # With no durable history there is nothing to scope or
+                # tombstone. The normal emit below creates the first uid via
+                # ensure_host_uid; this read-side probe never mints one.
                 rows = conn.execute(
                     "SELECT entity_type, entity_uid, entity_alias, tombstone,"
                     " MAX(ingest_seq) FROM registry_snapshots"

@@ -34,6 +34,13 @@ def test_absent_database_requires_explicit_initialization(tmp_path):
     with pytest.raises(sqlite3.OperationalError, match="unable to open database"):
         preflight_schema(root)
     assert path.is_dir() and list(path.iterdir()) == []
+    path.rmdir()
+    path.parent.rmdir()
+    path.parent.write_text("unavailable parent")
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        preflight_schema(root)
+    assert caught.value.sqlite_errorcode == sqlite3.SQLITE_CANTOPEN
+    assert path.parent.read_text() == "unavailable parent"
 
 
 @pytest.mark.parametrize("version", [0, SCHEMA_USER_VERSION - 1, SCHEMA_USER_VERSION + 1])

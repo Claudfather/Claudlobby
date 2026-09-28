@@ -205,6 +205,7 @@ def test_newest_received_wins(tmp_path):
     """A later `received` supersedes an earlier one for the same msg_id — the
     MAX(ingest_seq) rule (defensive; a re-send mints a fresh id in practice)."""
     _full_capture(tmp_path)
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [_comm(_mid("9"), BODY), _submitted(_mid("9"), BODY),
                           _received(_mid("9"), BODY[:-5])])   # first: short
     emit_batch(tmp_path, [_received(_mid("9"), BODY)])        # then: whole

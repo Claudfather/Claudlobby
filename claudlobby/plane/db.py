@@ -48,7 +48,18 @@ def connect_ro(path: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
     # Missing storage requires explicit initialization. An existing directory,
     # device or FIFO is an unavailable database, never an empty host. Refuse
     # before SQLite can block on a special file; emit retains its spool path.
-    if not stat.S_ISREG(Path(path).stat().st_mode):
+    try:
+        mode = Path(path).stat().st_mode
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        # A broken parent or denied stat is unavailable storage, not a missing
+        # schema. Keep the same operational classification SQLite open uses.
+        error = sqlite3.OperationalError("unable to open database file")
+        error.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+        error.sqlite_errorname = "SQLITE_CANTOPEN"
+        raise error from exc
+    if not stat.S_ISREG(mode):
         raise sqlite3.OperationalError("unable to open database file: not a regular file")
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=timeout)
     conn.row_factory = sqlite3.Row

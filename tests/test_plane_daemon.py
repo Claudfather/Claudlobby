@@ -669,6 +669,7 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
 
     fresh = tmp_path / "fresh"
     fresh.mkdir()
+    initialize_plane(fresh)
     emit(fresh, {"event_type": "work_item", "emitter": "t9",
                  "fleet": "f", "payload": {
                      "work_item_id": "wi_" + "9" * 32, "title": "t",
@@ -985,7 +986,7 @@ def test_a_root_whose_state_is_a_regular_file_refuses_before_lifecycle(tmp_path:
     sock = sdir / "s"
     try:
         daemon = PlaneDaemon(tmp_path, socket_override=sock)
-        with pytest.raises(PendingMigrationError):
+        with pytest.raises(sqlite3.OperationalError):
             daemon.serve(install_signals=False)
         assert not sock.exists()
         assert state.read_text() == content
