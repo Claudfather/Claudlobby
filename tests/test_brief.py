@@ -665,7 +665,7 @@ def test_no_residence_mismatch_label_on_the_plane(root: Path):
     task_id, _ = _land(overlay, _dispatch("alex", NOW - 100, NOW + 100,
                                         task_id="t-1"), fleet="f1")
 
-    brief = build_brief(_fleet(), overlay, "alex", NOW)
+    brief = build_brief(_fleet(name="f1"), overlay, "alex", NOW)
     assert [r["task_id"] for r in brief["work"]["items"]] == [task_id]
     assert _find(brief, "work", "#526") == []
 

@@ -9,7 +9,9 @@ ancestry, and (b) an unresolvable answer is loud rather than plausible.
 """
 
 import os
+import signal
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -40,32 +42,44 @@ def test_parses_under_bash():
 def _fake_tree(tmp_path, script):
     """Run `script` under a process genuinely named `claude`.
 
-    Uses a COPIED shell binary so `comm` really reads `claude` -- a stub that
-    merely claims the name would not exercise the comm-basename branch the door
-    takes on Linux.
-
-    The trailing `; true` is load-bearing. bash applies an exec optimisation to
-    the LAST command of a `-c` string, replacing itself in place; the fake
-    `claude` process then becomes the door process and there is no claude
-    ancestor left to find. That is not a door defect -- the walk correctly
-    continued past it -- but it silently destroys the fixture, so the fixture
-    keeps the parent alive on purpose.
+    The selected private Python executable is reached through a `claude`
+    symlink. It stays alive as Bash's parent while the door walks upward; a
+    copied /bin/bash can stall at startup on macOS. The process group and
+    bounded wait ensure a broken fixture cannot hang the entire suite.
     """
     fake = tmp_path / "claude"
-    fake.write_bytes(Path("/bin/bash").read_bytes())
-    fake.chmod(0o755)
-    return subprocess.run([str(fake), "-c", script + "; true"],
-                          capture_output=True, text=True)
+    fake.symlink_to(sys.executable)
+    runner = textwrap.dedent("""
+        import ctypes
+        import os
+        import subprocess
+        import sys
+
+        if sys.platform.startswith("linux"):
+            ctypes.CDLL(None).prctl(15, b"claude", 0, 0, 0)
+        print(f"ANCESTOR={os.getpid()}", flush=True)
+        comm = subprocess.check_output(
+            ["ps", "-o", "comm=", "-p", str(os.getpid())], text=True).strip()
+        print(f"COMM={comm}", flush=True)
+        result = subprocess.run(["bash", "-c", sys.argv[1]])
+        raise SystemExit(result.returncode)
+    """)
+    process = subprocess.Popen([str(fake), "-c", runner, script],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=20)
+    except subprocess.TimeoutExpired as exc:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise AssertionError("private claude ancestry fixture timed out") from exc
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def test_resolves_to_an_ancestor_named_claude(tmp_path):
     resolved = tmp_path / "resolved-pid"
     r = _fake_tree(
         tmp_path,
-        f'echo "ANCESTOR=$$"; echo "COMM=$(ps -o comm= -p $$)"; '
-        # Bash 3.2 forks a command substitution without changing its comm.
-        # Calling the door inside $(...) would create a nearer process named
-        # claude and make the door correctly return that child instead.
         f'bash "{DOOR}" --pid > "{resolved}"; '
         f'read -r got < "{resolved}"; echo "GOT=$got"',
     )
@@ -124,7 +138,7 @@ def test_from_walks_the_given_ancestry(tmp_path):
     """--from is the seam that makes the walk testable without a real session."""
     r = _fake_tree(
         tmp_path,
-        f'echo "ANCESTOR=$$"; echo "GOT=$(bash {DOOR} --from $$)"',
+        f'owner="$PPID"; echo "GOT=$(bash {DOOR} --from "$owner")"',
     )
     assert r.returncode == 0, r.stderr
     out = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
