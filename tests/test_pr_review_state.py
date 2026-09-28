@@ -1140,8 +1140,9 @@ class TestTheTaughtVocabularyIsRead:
 # exists to catch).
 # ---------------------------------------------------------------------------
 
-#: The four files #1913 names, repo-root-relative. Every one of these is
-#: somewhere a reviewer or a manager learns (or teaches) the verdict format.
+#: The files #1913 (and #1921's follow-up) names, repo-root-relative. Every
+#: one of these is somewhere a reviewer or a manager learns (or teaches) the
+#: verdict format.
 DOC_PATHS = [
     "library/expertise/code-review.md",
     "library/protocols/review-flow.md",
@@ -1155,13 +1156,43 @@ DOC_PATHS = [
 #: executable rather than eyeballed. `approve` is `pr-comment-hygiene.md`'s;
 #: the other four are `review-flow.md` step 5's (#1895), echoed by
 #: `code-review.md` and (ship it / request changes) by
-#: `verify-before-merge.md`.
+#: `verify-before-merge.md`. `comment` is deliberately NOT here -- it is a
+#: taught word the tool does not gate on at all (S1, #1921 review).
 TAUGHT_VERDICT_WORDS = {
     "approve",
     "ship it",
     "mechanical fixes",
     "request changes",
     "architectural concerns",
+}
+
+#: The bracket-tag SHAPE alone -- `] [VERDICT]` -- independent of whether the
+#: word after it is one `parse_verdict` recognizes. Kept separate from, and
+#: narrower than, `HEADER_IDENTITY`/`VERDICT_HEADER` on purpose: otis's
+#: #1921 review (R2) found that the original version of this test SELECTED
+#: examples with `HEADER_IDENTITY` and then ASSERTED `parse_header_identity`
+#: -- the same regex, searched a second time on the same string -- so the
+#: identity assertion could never fail. A mutant that dropped an example's
+#: bracket tag simply stopped matching the SELECTION filter and vanished
+#: from the sample instead of failing it (`bracket tag dropped,
+#: review-flow.md` -> green, 114 passed, in his review). Selection and
+#: assertion must probe DIFFERENT things, or the assertion is a tautology.
+BRACKET_TAG = re.compile(r"\]\s*\[VERDICT\]", re.I)
+
+#: The exact count of qualifying lines per file, pinned so a dropped example
+#: is a COUNT mismatch even in the case where every REMAINING line in that
+#: file still parses cleanly (otis's review: a mutation on one of several
+#: bullets in a file can leave the file's count non-zero while one example
+#: silently vanished -- a bare ">0" check does not see that). Includes
+#: `pr-comment-hygiene.md`'s `comment` example: it is bracket-tag SHAPED
+#: (`BRACKET_TAG` matches it) even though it is not a verdict the tool
+#: reads, so it is a counted example here, just one whose `verdict` is
+#: `None` in `_doc_examples()`'s output.
+EXAMPLES_PER_FILE = {
+    "library/expertise/code-review.md": 4,
+    "library/protocols/review-flow.md": 5,
+    "library/protocols/verify-before-merge.md": 2,
+    "library/protocols/pr-comment-hygiene.md": 3,
 }
 
 
@@ -1176,59 +1207,78 @@ class TestDocsTeachTheParseableHeader:
     this module's own regexes -- never a reimplementation of them."""
 
     def _doc_examples(self):
-        """(path, line, verdict) for every line in the four docs that carries
-        a genuine `**[name] [...` header (never a `<bot-name>` placeholder --
-        `HEADER_IDENTITY` requires its bracket to open on `[a-z0-9]`, which a
-        `<` cannot satisfy, so an abstract shape line is excluded by
-        construction, not by a second filter) resolving to a verdict the tool
-        recognizes. `pr-comment-hygiene.md`'s `comment` verdict is not in
-        `NORM`, so it is walked and correctly produces no example -- it is
-        not a verdict this tool gates on, and forcing it to parse would test
-        a claim nobody is making."""
+        """(path, line, verdict) for every line in the four docs that is
+        EITHER a verdict `parse_verdict` recognizes OR carries the bracket-tag
+        SHAPE (`BRACKET_TAG`) whether or not the word after it resolves --
+        so a taught-but-unrecognized word (`pr-comment-hygiene.md`'s
+        `comment`) is a FOUND example with `verdict is None`, never a silent
+        exclusion (#1921 review, S1). `<...>` marks a template line
+        (`<bot-name>`, `<sha>`) and is skipped explicitly -- selection must
+        not depend on the SAME regex the per-line assertions probe, or a
+        dropped tag disappears from the sample instead of failing it (R2)."""
         found = []
         for rel in DOC_PATHS:
             text = (_repo_root() / rel).read_text()
             for line in text.splitlines():
-                if not prs.HEADER_IDENTITY.search(line):
-                    continue
+                if "<" in line:
+                    continue  # a template line, not a concrete example
                 verdict = prs.parse_verdict(line)
-                if verdict is None:
-                    continue
+                if verdict is None and not BRACKET_TAG.search(line):
+                    continue  # not verdict-shaped at all -- ordinary prose
                 found.append((rel, line, verdict))
         return found
 
     def test_every_doc_header_example_is_attributed_and_anchored(self):
         examples = self._doc_examples()
 
-        # A pass over zero examples is not a pass: it means the scan (or the
-        # docs) silently stopped finding anything, the exact failure mode
-        # `test_main_runs_the_selftest` guards one door over -- a control
-        # that is not reached is not a control. Assert it PER FILE, not only
-        # in aggregate: an aggregate count can stay flat while one file's
-        # example count drops to zero and another's happens to rise.
-        by_file: dict[str, int] = {}
+        # Pinned per file, not just ">0": a dropped example is a count
+        # mismatch even where the file's remaining examples all still parse
+        # (the gap the original ">0" check could not see -- #1921 review).
+        by_file: dict[str, int] = {rel: 0 for rel in DOC_PATHS}
         for rel, _line, _verdict in examples:
-            by_file[rel] = by_file.get(rel, 0) + 1
-        for rel in DOC_PATHS:
-            assert by_file.get(rel, 0) > 0, (
-                f"{rel}: no attributed+anchored verdict-header example found "
-                f"-- the doc regressed to an unparseable shape, or the scan broke"
-            )
+            by_file[rel] += 1
+        assert by_file == EXAMPLES_PER_FILE, (
+            f"example count drifted from the pinned per-file count -- "
+            f"found {by_file}, want {EXAMPLES_PER_FILE}"
+        )
 
         for rel, line, verdict in examples:
-            assert verdict in (prs.APPROVE, prs.BLOCK), (rel, line, verdict)
             identity = prs.parse_header_identity(line)
             assert identity, f"{rel}: header carries no identity: {line!r}"
             anchor = prs.parse_anchor(line)
             assert anchor, f"{rel}: header carries no SHA anchor: {line!r}"
+            if verdict is None:
+                # The one taught, bracket-tagged word the tool does not gate
+                # on at all (S1, #1921 review): `pr-comment-hygiene.md`'s
+                # `comment`. Checked against the RAW LINE, deliberately not
+                # `prs.verdict_words()` -- that shares `VERDICT_HEADER`'s own
+                # vocabulary-restricted regex, so it returns `None` for
+                # "comment" for the SAME reason `parse_verdict` does (the
+                # word is outside its alternation, not merely unmapped by
+                # NORM), and asserting on its output here would check a
+                # string that can never contain the word being verified. A
+                # doc line landing here with any OTHER word is new
+                # vocabulary drift the doc introduced silently.
+                assert re.search(r"\[VERDICT\]\s*comment\b", line, re.I), (
+                    f"{rel}: bracket-tagged header with an unrecognized "
+                    f"verdict word the tool was never taught to expect "
+                    f"(not even S1's known `comment`): {line!r}"
+                )
+            else:
+                assert verdict in (prs.APPROVE, prs.BLOCK), (rel, line, verdict)
 
         # "Keep every verdict word the tool reads" -- executable, not
         # eyeballed. Same transform `parse_verdict` applies before its NORM
         # lookup, so `request-changes` and `request changes` count as one.
-        said_words = {
-            re.sub(r"[\s-]+", " ", prs.verdict_words(line).lower())
-            for _rel, line, _verdict in examples
-        }
+        # `comment` never reaches `NORM`, so `verdict_words` returns None for
+        # it and it is excluded here on purpose -- it is not one of the
+        # words this check is about.
+        said_words = set()
+        for _rel, line, _verdict in examples:
+            words = prs.verdict_words(line)
+            if words is None:
+                continue
+            said_words.add(re.sub(r"[\s-]+", " ", words.lower()))
         missing = TAUGHT_VERDICT_WORDS - said_words
         assert not missing, f"taught verdict word(s) no longer demonstrated in any doc: {missing}"
 
@@ -1240,10 +1290,19 @@ class TestDocsTeachTheParseableHeader:
         through the real CLI entry point exactly as `--payload-json` expects
         it (`TestOfflineSeam`'s pattern) -- proving the doc's shape survives
         the full `main()` -> `assess_pr()` -> `--json` path, not only the
-        regexes in isolation."""
-        rel, line, verdict = self._doc_examples()[0]
-        assert verdict == prs.APPROVE, (rel, line)  # code-review.md's "ship it" bullet
+        regexes in isolation. Selects the example by its VERDICT VALUE, never
+        by position (`examples[0]` broke two ways in otis's #1921 review: it
+        silently retargeted onto a different, unrelated example when the
+        first one was mutated away, and it called `len(anchor)` before
+        confirming the anchor existed, turning a missing anchor into an
+        uninformative `TypeError` instead of a clean assertion)."""
+        approve_examples = [
+            (rel, line) for rel, line, verdict in self._doc_examples() if verdict == prs.APPROVE
+        ]
+        assert approve_examples, "no APPROVE example found to drive the CLI seam with"
+        rel, line = approve_examples[0]  # code-review.md's "ship it" bullet, normally
         anchor = prs.parse_anchor(line)
+        assert anchor, f"{rel}: the chosen example carries no anchor: {line!r}"
         head = anchor + "0" * (40 - len(anchor))  # a full sha the anchor is a prefix of
 
         payload = _payload(

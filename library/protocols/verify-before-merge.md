@@ -9,7 +9,7 @@ When a reviewer reports "DONE," that means they've FINISHED reviewing — not th
 
 ### 1. Parse the verdict
 
-Read the latest review body and look for the explicit verdict — the bracket-tagged, anchored header `lib/pr-review-state.py` also reads, so its verdict and yours can never silently disagree:
+Read each reviewer's OWN latest verdict, never just the newest comment on the PR — reading only the newest comment is how a manager and `lib/pr-review-state.py` can reach opposite answers on the same PR (`lib/pr-review-state.py` resolves it the same way: a PR stays blocked while ANY reviewer's own latest verdict is a block, whoever posted most recently). Look for the explicit header on each:
 
 - `**[alex] [VERDICT] ship it** — reviewed at a1b2c3d` → safe to merge
 - `**[alex] [VERDICT] request changes** — reviewed at a1b2c3d` → bounce to engineer with fix direction; do NOT merge

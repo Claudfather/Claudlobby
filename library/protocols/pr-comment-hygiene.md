@@ -98,6 +98,8 @@ A review bot's overall assessment of the plan. **Bold the bracket tag and anchor
 
 `<sha>` is the commit you reviewed (a plan PR's `headRefOid`, same as any other PR) — carry it even on a `comment` verdict, so a later reader can tell whether the plan has moved on since.
 
+**Known limitation:** `comment` is not a verdict `lib/pr-review-state.py` gates on — bracket-tagging it still reads as vocabulary drift (`UNPARSED-HEADER`, the PR reported as not assessed), the same as any header shape the tool does not recognize, until #1923 teaches it to read `comment` as a neutral, non-gating verdict. `approve` and `request-changes` are unaffected.
+
 Examples:
 
 ```
