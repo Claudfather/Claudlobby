@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import constructed_env, plane_emit_env, read_fleet_events
+from tests.conftest import constructed_env, read_fleet_events
 
 REPO = Path(__file__).resolve().parent.parent
 GUARD = REPO / "lib" / "vault-git-guard.sh"
@@ -151,14 +151,15 @@ class TestTheDecisionIsRecordedAsData:
     where jq's does not.
     """
 
-    def test_the_source_is_the_script_and_the_detail_is_data(self, tree, tmp_path):
+    def test_the_source_is_the_script_and_the_detail_is_data(
+        self, tree, tmp_path, scratch_plane_env
+    ):
         vault, _ = tree
         root = tmp_path / "root"
         bot = root / "runtime" / "bots" / "tbot"
         bot.mkdir(parents=True)
         env = constructed_env(
             HOME=tmp_path / "home",
-            CLAUDLOBBY_ROOT=root,
             FLEET_NAME="testfleet",
             BOT_ID="tbot",
             BOT_DIR=bot,
@@ -166,7 +167,7 @@ class TestTheDecisionIsRecordedAsData:
             # A cold emit with no daemon; a loaded host can outrun the 10s
             # production bound and reap the row this test reads.
             FLEET_EVENT_EMIT_TIMEOUT_S="120",
-            **plane_emit_env(),
+            **scratch_plane_env(root),
         )
         cmd = "git '--some\"flag' checkout main"
         verdict, detail = D.decide(cmd, vault, vault)
