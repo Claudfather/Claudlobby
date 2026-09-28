@@ -197,3 +197,15 @@ platform-neutral mid-boot signal — PR B's substance is untouched by it; PR B's
   ratchet allowlist maintained there); the systemd stagger retirement and `boot_rung_for`'s consumer table (D2–D5) go to #1747's
   unit-ownership phase as a note, not a plan.
 - **F13/F14/F15/F17 stay locked as amended, provisional; F17's carrier is replaced by release rollback under #1747.**
+
+## The control reboot — 2026-09-28
+
+**Control reboot of the primary host on PR A alone** (`main` at the PR A tip + #1697; no gate), 2026-09-28 17:53 local, read at boot+50 min without any rescue by the reader.
+
+- 17 of 18 bots started (the 18th has no LaunchAgent plist — unenrolled since before the 25th, not a boot defect).
+- **5 bots were READY at +77…+101 s.** The other **12 reached their readiness poll only at ~+169 s** (the pre-poll seeding/plugin phase took ~3 minutes under contention), **timed out at +276…+447 s with `last bridge_state=no_bridge`**, and each logged `AUTH_CACHE_ARMED — a server listed in the host-global MCP auth cache is SKIPPED at spawn` then `BRIDGE_MISSING — keepalive CANNOT heal this one`. That is #1358's mechanism: once the first starved Telegram spawn lands in the host-global needs-auth cache, every later start skips the server.
+- **Zero keepalive `RESTART` lines** — the bounce loop from the 19th did not recur (PR 4 + PR A held).
+- **Every one of the 12 dead bridges came up in ~2 s after a rolling restart** (`RR_FENCE` markers from +7 to +10 min, both fleets, one bot at a time) — a rescue, so the final "17 of 17 bridges up" is contaminated exactly as `selfstart-snapshot.sh` says on its own page ("rescue receipt: none covers this boot — contamination CANNOT be ruled out"; its lateness bound is not applied on this host because the boot clock reads UNKNOWN). Plugin-update-once engaged (4 stamps this boot).
+
+**Verdict:** PR A alone does not boot the estate clean — 12 of 17 bridges were dead until a rescue — but the visible cascade is the auth-cache ARMING after the first starvation, not the starvation itself. A concurrency gate (PR B) lowers the chance of the first failure; it does nothing once the cache is armed. The cheaper, more targeted lever is the cache: a bot holding a channel credential must never inherit another bot's needs-auth verdict at spawn (clear the stale entry before spawn, or scope the cache per bot). Disposition to follow.
+
