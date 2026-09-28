@@ -11,6 +11,7 @@ import pytest
 
 from claudlobby import composer, config_staging, context, env_tiers, releases
 from claudlobby.config_plan import PlanError, read_plan
+from claudlobby.config_units import current_declarations, planned_units
 from claudlobby.paths import Paths
 from tests.package_fixtures import source_package
 
@@ -160,6 +161,18 @@ def test_stage_renders_bots_timers_and_host_guards_without_live_writes(staging_c
     changes = _changes(plan)
     assert plan.effects["restart_bots"] == ["primary/primary-manager", "primary/primary-worker"]
     assert plan.effects["reload_supervision"] is True
+    # The proposal's enrollment list covers both native representations, not
+    # whichever files happen to remain installed on the development host.
+    linux = planned_units(plan, "Linux")
+    darwin = planned_units(plan, "Darwin")
+    assert len([item for _, item in linux if item["scope"] == "bot"]) == 2
+    assert len([item for _, item in darwin if item["scope"] == "bot"]) == 2
+    assert all(item["phase"] == "bots" for _, item in linux if item["scope"] == "bot")
+    assert any(item["phase"] == "ingest" for _, item in linux)
+    assert all(item["phase"] == "producers" for _, item in linux
+               if item["scope"] == "fleet")
+    with pytest.raises(PlanError, match="current generated unit"):
+        current_declarations(plan, "Linux")  # candidate is not running evidence
     for bot in ("primary-manager", "primary-worker"):
         directory = case.paths.bot_runtime(bot)
         conf = plan.content(changes[directory / "bot.conf"]).decode()

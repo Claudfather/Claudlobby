@@ -16,6 +16,7 @@ import tempfile
 from . import composer as compose
 from .config import host_override_path
 from .config_plan import ConfigPlan, ConfigPlanBuilder, PlanError
+from .config_units import job_units, unit_family
 from .context import load_context
 from .paths import Paths, _iter_fleet_dirs
 from .releases import ReleaseManifest, read_release
@@ -76,6 +77,12 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
                      "data", "data/events", "logs", "mounts"):
         builder.directory(directory / relative)
     rendered = compose.render_bot_files(bot, fleet, paths, boot_delay_s=delay, cascade=cascade)
+    unit_name = f"{fleet.service_prefix}.{bot.bot_id}"
+    family = {name: (rendered[name].content.encode(), rendered[name].mode)
+              for name in (unit_name + ".service", unit_name + ".plist")}
+    builder.effects["units"].extend(unit_family(
+        family, destination=directory, scope="bot", phase="bots",
+        release_id=builder.release_id, fleet=fleet.name, bot=bot.bot_id))
     tools = {}
     for name, artifact in rendered.items():
         if name.startswith("tools/"):
@@ -168,6 +175,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
         "restart_bots": [f"{c.fleet.name}/{bot}" for c in contexts for bot in c.fleet.bots],
         "reload_supervision": True,
         "coverage": "declared fleets; activation must reconcile enrolled consumers",
+        "units": [],
     }
     managers_total = sum(len(c.fleet.manager_bots()) for c in contexts)
     managers_before = workers_before = 0
@@ -185,7 +193,11 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             timers = compose.compose_fleet_timers(
                 fleet, paths, context.merged_defaults, output_dir=scratch / str(index))
             paths.assert_writable(paths.runtime_fleet / "timers")
-            builder.tree(paths.runtime_fleet / "timers", _snapshot(timers))
+            files = _snapshot(timers)
+            builder.effects["units"].extend(job_units(
+                files, destination=paths.runtime_fleet / "timers", scope="fleet",
+                release_id=release.release_id, fleet=fleet.name))
+            builder.tree(paths.runtime_fleet / "timers", files)
             if paths.shared_docs:
                 for name in ("planning/active", "planning/completed", "decisions", "knowledge", "runbooks"):
                     builder.directory(paths.assert_writable(paths.shared_docs / name))
@@ -196,7 +208,14 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
         paths = contexts[0].paths
         timers = compose.compose_host_timers(paths, output_dir=host)
         paths.assert_writable(root / "runtime/_host/timers")
-        builder.tree(root / "runtime/_host/timers", _snapshot(timers))
+        files = _snapshot(timers)
+        builder.effects["units"].extend(job_units(
+            files, destination=root / "runtime/_host/timers", scope="host",
+            release_id=release.release_id,
+            # This is the declared host ingest service, not a pattern over
+            # installed unit names. It must survive until the controlled drain.
+            resident_phases={"claudlobby-plane-daemon": "ingest"}))
+        builder.tree(root / "runtime/_host/timers", files)
         for render in (compose.compose_host_bot_handles, compose.compose_host_mention_allowlist):
             result = render(paths, output_dir=host, manifests=sorted(manifests))
             paths.assert_writable(root / "runtime/_host" / result.name)
