@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import constructed_env, plane_emit_env, read_fleet_events
+from tests.conftest import constructed_env, read_fleet_events
 
 REPO = Path(__file__).resolve().parent.parent
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
@@ -105,13 +105,14 @@ def template_origin(tmp_path_factory):
 
 
 class Install:
-    def __init__(self, tmp_path: Path, template: Path):
+    def __init__(self, tmp_path: Path, template: Path, scratch_plane_env):
         self.origin = tmp_path / "origin.git"
         shutil.copytree(template, self.origin)
         self.root = tmp_path / "root"
         subprocess.run(
             ["git", "clone", "-q", str(self.origin), str(self.root)], check=True
         )
+        self.plane_env = scratch_plane_env(self.root)
         self.work = tmp_path / "upstream"  # where "merged PRs" are made
         subprocess.run(
             ["git", "clone", "-q", str(self.origin), str(self.work)], check=True
@@ -155,11 +156,10 @@ class Install:
         env = constructed_env(
             PATH=f"{self.bin}:/usr/bin:/bin",
             HOME=self.home,
-            CLAUDLOBBY_ROOT=self.root,
             PULL_ROOT_STUB=self.stub,
             PULL_ROOT_WATCH_S="1",
             FLEET_EVENT_EMIT_TIMEOUT_S="60",
-            **plane_emit_env(),
+            **self.plane_env,
         )
         return subprocess.run(
             ["bash", str(self.root / "lib" / "pull-root.sh")],
@@ -182,8 +182,8 @@ class Install:
 
 
 @pytest.fixture
-def inst(tmp_path, template_origin) -> Install:
-    return Install(tmp_path, template_origin)
+def inst(tmp_path, template_origin, scratch_plane_env) -> Install:
+    return Install(tmp_path, template_origin, scratch_plane_env)
 
 
 def _ok(proc):

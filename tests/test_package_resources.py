@@ -13,7 +13,7 @@ import sys
 import tarfile
 import zipfile
 
-from conftest import constructed_env
+from tests.conftest import constructed_env
 
 
 REPO = Path(__file__).resolve().parents[1]
