@@ -183,6 +183,29 @@ def test_every_test_lands_in_exactly_one_lane_of_the_tests_side(tmp_path):
     assert sum(len(sel) for _, sel in lanes.values()) == len(every) == 6
 
 
+def _jobs_running_pytest():
+    """Every (workflow, job) that invokes pytest, outside the quarantine lane."""
+    for wf in sorted(WORKFLOWS.glob("*.yml")):
+        if wf.name == QUARANTINE[0]:
+            continue
+        for job in yaml.safe_load(wf.read_text()).get("jobs", {}):
+            if _pytest_argvs((wf.name, job)):
+                yield (wf.name, job)
+
+
+def test_every_other_job_that_runs_pytest_leaves_quarantine_out(tmp_path):
+    """Not only the named lanes: a job added later (a platform matrix, say)
+    must deselect quarantined tests too, or it runs them red on every PR."""
+    jobs = list(_jobs_running_pytest())
+    assert set(REQUIRED) <= set(jobs), jobs  # the finder sees the known lanes
+    probe = _probe_dir(tmp_path)
+    quarantined = {"test_quarantined", "test_quarantined_harness", "test_quarantined_vault"}
+    for lane in jobs:
+        proc, selected = _collect(probe, _expression(lane))
+        assert proc.returncode in (0, 5), (lane, proc.stdout, proc.stderr)
+        assert not selected & quarantined, (lane, selected)
+
+
 def test_the_vault_lane_leaves_quarantine_out(tmp_path):
     proc, selected = _collect(_probe_dir(tmp_path), _expression(VAULT))
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
