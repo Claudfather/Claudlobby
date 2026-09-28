@@ -3,8 +3,8 @@
 Inputs are trusted operator-supplied wheels and a hash-locked requirements file.
 Only a complete lock of pinned wheel requirements is supported: URLs, nested
 files and pip options add sources outside that explicit offline boundary.
-A copied interpreter still uses its host stdlib and shared libraries; this is
-not OS hermeticity.
+A copied interpreter still uses its host stdlib and other system libraries;
+this is not OS hermeticity.
 Failures retain the owned incomplete directory for inspection, without a seal.
 """
 
@@ -33,9 +33,14 @@ from .releases import (Compatibility, InterpreterIdentity, ReleaseError,
 
 _INTERPRETER_QUERY = """
 import json, sys, sysconfig
+library = sysconfig.get_config_var('LDLIBRARY')
+library_dir = sysconfig.get_config_var('LIBDIR')
 print(json.dumps(dict(implementation=sys.implementation.name, version=sys.version,
     platform=':'.join((sys.platform, sysconfig.get_platform(),
-                      sysconfig.get_config_var('SOABI') or '')))))
+                      sysconfig.get_config_var('SOABI') or '')),
+    shared_library=(str(library_dir) + '/' + str(library))
+        if sys.platform == 'darwin' and library_dir and library and library.endswith('.dylib')
+        else None)))
 """
 _SITE_QUERY = "import sysconfig; print(sysconfig.get_path('purelib'))"
 
@@ -213,6 +218,7 @@ def assemble_release(data_root: Path, wheel: Path, dependency_lock: Path,
                "PYTHONDONTWRITEBYTECODE": "1"}
         identity = json.loads(_run([str(interpreter), "-I", "-S", "-B", "-c",
                                     _INTERPRETER_QUERY], env, work, timeout=15))
+        shared_library = identity.pop("shared_library", None)
         inputs = ReleaseInputs.from_lock(
             source_revision=artifact["source_revision"], artifact_id=artifact["artifact_id"],
             artifact_sha256=artifact["content_sha256"],
@@ -239,7 +245,22 @@ def assemble_release(data_root: Path, wheel: Path, dependency_lock: Path,
             installed_lock = directory / "dependency.lock"
             installed_lock.write_bytes(lock)
             venv = directory / "venv"
-            _run([str(interpreter), "-I", "-B", "-m", "venv", "--copies", str(venv)], env, work)
+            # Some macOS CPython builds resolve @rpath/libpython from
+            # @executable_path/../lib.
+            # venv --copies copies the executable but not that library. Create
+            # without pip, copy the library into the owned release, then run
+            # ensurepip through the copied interpreter.
+            if shared_library:
+                source_library = Path(shared_library)
+                if not source_library.is_file():
+                    raise ReleaseError(f"interpreter shared library is missing: {source_library}")
+                _run([str(interpreter), "-I", "-B", "-m", "venv", "--copies",
+                      "--without-pip", str(venv)], env, work)
+                shutil.copy2(source_library, venv / "lib" / source_library.name)
+                python = venv / "bin/python"
+                _run([str(python), "-I", "-B", "-m", "ensurepip", "--upgrade"], env, work)
+            else:
+                _run([str(interpreter), "-I", "-B", "-m", "venv", "--copies", str(venv)], env, work)
             python = venv / "bin/python"
             pip = [str(python), "-I", "-B", "-m", "pip", "--isolated",
                    "--disable-pip-version-check", "--no-input", "--no-cache-dir", "install",

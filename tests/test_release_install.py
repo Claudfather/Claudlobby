@@ -64,7 +64,7 @@ def assembly(tmp_path, monkeypatch):
     wheelhouse.mkdir()
     root = tmp_path / "fleet data"
     calls = []
-    behavior = {"fail_pip": False, "alter_package": False}
+    behavior = {"fail_pip": False, "alter_package": False, "shared_library": None}
 
     def runner(argv, env, cwd, timeout=300):
         calls.append(argv)
@@ -74,7 +74,8 @@ def assembly(tmp_path, monkeypatch):
         assert "PYTHONPATH" not in env
         if install._INTERPRETER_QUERY in argv:
             return json.dumps({"implementation": "cpython", "version": "3.11",
-                               "platform": "fixture"})
+                               "platform": "fixture",
+                               "shared_library": behavior["shared_library"]})
         if "venv" in argv:
             venv = Path(argv[-1])
             (venv / "bin").mkdir(parents=True)
@@ -86,6 +87,10 @@ def assembly(tmp_path, monkeypatch):
             return ""
         venv = Path(argv[0]).parent.parent
         site = venv / "lib/site-packages"
+        if "ensurepip" in argv:
+            library = Path(behavior["shared_library"])
+            assert (venv / "lib" / library.name).read_bytes() == library.read_bytes()
+            return ""
         if install._SITE_QUERY in argv:
             return str(site) + "\n"
         if "--require-hashes" in argv and behavior["fail_pip"]:
@@ -129,6 +134,21 @@ def test_complete_assembly_seals_exact_inputs_and_reuses_without_install(assembl
     first_count = len(calls)
     assert install.assemble_release(*args) == manifest
     assert len(calls) == first_count + 1  # only the bounded interpreter identity probe
+
+
+def test_copied_interpreter_gets_its_shared_library_before_ensurepip(assembly):
+    args, calls, behavior = assembly
+    library = args[4].parent / "libpython3.11.dylib"
+    library.write_bytes(b"fixture shared library")
+    behavior["shared_library"] = str(library)
+    manifest = install.assemble_release(*args)
+    installed = manifest.directory / "venv/lib/libpython3.11.dylib"
+    assert installed.read_bytes() == library.read_bytes()
+    venv_call = next(call for call in calls if "venv" in call)
+    assert "--copies" in venv_call and "--without-pip" in venv_call
+    ensurepip_call = next(call for call in calls if "ensurepip" in call)
+    assert ensurepip_call[0] == str(manifest.directory / "venv/bin/python")
+    assert r.read_release(args[0], manifest.release_id) == manifest
 
 
 def test_failed_pip_retains_unsealed_directory_and_refuses_retry(assembly):
