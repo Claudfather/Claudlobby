@@ -244,6 +244,49 @@ def test_stage_renders_bots_timers_and_host_guards_without_live_writes(staging_c
     assert all(changes.get(worker / directory) is None for directory in ("memory", "data", "projects"))
 
 
+def test_stage_refuses_incomplete_timer_compose_before_replacing_live_tree(
+        staging_case, monkeypatch):
+    case = staging_case
+    live = case.paths.runtime_fleet / "timers"
+    _write(live / "com.primary.keepalive.timer", "previous generated unit\n")
+    before = _tree(live)
+    store = case.root / "state/config-plans"
+
+    # A fleet still asks for default timers, but its declared job set was
+    # torn. Ordinary generate warns and preserves old files in its own tree;
+    # an empty scratch render must never become a sealed replacement tree.
+    with monkeypatch.context() as patch:
+        patch.setattr(config, "_load_system_defaults", lambda: {"defaults": {"jobs": {}}})
+        with pytest.raises(PlanError, match="torn declaration"):
+            config_staging.stage_configuration([case.paths], case.release)
+    assert _tree(live) == before and not store.exists()
+
+    # Drive the same shared guard's partial-composition branch from the
+    # staging boundary, without inventing a second declaration predicate.
+    reconcile = composer._reconcile_fleet_job_units
+
+    def shortfall(directory, prefix, composed, expected, *, declaration_torn=False,
+                  require_complete=False):
+        return reconcile(directory, prefix, set(), max(expected, 1),
+                         declaration_torn=declaration_torn,
+                         require_complete=require_complete)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(composer, "_reconcile_fleet_job_units", shortfall)
+        with pytest.raises(PlanError, match="partial composed set"):
+            config_staging.stage_configuration([case.paths], case.release)
+    assert _tree(live) == before and not store.exists()
+
+    # An explicit opt-out is a genuine teardown and may replace the timer tree.
+    manifest = case.paths.fleet_yaml
+    manifest.write_text(manifest.read_text().replace(
+        "system_defaults:\n", "system_defaults:\n    timers: false\n", 1))
+    plan = config_staging.stage_configuration([case.paths], case.release)
+    staged = _files(plan, _changes(plan)[live])
+    assert "com.primary.keepalive.timer" not in staged
+    assert _tree(live) == before
+
+
 def test_stage_freezes_overlay_skill_bytes_and_refuses_changed_inputs(staging_case):
     case = staging_case
     plan = config_staging.stage_configuration([case.paths], case.release)

@@ -4214,6 +4214,10 @@ def _write_timer_units(
 _UNIT_EXTS: tuple[str, ...] = ("service", "timer", "plist")
 
 
+class FleetTimerCompositionError(ValueError):
+    """A timer compose cannot safely replace its previously generated tree."""
+
+
 def _prune_stale_units(
     timers_dir: Path,
     stale: set[str],
@@ -4222,6 +4226,7 @@ def _prune_stale_units(
     family: str,
     *,
     declaration_torn: bool = False,
+    require_complete: bool = False,
 ) -> list[str]:
     """Delete each basename in *stale* — unless the compose looks TORN, in which
     case delete nothing and say so.
@@ -4253,6 +4258,13 @@ def _prune_stale_units(
     *family* names the caller in the warning, so an operator reading a skipped
     prune knows which half of the directory refused.
     """
+    if require_complete and declaration_torn:
+        raise FleetTimerCompositionError(
+            f"{family} reconcile: torn declaration; refusing a replacement timer tree")
+    if require_complete and len(composed) < n_expected:
+        raise FleetTimerCompositionError(
+            f"{family} reconcile: partial composed set ({len(composed)} of {n_expected}); "
+            "refusing a replacement timer tree")
     if not stale:
         return []
     if declaration_torn:
@@ -4289,7 +4301,8 @@ def _prune_stale_units(
 
 
 def _reconcile_briefing_units(
-    timers_dir: Path, prefix: str, composed: set[str], n_expected: int
+    timers_dir: Path, prefix: str, composed: set[str], n_expected: int,
+    *, require_complete: bool = False,
 ) -> list[str]:
     """Prune stale ``<prefix>.briefing-*`` unit files — glob-bounded, with a
     verify-before-disable partial/degenerate guard (F3).
@@ -4313,11 +4326,11 @@ def _reconcile_briefing_units(
     passes ``n_expected == 0`` and prunes everything. The glob bound means it can
     never touch a non-briefing unit. Returns the pruned unit basenames.
     """
-    if not timers_dir.is_dir():
-        return []
-    existing = {p.stem for p in timers_dir.glob(f"{prefix}.briefing-*")}
+    existing = ({p.stem for p in timers_dir.glob(f"{prefix}.briefing-*")}
+                if timers_dir.is_dir() else set())
     return _prune_stale_units(
-        timers_dir, existing - composed, composed, n_expected, "briefing"
+        timers_dir, existing - composed, composed, n_expected, "briefing",
+        require_complete=require_complete,
     )
 
 
@@ -4328,6 +4341,7 @@ def _reconcile_fleet_job_units(
     n_expected: int,
     *,
     declaration_torn: bool = False,
+    require_complete: bool = False,
 ) -> list[str]:
     """Prune stale ``<prefix>.<job>`` unit files for a job this fleet no longer
     composes — the named-job half of what :func:`_reconcile_briefing_units`
@@ -4391,8 +4405,6 @@ def _reconcile_fleet_job_units(
 
     Returns the pruned unit basenames.
     """
-    if not timers_dir.is_dir():
-        return []
     # Exactly `<prefix>.<job>`, the job ONE dotless segment: a longer dotted
     # name (`com.review.child.keepalive` under `com.review`) is a unit of a
     # fleet whose prefix EXTENDS this one, not a job of this fleet (#1765
@@ -4400,7 +4412,7 @@ def _reconcile_fleet_job_units(
     # fails safe.
     existing = {
         f.stem
-        for f in timers_dir.iterdir()
+        for f in (timers_dir.iterdir() if timers_dir.is_dir() else ())
         if f.is_file()
         and f.suffix.lstrip(".") in _UNIT_EXTS
         and f.name.startswith(f"{prefix}.")
@@ -4410,6 +4422,7 @@ def _reconcile_fleet_job_units(
     return _prune_stale_units(
         timers_dir, existing - composed - briefing, composed, n_expected,
         "fleet job", declaration_torn=declaration_torn,
+        require_complete=require_complete,
     )
 
 
@@ -4547,6 +4560,7 @@ def compose_fleet_timers(
     merged_defaults: dict,
     *,
     output_dir: Path | None = None,
+    require_complete: bool = False,
 ) -> Path:
     """Generate fleet-level systemd/launchd timer units into runtime/fleet/timers/.
 
@@ -4574,6 +4588,10 @@ def compose_fleet_timers(
     temp dir here so it can hand this function the real ``Paths`` — keeping the
     diff and generate code paths on an identical ``Paths`` surface — while writing
     the expected units somewhere other than ``runtime/``.
+
+    ``require_complete`` is for a staged whole-tree replacement: a guard that
+    would merely skip pruning in ordinary generate must refuse the plan even
+    when the scratch directory contains no stale units.
     """
     timers = merged_defaults.get("jobs", {})
     has_leaf_manager = bool(fleet.leaf_manager_bots())
@@ -4639,12 +4657,14 @@ def compose_fleet_timers(
         for removed in _reconcile_fleet_job_units(
             timers_dir, fleet.service_prefix, set(), 0,
             declaration_torn=jobs_declaration_torn,
+            require_complete=require_complete,
         ):
             _log.info(
                 "pruned stale fleet job unit %s (%s composes no fleet timers)",
                 removed, fleet.name,
             )
-        _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0)
+        _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0,
+                                  require_complete=require_complete)
         _write_briefing_manifest(timers_dir, set())
         return timers_dir
 
@@ -4776,6 +4796,7 @@ def compose_fleet_timers(
     for removed in _reconcile_fleet_job_units(
         timers_dir, prefix, composed_jobs, n_expected_jobs,
         declaration_torn=jobs_declaration_torn,
+        require_complete=require_complete,
     ):
         _log.info(
             "pruned stale fleet job unit %s (%s no longer declares it)",
@@ -4831,7 +4852,8 @@ def compose_fleet_timers(
             )
             composed_briefing.add(unit)
     _reconcile_briefing_units(
-        timers_dir, prefix, composed_briefing, len(expected_briefing)
+        timers_dir, prefix, composed_briefing, len(expected_briefing),
+        require_complete=require_complete,
     )
 
     return timers_dir

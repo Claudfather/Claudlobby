@@ -205,8 +205,12 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
                 _bot(builder, context, bot, delay, cascade, log)
             managers_before += len(fleet.manager_bots())
             workers_before += len(fleet.bots) - len(fleet.manager_bots())
-            timers = compose.compose_fleet_timers(
-                fleet, paths, context.merged_defaults, output_dir=scratch / str(index))
+            try:
+                timers = compose.compose_fleet_timers(
+                    fleet, paths, context.merged_defaults, output_dir=scratch / str(index),
+                    require_complete=True)
+            except compose.FleetTimerCompositionError as exc:
+                raise PlanError(f"cannot stage {fleet.name} fleet timers: {exc}") from exc
             paths.assert_writable(paths.runtime_fleet / "timers")
             files = _snapshot(timers)
             builder.effects["units"].extend(job_units(
