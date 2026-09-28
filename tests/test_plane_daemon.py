@@ -1149,3 +1149,74 @@ def test_a_refused_staged_batch_is_quarantined_not_retried(running):
     reasons = list((root / "state" / "plane" / "spool" / "quarantine").glob("*.reason"))
     assert len(reasons) == 1 and "contract" in reasons[0].read_text()
     assert send_batch(sock, [_comm("f")])["ok"] is True
+
+
+def _orphan(staged: Path, name: str, text: str, age_s: float) -> Path:
+    """What a stage killed between its write and its rename leaves behind."""
+    staged.mkdir(parents=True, exist_ok=True)
+    f = staged / name
+    f.write_text(text)
+    t = time.time() - age_s
+    os.utime(f, (t, t))
+    return f
+
+
+def test_an_orphaned_stage_is_replayed_not_lost(running):
+    """#1657 follow-up 2, measured on the Pi: a stage killed between its write
+    and its rename leaves `.<event id>.tmp`, and the daemon replayed only
+    `*.batch`, so the event was lost -- 21 in two days, none of them on the
+    plane, each written a few seconds before a counted 10 s reap. An old one
+    is a finished batch with pre-minted ids: replay it, never delete it."""
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+
+    root, _sock, _ = running
+    staged = root / "state" / "plane" / "staged"
+    ev = {**_comm("7"), "event_id": mint_event_id()}
+    orphan = _orphan(staged, f".{ev['event_id']}.tmp",
+                     json.dumps({"events": [ev]}) + "\n", STAGED_ORPHAN_AGE_S + 60)
+    _until(lambda: not orphan.exists(), timeout=10)
+    conn = connect(db_path(root))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM communications WHERE event_id = ?",
+                         (ev["event_id"],)).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1
+
+
+def test_a_young_tmp_is_left_to_its_stager(running):
+    """A `.tmp` may be a stage still inside its fsync, with the rename to
+    come: read now, it would race its own writer. A sentinel batch landing
+    proves a replay tick ran while the young file was there."""
+    root, _sock, _ = running
+    staged = root / "state" / "plane" / "staged"
+    ev = {**_comm("8"), "event_id": mint_event_id()}
+    young = _orphan(staged, f".{ev['event_id']}.tmp",
+                    json.dumps({"events": [ev]}) + "\n", 0)
+    sentinel = {**_comm("9"), "event_id": mint_event_id()}
+    _stage(staged, f"1-{sentinel['event_id']}.batch", [sentinel])
+    _until(lambda: not list(staged.glob("*.batch")))
+    assert young.exists()
+    conn = connect(db_path(root))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM communications WHERE event_id = ?",
+                         (ev["event_id"],)).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
+
+
+def test_an_orphan_that_is_not_a_batch_is_quarantined(running):
+    """A stage killed before its flush leaves an empty file. It goes to the
+    quarantine with its reason, under a name a listing shows (not a dotfile),
+    and the daemon keeps serving."""
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+
+    root, sock, _ = running
+    staged = root / "state" / "plane" / "staged"
+    orphan = _orphan(staged, ".ev_" + "0" * 32 + ".tmp", "", STAGED_ORPHAN_AGE_S + 60)
+    _until(lambda: not orphan.exists(), timeout=10)
+    names = {f.name for f in (root / "state" / "plane" / "spool" / "quarantine").iterdir()}
+    assert "ev_" + "0" * 32 + ".json" in names, names
+    assert "ev_" + "0" * 32 + ".json.reason" in names, names
+    assert send_batch(sock, [_comm("a")])["ok"] is True

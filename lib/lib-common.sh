@@ -841,10 +841,15 @@ plane_mint_id() {
 # Feed it through a here-string (`plane_emit_events door <<<"$batch"`), never a
 # pipeline, wherever the caller needs PLANE_EMIT_LAST_RC afterwards: a pipeline
 # runs the function in a subshell and the result never comes back.
+# PLANE_EMIT_CLASS (#1693) sets the socket deadline (lib/plane-emit.sh). A
+# caller assigns it WITHOUT export, once, at the top of its script; this helper
+# and plane_emit_bounded hand it to the shim, and nothing else the caller runs
+# inherits it (keepalive restarts bots, and a restarted session must not start
+# life as `background`).
 PLANE_EMIT_LAST_RC=0
 plane_emit_events() {
     local door="$1" _rc=0
-    "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || _rc=$?
+    PLANE_EMIT_CLASS="${PLANE_EMIT_CLASS:-}" "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || _rc=$?
     PLANE_EMIT_LAST_RC=$_rc
     if [ "$_rc" -eq 6 ]; then
         # #1711. SPOOLED is not failed and must never be worded as one: the
@@ -985,7 +990,10 @@ plane_emit_bounded() {
     # Opted in to cooldown staging (#1657): no caller of this door reads the
     # result (emit_fleet_event restores PLANE_EMIT_LAST_RC), and it carries
     # most of the host's traffic, bot-vitals' two per tool call included.
-    PLANE_EMIT_COOLDOWN_STAGE=1 "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
+    # For the same reason its class is `background` unless the caller named
+    # one (#1693): bot-vitals names `hook`, because a turn waits on it.
+    PLANE_EMIT_CLASS="${PLANE_EMIT_CLASS:-background}" PLANE_EMIT_COOLDOWN_STAGE=1 \
+        "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
     _pid=$!
     while kill -0 "$_pid" 2>/dev/null && [ "$SECONDS" -lt "$_deadline" ]; do
         # 50ms: the socket rung answers in ~40ms, so a 1s poll spent ~96% of

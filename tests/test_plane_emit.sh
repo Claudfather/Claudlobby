@@ -16,6 +16,11 @@ trap 'rm -rf "$tmpdir" "$sockdir"; [ -n "${daemon_pid:-}" ] && kill "$daemon_pid
 
 export CLAUDLOBBY_ROOT="$tmpdir/root"
 mkdir -p "$CLAUDLOBBY_ROOT"
+# Hermetic against the caller's session (#1693): a bot session exports its
+# identity, and a canary bot carries a deadline knob -- either would change
+# what the arm-record and default-deadline cases below observe.
+unset BOT_ID FLEET_NAME CLAUDLOBBY_FLEET PLANE_EMIT_CLASS \
+    PLANE_SOCKET_DEADLINE_HOOK_S PLANE_SOCKET_DEADLINE_BACKGROUND_S PLANE_SOCKET_DEADLINE_DOOR_S
 
 batch='{"events": [{"event_type": "communication", "emitter": "sh-test", "fleet": "f", "payload": {"msg_id": "msg_00000000000000000000000000000000", "sender": "bot:f/a", "message_class": "notice"}}]}'
 
@@ -36,11 +41,12 @@ export RECORDER_LOG="$tmpdir/rec.log" RECORDER_COPY="$tmpdir/rec.json"
 # --- fake daemon: replies with $RESP_FILE content per connection -------------
 fake_daemon="$tmpdir/faked.py"
 cat > "$fake_daemon" <<'PY'
-import socket, sys
+import socket, sys, time
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 srv.bind(sys.argv[1])
 srv.listen(8)
 resp = open(sys.argv[2], "rb").read()
+delay = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0  # #1693: a slow daemon
 open(sys.argv[1] + ".ready", "w").close()
 while True:
     c, _ = srv.accept()
@@ -51,6 +57,8 @@ while True:
             break
         buf += chunk
     open(sys.argv[3], "ab").write(buf)
+    if delay and buf:
+        time.sleep(delay)  # answers late, as the SD card makes the real one
     try:
         c.sendall(resp)
     except OSError:
@@ -58,10 +66,10 @@ while True:
     c.close()
 PY
 
-start_daemon() {  # $1=response-json
+start_daemon() {  # $1=response-json [$2=seconds before each reply]
     printf '%s\n' "$1" > "$tmpdir/resp.json"
     rm -f "$sockdir/s" "$sockdir/s.ready"
-    python3 "$fake_daemon" "$sockdir/s" "$tmpdir/resp.json" "$tmpdir/seen.jsonl" &
+    python3 "$fake_daemon" "$sockdir/s" "$tmpdir/resp.json" "$tmpdir/seen.jsonl" "${2:-0}" &
     daemon_pid=$!
     for _ in $(seq 1 100); do [ -e "$sockdir/s.ready" ] && break; sleep 0.05; done
     [ -e "$sockdir/s.ready" ] || { echo "FAIL: fake daemon never bound"; exit 1; }
@@ -120,6 +128,7 @@ printf 'not json' | PLANE_EMIT_CLI="$recorder" RECORDER_EXIT=0 PLANE_SOCKET="$so
 # fresh interpreter on the install CURRENT code, so it commits. Live on the
 # Mini this cost 261 heartbeat samples in ~15 minutes.
 rm -f "$RECORDER_LOG" "$RECORDER_COPY" "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
+mkdir -p "$CLAUDLOBBY_ROOT/state/plane"   # where the arm record lands, as on a live root
 start_daemon '{"ok": false, "code": "downgrade", "error": "plane.db user_version=10 is newer than this code (supports <=9) - refusing downgrade"}'
 rc=0
 out=$(printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" 2>"$tmpdir/err7") || rc=$?
@@ -134,6 +143,8 @@ grep -q "older code than the db it opened" "$tmpdir/err7" || { echo "FAIL(7): th
 seen_id=$(grep -o '"event_id": "ev_[0-9a-f]*"' "$tmpdir/seen.jsonl" | tail -1)
 [ -n "$seen_id" ] || { echo "FAIL(7): daemon saw no pre-minted id"; exit 1; }
 grep -q "$seen_id" "$RECORDER_COPY" || { echo "FAIL(7): replayed batch minted a NEW id ($seen_id absent) - a duplicate row"; exit 1; }
+# #1693: the arm it caused is recorded under its own cause, not as a timeout.
+[ "$(tail -1 "$CLAUDLOBBY_ROOT/state/plane/.socket-arms" | cut -f6)" = "downgrade" ] || { echo "FAIL(7): the arm record does not name the downgrade"; tail -1 "$CLAUDLOBBY_ROOT/state/plane/.socket-arms"; exit 1; }
 
 # Test 8 (#1485 companion): a contract_violation still passes through with no
 # cold attempt. The two must not move together - that is the whole rule.
@@ -276,5 +287,116 @@ stop_daemon
 [ ! -e "$staged" ] || { echo "FAIL(17): the client created the staged dir itself -- nothing guarantees a replayer"; exit 1; }
 
 rm -f "$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"; rm -rf "$staged"
+
+# --- #1693: the socket deadline follows the caller's class ------------------
+# The 1.0 s total deadline was one number for every caller, and on the Pi's SD
+# card a plain commit can take longer: every miss arms the host-wide marker.
+# A caller names its class (PLANE_EMIT_CLASS: hook | background | door) and
+# that class's knob sets its deadline. Every knob defaults to today's 1.0 s,
+# so a root pull changes nothing until a bot is given one.
+slow_ok='{"ok": true, "results": [{"event_id": "ev_55555555555555555555555555555555", "status": "committed"}]}'
+marker="$CLAUDLOBBY_ROOT/state/plane/.socket-wedged"
+arms="$CLAUDLOBBY_ROOT/state/plane/.socket-arms"
+reset_1693() { rm -f "$RECORDER_LOG" "$RECORDER_COPY" "$marker" "$arms"; }
+
+# Test 18 (the default IS today): no knob, a daemon that answers in 1.5 s is a
+# miss for a hook -- the cold rung records it and the marker arms, as before.
+reset_1693
+start_daemon "$slow_ok" 1.5
+rc=0
+printf '%s' "$batch" | PLANE_EMIT_CLASS=hook PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" >/dev/null 2>"$tmpdir/err18" || rc=$?
+stop_daemon
+[ "$rc" -eq 0 ] || { echo "FAIL(18): rc=$rc"; cat "$tmpdir/err18"; exit 1; }
+grep -q "transport failed (rc=5)" "$tmpdir/err18" || { echo "FAIL(18): with no knob a 1.5s daemon was not a miss -- the default moved"; cat "$tmpdir/err18"; exit 1; }
+[ -e "$RECORDER_LOG" ] || { echo "FAIL(18): the cold rung did not record the miss"; exit 1; }
+[ -e "$marker" ] || { echo "FAIL(18): the miss did not arm the marker"; exit 1; }
+awk -F'\t' 'NF == 6 && $2 == "hook" && $3 == "1.0" && $4 >= 990 && $6 == "timeout" { ok = 1 } END { exit !ok }' "$arms" \
+    || { echo "FAIL(18): want an arm record: hook 1.0 >=990ms ... timeout"; cat -A "$arms" 2>/dev/null; exit 1; }
+
+# Test 19: the class's knob raises ITS deadline. The same 1.5 s daemon answers
+# inside 4 s: recorded by the socket, no cold rung, and no marker.
+reset_1693
+start_daemon "$slow_ok" 1.5
+rc=0
+printf '%s' "$batch" | PLANE_EMIT_CLASS=hook PLANE_SOCKET_DEADLINE_HOOK_S=4 PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" >"$tmpdir/out19" 2>"$tmpdir/err19" || rc=$?
+stop_daemon
+[ "$rc" -eq 0 ] || { echo "FAIL(19): rc=$rc"; cat "$tmpdir/err19"; exit 1; }
+grep -q "ev_5555" "$tmpdir/out19" || { echo "FAIL(19): the socket's answer never reached stdout"; cat "$tmpdir/err19"; exit 1; }
+[ ! -e "$RECORDER_LOG" ] || { echo "FAIL(19): the cold rung ran although the daemon answered inside the class deadline"; cat "$tmpdir/err19"; exit 1; }
+[ ! -e "$marker" ] || { echo "FAIL(19): an answered request armed the marker"; exit 1; }
+[ ! -e "$arms" ] || { echo "FAIL(19): an answered request wrote an arm record"; exit 1; }
+
+# Test 20: a knob belongs to ONE class. The hook knob does nothing for a door,
+# nor for a caller that names no class.
+for cls in door ""; do
+    reset_1693
+    start_daemon "$slow_ok" 1.5
+    rc=0
+    printf '%s' "$batch" | PLANE_EMIT_CLASS="$cls" PLANE_SOCKET_DEADLINE_HOOK_S=4 PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/s" bash "$SHIM" >/dev/null 2>"$tmpdir/err20" || rc=$?
+    stop_daemon
+    [ "$rc" -eq 0 ] || { echo "FAIL(20:$cls): rc=$rc"; cat "$tmpdir/err20"; exit 1; }
+    grep -q "transport failed (rc=5)" "$tmpdir/err20" || { echo "FAIL(20:'$cls'): the hook knob changed the deadline of class '$cls'"; exit 1; }
+done
+
+# Test 20b: a class the shim does not know is DISCLOSED (a caller's typo would
+# otherwise leave it on the default deadline in silence).
+reset_1693
+rc=0
+printf '%s' "$batch" | PLANE_EMIT_CLASS=hooks PLANE_SOCKET_DEADLINE_HOOK_S=4 PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>"$tmpdir/err20b" || rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL(20b): rc=$rc"; cat "$tmpdir/err20b"; exit 1; }
+grep -q "PLANE_EMIT_CLASS=hooks" "$tmpdir/err20b" || { echo "FAIL(20b): an unknown class was not named"; cat "$tmpdir/err20b"; exit 1; }
+
+# Test 21: a knob the client would refuse is DISCLOSED and IGNORED. Passed
+# through, the client exits 2 on it, and 2 is a verdict: the record would be
+# dropped with no fallback, on every emit, from a typo.
+for bad in 3s 0 0.0 inf nan -1 4000 1e3; do
+    reset_1693
+    rc=0
+    printf '%s' "$batch" | PLANE_EMIT_CLASS=door PLANE_SOCKET_DEADLINE_DOOR_S="$bad" PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>"$tmpdir/err21" || rc=$?
+    [ "$rc" -eq 0 ] || { echo "FAIL(21:$bad): rc=$rc -- a bad knob dropped the record"; cat "$tmpdir/err21"; exit 1; }
+    grep -q "PLANE_SOCKET_DEADLINE_DOOR_S" "$tmpdir/err21" || { echo "FAIL(21:$bad): the ignored knob was not named"; cat "$tmpdir/err21"; exit 1; }
+    [ -e "$RECORDER_LOG" ] || { echo "FAIL(21:$bad): the record never reached the cold rung"; exit 1; }
+done
+
+# Test 22 (the canary's instrument): every arm is recorded with WHO armed it.
+# The marker holds only a time, so arms could be counted per host and never
+# per bot -- and a one-bot canary is invisible in a host count.
+reset_1693
+rc=0
+printf '%s' "$batch" | PLANE_EMIT_CLASS=hook BOT_ID=b FLEET_NAME=f PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>"$tmpdir/err22" || rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL(22): rc=$rc"; cat "$tmpdir/err22"; exit 1; }
+[ -s "$arms" ] || { echo "FAIL(22): the arm was not recorded"; cat "$tmpdir/err22"; exit 1; }
+[ "$(wc -l < "$arms")" -eq 1 ] || { echo "FAIL(22): want 1 arm record"; cat "$arms"; exit 1; }
+awk -F'\t' 'NF == 6 && $1 ~ /^[0-9]+$/ && $2 == "hook" && $3 == "1.0" && $4 ~ /^[0-9]+$/ && $5 == "bot:f/b" && $6 == "unreachable" { ok = 1 } END { exit !ok }' "$arms" \
+    || { echo "FAIL(22): want <epoch> hook 1.0 <ms> bot:f/b unreachable, got:"; cat -A "$arms"; exit 1; }
+
+# Test 23: the record carries the deadline in force, and a caller outside a
+# bot is named by its fleet, else as the host.
+reset_1693
+printf '%s' "$batch" | PLANE_EMIT_CLASS=background PLANE_SOCKET_DEADLINE_BACKGROUND_S=2.5 CLAUDLOBBY_FLEET=g PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>/dev/null || true
+rm -f "$marker"   # or the second emission is in cooldown and never tries the socket
+printf '%s' "$batch" | PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>/dev/null || true
+awk -F'\t' 'NR == 1 && $2 == "background" && $3 == "2.5" && $5 == "fleet:g" { a = 1 } NR == 2 && $2 == "-" && $3 == "1.0" && $5 == "host" { b = 1 } END { exit !(a && b && NR == 2) }' "$arms" \
+    || { echo "FAIL(23): records do not name the deadline and the caller"; cat -A "$arms"; exit 1; }
+
+# Test 24: a cooldown touches no socket, so it arms nothing and records nothing.
+reset_1693
+arm_cooldown
+printf '%s' "$batch" | PLANE_EMIT_CLASS=hook PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>/dev/null || true
+[ ! -e "$arms" ] || { echo "FAIL(24): a cooldown emission wrote an arm record"; cat "$arms"; exit 1; }
+
+# Test 25: the arm log keeps 7 days, not the loss file's 24 h: a canary compares
+# a day before the knob with a day after, so it needs both days on disk. (It is
+# rewritten only once its oldest row is a day past the window, so a busy host
+# does not rewrite it on every arm, on the card that is the bottleneck.)
+reset_1693
+mkdir -p "$CLAUDLOBBY_ROOT/state/plane"
+now=$(date +%s)
+printf '%s\thook\t1.0\t5\tbot:f/old\ttimeout\n%s\thook\t1.0\t5\tbot:f/kept\ttimeout\n' "$((now - 9 * 86400))" "$((now - 2 * 86400))" > "$arms"
+printf '%s' "$batch" | PLANE_EMIT_CLASS=hook PLANE_EMIT_CLI="$recorder" PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>/dev/null || true
+grep -q "bot:f/old" "$arms" && { echo "FAIL(25): a 9-day-old arm survived rotation"; cat "$arms"; exit 1; }
+grep -q "bot:f/kept" "$arms" || { echo "FAIL(25): a 2-day-old arm was rotated away -- the canary loses its before-window"; cat "$arms"; exit 1; }
+[ "$(wc -l < "$arms")" -eq 2 ] || { echo "FAIL(25): want the kept row + the new one"; cat "$arms"; exit 1; }
+reset_1693
 
 echo "PASS: all plane-emit shim tests passed"
