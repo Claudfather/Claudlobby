@@ -121,7 +121,13 @@ enroll_jobs() {
                 # very pass (#1924) -- reload-fleet, which calls --jobs-only
                 # nightly -- and that job's composed plist changed. A re-run
                 # from inside it defers again; a run from a shell applies it.
+                # So it is raised as a notice on every run until applied:
+                # nothing else would raise it. reload-fleet runs this step
+                # non-fatally, and no doctor rung compares a LOADED job with
+                # its composed plist, so a log line alone is never read.
                 log "○ job re-enroll DEFERRED: $base is running this enrollment and its plist changed — apply it with lib/setup-fleet${FLEET:+ $FLEET} --jobs-only from a shell"
+                emit_fleet_notice "$BOTS_DIR" "job_reenroll_deferred" \
+                    "$base changed, but it is the job running this enrollment, so launchd keeps running the old one until you apply it from a shell: $LIB_DIR/setup-fleet${FLEET:+ $FLEET} --jobs-only"
                 FAILURES=$((FAILURES + 1))
                 ;;
             *)

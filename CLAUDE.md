@@ -113,7 +113,7 @@ Key lifecycle scripts in `lib/`:
 | `install-bot.sh` | Bot service enrollment (launchd) |
 | `install-bot-systemd.sh` | Bot service enrollment (systemd) |
 | `install_fleet_timer.sh` | Generic fleet/host timer enrollment (systemd) — copies composed units + enables |
-| `install_fleet_timer_launchd.sh` | Generic fleet/host timer enrollment (launchd) — copies the composed plist and (re)loads it through the adapter's `svc_enroll_agent`, which never boots out a job that is running the enrollment: the nightly reload-fleet's `setup-fleet --jobs-only` booted out its own job and died mid-run (#1924). Exit 4 = deferred, nothing touched |
+| `install_fleet_timer_launchd.sh` | Generic fleet/host timer enrollment (launchd) — copies the composed plist and (re)loads it through the adapter's `svc_enroll_agent`, which never boots out a job that is running the enrollment: the nightly reload-fleet's `setup-fleet --jobs-only` booted out its own job and died mid-run (#1924). Exit 4 = deferred, nothing touched, and `setup-fleet` raises it as a `job_reenroll_deferred` FLEET NOTICE on every run until it is applied |
 | `setup-system` | Setup backbone: host prereqs + system.yaml host-job enrollment (cross-platform) |
 | `setup-fleet` | Setup backbone: per-fleet apply+enroll — default jobs (dormant opt-ins skipped), atomic legacy-keepalive swap (enable-new → verify → disable-old), bots (skips healthy), reconcile; root mode when invoked without a fleet |
 | `setup-fleets` | Run setup-fleet for every fleet on the host |

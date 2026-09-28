@@ -218,10 +218,13 @@ _reload_critical() {
     # sits composed-but-not-enrolled until a human happens to run
     # `setup-fleet` by hand, which is exactly how `task-recheck` shipped on
     # and ran nowhere for hours. Non-fatal (log + continue, no `|| return 1`):
-    # a failed enrollment is not a half-reload, and the doctor/validate
-    # `ignition` rung is what catches a persistent one. Touches no live
-    # session — `--jobs-only` skips the cache warm, bot spin-up and
-    # reconcile legs.
+    # a failed enrollment is not a half-reload. Nothing here raises one, and
+    # no doctor rung sees it (`ignition` reads declared state only):
+    # setup-fleet raises a deferred re-enroll itself, as a FLEET NOTICE
+    # (#1924), while a plain enrollment failure is in this log alone until
+    # something scheduled compares composed units with enrolled ones (#839,
+    # #1651). Touches no live session — `--jobs-only` skips the cache warm,
+    # bot spin-up and reconcile legs.
     _run_step "lib/setup-fleet --jobs-only" "$LIB_DIR/setup-fleet" ${FLEET:+"$FLEET"} --jobs-only || true
 }
 

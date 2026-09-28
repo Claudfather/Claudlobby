@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.conftest import TG_STUB, _write_exec, constructed_env
 
 REPO = Path(__file__).resolve().parent.parent
@@ -239,6 +240,12 @@ class Host:
         raise AssertionError(f"{needle!r} never reached the log:\n{self.log()}")
 
 
+def _telegram(tmp_path):
+    """Every message the run sent to Telegram, as the TG_STUB captured it."""
+    cap = tmp_path / "tg-capture"
+    return cap.read_text().splitlines() if cap.exists() else []
+
+
 def _wait_group_gone(p, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -282,6 +289,8 @@ def test_reload_job_is_never_booted_out_while_it_runs(tmp_path):
         assert f"bootstrap gui/{UID} {host.agents}/{PREFIX}.{job}.plist" in calls, calls
         assert (host.agents / f"{PREFIX}.{job}.plist").exists()
     assert "reload_failed" not in log, log
+    # the nightly case has nothing to apply, so it says nothing to anyone
+    assert _telegram(tmp_path) == []
 
 
 def test_a_changed_reload_plist_is_deferred_with_nothing_touched(tmp_path):
@@ -302,6 +311,15 @@ def test_a_changed_reload_plist_is_deferred_with_nothing_touched(tmp_path):
     assert f"bootstrap gui/{UID} {host.agents}/{PREFIX}.task-recheck.plist" in calls, (
         calls
     )
+    # The log line is read by nobody: reload-fleet runs this step non-fatally,
+    # and no doctor rung compares a loaded job with its composed plist. So the
+    # deferral also goes out as ONE notice naming the job and the command, and
+    # it is registered as a notice, so it never pages as critical.
+    sent = _telegram(tmp_path)
+    assert len(sent) == 1, sent
+    assert f"FLEET NOTICE [job_reenroll_deferred]: {SELF} changed" in sent[0], sent
+    assert f"lib/setup-fleet {FLEET} --jobs-only" in sent[0], sent
+    assert SYSTEM_EVENT_SEVERITY["job_reenroll_deferred"] == "notice"
 
 
 def test_removing_the_guard_reproduces_1924(tmp_path):

@@ -26,8 +26,12 @@ the service that is running it.
   (`svc_job_hosts_caller`). If it is, the job stays loaded. When its plist is
   unchanged, the nightly case, there is nothing to apply. When it changed,
   nothing is touched: the enroller exits 4, and `setup-fleet` reports the job
-  as DEFERRED with the command that applies it from a shell. The check fails
-  closed: a running job whose pid it cannot read is held, never stopped.
+  as DEFERRED with the command that applies it from a shell, in the log and as
+  a `job_reenroll_deferred` FLEET NOTICE, on every run until it is applied.
+  The notice is the only signal a deferral gets: reload-fleet runs that step
+  non-fatally, and no doctor rung compares a loaded job with its composed
+  plist (#839). The check fails closed: a running job whose pid it cannot
+  read is held, never stopped.
 - The guard sits at the bootout itself rather than in `reload-fleet`, so it
   covers every caller and every job, and it keys on launchd's own answer, not
   on a job's name.
