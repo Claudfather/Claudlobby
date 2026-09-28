@@ -80,7 +80,9 @@ def test_the_skill_is_coupled_to_its_doors():
     assert "record a follow-up `nothing` check-in" in text            # a confirmed failed ACT is recorded
     assert "names the chosen project and tier" in text                 # the rigor bar was weighed, not only what was picked
     assert "minimal valid `nothing` decision" in text                  # the re-record is bounded
-    assert text.index("checkin record --file") < text.index("claudlobby --json task admit")
+    _, body = parse_frontmatter(SKILL.read_text())
+    record_and_act = _flat(body.split("## RECORD before ACT", 1)[1])
+    assert record_and_act.index("checkin record --file") < record_and_act.index("claudlobby --json task admit")
     assert "stop before ACT" in text and "request show UUID" in text
     assert "UNOBSERVED" in text and "plane_unreachable" in text          # a roster answer with no observation is not an idle worker
     assert "propose" not in text.split("## Not in this chunk")[0]   # the enum the contract accepts
@@ -129,10 +131,12 @@ def test_the_skill_grants_cover_its_own_commands_and_nothing_forbidden():
     assert "mcp__plugin_telegram_telegram__reply" in grants           # ask posts through the reply tool
     bash_grants = [g for g in grants if g.startswith("Bash(")]
     assert "Bash(*dispatch-task.sh*)" not in grants
+    assert "Bash(claudlobby --json fleet inbox)" in bash_grants
     for g in bash_grants:                                              # a CLI grant names ONE literal verb, never a prefix
         if g.startswith("Bash(claudlobby"):
-            assert re.fullmatch(r"Bash\(claudlobby (?:--json )?(?:--fleet \* )?"
-                                r"(?:[a-z][a-z-]+ ){1,2}\*\)", g), g
+            assert (g == "Bash(claudlobby --json fleet inbox)"
+                    or re.fullmatch(r"Bash\(claudlobby (?:--json )?(?:--fleet \* )?"
+                                    r"(?:[a-z][a-z-]+ ){1,2}\*\)", g)), g
     cmds = _skill_command_lines()
     assert cmds, "no command lines found in the skill"
     assert any(c.startswith("gh issue list ") for c in cmds)          # the wrapped span IS collected (cycle-3 R7)
@@ -168,7 +172,7 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
     )
     for g in ("Bash(claudlobby --json --fleet * checkin record *)", "Bash(*tg-post.sh*)",
               "Bash(claudlobby --json --fleet * checkin list *)", "Bash(claudlobby --fleet * brief *)",
-              "Bash(claudlobby --fleet * status *)"):
+              "Bash(claudlobby --fleet * status *)", "Bash(claudlobby --json fleet inbox)"):
         assert g in grants, grants
     assert "Bash(*dispatch-task.sh*)" not in grants
     assert "Bash(claudlobby *)" not in grants

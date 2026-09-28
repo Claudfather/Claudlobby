@@ -191,7 +191,8 @@ def encode_transmission(intent: RequestIntent, observation: TransportObservation
                         occurred_at: str) -> dict:
     """Record one reserved native result without promoting uncertain effects."""
     if not isinstance(intent, RequestIntent) or intent.operation not in {
-            "message.send", "message.reply", "fleet.reports.submit", "assignment.deliver",
+            "message.send", "message.reply", "fleet.reports.submit", "task.nudge",
+            "task.recheck", "assignment.deliver",
             "assignment.progress", "assignment.block", "assignment.return",
             "assignment.complete", "assignment.fail"}:
         raise MessagePayloadError("unsupported native transmission operation")

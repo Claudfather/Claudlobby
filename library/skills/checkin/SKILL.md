@@ -7,6 +7,7 @@ tool_grants:
   - "Bash(claudlobby --json --fleet * checkin record *)"
   - "Bash(claudlobby --fleet * brief *)"
   - "Bash(claudlobby --fleet * status *)"
+  - "Bash(claudlobby --json fleet inbox)"
   - "Bash(claudron lookup *)"
   - "Bash(gh issue list *)"
   - "Bash(claudlobby --json task admit *)"

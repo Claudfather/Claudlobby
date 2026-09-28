@@ -9,6 +9,8 @@ from claudlobby import message_operations, operation_context
 from claudlobby.__main__ import main
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
+from tests.test_activation import cold, tmp_path  # noqa: F401 — active fixture dependencies
+from tests.test_releases import installed  # noqa: F401 — dependency of cold
 from tests.test_task_write_cli import _call, active  # noqa: F401 — shared private activated fixture
 
 
