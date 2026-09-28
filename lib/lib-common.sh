@@ -295,6 +295,7 @@ fleet_claude_path() {
 # it is a caller whose own resolution found nothing, and it is reported as such.
 # Each run is bounded (CLAUDE_VERSION_TIMEOUT_S, default 10): a binary that hangs
 # is could-not-measure, never a wait that holds a generate or a timer open.
+# Without timeout/gtimeout, refuse instead of the generic helper's bare run.
 measure_claude_version() {
     CLAUDE_VERSION=""
     CLAUDE_VERSION_WHY=""
@@ -302,6 +303,10 @@ measure_claude_version() {
     if [ "$#" -gt 0 ]; then p="$1"; else p="$(fleet_claude_path)"; fi
     if [ -z "$p" ]; then
         CLAUDE_VERSION_WHY="no claude binary resolved"
+        return 1
+    fi
+    if [ -z "$_TIMEOUT_BIN" ]; then
+        CLAUDE_VERSION_WHY="timeout/gtimeout unavailable; install coreutils to bound --version"
         return 1
     fi
     # Settled inside the substitution (|| exit) so install_error_trap never sees

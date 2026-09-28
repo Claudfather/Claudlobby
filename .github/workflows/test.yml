@@ -98,6 +98,8 @@ jobs:
           for tool in tmux jq node; do
             command -v "$tool" >/dev/null || brew install "$tool"
           done
+          command -v gtimeout >/dev/null || brew install coreutils
+          gtimeout --version
       - name: Install isolated package and report tool versions
         run: |
           python -m venv .venv

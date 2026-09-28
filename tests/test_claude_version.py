@@ -22,7 +22,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -71,17 +73,25 @@ def _stub(tmp_path: Path, name: str, script: str) -> Path:
     return p
 
 
-def _run(tmp_path: Path, argv: list[str], **env) -> subprocess.CompletedProcess:
+def _run(tmp_path: Path, argv: list[str], *, _timeout=120, **env) -> subprocess.CompletedProcess:
     """argv in a constructed env, with a throwaway HOME and CLAUDLOBBY_ROOT."""
     root = tmp_path / "root"
     root.mkdir(exist_ok=True)
-    return subprocess.run(
+    process = subprocess.Popen(
         argv,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=120,
+        start_new_session=True,
         env=constructed_env(HOME=tmp_path / "home", CLAUDLOBBY_ROOT=root, **env),
     )
+    try:
+        stdout, stderr = process.communicate(timeout=_timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def _bash(tmp_path: Path, code: str, **env) -> subprocess.CompletedProcess:
@@ -131,9 +141,20 @@ def test_the_door_prints_a_version_or_nothing(tmp_path, shape):
 
 def test_a_binary_that_hangs_is_could_not_measure_within_the_bound(tmp_path):
     hangs = _stub(tmp_path, "hangs", "#!/bin/bash\nsleep 30\n")
-    r = _door(tmp_path, str(hangs), CLAUDE_VERSION_TIMEOUT_S="1")
+    start = time.monotonic()
+    r = _door(tmp_path, str(hangs), CLAUDE_VERSION_TIMEOUT_S="1", _timeout=10)
     assert (r.returncode, r.stdout) == (3, ""), r.stderr
     assert "did not finish within 1s" in r.stderr, r.stderr
+    assert time.monotonic() - start < 8  # scheduling tolerance, not two bare 30s runs
+
+
+def test_missing_timeout_refuses_without_running_the_binary(tmp_path):
+    marker = tmp_path / "executed"
+    binary = _stub(tmp_path, "must-not-run", f'#!/bin/bash\ntouch "{marker}"\necho 2.1.281\n')
+    r = _bash(tmp_path, f'_TIMEOUT_BIN=""; measure_claude_version "{binary}"; '
+              'printf "%s|[%s]|%s" "$?" "$CLAUDE_VERSION" "$CLAUDE_VERSION_WHY"', _timeout=10)
+    assert r.returncode == 0 and r.stdout.startswith("1|[]|timeout/gtimeout unavailable"), (r.stdout, r.stderr)
+    assert not marker.exists()
 
 
 #: One input per path on which measure_claude_version returns 1: each failing
