@@ -30,12 +30,13 @@ F2 = "other-fleet"          # a second, equally fake fleet — #526's class
 _SEQ = [0]
 
 
-def _dispatched(root, ck: str, *, task_id, terminal: str | None = None):
+def _dispatched(root, ck: str, *, task_id, terminal: str | None = None,
+                dispatcher: str | None = None):
     """One dispatch the way `dispatch-task.sh --checkin` lands it: work_item +
     assignment (dispatch_msg_id minted, unsent by default -- no transmission
     row unless the caller adds one) + the checkin_dispatch system event, in
     ONE emit_batch, actor-anchored on the DISPATCHER (subject_kind: actor,
-    subject: bot:<F>/mgr) — the real door's own shape (lib/dispatch-task.sh,
+    normally subject: bot:<F>/mgr) — the real door's own shape (lib/dispatch-task.sh,
     search checkin_dispatch). *terminal*, when given, appends a task event of
     that name in a second emit_batch — any TASK_EVENTS token, not only a
     terminal one: `progress` rides the same path, since TASK_STATUS_SQL falls
@@ -60,7 +61,7 @@ def _dispatched(root, ck: str, *, task_id, terminal: str | None = None):
         {"event_type": "system", "emitter": "dispatch-task", "fleet": F,
          "source_ref": ref, "occurred_at": ts,
          "payload": {"event": "checkin_dispatch", "subject_kind": "actor",
-                     "subject": f"bot:{F}/mgr",
+                     "subject": dispatcher or f"bot:{F}/mgr",
                      "data": {"checkin_id": ck, "assignment_id": asg,
                               "work_item_id": wi, "task_id": task_id}}},
     ])
@@ -138,6 +139,25 @@ def test_an_id_less_dispatch_still_resolves_through_the_assignment(root, capsys)
     d = _out(capsys)["checkins"][0]["dispatches"][0]
     assert d["task_id"] is None
     assert d["status"] == "completed" and d["outcome"] == "completed"
+
+
+def test_join_uses_recorded_fleet_for_human_dispatcher_and_alias_only_for_legacy_null(root, capsys):  # noqa: F811 — shared pytest fixture
+    _decision(root, "mgr", CK2, age_h=1, action="dispatch")
+    _, human_asg, _ = _dispatched(root, CK2, task_id=None, dispatcher="human:operator")
+    _, legacy_asg, _ = _dispatched(root, CK2, task_id=None)
+    # Simulate the historical null-fleet join while retaining its bot alias.
+    from claudlobby.plane.db import connect, db_file
+    writable = connect(db_file(root))
+    try:
+        writable.execute("UPDATE events SET fleet_uid=NULL WHERE kind='system' "
+                         "AND event='checkin_dispatch' AND json_extract(detail, '$.assignment_id')=?",
+                         (legacy_asg,))
+        writable.commit()
+    finally:
+        writable.close()
+    assert cmd.cmd_checkins(_Args(root, json=True)) == 0
+    dispatches = _out(capsys)["checkins"][0]["dispatches"]
+    assert {row["assignment_id"] for row in dispatches} == {human_asg, legacy_asg}
 
 
 def test_a_join_row_naming_no_assignment_is_unjoined_never_open(root, capsys):

@@ -2,16 +2,20 @@
 
 import json
 import sqlite3
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
-from claudlobby.operation_context import OperationContextError, resolve_task_context
+from claudlobby.operation_context import (
+    OperationContextError, OperationContextUnavailableError,
+    canonical_task_provenance_alias, resolve_task_context, resolve_task_mutation_context,
+)
 from claudlobby.active_config import context_from_plan
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.plane.identity import resolve
 from claudlobby.plane.ids import ensure_host_uid
-from claudlobby.task_operations import TaskConflictError, _identities, assign
+from claudlobby.task_operations import TaskConflictError, _identities, admit, assign
 from tests.package_fixtures import source_package
 from tests.plane_setup import initialize_plane
 from tests.test_task_audit import _insert
@@ -101,6 +105,7 @@ def test_cross_fleet_destination_preserves_frozen_origin_without_writes(estate, 
     assert ctx.context.fleet.name == "target" and ctx.fleet_uid == ids["fleet", "target"]
     assert ctx.caller.alias == "bot:origin/manager" and ctx.caller.uid == ids["actor", ctx.caller.alias]
     assert ctx.caller_fleet_uid == ids["fleet", "origin"]
+    assert canonical_task_provenance_alias(ctx, ctx.caller.alias) == ctx.caller.alias
     assert ctx.bots["worker"].uid == ids["actor", "bot:target/worker"]
     _identities(ctx, conn, (ctx.caller, ctx.bots["worker"]))  # Same write-boundary identity check.
     with pytest.raises(TaskConflictError, match="only within its origin fleet"):
@@ -132,6 +137,83 @@ def test_explicit_human_remains_portable_and_missing_host_is_never_minted(estate
     with pytest.raises(OperationContextError, match="host identity"):
         resolve_task_context(root=root, fleet="target", operator_alias="human:operator", package=source_package())
     assert _tree(root) == missing
+
+
+def test_cold_local_operator_is_committed_once_before_mutation_and_read_stays_pure(estate, monkeypatch):
+    root, conn, _ = estate
+    monkeypatch.setattr("claudlobby.operation_context.pwd.getpwuid",
+                        lambda uid: SimpleNamespace(pw_name="123.user"))
+    before = _tree(root)
+    with pytest.raises(OperationContextError, match="identify an existing human"):
+        resolve_task_context(root=root, fleet="target", package=source_package())
+    with pytest.raises(OperationContextError, match="identity is missing"):
+        resolve_task_context(root=root, fleet="target", operator_alias="human:123.user",
+                             package=source_package())
+    assert _tree(root) == before
+
+    first = resolve_task_mutation_context(root=root, fleet="target", package=source_package())
+    created = admit(first, str(uuid4()), title="First local task")
+    assert created.task.created_by_uid == first.caller.uid
+    second = resolve_task_mutation_context(root=root, fleet="origin", package=source_package())
+    assert first.caller == second.caller
+    assert first.caller.alias == "human:123.user" and first.caller_fleet_uid is None
+    assert tuple(conn.execute("SELECT uid, provisional, parent_uid FROM identity_registry "
+                              "WHERE kind='actor' AND alias=?", (first.caller.alias,)).fetchone()) == (
+                            first.caller.uid, 1, None)
+    rows = conn.execute("SELECT subject_uid FROM events WHERE kind='system' "
+                        "AND event='operator_first_seen' AND subject_alias=?",
+                        (first.caller.alias,)).fetchall()
+    assert len(rows) == 1 and rows[0][0] == first.caller.uid
+    read = resolve_task_context(root=root, fleet="target", operator_alias="human:123.user",
+                                package=source_package())
+    assert read.caller == first.caller
+
+
+def test_cold_operator_refuses_uncommitted_recording_and_generated_bypass(estate, monkeypatch):
+    root, conn, _ = estate
+    monkeypatch.setattr("claudlobby.operation_context.pwd.getpwuid",
+                        lambda uid: SimpleNamespace(pw_name="colduser"))
+    calls = []
+    def unavailable(root_arg, batch, *, require_commit):
+        calls.append((root_arg, batch, require_commit))
+        raise sqlite3.OperationalError("recording unavailable")
+    monkeypatch.setattr("claudlobby.plane.emit_api.emit_batch", unavailable)
+    with pytest.raises(OperationContextUnavailableError, match="could not be recorded") as failed:
+        resolve_task_mutation_context(root=root, fleet="target", package=source_package())
+    assert failed.value.code == "unavailable"
+    assert len(calls) == 1 and calls[0][0] == root and calls[0][2] is True
+    assert calls[0][1][0]["payload"]["subject"] == "human:colduser"
+    assert conn.execute("SELECT COUNT(*) FROM identity_registry WHERE alias='human:colduser'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0] == 0
+    assert not (root / "state/requests").exists()
+
+    _generated(monkeypatch, root)
+    bot = resolve_task_mutation_context(fleet="origin", package=source_package())
+    assert bot.caller.alias == "bot:origin/manager"
+    with pytest.raises(OperationContextError, match="origin conflicts") as conflict:
+        resolve_task_mutation_context(fleet="target", operator_alias="human:colduser",
+                                      package=source_package())
+    assert conflict.value.code == "conflict"
+    monkeypatch.setenv("BOT_ID", "")
+    with pytest.raises(ValueError, match="invalid generated selector"):
+        resolve_task_mutation_context(root=root, fleet="target", package=source_package())
+    monkeypatch.delenv("BOT_ID")
+    monkeypatch.delenv("BOT_NAME")
+    with pytest.raises(OperationContextError, match="generated bot paths"):
+        resolve_task_mutation_context(root=root, fleet="target", package=source_package())
+    assert len(calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM identity_registry WHERE alias='human:colduser'").fetchone()[0] == 0
+
+
+def test_unreadable_existing_registry_is_unavailable(estate, monkeypatch):
+    root, _, _ = estate
+    def unavailable(_path):
+        raise sqlite3.OperationalError("cannot open registry")
+    monkeypatch.setattr("claudlobby.operation_context.connect_ro", unavailable)
+    with pytest.raises(OperationContextUnavailableError) as failed:
+        resolve_task_context(root=root, fleet="target", operator_alias="human:operator",
+                             package=source_package())
+    assert failed.value.code == "unavailable"
 
 
 @pytest.mark.parametrize(("key", "value"), [

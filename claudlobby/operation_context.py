@@ -1,9 +1,10 @@
-"""Freeze existing operation identities without minting or asserting authority.
+"""Bind operation identities; only mutation entry points register local humans.
 
 Generated origin and selected destination are distinct. Activation must seed
 host fleet/bot keyframes through the registry owner before public mutations;
 missing identities are never repaired by this reader. Human actors are portable
-identities explicitly selected by a trusted local operator, not host-owned bots.
+identities of a trusted local operator, not host-owned bots. A mutation may
+record that operator's first contact through the Plane ingest owner.
 Runtime admission and grants remain the public caller's responsibility. ``--by``
 is operation provenance, deliberately not an input to this identity resolver.
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 from contextlib import closing
 import os
 from pathlib import Path
+import pwd
 import re
 import sqlite3
 import stat
@@ -20,7 +22,7 @@ import stat
 from .active_config import resolve_active_context
 from .context import Context, generated_selectors
 from .plane.db import connect_ro, db_file
-from .plane.ids import ID_PATTERNS
+from .plane.ids import ID_PATTERNS, derive_uid
 from .plane.registry_read import current_entities
 from .plane.schema_state import require_current_schema
 from .resources import PackageResources
@@ -30,6 +32,21 @@ from .task_queries import TaskQueryError
 
 class OperationContextError(TaskQueryError):
     code = "conflict"
+
+
+class OperationContextUnavailableError(OperationContextError):
+    code = "unavailable"
+
+
+class _MissingHumanIdentity(OperationContextError):
+    """The sole read-boundary failure that a mutation may register."""
+
+
+_HUMAN_ALIAS = re.compile(r"human:[^\s:/]+")
+
+
+def _valid_human_alias(alias: object) -> bool:
+    return isinstance(alias, str) and _HUMAN_ALIAS.fullmatch(alias) is not None
 
 
 def _host_uid(root: Path) -> str:
@@ -53,6 +70,8 @@ def _host_uid(root: Path) -> str:
 def _identity(conn, kind, alias, *, parent=None, human=False):
     rows = conn.execute("SELECT uid, parent_uid, provisional FROM identity_registry "
                         "WHERE kind=? AND alias=?", (kind, alias)).fetchall()
+    if not rows and human:
+        raise _MissingHumanIdentity(f"existing {kind} identity is missing: {alias}")
     if len(rows) != 1 or not re.fullmatch(ID_PATTERNS[kind], rows[0]["uid"]):
         raise OperationContextError(f"existing {kind} identity is missing or ambiguous: {alias}")
     row = rows[0]
@@ -96,7 +115,7 @@ def bind_task_context(destination: Context, *, origin: Context | None = None,
         if (operator_alias is not None or origin.bot_id not in origin.fleet.bots
                 or origin.paths.root != destination.paths.root or origin.paths.seed):
             raise OperationContextError("caller origin conflicts with the selected operation context")
-    elif not isinstance(operator_alias, str) or not re.fullmatch(r"human:[^\s:/]+", operator_alias):
+    elif not _valid_human_alias(operator_alias):
         raise OperationContextError("identify an existing human: actor outside a generated bot context")
     root = destination.paths.root
     host_uid = _host_uid(root)
@@ -116,13 +135,45 @@ def bind_task_context(destination: Context, *, origin: Context | None = None,
                 raise OperationContextError("host identity changed during operation resolution")
             return TaskOperationContext(destination, host_uid, fleet_uid, caller, bots, caller_fleet_uid)
     except (OSError, sqlite3.Error) as exc:
-        raise OperationContextError("existing Plane identity registry is unavailable") from exc
+        raise OperationContextUnavailableError("existing Plane identity registry is unavailable") from exc
 
 
-def resolve_task_context(*, root: Path | None = None, fleet: str | None = None,
-                         operator_alias: str | None = None,
-                         package: PackageResources | None = None) -> TaskOperationContext:
-    """Resolve public selectors without replacing the generated caller origin.
+def canonical_task_provenance_alias(ctx: TaskOperationContext, alias: str | None) -> str:
+    """Validate the claimed actor spelling before a request can replay."""
+    if alias is None:
+        return ctx.caller.alias
+    if not isinstance(alias, str):
+        raise OperationContextError("provenance actor must be a canonical actor alias")
+    if alias == ctx.caller.alias:
+        return alias
+    if _valid_human_alias(alias) or any(actor.alias == alias for actor in ctx.bots.values()):
+        return alias
+    raise OperationContextError("provenance actor is not an existing selected-fleet actor")
+
+
+def resolve_task_provenance(ctx: TaskOperationContext, alias: str | None,
+                            conn: sqlite3.Connection) -> TaskActor:
+    """Resolve a claimed `--by` actor without changing the operation caller.
+
+    A named human must already exist in the identity registry. A named bot must
+    be a selected-fleet member; the operation's later identity check rechecks
+    the frozen UID under its request and task locks. This read never registers
+    a third party or grants the claimed actor's authority to the caller.
+    """
+    canonical = canonical_task_provenance_alias(ctx, alias)
+    if canonical == ctx.caller.alias:
+        return ctx.caller
+    if _valid_human_alias(canonical):
+        try:
+            return TaskActor(_identity(conn, "actor", canonical, human=True), canonical)
+        except (OSError, sqlite3.Error) as exc:
+            raise OperationContextUnavailableError("existing provenance identity registry is unavailable") from exc
+    return next(actor for actor in ctx.bots.values() if actor.alias == canonical)
+
+
+def _selected_task_contexts(*, root: Path | None, fleet: str | None,
+                            package: PackageResources | None) -> tuple[Context, Context | None]:
+    """Resolve selectors before either read or mutation can choose an actor.
 
     Environment selectors are read before applying explicit destination flags,
     so malformed bot context cannot be bypassed by naming another fleet/root.
@@ -143,8 +194,73 @@ def resolve_task_context(*, root: Path | None = None, fleet: str | None = None,
             if key in os.environ and (not os.environ[key].strip()
                     or Path(os.environ[key]).expanduser().resolve() != expected.resolve()):
                 raise OperationContextError(f"generated {key} conflicts with caller origin")
-    elif "BOT_DIR" in os.environ:
-        raise OperationContextError("generated bot directory has no caller identity")
+    elif "BOT_DIR" in os.environ or "FLEET_ROOT" in os.environ:
+        raise OperationContextError("generated bot paths have no caller identity")
     destination = resolve_active_context(root=root, fleet=fleet if fleet is not None else origin_fleet,
                                   package=package)
+    return destination, origin
+
+
+def resolve_operation_scope(*, root: Path | None = None, fleet: str | None = None,
+                            package: PackageResources | None = None) -> tuple[Context, Context | None]:
+    """Select frozen operation scope and validate any generated caller origin.
+
+    A read has no human-actor prerequisite and never registers an identity.
+    """
+    return _selected_task_contexts(root=root, fleet=fleet, package=package)
+
+
+def resolve_task_context(*, root: Path | None = None, fleet: str | None = None,
+                         operator_alias: str | None = None,
+                         package: PackageResources | None = None) -> TaskOperationContext:
+    """Read existing identities only; a missing human is never registered."""
+    destination, origin = _selected_task_contexts(root=root, fleet=fleet, package=package)
     return bind_task_context(destination, origin=origin, operator_alias=operator_alias)
+
+
+def _local_operator_alias() -> str:
+    """Use the OS account database, never USER/LOGNAME or a `--by` label."""
+    try:
+        name = pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError) as exc:
+        raise OperationContextError("local operator account is unavailable") from exc
+    if not isinstance(name, str) or not _valid_human_alias(f"human:{name}"):
+        raise OperationContextError("local operator account name is invalid")
+    return f"human:{name}"
+
+
+def resolve_task_mutation_context(*, root: Path | None = None, fleet: str | None = None,
+                                  operator_alias: str | None = None,
+                                  package: PackageResources | None = None) -> TaskOperationContext:
+    """Bind a task mutation, registering a cold local human through Plane ingest.
+
+    Generated bot origin always wins; `operator_alias` cannot replace it. A
+    human's first-contact fact is committed before any task operation receives
+    its context. Subsequent calls read the same actor from the registry.
+    """
+    destination, origin = _selected_task_contexts(root=root, fleet=fleet, package=package)
+    if origin is not None:
+        return bind_task_context(destination, origin=origin, operator_alias=operator_alias)
+    alias = operator_alias if operator_alias is not None else _local_operator_alias()
+    try:
+        return bind_task_context(destination, operator_alias=alias)
+    except _MissingHumanIdentity:
+        pass
+
+    # The read binder already verified the selected fleet and local host before
+    # finding this one missing actor. Ingest, not this module, owns its UID and
+    # the idempotent alias registry write. A deterministic event ID also makes
+    # an uncertain acknowledgment safe to reconcile on the next call.
+    root_path = destination.paths.root
+    event_id = derive_uid("ev", f"task-operator-first-contact:v1:{_host_uid(root_path)}:{alias}")
+    event = {"event_id": event_id, "event_type": "system", "emitter": "task-operation-context",
+             "fleet": destination.fleet.name, "source_ref": f"task-operator-first-contact:{event_id}",
+             "payload": {"event": "operator_first_seen", "subject_kind": "actor", "subject": alias}}
+    try:
+        from .plane.emit_api import emit_batch
+        outcome = emit_batch(root_path, [event], require_commit=True)[0]
+    except Exception as exc:
+        raise OperationContextUnavailableError("local operator identity could not be recorded") from exc
+    if outcome.status not in ("committed", "duplicate"):
+        raise OperationContextUnavailableError("local operator identity was not committed")
+    return bind_task_context(destination, operator_alias=alias)

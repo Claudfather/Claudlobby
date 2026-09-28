@@ -1011,6 +1011,18 @@ def _detail_json(col: str) -> str:
     return f"CASE WHEN json_valid({col}) THEN {col} ELSE '{{}}' END"
 
 
+def checkin_event_scope_sql(col: str = "e") -> str:
+    """Scope check-in facts by recorded fleet, with an explicit legacy fallback.
+
+    Current facts have an authoritative fleet_uid. Historical facts with no
+    fleet_uid can only be scoped through their bot dispatcher alias. Binds the
+    fleet alias three times: registry lookup, then the two alias range bounds.
+    """
+    return (f"({col}.fleet_uid = (SELECT uid FROM identity_registry"
+            " WHERE kind = 'fleet' AND alias = ?)"
+            f" OR ({col}.fleet_uid IS NULL AND {fleet_alias_range(col + '.subject_alias')}))")
+
+
 def checkin_dispatch_rows_sql(n: int) -> str:
     """The `checkin_dispatch` join rows for n checkin ids, oldest first.
 
@@ -1019,9 +1031,10 @@ def checkin_dispatch_rows_sql(n: int) -> str:
     DDL forces a system row's assignment_id / work_item_id COLUMNS to NULL
     (0001_kernel.sql), so the address lives in the detail and the join is a
     json_extract -- never the column, which is null by construction for this kind.
-    Fleet-scoped on the DISPATCHER's own alias (the decision rows' own predicate):
-    a 32-hex id is unique, but one bot name on two fleets (#526) is the failure it
-    costs nothing to exclude. The join walks the `kind='system'` slice through
+    Fleet-scoped by the recorded fleet_uid, with bot-alias scoping only for
+    historical null-fleet rows. This also admits a local human dispatcher on
+    a new fact without treating `--by` provenance as its authority. The join
+    walks the `kind='system'` slice through
     `idx_events_kind_seq` with the cheap `event =` filter ahead of any `json_extract`.
 
     There is deliberately no `plane-lookup.py --checkin-dispatch` sibling: this
@@ -1029,7 +1042,7 @@ def checkin_dispatch_rows_sql(n: int) -> str:
     read connection. A bash-side copy with no bash caller is the `--supersedes`
     dead-flag shape (#1032) -- add the mode when a caller exists.
 
-    Binds: fleet, fleet, then one per checkin id.
+    Binds: fleet, fleet, fleet, then one per checkin id.
     """
     ph = ",".join("?" * n)
     d = _detail_json("e.detail")
@@ -1041,7 +1054,7 @@ def checkin_dispatch_rows_sql(n: int) -> str:
         " e.occurred_at AS occurred_at, e.ingest_seq AS ingest_seq"
         " FROM events e"
         " WHERE e.kind = 'system' AND e.event = 'checkin_dispatch'"
-        f" AND {fleet_alias_range('e.subject_alias')}"
+        f" AND {checkin_event_scope_sql('e')}"
         f" AND json_extract({d}, '$.checkin_id') IN ({ph})"
         f" ORDER BY {_epoch('e.occurred_at')}, e.ingest_seq"
     )

@@ -72,6 +72,91 @@ def test_duplicate_admission_is_one_unassigned_task_without_plaintext_receipt(es
     assert _counts(conn) == (1, 0, 0, 0)
 
 
+def test_claimed_provenance_changes_attribution_never_caller_or_acceptance(estate):
+    ctx, conn = estate
+    human_alias = "human:operator"
+    human_uid = resolve_party(conn, human_alias, now="2026-09-28T00:00:00Z", fleet_uid=ctx.fleet_uid)
+    admitted_request = str(uuid4())
+    task = tasks.admit(ctx, admitted_request, title="Operator request", by=human_alias)
+    assert task.task.created_by_uid == human_uid
+    assert _receipt(ctx, admitted_request).intent.caller_uid == ctx.caller.uid
+    with pytest.raises(ReceiptConflict):
+        tasks.admit(ctx, admitted_request, title="Operator request", by=ctx.caller.alias)
+    with pytest.raises(tasks.TaskQueryError, match="provenance"):
+        tasks.admit(ctx, admitted_request, title="Operator request", by="")
+
+    assigned_request = str(uuid4())
+    routed = tasks.assign(ctx, assigned_request, task.task_id, bot_id="worker", by=human_alias)
+    assert routed.task.current_assignment.assigned_by_uid == human_uid
+    assert _receipt(ctx, assigned_request).intent.caller_uid == ctx.caller.uid
+    with pytest.raises(ReceiptConflict):
+        tasks.assign(ctx, assigned_request, task.task_id, bot_id="worker", by=ctx.caller.alias)
+    with pytest.raises(tasks.TaskConflictError, match="assignee"):
+        tasks.accept(replace(ctx, caller=tasks.TaskActor(human_uid, human_alias)),
+                     str(uuid4()), routed.assignment_id)
+    assert tasks.accept(replace(ctx, caller=ctx.bots["worker"]),
+                        str(uuid4()), routed.assignment_id).task.state == "active"
+
+    before = _counts(conn)
+    with pytest.raises(tasks.TaskQueryError, match="existing"):
+        tasks.admit(ctx, str(uuid4()), title="Unseen actor", by="human:unseen")
+    with pytest.raises(tasks.TaskQueryError, match="selected-fleet"):
+        tasks.admit(ctx, str(uuid4()), title="Foreign bot", by="bot:elsewhere/manager")
+    assert _counts(conn) == before
+
+
+def test_assignment_checkin_join_is_atomic_and_scoped(estate):
+    from claudlobby.plane.emit_api import emit_batch
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Check-in task")
+    checkin_id = "ck_" + "a" * 32
+    foreign_id = "ck_" + "b" * 32
+    emit_batch(ctx.root, [
+        {"event_type": "system", "fleet": "example", "emitter": "checkin-record",
+         "source_ref": f"checkin:{checkin_id}", "payload": {"event": "checkin_decision",
+         "subject_kind": "actor", "subject": ctx.caller.alias, "data": {"checkin_id": checkin_id}}},
+        {"event_type": "system", "fleet": "elsewhere", "emitter": "checkin-record",
+         "source_ref": f"checkin:{foreign_id}", "payload": {"event": "checkin_decision",
+         "subject_kind": "actor", "subject": "bot:elsewhere/manager", "data": {"checkin_id": foreign_id}}},
+    ], require_commit=True)
+    before = _counts(conn)
+    for refused in ("ck_" + "0" * 32, foreign_id):
+        with pytest.raises(tasks.TaskNotFoundError, match="selected fleet"):
+            tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker", checkin_id=refused)
+    with pytest.raises(tasks.TaskQueryError, match="canonical"):
+        tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker", checkin_id="ck_UPPER")
+    assert _counts(conn) == before
+
+    conn.execute("CREATE TRIGGER reject_checkin_join BEFORE INSERT ON events "
+                 "WHEN NEW.event='checkin_dispatch' BEGIN SELECT RAISE(ABORT, 'join rejected'); END")
+    request_id = str(uuid4())
+    with pytest.raises(tasks.TaskRecordingError):
+        tasks.assign(ctx, request_id, task.task_id, bot_id="worker", checkin_id=checkin_id)
+    assert _counts(conn) == before  # assignment did not survive a rejected second fact
+    assert len(_receipt(ctx, request_id).intent.stages[0].facts) == 2
+    conn.execute("DROP TRIGGER reject_checkin_join")
+    routed = tasks.assign(ctx, request_id, task.task_id, bot_id="worker", checkin_id=checkin_id)
+    assert routed.recording == "committed" and not routed.replayed
+    assert tasks.assign(ctx, request_id, task.task_id, bot_id="worker", checkin_id=checkin_id).replayed
+    join = conn.execute("SELECT subject_uid, fleet_uid, detail FROM events "
+                        "WHERE kind='system' AND event='checkin_dispatch'").fetchone()
+    assert join[0] == ctx.caller.uid and join[1] == ctx.fleet_uid
+    assert json.loads(join[2]) == {"checkin_id": checkin_id, "assignment_id": routed.assignment_id,
+                                   "work_item_id": task.task_id, "task_id": None}
+    assert _counts(conn) == (1, 1, before[2] + 1, 0)
+
+    human_alias = "human:operator"
+    human_uid = resolve_party(conn, human_alias, now="2026-09-28T00:00:00Z", fleet_uid=ctx.fleet_uid)
+    human = replace(ctx, caller=tasks.TaskActor(human_uid, human_alias), caller_fleet_uid=None)
+    second = tasks.admit(human, str(uuid4()), title="Human-routed task")
+    human_route = tasks.assign(human, str(uuid4()), second.task_id, bot_id="worker", checkin_id=checkin_id)
+    subject = conn.execute("SELECT subject_uid, subject_alias FROM events "
+                           "WHERE kind='system' AND event='checkin_dispatch' "
+                           "AND json_extract(detail, '$.assignment_id')=?",
+                           (human_route.assignment_id,)).fetchone()
+    assert tuple(subject) == (human_uid, human_alias)
+
+
 def test_competing_routing_and_exact_assignee_acceptance(estate):
     ctx, conn = estate
     task = tasks.admit(ctx, str(uuid4()), title="Route me", project_key="shop")

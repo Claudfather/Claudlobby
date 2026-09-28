@@ -71,7 +71,7 @@ def _join_dispatches(conn, fleet: str, refs: list[str]) -> dict[str, list[dict]]
     if not ids:
         return {}
     links = list(conn.execute(checkin_dispatch_rows_sql(len(ids)),
-                              (*fleet_range_params(fleet), *ids)))
+                              (fleet, *fleet_range_params(fleet), *ids)))
     asg = [r["assignment_id"] for r in links if r["assignment_id"]]
     status: dict[str, tuple] = {}
     if asg:

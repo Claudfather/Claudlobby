@@ -22,11 +22,12 @@ from typing import Literal, Mapping, TYPE_CHECKING
 
 from .plane.db import connect_ro, db_file
 from .plane.ids import ID_PATTERNS, mint_assignment_id, mint_event_id, mint_msg_id, mint_work_item_id
+from .plane.queries import checkin_event_scope_sql, fleet_alias_range, fleet_range_params
 from .plane.schema_state import PendingMigrationError, require_current_schema
 from .report_payload import ReportLink, ReportPayload, encode_report_facts
 from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import ReceiptConflict, RequestIntent, StagePlan, locked_request, semantic_digest
-from .task_queries import TaskQueryError, show_assignment, show_task
+from .task_queries import TaskNotFoundError, TaskQueryError, show_assignment, show_task
 from .task_state import TASK_EMITTER, Task
 
 if TYPE_CHECKING:
@@ -69,6 +70,10 @@ class TaskOperationContext:
 
 class TaskConflictError(TaskQueryError):
     code = "conflict"
+
+
+class TaskOperationUnavailableError(TaskQueryError):
+    code = "unavailable"
 
 
 class TaskRecordingError(TaskQueryError):
@@ -132,9 +137,14 @@ def _reader(ctx):
         conn = connect_ro(db_file(ctx.root))
     except FileNotFoundError as exc:
         raise PendingMigrationError("task operations require an explicitly initialized Plane") from exc
+    except (OSError, sqlite3.Error) as exc:
+        raise TaskOperationUnavailableError("task operation Plane storage is unavailable") from exc
     with closing(conn):
-        require_current_schema(conn)
-        yield conn
+        try:
+            require_current_schema(conn)
+            yield conn
+        except sqlite3.Error as exc:
+            raise TaskOperationUnavailableError("task operation Plane storage is unavailable") from exc
 
 
 def _identities(ctx, conn, actors):
@@ -188,6 +198,36 @@ def _scope_links(ctx, conn, project_key, workstream_id, repo):
             raise TaskQueryError("workstream does not belong to the selected fleet")
         if row[1] is not None and (row[1] not in projects or project_key is not None and row[1] != project_key):
             raise TaskQueryError("workstream project differs from the selected task project")
+
+
+def _provenance(ctx, conn, alias):
+    # The context module owns identity resolution; this claim never substitutes
+    # for the authoritative resolved caller frozen in the request receipt.
+    from .operation_context import resolve_task_provenance
+    return resolve_task_provenance(ctx, alias, conn)
+
+
+def _provenance_alias(ctx, alias):
+    from .operation_context import canonical_task_provenance_alias
+    return canonical_task_provenance_alias(ctx, alias)
+
+
+def _checkin_decision(ctx, conn, checkin_id):
+    if not isinstance(checkin_id, str) or not re.fullmatch(r"ck_[0-9a-f]{32}", checkin_id):
+        raise TaskQueryError("check-in ID must have canonical ck_<32hex> form")
+    # The existing decision reader admits only a bot of this fleet. Require
+    # that same visible decision even when a malformed fact claims our UID.
+    sql = ("SELECT 1 FROM events e WHERE e.kind='system' AND e.event='checkin_decision'"
+           " AND e.source_ref=? AND " + checkin_event_scope_sql("e")
+           + " AND " + fleet_alias_range("e.subject_alias") + " LIMIT 1")
+    try:
+        found = conn.execute(sql, (f"checkin:{checkin_id}", ctx.context.fleet.name,
+                                   *fleet_range_params(ctx.context.fleet.name),
+                                   *fleet_range_params(ctx.context.fleet.name))).fetchone()
+    except sqlite3.Error as exc:
+        raise TaskOperationUnavailableError("check-in decision registry is unavailable") from exc
+    if found is None:
+        raise TaskNotFoundError("check-in decision not found in the selected fleet")
 
 
 def _existing(store, ctx, operation, semantic, recipient=None, *, fact_count=1, notification=False):
@@ -280,33 +320,42 @@ def _commit(store, ctx, conn, receipt, raws, check_lock):
 
 def admit(ctx: TaskOperationContext, request_id: str, *, title: str, body: str | None = None,
           repo: str | None = None, project_key: str | None = None,
-          workstream_id: str | None = None) -> TaskOperationResult:
+          workstream_id: str | None = None, by: str | None = None) -> TaskOperationResult:
     """Admit fleet-owned intake, deliberately creating no assignment or message."""
+    by_alias = _provenance_alias(ctx, by)
     semantic = semantic_digest(dict(title=title, body=body, repo=repo, project_key=project_key,
-                                    workstream_id=workstream_id))
+                                    workstream_id=workstream_id, by=by_alias))
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
         previous = _existing(store, ctx, "task.admit", semantic)
         tid = previous.intent.task_id if previous else mint_work_item_id()
         with _locked_task(store, tid) as check, _reader(ctx) as conn:
             if _replayed(store, previous, conn):
                 return _result(ctx, conn, previous, True)
-            _identities(ctx, conn, (ctx.caller,))
+            provenance = _provenance(ctx, conn, by)
+            _identities(ctx, conn, (ctx.caller, provenance))
             _scope_links(ctx, conn, project_key, workstream_id, repo)
             raw = _raw(ctx, request_id, "work_item", dict(work_item_id=tid, title=title, body=body,
-                       created_by=ctx.caller.alias, repo=repo, project_key=project_key,
+                       created_by=provenance.alias, repo=repo, project_key=project_key,
                        workstream_id=workstream_id), previous)
-            receipt = _prepare(store, ctx, "task.admit", semantic, (raw,), tid)
+            receipt = _prepare(store, ctx, "task.admit", semantic, (raw,), tid, actors=(provenance,))
             return _commit(store, ctx, conn, receipt, (raw,), check)
 
 
 def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,
-           expected_by: str | None = None) -> TaskOperationResult:
+           expected_by: str | None = None, checkin_id: str | None = None,
+           by: str | None = None) -> TaskOperationResult:
     """Route one queued task, serialized with every other supported task mutation."""
     _own_fleet(ctx)
     worker = _worker(ctx, bot_id)
-    semantic = semantic_digest(dict(task_id=task_id, bot_id=bot_id, expected_by=expected_by))
+    by_alias = _provenance_alias(ctx, by)
+    if checkin_id is not None and (not isinstance(checkin_id, str)
+                                   or not re.fullmatch(r"ck_[0-9a-f]{32}", checkin_id)):
+        raise TaskQueryError("check-in ID must have canonical ck_<32hex> form")
+    semantic = semantic_digest(dict(task_id=task_id, bot_id=bot_id, expected_by=expected_by,
+                                    checkin_id=checkin_id, by=by_alias))
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
-        previous = _existing(store, ctx, "task.assign", semantic, worker.uid)
+        previous = _existing(store, ctx, "task.assign", semantic, worker.uid,
+                             fact_count=2 if checkin_id is not None else 1)
         with _reader(ctx) as conn:
             task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)  # canonical recovery errors
             with _locked_task(store, task.task_id) as check:
@@ -315,13 +364,25 @@ def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: 
                 task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
                 if task.state != "queued" or task.current_assignment is not None:
                     raise TaskConflictError("task is not queued and unassigned")
-                _identities(ctx, conn, (ctx.caller, worker))
+                provenance = _provenance(ctx, conn, by)
+                _identities(ctx, conn, (ctx.caller, worker, provenance))
                 _scope_links(ctx, conn, task.project_key, task.workstream_id, task.repo)
+                if checkin_id is not None:
+                    _checkin_decision(ctx, conn, checkin_id)
                 aid = previous.intent.assignment_id if previous else mint_assignment_id()
                 raw = _raw(ctx, request_id, "assignment", dict(assignment_id=aid, work_item_id=task_id,
-                           assignee=worker.alias, assigned_by=ctx.caller.alias, expected_by=expected_by), previous)
-                receipt = _prepare(store, ctx, "task.assign", semantic, (raw,), task_id, aid, worker.uid, (worker,))
-                return _commit(store, ctx, conn, receipt, (raw,), check)
+                           assignee=worker.alias, assigned_by=provenance.alias, expected_by=expected_by), previous)
+                raws = (raw,)
+                if checkin_id is not None:
+                    join = _raw(ctx, request_id, "system", {
+                        "event": "checkin_dispatch", "subject_kind": "actor", "subject": ctx.caller.alias,
+                        "data": {"checkin_id": checkin_id, "assignment_id": aid,
+                                 "work_item_id": task_id, "task_id": None},
+                    }, previous, fact_index=1)
+                    raws = (raw, join)
+                receipt = _prepare(store, ctx, "task.assign", semantic, raws, task_id, aid, worker.uid,
+                                   (worker, provenance))
+                return _commit(store, ctx, conn, receipt, raws, check)
 
 
 def accept(ctx: TaskOperationContext, request_id: str, assignment_id: str) -> TaskOperationResult:
