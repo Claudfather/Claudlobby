@@ -217,6 +217,33 @@ _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
 # practice there is one — MAX(ingest_seq) is defensive). Format with ph = the
 # msg_id placeholders; bind the msg_ids once. json_extract reads each proof out
 # of `detail`, the NEWEST_ACK_SQL idiom.
+# The receiver's fleet is proved by the event envelope plus the identity
+# registry. Historical bare names are usable only within that fleet; a marker
+# naming another fleet cannot turn a same-named bot into the intended recipient.
+_RECEIPT_MATCH_SQL = (
+    " e.kind='transmission' AND e.event='received'"
+    " AND e.host_uid=c.host_uid AND e.fleet_uid=recipient_fleet.uid"
+    " AND json_extract(e.detail, '$.destination') IN"
+    " (recipient.alias, substr(recipient.alias, 5),"
+    "  substr(recipient.alias, instr(recipient.alias, '/') + 1))"
+)
+
+# Separate destination history from per-message proof, so view batches do not
+# perform a destination-wide scan for every communication they display.
+_RECEIPT_PARTIES_SQL = (
+    " FROM communications c"
+    " LEFT JOIN identity_registry recipient ON recipient.kind='actor'"
+    "  AND recipient.uid=c.recipient_uid AND recipient.alias=c.recipient_alias"
+    " LEFT JOIN identity_registry recipient_fleet ON recipient_fleet.kind='fleet'"
+    "  AND recipient.alias LIKE 'bot:%/%'"
+    "  AND recipient_fleet.alias=substr(recipient.alias, 5, instr(recipient.alias, '/') - 5)"
+)
+
+RECEIPT_HISTORY_SQL = (
+    "SELECT EXISTS (SELECT 1 FROM events e WHERE" + _RECEIPT_MATCH_SQL + ")"
+    + _RECEIPT_PARTIES_SQL + " WHERE c.msg_id=?"
+)
+
 DELIVERY_STATUS_SQL = (
     "SELECT c.msg_id AS msg_id, s.wire_bytes AS wire_bytes,"
     " r.received_bytes AS received_bytes,"
@@ -229,29 +256,24 @@ DELIVERY_STATUS_SQL = (
     "    THEN 'altered'"
     "  WHEN s.msg_id IS NOT NULL THEN 'unconfirmed'"
     "  ELSE NULL"
-    " END AS delivery"
-    " FROM communications c"
+    " END AS delivery, r.ingest_seq AS received_ingest_seq"
+    + _RECEIPT_PARTIES_SQL +
     " LEFT JOIN ("
-    "  SELECT e.msg_id AS msg_id,"
-    "   json_extract(e.detail, '$.destination') AS destination,"
+    "  SELECT e.ingest_seq, e.msg_id,"
     "   json_extract(e.detail, '$.received_sha256') AS received_sha256,"
     "   json_extract(e.detail, '$.received_bytes') AS received_bytes"
-    "  FROM events e"
-    "  WHERE e.kind='transmission' AND e.event='received'"
-    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
-    "    WHERE e2.kind='transmission' AND e2.event='received' AND e2.msg_id = e.msg_id)"
-    " ) r ON r.msg_id = c.msg_id AND r.destination = c.recipient_raw"
+    "  FROM events e WHERE e.kind='transmission' AND e.event='received'"
+    " ) r ON r.ingest_seq=(SELECT MAX(e.ingest_seq) FROM events e"
+    "  WHERE e.msg_id=c.msg_id AND" + _RECEIPT_MATCH_SQL + ")"
     " LEFT JOIN ("
-    "  SELECT e.msg_id AS msg_id,"
+    "  SELECT e.ingest_seq, e.msg_id,"
     "   json_extract(e.detail, '$.wire_sha256') AS wire_sha256,"
     "   json_extract(e.detail, '$.wire_bytes') AS wire_bytes"
-    "  FROM events e"
+    "  FROM events e WHERE e.kind='transmission'"
+    "   AND e.event IN ('pane_submitted','carrier_queued')"
+    " ) s ON s.ingest_seq=(SELECT MAX(e.ingest_seq) FROM events e"
     "  WHERE e.kind='transmission' AND e.event IN ('pane_submitted','carrier_queued')"
-    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
-    "    WHERE e2.kind='transmission'"
-    "     AND e2.event IN ('pane_submitted','carrier_queued')"
-    "     AND e2.msg_id = e.msg_id)"
-    " ) s ON s.msg_id = c.msg_id"
+    "   AND e.msg_id=c.msg_id AND e.host_uid=c.host_uid AND e.fleet_uid IS c.fleet_uid)"
     " WHERE c.msg_id IN ({ph})"
 )
 
