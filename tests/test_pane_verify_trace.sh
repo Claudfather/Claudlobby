@@ -91,8 +91,11 @@ first_pane=$(cat "$TRACE_DIR/tick-1.pane" 2>/dev/null || printf 'MISSING')
 expected_pane=$(cat "$FIXTURES/input-clean-submit.txt")
 assert_eq "tick-1.pane is the frame verbatim, not a derived record" \
     "$(printf '%s' "$expected_pane" | cksum)" "$(printf '%s' "$first_pane" | cksum)"
-assert_eq "the tick file holds no derived fields" "no" \
-    "$(case "$first_pane" in *candidate*|*ge_floor*|*substr*) echo yes ;; *) echo no ;; esac)"
+derived=no
+if [[ "$first_pane" == *candidate* || "$first_pane" == *ge_floor* || "$first_pane" == *substr* ]]; then
+    derived=yes
+fi
+assert_eq "the tick file holds no derived fields" "no" "$derived"
 
 echo "== each candidate classifies distinctly =="
 # no-region: pre-draw pane, no glyph at all -> the render-lag shape

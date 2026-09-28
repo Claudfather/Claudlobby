@@ -59,10 +59,15 @@ def _fake_tree(tmp_path, script):
 
 
 def test_resolves_to_an_ancestor_named_claude(tmp_path):
+    resolved = tmp_path / "resolved-pid"
     r = _fake_tree(
         tmp_path,
         f'echo "ANCESTOR=$$"; echo "COMM=$(ps -o comm= -p $$)"; '
-        f'echo "GOT=$(bash {DOOR} --pid)"',
+        # Bash 3.2 forks a command substitution without changing its comm.
+        # Calling the door inside $(...) would create a nearer process named
+        # claude and make the door correctly return that child instead.
+        f'bash "{DOOR}" --pid > "{resolved}"; '
+        f'read -r got < "{resolved}"; echo "GOT=$got"',
     )
     assert r.returncode == 0, r.stderr
     out = dict(

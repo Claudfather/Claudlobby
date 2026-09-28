@@ -12,8 +12,9 @@
 #
 # It also pins the two properties that make errtrace safe to arm, because both
 # are the kind of premise that silently stops being true:
-#   * suppressed contexts (`f || true`, `if f`) must stay SILENT — errtrace must
-#     instrument real failures without emitting rows for deliberate tolerance
+#   * ordinary suppressed contexts (`f || true`, `if f`) must stay SILENT —
+#     errtrace must not emit rows for deliberate tolerance. A nested command
+#     substitution differs on Bash 3.2; the final control pins that behavior.
 #   * the handler must write NOTHING to stdout — under errtrace the trap fires
 #     inside the failing command substitution, so any handler stdout is captured
 #     as the caller's value (`local v=$(fn)` silently becomes the handler's
@@ -62,7 +63,7 @@ run_case() {
         env -i PATH="$PATH" HOME="$T" \
             CLAUDLOBBY_ROOT="$T" BOT_DIR="$BOTDIR" BOT_ID=canary FLEET_NAME=f \
             PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
-            bash -c "
+            "$BASH" -c "
                 set $opts
                 . '$LIB_COMMON'
                 install_error_trap '$BOTDIR'
@@ -159,7 +160,18 @@ assert_eq "…while still writing its row" "1" "$(rows_of "$r")"
 r=$(run_case "-euo pipefail" 'f() { echo "$(boom)"; }; f')
 assert_eq "failing substitution emits at both frames" "2" "$(rows_of "$r")"
 r=$(run_case "-euo pipefail" 'f() { echo "$(boom)"; }; f || true')
-assert_eq "…and stays silent when the caller tolerates it" "0" "$(rows_of "$r")"
+# Bash 3.2 cannot see the parent's `|| true` inside this substitution: a bare
+# native ERR trap also fires twice. Characterize the shell separately so this
+# assertion cannot accidentally make a missing fleet breadcrumb look green.
+native_traps=$("$BASH" -c 'set -Ee; trap '\''printf "ERR\n" >&2'\'' ERR; boom() { false; }; f() { echo "$(boom)"; }; f || true' 2>&1)
+native_rows=$(printf '%s\n' "$native_traps" | grep -c '^ERR$' || true)
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    expected_native_rows=2
+else
+    expected_native_rows=0
+fi
+assert_eq "native Bash nested-substitution trap count" "$expected_native_rows" "$native_rows"
+assert_eq "nested-substitution rows follow native Bash semantics" "$native_rows" "$(rows_of "$r")"
 
 echo
 echo "  $PASS/$TOTAL passed"
