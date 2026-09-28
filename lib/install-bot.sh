@@ -9,8 +9,8 @@
 #   3. Copies the correct plist into ~/Library/LaunchAgents/
 #   4. Bootstraps it with launchctl
 #
-# Idempotent: safe to run repeatedly — stale cleanup only touches plists that
-# don't match the current BOT_SERVICE name.
+# Idempotent: installed stale cleanup requires the same bot working directory
+# and excludes the current BOT_SERVICE name.
 #
 # Usage: install-bot.sh /path/to/runtime/bots/<bot>
 set -euo pipefail
@@ -61,18 +61,25 @@ for old_plist in "$BOT_DIR"/*.plist; do
     rm -f "$old_plist"
 done
 
+# Selection only: callers may mutate a candidate only after this succeeds.
+stale_installed_plist_owned_by_bot() {
+    local candidate="$1" name
+    name="$(basename "$candidate" .plist)"
+    [ "$name" != "$BOT_SERVICE" ] || return 1
+    case "$name" in
+        "$bot_id"|*".$bot_id") svc_bot_unit_owned_by "$candidate" "$BOT_DIR" ;;
+        *) return 1 ;;
+    esac
+}
+
 for old_installed in "$AGENTS_DIR"/*.plist; do
     [ -f "$old_installed" ] || continue
-    old_name="$(basename "$old_installed" .plist)"
-    [ "$old_name" = "$BOT_SERVICE" ] && continue
-    # Only clean plists that belong to THIS bot.
-    case "$old_name" in
-        "$bot_id"|*".$bot_id")
-            echo "install-bot.sh: unloading stale LaunchAgent: $old_name"
-            /bin/launchctl bootout "gui/$UID_NUM/$old_name" 2>/dev/null || true
-            rm -f "$old_installed"
-            ;;
-    esac
+    if stale_installed_plist_owned_by_bot "$old_installed"; then
+        old_name="$(basename "$old_installed" .plist)"
+        echo "install-bot.sh: unloading stale LaunchAgent: $old_name"
+        /bin/launchctl bootout "gui/$UID_NUM/$old_name" 2>/dev/null || true
+        rm -f "$old_installed"
+    fi
 done
 
 # --- Install current plist --------------------------------------------------

@@ -120,48 +120,6 @@ fi
 # Emit a script_error event on an unguarded abort (parity with lifecycle peers).
 install_error_trap "$BOT_DIR"
 
-# --- Leg 1: supervision (systemd user unit / launchd agent) ------------------
-reap_supervision() {
-    if [ -z "${BOT_SERVICE:-}" ]; then
-        sd_log "BOT_SERVICE unset — no supervised unit to remove"
-        return 0
-    fi
-    case "$_OS" in
-        Linux)
-            local ud="$HOME/.config/systemd/user"
-            # disable --now stops the unit (its ExecStop kills the tmux server)
-            # and drops the default.target.wants symlink; guarded for idempotency.
-            systemctl --user disable --now "$BOT_SERVICE.service" 2>/dev/null || true
-            rm -f "$ud/$BOT_SERVICE.service" "$ud/default.target.wants/$BOT_SERVICE.service"
-            systemctl --user daemon-reload 2>/dev/null || true
-            systemctl --user reset-failed "$BOT_SERVICE.service" 2>/dev/null || true
-            sd_log "systemd user unit $BOT_SERVICE.service stopped + disabled + removed"
-            ;;
-        Darwin)
-            # bootout is the modern inverse of bootstrap (matches install-bot.sh).
-            /bin/launchctl bootout "gui/$(id -u)/$BOT_SERVICE" 2>/dev/null || true
-            rm -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist"
-            sd_log "launchd agent $BOT_SERVICE booted out + plist removed"
-            ;;
-        *)
-            sd_log "unsupported OS ($_OS) — skipping supervision leg"
-            ;;
-    esac
-}
-
-# --- Leg 2: per-bot tmux server (belt-and-suspenders vs. the unit ExecStop) ---
-reap_tmux() {
-    local sock
-    sock="$(tmux_socket_for_bot "$BOT_DIR" 2>/dev/null)" || sock=""
-    if [ -n "$sock" ]; then
-        bot_tmux "$sock" kill-server 2>/dev/null || true
-        sd_log "tmux server -L $sock killed"
-    else
-        sd_log "no resolvable tmux socket — skipping tmux leg"
-    fi
-    rm -f "$BOT_DIR/.tmux-env" 2>/dev/null || true
-}
-
 # --- Leg 3: fleet-state key — delegate the surgical delete to its owner -------
 # fleet-state-update.sh is the single writer of fleet-state.json (path, lock, and
 # mutation all live there). Pass both the dir-slug and BOT_NAME identity in case
@@ -182,8 +140,7 @@ reap_fleet_state() {
 # standing. The teardown must not be contingent on the bookkeeping succeeding,
 # so the receipt is allowed to fail loudly and the legs run regardless.
 emit_teardown_receipt || sd_log "receipt: FAILED to record — continuing teardown"
-reap_supervision
-reap_tmux
+svc_disenroll "$BOT_DIR" sd_log "${BOT_SERVICE:-}" /bin/launchctl
 reap_fleet_state
 
 if [ "$PURGE" -eq 1 ]; then

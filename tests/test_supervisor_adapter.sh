@@ -299,6 +299,44 @@ set -e
 assert_eq "Other OS: svc_kick rc 2" "2" "$rc"
 assert_eq "Other OS: fake untouched" "" "$(cat "$FAKE_LOG")"
 
+echo "=== supervisor.sh contract -- selected actions and loaded identity ==="
+reset_fakes
+as_os Linux
+: > "$HOME/.config/systemd/user/svc-charlie.service"
+rc=0
+FAKE_EXIT=2 svc_kick "$BOT3" > "$T/kick-description" || rc=$?
+assert_eq "native rc 2 is retained" "2" "$rc"
+assert_eq "native rc 2 still selected an action" "1" "$SVC_KICK_SELECTED"
+reset_fakes
+rc=0
+svc_kick "$BOT3" > "$T/kick-description" || rc=$?
+assert_eq "missing target returns rc 2" "2" "$rc"
+assert_eq "missing target resets same-shell selection" "0" "$SVC_KICK_SELECTED"
+
+before_kick() { printf 'callback:%s\n' "$1" >> "$FAKE_LOG"; }
+reset_fakes
+: > "$HOME/.config/systemd/user/loaded.service"
+svc_kick "$BOT3" before_kick loaded charlie > "$T/kick-description"
+assert_eq "loaded identity overrides a different bot.conf"     "callback:systemctl --user restart loaded
+--user restart loaded.service" "$(cat "$FAKE_LOG")"
+assert_eq "callback owns description output" "" "$(cat "$T/kick-description")"
+
+before_kick_fails() { return 17; }
+reset_fakes
+: > "$HOME/.config/systemd/user/loaded.service"
+rc=0
+svc_kick "$BOT3" before_kick_fails loaded charlie || rc=$?
+assert_eq "callback failure is retained" "17" "$rc"
+assert_eq "callback failure is selected, never fallback" "1" "$SVC_KICK_SELECTED"
+assert_eq "callback failure prevents native command" "" "$(cat "$FAKE_LOG")"
+
+reset_fakes
+: > "$HOME/.config/systemd/user/svc-charlie.service"
+rc=0
+svc_kick "$BOT3" before_kick "" "" || rc=$?
+assert_eq "explicit empty identity never re-reads bot.conf" "0" "$SVC_KICK_SELECTED"
+assert_eq "explicit empty identity leaves native command untouched" "" "$(cat "$FAKE_LOG")"
+
 echo "=== supervisor.sh contract -- svc_enroll (dispatch only, stubbed installers) ==="
 
 # The REAL install-bot-systemd.sh / install-bot.sh are deliberately never
@@ -382,6 +420,22 @@ assert_eq "Other OS: svc_disenroll rc 0" "0" "$rc"
 assert_eq "Other OS: no systemctl/launchctl call (supervision leg skipped)" "" "$(cat "$FAKE_LOG")"
 assert_contains "Other OS: tmux teardown still runs (OS-independent leg)" "-L svc-echo kill-server" "$(cat "$TMUX_LOG")"
 assert_eq "Other OS: .tmux-env still removed" "false" "$([ -f "$BOT5/.tmux-env" ] && echo true || echo false)"
+
+echo "=== supervisor.sh contract -- reaper callbacks and command ownership ==="
+reset_fakes
+as_os Darwin
+: > "$HOME/Library/LaunchAgents/loaded.plist"
+reaper_log() { printf 'callback:%s\n' "$*" >> "$FAKE_LOG"; }
+svc_disenroll "$BOT5" reaper_log loaded "$T/bin/launchctl" > "$T/reaper-output"
+assert_eq "reaper callback owns output" "" "$(cat "$T/reaper-output")"
+assert_contains "explicit command and loaded label used" "bootout gui/$(id -u)/loaded" "$(cat "$FAKE_LOG")"
+assert_contains "supervision log retains caller text" "callback:launchd agent loaded booted out + plist removed" "$(cat "$FAKE_LOG")"
+assert_contains "tmux callback is present" "callback:tmux server -L svc-echo killed" "$(cat "$FAKE_LOG")"
+reset_fakes
+as_os SunOS
+svc_disenroll "$BOT5" reaper_log "" "$T/bin/launchctl"
+assert_contains "empty label wins before unsupported OS" "callback:BOT_SERVICE unset — no supervised unit to remove" "$(cat "$FAKE_LOG")"
+assert_eq "unsupported empty label invokes no supervision action" "2" "$(wc -l < "$FAKE_LOG" | tr -d ' ')"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

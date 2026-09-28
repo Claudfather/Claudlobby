@@ -9,8 +9,8 @@
 #   3. Copies the correct unit into ~/.config/systemd/user/
 #   4. Runs daemon-reload, enables + starts
 #
-# Idempotent: safe to run repeatedly — stale cleanup only touches units that
-# don't match the current BOT_SERVICE name.
+# Idempotent: installed stale cleanup requires the same bot working directory
+# and excludes the current BOT_SERVICE name.
 #
 # Usage: install-bot-systemd.sh /path/to/runtime/bots/<bot>
 #
@@ -68,18 +68,25 @@ for old_unit in "$BOT_DIR"/*.service; do
     rm -f "$old_unit"
 done
 
+# Selection only: callers may mutate a candidate only after this succeeds.
+stale_installed_unit_owned_by_bot() {
+    local candidate="$1" name
+    name="$(basename "$candidate")"
+    [ "$name" != "$UNIT_NAME" ] || return 1
+    case "$name" in
+        "$bot_id.service"|*".$bot_id.service") svc_bot_unit_owned_by "$candidate" "$BOT_DIR" ;;
+        *) return 1 ;;
+    esac
+}
+
 for old_installed in "$UNIT_DIR"/*.service; do
     [ -f "$old_installed" ] || continue
-    old_name="$(basename "$old_installed")"
-    [ "$old_name" = "$UNIT_NAME" ] && continue
-    # Only clean units that belong to THIS bot (contain the bot_id).
-    case "$old_name" in
-        "$bot_id.service"|*".$bot_id.service")
-            echo "install-bot-systemd.sh: disabling stale installed unit: $old_name"
-            systemctl --user disable --now "$old_name" 2>/dev/null || true
-            rm -f "$old_installed"
-            ;;
-    esac
+    if stale_installed_unit_owned_by_bot "$old_installed"; then
+        old_name="$(basename "$old_installed")"
+        echo "install-bot-systemd.sh: disabling stale installed unit: $old_name"
+        systemctl --user disable --now "$old_name" 2>/dev/null || true
+        rm -f "$old_installed"
+    fi
 done
 
 # --- Install current unit ---------------------------------------------------

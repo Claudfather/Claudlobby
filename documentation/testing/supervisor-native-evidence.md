@@ -1,0 +1,42 @@
+# Supervisor lifecycle native evidence
+
+The action-adoption refactor in [#1862](https://github.com/Claudfather/Claudlobby/pull/1862)
+was exercised on disposable Linux and macOS hosts in
+[run 36246470151](https://github.com/Claudfather/Claudlobby/actions/runs/36246470151):
+
+- Parent: `cb41997969274c77c7b6ed39ef171f22d1ccbb70`.
+- Candidate: `8201e2380b85470e2d16406b581253c5e81d95a5`.
+- Both revisions passed the complete validation harness: Linux 344/0; macOS 320/0.
+- Both passed all nine native lifecycle cases, scratch receipt recording,
+  preservation checks, negative controls, and cleanup.
+
+The dedicated workflow and driver were one-time acceptance tooling. They remain
+available in the candidate commit above; they are no longer maintained as a
+second test framework. Removing them changes no production code. These results
+belong to the recorded revisions; the simplified PR head has not repeated the
+native run.
+
+Recurring regression coverage remains in `tests/test_supervisor_lifecycle.sh`,
+`tests/test_supervisor_adapter.sh`, `tests/test_spin_down_receipt.sh`, the lifecycle
+identity tests, and `tests/test_supervisor_ratchet.py`. Pytest discovers the shell
+suites through `tests/test_sh_suites.py`. Phase 03's standard platform CI adds
+native service coverage through `tests/test_macos_supervision.py`; that is separate
+from the recorded parent/candidate acceptance run. Future runtime changes still
+require relevant empirical evidence under the repository's normal validation
+rules. This record neither closes the broader #1607 program nor authorizes rollout.
+
+The unified-CLI integration reuses the final net change from #1862 at
+`14339b1a759ed884e6cdc7566ad632f0ead52a6f`. Its four production-file changes
+are unchanged from `58fdd43adc5903019188fdcdb6805e6440d7560c`; the retained
+lifecycle fixture includes `db58d73887d38d9ba69ec96fe01669778451f79e`'s
+action-only failure injection. The existing `svc_restart_host` remains in the
+adapter. This attribution records reuse, not a new native acceptance result.
+
+Installer stale-unit selection also reuses [#1835](https://github.com/Claudfather/Claudlobby/pull/1835),
+single commit `beb4e35dcdfa51b51a17b306f0421d274c701698`: the stdlib
+`bot-unit-owner.py` reader, additive `svc_bot_unit_owned_by` adapter and both
+installers preserve foreign or unknown working-directory ownership. Its
+upstream [native proof](https://github.com/Claudfather/Claudlobby/actions/runs/36314243448)
+belongs to the source-pinned revisions recorded in #1894, not this integration.
+The reused installer fixtures put copied native helpers outside the writable
+data root and replace all supervisor calls with recording stubs.

@@ -25,7 +25,15 @@ mkdir -p "$T/bin"
 # The receipt's record is the plane (F18 closure R1); the CLI rung is stood in
 # for by tests/plane_capture_cli.sh, which renders each batch as the legacy row.
 CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
-# Stubs: nothing may reach the host's real systemd or any tmux server.
+# Pin the supervision branch to Linux: the production Darwin reaper uses an
+# absolute /bin/launchctl, which PATH cannot intercept. The dedicated lifecycle
+# matrix covers Darwin through an explicit seam in a test-only script copy.
+# No service operation may reach the host from this receipt-focused suite.
+cat > "$T/bin/uname" <<'EOF'
+#!/bin/bash
+printf '%s\n' Linux
+EOF
+chmod +x "$T/bin/uname"
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/systemctl"
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/launchctl"
