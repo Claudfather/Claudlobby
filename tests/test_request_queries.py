@@ -85,7 +85,7 @@ def test_submitted_and_unobserved_sends_remain_distinct_from_recording(tmp_path)
     submitted_id, unobserved_id = str(uuid4()), str(uuid4())
     with receipts.locked_request(root, intent.fleet_uid, submitted_id) as store:
         store.prepare(intent)
-        store.begin_message_attempt("ev_" + "a" * 32)
+        store.begin_native_attempt("ev_" + "a" * 32)
         store.stage(0)
         store.observe_message_transport(1, receipts.TransportObservation(
             "submitted", native_returncode=0))
@@ -95,7 +95,7 @@ def test_submitted_and_unobserved_sends_remain_distinct_from_recording(tmp_path)
         store.stage_message_transmission(1)
     with receipts.locked_request(root, intent.fleet_uid, unobserved_id) as store:
         store.prepare(replace(intent, message_id="msg_" + "b" * 32))
-        store.begin_message_attempt("ev_" + "c" * 32)
+        store.begin_native_attempt("ev_" + "c" * 32)
         store.stage(0)
     with sqlite3.connect(db_file(root)) as conn:
         before = (conn.execute("SELECT COUNT(*) FROM communications").fetchone()[0],

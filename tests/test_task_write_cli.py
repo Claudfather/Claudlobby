@@ -1,6 +1,7 @@
 """Public task writes against private selected activation and real Plane storage."""
 
 import builtins
+from dataclasses import replace
 import json
 import sqlite3
 from uuid import uuid4
@@ -13,6 +14,7 @@ from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.request_receipts import RequestStore, locked_request
+from tests.package_fixtures import source_package
 from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 
@@ -24,7 +26,9 @@ def active(cold, monkeypatch):  # noqa: F811 — pytest fixture parameter
                 "FLEET_ROOT", "CLAUDLOBBY_RELEASE_ID"):
         monkeypatch.delenv(key, raising=False)
     activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
-    monkeypatch.setattr(context, "get_resources", lambda: host.package)
+    package = replace(source_package(), native=release.native_path,
+                      artifact_id=release.inputs.artifact_id)
+    monkeypatch.setattr(context, "get_resources", lambda: package)
     return root, release
 
 

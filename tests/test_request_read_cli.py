@@ -28,7 +28,8 @@ def _call(capsys, root, *argv, expected=0):
     assert main(["--root", str(root), "--json", *argv]) == expected
     result = json.loads(capsys.readouterr().out)
     assert result["schema_version"] == 1 and result["ok"] is (expected == 0)
-    assert result["request_id"] is None
+    request_id = argv[argv.index("--request-id") + 1] if "--request-id" in argv else None
+    assert result["request_id"] == request_id
     return result
 
 

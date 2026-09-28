@@ -1089,6 +1089,11 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     )
     (root / "library" / "expertise" / "orchestration.md").write_text("# Mgr\n")
     (root / "library" / "expertise" / "software-engineering.md").write_text("# Eng\n")
+    fleet_ops = root / "library" / "skills" / "fleet-ops"
+    fleet_ops.mkdir()
+    (fleet_ops / "SKILL.md").write_bytes(
+        (REPO / "library" / "skills" / "fleet-ops" / "SKILL.md").read_bytes()
+    )
     for name in DEFAULT_GUARDRAILS:
         (root / "library" / "guardrails" / f"{name}.md").write_text(
             f"---\ntitle: {name}\n---\n\nDefault guardrail.\n"

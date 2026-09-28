@@ -329,6 +329,35 @@ class TestReconcileAccessJson:
         assert result["allowFrom"].count("12345") == 1
 
 
+def _expected_default_fleet_ops_allow() -> list[str]:
+    """Exact singleton-manager grants with the shipped skill's declared tools.
+
+    The skill frontmatter is independently pinned by test_requires_linking;
+    this checks the composer adds it in order, with only the manager role grants
+    and the boot brief grant in this fixture.
+    """
+    skill = (source_package().library / "skills" / "fleet-ops" / "SKILL.md").read_text()
+    assert skill.startswith("---\n")
+    skill_grants = yaml.safe_load(skill[4:].split("\n---\n", 1)[0])["tool_grants"]
+    return [
+        "Glob", "Grep", "Read",
+        "Skill(fleet-ops)", "Skill(fleet-ops:*)",
+        *skill_grants,
+        "Bash(claudlobby --json task admit *)",
+        "Bash(claudlobby --json assignment accept *)",
+        "Bash(claudlobby --json assignment progress *)",
+        "Bash(claudlobby --json assignment block *)",
+        "Bash(claudlobby --json assignment return *)",
+        "Bash(claudlobby --json assignment complete *)",
+        "Bash(claudlobby --json assignment fail *)",
+        "Bash(claudlobby --json task assign *)",
+        "Bash(claudlobby --json assignment deliver *)",
+        "Bash(claudlobby --json task withdraw *)",
+        "Bash(claudlobby --json task reassign *)",
+        "Bash(claudlobby --fleet claudlobby brief --bot solo)",
+    ]
+
+
 class TestComposeSettingsLocal:
     """compose_settings_local generates permissions from sibling isolation + tool rules."""
 
@@ -360,18 +389,9 @@ class TestComposeSettingsLocal:
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
-        # #1633: a bot with no startup_prompt now composes exactly one grant
-        # — the read its own default boot prompt names — so "no tools" no
-        # longer means an absent permissions block, it means this grant plus
-        # the BASE_TOOLS every non-empty allow list carries (inserted at 0,
-        # so they land REVERSED), and nothing else. fleet_dir.name is
-        # "claudlobby" in this fixture, hence --fleet claudlobby.
-        assert result["permissions"]["allow"] == [
-            "Glob",
-            "Grep",
-            "Read",
-            "Bash(claudlobby --fleet claudlobby brief --bot solo)",
-        ]
+        # No declared tools still includes the universal fleet-ops skill,
+        # manager-only grants, the default boot brief, and reversed BASE_TOOLS.
+        assert result["permissions"]["allow"] == _expected_default_fleet_ops_allow()
 
     def test_headless_ux_defaults_emitted(self, tmp_path):
         """The 3 settings.local headless UX keys are always emitted at their defaults."""
@@ -1455,9 +1475,8 @@ class TestChannelSkillInSettingsLocal:
         assert "mcp__plugin_telegram_telegram__reply" in result["permissions"]["allow"]
 
     def test_no_telegram_no_skills_no_permissions(self, tmp_path):
-        """Bot with no telegram, no skills, no explicit tools → only the
-        default boot prompt's own brief grant (#1633; BASE_TOOLS ride along
-        once any allow entry exists).
+        """Bot with no telegram, declared skills, or explicit tools still gets
+        universal fleet-ops and the default boot brief (#1633).
 
         `channels=[]` is what "no telegram" means; omitting the handle does not,
         since `channels` defaults to the Telegram plugin (#1107).
@@ -1466,14 +1485,7 @@ class TestChannelSkillInSettingsLocal:
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
-        # BASE_TOOLS insert at 0, so they land REVERSED; fleet_dir.name is
-        # "claudlobby" in this fixture, hence --fleet claudlobby.
-        assert result["permissions"]["allow"] == [
-            "Glob",
-            "Grep",
-            "Read",
-            "Bash(claudlobby --fleet claudlobby brief --bot solo)",
-        ]
+        assert result["permissions"]["allow"] == _expected_default_fleet_ops_allow()
 
     def test_explicit_allow_merges_with_auto_derived(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)

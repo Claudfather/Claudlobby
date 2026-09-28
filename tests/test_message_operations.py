@@ -231,7 +231,7 @@ def test_linked_report_notifies_after_exact_commit_with_operation_attempt_two(es
     with locked_request(route.selected.paths.root, route.selected_fleet_uid, request_id) as store:
         with monkeypatch.context() as patch:
             patch.setattr(messages, "reconcile_facts", lambda *_: FactProof("unknown", "private outage"))
-            with pytest.raises(messages.MessageConflict, match="proof"):
+            with pytest.raises(messages.MessageConflict, match="strict recording fact is absent"):
                 messages.send_committed_native_attempt(
                     native_route, package, store, store.load(), envelope,
                     request_id=request_id, transport=transport)
