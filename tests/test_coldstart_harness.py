@@ -43,12 +43,16 @@ def _host_unit(root: str, job: str = "disk-monitor") -> str:
 
 @pytest.fixture
 def host(tmp_path):
-    """Isolated HOME + harness state dir, with stub systemctl/tmux on PATH."""
+    """Isolated systemd HOME + harness state dir, independent of the test host."""
     home = tmp_path / "home"
     units = home / ".config" / "systemd" / "user"
     units.mkdir(parents=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    # Snapshot/restore must select the systemd directory seeded below.
+    uname = bin_dir / "uname"
+    uname.write_text('#!/bin/bash\nprintf "Linux\\n"\n')
+    uname.chmod(0o755)
     for tool in ("systemctl", "tmux", "launchctl", "pgrep"):
         p = bin_dir / tool
         p.write_text("#!/bin/bash\nexit 0\n")

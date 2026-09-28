@@ -1,7 +1,8 @@
 """Stub-harness tests for the setup backbone (setup-fleet / setup-fleets /
 install_fleet_timer.sh env overrides / fleet_service_prefix).
 
-The real scripts run against a throwaway CLAUDLOBBY_ROOT with systemctl, tmux,
+The real scripts exercise the Linux/systemd contract on every host, against a
+throwaway CLAUDLOBBY_ROOT with uname, systemctl, tmux,
 spin-up-bot.sh, and reconcile-fleet.sh stubbed (PATH-first binaries or tmp lib
 copies), so cold-start prefix resolution, enrollment fan-out, and skip-healthy
 behavior are asserted on actual execution — without touching the host's
@@ -45,6 +46,11 @@ class Harness:
             d.mkdir(parents=True)
         self.tmux_healthy.write_text("")
         self.log.write_text("")
+
+        # This fixture models systemd units and their registry, not launchd.
+        # Child installers source lib-common.sh and detect the OS afresh, so
+        # select Linux through their inherited PATH rather than setting _OS.
+        _write_exec(self.bin / "uname", '#!/bin/bash\nprintf "Linux\\n"\n')
 
         for name in REAL_SCRIPTS:
             shutil.copy2(os.path.join(LIB, name), self.root / "lib" / name)

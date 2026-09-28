@@ -68,7 +68,9 @@ def test_resolves_to_an_ancestor_named_claude(tmp_path):
     out = dict(
         l.split("=", 1) for l in r.stdout.splitlines() if "=" in l
     )
-    assert out["COMM"].strip() == "claude", (
+    # ps reports the basename on Linux and the executable path on macOS;
+    # the actual ancestor walk deliberately recognizes both native forms.
+    assert Path(out["COMM"].strip()).name == "claude", (
         "fixture control failed: the ancestor is not actually named claude, "
         "so a pass here would prove nothing"
     )

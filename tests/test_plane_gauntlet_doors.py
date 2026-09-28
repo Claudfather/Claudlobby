@@ -217,6 +217,7 @@ def test_crash_between_intent_and_send_leaves_visible_intent(tmp_path, armed):
         env=env, start_new_session=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    crashed = False
     try:
         deadline = time.monotonic() + 30
         comms: list = []
@@ -236,11 +237,13 @@ def test_crash_between_intent_and_send_leaves_visible_intent(tmp_path, armed):
             time.sleep(0.1)
         assert comms, "intent row never appeared — cannot exercise the window"
         os.killpg(proc.pid, signal.SIGKILL)  # the crash, inside the window
+        crashed = True
     finally:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if not crashed:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         proc.wait(timeout=10)
     tx = _rows(
         tmp_path,
