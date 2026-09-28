@@ -112,7 +112,7 @@ class Install:
         subprocess.run(
             ["git", "clone", "-q", str(self.origin), str(self.root)], check=True
         )
-        self.plane_env = scratch_plane_env(self.root)
+        self.plane_env = scratch_plane_env(self.root, initialize=True)
         self.work = tmp_path / "upstream"  # where "merged PRs" are made
         subprocess.run(
             ["git", "clone", "-q", str(self.origin), str(self.work)], check=True

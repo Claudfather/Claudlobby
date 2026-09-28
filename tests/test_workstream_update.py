@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from tests.plane_fixtures import ro as _ro
+from tests.plane_setup import initialize_plane
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "lib" / "workstream-update.sh"
@@ -48,7 +49,7 @@ pytestmark = pytest.mark.skipif(
 
 def _root(tmp_path: Path) -> Path:
     """The throwaway plane root (tests.plane_fixtures.plane_root's shape):
-    state/plane/capture.json only — the first emission creates the db."""
+    state/plane/capture.json only; positive writer fixtures initialize schema explicitly."""
     root = tmp_path / "root"
     plane = root / "state" / "plane"
     if not plane.exists():
@@ -63,7 +64,7 @@ def _env(tmp_path: Path, env_extra: dict | None = None, *, scratch_plane_env) ->
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
         "HOME": str(tmp_path / "home"),
-        **scratch_plane_env(root),
+        **scratch_plane_env(root, initialize=(env_extra or {}).get("PLANE_EMIT_DISABLED") != "1"),
         "FLEET_NAME": FLEET,
         "BOT_NAME": "mgr",
 
@@ -325,9 +326,8 @@ class TestRefusals:
         _no_files(tmp_path)
 
     def test_a_root_that_does_not_exist_refuses(self, tmp_path: Path, *, scratch_plane_env):
-        # the writer trusts an EXISTING root exactly as far as its own emit
-        # would (the first emission creates state/plane there); a root that is
-        # not a directory is unreachable, never an empty registry
+        # A missing root is unreachable, never an empty registry;
+        # ordinary writers cannot provision its database.
         missing = tmp_path / "missing"
         r = _run(tmp_path, "open", "nowhere", env_extra={"CLAUDLOBBY_ROOT": str(missing)}, scratch_plane_env=scratch_plane_env)
         assert r.returncode == 3
@@ -353,7 +353,7 @@ class TestConcurrency:
         # Cap raised above n so this isolates id-minting, not the cap (the cap
         # holding under concurrency is covered by the sequential cap tests).
         hi_cap = {"WORKSTREAM_MAX_ACTIVE": "50"}
-        _root(tmp_path)                                   # one root, created before the race
+        initialize_plane(_root(tmp_path))                 # provision schema before racing writers
         with ThreadPoolExecutor(max_workers=n) as ex:
             results = list(ex.map(
                 lambda i: _run(tmp_path, "open", f"work item {i}", env_extra=hi_cap, scratch_plane_env=scratch_plane_env), range(n)

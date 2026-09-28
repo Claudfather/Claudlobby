@@ -525,6 +525,7 @@ def test_fleets_default_is_the_room_that_moved_last(tmp_path):
     # silence everywhere: alphabetical, and an empty plane has no default
     empty = tmp_path / "empty"
     _full_capture(empty)
+    initialize_plane(empty)
     emit_batch(empty, [{"event_type": "metric_sample", "emitter": "p",
                         "fleet": "zeta", "payload": {
                             "subject_kind": "host", "subject": "h",

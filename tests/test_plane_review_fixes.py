@@ -644,6 +644,7 @@ class _FullError(sqlite3.OperationalError):
 def test_f13_emit_under_sqlite_full_spools_by_error_code(tmp_path: Path, monkeypatch):
     from claudlobby.plane import emit_api
 
+    initialize_plane(tmp_path)
     def full_ingest(conn, items, *, host_uid):
         raise _FullError("synthetic full condition")
 

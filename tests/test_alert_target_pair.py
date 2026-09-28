@@ -83,7 +83,7 @@ def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path, *, scratch_pla
         TG_CAPTURE=capture,
         TELEGRAM_GROUP_CHAT_ID=CHAT_A,
         FLEET_EVENT_EMIT_TIMEOUT_S="120",
-        **scratch_plane_env(root),
+        **scratch_plane_env(root, initialize=True),
     )
     driver = (
         f'. "{native}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'

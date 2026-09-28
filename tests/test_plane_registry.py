@@ -16,6 +16,7 @@ import json
 import logging
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 from tests.plane_setup import initialize_plane
@@ -213,8 +214,13 @@ def test_unchanged_rescan_suppresses_every_keyframe(tmp_path, *, scratch_plane_e
     """Determinism is what the hash gate rides on: an unchanged estate
     re-scanned writes NO keyframes (only the scan_completed declaration)."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
+    assert not (root / "state" / "host-uid").exists()
+    with closing(_db(root)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0] == 0
     s1 = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s1["complete"] is True and s1["outcomes"].get("duplicate") is None
+    assert (root / "state" / "host-uid").is_file()
     s2 = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s2["outcomes"]["duplicate"] == s2["entities"]
     assert s2["outcomes"]["committed"] == 1          # scan_completed only

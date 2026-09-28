@@ -72,7 +72,7 @@ def _run(root: Path, *, scratch_plane_env, **extra) -> subprocess.CompletedProce
     """A CONSTRUCTED child env (conftest's ratified default) plus the two keys
     that make the shim record into this root's own plane via its cold rung."""
     env = constructed_env(HOME=str(root / "home"),
-                          **scratch_plane_env(root), **extra)
+                          **scratch_plane_env(root, initialize=True), **extra)
     return subprocess.run(["bash", str(FLEET_PULSE), FLEET],
                           capture_output=True, text=True, env=env, timeout=180)
 

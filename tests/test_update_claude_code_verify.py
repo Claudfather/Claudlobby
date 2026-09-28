@@ -21,7 +21,7 @@ Hermetic by construction, because this module FIRES the alert path:
     real Telegram chat id and token, and an alert fired from inside one would
     post to the real group;
   - tg-post stubbed beside private native helpers (`_signal_root`, shared with
-    test_maintenance_jobs; the alert path resolves it through CLAUDLOBBY_ROOT),
+    test_maintenance_jobs; the alert path resolves its own native sibling),
     recording what would have been sent;
   - npm and sudo stubbed in $HOME/.local/bin, which the script PREPENDS to
     PATH, and the PATH it inherits holds NO real `sudo` or `npm` at all
@@ -50,8 +50,6 @@ from tests.conftest import (
     read_fleet_events,
 )
 from tests.test_maintenance_jobs import _captured, _native_fixture, _signal_root
-
-SCRIPT = Path(__file__).resolve().parent.parent / "lib" / "update-claude-code.sh"
 
 # The live capture's text, verbatim: the package's generic message, no host
 # identifiers in it.
@@ -169,7 +167,7 @@ class Host:
             # production bound and the event is reaped (forced at 1s, it drops
             # binary_unrunnable). Give the cold rung room.
             FLEET_EVENT_EMIT_TIMEOUT_S="120",
-            **self.scratch_plane_env(self.root),
+            **self.scratch_plane_env(self.root, initialize=True),
             **self.extra,
         )
         return subprocess.run(

@@ -121,6 +121,7 @@ def test_unknown_fleet_is_a_typed_state_on_every_route(tmp_path):
     assert c.get("/api/presence?fleet=disk-only").json()["state"] == "ok"
     # a plane holding no fleet at all: the name passes through
     bare = tmp_path / "bare"; bare.mkdir()
+    initialize_plane(bare)
     emit_batch(bare, [{"event_type": "metric_sample", "emitter": "probe",
                        "fleet": "_host", "payload": {"subject_kind": "host",
                                                      "subject": "h1",
