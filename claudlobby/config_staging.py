@@ -14,10 +14,10 @@ from pathlib import Path
 import tempfile
 
 from . import composer as compose
-from .config import host_override_path
+from .config import host_override_path, load_fleet_snapshot
 from .config_plan import ConfigPlan, ConfigPlanBuilder, PlanError
 from .config_units import job_units, unit_family
-from .context import load_context
+from .context import Context
 from .paths import Paths, _iter_fleet_dirs
 from .releases import ReleaseManifest, read_release
 from .resources import get_resources, selected_cli
@@ -151,9 +151,18 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
     builder.input(host_override_path())
     builder.input(Path.home() / ".gitconfig")
     contexts = []
+    source_digests = {}
     for paths in sorted(fleet_paths, key=lambda item: str(item.fleet_yaml)):
         _inputs(builder, paths)
-        context = load_context(paths)
+        fleet_content, fleet_digest = builder.input_snapshot(paths.fleet_yaml)
+        projects_content, projects_digest = builder.input_snapshot(paths.projects_yaml)
+        if fleet_content is None:
+            raise PlanError(f"fleet.yaml not found at {paths.fleet_yaml}")
+        fleet, defaults = load_fleet_snapshot(paths.fleet_yaml, fleet_content, projects_content)
+        if paths.fleet_name is not None and fleet.name != paths.fleet_name:
+            raise PlanError(f"requested fleet {paths.fleet_name!r}, but frozen {paths.fleet_yaml} "
+                            f"declares {fleet.name!r}")
+        context = Context(paths, fleet, defaults)
         for source in compose.manifest_inputs(context.fleet, paths).values():
             builder.input(source)
         for bot_id in context.fleet.bots:
@@ -166,6 +175,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
         for warning in report.warnings:
             log(str(warning))
         contexts.append(context)
+        source_digests[fleet.name] = {"fleet": fleet_digest, "projects": projects_digest}
     names = [context.fleet.name for context in contexts]
     prefixes = [context.fleet.service_prefix for context in contexts]
     if len(set(names)) != len(names) or len(set(prefixes)) != len(prefixes):
@@ -174,8 +184,8 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
     builder.effects = {
         "fleet_manifests": {c.fleet.name: str(c.paths.fleet_yaml) for c in contexts},
         "fleet_sources": {c.fleet.name: {
-            "fleet": {"path": str(c.paths.fleet_yaml), "sha256": builder.input_content(c.paths.fleet_yaml)},
-            "projects": {"path": str(c.paths.projects_yaml), "sha256": builder.input_content(c.paths.projects_yaml)},
+            "fleet": {"path": str(c.paths.fleet_yaml), "sha256": source_digests[c.fleet.name]["fleet"]},
+            "projects": {"path": str(c.paths.projects_yaml), "sha256": source_digests[c.fleet.name]["projects"]},
         } for c in contexts},
         "restart_bots": [f"{c.fleet.name}/{bot}" for c in contexts for bot in c.fleet.bots],
         "reload_supervision": True,

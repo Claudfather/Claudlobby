@@ -184,8 +184,8 @@ class ConfigPlanBuilder:
             raise PlanError(f"input changed during rendering: {target}")
         self.inputs[target] = state
 
-    def input_content(self, path: Path) -> str | None:
-        """Retain one optional authored file for active runtime interpretation.
+    def input_snapshot(self, path: Path) -> tuple[bytes | None, str | None]:
+        """Retain and return the exact authored bytes used by staged rendering.
 
         Its fingerprint remains a freshness gate before activation; its sealed
         bytes remain authoritative after activation, while authoring continues.
@@ -195,7 +195,7 @@ class ConfigPlanBuilder:
         while recorded["kind"] == "symlink":
             recorded = recorded["content"]
         if recorded["kind"] == "absent":
-            return None
+            return None, None
         if recorded["kind"] != "file":
             raise PlanError("runtime configuration source must be a file")
         content = path.read_bytes()
@@ -203,7 +203,11 @@ class ConfigPlanBuilder:
         if digest != recorded["sha256"]:
             raise PlanError(f"configuration input changed while freezing: {path}")
         self.contents[digest] = content
-        return digest
+        return content, digest
+
+    def input_content(self, path: Path) -> str | None:
+        """Retain one optional authored file and return its content digest."""
+        return self.input_snapshot(path)[1]
 
     def _add(self, target: Path, after: dict) -> None:
         target = _absolute(target)

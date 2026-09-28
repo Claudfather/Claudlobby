@@ -427,3 +427,28 @@ The operator Mac's native dependency/interpreter stalls remain unresolved; no
 further local interpreter workaround is planned. Actual-agent canaries,
 upgrade/recovery, O1 public sends/alerts, caller/skill/grant cutover and normal-load
 Pi timing remain outstanding. Production activation has not been performed.
+
+## Frozen-input CI repair — 2026-09-28 11:15 UTC
+
+**Measured:** candidate `0edbe2177feca2e2535efff218d5add57105155d` failed
+[Linux 3.11](https://github.com/Claudfather/Claudlobby/actions/runs/36411869941/job/108893728091)
+and [Linux 3.10](https://github.com/Claudfather/Claudlobby/actions/runs/36411869941/job/108893728414)
+with one failure, 6,361 passed, 15 skipped and four warnings in each lane.
+The sole failure was `test_no_unguarded_raw_source_reads`, identifying the
+frozen fleet/project YAML parse sites. Both conformance checks passed; macOS
+was still running at this checkpoint. Further feature integration is held.
+
+**Read from code:** staging previously parsed mutable authoring separately
+from retaining its input bytes. A temporary edit during that parse, restored
+before the next fingerprint, could make the validated/rendered manager differ
+from the manager retained for active routing. Staging now parses the exact
+captured bytes, validates/renders that Context, and seals those same digests.
+The source-safety inventory registers only these two reviewed parser sites.
+
+**Measured:** the existing AST tripwire, executed with stdlib dependencies,
+fails on the parent with two new sites and passes on the repair with none.
+Parent AST/diff checks pass. The new regression checks retained bytes,
+validated manager and rendered manager together; its runtime parent/candidate
+outcome is **not measured locally**. Hosted execution remains required.
+The additional identity/index commits and operator/read/alert work are held
+in the separate feature checkout and are not part of this repair publication.
