@@ -753,9 +753,9 @@ def test_the_arm_records_the_skill_symlink_and_the_grant(leaf_manager_compose):
     assert not any(s.split(" -> ", 1)[0] == ".claude/skills/checkin" for s in baseline_skills)
 
     leaf_grants = leaf.types["permissions"].composed_content or []
-    assert any("checkin-record.sh" in g for g in leaf_grants)
+    assert any("checkin record" in g for g in leaf_grants)
     baseline_grants = baseline.types["permissions"].composed_content or []
-    assert not any("checkin-record.sh" in g for g in baseline_grants)
+    assert not any("checkin record" in g for g in baseline_grants)
 
 
 def test_the_recorded_skill_symlink_target_is_scrubbed(leaf_manager_compose):

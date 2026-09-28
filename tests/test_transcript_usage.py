@@ -1,4 +1,4 @@
-"""Unit tests for lib/transcript-usage.py — per-session token accounting from
+"""Unit tests for the shared transcript-accounting owner, including the
 Claude Code transcripts (the prize-sizing instrument for the token-efficiency
 comms protocol, #716 / #729 stage A).
 
@@ -14,9 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.conftest import load_lib_module, write_jsonl
+from tests.conftest import write_jsonl
+from claudlobby import transcript_usage as tu
 
-tu = load_lib_module("transcript-usage")
 
 MODEL = "claude-opus-4-8"
 
@@ -155,6 +155,15 @@ class TestIterationsNotDoubleCounted:
         assert r.output_tokens == 8  # NOT 16
         assert r.input_tokens == 10  # NOT 20
 
+    def test_repeated_message_id_counts_flat_usage_once_within_session(self, tmp_path):
+        first = _turn({"input_tokens": 7, "output_tokens": 3}, [{"type": "text", "text": "a"}])
+        first["message"]["id"] = "msg-one"
+        second = json.loads(json.dumps(first))
+        second["message"]["content"] = [{"type": "text", "text": "b"}]
+        parsed = tu.parse_file(str(_write(tmp_path, [first, second])))
+        assert parsed.main.turns == 1 and parsed.main.input_tokens == 7
+        assert parsed.duplicate_messages == 1 and parsed.conflicting_duplicates == 0
+
 
 class TestRobustness:
     def test_non_assistant_lines_ignored(self, tmp_path):
@@ -220,6 +229,30 @@ class TestCommsShare:
         r = tu.parse_file(str(_write(tmp_path, [row]))).main
         assert r.comms_blocks == 0
         assert r.comms_chars == 0
+
+    def test_canonical_writes_count_but_reads_and_setup_do_not(self, tmp_path):
+        outbound = [
+            'claudlobby --json message send --to worker --text "Please check" --request-id UUID',
+            'claudlobby --root /tmp/root --fleet demo --json message reply msg_1 --text "Done" --request-id UUID',
+            'claudlobby --json fleet reports submit --status completed --summary "Done" --request-id UUID',
+            *(f'claudlobby --json assignment {verb} asg_1 --request-id UUID'
+              for verb in ("deliver", "progress", "block", "return", "complete", "fail")),
+        ]
+        controls = [
+            'claudlobby --json message show msg_1',
+            'claudlobby --json assignment accept asg_1 --request-id UUID',
+            'claudlobby --json task admit --title "New work" --request-id UUID',
+            'claudlobby --json task assign task_1 --bot worker --request-id UUID',
+            'claudlobby message send --help',
+            'echo "claudlobby --json message send --to worker --text quoted"',
+        ]
+        row = _turn({"input_tokens": 1}, [
+            {"type": "tool_use", "name": "Bash", "input": {"command": command}}
+            for command in outbound + controls
+        ])
+        r = tu.parse_file(str(_write(tmp_path, [row]))).main
+        assert r.comms_blocks == len(outbound)
+        assert r.comms_chars == sum(len(command) for command in outbound)
 
 
 class TestAggregation:

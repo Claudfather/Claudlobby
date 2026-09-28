@@ -152,6 +152,13 @@ def test_report_list_pages_ingest_order_and_discloses_capture(active, monkeypatc
     assert [row["message_id"] for row in ordinary["items"]] == [f"msg_{2:032x}"]
     assert ordinary["items"][0]["report"]["state"] == "withheld"
     assert ordinary["ack_cursor"] is None and ordinary["ack_available"] is False
+    empty = listed("--since", "2026-09-29T00:00:00Z")["data"]
+    assert empty["items"] == [] and empty["next_cursor"] is None
+    with monkeypatch.context() as patch:
+        patch.setattr(brief, "plane_session", lambda paths, fleet: (None, "unavailable"))
+        unavailable = listed("--since", "2026-09-29T00:00:00Z", expected=6)
+    assert unavailable["ok"] is False and unavailable["error"]["code"] == "unavailable"
+    assert unavailable["data"] == {}
     refused = listed("--unacknowledged", expected=4)["error"]
     assert refused["code"] == "conflict" and "generated viewer" in refused["message"]
     _generated(monkeypatch, root, "manager")

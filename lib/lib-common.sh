@@ -435,12 +435,12 @@ with_timeout() {
 
 # with_lock <lockfile> <command> [args...]
 # Portable mutex: uses flock if available, else an atomic mkdir-based spinlock
-# (mkdir is atomic on every POSIX filesystem). Spins up to ~5s then proceeds
-# best-effort. Suitable for the small jq+mv critical sections in this repo.
+# (mkdir is atomic on every POSIX filesystem). Refuses on lock failure or
+# after the bounded wait; proceeding unlocked can lose another writer's state.
 with_lock() {
     local lockfile="${1:?Usage: with_lock <lockfile> <command...>}"; shift
     if [ -n "$_FLOCK_BIN" ]; then
-        ( "$_FLOCK_BIN" -x 200; "$@" ) 200>"$lockfile"
+        ( "$_FLOCK_BIN" -x 200 || return $?; "$@" ) 200>"$lockfile"
         return $?
     fi
     # 30s budget (WITH_LOCK_WAIT_S), not 5: a critical section that reaches
@@ -449,7 +449,10 @@ with_lock() {
     local lockdir="${lockfile}.d" i=0 _max=$(( ${WITH_LOCK_WAIT_S:-30} * 20 ))
     while ! mkdir "$lockdir" 2>/dev/null; do
         i=$((i + 1))
-        [ "$i" -ge "$_max" ] && break
+        if [ "$i" -ge "$_max" ]; then
+            echo "with_lock: could not acquire $lockdir within ${WITH_LOCK_WAIT_S:-30}s; no action performed" >&2
+            return 1
+        fi
         sleep 0.05
     done
     local rc=0
@@ -3207,7 +3210,9 @@ _PANE_RECEIPT_WAIT_DEFAULT=10
 # So: wait for the receipt; none -> ONE more Enter (send_retry) and wait again;
 # still none -> send_miss, loudly, rc 1. Never a loop, never the payload again.
 # No verdict and nothing pressed when the plane cannot answer or the receiver
-# has never recorded a receipt (its hook is not armed). For a send into an IDLE
+# has never recorded a receipt (its hook is not armed); --quiet keeps the
+# lookup from explaining the second, so a clean dispatch stays silent but for
+# the plane shim. For a send into an IDLE
 # pane only: a busy one queues the prompt, whose receipt lands when the turn
 # ends, if at all. So a receiver found BUSY when its receipt is missing (a turn
 # that began after the door's idle probe, or during the wait) is not a held box
@@ -3217,7 +3222,7 @@ pane_await_receipt() {
     local wait="${PANE_RECEIPT_WAIT_S:-$_PANE_RECEIPT_WAIT_DEFAULT}"
     if [[ "$wait" =~ $off ]]; then return 0; fi
     local ask=(python3 -S -E "$_LIB_COMMON_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}"
-        --received "$msg" --destination "$session" --wait "$wait")
+        --received "$msg" --destination "$session" --wait "$wait" --quiet)
     "${ask[@]}" || rc=$?
     [ "$rc" -eq 1 ] || return 0
     if bot_is_busy "$socket" "$session"; then return 0; fi
@@ -3565,6 +3570,16 @@ stat_mtime() {
         stat -f %m "$file"
     else
         stat -c %Y "$file"
+    fi
+}
+
+stat_size() {
+    # Print a file's size in bytes, without reading it
+    local file="${1:?Usage: stat_size <file>}"
+    if [ "$_OS" = "Darwin" ]; then
+        stat -f %z "$file"
+    else
+        stat -c %s "$file"
     fi
 }
 

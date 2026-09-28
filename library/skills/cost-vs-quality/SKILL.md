@@ -45,7 +45,9 @@ Pin the battery and the versions. Same rules as `run-eval`.
 
 Non-negotiable: cost and quality come from the **same** executions. Measuring cost on one run and quality on another compares two different things and hides exactly the correlation you are looking for.
 
-- Cost via `lib/transcript-usage.py` (`cost_weighted_total`).
+- The evaluator's labeled weighted token estimate comes from
+  `claudlobby.transcript_usage` (`cost_weighted_total`); it is not a dollar
+  charge or a subscription-quota measurement.
 - Quality via the pre-registered rubric, scored **blind** to variant. If a model or a person scores knowing which arm produced the output, the score is contaminated.
 
 Run variants paired per task and rep, as in `run-eval`.

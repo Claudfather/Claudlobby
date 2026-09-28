@@ -259,6 +259,7 @@ def _family_values(payload, party, entity=None) -> tuple[str, dict]:
         detail = {
             k: v for k, v in {
                 "note": payload.note,
+                "waiting_on": payload.waiting_on,
                 "next_step": payload.next_step,
                 "disposition": payload.disposition,
                 "plan_ref": payload.plan_ref,

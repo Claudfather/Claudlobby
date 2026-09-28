@@ -12,6 +12,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
+import json
 import os
 from pathlib import Path
 import re
@@ -189,9 +190,9 @@ def _own_fleet(ctx):
         raise TaskConflictError("bot caller may change routing only within its origin fleet")
 
 
-def _reason(reason):
+def _reason(reason, *, field="reason"):
     if not isinstance(reason, str) or not reason.strip():
-        raise TaskQueryError("a nonempty reason is required")
+        raise TaskQueryError(f"a nonempty {field} is required")
 
 
 def _scope_links(ctx, conn, project_key, workstream_id, repo):
@@ -225,11 +226,12 @@ def _provenance_alias(ctx, alias):
 def _checkin_decision(ctx, conn, checkin_id):
     if not isinstance(checkin_id, str) or not re.fullmatch(r"ck_[0-9a-f]{32}", checkin_id):
         raise TaskQueryError("check-in ID must have canonical ck_<32hex> form")
-    # The existing decision reader admits only a bot of this fleet. Require
-    # that same visible decision even when a malformed fact claims our UID.
+    # Current human decisions retain the selected fleet UID and actual human
+    # subject; historical null-fleet decisions require a fleet bot alias.
     sql = ("SELECT 1 FROM events e WHERE e.kind='system' AND e.event='checkin_decision'"
            " AND e.source_ref=? AND " + checkin_event_scope_sql("e")
-           + " AND " + fleet_alias_range("e.subject_alias") + " LIMIT 1")
+           + " AND (" + fleet_alias_range("e.subject_alias")
+           + " OR (e.fleet_uid IS NOT NULL AND e.subject_alias LIKE 'human:%')) LIMIT 1")
     try:
         found = conn.execute(sql, (f"checkin:{checkin_id}", ctx.context.fleet.name,
                                    *fleet_range_params(ctx.context.fleet.name),
@@ -549,6 +551,92 @@ def withdraw(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason
                 receipt = _prepare(store, ctx, "task.withdraw", semantic, (raw,), task_id, aid,
                                    actors=(provenance,))
                 return _commit(store, ctx, conn, receipt, (raw,), check)
+
+
+def escalate(ctx: TaskOperationContext, request_id: str, task_id: str, *, question: str,
+             by: str | None = None) -> TaskOperationResult:
+    """Ask for human guidance on open fleet work without changing its state."""
+    _own_fleet(ctx)
+    _reason(question, field="question")
+    by_alias = _provenance_alias(ctx, by)
+    semantic = semantic_digest(dict(task_id=task_id, question=question, by=by_alias))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.escalate", semantic)
+        with _reader(ctx) as conn:
+            first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                if not task.open:
+                    raise TaskConflictError("terminal task cannot be escalated")
+                aid = task.current_assignment.assignment_id if task.current_assignment else None
+                if previous and previous.intent.assignment_id != aid:
+                    raise TaskConflictError("escalation's original assignment changed")
+                provenance = _provenance(ctx, conn, by)
+                _identities(ctx, conn, (ctx.caller, provenance))
+                raw = _raw(ctx, request_id, "task", dict(work_item_id=task_id,
+                           assignment_id=aid, event="escalated", actor=provenance.alias,
+                           by=provenance.alias, question=question), previous)
+                receipt = _prepare(store, ctx, "task.escalate", semantic, (raw,), task_id, aid,
+                                   actors=(provenance,))
+                return _commit(store, ctx, conn, receipt, (raw,), check)
+
+
+def nudge_body(task_id: str, assignment_id: str | None, by: str, reason: str) -> str:
+    """Keep authored text inside one JSON value in the recorded and native ask."""
+    return json.dumps({"kind": "task_nudge", "task_id": task_id,
+                       "assignment_id": assignment_id, "by": by, "reason": reason},
+                      ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def nudge(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: str,
+          route: MessageRouteBinding, by: str | None = None) -> TaskOperationResult:
+    """Commit one work-level nudge and manager ask before native notification."""
+    _own_fleet(ctx)
+    _reason(reason)
+    by_alias = _provenance_alias(ctx, by)
+    manager = _worker(ctx, ctx.context.fleet.manager)
+    if (not isinstance(route, MessageRouteBinding) or route.caller_alias != ctx.caller.alias
+            or route.caller_fleet_uid != ctx.caller_fleet_uid
+            or route.peer_fleet_uid != ctx.fleet_uid
+            or route.recipient_alias != manager.alias or route.manager_alias != manager.alias
+            or route.manager_uid != manager.uid):
+        raise ReceiptConflict("nudge route differs from the frozen caller or fleet manager")
+    semantic = semantic_digest(dict(task_id=task_id, reason=reason, by=by_alias))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.nudge", semantic, manager.uid,
+                             fact_count=2, notification=True, route=route)
+        with _reader(ctx) as conn:
+            first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                if not task.open:
+                    raise TaskConflictError("terminal task cannot be nudged")
+                assignment_id = (task.current_assignment.assignment_id
+                                 if task.current_assignment else None)
+                if previous and previous.intent.assignment_id != assignment_id:
+                    raise TaskConflictError("nudge's original assignment changed")
+                provenance = _provenance(ctx, conn, by)
+                _identities(ctx, conn, (ctx.caller, provenance, manager))
+                message_id = previous.intent.message_id if previous else mint_msg_id()
+                task_raw = _raw(ctx, request_id, "task", dict(
+                    work_item_id=task_id, assignment_id=assignment_id, event="nudged",
+                    actor=ctx.caller.alias, by=provenance.alias, reason=reason), previous)
+                body = nudge_body(task_id, assignment_id, provenance.alias, reason)
+                ask_raw = _raw(ctx, request_id, "communication", dict(
+                    msg_id=message_id, sender=ctx.caller.alias, recipient=manager.alias,
+                    recipient_raw=ctx.context.fleet.manager, message_class="task_request",
+                    command_type="query", work_item_id=task_id, body=body,
+                    **({"assignment_id": assignment_id} if assignment_id else {})),
+                    previous, fact_index=1)
+                raws = (task_raw, ask_raw)
+                receipt = _prepare(store, ctx, "task.nudge", semantic, raws, task_id,
+                                   assignment_id, manager.uid, (provenance, manager),
+                                   message_id=message_id, notification=True, route=route)
+                return _commit(store, ctx, conn, receipt, raws, check)
 
 
 def reassign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,

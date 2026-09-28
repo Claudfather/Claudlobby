@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Selection record for the autonomous sprint — Phase 0 of #974.
+"""Pure selection evidence rules for check-in decisions — Phase 0 of #974.
 
 THE PROBLEM THIS EXISTS FOR. The sprint's output is WORK SELECTION, and its
 failure modes do not throw. It can run flawlessly and pick the wrong things,
@@ -38,18 +38,13 @@ refuses to let them collapse: an empty candidate set cannot be recorded without
 an independent unfiltered count and the rc of every query that produced it.
 
 NOT A PICKER. It records and it verifies. It never scores, never selects, never
-decides. Standalone stdlib module (`dispatch-overdue.py` precedent) so the
-verification rungs are unit-testable offline; the issue-state seam
-(`--issue-states`) keeps the mission-staleness rung network-free.
+decides. The verification rungs are unit-testable offline; the issue-state
+seam keeps the mission-staleness rung network-free.
 """
 
 from __future__ import annotations
 
-import argparse
-import json
 import re
-import sys
-from pathlib import Path
 
 SCHEMA = 1
 
@@ -310,11 +305,37 @@ def verify(record: dict, issue_states: dict | None = None) -> tuple[str, list[st
     return OK, []
 
 
+def verify_record(record: dict, issue_states: dict | None = None) -> tuple[str, list[str]]:
+    """Verify external JSON through the builder's invariants before its verdict.
+
+    ``verify`` also reads historical observations, which need not have come
+    through this writer. A new decision may retain only a complete record the
+    pure builder itself could have produced.
+    """
+    if not isinstance(record, dict):
+        return INVALID, ["selection evidence must be an object"]
+    try:
+        cut = record["cut"]
+        rebuilt = build_record(
+            ts=record["ts"], run_id=record["run_id"], repo=record["repo"],
+            picker_version=record["picker_version"], mission_sha=record["mission_sha"],
+            queries=record["queries"], candidates=record["candidates"],
+            selected_ids=cut["selected_ids"], max_issues=cut["max_issues"],
+            threshold=cut.get("threshold"),
+            mission_focus_refs=record.get("mission_focus_refs"),
+        )
+        if rebuilt != record:
+            return INVALID, ["selection evidence differs from the complete builder record"]
+        return verify(record, issue_states)
+    except (RecordError, KeyError, TypeError, ValueError, AttributeError) as exc:
+        return INVALID, [f"invalid selection evidence: {exc}"]
+
+
 def parse_focus_refs(mission_text: str) -> list[str]:
     """Extract issue refs from a mission doc's Current sprint focus section.
 
     Matches `#NNN` only, never a bare number -- bare digits collide with task
-    ids and version numbers, the same rule `who-reviewed.py` learned the hard way.
+    ids and version numbers, the same rule the review reader follows.
     """
     # Two header forms, because the real doc uses the one the obvious regex
     # misses. Measured: PROJECT_MISSION.md writes `**Current sprint focus:**`
@@ -342,45 +363,3 @@ def parse_focus_refs(mission_text: str) -> list[str]:
         ln for ln in m.group(1).splitlines() if re.match(r"\s*\d+\.\s", ln)
     ]
     return sorted(set(re.findall(r"#(\d{2,5})\b", "\n".join(items))))
-
-
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    sub = ap.add_subparsers(dest="cmd", required=True)
-
-    v = sub.add_parser("verify", help="verify a selection record (JSON on stdin or --file)")
-    v.add_argument("--file")
-    v.add_argument("--issue-states", help="JSON map {issue_number: OPEN|CLOSED} (offline seam)")
-
-    f = sub.add_parser("focus-refs", help="print issue refs in a mission doc's sprint focus")
-    f.add_argument("mission")
-
-    args = ap.parse_args(argv)
-
-    if args.cmd == "focus-refs":
-        print("\n".join(parse_focus_refs(Path(args.mission).read_text())))
-        return 0
-
-    raw = Path(args.file).read_text() if args.file else sys.stdin.read()
-    try:
-        record = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"INVALID: not JSON: {e}", file=sys.stderr)
-        return 2
-
-    states = json.loads(Path(args.issue_states).read_text()) if args.issue_states else None
-    verdict, findings = verify(record, states)
-    unknown_n = sum(1 for f in findings if f.startswith("UNKNOWN"))
-    print(f"{verdict}  (unknown={unknown_n})")
-    for finding in findings:
-        print(f"  - {finding}")
-    if unknown_n:
-        # Said on every run that has one, like creds-reconcile: a validator that
-        # silently omitted its gaps would be indistinguishable from one that
-        # checked and found nothing.
-        print("  NOTE: unknown items are a GAP, not a pass. They do not fail the run.")
-    return {OK: 0, DEFECT: 1, INVALID: 2}[verdict]
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

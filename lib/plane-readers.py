@@ -115,7 +115,11 @@ def connect(root: str, *, retries: int = 1) -> sqlite3.Connection:
     a CANTOPEN falls back to a normal connection held read-only by
     `PRAGMA query_only` (SQLite may create the WAL side files; the pragma
     refuses every write). Anything else is retried once after a short
-    pause, then raised: refuse, never answer empty."""
+    pause, then raised: refuse, never answer empty.
+
+    Each read holds a snapshot for as long as its statement is open, and the
+    daemon's checkpoint cannot reset the WAL past it (#1905). So a loop that
+    queries or parses per row fetches its rows first."""
     path = db_file(root)
     if not os.path.isfile(path):
         raise PlaneUnreachable(f"no plane db at {path}")
@@ -371,26 +375,14 @@ def open_idless_assignments(conn: sqlite3.Connection, fleet: str, bot: str,
     return out
 
 
-# --- the task loop's two acts, resolved by TASK ID (chunk M-A, #1481) ---------
-# `task-act.sh withdraw|escalate <task-id>` is run by a MANAGER that does not
-# know the assignee — a manager holds task ids, not the roster — so unlike
-# `--supersedes` it cannot scope the lookup by assignee. It resolves against
-# every OPEN assignment carrying the id instead and REFUSES when more than one
-# matches: a task id is unique per dispatch but NOT across bots (#526 lets two
-# fleets hold the same name, and a re-dispatch under the same id is legal), and
-# guessing which row a manager meant is how the wrong worker's task gets
-# cancelled. Open closes per ASSIGNMENT — attention and expiry's question,
-# not the list reader's per-(bot, task id) one — because an act names one row.
+# --- historical task-id lookup, retained for plane-lookup diagnostics -------
+# This resolves every open assignment carrying a legacy dispatch id. A repeated
+# id can match multiple rows; the caller must not treat newest-first order as
+# authority to select one. Open closes per ASSIGNMENT, not per display id.
 #
-# The fold's F6: this question was written out three times (here, in
-# `commands/task.py`, and implicitly in both refusal ladders). It is defined
-# ONCE in `queries.OPEN_BY_TASK_REF_SQL`, of which this is the BYTE-IDENTICAL
-# stdlib twin, pinned by test the way `OPEN_SQL` is — a bash door cannot
-# import the package, and two spellings of "open" is how one door refuses an
-# id another door acts on. `--assignment` NARROWS this result in the caller
-# rather than adding a second query: a lookup by assignment alone would act
-# on a row belonging to another task while stamping the named task's
-# `source_ref` as the act's provenance.
+# The legacy lookup remains byte-identical to `queries.OPEN_BY_TASK_REF_SQL`,
+# pinned by test: a bash door cannot import the package. Canonical Task
+# mutations use the scoped task-state reducer, not this source-ref lookup.
 _NT_A = (
     " NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
     "   AND t.assignment_id = a.assignment_id AND t.event IN " + _TERMINAL + ")"
@@ -398,9 +390,8 @@ _NT_A = (
 # Split into COLUMNS and FROM (chunk M-B) so the fleet-scoped read below can
 # ask for two more columns off the SAME joins rather than carrying a second
 # copy of them. The assembled `_OPEN_ROW_SELECT` is unchanged BYTE FOR BYTE —
-# `TASK_OPEN_SQL` is pinned identical to `queries.OPEN_BY_TASK_REF_SQL`, and
-# that pin is the thing keeping the acts' definition of "open under this id"
-# from forking between bash and the package.
+# `TASK_OPEN_SQL` is pinned identical to `queries.OPEN_BY_TASK_REF_SQL`, keeping
+# this historical lookup's definition of "open under this id" in one shape.
 _OPEN_ROW_COLS_SQL = (
     "a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.occurred_at,"
     " w.title, i.alias AS assignee, m.alias AS assigned_by, f.alias AS fleet"
@@ -668,8 +659,10 @@ def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = 
     since = since_form(since)
     prefix = f"bot:{fleet}/"
     out: list[dict] = []
+    # Fetch whole before each report runs companion queries (#1905): an open
+    # cursor would hold one snapshot across the entire loop.
     for occurred_at, msg_id, sender_uid, sender_alias, body, ref, seq, privacy, truncated, work_id, assignment_id in conn.execute(
-            FLEET_REPORTS_SQL, (uid, fleet, since, since, since_seq, since_seq)):
+            FLEET_REPORTS_SQL, (uid, fleet, since, since, since_seq, since_seq)).fetchall():
         alias = sender_alias or ""
         # a sender on another fleet reads fleet/name — the fleet axis's rule
         name = alias.removeprefix(prefix) if alias.startswith(prefix) else alias.removeprefix("bot:")
@@ -908,7 +901,8 @@ def keepalive_entries(conn: sqlite3.Connection, fleet: str, bot: str,
     alias = f"bot:{fleet}/{bot}"
     since = since_form(since) or ""
     out: list[tuple[str, str]] = []
-    for at, metric, value in conn.execute(HEARTBEAT_ENTRIES_SQL, (alias, since)):
+    # fetched whole before parsing, the heartbeat_series rule (#1905)
+    for at, metric, value in conn.execute(HEARTBEAT_ENTRIES_SQL, (alias, since)).fetchall():
         if metric == "bot.session_up":
             state = "DOWN"
         else:
@@ -1008,10 +1002,16 @@ def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int
             e["renewals"].append({"ts": ts, "note": data.get("note") or ""})
         elif event == "blocked":
             e["status"] = "blocked"
+            e["blocked_at"] = ts
+            e["blocked_note"] = data.get("note")
+            e["waiting_on"] = data.get("waiting_on")
             if data.get("note"):
                 e["next"] = data["note"]
         elif event == "unblocked":
             e["status"] = "active"
+            e.pop("blocked_at", None)
+            e.pop("blocked_note", None)
+            e.pop("waiting_on", None)
         elif event == "closed":
             e["status"] = data.get("disposition") or "done"
             e["closed_ts"] = ts
@@ -1207,13 +1207,10 @@ def escalated_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
             for item in page.items]
 
 
-# --- the task loop's MENU and its re-check debounce (chunk M-B, #1481) --------
-# Three questions the re-check timer and the brief's task section both ask of a
-# row, answered HERE rather than twice: what the row's own history says
-# (`menu_facts`), which rows a re-check already named (`rechecked_at`), and
-# which rows a FLEET's managers own (`fleet_open_rows`). The timer sends the
-# menu and the brief prints it, and a manager must not be offered one set of
-# facts by the door and another by the page.
+# --- the legacy assignment menu facts (chunk M-B, #1481) ---------------------
+# The row's own history (`menu_facts`) and the fleet's open assignments
+# (`fleet_open_rows`) remain separate from canonical task-recheck's receipt
+# owner. Readers using these legacy rows must not infer an unrecorded action.
 #
 # `NEWEST_TASK_IGNORED` is the package's constant (`queries.NEWEST_TASK_IGNORED`,
 # pinned equal): `supplied_id_not_open` is a JOIN anomaly, not a lifecycle
@@ -1224,13 +1221,6 @@ def escalated_rows(conn: sqlite3.Connection, fleet: str) -> list[dict]:
 NEWEST_TASK_IGNORED = ("supplied_id_not_open",)
 ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged",)
 _ESC_SKIP = ",".join(f"'{e}'" for e in ESCALATION_IGNORED)
-
-# The ONE stamp that says a re-check NAMED a row: the `source_ref` of the
-# communication the re-check records for it. The emitter reads this constant off
-# this module rather than spelling the prefix again (`commands/task.py` holds
-# the plane session already), so the write and the read cannot drift.
-RECHECK_REF_PREFIX = "task-recheck:"
-
 
 def _newest_task_sql(ignore: tuple) -> str:
     """The row's newest task event inside a window, for a SET of assignments —
@@ -1258,22 +1248,6 @@ MENU_PROGRESS_SQL = (
     "SELECT e.assignment_id, MAX(e.occurred_at) FROM events e"
     " WHERE e.kind = 'task' AND e.event = 'progress' AND e.assignment_id IN (%s)"
     " GROUP BY e.assignment_id"
-)
-# A row counts as re-checked only when its ask actually LANDED (the fold's
-# F4): the communication alone used to be enough, but `cmd_task_recheck`
-# records it BEFORE the send (intent before transport), so a manager-down
-# send left the row stamped and silent for the whole repeat window while the
-# docs promised it would come back next sweep (reproduced: two managers, one
-# send failing, both rows stamped). `pane_submitted` is the one state
-# `commands.task.transmission_request` ever emits on success — this carrier
-# has no `carrier_accepted` / `recipient_acknowledged` rung, unlike Telegram's
-# — so it, not the general activation set, is the fact this join needs.
-RECHECKED_SQL = (
-    "SELECT c.source_ref, MAX(c.occurred_at) FROM communications c"
-    " WHERE c.source_ref IN (%s)"
-    " AND EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "   AND x.msg_id = c.msg_id AND x.event='pane_submitted')"
-    " GROUP BY c.source_ref"
 )
 # The FLEET's open rows: scoped by the assignment's own `fleet_uid`, which is
 # the DISPATCHING fleet — the manager's, not the assignee's. That is the scope
@@ -1342,28 +1316,6 @@ def menu_facts(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, dict
             if event == "escalated":
                 out.setdefault(asg, {})["escalated"] = {
                     "question": question, "by": by, "at": at}
-    return out
-
-
-def rechecked_at(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, str]:
-    """assignment_id → the newest instant a re-check LANDED for it: the stamp
-    the re-check writes (`RECHECK_REF_PREFIX + assignment_id` on the
-    communication it records for that row) counts only when RECHECKED_SQL's
-    join finds a `pane_submitted` transmission for that same communication
-    (the fold's F4) — a recorded ASK that never reached the manager is not a
-    re-check, or a manager-down window would go silent for the whole repeat
-    window instead of asking again next sweep. Absent = never (successfully)
-    re-checked, which is a plane read like any other — there is no timer
-    state file to lose."""
-    out: dict[str, str] = {}
-    ids = [a for a in assignment_ids if a]
-    if not ids:
-        return out
-    for chunk in _chunks(ids):
-        refs = [RECHECK_REF_PREFIX + a for a in chunk]
-        for ref, at in conn.execute(RECHECKED_SQL % _marks(len(refs)), refs):
-            if at:
-                out[ref[len(RECHECK_REF_PREFIX):]] = at
     return out
 
 

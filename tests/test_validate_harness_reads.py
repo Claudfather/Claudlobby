@@ -144,7 +144,7 @@ _DOORS = sorted(p.stem for p in (REPO / "lib").glob("*.py") if "plane-readers" i
 _DOOR = r"\b(?:" + "|".join(map(re.escape, _DOORS)) + r")\.py\b"
 _DOOR_CALL = re.compile(
     rf"python3\b[^|;]*{_DOOR}"
-    r'|"\$VAL_CLI"[^|;]*\b(?:checkins|events|report-back|workstreams|brief|uptime)\b'
+    r'|"\$VAL_CLI"[^|;]*\b(?:checkin|events|report-back|workstreams|brief|uptime)\b'
 )
 _HEREDOC = re.compile(r"<<-?'?(\w+)'?[^\n]*\n(.*?)\n\1\n", re.S)
 

@@ -185,7 +185,8 @@ def _fetch_fleets(conn: sqlite3.Connection, actors: dict | None = None) -> dict:
     never picked one."""
     actors = actors if actors is not None else _fleet_actors(conn)
     fleets = []
-    for uid, alias, first_seen, last_seen in conn.execute(_FLEET_ROWS_SQL):
+    # fetched whole: each fleet runs two more queries (#1905, db.connect_ro)
+    for uid, alias, first_seen, last_seen in conn.execute(_FLEET_ROWS_SQL).fetchall():
         rows = actors.get(alias, [])
         arms = conn.execute(
             "SELECT occurred_at FROM communications WHERE fleet_uid = ?"
@@ -1058,7 +1059,8 @@ _HOST_SAMPLES_SQL = (
     "  ROW_NUMBER() OVER (PARTITION BY metric ORDER BY ingest_seq DESC) AS rn"
     " FROM metric_samples WHERE subject_kind = 'host'"
     "  AND metric IN ('host.load', 'host.mem_available_mb', 'host.disk_free_gb',"
-    "                 'host.thermal_flags', 'host.undervoltage', 'host.boot_time'))"
+    "                 'host.thermal_flags', 'host.undervoltage', 'host.boot_time',"
+    "                 'host.plane_wal_bytes'))"
     " SELECT metric, value, occurred_at FROM latest WHERE rn = 1")
 
 # The page's ingest-lag warning threshold, stamped by the API so a JSON
@@ -1068,7 +1070,7 @@ _INGEST_LAG_WARN_S = 120
 
 def _plane_readers(paths: Paths):
     """The package's native `plane-readers.py` — the reader brief and
-    `claudlobby report-back` answer through — so the card counts EXACTLY the
+    `fleet reports list` answer through — so the card counts EXACTLY the
     rows the manager's brief lists (`report_rows` + `unacked_rows`, one rule);
     None when the install carries no readable copy (disclosed on the card)."""
     return load_lib_module(paths.lib, "plane-readers.py")
@@ -1088,6 +1090,16 @@ def _host_samples(conn: sqlite3.Connection) -> dict | None:
         except (TypeError, ValueError):
             return raw
     return {r[0]: {"value": _val(r[1]), "occurred_at": r[2]} for r in rows}
+
+
+def _wal_state(samples: dict | None) -> str | None:
+    """'over' when the probe's newest WAL size passes the ceiling, 'ok' under
+    it, None when there is no usable sample (absent is not ok)."""
+    from .wal import WAL_CEILING_BYTES
+    v = ((samples or {}).get("host.plane_wal_bytes") or {}).get("value")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return "over" if v > WAL_CEILING_BYTES else "ok"
 
 
 def _spawn_epoch(bot_dir: Path) -> int | None:
@@ -1252,6 +1264,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
     last_in = _epoch(prov.get("last_ingest_at"))
     lag = (round(max(0.0, now_dt.timestamp() - last_in), 1)
            if last_in is not None else None)
+    samples = _host_samples(conn)
     host = {
         **_recorder_state(root),
         "rows": conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0],
@@ -1260,7 +1273,10 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         "ingest_lag_s": lag,
         "ingest_lag_state": ("none" if lag is None
                              else "warn" if lag > _INGEST_LAG_WARN_S else "ok"),
-        "samples": _host_samples(conn),
+        "samples": samples,
+        # the WAL ceiling's verdict is the API's (#1905), like the lag state:
+        # the page only renders it. None when the probe never recorded one.
+        "wal_state": _wal_state(samples),
     }
     return {"fleets": rows, "default": fl["default"], "host": host,
             "capture_config": capture_state,

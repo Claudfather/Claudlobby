@@ -407,18 +407,15 @@ units — one set per fleet, not one per host. Current roster:
 | `reload-fleet` | `*-*-* 03:30:00` | *(absent — enrolled)* |
 | `weekly-worker-restart` | `Sun *-*-* 05:00:00` | `false` (enforced — see [Dormancy](#dormancy-enroll-semantics-differ-by-scope)) |
 | `data-sweep` | `Sat *-*-* 07:00:00` (script carries `--purge`) | *(absent — enrolled)* |
-| `task-recheck` | `interval: 21600` (6h) | `false` (enforced) **and** self-gated on `TASK_RECHECK_ENABLED=1` |
+| `task-recheck` | `interval: 21600` (6h) | *(absent — enrolled);* the private timer entrypoint skips on `TASK_RECHECK_ENABLED=0` |
 | `manager-checkin` | `interval: 900` (15 min) | `false` (dormant — injects `/checkin` into an idle, equipped manager) |
 
-`task-recheck` carries **two** gates because it is the first fleet job that
-dispatches into a live manager session (#1481; `manager-checkin` is its
-sibling here, chunk 2's own `/checkin` beat — one gate, not two, since it has
-no separate `_ENABLED` self-gate of its own): the manifest keeps
-`setup-fleet` from enrolling the unit, and `lib/task-recheck.sh` no-ops loudly
-unless the fleet's `.env` arms `TASK_RECHECK_ENABLED=1`. Arming that flag also
-composes it onto the unit (`FLEET_JOB_ARMING`, `composer.py`) — a timer unit
-sources no `.env`, so without that line the door would be unreachable however
-loudly the fleet armed it (#1383).
+`task-recheck` is enrolled by default. Its generated unit invokes the selected
+CLI's private tick entrypoint with an explicit fleet, which mints a fresh request
+UUID and calls the same canonical operation as public `task recheck`. The
+entrypoint no-ops loudly when `TASK_RECHECK_ENABLED=0`; composition carries that
+resolved tier value onto the unit (`FLEET_JOB_ARMING`), since timers do not
+source `.env` themselves.
 
 Merge (`_merge_system_into_defaults`'s `jobs` branch, `config.py`) is
 **by job name**, with **field-level shallow spread within a job**: a fleet's

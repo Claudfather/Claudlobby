@@ -14,25 +14,32 @@ from uuid import uuid4
 from .reference_hints import ReferenceHint
 
 
-_EXITS = {"internal_error": 1, "invalid_argument": 2, "not_found": 3,
+_EXITS = {"internal_error": 1, "selection_defect": 1, "invalid_argument": 2, "not_found": 3,
           "conflict": 4, "wrong_reference": 4, "ambiguous_reference": 4,
           "delivery_unknown": 5, "delivery_failed": 5, "notification_failed": 5,
           "unavailable": 6, "release_mismatch": 7, "timeout": 8,
           "receipt_unobservable": 9, "receipt_mismatch": 10, "recording_degraded": 11}
-_PUBLIC = {("host", "releases"): "host.releases", ("host", "status"): "host.status",
+_PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", "status"): "host.status",
            ("host", "activate"): "host.activate", ("config", "plan"): "config.plan",
            ("config", "diff"): "config.diff", ("migration", "plan"): "migration.plan",
            ("migration", "status"): "migration.status",
            ("fleet", "reports", "submit"): "fleet.reports.submit",
            ("fleet", "reports", "list"): "fleet.reports.list",
-           ("fleet", "reports", "ack"): "fleet.reports.ack"}
+           ("fleet", "reports", "ack"): "fleet.reports.ack",
+           ("checkin", "list"): "checkin.list", ("checkin", "show"): "checkin.show",
+           ("checkin", "record"): "checkin.record",
+           ("checkin", "selection", "verify"): "checkin.selection.verify",
+           ("checkin", "selection", "focus-refs"): "checkin.selection.focus-refs"}
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
-    ("context", ("show",)), ("bot", ("list", "show", "capabilities")),
-    ("fleet", ("show",)), ("project", ("list", "show")),
-    ("task", ("list", "show", "admit", "assign", "withdraw", "reassign")),
+    ("context", ("show",)), ("bot", ("list", "show", "capabilities", "usage")),
+    ("fleet", ("show", "inbox", "usage")), ("project", ("list", "show")),
+    ("task", ("list", "show", "reviews", "admit", "assign", "withdraw", "reassign", "escalate", "nudge")),
     ("assignment", ("show", "deliver", "accept", "progress", "block", "return", "complete", "fail")),
     ("message", ("show", "receipt", "wait", "send", "reply")),
-    ("request", ("show",))) for verb in verbs})
+    ("request", ("show",)),
+    ("workstream", ("list", "show", "open", "progress", "renew", "block", "unblock", "close", "prune"))) for verb in verbs})
+_PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
+                for action in ("status", "pause", "resume", "record")})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
 
 

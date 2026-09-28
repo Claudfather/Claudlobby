@@ -17,7 +17,8 @@ from claudlobby.paths import Paths
 from claudlobby.plane.db import connect, db_file
 from claudlobby.plane.identity import resolve, resolve_party
 from claudlobby.plane.ids import ensure_host_uid
-from claudlobby.request_receipts import ReceiptConflict, locked_request
+from claudlobby.request_receipts import (MessageRouteBinding, NativeDestination,
+                                         ReceiptConflict, locked_request)
 from claudlobby.report_payload import ReportPayload, decode_report_body
 from claudlobby.task_queries import WrongTaskReferenceError, show_task
 from tests.package_fixtures import source_package
@@ -51,6 +52,84 @@ def _counts(conn):
 def _receipt(ctx, request_id):
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
         return store.load()
+
+
+def _manager_route(ctx):
+    native = NativeDestination(str(ctx.root), "example", "example-manager", "manager",
+                               str(ctx.root))
+    return MessageRouteBinding("activation-probe", "plan-probe", "release-probe",
+                               ctx.caller_fleet_uid, ctx.fleet_uid, ctx.caller.alias,
+                               ctx.bots["manager"].alias, ctx.bots["manager"].uid,
+                               ctx.bots["manager"].alias, native, native)
+
+
+def test_workstream_declared_wait_survives_child_completion_until_unblocked(estate):
+    from claudlobby.brief import _workstream_section, plane_session
+    from claudlobby.workstream_operations import apply as workstream_apply
+
+    ctx, _conn = estate
+    opened = workstream_apply(ctx, "open", {"title": "Release review", "id": None,
+        "project": None, "owner": None, "next": None}, request_id=str(uuid4()))
+    wid = opened.workstream_ids[0]
+    admitted = tasks.admit(ctx, str(uuid4()), title="Finish review", workstream_id=wid)
+    assigned = tasks.assign(ctx, str(uuid4()), admitted.task_id, bot_id="worker")
+    worker = replace(ctx, caller=ctx.bots["worker"])
+    tasks.accept(worker, str(uuid4()), assigned.assignment_id)
+    blocked = workstream_apply(ctx, "block", {"id": wid, "on": "human:reviewer",
+        "note": "Waiting for signoff"}, request_id=str(uuid4()))
+    assert blocked.recording == "committed" and blocked.notification == "not_requested"
+    tasks.complete(worker, str(uuid4()), assigned.assignment_id,
+                   ReportPayload("completed", summary="Review finished"))
+    workstream_apply(ctx, "progress", {"id": wid, "next": "Evidence prepared"},
+                     request_id=str(uuid4()))  # progress never clears a declared wait
+    plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
+    assert note is None
+    with plane:
+        section = _workstream_section(ctx.context.fleet, ctx.context.paths, int(time.time()), [], plane=plane)
+    assert section["active"] == []
+    assert section["blocked"][0]["id"] == wid
+    assert section["blocked"][0]["waiting_on"] == "human:reviewer"
+    assert section["blocked"][0]["note"] == "Waiting for signoff"
+    assert section["blocked"][0]["age_seconds"] is not None
+    unblocked = workstream_apply(ctx, "unblock", {"id": wid, "note": "Signoff received"},
+                                 request_id=str(uuid4()))
+    assert unblocked.workstream_ids == (wid,)
+    plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
+    assert note is None
+    with plane:
+        section = _workstream_section(ctx.context.fleet, ctx.context.paths, int(time.time()), [], plane=plane)
+    assert section["blocked"] == [] and [row["id"] for row in section["active"]] == [wid]
+
+
+def test_workstream_cap_renewal_archived_id_and_request_replay(estate):
+    from claudlobby.config import WorkstreamsConfig
+    from claudlobby.workstream_operations import (WorkstreamError, _reader,
+                                                  apply as workstream_apply)
+
+    ctx, _conn = estate
+    fleet = replace(ctx.context.fleet, workstreams=WorkstreamsConfig(max_active=1, lease_days=14))
+    ctx = replace(ctx, context=replace(ctx.context, fleet=fleet))
+    opening = {"title": "One focus", "id": None, "project": None, "owner": None, "next": None}
+    request = str(uuid4())
+    first = workstream_apply(ctx, "open", opening, request_id=request)
+    assert workstream_apply(ctx, "open", opening, request_id=request).replayed
+    wid = first.workstream_ids[0]
+    with pytest.raises(WorkstreamError, match="cap"):
+        workstream_apply(ctx, "open", {**opening, "title": "Another focus"}, request_id=str(uuid4()))
+    before = _reader(ctx, 14, or_empty=False)["workstreams"]
+    progress_at = before[wid]["last_progress_ts"]
+    workstream_apply(ctx, "renew", {"id": wid, "note": "Still responsible"}, request_id=str(uuid4()))
+    after = _reader(ctx, 14, or_empty=False)["workstreams"]
+    assert after[wid]["last_progress_ts"] == progress_at
+    assert after[wid]["lease_expires_ts"] >= before[wid]["lease_expires_ts"]
+    workstream_apply(ctx, "close", {"id": wid, "status": "done"}, request_id=str(uuid4()))
+    second = workstream_apply(ctx, "open", {**opening, "title": "Another focus"},
+                              request_id=str(uuid4())).workstream_ids[0]
+    workstream_apply(ctx, "close", {"id": second, "status": "abandoned"}, request_id=str(uuid4()))
+    pruned = workstream_apply(ctx, "prune", {}, request_id=str(uuid4()))
+    assert set(pruned.workstream_ids) == {wid, second}
+    reopened = workstream_apply(ctx, "open", opening, request_id=str(uuid4()))
+    assert reopened.workstream_ids == (wid + "-2",)
 
 
 def test_duplicate_admission_is_one_unassigned_task_without_plaintext_receipt(estate):
@@ -299,6 +378,108 @@ def test_withdraw_closes_queued_work_and_its_active_assignment_in_one_fact(estat
         with pytest.raises(tasks.TaskConflictError, match="current assignment"):
             tasks.reassign(ctx, str(uuid4()), admitted.task_id, bot_id="other", reason="Too late")
         assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == before + 1
+
+
+def test_escalate_queued_or_assigned_and_refuse_uncommitted_retarget(estate):
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Needs a decision")
+    queued_id = str(uuid4())
+    queued = tasks.escalate(ctx, queued_id, task.task_id, question="Which priority?")
+    assert queued.task.state == "queued" and queued.assignment_id is None
+    fact = conn.execute("SELECT assignment_id, actor_uid, detail FROM events "
+                        "WHERE event='escalated' AND work_item_id=?", (task.task_id,)).fetchone()
+    assert fact[0] is None and fact[1] == ctx.caller.uid
+    assert json.loads(fact[2])["question"] == "Which priority?"
+    assert json.loads(fact[2])["by"] == ctx.caller.alias
+    assigned = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    before = _counts(conn)
+    replay = tasks.escalate(ctx, queued_id, task.task_id, question="Which priority?")
+    assert replay.replayed and replay.assignment_id is None and replay.task.state == "assigned"
+    assert _counts(conn) == before
+
+    conn.execute("CREATE TRIGGER reject_escalation BEFORE INSERT ON events "
+                 "WHEN NEW.event='escalated' BEGIN SELECT RAISE(ABORT, 'owned escalation failure'); END")
+    pending_id = str(uuid4())
+    with pytest.raises(tasks.TaskRecordingError):
+        tasks.escalate(ctx, pending_id, task.task_id, question="Which repository?",
+                       by=ctx.bots["other"].alias)
+    pending = _receipt(ctx, pending_id)
+    assert pending.intent.assignment_id == assigned.assignment_id
+    assert pending.stages[0].status == "unknown" and _counts(conn) == before
+    conn.execute("DROP TRIGGER reject_escalation")
+    replacement = tasks.reassign(ctx, str(uuid4()), task.task_id, bot_id="other",
+                                reason="Move to specialist")
+    after = _counts(conn)
+    with pytest.raises(tasks.TaskConflictError, match="original assignment changed"):
+        tasks.escalate(ctx, pending_id, task.task_id, question="Which repository?",
+                       by=ctx.bots["other"].alias)
+    assert _receipt(ctx, pending_id).intent == pending.intent and _counts(conn) == after
+    assert replacement.assignment_id != assigned.assignment_id
+    assigned_id = str(uuid4())
+    raised = tasks.escalate(ctx, assigned_id, task.task_id, question="Which repository?",
+                            by=ctx.bots["other"].alias)
+    assert raised.task.state == "assigned" and raised.assignment_id == replacement.assignment_id
+    assigned_fact = conn.execute("SELECT assignment_id, actor_uid, detail FROM events "
+                                 "WHERE event='escalated' AND work_item_id=? ORDER BY ingest_seq DESC LIMIT 1",
+                                 (task.task_id,)).fetchone()
+    assert assigned_fact[0] == replacement.assignment_id
+    assert assigned_fact[1] == ctx.bots["other"].uid
+    assert json.loads(assigned_fact[2])["by"] == ctx.bots["other"].alias
+    assert _receipt(ctx, assigned_id).intent.caller_uid == ctx.caller.uid
+    after = _counts(conn)
+    assert tasks.escalate(ctx, assigned_id, task.task_id, question="Which repository?",
+                          by=ctx.bots["other"].alias).replayed
+    assert _counts(conn) == after
+
+
+def test_nudge_commits_queued_and_assigned_asks_without_retargeting_retry(estate):
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Need manager attention")
+    route = _manager_route(ctx)
+    queued_id = str(uuid4())
+    reason = "Please decide\nwhich work comes first"
+    queued = tasks.nudge(ctx, queued_id, task.task_id, reason=reason,
+                         by=ctx.bots["other"].alias, route=route)
+    assert queued.task.state == "queued" and queued.assignment_id is None
+    assert queued.recording == "committed" and queued.notification == "pending"
+    receipt = _receipt(ctx, queued_id)
+    assert receipt.intent.route == route and receipt.intent.assignment_id is None
+    assert len(receipt.intent.stages[0].facts) == 2
+    event = conn.execute("SELECT actor_uid, detail FROM events WHERE event='nudged'").fetchone()
+    assert event[0] == ctx.caller.uid
+    assert json.loads(event[1])["by"] == ctx.bots["other"].alias
+    ask = conn.execute("SELECT sender_uid, recipient_uid, body FROM communications "
+                       "WHERE msg_id=?", (queued.message_id,)).fetchone()
+    assert ask[:2] == (ctx.caller.uid, ctx.bots["manager"].uid)
+    assert json.loads(ask[2])["reason"] == reason
+    assert b"Please decide" not in (ctx.root / "state/requests" / ctx.fleet_uid /
+                                   (queued_id + ".json")).read_bytes()
+    before = _counts(conn)
+    assert tasks.nudge(ctx, queued_id, task.task_id, reason=reason,
+                       by=ctx.bots["other"].alias, route=route).replayed
+    assert _counts(conn) == before
+    with pytest.raises(ReceiptConflict):
+        tasks.nudge(ctx, queued_id, task.task_id, reason="Different", route=route)
+
+    assigned = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    conn.execute("CREATE TRIGGER reject_nudge BEFORE INSERT ON events "
+                 "WHEN NEW.event='nudged' BEGIN SELECT RAISE(ABORT, 'owned nudge failure'); END")
+    pending_id = str(uuid4())
+    with pytest.raises(tasks.TaskRecordingError):
+        tasks.nudge(ctx, pending_id, task.task_id, reason="Check ownership", route=route)
+    pending = _receipt(ctx, pending_id)
+    assert pending.intent.assignment_id == assigned.assignment_id
+    assert pending.stages[0].status == "unknown"
+    assert _counts(conn) == tuple(a + b for a, b in zip(before, (0, 1, 0, 0)))
+    conn.execute("DROP TRIGGER reject_nudge")
+    replacement = tasks.reassign(ctx, str(uuid4()), task.task_id, bot_id="other",
+                                reason="Move work")
+    after = _counts(conn)
+    with pytest.raises(tasks.TaskConflictError, match="original assignment changed"):
+        tasks.nudge(ctx, pending_id, task.task_id, reason="Check ownership", route=route)
+    assert _counts(conn) == after and _receipt(ctx, pending_id).intent == pending.intent
+    recorded = tasks.nudge(ctx, str(uuid4()), task.task_id, reason="Check now", route=route)
+    assert recorded.assignment_id == replacement.assignment_id
 
 
 def test_reassign_commit_before_receipt_update_replays_without_retargeting(estate, monkeypatch):

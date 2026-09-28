@@ -1,56 +1,36 @@
 """The readers of the report rows serve the PLANE — the only source since
-the F18 closure (R2b): `claudlobby report-back`, brief's unacked reports,
+the F18 closure (R2b): brief's unacked reports
 and the report acknowledgement cursor read `plane-readers.report_rows` with no ledger probe, no
 retirement fact and no file; an unreachable plane REFUSES (rc 3) or OMITS
 the section, never an empty answer. The row shapes are the legacy ones, `ts`
 in the legacy form, so every consumer and every brief cursor keeps working.
-(Cutover C3 introduced these readers behind the retirement fact; R2b removed
-the fact. F18 R2a: the supersede hint reads the plane unconditionally —
-test_the_supersede_hint_reads_its_task_texts_from_the_plane, and its stdlib
-half is test_the_planes_task_texts_carry_the_dispatch_text.)
+The historical task-text projection remains covered by
+test_the_planes_task_texts_carry_the_dispatch_text.
 
 Deleted with the ledgers (R2b): test_plane_retired_conn_is_the_one_door_fact
 (the door is gone — `brief.plane_conn` replaces it, pinned in test_brief),
 test_who_reviewed_auto_joins_the_plane_with_the_unretired_ledgers_and_dedupes
 (`--source auto` and the ledger sources went with who-reviewed's plane-only
-rewrite), and the "not retired: the ledger" halves of the report-back / brief
-tests (→ test_report_back_serves_the_plane,
-test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing).
+rewrite), and the "not retired: the ledger" half of the brief test
+(→ test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing).
 """
 from __future__ import annotations
 
-import importlib.util
 import json
-import os
-import subprocess
-import sys
 from dataclasses import replace
-from datetime import datetime, timezone
 
 import pytest
 
 from claudlobby.brief import _reports_section, ack_request
 from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import F, REPO, _env, _report, _scene, _stdlib_readers, ro as _ro
+from tests.plane_fixtures import F, _report, _scene, _stdlib_readers, ro as _ro
 
-LIB = REPO / "lib"
 TERMINAL = {"completed", "failed", "blocked"}
 
 
 def _drop_plane(root):
     for p in (root / "state" / "plane").glob("plane.db*"):
         p.unlink()
-
-
-def _report_back(root, *args, **extra):
-    return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root), "--fleet", F,
-                           "report-back", *args], capture_output=True, text=True, timeout=180,
-                          env=_env(root, **extra))
-
-
-def _rows_of(r):
-    assert r.returncode == 0, r.stdout + r.stderr
-    return [json.loads(l) for l in r.stdout.splitlines()]
 
 
 def _wire(bot, status, summary, **extras):
@@ -233,42 +213,6 @@ def test_unavailable_report_content_never_becomes_empty_or_legacy_evidence(
             assert "private" not in json.dumps(pr.public(row))  # Even a retained companion cannot leak content.
 
 
-# --- claudlobby report-back --------------------------------------------------------
-
-def test_report_back_serves_the_plane(tmp_path):
-    root, paths, d, r = _scene(tmp_path)
-    wi2, asg2 = "wi_" + "2".rjust(32, "0"), "asg_" + "2".rjust(32, "0")
-    msg = _report(root, wi2, asg2, "2026-09-02T12:00:00Z", event="completed",
-                  extra={"summary": "shipped it", "pr_url": "https://github.com/o/r/pull/7"})
-    rows = _rows_of(_report_back(root, "--json"))
-    assert [x["task_id"] for x in rows] == ["t-1-aaaa", "t-2-bbbb"]
-    assert set(rows[1]) == set(_stdlib_readers().REPORT_FIELDS)                     # the legacy row, private keys stripped
-    assert (rows[1]["summary"], rows[1]["pr_url"], rows[1]["plane_msg_id"]) == \
-        ("shipped it", "https://github.com/o/r/pull/7", msg)
-    assert [x["task_id"] for x in _rows_of(_report_back(root, "--json", "--bot", "w1", "--status", "completed"))] == ["t-1-aaaa", "t-2-bbbb"]
-    assert [x["task_id"] for x in _rows_of(_report_back(root, "--json", "--since", "2026-09-02T11:30:00Z"))] == ["t-2-bbbb"]
-    table = _report_back(root)
-    assert table.returncode == 0 and "shipped it" in table.stdout and "2 event(s)" in table.stdout
-    none = _report_back(root, "--bot", "nobody")
-    assert none.returncode == 0 and "0 event(s) matched" in none.stdout and f"the plane (fleet {F})" in none.stdout
-    _drop_plane(root)
-    gone = _report_back(root, "--json")
-    assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr    # unreachable is not empty
-
-
-def test_report_back_refuses_when_the_matcher_is_unreachable(tmp_path, monkeypatch, capsys):
-    """Every reader rides the install's matcher session (R2b-1 fold): a lib/
-    without it cannot answer, and the command REFUSES — never an empty table."""
-    from claudlobby import context
-    from claudlobby.__main__ import main
-
-    root, paths, _, _ = _scene(tmp_path)
-    paths = _without_matcher(paths, tmp_path / "native")
-    monkeypatch.setattr(context, "get_resources", lambda: paths.package)
-    rc = main(["--root", str(root), "--fleet", F, "report-back", "--json"])
-    gone = capsys.readouterr()
-    assert rc == 3 and gone.out == "" and "UNREACHABLE" in gone.err
-
 
 # --- brief: unacked reports and the plane acknowledgement fact -------------------
 
@@ -314,13 +258,6 @@ def test_brief_omits_the_section_when_the_matcher_is_unreachable(tmp_path):
 
 # --- the supersede hint ------------------------------------------------------------------
 
-def _hint_module():
-    spec = importlib.util.spec_from_file_location("hint", LIB / "dispatch-supersede-hint.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def _title_with_ref(root):
     """The plane's work item for t-2 carries the text with the reference."""
     from claudlobby.plane.db import connect
@@ -336,15 +273,3 @@ def test_the_planes_task_texts_carry_the_dispatch_text(tmp_path):
     with _ro(root) as conn:
         assert pr.task_texts(conn, F, "W1")["t-2-bbbb"] == "fix the flaky test in #480"   # case-insensitive alias
         assert pr.task_texts(conn, F, "ghost") == {}
-
-
-def test_the_supersede_hint_reads_its_task_texts_from_the_plane(tmp_path, monkeypatch):
-    root, paths, _, _ = _scene(tmp_path)
-    _title_with_ref(root)
-    hint = _hint_module()
-    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root)); monkeypatch.setenv("CLAUDLOBBY_FLEET", F)
-    monkeypatch.delenv("FLEET_NAME", raising=False)
-    n, ids, note = hint.hint("w1", "another pass at #480")           # the plane's text carries #480
-    assert n == 1 and ids == ["t-2-bbbb"] and "--supersedes t-2-bbbb" in note
-    n, ids, note = hint.hint("w1", "unrelated work")                 # the quiet tier: counted, never spoken
-    assert (n, ids, note) == (1, [], "")

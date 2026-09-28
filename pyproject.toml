@@ -38,6 +38,9 @@ packages = ["claudlobby", "claudlobby.commands", "claudlobby.plane"]
 include-package-data = false
 
 [tool.setuptools.package-data]
+# system.yaml is package-owned data, not operator config: every default job,
+# hook, host job and boot policy is read from it. A built wheel must include it,
+# and a missing or empty copy is refused by _load_system_defaults.
 claudlobby = ["system.yaml"]
 "claudlobby.plane" = ["migrations/*.sql", "ui/*"]
 

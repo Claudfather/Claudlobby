@@ -27,6 +27,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+import time
+from uuid import uuid4
 
 import pytest
 from pathlib import Path
@@ -255,6 +258,64 @@ def _update(root: Path, *args: str, fleet: str | None = None):
     return subprocess.run(
         ["bash", str(UPDATER), *args], capture_output=True, text=True, env=env
     )
+
+
+def test_automation_and_shell_status_writers_preserve_each_other_under_shared_lock(tmp_path: Path) -> None:
+    from claudlobby.automation_state import AutomationStateError, mutate, record_input, status
+    from claudlobby.plane.workstream_import import registry_lock
+
+    root = _host(tmp_path)
+    state = _seed_state(root)
+    lock = Path(f"{state}.lock")
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(root),
+           "CLAUDLOBBY_ROOT": str(root), "FLEET_STATE_PATH": str(state),
+           "FLEET_NAME": "f-alpha"}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with registry_lock(lock):
+            shell = subprocess.Popen(["bash", str(UPDATER), "a1", "working", "task-one"],
+                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True)
+            future = pool.submit(mutate, root, "f-alpha", "a1", "pause",
+                                 actor="bot:f-alpha/a1", request_id=str(uuid4()),
+                                 payload={"reason": "Need input"})
+            time.sleep(0.2)
+            assert shell.poll() is None and not future.done(), "writers bypassed the shared lock"
+        outcome = future.result(timeout=10)
+        stdout, stderr = shell.communicate(timeout=10)
+    assert shell.returncode == 0, (stdout, stderr)
+    assert outcome["state"]["paused"] is True
+    saved = json.loads(state.read_text())
+    assert saved["bots"]["a1"]["status"] == "working"
+    assert saved["bots"]["a1"]["current_task"] == "task-one"
+    assert saved["bots"]["a1"]["autonomous_runner_pause"]["reason"] == "Need input"
+    assert saved["bots"]["b1"] == SEED_ROWS["b1"]
+    assert status(root, "f-alpha", "a1", configured=True)["eligible"] is False
+
+    run_id = str(uuid4())
+    payload = {"outcome": "blocked", "pr_url": None, "issue_url": None}
+    assert mutate(root, "f-alpha", "a1", "record", actor="bot:f-alpha/a1",
+                  request_id=run_id, payload=payload, target_repo="owner/repo")["recording"] == "committed"
+    assert mutate(root, "f-alpha", "a1", "record", actor="bot:f-alpha/a1",
+                  request_id=run_id, payload=payload, target_repo="owner/repo")["replayed"] is True
+    assert _update(root, "a1", "idle", fleet="f-alpha").returncode == 0
+    saved = json.loads(state.read_text())
+    assert len(saved["bots"]["a1"]["autonomous_runner_runs"]) == 1
+    assert saved["bots"]["a1"]["autonomous_runner_pause"]["reason"] == "Need input"
+    with pytest.raises(AutomationStateError, match="documented runner outcome"):
+        record_input("succeeded", None, None, "owner/repo")
+    with pytest.raises(AutomationStateError, match="owner/repo pull URL"):
+        record_input("partial", "https://github.com/other/repo/pull/1", None, "owner/repo")
+
+
+def test_portable_lock_timeout_never_executes_an_unlocked_state_write(tmp_path: Path) -> None:
+    lock = tmp_path / "fleet-state.json.lock"
+    Path(f"{lock}.d").mkdir()
+    touched = tmp_path / "touched"
+    script = (f'. "{LIB_COMMON}"; _FLOCK_BIN=; WITH_LOCK_WAIT_S=0; '
+              f'with_lock "{lock}" touch "{touched}"')
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode != 0 and "could not acquire" in proc.stderr
+    assert not touched.exists(), "timed-out lock ran its callback without exclusion"
 
 
 @pytest.mark.parametrize(

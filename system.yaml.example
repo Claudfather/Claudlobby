@@ -505,29 +505,12 @@ defaults:
   observability:
     pulse_interval: 300
     activity_stuck_threshold: 1800
-    # A DEADLINE BY DEFAULT, SO THE WATCHDOG AND THE RE-CHECK HAVE A CLOCK
-    # (chunk M-A, #1481; ruled 24h). SECONDS. 24h is 1440 MINUTES, and putting
-    # that number here would give the estate a 24-minute deadline; `0` is an
-    # open-ended dispatch, which mints no `expected_by` at all.
-    #
-    # This value is ONE of three spellings of a single fact and they are
-    # pinned together (tests/test_composer.py): this tier, the composer's
-    # `DEFAULT_DISPATCH_DEADLINE_S`, and `dispatch-task.sh`'s own literal for
-    # a bot.conf composed before M-A. It sat at 1800 while the other two moved
-    # to 86400, which meant every fleet using this tier -- i.e. nearly all of
-    # them -- kept composing the old 30-minute clock and the ruling reached
-    # nobody (measured on a bare fleet.yaml).
-    #
-    # The 30-minute threshold's own history -- the bimodal completion
-    # distribution behind it, and why raising a threshold is not the fix for
-    # false alerts -- is #946 and the CHANGELOG. What survives of it here is
-    # the standing rule: DO NOT MOVE THIS NUMBER TO QUIET NOISE. A run of
-    # false alerts makes that the obvious edit and it reaches every fleet at
-    # the next generate; the intended fix is suppress-while-provably-working
-    # (#946), and for work known to run long there is already a per-dispatch
-    # door, `dispatch-task.sh --deadline-min <n>`, which widens the window for
-    # the one task that needs it and trades away no stall detection anywhere
-    # else.
+    # Historical dispatch observation uses a 24h default, in SECONDS.
+    # Canonical assignments carry an explicit --expected-by timestamp.
+    # The system tier and composer both default to 86400 seconds. Historical
+    # native watchdog rows retain their recorded deadlines; canonical task
+    # assignment instead accepts an explicit --expected-by timestamp. Do not
+    # lower this default merely to quiet false alerts across every fleet.
     dispatch_deadline: 86400
 
   jobs:
@@ -597,12 +580,12 @@ defaults:
     # as a timer gets, and it still ships on: what it sends is a message to
     # the fleet's own manager about the fleet's own stale rows, which is none
     # of the four categories in the defaults rule. A fleet that wants it quiet
-    # sets TASK_RECHECK_ENABLED=0 in its fleet-tier .env; the launcher then
+    # sets TASK_RECHECK_ENABLED=0 in its fleet-tier .env; the private CLI tick then
     # no-ops LOUDLY on every tick, so an off switch is visible in the log of
     # the host it is off on rather than reading as a broken timer. The
     # self-gate SHAPE is kept for exactly that -- it is an opt-OUT now.
     task-recheck:
-      script: "$CLAUDLOBBY_NATIVE_DIR/task-recheck.sh"
+      script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _task-recheck-tick"
       interval: 21600
       type: oneshot
     # PR 2 of the manager check-in build (chunk 2): every 15 min, inject

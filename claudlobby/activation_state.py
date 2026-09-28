@@ -169,7 +169,8 @@ class ActivationStore:
 
     def prepare(self, activation_id: str, plan: ConfigPlan, *,
                 recovery_release_id: str, enrollment_digest: str,
-                source_release_id: str | None = None) -> ActivationRecord:
+                source_release_id: str | None = None,
+                legacy_source: bool = False) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
@@ -178,15 +179,21 @@ class ActivationStore:
             raise ActivationError("verified enrollment manifest digest is required")
         existing = read_activation(self.root, activation_id) if path.exists() else None
         previous = existing.body["previous_selection"] if existing else read_selection(self.root)
-        source_release_id = source_release_id or (
-            existing.body["intent"]["source_release_id"] if existing else
-            previous["release_id"] if previous else recovery_release_id)
-        if previous is not None and source_release_id != previous["release_id"]:
-            raise ActivationError("activation source differs from the selected release")
+        if legacy_source:
+            if previous is not None or source_release_id is not None:
+                raise ActivationError("unsealed first adoption cannot claim a selected source release")
+        else:
+            source_release_id = source_release_id or (
+                existing.body["intent"]["source_release_id"] if existing else
+                previous["release_id"] if previous else recovery_release_id)
+            if previous is not None and source_release_id != previous["release_id"]:
+                raise ActivationError("activation source differs from the selected release")
         intent = {"plan_id": plan.plan_id, "release_id": plan.release_id,
                   "source_release_id": source_release_id,
                   "recovery_release_id": recovery_release_id,
                   "enrollment_digest": enrollment_digest}
+        if legacy_source:
+            intent["source_kind"] = "legacy-unsealed"
         if existing is not None:
             if existing.body["intent"] != intent:
                 raise ActivationError("activation id already belongs to a different intent")
@@ -197,7 +204,8 @@ class ActivationStore:
                 raise ActivationError(f"unfinished activation must be recovered: {record.activation_id}")
         plan.check_fresh()
         read_release(self.root, plan.release_id)
-        read_release(self.root, source_release_id)
+        if not legacy_source:
+            read_release(self.root, source_release_id)
         read_release(self.root, recovery_release_id)
         body = {"schema": 1, "activation_id": activation_id, "root": str(self.root),
                 "intent": intent, "previous_selection": previous, "status": "prepared",
@@ -273,6 +281,8 @@ class ActivationStore:
     def begin_rollback(self, activation_id: str) -> ActivationRecord:
         self.assert_locked()
         record = read_activation(self.root, activation_id)
+        if record.body["intent"].get("source_kind") == "legacy-unsealed":
+            raise ActivationError("unsealed first adoption has no recorded rollback release; repair forward")
         if record.status == "rolling_back":
             return record
         if record.status == "rolled_back":

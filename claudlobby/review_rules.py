@@ -1,142 +1,11 @@
-#!/usr/bin/env python3
-"""True PR review state on a single-identity fleet — is the blocking verdict still live?
+"""Pure PR verdict and current-head assessment rules for task reviews.
 
-WHAT THIS ANSWERS, AND WHY NOTHING ELSE CAN
--------------------------------------------
-A PR sitting on Request Changes and a PR being actively revised are the **same
-GitHub state**: OPEN, green CI, MERGEABLE, identical colour. Claudlobby#1160 sat
-EIGHT DAYS carrying a blocking verdict because of exactly that. The gap is not
-attention; it is that the discriminator is not in any field GitHub serves here.
-
-``reviewDecision`` and ``reviewRequests`` are **DEAD FIELDS on this estate**, and
-that is structural rather than a configuration mistake:
-
-* One shared PAT means GitHub blocks ``--approve``/``--request-changes`` on
-  self-authored PRs, so verdicts land as prose via the same-identity fallback.
-  ``reviewDecision`` reads ``NO_REVIEW`` forever on a repo being reviewed hard.
-* Reviews route by **tmux dispatch**, not by GitHub's reviewer field — and per
-  Claudlobby#1062 a bot name must not be passed to a person-valued field at all.
-  So ``reviewRequests`` reads 0 whether a PR has three reviewers or none.
-* A same-identity verdict posted with ``gh pr comment`` is an ISSUE COMMENT and
-  carries **no** ``commit_id``. ``gh api .../reviews`` returns nothing for it.
-
-So the commit a reviewer actually looked at exists **only as prose they typed**.
-This module reads that prose. That is not a design preference; it is the only
-anchor that exists.
-
-THREE BOUNDS, STATED BY THE PROTOTYPE'S AUTHOR, AND (b) DECIDES WHAT A CLEAN RUN IS WORTH
------------------------------------------------------------------------------------------
-(b) FIRST, because it is the one that gets forgotten and then cited as coverage:
-
-**(b) Staleness is only detectable where the reviewer WROTE the SHA.** That is a
-CONVENTION on one fleet as of 2026-08-21, **not an enforced property**. A verdict
-with no anchor is ``NO-SHA-ANCHOR`` — *unknowable*, never *clean*. This is why
-the summary always prints the anchored-vs-total denominator and why an
-unanchored verdict moves the exit code off 0: a reader who greps for ``STALE``,
-finds nothing, and concludes nothing is stale must be wrong only when the tool
-actually checked.
-
-**(a) The verdict regex is SAMPLED from live formats, not a spec.** It has
-already drifted twice — a fleet adopted ``**[name] [VERDICT] approve**`` in an
-afternoon and every PR read UNPARSED; then ``**Blocking — do not merge yet.**``
-went unread because ``block`` was not a verdict token (fixed #1700).
-And it never read the vocabulary the library itself teaches: two of the four
-verdicts in ``library/protocols/review-flow.md`` (and
-``library/expertise/code-review.md``), ``Mechanical fixes`` and
-``Architectural concerns``, were not tokens until #1895. Both mean "do not
-merge yet", and on a 1,506-event corpus 29 of them read as nothing, as a block
-only by matching an unrelated later bold span, or once (Claudlobby#465) as
-APPROVE.
-
-The runtime guard is verbatim-on-unmatched so drift is *visible* — **but that
-claim was measured FALSE in its first form and is only true now because there
-are TWO channels.** The original guard keyed on the structural families the
-parser already covered, so it could report drift only inside vocabulary the
-parser understood: on a 44-PR corpus it fired **0 times against 3 real misses**.
-A guard derived from the classifier inherits the classifier's blind spot.
-``DECISION_SHAPED`` is therefore a deliberately WIDER lexicon, maintained apart
-from ``NORM`` and never derived from it — see the note beside it. The
-``tests/test_pr_review_state.py`` pinning tests are what stop the next edit
-narrowing either channel silently.
-
-**(c) One repo per invocation.** No cross-repo sweep.
-
-WHY THE LAST VERDICT CHRONOLOGICALLY IS THE WRONG ANSWER
---------------------------------------------------------
-The prototype took the newest verdict on the PR. On Claudlobby#1311 that is
-*correct by accident*: Request Changes 03:57Z then Approve 04:39Z, **same
-reviewer**, so latest-wins and per-reviewer agree. Reverse the reviewers — A
-blocks, B approves later — and latest-wins reports APPROVE over an unresolved
-block, which is the failure this tool exists to prevent, produced by the tool.
-
-Passing is not handling. Resolution is therefore **per reviewer**: each
-reviewer's own latest verdict stands, and a PR is blocked while *any* reviewer's
-latest is REQUEST-CHANGES. ``test_reversing_the_reviewers_flips_the_answer``
-pins it against the shape that the accidental pass hides.
-
-IDENTITY HAS TWO SOURCES AND THEY ARE NOT INTERCHANGEABLE
-----------------------------------------------------------
-A verdict header may name its author (``**[rajan] [VERDICT] approve**``); the
-report-back ledger observes who was dispatched (``lib/who-reviewed.py``). The
-header is **self-reported** — a bot copying a verdict template writes whatever
-the template said — while the ledger is **observed**. When both exist and
-disagree the answer is ``DISAGREEMENT``, never a winner: a wrong attribution
-makes a reader act, an absent one only makes them look, and the first is the
-original failure this estate already had.
-
-EXIT CODES — THE FAILURE DIRECTION IS IN THE CODE, NOT ONLY THE OUTPUT
------------------------------------------------------------------------
-``0`` is meant to be hard to earn, because a cheap 0 is the bug::
-
-    0  every verdict parsed, every verdict anchored, none stale, none blocking —
-       and no PR that HAD events yielded nothing
-    1  ACTIONABLE — a stale verdict, or a live blocking verdict
-    2  usage error
-    3  INCOMPLETE — the run could not answer for at least one PR (an unparsed
-       verdict header, i.e. vocabulary drift; an unanchored verdict; or a PR
-       carrying comment/review events from which NOTHING was recognised)
-
-**That last rung is #1700 and the sentence above it did not used to be true.**
-Every other rung keys on something the parser had already recognised, so a PR
-the tool could not read at all produced an empty flag list, an empty blocking
-list and exit ``0`` — reported identically to a genuinely clean PR. Recognition
-gated every finding, so a miss produced silence and silence scored clean, and
-the worse the miss the cleaner the score. Measured on a 44-PR corpus before the
-fix: 13 PRs exited 0, and **7 of those 13 carried events from which NOTHING
-was recognised.** (Nine had no verdict recognised, but two of those carried no
-events at all -- legitimately clean, not missed; see the discriminator below.)
-
-The matching defect in the OUTPUT was the coverage caveat, which was gated on
-``anchored < verdicts`` — at zero recognition, ``0 < 0``, false. The one
-sentence written to prevent a false-clean reading was suppressed precisely in
-the total-miss case; its volume tracked how well the run had already gone. It is
-now inverted and fires hardest where recognition is worst (``summary_line``).
-
-A PR with NO events is still legitimately ``0``: nothing was said, so nothing
-was missed. The discriminator is events-without-recognition, not emptiness —
-the same presence-not-emptiness line ``source_state`` draws.
-
-Precedence is 1 over 3: an actionable finding dominates an incomplete one,
-because the reader should act either way and acting is the stronger instruction.
-Expect 3 to be common today — most verdicts carry no anchor, so a genuinely
-clean answer is not available for them, and saying so is the point of (b).
-
-Standalone stdlib (``lib/who-reviewed.py`` and ``lib/dispatch-overdue.py``
-precedent). ``--payload-json`` is the offline seam that keeps every rule here a
-pure function, unit-testable with no network.
-
-  pr-review-state.py <owner/repo> [--pr N] [--limit N] [--json]
-                     [--payload-json FILE] [--attribute] [--plane-root DIR]
+These sampled formats preserve the historical review-state source interpretation.
+GitHub author is a shared account; observed bot identity is supplied per event.
 """
-
 from __future__ import annotations
 
-import argparse
-import json
-import os
 import re
-import subprocess
-import sys
 from datetime import datetime, timezone
 
 # --------------------------------------------------------------------------
@@ -386,7 +255,8 @@ def attribution_state(unattributed: list[dict], attribution: dict | None) -> dic
     info = dict(attribution or {})
     state = info.get("state", ATTR_NOT_ATTEMPTED)
     out = {"state": state, "error": info.get("error"), "epoch": info.get("epoch"),
-           "pre_epoch": 0, "undated": 0, "total": len(unattributed)}
+           "pre_epoch": 0, "undated": 0, "total": len(unattributed),
+           "ambiguous": info.get("ambiguous", 0)}
     epoch = parse_instant(out["epoch"] or "")
     if out["epoch"] and epoch is None:
         # #1709 review (vera). Null the FIELD, not just the local. The advice's
@@ -423,14 +293,17 @@ def attribution_advice(info: dict) -> str:
     """
     state, total = info["state"], info["total"]
     if state == ATTR_NOT_ATTEMPTED:
-        return "Re-run with --attribute to resolve it."
+        return "Observed attribution was not attempted; inspect the Plane report evidence."
     if state == ATTR_UNREACHABLE:
-        return (f"--attribute ran but the plane could not be read ({info['error']}); "
+        return (f"Plane attribution could not be read ({info['error']}); "
                 "whether these are attributable is UNKNOWN, which is not the same as "
                 "'nobody was attributable'.")
+    if info.get("ambiguous"):
+        return (f"Plane found multiple citing reviewers for {info['ambiguous']} verdict(s); "
+                "identity is AMBIGUOUS. Inspect the candidates; no reviewer was selected.")
     epoch, pre, undated = info["epoch"], info["pre_epoch"], info["undated"]
     if not epoch:
-        return ("--attribute ran and resolved nothing here; the plane's epoch could not "
+        return ("Plane attribution resolved nothing here; the plane's epoch could not "
                 f"be read ({info.get('error') or 'reason not reported'}), so whether these "
                 "are permanently unattributable cannot be determined from this run.")
     tail = f" ({undated} verdict(s) carry no parseable timestamp and are counted in neither)" if undated else ""
@@ -444,7 +317,7 @@ def attribution_advice(info: dict) -> str:
                 f"record ({epoch}) and are permanently unattributable (#1444); the other "
                 f"{dated - pre} verdict(s) are inside the epoch and simply have no citing "
                 f"report.{tail}")
-    return (f"--attribute ran and found no citing report for these {dated} verdict(s), which "
+    return (f"Plane attribution found no citing report for these {dated} verdict(s), which "
             f"are INSIDE the plane's epoch ({epoch}) — so this is a missing report, not an "
             f"impossible one, and a report filed later would resolve it.{tail}")
 
@@ -499,26 +372,25 @@ def first_bold(body: str) -> str:
 def events_from_payload(payload: dict) -> list[dict]:
     """Flatten ``gh pr view --json reviews,comments`` into time-ordered events.
 
-    Deliberately NOT ``who-reviewed.py::events_from_payload``, which truncates
-    each body to a 72-char excerpt for display. Every rule here reads the FULL
+    Every rule here reads the FULL
     body — the SHA anchor is usually a sentence in, so an excerpt would silently
     turn every anchored verdict into NO-SHA-ANCHOR. Same reason ``source_state``
     shares a classification and never a parse: the readers want different things
     from the same bytes.
     """
     events: list[dict] = []
-    for review in payload.get("reviews") or []:
+    for index, review in enumerate(payload.get("reviews") or []):
         events.append(
             {
-                "surface": "reviews",
+                "surface": "reviews", "_event_id": ("reviews", index),
                 "ts": review.get("submittedAt") or "",
                 "body": review.get("body") or "",
             }
         )
-    for comment in payload.get("comments") or []:
+    for index, comment in enumerate(payload.get("comments") or []):
         events.append(
             {
-                "surface": "comments",
+                "surface": "comments", "_event_id": ("comments", index),
                 "ts": comment.get("createdAt") or "",
                 "body": comment.get("body") or "",
             }
@@ -526,24 +398,30 @@ def events_from_payload(payload: dict) -> list[dict]:
     return sorted(events, key=lambda e: e["ts"])
 
 
-def verdict_events(events: list[dict], ledger_identity: dict | None = None) -> list[dict]:
+def verdict_events(events: list[dict], observed_identity: dict | None = None,
+                   *, require_observed: bool = False) -> list[dict]:
     """Every event carrying a parseable verdict, annotated.
 
-    ``ledger_identity`` maps an event timestamp to an observed reviewer name (from
-    ``who-reviewed.py``). Passed in rather than fetched so this stays pure.
+    ``observed_identity`` maps the stable event occurrence to a fleet-qualified
+    Plane actor. It is supplied from the same GitHub payload, never re-fetched.
     """
-    ledger_identity = ledger_identity or {}
+    observed_identity = observed_identity or {}
     out = []
     for event in events:
         verdict = parse_verdict(event["body"])
         if verdict is None:
             continue
         header_name = parse_header_identity(event["body"])
-        observed = ledger_identity.get(event["ts"])
-        if header_name and observed and header_name != observed:
-            who, identity_flag = DISAGREEMENT, f"header={header_name} ledger={observed}"
+        observed = observed_identity.get(event["_event_id"])
+        leaf = observed.rsplit("/", 1)[-1] if observed else None
+        if header_name and observed and header_name != leaf:
+            who, identity_flag = DISAGREEMENT, f"header={header_name} observed={observed}"
+        elif require_observed and not observed:
+            # A header is self-reported and has no fleet axis. It cannot
+            # resolve another event's block when Plane attribution is missing.
+            who, identity_flag = "UNKNOWN", None
         else:
-            who, identity_flag = (header_name or observed or "UNKNOWN"), None
+            who, identity_flag = (observed or header_name or "UNKNOWN"), None
         out.append(
             {
                 **event,
@@ -565,24 +443,24 @@ def resolve_per_reviewer(vevents: list[dict]) -> dict[str, dict]:
 
     An ``UNKNOWN`` reviewer is NOT collapsed into one bucket, because that would
     let one unattributable approve overwrite another unattributable block. Each
-    unattributed verdict keys on its own timestamp, so it can only ever resolve
+    unattributed verdict keys on its own occurrence, so it can only ever resolve
     itself — the conservative direction, and it keeps a block alive.
     """
     latest: dict[str, dict] = {}
     for event in sorted(vevents, key=lambda e: e["ts"]):
         key = event["reviewer"]
         if key in ("UNKNOWN", DISAGREEMENT):
-            key = f"{key}@{event['ts']}"
+            key = f"{key}@{event['surface']}:{event['_event_id'][1]}"
         latest[key] = event
     return latest
 
 
-def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: bool = False,
-              attribution: dict | None = None) -> dict:
+def assess_pr(payload: dict, observed_identity: dict | None = None, canonical: bool = False,
+              attribution: dict | None = None, *, require_observed: bool = False) -> dict:
     """The whole verdict for one PR. Pure; ``payload`` is one ``gh pr view`` blob."""
     head = payload.get("headRefOid") or ""
     events = events_from_payload(payload)
-    vevents = verdict_events(events, ledger_identity)
+    vevents = verdict_events(events, observed_identity, require_observed=require_observed)
     resolved = resolve_per_reviewer(vevents)
 
     flags: list[str] = []
@@ -626,7 +504,7 @@ def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: boo
     # symmetric: a false live block sends a reader to look, a false clear lets an
     # unresolved objection merge. But it is FLAGGED, so the reader is told the
     # answer is unresolvable rather than confirmed — and told the remedy, which is
-    # --attribute. Reporting a block without saying it might be self-resolved is
+    # recorded attribution. Reporting a block without saying it might be self-resolved is
     # how a tool built to end false confidence acquires its own.
     unattributed = [e for e in resolved.values() if e["reviewer"].startswith("UNKNOWN")]
     if len(unattributed) > 1 and len({e["verdict"] for e in unattributed}) > 1:
@@ -783,117 +661,6 @@ def missing_payload_fields(payload: dict) -> list[str]:
     return [f for f in PR_FIELD_LIST if f not in payload]
 
 
-def _gh(args: list[str]) -> dict | list:
-    proc = subprocess.run(["gh"] + args, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"gh failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}")
-    return json.loads(proc.stdout or "[]")
-
-
-def fetch_payload(repo: str, number: int) -> dict:
-    return _gh(["pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS])
-
-
-def fetch_open_numbers(repo: str, limit: int) -> list[int]:
-    rows = _gh(["pr", "list", "--repo", repo, "--state", "open", "--json", "number",
-                "--limit", str(limit)])
-    return [r["number"] for r in rows]
-
-
-def ledger_identity_for(repo: str, number: int, plane_root: str, *, module=None) -> dict:
-    """Observed reviewer names keyed by review timestamp, via ``lib/who-reviewed.py``
-    — the PLANE's report rows under *plane_root* (F18 closure R2b-1: the ledgers
-    are gone, and the first plane-only who-reviewed left this caller reaching for
-    its deleted loaders, so attribution failed soft on every PR — the spec lens).
-
-    Lazily imported and OPT-IN (``--attribute``): it needs a plane root, and a
-    module that reached for one unbidden could not be unit-tested without a fleet.
-    *module* is the seam the test drives (a preloaded who-reviewed stand-in).
-
-    Returns ``(mapping, error)``. It fails SOFT but never SILENT, and that shape is
-    scar tissue from writing it the other way first: the original swallowed every
-    exception and returned ``{}``, so a reversed tuple unpack —
-    ``discover_ledgers`` yields ``(fleet, path)``, not ``(path, fleet)`` — became a
-    clean-looking "no attribution available" instead of the ``IsADirectoryError``
-    it actually was. Losing attribution and being unable to look for it are
-    different facts with different remedies, which is ``source_state``'s rule; the
-    first version of this function broke it inside the module written to enforce it.
-    """
-    try:
-        if module is None:
-            module = _load_who_reviewed()
-        # (rows, why) — an unreachable plane is a reason, never an empty answer
-        rows, why = module.load_plane_rows(plane_root)
-        if why is not None:
-            return {}, f"the plane is unreachable: {why}"
-        events = module.fetch_events(repo, number)
-        # "bot" is present only on the MATCH path; UNKNOWN and AMBIGUOUS omit it,
-        # and neither may be turned into a name here — who-reviewed refuses a
-        # nearest-wins tiebreak deliberately and this must not re-add one.
-        return {
-            e["ts"]: e["bot"]
-            for e in module.attribute(events, rows, repo, number)
-            if e.get("bot")
-        }, None
-    except Exception as exc:
-        return {}, f"{type(exc).__name__}: {exc}"
-
-
-#: The earliest instant the plane holds ANYTHING. Not the earliest PR-CITING row,
-#: which is the tempting query and the wrong one: a plane whose first citing report
-#: happens to land late would report every earlier verdict as "predates the plane",
-#: collapsing the two states this change exists to separate. This bound supports
-#: exactly one sound claim, in one direction — before it, no report can exist, so
-#: attribution is impossible forever. After it, attribution merely found nothing,
-#: which is a different fact with a different remedy.
-PLANE_EPOCH_SQL = "SELECT MIN(occurred_at) FROM events"
-
-
-def plane_epoch(plane_root: str, *, module=None) -> tuple[str | None, str | None]:
-    """``(epoch, error)`` — the F18 clean-epoch boundary (#1444), read not assumed.
-
-    Derived from the db rather than pinned to the known 2026-09-20 cutover date,
-    because a hardcoded epoch is correct on exactly one host until the day someone
-    re-seeds a plane, and then it is confidently wrong with nothing to notice.
-
-    Fails SOFT but never SILENT, ``ledger_identity_for``'s shape: an unreachable
-    plane returns a reason, and the caller renders "cannot say" rather than
-    "permanently unattributable". Claiming permanence from an instrument that could
-    not be read is the exact over-claim #1699 is about, one level up.
-    """
-    try:
-        if module is None:
-            module = _load_who_reviewed()
-        pr = module._readers()
-        conn = pr.connect(plane_root)
-        try:
-            row = conn.execute(PLANE_EPOCH_SQL).fetchone()
-        finally:
-            conn.close()
-        epoch = row[0] if row else None
-        if not epoch:
-            return None, "the plane holds no events at all"
-        return epoch, None
-    except Exception as exc:
-        return None, f"{type(exc).__name__}: {exc}"
-
-
-def _load_who_reviewed():
-    """The lazy sibling-module import, in ONE place — two callers now."""
-    import importlib.util
-
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "who-reviewed.py")
-    spec = importlib.util.spec_from_file_location("who_reviewed", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-
-
 def render(results: list[dict], canonical: bool) -> str:
     lines = [
         "reviews[] UNION comments[]; reviewDecision and reviewRequests IGNORED — "
@@ -948,137 +715,3 @@ def render(results: list[dict], canonical: bool) -> str:
             )
     lines.append(summary_line(results))
     return "\n".join(lines)
-
-
-#: Real verdict text from Claudlobby#1311, kept HERE and not only in the test file
-#: on purpose. `tests/` runs in CI; this runs on the operator's machine at the
-#: moment they are reading the output. Prototype author's rationale, kept intact:
-#: validation-by-live-case cannot distinguish a clean estate from a dead detector,
-#: because both print nothing. A fixture fires whether or not the estate is dirty,
-#: so a live hit CONFIRMS the detector rather than being the only evidence it works.
-_SELFTEST_HEAD = "b27ffc2c16e9dc3972332a550925b33f1b6143b1"
-_SELFTEST_CASES = [
-    ("**Request Changes**", BLOCK, None),
-    ("**Approve**\n\nRe-reviewed at b27ffc2. Both changes address the round-1 "
-     "blocking finding directly.\n\n- swapped the pre-fix (7a49f7c) doc back in",
-     APPROVE, "b27ffc2"),
-    ("**Verdict: Ship it**", APPROVE, None),
-    # With the line above: the four verdicts library/protocols/review-flow.md
-    # teaches, verbatim. Two of them read as nothing until #1895.
-    ("**Verdict: Mechanical fixes**", BLOCK, None),
-    ("**Verdict: Request changes**", BLOCK, None),
-    ("**Verdict: Architectural concerns**", BLOCK, None),
-    ("**[branden] [VERDICT] approve** reviewed against `ee29406`", APPROVE, "ee29406"),
-    ("**Merge note**\n\nThe reviewer will approve once CI clears.\n\n**Status**",
-     None, None),
-]
-
-
-def selftest() -> None:
-    """Positive control on EVERY invocation, so tomorrow's silence is readable."""
-    for body, want_verdict, want_anchor in _SELFTEST_CASES:
-        got = parse_verdict(body)
-        assert got == want_verdict, f"SELFTEST: verdict {body[:32]!r} -> {got!r}, want {want_verdict!r}"
-        got_anchor = parse_anchor(body)
-        assert got_anchor == want_anchor, (
-            f"SELFTEST: anchor {body[:32]!r} -> {got_anchor!r}, want {want_anchor!r}")
-    # staleness both directions, against the real head
-    assert not _SELFTEST_HEAD.startswith("ee29406"), "SELFTEST: stale case is not stale"
-    assert _SELFTEST_HEAD.startswith("b27ffc2"), "SELFTEST: current case reads stale"
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("repo", help="owner/repo")
-    parser.add_argument("--pr", type=int, help="one PR; default is every open PR")
-    parser.add_argument("--limit", type=int, default=50)
-    parser.add_argument("--json", action="store_true", dest="as_json")
-    parser.add_argument(
-        "--payload-json",
-        help="read payload(s) from a file instead of calling gh; produce it with: "
-        + PAYLOAD_COMMAND,
-    )
-    parser.add_argument("--canonical", action="store_true",
-                        help="flag verdicts landing on .comments[]")
-    parser.add_argument("--attribute", action="store_true",
-                        help="cross-check header identity against the plane's report rows")
-    parser.add_argument("--plane-root", default=os.environ.get("CLAUDLOBBY_ROOT", ""),
-                        help="the CLAUDLOBBY_ROOT whose state/plane/plane.db holds the reports")
-    args = parser.parse_args(argv)
-    selftest()
-
-    if args.attribute and not args.plane_root:
-        print("--attribute needs --plane-root (or CLAUDLOBBY_ROOT)", file=sys.stderr)
-        return RC_USAGE
-
-    try:
-        if args.payload_json:
-            with open(args.payload_json) as handle:
-                loaded = json.load(handle)
-            payloads = loaded if isinstance(loaded, list) else [loaded]
-            for index, payload in enumerate(payloads):
-                if not isinstance(payload, dict):
-                    print(f"payload[{index}] is not an object", file=sys.stderr)
-                    return RC_USAGE
-                gaps = missing_payload_fields(payload)
-                if gaps:
-                    print(
-                        f"payload[{index}] is missing required field(s): "
-                        f"{', '.join(gaps)}\n  produce a valid one with:\n    "
-                        f"{PAYLOAD_COMMAND}",
-                        file=sys.stderr,
-                    )
-                    return RC_USAGE
-        elif args.pr:
-            payloads = [fetch_payload(args.repo, args.pr)]
-        else:
-            payloads = [fetch_payload(args.repo, n)
-                        for n in fetch_open_numbers(args.repo, args.limit)]
-    except (RuntimeError, OSError, json.JSONDecodeError) as exc:
-        print(f"cannot read PR data: {exc}", file=sys.stderr)
-        return RC_USAGE
-
-    # ONE epoch read per run, not per PR: it is a property of the plane, not of any
-    # PR, and re-deriving it per row would multiply the open while letting two rows
-    # in one run disagree about where the boundary is.
-    epoch, epoch_error = (None, None)
-    if args.attribute:
-        epoch, epoch_error = plane_epoch(args.plane_root)
-        if epoch_error:
-            print(f"warning: could not read the plane's epoch ({epoch_error}); "
-                  "unattributable rows cannot be reported as permanent",
-                  file=sys.stderr)
-
-    results = []
-    for payload in payloads:
-        identity = {}
-        attribution = {"state": ATTR_NOT_ATTEMPTED}
-        if args.attribute and payload.get("number"):
-            identity, attr_error = ledger_identity_for(
-                args.repo, payload["number"], args.plane_root
-            )
-            if attr_error:
-                print(
-                    f"warning: --attribute could not read the plane for "
-                    f"#{payload['number']} ({attr_error}); identity falls back to "
-                    "UNKNOWN, which is NOT the same as 'nobody was attributable'",
-                    file=sys.stderr,
-                )
-                attribution = {"state": ATTR_UNREACHABLE, "error": attr_error}
-            else:
-                attribution = {"state": ATTR_ATTEMPTED, "epoch": epoch,
-                               "error": epoch_error}
-        results.append(assess_pr(payload, identity, canonical=args.canonical,
-                                 attribution=attribution))
-
-    rc = exit_code_for(results)
-    if args.as_json:
-        print(json.dumps({"schema": 1, "repo": args.repo, "rc": rc,
-                          "summary": summary_line(results), "prs": results}, indent=2))
-    else:
-        print(render(results, args.canonical))
-    return rc
-
-
-if __name__ == "__main__":
-    sys.exit(main())

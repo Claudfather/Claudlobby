@@ -290,7 +290,9 @@ def test_unlinked_report_routes_to_own_manager_without_task_effect(active, monke
     _native(monkeypatch, calls, operation="send_unlinked_report")
     args = ["--root", str(root), "--json", "fleet", "reports", "submit",
             "--status", "completed", "--summary", "Private unlinked result",
-            "--artifact", "https://example.test/evidence", "--request-id", str(uuid4())]
+            "--artifact", "https://example.test/evidence",
+            "--pr", "https://github.com/o/r/pull/7", "--pr-role", "reviewed",
+            "--request-id", str(uuid4())]
     assert main(args + ["--percent", "50"]) == 2
     invalid = json.loads(capsys.readouterr().out)
     assert invalid["command"] == "fleet.reports.submit" and calls == []
@@ -311,6 +313,12 @@ def test_unlinked_report_routes_to_own_manager_without_task_effect(active, monke
                            "WHERE msg_id=?", (first["data"]["message_id"],)).fetchone()
         assert row[:3] == ("report", None, None)
         assert json.loads(row[3])["artifacts"] == ["https://example.test/evidence"]
+        marker = conn.execute("SELECT detail FROM events WHERE event='report_status'").fetchone()
+        assert marker is not None
+        data = json.loads(marker[0])
+        assert data["pr_url"] == "https://github.com/o/r/pull/7"
+        assert data["pr_role"] == "reviewed"
+        assert data["msg_id"] == first["data"]["message_id"]
 
 
 def test_help_and_syntax_do_not_import_message_effect_owner(monkeypatch, capsys):

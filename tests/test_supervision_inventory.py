@@ -179,6 +179,24 @@ def test_empty_bootstrap_refuses_unknown_catalog_and_prior_selection(tmp_path):
         collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner, bootstrap_empty=True)
 
 
+def test_unsealed_darwin_source_keeps_exact_unit_ownership_without_release_claim(tmp_path):
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root)}
+    installed = obs.add("com.legacy.owned.plist")
+    obs.declarations[0] = replace(obs.declarations[0], release_id="")
+    with pytest.raises(InventoryError, match="incomplete declaration"):
+        obs.collect()
+    inventory = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                   runner=obs.runner, legacy_source=True).require_complete()
+    assert inventory.legacy_source is True
+    assert inventory.units[0].installed[0].content == installed.read_bytes()
+    installed.write_bytes(installed.read_bytes() + b"\n")
+    with pytest.raises(InventoryError, match="installed bytes differ"):
+        collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                           runner=obs.runner, legacy_source=True).require_complete()
+
+
 def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):
     obs = Observations(tmp_path)
     obs.add("host.service")

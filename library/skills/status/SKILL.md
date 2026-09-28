@@ -29,11 +29,17 @@ Anything failing both tests is context, and context goes in a pointer.
 claudlobby --fleet "$FLEET_NAME" brief --bot "$BOT_NAME" --json
 ```
 
-`brief` is the fleet's one read door. **Do not hand-roll greps over `state/` — and there are no event files to grep: the events are on the plane** — a
+The schema-1 result carries the schema-2 document in `data.brief`; check `ok`
+before reading it. `brief` is the fleet's one read door. **Do not hand-roll greps over `state/` — and there are no event files to grep: the events are on the plane** — a
 hand-rolled reader silently disagrees with the framework's own, and yours is the one that is wrong.
 
-It gives you: `mission`, `dispatches` (`open`/`overdue`/`orphaned`), `workstreams`, `reports.unacked`,
+It gives you: `mission`, `work.items` (canonical open task and assignment IDs,
+including queued manager intake), `work.issues` (unresolved history),
+assignment-keyed `work.items[].attention` (including overdue/orphaned or an
+explicit unknown), `workstreams`, `reports.unacked`,
 `alerts`, and — load-bearing — `degraded[]`.
+For current escalations use `claudlobby fleet inbox`; an empty brief work view
+does not certify that no alert or question needs attention.
 
 If the command fails or the fleet has no brief, **say so and stop.** A readout assembled from a door
 that would not open is not a readout.

@@ -13,7 +13,7 @@
 #   - the two-variant fixture, composed by real `claudlobby generate`
 #   - the paired task x rep x variant run matrix
 #   - the two gated token axes (protocol_sensitive + cost_weighted_total) via
-#     lib/transcript-usage.py (#729 stage A)
+#     claudlobby.transcript_usage (#729 stage A)
 #   - the pass-bar / verdict computation (cost-weighted CO-PRIMARY,
 #     per-task-type, INCONCLUSIVE-never-PASS)
 # The task CONTENT and the quality rubric are F2-ratified — they slot behind the
@@ -34,12 +34,9 @@
 # threshold T and a stub quality scorer, the harness can never emit PASS. That is
 # the intended safety posture — the skeleton cannot green a real gate pre-F2.
 #
-# KNOWN BLOCKER for real runs (surfaced by stage B): transcript-usage.py sums
-# per-line, but interactive Claude Code writes one assistant message as N
-# content-block lines EACH repeating message.usage, so real transcripts
-# over-count. A --dedup-by-message-id mode belongs in the parser OWN PR (it moves
-# the published stage-A read-out). Dry-run is unaffected — synth writes one line
-# per message.
+# Real interactive Claude Code may repeat one assistant message's flat usage
+# across content-block lines. The accounting owner deduplicates a known
+# session/message ID within its transcript; unkeyed rows remain disclosed.
 #
 # Opt-in cost when real (post-F2): ~36-60 short real sessions per full run.
 set -euo pipefail
@@ -798,7 +795,7 @@ suc_main() {
 
 # --- verdict computation: thin wrapper over lib/ab-comms-verdict.py ----------
 # The pass-bar / bootstrap / verdict logic is a standalone stdlib module (sibling
-# to transcript-usage.py, following the dispatch-overdue.py precedent) so it is
+# to the transcript accounting owner, following the dispatch-overdue.py precedent) so it is
 # directly unit-testable and F2 can extend the threshold + scorer there. This
 # wrapper only threads the harness pins into it.
 compute_verdict() {  # $1 results.jsonl  $2 out.json  $3 reps_now
@@ -1002,13 +999,10 @@ YAML
     _generate_or_die "$ROOT" "the A/B fixture"
 }
 
-# --- token measurement: the two gated axes via transcript-usage.py -----------
-# NOTE: on REAL interactive transcripts this over-counts (per-line usage
-# repetition); see the header blocker. Dry-run synth writes one line per message,
-# so it is exact here.
+# --- token measurement: the two gated axes via the shared accounting owner ---
 measure_transcript() {  # $1 path (file or dir) -> "in out cc cr ps cwt turns msgs model"
     local path="$1" j msgs
-    j="$(python3 "$LIB/transcript-usage.py" --json "$path" 2>/dev/null)" || return 1
+    j="$(PYTHONPATH="$(dirname "$LIB")${PYTHONPATH:+:$PYTHONPATH}" python3 -m claudlobby.transcript_usage --json "$path" 2>/dev/null)" || return 1
     [ -n "$j" ] || return 1
     if [ ! -s "$ROOT/weights.json" ]; then
         printf '%s' "$j" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("weights",{})))' \

@@ -93,7 +93,12 @@ def _admit(store: ActivationStore, activation_id: str, manifest: MigrationManife
             or body["intent"]["release_id"] != manifest.target["release_id"]
             or body["evidence"].get("queues_classified") != manifest.manifest_id[2:]):
         raise MigrationApplyError("activation does not bind this reviewed migration manifest")
-    if body["intent"]["source_release_id"] != manifest.source["release_id"]:
+    legacy = manifest.source.get("kind") == "legacy-unsealed"
+    if legacy:
+        if (body["intent"].get("source_kind") != "legacy-unsealed"
+                or body["intent"].get("source_release_id") is not None):
+            raise MigrationApplyError("migration source is not the recorded legacy source")
+    elif body["intent"]["source_release_id"] != manifest.source["release_id"]:
         raise MigrationApplyError("migration source is not the recorded source release")
     if manifest.blockers:
         raise MigrationApplyError("migration remains blocked: " + "; ".join(manifest.blockers))
@@ -181,7 +186,8 @@ def _backup(source: sqlite3.Connection, path: Path) -> None:
 def _save_backup(store, activation_id, manifest, body, backup_path):
     # Until a complete backup is journaled, source bytes/version must still
     # match the reviewed preview. No migration can have been admitted yet.
-    source_release = read_release(store.root, manifest.source["release_id"])
+    source_release = (None if manifest.source.get("kind") == "legacy-unsealed" else
+                      read_release(store.root, manifest.source["release_id"]))
     target_release = read_release(store.root, manifest.target["release_id"])
     fresh = build_migration_manifest(
         store.root, source_release, target_release,

@@ -374,7 +374,7 @@ def _coerce_project(key: Any, d: Any) -> ProjectConfig:
 
 # A derived project key must satisfy every slug gate the estate already
 # ships, or the derivation hands out a key the doors refuse: the validator's
-# _PROJECT_KEY_RE, lib/checkin-contract.py's SLUG_RE and dispatch-task.sh's
+# _PROJECT_KEY_RE, checkin_contract.SLUG_RE and dispatch-task.sh's
 # --project check are three independent copies of ^[a-z][a-z0-9-]*$.
 _DERIVED_SLUG_PREFIX = "p-"
 
@@ -819,7 +819,7 @@ class WorkstreamsConfig:
     """fleet.workstreams knobs — the anti-rot bounds for the P5 registry.
 
     max_active: the manager-attention-span cap on concurrently active
-    workstreams (`workstream-update.sh open` refuses past it). lease_days:
+    workstreams (the canonical workstream open/unblock operations refuse past it). lease_days:
     how long a workstream keeps its slot without progress before the
     (follow-up PR) fleet-pulse stall check will flag it. Both compose into
     every bot.conf as WORKSTREAM_MAX_ACTIVE / WORKSTREAM_LEASE_DAYS so the

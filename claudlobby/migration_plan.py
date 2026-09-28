@@ -251,7 +251,11 @@ def _classify(request: dict, *, raw: bool, source, target) -> dict:
     if not target.envelope.supports(version):
         raise ValueError(f"target cannot read pending envelope version: {version!r}")
     category = "ordinary_telemetry"
-    if family in ("work_item", "assignment", "task"):
+    if family == "workstream_event" and "waiting_on" in payload:
+        # Optional on the new wire, but an older strict payload codec cannot
+        # replay a pending blocked-wait event. Drain or name a replay decision.
+        category = "additive_workstream_wait"
+    elif family in ("work_item", "assignment", "task"):
         category = "conditional_legacy_task_mutation"
     elif (family == "transmission" or family == "communication" and (
             payload.get("work_item_id") or payload.get("assignment_id")
@@ -346,7 +350,7 @@ def _queues(root: Path, source, target) -> tuple[dict, list[str]]:
             blockers.extend(f"{item['path']}: {issue}" for issue in item["issues"])
             if queue != "quarantine" and any(r["classification"] != "ordinary_telemetry"
                                              for r in item["records"]):
-                blockers.append(f"{item['path']}: unresolved legacy task records need a drain/quarantine decision")
+                blockers.append(f"{item['path']}: non-telemetry pending records need a drain/quarantine decision")
     return result, blockers
 
 
@@ -363,19 +367,30 @@ def _binding(release: ReleaseManifest) -> dict:
             "runtime_sha256": release.runtime_sha256, "versions": release.compatibility.to_dict()}
 
 
-def build_migration_manifest(data_root: Path, source: ReleaseManifest,
+def build_migration_manifest(data_root: Path, source: ReleaseManifest | None,
                              target: ReleaseManifest, *, initialize_empty: bool = False) -> MigrationManifest:
-    """Inventory named releases and data; initialization intent never creates a DB."""
+    """Inventory releases and data; None denotes an observed unsealed source.
+
+    First adoption asserts no old executable compatibility or rollback path.
+    Pending legacy batches are refused rather than guessed or discarded.
+    """
     if type(initialize_empty) is not bool:
         raise ValueError("initialize_empty must be an explicit boolean")
     root = Path(data_root).expanduser().resolve()
-    source, target = _release(root, source), _release(root, target)
+    source, target = (_release(root, source) if source is not None else None), _release(root, target)
     database, audit, blockers = _database(root, initialize_empty)
-    queues, queue_blockers = _queues(root, source.compatibility, target.compatibility)
+    if source is None and (initialize_empty or database["state"] != "ok"):
+        blockers.append("legacy adoption requires an existing readable Plane database")
+    queues, queue_blockers = _queues(root, (source or target).compatibility, target.compatibility)
     blockers.extend(queue_blockers)
+    if source is None and any(row["file_count"] != 0 for row in queues.values()):
+        blockers.append("legacy adoption requires empty pending, inflight, staged and quarantine queues")
     receipts, receipt_blockers = _receipts(root)
     blockers.extend(receipt_blockers)
-    operational = {"receipts": receipts, "task_model_versions": database["task_model_versions"]}
+    operational = {"receipts": receipts, "task_model_versions": database["task_model_versions"],
+                   "wire_additions": [{"family": "workstream_event", "field": "waiting_on",
+                                       "location": "event.detail", "classification": "optional_metadata",
+                                       "old_reader": "blocked row remains visible with unknown addressee"}]}
     observed = {"receipt_format": receipts["versions"],
                 "task_model": operational["task_model_versions"]}
     for name, versions in observed.items():
@@ -401,31 +416,36 @@ def build_migration_manifest(data_root: Path, source: ReleaseManifest,
     if current is not None and current > goal:
         blockers.append("forward-only SQL owner cannot downgrade the current database")
     for name, version in target.compatibility.write_versions.items():
-        if name != "schema" and version != source.compatibility.write_versions[name]:
+        if source is not None and name != "schema" and version != source.compatibility.write_versions[name]:
             if (name in observed and source.compatibility.write_versions[name] == 0 and version == 1
                     and observed[name] is not None
                     and all(getattr(target.compatibility, name).supports(v) for v in (0, 1))
                     and (name != "task_model" or not any(b.startswith("task audit:") for b in blockers))):
                 continue  # Implemented decoders read both; no conversion or row rewrite.
             blockers.append(f"explicit {name} conversion/rehearsal required before changing its write version")
-    after_sql = {**source.compatibility.write_versions, "schema": max(current or 0, goal)}
+    after_sql = {**(source or target).compatibility.write_versions, "schema": max(current or 0, goal)}
     for name, versions in observed.items():
         if versions is not None:
             after_sql[name] = max(versions)
     after_writes = {**target.compatibility.write_versions, "schema": max(current or 0, goal)}
-    sql_floor = _readability_blockers(source.compatibility, after_sql, operational)
-    write_floor = _readability_blockers(source.compatibility, after_writes, operational)
+    sql_floor = (_readability_blockers(source.compatibility, after_sql, operational)
+                 if source is not None else ("unsealed legacy runtime is not a rollback target",))
+    write_floor = (_readability_blockers(source.compatibility, after_writes, operational)
+                   if source is not None else ("unsealed legacy runtime is not a rollback target",))
     rollback = {"after_sql_versions": after_sql, "after_target_write_versions": after_writes,
                 "source_after_sql_blockers": sql_floor, "source_after_target_writes_blockers": write_floor,
-                "compatible_recovery_release_required_before_sql": bool(sql_floor),
+                "compatible_recovery_release_required_before_sql": bool(sql_floor) and source is not None,
                 "backup_restoration_over_accepted_work_permitted": False}
     steps = ("repeat database/task/queue/receipt inventory under the host activation lock after quiescence",
              "resolve named conditional records under old semantics; retain ordinary telemetry for validated replay",
-             *(("name a state-compatible recovery release before irreversible SQL",) if sql_floor else ()),
+             *(("name a state-compatible recovery release before irreversible SQL",) if sql_floor and source is not None else ()),
              "record a consistent database backup and explicit migration/recovery approval",
              *(f"explicit SQL apply {m['version']:04d}, sha256 {m['sha256']}" for m in migrations if m["proposed"]),
              "verify schema, task linkage, cursor preservation and pending formats before candidate daemon start")
-    return MigrationManifest(str(root), _binding(source), _binding(target), database, audit,
+    binding = (_binding(source) if source is not None else
+               {"kind": "legacy-unsealed", "root": str(root), "user_version": current,
+                "database_files": database["files"]})
+    return MigrationManifest(str(root), binding, _binding(target), database, audit,
                              tuple(migrations), queues, operational, tuple(sorted(set(blockers))), steps, rollback)
 
 
@@ -438,11 +458,17 @@ def verify_pending_queues(data_root: Path, manifest: MigrationManifest) -> None:
     root = Path(data_root).expanduser().resolve()
     if str(root) != manifest.data_root:
         raise ValueError("migration manifest belongs to another data root")
-    source = read_release(root, manifest.source["release_id"])
+    legacy = manifest.source.get("kind") == "legacy-unsealed"
+    source = None if legacy else read_release(root, manifest.source["release_id"])
     target = read_release(root, manifest.target["release_id"])
-    if _binding(source) != manifest.source or _binding(target) != manifest.target:
+    legacy_binding = {"kind": "legacy-unsealed", "root": str(root),
+                      "user_version": manifest.database["user_version"],
+                      "database_files": manifest.database["files"]}
+    if ((legacy and manifest.source != legacy_binding)
+            or (not legacy and _binding(source) != manifest.source)
+            or _binding(target) != manifest.target):
         raise ValueError("migration release bindings changed")
-    queues, blockers = _queues(root, source.compatibility, target.compatibility)
+    queues, blockers = _queues(root, (source or target).compatibility, target.compatibility)
     if _json(queues) != _json(manifest.queues):
         raise ValueError("pending queue inventory changed; repeat the migration preview")
     if blockers:

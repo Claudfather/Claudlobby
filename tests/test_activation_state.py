@@ -39,6 +39,26 @@ def test_lock_and_unfinished_intent_prevent_competing_cutovers(proposal):
     assert a.read_selection(builder.root) is None
 
 
+def test_first_adoption_records_unsealed_source_without_inventing_release(proposal):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    with a.locked_activation(builder.root) as store:
+        record = store.prepare("adopt", plan, recovery_release_id=plan.release_id,
+                               enrollment_digest="1" * 64, legacy_source=True)
+        assert record.body["intent"]["source_kind"] == "legacy-unsealed"
+        assert record.body["intent"]["source_release_id"] is None
+        assert store.prepare("adopt", plan, recovery_release_id=plan.release_id,
+                             enrollment_digest="1" * 64, legacy_source=True) == record
+        with pytest.raises(a.ActivationError, match="repair forward"):
+            store.begin_rollback("adopt")
+        with pytest.raises(a.ActivationError, match="different intent"):
+            _prepare(store, plan, "adopt")
+        with pytest.raises(a.ActivationError, match="cannot claim a selected source"):
+            store.prepare("other", plan, recovery_release_id=plan.release_id,
+                          source_release_id=plan.release_id, enrollment_digest="1" * 64,
+                          legacy_source=True)
+
+
 def test_interrupted_switch_reconciles_exact_selection_without_resuming(proposal, monkeypatch):
     builder, _, _ = proposal
     plan = builder.seal()

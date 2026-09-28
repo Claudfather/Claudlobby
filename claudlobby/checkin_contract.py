@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-# lib/checkin-contract.py
 """The check-in decision record contract (manager check-in spec §7), schema 1.
 
-Stdlib only (the dispatch-overdue.py precedent): checkin-record.sh pipes the
-manager's decision JSON through `normalize` before anything reaches the plane,
+Stdlib only: the public record command passes the manager's decision JSON
+through `normalize` before anything reaches the Plane,
 so a malformed decision is refused AT THE DOOR with every reason named, never
 landed as a row no reader can join.
 
-    python3 checkin-contract.py --checkin-id ck_<32hex> < decision.json
-    exit 0 ok (normalized JSON on stdout) / 2 contract violation (reasons on stderr)
-
-The DOOR mints the id (lib-common's plane_mint_id, the one mint every door
-uses); this module validates its shape and never mints. Schema 1 is the record
+The operation supplies the id; this module validates its shape and never mints.
+Schema 1 is the record
 ONE hand-equipped manager can produce this chunk: actions dispatch | ask |
 nothing. Later chunks ADD (propose, sprint, focus fields) as schema 2. Every
 count in `inputs_seen` and `delta` is int | null -- null means "could not
 measure" and is never collapsed to 0, because an unchanged delta is the skill's
 primary argument for silence -- and a MISSING count is a defect, not a 0.
 `inputs_seen.considered` is the losers list: a selector can only be judged
-against what it did NOT pick (lib/sprint-selection-record.py, #974), so on
+against what it did NOT pick (checkin_selection.py, #974), so on
 `dispatch` it must be non-empty, and on `nothing` whenever `issues_seen` is a
 positive count (the nothing rows are the population an inert verdict is
 diagnosed from); `issues_seen` beside `issues_considered` is
@@ -33,9 +29,7 @@ true requires action ask (--raised counts on it); with `mission` unavailable,
 """
 from __future__ import annotations
 
-import json
 import re
-import sys
 
 SCHEMA = 1
 ACTIONS = ("dispatch", "ask", "nothing")
@@ -78,7 +72,7 @@ def normalize(obj, *, checkin_id: str | None = None) -> dict:
 
     cid = checkin_id or obj.get("checkin_id")
     if not cid:
-        bad.append("checkin_id required (the door mints it: plane_mint_id ck)")
+        bad.append("checkin_id required (the recording operation supplies it)")
     elif not ID_RE.match(str(cid)):
         bad.append("checkin_id must be ck_<32 hex>")
     out["checkin_id"] = cid
@@ -180,30 +174,3 @@ def normalize(obj, *, checkin_id: str | None = None) -> dict:
     if bad:
         raise ContractError(bad)
     return out
-
-
-def main(argv: list[str]) -> int:
-    checkin_id = None
-    if len(argv) == 3 and argv[1] == "--checkin-id":
-        checkin_id = argv[2]
-    elif len(argv) != 1:
-        print("usage: checkin-contract.py [--checkin-id ck_<32hex>] < decision.json", file=sys.stderr)
-        return 2
-    try:
-        obj = json.load(sys.stdin)
-    except json.JSONDecodeError as exc:
-        print(f"checkin-contract: not JSON: {exc}", file=sys.stderr)
-        return 2
-    try:
-        out = normalize(obj, checkin_id=checkin_id)
-    except ContractError as exc:
-        for r in exc.reasons:
-            print(f"checkin-contract: {r}", file=sys.stderr)
-        return 2
-    json.dump(out, sys.stdout, ensure_ascii=False, separators=(",", ":"))
-    sys.stdout.write("\n")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv))

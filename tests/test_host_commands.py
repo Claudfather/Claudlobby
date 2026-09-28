@@ -91,6 +91,33 @@ def test_activate_freezes_one_id_and_delegates_exact_reviewed_candidate(candidat
     assert result["data"]["recording"] == "committed" and result["release_id"] == release.release_id
 
 
+def test_explicit_first_adoption_routes_to_legacy_owner_without_changing_cold_default(
+        candidate, monkeypatch, capsys):
+    root, release, plan, directory = candidate
+    calls = []
+
+    def adopt(selected_root, activation_id, plan_id, install_directory):
+        calls.append((selected_root, activation_id, plan_id, install_directory))
+        with state.locked_activation(root) as store:
+            store.prepare(activation_id, plan, recovery_release_id=release.release_id,
+                          enrollment_digest="1" * 64, legacy_source=True)
+            for step in state.STEPS:
+                store.begin(activation_id, step)
+                record = (store.select(activation_id) if step == "selection_switched" else
+                          store.complete(activation_id, step, evidence_digest="2" * 64))
+        return record
+
+    monkeypatch.setattr(activation, "adopt_existing_activation", adopt)
+    monkeypatch.setattr(activation, "bootstrap_activation", lambda *_: pytest.fail("cold owner called"))
+    result = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                           "--install-directory", str(directory), "--adopt-existing"])
+    assert calls == [(root, result["request_id"], plan.plan_id, directory)]
+    record = state.read_activation(root, result["request_id"])
+    assert record.status == "active"
+    assert record.body["intent"]["source_kind"] == "legacy-unsealed"
+    assert record.body["intent"]["source_release_id"] is None
+
+
 def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(candidate, monkeypatch, capsys):
     root, release, plan, directory = candidate
     calls = []
@@ -107,7 +134,7 @@ def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(c
     monkeypatch.delenv("BOT_ID")
     denied = call(capsys, argv, 4)
     assert len(calls) == 1 and denied["data"]["activation_id"] == calls[0][1]
-    assert "host status" in denied["error"]["hint"] and "does not implement upgrades or recovery" in denied["error"]["hint"]
+    assert "host status" in denied["error"]["hint"] and "does not recover an interrupted activation" in denied["error"]["hint"]
     assert "SECRET-value" not in json.dumps(denied) and snapshot(root) == before
 
 

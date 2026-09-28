@@ -88,7 +88,8 @@ Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the tabl
   this host: `history_size` is **0** on every bot pane while `history-limit`
   reads `2000`, and `capture-pane -S -` returns exactly `pane_height` lines —
   the current frame, with nothing behind it. There is no durable trace either;
-  `lib/transcript-usage.py` measures spend, not position against a ceiling.
+  `claudlobby --json fleet usage --since 24h` reads covered transcript token
+  counts, not position against a provider ceiling.
   **A limit that actually trips announces itself** and needs no instrument —
   that is the signal to act on. Anything short of it is a *sighting*: label it
   as one, use it to raise a question, never as a measurement — the frame is

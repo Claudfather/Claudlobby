@@ -2,6 +2,7 @@
 
 import builtins
 import json
+from pathlib import Path
 import sqlite3
 
 import pytest
@@ -97,6 +98,84 @@ def test_empty_or_absent_plane_and_invalid_generated_origin_never_initialize(act
     monkeypatch.delenv("FLEET_NAME")
     db_file(root).rename(root / "plane-db-offline")
     assert _call(capsys, root, "task", "list", expected=6)["error"]["code"] == "unavailable"
+    assert not db_file(root).exists()
+
+
+def test_task_reviews_reads_host_evidence_without_writing_and_refuses_plane_outage(active, monkeypatch, capsys):
+    root, host = active
+    from claudlobby import review_queries, review_rules
+    from claudlobby.plane.emit_api import emit_batch
+
+    url = "https://github.com/org/repo/pull/1046"
+    ts = "2026-09-02T14:00:00Z"
+    doc = Path(__file__).resolve().parents[1] / "library/expertise/code-review.md"
+    examples = [line for line in doc.read_text().splitlines()
+                if "<" not in line and review_rules.parse_verdict(line) == review_rules.APPROVE]
+    assert examples, "the documented approve header must reach the public review reader"
+    doc_header = examples[0]
+    anchor = review_rules.parse_anchor(doc_header)
+    assert anchor and review_rules.parse_header_identity(doc_header) == "alex"
+    doc_head = anchor + "0" * (40 - len(anchor))
+    emit_batch(root, [
+        {"event_type": "system", "emitter": "report-back", "fleet": "other",
+         "source_ref": f"report-back:msg_{'8':0>32}", "occurred_at": ts,
+         "payload": {"event": "report_status", "subject_kind": "actor",
+                     "subject": "bot:other/worker",
+                     "data": {"status": "completed", "pr_url": url,
+                              "pr_role": "reviewed"}}},
+        {"event_type": "system", "emitter": "report-back", "fleet": "example",
+         "source_ref": f"report-back:msg_{'9':0>32}", "occurred_at": ts,
+         "payload": {"event": "report_status", "subject_kind": "actor",
+                     "subject": "bot:example/worker",
+                     "data": {"status": "completed", "pr_url": url,
+                              "pr_role": "authored"}}},
+        {"event_type": "system", "emitter": "report-back", "fleet": "other",
+         "source_ref": f"report-back:msg_{'a':0>32}", "occurred_at": "2026-09-27T00:00:08Z",
+         "payload": {"event": "report_status", "subject_kind": "actor",
+                     "subject": "bot:other/alex",
+                     "data": {"status": "completed",
+                              "pr_url": "https://github.com/org/repo/pull/1913",
+                              "pr_role": "reviewed"}}},
+    ])
+    head = "b27ffc2c16e9dc3972332a550925b33f1b6143b1"
+    payload = {"number": 1046, "title": "Review", "headRefOid": head,
+               "reviews": [{"submittedAt": "2026-09-02T13:59:52Z",
+                            "body": "**[worker] [VERDICT] request-changes** reviewed against b27ffc2"}],
+               "comments": []}
+    doc_payload = {"number": 1913, "title": "Doc-sourced fixture", "headRefOid": doc_head,
+                   "reviews": [{"submittedAt": "2026-09-27T00:00:00Z", "body": doc_header}],
+                   "comments": []}
+
+    def github(args):
+        assert args[0:2] == ["pr", "view"]
+        assert args[3:] == ["--repo", "org/repo", "--json",
+                            review_queries.review_rules.PR_FIELDS]
+        return {"1046": payload, "1913": doc_payload}[args[2]]
+
+    monkeypatch.setattr(review_queries, "_gh", github)
+    with sqlite3.connect(db_file(root)) as conn:
+        before = (conn.execute("SELECT COUNT(*) FROM identity_registry").fetchone()[0],
+                  conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
+    result = _call(capsys, root, "task", "reviews", "org/repo", "--pr", "1046")
+    data = result["data"]
+    assert result["release_id"] == host.release.release_id
+    assert data["caller_fleet"] == "example" and data["host_scope"] == "all fleets in the selected root"
+    assert data["rows"] == 2 and data["fleets"] == ["other"]
+    assert data["attribution_events"][0]["events"][0]["actor"] == "bot:other/worker"
+    assert data["prs"][0]["blocking"] and data["merge_authorization"] is False
+    doc_result = _call(capsys, root, "task", "reviews", "org/repo", "--pr", "1913")["data"]
+    assessed = doc_result["prs"][0]
+    assert assessed["resolved"]["bot:other/alex"]["verdict"] == review_rules.APPROVE
+    assert assessed["resolved"]["bot:other/alex"]["anchor"] == anchor
+    assert assessed["blocking"] == assessed["stale"] == assessed["unanchored"] == []
+    assert doc_result["attribution_events"][0]["events"][0]["actor"] == "bot:other/alex"
+    with sqlite3.connect(db_file(root)) as conn:
+        after = (conn.execute("SELECT COUNT(*) FROM identity_registry").fetchone()[0],
+                 conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
+    assert after == before
+    db_file(root).rename(root / "plane-db-offline")
+    assert _call(capsys, root, "task", "reviews", "org/repo", "--pr", "1046",
+                 expected=6)["error"]["code"] == "unavailable"
     assert not db_file(root).exists()
 
 

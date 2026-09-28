@@ -65,6 +65,7 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     # re-entering through its own remedy. Closed Literal, so no cap.
     ("task", "pr_attribution_withheld"): {"class": "METADATA"},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
+    ("workstream_event", "waiting_on"): {"class": "METADATA"},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
     ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail
     ("system", "data"): {"class": "DIAGNOSTIC", "cap": 16_384},
@@ -188,6 +189,10 @@ METRIC_NAMES: dict[str, dict] = {
     "host.undervoltage": {"unit": "bool", "description": "Pi undervoltage flag"},
     "host.boot_time": {"unit": "iso8601", "description": "last boot instant"},
     "host.job_ran": {"unit": "run", "description": "one sample per machinery run"},
+    "host.plane_wal_bytes": {"unit": "B",
+                             "description": "size of the plane's WAL; over"
+                                            " 4 MiB means a reader is holding"
+                                            " a snapshot (#1905)"},
     "vault.behind": {"unit": "commits", "description": "behind upstream"},
     "vault.ahead": {"unit": "commits", "description": "ahead of upstream"},
     "vault.last_fetch_age_s": {"unit": "s", "description": "age of last fetch"},

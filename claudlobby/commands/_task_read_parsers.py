@@ -11,6 +11,12 @@ def _dispatch(args):
                    json_output=args.json)
 
 
+def _review_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".task_reviews", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(children, verb, command, help):
     parser = children.add_parser(verb, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -27,6 +33,13 @@ def register_task_read_subparsers(sub, task_children):
     listing.add_argument("--cursor", metavar="TOKEN", help="Continue the same scope and filters")
     showing = _route(task_children, "show", "task.show", "Show one canonical task ID")
     showing.add_argument("task_id", metavar="TASK_ID")
+
+    reviews = task_children.add_parser("reviews", help="Read current PR verdicts and host-wide review attribution")
+    reviews.add_argument("repo", metavar="OWNER/REPO")
+    reviews.add_argument("--pr", type=int, metavar="N", help="Inspect one PR; default is open PRs")
+    reviews.add_argument("--limit", type=int, default=50, metavar="N", help="Maximum open PRs, 1 to 1000")
+    reviews.add_argument("--json", action="store_true", help="One schema-1 result object")
+    reviews.set_defaults(func=_review_dispatch, public_command="task.reviews")
 
     assignment = sub.add_parser("assignment", help="Read canonical assignment records")
     children = assignment.add_subparsers(dest="assignment_command", required=True)

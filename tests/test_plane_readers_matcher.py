@@ -290,19 +290,22 @@ def test_an_unreachable_plane_refuses_and_never_answers_empty(tmp_path):
 def test_brief_serves_the_plane_and_omits_loudly_when_it_is_unreachable(tmp_path):
     from claudlobby.brief import build_brief
     from claudlobby.config import load_fleet
-    root, paths, _, _ = _scene(tmp_path)
+    root, paths, dispatches, _ = _scene(tmp_path)
     fleet, _ = load_fleet(paths.fleet_yaml)
     b = build_brief(fleet, paths, "w1", NOW_EPOCH)
-    assert [x["task_id"] for x in b["dispatches"]["open"]] == ["t-2-bbbb"]
-    assert [x["task_id"] for x in b["dispatches"]["overdue"]] == ["t-2-bbbb"]
-    assert not {x["field"] for x in b["degraded"]} & {"dispatches.open", "dispatches.overdue"}
+    item, = b["work"]["items"]
+    assert item["task_id"] == dispatches[1]["plane_work_item_id"]
+    assert item["assignment"]["assignment_id"] == dispatches[1]["plane_assignment_id"]
+    assert item["attention"]["past_due"] is True
+    assert item["attention"]["status"] == "unknown"
+    assert item["attention"]["reason"] == "spawn_unavailable"
+    assert not any(x["field"] == "work" and x["mode"] == "omitted" for x in b["degraded"])
     assert "shadow" not in b                                         # the envelope carries no shadow section
     (root / "state" / "plane" / "plane.db").unlink()
     b2 = build_brief(fleet, paths, "w1", NOW_EPOCH)
-    assert b2["dispatches"] == {}                                   # the WHOLE section withheld: never "0 open"
+    assert b2["work"] == {}                                         # no false empty work list
     modes = {(x["field"], x["mode"]) for x in b2["degraded"]}
-    assert {("dispatches.open", "omitted"), ("dispatches.overdue", "omitted"),
-            ("dispatches.orphaned", "omitted")} <= modes
+    assert ("work", "omitted") in modes
     assert any("the plane cannot answer" in x["reason"] for x in b2["degraded"])
 
 

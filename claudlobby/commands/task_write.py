@@ -94,6 +94,14 @@ def _inputs(args) -> dict:
         return {"task_id": _reference(args.task_id, "TASK_ID"),
                 "reason": _text(args.reason, "--reason"),
                 "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
+    if args.public_command == "task.escalate":
+        return {"task_id": _reference(args.task_id, "TASK_ID"),
+                "question": _text(args.question, "--question"),
+                "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
+    if args.public_command == "task.nudge":
+        return {"task_id": _reference(args.task_id, "TASK_ID"),
+                "reason": _text(args.reason, "--reason"),
+                "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
     if args.public_command == "task.reassign":
         return {"task_id": _reference(args.task_id, "TASK_ID"),
                 "bot_id": _optional(args.bot, "--bot", r"[A-Za-z0-9_-]+"),
@@ -132,7 +140,17 @@ def _report_envelope(result, route, report) -> str:
             f"Assignment: {result.assignment_id}\nReport: {report.to_body()}")
 
 
-def _report_notification(ctx, route, package, result, report):
+def _nudge_envelope(result, route, by, reason):
+    from ..task_operations import nudge_body
+
+    return ("[Claudlobby task nudge]\n"
+            f"Message: {result.message_id}\nFrom: {route.caller.alias}\n"
+            f"To: {route.peer.alias}\nTask: {result.task_id}\n"
+            f"Assignment: {result.assignment_id or '-'}\n"
+            "Nudge: " + nudge_body(result.task_id, result.assignment_id, by, reason))
+
+
+def _committed_notification(ctx, route, package, result, envelope, *, send_on_replay=True):
     from ..message_operations import RenderedNativeEnvelope, send_committed_native_attempt
     from ..message_queries import receipt as observe_receipt
     from ..request_receipts import locked_request
@@ -151,17 +169,32 @@ def _report_notification(ctx, route, package, result, report):
                     or frozen.intent.task_id != result.task_id
                     or frozen.intent.assignment_id != result.assignment_id
                     or frozen.intent.recipient_uid != route.peer.uid):
-                raise ValueError("linked report request differs from the frozen route")
-            attempt = send_committed_native_attempt(
-                route, package, store, frozen,
-                RenderedNativeEnvelope(result.message_id, _report_envelope(result, route, report)),
-                request_id=result.request_id)
-        data.update(transport=attempt.delivery,
-                    notification=attempt.delivery,
-                    transmission_recording=attempt.transmission_recording,
-                    request_persisted=attempt.request_persisted)
+                raise ValueError("committed request differs from the frozen native route")
+            if result.replayed and not send_on_replay:
+                # Nudge has no uncertain-retry flag. A replay inspects any
+                # retained attempt; it never turns a crash gap into a send.
+                prior = frozen.message_attempts[-1] if frozen.message_attempts else None
+                if prior is None:
+                    data.update(transport="not_attempted", notification="pending",
+                                transmission_recording="not_attempted", request_persisted=True)
+                    return data
+                observation = prior.observation
+                data.update(transport=observation.status if observation else "unknown",
+                            notification=observation.status if observation else "unknown",
+                            transmission_recording=prior.recording_status,
+                            request_persisted=True)
+            else:
+                attempt = send_committed_native_attempt(
+                    route, package, store, frozen,
+                    RenderedNativeEnvelope(result.message_id, envelope),
+                    request_id=result.request_id)
+                data.update(transport=attempt.delivery,
+                            notification=attempt.delivery,
+                            transmission_recording=attempt.transmission_recording,
+                            request_persisted=attempt.request_persisted)
         observed = observe_receipt(ctx, result.message_id, destination=route.peer.alias,
-                                   wait=10 if attempt.delivery == "submitted" else 0)
+                                   wait=10 if data["transport"] == "submitted"
+                                   and (not result.replayed or send_on_replay) else 0)
         data.update(receipt_observation=observed.receipt_observation,
                     integrity_verdict=observed.integrity_verdict)
         if (observed.exit_code == 0 and observed.receipt_observation == "received"
@@ -194,8 +227,8 @@ def dispatch(args) -> CommandOutput:
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
     from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
-                                   complete, fail, progress, reassign, return_assignment,
-                                   withdraw)
+                                   complete, escalate, fail, nudge, progress, reassign,
+                                   return_assignment, withdraw)
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
 
@@ -221,34 +254,47 @@ def dispatch(args) -> CommandOutput:
             release_id = release.release_id
             ctx = resolve_task_mutation_context(root=root, fleet=selected.fleet.name,
                                                 package=selected.paths.package)
-            if args.public_command in _REPORTS:
-                if origin is None or origin.bot_id is None:
+            if args.public_command in _REPORTS or args.public_command == "task.nudge":
+                if args.public_command in _REPORTS and (origin is None or origin.bot_id is None):
                     raise CommandFailure("conflict", "linked assignment reports require a generated bot caller",
                                          release_id=release_id)
                 route = resolve_message_route(selected.fleet.manager, root=root,
                                               fleet=selected.fleet.name,
-                                              package=selected.paths.package)
+                                              package=selected.paths.package,
+                                              caller_context=ctx if origin is None else None)
                 if (route.release_id != release_id or route.host_uid != ctx.host_uid
                         or route.selected_fleet_uid != ctx.fleet_uid
                         or route.caller_fleet_uid != ctx.caller_fleet_uid
                         or route.caller != ctx.caller
                         or route.peer != ctx.bots[selected.fleet.manager]
                         or route.manager != route.peer):
-                    raise CommandFailure("conflict", "linked report route differs from active task identities",
+                    raise CommandFailure("conflict", "manager route differs from active task identities",
                                          release_id=release_id)
+            if args.public_command in _REPORTS:
                 reporters = {"assignment.progress": progress, "assignment.block": block,
                              "assignment.return": return_assignment,
                              "assignment.complete": complete, "assignment.fail": fail}
                 result = reporters[args.public_command](ctx, args.request_id, values["assignment_id"],
                                                         values["report"], route=route.receipt_binding())
-                notification_data = _report_notification(ctx, route, selected.paths.package,
-                                                         result, values["report"])
+                notification_data = _committed_notification(
+                    ctx, route, selected.paths.package, result,
+                    _report_envelope(result, route, values["report"]))
+            elif args.public_command == "task.nudge":
+                result = nudge(ctx, args.request_id, values["task_id"],
+                               reason=values["reason"], by=values["by"],
+                               route=route.receipt_binding())
+                notification_data = _committed_notification(
+                    ctx, route, selected.paths.package, result,
+                    _nudge_envelope(result, route, values["by"] or ctx.caller.alias,
+                                    values["reason"]), send_on_replay=False)
             elif args.public_command == "task.admit":
                 result = admit(ctx, args.request_id, **values)
             elif args.public_command == "task.assign":
                 result = assign(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.withdraw":
                 result = withdraw(ctx, args.request_id, values.pop("task_id"), **values)
+            elif args.public_command == "task.escalate":
+                result = escalate(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.reassign":
                 result = reassign(ctx, args.request_id, values.pop("task_id"), **values)
             else:
@@ -264,7 +310,7 @@ def dispatch(args) -> CommandOutput:
             data.update(notification_data)
             if data["notification"] != "received" or data["request_persisted"] is not True:
                 raise CommandFailure("notification_failed",
-                                     "linked report committed; manager notification is unverified; "
+                                     "task recording committed; manager notification is unverified; "
                                      "inspect the request and message receipt",
                                      data=data, release_id=release_id)
         lines = (f"{result.task_id}\t{result.assignment_id or '-'}\t{result.task.state}\t"
@@ -281,11 +327,12 @@ def dispatch(args) -> CommandOutput:
                 "recipient_uid": exc.recipient_uid,
                 "request_persisted": exc.request_persisted,
                 "delivery": "not_requested", "replayed": False if exc.recording == "committed" else None}
-        if args.public_command in _REPORTS and exc.recording == "committed":
+        if (args.public_command in _REPORTS or args.public_command == "task.nudge") \
+                and exc.recording == "committed":
             data.update(notification="pending", transport="not_attempted",
                         receipt_observation=None, integrity_verdict=None)
             raise CommandFailure("notification_failed",
-                                 "linked report committed; request outcome was not retained reliably; "
+                                 "task recording committed; request outcome was not retained reliably; "
                                  "notification was not attempted; inspect the request",
                                  data=data, release_id=release_id) from exc
         raise CommandFailure("unavailable", "task recording is unconfirmed; inspect the request before retrying"

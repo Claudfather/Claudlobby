@@ -15,8 +15,8 @@ all with did-you-mean suggestions). Composed by `claudlobby generate`.
 `projects.yaml` is absent (or holds no projects), `claudlobby` derives one
 project per repo any bot declares in `scope.repos`, at tier `review`, and
 the composed table says so in a line above it. Everything downstream — the
-`PROJECT_TIER_*` map, `dispatch-task.sh --project`, the manager check-in's
-`dispatch` action — works against a derived registry exactly as it does
+`PROJECT_TIER_*` map, canonical task admission, the manager check-in's
+assignment link — works against a derived registry exactly as it does
 against a declared one.
 
 Three rules govern the derivation, and each exists because the alternative
@@ -33,8 +33,7 @@ breaks a shipped door:
   `gh issue list --repo <owner/name>`. A bot with repos and no `org` keeps the
   bare value rather than having an owner invented for it.
 - **A slug always starts with a letter.** A repo such as `30-day-abs` would
-  slug to a key that the validator, `lib/checkin-contract.py` and
-  `dispatch-task.sh --project` all reject, so such a key is prefixed (`p-`)
+  slug to a key that the validator and `claudlobby/checkin_contract.py` reject, so such a key is prefixed (`p-`)
   rather than emitted broken or silently dropped.
 
 Write this file when a project's real closure bar is **not** `review` — that

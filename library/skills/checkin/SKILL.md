@@ -1,15 +1,18 @@
 ---
 name: checkin
-description: "The idle-manager check-in: read the SSOT (the plane through checkins, brief and status, Claudron, the mission with each project's tier and repos, the GitHub backlog), decide ONE project and ONE action, record the decision BEFORE acting, and let the surfacing judgment decide whether the operator hears anything at all. Silence is the default."
+description: "The idle-manager check-in: read the selected fleet's check-in history, brief and status, Claudron, mission and backlog; decide one project and one action, commit the decision before acting, and surface only justified asks."
 argument-hint: "[--dry-run]"
 tool_grants:
-  - "Bash(claudlobby --fleet * checkins *)"
+  - "Bash(claudlobby --json --fleet * checkin list *)"
+  - "Bash(claudlobby --json --fleet * checkin record *)"
   - "Bash(claudlobby --fleet * brief *)"
   - "Bash(claudlobby --fleet * status *)"
   - "Bash(claudron lookup *)"
   - "Bash(gh issue list *)"
-  - "Bash(*checkin-record.sh*)"
-  - "Bash(*dispatch-task.sh*)"
+  - "Bash(claudlobby --json task admit *)"
+  - "Bash(claudlobby --json task assign *)"
+  - "Bash(claudlobby --json assignment deliver *)"
+  - "Bash(claudlobby --json request show *)"
   - "Bash(*tg-post.sh*)"
   - "mcp__plugin_telegram_telegram__reply"
 ---
@@ -20,11 +23,10 @@ Your own re-engagement cycle. Nobody is watching it; what they may see is only w
 the surfacing judgment (DECIDE, below) lets through. **Every read goes through a
 named door and every write through a named door** — never a hand-rolled query,
 never a hand-built plane envelope, never a pipeline. That coupling is what makes
-your reasoning inspectable (the `checkins` read door) and the edges deterministic.
-The fleet is named on every door because a fleet-less call runs the CLI in root
-mode, which an overlay install does not have — and naming it is never a problem
-on a root-mode install either: `--fleet` matching that install's own
-`fleet.name` resolves to root mode too, instead of refusing.
+your reasoning inspectable (the `checkin list` read door) and the edges deterministic.
+Name the fleet on each read and record so an overlay install selects the same
+sealed release throughout the check-in. Canonical task, assignment, and request
+doors also resolve that active selected context.
 
 `$BOT_ID`, `$FLEET_NAME` and `$CLAUDLOBBY_ROOT` come from your `bot.conf`; each
 project's key, repos and tier come from the `## Projects` table in your own
@@ -43,9 +45,8 @@ in the rationale.
 
 Parse `$ARGUMENTS`:
 - `--dry-run`: do every READ and the DECIDE, then validate the decision through the
-  door's own dry run (the RECORD here-doc with `--dry-run`, which prints
-  `DRY-RUN <ck_id>` and records nothing), and print, without running it, the
-  single-call ACT line you would have run. Act on nothing.
+  record door's own `--dry-run`, which validates and records nothing. Print the planned admit, assign, and
+  deliver steps without running them. Act on nothing.
 
 ## READ — in order, all cheap, all SSOT
 
@@ -54,24 +55,30 @@ A step that fails is **recorded, never guessed around**: add its name to
 (**could not measure**), never `0` — in `inputs_seen` and in `delta` alike.
 
 0. **The previous check-in, and this week's asks** —
-   `claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json` (the row
-   is `checkins[0]`; its `record.inputs_seen` is *the state at the last check-in*;
-   keep its `checkin_id` for `prev_checkin_id`; an empty `checkins` → `null`) and
-   `claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --since 7d --raised
-   --json` (the `checkins[]` rows are the asks already raised this week; count them
-   — `--raised` keeps the read to those rows). rc 3 means the plane is unreachable —
+   `claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --last`
+   (the row is `data.items[0]`; its `record.inputs_seen` is *the state at the last check-in*;
+   keep its `checkin_id` for `prev_checkin_id`; an empty `items` → `null`) and
+   `claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --since 7d --raised`
+   (the `data.items` rows are the asks already raised this week). Exit 6 means the
+   plane or selected check-in scope is unavailable —
    record `checkins` as unavailable and `prev_checkin_id` as `null`; the record
    shows both, so a skipped read never poses as a first one.
 1. **The fleet's present** — `claudlobby --fleet "$FLEET_NAME" brief --bot $BOT_ID
-   --json`: `dispatches` (`open` / `overdue` / `orphaned` / `dispatched`, each row
-   with `escalated`, `nudged`, `last_progress_at`), `workstreams` (`active`,
-   `stalled`), `reports.unacked`, `alerts` (last 24h critical), `mission`. Read
+   --json`: read the schema-1 result's `data.brief` (schema 2). Its `work.items` (fleet-owned open tasks for the manager, including
+   queued intake; each row has canonical `task_id`, nullable current
+   `assignment.assignment_id`, `state`, `attention` and labeled
+   `historical_references`), `work.issues` (unresolved history even when no
+   task is open), `workstreams` (`active`, `stalled`, `blocked` waits), `reports.unacked`,
+   `alerts` (last 24h critical), `mission`. Read
    `degraded[]` **by mode, for the fields you use**: an entry whose `mode` is
-   `omitted` and whose `field` is `dispatches`, `workstreams`, `reports` or `alerts`
-   (or a dotted child, such as `dispatches.open`) makes that section **unavailable** —
+   `omitted` and whose `field` is `work`, `workstreams`, `reports` or `alerts`
+   makes that section **unavailable** —
    never zero. An entry whose `mode` is `labeled` means the field is present and
    bounded — a real fleet's brief always carries `alerts` labeled, and usually
-   `dispatches.orphaned` — so use the field and note the bound. The standing
+   `work.attention` — so use the field and note the bound. A nullable attention
+   observation is not a clean deadline verdict. For current escalations use
+   `claudlobby --json fleet inbox`; brief's work section does not claim to include
+   every raised question. The standing
    `utilization` entry (#891) is **not an input** of this skill; ignore it.
 1b. **The roster, and who is idle** — `claudlobby --fleet "$FLEET_NAME" status
    --json`: `bots[]`, each with `name` (the id the ACT line takes as `<worker>`),
@@ -126,7 +133,7 @@ weighed and passed over goes into `inputs_seen.considered` as one line, `<candid
 
 | action | when | through |
 |---|---|---|
-| **dispatch** | an open or backlog item fits an idle worker (step 1b); you choose the worker and the rationale says why | ONE Bash call — the RECORD here-doc with the dispatch appended by `&&` (the block under RECORD before ACT): `bash "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh" --project <key> [--repo <owner/name>] [--ref <issue-url>] --checkin "$ck" <worker> "<task>"` — `--project` is the well-defined bar (a projects.yaml key); `--checkin` joins the dispatch to this decision; `$ck` is the id the record door just printed, captured in the same call |
+| **dispatch** | an open or backlog item fits an idle worker (step 1b); you choose the worker and the rationale says why | Record the decision first. For new intake, `task admit` with its project key; for an existing queued task, use its canonical ID. Then `task assign TASK_ID --bot WORKER --checkin CHECKIN_ID` joins the assignment to this decision; finally `assignment deliver ASSIGNMENT_ID --file FILE` sends the prepared instructions. Each mutation needs its own retained request UUID. `/fleet-ops` owns the detailed command and recovery contract. |
 | **ask** | the surfacing judgment (below) concludes the operator should hear something — a fork only they can resolve, or the backlog holds nothing worth starting ("ask for tasks") | one Telegram post in the shape chunk 2's protocol will fix (one line, one ask with named options, one pointer): the reply tool when this check-in arrived on Telegram; `bash "$CLAUDLOBBY_NATIVE_DIR/tg-post.sh" "<the post>"` when it was injected into your pane (there is no chat to reply to). Either way it is recorded as your communication |
 | **nothing** | all work in flight, nothing worthwhile — **recorded**, so "checked and chose nothing" is a fact, not silence | — |
 
@@ -142,8 +149,8 @@ be engaged · the urgency floor (a `blocked` that stalls everything breaks throu
 regardless). Record the judgment in `raise`: `decided`, `reason` (always, in both
 directions), and what you `held`.
 
-**Degraded inputs, per input.** The plane unreachable (`checkins` rc 3, or
-`dispatches`/`workstreams`/`reports`/`alerts` **omitted** in `brief`, or `status`
+**Degraded inputs, per input.** The plane unreachable (`checkin list` exit 6, or
+`work`/`workstreams`/`reports`/`alerts` **omitted** in `brief`, or `status`
 failing) narrows the actions to `ask | nothing` — never dispatch blind. `gh` or
 `claudron` unavailable narrows only the **source** of new work: you may still
 dispatch open, **plane-known** tasks; you may not pick fresh backlog issues you
@@ -151,32 +158,16 @@ could not read. Record what was unavailable either way.
 
 ## RECORD before ACT
 
-Build the decision as JSON (schema 1) and record it FIRST — the decision exists even
-if the action then fails. The door is invoked directly with a here-doc (never
-through `cat |`). For `ask` and `nothing` the record is the door call alone (the
-first form below: the door prints the id; you do not need it — READ 0 finds it next
-time); for `dispatch` the SAME call carries the act after `&&` (the second form),
-so the id never crosses a tool boundary and a refused or unrecorded decision (rc 2 /
-rc 3) skips the act by construction. **Nothing else rides either call** — no `echo`,
-no `printf`: a builtin is an ungranted subcommand in this session. Two shapes are
-coupled: **`ask` requires `raise.decided: true`**,
-and **`dispatch` requires `project_key: "<slug>"` and a non-empty `considered`**.
-Every `N|null` below is an integer or `null`, never omitted — in both blocks. The
-rationale names the chosen project and its tier (the `## Projects` table): the record
-must show the rigor bar was weighed, not only what was picked.
+Build the schema-1 decision JSON in a private UTF-8 file and commit it through
+`checkin record` **before** any task mutation or operator post. Task admission
+does not replace the decision writer. Generate and retain one canonical request
+UUID for this decision; a replay with changed content is a conflict.
+For `dispatch`, `project_key` is required and `inputs_seen.considered` must be
+nonempty. For `ask`, `raise.decided` must be true. Every `N|null` below is an
+integer or `null`, never omitted. The rationale names the chosen project and
+tier, worker, observed idle state, and why.
 
-For `ask` or `nothing`:
-
-```bash
-bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<'EOF'
-{ ...the decision JSON below... }
-EOF
-```
-
-For `dispatch`, the record and the act as ONE call:
-
-```bash
-ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<'EOF'
+```json
 {"prev_checkin_id": <"ck_…" from step 0, or null>,
  "inputs_seen": {"open_tasks": N|null, "stalls": N|null, "unacked": N|null,
                  "issues_seen": N|null, "issues_considered": N|null, "knowledge_hits": N|null,
@@ -185,48 +176,52 @@ ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<'EOF'
            "stalls_cleared": N|null, "issues_new": N|null, "messages_new": N|null, "held_pending": N|null},
  "action": "dispatch|ask|nothing",
  "project_key": <"<slug>" for dispatch (or the project an ask is about), else null>,
- "rationale": "<your words, <= 600 chars: the weighing, the project and its tier, the worker and its observed state, the why>",
+ "rationale": "<your words, <= 600 chars: the weighing, project and tier, worker and observed state, why>",
  "raise": {"decided": <true for ask, else false>, "reason": "<why it surfaced, or why not, <= 600>", "held": []}}
-EOF
-) && bash "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh" --project <key> --checkin "$ck" <worker> "<task>"
 ```
 
-The `&&` is RECORD-before-ACT made mechanical: the door prints the `checkin_id` alone
-on success, `$ck` carries it into the dispatch in the same call (a shell variable
-does not survive between your tool calls, which is why the two are never split), and
-rc 2 or rc 3 from the door skips the act. If the dispatch door says the plane cannot
-see that id, verify with `claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID
---last --json` before anything else. rc 2: the decision was refused — every reason is
-on stderr;
-fix and re-record **once**; if the second attempt is refused too, record the minimal
-valid `nothing` row and stop — minimal means EVERY required key, so it cannot be
-refused a third time: `prev_checkin_id` from step 0 (or `null`), every count `null`,
-`considered` `[]`, `unavailable` listing the reads that failed, `action: "nothing"`,
-`project_key: null`, a `rationale` quoting the refusal reasons, and `raise` with
-`decided: false`, a non-empty `reason` ("refused twice; nothing surfaced") and
-`held: []` — the record's existence is the point, a
-turn that ends with no row is the one failure the loop must not produce. rc 3: the
-plane did not record it — do **not** act on an unrecorded `dispatch` (the `&&` has
-already skipped it); say so in your next justified post. For `ask`, ACT through the
-door in the table once the record has printed its id. **If the ACT door fails** (a nonzero rc from `dispatch-task.sh` or the post),
-record a **follow-up check-in** at once — `prev_checkin_id` = the id just printed,
-`action: nothing`, the rationale naming the failure — and never retry a dispatch
-blind; the pair is what the outcome join will show.
-
-Under `--dry-run` the same here-doc goes to the door's dry run, which validates and
-prints `DRY-RUN <ck_id>` (the id is the SECOND word; a real run prints the id
-alone), in the composed shape with a harmless granted read standing where the
-dispatch would go — so the shape itself passes through the permission layer before
-any real run relies on it:
+Write valid JSON values in place of the angle-bracket prompts, then run:
 
 ```bash
-ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" --dry-run <<'EOF'
-{ ...the same decision JSON... }
-EOF
-) && claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json
+claudlobby --json --fleet "$FLEET_NAME" checkin record --file DECISION_FILE --request-id CHECKIN_UUID
 ```
 
-Then print, in your reply and not as a command, the ACT line you would have run.
+The result's `data.checkin_id` is a usable `CHECKIN_ID` only when
+`data.recording` is `committed` and `data.request_persisted` is true.
+If it refuses or cannot confirm recording, **stop before ACT**. For a refusal,
+correct the JSON and re-record once; if refused again, record a minimal valid
+`nothing` decision with every required key and the refusal reasons. If storage
+is unavailable, inspect `claudlobby --json request show CHECKIN_UUID` and do
+not act without exact committed proof. Never claim an unknown recording was
+rolled back or retry it with a new UUID blindly.
+For `ask`, use the existing Telegram reply or `tg-post.sh` route only after
+recording. For `nothing`, stop after recording.
+
+For `dispatch`, keep the returned `CHECKIN_ID`, then perform these distinct
+steps, inspecting each result before starting the next:
+
+```bash
+claudlobby --json task admit --title "<outcome>" --project PROJECT_KEY --repo OWNER/REPO --request-id ADMIT_UUID
+claudlobby --json task assign TASK_ID --bot WORKER --checkin CHECKIN_ID --request-id ASSIGN_UUID
+claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id DELIVER_UUID
+```
+
+Use an already open canonical task ID instead of admitting duplicate intake.
+`--repo` is optional if no repository applies; `--project` is the project key
+chosen in the decision. Prepare and retain the UTF-8 delivery file before the
+send. The assignment's `--checkin` is the join to the committed decision; it
+must not be added to `task admit`. A queued task, assignment, and delivered
+message are separate facts. Keep each operation's UUID for `claudlobby --json
+request show UUID`. If a command reports an uncertain or partially committed
+outcome, inspect that request and the task/assignment/message receipt before
+proceeding; never mint another UUID or resend automatically. If an act is
+confirmed failed, record a follow-up `nothing` check-in with
+`prev_checkin_id=CHECKIN_ID` and name the failed step. Do not report a failed
+notification as an unrecorded task.
+
+Under `--dry-run`, pass the same file and request UUID to `checkin record --dry-run`.
+Its `validated: true` output has no committed check-in ID. Print the
+planned steps and do not admit, assign, deliver, or post.
 
 ## Not in this chunk
 

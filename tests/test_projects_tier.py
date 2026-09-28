@@ -620,25 +620,8 @@ def test_a_slug_that_would_start_with_a_digit_is_prefixed(fleet_dir):
     assert fleet.projects["p-30-day-abs"].repos == ["acme/30-day-abs"]
 
 
-def test_every_derived_slug_passes_the_three_shipped_slug_gates(fleet_dir):
-    """The validator's _PROJECT_KEY_RE, lib/checkin-contract.py's SLUG_RE and
-    dispatch-task.sh's --project check are three independent copies of one
-    rule. A derived key that any of them refuses is a table row nobody can
-    dispatch — acceptance criterion 3 of #1634.
-
-    BOUND — read this before trusting the third gate. Only TWO of the three are
-    exercised against the derived keys: `_PROJECT_KEY_RE` and the contract's
-    SLUG_RE are compiled and matched here. The shell gate is NOT executed; the
-    `shell_src` assertion is a **drift tripwire** that fails if
-    dispatch-task.sh's rule literal moves, and nothing more. It does not prove a
-    derived slug survives the shell path end to end, and a reader who takes it
-    that way will over-credit this test.
-
-    That end-to-end evidence exists, but it is not here: the door was driven for
-    real (`lib/dispatch-task.sh --project <slug> ...`) with derived slugs passing
-    the gate and the unprefixed control refused by name, recorded in the #1634 PR
-    body. If that path is ever made cheap to exercise in-process, promote it into
-    this test and delete this paragraph."""
+def test_every_derived_slug_passes_the_shipped_validators(fleet_dir):
+    """Derived keys satisfy config and check-in slug validation."""
     import re as _re
 
     from claudlobby.validator import _PROJECT_KEY_RE
@@ -646,12 +629,9 @@ def test_every_derived_slug_passes_the_three_shipped_slug_gates(fleet_dir):
     contract_slug = _re.compile(
         _re.search(
             r'SLUG_RE = re\.compile\(r"([^"]+)"',
-            (REPO_DIR / "lib" / "checkin-contract.py").read_text(),
+            (REPO_DIR / "claudlobby" / "checkin_contract.py").read_text(),
         ).group(1)
     )
-    shell_src = (REPO_DIR / "lib" / "dispatch-task.sh").read_text()
-    assert "[a-z][a-z0-9-]*" in shell_src, "dispatch-task's --project rule moved"
-
     _write_fleet(
         fleet_dir,
         _with_scope(

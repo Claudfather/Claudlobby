@@ -5,12 +5,12 @@ a pipeline is matched per subcommand) and contain no forbidden wildcard
 (claudron-integration.md:29; boundary Invariant 5)."""
 
 import fnmatch
-import importlib.util
 import json
 import re
 import shutil
 from pathlib import Path
 
+from claudlobby import checkin_contract as cc
 from claudlobby.composer import compose_claude_md
 from claudlobby.config import load_fleet
 from claudlobby.loader import parse_frontmatter
@@ -30,25 +30,24 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-DOORS = ['claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json',
-         'claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --since 7d --raised --json',
+DOORS = ['claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --last',
+         'claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --since 7d --raised',
          'claudlobby --fleet "$FLEET_NAME" brief --bot $BOT_ID --json',
          'claudlobby --fleet "$FLEET_NAME" status --json', "claudron lookup --limit 5", "gh issue list",
-         'bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<\'EOF\'', 'ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<\'EOF\'', '--checkin "$ck"',
-         'ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" --dry-run <<\'EOF\'', ') && claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json',
-         "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh", "--checkin", "--project", "$CLAUDLOBBY_NATIVE_DIR/tg-post.sh", "## Projects", "## Fleet Mission",
-         "pane_state", "issues_seen", "DRY-RUN", "checkins[0]", "unavailable"]
-CONTRACT = REPO / "lib" / "checkin-contract.py"
-_spec = importlib.util.spec_from_file_location("checkin_contract", CONTRACT)
-cc = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cc)
+         'claudlobby --json --fleet "$FLEET_NAME" checkin record --file DECISION_FILE --request-id CHECKIN_UUID',
+         'task assign TASK_ID --bot WORKER --checkin CHECKIN_ID',
+         'assignment deliver ASSIGNMENT_ID --file FILE',
+         "--project", "$CLAUDLOBBY_NATIVE_DIR/tg-post.sh", "## Projects", "## Fleet Mission",
+         "pane_state", "issues_seen", "validated: true", "data.items[0]", "unavailable"]
 
 
 def test_the_record_template_carries_every_contract_key():
-    # the here-doc is the model's only example of the contract; a dropped key would refuse
+    # the JSON example is the model's only example of the contract; a dropped key would refuse
     # every real check-in at rc 2 and the fallback would keep writing stub rows (cycle-8 devex)
     text = SKILL.read_text()
-    record = re.search(r"```bash\nck=\$\(bash \"\$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh\" <<'EOF'\n(.*?)\nEOF", text, re.S).group(1)
+    match = re.search(r"```json\n(.*?)\n```", text, re.S)
+    assert match, "committed decision example missing"
+    record = match.group(1)
     for key in (*cc.INPUTS_COUNTS, *cc.INPUTS_LISTS, *cc.DELTA_COUNTS, "prev_checkin_id", "project_key", "rationale", "decided", "reason", "held"):
         assert f'"{key}"' in record, f"the RECORD template lost {key}"
 
@@ -60,13 +59,15 @@ def test_the_roster_door_still_types_an_unobserved_worker_as_null():
     assert bots[0]["pane_state"] is None and bots[0]["plane_unreachable"] is None
 
 
-def test_the_skill_file_is_whole_and_its_three_bash_blocks_are_closed():
+def test_the_skill_file_is_whole_and_its_bash_blocks_are_closed():
     # cycle-3 B6: a nested fence in the plan truncated the deliverable at the inner
     # closer and every test still passed on the stump; pin the tail and the fences
-    # (three blocks since cycle 9: the plain record, the record-and-dispatch call, the dry run)
+    # The closure protects the rules after the examples; their precise count
+    # belongs to the current coaching, not to a shell call shape.
     text = SKILL.read_text()
     assert "## Not in this chunk" in text and "## Rules" in text
-    assert text.count("```") == 6 and len(re.findall(r"```bash\n.*?```", text, re.S)) == 3
+    assert text.count("```") % 2 == 0
+    assert len(re.findall(r"```bash\n.*?```", text, re.S)) >= 2
 
 
 def test_the_skill_is_coupled_to_its_doors():
@@ -76,9 +77,11 @@ def test_the_skill_is_coupled_to_its_doors():
     for action in ("dispatch", "ask", "nothing"):
         assert f"**{action}**" in text, action
     assert "RECORD before ACT" in text and "considered" in text and "could not measure" in text
-    assert "follow-up check-in" in text                               # a failed ACT is recorded, never retried blind
-    assert "names the chosen project and its tier" in text            # the rigor bar was weighed, not only what was picked
-    assert "minimal valid `nothing` row" in text                       # the re-record is bounded: a turn never ends without a row
+    assert "record a follow-up `nothing` check-in" in text            # a confirmed failed ACT is recorded
+    assert "names the chosen project and tier" in text                 # the rigor bar was weighed, not only what was picked
+    assert "minimal valid `nothing` decision" in text                  # the re-record is bounded
+    assert text.index("checkin record --file") < text.index("claudlobby --json task admit")
+    assert "stop before ACT" in text and "request show UUID" in text
     assert "UNOBSERVED" in text and "plane_unreachable" in text          # a roster answer with no observation is not an idle worker
     assert "propose" not in text.split("## Not in this chunk")[0]   # the enum the contract accepts
     assert "cat <<" not in text                                      # a pipeline is matched per subcommand
@@ -86,7 +89,7 @@ def test_the_skill_is_coupled_to_its_doors():
 
 def test_the_degraded_rule_is_keyed_on_mode_omitted_per_field():
     # brief's degraded[] is NEVER empty on a real fleet (captured live, cycle 4: a
-    # fleet with a plane carries alerts:labeled #903 and dispatches.orphaned:labeled
+    # fleet with a plane carries alerts:labeled #903 and work.attention:labeled
     # #1014 on every call); only mode "omitted" means a field is absent (#1467)
     rule = _flat(SKILL.read_text().split("## DECIDE")[0])
     assert "`mode` is `omitted`" in rule and "unavailable" in rule
@@ -109,17 +112,13 @@ def _bash_grant_matches(grant: str, command: str) -> bool:
 
 def _skill_command_lines() -> list[str]:
     """Every `bash …`, `claudlobby …`, `claudron …`, `gh …` span — inline code,
-    which MAY wrap across lines — or fenced-bash line of SKILL.md, whitespace
-    collapsed; first pipeline stage only (the skill must not use pipelines)."""
+    which MAY wrap across lines — or fenced-bash line of SKILL.md."""
     text = SKILL.read_text()
     cmds = re.findall(r"`((?:bash|claudlobby|claudron|gh) [^`]+)`", text)
     for block in re.findall(r"```bash\n(.*?)```", text, re.S):
         for line in block.splitlines():
-            for piece in line.split(" && "):                        # a compound command is matched per subcommand
-                piece = re.sub(r"^[a-z_]+=\$\(", "", piece.strip())   # `ck=$(bash …` is the bash subcommand
-                piece = re.sub(r"^\)\s*", "", piece)                    # `) && claudlobby …` closes the substitution
-                if piece.startswith(("bash ", "claudlobby ", "claudron ", "gh ")):
-                    cmds.append(piece)
+            if line.startswith(("bash ", "claudlobby ", "claudron ", "gh ")):
+                cmds.append(line)
     return [_flat(c) for c in cmds]
 
 
@@ -129,19 +128,18 @@ def test_the_skill_grants_cover_its_own_commands_and_nothing_forbidden():
     assert not [g for g in grants if g in FORBIDDEN], grants
     assert "mcp__plugin_telegram_telegram__reply" in grants           # ask posts through the reply tool
     bash_grants = [g for g in grants if g.startswith("Bash(")]
+    assert "Bash(*dispatch-task.sh*)" not in grants
     for g in bash_grants:                                              # a CLI grant names ONE literal verb, never a prefix
         if g.startswith("Bash(claudlobby"):
-            assert re.fullmatch(r"Bash\(claudlobby --fleet \* [a-z][a-z-]+ \*\)", g), g
+            assert re.fullmatch(r"Bash\(claudlobby (?:--json )?(?:--fleet \* )?"
+                                r"(?:[a-z][a-z-]+ ){1,2}\*\)", g), g
     cmds = _skill_command_lines()
     assert cmds, "no command lines found in the skill"
     assert any(c.startswith("gh issue list ") for c in cmds)          # the wrapped span IS collected (cycle-3 R7)
-    assert any("--dry-run" in c for c in cmds)                          # the dry run has a runnable invocation
-    assert any(c.startswith('bash "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh"') and '"$ck"' in c for c in cmds)   # the act rides the record call (cycle-7 R1)
+    assert "checkin record --dry-run" in SKILL.read_text()
     for block in re.findall(r"```bash\n(.*?)```", SKILL.read_text(), re.S):                                # …and none hides in a fenced block
         for line in block.splitlines():
-            for piece in line.split(" && "):
-                piece = re.sub(r"^[a-z_]+=\$\(", "", re.sub(r"^\)\s*", "", piece.strip()))
-                assert not re.match(r"(echo|printf|env|cat|export)\b", piece), f"ungranted builtin: {line!r}"
+            assert not re.match(r"(echo|printf|env|cat|export)\b", line), f"ungranted builtin: {line!r}"
     for c in cmds:
         assert any(_bash_grant_matches(g, c) for g in bash_grants), f"ungranted: {c!r}"
     # necessity: every grant is the ONLY match for some command line, so a grant
@@ -168,10 +166,11 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
     grants = _resolve_skill_grants(
         fleet.bots["lead"].skills, Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
     )
-    for g in ("Bash(*checkin-record.sh*)", "Bash(*dispatch-task.sh*)", "Bash(*tg-post.sh*)",
-              "Bash(claudlobby --fleet * checkins *)", "Bash(claudlobby --fleet * brief *)",
+    for g in ("Bash(claudlobby --json --fleet * checkin record *)", "Bash(*tg-post.sh*)",
+              "Bash(claudlobby --json --fleet * checkin list *)", "Bash(claudlobby --fleet * brief *)",
               "Bash(claudlobby --fleet * status *)"):
         assert g in grants, grants
+    assert "Bash(*dispatch-task.sh*)" not in grants
     assert "Bash(claudlobby *)" not in grants
     for g in ("Bash(claudlobby checkins *)", "Bash(claudlobby brief *)", "Bash(claudlobby status *)"):
         assert g not in grants, g
@@ -192,7 +191,7 @@ def test_the_protocol_requires_its_skill_and_still_has_no_self_fire():
 def test_the_protocol_names_the_same_bounded_ask_read_as_the_skill():
     # without --raised every check-in counts as an ask and the manager falls silent
     _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
-    assert 'claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --since 7d --raised' in _flat(body)
+    assert 'claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --since 7d --raised' in _flat(body)
 
 
 def test_both_sections_compose_for_a_hand_equipped_manager(fleet_dir):
@@ -216,13 +215,14 @@ def test_the_manager_section_fixes_the_post_shape_and_the_one_post_budget():
         assert needle in m, needle
 
 
-def test_the_worker_section_keeps_the_start_ack_off_telegram():
-    # start agrees with worker-lifecycle's "No Telegram ack" (line 87); only
-    # done/blocked are Telegram-eligible, per the checkin/worker-lifecycle ruling
+def test_the_worker_section_separates_acceptance_from_progress():
     _fm, body = parse_frontmatter((LIB / "protocols" / "checkin.md").read_text())
     w = _flat(body.split("## Worker")[1])
-    assert "Start is plane-only" in w
-    assert "Done and blocked" in w and "Telegram where the worker is configured for it" in w
+    assert "assignment accept ASSIGNMENT_ID" in w
+    assert "does not assert progress" in w
+    assert "never by a Telegram post" in w
+    assert "assignment progress" in w and "before manager notification" in w
+    assert "Done and blocked stay one thin Telegram line" in w
 
 
 def test_the_cadence_rules_are_retired_by_this_chunk():
@@ -233,40 +233,17 @@ def test_the_cadence_rules_are_retired_by_this_chunk():
     assert not re.search(r"2.3 min", (LIB / "protocols" / "worker-lifecycle.md").read_text())
 
 
-# --- library/protocols/dispatch.md: the project: envelope field (PR2 Task 4) -----
-
-
-def test_the_dispatch_envelope_documents_the_project_field():
-    # chunk 1 shipped `dispatch-task.sh --project KEY`; the composed protocol
-    # text catches up here so a manager reading it sees the field it stamps
-    text = (LIB / "protocols" / "dispatch.md").read_text()
-    row = next((ln for ln in text.splitlines() if "`project:<key>`" in ln), None)
-    assert row, "no `project:<key>` row in the envelope key-value table"
-    flat = _flat(row)
-    assert "`projects.yaml` slug" in flat
-    assert "adds it to the envelope" in flat
-    assert "stamps `project_key`" in flat
-    assert "plane work item" in flat
-
-
-def test_the_tracked_dispatch_recipe_shows_the_project_flag():
-    text = (LIB / "protocols" / "dispatch.md").read_text()
-    line = next((ln for ln in text.splitlines()
-                 if "dispatch-task.sh" in ln and "--workstream <ws-id>" in ln), None)
-    assert line, "tracked-dispatch recipe line not found"
-    assert "--project <key>" in line
-
-
 # --- every CLI door names the fleet (PR4 task 5b) ---------------------------
 
 
-def test_no_checkin_door_runs_the_cli_without_a_fleet():
+def test_checkin_reads_name_the_fleet():
     # a fleet-less call runs the CLI in root mode, which an overlay install does
     # not have (#1570) -- a future edit that drops the flag must fail HERE, not
     # on a running bot
-    bare = re.compile(r"claudlobby\s+(checkins|brief|status)\b")
+    bare = re.compile(r"claudlobby\s+(checkin|brief|status)\b")
     skill_flat = _flat(SKILL.read_text())
     protocol_flat = _flat((LIB / "protocols" / "checkin.md").read_text())
     for flat in (skill_flat, protocol_flat):
         assert not bare.findall(flat), bare.findall(flat)
-    assert skill_flat.count('claudlobby --fleet "$FLEET_NAME" ') >= 6
+    for command in DOORS[:4]:
+        assert command in skill_flat

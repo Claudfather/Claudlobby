@@ -18,7 +18,6 @@ between the two states. That ambiguity is what this pins.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from pathlib import Path
 
@@ -28,7 +27,6 @@ from claudlobby.plane.contracts import PR_WITHHELD_REASONS, TaskEvent
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import _apply_capture
 from claudlobby.plane.registries import CONTENT_FIELDS, FIELD_POLICY
-from tests.test_plane_door_e2e import _bash, _plane_row, armed  # noqa: F401
 
 REPO = Path(__file__).resolve().parent.parent
 WI = "wi_" + "a" * 32
@@ -86,69 +84,3 @@ class TestTheContract:
         )["payload"]
         assert "summary" not in out, "positive control: the door must strip content"
         assert out["pr_attribution_withheld"] == "guessed_link"
-
-
-class TestOneDiscriminatorOnly:
-    def test_the_stamp_derives_from_the_gate_it_describes(self):
-        """It must be decided off the SAME `TASK_NAMED` the refusal uses, never
-        a second predicate. Two places deciding one fact is how they drift, and
-        here they would drift silently — both answers look equally plausible on
-        a stored row (#1713's rule, applied again)."""
-        src = (REPO / "lib" / "report-back.sh").read_text()
-        stamps = re.findall(r'pr_attribution_withheld\\":\\"guessed_link', src)
-        assert len(stamps) == 1, f"stamped in {len(stamps)} places; must be one"
-        # it sits in the ELSE of the attribution gate, not in a new condition
-        gate = re.search(
-            r'if \[ -n "\$TASK_NAMED" \]; then.*?pr_attribution_withheld',
-            src, re.S)
-        assert gate, "the stamp is not inside the TASK_NAMED attribution gate"
-
-
-class TestTheWriter:
-    def _declared(self, libdir, env, summary, *, task=None):
-        flags = f'--pr {PR} --pr-role reviewed'
-        if task:
-            flags += f" --task {task}"
-        return _bash(
-            f'"{libdir}/report-back.sh" w1 completed "{summary}" {flags}', env)
-
-    def test_declared_and_AUTO_RESOLVED_stamps_the_withholding(self, tmp_path, armed):
-        """The case the field exists for."""
-        libdir, env = armed
-        assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "tracked"', env).returncode == 0
-        r = self._declared(libdir, env, "withheld here")
-        assert r.returncode == 0, r.stderr
-        rows = [d for d in _task_details(tmp_path) if d.get("summary") == "withheld here"]
-        assert rows, "positive control: the report produced a task event at all"
-        assert rows[0].get("link_source") == "auto-resolved", "precondition"
-        assert rows[0].get("pr_attribution_withheld") == "guessed_link"
-        # and the attribution itself is still refused — that gate is unchanged
-        assert "pr_role" not in rows[0] and "pr_url" not in rows[0]
-
-    def test_declared_and_NAMED_does_NOT_stamp_it(self, tmp_path, armed):
-        """Positive control. Nothing was withheld, so the marker must be
-        absent — and the attribution itself rides instead. Without this a
-        stamp applied unconditionally passes the test above."""
-        libdir, env = armed
-        assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "tracked"', env).returncode == 0
-        tid = _plane_row(tmp_path)["task_id"]
-        r = self._declared(libdir, env, "attributed", task=tid)
-        assert r.returncode == 0, r.stderr
-        rows = [d for d in _task_details(tmp_path) if d.get("summary") == "attributed"]
-        assert rows and rows[0].get("pr_role") == "reviewed"
-        assert "pr_attribution_withheld" not in rows[0], rows[0]
-
-    def test_NOTHING_declared_does_NOT_stamp_it(self, tmp_path, armed):
-        """THE discrimination this field is for, and the one `link_source`
-        cannot make. Same auto-resolved link as the first test, but nothing was
-        declared — so nothing was withheld, and the row must say so by staying
-        absent. If this stamped too, the field would mean 'the link was
-        guessed', which `link_source` already says."""
-        libdir, env = armed
-        assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "tracked"', env).returncode == 0
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "nothing declared"', env)
-        assert r.returncode == 0, r.stderr
-        rows = [d for d in _task_details(tmp_path) if d.get("summary") == "nothing declared"]
-        assert rows, "positive control: a task event landed"
-        assert rows[0].get("link_source") == "auto-resolved", "precondition"
-        assert "pr_attribution_withheld" not in rows[0], rows[0]

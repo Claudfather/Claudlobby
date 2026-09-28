@@ -3,12 +3,20 @@ name: fleet-ops
 description: "Read fleet work, admit tasks, deliver and route assignments as manager, and accept or report assigned work as worker. Use the canonical claudlobby CLI and verify recorded results."
 tool_grants:
   - "Bash(claudlobby --help)"
+  - "Bash(claudlobby brief --help)"
   - "Bash(claudlobby task list --help)"
   - "Bash(claudlobby task show --help)"
+  - "Bash(claudlobby task reviews --help)"
   - "Bash(claudlobby task admit --help)"
   - "Bash(claudlobby task assign --help)"
   - "Bash(claudlobby task withdraw --help)"
   - "Bash(claudlobby task reassign --help)"
+  - "Bash(claudlobby task escalate --help)"
+  - "Bash(claudlobby task nudge --help)"
+  - "Bash(claudlobby workstream --help)"
+  - "Bash(claudlobby bot usage --help)"
+  - "Bash(claudlobby bot automation --help)"
+  - "Bash(claudlobby fleet usage --help)"
   - "Bash(claudlobby assignment show --help)"
   - "Bash(claudlobby assignment accept --help)"
   - "Bash(claudlobby assignment deliver --help)"
@@ -25,11 +33,15 @@ tool_grants:
   - "Bash(claudlobby fleet reports submit --help)"
   - "Bash(claudlobby fleet reports list --help)"
   - "Bash(claudlobby fleet reports ack --help)"
+  - "Bash(claudlobby fleet inbox --help)"
   - "Bash(claudlobby request show --help)"
   - "Bash(claudlobby --json context show)"
+  - "Bash(claudlobby --json brief)"
+  - "Bash(claudlobby --json brief *)"
   - "Bash(claudlobby --json task list)"
   - "Bash(claudlobby --json task list *)"
   - "Bash(claudlobby --json task show *)"
+  - "Bash(claudlobby --json task reviews *)"
   - "Bash(claudlobby --json assignment show *)"
   - "Bash(claudlobby --json message show *)"
   - "Bash(claudlobby --json message receipt *)"
@@ -40,7 +52,18 @@ tool_grants:
   - "Bash(claudlobby --json fleet reports list)"
   - "Bash(claudlobby --json fleet reports list *)"
   - "Bash(claudlobby --json fleet reports ack *)"
+  - "Bash(claudlobby --json fleet inbox)"
+  - "Bash(claudlobby --json fleet inbox *)"
   - "Bash(claudlobby --json request show *)"
+  - "Bash(claudlobby --json workstream list)"
+  - "Bash(claudlobby --json workstream show *)"
+  - "Bash(claudlobby --json bot usage *)"
+  - "Bash(claudlobby --json bot automation status *)"
+  - "Bash(claudlobby --json bot automation pause *)"
+  - "Bash(claudlobby --json bot automation resume *)"
+  - "Bash(claudlobby --json bot automation record *)"
+  - "Bash(claudlobby --json fleet usage)"
+  - "Bash(claudlobby --json fleet usage *)"
 ---
 
 # Fleet operations
@@ -54,10 +77,58 @@ context show`. Discover exact flags with `claudlobby --help` and `claudlobby
 Read before acting:
 
 ```bash
+claudlobby --json brief
+claudlobby --json fleet inbox
 claudlobby --json task list
 claudlobby --json task show TASK_ID
+claudlobby --json task reviews OWNER/REPO --pr N
 claudlobby --json assignment show ASSIGNMENT_ID
+claudlobby --json workstream list
 ```
+
+The brief defaults to your bot and combines mission, open work, workstreams,
+reports and recent alerts. Its `data.brief.work` uses canonical task IDs; inspect
+`data.brief.degraded` and `data.brief.work.issues` before treating an empty view as clear.
+`--bot BOT` changes only the view. It does not change your caller identity.
+When token counts are needed, run `claudlobby --json bot usage BOT --since 24h`,
+`claudlobby --json fleet usage --since 24h`, or
+`claudlobby --json brief --usage-since 24h` for the brief viewer's concise
+summary. These on-demand reads cover only configured accounts' current bot
+directory transcripts in the selected window. Inspect `coverage` before using
+counts; quota and reset time are unavailable without a provider observation.
+Ordinary and boot briefs do not scan transcripts.
+
+For an equipped autonomous runner, `claudlobby --json bot automation status BOT`
+reports whether the next tick is eligible. A missing or ambiguously attributed
+state row is unknown and ineligible. The bot can pause or resume itself; the
+current manager can pause or resume a selected-fleet bot. A generated bot may
+record only its own run; a trusted local operator remains an explicit repair
+caller. Each mutation needs a retained `--request-id UUID`; use
+`--reason TEXT` for pause and `--outcome completed|bypassed|needs-input|blocked|partial`
+for record, with `--pr URL` or `--issue URL` only for validated target-repo links.
+These commands preserve the host-shared state under its lock; they do not
+deliver a report or Telegram message.
+
+The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
+with a retained `--request-id UUID` for each mutation. `block ID --on
+human:NAME --note TEXT` records a declared wait; `unblock ID --note TEXT`
+restores that same ID to active. `renew` extends the lease without crediting
+progress. Inspect `workstream show ID` and the brief's blocked waits after an
+uncertain recording; replaying a UUID never sends a notification.
+
+`task reviews` reads verdicts at the fetched PR head and attributes explicitly
+reported reviews across every fleet on the selected host. Inspect each event's
+`MATCH`, `UNKNOWN`, or `AMBIGUOUS` evidence and the verdict flags. A successful
+read is not merge permission or proof of who authored the PR.
+
+The inbox shows fleet-owned open work, your unread reports, and recent
+attention evidence. `--bot VIEWER` selects whose report read position to
+display; it does not change your identity or filter work to that bot.
+`--limit` bounds each work/report section, and `next_cursor` continues those
+pages. Attention shows recent alerts and escalations on open tasks, including queued work;
+it does not track whether every question to a human has been answered.
+Reading the inbox never acknowledges reports;
+use the explicit report-list and acknowledgement commands below.
 
 Use the canonical ID returned by a read. A task ID and assignment ID are
 different. If a command refuses a historical or wrong-kind reference, follow
@@ -99,7 +170,13 @@ never an old task ID. `assignment progress` alone may include `--percent 0..100`
 reports may carry `--pr URL --pr-role authored|reviewed`, repeatable
 `--artifact URL` and `--issue URL`, and `--skill NAME`. Check each verb's help.
 The manager can inspect `task withdraw --help` and `task reassign --help` for
-reasoned changes.
+reasoned changes. To record a request for human guidance, including before
+assignment, use `task escalate TASK_ID --question "The decision needed" --request-id UUID`.
+Escalation leaves the task open; recording it does not prove a human was notified.
+To ask the fleet manager to revisit an open task, use `claudlobby --json task nudge
+TASK_ID --reason "Why this needs attention" --request-id UUID`. The task fact and
+manager request commit before notification. Inspect the notification outcome;
+replaying the same request does not resend an uncertain message.
 
 Each mutation needs its own retained request UUID. Reuse the same UUID only
 to inspect or reconcile the *same* intended operation; use `claudlobby --json

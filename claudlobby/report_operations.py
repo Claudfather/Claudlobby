@@ -34,10 +34,13 @@ class AckError(RuntimeError):
 
 
 @contextmanager
-def _viewer_lock(root: Path, fleet_uid: str, viewer_uid: str):
-    """Serialize distinct request UUIDs for one viewer without a task lock."""
+def _viewer_lock(root: Path, fleet_uid: str, viewer_uid: str, *,
+                 namespace: str = "report-ack-locks"):
+    """Serialize distinct requests in one private, fleet-scoped lock namespace."""
+    if namespace not in {"report-ack-locks", "task-recheck-locks"}:
+        raise AckError("conflict", "unknown scoped lock namespace")
     directory = root / "state"
-    for part in ("report-ack-locks", fleet_uid):
+    for part in (namespace, fleet_uid):
         directory = directory / part
         if directory.is_symlink():
             raise AckError("conflict", "report ACK lock directory is redirected")

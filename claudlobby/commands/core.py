@@ -1,4 +1,4 @@
-"""Core compositor commands: validate, generate, list-library, diff, promote, status, doctor, report-back, uptime, warm-cache."""
+"""Core compositor commands: validate, generate, list-library, diff, promote, status, doctor, uptime, warm-cache."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json as _json
 import logging
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..mcp_grammar import GrammarUnavailable, grammar
@@ -14,8 +14,6 @@ from ..composer import compose_bot, compose_fleet
 from ..diff import diff_bot, promote_bot
 from ..source_state import (
     SOURCE_ABSENT,
-    UNREACHABLE_REMEDIES,
-    probe_dir,
     probe_source,
     scan_dir,
     unreachable_line,
@@ -577,8 +575,7 @@ def cmd_status(args) -> int:
 def _coverage_line(plane, window_s, family=None) -> str:
     """The coverage statement for an OPEN plane session (#1658).
 
-    Every windowed door in this package routes through here so the wording is
-    written once; the derivation and the wording both live in
+    The uptime door routes through here so the wording and derivation live in
     `lib/plane-readers.py`, beside the plane's other SQL.
 
     Degrades to a plain note rather than raising: a door must not lose its
@@ -594,182 +591,6 @@ def _coverage_line(plane, window_s, family=None) -> str:
                 " the coverage derivation (#1658)")
     except Exception as exc:                       # pragma: no cover - defensive
         return f"coverage: unknown — {exc}"
-
-
-def cmd_report_back(args) -> int:
-    """Query the fleet's reports on the plane — a human-readable table of bot work events.
-
-    #1216: an unreachable ledger and a ledger with no matching rows must not
-    render alike. They did — both were an ``INFO`` line on *stderr* and rc 0 with
-    **zero bytes on stdout** — and the composed manager guidance told managers to
-    decide worker restarts on this command's output, without ``--fleet``. Run that
-    way it resolves the ROOT tier, finds nothing, and reads as "this worker is
-    fresh". Measured on the reporting host: a manager followed its own
-    instructions for a day and read zero completed while three bots sat at 6, 6
-    and 9; the fleet-tier ledger held 34 rows for the bot in question the whole
-    time.
-
-    The remedy is rc **and** stdout, because they cover different readers: rc is
-    invisible to a human at a terminal, and a stdout line is invisible to a
-    script. Nothing parses this command's stdout (it is a human table; the one
-    documented pipe is into ``grep``), which is what makes stdout safe here and
-    is *not* true of ``dispatch-overdue.py`` — see ``source_state``.
-    """
-    paths = _resolve_paths(args)
-
-    # Parse --since into a cutoff timestamp
-    cutoff = None
-    if args.since:
-        raw = args.since.strip()
-        now = datetime.now(timezone.utc)
-        if raw.endswith("h"):
-            cutoff = now - timedelta(hours=int(raw[:-1]))
-        elif raw.endswith("d"):
-            cutoff = now - timedelta(days=int(raw[:-1]))
-        elif raw.endswith("m"):
-            cutoff = now - timedelta(minutes=int(raw[:-1]))
-        else:
-            try:
-                cutoff = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except ValueError:
-                log.error(
-                    "cannot parse --since '%s' (use e.g. 24h, 7d, 30m, or ISO date)",
-                    raw,
-                )
-                return 1
-
-    # The window the caller actually asked for, in seconds, so the coverage
-    # line compares like with like. None when no --since was given: the answer
-    # then spans whatever exists and there is no window to fall short of.
-    window_s = (now - cutoff).total_seconds() if cutoff else None
-
-    # The plane, the only source (F18 R2b): no ledger probe, no retirement
-    # fact, no file. An unreachable plane REFUSES (rc 3) with the remedy —
-    # never an empty table, which would read as "this worker is fresh"
-    # (#1216's incident, re-created).
-    from ..brief import plane_session
-    plane, note = plane_session(paths)
-    if plane is None:
-        return refuse_unreachable("report-back", note)
-    try:
-        rows = plane.pr.report_rows(plane.conn, plane.fleet, since=cutoff.isoformat() if cutoff else None)
-        # #1658: derived INSIDE the session, from the same connection that
-        # served the rows -- a coverage line fetched from a second open could
-        # describe a different plane than the one the numbers came from.
-        cov = _coverage_line(plane, window_s)
-    except Exception as exc:
-        return refuse_unreachable("report-back", f"the plane cannot answer: {exc}")
-    finally:
-        plane.close()
-    source = f"the plane (fleet {plane.fleet})"
-    total_rows = len(rows)
-    entries = [plane.pr.public(r) for r in rows
-               if (not args.bot or r.get("bot") == args.bot)
-               and (not args.status or r.get("status") == args.status)]
-
-    if not entries:
-        # Emptiness is stated POSITIVELY, naming the source that was read and
-        # how many rows it holds. "0 matched of 34 rows" cannot be confused with
-        # "cannot read the plane", which is the whole point: the reader learns
-        # the instrument worked and the filter is what excluded everything. Left
-        # on stderr under --json so an empty JSONL stream stays empty.
-        stream = sys.stderr if args.json else sys.stdout
-        print(f"0 event(s) matched — read {total_rows} row(s) from {source}",
-              file=stream)
-        print(cov, file=stream)
-        return 0
-
-    if args.json:
-        for e in entries:
-            print(_json.dumps(e))
-        # stdout is a JSONL stream something parses; the coverage statement
-        # rides stderr for the same reason source_state.py puts a refusal there.
-        print(cov, file=sys.stderr)
-        return 0
-
-    # Table output
-    print(f"{'TIMESTAMP':<22} {'BOT':<12} {'STATUS':<10} {'SUMMARY':<50} {'PR'}")
-    print("-" * 110)
-    for e in entries:
-        ts = e.get("ts", "")[:19]
-        bot = e.get("bot", "")[:11]
-        status = e.get("status", "")[:9]
-        summary = e.get("summary", "")[:49]
-        pr = e.get("pr_url", "")
-        print(f"{ts:<22} {bot:<12} {status:<10} {summary:<50} {pr}")
-
-    print(f"\n{len(entries)} event(s)")
-    print(cov)
-    return 0
-
-
-def cmd_brief(args) -> int:
-    """The fleet's composed, read-only state for one bot."""
-    from ..brief import (
-        boot_provenance,
-        build_brief,
-        format_boot_brief,
-        format_brief,
-    )
-
-    paths = _resolve_paths(args)
-    _load_env(paths)  # WORKSTREAM_LEASE_DAYS / DISPATCH_* knobs live in .env
-    fleet, _md = _load_fleet_or_exit(paths)
-
-    bot_id = args.bot
-    if bot_id not in fleet.bots:
-        log.error("bot %r not found in fleet %r", bot_id, fleet.name)
-        return 1
-
-    # getattr, not args.boot: argparse always supplies the flag, but three
-    # hand-built test Namespaces across two authors now call cmd_brief
-    # directly — the defensive default is cheaper than coordinating them.
-    boot = getattr(args, "boot", False)
-    if boot and args.json:
-        # The boot payload is a render mode; its JSON is the plain envelope
-        # --json already serves.
-        log.error("--boot is mutually exclusive with --json")
-        return 1
-
-    now = int(datetime.now(timezone.utc).timestamp())
-    brief = build_brief(fleet, paths, bot_id, now)
-
-    if boot:
-        print(format_boot_brief(brief, boot_provenance(paths, now)))
-        return 0
-
-    if args.json:
-        print(_json.dumps(brief, indent=2))
-    else:
-        sys.stdout.write(format_brief(brief))
-
-    return 0
-
-
-def cmd_workstreams(args) -> int:
-    """Read-only view of the fleet workstream registry. Writes go exclusively
-    through lib/workstream-update.sh and the /workstream manager skill."""
-    from ..workstreams import format_list, format_show
-
-    paths = _resolve_paths(args)
-
-    # The plane, the only source (F18 R2b): an unreachable plane refuses (rc 3)
-    # with the note — never "No workstreams." from a registry that could not be
-    # read (#1216's class).
-    from ..workstreams import plane_workstreams
-    workstreams, note = plane_workstreams(paths)
-    if workstreams is None:
-        return refuse_unreachable("workstreams", note)
-
-    if getattr(args, "ws_command", "list") == "show":
-        entry = workstreams.get(args.id)
-        if not entry:
-            log.error("no such workstream: %s", args.id)
-            return 1
-        print(format_show(entry))
-    else:
-        print(format_list(workstreams))
-    return 0
 
 
 def cmd_uptime(args) -> int:

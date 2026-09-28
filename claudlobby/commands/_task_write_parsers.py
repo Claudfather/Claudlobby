@@ -6,7 +6,8 @@ from ..command_result import execute
 
 
 def _dispatch(args):
-    module = ".assignment_delivery" if args.public_command == "assignment.deliver" else ".task_write"
+    module = (".assignment_delivery" if args.public_command == "assignment.deliver" else
+              ".task_recheck" if args.public_command == "task.recheck" else ".task_write")
     return execute(args.public_command,
                    lambda: import_module(module, __package__).dispatch(args),
                    json_output=args.json, request_id=args.request_id)
@@ -50,6 +51,26 @@ def register_task_write_subparsers(task_children, assignment_children):
     withdrawing.add_argument("task_id", metavar="TASK_ID")
     withdrawing.add_argument("--reason", required=True, metavar="TEXT")
     withdrawing.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
+
+    escalating = _route(task_children, "escalate", "task.escalate",
+                        "Ask for human guidance on open fleet work")
+    escalating.add_argument("task_id", metavar="TASK_ID")
+    escalating.add_argument("--question", required=True, metavar="TEXT")
+    escalating.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
+
+    nudging = _route(task_children, "nudge", "task.nudge",
+                     "Record a nudge and ask the current fleet manager to act")
+    nudging.add_argument("task_id", metavar="TASK_ID")
+    nudging.add_argument("--reason", required=True, metavar="TEXT")
+    nudging.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
+
+    rechecking = _route(task_children, "recheck", "task.recheck",
+                        "Ask the current fleet manager about overdue open work")
+    from ..task_defaults import DEFAULT_MAX_AGE_H, DEFAULT_REPEAT_H
+    rechecking.add_argument("--max-age-h", type=float, default=DEFAULT_MAX_AGE_H)
+    rechecking.add_argument("--repeat-h", type=float, default=DEFAULT_REPEAT_H)
+    rechecking.add_argument("--dry-run", action="store_true")
+    rechecking.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
     reassigning = _route(task_children, "reassign", "task.reassign",
                          "Close the current assignment and route its successor")

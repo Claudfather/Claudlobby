@@ -440,30 +440,24 @@ systemctl --user show claudlobby-<job>.service -p Result -p ExecMainStatus
 journalctl --user -u claudlobby-<job>.service -n 20
 ```
 
-## Installing the fleet (pick one pattern)
+## Installing the fleet
 
-Two supported patterns on Linux. Pick the one that fits — both produce a working fleet, neither blocks the other later. Full reference: [install-patterns.md](../install-patterns.md).
+One supported pattern on Linux — systemd user services; the cron + tmux pattern was retired. Full reference: [install-patterns.md](../install-patterns.md).
 
-### Pattern A — cron + tmux (retired)
-
-The cron plane (`lib/install-cron.sh`) was removed: neither first-class host used it. Use Pattern B.
-
-### Pattern B — systemd user services (modern, self-restarting)
+### systemd user services (self-restarting)
 
 ```bash
 loginctl enable-linger $USER     # one-time, so user services persist past logout
 claudlobby --fleet <name> generate
 
-# Per bot
-lib/install-bot-systemd.sh local/<name>/runtime/bots/<bot>
-
-# Fleet-wide timers — every composed job, one call
+# Enroll every armed job and spin up every declared bot — one call.
+# Dormant jobs (enroll: false) stay off until the fleet opts in.
 lib/setup-fleet <name>
 ```
 
 Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `systemctl --user list-timers` and `journalctl --user -u <name> -f`.
 
-### Generic helpers used by both patterns
+### Generic helpers
 
 - `lib/keepalive.sh <bot-dir>` — restart a dead session, nudge idle panes
 - `lib/log-rotate.sh [--keep N] <log>...` — tail each log to last N lines

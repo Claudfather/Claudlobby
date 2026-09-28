@@ -1187,12 +1187,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         for _k, _v in _silencer.items():
             lines.append(f"export {_k}={_shq(_v)}")
 
-    # Workstream registry bounds (fleet.workstreams). Read from the env by the
-    # single-writer helper (lib/workstream-update.sh) at open/renew time.
-    # Emitted into EVERY bot.conf rather than manager-gated so the fleet-wide
-    # cap/lease applies regardless of team topology — a teamless fleet would
-    # silently lose its config under a manager-only gate. Defaults (12/14) apply
-    # when the fleet omits the block.
+    # The canonical writer reads selected fleet policy. Keep the lease carrier
+    # for current session readers that resolve the brief's boot observations.
     lines.append("")
     lines.append("# Workstream registry (fleet.workstreams)")
     lines.append(f"export WORKSTREAM_MAX_ACTIVE={_shq(fleet.workstreams.max_active)}")
@@ -2488,6 +2484,8 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
         "Bash(claudlobby --json assignment return *)",
         "Bash(claudlobby --json assignment complete *)",
         "Bash(claudlobby --json assignment fail *)",
+        "Bash(claudlobby --json workstream list)",
+        "Bash(claudlobby --json workstream show *)",
     ]
     if bot.bot_id in fleet.manager_bots():
         grants.extend((
@@ -2495,6 +2493,15 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
             "Bash(claudlobby --json assignment deliver *)",
             "Bash(claudlobby --json task withdraw *)",
             "Bash(claudlobby --json task reassign *)",
+            "Bash(claudlobby --json task escalate *)",
+            "Bash(claudlobby --json task nudge *)",
+            "Bash(claudlobby --json workstream open *)",
+            "Bash(claudlobby --json workstream progress *)",
+            "Bash(claudlobby --json workstream renew *)",
+            "Bash(claudlobby --json workstream block *)",
+            "Bash(claudlobby --json workstream unblock *)",
+            "Bash(claudlobby --json workstream close *)",
+            "Bash(claudlobby --json workstream prune *)",
         ))
     return grants
 

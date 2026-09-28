@@ -128,7 +128,7 @@ claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
 claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
 claudlobby status [--bot <name>] # fleet health dashboard
 claudlobby doctor                # pre-flight fleet health diagnostic
-claudlobby report-back           # worker reports from the plane (--since, --bot)
+claudlobby --json fleet reports list  # paginated worker reports (--bot, --status, --since RFC3339)
 claudlobby uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
 claudlobby events                # fleet events from the plane (--bot, --type, --critical)
 claudlobby new-bot               # interactive bot scaffolding
@@ -143,7 +143,7 @@ claudlobby warm-cache            # pre-download npx + uvx packages for MCP serve
 **Gives you:**
 
 - `library/` — 19 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 55 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 17 MCP fragments (github, github-app, gws, google-analytics, google-search-console, meta-ads, meta-business, posthog, notion, linear, slack, shopify, printify, homeassistant, docker, spotify, granola), 25 guardrails, 40 protocols
-- `lib/` — 92 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
+- `lib/` — bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `plane-emit.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
 - `bin/claudlobby` — the Python compositor
 - `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
 

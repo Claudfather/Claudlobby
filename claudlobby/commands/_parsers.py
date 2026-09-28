@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from importlib import import_module
 
-from ..task_defaults import DEFAULT_MAX_AGE_H, DEFAULT_REPEAT_H
+import argparse
 
 
 def _command(module: str, name: str):
@@ -168,118 +168,46 @@ def register_subparsers(sub) -> None:
     )
     ps.set_defaults(func=_command("core", "cmd_status"))
 
-    prb = sub.add_parser(
-        "report-back",
-        help="Query the report-back ledger (bot work events)",
-    )
-    prb.add_argument("--bot", help="Filter by bot name")
-    prb.add_argument(
-        "--status", help="Filter by status (completed/progress/blocked/failed)"
-    )
-    prb.add_argument(
-        "--since",
-        help="Show events since (e.g. 24h, 7d, 30m, or ISO timestamp)",
-    )
-    prb.add_argument(
-        "--json", action="store_true", help="Output raw JSONL instead of table"
-    )
-    prb.set_defaults(func=_command("core", "cmd_report_back"))
-
     pb = sub.add_parser(
         "brief",
-        help="One read door over fleet state for a bot (mission, dispatches, "
-        "workstreams, unacked reports, alerts)",
+        help="Read a bot's active fleet mission, canonical work, workstreams, reports and alerts",
     )
-    pb.add_argument("--bot", required=True, help="Bot to brief (required in v1)")
-    pb.add_argument("--json", action="store_true", help="Schema-1 JSON envelope")
+    pb.add_argument("--bot", help="Read this active-fleet bot's view (defaults to caller or fleet manager)")
+    pb.add_argument("--json", action="store_true", help="One schema-1 result containing a schema-2 brief")
+    pb.add_argument("--usage-since", metavar="DURATION",
+                    help="Include bounded viewer transcript usage for up to 7d (for example 24h)")
     pb.add_argument(
         "--boot",
         action="store_true",
-        help="Render the SessionStart boot payload (#1102 R3/M1): dispatch "
+        help="Render the SessionStart boot payload (#1102 R3/M1): work "
         "lines + empty-state provenance + door line, token-capped — the "
         "composed hook's mode, never the full brief",
     )
-    pb.set_defaults(func=_command("core", "cmd_brief"))
+    from ..command_result import execute
 
-    pws = sub.add_parser(
-        "workstreams",
-        help="Read-only view of the fleet workstream registry",
-    )
-    pws.set_defaults(func=_command("core", "cmd_workstreams"), ws_command="list")
-    ws_sub = pws.add_subparsers(dest="ws_command")
-    ws_sub.add_parser("list", help="List all workstreams (default)")
-    pws_show = ws_sub.add_parser("show", help="Show one workstream by id")
-    pws_show.add_argument("id", help="Workstream id (e.g. ws-ship-the-widget)")
+    def _brief_dispatch(args):
+        return execute("brief", lambda: _command("brief_read", "dispatch")(args),
+                       json_output=args.json)
 
-    pck = sub.add_parser("checkins", help="The manager check-in's decisions, newest first (plane read)")
-    pck.add_argument("--fleet", dest="checkins_fleet", default=None,
-                     help="fleet whose rows to read (default: the fleet.yaml this root names)")
-    pck.add_argument("--bot", default=None, help="one manager's rows only")
-    pck.add_argument("--since", default="7d", help="window: 24h, 7d, 30m, or an ISO instant (default 7d)")
-    pck.add_argument("--last", action="store_true", help="only the newest row, ignoring --since")
-    pck.add_argument("--raised", action="store_true", help="only the rows that surfaced to the operator (raise.decided) — the ask count")
-    pck.add_argument("--json", action="store_true", help="machine-facing envelope")
-    pck.add_argument("--summary", action="store_true",
-                     help="roll the window up instead of listing it: actions, ask rate,"
-                          " considered lengths, unavailable inputs, dispatch outcomes — by project")
-    pck.add_argument("--limit", type=int, default=None,
-                     help="at most N rows (applied after every filter; not with --summary)")
-    pck.set_defaults(func=_command("checkins", "cmd_checkins"))
+    pb.set_defaults(func=_brief_dispatch, public_command="brief")
 
-    # The task loop's operator door (chunk M-A, #1481). A subcommand group from
-    # the start, because M's other verbs land beside `nudge` rather than as
-    # top-level commands of their own.
-    pt = sub.add_parser("task", help="Acts on ONE task (the plane's assignments)")
+    from ._workstream_parsers import register_workstream_subparsers
+    register_workstream_subparsers(sub)
+
+    from ._checkin_parsers import register_checkin_subparsers
+    register_checkin_subparsers(sub)
+
+    pt = sub.add_parser("task", help="Read and operate on fleet-owned work")
     t_sub = pt.add_subparsers(dest="task_action", required=True)
-    ptn = t_sub.add_parser(
-        "nudge",
-        help="Record a nudge on an open task and ask its manager to act",
-    )
-    ptn.add_argument("task_id", help="The dispatch's task id (e.g. t-1757000000-ab12)")
-    ptn.add_argument("why", nargs="?", default="",
-                     help="Why you are nudging — carried to the manager and recorded")
-    ptn.add_argument("--as", dest="as_who", default=None,
-                     help="Who is nudging (default: $USER) — the actor is human:<who>;"
-                     " letters, digits, '.', '-', '_' (it mints a plane identity)")
-    ptn.add_argument("--assignment", default=None,
-                     help="Act on THIS assignment (asg_...) when the task id matches"
-                     " more than one open row — the remedy the refusal names")
-    ptn.set_defaults(func=_command("task", "cmd_task_nudge"))
-
-    # M4 (chunk M-B): the re-check the dormant `task-recheck` fleet timer runs,
-    # and the same door by hand. `--fleet` here names the PLANE's fleet (an
-    # alias in a per-root db), which is a different question from the global
-    # `--fleet`'s overlay — the matcher's own `--fleet F --root R` shape. It
-    # carries its own dest for a mechanical reason too: an argparse subparser
-    # copies its whole namespace over the parent's, so a second `--fleet` on
-    # `dest="fleet"` would erase a global one given before the subcommand.
-    ptr = t_sub.add_parser(
-        "recheck",
-        help="Ask each manager to act on their stale rows (chase, supersede, "
-        "withdraw, escalate) — the task-recheck timer's door",
-    )
-    ptr.add_argument("--fleet", dest="recheck_fleet", default=None,
-                     help="Fleet whose managers to re-check, as the PLANE names it (default: "
-                     "the overlay's / fleet.yaml's own name)")
-    ptr.add_argument("--max-age-h", dest="max_age_h", type=float,
-                     default=DEFAULT_MAX_AGE_H,
-                     help="Also re-check a row open longer than this, deadline "
-                     "or not (default: 48; 0 = every open row with a readable "
-                     "dispatch instant qualifies on age alone; negative refused)")
-    ptr.add_argument("--repeat-h", dest="repeat_h", type=float,
-                     default=DEFAULT_REPEAT_H,
-                     help="Skip a row a re-check already named inside this "
-                     "window — read from the plane, not a state file "
-                     "(default: 24; negative refused)")
-    ptr.add_argument("--dry-run", dest="dry_run", action="store_true",
-                     help="Print what each manager would be sent; record and "
-                     "send nothing")
-    ptr.set_defaults(func=_command("task", "cmd_task_recheck"))
 
     from ._task_read_parsers import register_task_read_subparsers
     assignment_children = register_task_read_subparsers(sub, t_sub)
     from ._task_write_parsers import register_task_write_subparsers
     register_task_write_subparsers(t_sub, assignment_children)
+
+    tick = sub.add_parser("_task-recheck-tick", help=argparse.SUPPRESS)
+    tick.add_argument("tick_fleet", metavar="FLEET")
+    tick.set_defaults(func=_command("task_recheck", "tick"))
 
     from ._message_read_parsers import register_message_read_subparsers
     message_children = register_message_read_subparsers(sub)

@@ -44,22 +44,24 @@ No bot can measure a context percentage, so do not ask for one and do not
 report one (`context-management`). What IS available is the worker's own
 `context-degraded` report:
 
+Choose a 24-hour cutoff from the current time in RFC3339 form with an offset,
+then read the report pages directly:
+
 ```bash
-claudlobby --fleet "$FLEET_NAME" report-back --since 24h 2>/dev/null \
-  | grep -i context-degraded
+claudlobby --fleet "$FLEET_NAME" --json fleet reports list --since "$CUTOFF"
 ```
+
+Inspect `ok` and each item's captured summary for `context-degraded`; continue
+with `--cursor NEXT_CURSOR` until `data.next_cursor` is null. A withheld summary
+cannot prove the worker did not report degradation. Count completed reports in
+the same window only after reading every page.
 
 Any bot listed there is asking to be restarted — pair it with its completed
 count in the same window before deciding.
 
-**Two things about that command that used to make it lie.** The plane's rows
-are per fleet, so `--fleet` is what scopes the query; a run that cannot be
-scoped refuses (rc 3) rather than reading as "nobody is degraded" (#1216's
-lesson). And the pipe hides the exit status — `grep`'s rc is what you
-get back, so check the command alone before trusting an empty grep. A refused run
-prints `claudlobby report-back: UNREACHABLE — …` on stderr and exits 3, which a
-`grep -i` on stdout will filter out of your view: run it unpiped once if the result is
-empty and you are about to act on that.
+Keep `--fleet` for the intended fleet. Inspect the result envelope and exit
+status before treating an empty page as clear. Do not pipe the CLI straight to
+`grep`: that hides its failure status, and a single page may omit later reports.
 
 
 For each discovered bot:

@@ -925,12 +925,11 @@ def test_switch_is_on_owns_polarity(tmp_path, value, off):
 
 
 @pytest.mark.parametrize("script,var", [
-    ("lib/task-recheck.sh", "TASK_RECHECK_ENABLED"),
     ("lib/plane-expire.sh", "PLANE_EXPIRE_ENABLED"),
     ("lib/plane-prune.sh", "PLANE_PRUNE_ENABLED"),
     ("lib/spin-down-bot.sh", "SPINDOWN_RECEIPT_ENABLED"),
 ])
-def test_the_four_launchers_call_the_shared_gate(script, var):
+def test_the_remaining_shell_launchers_call_the_shared_gate(script, var):
     body = (REPO / script).read_text()
     assert f"switch_is_on {var}" in body
     assert f'"${{{var}:-1}}" = "0"' not in body

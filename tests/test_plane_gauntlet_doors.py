@@ -1,22 +1,15 @@
 """Gauntlet-round regression pins — door/shim tier.
 
-Every test here pins a defect found by the post-merge review gauntlet on
-PR #1372 (8 reviewers, consensus-ranked): the wedge marker clock-skew pin,
-the cooldown rc laundering, the report-back grammar-gate newline bypass,
-the --progress 64-bit wrap, the T5 crash-window plan obligation, the
-.plane-session writer/reader cross-pin, the prune single-batch emission,
-and the previously assertion-free tg-post / briefing-trigger armed paths.
+Remaining tests pin the shim wedge marker and cooldown verdicts, plus
+the tg-post and briefing-trigger armed paths on private Plane storage.
 
-Harness = test_plane_door_e2e's _plane_lib pattern (real doors, real shim,
-real cold-CLI ingest into a scratch plane db; transport stubbed).
+The real shim uses a private cold-CLI fallback; native transport is stubbed.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
-import sqlite3
 import subprocess
 import sys
 import time
@@ -30,7 +23,6 @@ LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
 CLI = Path(sys.executable).parent / "claudlobby"
 
 DOOR_FILES = (
-    "dispatch-task.sh", "report-back.sh", "workstream-update.sh",
     "tg-post.sh", "briefing-trigger.sh", "plane-session-start.sh",
     "lib-common.sh", "supervisor.sh", "plane-emit.sh", "plane-socket-client.py",
     "dispatch-overdue.py", "plane-readers.py", "plane-lookup.py",   # the doors' plane joins (R1: no ledger fallback)
@@ -142,175 +134,15 @@ class TestWedgeMarker:
 # ---------------------------------------------------------------------------
 # report-back: grammar gates + progress wrap (C5, C10)
 # ---------------------------------------------------------------------------
-class TestReportBackGates:
-    def test_newline_task_id_never_reaches_the_join(self, tmp_path, armed):
-        """Measured pre-fix on bash 3.2: a task id carrying an embedded
-        newline passed BOTH gates (case-glob * spans newlines; grep-on-stdin
-        anchors per line) and reached grep -F as pattern-OR, linking an
-        unrelated dispatch row. The whole-string [[ =~ ]] gates refuse it:
-        the report lands UNLINKED, rc 0 (fail-open)."""
-        libdir, env = armed
-        state = tmp_path / "state"
-        state.mkdir(parents=True, exist_ok=True)
-        # A row the OLD pattern-OR would have matched via its second line.
-        (state / "dispatch-log.jsonl").write_text(
-            '{"ts":"2026-08-27T00:00:00Z","bot":"w1","task_id":"t-9-ffff",'
-            '"plane_msg_id":"msg_' + "a" * 32 + '",'
-            '"plane_work_item_id":"wi_' + "a" * 32 + '",'
-            '"plane_assignment_id":"asg_' + "a" * 32 + '"}\n'
-            'junk\n'
-        )
-        rbenv = dict(env, BOT_DIR=str(tmp_path / "botdir"))
-        r = _bash(
-            f'"{libdir}/report-back.sh" w1 completed "done" '
-            "--task $'t-9-ffff\\njunk'",
-            rbenv,
-        )
-        assert r.returncode == 0, r.stderr
-        comm = _rows(tmp_path, "SELECT work_item_id FROM communications")
-        assert len(comm) == 1
-        assert comm[0]["work_item_id"] is None  # unlinked, never pattern-OR
-
-    def test_progress_wraparound_refused(self, tmp_path, armed):
-        """Probed pre-fix: a 20-digit --progress passed the digit gate,
-        wrapped $((10#...)) negative, passed -le 100, and the plane refused
-        the batch at pydantic ge=0 — dropping the report's communication AND
-        task fact. The length cap refuses it at the door, exit 2."""
-        libdir, env = armed
-        r = _bash(
-            f'"{libdir}/report-back.sh" w1 progress "x" '
-            "--progress 9223372036854775808",
-            env,
-        )
-        assert r.returncode == 2, (r.returncode, r.stderr)
-        assert "0-100" in r.stderr
-
-    def test_valid_progress_still_lands(self, tmp_path, armed):
-        libdir, env = armed
-        r = _bash(f'"{libdir}/report-back.sh" w1 progress "x" --progress 40', env)
-        assert r.returncode == 0, r.stderr
-        assert _rows(tmp_path, "SELECT msg_id FROM communications")
-
-
 # ---------------------------------------------------------------------------
 # T5 plan obligation: the crash window is VISIBLE (spec-lens Major)
 # ---------------------------------------------------------------------------
-def test_crash_between_intent_and_send_leaves_visible_intent(tmp_path, armed):
-    """The phase-2 plan names this the canary sharp edge: intent-FIRST means
-    a crash between the plane record and the tmux send must leave a VISIBLE
-    intent-without-transmission (the deliberate flip from the legacy shape,
-    a sent-report-without-ledger-row). Mechanism: the tmux stub BLOCKS on
-    send-keys; once the intent row is visible in the db, SIGKILL the door
-    process group — a real kill inside the window — then assert the shape."""
-    import os
-    import signal
-
-    libdir, env = armed
-    blocker = tmp_path / "tmux-blocker"
-    blocker.write_text(
-        '#!/bin/bash\ncase "$*" in *send-keys*) sleep 30 ;; esac\nexit 0\n'
-    )
-    blocker.chmod(0o755)
-    env = dict(env, TMUX_BIN=str(blocker))
-    proc = subprocess.Popen(
-        ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "done"'],
-        env=env, start_new_session=True,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    crashed = False
-    try:
-        deadline = time.monotonic() + 30
-        comms: list = []
-        while time.monotonic() < deadline:
-            if db_path(tmp_path).exists():
-                # the db FILE lands before migrations create the tables —
-                # on a loaded CI runner this poll raced into that window
-                # ("no such table: communications", twice on #1421's CI,
-                # never locally). Mid-creation is simply not-ready-yet.
-                try:
-                    comms = _rows(tmp_path,
-                                  "SELECT msg_id FROM communications")
-                except sqlite3.OperationalError:
-                    comms = []
-                if comms:
-                    break
-            time.sleep(0.1)
-        assert comms, "intent row never appeared — cannot exercise the window"
-        os.killpg(proc.pid, signal.SIGKILL)  # the crash, inside the window
-        crashed = True
-    finally:
-        if not crashed:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        proc.wait(timeout=10)
-    tx = _rows(
-        tmp_path,
-        "SELECT 1 FROM events WHERE kind='transmission' AND msg_id = ?",
-        (comms[0]["msg_id"],),
-    )
-    assert tx == [], "no transmission may exist — that IS the visible window"
-
-
 # ---------------------------------------------------------------------------
 # .plane-session cross-pin: the hook WRITES what report-back READS (S16)
 # ---------------------------------------------------------------------------
-def test_session_hook_writer_and_report_back_reader_agree(tmp_path, armed):
-    libdir, env = armed
-    botdir = tmp_path / "botdir"
-    (botdir / "data").mkdir(parents=True)
-    hook = _bash(
-        f'"{libdir}/plane-session-start.sh"',
-        dict(env, BOT_DIR=str(botdir)),
-        stdin='{"session_id": "abc-123"}',
-    )
-    assert hook.returncode == 0, hook.stderr
-    expected = "sess_" + hashlib.sha256(b"abc-123").hexdigest()[:32]
-    assert expected in (botdir / "data" / ".plane-session").read_text()
-
-    # the dispatch this report closes, through the real door (the plane is the
-    # only record — no ledger row to seed)
-    d = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "sess probe"', env)
-    assert d.returncode == 0, d.stderr
-    task_id = _rows(tmp_path, "SELECT source_ref FROM assignments ORDER BY ingest_seq DESC LIMIT 1")[0]["source_ref"]
-    task_id = task_id[len("dispatch-log:"):]
-    r = _bash(
-        f'"{libdir}/report-back.sh" w1 completed "done" --task {task_id}',
-        dict(env, BOT_DIR=str(botdir)),
-    )
-    assert r.returncode == 0, r.stderr
-    ev = _rows(
-        tmp_path,
-        "SELECT session_uid FROM events WHERE kind='task' AND event='completed'",
-    )
-    assert len(ev) == 1, r.stderr
-    assert ev[0]["session_uid"] == expected
-
-
 # ---------------------------------------------------------------------------
 # Join parity: casefold + newest-wins matches dispatch-overdue semantics (C7)
 # ---------------------------------------------------------------------------
-def test_link_join_is_casefold_newest_wins(tmp_path, armed):
-    libdir, env = armed
-    from tests.test_plane_door_e2e import _seed_assignment
-    # two assignments carrying the same task id, W1 first then w1 — on the
-    # plane, the only record (the ledger rows this once seeded are gone)
-    old_ids = _seed_assignment(tmp_path, task_id="t-9-ffff", bot="W1", tag="c")
-    new_ids = _seed_assignment(tmp_path, task_id="t-9-ffff", bot="w1", tag="d")
-    r = _bash(
-        f'"{libdir}/report-back.sh" W1 completed "done" --task t-9-ffff', env
-    )
-    assert r.returncode == 0, r.stderr
-    ev = _rows(
-        tmp_path,
-        "SELECT assignment_id FROM events WHERE kind='task' AND event='completed'",
-    )
-    # dispatch-overdue.py's join is case-insensitive and newest-row-wins;
-    # the plane lookup must agree: the LATEST matching assignment's ids link.
-    assert ev and ev[0]["assignment_id"] == new_ids[2], r.stderr
-
-
 # ---------------------------------------------------------------------------
 # tg-post armed path (previously zero plane assertions — general-lens #2)
 # ---------------------------------------------------------------------------
@@ -416,51 +248,6 @@ def test_briefing_trigger_armed_lands_briefing_comm(tmp_path, armed):
 
 # ---------------------------------------------------------------------------
 # workstream prune: ONE batch, emitted once (C6)
-# ---------------------------------------------------------------------------
-def test_prune_emits_one_batch_for_all_archived(tmp_path, armed):
-    libdir, env = armed
-    counter = tmp_path / "emit-count"
-    wrapper = tmp_path / "counting-cli"
-    # Count the DOOR's batches only (emitter workstream-update): a fleet event
-    # the door's ERR trap lands (Phase B, emitter lib) is emitted DETACHED and
-    # may reach the cold CLI after the counter reset below — a different
-    # family's batch, never the prune's, and counting it made this pin flake
-    # (measured 1 in 3).
-    wrapper.write_text(
-        "#!/bin/bash\n"
-        'f="${@: -1}"\n'
-        "grep -q '\"emitter\": *\"workstream-update\"' \"$f\" 2>/dev/null && echo x >> " + str(counter) + "\n"
-        f'exec "{CLI}" "$@"\n'
-    )
-    wrapper.chmod(0o755)
-    wenv = dict(env, PLANE_EMIT_CLI=str(wrapper))
-    ws = f'"{libdir}/workstream-update.sh"'
-    for i in (1, 2):
-        r = _bash(f'{ws} open "ws {i}" --project alpha', wenv)
-        assert r.returncode == 0, r.stderr
-    ids = [
-        row["workstream_id"]
-        for row in _rows(tmp_path, "SELECT workstream_id FROM workstreams")
-    ]
-    assert len(ids) == 2
-    for wid in ids:
-        r = _bash(f'{ws} close {wid} --status done', wenv)
-        assert r.returncode == 0, r.stderr
-    counter.write_text("")  # count only the prune
-    r = _bash(f'{ws} prune', wenv)
-    assert r.returncode == 0, r.stderr
-    archived = _rows(
-        tmp_path,
-        "SELECT workstream_id FROM events WHERE kind='workstream'"
-        " AND event='archived'",
-    )
-    assert {row["workstream_id"] for row in archived} == set(ids)
-    # ONE shim invocation for the whole prune — not one per pruned id.
-    assert counter.read_text().count("x") == 1
-
-
-# ---------------------------------------------------------------------------
-# lib-common plane helpers (C3 consolidation)
 # ---------------------------------------------------------------------------
 class TestPlaneHelpers:
     def _run(self, snippet: str, env: dict) -> subprocess.CompletedProcess:

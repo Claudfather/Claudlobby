@@ -6,7 +6,7 @@ Prerequisites: a working fleet with at least a manager bot and one worker, super
 
 Two mechanics run through most of these patterns. Read them once here:
 
-- **Every bot runs on its own tmux server.** A bot's session lives on a *private* tmux server addressed by `-L <socket>`, where the socket name is the bot's `BOT_SERVICE` (also written to `bot.conf` as `TMUX_SOCKET`). One server's death drops only that bot, never the fleet. The practical consequence for these patterns: a bare `tmux -t <bot>` or `tmux send-keys -t <bot>` targets the *default* tmux server, which has none of your bots on it — the call silently no-ops rather than erroring. Always dispatch through the socket-aware helpers (`lib/dispatch.sh`, `lib/report-back.sh`, `lib/bot-sweep-cron.sh`) or address the socket explicitly (`tmux -L <bot-service> ...`). Section 5 covers the dispatch/report-back model.
+- **Every bot runs on its own tmux server.** A bot's session lives on a *private* tmux server addressed by `-L <socket>`, where the socket name is the bot's `BOT_SERVICE` (also written to `bot.conf` as `TMUX_SOCKET`). One server's death drops only that bot, never the fleet. Use the canonical task, assignment, message, and report commands for work; Section 5 covers that model. Legacy lifecycle scripts that inspect or restart a pane must address its private socket.
 
 - **Several patterns below ship as library skills, not recipes.** Where a pattern is a real skill, you enable it by adding its name to a bot's `skills:` list in `fleet.yaml` and running `claudlobby generate` — the compositor symlinks `library/skills/<name>/` into that bot's `.claude/skills/<name>/`. Because the symlink points at the shared library file, edits to `library/skills/<name>/SKILL.md` propagate live to every bot using it. Never hand-author a `SKILL.md` into a generated bot directory: the next `generate` overwrites it, and it defeats the whole point of composition. For those patterns, this doc gives you the *why*, the one-line wiring, and how to schedule it — the skill file itself is the source of truth for the steps, so we point at it rather than copy it.
 
@@ -36,11 +36,11 @@ The example fleet already wires this on its `lead` bot. The phase-by-phase decis
 
 ### How it dispatches
 
-Lifecycle hands work to the engineer and reviewer through the same socket-aware path every fleet dispatch uses — `lib/dispatch.sh` (or `lib/dispatch-task.sh`, which additionally records the task on the plane as an assignment with a deadline so an overdue task surfaces as `overdue_dispatch`). Workers signal progress and completion with `lib/report-back.sh`, which the manager reads in its own pane. See Section 5 for both.
+Lifecycle hands tracked work to the engineer and reviewer through fleet-owned task admission, assignment, and delivery. Workers accept their exact assignment and report linked progress or completion; the manager reads fleet reports. See Section 5 for the commands.
 
 ### Gotchas
 
-- The manager waits for the `[BOTREPORT]` message rather than polling. Each dispatch can take minutes to tens of minutes; the report sits in the manager's pane buffer until it reaches a natural pause.
+- Read `fleet reports list` or the fleet inbox for recorded results; a committed report and manager notification are distinct outcomes.
 - "Mechanical fix" vs "ambiguous concern" is a judgment the manager makes by reading the review. Bias toward flagging a human early — a false escalation is cheaper than a bad merge.
 
 ---
@@ -132,63 +132,41 @@ Resume needs no separate wiring in the common case. `lib/start-bot.sh` injects t
 
 ---
 
-## 5. Inter-Bot Communication (dispatch.sh + report-back.sh)
+## 5. Inter-Bot Communication and Reports
 
-Structured, deterministic messaging between bots over tmux. The manager dispatches work to a worker; the worker reports back when it has something to say. Telegram is unreliable for bot-to-bot traffic (messages drop); a direct send into the peer's pane is instant and observable.
-
-Because each bot is on its own tmux server (see the intro), both directions go through helpers that **resolve the peer's socket** and send safely — they never assume a shared default server.
-
-### Dispatch: manager → worker
-
-```bash
-# Resolve the worker's socket, precheck the session, race-safe two-step send:
-$CLAUDLOBBY_ROOT/lib/dispatch.sh <worker-session> "Implement X in org/repo. Branch + PR. Report back when done."
-```
-
-`dispatch.sh` reverse-resolves the worker's private socket from its session name, confirms the session exists on that socket, and sends the text and Enter as two steps (so a rendering TUI can't swallow the keystroke). If the peer can't be reached it logs a `send_miss` event and exits non-zero instead of silently dropping the message.
-
-`lib/dispatch-task.sh` wraps `dispatch.sh` with accountability: it records the dispatch on the plane (a work item + an assignment) with a deadline (`expected_by`) before sending, so the fleet-pulse watchdog can flag the task `overdue_dispatch` if no terminal report arrives in time. Any envelope flag (`--botcommand`, `--repo`, `--priority`, `--ref`, `--workstream`) wraps the task in a `[BOTCOMMAND]` envelope **and mints a `task:<id>`** the worker echoes back (`report-back.sh <bot> <status> "<summary>" --task <id>`), so the watchdog joins on identity — prefer `--botcommand` at minimum for anything individually tracked.
-
-### Report-back: worker → manager
+Use `/fleet-ops` for the current Task, assignment, message, and report
+contracts. Fleet work is admitted before it is assigned; assignment is not
+delivery, and delivery is not worker acceptance. Retain a distinct request UUID
+for each operation and inspect recording and notification separately.
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot> <status> "<summary>" [flags...]
+# Manager: admit, assign, then deliver the exact assignment from a UTF-8 file.
+claudlobby --json task admit --title "Implement X" --request-id ADMIT_UUID
+claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID
+claudlobby --json assignment deliver ASSIGNMENT_ID --file INSTRUCTIONS_FILE --request-id DELIVER_UUID
+
+# Worker: accept, then report against that current assignment.
+claudlobby --json assignment accept ASSIGNMENT_ID --request-id ACCEPT_UUID
+claudlobby --json assignment progress ASSIGNMENT_ID --summary "Refactoring auth" --percent 40 --request-id PROGRESS_UUID
+claudlobby --json assignment complete ASSIGNMENT_ID --summary "Rate limit landed" --pr https://github.com/org/api/pull/87 --pr-role authored --request-id COMPLETE_UUID
 ```
 
-Message format written into the manager's pane:
+A blocker that leaves the worker owning the assignment uses `assignment
+block --reason`; a worker yielding it uses `assignment return --reason`.
+Terminal unsuccessful work uses `assignment fail --reason`. With no current
+assignment, use an explicitly unlinked `fleet reports submit --status STATUS
+--summary "..." --request-id UUID`; that report does not transition a task.
+No report may borrow a historical display task ID as an assignment ID.
 
-```
-[BOTREPORT] <bot> | <status> | <summary> [| progress:<N>] [| pr:<url>] [| artifact:<url>]
-```
-
-**Statuses:** `completed`, `progress`, `blocked`, `failed`. (`progress` — paired with `--progress N` — lets a long-running task report a percentage without claiming it's done.)
-
-**Optional fields:** `--pr <url>`, `--issues <url,url>`, `--skill <name>`, `--progress <N>`, `--artifact <url>` (source-of-findings provenance, repeatable). Older positional forms like a bare `pr:<url>` argument still work.
-
-```bash
-# Completed with a PR:
-$CLAUDLOBBY_ROOT/lib/report-back.sh eng-1 completed "Added rate limiting to auth endpoint" --pr https://github.com/org/api/pull/87
-
-# Blocked:
-$CLAUDLOBBY_ROOT/lib/report-back.sh eng-1 blocked "Need DB migration permissions — cannot alter production schema"
-
-# Mid-task progress:
-$CLAUDLOBBY_ROOT/lib/report-back.sh eng-1 progress "Refactoring auth" --progress 40
-```
-
-Beyond the pane message, `report-back.sh` lands the report on the plane (a communication + the task event) and mirrors the bot's state (idle/working/blocked) to `fleet-state`, so completion is queryable via `claudlobby report-back` even if the manager missed the pane message.
-
-### Where the manager address comes from — you don't set it by hand
-
-`report-back.sh` sends to the session named in `MANAGER_TMUX` (default `claude-bot`) on the socket in `MANAGER_TMUX_SOCKET`. **The compositor sets both for you** from your `teams:` wiring: a bot listed in a team's `workers` gets `MANAGER_TMUX=<that team's manager>` and the manager's socket; a manager bot gets its own id. You configure the relationship in `fleet.yaml` (`teams:`), not the env var.
-
-> If you're following an older guide that mentions `MANAGER_BOT_NAME`: that variable never existed in the shipping code and was a documented bug. The real variable is `MANAGER_TMUX`, and it's composed automatically.
-
-### Gotchas
-
-- The `|` delimiter means summaries must not contain pipes. Keep summaries to one sentence.
-- `send-keys` has a practical length limit — keep the whole message well under ~500 characters. For detail, include a PR/issue URL and let the manager read it via GitHub MCP.
-- A dropped cross-socket send is no longer silent: it emits a `send_miss` event to the plane (`claudlobby events --type send_miss`), so you can see when a report failed to land (e.g. the manager's session was down).
+Read reports with `claudlobby --json fleet reports list`, optionally filtering
+with `--bot`, `--status`, or `--since RFC3339_CUTOFF`. The cutoff must be a
+real RFC3339 instant with an offset, derived for the intended window. Inspect
+`ok` and follow `data.next_cursor` with `--cursor` until null. An error or
+unreadable page is unknown, not zero reports. The manager can use `fleet inbox`
+for a concise view; an unfiltered `--unacknowledged` report page supplies a
+separate ACK cursor. See `/fleet-ops` for that exact acknowledgement protocol.
+A request replay is for the same intended operation and never automatically
+resends an uncertain message.
 
 ---
 

@@ -350,10 +350,21 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json assignment return *)",
         "Bash(claudlobby --json assignment complete *)",
         "Bash(claudlobby --json assignment fail *)",
+        "Bash(claudlobby --json workstream list)",
+        "Bash(claudlobby --json workstream show *)",
         "Bash(claudlobby --json task assign *)",
         "Bash(claudlobby --json assignment deliver *)",
         "Bash(claudlobby --json task withdraw *)",
         "Bash(claudlobby --json task reassign *)",
+        "Bash(claudlobby --json task escalate *)",
+        "Bash(claudlobby --json task nudge *)",
+        "Bash(claudlobby --json workstream open *)",
+        "Bash(claudlobby --json workstream progress *)",
+        "Bash(claudlobby --json workstream renew *)",
+        "Bash(claudlobby --json workstream block *)",
+        "Bash(claudlobby --json workstream unblock *)",
+        "Bash(claudlobby --json workstream close *)",
+        "Bash(claudlobby --json workstream prune *)",
         "Bash(claudlobby --fleet claudlobby brief --bot solo)",
     ]
 
@@ -3051,13 +3062,8 @@ class TestComposeBotConfObservability:
         assert fleet.bots["worker"].observability.dispatch_deadline == \
             DEFAULT_DISPATCH_DEADLINE_S
 
-    def test_one_number_three_places_and_they_are_pinned_together(self):
-        """FOLD F2. The default deadline is spelled in THREE files — the
-        system-defaults tier, the composer's constant, and `dispatch-task.sh`'s
-        own literal for a bot.conf composed before M-A. Two of them moved to
-        86400 and the third did not, which is how the ruling shipped and
-        changed nothing. Pinned together so the next move has to visit all
-        three."""
+    def test_default_deadline_matches_system_tier(self):
+        """The composed default and system tier retain the same 24h value."""
         import re
         from pathlib import Path as _P
 
@@ -3066,11 +3072,8 @@ class TestComposeBotConfObservability:
         repo = _P(__file__).resolve().parent.parent
         tier = re.search(r"^    dispatch_deadline: (\d+)$",
                          (repo / "claudlobby" / "system.yaml").read_text(), re.M)
-        door = re.search(r'DEADLINE_S="\$\{OBSERVABILITY_DISPATCH_DEADLINE:-(\d+)\}"',
-                         (repo / "lib" / "dispatch-task.sh").read_text())
-        assert tier and door
-        assert int(tier.group(1)) == int(door.group(1)) == DEFAULT_DISPATCH_DEADLINE_S
-        assert DEFAULT_DISPATCH_DEADLINE_S == 86_400      # 24h in SECONDS, the ruling
+        assert tier
+        assert int(tier.group(1)) == DEFAULT_DISPATCH_DEADLINE_S == 86_400
 
     def test_a_zero_deadline_composes_as_zero_and_disables_the_clock(self, tmp_path):
         """`0` is the open-ended dispatch, not "now": it must reach bot.conf
@@ -5182,7 +5185,8 @@ class TestTaskRecheckTimer:
         timers = self._compose(tmp_path, monkeypatch)
         service = (timers / "com.test.task-recheck.service").read_text()
         assert (timers / "com.test.task-recheck.timer").is_file()
-        assert f"{source_package().native}/task-recheck.sh rc-fleet" in service
+        assert "_task-recheck-tick rc-fleet" in service
+        assert "task-recheck.sh" not in service
 
     def test_it_is_ENROLLED_by_default(self, tmp_path, monkeypatch):
         """The flip: a fresh fleet that declares nothing gets the re-check."""

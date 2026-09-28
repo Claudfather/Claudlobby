@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from claudlobby.plane.emit_api import emit_batch
+from claudlobby.task_work_queries import BotWork, CurrentWork
 from claudlobby.utilization import (
     BotUtilization,
     PlaneUnreachable,
@@ -168,52 +169,50 @@ class TestFindStateTransition:
 class TestComputeBotUtilization:
     def test_idle_bot(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        util = compute_bot_utilization("eng-1", _series(now, ["IDLE"] * 10), {"status": "idle"}, now=now)
+        util = compute_bot_utilization("eng-1", _series(now, ["IDLE"] * 10), now=now)
 
         assert util.busy_pct_24h == 0.0
         assert util.idle_since is not None
-        assert util.current_task_age_secs is None
+        assert util.busy_age_secs is None
         assert util.stall is False
 
     def test_busy_bot(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        util = compute_bot_utilization("eng-1", _series(now, ["BUSY"] * 10), {"status": "working"}, now=now)
+        util = compute_bot_utilization("eng-1", _series(now, ["BUSY"] * 10), now=now)
 
         assert util.busy_pct_24h == 100.0
         assert util.idle_since is None
-        assert util.current_task_age_secs is not None
-        assert util.current_task_age_secs > 0
+        assert util.busy_age_secs is not None
+        assert util.busy_age_secs > 0
 
     def test_stall_detection(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         # Bot has been busy for 3 hours (> 2h stall threshold), a sample a minute
-        util = compute_bot_utilization("eng-1", _series(now, ["BUSY"] * 180), {"status": "working"}, now=now)
+        util = compute_bot_utilization("eng-1", _series(now, ["BUSY"] * 180), now=now)
 
         assert util.stall is True
-        assert util.current_task_age_secs > 7200
+        assert util.busy_age_secs > 7200
 
     def test_no_samples(self):
-        util = compute_bot_utilization("eng-1", [], {}, now=datetime.now(timezone.utc))
+        util = compute_bot_utilization("eng-1", [], now=datetime.now(timezone.utc))
 
         assert util.busy_pct_24h == 0.0
         assert util.idle_since is None
-        assert util.current_task_age_secs is None
+        assert util.busy_age_secs is None
 
     def test_naive_entries_are_read_as_utc(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
         naive = [(ts.replace(tzinfo=None), s) for ts, s in _series(now, ["BUSY"] * 3)]
-        assert compute_bot_utilization("eng-1", naive, {}, now=now).busy_pct_24h == 100.0
+        assert compute_bot_utilization("eng-1", naive, now=now).busy_pct_24h == 100.0
 
-    def test_fleet_state_fields(self):
+    def test_work_is_separate_from_observed_state(self):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        fleet_state = {
-            "status": "working",
-            "current_task": "Fix auth bug",
-        }
-        util = compute_bot_utilization("eng-1", [], fleet_state, now=now)
+        work = BotWork((CurrentWork("wi_auth", "asg_auth", "Fix auth bug", "assigned"),))
+        util = compute_bot_utilization("eng-1", [], work, now=now)
 
-        assert util.state == "working"
+        assert util.state == "unknown"
         assert util.current_task == "Fix auth bug"
+        assert util.work_assignments[0].assignment_id == "asg_auth"
 
 
 # ── compute_fleet_utilization ────────────────────────────────────────────────
@@ -228,7 +227,7 @@ class TestComputeFleetUtilization:
         return Paths(root=tmp_path, package=source_package())
 
     def test_discovers_bots_from_dirs_and_reads_their_series_from_the_plane(self, tmp_path):
-        now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 2, 18, 0, 0, tzinfo=timezone.utc)
         bots_dir = tmp_path / "bots"
         bots_dir.mkdir()
         _make_bot_dir(bots_dir, "eng-1")
@@ -241,6 +240,41 @@ class TestComputeFleetUtilization:
         by_name = {r.name: r for r in results}
         assert by_name["eng-1"].busy_pct_24h == 100.0          # the plane's samples
         assert by_name["eng-2"].busy_pct_24h == 0.0            # no sample recorded: nothing to roll up
+        assert by_name["eng-1"].current_task is None
+        assert by_name["eng-1"].state == "working"
+        assert "no actor identity" in by_name["eng-1"].work_unavailable
+        assert by_name["eng-2"].state == "unknown"
+
+        from claudlobby.plane.db import connect, db_file
+        from claudlobby.plane.identity import resolve_party
+        from tests.test_task_state import _insert
+
+        (tmp_path / "state" / "fleet-state.json").write_text(
+            '{"bots":{"eng-1":{"current_task":"stale file task","status":"blocked"}}}')
+        conn = connect(db_file(tmp_path))
+        fleet_uid = conn.execute("SELECT uid FROM identity_registry WHERE kind='fleet'"
+                                 " AND alias='f'").fetchone()[0]
+        worker_uid = resolve_party(conn, "bot:f/eng-1", now=now.isoformat(), fleet_uid=fleet_uid)
+        _insert(conn, "work_items", fleet_uid=fleet_uid, work_item_id="wi_rollup",
+                title="Canonical rollup work", created_by_uid=worker_uid)
+        _insert(conn, "assignments", fleet_uid=fleet_uid, assignment_id="asg_rollup",
+                work_item_id="wi_rollup", assignee_uid=worker_uid, assigned_by_uid=worker_uid)
+        assigned = compute_fleet_utilization(bots_dir, paths, now=now, fleet="f")
+        worker = next(row for row in assigned if row.name == "eng-1")
+        assert worker.current_task == "Canonical rollup work" and worker.state == "working"
+        assert not worker.work_unavailable
+        assert worker.work_assignments[0].task_id == "wi_rollup"
+        _insert(conn, "events", fleet_uid=fleet_uid, kind="task", work_item_id="wi_rollup",
+                assignment_id="asg_rollup", event="returned_blocked")
+        returned = compute_fleet_utilization(bots_dir, paths, now=now, fleet="f")
+        assert next(row for row in returned if row.name == "eng-1").current_task is None
+        _insert(conn, "events", fleet_uid=fleet_uid, kind="task", work_item_id="wi_rollup",
+                assignment_id="asg_missing", event="progress")
+        conn.close()
+        unresolved = compute_fleet_utilization(bots_dir, paths, now=now, fleet="f")
+        assert any(issue["code"] == "dangling_task_event" for issue in unresolved[0].work_issues)
+        assert unresolved[0].work_unresolved
+        assert unresolved[0].work_unavailable
 
     def test_explicit_bot_names(self, tmp_path):
         now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
@@ -339,7 +373,7 @@ class TestFormatUtilizationSummary:
                 name="eng-1",
                 busy_pct_24h=75.0,
                 state="working",
-                current_task_age_secs=3600,
+                busy_age_secs=3600,
             ),
             BotUtilization(
                 name="eng-2",

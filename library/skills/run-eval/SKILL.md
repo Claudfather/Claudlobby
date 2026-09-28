@@ -51,7 +51,7 @@ Existing assets — use them, do not rebuild:
 | Asset | Role |
 |-------|------|
 | `lib/ab-comms-eval.sh` | Two-variant fixture composed by real `generate`; paired task x rep x variant matrix |
-| `lib/transcript-usage.py` | The measurement — `protocol_sensitive` + `cost_weighted_total` axes |
+| `claudlobby.transcript_usage` | The evaluator's private measurement — `protocol_sensitive` + labeled weighted-estimate axes |
 | `lib/ab-comms-verdict.py` | Paired deltas, seeded bootstrap CI, the pass-bar |
 
 Run control and treatment **paired** — compare within a task and rep, then aggregate the paired deltas. Unpaired comparison lets task variance swamp the effect.

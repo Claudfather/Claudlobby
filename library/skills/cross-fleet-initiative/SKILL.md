@@ -16,10 +16,10 @@ The skill is invoked **per-stage**. State persists in `<initiatives_root>/<name>
 
 ## Configuration
 
-All fleet-specific identifiers (manager names, tmux sessions, telegram chat IDs) live in a `config.json` alongside this skill — never hardcoded into the stage prompts. Copy `config.example.json` to `config.json` and fill in real values for your fleet.
+Destination fleet names and human-facing chat/project metadata live in `config.json` alongside this skill. Copy `config.example.json` to `config.json` and fill in real values. A configured name or chat handle is not routing authority: each destination fleet's current manager comes from `claudlobby --fleet FLEET --json fleet show` at use time (`data.fleet.manager`).
 
 Required config keys:
-- `managers`: array of `{name, tmux_session, telegram_handle, project_root, fleet_repos}` objects
+- `managers`: array of `{name, fleet, telegram_handle, project_root, fleet_repos}` objects; `name` is a display label and `fleet` is the exact active destination identity
 - `managers_chat_id`: Telegram chat where strategic forks surface
 - `founder_handle`: Telegram user for direct escalation
 - `founder_user_id`: Telegram user ID for programmatic tagging
@@ -27,6 +27,24 @@ Required config keys:
 - `initiatives_root`: absolute path where initiative state directories are stored
 
 If `config.json` is missing, the skill exits and instructs the operator to create it from `config.example.json`.
+
+The universal `fleet-ops` skill covers the caller's own fleet. A coordinator that works with another fleet needs explicit `bots.<coordinator>.tool_permissions.allow` entries in its fleet configuration. Replace `DEST` below with each exact active destination name and include only the verbs used:
+
+```yaml
+tool_permissions:
+  allow:
+    - "Bash(claudlobby --fleet DEST --json fleet show)"
+    - "Bash(claudlobby --fleet DEST --json task admit *)"
+    - "Bash(claudlobby --fleet DEST --json task list)"
+    - "Bash(claudlobby --fleet DEST --json task list *)"
+    - "Bash(claudlobby --fleet DEST --json task show *)"
+    - "Bash(claudlobby --fleet DEST --json message send --to DEST/*)"
+    - "Bash(claudlobby --fleet DEST --json request show *)"
+    - "Bash(claudlobby --fleet DEST --json message receipt *)"
+    - "Bash(claudlobby --fleet DEST --json message wait *)"
+```
+
+The message grant scopes the target fleet; resolve and address its current manager, not an arbitrary worker. These grants do not include destination `task assign` or `assignment deliver`. Do not add a blanket `claudlobby` grant. A permission or scope refusal is a stop, not a reason to use tmux.
 
 ## Arguments
 
@@ -105,7 +123,7 @@ For each manager in config, a section:
 **Procedure:**
 1. Re-read FRAME.md.
 2. For each manager, propose a lane. Apply the principle: each lane is single-fleet-actionable except for explicit handshake points.
-3. Validate split with each manager via a tmux probe: "Here's your proposed lane — does it map cleanly to your fleet's surface? Push back if scope crosses boundary." Wait for ack from each.
+3. Resolve each destination's current manager with `claudlobby --fleet FLEET --json fleet show`. Send the proposed lane with `claudlobby --fleet FLEET --json message send --to FLEET/MANAGER --text "..." --request-id UUID`. Keep the UUID and message ID; inspect `request show` and `message receipt`, then use `message wait MESSAGE_ID --for reply --timeout SECONDS` for a bounded reply check. A transport receipt is not agreement. Wait for each manager's actual response before marking the split accepted.
 4. On all managers ack'd, mark `current_stage: GATE`.
 
 ### 3. GATE
@@ -134,7 +152,7 @@ For each gate (typically 2-5 per initiative):
 
 **Inputs:** ratified DECOMPOSE.md + GATE.md.
 
-**Output:** `dispatches/<manager>-<date>-opening.md` for each manager (durable copy of the dispatch text).
+**Output:** `dispatches/<manager>-<date>-opening.md` for each destination (durable scope text, with its admitted task ID recorded beside it).
 
 **Procedure:**
 1. For each manager, compose an opening dispatch with:
@@ -142,11 +160,11 @@ For each gate (typically 2-5 per initiative):
    - First-dispatch directive from DECOMPOSE.md
    - Cross-fleet handshake protocol (when to mirror what to the managers chat)
    - Gate references (which gates apply to their lane, who ratifies)
-   - Reporting expectations (BOTREPORT shape, cadence)
+   - Reporting expectations (recorded task progress and manager-to-coordinator messages, cadence)
 2. Save dispatch to `dispatches/<manager>-<date>-opening.md`.
-3. Send via tmux send-keys to manager's session (with the standard verify-flush SOP — `set +H;` prefix if any `!word` patterns).
-4. Confirm submission (capture pane, look for thinking indicator).
-5. On all dispatches submitted (step 4's pane check), mark `current_stage: MONITOR` — do not wait for acks; a recipient's ack is its first report, whenever that lands (Worker Lifecycle, Step 2).
+3. For each exact destination fleet, admit unassigned work: `claudlobby --fleet FLEET --json task admit --title "..." --body-file dispatches/<manager>-<date>-opening.md --request-id UUID`. Retain the UUID and returned canonical `data.task_id`; use `claudlobby --fleet FLEET --json task show TASK_ID` to inspect the selected fleet's queued work. The destination fleet owns assignment and `assignment deliver`; this coordinator never assigns its workers.
+4. Resolve that fleet's current manager with `fleet show`, then send a separate ordinary message naming the task ID and gate expectations: `claudlobby --fleet FLEET --json message send --to FLEET/MANAGER --text "..." --request-id UUID`. Inspect the request and `message receipt MESSAGE_ID`; use a bounded `message wait` when a reply is needed. Admission is not delivery, and a sent message is not worker acceptance. On uncertain recording or transport, inspect the same UUID and receipt; never mint a second send automatically.
+5. After every destination task is recorded and the manager messages have been checked, mark `current_stage: MONITOR`. Record any unverified notification in STATE.md rather than claiming it landed.
 
 ### 5. MONITOR
 
@@ -156,13 +174,14 @@ For each gate (typically 2-5 per initiative):
 
 **Procedure:**
 1. Compose the MONITOR cron prompt parameterized to this initiative:
-   - Poll managers (from config) at 15-min cadence
-   - Watch for: BOTREPORTs landing, gate-condition checks, PR state changes on initiative-relevant PRs, spotlights
+   - Read each destination's canonical task with `claudlobby --fleet FLEET --json task show TASK_ID` at 15-min cadence; read manager messages and independent gate evidence
+   - Watch for: task progress, manager replies, gate-condition checks, PR state changes on initiative-relevant PRs, spotlights
    - **Context-aware manager nudge** at light cadence (every 2-3 polls). Classify each manager's state:
-     - **WORKING** = active processing indicator or recent BOTREPORTs in last ~10 min or substantive activity since last poll
-     - **IDLE** = no processing indicator, no recent BOTREPORTs, queue empty
-   - If WORKING: optionally nudge to check their workers' state — silent workers, high context, rate-limits.
-   - If IDLE: check for autonomous-allowed work queue on GitHub issues. If queue exists with unblocked items, nudge to kick off. If queue is empty or all items require owner ratify, surface a discussion to the managers chat.
+     - **WORKING** = recorded task progress or a substantive manager reply since the last poll
+     - **IDLE** = the manager explicitly confirms it has no active work and the current task read supports that account
+     - **UNKNOWN** = the manager has not confirmed its state, the read is stale or unavailable, or the two disagree; disclose the gap instead of calling it idle
+   - If WORKING: optionally ask the manager to check silent workers, context, and rate limits through an ordinary message.
+   - If IDLE: check for autonomous-allowed work queue on GitHub issues. If queue exists with unblocked items, ask the manager to resume through an ordinary message. If queue is empty or all items require owner ratify, surface a discussion to the managers chat.
    - Surface flags or forks to managers chat when input required
    - Update STATE.md with each gate clear and each fork opened/closed
 2. Register the cron via CronCreate with offset-minute (per config) and the initiative-parameterized prompt.
@@ -172,12 +191,12 @@ The MONITOR stage is steady-state; stages 6 and 7 fire on triggers within it.
 
 ### 6. SYNTHESIZE
 
-**Triggers:** a gate's definition-of-done is met (manager BOTREPORT signals gate-clear) OR a fork lands that the owner must ratify.
+**Triggers:** a gate's definition-of-done is met (recorded work and independent evidence support it) OR a fork lands that the owner must ratify.
 
 **Output:** `synthesis/<date>-<gate-or-fork>.md` — consolidated read for the owner.
 
 **Procedure:**
-1. Pull the relevant state: gate definition (from GATE.md), evidence (BOTREPORTs / PR diffs / empirical artifacts), each manager's read.
+1. Pull the relevant state: gate definition (from GATE.md), canonical task state, manager messages, PR diffs or empirical artifacts, and each manager's read.
 2. For gate-clear: confirm DoD is empirically met; document evidence; on auto-proceed-gates: ratify; on ratify-required: surface to owner with the compiled evidence + your read + the ask.
 3. For fork-ratify: name the fork, name the options (use descriptive names not letters), name each manager's lean, name your read with the four lenses (best practice / future-proof / elegant / consistent-with-codebase), name the ask to owner.
 4. Post synthesis to managers chat as a single coherent message. Tag owner.

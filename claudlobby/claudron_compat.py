@@ -53,7 +53,7 @@ COMPAT_FLOOR: tuple[ClaudronCapability, ...] = (
         probe=PROBE_API,
     ),
     ClaudronCapability(
-        feature="CLI query wedge (dispatch-task.sh preflight)",
+        feature="Agent vault lookup (composed instructions and check-in skill)",
         requires="claudron lookup CLI",
         # 0.3.0, not 0.2.0: post-L1 the wedge relies on the CLI reading
         # CLAUDRON_VAULT_PATH (dropped the explicit --vault), which landed in

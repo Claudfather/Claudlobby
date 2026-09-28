@@ -82,7 +82,7 @@ def not_sentinel_sql(col: str = "alias") -> str:
 # THE definition of "a fleet's reports": report-class communications on the
 # fleet's ROOM AXIS — sent by the fleet (fleet_uid) or addressed to it
 # (recipient_fleet: a worker on another fleet reporting to this fleet's manager
-# is this fleet's report). brief's unacked list, `claudlobby report-back` and
+# is this fleet's report). Brief's unacked list, `fleet reports list`, and
 # the overview card all read this text (lib/plane-readers.py carries the
 # byte-identical copy, pinned): a second population let the card count a report
 # the manager's brief never showed, which no ack could clear. Binds
@@ -629,25 +629,16 @@ NUDGE_STATE_SQL = (
 )
 
 # --- resolving ONE task a human names (chunk M-A fold, F6) --------------------
-# "The open assignments carrying this task id" existed three times — the
-# stdlib reader's `TASK_OPEN_SQL`, `commands/task.py`'s `OPEN_BY_TASK_SQL`,
-# and the shape both refusal ladders reason about. Three spellings of one
-# question is how a door starts refusing an id another door acts on. Here it
-# is once; `lib/plane-readers.py` carries the byte-identical stdlib twin, the
-# `OPEN_ASSIGNMENTS_AT_SQL` pattern, pinned by test.
+# The historical shell reader's `TASK_OPEN_SQL` carries a byte-identical
+# stdlib twin of this lookup, pinned by test. It remains for legacy reference
+# resolution; canonical Task operations use the task-state reducer.
 #
-# There is deliberately NO fleet or assignee scope in the SQL. An operator may
-# nudge or withdraw ANY task they can name — they are not a member of a fleet
-# — and the sender's roster does not hold a cross-fleet worker (44.6% of
-# dispatch traffic). Ambiguity is answered by naming the assignment
-# (`--assignment`, the fold's F5), not by silently narrowing the search to the
-# caller's own fleet and acting on whatever survives.
+# There is deliberately NO fleet or assignee scope in this historical lookup;
+# its caller must disambiguate matching assignments explicitly. Canonical
+# task mutations use fleet-scoped IDs and the task-state reducer instead.
 #
-# Columns are the union the two callers need, so one row serves the CLI's
-# re-check message (title, age, assignee, the task's own manager) and the bash
-# door's refusal listing (dispatch_msg_id, assignee, fleet). Newest first:
-# the ORDER only decides how candidates are LISTED, never which one is acted
-# on — a single match is the only thing either door acts on.
+# Columns retain the legacy lookup shape for the stdlib reader. Newest first:
+# the ORDER decides how candidates are listed, never which one is acted on.
 _OPEN_ROW_SELECT = (
     "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.occurred_at,"
     " w.title, i.alias AS assignee, m.alias AS assigned_by, f.alias AS fleet"
@@ -946,22 +937,37 @@ def is_bare_events_scan(plan_detail: str, aliases: frozenset[str]) -> bool:
 # row is still returned -- the door exists to show every decision, and dropping
 # the over-cap ones would hide exactly the records that most need looking at.
 #
-# SELECT/FROM through the fleet scope -- the two constant WHERE terms and the
-# fleet range, shared by every shape `checkin_rows_sql` produces. Binds so
-# far: fleet, fleet.
+def checkin_event_scope_sql(col: str = "e") -> str:
+    """Scope check-in facts by recorded fleet, with an explicit legacy fallback.
+
+    Current facts have an authoritative fleet_uid. Historical facts with no
+    fleet_uid can only be scoped through their bot dispatcher alias. Binds the
+    fleet alias three times: registry lookup, then the two alias range bounds.
+    """
+    return (f"({col}.fleet_uid = (SELECT uid FROM identity_registry"
+            " WHERE kind = 'fleet' AND alias = ?)"
+            f" OR ({col}.fleet_uid IS NULL AND {fleet_alias_range(col + '.subject_alias')}))")
+
+
+# SELECT/FROM through the same recorded-fleet scope as check-in assignment
+# links. Current local-human decisions have a fleet UID but no bot alias;
+# historical null-fleet rows retain the exact bot-alias fallback.
 _CHECKIN_ROWS_HEAD = (
     "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
     " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq,"
     " e.source_ref AS source_ref"
     " FROM events e"
     " WHERE e.kind = 'system' AND e.event = 'checkin_decision'"
-    f" AND {fleet_alias_range('e.subject_alias')}"
+    f" AND {checkin_event_scope_sql('e')}"
+    " AND (" + fleet_alias_range("e.subject_alias")
+    + " OR (e.fleet_uid IS NOT NULL AND e.subject_alias LIKE 'human:%'))"
 )
 
 _CHECKIN_ROWS_ORDER = f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC"
 
 
-def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False) -> str:
+def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False,
+                     checkin_id: bool = False) -> str:
     """The check-in decision rows query (PR 3 chunk 4): the window, the bot
     filter and --limit bound here rather than pulled whole into Python and
     filtered there (PR 1's shape) -- a wide --since still shrinks what
@@ -971,13 +977,13 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     OPT-IN and appended in this fixed order onto `_CHECKIN_ROWS_HEAD`: the
     alias equality (`bot`), the since floor (`since`), THEN the order
     clause, THEN `LIMIT` (`limit`) -- `LIMIT` has to trail `ORDER BY`
-    syntactically, the one term here whose position is not free. With every
-    flag False this reproduces PR 1's shipped string byte-for-byte, which is
-    what lets `CHECKIN_ROWS_SQL = checkin_rows_sql()` stay a valid alias for
-    every existing reference (test_the_no_bounds_sql_is_the_pr1_string).
+    syntactically, the one term here whose position is not free. The shared
+    base query admits human actors only under the recorded fleet UID;
+    historical bot rows retain the alias fallback.
 
-    Binds, in the order a caller must supply them: fleet, fleet [, alias]
-    [, since] [, limit] -- `fleet_alias_range` binds the fleet TWICE, so
+    Binds: fleet, fleet, fleet, fleet, fleet [, checkin ref] [, alias]
+    [, since] [, limit] -- current UID scope, legacy alias fallback and
+    a separate exact bot-alias guard, so
     every optional term is appended AFTER it. `collect_checkins`
     (commands/checkins.py) gates its params list on the SAME three booleans
     this function is called with, in the SAME order, so the SQL shape and
@@ -989,6 +995,8 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     lexical compare reads a ten-minutes-old `-04:00` row as hours stale
     (`_epoch`'s own docstring, above)."""
     sql = _CHECKIN_ROWS_HEAD
+    if checkin_id:
+        sql += " AND e.source_ref = ?"
     if bot:
         sql += " AND e.subject_alias = ?"
     if since:
@@ -1009,18 +1017,6 @@ def _detail_json(col: str) -> str:
     out the WHOLE query (probed, sqlite 3.53.2). A CASE rather than a second AND
     term, so it holds by construction and not by trusting the optimizer's order."""
     return f"CASE WHEN json_valid({col}) THEN {col} ELSE '{{}}' END"
-
-
-def checkin_event_scope_sql(col: str = "e") -> str:
-    """Scope check-in facts by recorded fleet, with an explicit legacy fallback.
-
-    Current facts have an authoritative fleet_uid. Historical facts with no
-    fleet_uid can only be scoped through their bot dispatcher alias. Binds the
-    fleet alias three times: registry lookup, then the two alias range bounds.
-    """
-    return (f"({col}.fleet_uid = (SELECT uid FROM identity_registry"
-            " WHERE kind = 'fleet' AND alias = ?)"
-            f" OR ({col}.fleet_uid IS NULL AND {fleet_alias_range(col + '.subject_alias')}))")
 
 
 def checkin_dispatch_rows_sql(n: int) -> str:

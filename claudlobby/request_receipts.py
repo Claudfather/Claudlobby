@@ -153,22 +153,25 @@ class RequestReceipt:
 _OPERATIONS = frozenset(
     "task.admit task.assign task.withdraw task.reassign task.escalate task.nudge task.recheck "
     "assignment.deliver assignment.accept assignment.progress assignment.block assignment.return "
-    "assignment.complete assignment.fail message.send message.reply fleet.reports.submit fleet.reports.ack".split())
+    "assignment.complete assignment.fail message.send message.reply fleet.reports.submit fleet.reports.ack "
+    "checkin.record workstream.open workstream.progress workstream.renew workstream.block "
+    "workstream.unblock workstream.close workstream.prune".split())
 _STATUSES = {"recording": {"prepared", "unknown", "committed", "unrecorded"},
              "delivery": {"prepared", "unknown", "received", "submitted", "failed"},
              "notification": {"prepared", "unknown", "received", "submitted", "failed"}}
 # This operation codec supports task/message facts and report acknowledgements.
 # These are wire event_type / ingest_ledger.family values, never SQL table names;
 # physical storage mapping remains owned by ingest.CONSTRUCT_TABLES.
-FACT_FAMILIES = frozenset({"communication", "transmission", "work_item", "assignment", "task", "system"})
+FACT_FAMILIES = frozenset({"communication", "transmission", "work_item", "assignment", "task", "system", "workstream", "workstream_event"})
 _NATIVE_STAGES = {
     "message.send": "delivery", "message.reply": "delivery",
     "fleet.reports.submit": "delivery",
     "assignment.deliver": "delivery",
+    "task.nudge": "notification", "task.recheck": "notification",
     **{f"assignment.{verb}": "notification"
        for verb in ("progress", "block", "return", "complete", "fail")},
 }
-_STRICT_NATIVE = frozenset({"assignment.deliver", "assignment.progress", "assignment.block",
+_STRICT_NATIVE = frozenset({"task.nudge", "task.recheck", "assignment.deliver", "assignment.progress", "assignment.block",
                             "assignment.return", "assignment.complete", "assignment.fail"})
 _O1_NATIVE = frozenset({"message.send", "message.reply", "fleet.reports.submit"})
 
@@ -219,8 +222,8 @@ def _message_route(intent):
     if route.caller_alias.startswith("human:"):
         if route.caller_fleet_uid is not None or not re.fullmatch(r"human:[^\s:/]+", route.caller_alias):
             raise ReceiptError("local human route has a foreign caller fleet or alias")
-        if intent.operation not in {"message.send", "message.reply"}:
-            raise ReceiptError("only ordinary messages may use a local human route")
+        if intent.operation not in {"message.send", "message.reply", "task.nudge", "task.recheck"}:
+            raise ReceiptError("local human route is not supported for this operation")
     else:
         _id(route.caller_fleet_uid, "fleet")
         if not re.fullmatch(r"bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", route.caller_alias):

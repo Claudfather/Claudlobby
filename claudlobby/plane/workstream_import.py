@@ -43,11 +43,11 @@ Two hazards the R1 gauntlet already found in the WRITE door
     exactly the writer's own carried-forward fix for this.
 
   * The registry must be materialized INSIDE the caller's lock, never
-    before it. Two concurrent writers (a live `workstream-update.sh open`
+    before it. Two concurrent writers (a canonical `workstream open`
     racing this import) must dedup against the plane as it is when their
     turn comes, not a snapshot taken before the wait. This module does not
     hold the lock itself — `import_workstreams` in `commands/plane.py` does,
-    mirroring `with_lock "$(_ws_lock)" _open_ws` — but `plan()` is written
+    sharing the canonical writer's registry lock — but `plan()` is written
     pure specifically so the caller can materialize-then-plan atomically
     under the lock without this module reaching for a connection itself.
 
@@ -95,30 +95,13 @@ LOCK_WAIT_S = 30.0
 
 @contextmanager
 def registry_lock(lock_path: Path, *, wait_s: float = LOCK_WAIT_S):
-    """Exclusive lock on the SAME name `lib/workstream-update.sh` locks
-    (`<fleet runtime>/workstreams.lock`, `_ws_lock`) — but WHICH mechanism
-    depends on the host, and it must match the shell's choice or the two
-    writers do not exclude each other at all (#1748 review).
+    """Exclusive lock on `<fleet runtime>/workstreams.lock` for import and
+    canonical workstream operations. The mechanism remains portable so a
+    selected host's writers exclude each other.
 
-    `with_lock` (`lib-common.sh`) resolves `flock` via `command -v flock`
-    and, when that is empty, falls back to an mkdir spinlock on a
-    DIFFERENT PATH (`<lockfile>.d`) — `_FLOCK_BIN`'s own comment: "resolved
-    path to flock (empty on stock macOS)". `fcntl.flock` on `lock_path`
-    only interoperates with the shell's FIRST branch: on a host taking the
-    fallback, a real `flock(2)` on a file nothing else opens excludes
-    nothing, silently, on exactly the platform the shell's own comment
-    names. So this resolves `flock` in Python the same way the shell
-    resolves it in bash, and takes whichever mechanism a shell writer on
-    THIS host would take — never both, never a guess.
-
-    One deliberate divergence, disclosed rather than silent: `with_lock`'s
-    own fallback gives up after its budget and runs UNLOCKED ("a waiter
-    that gives up runs unlocked" — measured by the R1 gauntlet as the
-    correct choice for a small jq+mv critical section). This is a one-shot
-    migration into an append-only ledger, where racing an unprotected
-    write is worse than asking the operator to retry, so this raises
-    TimeoutError instead of proceeding — a stricter EXIT, never a looser
-    EXCLUSION.
+    The existing portable lock selects flock where the host provides it and
+    an atomic mkdir spinlock otherwise. The import and canonical operation
+    use this same helper, including a bounded wait that refuses on timeout.
 
     The caller is expected to materialize the existing registry AND emit
     its plan's events while holding this — see the module docstring's
@@ -144,7 +127,7 @@ def _flock_lock(lock_path: Path, wait_s: float):
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
                         f"could not acquire {lock_path} within {wait_s}s"
-                        " -- another workstream-update.sh call may be running"
+                        " -- another workstream operation may be running"
                     ) from None
                 time.sleep(0.1)
         yield
@@ -156,11 +139,7 @@ def _flock_lock(lock_path: Path, wait_s: float):
 
 
 def _mkdir_lock(lock_path: Path, wait_s: float):
-    """The SAME fallback `with_lock` takes when no `flock` binary is on
-    PATH: an atomic `mkdir` on `<lock_path>.d` (POSIX guarantees mkdir is
-    atomic on every filesystem the shell targets) -- same suffix, same
-    parent directory, so a shell writer's spinlock and this one contend
-    for the SAME directory rather than two unrelated ones."""
+    """Atomic mkdir fallback shared by import and canonical operation."""
     lockdir = Path(f"{lock_path}.d")
     deadline = time.monotonic() + wait_s
     while True:
@@ -171,9 +150,8 @@ def _mkdir_lock(lock_path: Path, wait_s: float):
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"could not acquire {lockdir} within {wait_s}s"
-                    " -- another workstream-update.sh call may be running"
-                    " (this host has no flock binary, so both writers use"
-                    " the mkdir-spinlock fallback)"
+                    " -- another workstream operation may be running"
+                    " (this host uses the mkdir-spinlock fallback)"
                 ) from None
             time.sleep(0.05)
     try:

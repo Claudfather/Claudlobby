@@ -521,6 +521,7 @@ class WorkstreamEvent(_Strict):
     # authored -> over-cap REJECTS); disposition carries close --status
     # done|abandoned (F21); plan_ref is the linked-never-stored doc pointer.
     note: Optional[str] = None
+    waiting_on: Optional[str] = Field(None, max_length=256)
     next_step: Optional[str] = None
     disposition: Optional[Literal["done", "abandoned"]] = None
     plan_ref: Optional[str] = None

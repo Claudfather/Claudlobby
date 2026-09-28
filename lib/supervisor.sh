@@ -439,6 +439,40 @@ EOF
     case "$SVC_ACT_ACTIVE" in active|inactive) ;; *) return 3 ;; esac
 }
 
+# First adoption uses the existing session handoff and exact private tmux
+# server. The coordinator supplies paths/socket from frozen, verified unit
+# ownership; no fleet walk or process-table search occurs.
+svc_activation_handoff() (
+    local bot_dir="$1" expected="$2" tmpdir="$3" actual session sessions declared_tmpdir
+    [ -d "$bot_dir" ] || return 3
+    case "$tmpdir" in /*) ;; *) return 3 ;; esac
+    case "$tmpdir" in *$'\n'*|*$'\t'*) return 3 ;; esac
+    export TMUX_TMPDIR="$tmpdir"
+    . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    declared_tmpdir=$(bot_conf_get_path "$bot_dir" TMUX_TMPDIR "") || return 3
+    [ -z "$declared_tmpdir" ] || [ "$declared_tmpdir" = "$tmpdir" ] || return 3
+    actual=$(tmux_socket_for_bot "$bot_dir") || return 3
+    [ "$actual" = "$expected" ] || return 3
+    session=$(tmux_session_name "$bot_dir") || return 3
+    sessions=$(bot_tmux "$expected" list-sessions -F '#{session_name}' 2>/dev/null) || return 3
+    [ "$sessions" = "$session" ] || return 3
+    "$_SUPERVISOR_LIB_DIR/pre-stop-handoff.sh" "$bot_dir"
+)
+
+svc_activation_stop_private_server() (
+    local bot_dir="$1" expected="$2" tmpdir="$3" sessions session
+    case "$bot_dir" in /*) ;; *) return 3 ;; esac
+    case "$expected" in ''|*[!a-zA-Z0-9_.-]*) return 3 ;; esac
+    case "$tmpdir" in /*) ;; *) return 3 ;; esac
+    case "$tmpdir" in *$'\n'*|*$'\t'*) return 3 ;; esac
+    export TMUX_TMPDIR="$tmpdir"
+    . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    session=$(tmux_session_name "$bot_dir") || return 3
+    sessions=$(bot_tmux "$expected" list-sessions -F '#{session_name}' 2>/dev/null) || return 3
+    [ "$sessions" = "$session" ] || return 3
+    bot_tmux "$expected" kill-server || return 3
+)
+
 svc_activation_snapshot() {
     [ -f "$1" ] || { _svc_activation_unknown "missing installed file: $1"; return 3; }
     _svc_activation_read "$1" "$2" || { _svc_activation_unknown "$2 state"; return 3; }

@@ -1,6 +1,6 @@
 #!/bin/bash
 # manager-checkin.sh -- the check-in beat. The composed `<prefix>.manager-checkin`
-# FLEET timer execs this; the fleet arrives as $1 the way `task-recheck.sh` takes it.
+# FLEET timer execs this; the fleet arrives as $1 from the generated unit.
 #
 # Usage: manager-checkin.sh <fleet> [--min-gap-s N]
 #   rc 0 always, on every operating path (spec section 14) -- a manager it chose

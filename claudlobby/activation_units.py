@@ -156,6 +156,13 @@ def _darwin_check(adapter, enrollment, targets=None, *, original_load=False):
 
 
 def _original_release(record, enrollment):
+    if enrollment.get("legacy_source"):
+        if (record.body["intent"].get("source_kind") != "legacy-unsealed"
+                or record.body["previous_selection"] is not None
+                or any(unit["declaration"]["release_id"] for unit in enrollment["units"])
+                or not enrollment["units"]):
+            raise ActivationError("legacy enrollment claims a sealed prior release")
+        return None
     if enrollment.get("bootstrap_empty"):
         if (enrollment["bootstrap_empty"] is not True or enrollment["units"]
                 or enrollment["issues"] or record.body["previous_selection"] is not None):
@@ -199,12 +206,13 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
     # the explicit recovery release only as their zero-change storage carrier;
     # original_release_id remains None, never a fabricated prior installation.
     release = read_release(store.root, original_release_id or record.body["intent"]["recovery_release_id"])
-    for unit in inventory.units:
-        env = dict(unit.declaration.environment)
-        if (env.get("CLAUDLOBBY_NATIVE_DIR") != str(release.native_path)
-                or env.get("CLAUDLOBBY_CLI") != str(release.cli_path)
-                or env.get("CLAUDLOBBY_ARTIFACT_ID") != release.inputs.artifact_id):
-            raise ActivationError("enrollment identity differs from its sealed original release")
+    if not inventory.legacy_source:
+        for unit in inventory.units:
+            env = dict(unit.declaration.environment)
+            if (env.get("CLAUDLOBBY_NATIVE_DIR") != str(release.native_path)
+                    or env.get("CLAUDLOBBY_CLI") != str(release.cli_path)
+                    or env.get("CLAUDLOBBY_ARTIFACT_ID") != release.inputs.artifact_id):
+                raise ActivationError("enrollment identity differs from its sealed original release")
     previous = record.body["previous_selection"]
     if previous is not None and previous["release_id"] != release.release_id:
         raise ActivationError("enrollment differs from the saved selected release")

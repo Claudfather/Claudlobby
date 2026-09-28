@@ -116,6 +116,32 @@ def test_old_schema_preview_binds_sql_task_blockers_and_recovery_floor(releases)
         build_migration_manifest(root, source, target)
 
 
+def test_unsealed_first_adoption_binds_real_database_and_refuses_pending_queue(releases):
+    root, _, target = releases
+    conn = _database(root, version=11)
+    _task(conn, "wi_running")
+    _assignment(conn, "asg_running", "wi_running")
+    conn.close()
+    before = _snapshot(root)
+    plan = build_migration_manifest(root, None, target)
+    assert not plan.blockers
+    assert plan.source["kind"] == "legacy-unsealed"
+    assert plan.source["user_version"] == 11
+    assert plan.source["database_files"] == plan.database["files"]
+    assert plan.task_audit["counts"]["current_assignments"] == 1
+    assert plan.rollback["source_after_sql_blockers"] == (
+        "unsealed legacy runtime is not a rollback target",)
+    assert [row["version"] for row in plan.migrations if row["proposed"]] == [12, 13]
+    assert _snapshot(root) == before
+    verify_pending_queues(root, plan)
+
+    _pending(spool_path(root) / "undrained.json", [_event_request()])
+    blocked = build_migration_manifest(root, None, target)
+    assert any("empty pending" in reason for reason in blocked.blockers)
+    with pytest.raises(ValueError, match="pending queue inventory changed"):
+        verify_pending_queues(root, plan)
+
+
 def test_absent_and_empty_databases_are_distinct_and_never_initialized(releases):
     root, source, target = releases
     absent = build_migration_manifest(root, source, target)
@@ -164,7 +190,9 @@ def test_both_pending_lanes_preserve_telemetry_and_name_conditional_decisions(re
     transmission = _event_request("transmission", event_id="send-proof", payload={
         "msg_id": "msg_old", "attempt_no": 1, "carrier": "tmux",
         "destination": "bot:fleet/worker", "state": "pane_submitted"})
-    _pending(spool_path(root) / "conditional.json", [telemetry, task, transmission])
+    wait = _event_request("workstream_event", event_id="declared-wait", payload={
+        "workstream_id": "ws-one", "event": "blocked", "waiting_on": "human:reviewer"})
+    _pending(spool_path(root) / "conditional.json", [telemetry, task, transmission, wait])
     raw_telemetry = _event_request(event_id="raw-health")
     raw_telemetry.pop("schema_version")
     cursor = _event_request(event_id="raw-cursor", payload={"event": "reports_acked"})
@@ -177,7 +205,8 @@ def test_both_pending_lanes_preserve_telemetry_and_name_conditional_decisions(re
     assert all(queue["file_count"] == 1 and queue["sha256"] for queue in plan.queues.values())
     spool = plan.queues["spool"]["files"][0]
     assert [record["classification"] for record in spool["records"]] == [
-        "ordinary_telemetry", "conditional_legacy_task_mutation", "legacy_task_evidence"]
+        "ordinary_telemetry", "conditional_legacy_task_mutation", "legacy_task_evidence",
+        "additive_workstream_wait"]
     staged = plan.queues["staged"]["files"][0]
     assert [record["classification"] for record in staged["records"]] == [
         "ordinary_telemetry", "legacy_task_cursor_or_status"]

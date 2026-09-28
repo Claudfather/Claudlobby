@@ -1,4 +1,4 @@
-"""Unit tests for lib/pr-review-state.py — is a PR's blocking verdict still live?
+"""Unit tests for review_rules — is a PR's blocking verdict still live?
 
 Every fixture that pins a REGEX is REAL text taken from a live verdict, never
 synthetic. That is the whole lesson of `test_who_reviewed.py`'s inert-mutant
@@ -16,13 +16,12 @@ Provenance of the fixtures below:
 
 from __future__ import annotations
 
-import json
+from pathlib import Path
+import re
 
 import pytest
 
-from tests.conftest import load_lib_module
-
-prs = load_lib_module("pr-review-state")
+from claudlobby import review_rules as prs
 
 # ---- REAL fixtures, copied verbatim from Claudlobby#1311 --------------------
 
@@ -153,7 +152,7 @@ class TestShaAnchorRegex:
 
         The decoys are not sloppiness and will not go away on their own — a
         rigorous verdict CITES things, and every citation is a hex: the base it was
-        reviewed against (`against \`main\` @ \`560c3c9\``), the commit a fix
+        reviewed against (`against main @ 560c3c9`), the commit a fix
         landed on, and in one real case a **SHA-256 checksum** that is not a commit
         at all. A hex-first matcher takes the first of those and reports the verdict
         stale against something nobody reviewed: confident, wrong, and in the
@@ -283,15 +282,25 @@ class TestIdentity:
         a wrong attribution makes a reader ACT; DISAGREEMENT only makes them look."""
         payload = _payload([("reviews", "2026-08-21T04:39:06Z",
                              "**[branden] [VERDICT] approve** " + REAL_ANCHOR_LINE)])
-        result = prs.assess_pr(payload, ledger_identity={"2026-08-21T04:39:06Z": "vera"})
+        result = prs.assess_pr(payload, observed_identity={("reviews", 0): "bot:f/vera"})
         assert prs.DISAGREEMENT in result["flags"]
-        assert "branden" not in result["resolved"] and "vera" not in result["resolved"]
+        assert "branden" not in result["resolved"] and "bot:f/vera" not in result["resolved"]
 
     def test_agreement_uses_the_name(self):
         payload = _payload([("reviews", "2026-08-21T04:39:06Z",
                              "**[vera] [VERDICT] approve** " + REAL_ANCHOR_LINE)])
-        result = prs.assess_pr(payload, ledger_identity={"2026-08-21T04:39:06Z": "vera"})
-        assert list(result["resolved"]) == ["vera"]
+        result = prs.assess_pr(payload, observed_identity={("reviews", 0): "bot:f/vera"})
+        assert list(result["resolved"]) == ["bot:f/vera"]
+
+    def test_same_second_events_do_not_overwrite_observed_fleet_identities(self):
+        payload = _payload([
+            ("reviews", "2026-08-21T04:39:06Z", "**Request Changes** " + REAL_ANCHOR_LINE),
+            ("comments", "2026-08-21T04:39:06Z", "**Approve** " + REAL_ANCHOR_LINE),
+        ])
+        result = prs.assess_pr(payload, observed_identity={
+            ("reviews", 0): "bot:first/vera", ("comments", 0): "bot:second/vera"})
+        assert result["blocking"] == ["bot:first/vera"]
+        assert set(result["resolved"]) == {"bot:first/vera", "bot:second/vera"}
 
 
 class TestFailureDirection:
@@ -320,68 +329,15 @@ class TestFailureDirection:
         """A superseded verdict was never assessed, so counting it claimed coverage
         the run did not have. Real #1311 shape: 2 verdict events, 1 live."""
         result = prs.assess_pr(
-            _payload([("reviews", "2026-08-21T03:57:14Z", f"**[vera] [VERDICT] request-changes**"),
+            _payload([("reviews", "2026-08-21T03:57:14Z", "**[vera] [VERDICT] request-changes**"),
                       ("reviews", "2026-08-21T04:39:06Z", "**[vera] [VERDICT] approve** " + REAL_ANCHOR_LINE)]))
         line = prs.summary_line([result])
         assert "1 live verdict(s) (1 superseded)" in line
         assert "1/1 anchored" in line
 
 
-class TestOfflineSeam:
-    """Requirement 1: every rule is reachable with no network."""
-
-    def test_end_to_end_on_the_real_1311_payload(self, tmp_path):
-        payload = _payload(
-            [("reviews", "2026-08-21T03:57:14Z", REAL_BLOCK),
-             ("reviews", "2026-08-21T04:39:06Z", REAL_APPROVE_BODY)])
-        path = tmp_path / "p.json"
-        path.write_text(json.dumps(payload))
-        rc = prs.main(["Claudfather/Claudlobby", "--payload-json", str(path)])
-        assert rc == prs.RC_ACTIONABLE  # unattributed block stays live
-
-    def test_json_mode_carries_the_rc_and_summary(self, tmp_path, capsys):
-        path = tmp_path / "p.json"
-        path.write_text(json.dumps(_payload([("reviews", "t1", REAL_APPROVE_HEADER)])))
-        rc = prs.main(["o/r", "--payload-json", str(path), "--json"])
-        out = json.loads(capsys.readouterr().out)
-        assert out["schema"] == 1 and out["rc"] == rc == prs.RC_INCOMPLETE
-        assert "UNKNOWABLE" in out["summary"]
-
-    def test_unreadable_payload_is_usage_error_not_a_clean_run(self, tmp_path):
-        assert prs.main(["o/r", "--payload-json", str(tmp_path / "nope.json")]) == prs.RC_USAGE
 
 
-class TestSelftest:
-    """The on-invocation positive control, kept from the prototype.
-
-    `tests/` runs in CI; `selftest()` runs on the operator's machine at the moment
-    they read the output. A clean estate and a dead detector both print nothing,
-    so the fixture has to fire independently of whether the estate is dirty.
-    """
-
-    def test_selftest_passes_on_the_shipped_regexes(self):
-        prs.selftest()  # raises AssertionError if a sampled format stopped parsing
-
-    def test_main_runs_the_selftest(self, tmp_path, monkeypatch):
-        """Pin the WIRING, not just the function.
-
-        Found by mutation: deleting the `selftest()` call from `main` broke no
-        test, so the control could have been silently unwired while every unit
-        test stayed green — a positive control that is not reached is not a
-        control.
-        """
-        called = []
-        monkeypatch.setattr(prs, "selftest", lambda: called.append(True))
-        path = tmp_path / "p.json"
-        path.write_text(json.dumps(_payload([("reviews", "t1", REAL_APPROVE_HEADER)])))
-        prs.main(["o/r", "--payload-json", str(path)])
-        assert called, "main() must run the self-test before reporting anything"
-
-    def test_selftest_fails_loudly_if_a_sampled_format_stops_parsing(self, monkeypatch):
-        """The control must be able to FAIL, or it certifies nothing."""
-        monkeypatch.setattr(prs, "parse_verdict", lambda body: None)
-        with pytest.raises(AssertionError):
-            prs.selftest()
 
 
 class TestDriftSignalIsNarrow:
@@ -445,39 +401,14 @@ class TestPayloadContract:
         assert prs.missing_payload_fields(_payload([])) == []
 
     @pytest.mark.parametrize("dropped", list(prs.PR_FIELD_LIST))
-    def test_every_single_missing_field_refuses_rather_than_crashes(
-        self, dropped, tmp_path, capsys
-    ):
-        """Each field individually, not just `number`.
-
-        `number` is the one that bit; testing only `number` would re-create the
-        original defect one field over. `head` was already guarded (`r["head"] or ""`)
-        — the defensive instinct was there and stopped one field short, which is
-        precisely why the module read as finished.
-        """
+    def test_each_missing_field_is_named(self, dropped):
         payload = _payload([("reviews", "t1", REAL_APPROVE_HEADER)])
         payload.pop(dropped)
-        path = tmp_path / "p.json"
-        path.write_text(json.dumps(payload))
-        rc = prs.main(["o/r", "--payload-json", str(path)])
-        err = capsys.readouterr().err
-        assert rc == prs.RC_USAGE, f"missing {dropped} must refuse, not crash"
-        assert dropped in err and prs.PAYLOAD_COMMAND in err
+        assert prs.missing_payload_fields(payload) == [dropped]
 
-    def test_the_exact_obvious_short_command_is_refused_by_name(self, tmp_path, capsys):
-        """The literal shape from the review: reviews,comments,headRefOid."""
+    def test_obvious_short_payload_is_incomplete(self):
         obvious = {"reviews": [], "comments": [], "headRefOid": REAL_HEAD}
-        path = tmp_path / "p.json"
-        path.write_text(json.dumps(obvious))
-        rc = prs.main(["o/r", "--payload-json", str(path)])
-        err = capsys.readouterr().err
-        assert rc == prs.RC_USAGE
-        assert "number" in err and "title" in err
-
-    def test_a_non_object_payload_is_refused(self, tmp_path):
-        path = tmp_path / "p.json"
-        path.write_text(json.dumps(["not", "an", "object"]))
-        assert prs.main(["o/r", "--payload-json", str(path)]) == prs.RC_USAGE
+        assert prs.missing_payload_fields(obvious) == ["number", "title"]
 
 
 class TestAnchorVerbBoundary:
@@ -638,35 +569,6 @@ def test_a_multi_hex_verdict_that_names_its_anchor_is_still_anchored():
     assert prs.parse_anchor(body) == want
 
 
-class TestAttributionReadsThePlane:
-    """`--attribute` joins who-reviewed's PLANE rows (F18 closure R2b-1): the
-    first plane-only who-reviewed left this caller reaching for its deleted
-    ledger loaders, so attribution failed soft on every PR (the spec lens)."""
-
-    def test_a_plane_backed_attribution_resolves(self):
-        class _Stub:
-            @staticmethod
-            def load_plane_rows(root):
-                return [{"ts": "2026-06-01T10:00:00Z", "bot": "vera", "status": "completed",
-                         "task_id": "t-1", "pr_url": "https://github.com/o/r/pull/1", "summary": "",
-                         "_fleet": "f"}], None
-
-            @staticmethod
-            def fetch_events(repo, number):
-                return [{"ts": "2026-06-01T10:00:12Z"}]
-
-            @staticmethod
-            def attribute(events, rows, repo, number):
-                return [{"ts": e["ts"], "bot": "vera"} for e in events]
-
-        mapping, err = prs.ledger_identity_for("o/r", 1, "/nonexistent", module=_Stub())
-        assert err is None and mapping == {"2026-06-01T10:00:12Z": "vera"}
-
-    def test_an_unreachable_plane_is_soft_but_never_silent(self, tmp_path):
-        """The real module against a root with no plane: a reason, not {} read
-        as 'no attribution available' — `source_state`'s rule."""
-        mapping, err = prs.ledger_identity_for("o/r", 1, str(tmp_path / "nowhere"))
-        assert mapping == {} and err and "unreachable" in err
 
 
 # ---------------------------------------------------------------------------
@@ -907,7 +809,7 @@ class TestAttributionAdviceKnowsWhetherAttributionRan:
     def test_advice_stays_live_when_attribution_was_not_attempted(self):
         out = _advice([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE],
                       {"state": prs.ATTR_NOT_ATTEMPTED})
-        assert "Re-run with --attribute" in out
+        assert "Observed attribution was not attempted" in out
 
     def test_the_repro_attribute_ran_so_the_advice_never_says_rerun(self):
         """#1699's exact defect: the flag is right there in the command line."""
@@ -916,7 +818,7 @@ class TestAttributionAdviceKnowsWhetherAttributionRan:
             {"state": prs.ATTR_UNREACHABLE, "error": "no plane db"},
             {"state": prs.ATTR_ATTEMPTED, "epoch": None, "error": "unreadable"},
         ):
-            assert "Re-run with --attribute" not in _advice(
+            assert "Observed attribution was not attempted" not in _advice(
                 [PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE], attribution)
 
     def test_all_pre_epoch_says_permanent_and_names_the_boundary(self):
@@ -966,12 +868,12 @@ class TestAttributionAdviceKnowsWhetherAttributionRan:
                             attribution={"state": prs.ATTR_ATTEMPTED, "epoch": REAL_EPOCH})
         out = prs.render([pre], False)
         assert "PERMANENTLY UNATTRIBUTABLE" in out
-        assert "Re-run with --attribute" not in out
+        assert "Observed attribution was not attempted" not in out
 
         none = prs.assess_pr(_unattributed([PRE_EPOCH_BLOCK, PRE_EPOCH_APPROVE]),
                              attribution={"state": prs.ATTR_NOT_ATTEMPTED})
         out = prs.render([none], False)
-        assert "Re-run with --attribute" in out
+        assert "Observed attribution was not attempted" in out
         assert "PERMANENTLY" not in out
 
     def test_the_four_states_share_no_string(self):
@@ -1048,35 +950,6 @@ class TestEpochComparisonIsParsedNotLexical:
         assert info["pre_epoch"] == 1 and info["undated"] == 1 and info["total"] == 2
 
 
-class TestPlaneEpochIsDerivedNotPinned:
-
-    def test_epoch_comes_from_the_db(self):
-        class _Conn:
-            def execute(self, sql):
-                assert "MIN(occurred_at)" in sql
-                return type("R", (), {"fetchone": lambda s: ("2026-01-02T03:04:05Z",)})()
-            def close(self): pass
-        module = type("M", (), {"_readers": staticmethod(
-            lambda: type("P", (), {"connect": staticmethod(lambda r: _Conn())})())})
-        epoch, err = prs.plane_epoch("/anywhere", module=module)
-        assert epoch == "2026-01-02T03:04:05Z" and err is None
-
-    def test_an_unreachable_plane_is_a_reason_never_an_epoch(self):
-        def _boom():
-            raise RuntimeError("no plane db")
-        module = type("M", (), {"_readers": staticmethod(_boom)})
-        epoch, err = prs.plane_epoch("/anywhere", module=module)
-        assert epoch is None and "no plane db" in err
-
-    def test_an_empty_plane_is_a_reason_never_a_null_epoch(self):
-        class _Conn:
-            def execute(self, sql):
-                return type("R", (), {"fetchone": lambda s: (None,)})()
-            def close(self): pass
-        module = type("M", (), {"_readers": staticmethod(
-            lambda: type("P", (), {"connect": staticmethod(lambda r: _Conn())})())})
-        epoch, err = prs.plane_epoch("/anywhere", module=module)
-        assert epoch is None and "no events" in err
 
 
 # ---------------------------------------------------------------------------
@@ -1121,3 +994,161 @@ class TestTheTaughtVocabularyIsRead:
         # --json and in the text a manager reads.
         assert [v["said"] for v in result["resolved"].values()] == ["Mechanical fixes"]
         assert '=REQUEST-CHANGES("Mechanical fixes")@' in prs.render([result], False)
+
+
+# ---------------------------------------------------------------------------
+# #1913 — the bracket-tag, anchored header is now taught wherever a reviewer
+# or a manager learns the verdict format, not only in this test file. A doc
+# example that drifted back to the old identity-less, anchor-less shape (or
+# was never wrapped in `**...**` at all, `pr-comment-hygiene.md`'s prior
+# state) would silently stop attributing and anchoring -- exactly the #1699/
+# #1700 class this module exists to name, reached through a doc rather than
+# a live PR. So these tests read the docs straight off disk rather than
+# duplicating their text here: an edit that regresses the taught shape fails
+# THIS test, not a hand-kept copy of it that can drift independently
+# (`test_fixture_is_not_kinder_than_the_documented_command`'s reasoning, one
+# door up -- a fixture that is not the real artifact hides the defect it
+# exists to catch).
+# ---------------------------------------------------------------------------
+
+#: The files #1913 (and #1921's follow-up) names, repo-root-relative. Every
+#: one of these is somewhere a reviewer or a manager learns (or teaches) the
+#: verdict format.
+DOC_PATHS = [
+    "library/expertise/code-review.md",
+    "library/protocols/review-flow.md",
+    "library/protocols/verify-before-merge.md",
+    "library/protocols/pr-comment-hygiene.md",
+]
+
+#: Every verdict WORD these docs teach, normalized the way `parse_verdict`
+#: itself normalizes before its NORM lookup (`.lower()`, then collapse
+#: `[\s-]+` to one space) -- "keep every verdict word the tool reads" made
+#: executable rather than eyeballed. `approve` is `pr-comment-hygiene.md`'s;
+#: the other four are `review-flow.md` step 5's (#1895), echoed by
+#: `code-review.md` and (ship it / request changes) by
+#: `verify-before-merge.md`. `comment` is deliberately NOT here -- it is a
+#: taught word the tool does not gate on at all (S1, #1921 review).
+TAUGHT_VERDICT_WORDS = {
+    "approve",
+    "ship it",
+    "mechanical fixes",
+    "request changes",
+    "architectural concerns",
+}
+
+#: The bracket-tag SHAPE alone -- `] [VERDICT]` -- independent of whether the
+#: word after it is one `parse_verdict` recognizes. Kept separate from, and
+#: narrower than, `HEADER_IDENTITY`/`VERDICT_HEADER` on purpose: otis's
+#: #1921 review (R2) found that the original version of this test SELECTED
+#: examples with `HEADER_IDENTITY` and then ASSERTED `parse_header_identity`
+#: -- the same regex, searched a second time on the same string -- so the
+#: identity assertion could never fail. A mutant that dropped an example's
+#: bracket tag simply stopped matching the SELECTION filter and vanished
+#: from the sample instead of failing it (`bracket tag dropped,
+#: review-flow.md` -> green, 114 passed, in his review). Selection and
+#: assertion must probe DIFFERENT things, or the assertion is a tautology.
+BRACKET_TAG = re.compile(r"\]\s*\[VERDICT\]", re.I)
+
+#: The exact count of qualifying lines per file, pinned so a dropped example
+#: is a COUNT mismatch even in the case where every REMAINING line in that
+#: file still parses cleanly (otis's review: a mutation on one of several
+#: bullets in a file can leave the file's count non-zero while one example
+#: silently vanished -- a bare ">0" check does not see that). Includes
+#: `pr-comment-hygiene.md`'s `comment` example: it is bracket-tag SHAPED
+#: (`BRACKET_TAG` matches it) even though it is not a verdict the tool
+#: reads, so it is a counted example here, just one whose `verdict` is
+#: `None` in `_doc_examples()`'s output.
+EXAMPLES_PER_FILE = {
+    "library/expertise/code-review.md": 4,
+    "library/protocols/review-flow.md": 5,
+    "library/protocols/verify-before-merge.md": 2,
+    "library/protocols/pr-comment-hygiene.md": 3,
+}
+
+
+def _repo_root() -> Path:
+    # This file lives at <repo>/tests/test_pr_review_state.py.
+    return Path(__file__).resolve().parent.parent
+
+
+class TestDocsTeachTheParseableHeader:
+    """Every concrete verdict-header example the four docs carry must parse as
+    BOTH attributed (a header identity) and anchored (a commit sha) through
+    this module's own regexes -- never a reimplementation of them."""
+
+    def _doc_examples(self):
+        """(path, line, verdict) for every line in the four docs that is
+        EITHER a verdict `parse_verdict` recognizes OR carries the bracket-tag
+        SHAPE (`BRACKET_TAG`) whether or not the word after it resolves --
+        so a taught-but-unrecognized word (`pr-comment-hygiene.md`'s
+        `comment`) is a FOUND example with `verdict is None`, never a silent
+        exclusion (#1921 review, S1). `<...>` marks a template line
+        (`<bot-name>`, `<sha>`) and is skipped explicitly -- selection must
+        not depend on the SAME regex the per-line assertions probe, or a
+        dropped tag disappears from the sample instead of failing it (R2)."""
+        found = []
+        for rel in DOC_PATHS:
+            text = (_repo_root() / rel).read_text()
+            for line in text.splitlines():
+                if "<" in line:
+                    continue  # a template line, not a concrete example
+                verdict = prs.parse_verdict(line)
+                if verdict is None and not BRACKET_TAG.search(line):
+                    continue  # not verdict-shaped at all -- ordinary prose
+                found.append((rel, line, verdict))
+        return found
+
+    def test_every_doc_header_example_is_attributed_and_anchored(self):
+        examples = self._doc_examples()
+
+        # Pinned per file, not just ">0": a dropped example is a count
+        # mismatch even where the file's remaining examples all still parse
+        # (the gap the original ">0" check could not see -- #1921 review).
+        by_file: dict[str, int] = {rel: 0 for rel in DOC_PATHS}
+        for rel, _line, _verdict in examples:
+            by_file[rel] += 1
+        assert by_file == EXAMPLES_PER_FILE, (
+            f"example count drifted from the pinned per-file count -- "
+            f"found {by_file}, want {EXAMPLES_PER_FILE}"
+        )
+
+        for rel, line, verdict in examples:
+            identity = prs.parse_header_identity(line)
+            assert identity, f"{rel}: header carries no identity: {line!r}"
+            anchor = prs.parse_anchor(line)
+            assert anchor, f"{rel}: header carries no SHA anchor: {line!r}"
+            if verdict is None:
+                # The one taught, bracket-tagged word the tool does not gate
+                # on at all (S1, #1921 review): `pr-comment-hygiene.md`'s
+                # `comment`. Checked against the RAW LINE, deliberately not
+                # `prs.verdict_words()` -- that shares `VERDICT_HEADER`'s own
+                # vocabulary-restricted regex, so it returns `None` for
+                # "comment" for the SAME reason `parse_verdict` does (the
+                # word is outside its alternation, not merely unmapped by
+                # NORM), and asserting on its output here would check a
+                # string that can never contain the word being verified. A
+                # doc line landing here with any OTHER word is new
+                # vocabulary drift the doc introduced silently.
+                assert re.search(r"\[VERDICT\]\s*comment\b", line, re.I), (
+                    f"{rel}: bracket-tagged header with an unrecognized "
+                    f"verdict word the tool was never taught to expect "
+                    f"(not even S1's known `comment`): {line!r}"
+                )
+            else:
+                assert verdict in (prs.APPROVE, prs.BLOCK), (rel, line, verdict)
+
+        # "Keep every verdict word the tool reads" -- executable, not
+        # eyeballed. Same transform `parse_verdict` applies before its NORM
+        # lookup, so `request-changes` and `request changes` count as one.
+        # `comment` never reaches `NORM`, so `verdict_words` returns None for
+        # it and it is excluded here on purpose -- it is not one of the
+        # words this check is about.
+        said_words = set()
+        for _rel, line, _verdict in examples:
+            words = prs.verdict_words(line)
+            if words is None:
+                continue
+            said_words.add(re.sub(r"[\s-]+", " ", words.lower()))
+        missing = TAUGHT_VERDICT_WORDS - said_words
+        assert not missing, f"taught verdict word(s) no longer demonstrated in any doc: {missing}"

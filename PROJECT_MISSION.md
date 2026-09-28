@@ -52,7 +52,7 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and t
 **Current sprint focus:**
 
 > **Freshness is mechanically checkable, and each item must carry its tracking
-> issue for that to work.** `lib/sprint-selection-record.py focus-refs
+> issue for that to work.** `claudlobby checkin selection focus-refs
 > PROJECT_MISSION.md` lists the refs in this section, and the selection record's
 > verify step flags any that are CLOSED. This matters because the autonomous
 > sprint sources its goal from here: a picker scoring *mission alignment* against

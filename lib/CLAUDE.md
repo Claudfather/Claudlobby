@@ -10,7 +10,7 @@ reporting, health checks, migrations, setup.
 **What must never land here.**
 
 - **Direct vault access.** Knowledge is consumed through the `claudron` CLI door only, in the
-  `dispatch-task.sh` wedge shape: titles + pointers, never note bodies — the worker reads files
+  title and path pointers only, never note bodies — the worker reads files
   itself. Resolution comes from the contract env (`CLAUDRON_VAULT_PATH`); no script opens files
   under a vault's note tiers (the set Claudron owns in `VAULT-STRUCTURE.md §Directory contract` —
   point at it, don't re-list it here).

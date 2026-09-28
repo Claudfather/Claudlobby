@@ -28,18 +28,21 @@ def _route(sub, name, command, help):
 
 
 def register_release_subparsers(sub):
-    host = sub.add_parser("host", help="Host release diagnosis and explicit cold-host activation")
+    host = sub.add_parser("host", help="Host release diagnosis and explicit first activation")
     hosts = host.add_subparsers(dest="host_command", required=True)
     _route(hosts, "releases", "host.releases", "Verify installed releases and report selection")
     status = _route(hosts, "status", "host.status", "Inspect recorded host state; running processes are unobserved")
     status.set_defaults(func=_dispatch_host)
-    activate = _route(hosts, "activate", "host.activate", "Activate PLAN_ID on an empty host from an operator shell")
-    activate.description = ("Cold-host activation only; requires explicit global --root. "
-                            "Existing estates and interrupted activations require recovery, which this route does not implement.")
+    activate = _route(hosts, "activate", "host.activate", "Activate PLAN_ID from an operator shell")
+    activate.description = ("First activation requires explicit global --root. "
+                            "Use --adopt-existing only for an unsealed, already running Darwin estate; "
+                            "interrupted activations require explicit forward repair.")
     activate.set_defaults(func=_dispatch_host)
     activate.add_argument("plan_id", metavar="PLAN_ID")
     activate.add_argument("--install-directory", required=True, metavar="PATH",
                           help="Absolute native user-unit directory; verified against the OS adapter's search paths")
+    activate.add_argument("--adopt-existing", action="store_true",
+                          help="First, forward-only adoption of a reviewed unsealed Darwin estate and its existing Plane")
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)

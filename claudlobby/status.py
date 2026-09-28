@@ -1,11 +1,10 @@
 """Fleet health dashboard — ``claudlobby status``.
 
-Aggregates live state from four sources:
+Aggregates live state from three sources:
 
-1. **fleet-state.json** — canonical bot status (idle/working/blocked/offline)
-2. **tmux** — session presence (alive or not)
-3. **systemd / launchd** — service supervision state
-4. **the plane** — the newest ``bot.heartbeat`` sample per bot (last heartbeat
+1. **tmux** — session presence (alive or not)
+2. **systemd / launchd** — service supervision state
+3. **the plane** — canonical Task assignments and newest ``bot.heartbeat`` sample (last heartbeat
    + pane state, BUSY/IDLE) and the heartbeat series behind the utilization
    columns (F18 closure R2b; keepalive.log is gone). A plane that cannot answer
    renders those columns ``unknown``, flags health ``?`` and says why under the
@@ -23,13 +22,14 @@ import platform
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import FleetConfig
 from .plane.presence import derive_presence
 from .paths import Paths, tmux_socket_for_bot
+from .task_work_queries import CurrentWork, read_fleet_work
 from .uptime import _fmt_duration
 
 log = logging.getLogger("claudlobby.status")
@@ -85,10 +85,16 @@ _SVC_UNDETERMINED = "undetermined"
 @dataclass
 class BotStatus:
     name: str
-    # fleet-state.json
     state: str = "unknown"  # idle/working/blocked/offline/unknown
     current_task: str | None = None
     last_completed: str | None = None
+    work_assignments: tuple[CurrentWork, ...] = ()
+    work_issues: tuple[dict, ...] = ()
+    work_unavailable: str = ""
+
+    @property
+    def work_unresolved(self) -> bool:
+        return any(issue["blocking"] for issue in self.work_issues)
     # tmux
     tmux_alive: bool = False
     # systemd/launchd
@@ -106,7 +112,7 @@ class BotStatus:
     # utilization (populated by collect_fleet_status)
     busy_pct_24h: float | None = None
     idle_since: datetime | None = None
-    current_task_age_secs: int | None = None
+    busy_age_secs: int | None = None
 
     @property
     def service_undetermined(self) -> bool:
@@ -309,10 +315,7 @@ def collect_fleet_status(
     paths: Paths,
 ) -> list[BotStatus]:
     """Collect status for all bots in the fleet."""
-    from .utilization import compute_bot_utilization, fleet_heartbeat_series, load_fleet_state
-
-    state_data = load_fleet_state(paths)
-    bots_state = state_data.get("bots", {})
+    from .utilization import compute_bot_utilization, fleet_heartbeat_series
     tmux_sessions = _check_tmux_sessions(fleet, paths)
     is_linux = platform.system() == "Linux"
     now = datetime.now(timezone.utc)
@@ -325,6 +328,8 @@ def collect_fleet_status(
     from .brief import plane_session
     presence: dict = {}
     plane_fleet = ""
+    work = None
+    work_unavailable = ""
     plane, plane_unreachable = plane_session(paths)      # the overlay's fleet, else the manifest's
     if plane is not None:
         try:
@@ -345,9 +350,15 @@ def collect_fleet_status(
             plane_fleet = plane.fleet
         except Exception as exc:                 # a schema the reader cannot use: say so, never blank
             plane_unreachable = f"the plane could not answer: {exc}"
+        try:
+            work = read_fleet_work(plane.conn, fleet_uid=plane.pr.fleet_uid(plane.conn, plane.fleet),
+                                   fleet=plane.fleet, bot_names=list(fleet.bots))
+        except Exception as exc:
+            work_unavailable = f"the Task snapshot could not answer: {exc}"
         finally:
             plane.close()
     plane_unreachable = plane_unreachable or ""
+    work_unavailable = work_unavailable or plane_unreachable
 
     results: list[BotStatus] = []
 
@@ -355,14 +366,15 @@ def collect_fleet_status(
         bs = BotStatus(name=bot_id)
         bot_dir = paths.bot_runtime(bot_id)
 
-        # fleet-state.json: `last_completed` and `current_task` only. STATE is
-        # the plane's now (#1615) -- the file's status is the last REPORT's
-        # word, frozen until the bot's next report, and rendering it beside a
-        # live pane verdict put two different "idle"s in one row.
-        entry = bots_state.get(bot_id, {})
-        bs.current_task = entry.get("current_task")
-        bs.last_completed = entry.get("last_completed")
-        _reported_blocked = entry.get("status") == "blocked"
+        if work is not None:
+            bot_work = work.bots[bot_id]
+            bs.current_task = bot_work.current_task
+            bs.last_completed = bot_work.last_completed
+            bs.work_assignments = bot_work.assignments
+            bs.work_issues = tuple(asdict(issue) for issue in work.issues)
+            bs.work_unavailable = bot_work.unavailable
+        else:
+            bs.work_unavailable = work_unavailable
 
         # tmux
         bs.tmux_alive = bot_id in tmux_sessions
@@ -380,26 +392,24 @@ def collect_fleet_status(
         if not plane_unreachable:
             bs.last_heartbeat, bs.pane_state = heartbeats.get(bot_id.lower(), (None, ""))
             util = compute_bot_utilization(
-                bot_id, series.get(bot_id.lower(), []), bots_state.get(bot_id, {}), now=now
+                bot_id, series.get(bot_id.lower(), []),
+                work.bots[bot_id] if work is not None else None, now=now
             )
             bs.busy_pct_24h = util.busy_pct_24h
-            bs.current_task_age_secs = util.current_task_age_secs
+            bs.busy_age_secs = util.busy_age_secs
             bs.idle_since = util.idle_since
         # STATE and TMUX now answer the SAME question from the SAME verdict.
-        # `blocked` is the one exception and is NOT a second "idle": it is a
-        # claim the bot made about ITSELF that no pane verdict can express, so
-        # it is honoured only while presence says idle -- a bot that is working
-        # is not blocked, which is what kept a stale `blocked` on screen
-        # indefinitely (#1615's `tom`). It retires with the file (#1504).
+        # A current blocked assignment decorates an observed idle presence;
+        # it cannot turn a BUSY pane into an idle one.
         _pres = presence.get(f"bot:{plane_fleet}/{bot_id}".lower()) if presence else None
         if _pres is not None:
             bs.state = _pres.presence
-            if bs.state == "idle" and _reported_blocked:
+            if bs.state == "idle" and work is not None and work.bots[bot_id].blocked:
                 bs.state = "blocked"
         elif not plane_unreachable:
             bs.state = "unknown"
         else:
-            bs.state = entry.get("status", "unknown")   # plane down: the file is all there is
+            bs.state = "unknown"
 
         results.append(bs)
 
@@ -418,7 +428,7 @@ def _health_indicator(bs: BotStatus) -> str:
         # never undetermined, so the sentinel is only consulted once we know
         # the unit was not reported active.
         return _yellow("?") if bs.service_undetermined else _red("x")
-    if bs.plane_unreachable:
+    if bs.plane_unreachable or bs.work_unavailable or bs.work_unresolved:
         # up by tmux and the service, but the recorded half is unreadable:
         # NOT known healthy (a plane outage read as an all-green fleet is the
         # founding gap of #1361)
@@ -542,14 +552,14 @@ def _idle_since_display(bs: BotStatus, now: datetime) -> str:
     return _fmt_duration(int(age))
 
 
-def _task_age_display(bs: BotStatus) -> str:
-    """Current task age."""
+def _busy_age_display(bs: BotStatus) -> str:
+    """Age of the observed BUSY heartbeat run, not an assignment clock."""
     if bs.plane_unreachable:
         return _yellow("?")
-    if bs.current_task_age_secs is None:
+    if bs.busy_age_secs is None:
         return _dim("--")
-    s = _fmt_duration(bs.current_task_age_secs)
-    if bs.current_task_age_secs > 7200:
+    s = _fmt_duration(bs.busy_age_secs)
+    if bs.busy_age_secs > 7200:
         return _yellow(s)
     return s
 
@@ -610,7 +620,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
         f"{'HEARTBEAT':<10}  "
         f"{'BUSY%':<6}  "
         f"{'IDLE':<8}  "
-        f"{'TASK AGE':<8}  "
+        f"{'BUSY AGE':<8}  "
         f"ACTIVITY"
     )
     lines.append(_dim(hdr))
@@ -618,9 +628,13 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
 
     for bs in statuses:
         indicator = _health_indicator(bs)
-        activity = bs.current_task or bs.last_completed or ""
+        activity = ("work unresolved" if bs.work_unresolved else
+                    bs.current_task or bs.last_completed or
+                    ("work unknown" if bs.work_unavailable else ""))
         activity = _truncate(activity, 40)
-        if bs.current_task:
+        if bs.work_unresolved or bs.work_unavailable:
+            activity_display = _yellow(activity)
+        elif bs.current_task:
             activity_display = activity
         elif bs.last_completed:
             activity_display = _dim(activity)
@@ -636,7 +650,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
             f"{_pad(_heartbeat_display(bs), 10)}  "
             f"{_pad(_busy_pct_display(bs), 6)}  "
             f"{_pad(_idle_since_display(bs, now), 8)}  "
-            f"{_pad(_task_age_display(bs), 8)}  "
+            f"{_pad(_busy_age_display(bs), 8)}  "
             f"{activity_display}"
         )
         lines.append(row)
@@ -654,6 +668,13 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
         lines.append(_yellow(f"  heartbeat, pane state and utilization: unknown — the plane is"
                              f" unreachable ({why}); restore state/plane/plane.db or name the"
                              " right root"))
+        lines.append("")
+    work_why = next((bs.work_unavailable for bs in statuses if bs.work_unavailable), "")
+    if work_why and not why:
+        lines.append(_yellow(f"  Task work: unknown ({work_why})"))
+        lines.append("")
+    elif any(bs.work_unresolved for bs in statuses):
+        lines.append(_yellow("  Task work: unresolved reducer issues; inspect JSON or bot detail"))
         lines.append("")
     summary_parts = [f"{up_count}/{total} up"]
     if undetermined:
@@ -682,12 +703,20 @@ def format_bot_detail(bs: BotStatus) -> str:
     lines.append(f"  Busy 24h:   {_busy_pct_display(bs)}")
     now = datetime.now(timezone.utc)
     lines.append(f"  Idle since: {_idle_since_display(bs, now)}")
-    lines.append(f"  Task age:   {_task_age_display(bs)}")
+    lines.append(f"  Busy age:   {_busy_age_display(bs)}")
 
     if bs.current_task:
         lines.append(f"  Task:       {bs.current_task}")
+    for assignment in bs.work_assignments:
+        lines.append(f"  Assignment: {assignment.assignment_id} / {assignment.task_id} ({assignment.state})")
     if bs.last_completed:
         lines.append(f"  Last:       {bs.last_completed}")
+    if bs.work_unavailable:
+        lines.append(f"  Work:       unknown ({bs.work_unavailable})")
+    if bs.work_issues:
+        label = "unresolved" if bs.work_unresolved else "issues"
+        codes = ", ".join(sorted({issue["code"] for issue in bs.work_issues}))
+        lines.append(f"  Work:       {label} ({len(bs.work_issues)} Task issue(s): {codes})")
 
     return "\n".join(lines) + "\n"
 
@@ -715,9 +744,14 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 "plane_unreachable": bs.plane_unreachable or None,
                 "busy_pct_24h": bs.busy_pct_24h,
                 "idle_since": (bs.idle_since.isoformat() if bs.idle_since else None),
-                "current_task_age_secs": bs.current_task_age_secs,
+                # The observed BUSY run, separate from assignment state.
+                "busy_age_secs": bs.busy_age_secs,
                 "current_task": bs.current_task,
                 "last_completed": bs.last_completed,
+                "work_assignments": [asdict(a) for a in bs.work_assignments],
+                "work_issues": list(bs.work_issues),
+                "work_unresolved": bs.work_unresolved,
+                "work_unavailable": bs.work_unavailable or None,
             }
         )
     payload: dict = {"fleet": fleet_name, "bots": bots}

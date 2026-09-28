@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -88,6 +89,25 @@ def _assignee_key(alias):
         return None
     fl, _, name = alias.rpartition("/")
     return (fl.lower(), name.lower())
+
+
+# The shape a msg id is minted in (claudlobby/plane/ids.py's own
+# ID_PATTERNS["msg"]). This stdlib door runs under `python3 -S -E` (#1922's
+# _bare_destination precedent) and cannot import the package, so the pattern
+# is a local, anchored copy -- keep it byte-identical to ids.py's if that ever
+# moves (#1946).
+_MSG_ID_RE = re.compile(r"^msg_[0-9a-f]{32}$")
+
+
+def _bare_destination(dest):
+    """The id a receipt is recorded under: the receipt hook stamps the bare
+    BOT_ID, so a receiver's plane alias `bot:<fleet>/<name>` is matched on its
+    name (#1922). Anything else comes back as it arrived. A recorded send is
+    checked against its canonical recipient and fleet before this bare-name
+    form can count as a receipt."""
+    if dest and dest.startswith("bot:") and "/" in dest:
+        return dest.rsplit("/", 1)[1] or dest
+    return dest
 
 
 def _open_idless(a) -> int:
@@ -175,6 +195,18 @@ def _checkin_id(a) -> int:
     return _with_plane(a.root, fn)
 
 
+def _no_receipt_note(dest, root) -> str:
+    """The ONE stderr line behind rc 4 (#1922). Stdout stays empty: it carries
+    only the --verdict line, and pane_await_receipt reads the exit code."""
+    if not dest:
+        return ("plane-lookup: --received needs --destination <the receiver's BOT_ID>;"
+                " without one no receipt can match, so this proves nothing")
+    return (f"plane-lookup: no receipt has ever been recorded for destination {dest!r} on"
+            f" the plane under {root}: its receipt hook is not armed, or this lookup does not"
+            f" reach it ({dest!r} is not the BOT_ID the hook records, or the receiver's plane"
+            " is under another root). An absence here proves nothing")
+
+
 def _received(a) -> int:
     """`--received <msg_id> --destination <bot> [--wait S]`: has the RECEIVER
     recorded this tracked send? plane-dispatch-in.sh writes the `received` row
@@ -182,9 +214,16 @@ def _received(a) -> int:
     box leaves none (#1099). Polls up to S seconds: rc 0 once the row lands
     addressed to <bot> (fold F3, queries.DELIVERY_STATUS_SQL's rule: a prompt
     that merely QUOTES the trailer files it under another bot), rc 1 when none
-    has by then, rc 4 when <bot> has never recorded a receipt
-    at all (its hook is not armed, so an absence proves nothing), rc 3
-    unreachable.
+    has by then, rc 4 when <bot> has never recorded a receipt at all, rc 3
+    unreachable, rc 2 (main(), before this function even runs) when <msg_id>
+    itself is not msg_ + 32 hex -- refused rather than waited out, since that
+    shape can never match anything (#1946). rc 4 proves nothing either way
+    (the hook is not armed, or this lookup cannot reach what it records), so
+    it names the destination and the root in one stderr line (#1922), unless
+    --quiet: the dispatch door's receipt gate passes it, since a clean
+    dispatch is silent but for the plane shim. <bot> is the bare BOT_ID the
+    hook records; its plane alias `bot:<fleet>/<name>` is matched on the
+    name.
 
     --verdict (#1876) also prints `<verdict> <sender>` once the receipt is
     found: the plane's delivery verdict for this msg id and the alias that
@@ -196,8 +235,9 @@ def _received(a) -> int:
     sender's own wire proof (193 of 247 on the Pi), and until it lands there is
     nothing to compare. `unknown -` = no send recorded under this id; a verdict
     still unconfirmed when the wait runs out prints as it stands. No --verdict,
-    no output: pane_await_receipt reads the exit code alone."""
+    nothing on stdout: pane_await_receipt reads the exit code alone."""
     deadline = time.monotonic() + a.wait
+    dest = _bare_destination(a.destination)
 
     def say(pr, conn):
         v = None
@@ -215,12 +255,46 @@ def _received(a) -> int:
     def fn(pr, conn):
         sql = ("SELECT 1 FROM events WHERE kind = 'transmission' AND event = 'received'"
                " AND json_extract(detail, '$.destination') = ? {} ORDER BY ingest_seq DESC LIMIT 1")
+        recipient = conn.execute("SELECT recipient_alias FROM communications WHERE msg_id = ?",
+                                 (a.received,)).fetchone()
+        if recipient:
+            # The hook records BOT_ID, but the send names a fleet-qualified
+            # actor. The shared delivery/history readers bind that actor to the
+            # receipt's host and fleet UID; a same-named foreign bot cannot
+            # arm this sender's retry gate or verify its prompt.
+            alias = recipient[0]
+            if not alias or a.destination not in (alias, _bare_destination(alias)):
+                if not a.quiet:
+                    print(_no_receipt_note(dest, a.root), file=sys.stderr)
+                return 4
 
-        def got():
-            return conn.execute(sql.format("AND msg_id = ?"), (a.destination, a.received)).fetchone()
+            def got():
+                row = conn.execute(pr.DELIVERY_SQL.format(ph="?"), (a.received,)).fetchone()
+                return row is not None and row[4] is not None
+
+            def has_history():
+                return bool(conn.execute(pr.RECEIPT_HISTORY_SQL,
+                                         (a.received,)).fetchone()[0])
+        else:
+            # An untracked pasted trailer still has a diagnostic verdict of
+            # `unknown -`, but an alias without a recorded recipient cannot
+            # claim a fleet-qualified receipt from a bare-name event.
+            if a.destination != dest:
+                if not a.quiet:
+                    print(_no_receipt_note(dest, a.root), file=sys.stderr)
+                return 4
+
+            def got():
+                return conn.execute(sql.format("AND msg_id = ?"), (dest, a.received)).fetchone()
+
+            def has_history():
+                return bool(conn.execute(sql.format(""), (dest,)).fetchone())
+
         if got():
             return say(pr, conn) if a.verdict else 0
-        if not conn.execute(sql.format(""), (a.destination,)).fetchone():
+        if not has_history():
+            if not a.quiet:
+                print(_no_receipt_note(dest, a.root), file=sys.stderr)
             return 4
         while time.monotonic() < deadline:
             time.sleep(0.25)
@@ -289,8 +363,15 @@ def main(argv=None) -> int:
                          " registry instead of refusing (the writer's first open of a fresh fleet)")
     ap.add_argument("--received", default=None,
                     help="rc 0 once the receiver's `received` row for this msg id is on the plane, rc 1"
-                    " when none by --wait, rc 4 when --destination never recorded one (#1099)")
-    ap.add_argument("--destination", default=None)
+                    " when none by --wait, rc 4 (said on stderr) when --destination never"
+                    " recorded one (#1099); rc 2 when the id itself is not msg_ + 32 hex,"
+                    " refused before any wait (#1946)")
+    ap.add_argument("--destination", default=None,
+                    help="--received: the receiver's BOT_ID, as its receipt hook records it;"
+                    " bot:<fleet>/<name> is matched on <name>")
+    ap.add_argument("--quiet", action="store_true",
+                    help="--received: no rc 4 note on stderr, for a caller that reads the exit code"
+                    " alone (the dispatch door's receipt gate); rc 3 still says why")
     ap.add_argument("--verdict", action="store_true",
                     help="--received: also print `<verdict> <sender>` for a found receipt — the"
                     " check a receiver runs before trusting a paste-framed dispatch (#1876)")
@@ -306,6 +387,9 @@ def main(argv=None) -> int:
     if a.checkin_id:
         return _checkin_id(a)
     if a.received:
+        if not _MSG_ID_RE.fullmatch(a.received):
+            ap.error(f"--received must be msg_ followed by 32 lowercase hex characters,"
+                     f" got {a.received!r} (#1946)")
         return _received(a)   # no --destination matches no receipt: rc 4, no verdict
     if a.escalated:
         if not a.fleet:

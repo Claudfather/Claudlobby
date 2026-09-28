@@ -300,7 +300,7 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
     """
     if (not isinstance(store, RequestStore) or not isinstance(receipt, RequestReceipt)
             or receipt.request_id != request_id or receipt.intent.operation not in {
-                "assignment.deliver", "assignment.progress", "assignment.block",
+                "task.nudge", "task.recheck", "assignment.deliver", "assignment.progress", "assignment.block",
                 "assignment.return", "assignment.complete", "assignment.fail"}):
         raise MessageConflict("strict native attempt requires a frozen task or linked report request")
     if (not isinstance(envelope, RenderedNativeEnvelope) or

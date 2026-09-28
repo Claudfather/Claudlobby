@@ -1,7 +1,7 @@
-"""Operator cold-host activation and read-only recorded-state orientation.
+"""Operator first activation and read-only recorded-state orientation.
 
 The activation owner holds the lock and owns every effect. This adapter neither
-upgrades an existing estate nor retries or recovers an interrupted activation.
+retries nor recovers an interrupted activation.
 Imports stay stdlib-only until the selected command needs its backend.
 """
 
@@ -20,7 +20,7 @@ from .releases import _executing_release, _host_releases, _host_root
 
 def _hint(root):
     return (f"inspect claudlobby --root {shlex.quote(str(root))} host status; "
-            "this route does not implement upgrades or recovery; do not retry an interrupted activation")
+            "this route does not recover an interrupted activation; inspect its recorded pending step")
 
 
 def _status(args, root):
@@ -94,14 +94,15 @@ def _activate(args, root):
             data=data, release_id=executing,
             hint=f"use this plan's sealed candidate CLI; inspect claudlobby --root {shlex.quote(str(root))} host releases")
     try:
-        from ..activation import bootstrap_activation
-        record = bootstrap_activation(root, args.activation_id, plan.plan_id, directory)
+        from ..activation import adopt_existing_activation, bootstrap_activation
+        activate = adopt_existing_activation if args.adopt_existing else bootstrap_activation
+        record = activate(root, args.activation_id, plan.plan_id, directory)
     except Exception as exc:
         data.update(recorded_activation=_recorded(root, args.activation_id), recording="unknown")
         if isinstance(exc, (ImportError, OSError)):
             code, message = "unavailable", "unavailable: cold-host activation dependency or native access"
         elif isinstance(exc, (ValueError, RuntimeError)):
-            code, message = "conflict", "conflict: cold-host activation did not complete; existing or interrupted hosts require recovery"
+            code, message = "conflict", "conflict: first activation did not complete; inspect its pending step"
         else:
             diagnostic = str(uuid4())
             print(f"diagnostic {diagnostic}: {type(exc).__name__}", file=sys.stderr)

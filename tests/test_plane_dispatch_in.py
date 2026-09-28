@@ -32,6 +32,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -368,8 +369,11 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path, *
         "SELECT event, json_extract(detail, '$.data.msg_id') FROM events"
         " WHERE kind = 'system' AND event IN ('send_retry', 'send_miss') ORDER BY ingest_seq"))] \
         == [("send_retry", held), ("send_retry", stuck), ("send_miss", stuck)]
-    # A recipient that never recorded a receipt has no hook armed: no verdict, nothing pressed.
-    assert gate(stuck, "holds", dest="dinesh")[:2] == (0, [])
+    # A recipient that never recorded a receipt has no hook armed: no verdict, nothing
+    # pressed, and nothing said. The gate passes --quiet, so a clean dispatch stays
+    # silent but for the plane shim (#1922).
+    rc, keys, err = gate(stuck, "holds", dest="dinesh")
+    assert (rc, keys) == (0, []) and "plane-lookup" not in err, err
 
 
 def test_a_queued_delivery_is_not_a_miss(tmp_path, *, scratch_plane_env):
@@ -488,10 +492,12 @@ def _seed_send(root: Path, payload: str, sender: str = "mgr") -> tuple[str, int]
     return safe, nbytes
 
 
-def _verdict(root: Path, *extra: str) -> subprocess.CompletedProcess:
+def _verdict(root: Path, *extra: str, dest: str | None = BOT,
+             received: str = MSGID) -> subprocess.CompletedProcess:
+    where = ("--destination", dest) if dest is not None else ()
     return subprocess.run(
-        ["python3", str(LOOKUP), "--root", str(root), "--received", MSGID,
-         "--destination", BOT, *extra], capture_output=True, text=True, timeout=60)
+        ["python3", str(LOOKUP), "--root", str(root), "--received", received,
+         *where, *extra], capture_output=True, text=True, timeout=60)
 
 
 @pytest.mark.parametrize("trailer_framed", [False, True],
@@ -550,3 +556,111 @@ def test_without_verdict_the_received_mode_still_prints_nothing(tmp_path, *, scr
     _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     v = _verdict(root)
     assert (v.returncode, v.stdout) == (0, "")
+
+
+# --- rc 4 says why, and the receiver's plane alias finds its receipt (#1922) ----
+# rc 4 = this destination has never recorded a receipt, so an absence proves
+# nothing. It printed NOTHING, and a lookup that could never match (the bot's
+# `bot:<fleet>/<name>` alias, where the hook records the bare BOT_ID, or a plane
+# under another root) read exactly like a receipt hook that is not armed.
+
+
+@pytest.mark.parametrize("dest", ["dinesh", f"bot:{FLEET}/dinesh"], ids=["bare", "alias"])
+@pytest.mark.parametrize("extra", [(), ("--verdict",)], ids=["plain", "verdict"])
+def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path, extra, dest, scratch_plane_env):
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
+    v = _verdict(root, *extra, dest=dest)   # erlich's hook recorded; dinesh's never has
+    # stdout stays empty: the verdict line is the only stdout this mode has.
+    assert (v.returncode, v.stdout) == (4, "")
+    [line] = v.stderr.splitlines()
+    assert "'dinesh'" in line and str(root) in line, line   # the id actually matched
+    assert "not armed" in line and "BOT_ID" in line, line   # both causes, named
+
+
+@pytest.mark.parametrize("dest", [None, ""], ids=["absent", "empty"])
+def test_a_lookup_with_no_destination_says_so_instead_of_naming_one(tmp_path, dest, scratch_plane_env):
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
+    v = _verdict(root, "--verdict", dest=dest)
+    assert (v.returncode, v.stdout) == (4, "")
+    [line] = v.stderr.splitlines()
+    assert "--destination" in line and "None" not in line, line
+
+
+def test_quiet_withholds_the_rc4_note_and_nothing_else(tmp_path, *, scratch_plane_env):
+    # The dispatch door's receipt gate reads the exit code alone and passes --quiet.
+    # It must still hear an unreachable plane: that is a refusal, not an absence.
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
+    v = _verdict(root, "--quiet", dest="dinesh")
+    assert (v.returncode, v.stdout, v.stderr) == (4, "", "")
+    v = _verdict(tmp_path / "no-plane-here", "--quiet")
+    assert v.returncode == 3 and "unreachable" in v.stderr, v.stderr
+
+
+def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path, *, scratch_plane_env):
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    foreign = _env(root, scratch_plane_env=scratch_plane_env, FLEET_NAME="other-fleet")
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), foreign).returncode == 0
+    v = _verdict(root, "--verdict", dest=f"bot:{FLEET}/{BOT}")
+    assert v.returncode == 4 and v.stdout == "", v
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
+    v = _verdict(root, "--verdict", dest=f"bot:{FLEET}/{BOT}")
+    assert v.returncode == 0, v.stderr
+    assert v.stdout == f"delivered bot:{FLEET}/mgr\n"
+
+
+# --- a malformed --received id is refused, not waited out (#1946) -----------
+# The shape is msg_ + 32 lowercase hex (claudlobby/plane/ids.py's own ID_PATTERNS
+# ["msg"]). A caller who strips the msg_ prefix -- or otherwise passes the wrong
+# shape -- was passing something that could NEVER match: the old behaviour waited
+# the full --wait and answered rc 1, indistinguishable from "not received yet".
+
+
+@pytest.mark.parametrize("bad", [
+    MSGID[len("msg_"):],           # the real mistake: prefix stripped (#1922 comment)
+    MSGID[:-1],                    # 31 hex chars, one short
+    MSGID + "0",                   # 33 hex chars, one long
+    "msg_" + MSGID[4:].upper(),    # uppercase hex
+    "msg_" + "g" + MSGID[5:],      # non-hex character
+    "t-1234567890-ab12",           # a task id, not a message id, passed by mistake
+], ids=["missing-prefix", "one-short", "one-long", "uppercase", "non-hex", "wrong-kind"])
+def test_a_received_id_that_is_not_msg_plus_32_hex_is_refused_as_usage(tmp_path, bad, scratch_plane_env):
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
+    v = _verdict(root, received=bad)
+    assert (v.returncode, v.stdout) == (2, ""), v.stderr
+    assert repr(bad) in v.stderr, v.stderr                    # names the bad value
+    assert "msg_" in v.stderr and "32" in v.stderr, v.stderr  # names the expected shape
+
+
+def test_a_malformed_received_id_is_refused_before_any_wait(tmp_path, *, scratch_plane_env):
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
+    start = time.monotonic()
+    v = _verdict(root, "--wait", "5", received=MSGID[len("msg_"):])
+    elapsed = time.monotonic() - start
+    assert v.returncode == 2
+    assert elapsed < 2, f"refused after {elapsed:.2f}s against --wait 5 -- waited instead of refusing"
+
+
+def test_a_freshly_minted_msg_id_is_never_refused_by_the_shape_check(tmp_path, *, scratch_plane_env):
+    """Drift guard: the local shape check must accept whatever the package's
+    OWN minter actually produces, not just a string that happens to look
+    right today. The minted id was never sent, so it gets the ordinary
+    never-armed rc 4 (the plane exists -- seeded by an unrelated send -- but
+    "nobody-armed" has no receipt on it either way); the one thing under
+    test is that the shape check itself does not intercept it at rc 2."""
+    from claudlobby.plane.ids import mint_msg_id
+    root = _root(tmp_path)
+    safe, _ = _seed_send(root, "set +H; " + BODY)
+    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env)).returncode == 0
+    v = _verdict(root, "--wait", "0", received=mint_msg_id(), dest="nobody-armed")
+    assert v.returncode == 4, (v.returncode, v.stdout, v.stderr)

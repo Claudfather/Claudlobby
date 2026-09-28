@@ -6,7 +6,7 @@ lib/ab-comms-eval.sh), pairs per-rep deltas by task, computes a SEEDED bootstrap
 CI on the median paired relative reduction per axis, and applies the pass-bar.
 
 Standalone lib/ Python (stdlib-only, shell-invokable) following the
-lib/dispatch-overdue.py and lib/transcript-usage.py precedent — the eval harness
+lib/dispatch-overdue.py and claudlobby.transcript_usage precedent — the eval harness
 shells out to it, and it is directly unit-testable (tests/test_ab_comms_eval.py).
 F2 ratifies the threshold and the quality scorer; keeping this a module (not an
 inline heredoc) is what lets F2 land its work in a testable place.

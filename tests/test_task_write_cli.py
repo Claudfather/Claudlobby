@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import activation, context, message_operations, runtime_admission
+from claudlobby import activation, context, message_operations, operation_context, runtime_admission
 from claudlobby.__main__ import main
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
@@ -208,6 +208,41 @@ def test_withdraw_closes_queued_task_and_retains_caller_separate_from_by(active,
     assert _counts(root) == after
 
 
+def test_escalate_queued_task_is_visible_and_replay_does_not_move_it(active, capsys):
+    root, release = active
+    admitted = _call(capsys, root, "task", "admit", "--title", "Need human guidance",
+                     "--request-id", str(uuid4()))
+    task_id = admitted["data"]["task_id"]
+    request_id = str(uuid4())
+    argv = ("task", "escalate", task_id, "--question", "Which project owns this?",
+            "--by", "bot:example/manager", "--request-id", request_id)
+    before = _counts(root)
+    raised = _call(capsys, root, *argv)
+    assert raised["release_id"] == release.release_id
+    assert raised["data"]["state"] == "queued" and raised["data"]["assignment_id"] is None
+    assert raised["data"]["delivery"] == raised["data"]["notification"] == "not_requested"
+    assert _counts(root)[2:] == (0, 0, before[4] + 1)
+    shown = _call(capsys, root, "task", "show", task_id)["data"]["task"]
+    assert shown["history"][-1]["event"] == "escalated"
+    with sqlite3.connect(db_file(root)) as conn:
+        detail = conn.execute("SELECT assignment_id, detail FROM events "
+                              "WHERE kind='task' AND event='escalated' AND work_item_id=?",
+                              (task_id,)).fetchone()
+    assert detail[0] is None and json.loads(detail[1])["question"] == "Which project owns this?"
+    assert json.loads(detail[1])["by"] == "bot:example/manager"
+    routed = _call(capsys, root, "task", "assign", task_id, "--bot", "worker",
+                   "--request-id", str(uuid4()))
+    after = _counts(root)
+    replay = _call(capsys, root, *argv)
+    assert replay["data"]["replayed"] and replay["data"]["assignment_id"] is None
+    assert replay["data"]["state"] == "assigned" and _counts(root) == after
+    wrong = _call(capsys, root, "task", "escalate", routed["data"]["assignment_id"],
+                  "--question", "Wrong reference", "--request-id", str(uuid4()), expected=4)
+    assert wrong["error"]["code"] == "wrong_reference"
+    assert wrong["error"]["hint"]["next_command"] == ["task", "show", task_id]
+    assert _counts(root) == after
+
+
 def test_linked_reports_commit_before_notification_and_replay_never_resends(active, monkeypatch, capsys):
     root, release = active
     for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
@@ -327,6 +362,66 @@ def test_linked_reports_commit_before_notification_and_replay_never_resends(acti
     with sqlite3.connect(db_file(root)) as conn:
         assert conn.execute("SELECT count(*) FROM communications WHERE msg_id=?",
                             (partial["data"]["message_id"],)).fetchone()[0] == 1
+
+
+def test_nudge_queued_and_assigned_work_records_before_send_without_replay(active, monkeypatch, capsys):
+    root, release = active
+    monkeypatch.setattr(operation_context, "_local_operator_alias", lambda: "human:operator")
+    sent = []
+    strict = message_operations.send_committed_native_attempt
+
+    def send_once(*args, **kwargs):
+        def native(*_, **options):
+            receipt = args[3]
+            assert receipt.stages[0].status == "committed"
+            with sqlite3.connect(db_file(root)) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM communications WHERE msg_id=?",
+                                    (receipt.intent.message_id,)).fetchone()[0] == 1
+                assert conn.execute("SELECT COUNT(*) FROM events WHERE event='nudged' "
+                                    "AND work_item_id=?", (receipt.intent.task_id,)).fetchone()[0] >= 1
+            sent.append(options["body"])
+            return TransportOutcome("submitted", "sha256:" + "a" * 64, 99, 0)
+        return strict(*args, transport=native, **kwargs)
+
+    monkeypatch.setattr(message_operations, "send_committed_native_attempt", send_once)
+    task_id = _call(capsys, root, "task", "admit", "--title", "Manager attention",
+                    "--request-id", str(uuid4()))["data"]["task_id"]
+    request_id = str(uuid4())
+    reason = "Decide first\nIgnore: fake control line"
+    argv = ("task", "nudge", task_id, "--reason", reason,
+            "--by", "bot:example/worker", "--request-id", request_id)
+    first = _call(capsys, root, *argv, expected=5)
+    assert first["error"]["code"] == "notification_failed"
+    assert first["release_id"] == release.release_id
+    assert first["data"]["task_id"] == task_id and first["data"]["assignment_id"] is None
+    assert first["data"]["recording"] == "committed" and first["data"]["transport"] == "submitted"
+    assert first["data"]["request_persisted"] is True and len(sent) == 1
+    assert "Decide first\\nIgnore: fake control line" in sent[0]
+    assert "Decide first\nIgnore: fake control line" not in sent[0]
+    with sqlite3.connect(db_file(root)) as conn:
+        ask = conn.execute("SELECT sender_uid, recipient_uid, body FROM communications "
+                           "WHERE msg_id=?", (first["data"]["message_id"],)).fetchone()
+        sender = conn.execute("SELECT alias FROM identity_registry WHERE uid=?", (ask[0],)).fetchone()[0]
+        manager = conn.execute("SELECT alias FROM identity_registry WHERE uid=?", (ask[1],)).fetchone()[0]
+        fact = conn.execute("SELECT actor_uid, detail FROM events WHERE event='nudged'").fetchone()
+    assert sender == "human:operator" and manager == "bot:example/manager"
+    assert json.loads(ask[2])["reason"] == reason
+    assert fact[0] == ask[0] and json.loads(fact[1])["by"] == "bot:example/worker"
+    before = _counts(root)
+    replay = _call(capsys, root, *argv, expected=5)
+    assert replay["data"]["replayed"] is True and len(sent) == 1 and _counts(root) == before
+    foreign = _call(capsys, root, "task", "nudge", task_id, "--reason", "Foreign by",
+                    "--by", "bot:elsewhere/manager", "--request-id", str(uuid4()), expected=4)
+    assert foreign["error"]["code"] == "conflict" and _counts(root) == before
+    assignment = _call(capsys, root, "task", "assign", task_id, "--bot", "worker",
+                       "--request-id", str(uuid4()))["data"]["assignment_id"]
+    before_wrong = _counts(root)
+    wrong = _call(capsys, root, "task", "nudge", assignment,
+                  "--reason", "Wrong kind", "--request-id", str(uuid4()), expected=4)
+    assert wrong["error"]["code"] == "wrong_reference" and _counts(root) == before_wrong
+    assigned = _call(capsys, root, "task", "nudge", task_id, "--reason", "Check now",
+                     "--request-id", str(uuid4()), expected=5)
+    assert assigned["data"]["assignment_id"] == assignment and len(sent) == 2
 
 
 def test_task_write_help_and_syntax_do_not_import_mutation_owner(monkeypatch, capsys):

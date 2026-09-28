@@ -1,21 +1,15 @@
-"""json_escape (lib-common) — JSON string escaping for the JSONL ledgers (#530).
+"""json_escape (lib-common) — JSON string escaping for batch fixtures.
 
 The escaper must produce content that round-trips ``json.loads`` when wrapped
-in double quotes — including control characters, which would otherwise split
-single-line JSONL rows that the line-oriented rotation then truncates into
-permanently invalid JSON (the #528-review Major generalized: any ledger
-writer, any caller-supplied text).
+in double quotes — including control characters, which would otherwise make a serialized batch invalid.
 """
 
 from __future__ import annotations
 
 import json
 
-import subprocess
 
 from tests.conftest import call_lib_fn
-from tests.plane_fixtures import ro as _ro
-from tests.test_task_id_dispatch import _fake_lib
 
 
 def _escaped(value: str) -> str:
@@ -50,20 +44,3 @@ def test_exotic_control_characters_roundtrip():
         out = _escaped(value)
         assert not any(ord(c) < 0x20 for c in out), (value, out)
         assert _roundtrip(value) == value
-
-
-def test_dispatch_record_survives_newline_in_task(tmp_path, *, scratch_plane_env):
-    # End-to-end: operator-supplied task text with an embedded newline must
-    # land as one valid record — on the plane since F18 R1 (the work item's
-    # title is the task text the door escaped; the wedge fixed the
-    # claudron-supplied vector in #529; this is the caller-supplied one).
-    libdir, env = _fake_lib(tmp_path, "#!/bin/bash\nexit 0\n", scratch_plane_env=scratch_plane_env)
-    r = subprocess.run(
-        ["bash", "-c", f'"{libdir}/dispatch-task.sh" --repo kev worker-1 "line one\nline two"'],
-        capture_output=True, text=True, env=env, timeout=120)
-    assert r.returncode == 0, r.stderr
-    with _ro(tmp_path) as conn:
-        titles = [row[0] for row in conn.execute("SELECT title FROM work_items")]
-    # the batch validated and landed — reaching a row means the text
-    # round-tripped despite the newline
-    assert titles == ["line one\nline two"], (titles, r.stderr)

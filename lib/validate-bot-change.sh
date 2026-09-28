@@ -344,7 +344,7 @@ val_plane_ready() {
 # stdlib readers the doors consult must sit beside it.
 val_link_plane_shim() {
     local d="$1" f
-    for f in plane-emit.sh plane-socket-client.py plane-lookup.py plane-readers.py dispatch-overdue.py dispatch-supersede-hint.py; do
+    for f in plane-emit.sh plane-socket-client.py plane-lookup.py plane-readers.py dispatch-overdue.py; do
         [ -e "$d/$f" ] || ln -s "$LIB_DIR/$f" "$d/$f"
     done
 }
@@ -424,7 +424,7 @@ cleanup() {
             "$rc" "$((${pass:-0} + ${fail:-0}))"
     fi
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFNOSKILL:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TA_MGR:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFNOSKILL:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -596,52 +596,11 @@ printf '%s' "$mgr_pane" | grep -q 'no report has closed' && printf '%s' "$mgr_pa
 harness_check "manager nudge names the open id (for the manager to act on)" "$r"
 
 # ===========================================================================
-# #835 — the two halves that stop the watchdog crying wolf over finished work.
-# Both drive the REAL scripts: report-back.sh for the resolve, fleet-pulse.sh
-# for the orphan split. Unit semantics are in tests/test_dispatch_overdue.py;
-# what only running the code can prove is that the id actually lands in the
-# ledger and that the pulse actually stops emitting.
+# #835: the pulse must distinguish a respawn orphan from an overdue task.
+# The historical dispatch remains a direct Plane fixture; the retired report
+# writer's implicit task-link behavior is covered by canonical report tests.
 # ===========================================================================
-val_scenario "validate #835: an id-less report closes its dispatch; a respawn orphan goes quiet"
-
-# --- Half 1: report-back.sh with NO --task must resolve the open dispatch. ---
-T835_BOT="valrb835"
-T835_DIR="$ROOT/local/$FLEET/runtime/bots/$T835_BOT"
-mkdir -p "$T835_DIR/data"
-cat > "$T835_DIR/bot.conf" <<CONF
-BOT_NAME="$T835_BOT"
-BOT_ID="$T835_BOT"
-BOT_SERVICE=""
-MANAGER_TMUX="$MGR"
-CONF
-t835_dispatch="$VAL_DISPATCH_LOG"
-val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$T835_BOT" t-835-0001 "$((now - 600))" "$((now - 10))" "do y"
-
-# Deliberately NO --task, the way every worker actually calls it.
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="$MGR" \
-    "$LIB_DIR/report-back.sh" "$T835_BOT" completed "finished the thing" >/dev/null 2>&1 || true
-
-t835_ledger="$VAL_REPORT_LEDGER"
-# The resolved id lands as the report's task event on THAT assignment (the
-# plane's twin of the ledger row's stamped task_id).
-t835_closed=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'completed' AND a.source_ref = 'dispatch-log:t-835-0001'")
-[ "${t835_closed:-0}" -eq 1 ] && r=yes || r=no
-harness_check "#835 report-back without --task lands its task event on the resolved dispatch (the plane's stamped id)" "$r"
-
-# The join is unchanged — so the row closing is proof the id is the RIGHT one.
-t835_left=$(val_read "overdue --all" python3 "$LIB_DIR/dispatch-overdue.py" --all "$(date +%s)" \
-    --fleet "$FLEET" --root "$ROOT" | grep -c "^$T835_BOT " || true)
-[ "${t835_left:-1}" -eq 0 ] && r=yes || r=no
-harness_check "#835 the resolved id actually closes the dispatch (watchdog join untouched)" "$r"
-
-# A second id-less report with nothing open must stay id-less, not grab a peer's:
-# no new task event, and the report_status marker a resolved-nothing report carries.
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="$MGR" \
-    "$LIB_DIR/report-back.sh" "$T835_BOT" completed "and again" >/dev/null 2>&1 || true
-t835_tasks=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN identity_registry i ON i.uid = e.actor_uid WHERE e.kind = 'task' AND i.alias = 'bot:$FLEET/$T835_BOT'")
-t835_marker=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e WHERE e.kind = 'system' AND e.event = 'report_status' AND e.subject_alias = 'bot:$FLEET/$T835_BOT'")
-{ [ "${t835_tasks:-0}" -eq 1 ] && [ "${t835_marker:-0}" -ge 1 ]; } && r=yes || r=no
-harness_check "#835 nothing open -> report stays id-less (no scavenging a peer's row; the report_status marker lands instead)" "$r"
+val_scenario "validate #835: a respawn orphan goes quiet"
 
 # --- Half 2: a respawn orphan must stop reaching the pulse's overdue path. ---
 # Same bot dir, but .spawn is now NEWER than the dispatch: the session that
@@ -685,303 +644,7 @@ or_ev2=$(val_events "$ROOT" "$FLEET" "$OR_BOT" dispatch_orphaned | grep -c 't-83
 harness_check "#835 a second sweep does NOT re-record the same orphan (latch holds)" "$r"
 
 # ===========================================================================
-# #1481 chunk M-A — the manager's two acts on ONE open task.
-#
-# Unit tests pin the resolution and the vocabulary. What only running the real
-# doors proves is the pair of facts the acts exist for and that no unit test
-# reaches: a WITHDRAWN row actually leaves the matcher's open set (the
-# watchdog stops crying wolf over a send that never landed), and an ESCALATED
-# one actually does NOT -- `escalated` is non-terminal by ruling, so the work
-# survives the human deciding, and the only thing that can see it is the
-# dedicated read fleet-pulse will page from.
-#
-# The reason and the question are CONTENT, so this rig -- which carries no
-# capture.json, i.e. metadata mode -- deliberately asserts the ARM and the
-# person rather than the prose. The text round-trip is pinned under full
-# capture in tests/test_task_loop_doors.py; a harness that flipped the
-# capture policy mid-run would be testing the policy, not the door.
 # ===========================================================================
-val_scenario "validate #1481: withdraw closes a row, escalate keeps it open"
-
-# NO bot directory for the worker, deliberately. Every door under test here
-# reads the PLANE (the acts, the matcher, the escalated read) and none needs
-# one -- while a directory under the fleet's bots dir is what makes
-# fleet-pulse health-check a bot, so creating one would add a session_missing
-# push to the shared manager pane on every later sweep and scroll the line a
-# LATER scenario captures out of view. Measured: with the directory, the
-# #1024 pane assertion failed on both runs and passed on the baseline.
-TA_BOT="valact1481"
-val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0001 "$((now - 600))" "$((now + 3600))" "the undelivered one"
-val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0002 "$((now - 600))" "$((now + 3600))" "the twin id"
-
-# --- withdraw: run as the MANAGER, the way a manager session would ---
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
-    "$LIB_DIR/task-act.sh" withdraw t-1481-0001 --reason "the broadcast never landed" \
-    > "$ROOT/ta-withdraw.out" 2> "$ROOT/ta-withdraw.err" || true
-
-ta_cancel=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'cancelled' AND a.source_ref = 'dispatch-log:t-1481-0001'")
-[ "${ta_cancel:-0}" -eq 1 ] && r=yes || r=no
-harness_check "#1481 task-act.sh withdraw lands ONE cancelled task event on the resolved assignment" "$r"
-
-ta_by=$(val_sql "$ROOT" "SELECT json_extract(e.detail, '\$.by') FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'cancelled' AND a.source_ref = 'dispatch-log:t-1481-0001'")
-[ "$ta_by" = "$MGR" ] && r=yes || r=no
-harness_check "#1481   ...stamped with WHO withdrew it (the manager, by name)" "$r"
-
-ta_open=$(val_read "open rows of $TA_BOT" python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
-    --fleet "$FLEET" --root "$ROOT" | grep -c 't-1481-0001' || true)
-[ "${ta_open:-1}" -eq 0 ] && r=yes || r=no
-harness_check "#1481 the withdrawn row leaves the matcher OPEN set (the watchdog stops chasing it)" "$r"
-
-# The refusal that keeps a manager from cancelling the wrong worker: a second
-# OPEN assignment under the same id, on another bot.
-val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$T835_BOT" t-1481-0002 "$((now - 500))" "$((now + 3600))" "a twin id on another bot"
-ta_amb_rc=0
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
-    "$LIB_DIR/task-act.sh" withdraw t-1481-0002 --reason "which one?" \
-    >/dev/null 2> "$ROOT/ta-amb.err" || ta_amb_rc=$?
-ta_amb_events=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND a.source_ref = 'dispatch-log:t-1481-0002'")
-{ [ "$ta_amb_rc" -eq 2 ] && grep -q "matches 2 open assignments" "$ROOT/ta-amb.err" \
-    && [ "${ta_amb_events:-1}" -eq 0 ]; } && r=yes || r=no
-harness_check "#1481 an id matching TWO open assignments is REFUSED, naming them, with nothing acted" "$r"
-
-# Close both deliberately ambiguous rows before the fleet-wide escalation read.
-# The refusal above remains tested; leaving both twins open makes the canonical
-# reader disclose unresolved historical display-ID state for the whole fleet.
-val_seed_report "$ROOT" "$FLEET" "$TA_BOT" t-1481-0002 completed "$now"
-val_seed_report "$ROOT" "$FLEET" "$T835_BOT" t-1481-0002 completed "$now"
-
-# --- escalate: a fresh id in a fleet with resolved task history ---
-val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$TA_BOT" t-1481-0003 "$((now - 400))" "$((now + 3600))" "the one with a question"
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" BOT_ID="$MGR" BOT_NAME="$MGR" \
-    "$LIB_DIR/task-act.sh" escalate t-1481-0003 "do we ship without the migration" \
-    > "$ROOT/ta-esc.out" 2> "$ROOT/ta-esc.err" || true
-
-ta_esc_open=$(val_read "open rows of $TA_BOT" python3 "$LIB_DIR/dispatch-overdue.py" --open "$TA_BOT" \
-    --fleet "$FLEET" --root "$ROOT" | grep -c 't-1481-0003' || true)
-[ "${ta_esc_open:-0}" -ge 1 ] && r=yes || r=no
-harness_check "#1481 an escalated task stays OPEN (non-terminal by ruling: the work survives the human)" "$r"
-
-ta_esc_rows=$(val_read "escalations of $FLEET" python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
-    --fleet "$FLEET")
-ta_esc_task=$(val_sql "$ROOT" "SELECT work_item_id FROM work_items WHERE source_ref = 'dispatch-log:t-1481-0003'")
-ta_esc=$(printf '%s\n' "$ta_esc_rows" | awk -F '\t' -v task="$ta_esc_task" '$2 == task { n++ } END { print n+0 }')
-[ "${ta_esc:-0}" -eq 1 ] && r=yes || r=no
-harness_check "#1481 plane-lookup --escalated lists it (the only read that can see a non-terminal raise)" "$r"
-
-ta_esc_by=$(printf '%s\n' "$ta_esc_rows" | awk -F '\t' -v task="$ta_esc_task" '$2 == task { print $3 }')
-[ "$ta_esc_by" = "$MGR" ] && r=yes || r=no
-harness_check "#1481   ...naming who asked, which no capture mode strips" "$r"
-
-# A later report is an ACT: the arm holds only while `escalated` is the
-# assignment newest task event, so nothing has to remember to un-escalate.
-#
-# Deliberately addressed to a manager session that does not exist. The plane
-# record is emitted BEFORE the send (report-back.sh, F9 intent-before-transport),
-# so the fact under test lands either way -- and pointing this at the shared
-# $MGR pane pushed two [BOTREPORT] lines into it, which scrolled the line a
-# LATER scenario captures out of the visible pane and failed a #1024 push
-# assertion that had nothing to do with this change. A harness scenario must
-# not perturb its neighbours to make its own point.
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="valnomgr1481" \
-    "$LIB_DIR/report-back.sh" "$TA_BOT" progress "on it" --progress 30 \
-    --task t-1481-0003 >/dev/null 2>&1 || true
-ta_esc_after=$(val_read "escalations of $FLEET" python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
-    --fleet "$FLEET" | awk -F '\t' -v task="$ta_esc_task" '$2 == task { n++ } END { print n+0 }')
-[ "${ta_esc_after:-1}" -eq 0 ] && r=yes || r=no
-harness_check "#1481 a later report CLEARS the escalation (no second door, nothing to reconcile)" "$r"
-
-# --- nudge: the OPERATOR act, and the half no unit test reaches ---
-#
-# The fold F14. Unit tests pin the record and the refusals with the send
-# monkeypatched away; what only running the real door proves is the reaction:
-# `claudlobby task nudge` resolves the row, records the ask, hands it to
-# `lib/dispatch.sh`, and the MANAGER PANE receives the four-verb menu. That
-# chain crosses three processes and a tmux server, and the fold found it
-# recording nothing at all -- the ask reached the pane and left no trace, so a
-# manager that never answered looked exactly like one nobody asked.
-#
-# ITS OWN MANAGER SESSION, not the shared $MGR. Measured on the first run of
-# this block: the re-check is ~300 characters and landing it in the shared
-# pane scrolled the [FLEET-PULSE] line a LATER scenario captures out of view,
-# failing a #1024 assertion that has nothing to do with this change -- the
-# same neighbour-perturbation the withdraw scenario above already avoids by
-# creating no bot directory. The task is therefore DISPATCHED BY this manager
-# too (`assigned_by` is what the nudge reads), which is also the honest
-# shape: the re-check goes to the row's own manager.
-TA_MGR="valmgr1481"
-tmux new-session -d -s "$TA_MGR" "sleep 600"
-sleep 1
-val_seed_dispatch "$ROOT" "$FLEET" "$TA_MGR" "$TA_BOT" t-1481-0004 "$((now - 300))" "$((now + 3600))" "the nudged one"
-# The selected prepared package owns dispatch.sh; mutable data needs no lib link.
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$FLEET" USER=valop \
-    "$VAL_CLI" --root "$ROOT" task nudge t-1481-0004 "any movement" --as valop \
-    > "$ROOT/ta-nudge.out" 2> "$ROOT/ta-nudge.err" || true
-
-tn_event=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'nudged' AND a.source_ref = 'dispatch-log:t-1481-0004'")
-[ "${tn_event:-0}" -eq 1 ] && r=yes || r=no
-harness_check "#1481 claudlobby task nudge lands ONE nudged task event on the resolved assignment" "$r"
-
-tn_actor=$(val_sql "$ROOT" "SELECT i.alias FROM events e JOIN identity_registry i ON i.uid = e.actor_uid WHERE e.kind = 'task' AND e.event = 'nudged'")
-[ "$tn_actor" = "human:valop" ] && r=yes || r=no
-harness_check "#1481   ...under a FIRST-CLASS human actor, not the bot that carried it" "$r"
-
-tn_ask=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE message_class = 'task_request' AND command_type = 'query' AND sender_alias = 'human:valop' AND recipient_alias = 'bot:$FLEET/$TA_MGR'")
-[ "${tn_ask:-0}" -eq 1 ] && r=yes || r=no
-harness_check "#1481 the re-check ASK is recorded as a communication to the task manager" "$r"
-
-tn_tx=$(val_sql "$ROOT" "SELECT e.event FROM events e JOIN communications c ON c.msg_id = e.msg_id WHERE e.kind = 'transmission' AND c.sender_alias = 'human:valop'")
-[ "$tn_tx" = "pane_submitted" ] && r=yes || r=no
-harness_check "#1481   ...with an HONEST carrier fact (the send returned 0, so pane_submitted)" "$r"
-
-# -J joins the wrapped lines: the re-check is ~300 characters and an 80-column
-# pane splits `task-act.sh withdraw <id>` across two rows, so a plain capture
-# would fail the assertion for a message that arrived intact.
-tn_pane=$(tmux capture-pane -t "$TA_MGR" -p -J 2>/dev/null || true)
-printf '%s' "$tn_pane" | grep -q 'NUDGE from valop' && r=yes || r=no
-harness_check "#1481 the manager PANE received the nudge (the reaction, not just the record)" "$r"
-# ...and the SHARED manager pane is untouched by this scenario (the neighbour rule)
-command tmux -L "$(vsock "$TA_MGR")" kill-server 2>/dev/null || true
-printf '%s' "$tn_pane" | grep -q 'task-act.sh withdraw t-1481-0004' && r=yes || r=no
-harness_check "#1481   ...carrying the four verbs the manager may answer with" "$r"
-
-# ===========================================================================
-# #1481 chunk M-B — the REACTIONS: the re-check timer, and each escalation
-# paged once.
-#
-# Unit tests pin the rows, the stamp and the refusals with the send replaced.
-# What only running the real doors proves is the reaction itself, which
-# crosses three processes and a tmux server in one case and a whole sweep in
-# the other: a manager PANE receiving the menu it is supposed to act on, and
-# an operator being paged about a question exactly once.
-#
-# The re-check scenario gets its OWN manager session and creates no worker
-# directory, both for the reasons the M-A block documents above: a ~400
-# character message in the shared pane scrolls a LATER scenario capture out
-# of view, and a directory under the fleet bots dir makes fleet-pulse
-# health-check a bot that does not exist.
-# ===========================================================================
-val_scenario "validate #1481: the re-check reaches a manager, once per window"
-
-TR_MGR="valrc1481"
-TR_BOT="valrcbot1481"
-# ITS OWN SANDBOX FLEET, not the shared one. The row this scenario needs is
-# OVERDUE by construction, and an overdue row seeded into the shared fleet
-# perturbs every later scenario that sweeps it -- measured on the first run of
-# this block: the #1024 pane assertion, which greps a fixed capture of the
-# SHARED manager pane, flipped to FAIL for a change that has nothing to do
-# with it. The neighbour rule, structurally rather than hopefully.
-TR_FLEET="valrcf"
-val_plane_ready "$ROOT" "$TR_FLEET"
-tmux new-session -d -s "$TR_MGR" "sleep 600"
-sleep 1
-val_seed_dispatch "$ROOT" "$TR_FLEET" "$TR_MGR" "$TR_BOT" t-1481-0010 "$((now - 7200))" "$((now - 3600))" "the row that stopped moving"
-# The selected prepared package owns the send door for this scenario too.
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$TR_FLEET" \
-    "$VAL_CLI" --root "$ROOT" task recheck --fleet "$TR_FLEET" \
-    > "$ROOT/tr-recheck.out" 2> "$ROOT/tr-recheck.err" || true
-
-tr_pane=$(tmux capture-pane -t "$TR_MGR" -p -J 2>/dev/null || true)
-printf '%s' "$tr_pane" | grep -q 'TASK RE-CHECK' && r=yes || r=no
-harness_check "#1481 the manager PANE received the re-check (the timer reaction, end to end)" "$r"
-
-printf '%s' "$tr_pane" | grep -q 't-1481-0010' && r=yes || r=no
-harness_check "#1481   ...naming the stale row, with the four verbs" "$r"
-
-tr_asg=$(val_sql "$ROOT" "SELECT assignment_id FROM assignments WHERE source_ref = 'dispatch-log:t-1481-0010'")
-tr_ask=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE source_ref = 'task-recheck:$tr_asg'")
-[ "${tr_ask:-0}" -eq 1 ] && r=yes || r=no
-harness_check "#1481 the ask is recorded PER ROW, stamped task-recheck:<assignment_id>" "$r"
-
-tr_sender=$(val_sql "$ROOT" "SELECT sender_alias FROM communications WHERE source_ref = 'task-recheck:$tr_asg'")
-[ "$tr_sender" = "system:task-recheck" ] && r=yes || r=no
-harness_check "#1481   ...from the machinery, to the row own manager" "$r"
-
-tr_tx=$(val_sql "$ROOT" "SELECT e.event FROM events e JOIN communications c ON c.msg_id = e.msg_id WHERE e.kind = 'transmission' AND c.source_ref = 'task-recheck:$tr_asg'")
-[ "$tr_tx" = "pane_submitted" ] && r=yes || r=no
-harness_check "#1481   ...with an HONEST carrier fact (the send returned 0)" "$r"
-
-# The debounce is a PLANE READ: a second run inside the repeat window must add
-# nothing, with no state file anywhere to have remembered it.
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$TR_FLEET" \
-    "$VAL_CLI" --root "$ROOT" task recheck --fleet "$TR_FLEET" \
-    > "$ROOT/tr-recheck2.out" 2> "$ROOT/tr-recheck2.err" || true
-tr_ask2=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE source_ref = 'task-recheck:$tr_asg'")
-{ [ "${tr_ask2:-0}" -eq 1 ] && grep -q 'nothing sent' "$ROOT/tr-recheck2.out"; } && r=yes || r=no
-harness_check "#1481 a second run inside the repeat window asks NOTHING (the stamp is the debounce)" "$r"
-command tmux -L "$(vsock "$TR_MGR")" kill-server 2>/dev/null || true
-
-val_scenario "validate #1481: fleet-pulse pages each escalation ONCE"
-# The real sweep, from a stub lib dir whose tg-post.sh RECORDS the page instead
-# of sending it (scenario 2c pattern) -- so the assertion is the alert an
-# operator would actually have received. Its own sandbox fleet, because the
-# marker set is per fleet state dir and the shared fleet is swept by ten other
-# scenarios.
-_tesc_fleet="valtesc"
-_tesc_lib="$ROOT/tesclib"
-mkdir -p "$_tesc_lib"
-ln -s "$LIB_DIR/fleet-pulse.sh" "$_tesc_lib/fleet-pulse.sh"
-ln -s "$LIB_DIR/lib-common.sh"  "$_tesc_lib/lib-common.sh"
-ln -s "$LIB_DIR/supervisor.sh"  "$_tesc_lib/supervisor.sh"
-val_link_plane_shim "$_tesc_lib"
-_tesc_pages="$ROOT/tesc-pages.log"
-: > "$_tesc_pages"
-cat > "$_tesc_lib/tg-post.sh" <<STUB
-#!/bin/bash
-printf '%s\n' "\$1" >> "$_tesc_pages"
-STUB
-chmod +x "$_tesc_lib/tg-post.sh"
-val_plane_ready "$ROOT" "$_tesc_fleet"
-mkdir -p "$ROOT/local/$_tesc_fleet/runtime/bots/valtescbot"
-printf 'BOT_SERVICE=\n' > "$ROOT/local/$_tesc_fleet/runtime/bots/valtescbot/bot.conf"
-val_seed_dispatch "$ROOT" "$_tesc_fleet" valtescmgr valtescbot t-1481-0020 "$((now - 7200))" "$((now + 3600))" "the one with a question"
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$_tesc_fleet" BOT_ID=valtescmgr BOT_NAME=valtescmgr \
-    "$LIB_DIR/task-act.sh" escalate t-1481-0020 "do we ship without the migration" \
-    > "$ROOT/tesc-act.out" 2> "$ROOT/tesc-act.err" || true
-
-_tesc_run() {
-    CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$_tesc_fleet" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
-        FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/escalation-sender" \
-        "$_tesc_lib/fleet-pulse.sh" "$_tesc_fleet" >/dev/null 2>&1 || true
-}
-_tesc_run
-tesc_paged=$(grep -c 'escalated by valtescmgr' "$_tesc_pages" 2>/dev/null || true)
-[ "${tesc_paged:-0}" -eq 1 ] && r=yes || r=no
-harness_check "#1481 an open escalation PAGES the operator (the only read that can see a raise)" "$r"
-
-tesc_task=$(val_sql "$ROOT" "SELECT work_item_id FROM work_items WHERE source_ref = 'dispatch-log:t-1481-0020'")
-grep -Fq "task $tesc_task escalated by valtescmgr" "$_tesc_pages" && r=yes || r=no
-harness_check "#1481   ...naming the task and who raised it" "$r"
-
-_tesc_run
-tesc_paged2=$(grep -c 'escalated by valtescmgr' "$_tesc_pages" 2>/dev/null || true)
-[ "${tesc_paged2:-0}" -eq 1 ] && r=yes || r=no
-harness_check "#1481 a second sweep does NOT re-page the same question (once per escalation)" "$r"
-
-# An act clears the arm, so the marker is forgotten and the row goes quiet.
-# The marker lives in a PER-FLEET seen-file now (the M-B fold's F1 — a
-# directory shared by every fleet's sweep let one fleet's forget-loop erase
-# another's markers), so this checks that file's line count rather than a
-# directory listing; `[ -s ]` first so a missing/empty file (the honest
-# "nothing marked" state) never fails a redirect or a pipeline under
-# set -e/pipefail the way `ls`/`wc <` on an absent path would.
-_tesc_seen="$ROOT/state/pulse/${_tesc_fleet}.escalated"
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$_tesc_fleet" MANAGER_TMUX="valnomgr1481" \
-    "$LIB_DIR/report-back.sh" valtescbot progress "on it" --progress 30 \
-    --task t-1481-0020 >/dev/null 2>&1 || true
-_tesc_run
-if [ -s "$_tesc_seen" ]; then
-    tesc_marker=$(wc -l < "$_tesc_seen" | tr -d ' ')
-else
-    tesc_marker=0
-fi
-[ "${tesc_marker:-1}" = "0" ] && r=yes || r=no
-harness_check "#1481 an answered escalation is FORGOTTEN (so a re-raise pages again)" "$r"
-
-if [ "${tesc_paged:-0}" -ne 1 ] || [ "${tesc_paged2:-0}" -ne 1 ]; then
-    echo "  --- DIAGNOSTIC: escalation pages recorded ---"
-    sed 's/^/    /' "$_tesc_pages" 2>/dev/null || echo "    (none)"
-fi
-
 # ===========================================================================
 # #1187 — a read door whose misuse was indistinguishable from "nothing open".
 #
@@ -993,10 +656,8 @@ fi
 # Single-bot mode has the same grammar and is NOT gated; see the module docstring.
 #
 # Unit tests pin the matcher. What only running the real scripts can prove is
-# the half that has no unit: report-back.sh:117 pipes --open STDOUT through
-# awk to decide whether a supplied --task id is open, so the scope disclosure
-# has to reach a human WITHOUT reaching that pipe. This path had no runtime
-# coverage at all before #1187.
+# the shared native reader must keep scope disclosure on stderr, while stdout
+# remains rows only for its existing shell consumers.
 # ===========================================================================
 val_scenario "validate #1187: --open refuses a mis-ordered call and states its scope"
 
@@ -1014,7 +675,7 @@ val_seed_dispatch "$ROOT" "$FLEET" "$MGR" "$T1187_BOT" t-1187-0001 "$((now - 600
 # THE defect: --all's grammar passed to --open. Three positionals, so the arity
 # check passes and a ledger path is read as the bot name.
 val_probe python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now"
+    "$VAL_DISPATCH_LOG" "$VAL_REPORT_LEDGER" "$now"
 [ "$PROBE_RC" -eq 2 ] && [ -z "$PROBE_OUT" ] && r=yes || r=no
 harness_check "#1187 mis-ordered --open is REFUSED (rc 2), not a silent empty result" "$r"
 
@@ -1027,11 +688,11 @@ harness_check "#1187   ...and names the grammar split, not merely that it refuse
 # never mistaken for the thing that made misuse loud -- measuring THIS shape is
 # what makes the real defect read as unreproducible.
 val_probe python3 "$LIB_DIR/dispatch-overdue.py" --open \
-    "$t835_dispatch" "$VAL_REPORT_LEDGER"
+    "$VAL_DISPATCH_LOG" "$VAL_REPORT_LEDGER"
 [ "$PROBE_RC" -eq 2 ] && r=yes || r=no
 harness_check "#1187 wrong ARITY was already loud and stays loud (the gate is about SHAPE)" "$r"
 
-# STDOUT must stay rows-only. This is the assertion that protects report-back.
+# STDOUT stays rows-only for the native shell consumers.
 t1187_stdout=$(val_read "open rows of $T1187_BOT" python3 "$LIB_DIR/dispatch-overdue.py" --open \
     "$T1187_BOT" --fleet "$FLEET" --root "$ROOT")
 printf '%s' "$t1187_stdout" | grep -q 't-1187-0001' \
@@ -1044,17 +705,6 @@ VAL_READ_ERR="$ROOT/t1187b.err" val_read "open rows of nosuchbot-1187" \
     python3 "$LIB_DIR/dispatch-overdue.py" --open "nosuchbot-1187" --fleet "$FLEET" --root "$ROOT" >/dev/null
 grep -q "nosuchbot-1187" "$ROOT/t1187b.err" && grep -q "0 open" "$ROOT/t1187b.err" && r=yes || r=no
 harness_check "#1187 an EMPTY result names the bot it filtered on (cannot read as nothing-exists)" "$r"
-
-# The regression probe, through the REAL report-back.sh. With nothing open the
-# supplied-id guard must stay fail-open (#1146): only a NON-EMPTY open set may
-# contradict the caller. A scope line on stdout makes that set ["->"] and flags
-# a correct report. Note the shape -- a bot HOLDING a row still matches its own
-# id, so that case reads clean and would pass a placement that is actually broken.
-CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="$MGR" \
-    "$LIB_DIR/report-back.sh" "nobodyhome1187" completed "nothing open here" \
-    --task "t-1187-0002" >/dev/null 2>"$ROOT/t1187c.err" || true
-grep -q "is not open for" "$ROOT/t1187c.err" && r=no || r=yes
-harness_check "#1187 report-back with NOTHING open raises no false supplied-id anomaly" "$r"
 
 # ===========================================================================
 # #1024 — the MIRROR watchdog: reported, then never re-dispatched.
@@ -3625,17 +3275,14 @@ harness_check "  ...and the launchd plist (both platforms, or half the estate is
 # nonzero command aborts the whole harness and no summary line is ever printed.
 _sw_rc=0
 env CLAUDLOBBY_ROOT="$SW_ROOT" TASK_RECHECK_ENABLED=0 PATH="/usr/bin:/bin" \
-    bash "$VAL_REPO/lib/task-recheck.sh" sw-validate \
+    "$VAL_CLI" --root "$SW_ROOT" _task-recheck-tick sw-validate \
     > "$SW_ROOT/off.out" 2> "$SW_ROOT/off.err" || _sw_rc=$?
 [ "$_sw_rc" -eq 0 ] && r=yes || r=no
 harness_check "  ...the launcher no-ops CLEANLY with it (a timer must not go red for being off)" "$r"
-# The loud line comes from lib-common's shared switch_is_on gate since the
-# fold (F6) -- four launchers had four spellings of one comparison. Same three
-# facts pinned: the door names itself, names the flag, and says what will not
-# happen while it is off.
+# The private timer entrypoint names the off switch and says what was skipped.
 r=yes
 for _p in "task-recheck: OFF here" "TASK_RECHECK_ENABLED=0" "no re-check will be sent"; do
-    grep -q "$_p" "$SW_ROOT/off.err" || r=no
+    grep -q "$_p" "$SW_ROOT/off.out" || r=no
 done
 harness_check "  ...and LOUDLY (a silent skip reads exactly like a broken timer)" "$r"
 
@@ -3676,15 +3323,13 @@ harness_check "  ...each with the one line that arms it" "$r"
 rm -rf "$SW_ROOT"
 
 # =============================================================================
-# PR-B T9 — the observable-plane dual-write leg: a REAL daemon on a temp root,
-# the REAL dispatch door through the REAL shim, and the ladder's degradation
-# observed rather than claimed. Gated: no venv CLI resolvable -> the leg skips
-# loudly instead of failing a host that cannot run it.
+# PR-B T9 — the Plane shim and daemon on a private root. Drive the shim
+# directly; dispatch-task.sh is retired and cannot serve as its harness.
 # =============================================================================
 PL_REPO="$VAL_REPO"
 PL_CLI="$VAL_CLI"
 if false; then
-    :   # the CLI is a prerequisite of the whole harness now (F18 R1) — never a skipped leg
+    :
 else
     PL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/vbcplane.XXXXXX")"
     val_initialize_plane "$PL_ROOT"
@@ -3692,11 +3337,9 @@ else
     PL_SOCK="$PL_SOCKDIR/s"
     PL_LIB="$PL_ROOT/lib"
     mkdir -p "$PL_LIB"
-    for _f in dispatch-task.sh lib-common.sh supervisor.sh plane-emit.sh plane-socket-client.py dispatch-supersede-hint.py; do
+    for _f in plane-emit.sh plane-socket-client.py; do
         ln -s "$PL_REPO/lib/$_f" "$PL_LIB/$_f"
     done
-    printf '#!/bin/bash\nexit 0\n' > "$PL_LIB/dispatch.sh"; chmod +x "$PL_LIB/dispatch.sh"
-    printf '#!/bin/bash\nexit 0\n' > "$PL_ROOT/tmux"; chmod +x "$PL_ROOT/tmux"
 
     "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
         > "$PL_ROOT/daemon.log" 2>&1 &
@@ -3706,50 +3349,35 @@ else
     [ -S "$PL_SOCK" ] && r=yes || r=no
     harness_check "plane daemon binds its socket on a temp root" "$r"
 
-    _pl_dispatch() {  # $1 = extra env assignments, $2 = task text; stderr -> $PL_ROOT/err
-        env CLAUDLOBBY_ROOT="$PL_ROOT" TMUX_BIN="$PL_ROOT/tmux" BOT_ID=vbc \
-            BOT_NAME=vbc FLEET_NAME=vbc-fleet PLANE_SOCKET="$PL_SOCK" \
-            PLANE_EMIT_CLI="$PL_CLI" OBSERVABILITY_DISPATCH_DEADLINE=600 \
-            PATH="/usr/bin:/bin" $1 \
-            bash "$PL_LIB/dispatch-task.sh" --botcommand w1 "$2" 2> "$PL_ROOT/err"
+    _pl_emit() {  # $1 = extra env assignment, $2 = unique leg; stderr -> err
+        printf '{"events":[{"event_type":"system","emitter":"validate-bot-change","fleet":"vbc-fleet","payload":{"event":"daemon_started","data":{"leg":"%s"}}}]}' "$2" \
+            | env CLAUDLOBBY_ROOT="$PL_ROOT" PLANE_SOCKET="$PL_SOCK" \
+                PLANE_EMIT_CLI="$PL_CLI" PATH="/usr/bin:/bin" $1 \
+                bash "$PL_LIB/plane-emit.sh" 2> "$PL_ROOT/err"
     }
-    _pl_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM communications"; }
+    _pl_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM events WHERE event='daemon_started'"; }
 
-    _pl_dispatch "" "leg one: rung 1" >/dev/null && r=yes || r=no
-    harness_check "a dispatch with NO plane flag in its environment succeeds with the daemon up (always-on, F18 R1)" "$r"
+    _pl_emit "" "socket" >/dev/null && r=yes || r=no
+    harness_check "Plane shim records with daemon up and no flag" "$r"
     [ "$(_pl_count)" = "1" ] && r=yes || r=no
-    harness_check "the communication row LANDED (real db, real shim)" "$r"
-    # Both documented cold routes must be absent while the daemon serves:
-    # a transport failure falls back, and a prior wedge takes cooldown.
+    harness_check "the event row LANDED (real db, real shim)" "$r"
     grep -Eq 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=no || r=yes
     harness_check "  ...via rung 1 (no fallback disclosure on stderr)" "$r"
 
     kill "$PL_DPID" 2>/dev/null || true; wait "$PL_DPID" 2>/dev/null || true
-    _pl_dispatch "PLANE_EMIT_ENABLED=0" "leg two: daemon down" >/dev/null && r=yes || r=no
-    harness_check "dispatch still succeeds with the daemon DEAD (and PLANE_EMIT_ENABLED=0 is ignored)" "$r"
+    _pl_emit "PLANE_EMIT_ENABLED=0" "cold" >/dev/null && r=yes || r=no
+    harness_check "Plane shim records with daemon down (legacy flag ignored)" "$r"
     [ "$(_pl_count)" = "2" ] && r=yes || r=no
-    harness_check "the row still landed (cold-CLI rung)" "$r"
-    # A two-emission dispatch can hit the dead socket on intent, then emit its
-    # transmission during the wedge cooldown. Each cold route discloses itself;
-    # the assertion still requires an explicit disclosure on stderr.
+    harness_check "the event row LANDED through the cold rung" "$r"
     grep -Eq 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=yes || r=no
-    harness_check "  ...and the fallback was DISCLOSED, not silent" "$r"
-    [ "$r" = yes ] || { echo "  --- DIAGNOSTIC: cold-rung stderr ---"; sed 's/^/    /' "$PL_ROOT/err"; }
+    harness_check "  ...and the fallback was DISCLOSED" "$r"
 
-    _pl_dispatch "PLANE_EMIT_DISABLED=1" "leg three: disabled" >/dev/null && r=yes || r=no
-    harness_check "PLANE_EMIT_DISABLED dispatch succeeds" "$r"
+    _pl_emit "PLANE_EMIT_DISABLED=1" "disabled" >/dev/null && r=yes || r=no
+    harness_check "PLANE_EMIT_DISABLED shim returns successfully" "$r"
     [ "$(_pl_count)" = "2" ] && r=yes || r=no
-    harness_check "  ...and wrote NOTHING (harness exemption is a true no-op)" "$r"
-    ls "$PL_ROOT/state"/dispatch-log*.jsonl >/dev/null 2>&1 && r=no || r=yes
-    harness_check "  ...and no dispatch ledger exists under the root after three dispatches (no legacy write, F18 R1)" "$r"
+    harness_check "  ...and writes NOTHING" "$r"
 
-    # -- #1485: a STALE daemon must not swallow the record ------------------
-    # The Mini shape, reproduced with the two halves real and the one half
-    # that cannot be real faked: a fake daemon answers every request with the
-    # downgrade refusal (there is no second install here to run older code
-    # from), while the door, the shim and the db are production. The refusal
-    # used to pass through as a verdict, so nothing fell to the cold rung and
-    # nothing spooled - 261 heartbeat samples lost in ~15 minutes.
+    # A stale daemon refusal must reach the current cold-CLI rung.
     cat > "$PL_ROOT/stale-daemon.py" <<'PLPY'
 import socket, sys
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -3773,18 +3401,12 @@ PLPY
     _pl_i=0
     while [ "$_pl_i" -lt 100 ] && [ ! -e "$PL_SOCK.ready" ]; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
     _pl_before=$(_pl_count)
-    # PLANE_WEDGE_COOLDOWN_S=0 because the DOOR emits twice (intent, then the
-    # transmission) and the first emission rc 5 arms the shim wedge marker,
-    # so without it the second emission skips the socket entirely and the leg
-    # would measure the COOLDOWN path while claiming to measure the downgrade
-    # one. The previous leg (daemon dead) arms the same marker. Orthogonal
-    # machinery neutralised so the assertion measures what it names.
-    _pl_dispatch "PLANE_WEDGE_COOLDOWN_S=0" "leg four: a stale daemon refuses" >/dev/null && r=yes || r=no
-    harness_check "#1485 a dispatch succeeds against a daemon that refuses [downgrade]" "$r"
+    _pl_emit "PLANE_WEDGE_COOLDOWN_S=0" "downgrade" >/dev/null && r=yes || r=no
+    harness_check "#1485 shim records against a daemon that refuses [downgrade]" "$r"
     [ "$(_pl_count)" = "$((_pl_before + 1))" ] && r=yes || r=no
-    harness_check "  ...and the row LANDED through the cold rung (the install current code commits)" "$r"
+    harness_check "  ...and the event LANDED through the cold rung" "$r"
     grep -q "falling back to cold CLI" "$PL_ROOT/err" && r=yes || r=no
-    harness_check "  ...with the fallback DISCLOSED, not silent" "$r"
+    harness_check "  ...with fallback DISCLOSED" "$r"
     grep -q "older code than the db it opened" "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...naming the stale daemon rather than a dead socket" "$r"
     kill "$PL_STALE_PID" 2>/dev/null || true; wait "$PL_STALE_PID" 2>/dev/null || true
@@ -3878,65 +3500,12 @@ c.commit()' "$PL_ROOT/state/plane/plane.db"
 fi
 
 # ===========================================================================
-# manager check-in chunk 1 -- the record door and the read door, end to end
-# on a real plane. Unit tests pin the contract and the envelopes; what only
-# running the real doors proves is that a decision LANDS as a row the read
-# door can join, through the real shim, under the identity env a manager
-# session carries (BOT_ID, FLEET_NAME), and that "not listed" is a real
-# negative -- the positive control runs FIRST and is gated on a non-empty id,
-# so a failed record or an unreachable read door can never read as a clean
-# answer (an empty grep pattern matches every line).
+# Manager check-in timer on a real plane: it injects /checkin into an idle,
+# equipped manager pane. The scripted pane only supplies a prompt; it does not
+# stand in for the manager's reasoning or canonical decision recorder. The
+# timer, gates, dispatch and trigger events are the real paths under test.
 # ===========================================================================
-val_scenario "validate manager check-in: the decision lands and the read door joins it"
-CK_FLEET_H="valckf"
-val_plane_ready "$ROOT" "$CK_FLEET_H"
-ck_decision='{"prev_checkin_id":null,"inputs_seen":{"open_tasks":0,"stalls":0,"unacked":0,"issues_seen":null,"issues_considered":0,"knowledge_hits":0,"considered":[],"unavailable":["gh"]},"delta":{"tasks_opened":0,"tasks_completed":0,"stalls_appeared":0,"stalls_cleared":0,"issues_new":0,"messages_new":null,"held_pending":0},"action":"nothing","project_key":null,"rationale":"harness: nothing worth starting","raise":{"decided":false,"reason":"no delta","held":[]}}'
-ck_id=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckmgr" \
-    PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
-    bash "$VAL_REPO/lib/checkin-record.sh" 2> "$ROOT/ck-record.err" || true)
-printf '%s' "$ck_id" | grep -Eq '^ck_[0-9a-f]{32}$' && r=yes || r=no
-harness_check "checkin: the record door returns a ck_<32hex> id" "$r"
-ck_row=$(val_sql "$ROOT" "SELECT json_extract(detail,'\$.action') || '|' || severity || '|' || subject_alias FROM events WHERE kind='system' AND event='checkin_decision' AND source_ref='checkin:$ck_id'")
-[ -n "$ck_id" ] && [ "$ck_row" = "nothing|notice|bot:$CK_FLEET_H/valckmgr" ] && r=yes || r=no
-harness_check "checkin: ...and the decision LANDED as one actor-anchored notice row (source_ref checkin:<id>, BOT_ID alias)" "$r"
-# A REFUSAL, on purpose: the ERR-trap class fires only when the contract child
-# fails, so a block that feeds the door valid decisions alone can never see it
-# (cycle-5 B2). rc 2, nothing on stdout, and -- the line after -- no script_error
-# row with this door's name under detail.data.script.
-if printf '%s' '{"action":"coffee"}' | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckmgr" \
-    PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
-    bash "$VAL_REPO/lib/checkin-record.sh" > "$ROOT/ck-refuse.out" 2> "$ROOT/ck-refuse.err"; then ck_rc=0; else ck_rc=$?; fi
-[ "$ck_rc" = "2" ] && [ ! -s "$ROOT/ck-refuse.out" ] && r=yes || r=no
-harness_check "checkin: a malformed decision is refused at rc 2 with nothing printed" "$r"
-ck_err=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events WHERE kind='system' AND event='script_error' AND json_extract(detail,'\$.data.script') LIKE 'checkin-record%'")
-[ "$ck_err" = "0" ] && r=yes || r=no
-harness_check "checkin: ...and neither the record nor the refusal fired a script_error row (the ERR-trap class)" "$r"
-ck_other=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckother" \
-    PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
-    bash "$VAL_REPO/lib/checkin-record.sh" 2>> "$ROOT/ck-record.err" || true)
-# The selected prepared package supplies this read door's native resources.
-CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK_FLEET_H" \
-    "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --json > "$ROOT/ck-read.out"
-{ [ -n "$ck_id" ] && grep -q "$ck_id" "$ROOT/ck-read.out"; } && r=yes || r=no
-harness_check "checkin: the read door LISTS the decision (positive control, gated on a non-empty id)" "$r"
-CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK_FLEET_H/valckmgr --last" \
-    "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --bot valckmgr --last --json > "$ROOT/ck-read2.out"
-{ [ -n "$ck_id" ] && [ -n "$ck_other" ] && grep -q "$ck_id" "$ROOT/ck-read2.out" && ! grep -q "$ck_other" "$ROOT/ck-read2.out"; } && r=yes || r=no
-harness_check "checkin: ...--bot --last returns THIS manager's newest row and not the other manager's (a real negative)" "$r"
-
-# ===========================================================================
-# manager check-in chunk 2 -- the whole beat on a real plane: the fleet timer
-# injects /checkin into an idle, equipped manager pane; the session answers
-# it. The harness stubs `claude` with `exec cat` (:42), which cannot run a
-# skill, so the manager pane runs a SCRIPTED RESPONDER standing in for the
-# RECORD step alone: on a line beginning /checkin it feeds one canned
-# decision to the real checkin-record.sh. The responder stands in for the
-# reasoning and for nothing else -- the timer script, the gates, dispatch.sh,
-# pane_send_verified, the record door and the plane are all the real ones.
-# That is the only way to observe timer -> pane -> row end to end without a
-# model, and it is a bound rather than a claim.
-# ===========================================================================
-val_scenario "validate manager check-in: the beat injects, gates, and records on a real plane"
+val_scenario "validate manager check-in: the beat injects and gates on a real plane"
 CK2_FLEET="valckbeat"
 CK2_BOT="valckmgr2"
 val_plane_ready "$ROOT" "$CK2_FLEET"
@@ -3958,27 +3527,10 @@ CONF
 # The equip gate: the real symlink shape the composer writes.
 ln -sfn "$CLAUDLOBBY_LIBRARY_DIR/skills/checkin" "$CK2_DIR/.claude/skills/checkin"
 
-# Chunk 1's harness decision, reused verbatim ($ck_decision, above): both list
-# keys present, raise.reason non-empty, prev_checkin_id present -- the
-# contract refuses anything less. Unquoted heredoc: $ROOT / $VAL_REPO /
-# $VAL_CLI / $CK2_DIR expand at write time; \$line does not, so the read loop
-# evaluates it at run time, once per line, for as long as the pane lives.
-printf '%s' "$ck_decision" > "$CK2_DIR/decision.json"
 cat > "$CK2_DIR/responder.sh" <<RESP
 #!/bin/bash
-export CLAUDLOBBY_ROOT="$ROOT"
-export CLAUDLOBBY_FLEET="$CK2_FLEET"
-export FLEET_NAME="$CK2_FLEET"
-export BOT_ID="$CK2_BOT"
-export PLANE_EMIT_CLI="$VAL_CLI"
-export PLANE_SOCKET="$PLANE_SOCKET"
 printf '\n> \n'
 while IFS= read -r line; do
-    case "\$line" in
-        /checkin*)
-            bash "$VAL_REPO/lib/checkin-record.sh" < "$CK2_DIR/decision.json" >> "$CK2_DIR/logs/record.out" 2>&1 || true
-            ;;
-    esac
     printf '\n> \n'
 done
 RESP
@@ -4015,20 +3567,6 @@ ck2_trig=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_triggered | wc -l)
 [ "$ck2_trig" -eq 1 ] && r=yes || r=no
 harness_check "checkin: ...and recorded ONE checkin_triggered anchored on the manager" "$r"
 
-# The RESPONDER's reaction (reading the pane, running checkin-record.sh) is
-# the one truly async leg -- everything else above already settled
-# synchronously before manager-checkin.sh returned. record.out carries the
-# door's own stdout (the ck_<32hex> id) interleaved with its stderr fallback
-# breadcrumbs (the harness plane has no daemon, so every emit takes the cold
-# CLI rung, disclosed there by design) -- grep the one line shaped like an id.
-ck2_id=$(grep -Eo '^ck_[0-9a-f]{32}$' "$CK2_DIR/logs/record.out" 2>/dev/null | head -1 || true)
-ck2_dec=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events WHERE kind='system' AND event='checkin_decision' AND source_ref='checkin:$ck2_id'")
-# The selected prepared package supplies the read door, with no data-root link.
-CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK2_FLEET" \
-    "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK2_FLEET" --json > "$ROOT/ck2-read.out"
-{ [ -n "$ck2_id" ] && [ "${ck2_dec:-0}" -eq 1 ] && grep -q "$ck2_id" "$ROOT/ck2-read.out"; } && r=yes || r=no
-harness_check "checkin: ...and the session's answer landed a checkin_decision the read door lists" "$r"
-
 # --- a second tick, inside the min gap ---------------------------------------
 # No flag: the same default gap as the run above. The plane read IS the rate
 # limit -- there is no timer state file to lose or to lie, so a repeat inside
@@ -4061,7 +3599,7 @@ ck2_busy=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_skipped)
 harness_check "checkin: a BUSY manager is never injected into mid-turn, and the skip is recorded" "$r"
 
 # --- an unreachable plane -----------------------------------------------------
-# A second scratch root: same manifest shape, same bot dir shape, but NO
+# A second scratch root: same manifest shape and bot dir shape, but NO
 # state/plane/plane.db at all. Session identity is the bot dir BASENAME, not
 # the root, so the very same manager session ("$CK2_BOT", above) is still the
 # dispatch target -- "the pane count is unchanged" is the same pane the

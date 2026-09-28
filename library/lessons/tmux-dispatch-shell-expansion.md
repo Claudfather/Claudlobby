@@ -1,19 +1,10 @@
 ---
 title: tmux dispatch shell expansion
-description: Disable bash history expansion before tmux send-keys dispatches containing ! tokens
+description: Use recorded task and message doors so authored punctuation never becomes shell input
 ---
 
-Every tmux send-keys dispatch with prompt-like content MUST begin with `set +H;` prefix to disable bash history expansion.
+Raw `tmux send-keys` task prompts crossed a shell boundary: `!word` could trigger history expansion, and backticks in double-quoted strings could execute command substitution. A failed send could leave text in a pane, making a manual Enter or resend ambiguous.
 
-A literal `!` followed by a word (e.g., `!readOnly`, `!isDashboard`, `!foo && bar`) triggers bash/zsh history expansion, which can:
-- Silently blank exclamation-adjacent text
-- Cause the Enter keystroke to not fire — the prompt lands in the worker's input buffer unsubmitted
+For fleet work, follow the default `fleet-ops` skill: `claudlobby --json task admit`, then manager-owned `task assign` and `assignment deliver --file FILE`, each with its own retained request UUID. For ordinary communication use `claudlobby --json message send --to BOT --file FILE --request-id UUID`. Authored text stays in the file or one CLI value; do not wrap it in a hand-built tmux command. Admission is not delivery. Inspect the request and message receipt after uncertainty; never send a bare Enter or automatically resend.
 
-**Fixes:**
-- **Prefix:** `set +H; <dispatch content>`
-- **Large dispatches (>50 lines):** write to a temp file and `tmux send-keys -t <bot> 'cat /tmp/dispatch.txt | claude' Enter`
-- **If a dispatch lands but doesn't submit:** send a bare `tmux send-keys -t <bot> Enter`. Dispatches routed through `lib/dispatch.sh` do this for you — `pane_send_verified` polls the input box after the Enter and resends once if the payload is still sitting there, logging a `send_retry` event. Reach for the manual Enter only for a hand-rolled `send-keys` that bypassed the helper.
-
-**Related:** backticks inside double-quoted bash strings also trigger command substitution. Use single quotes for curl/message bodies containing backticks or `!word` patterns. If double quotes are required, escape every backtick as `` \` ``.
-
-That rule is **not a tmux fact and not a formatting nicety — it is a security property.** The mechanism, and the arbitrary-code-execution instance it produced in `lib/gh-mention-guard.sh`, are stated once in the `shell-quoting-in-generated-commands` guardrail.
+`lib/dispatch.sh` and `pane_send_verified` still serve legacy lifecycle and native delivery internals. Their quoting and flush behavior is not a caller recipe for task dispatch. The general shell-quoting mechanism and the `lib/gh-mention-guard.sh` incident remain documented in the `shell-quoting-in-generated-commands` guardrail.

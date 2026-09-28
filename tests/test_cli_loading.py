@@ -62,6 +62,8 @@ def _run(code, *argv, tmp_path):
 
 @pytest.mark.parametrize(("argv", "expected"), [
     (("--help",), "Compositor for Claude Code agent fleets"),
+    (("brief", "--help"), "--boot"),
+    (("bot", "automation", "status", "--help"), "BOT"),
     (("plane", "view", "--help"), "--host"),
     (("data-migrate", "--help"), "--source"),
     (("message", "show", "--help"), "MESSAGE_ID"),
@@ -70,6 +72,7 @@ def _run(code, *argv, tmp_path):
     (("fleet", "reports", "submit", "--help"), "--summary"),
     (("fleet", "reports", "list", "--help"), "--unacknowledged"),
     (("fleet", "reports", "ack", "--help"), "ACK_CURSOR"),
+    (("fleet", "inbox", "--help"), "VIEWER"),
     (("assignment", "deliver", "--help"), "--file"),
     (("request", "show", "--help"), "REQUEST_ID"),
 ])
@@ -85,6 +88,10 @@ def test_invalid_arguments_refuse_before_loading_commands(tmp_path):
     assert result.stderr == "invalid argument: command syntax\ninspect claudlobby task --help\n"
     assert result.stdout == ""
     assert "Traceback" not in result.stderr
+
+    brief = _run(PARSE, "--json", "brief", "--unexpected=private-value", tmp_path=tmp_path)
+    assert brief.returncode == 2 and '"command":"brief"' in brief.stdout
+    assert "private-value" not in brief.stdout + brief.stderr
 
 
 def test_main_passes_namespace_to_only_selected_handler_and_returns_its_result(tmp_path):

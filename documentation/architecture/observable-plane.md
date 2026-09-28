@@ -193,9 +193,9 @@ program keeps refusing.
 | `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; the `scan_completed` declaration that validates its tombstones | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the flag's only meaning since the closure |
 | `lib/workstream-update.sh`, `lib/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
-| `lib/task-act.sh` | a manager's act on ONE open task: a terminal `cancelled` (`withdraw`) or a non-terminal `escalated` (`escalate`) on the assignment its key resolves to. The key is a task id, an id-less row's `sha:<hex32>` content key, or the `asg_` id the re-check digest hands out (#1492) — an `asg_` id resolves via `plane-lookup.py --by-assignment` to the row's own `source_ref` (so the act stamps the real key, never `dispatch-log:asg_…`); `--task-id … --all-open` REFUSES an id matching two open rows, and an `asg_` naming no OPEN row is refused actionably with the row's `sha:` key + the close command | `PLANE_EMIT_DISABLED=1` — and unlike the dispatch door it then REFUSES (rc 3): the act IS the record, so there is nothing left to have done |
-| `claudlobby task nudge` | the operator's non-terminal `nudged` on one assignment (actor `human:<who>`), then an id-less re-check to the task's manager (`assigned_by`) through `lib/dispatch.sh` — the record first, so a failed send never leaves a delivered nudge untraced | `PLANE_EMIT_DISABLED=1` — refuses (rc 3) and sends nothing |
-| `claudlobby task recheck` (fleet timer, `lib/task-recheck.sh`) | one id-less re-check per MANAGER covering their stale rows, recorded as one `task_request` communication PER ROW (sender `system:task-recheck`, `source_ref = task-recheck:<assignment_id>`) plus its transmission | `TASK_RECHECK_ENABLED` (and `enroll: true`); `PLANE_EMIT_DISABLED=1` refuses (rc 3) |
+| `claudlobby task withdraw` / `task escalate` | Fleet-owned acts on a canonical work item: a withdrawal records a terminal `cancelled` task event, and an escalation records a non-terminal question that remains visible while the work is open. Both accept queued work and use a durable request UUID; historical dispatch display and assignment IDs are not aliases. The granted bot forms use `claudlobby --json task ...`. | No action is claimed if the Plane write fails; a replay with the same request UUID returns the prior result. |
+| `claudlobby task nudge` | non-terminal `nudged` on canonical open work, including queued intake, plus a linked request from the actual caller to the selected fleet's implicit manager; both commit before shared native notification. `--by` is provenance. Request replay never resends | Recording or request persistence unavailable: refuses before notification; a later transport failure leaves the committed fact intact |
+| `claudlobby task recheck` (fleet timer invokes the selected CLI) | One digest to the current implicit fleet manager for up to eight overdue or ageing canonical open tasks, including queued work. The actual caller records one ask per named task before transport; only the primary digest message has a transmission and receiver proof. A request UUID freezes the selection, and a no-op sweep records a system fact so replay cannot acquire new work. | `TASK_RECHECK_ENABLED=0` skips the timer tick loudly; recording failure prevents the send. |
 
 Dormancy is a compose-time fact where the composer can make it one (an unarmed
 `unit: service` job composes NO units) and a self-gate where it cannot (host
@@ -224,7 +224,8 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   Composed as the dormant `claudlobby-plane-view` host service; Tailscale Serve
   fronts it.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
-  rungs (schema, provisional actors, tombstone validity, reconciliation).
+  rungs (schema, provisional actors, tombstone validity, reconciliation, the
+  WAL against its ceiling).
   **These RUN
   `migrate()` and are therefore not read-only — and so do `plane registry`,
   `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
@@ -232,8 +233,7 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   will migrate a live db. Verify a branch on a live host only through the
   doors that open read-only: `brief`, `plane view`,
   and the stdlib readers below.
-- **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
-  `lib/who-reviewed.py`) — the
+- **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to
   `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the legacy-id join, the
@@ -241,7 +241,19 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   URI first, and on CANTOPEN a plain connection held read-only by `PRAGMA
   query_only` — under the system `python3` the doors run, a read-only URI
   cannot open a WAL database whose writer has closed (it cannot create the
-  shared-memory file), which is what a daemon restart looks like.
+  shared-memory file), which is what a daemon restart looks like. Review
+  attribution now lives in `claudlobby task reviews` (`claudlobby/review_queries.py`).
+- **A read pins the WAL while its statement is open (#1905).** The daemon's
+  checkpoint cannot reset the WAL past a reader's snapshot, and a loop over a
+  live cursor keeps its statement open for the whole loop, so readers fetch
+  their rows first and do the per-row work after
+  (`tests/test_plane_reader_snapshots.py` fails a loop that queries, yields or
+  writes per row). A reader that never lets go, such as an interactive
+  `sqlite3` session or a hung process, still grows the WAL, and the daemon
+  cannot end another process's transaction. So it is reported: the host probe
+  records `host.plane_wal_bytes` every minute (the Host card shows it), and
+  `plane doctor`'s `wal` rung turns ATTENTION past the 4 MiB ceiling accepted
+  on #1693, naming the holding process from `/proc/locks` on Linux.
 
 ## The task loop (#1481) — in the operator's words
 
@@ -252,25 +264,27 @@ bookkeeping surface to reconcile.
 
 1. **Every id'd dispatch gets a deadline** (24h by default, per fleet), so the
    watchdog and the re-check have a clock.
-2. **The manager can end a row without a report.** `task-act.sh withdraw <id>
-   --reason …` closes it (`cancelled`, terminal for every reader); a
+2. **The manager can end a row without a report.** `claudlobby --json task
+   withdraw TASK_ID --reason "…" --request-id UUID` closes canonical work
+   (`cancelled`, terminal for every reader); a
    re-dispatch with `--supersedes` retires it and opens the replacement.
-3. **The manager can ask you a question about a row** — `task-act.sh escalate
-   <id> "…"` — and the row STAYS OPEN while you decide, and is EXEMPT from the
-   re-check timer below (item 5): it is the human's to answer, not the
-   manager's to be nagged about (the M-B fold's F5). Each escalation is paged
+3. **The manager can ask you a question about a task** — `claudlobby --json task
+   escalate TASK_ID --question "…" --request-id UUID` — and the work STAYS OPEN while you decide, and is EXEMPT from the
+   re-check timer below (item 5) once assigned: it is the human's to answer, not the
+   manager's to be nagged about (the M-B fold's F5). Queued work can be escalated too. Each recorded raise is paged
    to the fleet's Telegram chat exactly ONCE, by fleet-pulse, as
    `NEEDS YOU (<fleet>): task <id> escalated by <manager>: <question>`, keyed
-   by assignment id in a PER-FLEET seen-file (`state/pulse/<fleet>.escalated`
+   by event id in a PER-FLEET seen-file (`state/pulse/<fleet>.escalated`
    — the fold's F1: `state/pulse/` is host-global, one root composing several
    fleets, so a single shared marker directory let one fleet's forget-loop
    erase another's markers and re-page its whole backlog). The page is keyed
-   by the row, not by a clock: it goes quiet when any act clears the raise
+   by the raise, not by a clock: it goes quiet when a later task act clears the raise
    (progress, a report, a withdrawal, a supersede) and speaks again if the
    manager raises the row afresh. A nudge does not clear it.
-4. **You can poke a row** — `claudlobby task nudge <id> "why"` records who
-   asked and sends that task's own manager a one-row re-check. From Telegram,
-   ask the manager to run it for you ("nudge <task-id> …").
+4. **You can poke open work** — `claudlobby --json task nudge TASK_ID
+   --reason "why" --request-id UUID` records the nudge and asks the selected
+   fleet's manager to revisit it. From Telegram, ask the manager to run it
+   with your provenance in `--by`; the bot remains the actual caller.
 5. **The clock pokes for you.** Where a fleet arms `task-recheck`, every 6h
    each manager gets ONE message listing their rows past deadline or older
    than 48h — id, title (clipped to ~80 chars, the fold's F6: the id already
@@ -281,13 +295,14 @@ bookkeeping surface to reconcile.
    count where a digest is already going out for other reasons. A row already
    named inside the repeat window (24h) is skipped, and that skip is a PLANE
    READ: the ask itself is recorded per row, stamped
-   `source_ref = task-recheck:<assignment_id>`, so there is no timer state
-   file to lose, to stale, or to lie — **and the stamp counts only when the
-   ask LANDED** (the fold's F4): the ask is recorded before the send, so
-   `rechecked_at` additionally requires that same communication's `msg_id` to
-   carry a `pane_submitted` transmission, never a `failed` one. A row nobody
-   asked about — because the send failed, or the plane refused the record —
-   comes back next sweep, which is the safe direction.
+   `source_ref = task-recheck:<task_id>:<current_assignment_id|queued>:<request_id>`,
+   so there is no timer state file to lose. Each named row has a committed
+   communication fact, but only the primary digest has a physical transmission;
+   the other rows have no individual delivery proof. A known failed send is
+   eligible on the next tick. A submitted digest holds rows for the repeat
+   window; an uncertain attempt or missing readable receipt holds them for
+   inspection rather than implying delivery. Replaying the same request UUID
+   never sends again.
 6. **The same list by hand.** `claudlobby brief --bot <manager>` renders, under
    its own `dispatched` heading, the rows the manager assigned that are still
    open, with those facts, and prints the same four verbs once under that
@@ -376,13 +391,13 @@ is the one definition of what a flag value means; the registry of switches is
 `claudlobby/switches.py`, and every surface above derives from it.
 
 **Migrations** — `claudlobby/plane/migrations/NNNN_*.sql`, `user_version`-gated
-(`migrations.py`); the daemon migrates at start, and so do `plane status` /
-`plane doctor` / `plane registry` / `plane prune` / `plane expire` / `spool retry` /
-`claudlobby task nudge` (its cold `emit_batch` opens the plane like any other
-writer). 0001 kernel · 0002 task-status index · 0003/0004
+(`migrations.py`); `migration apply` owns initialization and schema changes.
+The daemon, normal writers and Plane diagnostics require a prepared schema;
+they do not migrate as a side effect. The early migration history is:
+0001 kernel · 0002 task-status index · 0003/0004
 the fleet room · 0005 FTS · 0006 the registry lane · 0007 `assignments(source_ref)`
 (the legacy join) · 0008 `events(actor_uid, occurred_at)` (progress grace, the
-resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window) · 0010 the task vocabulary widened for `escalated` and `nudged` (chunk M-A). A newer db refuses older code (rc 4), never downgrades — and a refusing *daemon* exits so its supervisor relaunches it on the current install (#1485, the write-spine section above). **0010 is the estate's first table REBUILD** — SQLite cannot ALTER a CHECK, so widening the task-event list means the documented 12-step copy of `events`, paid once by whichever door opens the plane first after the upgrade (it needs the table's size again in free space while it runs — and on a WAL database that means the WAL's copy TOO: an 80 MB plane whose `events` is 67 MB needs ~67 MB of WAL on top of the new table's ~67 MB, so a host at 90% full passes the naive check and fails the real one). It also holds the write lock for SECONDS rather than the milliseconds every earlier migration took, which is long enough for a second migrator's `BEGIN IMMEDIATE` to exceed `busy_timeout` and raise on a benign race — `migrate()` therefore re-reads `user_version` after WAITING for the write lock, so the loser no-ops on the winner's result. The O(1) alternative, a `PRAGMA writable_schema` edit of `sqlite_master`, corrupts the schema outright when the SQL is wrong, which is a worse failure than a slow start on the one database the estate keeps its history in.
+resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window) · 0010 the task vocabulary widened for `escalated` and `nudged` (chunk M-A). A newer db refuses older code (rc 4), never downgrades — and a refusing *daemon* exits so its supervisor relaunches it on the current install (#1485, the write-spine section above). **0010 is the estate's first table REBUILD** — SQLite cannot ALTER a CHECK, so widening the task-event list means the documented 12-step copy of `events`, paid by explicit migration before activating the upgraded writers (it needs the table's size again in free space while it runs — and on a WAL database that means the WAL's copy TOO: an 80 MB plane whose `events` is 67 MB needs ~67 MB of WAL on top of the new table's ~67 MB, so a host at 90% full passes the naive check and fails the real one). It also holds the write lock for SECONDS rather than the milliseconds every earlier migration took, which is long enough for a second migrator's `BEGIN IMMEDIATE` to exceed `busy_timeout` and raise on a benign race — `migrate()` therefore re-reads `user_version` after WAITING for the write lock, so the loser no-ops on the winner's result. The O(1) alternative, a `PRAGMA writable_schema` edit of `sqlite_master`, corrupts the schema outright when the SQL is wrong, which is a worse failure than a slow start on the one database the estate keeps its history in.
 
 **Retention** — `plane prune` ages `metric_samples` past 30 days by
 `ingested_at` (the incident-join window); nothing else is ever deleted; no

@@ -48,7 +48,8 @@ class Adapter:
         "svc_activation_snapshot", "svc_activation_assert_external",
         "svc_activation_pause", "svc_activation_resume",
         "svc_activation_start", "svc_activation_quiet", "svc_activation_bot_fence",
-        "svc_activation_bot_ready",
+        "svc_activation_bot_ready", "svc_activation_handoff",
+        "svc_activation_stop_private_server",
     })
 
     def __init__(self, package: PackageResources | None = None, *, runner=None):
@@ -172,6 +173,7 @@ class EnrollmentInventory:
     foreign: tuple[str, ...]
     issues: tuple[str, ...]
     bootstrap_empty: bool = False
+    legacy_source: bool = False
 
     def payload(self) -> dict:
         return _json_value(asdict(self))
@@ -488,7 +490,8 @@ def validate_darwin_unit(adapter, target: str, *, source: bytes, installed_path:
 
 def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...], *,
                        package: PackageResources | None = None, runner=None,
-                       bootstrap_empty: bool = False, adapter=None) -> EnrollmentInventory:
+                       bootstrap_empty: bool = False, legacy_source: bool = False,
+                       adapter=None) -> EnrollmentInventory:
     """Observe every installed/loaded candidate, preserving incomplete evidence.
 
     This accepts the current manifest, including intentionally uninstalled units;
@@ -502,7 +505,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     Candidate declarations never stand in for a previous installed release.
     """
     data_root = data_root.resolve(strict=True)
-    if type(bootstrap_empty) is not bool or bootstrap_empty and declarations:
+    if (type(bootstrap_empty) is not bool or type(legacy_source) is not bool
+            or bootstrap_empty and (declarations or legacy_source)):
         raise InventoryError("bootstrap inventory must have no original declarations")
     if not declarations and not bootstrap_empty:
         raise InventoryError("empty generated manifest is not deletion authority")
@@ -515,12 +519,15 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         env = dict(declaration.environment)
         if (name in expected or not _NAME.fullmatch(name) or not name.endswith(_SUFFIXES)
                 or not declaration.source.is_absolute() or not declaration.working_directory.is_absolute()
-                or declaration.scope not in ("host", "fleet", "bot") or not declaration.release_id
+                or declaration.scope not in ("host", "fleet", "bot")
+                or (declaration.release_id != "" if legacy_source else not declaration.release_id)
                 or (declaration.scope in ("fleet", "bot") and not declaration.fleet)
                 or (declaration.scope == "bot" and not declaration.bot)
                 or len(env) != len(declaration.environment)
                 or env.get("CLAUDLOBBY_ROOT") != str(data_root)
-                or not all(env.get(key) for key in ("CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR", "CLAUDLOBBY_CLI", "CLAUDLOBBY_ARTIFACT_ID", "FLEET_ROOT"))):
+                or not legacy_source and not all(env.get(key) for key in (
+                    "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_LIBRARY_DIR", "CLAUDLOBBY_CLI",
+                    "CLAUDLOBBY_ARTIFACT_ID", "FLEET_ROOT"))):
             raise InventoryError(f"ambiguous or incomplete declaration: {name}")
         expected[name] = declaration
     for declaration in declarations:
@@ -685,7 +692,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
             units.append(EnrolledUnit(declaration, target, generated, sources, tuple(sorted(props.items()))))
     observed_files = tuple(saved for name in sorted(installed) for saved in installed[name])
     result = EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,
-                                 tuple(sorted(foreign)), tuple(issues), bootstrap_empty)
+                                 tuple(sorted(foreign)), tuple(issues), bootstrap_empty, legacy_source)
     try:
         result.check_files()
         if adapter.read("svc_inventory_catalog") != catalog:
@@ -696,5 +703,5 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
             _require_no_selection(data_root)
     except (InventoryError, OSError, subprocess.SubprocessError) as exc:
         result = EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,
-                                     tuple(sorted(foreign)), (*issues, str(exc)), bootstrap_empty)
+                                     tuple(sorted(foreign)), (*issues, str(exc)), bootstrap_empty, legacy_source)
     return result

@@ -17,16 +17,16 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | Is a service down? | systemd journal | `journalctl --user -u <BOT_SERVICE> -n 30` |
 | What's the bot doing right now? | tmux pane | `tmux -L "$(tmux_socket_for_bot runtime/bots/<bot>)" capture-pane -t <bot> -p \| tail -10` |
 | How long has the fleet been up? | Uptime metrics | `claudlobby uptime` |
-| What work completed? | The plane (the report door's task events) | `claudlobby report-back --since 24h` |
-| What did a manager decide at its last check-in, and why? | The plane (the check-in's `checkin_decision` rows, joined through `checkin_dispatch` to the task's status) | `claudlobby checkins --bot <b> --last` (`--json` for tools) |
-| How is a manager's check-in window distributed: actions, ask rate, what it could not read, dispatch outcomes — by project? | The plane (the decision rows, rolled up) | `claudlobby checkins --summary --since 14d` |
+| What work completed? | The plane's fleet reports | `claudlobby --json fleet reports list --status completed --since "$CUTOFF"` (`CUTOFF` must be an offset-bearing RFC3339 instant derived for the intended window; follow `next_cursor`) |
+| What did a manager decide at its last check-in, and why? | The plane (the check-in's `checkin_decision` rows, joined through `checkin_dispatch` to the task's status) | `claudlobby --json --fleet <F> checkin list --bot <b> --last`; inspect `data.items[0]` |
+| How is a manager's check-in window distributed: actions, ask rate, what it could not read, dispatch outcomes — by project? | The plane (the decision rows, rolled up) | `claudlobby --json --fleet <F> checkin list --summary --since 14d` |
 | Fleet-wide log search | Tail all logs | `lib/tail-fleet.sh --fleet <name> --grep ERROR` |
 | Last pulse snapshot | The fleet's pulse summary file | `cat state/pulse/<fleet>.pulse-summary.txt` |
 | Is the observable-plane kernel healthy? | Plane kernel status (db/spool/quarantine) | `claudlobby plane doctor` |
 
 > Every bot runs its own private tmux server (`-L <socket>`, the socket name is the bot's `BOT_SERVICE`/`TMUX_SOCKET`) since per-bot-tmux-socket isolation shipped. A bare `tmux -t <bot>` targets the shared *default* server, which has none of your bots on it, and silently reports no session instead of erroring. The commands above resolve the socket via `tmux_socket_for_bot <bot-dir>` — `source lib/lib-common.sh` first (from the claudlobby repo root) to get it in scope — or skip raw tmux entirely and dispatch through `lib/dispatch.sh` / the `bot_tmux`/`bot_tmux_send` wrappers. See [advanced-patterns.md](../advanced-patterns.md) for the full model.
 
-> **The plane is the fleet's only record.** `emit_fleet_event` and every door (`dispatch-task.sh`, `report-back.sh`, `keepalive.sh`, `bot-vitals.sh`, the hooks) land on `state/plane/plane.db`; `claudlobby events` / `report-back` / `uptime` / `status` / `brief` read it; `plane prune` ages its metric samples. Health: `claudlobby plane status` / `plane doctor`.
+> **The plane is the fleet's only record.** `emit_fleet_event` and fleet doors land on `state/plane/plane.db`; `claudlobby events` / `fleet reports list` / `uptime` / `status` / `brief` read it; `plane prune` ages its metric samples. Health: `claudlobby plane status` / `plane doctor`.
 
 ## Event Data Flow
 
@@ -39,7 +39,7 @@ Bot activity
                                 ──► [FLEET-PULSE] notification to manager tmux
   └─► emit_failure_alert / emit_fleet_notice ──► emit_fleet_event ──► the plane (anchored on the fleet, source: alert/notice)
       (start-bot.sh, reload-fleet.sh, …)      ──► [FLEET-ALERT]/[FLEET-NOTICE] nudge to manager tmux
-Readers: claudlobby events / report-back / uptime / status / brief; the plane's samples age under `plane prune`.
+Readers: claudlobby events / fleet reports list / uptime / status / brief; the plane's samples age under `plane prune`.
 ```
 
 ## Event Types
@@ -107,7 +107,7 @@ Readers: claudlobby events / report-back / uptime / status / brief; the plane's 
 | Path | Content | Retention |
 |------|---------|-----------|
 | `runtime/bots/<bot>/keepalive.log` | Plaintext keepalive state log | Rotated by log-rotate.sh (500 lines) |
-| `state/plane/plane.db` | The plane: every event, dispatch, report and heartbeat sample (F18 closure — the per-bot and fleet-root event files are gone); read with `claudlobby events` / `report-back` / `uptime` / `brief` | Append-only; metric samples aged by `plane prune` (30d) |
+| `state/plane/plane.db` | The plane: every event, dispatch, report and heartbeat sample (F18 closure — the per-bot and fleet-root event files are gone); read with `claudlobby events` / `fleet reports list` / `uptime` / `brief` | Append-only; metric samples aged by `plane prune` (30d) |
 | `runtime/bots/<bot>/data/.idle` | Idle marker — touched by keepalive.sh on IDLE, cleared on BUSY. Fleet-pulse reads mtime. | Transient (current state only) |
 | `runtime/bots/<bot>/data/.last-tool-call` | Tool-call marker — touched by bot-vitals.sh on every hook. Stale mtime + no `.idle` = activity_stuck candidate. | Transient (current state only) |
 | `state/fleet-state.json` | Per-bot current status + task | Persistent |

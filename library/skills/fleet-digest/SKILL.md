@@ -1,6 +1,6 @@
 ---
 name: fleet-digest
-description: "Assemble the monitor's pass input. Joins the plane's session_digest events with vitals, utilization, and report-back rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
+description: "Assemble the monitor's pass input. Joins the plane's session_digest events with vitals, utilization, and fleet report rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
 argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"
@@ -48,8 +48,8 @@ the flat shape the rest of this skill reads: the pre-aggregated digest rides
 
 ```bash
 DAYS="${1:-7}"
-SINCE="$(date -d "-$((DAYS - 1)) day" +%Y-%m-%d 2>/dev/null \
-         || date -v-"$((DAYS - 1))"d +%Y-%m-%d)"
+SINCE="$(date -u -d "-$((DAYS - 1)) day" +%Y-%m-%d 2>/dev/null \
+         || date -u -v-"$((DAYS - 1))"d +%Y-%m-%d)"
 
 : > /tmp/window.jsonl
 : > /tmp/coverage.txt
@@ -132,8 +132,14 @@ an uncitable theme is unusable downstream.
 ```bash
 claudlobby --fleet "$F" uptime
 claudlobby --fleet "$F" utilization
-claudlobby --fleet "$F" report-back --since "${DAYS}d"
+claudlobby --fleet "$F" --json fleet reports list --since "${SINCE}T00:00:00Z"
 ```
+
+This cutoff is the first UTC midnight of the calendar-day window assembled in
+Step 2, not a rolling `DAYS` × 24-hour cutoff. For reports, inspect `ok` and
+follow `data.next_cursor` with `--cursor` until null before computing counts
+or highlights. If a page fails or content is withheld, disclose that limit;
+never count an unreadable page as zero.
 
 These answer "was the fleet even working?" — the denominator for anything the
 digest rows suggest. A spike in `failed` rows across a week when utilization
@@ -145,7 +151,8 @@ rest. Never synthesise a rollup you did not get.
 ## Step 6 — Bound the output
 
 Budget at **≈4 characters per token** (planning estimate only — use
-`lib/transcript-usage.py` for actual spend). Target a summary that comfortably
+`claudlobby --json fleet usage --since 24h` for covered Claude token counts,
+not quota). Target a summary that comfortably
 fits a reasoning pass alongside its instructions.
 
 If you must cut, cut in this order — **and say what you cut**:
@@ -175,7 +182,7 @@ FRICTION THEMES (each with citable session_ids)
   <theme> — <N> sessions — [<session_id>, ...]
 
 ROLLUPS
-  uptime / utilization / report-back highlights, or the verbatim failure
+  uptime / utilization / fleet report highlights, or the verbatim failure
 
 UNRESOLVED
   anything the digests could not answer — a gap here is a finding for /fleet-observe

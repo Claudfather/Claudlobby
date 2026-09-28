@@ -29,9 +29,9 @@ Restarting a worker tmux session **clears its context**. Workers often have real
 
 ## Reviewers are an exception
 
-For reviewers (typically Sonnet, lower context budget): **do** restart on the first `context-degraded` report, or after ~3 completed rows in a 24h `claudlobby --fleet {{FLEET_NAME}} report-back` window, because review sessions don't carry PR-level WIP — reviews are stateless between PRs and Sonnet degrades faster than Opus. Still send a one-line "restarting <reviewer>" note to Telegram for visibility.
+For reviewers (typically Sonnet, lower context budget): **do** restart on the first `context-degraded` report, or after ~3 completed reports in a verified 24h window, because review sessions don't carry PR-level WIP — reviews are stateless between PRs and Sonnet degrades faster than Opus. Read `claudlobby --fleet {{FLEET_NAME}} --json fleet reports list --bot REVIEWER --status completed --since RFC3339_CUTOFF`, deriving the offset-bearing cutoff from the current time and following `next_cursor`. Still send a one-line "restarting <reviewer>" note to Telegram for visibility.
 
-**Count the rows, do not count an empty result.** The plane's rows are per fleet, so `--fleet` is what scopes a `report-back` query; a run that cannot be scoped or cannot reach the plane REFUSES (rc 3, `UNREACHABLE` on stderr) rather than printing an empty result. Before #1216 the flagless form was silent — empty stdout, exit 0 — so "0 completed" and "I could not read the record" were the same output, and the failure direction is *do not restart*, which is the one nobody investigates. **A zero you have not seen the command succeed on is not a zero.**
+**Count the rows, do not count an empty result.** Keep `--fleet` for the intended fleet, inspect the result envelope for an error, and follow every `next_cursor` before claiming a count. An unreadable or incomplete page is unknown, not zero. **A zero you have not seen the command succeed on is not a zero.**
 
 ## When in doubt, ask the human
 
