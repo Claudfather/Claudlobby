@@ -355,3 +355,36 @@ selections are not additive. One native mktemp control passed before the
 next owned stub stalled; the bounded runner reaped it. No local fallback-rescue
 or full native-suite pass is claimed. New real-ingest report/registry and actual
 native activation acceptance remain hosted/canary work.
+
+## CI repair checkpoint — 2026-09-28 10:10 UTC
+
+**Measured:** integration `517d0749` passed both Linux lanes with 6,337 passed,
+15 skipped and four warnings: [Python 3.11](https://github.com/Claudfather/Claudlobby/actions/runs/36403947539/job/108868069608)
+in 924.16s and [Python 3.10](https://github.com/Claudfather/Claudlobby/actions/runs/36403947539/job/108868069257)
+in 1,189.72s. Its [Mac run](https://github.com/Claudfather/Claudlobby/actions/runs/36403947539/job/108868069547)
+completed the selected suite with 11 failed, 6,304 passed, 37 skipped and four
+warnings in 1,714.98s. Eighteen of the previous 20 failed cases now pass; two
+updater failures remain and nine failures are newly observed. All seven
+dedicated native launchd/bridge cases executed and passed in the retained XML.
+
+**Measured:** prerequisite `6e876c96` passed both Linux lanes with 6,142 passed,
+15 skipped and three warnings. Its [Mac run](https://github.com/Claudfather/Claudlobby/actions/runs/36404307850/job/108869238738)
+completed with the identical 11 failed test IDs, 6,109 passed, 37 skipped and
+three warnings in 1,922.40s. Neither revision has platform acceptance.
+
+**Read from code / focused evidence:** Sol-authored repair `462209d9` removes
+GNU-only vault canonicalization by using the existing Python decider, handles
+an expected executable-lookup miss inside its substitution on Bash 3.2, and
+repairs native harness fixtures. The manager fixture drains its tty, the
+foreign-poller fixture creates its owned process group through Python, and
+existing-path canonicalization works on BSD. The cold-route check requires an
+explicit disclosure for either supported fallback route. No tests are skipped.
+
+**Measured private limits:** the real Bash error-handler probe preserves the
+missing lookup's empty output and rc 0 while removing its false `script_error`;
+a present lookup still resolves without an error event. A private tmux probe
+retained 9 of 40 notices with the sleeping fixture and all 40 with the draining
+fixture. Private vault-hook deny/allow controls and parent syntax/AST/diff checks
+passed. These focused probes do not establish a full-suite pass or actual-agent
+acceptance. Local complete dependency environments remain unreliable; the new
+exact-head hosted matrix is required. Feature expansion stays held until green.
