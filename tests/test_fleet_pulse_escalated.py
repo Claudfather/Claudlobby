@@ -24,7 +24,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -33,7 +32,6 @@ from claudlobby.plane.emit_api import emit_batch
 from tests.plane_fixtures import F, REPO, _live_dispatch, _paths, plane_root
 
 LIB = REPO / "lib"
-CLI = Path(sys.executable).parent / "claudlobby"
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None,
                                 reason="fleet-pulse needs tmux")
 
@@ -239,7 +237,7 @@ def test_two_fleets_each_page_their_own_and_never_touch_the_others_marker(tmp_pa
 
 
 @needs_tmux
-def test_two_fleets_hit_at_once_each_page_their_own(tmp_path):
+def test_two_fleets_hit_at_once_each_page_their_own(tmp_path, *, scratch_plane_env):
     """#1903: every marker that debounces a fleet-pulse page lives in the
     HOST-GLOBAL `state/pulse`, so one kept under a name without the fleet was
     shared by every fleet's sweep. Measured on a same-instant run: two fleets,
@@ -270,8 +268,7 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path):
     seed = subprocess.run(
         ["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event bridge_down pulse "{{}}" "{f_w1}" w1'],
         capture_output=True, text=True, timeout=180,
-        env={"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F,
-             "PLANE_EMIT_CLI": str(CLI), "PLANE_SOCKET": str(root / "no-daemon.sock"),
+        env={**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": F,
              "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
     assert seed.returncode == 0, seed.stderr[-1000:]
 
@@ -281,7 +278,7 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path):
     def sweep(fleet, threshold="1"):
         n = len(_pages(capture))
         r = _pulse(root, libdir, fleet=fleet, FLEET_PULSE_ESCALATION_THRESHOLD=threshold,
-                   FLEET_EVENT_EMIT_TIMEOUT_S="120")
+                   FLEET_EVENT_EMIT_TIMEOUT_S="120", scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr[-2000:]
         return sorted(_pages(capture)[n:])
 
@@ -308,4 +305,3 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path):
         paged = sweep(fleet)
         for reader in ("overdue reader", "escalated-task reader", "events reader"):
             assert any(f"the {reader} for {fleet} is UNREACHABLE" in x for x in paged), (fleet, reader, paged)
-

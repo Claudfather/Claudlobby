@@ -63,11 +63,13 @@ def _isolate_plane_session(tmp_path_factory):
 @pytest.fixture(autouse=True)
 def _isolate_claudlobby_root(monkeypatch, _isolate_plane_session):
     """Reset the default for each test; explicit local overrides still win."""
-    with tempfile.TemporaryDirectory(prefix="t-", dir=_isolate_plane_session) as directory:
-        base = Path(directory).resolve()
-        _isolate_home(monkeypatch, base)
-        _silence_plane(monkeypatch)
-        yield base
+    # The session owns cleanup after every test monkeypatch has been undone.
+    # Deleting here runs before this dependent monkeypatch fixture tears down;
+    # source-state tests deliberately replace os.scandir and break rmtree then.
+    base = Path(tempfile.mkdtemp(prefix="t-", dir=_isolate_plane_session)).resolve()
+    _isolate_home(monkeypatch, base)
+    _silence_plane(monkeypatch)
+    yield base
 
 
 @pytest.fixture(autouse=True)
