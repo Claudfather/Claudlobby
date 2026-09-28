@@ -182,6 +182,108 @@ def test_declared_scope_and_missing_identity_refuse_before_recording(estate):
     assert _counts(conn) == (0, 0, 0, 0)
 
 
+def test_withdraw_closes_queued_work_and_its_active_assignment_in_one_fact(estate):
+    ctx, conn = estate
+    for assigned in (False, True):
+        admitted = tasks.admit(ctx, str(uuid4()), title="Withdraw this work")
+        aid = None
+        if assigned:
+            routed = tasks.assign(ctx, str(uuid4()), admitted.task_id, bot_id="worker")
+            aid = routed.assignment_id
+            tasks.accept(replace(ctx, caller=ctx.bots["worker"]), str(uuid4()), aid)
+        before = conn.execute("SELECT count(*) FROM events").fetchone()[0]
+        rid = str(uuid4())
+        withdrawn = tasks.withdraw(ctx, rid, admitted.task_id, reason="No longer needed")
+        assert withdrawn.task.state == "cancelled" and withdrawn.task.current_assignment is None
+        assert withdrawn.assignment_id == aid
+        terminal = withdrawn.task.terminal_event
+        assert terminal.event == "cancelled" and terminal.assignment_id is None
+        assert terminal.emitter == tasks.TASK_EMITTER
+        assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == before + 1
+        if assigned:
+            old = withdrawn.task.assignments[0]
+            assert old.assignment_id == aid and old.state == "closed"
+            assert old.terminal_event.event_id == terminal.event_id
+        assert tasks.withdraw(ctx, rid, admitted.task_id, reason="No longer needed").replayed
+        with pytest.raises(tasks.TaskConflictError, match="terminal"):
+            tasks.withdraw(ctx, str(uuid4()), admitted.task_id, reason="Again")
+        with pytest.raises(tasks.TaskConflictError, match="current assignment"):
+            tasks.reassign(ctx, str(uuid4()), admitted.task_id, bot_id="other", reason="Too late")
+        assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == before + 1
+
+
+def test_reassign_commit_before_receipt_update_replays_without_retargeting(estate, monkeypatch):
+    from claudlobby.request_receipts import RequestStore
+    ctx, conn = estate
+    admitted = tasks.admit(ctx, str(uuid4()), title="Hand off")
+    old = tasks.assign(ctx, str(uuid4()), admitted.task_id, bot_id="worker")
+    rid = str(uuid4())
+    with monkeypatch.context() as patch:
+        patch.setattr(RequestStore, "outcome", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("after commit")))
+        with pytest.raises(OSError, match="after commit"):
+            tasks.reassign(ctx, rid, admitted.task_id, bot_id="other", reason="New specialist")
+    pending = _receipt(ctx, rid)
+    assert pending.stages[0].status == "unknown" and len(pending.intent.stages[0].facts) == 2
+    current = show_task(conn, admitted.task_id, fleet_uid=ctx.fleet_uid)
+    successor = current.current_assignment.assignment_id
+    assert successor == pending.intent.assignment_id and successor != old.assignment_id
+    assert current.state == "assigned" and current.assignments[0].state == "closed"
+    closure = current.assignments[0].terminal_event
+    assert closure.event == "reassigned" and closure.successor_id == successor
+    assert closure.assignment_id == old.assignment_id and closure.emitter == tasks.TASK_EMITTER
+    with pytest.raises(tasks.TaskConflictError, match="stale"):
+        tasks.accept(replace(ctx, caller=ctx.bots["worker"]), str(uuid4()), old.assignment_id)
+    tasks.accept(replace(ctx, caller=ctx.bots["other"]), str(uuid4()), successor)
+    before = _counts(conn)
+    replayed = tasks.reassign(ctx, rid, admitted.task_id, bot_id="other", reason="New specialist")
+    assert replayed.replayed and replayed.assignment_id == successor and replayed.task.state == "active"
+    assert _receipt(ctx, rid).attempt == 1 and _counts(conn) == before
+
+
+def test_reassign_rolls_back_both_facts_and_failed_retry_cannot_close_a_replacement(estate):
+    ctx, conn = estate
+    admitted = tasks.admit(ctx, str(uuid4()), title="Atomic handoff")
+    old = tasks.assign(ctx, str(uuid4()), admitted.task_id, bot_id="worker")
+    # Fail the second write inside the real ingest transaction, after the
+    # predecessor closure. The trigger and all rows belong to this fixture.
+    conn.execute("CREATE TRIGGER reject_successor BEFORE INSERT ON assignments "
+                 "BEGIN SELECT RAISE(ABORT, 'owned successor failure'); END")
+    rid = str(uuid4())
+    before = _counts(conn)
+    with pytest.raises(tasks.TaskRecordingError):
+        tasks.reassign(ctx, rid, admitted.task_id, bot_id="other", reason="Move work")
+    pending = _receipt(ctx, rid)
+    assert pending.stages[0].status == "unknown" and _counts(conn) == before
+    current = show_task(conn, admitted.task_id, fleet_uid=ctx.fleet_uid)
+    assert current.current_assignment.assignment_id == old.assignment_id and current.history == ()
+    for fact in pending.intent.stages[0].facts:
+        assert conn.execute("SELECT 1 FROM ingest_ledger WHERE event_id=?", (fact.event_id,)).fetchone() is None
+    conn.execute("DROP TRIGGER reject_successor")
+    winner = tasks.reassign(ctx, str(uuid4()), admitted.task_id, bot_id="manager", reason="Manager takes it")
+    before = _counts(conn)
+    with pytest.raises(ReceiptConflict):
+        tasks.reassign(ctx, rid, admitted.task_id, bot_id="other", reason="Move work")
+    assert _receipt(ctx, rid).intent == pending.intent and _counts(conn) == before
+    assert show_task(conn, admitted.task_id, fleet_uid=ctx.fleet_uid).current_assignment.assignment_id == winner.assignment_id
+    assert not list((ctx.root / "state/plane").rglob("*.jsonl"))
+
+
+def test_reassign_without_current_and_foreign_bot_mutations_refuse_before_preparation(estate):
+    ctx, conn = estate
+    tid = "wi_" + "b" * 32
+    _insert(conn, "work_items", fleet_uid=ctx.fleet_uid, work_item_id=tid,
+            title="Queued", created_by_uid=ctx.caller.uid)
+    with pytest.raises(tasks.TaskConflictError, match="current assignment"):
+        tasks.reassign(ctx, str(uuid4()), tid, bot_id="worker", reason="No predecessor")
+    foreign = replace(ctx, caller_fleet_uid="fleet_" + "f" * 32)
+    with pytest.raises(tasks.TaskConflictError, match="origin fleet"):
+        tasks.reassign(foreign, str(uuid4()), tid, bot_id="worker", reason="Wrong fleet")
+    with pytest.raises(tasks.TaskConflictError, match="origin fleet"):
+        tasks.withdraw(foreign, str(uuid4()), tid, reason="Wrong fleet")
+    assert _counts(conn) == (1, 0, 0, 0)
+    assert not list((ctx.root / "state/requests").rglob("*.json"))
+
+
 def test_task_flock_excludes_a_different_request_in_an_independent_process(estate):
     ctx, _ = estate
     task_id = "wi_" + "a" * 32

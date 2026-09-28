@@ -588,10 +588,34 @@ def _has_ingest_history(conn) -> bool:
     ).fetchone()[0])
 
 
-def run_generate_scan(paths, fleet) -> dict | None:
+class RegistryScanError(RuntimeError):
+    """Activation cannot admit writers; acknowledged partial chunks remain."""
+
+    def __init__(self, reason: str, summary: dict):
+        self.summary = summary
+        super().__init__(reason)
+
+
+def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | None:
     """Emit one generate-cause registry scan for *fleet*. Returns the summary
     dict, or None when a tier has turned the scan OFF. Raises only upward
-    through the non-blocking hook in cmd_generate."""
+    through the non-blocking hook in cmd_generate.
+
+    Activation passes require_commit=True after exact ingest/config readiness,
+    before starting any bot or producer. That mode refuses disabled/unavailable
+    recording and incomplete enumeration before the first emission; success is
+    complete=True, recording='committed', with every <=50-event chunk confirmed.
+    RegistryScanError.summary discloses acknowledged partial chunks; an exception
+    during a chunk leaves its commit unknown, never definitely absent. Keep the
+    coordinator pending on any failure. A later scan reuses canonical hash
+    suppression for existing keyframes; this is not an all-fleet transaction or
+    a second activation journal. The caller owns selected release/source paths.
+    """
+    summary = {"scan_id": None, "entities": None, "tombstoned": 0, "complete": False,
+               "foreign_host_rows": 0, "outcomes": {}, "recording": "not_attempted",
+               "attempted_chunks": 0, "committed_chunks": 0, "event_count": None}
+    def refuse(reason, recording="not_attempted"):
+        raise RegistryScanError(reason, {**summary, "recording": recording})
     # The flag resolves through the runtime's OWN .env tier cascade —
     # env_tiers, exactly as the composer resolves the SAME variable for timer
     # stamps. (The shipped check once read fleet.defaults["env"], a tier the
@@ -609,12 +633,18 @@ def run_generate_scan(paths, fleet) -> dict | None:
     # PLANE_EMIT_DISABLED=1 is the ruled harness exemption, honored here like
     # every other door.
     if os.environ.get("PLANE_EMIT_DISABLED") == "1":
+        if require_commit:
+            refuse("activation registry scan is disabled by PLANE_EMIT_DISABLED")
         return None
+    if require_commit and os.environ.get("PLANE_EMIT_ENABLED") == "0":
+        refuse("activation registry scan is opted out by PLANE_EMIT_ENABLED")
     from .. import env_tiers as _env_tiers
     try:
         _res = _env_tiers.resolve(
             paths, fleet_name=fleet.name).get("PLANE_EMIT_ENABLED")
     except _env_tiers.ResolverUnavailable as exc:
+        if require_commit:
+            refuse("activation registry scan cannot resolve its recording opt-out tiers")
         # ...but an EXPLICIT opt-out beats a fail-open scan (F3). The CLI
         # already loaded the fleet's .env into os.environ (_load_env), so an
         # operator who wrote PLANE_EMIT_ENABLED=0 is visible here even when
@@ -638,6 +668,8 @@ def run_generate_scan(paths, fleet) -> dict | None:
         log.info("registry scan: OFF for this fleet (PLANE_EMIT_ENABLED=0 at"
                  " the %s tier) — no keyframes recorded for this generate",
                  _res.tier)
+        if require_commit:
+            refuse("activation registry scan is opted out by an environment tier")
         return None
 
     from .emit_api import emit_batch
@@ -646,6 +678,13 @@ def run_generate_scan(paths, fleet) -> dict | None:
     scan_id = f"scan-{uuid.uuid4().hex[:12]}"
     vault_rev = _vault_rev(paths)
     entities, complete = assemble_entities(paths, fleet, vault_rev)
+    summary.update(scan_id=scan_id, entities=len(entities), complete=complete)
+    if require_commit:
+        required = {("host", platform.node()), ("fleet", fleet.name)} | {
+            ("bot", f"bot:{fleet.name}/{bot}") for bot in fleet.bots}
+        if not complete or not required <= {(kind, alias) for kind, alias, _ in entities}:
+            summary["complete"] = False
+            refuse("activation registry enumeration is incomplete")
 
     def snap(etype, alias, payload, tombstone=False):
         body = {"entity_type": etype, "entity_alias": alias,
@@ -671,6 +710,7 @@ def run_generate_scan(paths, fleet) -> dict | None:
         # db_path(): its mkdir is a write this read path must not carry)
         seen = {(t, a) for t, a, _ in entities}
         if db.is_file():
+            conn = None
             try:
                 conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
                 conn.row_factory = sqlite3.Row
@@ -719,7 +759,6 @@ def run_generate_scan(paths, fleet) -> dict | None:
                     (cr["entity_type"], cr["entity_uid"])
                     for cr in conn.execute(REG_CURRENT_KEYS_SQL,
                                            (this_host,))}
-                conn.close()
                 for r in rows:
                     if (r["entity_type"], r["entity_uid"]) not in current_keys:
                         continue   # effectively deleted — nothing to re-claim
@@ -735,6 +774,12 @@ def run_generate_scan(paths, fleet) -> dict | None:
             except sqlite3.Error as exc:
                 log.warning("registry scan: tombstone diff skipped (%s)", exc)
                 complete = False
+            finally:
+                if conn is not None:
+                    conn.close()
+    summary.update(complete=complete, tombstoned=tombstoned, foreign_host_rows=foreign_rows)
+    if require_commit and not complete:
+        refuse("activation registry prior-state inventory is incomplete")
 
     # the vault alias comes FROM THE ASSEMBLY (the chunk-B extraction left
     # `vp` dangling — NameError on every vault-armed scan; found live) and
@@ -769,8 +814,34 @@ def run_generate_scan(paths, fleet) -> dict | None:
     # One cold-path CLI spawn + transaction per chunk; 50 keeps a ~190-event
     # fleet scan to ~4 spawns while staying far under any payload cap.
     _CHUNK = 50
+    summary["event_count"] = len(events)
     for i in range(0, len(events), _CHUNK):
-        outcomes.extend(emit_batch(root, events[i:i + _CHUNK]))
+        chunk = events[i:i + _CHUNK]
+        if not require_commit:
+            outcomes.extend(emit_batch(root, chunk))
+            continue
+        summary["attempted_chunks"] += 1
+        try:
+            batch = emit_batch(root, chunk, require_commit=True)
+        except Exception as exc:
+            raise RegistryScanError("activation registry chunk did not prove committed recording",
+                                    {**summary, "recording": "unknown"}) from exc
+        if not isinstance(batch, list):
+            refuse("activation registry chunk has no complete outcome list", "unknown")
+        statuses = []
+        for outcome in batch:
+            status = getattr(outcome, "status", "unknown")
+            status = status if isinstance(status, str) else "unknown"
+            statuses.append(status)
+            counts = summary["outcomes"]
+            counts[status] = counts.get(status, 0) + 1
+        if len(batch) != len(chunk):
+            refuse("activation registry chunk has incomplete outcomes", "unknown")
+        if any(s not in ("committed", "duplicate") for s in statuses):
+            refuse("activation registry chunk has uncommitted or incomplete outcomes", "uncommitted")
+        summary["committed_chunks"] += 1
+    if require_commit:
+        return {**summary, "recording": "committed"}
     by_status: dict[str, int] = {}
     for o in outcomes:
         by_status[o.status] = by_status.get(o.status, 0) + 1

@@ -105,13 +105,14 @@ def _db(root: Path) -> sqlite3.Connection:
     return conn
 
 
-def _scan(root: Path, *, scratch_plane_env, package=None, initialize=True):
+def _scan(root: Path, *, scratch_plane_env, package=None, initialize=True, require_commit=False):
     fleet, _ = load_fleet(root / "fleet.yaml")
     env = scratch_plane_env(root, initialize=initialize)
     with pytest.MonkeyPatch.context() as patch:
         for key, value in env.items():
             patch.setenv(key, value)
-        return run_generate_scan(Paths(root=root, package=package or source_package()), fleet)
+        return run_generate_scan(Paths(root=root, package=package or source_package()), fleet,
+                                 require_commit=require_commit)
 
 
 # ---------------------------------------------------------------------------
@@ -869,3 +870,103 @@ def test_keyframe_carries_effective_integrations_and_protocols(tmp_path):
     assert "github" in eq["integrations"]          # auto-paired, undeclared
     assert set(eq["integrations"]) > set(bot.integrations)   # strict superset
     assert set(eq["protocols"]) >= set(bot.protocols)
+
+
+@pytest.fixture
+def activation_scan(tmp_path, monkeypatch):
+    from claudlobby import env_tiers
+    from claudlobby.plane import registry_emit as registry
+    from claudlobby.plane import emit_api
+    root = _fleet_root(tmp_path)
+    fleet, _ = load_fleet(root / "fleet.yaml")
+    paths = Paths(root=root, package=source_package())
+    entities = [("host", registry.platform.node(), {}), ("fleet", fleet.name, {})]
+    entities += [("bot", f"bot:{fleet.name}/{bot}", {}) for bot in fleet.bots]
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+    monkeypatch.setattr(env_tiers, "resolve", lambda *a, **k: {})
+    monkeypatch.setattr(registry, "_vault_rev", lambda *a: None)
+    monkeypatch.setattr(registry, "assemble_entities", lambda *a: (entities, True))
+    calls = []
+    monkeypatch.setattr(emit_api, "emit_batch", lambda *a, **k: calls.append((a, k)))
+    return registry, emit_api, env_tiers, paths, fleet, entities, calls
+
+
+@pytest.mark.parametrize("stop", ["disabled", "process-opt-out", "tier-opt-out", "unreachable", "incomplete", "empty", "prior-state"])
+def test_activation_scan_refuses_before_any_emit(activation_scan, monkeypatch, stop):
+    registry, _, tiers, paths, fleet, entities, calls = activation_scan
+    if stop == "disabled":
+        monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
+    elif stop == "process-opt-out":
+        monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
+    elif stop == "tier-opt-out":
+        monkeypatch.setattr(tiers, "resolve", lambda *a, **k: {
+            "PLANE_EMIT_ENABLED": tiers.Resolution("PLANE_EMIT_ENABLED", "0", "fleet", paths.env_file)})
+    elif stop == "unreachable":
+        def unavailable(*a, **k):
+            raise tiers.ResolverUnavailable("owned unavailable resolver")
+        monkeypatch.setattr(tiers, "resolve", unavailable)
+    elif stop == "prior-state":
+        (paths.root / "state/plane/plane.db").write_bytes(b"unreadable prior registry")
+    else:
+        monkeypatch.setattr(registry, "assemble_entities", lambda *a: (
+            (entities, False) if stop == "incomplete" else ([], True)))
+    with pytest.raises(registry.RegistryScanError) as caught:
+        registry.run_generate_scan(paths, fleet, require_commit=True)
+    assert not calls
+    if stop == "prior-state":
+        assert (paths.root / "state/plane/plane.db").read_bytes() == b"unreadable prior registry"
+    else:
+        assert not (paths.root / "state/plane/plane.db").exists()
+    assert caught.value.summary["recording"] == "not_attempted"
+    assert caught.value.summary["attempted_chunks"] == 0
+
+
+@pytest.mark.parametrize("failure", ["spooled", "staged", "exception", "short-list"])
+def test_activation_scan_discloses_partial_commits_and_never_accepts_a_pending_chunk(
+        activation_scan, monkeypatch, failure):
+    registry, api, _, paths, fleet, entities, calls = activation_scan
+    entities.extend(("library_item", f"shared/skills/item-{i}", {}) for i in range(100))
+    def emit(root, batch, *, require_commit):
+        assert root == paths.root and require_commit is True and len(batch) <= 50
+        calls.append(batch)
+        if len(calls) == 1:
+            return [api.EmitOutcome(str(i), "committed") for i in range(len(batch))]
+        if failure == "exception":
+            raise OSError("owned interrupted store")
+        if failure == "short-list":
+            return []
+        return [api.EmitOutcome(str(i), failure) for i in range(len(batch))]
+    monkeypatch.setattr(api, "emit_batch", emit)
+    with pytest.raises(registry.RegistryScanError) as caught:
+        registry.run_generate_scan(paths, fleet, require_commit=True)
+    summary = caught.value.summary
+    assert len(calls) == summary["attempted_chunks"] == 2  # Never reaches scan_completed.
+    assert summary["committed_chunks"] == 1 and summary["outcomes"]["committed"] == 50
+    assert summary["recording"] != "committed" and summary["event_count"] == len(entities) + 1
+    if failure == "exception":
+        assert summary["recording"] == "unknown" and isinstance(caught.value.__cause__, OSError)
+
+
+def test_activation_committed_scan_seeds_existing_identity_binding(
+        tmp_path, monkeypatch, *, scratch_plane_env):
+    """Real assembler + ingest + SQL; host probes are not identity evidence."""
+    from dataclasses import replace
+    from claudlobby import env_tiers
+    from claudlobby.claude_version import Measurement
+    from claudlobby.context import load_context
+    from claudlobby.operation_context import bind_task_context
+    from claudlobby.plane import registry_emit as registry
+    root = _fleet_root(tmp_path)
+    package = replace(source_package(), library=root / "library")
+    monkeypatch.setattr(env_tiers, "resolve", lambda *a, **k: {})
+    monkeypatch.setattr(registry, "measure_claude_version", lambda *a: Measurement("2.1.0", None))
+    first = _scan(root, scratch_plane_env=scratch_plane_env, package=package, require_commit=True)
+    assert first["complete"] and first["recording"] == "committed"
+    assert first["attempted_chunks"] == first["committed_chunks"]
+    assert sum(first["outcomes"].values()) == first["event_count"]
+    context = load_context(Paths(root=root, package=package), bot="lead")
+    frozen = bind_task_context(context, origin=context)
+    assert frozen.caller == frozen.bots["lead"] and len(frozen.bots) == 2
+    again = _scan(root, scratch_plane_env=scratch_plane_env, package=package, require_commit=True)
+    assert again["outcomes"]["duplicate"] == again["entities"]
+    assert again["outcomes"]["committed"] == 1 and again["recording"] == "committed"

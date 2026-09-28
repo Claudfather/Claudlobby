@@ -1,4 +1,4 @@
-"""First task mutations: durable admission, routing and acceptance, no delivery.
+"""Durable task admission, routing, acceptance and withdrawal, no delivery.
 
 The public boundary supplies resolved Context and existing frozen identities,
 and owns runtime/release admission. Request lock precedes the per-task lock;
@@ -160,6 +160,16 @@ def _worker(ctx, bot_id):
     return ctx.bots[bot_id]
 
 
+def _own_fleet(ctx):
+    if ctx.caller.alias.startswith("bot:") and ctx.caller_fleet_uid != ctx.fleet_uid:
+        raise TaskConflictError("bot caller may change routing only within its origin fleet")
+
+
+def _reason(reason):
+    if not isinstance(reason, str) or not reason.strip():
+        raise TaskQueryError("a nonempty reason is required")
+
+
 def _scope_links(ctx, conn, project_key, workstream_id, repo):
     projects = ctx.context.fleet.projects
     if project_key is not None:
@@ -176,7 +186,7 @@ def _scope_links(ctx, conn, project_key, workstream_id, repo):
             raise TaskQueryError("workstream project differs from the selected task project")
 
 
-def _existing(store, ctx, operation, semantic, recipient=None):
+def _existing(store, ctx, operation, semantic, recipient=None, *, fact_count=1):
     receipt = store.load()
     if receipt is not None:
         intent = receipt.intent
@@ -184,7 +194,7 @@ def _existing(store, ctx, operation, semantic, recipient=None):
              intent.caller_uid, intent.recipient_uid, intent.semantic_sha256)
                 != (operation, 1, ctx.host_uid, ctx.fleet_uid, ctx.caller.uid, recipient, semantic)
                 or len(intent.stages) != 1 or intent.stages[0].kind != "recording"
-                or len(intent.stages[0].facts) != 1):
+                or len(intent.stages[0].facts) != fact_count):
             raise ReceiptConflict("request UUID already has different semantics or identities")
     return receipt
 
@@ -209,22 +219,22 @@ def _replayed(store, receipt, conn):
     return False
 
 
-def _raw(ctx, request_id, family, payload, receipt):
+def _raw(ctx, request_id, family, payload, receipt, *, fact_index=0):
     from .plane import PLANE_SCHEMA_VERSION
     return {"event_type": family, "payload": payload, "emitter": TASK_EMITTER,
             "fleet": ctx.context.fleet.name, "source_ref": f"request:{request_id}",
             "schema_version": PLANE_SCHEMA_VERSION,
-            "event_id": receipt.intent.stages[0].facts[0].event_id if receipt else mint_event_id()}
+            "event_id": receipt.intent.stages[0].facts[fact_index].event_id if receipt else mint_event_id()}
 
 
-def _prepare(store, ctx, operation, semantic, raw, task_id, assignment_id=None, recipient=None, actors=()):
+def _prepare(store, ctx, operation, semantic, raws, task_id, assignment_id=None, recipient=None, actors=()):
     from .plane.emit_api import CONTENT_FIELDS, load_capture_config, validate_item
-    modes = load_capture_config(ctx.root) if CONTENT_FIELDS.get(raw["event_type"]) else {}
-    validated, _ = validate_item(raw, modes)
-    fact = expected_fact(validated, host_uid=ctx.host_uid, fleet_uid=ctx.fleet_uid,
-                         parties={actor.alias: actor.uid for actor in (ctx.caller, *actors)})
+    modes = load_capture_config(ctx.root) if any(CONTENT_FIELDS.get(r["event_type"]) for r in raws) else {}
+    parties = {actor.alias: actor.uid for actor in (ctx.caller, *actors)}
+    facts = tuple(expected_fact(validate_item(raw, modes)[0], host_uid=ctx.host_uid,
+                               fleet_uid=ctx.fleet_uid, parties=parties) for raw in raws)
     return store.prepare(RequestIntent(operation, 1, ctx.host_uid, ctx.fleet_uid, ctx.caller.uid,
-                         recipient, semantic, (StagePlan("recording", (fact,)),),
+                         recipient, semantic, (StagePlan("recording", facts),),
                          task_id=task_id, assignment_id=assignment_id))
 
 
@@ -233,13 +243,13 @@ def _result(ctx, conn, receipt, replayed):
                                show_task(conn, receipt.intent.task_id, fleet_uid=ctx.fleet_uid), replayed)
 
 
-def _commit(store, ctx, conn, receipt, raw, check_lock):
+def _commit(store, ctx, conn, receipt, raws, check_lock):
     from .plane.emit_api import emit_batch
     check_lock()
     store.begin_attempt()
     store.stage(0)  # durable unknown before SQLite; crashes never authorize blind replay
     try:
-        emit_batch(ctx.root, [raw], require_commit=True)
+        emit_batch(ctx.root, list(raws), require_commit=True)
     except (sqlite3.Error, OSError) as exc:
         # Do not turn an exception into an unchanged result, even if it looks
         # like a connection failure. The next invocation reconciles exact IDs.
@@ -270,15 +280,14 @@ def admit(ctx: TaskOperationContext, request_id: str, *, title: str, body: str |
             raw = _raw(ctx, request_id, "work_item", dict(work_item_id=tid, title=title, body=body,
                        created_by=ctx.caller.alias, repo=repo, project_key=project_key,
                        workstream_id=workstream_id), previous)
-            receipt = _prepare(store, ctx, "task.admit", semantic, raw, tid)
-            return _commit(store, ctx, conn, receipt, raw, check)
+            receipt = _prepare(store, ctx, "task.admit", semantic, (raw,), tid)
+            return _commit(store, ctx, conn, receipt, (raw,), check)
 
 
 def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,
            expected_by: str | None = None) -> TaskOperationResult:
     """Route one queued task, serialized with every other supported task mutation."""
-    if ctx.caller.alias.startswith("bot:") and ctx.caller_fleet_uid != ctx.fleet_uid:
-        raise TaskConflictError("bot caller may assign only within its origin fleet")
+    _own_fleet(ctx)
     worker = _worker(ctx, bot_id)
     semantic = semantic_digest(dict(task_id=task_id, bot_id=bot_id, expected_by=expected_by))
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
@@ -296,8 +305,8 @@ def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: 
                 aid = previous.intent.assignment_id if previous else mint_assignment_id()
                 raw = _raw(ctx, request_id, "assignment", dict(assignment_id=aid, work_item_id=task_id,
                            assignee=worker.alias, assigned_by=ctx.caller.alias, expected_by=expected_by), previous)
-                receipt = _prepare(store, ctx, "task.assign", semantic, raw, task_id, aid, worker.uid, (worker,))
-                return _commit(store, ctx, conn, receipt, raw, check)
+                receipt = _prepare(store, ctx, "task.assign", semantic, (raw,), task_id, aid, worker.uid, (worker,))
+                return _commit(store, ctx, conn, receipt, (raw,), check)
 
 
 def accept(ctx: TaskOperationContext, request_id: str, assignment_id: str) -> TaskOperationResult:
@@ -320,5 +329,68 @@ def accept(ctx: TaskOperationContext, request_id: str, assignment_id: str) -> Ta
                 _identities(ctx, conn, (ctx.caller,))
                 raw = _raw(ctx, request_id, "task", dict(work_item_id=task.task_id,
                            assignment_id=assignment_id, event="accepted", actor=ctx.caller.alias), previous)
-                receipt = _prepare(store, ctx, "assignment.accept", semantic, raw, task.task_id, assignment_id)
-                return _commit(store, ctx, conn, receipt, raw, check)
+                receipt = _prepare(store, ctx, "assignment.accept", semantic, (raw,), task.task_id, assignment_id)
+                return _commit(store, ctx, conn, receipt, (raw,), check)
+
+
+def withdraw(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: str) -> TaskOperationResult:
+    """Cancel open work, including its current assignment; queued work is valid."""
+    _own_fleet(ctx)
+    _reason(reason)
+    semantic = semantic_digest(dict(task_id=task_id, reason=reason))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.withdraw", semantic)
+        with _reader(ctx) as conn:
+            first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                if not task.open:
+                    raise TaskConflictError("terminal task cannot be withdrawn")
+                aid = task.current_assignment.assignment_id if task.current_assignment else None
+                if previous and previous.intent.assignment_id != aid:
+                    raise TaskConflictError("withdrawal's original assignment changed")
+                _identities(ctx, conn, (ctx.caller,))
+                # The reducer's work-level cancellation also closes every
+                # assignment preceding it; an assignment-only cancel queues work.
+                raw = _raw(ctx, request_id, "task", dict(work_item_id=task_id,
+                           event="cancelled", actor=ctx.caller.alias, reason=reason), previous)
+                receipt = _prepare(store, ctx, "task.withdraw", semantic, (raw,), task_id, aid)
+                return _commit(store, ctx, conn, receipt, (raw,), check)
+
+
+def reassign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,
+             reason: str, expected_by: str | None = None) -> TaskOperationResult:
+    """Close the exact current assignment and admit its successor atomically."""
+    _own_fleet(ctx)
+    _reason(reason)
+    worker = _worker(ctx, bot_id)
+    semantic = semantic_digest(dict(task_id=task_id, bot_id=bot_id, reason=reason, expected_by=expected_by))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.reassign", semantic, worker.uid, fact_count=2)
+        with _reader(ctx) as conn:
+            first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                if not task.open or task.current_assignment is None:
+                    raise TaskConflictError("reassignment requires an open task with a current assignment")
+                _identities(ctx, conn, (ctx.caller, worker))
+                _scope_links(ctx, conn, task.project_key, task.workstream_id, task.repo)
+                successor = previous.intent.assignment_id if previous else mint_assignment_id()
+                raws = (
+                    _raw(ctx, request_id, "task", dict(work_item_id=task_id,
+                         assignment_id=task.current_assignment.assignment_id, event="reassigned",
+                         successor_id=successor, actor=ctx.caller.alias, reason=reason), previous),
+                    _raw(ctx, request_id, "assignment", dict(assignment_id=successor, work_item_id=task_id,
+                         assignee=worker.alias, assigned_by=ctx.caller.alias, expected_by=expected_by),
+                         previous, fact_index=1),
+                )
+                # The immutable closure projection freezes both predecessor
+                # and successor. A retry against a replacement cannot prepare
+                # a different closure under this UUID, even when no fact landed.
+                receipt = _prepare(store, ctx, "task.reassign", semantic, raws,
+                                   task_id, successor, worker.uid, (worker,))
+                return _commit(store, ctx, conn, receipt, raws, check)
