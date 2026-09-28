@@ -31,7 +31,7 @@ _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", 
            ("checkin", "selection", "verify"): "checkin.selection.verify",
            ("checkin", "selection", "focus-refs"): "checkin.selection.focus-refs"}
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
-    ("context", ("show",)), ("bot", ("list", "show", "capabilities", "usage")),
+    ("context", ("show",)), ("bot", ("list", "show", "capabilities", "usage", "start", "stop", "restart")),
     ("fleet", ("show", "inbox", "usage")), ("project", ("list", "show")),
     ("task", ("list", "show", "reviews", "admit", "assign", "withdraw", "reassign", "escalate", "nudge")),
     ("assignment", ("show", "deliver", "accept", "progress", "block", "return", "complete", "fail")),
