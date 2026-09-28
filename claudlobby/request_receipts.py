@@ -72,6 +72,34 @@ class StagePlan:
 
 
 @dataclass(frozen=True)
+class NativeDestination:
+    """Exact, nonsecret native target retained without resolving mutable config."""
+
+    root: str
+    fleet: str
+    socket: str
+    session: str
+    tmux_tmpdir: str
+
+
+@dataclass(frozen=True)
+class MessageRouteBinding:
+    """Selection and parties that authorized one immutable message request."""
+
+    activation_id: str
+    plan_id: str
+    release_id: str
+    caller_fleet_uid: str
+    peer_fleet_uid: str
+    caller_alias: str
+    recipient_alias: str
+    manager_uid: str
+    manager_alias: str
+    peer_destination: NativeDestination
+    manager_destination: NativeDestination
+
+
+@dataclass(frozen=True)
 class RequestIntent:
     operation: str
     operation_version: int
@@ -84,6 +112,7 @@ class RequestIntent:
     task_id: str | None = None
     assignment_id: str | None = None
     message_id: str | None = None
+    route: MessageRouteBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -93,11 +122,31 @@ class StageOutcome:
 
 
 @dataclass(frozen=True)
+class TransportObservation:
+    """Nonsecret native result; absence after a reserved attempt means unknown."""
+
+    status: str  # submitted, failed, unknown
+    wire_sha256: str | None = None
+    wire_bytes: int | None = None
+    native_returncode: int | None = None
+
+
+@dataclass(frozen=True)
+class MessageAttempt:
+    attempt_no: int
+    transmission_event_id: str
+    observation: TransportObservation | None = None
+    transmission_fact: ExpectedFact | None = None
+    recording_status: str = "prepared"
+
+
+@dataclass(frozen=True)
 class RequestReceipt:
     request_id: str
     intent: RequestIntent
     stages: tuple[StageOutcome, ...]
     attempt: int = 0
+    message_attempts: tuple[MessageAttempt, ...] = ()
     format_version: int = FORMAT_VERSION
 
 
@@ -124,6 +173,54 @@ def _sha(value):
         raise ReceiptError("invalid receipt digest")
 
 
+def _fact(fact, seen):
+    _id(fact.event_id, "event")
+    _sha(fact.projection_sha256)
+    if fact.family not in FACT_FAMILIES or fact.event_id in seen:
+        raise ReceiptError("invalid or repeated expected fact")
+    if (len(set(fact.fields)) != len(fact.fields)
+            or any(not re.fullmatch(r"[a-z][a-z0-9_]*", field) for field in fact.fields)):
+        raise ReceiptError("invalid expected fact fields")
+    seen.add(fact.event_id)
+
+
+def _native_destination(destination):
+    for value in (destination.root, destination.tmux_tmpdir):
+        if (not isinstance(value, str) or not os.path.isabs(value)
+                or os.path.normpath(value) != value):
+            raise ReceiptError("message route requires canonical absolute native paths")
+    for value, pattern in ((destination.fleet, r"[A-Za-z0-9_-]+"),
+                           (destination.socket, r"[A-Za-z0-9][A-Za-z0-9_.-]*"),
+                           (destination.session, r"[A-Za-z0-9_-]+")):
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise ReceiptError("invalid message native destination")
+
+
+def _message_route(intent):
+    route = intent.route
+    if not isinstance(route, MessageRouteBinding) or intent.recipient_uid is None or intent.message_id is None:
+        raise ReceiptError("message request requires a frozen route, recipient and message ID")
+    for value in (route.activation_id, route.plan_id, route.release_id):
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+            raise ReceiptError("invalid message selection stamp")
+    for value in (route.caller_fleet_uid, route.peer_fleet_uid):
+        _id(value, "fleet")
+    _id(route.manager_uid, "actor")
+    for value in (route.caller_alias, route.recipient_alias, route.manager_alias):
+        if not isinstance(value, str) or not re.fullmatch(r"bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", value):
+            raise ReceiptError("invalid frozen message actor alias")
+    for destination in (route.peer_destination, route.manager_destination):
+        if not isinstance(destination, NativeDestination):
+            raise ReceiptError("message route requires native destinations")
+        _native_destination(destination)
+    if (route.peer_destination.root != route.manager_destination.root
+            or route.peer_destination.fleet != route.recipient_alias.split(":", 1)[1].split("/", 1)[0]
+            or route.peer_destination.session != route.recipient_alias.rsplit("/", 1)[1]
+            or route.manager_destination.fleet != route.manager_alias.split(":", 1)[1].split("/", 1)[0]
+            or route.manager_destination.session != route.manager_alias.rsplit("/", 1)[1]):
+        raise ReceiptError("message route aliases differ from native destinations")
+
+
 def _validate(receipt):
     if type(receipt.format_version) is not int or receipt.format_version != FORMAT_VERSION:
         raise ReceiptError("unsupported request receipt format")
@@ -139,6 +236,15 @@ def _validate(receipt):
         if getattr(intent, field) is not None:
             _id(getattr(intent, field), kind)
     _sha(intent.semantic_sha256)
+    is_message = intent.operation in {"message.send", "message.reply"}
+    if is_message:
+        _message_route(intent)
+        if sum(plan.kind == "delivery" for plan in intent.stages) != 1:
+            raise ReceiptError("message request requires one delivery stage")
+        if any(fact.family == "transmission" for plan in intent.stages for fact in plan.facts):
+            raise ReceiptError("message transmission facts belong to reserved attempts")
+    elif intent.route is not None or receipt.message_attempts:
+        raise ReceiptError("non-message request cannot retain a message route or attempts")
     if type(receipt.attempt) is not int or receipt.attempt < 0 or len(intent.stages) != len(receipt.stages):
         raise ReceiptError("invalid receipt attempt/stages")
     seen = set()
@@ -152,25 +258,86 @@ def _validate(receipt):
         if (outcome.status == "prepared") != (outcome.attempt == 0):
             raise ReceiptError("stage outcome lacks an attempt")
         for fact in plan.facts:
-            _id(fact.event_id, "event")
-            _sha(fact.projection_sha256)
-            if fact.family not in FACT_FAMILIES or fact.event_id in seen:
-                raise ReceiptError("invalid or repeated expected fact")
-            if (len(set(fact.fields)) != len(fact.fields)
-                    or any(not re.fullmatch(r"[a-z][a-z0-9_]*", field) for field in fact.fields)):
-                raise ReceiptError("invalid expected fact fields")
-            seen.add(fact.event_id)
+            _fact(fact, seen)
+    if is_message:
+        delivery = next(outcome for plan, outcome in zip(intent.stages, receipt.stages)
+                        if plan.kind == "delivery")
+        if len(receipt.message_attempts) != receipt.attempt:
+            raise ReceiptError("each message attempt must be durably reserved")
+        for number, item in enumerate(receipt.message_attempts, 1):
+            if type(item.attempt_no) is not int or item.attempt_no != number:
+                raise ReceiptError("message attempts must increase without gaps")
+            _id(item.transmission_event_id, "event")
+            if item.transmission_event_id in seen:
+                raise ReceiptError("repeated message transmission event ID")
+            seen.add(item.transmission_event_id)
+            if item.observation is not None:
+                observation = item.observation
+                if observation.status not in {"submitted", "failed", "unknown"}:
+                    raise ReceiptError("invalid message transport observation")
+                if (observation.wire_sha256 is None) != (observation.wire_bytes is None):
+                    raise ReceiptError("incomplete message wire proof")
+                if observation.wire_sha256 is not None and (
+                        not isinstance(observation.wire_sha256, str)
+                        or not re.fullmatch(r"sha256:[0-9a-f]{64}", observation.wire_sha256)
+                        or type(observation.wire_bytes) is not int or observation.wire_bytes < 0):
+                    raise ReceiptError("invalid message wire proof")
+                if observation.native_returncode is not None and type(observation.native_returncode) is not int:
+                    raise ReceiptError("invalid native return code")
+                if (observation.status == "submitted" and observation.native_returncode != 0
+                        or observation.status == "failed" and (
+                            observation.native_returncode is not None or observation.wire_sha256 is not None)):
+                    raise ReceiptError("message transport observation is inconsistent")
+            if item.recording_status not in _STATUSES["recording"]:
+                raise ReceiptError("invalid message transmission recording status")
+            if item.transmission_fact is not None:
+                fact = item.transmission_fact
+                if fact.event_id != item.transmission_event_id or fact.family != "transmission":
+                    raise ReceiptError("message transmission fact differs from reserved event")
+                if not {"event_id", "host_uid", "fleet_uid", "emitter"} <= set(fact.fields):
+                    raise ReceiptError("message transmission fact lacks a scoped projection")
+                seen.remove(item.transmission_event_id)
+                _fact(fact, seen)
+                if item.observation is None:
+                    raise ReceiptError("transmission fact requires retained transport observation")
+            elif item.recording_status != "prepared":
+                raise ReceiptError("transmission recording status has no expected fact")
+        if receipt.message_attempts:
+            latest = receipt.message_attempts[-1]
+            if latest.attempt_no != receipt.attempt or delivery.attempt != latest.attempt_no:
+                raise ReceiptError("delivery must refer to latest reserved message attempt")
+            expected_status = latest.observation.status if latest.observation is not None else "unknown"
+            if delivery.status not in ({"submitted", "received"} if expected_status == "submitted"
+                                       else {expected_status}):
+                raise ReceiptError("delivery disagrees with retained native observation")
 
 
 def _decode(raw):
     try:
         intent = raw["intent"]
-        intent = RequestIntent(**{**intent, "stages": tuple(
+        route = intent["route"]
+        if route is not None:
+            route = MessageRouteBinding(**{
+                **route,
+                "peer_destination": NativeDestination(**route["peer_destination"]),
+                "manager_destination": NativeDestination(**route["manager_destination"]),
+            })
+        intent = RequestIntent(**{**intent, "route": route, "stages": tuple(
             StagePlan(**{**s, "facts": tuple(ExpectedFact(**{**f, "fields": tuple(f["fields"])})
                                              for f in s["facts"])})
             for s in intent["stages"])})
+        attempts = tuple(MessageAttempt(**{
+            **item,
+            "observation": (TransportObservation(**item["observation"])
+                            if item["observation"] is not None else None),
+            "transmission_fact": (ExpectedFact(**{
+                **item["transmission_fact"],
+                "fields": tuple(item["transmission_fact"]["fields"]),
+            }) if item["transmission_fact"] is not None else None),
+        }) for item in raw["message_attempts"])
         receipt = RequestReceipt(**{**raw, "intent": intent,
-                                   "stages": tuple(StageOutcome(**s) for s in raw["stages"])})
+                                   "stages": tuple(StageOutcome(**s) for s in raw["stages"]),
+                                   "message_attempts": attempts})
         _validate(receipt)
         if json.loads(json.dumps(asdict(receipt))) != raw:
             raise ReceiptError("request receipt fields are incomplete")
@@ -235,11 +402,19 @@ class RequestStore:
                 raw = json.load(stream)
             except (ValueError, UnicodeError) as exc:
                 raise ReceiptError("invalid request receipt") from exc
-        return decode_receipt(raw, request_id=self.path.stem, fleet_uid=self.fleet_uid)
+        receipt = decode_receipt(raw, request_id=self.path.stem, fleet_uid=self.fleet_uid)
+        self._check_route_root(receipt)
+        return receipt
+
+    def _check_route_root(self, receipt):
+        route = receipt.intent.route
+        if route is not None and route.peer_destination.root != str(self.path.parents[3]):
+            raise ReceiptConflict("message route belongs to another request root")
 
     def _save(self, receipt):
         self.assert_locked()
         _validate(receipt)
+        self._check_route_root(receipt)
         temporary = self.path.with_name(f".{self.path.stem}.{uuid4().hex}.tmp")
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
@@ -268,7 +443,105 @@ class RequestStore:
     def begin_attempt(self) -> RequestReceipt:
         """An explicit execution attempt only; inspection/replay lookup never increments."""
         receipt = self._required()
+        if receipt.intent.operation in {"message.send", "message.reply"}:
+            raise ReceiptError("reserve a message attempt and delivery outcome atomically")
         return self._save(replace(receipt, attempt=receipt.attempt + 1))
+
+    def begin_message_attempt(self, transmission_event_id: str, *, retry_uncertain: bool = False) -> RequestReceipt:
+        """Reserve an event ID and unknown delivery in one write BEFORE native send.
+
+        Communication recording may still be pending after this reservation.
+        A crash before the send then leaves delivery conservatively unknown;
+        inspection never infers no send and this store never resends.
+        A prior unknown/failed attempt needs an explicit caller decision. A
+        submitted or received attempt never authorizes another send.
+        """
+        receipt = self._message_required()
+        _id(transmission_event_id, "event")
+        index = self._message_delivery_index(receipt)
+        old = receipt.stages[index]
+        if old.status != "prepared" and not (old.status in {"unknown", "failed"} and retry_uncertain):
+            raise ReceiptConflict("message send requires an explicit uncertain retry or has already submitted")
+        if any(transmission_event_id == fact.event_id for plan in receipt.intent.stages for fact in plan.facts):
+            raise ReceiptConflict("message event ID is already reserved")
+        if any(transmission_event_id == item.transmission_event_id for item in receipt.message_attempts):
+            raise ReceiptConflict("message event ID is already reserved")
+        number = receipt.attempt + 1
+        stages = receipt.stages[:index] + (StageOutcome("unknown", number),) + receipt.stages[index + 1:]
+        return self._save(replace(receipt, attempt=number, stages=stages,
+                                  message_attempts=receipt.message_attempts + (
+                                      MessageAttempt(number, transmission_event_id),)))
+
+    def observe_message_transport(self, attempt_no: int, observation: TransportObservation) -> RequestReceipt:
+        """First post-send durable write; never revise a retained native result."""
+        receipt = self._message_required()
+        index, item = self._message_attempt(receipt, attempt_no)
+        if not isinstance(observation, TransportObservation):
+            raise ReceiptError("message transport observation must be typed and nonsecret")
+        if item.observation is not None:
+            if item.observation != observation:
+                raise ReceiptConflict("message transport observation is immutable")
+            return receipt
+        delivery_index = self._message_delivery_index(receipt)
+        if index != len(receipt.message_attempts) - 1 or receipt.stages[delivery_index].attempt != attempt_no:
+            raise ReceiptConflict("a later attempt superseded this delivery stage")
+        attempts = self._replace_message_attempt(receipt, index, replace(item, observation=observation))
+        stages = (receipt.stages[:delivery_index] + (StageOutcome(observation.status, attempt_no),)
+                  + receipt.stages[delivery_index + 1:])
+        return self._save(replace(receipt, message_attempts=attempts, stages=stages))
+
+    def prepare_message_transmission(self, attempt_no: int, fact: ExpectedFact) -> RequestReceipt:
+        """Freeze the exact observed transmission projection before Plane ingest."""
+        receipt = self._message_required()
+        index, item = self._message_attempt(receipt, attempt_no)
+        if item.observation is None or not isinstance(fact, ExpectedFact):
+            raise ReceiptError("retained native observation and expected fact are required")
+        if fact.event_id != item.transmission_event_id or fact.family != "transmission":
+            raise ReceiptConflict("transmission fact differs from its reserved event")
+        if item.transmission_fact is not None:
+            if item.transmission_fact != fact:
+                raise ReceiptConflict("prepared transmission fact is immutable")
+            return receipt
+        attempts = self._replace_message_attempt(receipt, index, replace(item, transmission_fact=fact))
+        return self._save(replace(receipt, message_attempts=attempts))
+
+    def stage_message_transmission(self, attempt_no: int) -> RequestReceipt:
+        """Mark exact-fact recording unknown BEFORE ingest; never sends payload."""
+        receipt = self._message_required()
+        index, item = self._message_attempt(receipt, attempt_no)
+        if item.transmission_fact is None or item.recording_status not in {"prepared", "unrecorded"}:
+            raise ReceiptConflict("transmission requires a prepared fact and reconciliation")
+        attempts = self._replace_message_attempt(receipt, index, replace(item, recording_status="unknown"))
+        return self._save(replace(receipt, message_attempts=attempts))
+
+    def message_transmission_outcome(self, attempt_no: int, status: str) -> RequestReceipt:
+        """Retain caller-proven exact-fact reconciliation, not transport claims."""
+        receipt = self._message_required()
+        index, item = self._message_attempt(receipt, attempt_no)
+        if status not in {"unknown", "committed", "unrecorded"} or item.recording_status != "unknown":
+            raise ReceiptConflict("transmission recording needs a staged, reconciled outcome")
+        attempts = self._replace_message_attempt(receipt, index, replace(item, recording_status=status))
+        return self._save(replace(receipt, message_attempts=attempts))
+
+    def _message_required(self):
+        receipt = self._required()
+        if receipt.intent.operation not in {"message.send", "message.reply"}:
+            raise ReceiptError("message attempt is only valid for message requests")
+        return receipt
+
+    @staticmethod
+    def _message_delivery_index(receipt):
+        return next(i for i, plan in enumerate(receipt.intent.stages) if plan.kind == "delivery")
+
+    @staticmethod
+    def _message_attempt(receipt, attempt_no):
+        if type(attempt_no) is not int or not 1 <= attempt_no <= len(receipt.message_attempts):
+            raise ReceiptError("unknown message attempt")
+        return attempt_no - 1, receipt.message_attempts[attempt_no - 1]
+
+    @staticmethod
+    def _replace_message_attempt(receipt, index, value):
+        return receipt.message_attempts[:index] + (value,) + receipt.message_attempts[index + 1:]
 
     def _required(self):
         receipt = self.load()
