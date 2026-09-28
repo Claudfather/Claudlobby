@@ -439,7 +439,10 @@ class TestSystemYamlIsPackaged:
         # The measured route into the torn state: system.yaml was absent from
         # package-data, so a built wheel shipped without it and every
         # non-editable install read empty system defaults.
-        import tomllib
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # supported Python 3.10; declared dev extra
+            import tomli as tomllib
 
         root = Path(__file__).resolve().parent.parent
         data = tomllib.loads((root / "pyproject.toml").read_text())
