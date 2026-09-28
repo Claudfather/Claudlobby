@@ -49,6 +49,25 @@ To recover a host that already lost the job, once this is installed there:
 confirm no reload is running, remove the stale `state/reload-fleet.lock.d`,
 and run `lib/setup-fleet <fleet> --jobs-only` from a shell for each fleet.
 
+### Fixed — `plane-lookup.py --received` refuses a malformed message id instead of waiting it out (#1946)
+
+`--received <msg_id>` accepted any string, and when it could never match
+anything it waited the full `--wait` and answered rc 1 -- indistinguishable
+from "the receipt has not landed yet". A receiver who took the id as
+everything after `msg_` (the hex, prefix stripped) rather than everything
+after `plane:` held a genuine dispatch and asked back twice before the
+mistake was found. #1927 fixed this door's two `--destination`-shape cases
+and named this one explicitly out of scope.
+
+- rc 2 now, before any wait: `--received` must be `msg_` plus 32 lowercase
+  hex -- the shape `claudlobby/plane/ids.py`'s own `ID_PATTERNS["msg"]`
+  mints -- or the door refuses and names both the value it got and the
+  expected shape. A malformed id can never match a real receipt, so nothing
+  is lost by refusing before the wait rather than after it.
+- The verify-then-trust guidance every bot carries (#1876) now says plainly
+  that the id is everything between `plane:` and the closing bracket, `msg_`
+  included, never the hex alone.
+
 ### Changed — the bracket-tag, anchored verdict header is taught wherever a reviewer or a manager learns the format (#1913)
 
 `lib/pr-review-state.py` reads `**[name] [VERDICT] x** — reviewed at <sha>` and attributes
