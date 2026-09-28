@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
@@ -170,7 +171,11 @@ def test_owned_recording_reaches_real_cold_cli(tmp_path, scratch_plane_env, sent
     monkeypatch.setenv("PLANE_EMIT_CLI", str(sentinel["cli"]))
     root = tmp_path / "recording"
     root.mkdir()
-    env = constructed_env(HOME=tmp_path / "home", **scratch_plane_env(root))
+    stale = tmp_path / "stale-bin"
+    stale.mkdir()
+    (stale / "claudlobby").symlink_to(sentinel["cli"])
+    env = constructed_env(PATH=f"{stale}:{os.environ['PATH']}", **scratch_plane_env(root))
+    assert shutil.which("claudlobby", path=env["PATH"]) == str(stale / "claudlobby")
     if default_on:
         env.pop("PLANE_EMIT_DISABLED")
     result = _emit(env)
@@ -181,6 +186,33 @@ def test_owned_recording_reaches_real_cold_cli(tmp_path, scratch_plane_env, sent
         rows = conn.execute("SELECT msg_id, sender_alias, message_class FROM communications").fetchall()
     assert [tuple(row) for row in rows] == [(MSG_ID, "bot:scratch/test", "notice")]
     _assert_untouched(sentinel)
+
+
+def test_child_home_and_config_are_private(tmp_path):
+    env = constructed_env()
+    for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "TMPDIR"):
+        assert Path(env[key]).is_relative_to(tmp_path)
+        assert Path(env[key]).is_dir()
+    result = subprocess.run(
+        [sys.executable, "-c", "from pathlib import Path; print(Path.home())"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.strip() == env["HOME"]
+
+
+def test_wrong_package_origin_refuses_before_collection(tmp_path):
+    # A preloaded/stale package must not let cwd disguise the tree being tested.
+    probe = (
+        "import runpy, sys, types\n"
+        "package = types.ModuleType('claudlobby')\n"
+        f"package.__file__ = {str(tmp_path / 'other/claudlobby/__init__.py')!r}\n"
+        "sys.modules['claudlobby'] = package\n"
+        f"runpy.run_path({str(REPO / 'tests/conftest.py')!r})\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], cwd=tmp_path,
+                            env=constructed_env(), capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "test package origin does not match the tree under test" in result.stderr
 
 
 def test_factory_rejects_unowned_and_symlink_destinations(tmp_path, scratch_plane_env):

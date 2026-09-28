@@ -27,5 +27,11 @@ jobs:
         # (tracked in the issue thread for #229). The rest of the suite must
         # stay green.
         run: |
-          .venv/bin/python -m pytest -v \
+          test_scratch="$(mktemp -d)"
+          mkdir -p "$test_scratch"/{home,tmp,config,cache,state,data}
+          env HOME="$test_scratch/home" TMPDIR="$test_scratch/tmp" \
+            XDG_CONFIG_HOME="$test_scratch/config" XDG_CACHE_HOME="$test_scratch/cache" \
+            XDG_STATE_HOME="$test_scratch/state" XDG_DATA_HOME="$test_scratch/data" \
+            PLANE_EMIT_DISABLED=1 \
+            .venv/bin/python -m pytest -v \
             --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn
