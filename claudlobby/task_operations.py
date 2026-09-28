@@ -44,6 +44,7 @@ class TaskOperationContext:
     fleet_uid: str
     caller: TaskActor
     bots: Mapping[str, TaskActor]
+    caller_fleet_uid: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "bots", MappingProxyType(dict(self.bots)))
@@ -53,6 +54,11 @@ class TaskOperationContext:
                 raise TaskQueryError("operation context requires canonical frozen identities")
         if any(not isinstance(actor.alias, str) or not actor.alias for actor in (self.caller, *self.bots.values())):
             raise TaskQueryError("operation context requires existing actor aliases")
+        if self.caller.alias.startswith("bot:") and self.caller_fleet_uid is None:
+            object.__setattr__(self, "caller_fleet_uid", self.fleet_uid)
+        if self.caller_fleet_uid is not None and (not isinstance(self.caller_fleet_uid, str)
+                or not re.fullmatch(ID_PATTERNS["fleet"], self.caller_fleet_uid)):
+            raise TaskQueryError("operation context requires a canonical caller fleet")
 
     @property
     def root(self) -> Path:
@@ -137,7 +143,14 @@ def _identities(ctx, conn, actors):
     for kind, alias, uid in expected:
         row = conn.execute("SELECT uid, parent_uid FROM identity_registry WHERE kind=? AND alias=?",
                            (kind, alias)).fetchone()
-        if row is None or row[0] != uid or kind == "actor" and row[1] not in (None, ctx.fleet_uid):
+        parent = ctx.caller_fleet_uid if kind == "actor" and alias == ctx.caller.alias else ctx.fleet_uid
+        if kind == "actor" and alias.startswith("bot:") and alias == ctx.caller.alias:
+            origin = conn.execute("SELECT alias FROM identity_registry WHERE kind='fleet' AND uid=?",
+                                  (parent,)).fetchone()
+            if origin is None or not alias.startswith(f"bot:{origin[0]}/"):
+                raise TaskConflictError("frozen caller origin is absent or changed")
+        if (row is None or row[0] != uid or kind == "actor" and not alias.startswith("human:")
+                and row[1] not in (None, parent)):
             raise TaskConflictError("frozen identity is absent, foreign or changed")
 
 
@@ -264,6 +277,8 @@ def admit(ctx: TaskOperationContext, request_id: str, *, title: str, body: str |
 def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,
            expected_by: str | None = None) -> TaskOperationResult:
     """Route one queued task, serialized with every other supported task mutation."""
+    if ctx.caller.alias.startswith("bot:") and ctx.caller_fleet_uid != ctx.fleet_uid:
+        raise TaskConflictError("bot caller may assign only within its origin fleet")
     worker = _worker(ctx, bot_id)
     semantic = semantic_digest(dict(task_id=task_id, bot_id=bot_id, expected_by=expected_by))
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
