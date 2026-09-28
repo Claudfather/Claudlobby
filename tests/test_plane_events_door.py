@@ -501,7 +501,7 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     assert "UNREACHABLE" not in after.stderr
     n = _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 2)
     assert n >= 2, n                                                 # one sweep, two bots, on the plane
-    summary = (root / "state" / "pulse" / "pulse-summary.txt").read_text()
+    summary = (root / "state" / "pulse" / f"{F}.pulse-summary.txt").read_text()
     assert "session_missing" in summary and "unknown" not in summary
 
     # the plane UNREACHABLE under the declared flip: NOT the files (they hold
@@ -510,7 +510,7 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     # readers ask, and the cold CLI would re-create an absent db as an EMPTY
     # plane whose "not declared" answer is the files again — so the db path is
     # made unopenable (a directory), the shape a wedged disk presents.
-    (root / "state" / "pulse" / "escalation_session_missing").unlink()
+    (root / "state" / "pulse" / f"{F}.escalation_session_missing").unlink()
     capture.write_text("")
     _drop_plane(root)
     (root / "state" / "plane" / "plane.db").mkdir()
@@ -519,10 +519,11 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     assert "UNREACHABLE" in dark.stderr and "cannot be judged this pass" in dark.stderr
     # the escalation loop never reaches for a cache no read produced (a read
     # regardless of the verdict would be a bash redirect error on a missing file)
-    assert ".critical-window" not in dark.stderr and "No such file" not in dark.stderr
+    # (the cache is the pass's own temp file, so the check is on the error, not its name)
+    assert "No such file" not in dark.stderr
     paged = capture.read_text()
     assert "events reader for f is UNREACHABLE" in paged and page not in paged, paged
-    summary = (root / "state" / "pulse" / "pulse-summary.txt").read_text()
+    summary = (root / "state" / "pulse" / f"{F}.pulse-summary.txt").read_text()
     assert "unknown (events reader unreachable)" in summary and " none" not in summary
 
 

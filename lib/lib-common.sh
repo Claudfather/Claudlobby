@@ -2324,11 +2324,27 @@ _PANE_SEND_SETTLE_DEFAULT=0.3
 # the NEW bytes on overflow, so the Pi shows the mirror symptom — tail loss
 # above 4 KB — of the same primitive.)
 #
-# 900 leaves ~120 bytes of headroom under the 1024 the queue holds, so a chunk
-# cannot fill it even accounting for what the reader has not yet drained; the
-# settle then gives the reader a window to empty the queue before the next chunk
-# lands. Measured on this host by lib/send-size-probe.sh, which is the A/B
-# instrument for exactly this pair of knobs.
+# A chunk well under the 1024 the queue holds cannot fill it even accounting for
+# what the reader has not yet drained, and the settle gives the reader a window
+# to empty the queue before the next chunk lands.
+#
+# 400, not the 900 that limit allowed (#1876), because a stricter one sits in
+# the READER. Claude Code's TUI takes any single read() of MORE THAN 800 bytes
+# as a paste, and on a session whose server-assigned framing flag is on (the
+# fleet's are) it submits the paste inside <pasted_content> tags, which the
+# harness tells the model to treat as text the user may not have written. At
+# 900 the first chunk of every long dispatch, envelope and task id included,
+# arrived framed. Measured by lib/send-size-probe.sh on the Pi (Linux, claude
+# 2.1.281): 800 bytes in one read never framed and 801 always did; at 400
+# nothing framed at any payload size while the reader kept up. A reader that
+# falls behind merges chunks into one read: two merged chunks total 800 and stay
+# unframed, three (a reader ~0.3s behind; measured with an injected 0.6s read
+# delay) are framed. So the cap lowers the rate, and the receiver's own check,
+# "verify, then trust" in the dispatch protocol, covers the rest.
+# BOUNDS: Linux only; the threshold is the receiving binary's and bites only
+# while that flag is on; macOS is unmeasured, and its 1024-byte queue above is
+# the older limit this cap also stays under. The cost is settles: a 2,000-byte
+# dispatch now crosses in 5 chunks instead of 3.
 #
 # PANE_SEND_CHUNK_BYTES=0 restores the legacy single unchunked send-keys. It
 # exists for ONE reason — the probe's control arm, which has to drive the real
@@ -2343,7 +2359,7 @@ _PANE_SEND_SETTLE_DEFAULT=0.3
 # docs all name it — and the door says so on stderr each time it runs
 # unchunked, because a silent restoration of a send that loses data is the
 # shape this whole chunk exists to end.
-_PANE_SEND_CHUNK_BYTES_DEFAULT=900
+_PANE_SEND_CHUNK_BYTES_DEFAULT=400
 _PANE_SEND_CHUNK_SETTLE_DEFAULT=0.15
 # The 64 UTF-8 continuation bytes (0x80-0xBF) as one literal string — the
 # membership set the splitter tests a candidate boundary byte against. Built

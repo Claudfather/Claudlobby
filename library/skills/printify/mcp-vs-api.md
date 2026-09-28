@@ -35,5 +35,5 @@ Both resolve `${PRINTIFY_API_KEY}` / `${PRINTIFY_SHOP_ID}` at runtime from the p
 
 ## Related
 - `library/skills/printify/SKILL.md` — this REST actuator (reads + draft-first writes).
-- `library/mcp/printify.json` — the MCP fragment. The shipped default is upstream `npx printify-mcp`; a fleet running a patched build points its overlay fragment at that build instead.
+- `library/mcp/printify.json` — the MCP fragment. The shipped default is upstream `npx @tsavo/printify-mcp@0.1.1`; a fleet running a patched build points its overlay fragment at that build instead.
 - `library/skills/README.md` — the skill-authoring conventions this skill follows.

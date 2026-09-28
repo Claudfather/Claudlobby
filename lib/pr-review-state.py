@@ -40,6 +40,13 @@ actually checked.
 already drifted twice — a fleet adopted ``**[name] [VERDICT] approve**`` in an
 afternoon and every PR read UNPARSED; then ``**Blocking — do not merge yet.**``
 went unread because ``block`` was not a verdict token (fixed #1700).
+And it never read the vocabulary the library itself teaches: two of the four
+verdicts in ``library/protocols/review-flow.md`` (and
+``library/expertise/code-review.md``), ``Mechanical fixes`` and
+``Architectural concerns``, were not tokens until #1895. Both mean "do not
+merge yet", and on a 1,506-event corpus 29 of them read as nothing, as a block
+only by matching an unrelated later bold span, or once (Claudlobby#465) as
+APPROVE.
 
 The runtime guard is verbatim-on-unmatched so drift is *visible* — **but that
 claim was measured FALSE in its first form and is only true now because there
@@ -170,9 +177,21 @@ from datetime import datetime, timezone
 #: false-negative one. Those headers are caught by the drift channel below
 #: instead, which is the honest place: it says "this is a decision I could not
 #: classify" without risking classifying it wrong.
+#:
+#: ``mechanical fixes`` and ``architectural concerns`` joined in #1895: the two of
+#: the four verdicts ``library/protocols/review-flow.md`` step 5 teaches that the
+#: set had never held. Both map to REQUEST-CHANGES, and the reviewer's own words
+#: travel beside the state (``verdict_words``). Once the author pushes, an
+#: anchored one reads COMMIT-STALE, the manager's cue to re-check. The block
+#: itself clears only when the reviewer's later verdict supersedes it, which needs
+#: attribution: measured on Claudlobby#1823, ``1 stale, 1 blocking`` without
+#: ``--attribute`` and ``0 blocking`` with it (the unattributable case is #1691).
+#: ``[\s-]+`` mirrors ``request[\s-]+changes``, so the bracket-tagged family's
+#: ``mechanical-fixes`` reads too; no live verdict spells it that way yet.
 VERDICT_HEADER = re.compile(
     r"\*\*[^*\n]{0,40}?(?:verdict:?\s*\]?\s*|\[verdict\]\s*)?"
     r"(approve|ship it|request[\s-]+changes"
+    r"|mechanical[\s-]+fixes|architectural[\s-]+concerns"
     r"|(?<!non-)(?<!non )(?<!un)block(?:ing|ed)?\b(?!\s+on\b))"
     r"\s*[.!:]?\s*[^*\n]{0,40}?\*\*",
     re.I,
@@ -305,6 +324,7 @@ DECISION_SHAPED = re.compile(
 )
 
 NORM = {"approve": "APPROVE", "ship it": "APPROVE", "request changes": "REQUEST-CHANGES",
+        "mechanical fixes": "REQUEST-CHANGES", "architectural concerns": "REQUEST-CHANGES",
         "block": "REQUEST-CHANGES", "blocking": "REQUEST-CHANGES",
         "blocked": "REQUEST-CHANGES"}
 
@@ -442,6 +462,18 @@ def parse_verdict(body: str) -> str | None:
     return NORM.get(re.sub(r"[\s-]+", " ", match.group(1).lower()))
 
 
+def verdict_words(body: str) -> str | None:
+    """The verdict as the reviewer wrote it (``Mechanical fixes``), or None.
+
+    ``parse_verdict`` maps three of the four taught verdicts onto REQUEST-CHANGES.
+    The words are what still tell a manager which one it is: a send-back
+    (``Mechanical fixes``), a substantive objection (``Request changes``), or an
+    escalation to the manager and a human (``Architectural concerns``, #1895).
+    """
+    match = VERDICT_HEADER.search(body or "")
+    return match.group(1) if match else None
+
+
 def parse_anchor(body: str) -> str | None:
     """The SHA the reviewer said they read, or None. Verb-anchored — see SHA_ANCHOR."""
     match = SHA_ANCHOR.search(body or "")
@@ -516,6 +548,7 @@ def verdict_events(events: list[dict], ledger_identity: dict | None = None) -> l
             {
                 **event,
                 "verdict": verdict,
+                "said": verdict_words(event["body"]),
                 "reviewer": who,
                 "identity_note": identity_flag,
                 "anchor": parse_anchor(event["body"]),
@@ -623,7 +656,8 @@ def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: boo
         "head": head,
         "events": len(events),
         "verdicts": len(vevents),
-        "resolved": {k: {"verdict": v["verdict"], "anchor": v["anchor"], "ts": v["ts"]}
+        "resolved": {k: {"verdict": v["verdict"], "said": v["said"], "anchor": v["anchor"],
+                         "ts": v["ts"]}
                      for k, v in resolved.items()},
         "blocking": [e["reviewer"] for e in blocking],
         "stale": [{"reviewer": e["reviewer"], "anchor": e["anchor"]} for e in stale],
@@ -870,7 +904,7 @@ def render(results: list[dict], canonical: bool) -> str:
         parts = []
         for reviewer, info in sorted(r["resolved"].items()):
             anchor = info["anchor"][:7] if info["anchor"] else "no-anchor"
-            parts.append(f"{reviewer}={info['verdict']}@{anchor}")
+            parts.append(f'{reviewer}={info["verdict"]}("{info["said"]}")@{anchor}')
         lines.append(
             f"  #{r['number']:<5} head={head}  events={r['events']:<3} "
             f"{' '.join(parts) or '(no parseable verdict)'}"
@@ -929,6 +963,11 @@ _SELFTEST_CASES = [
      "blocking finding directly.\n\n- swapped the pre-fix (7a49f7c) doc back in",
      APPROVE, "b27ffc2"),
     ("**Verdict: Ship it**", APPROVE, None),
+    # With the line above: the four verdicts library/protocols/review-flow.md
+    # teaches, verbatim. Two of them read as nothing until #1895.
+    ("**Verdict: Mechanical fixes**", BLOCK, None),
+    ("**Verdict: Request changes**", BLOCK, None),
+    ("**Verdict: Architectural concerns**", BLOCK, None),
     ("**[branden] [VERDICT] approve** reviewed against `ee29406`", APPROVE, "ee29406"),
     ("**Merge note**\n\nThe reviewer will approve once CI clears.\n\n**Status**",
      None, None),

@@ -167,6 +167,20 @@ def _window_seconds(since) -> float | None:
 def cmd_events(args) -> int:
     """CLI entry point for ``claudlobby events``."""
     from ._helpers import _resolve_paths
+    from .checkins import _since
+
+    # #1896: the reader compares instants, so the window crosses as one. A bare
+    # `24h` handed on as text came back as UNREACHABLE (rc 3), a refusal that
+    # blamed the plane for the caller's input. The coverage line keeps the text
+    # as typed: measured against the instant a few ms later, `24h` reads "1.0d".
+    typed = getattr(args, "since", None)
+    since = None
+    if typed:
+        try:
+            since = _since(typed).isoformat()
+        except ValueError as exc:
+            print(f"claudlobby events: {exc}", file=sys.stderr)
+            return 2
 
     paths = _resolve_paths(args)
     conn, note = plane_events_conn(paths)
@@ -181,10 +195,10 @@ def cmd_events(args) -> int:
     try:
         events = collect_plane_events(conn, paths, bot=args.bot, event_type=args.type,
                                       source=args.source, critical_only=args.critical,
-                                      since=getattr(args, "since", None))
+                                      since=since)
         # #1658: same connection that served the events, so the line cannot
         # describe a different plane than the rows above it.
-        cov = _events_coverage_line(conn, paths, getattr(args, "since", None))
+        cov = _events_coverage_line(conn, paths, typed)
     except RuntimeError as exc:
         print(f"claudlobby events: UNREACHABLE — {exc}", file=sys.stderr)
         return 3

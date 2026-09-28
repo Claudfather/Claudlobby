@@ -100,6 +100,10 @@ def test_exactly_the_categories_that_ship_off():
                       # category, not a new one: armed, vault-sync commits and
                       # pushes the vault on every host it runs on.
                       "vault-sync",
+                      # mutates operator source, the same category again:
+                      # armed, pull-root fast-forwards the install every bot
+                      # on the host runs (#1251).
+                      "pull-root",
                       # model spend — same class as code-audit-sweep /
                       # session-digest, not a new category
                       "manager-checkin",
@@ -138,7 +142,20 @@ def test_exactly_the_categories_that_ship_off():
                       # GENERATE for every fleet. The offline half of the same
                       # check ships on precisely because it takes that
                       # dependency away.
-                      "mcp-package-probe"}
+                      "mcp-package-probe",
+                      # #1665, the #1265 arrival category, and NOT by the
+                      # "any compositor change" reading mcp-package-probe's
+                      # note warns against. Composed CLAUDE.md text reaches a
+                      # running bot only at its next restart, which is a gate a
+                      # human chooses; a composed DENY binds on the bot's next
+                      # tool call with no restart at all (measured, CLAUDE.md's
+                      # runtime-model note), and the nightly reload-fleet
+                      # generate composes onto every bot of every fleet with
+                      # nobody choosing to. So between merge and enforcement
+                      # there is no step at which one bot could go first but
+                      # the manifest, per bot. Nothing from the four list: it
+                      # only ever narrows what a bot's own tools may touch.
+                      "shared-config-isolation"}
     for s in sw.SWITCHES:
         if s.polarity == sw.OPT_IN:
             assert s.why_opt_in, f"{s.key} ships off with no stated reason"

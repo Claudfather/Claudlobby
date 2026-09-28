@@ -1263,8 +1263,10 @@ class TestClaudronDoor:
         self._no_cli_on_path(tmp_path, monkeypatch)
         self._wire(fleet_dir, self._vault(tmp_path))
         warnings = self._warnings(fleet_dir)
+        # A host fact every vault-wired bot shares: one line naming the bots.
         assert any(
-            "bot 'lead'" in w and "claudron CLI is not on PATH" in w for w in warnings
+            "claudron CLI is not on PATH" in w and "affects 1 bot(s): lead" in w
+            for w in warnings
         ), warnings
         # The message names the door, and where the door is documented.
         assert any("docs/INTEGRATION.md" in w for w in warnings), warnings
@@ -2130,7 +2132,7 @@ class TestGithubAppWarnings:
 
 class TestExpertiseGrantValidation:
     """Expertise declares deny-capable ``permissions:`` exactly as guardrails do, and
-    was the one grant-declaring source ``_grant_shape_warnings`` never ran on (#913).
+    was the one grant-declaring source ``_warn_grant_shapes`` never ran on (#913).
 
     The shipped library grants bare ``Bash`` from expertise in 14 of its 19 expertise
     files, so the validator forbade from three doors what the library does through a

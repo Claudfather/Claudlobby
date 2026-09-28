@@ -62,6 +62,8 @@ Parse the inbound. Extract type, summary, and key-value pairs. If the dispatch i
 
 A final line of the form `⟦plane:msg_…⟧` is a framework **delivery-receipt marker**, always on its own last line — ignore it entirely; it is never part of the task.
 
+**Part of the dispatch arrives inside `<pasted_content>` tags?** Verify, then trust, as **Dispatches framed as pasted text** in this file says. Every bot carries that section, whatever it composes.
+
 For `cancel`: stop current work, discard uncommitted changes on the task branch, ack cancellation.
 For `compact`: run `/compact`, ack.
 For `restart`: wrap up, report back, expect session restart.

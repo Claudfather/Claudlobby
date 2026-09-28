@@ -305,7 +305,8 @@ a payload over 1 KB handed to one `tmux send-keys` overflowed the pane's 1024-by
 pty input queue, which on macOS FLUSHES rather than drops, so 85 of 180 large
 sends arrived with their head — envelope and task id included — gone, all of them
 recorded `pane_submitted` (#1493). `pane_send_verified` now writes the payload in
-900-byte chunks with a short settle between them, and `lib/send-size-probe.sh`
+400-byte chunks with a short settle between them (900 until #1876, which found
+the receiving TUI frames any read over 800 bytes as pasted text), and `lib/send-size-probe.sh`
 measures the result against the recipient's own transcript. The wider point stands
 unchanged and is the reason this paragraph is in a lifecycle doc: `pane_submitted`
 is a **sender-side inference**, not an observation of arrival.

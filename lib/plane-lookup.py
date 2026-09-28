@@ -184,7 +184,34 @@ def _received(a) -> int:
     that merely QUOTES the trailer files it under another bot), rc 1 when none
     has by then, rc 4 when <bot> has never recorded a receipt
     at all (its hook is not armed, so an absence proves nothing), rc 3
-    unreachable."""
+    unreachable.
+
+    --verdict (#1876) also prints `<verdict> <sender>` once the receipt is
+    found: the plane's delivery verdict for this msg id and the alias that
+    RECORDED sending it. It is what a receiver checks before treating a
+    paste-framed dispatch as its manager's: a trailer is plain text and the hook
+    records a receipt for any prompt that ends in one, so only a recorded send
+    whose verdict is `delivered` proves the bytes are the sender's. The verdict
+    is waited on too, within the same --wait: most receipts land BEFORE the
+    sender's own wire proof (193 of 247 on the Pi), and until it lands there is
+    nothing to compare. `unknown -` = no send recorded under this id; a verdict
+    still unconfirmed when the wait runs out prints as it stands. No --verdict,
+    no output: pane_await_receipt reads the exit code alone."""
+    deadline = time.monotonic() + a.wait
+
+    def say(pr, conn):
+        v = None
+        while True:
+            row = conn.execute(pr.DELIVERY_SQL.format(ph="?"), (a.received,)).fetchone()
+            v = row[3] if row else None
+            if v in ("delivered", "truncated", "altered") or time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+        who = conn.execute("SELECT sender_alias FROM communications WHERE msg_id = ?",
+                           (a.received,)).fetchone()
+        print(f"{v or 'unknown'} {who[0] if who else '-'}")
+        return 0
+
     def fn(pr, conn):
         sql = ("SELECT 1 FROM events WHERE kind = 'transmission' AND event = 'received'"
                " AND json_extract(detail, '$.destination') = ? {} ORDER BY ingest_seq DESC LIMIT 1")
@@ -192,14 +219,13 @@ def _received(a) -> int:
         def got():
             return conn.execute(sql.format("AND msg_id = ?"), (a.destination, a.received)).fetchone()
         if got():
-            return 0
+            return say(pr, conn) if a.verdict else 0
         if not conn.execute(sql.format(""), (a.destination,)).fetchone():
             return 4
-        deadline = time.monotonic() + a.wait
         while time.monotonic() < deadline:
             time.sleep(0.25)
             if got():
-                return 0
+                return say(pr, conn) if a.verdict else 0
         return 1
     return _with_plane(a.root, fn)
 
@@ -264,6 +290,9 @@ def main(argv=None) -> int:
                     help="rc 0 once the receiver's `received` row for this msg id is on the plane, rc 1"
                     " when none by --wait, rc 4 when --destination never recorded one (#1099)")
     ap.add_argument("--destination", default=None)
+    ap.add_argument("--verdict", action="store_true",
+                    help="--received: also print `<verdict> <sender>` for a found receipt — the"
+                    " check a receiver runs before trusting a paste-framed dispatch (#1876)")
     ap.add_argument("--wait", type=float, default=0)
     ap.add_argument("--fleet", default=None)
     ap.add_argument("--bot", default=None)

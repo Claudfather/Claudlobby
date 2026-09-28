@@ -128,12 +128,17 @@ ENV_HOST = "host/root .env"
 BOT_CONF = "fleet.yaml env: → bot.conf"
 ENROLL_HOST = "system.yaml enroll"
 ENROLL_FLEET = "fleet.yaml"
+#: A per-bot manifest key the composer reads and nothing else: no unit, so no
+#: setup run. What it composes takes effect with no restart (a composed deny
+#: binds on the bot's next tool call), which is why its arm line says to stage
+#: one bot first.
+COMPOSE_BOT = "fleet.yaml bots.<bot> → generate"
 
 #: Carriers whose scope is a FLEET. A host-wide run (``lib/setup-system``,
 #: ``plane doctor`` without ``--fleet``) has not read these, and saying so is
 #: the whole of F5: an unread scope reported as "shipped default" is an
 #: assertion about something nobody looked at.
-FLEET_SCOPED_CARRIERS = frozenset({ENV_FLEET, BOT_CONF, ENROLL_FLEET})
+FLEET_SCOPED_CARRIERS = frozenset({ENV_FLEET, BOT_CONF, ENROLL_FLEET, COMPOSE_BOT})
 
 _ENV_WHERE = {
     ENV_FLEET: "the fleet-tier .env",
@@ -204,6 +209,15 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
                     f"{var}=1 in {where} — the ruled harness exemption;"
                     " silences EVERY door at once")
         return f"unset {var} — on by default", f"{var}=0 in {where}"
+    if sw.carrier == COMPOSE_BOT:
+        return (
+            f"bots.<bot>.{sw.config}: true in fleet.yaml for ONE bot first, then"
+            " claudlobby --fleet <fleet> generate --bot <bot> (it binds on that"
+            f" bot's next tool call, no restart); widen to defaults.{sw.config}"
+            " once it has run clean",
+            f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
+            " generate (off on the next tool call, no restart)",
+        )
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
         return (
@@ -438,6 +452,19 @@ SWITCHES: tuple[Switch, ...] = (
              "ONCE on a state change",
     ),
     Switch(
+        key="pull-root",
+        scope=HOST_JOB,
+        polarity=OPT_IN,
+        carrier=ENROLL_HOST,
+        job="pull-root",
+        why_opt_in="mutates operator source: it fast-forwards the install every "
+                   "bot on the host runs",
+        what="daily 07:00 fast-forward of $CLAUDLOBBY_ROOT, a plane daemon and "
+             "view restart when claudlobby/ moved, a 15-minute watch that pages "
+             "on a regression, one source_pull record per run; a hold in the "
+             "host override pins a commit",
+    ),
+    Switch(
         key="update-siblings",
         scope=HOST_JOB,
         polarity=OPT_IN,
@@ -561,6 +588,24 @@ SWITCHES: tuple[Switch, ...] = (
         what="page the manager when a worker sits idle with nothing "
              "assigned — the mirror of the overdue-dispatch watchdog, for "
              "an empty assignment rather than a stale one",
+    ),
+    Switch(
+        key="shared-config-isolation",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=COMPOSE_BOT,
+        config="isolation.shared_config",
+        why_opt_in="no deployment gate: a composed deny binds on the bot's next "
+                   "tool call with no restart in between, and the nightly "
+                   "reload-fleet generate would carry a default-on rule set onto "
+                   "every bot of every fleet with nobody choosing to — the "
+                   "manifest is the only place one bot can go first",
+        what="compose the Layer 0b deny rules (#1665): other bots' transcripts "
+             "and Telegram dirs, the shared history, credential and account "
+             "config, every .env tier, and Edit on the install's code and the "
+             "shared settings — a guard on Claude's own tools against "
+             "ACCIDENTAL reads, not a boundary a process running as the same "
+             "user respects",
     ),
     Switch(
         key="boot-brief",
@@ -755,12 +800,26 @@ def _env_state(cascade, sw: Switch) -> tuple[bool | None, str]:
 
 
 def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
-                  sweep_on: bool | None) -> tuple[bool | None, str]:
+                  sweep_on: bool | None,
+                  isolation: tuple[list[str], int] | None = None,
+                  ) -> tuple[bool | None, str]:
     """(enrolled, where) from the composed manifests' own config truth."""
     if sw.key == "code-audit-sweep":
         if sweep_on is None:
             return None, ""
         return sweep_on, "fleet.yaml sweep:"
+    if sw.key == "shared-config-isolation":
+        # PER BOT, so neither an env var nor a job can say it: read every
+        # bot's own resolved value. On means on for at least one bot, and the
+        # source names which, because a canary is exactly one bot of many.
+        if isolation is None:
+            return None, ""
+        on, total = isolation
+        if not on:
+            return False, "fleet.yaml"
+        shown = ", ".join(on[:4]) + (f" (+{len(on) - 4} more)" if len(on) > 4 else "")
+        return True, (f"fleet.yaml isolation.shared_config — {len(on)} of"
+                      f" {total} bot(s): {shown}")
     if not sw.job:
         return None, ""
     if sw.scope == HOST_SERVICE:
@@ -829,17 +888,21 @@ def resolve(
                             " is shown, not the shipped default")
     fleet_jobs: dict = {}
     sweep_on: bool | None = None
+    isolation: tuple[list[str], int] | None = None
     if fleet is not None:
         # FleetConfig.defaults IS the merged system<fleet tier (config.py
         # writes it there), so a fleet's `enroll: true` override is already
         # folded in — re-merging here would be a second copy of that rule.
         fleet_jobs = (getattr(fleet, "defaults", None) or {}).get("jobs") or {}
         sweep_on = fleet.sweep_enabled()
+        isolation = (sorted(b.bot_id for b in fleet.bots.values()
+                            if b.isolation.shared_config), len(fleet.bots))
 
     rows: list[SwitchState] = []
     for sw in SWITCHES:
         env_on, tier = _env_state(cascade, sw)
-        enrolled, where = _enroll_state(sw, host_jobs, fleet_jobs, sweep_on)
+        enrolled, where = _enroll_state(sw, host_jobs, fleet_jobs, sweep_on,
+                                        isolation)
 
         # A door runs only when BOTH gates allow it: the manifest may enroll a
         # unit whose script still no-ops on its own flag, and that combination

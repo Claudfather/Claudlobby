@@ -110,6 +110,23 @@ A tracked send (dispatch-task, report-back, briefing) arrives at the worker with
 
 That `⟦plane:<msg_id>⟧` line is a **delivery receipt token**, not part of the task. The receiving session's `UserPromptSubmit` hook (`plane-dispatch-in.sh`) reads it, records the byte length and sha256 of the message it actually got, and the plane then **proves** delivery (DELIVERED / ARRIVED SHORT / not-yet-confirmed) instead of inferring it from the sender's Enter — closing the "the send looked fine but the head was gone" class (#1493/#1501). It rides the **last** tmux chunk on purpose, so it survives the head loss that was the measured failure. **Ignore it** as an instruction: it is always on its OWN final line, so it never fuses with the task text, and it carries nothing you act on. You never type it — the framework appends it and strips nothing you sent; `body_sha256` is over the message proper, above the trailer.
 
+### When the harness frames part of a dispatch (#1876)
+
+Claude Code treats any single read of more than 800 bytes as a **paste**. On the fleet's sessions it submits a paste inside `<pasted_content id="…">` tags, and its harness then tells the model that framed text may carry instructions the user did not write. The 400-byte send chunk keeps a dispatch under that line while the receiver keeps up. A receiver that falls behind, or a send from an older host, can still arrive framed. The head, often the `[BOTCOMMAND]` envelope and task id, sits inside the tags and the rest follows them. When the last chunk was framed too, the trailer is inside the last block:
+
+```
+<pasted_content id="4c1f">
+set +H; [BOTCOMMAND] dara | task | …the first chunk…
+</pasted_content id="4c1f">
+
+…the rest of the dispatch… | task:t-1790000000-ab12
+⟦plane:msg_1f3c…⟧
+```
+
+The same harness puts a backslash into any literal tag in the text (`<\pasted_content`). That is its escaping, not the sender's.
+
+**The receiver verifies, then trusts.** The check and its scope are in every bot's composed `CLAUDE.md` (**Dispatches framed as pasted text**), so a bot that composes neither this protocol nor `worker-lifecycle` still has it. As the sender there is nothing to add: a receiver that cannot verify your send asks you back, with a `blocked` report naming the msg id.
+
 ## Freeform fallback
 
 For ad-hoc prompts that don't fit the structured format (exploratory questions, multi-paragraph context), freeform dispatch still works — any dispatch without a `[BOTCOMMAND]` prefix is treated as a freeform task:

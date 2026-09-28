@@ -22,6 +22,7 @@ absolute inputs.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, fields, is_dataclass
@@ -259,6 +260,23 @@ def _emitted_scan_files(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> lis
     return rels
 
 
+def _without_deny_rules(text: str) -> str:
+    """*text* (a composed ``settings.local.json``) with ``permissions.deny``
+    removed. A deny rule is a restriction, not wiring to a path: it never
+    dangles into a broken bot, and naming ANOTHER fleet's paths is the whole
+    job of the host-wide isolation rules (#1665). L1 already leaves denies
+    unclassified for the same reason (``compose_settings_local``). Text that
+    does not parse is scanned whole, the conservative direction."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text
+    perms = data.get("permissions") if isinstance(data, dict) else None
+    if isinstance(perms, dict):
+        perms.pop("deny", None)
+    return json.dumps(data)
+
+
 def audit_bot_paths(
     bot: BotConfig, fleet: FleetConfig, paths: Paths
 ) -> list[PathFinding]:
@@ -270,6 +288,8 @@ def audit_bot_paths(
             text = (bot_dir / rel).read_text()
         except (OSError, UnicodeDecodeError):
             continue  # file absent (e.g. no .mcp.json) or binary — nothing to scan
+        if rel == ".claude/settings.local.json":
+            text = _without_deny_rules(text)
         for path, reason in improper_fleet_paths(text, bot, paths):
             findings.append(PathFinding(bot.bot_id, rel, path, reason))
     return findings

@@ -33,8 +33,13 @@ and returns `Not Authorized` here; that is the token kind, not a broken
 credential. (This block used to name `RAILWAY_API_TOKEN`, which is dead and
 has been removed.)
 
+The token is already in your session env — `start-bot.sh` sources the `.env`
+tiers at boot — so never read `~/.env` for it. The first line below only checks
+it is there (it never prints the value); a secrets file read through your own
+tools is a path an isolation rule may deny (#1665).
+
 ```bash
-set -a; . ~/.env; set +a          # or wherever you keep secrets
+: "${RAILWAY_PERSONAL_TOKEN:?not in the session env - declare it with export in a .env tier, then restart the bot}"
 curl -s -X POST https://backboard.railway.com/graphql/v2 \
   -H "Authorization: Bearer $RAILWAY_PERSONAL_TOKEN" \
   -H "Content-Type: application/json" \

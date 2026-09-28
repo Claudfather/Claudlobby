@@ -149,7 +149,7 @@ Print-on-demand fulfillment, product management, order tracking.
 {
   "printify": {
     "command": "npx",
-    "args": ["-y", "printify-mcp"],
+    "args": ["-y", "@tsavo/printify-mcp@0.1.1"],
     "env": {
       "PRINTIFY_API_KEY": "your_printify_token",
       "PRINTIFY_SHOP_ID": "your_shop_id"

@@ -6,6 +6,308 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the `~/.env` lint no longer lets a negation elsewhere on a line hide an instruction (#1919)
+
+The lint `validate` and `freshbox` run for a bot with shared-config isolation
+on (#1665) dropped a `source ~/.env` span whenever its LINE held a negation
+word, anywhere. So "If `SIMPLEFIN_ACCESS_URL` is not set, run `source ~/.env`
+first", "Run `source ~/.env` — without it the scripts fail" and "Do not skip
+`source ~/.env`" were all missed, and on an armed bot each would have failed
+at run time with no warning (otis's review of #1918).
+
+- A negation now counts only in the span's own clause and within the three
+  words directly before it. A verb that reverses it ("do not skip", "don't
+  forget") keeps the span an instruction.
+- A span that is the subject of a negated predicate ("`source ~/.env` is not
+  needed") is still a mention, as are the cases that were quiet before: prose,
+  a negated span, the path inside `echo` or `grep`, a comment in a fence. A
+  reversal after the negation undoes it there too ("`source ~/.env` cannot be
+  skipped", "shouldn't be omitted"), and the reversal verbs include their past
+  participles.
+- `validate` and `freshbox` each have a test that fails when they stop handing
+  the lint the composer's home.
+- Every spelling row E denies is recognised: `~user/.env`, `"$HOME"/.env`
+  quoted up to the slash, `/home/<user>/.env`, `/Users/<user>/.env`,
+  `/root/.env`, and the composer's own home by its absolute path.
+
+### Added — shared-config isolation, the Layer 0b deny rules, opt-in per bot (#1665)
+
+Layer 0 denies each fleet sibling's bot directory, and most cross-bot content
+is not there. A transcript is written under the shared Claude config dir,
+beside the shared prompt history, the OAuth credential and the account config;
+none of those, no `.env` tier, and nothing in the install root was named by any
+rule. On the reviewed host 249 correctly shaped sibling rules read as "the bots
+are isolated" while every bot could read every other bot's transcripts.
+
+- `isolation.shared_config: true` (at `defaults:` or `bots.<bot>:`) composes
+  eight classes of deny rule (`claudlobby/isolation.py`): other bots'
+  transcripts, `history.jsonl`, `.credentials.json`, the account config, every
+  `.env` tier (the bot's own included), Edit on the install's code, other bots'
+  Telegram state dirs, and Edit on the shared settings surfaces. Every rule is
+  `//`-anchored on an absolute path.
+- Transcript and bot-tier `.env` rules are keyed on the bot's NAME, so a
+  `move-bot` leaves both homes covered. A name another fleet shares falls back
+  to that bot's path, a name that is a hyphen-prefix of another skips or
+  states the one pattern that would reach the bot's own sessions, and a sibling
+  manifest that cannot be read is named rather than dropped.
+- `isolation.exempt` restores a READ only: `account_config` or `env_host`.
+- Off by default, registered in `switches.py` under the no-deployment-gate
+  category: a composed deny binds on the bot's next tool call with no restart,
+  and the nightly `reload-fleet` would carry a default-on rule set onto every
+  bot. `doctor --switches` shows which bots have it on.
+- `claudlobby validate` (category `isolation-env-read`) and `freshbox` name
+  every composed CLAUDE.md or skill file that tells an armed bot to
+  `source ~/.env` or `. ~/.env`, the read the `env` class denies. A mention in
+  prose is not flagged.
+- `freshbox` compares an armed bot's on-disk deny list with what the current
+  install would compose and names each class that falls short, including a bot
+  that joined the host since the last generate; it prints one line per fleet
+  naming what the unarmed bots' deny lists do not cover.
+- The post-compose wiring audit (`path_audit.audit_bot_paths`) no longer reads
+  `permissions.deny` in `settings.local.json`. A deny is a restriction, not
+  wiring, which the source-side guard already ruled; the host-wide rules name
+  other fleets on purpose, and a throwaway-root `generate` of an armed bot
+  failed on them. Every other path in the file is still scanned.
+- The bound, stated wherever the rules are: they gate Claude's own tools, and a
+  literal path in Bash. `python3 -c "open(...)"`, a `$HOME/...` path and any
+  script or hook are not stopped. They reduce accidental reads; they are not
+  confidentiality.
+- `permissions-model.md` no longer says a deny misses `cat .env` or that
+  sibling isolation blocks Read only, and the `permissions-are-not-a-control`
+  guardrail no longer says denies are ignored.
+
+### Changed — `finance`, `spending` and `deploy-status` no longer read `~/.env` (#1665)
+
+The three skills told the model to load its credentials with `source ~/.env`
+(`finance`, `spending`) or `set -a; . ~/.env; set +a` (`deploy-status`) before
+a command. The variables they need are already in the session: `start-bot.sh`
+sources the `.env` tiers at boot and every Bash tool call inherits them.
+Measured on the live sessions of the two bots that carry these skills,
+`SIMPLEFIN_ACCESS_URL` and `RAILWAY_PERSONAL_TOKEN` were both present (checked
+by name, never by value). So the read loaded nothing new, while making each
+skill depend on reading a secrets file through the model's own tools, which
+the planned Layer 0b isolation rules deny.
+
+- Each read is replaced by a check that prints nothing when the variable is
+  set and stops the command with a message naming the fix when it is not:
+  `: "${SIMPLEFIN_ACCESS_URL:?not in the session env - ...}"`. It never prints
+  the value.
+- `spending`'s weekly block reads saved snapshots only, so it loses the read
+  and gains no check.
+- A credential rotated in `~/.env` now reaches these skills at the bot's next
+  restart, like every other composed secret.
+
+### Changed — `validate` reports a shared cause once and names what kind each warning is (#1663)
+
+`claudlobby validate` printed dozens of warnings at rc 0, and `doctor` showed
+them as one number. A new kind of warning could arrive inside an unchanged
+total and nothing would show it. Measured on 2026-09-27, crog-eng-team printed
+38 warnings, the same total as when #1663 was filed. Twelve of those lines
+belong to a warning family added after the issue was filed.
+
+- A finding whose cause is shared is now one line ending `affects N bot(s)`:
+  a retired key set under `defaults.observability`, an MCP variable assigned
+  (or missing) above the bot tier, the `claudron` CLI missing from PATH, a
+  vault path, and the operator gitconfig's identity and ssh rewrite. A bot's
+  own `.env` assignment, or a key in its own stanza, stays on that bot. In a
+  clean environment crog-eng-team goes from 48 lines to 28 and ai-platform
+  from 15 to 9.
+- Every warning carries a category slug, passed where it is raised
+  (`ValidationReport.warn`). `validate` prints it in front of each line and
+  ends with a count by category. `doctor`'s `fleet-yaml` rung prints that
+  count instead of a bare total.
+- `validate --warn-baseline FILE --write` records the categories. Later
+  `validate --warn-baseline FILE` runs fail (rc 1) only on a category that is
+  new or has grown, and name it. An unreadable baseline exits 2. `--strict`
+  is unchanged.
+
+### Fixed — the vault git guard records what it refused where a reader can find it (#1909)
+
+`vault-git-guard.sh` handed each decision's detail (the refused verb, or why a
+target could not be read) to `emit_fleet_event` as its second argument, which
+is the event's source. Every `vault_guard_denied` and `vault_guard_unresolved`
+row therefore carried free text such as `checkout` as its source and an empty
+`data`. `claudlobby events --source` could not find the guard's rows, and the
+verb the guard exists to count sat in no field a reader treats as data. The
+source is now `vault-git-guard` and the detail is `data.detail`, built with
+`jq` because a detail can carry quotes. The pinning test's detail contains a
+double quote, and a hand-built JSON string does not just mangle it: that mutant
+recorded no row at all. Rows written before this lands keep the old shape.
+
+### Fixed — a test read the stub mint's counter half-written and failed a merge gate (#1908)
+
+The stub mint in `tests/test_github_app_wrapper.py` rewrote its call counter
+with `>`, which empties the file before the number lands. A test polling the
+counter in that window read `''` and failed with `int('')`, which is how it
+failed #1906's gate. The stub now writes a temp file and renames it into place,
+so a reader sees the old count or the new one, never an empty file. With a
+0.4 s delay injected into the write, the old stub failed 3 of 3 runs with the
+CI error and the new one passed 3 of 3.
+
+### Fixed — the plane daemon replies before it checkpoints, and the checkpoint never waits on a reader (#1693)
+
+Every wedge arm measured in a 30-minute window on 2026-09-26 was the daemon's
+TRUNCATE checkpoint running inside a request, before the reply. In three of the
+four it was waiting on fleet-pulse's readers (1.3-4.5 s, inside its 5 s busy
+timeout); in one it was the checkpoint's own SD-card I/O. The accept loop is
+serial, so each stall became 3-12 missed client deadlines and a 60 s host-wide
+cooldown.
+
+- **Reply, close, then checkpoint.** `_handle` answers and returns whether it
+  committed; `serve()` closes the connection and only then runs the cadence. The
+  comment above the old call said the cadence "must never be what a caller waits
+  on"; the reply waited on it.
+- **The cadence checkpoint never waits.** It runs with the busy handler off for
+  that one call. SQLite still truncates whenever no read-mark and no writer is in
+  the way; otherwise it checkpoints what it can and answers busy, and the next
+  due checkpoint truncates. SQLite's own auto-checkpoint is off on the held
+  connection, because it runs inside COMMIT, which is before the reply.
+- **Measured with the #1693 canary** on a disposable root, 60 s per arm. No
+  reader: 0 of 1,298 acknowledged events lost on main and 0 of 1,486 on this
+  change, WAL peak 1.09 MB and 1.12 MB, under the 4 MB ceiling. A reader held for
+  the whole soak: main acknowledged 21 events, its stalls at the 5 s busy
+  timeout (busy-run p95 5.01 s); this change acknowledged 1,726, 0 lost, longest
+  busy run 1.03 s. The held reader grows the WAL either way (81.8 MB here), and
+  nothing reports the WAL size: #1905.
+- **Not fixed: the checkpoint's own I/O.** It still runs on the serial loop, now
+  after the reply, so a slow one delays the next caller instead of the one it
+  follows. In a synthetic A/B on the same SD card, moving it to a background
+  thread did not fix that: commits that overlapped the background checkpoint
+  took 618-935 ms (median) against about 20 ms, 26 of 264 requests still took
+  over 1 s (27 with the checkpoint on the loop), and the WAL stopped truncating.
+  A checkpoint a quarter the size, still on the loop (every 6 batches instead of
+  22), kept all 42 checkpoints under 0.6 s. That is a recommendation on #1693,
+  not part of this change.
+
+### Fixed — one fleet's pulse page no longer silences another fleet's (#1903)
+
+`fleet-pulse.sh` keeps its debounce markers in `state/pulse`, a directory
+every fleet on the host shares, and three kinds of file there were named
+without the fleet. The 10-minute burst debounce (`escalation_<type>`) was one
+file per host: when two fleets had the same kind of critical burst, the first
+fleet's page silenced the second's. A fleet with no such burst deleted the
+other fleet's marker on every pass, so that fleet paged every pass instead of
+every 10 minutes. The reader-outage and refused-target debounces were keyed by
+the literal word `fleet`, so one fleet's outage page silenced another's. The
+summary table was one file, holding whichever fleet ran last. All three are now
+keyed by fleet (`<fleet>.<key>`, `<fleet>.pulse-summary.txt`), and the burst
+page names its fleet. In runs with two fleets launched at once and both
+bursting, both fleets paged in 0 of 10 rounds before and 10 of 10 after.
+Markers under the old names are never read again, so a burst or outage in
+progress when this lands pages once more.
+
+### Fixed — two fleets' pulse passes no longer read or delete each other's critical-event window (#1901)
+
+`fleet-pulse.sh` kept four scratch files at fixed names in `state/pulse`, a
+directory every fleet on the host shares: the escalation window
+(`.critical-window`), the summary's read-back (`.critical-readback`) and two
+stderr captures. Every fleet's pulse timer fires in the same second, so passes
+overlap as a matter of routine, and a sibling pass could rewrite the window
+inside this pass's read loop or delete it there. A rewrite sent nothing and
+said nothing: the pass read the other fleet's rows and skipped its own page. A
+deletion failed the loop's redirect and aborted the pass on a `script_error`,
+23 of them from 2026-09-25 to 09-27 on ai-platform and tl-enterprises. Each
+file is now the pass's own temporary file, which lib-common removes when the
+pass exits. A new test interleaves two fleets' passes at both points; the old
+code fails it both ways.
+
+### Fixed — `pr-review-state.py` read two of the four verdicts reviewers are taught as "not assessed" (#1895)
+
+`library/protocols/review-flow.md` and `library/expertise/code-review.md` teach
+four verdict markers, and the reader parsed two of them. `**Verdict: Mechanical
+fixes**` and `**Verdict: Architectural concerns**` both mean "do not merge yet",
+and both read as `UNPARSED-HEADER` / `NO-RECOGNITION`. Measured on 1,506
+review/comment events (Claudlobby's newest 600 PRs; all of clauDNA, Claudron and
+Claudosseum), there were 29 such verdicts, not the three reported. 23 read as
+nothing. 5 read as blocking only because a later, unrelated bold span matched
+(four of them an aside saying `not blocking`). One, Claudlobby#465's
+`Architectural concerns`, read as **APPROVE**, from a bold `**Approve**` in
+prose about a different PR.
+
+- Both now map to `REQUEST-CHANGES`, and the reviewer's own words travel beside
+  the state: `REQUEST-CHANGES("Architectural concerns")` in the text, and a
+  `said` field on each resolved verdict in `--json` (additive; schema stays 1).
+  Three of the four taught verdicts share one state, so the words are what tell
+  a manager whether to send the PR back, wait for a substantive fix, or bring in
+  a human.
+- **What a manager will notice.** A PR where the reviewer asked for mechanical
+  fixes, the author made them and the reviewer then approved used to read
+  `0 blocking`, because the first verdict was invisible. Without `--attribute`
+  it now reads `1 stale, 1 blocking` and says to re-run with `--attribute`; with
+  it, the reviewer's later approval supersedes their own block (Claudlobby#1823:
+  `0 blocking`, rc 0). Staleness is the cue to re-check; an attributed later
+  verdict is what clears the block. A block that can never be attributed is #1691.
+- Pinned by one new test on #1892's real review, and by the on-every-run
+  selftest, which now carries the four taught markers verbatim. Eight mutants
+  (each token dropped from the regex, dropped from `NORM` or mapped to
+  `APPROVE`; the words dropped from the render or not carried) all go red.
+
+### Fixed — `claudlobby events --since` works, as the fleet-observability protocol and the fleet-pulse skill tell every manager to run it (#1896)
+
+The flag was never registered, so `events --since 24h` failed with rc 2, while
+the code behind it has read `args.since` since F18 R2b-1. Registering it was not
+enough on its own. The reader takes only an ISO instant, so a bare `24h` came
+back as `UNREACHABLE` at rc 3, blaming the plane for the caller's input. The
+window now uses the grammar `checkins` and `report-back` share (24h, 7d, 30m,
+or an ISO instant) and reaches the reader as an instant. A value outside that
+grammar is refused at rc 2 with the forms it accepts. The coverage line keeps
+the window as typed, so `--since 24h` reads back as the 24h window.
+
+### Fixed — the printify fragment launched a package npm does not have, under a name anyone could claim (#1890)
+
+`library/mcp/printify.json` ran `npx -y printify-mcp`, and npm has no such
+package (E404), so a bot equipping the shared fragment got a dead server. The
+unscoped name was also unclaimed, so whoever published it next would run on
+every such bot's start. The fragment now pins the package it was written for,
+`@tsavo/printify-mcp@0.1.1` (all 19 contracted tools are in its source; 0.1.1
+is the latest of its three published versions, 0.0.1, 0.1.0 and 0.1.1, all from
+one publisher, and the version the estate's running fork declares). A test
+guards the shipped library with #1058's own predicate: no fragment may launch
+an unpinned npx package. The one
+allowance is `spotify.json`, whose `@modelcontextprotocol/server-spotify` is
+also E404, so there is nothing to pin. A composed `.mcp.json` changes at the
+next `generate` plus a restart.
+
+### Fixed — every bot can verify a dispatch framed as pasted text, not only the 12 that composed the guidance (#1876)
+
+#1882's verify-then-trust check lived in the `dispatch` and `worker-lifecycle`
+protocols, and 9 of the estate's 21 bots compose neither, although any pane can
+receive a framed dispatch. The check is now a short fixed section of the
+`CLAUDE.md` template, which every bot composes; the two protocols point to it,
+so there is one copy. It reaches a running bot at its next restart after a
+`generate`.
+
+### Added — `pull-root`: the compositor root pulls itself, and watches what it did (#1251)
+
+A merged framework fix was inert on every host until someone pulled
+`$CLAUDLOBBY_ROOT` by hand, and nothing owned that pull. `lib/pull-root.sh` is
+an opt-in host job (it mutates operator source), daily at 07:00 host-local. It
+fast-forwards to `repo_currency_target` and never past a hold. It refuses any
+dirty tree and names the paths. It restarts the plane daemon and view when
+`claudlobby/` moved. It then watches every fleet on the host for 15 minutes and
+pages once on a regression: a new critical event type, a `script_error` from a
+script the pull changed, a bot that stopped heartbeating, a failed restart, or a
+read that could not run. When the pull added a plane migration, the page carries
+the revert runbook. Every run lands one `source_pull` record on the plane. A
+hold in the host override (`host.jobs.pull-root.hold`) pins the host at a sha,
+readable through the new `claudlobby host-job <name>`. It runs from inside the
+tree it pulls: git replaces a changed file's inode, so a running script
+finishes on its old bytes, and `update-siblings.sh`'s comment claiming
+otherwise is corrected.
+
+### Fixed — a long dispatch no longer arrives with its envelope framed as pasted text, and a framed one can be verified (#1876)
+
+Dispatches now cross the pane in 400-byte chunks instead of 900. The receiving
+Claude Code frames any single read of more than 800 bytes as pasted content,
+which its harness tells the model may not come from the user. At 900 that was
+the first chunk of every long dispatch, envelope and task id included. A
+receiver that falls behind can still merge chunks, so the dispatch and
+worker-lifecycle protocols now say how to verify a framed dispatch before
+trusting it: `plane-lookup.py --received <msg_id> --destination <bot> --verdict`
+prints the plane's delivery verdict and the recorded sender. The receiver hook
+also undoes the harness's escaping of a quoted `<pasted_content` tag. Until now
+that escaping made any dispatch that mentions the tag read as altered.
+
 ### Added — a host's own override for host jobs, outside the tracked tree (#1251)
 
 Arming, disarming or pausing a host job meant editing the package-owned

@@ -45,6 +45,8 @@ SCRIPTS_REACHING_DOOR = {
     "reload-fleet", "rolling-restart", "start-bot", "update-claude-code",
     "update-siblings", "validate-bot-change", "weekly-worker-restart",
     "vault-sync",
+    # #1251: pull-root pages a watch regression, a blocked pull, a held host.
+    "pull-root",
     # #1771: a REFUSED alert target is raised through emit_failure_alert (a plane
     # event and the manager's pane, the channels that do not need the target).
     "fleet-pulse", "creds-check",
@@ -69,7 +71,9 @@ ACTIVE_MISROUTING = {
 # `enroll: false` composes NO unit at all (#1385), so nothing systemd runs
 # can misroute it. It is host-scoped by design and resolves through
 # resolve_bots_dir + the declared-wins path, never a lexical first pick.
-LATENT = {"update-siblings", "vault-sync"}
+# pull-root (#1251) is the same shape: host-scoped, `enroll: false` composes no
+# unit, and it pages through resolve_bots_dir + the declared-wins path.
+LATENT = {"update-siblings", "vault-sync", "pull-root"}
 
 # Pass a fleet, resolve at step 1, and must stay untouched. Over-reaching into
 # this set is the realistic failure mode of a fix aimed at the other one.

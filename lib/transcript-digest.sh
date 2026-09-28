@@ -125,6 +125,8 @@ sid = p.get("session_id") or ""
 cwd = p.get("cwd") or os.getcwd()
 # Fall back to the documented layout when the payload omits the path:
 # ~/.claude/projects/<cwd-slug>/<session_id>.jsonl
+# The slug rule is also claudlobby/isolation.py transcript_slug, which the
+# Layer 0b deny rules are built on; the two must stay the same rule.
 if not path and sid:
     slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
     path = os.path.expanduser(f"~/.claude/projects/{slug}/{sid}.jsonl")

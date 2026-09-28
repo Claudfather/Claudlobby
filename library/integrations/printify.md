@@ -31,11 +31,11 @@ Wire config: shipped as the shared fragment `library/mcp/printify.json` — add 
 
 #### Forked MCP with Order Tools
 
-The published `printify-mcp` package only exposes product/shop/blueprint tools. To get order-management tools (`list_orders`, `submit_order`, `get_order`, `send_order_to_production`, `calculate_shipping`, `cancel_order`), fork upstream `TSavo/printify-mcp` and add them yourself.
+The published `@tsavo/printify-mcp` package (the fragment pins 0.1.1; there is no unscoped `printify-mcp` on npm) only exposes product/shop/blueprint tools. To get order-management tools (`list_orders`, `submit_order`, `get_order`, `send_order_to_production`, `calculate_shipping`, `cancel_order`), fork upstream `TSavo/printify-mcp` and add them yourself.
 
 The `.mcp.json` points to the local build at `~/your-fork/printify-mcp/dist/index.js`. If making changes, edit `src/` files, run `npm run build`, then restart the bot.
 
-**Periodically check:** whether upstream merged the order tools PR. If merged, switch back to the published package (`npx -y printify-mcp`) and drop the local fork.
+**Periodically check:** whether upstream merged the order tools PR. If merged, switch back to the published package (`npx -y @tsavo/printify-mcp@<version>`, pinned like every shipped fragment) and drop the local fork.
 
 #### Permissions
 

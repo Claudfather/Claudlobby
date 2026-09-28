@@ -36,8 +36,8 @@
 #   host:      Host-global singletons -- one instance per host, NOT layered,
 #              fixed `claudlobby-<name>` unit identity (no fleet prefix).
 #              Composed into runtime/_host/timers/ and enrolled once per host
-#              by `setup-system`. Opt-in host jobs (e.g. root-self-update)
-#              ship behind explicit toggles via their own plans, never here.
+#              by `setup-system`. Opt-in host jobs ship DORMANT here
+#              (`enroll: false`) and are armed per host (see below).
 #   defaults:  Per-fleet defaults, mirroring fleet.yaml's `defaults:` shape and
 #              deep-merged down into every bot. `jobs:` drives fleet timer units
 #              (a fleet may override an individual job by name); `hooks:` and
@@ -168,9 +168,8 @@ host:
     # Source-currency APPLY: fast-forward stale SIBLING checkouts to their newest
     # cut release, guarded (never a dirty tree, unpushed commits, or a diverged
     # one; ff-only) and loud (an event on every movement). $CLAUDLOBBY_ROOT is
-    # deliberately excluded -- pulling the compositor is root-self-update, which
-    # the `host:` note at the top of this file says ships behind its own
-    # toggle, and the script lives in that repo.
+    # deliberately excluded -- pulling the compositor is its own opt-in job,
+    # pull-root below, with a watch and a hold this one has no reason to carry.
     #
     # COMPOSED-BUT-DORMANT: this is the host job that mutates the
     # operator's source -- one of the four
@@ -206,6 +205,29 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 300
+    # Daily fast-forward of $CLAUDLOBBY_ROOT itself (#1251): a merged fix was
+    # inert on every host until someone pulled by hand. lib/ is in force the
+    # moment the pull lands, on every bot at once, so the job restarts the
+    # plane daemon and view when claudlobby/ moved, watches every fleet on the
+    # host for 15 minutes, pages on a regression, and records one source_pull
+    # event per run. OPT-IN: it mutates operator source. Arm it in THIS host's
+    # override, ~/.config/claudlobby/system.yaml:
+    #   host: { jobs: { pull-root: { enroll: true } } }
+    # then generate + lib/setup-system. Pin the host at a commit with a hold in
+    # the same file -- who, why and until, or the job still holds and pages:
+    #   host: { jobs: { pull-root: { enroll: true, hold: { sha: <sha>,
+    #     by: <who>, reason: <why>, until: <YYYY-MM-DD> } } } }
+    # The job reads the hold at run time (`claudlobby host-job pull-root`), so a
+    # hold needs no recompose. 07:00 is host-local time, when a human is up for
+    # the watch's page; persistent: false, so a host that was down at 07:00
+    # does not pull at boot, unwatched.
+    pull-root:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/pull-root.sh"
+      schedule: "*-*-* 07:00:00"
+      type: oneshot
+      persistent: false
+      hold: null
     # The SCHEDULED vault door (#1721). Claudron's sync fires only at session
     # boundaries, under a 2s hook budget, and reports to a log inside the vault
     # it is failing to sync -- so when a live host wedged, every sync refused

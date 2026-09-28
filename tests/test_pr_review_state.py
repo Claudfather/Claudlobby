@@ -1077,3 +1077,47 @@ class TestPlaneEpochIsDerivedNotPinned:
             lambda: type("P", (), {"connect": staticmethod(lambda r: _Conn())})())})
         epoch, err = prs.plane_epoch("/anywhere", module=module)
         assert epoch is None and "no events" in err
+
+
+# ---------------------------------------------------------------------------
+# #1895 — the reader could not read two of the four verdicts the library
+# teaches (`library/protocols/review-flow.md` step 5): `Mechanical fixes` and
+# `Architectural concerns`. Both are "do not merge yet", and both read as "not
+# assessed". Measured on 1,506 review/comment events (Claudlobby's newest 600
+# PRs; all of clauDNA, Claudron, Claudosseum): 29 such verdicts; 23 read as
+# nothing, 5 read as blocking only by matching a later, unrelated bold span,
+# and one (Claudlobby#465, `Architectural concerns`) read as APPROVE from a
+# bold `**Approve**` in prose about a different PR.
+#
+# Provenance: REAL_MECHANICAL_FIXES is Claudlobby#1892's review, header and
+# first paragraph verbatim (vera, 2026-09-26). The same header opens the first
+# review on #1823 and on #1825.
+# ---------------------------------------------------------------------------
+
+REAL_MECHANICAL_FIXES = (
+    "**Verdict: Mechanical fixes**\n\n"
+    "Independently re-derived all four asks (registry queries, a downloaded "
+    "tarball, an isolated worktree with a real mutation run — not read off the "
+    "PR body). The pin, the tool-count claim, the impact assessment, and the "
+    "guard all hold up. One evidentiary claim in the shipped `CHANGELOG.md` "
+    "entry is wrong and should be corrected before merge; it doesn't change the "
+    "fix's correctness.\n"
+)
+
+
+class TestTheTaughtVocabularyIsRead:
+    """#1895. The failure seen three times: a fix-this-first verdict read as "not assessed"."""
+
+    def test_a_mechanical_fixes_review_is_a_live_block_not_unassessed(self):
+        result = prs.assess_pr(
+            _payload([("reviews", "2026-09-26T15:09:22Z", REAL_MECHANICAL_FIXES)]))
+        # The exit code first, as in TestSilenceDoesNotScoreClean: the defect is
+        # rc 3, "not assessed", so rc 3 is what a failure here must name.
+        assert prs.exit_code_for([result]) == prs.RC_ACTIONABLE
+        assert result["blocking"], "a Mechanical-fixes verdict blocks while it is live"
+        assert result["no_recognition"] is False
+        assert result["unparsed_headers"] == []
+        # The reviewer's own words survive the mapping onto REQUEST-CHANGES, in
+        # --json and in the text a manager reads.
+        assert [v["said"] for v in result["resolved"].values()] == ["Mechanical fixes"]
+        assert '=REQUEST-CHANGES("Mechanical fixes")@' in prs.render([result], False)

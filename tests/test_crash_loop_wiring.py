@@ -138,7 +138,7 @@ class Scene:
             errors="replace",
             timeout=120,
         )
-        summary = self.pulse_state / "pulse-summary.txt"
+        summary = self.pulse_state / "F.pulse-summary.txt"
         return r, (summary.read_text(errors="replace") if summary.exists() else "")
 
     def restarts(self):

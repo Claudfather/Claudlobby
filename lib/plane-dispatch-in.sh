@@ -96,6 +96,12 @@ prompt = hook.get("prompt") or ""
 # arrival is the wire form again (59 of 60 live wrapped prompts, 2026-09-20..24;
 # the 60th was two sends glued together, #1543, and still reads as altered).
 prompt = re.sub(r'\n*</?pasted_content id="[^"]*">\n*', "", prompt)
+# The same TUI escapes every LITERAL `<pasted_content` / `</pasted_content` in a
+# prompt, framed or typed alike, with a backslash after the `<` (+1 byte each;
+# measured live, #1876). Undone once the real tags are gone, or a dispatch that
+# merely quotes the tag reads ALTERED: one quoting it twice arrived as 1601
+# bytes against 1599 sent.
+prompt = re.sub(r"<\\(/?pasted_content)", r"<\1", prompt)
 # The trailer, at the very END (a re-send would only append a fresh one; the
 # end anchor + the minted-id grammar make a body that merely QUOTES a marker
 # harmless). `\s*$` tolerates any trailing whitespace the terminal/pane added

@@ -193,6 +193,53 @@ def test_slow_client_does_not_kill_the_daemon(running):
     assert send_batch(sock, [_comm("6")])["ok"] is True
 
 
+def test_a_slow_checkpoint_does_not_delay_the_reply(running, monkeypatch):
+    """#1693: every wedge arm measured on 2026-09-26 was the checkpoint cadence
+    running INSIDE a request, before the reply. The caller must be released,
+    reply written AND connection closed, before the cadence runs.
+
+    Deterministic, not timed: the cadence below blocks until the test has seen
+    both. A daemon that still runs it first cannot answer at all, so this fails
+    on its own socket deadline rather than on a latency threshold.
+    """
+    _, sock, daemon = running
+    entered, release = threading.Event(), threading.Event()
+    real_after_batch = daemon.writer.after_batch
+
+    def a_slow_checkpoint():
+        entered.set()
+        release.wait(timeout=30)
+        real_after_batch()
+
+    monkeypatch.setattr(daemon.writer, "after_batch", a_slow_checkpoint)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5.0)
+    try:
+        client.connect(str(sock))
+        client.sendall(json.dumps({"events": [_comm("7")]}).encode() + b"\n")
+        buf = b""
+        try:
+            while not buf.endswith(b"\n"):
+                chunk = client.recv(65536)
+                assert chunk, "the daemon closed the connection without replying"
+                buf += chunk
+            reply = json.loads(buf)
+            # End of stream too, not just the reply line: a caller that reads
+            # to EOF must not wait on the checkpoint either.
+            eof = client.recv(65536)
+        except socket.timeout:
+            pytest.fail("no reply and close within 5s: the caller waited on the checkpoint")
+        assert reply["ok"] is True and reply["results"][0]["status"] == "committed"
+        assert eof == b"", "the daemon held the connection open"
+        assert not release.is_set()
+        # Positive control: deleting the cadence would pass everything above.
+        # It must still run, after the caller has gone.
+        assert entered.wait(timeout=5), "the checkpoint cadence never ran"
+    finally:
+        release.set()
+        client.close()
+
+
 def test_stale_socket_is_recovered(tmp_path: Path):
     sdir = _short_sock_dir()
     sock = sdir / "s"

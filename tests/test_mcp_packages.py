@@ -11,6 +11,11 @@ here is the CLASSIFIER's behaviour on synthetic specs, plus the structural fact
 that every shipped fragment is readable by the grammar — both stable under any
 remedy anyone chooses.
 
+One guard is the exception, and it points the other way: no shipped fragment
+may launch an UNPINNED npx package (#1890). Pinning satisfies it, so it never
+blocks the remedy; it blocks the regression, a new fragment that runs whatever
+the registry serves at boot.
+
 The network path is exercised for real in the PR body's live run, not here:
 these tests make no network call.
 """
@@ -258,7 +263,20 @@ class TestFindingMessages:
 
 
 class TestAgainstTheShippedLibrary:
-    """Structural only — never which fragments are unpinned (see module docstring)."""
+    """Structural, plus the one guard the module docstring names."""
+
+    def test_no_shipped_fragment_launches_an_unpinned_npx_package(self):
+        # #1890: an unversioned `npx -y <pkg>` runs whatever the registry serves
+        # at boot on every bot equipping the fragment, and an unscoped name
+        # nobody owns can be claimed by anyone (printify-mcp was one). #1058's
+        # own predicate, over the whole shipped library.
+        rows = g.declared_packages([str(REPO_ROOT / "library" / "mcp")])
+        unpinned = {f.fragment for f in mp.pinning_findings(rows) if f.runtime == "npx"}
+        # One allowance: spotify.json names a package npm does not have
+        # (@modelcontextprotocol/server-spotify, E404), so there is no version
+        # to pin, and the scope is npm-owned, so the name cannot be claimed.
+        # A SUBSET, so removing or replacing it passes.
+        assert unpinned <= {"spotify.json"}, sorted(unpinned)
 
     def test_every_shipped_fragment_is_readable_by_the_grammar(self):
         rows = g.declared_packages([str(REPO_ROOT / "library" / "mcp")])

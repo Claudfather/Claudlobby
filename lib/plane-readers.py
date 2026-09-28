@@ -703,6 +703,50 @@ def unacked_rows(rows: list, acked_seq: Optional[int], terminal=TERMINAL_STATUSE
     return keep
 
 
+# The delivery verdict (#1876): did this bot receive exactly the bytes the sender
+# recorded? delivered / truncated / altered / unconfirmed, or NULL with no
+# submission. BYTE-IDENTICAL to queries.DELIVERY_STATUS_SQL, pinned by test (the
+# OPEN_SQL rule), so plane-lookup.py --received --verdict and the plane view
+# cannot disagree about a send. Format with ph = the msg_id placeholders.
+DELIVERY_SQL = (
+    "SELECT c.msg_id AS msg_id, s.wire_bytes AS wire_bytes,"
+    " r.received_bytes AS received_bytes,"
+    " CASE"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_sha256 IS NOT NULL"
+    "   AND r.received_sha256 = s.wire_sha256 THEN 'delivered'"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_bytes IS NOT NULL"
+    "   AND r.received_bytes < s.wire_bytes THEN 'truncated'"
+    "  WHEN r.received_sha256 IS NOT NULL AND s.wire_sha256 IS NOT NULL"
+    "    THEN 'altered'"
+    "  WHEN s.msg_id IS NOT NULL THEN 'unconfirmed'"
+    "  ELSE NULL"
+    " END AS delivery"
+    " FROM communications c"
+    " LEFT JOIN ("
+    "  SELECT e.msg_id AS msg_id,"
+    "   json_extract(e.detail, '$.destination') AS destination,"
+    "   json_extract(e.detail, '$.received_sha256') AS received_sha256,"
+    "   json_extract(e.detail, '$.received_bytes') AS received_bytes"
+    "  FROM events e"
+    "  WHERE e.kind='transmission' AND e.event='received'"
+    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
+    "    WHERE e2.kind='transmission' AND e2.event='received' AND e2.msg_id = e.msg_id)"
+    " ) r ON r.msg_id = c.msg_id AND r.destination = c.recipient_raw"
+    " LEFT JOIN ("
+    "  SELECT e.msg_id AS msg_id,"
+    "   json_extract(e.detail, '$.wire_sha256') AS wire_sha256,"
+    "   json_extract(e.detail, '$.wire_bytes') AS wire_bytes"
+    "  FROM events e"
+    "  WHERE e.kind='transmission' AND e.event IN ('pane_submitted','carrier_queued')"
+    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
+    "    WHERE e2.kind='transmission'"
+    "     AND e2.event IN ('pane_submitted','carrier_queued')"
+    "     AND e2.msg_id = e.msg_id)"
+    " ) s ON s.msg_id = c.msg_id"
+    " WHERE c.msg_id IN ({ph})"
+)
+
+
 TASK_TEXTS_SQL = (
     "SELECT a.source_ref, w.title FROM assignments a"
     " JOIN work_items w ON w.work_item_id = a.work_item_id"

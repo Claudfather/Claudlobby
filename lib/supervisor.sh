@@ -225,6 +225,26 @@ svc_kick() {
     return 2
 }
 
+# svc_restart_host <unit>
+# Restart an installed HOST service by its composed name (claudlobby-plane-daemon,
+# claudlobby-plane-view), for a caller that moved the code it runs (#1251's
+# pull-root). svc_kick resolves a BOT's label from bot.conf; a host service has
+# no bot.conf, and its unit name IS its label. rc 0 restarted; the supervisor's
+# own rc when it refused; rc 2 when no unit by that name is installed here, so
+# nothing was invoked -- a host that never enrolled the service is not a failed
+# restart.
+svc_restart_host() {
+    local unit="${1:?Usage: svc_restart_host <unit>}" rc=0
+    if [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$unit.service" ]; then
+        systemctl --user restart "$unit.service" || rc=$?
+        return "$rc"
+    elif [ "$_OS" = "Darwin" ] && [ -f "$HOME/Library/LaunchAgents/$unit.plist" ]; then
+        launchctl kickstart -k "gui/$(id -u)/$unit" || rc=$?
+        return "$rc"
+    fi
+    return 2
+}
+
 # svc_enroll <bot_dir>
 # In THIS PR, a thin dispatcher onto the two existing installer scripts —
 # install-bot-systemd.sh's sequence (stale-unit cleanup, copy the composed

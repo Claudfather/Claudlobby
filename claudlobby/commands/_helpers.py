@@ -98,11 +98,11 @@ def _validation_gate(fleet: "FleetConfig", paths: Paths, *, context: str) -> boo
     Warnings are surfaced (not just errors) so did-you-mean hints reach
     the user on these paths too.
     """
-    from ..validator import validate
+    from ..validator import render_warnings, validate
 
     report = validate(fleet, paths)
-    for warning in report.warnings:
-        log.warning("%s", warning)
+    for line in render_warnings(report):
+        log.warning("%s", line)
     if report.has_errors:
         for err in report.errors:
             log.error("%s", err)
@@ -144,26 +144,6 @@ def _migration_preamble(
         sys.exit(1)
 
     return paths, fleet, source_dir, rename_map
-
-
-def _add_migration_args(parser) -> None:
-    """Add the common --source, --map, --apply args shared by all migration commands."""
-    parser.add_argument(
-        "--source",
-        required=True,
-        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
-    )
-    parser.add_argument(
-        "--map",
-        action="append",
-        default=[],
-        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
-    )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write changes (default: dry-run preview only)",
-    )
 
 
 def refuse_unreachable(command: str, note: str) -> int:
