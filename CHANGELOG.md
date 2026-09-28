@@ -45,6 +45,28 @@ To recover a host that already lost the job, once this is installed there:
 confirm no reload is running, remove the stale `state/reload-fleet.lock.d`,
 and run `lib/setup-fleet <fleet> --jobs-only` from a shell for each fleet.
 
+### Fixed — `plane-lookup.py --received` says why at rc 4, and finds a receipt by the receiver's plane alias (#1922)
+
+`--received <msg_id> --destination <bot>` exits 4 when the destination has
+never recorded a receipt, which proves nothing either way. It printed nothing,
+and the match was exact, so a lookup that could never match (the receiver's
+`bot:<fleet>/<name>` alias, where the receipt hook records the bare `BOT_ID`,
+or a plane under another root) read exactly like a receipt hook that is not
+armed. Another fleet's manager lost time to it.
+
+- rc 4 now prints one line to stderr naming the destination, the root and both
+  causes: the receipt hook is not armed, or this lookup cannot reach what it
+  records. A lookup with no `--destination` says that instead. Stdout stays
+  empty and the exit code is still 4.
+- A `bot:<fleet>/<name>` destination is matched on its name, the way the
+  delivery join already keys receipts. The fleet part is dropped, not checked.
+- The new `--quiet` withholds that line and nothing else: an unreachable plane
+  still says so. The dispatch door's receipt gate passes it, so a clean
+  dispatch stays silent but for the plane shim
+  (`test_a_clean_dispatch_writes_only_the_shims_disclosure_to_stderr`).
+- The verify-then-trust check every bot carries (#1876) already passes the bare
+  `$BOT_ID` and treats any non-zero exit as unverified, so it is unchanged.
+
 ### Fixed — the `~/.env` lint no longer lets a negation elsewhere on a line hide an instruction (#1919)
 
 The lint `validate` and `freshbox` run for a bot with shared-config isolation
