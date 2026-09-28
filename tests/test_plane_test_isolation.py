@@ -188,10 +188,11 @@ def test_owned_recording_reaches_real_cold_cli(tmp_path, scratch_plane_env, sent
     _assert_untouched(sentinel)
 
 
-def test_child_home_and_config_are_private(tmp_path):
+def test_child_home_and_config_are_private(tmp_path, _isolate_claudlobby_root):
     env = constructed_env()
     for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "TMPDIR"):
-        assert Path(env[key]).is_relative_to(tmp_path)
+        assert Path(env[key]).is_relative_to(_isolate_claudlobby_root)
+        assert not Path(env[key]).is_relative_to(tmp_path)
         assert Path(env[key]).is_dir()
     result = subprocess.run(
         [sys.executable, "-c", "from pathlib import Path; print(Path.home())"],

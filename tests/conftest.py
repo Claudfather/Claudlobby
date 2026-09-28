@@ -41,23 +41,30 @@ def _silence_plane(patch):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _isolate_plane_session(tmp_path_factory):
+def _isolate_plane_session():
     """Guard session fixtures too; undo only our changes when pytest exits.
 
     Collection-time subprocesses must use constructed_env themselves: no
     fixture can protect code that ran before fixture setup.
     """
-    with pytest.MonkeyPatch.context() as patch:
-        _isolate_home(patch, tmp_path_factory.mktemp("session-environment"))
+    # Keep Unix socket paths short and environment state outside tests' data
+    # directories. A nested pytest tmp_path can exceed sun_path before tmux
+    # even opens its socket, and adding children changes directory-scan tests.
+    with tempfile.TemporaryDirectory(prefix="ct-", dir="/tmp") as directory, pytest.MonkeyPatch.context() as patch:
+        base = Path(directory).resolve()
+        _isolate_home(patch, base)
         _silence_plane(patch)
-        yield
+        yield base
 
 
 @pytest.fixture(autouse=True)
-def _isolate_claudlobby_root(monkeypatch, tmp_path, _isolate_plane_session):
+def _isolate_claudlobby_root(monkeypatch, _isolate_plane_session):
     """Reset the default for each test; explicit local overrides still win."""
-    _isolate_home(monkeypatch, tmp_path / "test-environment")
-    _silence_plane(monkeypatch)
+    with tempfile.TemporaryDirectory(prefix="t-", dir=_isolate_plane_session) as directory:
+        base = Path(directory).resolve()
+        _isolate_home(monkeypatch, base)
+        _silence_plane(monkeypatch)
+        yield base
 
 
 @pytest.fixture(autouse=True)
