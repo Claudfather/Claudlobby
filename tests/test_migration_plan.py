@@ -14,12 +14,15 @@ from claudlobby.plane.db import db_file
 from claudlobby.plane.migrations import _migration_files, migrate
 from claudlobby.plane.queue_paths import spool_path, staged_dir
 from claudlobby.releases import ReleaseError
+from claudlobby import request_receipts as rr
+from claudlobby.task_state import TASK_EMITTER
+from tests.test_request_receipts import receipt_case
 from tests.test_releases import installed, r
 from tests.test_task_audit import _assignment, _event, _insert, _task
 
 
 @pytest.fixture
-def releases(installed):
+def releases(installed, request):
     root, inputs, paths, _, directory = installed
     target_inputs = replace(inputs, source_revision="c" * 40, artifact_id="candidate")
     target_dir = r.release_path(root, target_inputs.release_id)
@@ -29,6 +32,11 @@ def releases(installed):
         metadata = json.loads((dest / paths.artifact).read_text())
         metadata.update(source_revision=assembly.source_revision, artifact_id=assembly.artifact_id)
         metadata["compatibility"]["schema"] = {"read": [version], "write": version}
+        if assembly == inputs:
+            for name in ("receipt_format", "task_model"):
+                metadata["compatibility"][name] = {"read": [0], "write": 0}
+        else:
+            metadata["compatibility"].update(getattr(request, "param", {}))
         (dest / paths.artifact).write_text(json.dumps(metadata))
         (dest / paths.cli).write_text(f"#!{dest / paths.interpreter}\n")
         selected = dest / "package/plane/migrations"
@@ -116,6 +124,12 @@ def test_absent_and_empty_databases_are_distinct_and_never_initialized(releases)
     initial = build_migration_manifest(root, source, target, initialize_empty=True)
     assert initial.database["initialize_empty"]
     assert not any("database absent" in reason for reason in initial.blockers)
+    assert not initial.blockers
+    assert initial.operational["receipts"]["versions"] == [0]
+    assert initial.operational["task_model_versions"] == [0]
+    assert initial.rollback["after_sql_versions"]["receipt_format"] == 0
+    assert initial.rollback["after_target_write_versions"]["receipt_format"] == 1
+    assert "unsupported receipt_format: 1" in initial.rollback["source_after_target_writes_blockers"]
     assert initial.manifest_id != absent.manifest_id
     assert not db_file(root).parent.exists()
     db_file(root).parent.mkdir(parents=True)
@@ -200,3 +214,92 @@ def test_malformed_unknown_and_unreadable_pending_is_blocked_not_empty(releases)
     assert any("unknown event family" in reason for reason in plan.blockers)
     assert any("unknown pending envelope version" in reason for reason in plan.blockers)
     assert any("system.event payload shape" in reason for reason in plan.blockers)
+
+
+def test_v1_inventory_preserves_history_and_receipts_and_binds_recovery(releases, receipt_case):
+    root, source, target = releases
+    _, request_id, intent = receipt_case
+    conn = _database(root)
+    for name, emitter in (("old", "dispatch-task"), ("new", TASK_EMITTER)):
+        _task(conn, f"wi_{name}", emitter=emitter)
+        _assignment(conn, f"asg_{name}", f"wi_{name}", emitter=emitter)
+        _event(conn, f"wi_{name}", f"asg_{name}", "returned_blocked", emitter=emitter)
+    conn.close()
+    with rr.locked_request(root, intent.fleet_uid, request_id) as store:
+        store.prepare(intent)
+    before = _snapshot(root)
+    plan = build_migration_manifest(root, source, target)
+    assert not plan.blockers and _snapshot(root) == before
+    assert plan.task_audit["counts"]["closed_tasks"] == 1
+    assert plan.task_audit["counts"]["unassigned_tasks"] == 1  # v1 release is still queued
+    assert plan.operational["task_model_versions"] == [0, 1]
+    inventory = plan.operational["receipts"]
+    assert inventory["versions"] == [1] and inventory["file_count"] == 1
+    node = next(item for item in inventory["files"] if item["format_version"] == 1)
+    assert node["sha256"] == hashlib.sha256(store.path.read_bytes()).hexdigest()
+    assert "SECRET" not in json.dumps(inventory) and "semantic_sha256" not in json.dumps(inventory)
+    assert plan.rollback["after_sql_versions"]["receipt_format"] == 1
+    assert plan.rollback["after_sql_versions"]["task_model"] == 1
+    assert "unsupported receipt_format: 1" in plan.readability_blockers(source.compatibility)
+    assert not plan.readability_blockers(target.compatibility)
+    sparse = replace(target.compatibility, task_model=replace(target.compatibility.task_model, read=(1,)))
+    assert plan.readability_blockers(sparse) == ("unsupported task_model: 0",)
+    verify_pending_queues(root, plan)
+    with rr.locked_request(root, intent.fleet_uid, request_id) as store:
+        store.begin_attempt()
+    changed = build_migration_manifest(root, source, target)
+    assert changed.manifest_id != plan.manifest_id
+    with pytest.raises(ValueError, match="receipt inventory changed"):
+        verify_pending_queues(root, plan)
+    with sqlite3.connect(db_file(root)) as conn:
+        migrate(conn)
+    verify_pending_queues(root, changed)  # Receipt binding remains valid after SQL.
+    with sqlite3.connect(db_file(root)) as conn:
+        conn.execute("UPDATE work_items SET emitter='claudlobby.tasks.v2' WHERE work_item_id='wi_new'")
+    assert any("unsupported future task producer" in b
+               for b in build_migration_manifest(root, source, target).blockers)
+
+
+def test_invalid_receipt_nodes_block_without_body_disclosure(releases, receipt_case):
+    root, source, target = releases
+    _, request_id, intent = receipt_case
+    _database(root).close()
+    with rr.locked_request(root, intent.fleet_uid, request_id) as store:
+        store.prepare(intent)
+    raw = json.loads(store.path.read_bytes())
+    original = store.path.read_bytes()
+    for damaged in ({**raw, "format_version": 0}, {**raw, "format_version": 2},
+                    {**raw, "request_id": "00000000-0000-0000-0000-000000000000"},
+                    {**raw, "intent": {**raw["intent"], "fleet_uid": "fleet_" + "f" * 32}},
+                    {"SECRET-private-body": "malformed"}):
+        store.path.write_text(json.dumps(damaged))
+        plan = build_migration_manifest(root, source, target)
+        assert plan.operational["receipts"]["versions"] is None
+        assert plan.operational["receipts"]["file_count"] is None
+        assert any("receipt node" in b for b in plan.blockers)
+        assert "SECRET" not in json.dumps(plan.payload())
+        with pytest.raises(ValueError, match="receipts remain blocked"):
+            verify_pending_queues(root, plan)
+    store.path.write_bytes(original)
+    store.path.chmod(0o644)
+    assert any("receipt node" in b for b in build_migration_manifest(root, source, target).blockers)
+    store.path.chmod(0o600)
+    stray = store.path.with_name(".interrupted.tmp")
+    stray.write_bytes(b"SECRET")
+    assert any("receipt node" in b for b in build_migration_manifest(root, source, target).blockers)
+    stray.unlink()
+    store.path.unlink()
+    store.path.symlink_to(store.path.with_suffix(".lock"))
+    assert any("receipt node" in b for b in build_migration_manifest(root, source, target).blockers)
+
+
+@pytest.mark.parametrize("releases", [
+    {"task_model": {"read": [0, 1, 2], "write": 2}},
+    {"receipt_format": {"read": [1], "write": 1}},
+    {"protocol": {"read": [0, 1], "write": 1}},
+], indirect=True)
+def test_unsupported_or_incomplete_transition_still_needs_explicit_evidence(releases):
+    root, source, target = releases
+    _database(root).close()
+    plan = build_migration_manifest(root, source, target)
+    assert any("conversion/rehearsal" in b for b in plan.blockers)

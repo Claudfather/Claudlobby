@@ -92,7 +92,7 @@ def test_identity_is_stable_and_binds_assembly_inputs(installed):
     assert sealed.compatibility == compatibility
     assert compatibility.write_versions == {
         "schema": 12, "envelope": "1.0.0", "protocol": 0, "pending_format": 0,
-        "receipt_format": 0, "task_model": 0, "config_plan": 1,
+        "receipt_format": 1, "task_model": 1, "config_plan": 1,
     }
     assert compatibility.blockers(compatibility.write_versions) == ()
     assert compatibility.blockers({**compatibility.write_versions, "schema": 13}) == (

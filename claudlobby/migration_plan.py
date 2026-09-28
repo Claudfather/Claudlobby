@@ -11,17 +11,23 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
+from uuid import UUID
 
 from .plane.db import connect_ro, db_file
+from .plane.ids import ID_PATTERNS
 from .plane.migrations import _MIGRATION_RE
 from .plane.queue_paths import scan_spool, spool_path, staged_dir
 from .releases import ReleaseManifest, read_release
+from .request_receipts import decode_receipt
 from .runtime_versions import SUPPORTED_PLANE_SCHEMA_VERSIONS
 from .source_state import SOURCE_UNREADABLE, scan_dir
 from .task_audit import TaskAuditError, audit_tasks
+from .task_state import TASK_EMITTER
 
 
 def _digest(content: bytes) -> str:
@@ -41,6 +47,7 @@ class MigrationManifest:
     task_audit: dict | None
     migrations: tuple[dict, ...]
     queues: dict
+    operational: dict
     blockers: tuple[str, ...]
     proposed_steps: tuple[str, ...]
     rollback: dict
@@ -52,6 +59,23 @@ class MigrationManifest:
     @property
     def manifest_id(self) -> str:
         return "m-" + _digest(_json(self.payload()))
+
+    def readability_blockers(self, compatibility, *, after_target_writes: bool = False) -> tuple[str, ...]:
+        """Recovery must read every retained version, not merely its maximum."""
+        key = "after_target_write_versions" if after_target_writes else "after_sql_versions"
+        return _readability_blockers(compatibility, self.rollback[key], self.operational)
+
+
+def _readability_blockers(compatibility, floor: dict, operational: dict) -> tuple[str, ...]:
+    blockers = list(compatibility.blockers(floor))
+    for name, versions in (("receipt_format", operational["receipts"]["versions"]),
+                           ("task_model", operational["task_model_versions"])):
+        if versions is None:
+            blockers.append(f"unknown retained {name}")
+        else:
+            blockers.extend(f"unsupported {name}: {v}" for v in versions
+                            if not getattr(compatibility, name).supports(v))
+    return tuple(dict.fromkeys(blockers))
 
 
 def _file(path: Path) -> tuple[dict, bytes | None]:
@@ -75,10 +99,12 @@ def _database(root: Path, initialize_empty: bool) -> tuple[dict, dict | None, li
     # durable data version. Byte hashes are observation bindings, not backups.
     files = [_file(Path(str(path) + suffix))[0] for suffix in ("", "-wal")]
     state = {"path": str(path), "state": files[0]["state"], "user_version": None,
-             "files": files, "consistent_backup": False, "initialize_empty": initialize_empty}
+             "files": files, "consistent_backup": False, "initialize_empty": initialize_empty,
+             "task_model_versions": None}
     blockers, audit = [], None
     if initialize_empty:
         if all(item["state"] == "absent" for item in files):
+            state["task_model_versions"] = [0]
             return state, audit, blockers
         blockers.append("empty initialization requires both database and WAL to be absent")
     if state["state"] != "ok":
@@ -91,6 +117,14 @@ def _database(root: Path, initialize_empty: bool) -> tuple[dict, dict | None, li
             state["user_version"] = conn.execute("PRAGMA user_version").fetchone()[0]
             report = audit_tasks(conn)
             audit = asdict(report)
+            # A0 has already checked every producer with the semantic owner.
+            # Empty history needs only legacy/empty readability. Do not infer
+            # retained versions from the source release's declared writer.
+            emitters = [] if not report.schema_version else conn.execute(
+                "SELECT emitter FROM work_items UNION SELECT emitter FROM assignments "
+                "UNION SELECT emitter FROM events WHERE kind='task'").fetchall()
+            state["task_model_versions"] = sorted({1 if row[0] == TASK_EMITTER else 0
+                                                   for row in emitters} or {0})
             blockers.extend(f"task audit: {issue.code}" for issue in report.blockers)
         finally:
             conn.close()
@@ -104,6 +138,68 @@ def _database(root: Path, initialize_empty: bool) -> tuple[dict, dict | None, li
     if any(item["state"] == "unreadable" for item in after):
         blockers.append("database/WAL inventory is unreadable")
     return state, audit, blockers
+
+
+def _receipts(root: Path) -> tuple[dict, list[str]]:
+    """Read private receipt nodes, never creating locks or retaining bodies.
+
+    Quiescence belongs to the caller. Empty request locks are metadata, not
+    evidence that a send did not happen. Unknown nodes (including interrupted
+    temporary files) require an explicit repair, never implicit deletion.
+    """
+    directory = root / "state/requests"
+    result = {"path": str(directory), "state": "absent", "files": [],
+              "versions": [0], "file_count": 0}
+    blockers, versions = [], set()
+    try:
+        for ancestor in (root / "state", directory):
+            info = ancestor.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise ValueError("receipt directory is redirected or not owned")
+        result["state"] = "ok"
+        for fleet in sorted(directory.iterdir()):
+            info = fleet.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or not re.fullmatch(ID_PATTERNS["fleet"], fleet.name)):
+                raise ValueError("invalid receipt fleet directory")
+            for path in sorted(fleet.iterdir()):
+                record = {"path": str(path), "sha256": None, "bytes": None,
+                          "mode": None, "format_version": None}
+                result["files"].append(record)
+                try:
+                    if path.suffix not in {".json", ".lock"} or str(UUID(path.stem)) != path.stem:
+                        raise ValueError("invalid receipt filename")
+                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(fd, "rb") as stream:
+                        info = os.fstat(stream.fileno())
+                        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                                or stat.S_IMODE(info.st_mode) != 0o600):
+                            raise ValueError("receipt file must be owned and private")
+                        content = stream.read()
+                    record.update(sha256=_digest(content), bytes=len(content), mode=0o600)
+                    if path.suffix == ".lock":
+                        if content:
+                            raise ValueError("request lock has unexpected content")
+                        continue
+                    receipt = decode_receipt(json.loads(content, object_pairs_hook=_unique,
+                                                        parse_constant=_invalid_number),
+                                             request_id=path.stem, fleet_uid=fleet.name)
+                    record["format_version"] = receipt.format_version
+                    versions.add(receipt.format_version)
+                except (OSError, ValueError, UnicodeError):
+                    # Codec failures can contain caller-provided data; keep
+                    # only fixed wording and the scoped node in the preview.
+                    blockers.append(f"invalid, unsupported or unreadable receipt node: {path}")
+    except FileNotFoundError:
+        if result["state"] != "absent":
+            blockers.append("receipt inventory changed during preview")
+    except (OSError, ValueError):
+        blockers.append("receipt directory inventory unavailable or invalid")
+    result["state"] = "blocked" if blockers else result["state"]
+    result["versions"] = None if blockers else sorted(versions or {0})
+    result["file_count"] = None if blockers else sum(
+        item["format_version"] is not None for item in result["files"])
+    return result, blockers
 
 
 # Historical v0 family shapes from plane/contracts.py and ingest._family_values.
@@ -277,6 +373,15 @@ def build_migration_manifest(data_root: Path, source: ReleaseManifest,
     database, audit, blockers = _database(root, initialize_empty)
     queues, queue_blockers = _queues(root, source.compatibility, target.compatibility)
     blockers.extend(queue_blockers)
+    receipts, receipt_blockers = _receipts(root)
+    blockers.extend(receipt_blockers)
+    operational = {"receipts": receipts, "task_model_versions": database["task_model_versions"]}
+    observed = {"receipt_format": receipts["versions"],
+                "task_model": operational["task_model_versions"]}
+    for name, versions in observed.items():
+        if versions is not None:
+            blockers.extend(f"target cannot read retained {name}: {version}"
+                            for version in versions if not getattr(target.compatibility, name).supports(version))
     current, goal = database["user_version"], target.compatibility.schema.write
     migrations = []
     directory = (target.directory / target.paths.artifact).parent / "plane/migrations"
@@ -297,30 +402,38 @@ def build_migration_manifest(data_root: Path, source: ReleaseManifest,
         blockers.append("forward-only SQL owner cannot downgrade the current database")
     for name, version in target.compatibility.write_versions.items():
         if name != "schema" and version != source.compatibility.write_versions[name]:
+            if (name in observed and source.compatibility.write_versions[name] == 0 and version == 1
+                    and observed[name] is not None
+                    and all(getattr(target.compatibility, name).supports(v) for v in (0, 1))
+                    and (name != "task_model" or not any(b.startswith("task audit:") for b in blockers))):
+                continue  # Implemented decoders read both; no conversion or row rewrite.
             blockers.append(f"explicit {name} conversion/rehearsal required before changing its write version")
     after_sql = {**source.compatibility.write_versions, "schema": max(current or 0, goal)}
+    for name, versions in observed.items():
+        if versions is not None:
+            after_sql[name] = max(versions)
     after_writes = {**target.compatibility.write_versions, "schema": max(current or 0, goal)}
-    sql_floor = source.compatibility.blockers(after_sql)
-    write_floor = source.compatibility.blockers(after_writes)
+    sql_floor = _readability_blockers(source.compatibility, after_sql, operational)
+    write_floor = _readability_blockers(source.compatibility, after_writes, operational)
     rollback = {"after_sql_versions": after_sql, "after_target_write_versions": after_writes,
                 "source_after_sql_blockers": sql_floor, "source_after_target_writes_blockers": write_floor,
                 "compatible_recovery_release_required_before_sql": bool(sql_floor),
                 "backup_restoration_over_accepted_work_permitted": False}
-    steps = ("repeat database/task/queue inventory under the host activation lock after quiescence",
+    steps = ("repeat database/task/queue/receipt inventory under the host activation lock after quiescence",
              "resolve named conditional records under old semantics; retain ordinary telemetry for validated replay",
              *(("name a state-compatible recovery release before irreversible SQL",) if sql_floor else ()),
              "record a consistent database backup and explicit migration/recovery approval",
              *(f"explicit SQL apply {m['version']:04d}, sha256 {m['sha256']}" for m in migrations if m["proposed"]),
              "verify schema, task linkage, cursor preservation and pending formats before candidate daemon start")
     return MigrationManifest(str(root), _binding(source), _binding(target), database, audit,
-                             tuple(migrations), queues, tuple(sorted(set(blockers))), steps, rollback)
+                             tuple(migrations), queues, operational, tuple(sorted(set(blockers))), steps, rollback)
 
 
 def verify_pending_queues(data_root: Path, manifest: MigrationManifest) -> None:
-    """Recheck preserved queues under caller-owned quiescence, even after SQL.
+    """Recheck preserved queues and receipts under quiescence, even after SQL.
 
-    This verifies only queues and their named readers, never the now-changed DB.
-    It grants no replay, quarantine or discard permission.
+    The apply owner verifies the now-changed DB against its recorded SQL result.
+    This grants no replay, quarantine, receipt mutation or discard permission.
     """
     root = Path(data_root).expanduser().resolve()
     if str(root) != manifest.data_root:
@@ -334,3 +447,8 @@ def verify_pending_queues(data_root: Path, manifest: MigrationManifest) -> None:
         raise ValueError("pending queue inventory changed; repeat the migration preview")
     if blockers:
         raise ValueError("pending queues remain blocked: " + "; ".join(blockers))
+    receipts, blockers = _receipts(root)
+    if _json(receipts) != _json(manifest.operational["receipts"]):
+        raise ValueError("operational receipt inventory changed; repeat the migration preview")
+    if blockers:
+        raise ValueError("operational receipts remain blocked: " + "; ".join(blockers))

@@ -179,6 +179,14 @@ def _decode(raw):
         raise ReceiptError("invalid or unsupported request receipt") from exc
 
 
+def decode_receipt(raw, *, request_id: str, fleet_uid: str) -> RequestReceipt:
+    """Decode retained metadata and bind it to its scoped filename; no IO."""
+    receipt = _decode(raw)
+    if receipt.request_id != request_id or receipt.intent.fleet_uid != fleet_uid:
+        raise ReceiptConflict("receipt identity differs from its scoped path")
+    return receipt
+
+
 def _sync(directory):
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -224,12 +232,10 @@ class RequestStore:
         with os.fdopen(fd, "rb") as stream:
             _regular(stream.fileno())
             try:
-                receipt = _decode(json.load(stream))
+                raw = json.load(stream)
             except (ValueError, UnicodeError) as exc:
                 raise ReceiptError("invalid request receipt") from exc
-        if receipt.request_id != self.path.stem or receipt.intent.fleet_uid != self.fleet_uid:
-            raise ReceiptConflict("receipt identity differs from its scoped path")
-        return receipt
+        return decode_receipt(raw, request_id=self.path.stem, fleet_uid=self.fleet_uid)
 
     def _save(self, receipt):
         self.assert_locked()

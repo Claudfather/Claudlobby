@@ -98,7 +98,7 @@ def _admit(store: ActivationStore, activation_id: str, manifest: MigrationManife
     if manifest.blockers:
         raise MigrationApplyError("migration remains blocked: " + "; ".join(manifest.blockers))
     recovery = read_release(store.root, body["intent"]["recovery_release_id"])
-    if recovery.compatibility.blockers(manifest.rollback["after_sql_versions"]):
+    if manifest.readability_blockers(recovery.compatibility):
         raise MigrationApplyError("recorded recovery release cannot read the post-migration state")
     return record
 
