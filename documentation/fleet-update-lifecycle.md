@@ -483,7 +483,7 @@ here — tracked as #1732.
 
 ## Mechanism 1 — daily live reload (plugins + skills)
 
-`lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled by `lib/setup-fleet` (the generic timer enroller).
+`lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled by `lib/setup-fleet` (via `lib/install_fleet_timer.sh`, the generic timer enroller).
 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
 2. Runs `claudlobby generate` to completion — re-links composed skill symlinks.
