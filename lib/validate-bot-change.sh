@@ -172,8 +172,12 @@ val_initialize_plane "$ROOT"
 # real start/watchdog bodies with an explicit, private admission collaborator;
 # tests/test_native_admission.py and test_unit_admission.py own real refusal.
 # Never overwrite the checked-out or installed guard, even in a source export.
-cp -R "$LIB_DIR" "$ROOT/native-fixture"
-LIB_DIR="$ROOT/native-fixture"
+# The stdlib native reader accepts the actual source layout: lib/ beside its
+# selected claudlobby/ package. Keep the copied lib writable for this fixture's
+# private admission override, and bind the package to the exact source tree.
+cp -R "$LIB_DIR" "$ROOT/lib"
+ln -s "$VAL_REPO/claudlobby" "$ROOT/claudlobby"
+LIB_DIR="$ROOT/lib"
 printf 'native_admission() { return 0; }\n' > "$LIB_DIR/runtime-admission.sh"
 export CLAUDLOBBY_NATIVE_DIR="$LIB_DIR"
 
@@ -753,11 +757,12 @@ harness_check "#1481 an escalated task stays OPEN (non-terminal by ruling: the w
 
 ta_esc_rows=$(val_read "escalations of $FLEET" python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
     --fleet "$FLEET")
-ta_esc=$(printf '%s\n' "$ta_esc_rows" | grep -c 't-1481-0003' || true)
+ta_esc_task=$(val_sql "$ROOT" "SELECT work_item_id FROM work_items WHERE source_ref = 'dispatch-log:t-1481-0003'")
+ta_esc=$(printf '%s\n' "$ta_esc_rows" | awk -F '\t' -v task="$ta_esc_task" '$2 == task { n++ } END { print n+0 }')
 [ "${ta_esc:-0}" -eq 1 ] && r=yes || r=no
 harness_check "#1481 plane-lookup --escalated lists it (the only read that can see a non-terminal raise)" "$r"
 
-ta_esc_by=$(printf '%s\n' "$ta_esc_rows" | grep 't-1481-0003' | cut -f3 || true)
+ta_esc_by=$(printf '%s\n' "$ta_esc_rows" | awk -F '\t' -v task="$ta_esc_task" '$2 == task { print $3 }')
 [ "$ta_esc_by" = "$MGR" ] && r=yes || r=no
 harness_check "#1481   ...naming who asked, which no capture mode strips" "$r"
 
@@ -775,7 +780,7 @@ CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="valnomgr1481" \
     "$LIB_DIR/report-back.sh" "$TA_BOT" progress "on it" --progress 30 \
     --task t-1481-0003 >/dev/null 2>&1 || true
 ta_esc_after=$(val_read "escalations of $FLEET" python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --escalated \
-    --fleet "$FLEET" | grep -c 't-1481-0003' || true)
+    --fleet "$FLEET" | awk -F '\t' -v task="$ta_esc_task" '$2 == task { n++ } END { print n+0 }')
 [ "${ta_esc_after:-1}" -eq 0 ] && r=yes || r=no
 harness_check "#1481 a later report CLEARS the escalation (no second door, nothing to reconcile)" "$r"
 
@@ -937,7 +942,8 @@ tesc_paged=$(grep -c 'escalated by valtescmgr' "$_tesc_pages" 2>/dev/null || tru
 [ "${tesc_paged:-0}" -eq 1 ] && r=yes || r=no
 harness_check "#1481 an open escalation PAGES the operator (the only read that can see a raise)" "$r"
 
-grep -q 'task t-1481-0020 escalated by valtescmgr' "$_tesc_pages" && r=yes || r=no
+tesc_task=$(val_sql "$ROOT" "SELECT work_item_id FROM work_items WHERE source_ref = 'dispatch-log:t-1481-0020'")
+grep -Fq "task $tesc_task escalated by valtescmgr" "$_tesc_pages" && r=yes || r=no
 harness_check "#1481   ...naming the task and who raised it" "$r"
 
 _tesc_run

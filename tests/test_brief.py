@@ -101,6 +101,10 @@ def root(tmp_path: Path) -> Path:  # noqa: F811 — imported short-path fixture
     (tmp_path / "lib").mkdir()
     for name in ("dispatch-overdue.py", "plane-readers.py", "plane-lookup.py"):
         shutil.copy(REPO_ROOT / "lib" / name, tmp_path / "lib" / name)
+    # The native report reader resolves its codec from the selected sibling
+    # package. Keep the mutable lib copies, but bind them to this exact source
+    # package instead of leaving a lib-only layout that production never has.
+    (tmp_path / "claudlobby").symlink_to(REPO_ROOT / "claudlobby", target_is_directory=True)
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "full"}')   # bodies kept, as on the estate
     (tmp_path / "runtime" / "fleet").mkdir(parents=True)
