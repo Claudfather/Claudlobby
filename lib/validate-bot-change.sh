@@ -1522,6 +1522,7 @@ harness_check "send_reload_command fires no spurious Enter on clean submit (veri
 # A fresh session.md -> /claudna:session resume is sent BEFORE STARTUP_PROMPT; a
 # stale one -> resume skipped (clean start).
 RB_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-rb.XXXXXX")"
+val_initialize_plane "$RB_ROOT"
 RB_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valrb"
 mkdir -p "$RB_DIR/.claude" "$RB_DIR/logs" "$RB_ROOT/bin" "$RB_ROOT/tmp"
 # Controlled HOME with consent pre-accepted. start-bot.sh's consent block runs
@@ -2052,6 +2053,7 @@ fi
 # must be skipped; the worker must be processed.
 val_scenario "validate-bot-change: weekly worker-only restart"
 WR_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-wr.XXXXXX")"
+val_initialize_plane "$WR_ROOT"
 WR_LIB="$WR_ROOT/lib"
 mkdir -p "$WR_LIB"
 cp "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$LIB_DIR/weekly-worker-restart.sh" "$WR_LIB/"
@@ -3199,6 +3201,10 @@ sc_advance() {
 
 # The fake claudlobby root defines the org every sibling is matched against.
 SC_HOME=$(sc_mkrepo "claudlobby" "testorg")
+# The real checkout ignores host state; keep recording out of this synthetic
+# source tree's dirty-work guard as well.
+printf '\n/state/\n' >> "$SC_HOME/.git/info/exclude"
+val_initialize_plane "$SC_HOME"
 SC_SIB=$(sc_mkrepo "sibling" "testorg")     # framework — must be watched
 SC_PROD=$(sc_mkrepo "productrepo" "otherorg") # product — must NOT be watched
 SC_DIRTY=$(sc_mkrepo "dirtysib" "testorg")  # framework, but someone is mid-work
