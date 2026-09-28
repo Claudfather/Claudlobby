@@ -978,7 +978,7 @@ def test_ui_reads_in_the_operators_language():
     assert "r.terminal_event?.occurred_at" in js
     assert 'dueLabel(r.expected_by).replace' not in js
     assert "attention_since" in js and "never delivered" in js
-    assert "chase the worker" in js and "send failed" in js
+    assert "check the worker" in js and "send failed" in js
     # the clamp: ONE number, read by the stylesheet; the toggle finds its
     # body by structure and remembers what the operator opened
     assert "--clamp-lines" in js and "openBodies" in js
@@ -1129,6 +1129,10 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
         {"event_type": "task", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": queued, "event": "escalated",
                      "actor": "bot:f/mgr", "question": "Which priority?", "by": "mgr"}},
+        {"event_type": "communication", "emitter": "t", "fleet": "g",
+         "payload": {"msg_id": "msg_" + "9" * 32, "sender": "bot:g/worker",
+                     "recipient": "bot:g/mgr", "message_class": "chat",
+                     "body": "fleet g is recorded"}},
     ], require_commit=True)
     client = TestClient(create_app(tmp_path, package=source_package()))
     room = client.get("/api/tasks?fleet=f").json()["data"]
@@ -1141,7 +1145,9 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
     assert routed["state"] == "assigned"
     assert routed["current_assignment"]["assignment_id"] == first
     assert routed["current_assignment"]["assignee_alias"] == "bot:g/worker"
-    assert moved not in {r["task_id"] for r in client.get("/api/tasks?fleet=g").json()["data"]["tasks"]}
+    other = client.get("/api/tasks?fleet=g").json()
+    assert other["state"] == "ok"
+    assert moved not in {r["task_id"] for r in other["data"]["tasks"]}
 
     emit_batch(tmp_path, [
         {"event_type": "task", "emitter": TASK_EMITTER, "fleet": "f",
