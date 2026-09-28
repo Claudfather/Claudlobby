@@ -10,9 +10,9 @@
 # The safe recovery is serial + gated; this codifies the manual procedure that
 # healed it.
 #
-# Per bot: [skip if already healthy] → pre-stop-handoff → spin-up-bot → WAIT for
-# a fresh BRIDGE_READY in logs/startup.log (marker-fenced so a stale line cannot
-# pass) up to --ceiling seconds → only THEN the next bot. Hard-stop on the first
+# Per bot: [skip if already healthy] → canonical `bot restart` (handoff, exact
+# native restart, fresh bridge/session readiness proof) → only THEN the next bot.
+# Hard-stop on the first
 # bot that never comes ready (proceed-anyway across the fleet is the bug itself).
 #
 # Usage:
@@ -66,6 +66,9 @@ rr_parse_args() {
         esac
     done
     case "$CEILING" in ''|*[!0-9]*) echo "rolling-restart: --ceiling must be an integer" >&2; exit 2 ;; esac
+    if [ "$CEILING" -le 0 ]; then
+        echo "rolling-restart: --ceiling must be positive" >&2; exit 2
+    fi
     if [ "$WORKERS_ONLY" -eq 1 ] && [ "$MANAGERS_ONLY" -eq 1 ]; then
         echo "rolling-restart: --workers-only and --managers-only are mutually exclusive (it would skip every bot)" >&2
         exit 2
@@ -122,7 +125,7 @@ rr_bot_ceiling() {
 # Roll a single fleet. Sets global counters; returns 1 to signal a hard-stop.
 rr_process_fleet() {
     local fleet="$1"
-    local bots_dir fleet_dir declared bot_dir bot_id fence state ceiling ceiling_desc auth_note why
+    local bots_dir fleet_dir declared bot_dir bot_id state ceiling ceiling_desc auth_note why
     bots_dir="$(resolve_bots_dir "$fleet")"
     if [ ! -d "$bots_dir" ]; then
         echo "$(ts_iso) SKIP fleet: no bots dir for '$fleet' ($bots_dir)" >> "$LOG"
@@ -153,6 +156,11 @@ rr_process_fleet() {
         if [ "$MANAGERS_ONLY" -eq 1 ] && ! bot_is_manager "$bot_dir"; then
             echo "$(ts_iso) SKIP (worker): $bot_id" >> "$LOG"; SKIPPED=$((SKIPPED + 1)); continue
         fi
+        # An explicit fleet restart does not re-enroll a bot deliberately
+        # stopped through `bot stop`; only `bot start` may do that.
+        if ! svc_is_registered "$bot_dir"; then
+            echo "$(ts_iso) SKIP (de-enrolled): $bot_id" >> "$LOG"; SKIPPED=$((SKIPPED + 1)); continue
+        fi
         if [ "$SKIP_HEALTHY" -eq 1 ]; then
             state="$(bridge_state "$bot_dir" 2>/dev/null || true)"
             if [ "$state" = "up" ]; then
@@ -160,38 +168,18 @@ rr_process_fleet() {
             fi
         fi
 
-        # Write a unique fence marker BEFORE the restart so only a BRIDGE_READY
-        # after it counts (rotation-proof + fail-closed; see wait_bridge_ready).
-        fence="$(bridge_fence_write "$bot_dir")"
-
         echo "$(ts_iso) RESTART: $bot_id" >> "$LOG"
-        "$LIB_DIR/pre-stop-handoff.sh" "$bot_dir" >> "$LOG" 2>&1 || true
-        if ! "$LIB_DIR/spin-up-bot.sh" "$bot_dir" >> "$LOG" 2>&1; then
-            rr_fail "$fleet" "$bot_id" "$bots_dir" "spin-up-bot failed" || return 1
-            continue
-        fi
         ceiling="$(rr_bot_ceiling "$bot_dir")"
-        if wait_bridge_ready "$bot_dir" "$ceiling" "$fence"; then
+        if claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" \
+                bot restart "$bot_id" --ceiling "$ceiling" --json >> "$LOG" 2>&1; then
             echo "$(ts_iso) READY: $bot_id" >> "$LOG"; RESTARTED=$((RESTARTED + 1))
         else
-            # A stalled gate used to report only its own ceiling, while the most
-            # likely cause was already on disk and unnamed (#1358). Worse, the
-            # advice an operator actually reads here comes from start-bot via
-            # spin-up-bot (redirected into THIS log): "BRIDGE_MISSING ...
-            # keepalive owns heal". For this one cause that is precisely wrong --
-            # keepalive restarts the bot, the restart re-reads the same
-            # host-global cache, the poller is skipped again, and the gate waits
-            # out a BRIDGE_READY that can never arrive. That is what another
-            # fleet reports stalled their fleet-wide restart on 2026-09-19 --
-            # their report, relayed onto #1358, not verified on this host. It is
-            # also the report that widened the trigger past a credential-less
-            # bot, so it is carried as a report rather than flattened into fact.
-            #
-            # So name the signature instead. Same plain file read as start-bot,
-            # scoped to THIS bot dir so a bot pinned to its own CLAUDE_CONFIG_DIR
-            # is described by the cache its session actually consults.
+            # A failed canonical restart may be native or readiness failure.
+            # Preserve the cache diagnostic for a bridge that cannot come up:
+            # an armed host-global cache is re-read on every bounce, so another
+            # keepalive retry cannot heal it. Read this bot's config directory.
             auth_note="$(mcp_auth_cache_note "$bot_dir" 2>/dev/null || true)"
-            why="no BRIDGE_READY within ${ceiling}s"
+            why="restart or readiness proof failed (bridge ceiling ${ceiling}s)"
             # The alert is a Telegram-bound one-liner, so it carries the
             # signature and the address of the detail, never the detail. An
             # UNDETERMINED cache gets its own wording rather than the armed

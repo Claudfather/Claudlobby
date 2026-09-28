@@ -6,9 +6,8 @@
 # week to pick up a staged binary (downloaded daily by update-claude-code.sh),
 # each via a lossless intentional restart:
 #
-#   pre-stop-handoff.sh  (writes a session.md handoff, best-effort, never blocks)
-#     → spin-up-bot.sh   (cross-platform idempotent restart)
-#     → start-bot.sh resumes from the handoff (age-gated) on the new session
+#   claudlobby bot restart (best-effort handoff, exact native restart,
+#     fresh bridge and session readiness proof)
 #
 # MANAGERS are excluded: their long-horizon orchestration context is the least
 # summarizable, so they are never auto-restarted — they pick up a new binary on
@@ -52,7 +51,7 @@ fi
 
 # fleet.yaml is authoritative for which bots this fleet owns. Filter the runtime
 # glob through it so a departed bot's leftover runtime dir is never bounced —
-# spin-up-bot.sh would otherwise re-enroll + restart a bot the fleet no longer
+# a restart must not re-enroll a bot the fleet no longer
 # declares, resurrecting cross-fleet orphan residue. Empty list (no/unreadable
 # fleet.yaml) → bot_in_fleet treats every dir as declared, preserving prior behavior.
 # #1146: that fallback is over-inclusive, not a no-op — a drifted manifest makes
@@ -74,54 +73,30 @@ for bot_dir in "$BOTS_DIR"/*/; do
         continue
     fi
 
-    log "RESTART worker: $bot_id"
-    # Write a unique fence marker BEFORE the bounce so the gate below only sees a
-    # BRIDGE_READY after it (rotation-proof + fail-closed; see wait_bridge_ready).
-    _wr_fence="$(bridge_fence_write "$bot_dir")"
-    # Best-effort handoff first — pre-stop-handoff.sh self-bounds (≤30s, early
-    # exits as soon as the handoff lands) and exits 0, so it never blocks the
-    # restart. The restart proceeds regardless of the handoff outcome.
-    "$LIB_DIR/pre-stop-handoff.sh" "$bot_dir" >> "$LOG" 2>&1 || true
+    # A declared worker can be deliberately de-enrolled by `bot stop`.
+    # This scheduled maintenance tick must not turn that stop into a start.
+    if ! svc_is_registered "$bot_dir"; then
+        log "RESTART skip (de-enrolled): $bot_id"
+        skipped=$((skipped + 1))
+        continue
+    fi
 
-    if "$LIB_DIR/spin-up-bot.sh" "$bot_dir" >> "$LOG" 2>&1; then
-        # F4 coupling: bot.conf is the carrier for the launcher's OWN readiness
-        # ceiling (RC_READY_TIMEOUT_S, composed from host.boot.mcp_timeout_ms),
-        # and start-bot.sh writes BRIDGE_READY only AFTER that poll finishes —
-        # so a fixed gate shorter than it alerts bridge_down on a bot that is
-        # merely slow and healthy (the composed ceiling is 200 at this tip; the
-        # old fixed 180 sat inside that band, and the band widens with every
-        # raise of mcp_timeout_ms). Derive from the bot's own composed value plus
-        # the margin for pre-stop-handoff + spin-up + the poller settle, so a
-        # policy change moves this driver too. WEEKLY_RESTART_CEILING stays the
-        # operator override and wins when set.
-        _wr_rc_s="$(bot_conf_get "$bot_dir" RC_READY_TIMEOUT_S 90)"
-        case "$_wr_rc_s" in ''|*[!0-9]*) _wr_rc_s=90 ;; esac
-        # 10# forces base 10 -- the digits guard admits a ZERO-PADDED value and
-        # bare $(( 090 )) is read as octal ("value too great for base"). What
-        # that costs here is worse than an abort, and is MEASURED rather than
-        # reasoned: bash treats an expansion error as a discard of the
-        # enclosing command, so the rest of this iteration AND every remaining
-        # iteration of the per-bot loop are skipped -- yet the script runs on
-        # to its summary line and exits 0. One zero-padded bot would silently
-        # truncate the weekly bounce, leaving every later worker un-restarted
-        # under a "RESTART complete" line, with the shell's diagnostic going
-        # to the journal rather than to this log.
-        _wr_ceiling="${WEEKLY_RESTART_CEILING:-$((10#$_wr_rc_s + 120))}"
-        # Serialize on the Telegram bridge: wait for THIS worker's poller to come
-        # ready before bouncing the next, so an all-workers weekly bounce cannot
-        # mass-starve channel init (#688/#689). A gate timeout is logged + alerted
-        # but does NOT abort the maintenance run — the next worker still bounces.
-        if wait_bridge_ready "$bot_dir" "$_wr_ceiling" "$_wr_fence"; then
-            log "RESTART ready: $bot_id"
-        else
-            log "RESTART bridge-timeout: $bot_id (no BRIDGE_READY in ${_wr_ceiling}s)"
-            emit_failure_alert "$BOTS_DIR" "bridge_down" "worker $bot_id restarted but its Telegram bridge did not come ready within ${_wr_ceiling}s (weekly bounce)"
-        fi
+    log "RESTART worker: $bot_id"
+    # The canonical restart owns the handoff, fresh fence and bridge/session
+    # proof. Keep only this weekly driver's worker policy and alert behavior.
+    _wr_rc_s="$(bot_conf_get "$bot_dir" RC_READY_TIMEOUT_S 90)"
+    case "$_wr_rc_s" in ''|*[!0-9]*) _wr_rc_s=90 ;; esac
+    # Decimal conversion preserves the composed timeout when zero-padded.
+    # The explicit weekly override remains authoritative.
+    _wr_ceiling="${WEEKLY_RESTART_CEILING:-$((10#$_wr_rc_s + 120))}"
+    if claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$FLEET" \
+            bot restart "$bot_id" --ceiling "$_wr_ceiling" --json >> "$LOG" 2>&1; then
+        log "RESTART ready: $bot_id"
         restarted=$((restarted + 1))
     else
         rc=$?
-        log "RESTART FAILED: $bot_id (spin-up-bot rc=$rc)"
-        emit_failure_alert "$BOTS_DIR" "restart_failed" "worker $bot_id failed to restart on the weekly bounce (spin-up rc=$rc)"
+        log "RESTART FAILED: $bot_id (bot restart rc=$rc; bridge ceiling ${_wr_ceiling}s)"
+        emit_failure_alert "$BOTS_DIR" "restart_failed" "worker $bot_id failed restart or bridge readiness on the weekly bounce (bot restart rc=$rc; bridge ceiling ${_wr_ceiling}s)"
         failed=$((failed + 1))
     fi
 done
