@@ -8,6 +8,7 @@ import pytest
 from claudlobby.plane.db import db_file
 from claudlobby.plane.migrations import _migration_files, migrate
 from claudlobby.task_audit import TaskAuditError, audit_root, audit_tasks
+from claudlobby.task_state import TASK_EMITTER, read_tasks
 
 
 @pytest.fixture(params=[1, 12], ids=["original-kernel", "current-schema"])
@@ -22,30 +23,31 @@ def conn(request):
     connection.close()
 
 
-def _insert(conn, table, **fields):
+def _insert(conn, table, *, emitter="dispatch-task", **fields):
     seq = conn.execute(
         "INSERT INTO ingest_ledger (event_id, family, ingested_at) VALUES (?, ?, 't')",
         (f"ev_{conn.execute('SELECT COUNT(*) FROM ingest_ledger').fetchone()[0]}", table),
     ).lastrowid
     row = dict(ingest_seq=seq, event_id=f"row_{seq}", schema_version="1.0.0",
                occurred_at="2026-09-01T00:00:00Z", ingested_at="2026-09-01T00:00:00Z",
-               host_uid="host_test", emitter="dispatch-task", origin="legacy", **fields)
+               host_uid="host_test", emitter=emitter, origin="legacy", **fields)
     conn.execute(f"INSERT INTO {table} ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
                  tuple(row.values()))
 
 
-def _task(conn, tid, *, fleet="fleet_a", ref=None):
+def _task(conn, tid, *, fleet="fleet_a", ref=None, emitter="dispatch-task"):
     _insert(conn, "work_items", work_item_id=tid, fleet_uid=fleet, source_ref=ref,
-            title="Historical work", created_by_uid="actor_not_the_owner")
+            title="Historical work", created_by_uid="actor_not_the_owner", emitter=emitter)
 
 
-def _assignment(conn, aid, tid, *, fleet="fleet_a", ref=None, worker="actor_worker"):
+def _assignment(conn, aid, tid, *, fleet="fleet_a", ref=None, worker="actor_worker", emitter="dispatch-task"):
     _insert(conn, "assignments", assignment_id=aid, work_item_id=tid, fleet_uid=fleet,
-            source_ref=ref, assignee_uid=worker, assigned_by_uid="actor_not_the_owner")
+            source_ref=ref, assignee_uid=worker, assigned_by_uid="actor_not_the_owner", emitter=emitter)
 
 
-def _event(conn, tid, aid, event):
-    _insert(conn, "events", kind="task", event=event, work_item_id=tid, assignment_id=aid)
+def _event(conn, tid, aid, event, *, emitter="dispatch-task", fleet=None):
+    _insert(conn, "events", kind="task", event=event, work_item_id=tid, assignment_id=aid,
+            emitter=emitter, fleet_uid=fleet)
 
 
 def test_intake_idless_and_scoped_historical_reference_mapping(conn):
@@ -230,8 +232,48 @@ def test_empty_and_unrecognized_formats_are_not_migrated():
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 13
 
 
-def test_new_producer_is_not_reinterpreted_as_historical_terminal_work(conn):
+def test_future_producer_is_not_reinterpreted_as_historical_terminal_work(conn):
     _task(conn, "wi_new")
-    conn.execute("UPDATE work_items SET emitter='claudlobby.tasks.v1'")
-    with pytest.raises(TaskAuditError, match="task-state reducer"):
+    conn.execute("UPDATE work_items SET emitter='claudlobby.tasks.v2'")
+    with pytest.raises(TaskAuditError, match="unsupported future task producer"):
         audit_tasks(conn)
+
+
+def test_mixed_producers_share_closure_and_preview_queued_work_without_resuming_old_assignment(conn):
+    _task(conn, "wi_old", ref="dispatch-log:old-return")
+    _assignment(conn, "asg_old", "wi_old", ref="dispatch-log:old-return")
+    _event(conn, "wi_old", "asg_old", "returned_blocked", fleet="fleet_a")
+    for suffix, token in (("returned", "returned_blocked"), ("completed", "completed"),
+                          ("failed", "failed"), ("cancelled", "cancelled"), ("reassigned", "superseded")):
+        tid, aid, ref = f"wi_{suffix}", f"asg_{suffix}", f"dispatch-log:{suffix}"
+        _task(conn, tid, ref=ref, emitter=TASK_EMITTER)
+        _assignment(conn, aid, tid, ref=ref, emitter=TASK_EMITTER)
+        _event(conn, tid, None if token == "cancelled" else aid, token,
+               emitter=TASK_EMITTER, fleet="fleet_a")
+    _assignment(conn, "asg_successor", "wi_reassigned", ref="dispatch-log:reassigned", emitter=TASK_EMITTER)
+
+    before = tuple(conn.iterdump())
+    statements = []
+    conn.set_trace_callback(statements.append)
+    report = audit_tasks(conn)
+    conn.set_trace_callback(None)
+    assert sum(sql.startswith("SELECT") for sql in statements) == 4  # schema + three bulk reads
+    assert not report.blockers and report.issues == ()
+    assert {key: report.counts[key] for key in ("tasks", "active_tasks", "closed_tasks",
+            "unassigned_tasks", "assignments", "current_assignments", "closed_assignments")} == {
+        "tasks": 6, "active_tasks": 2, "closed_tasks": 4, "unassigned_tasks": 1,
+        "assignments": 7, "current_assignments": 1, "closed_assignments": 6}
+    queued = report.preview("wi_returned", fleet_uid="fleet_a", active_only=True).mapping
+    assert queued.task_id == "wi_returned" and queued.assignment_id is None and queued.resumable
+    closed = report.preview("asg_returned", fleet_uid="fleet_a").mapping
+    assert not closed.active and not closed.resumable and closed.display_ids == ("returned",)
+    assert report.preview("old-return", fleet_uid="fleet_a", active_only=True).total_matches == 0
+    successor = report.preview("reassigned", fleet_uid="fleet_a", active_only=True).mapping
+    assert successor.assignment_id == "asg_successor" and successor.resumable
+    assert report.preview("wi_returned", fleet_uid="fleet_b").total_matches == 0
+    state = read_tasks(conn, fleet_uid="fleet_a")
+    assert {task.task_id for task in state.tasks if task.open} == {
+        row.task_id for row in report.references if row.active}
+    assert state.get("wi_returned").state == "queued" and state.get("wi_old").state == "cancelled"
+    assert state.get("wi_cancelled").assignments[0].current is False
+    assert tuple(conn.iterdump()) == before

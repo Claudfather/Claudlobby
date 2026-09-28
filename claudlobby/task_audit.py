@@ -1,4 +1,4 @@
-"""Read-only A0 preflight for historical Plane tasks (schema versions 1–12).
+"""Read-only A0 preflight for historical and supported versioned Plane tasks.
 
 This is a migration inventory, not the new task-state reducer or a mutation
 lookup. It preserves legacy terminal semantics and reports disagreements with
@@ -16,19 +16,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .plane.db import connect_ro, db_file
-from .plane.queries import TERMINAL_TASK_EVENTS
+from .runtime_versions import SQL_SCHEMA_VERSION
+from .task_state import (
+    TASK_EMITTER,
+    known_task_producer,
+    legacy_display_id,
+    task_closures,
+    task_event_from_row,
+)
 
 
 class TaskAuditError(ValueError):
     """The database cannot be interpreted by this historical audit."""
-
-
-def _display_id(source_ref: str | None) -> str | None:
-    if source_ref and source_ref.startswith("dispatch-log:"):
-        value = source_ref.removeprefix("dispatch-log:")
-        if value and not value.startswith("sha:"):
-            return value
-    return None
 
 
 @dataclass(frozen=True)
@@ -124,15 +123,16 @@ def audit_tasks(conn: sqlite3.Connection) -> TaskAudit:
     An existing transaction belongs to the caller. Otherwise a read transaction
     holds one snapshot across all queries, and is rolled back on return. A0
     accepts the actual historical schema range, including an empty version-0
-    database. New task-producer semantics need their own reducer before this
-    audit can interpret them; an unfamiliar format is never guessed.
+    database. The task-state owner supplies producer and closure semantics;
+    unfamiliar future producers are refused. Three bulk row queries retain
+    the whole estate, including unscoped tasks and orphan assignments/events.
     """
     own_snapshot = not conn.in_transaction
     if own_snapshot:
         conn.execute("BEGIN")
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if not 0 <= version <= 12:
+        if not 0 <= version <= SQL_SCHEMA_VERSION:
             raise TaskAuditError(f"unsupported historical task schema: {version}")
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -142,13 +142,12 @@ def audit_tasks(conn: sqlite3.Connection) -> TaskAudit:
             raise TaskAuditError("historical task tables are missing or unversioned")
         tasks = _rows(conn, "SELECT work_item_id, fleet_uid, source_ref, emitter"
                       " FROM work_items ORDER BY ingest_seq")
-        assignments = _rows(conn, "SELECT assignment_id, work_item_id, fleet_uid,"
+        assignments = _rows(conn, "SELECT ingest_seq, assignment_id, work_item_id, fleet_uid,"
                             " assignee_uid, source_ref, emitter FROM assignments ORDER BY ingest_seq")
-        events = _rows(conn, "SELECT event_id, work_item_id, assignment_id, event, emitter"
-                       " FROM events WHERE kind='task' ORDER BY ingest_seq")
-        if any(r["emitter"].startswith("claudlobby.tasks.")
+        events = _rows(conn, "SELECT * FROM events WHERE kind='task' ORDER BY ingest_seq")
+        if any(not known_task_producer(r["emitter"])
                for r in tasks + assignments + events):
-            raise TaskAuditError("versioned task producers require their task-state reducer")
+            raise TaskAuditError("unsupported future task producer")
         return _audit(version, tasks, assignments, events)
     finally:
         if own_snapshot:
@@ -160,19 +159,12 @@ def _audit(version: int, tasks: list[dict], assignments: list[dict],
     work = {r["work_item_id"]: r for r in tasks}
     assigned = {r["assignment_id"]: r for r in assignments}
     by_task: dict[str, list[dict]] = defaultdict(list)
-    terminal_assignments: set[str] = set()
-    terminal_tasks: set[str] = set()
+    closures = task_closures(map(task_event_from_row, events), assignments)
+    terminal_assignments, terminal_tasks = closures.assignments, closures.tasks
     issues: list[AuditIssue] = []
 
-    # Match the old per-assignment reducer even for malformed event links, then
-    # disclose those links. Otherwise the audit could silently resurrect a row
-    # the historical reader already considers closed.
-    for event in events:
-        tid, aid = event["work_item_id"], event["assignment_id"]
-        if event["event"] in TERMINAL_TASK_EVENTS:
-            terminal_tasks.add(tid)
-            if aid:
-                terminal_assignments.add(aid)
+    # The semantic owner preserves closure even for malformed historical
+    # links; disclose those links rather than silently reopening their rows.
     for event in events:
         tid, aid = event["work_item_id"], event["assignment_id"]
         if tid not in work or (aid and aid not in assigned) or (
@@ -188,7 +180,9 @@ def _audit(version: int, tasks: list[dict], assignments: list[dict],
     closed_display_groups = {
         (row["assignee_uid"], row["source_ref"])
         for row in assignments
-        if row["assignment_id"] in terminal_assignments and _display_id(row["source_ref"])
+        if row["assignment_id"] in terminal_assignments
+        and terminal_assignments[row["assignment_id"]].emitter != TASK_EMITTER
+        and legacy_display_id(row["source_ref"])
     }
     references: list[TaskReference] = []
     for row in assignments:
@@ -212,10 +206,11 @@ def _audit(version: int, tasks: list[dict], assignments: list[dict],
         for code in codes:
             issues.append(AuditIssue(code, (tid,), (aid,), active))
         if task is not None:
-            displays = {_display_id(r["source_ref"]) for r in (task, row)} - {None}
+            displays = {legacy_display_id(r["source_ref"]) for r in (task, row)} - {None}
             references.append(TaskReference(tid, aid, task["fleet_uid"], row["fleet_uid"],
                                             tuple(sorted(displays)), active, tuple(codes)))
 
+    queued_after_release = set()
     for tid, task in work.items():
         active = tid not in terminal_tasks
         if not task["fleet_uid"]:
@@ -224,8 +219,13 @@ def _audit(version: int, tasks: list[dict], assignments: list[dict],
                                if r["assignment_id"] not in terminal_assignments))
         if len(current) > 1:
             issues.append(AuditIssue("multiple_current_assignments", (tid,), current, True))
-        if not by_task[tid]:
-            display = _display_id(task["source_ref"])
+        if active and not current and any(
+                (closed := terminal_assignments.get(row["assignment_id"]))
+                and closed.emitter == TASK_EMITTER and closed.task_id == tid
+                for row in by_task[tid]):
+            queued_after_release.add(tid)
+        if not by_task[tid] or tid in queued_after_release:
+            display = legacy_display_id(task["source_ref"])
             references.append(TaskReference(tid, None, task["fleet_uid"], None,
                                             (display,) if display else (), active,
                                             () if task["fleet_uid"] else ("unscoped_task",)))
@@ -262,7 +262,7 @@ def _audit(version: int, tasks: list[dict], assignments: list[dict],
         "unscoped_tasks": sum(not r["fleet_uid"] for r in tasks),
         "active_tasks": sum(tid not in terminal_tasks for tid in work),
         "closed_tasks": sum(tid in terminal_tasks for tid in work),
-        "unassigned_tasks": sum(not by_task[tid] for tid in work),
+        "unassigned_tasks": sum(not by_task[tid] or tid in queued_after_release for tid in work),
         "assignments": len(assignments),
         "current_assignments": sum(aid not in terminal_assignments for aid in assigned),
         "closed_assignments": sum(aid in terminal_assignments for aid in assigned),

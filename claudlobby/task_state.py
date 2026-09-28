@@ -21,7 +21,6 @@ from typing import Literal
 
 from .plane.queries import TERMINAL_TASK_EVENTS
 from .runtime_versions import SQL_SCHEMA_VERSION
-from .task_audit import _display_id
 
 TASK_EMITTER = "claudlobby.tasks.v1"
 WorkState = Literal["queued", "assigned", "active", "blocked", "completed", "failed", "cancelled"]
@@ -30,6 +29,15 @@ _OPEN = {"queued", "assigned", "active", "blocked"}
 _RELEASE = {"returned_blocked", "rejected", "expired", "cancelled", "superseded", "reassigned"}
 _ACTIVITY = {"accepted": "active", "progress": "active", "resumed": "active", "blocked_waiting": "blocked"}
 _BATCH = 400  # safely below SQLite's older 999-variable limit
+
+
+def legacy_display_id(source_ref: str | None) -> str | None:
+    """Decode historical display metadata, never ownership or a public alias."""
+    if source_ref and source_ref.startswith("dispatch-log:"):
+        value = source_ref.removeprefix("dispatch-log:")
+        if value and not value.startswith("sha:"):
+            return value
+    return None
 
 
 class TaskStateError(ValueError):
@@ -171,31 +179,63 @@ def _fact(row):
     return {name: row[name] for name in Fact.__dataclass_fields__}
 
 
-def _event(row):
+def task_event_from_row(row):
+    """Decode one stored task event without changing its identity/provenance."""
     return TaskEvent(**_fact(row), task_id=row["work_item_id"],
                      **{name: row[name] for name in ("assignment_id", "event", "actor_uid",
                                                    "detail", "deadline", "successor_id")})
 
 
-def _known(emitter):
+def known_task_producer(emitter):
+    """Recognize legacy producers and the supported version of the new owner."""
     # Historical producers were not versioned. Refuse an unfamiliar version
     # of the new owner, rather than pretending it is an old shell producer.
     return not emitter.startswith("claudlobby.tasks.") or emitter == TASK_EMITTER
 
 
 def _assignment_terminal(event):
-    return _known(event.emitter) and event.event in (
+    return known_task_producer(event.emitter) and event.event in (
         _RELEASE | {"completed", "failed"} if event.emitter == TASK_EMITTER
         else TERMINAL_TASK_EVENTS)
 
 
 def _work_terminal(event):
-    if not _known(event.emitter):
+    if not known_task_producer(event.emitter):
         return False
     if event.emitter != TASK_EMITTER:
         return event.event in TERMINAL_TASK_EVENTS
     return event.event in {"completed", "failed"} or (
         event.event == "cancelled" and event.assignment_id is None)
+
+
+@dataclass(frozen=True)
+class TaskClosures:
+    """First terminal facts, shared by the scoped reader and estate audit.
+
+    IDs may name missing constructs: closure evidence must not hide broken
+    links or accidentally reopen historical rows. Callers own linkage issues
+    and unknown-producer refusal; unknown facts never establish closure.
+    """
+    tasks: dict[str, TaskEvent]
+    assignments: dict[str, TaskEvent]
+
+
+def task_closures(events, assignment_rows) -> TaskClosures:
+    """Reduce closure once in ingest order, including v1 work cancellation."""
+    tasks, assignments = {}, {}
+    for event in sorted(events, key=lambda event: event.ingest_seq):
+        if _work_terminal(event):
+            tasks.setdefault(event.task_id, event)
+        if event.assignment_id and _assignment_terminal(event):
+            assignments.setdefault(event.assignment_id, event)
+    for row in assignment_rows:
+        terminal = tasks.get(row["work_item_id"])
+        if terminal and terminal.emitter == TASK_EMITTER and terminal.event == "cancelled" \
+                and terminal.assignment_id is None and row["ingest_seq"] < terminal.ingest_seq:
+            closed = assignments.get(row["assignment_id"])
+            if closed is None or terminal.ingest_seq < closed.ingest_seq:
+                assignments[row["assignment_id"]] = terminal
+    return TaskClosures(tasks, assignments)
 
 
 def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskSnapshot:
@@ -244,7 +284,7 @@ def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskSnapshot:
 
 def _reduce(version, fleet, rows, assignment_rows, known_assignments,
             event_rows, orphan_assignments, orphan_events, orphan_history):
-    events = tuple(_event(row) for row in event_rows)
+    events = tuple(task_event_from_row(row) for row in event_rows)
     by_task, by_assignment = defaultdict(list), defaultdict(list)
     for event in events:
         by_task[event.task_id].append(event)
@@ -253,14 +293,8 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
     assigned = defaultdict(list)
     for row in sorted(assignment_rows, key=lambda row: row["ingest_seq"]):
         assigned[row["work_item_id"]].append(row)
-    terminals = {tid: next((event for event in history if _work_terminal(event)), None)
-                 for tid, history in by_task.items()}
-    closed_ids = {event.assignment_id for event in events if _assignment_terminal(event)}
-    for row in assignment_rows:
-        terminal = terminals.get(row["work_item_id"])
-        if terminal and terminal.emitter == TASK_EMITTER and terminal.event == "cancelled" \
-                and terminal.assignment_id is None and row["ingest_seq"] < terminal.ingest_seq:
-            closed_ids.add(row["assignment_id"])
+    closures = task_closures(events, assignment_rows)
+    terminals, closed_ids = closures.tasks, closures.assignments
 
     def unresolved_link_is_active(event):
         active = event.assignment_id not in closed_ids if event.assignment_id else not terminals.get(event.task_id)
@@ -278,30 +312,24 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
         def issue(code, aid=None, eid=None, *, blocking=None):
             issues.append(TaskIssue(code, tid, aid, eid,
                                     terminal is None if blocking is None else blocking))
-        if not _known(row["emitter"]):
+        if not known_task_producer(row["emitter"]):
             issue("unknown_task_producer", eid=row["event_id"], blocking=True)
         assignments = []
         for assignment in assigned[tid]:
             aid = assignment["assignment_id"]
             ahistory = tuple(by_assignment[aid])
-            closed = next((event for event in ahistory if _assignment_terminal(event)), None)
-            # A v1 work cancellation explicitly closes any assignment already
-            # present. A later assignment cannot reopen that terminal work.
-            if terminal and terminal.emitter == TASK_EMITTER and terminal.event == "cancelled" \
-                    and terminal.assignment_id is None and assignment["ingest_seq"] < terminal.ingest_seq:
-                if closed is None or terminal.ingest_seq < closed.ingest_seq:
-                    closed = terminal
+            closed = closures.assignments.get(aid)
             if assignment["fleet_uid"] != fleet:
                 issue("cross_fleet_assignment" if assignment["fleet_uid"] else "unscoped_assignment",
                       aid, blocking=closed is None)
-            if not _known(assignment["emitter"]):
+            if not known_task_producer(assignment["emitter"]):
                 issue("unknown_task_producer", aid, assignment["event_id"], blocking=True)
             state = "assigned"
             for event in ahistory:
                 if event.task_id != tid:
                     issue("mismatched_task_event", aid, event.event_id,
                           blocking=unresolved_link_is_active(event))
-                if _known(event.emitter) and event.event in _ACTIVITY:
+                if known_task_producer(event.emitter) and event.event in _ACTIVITY:
                     state = _ACTIVITY[event.event]
             assignments.append(Assignment(**_fact(assignment), assignment_id=aid, task_id=tid,
                 assignee_uid=assignment["assignee_uid"], assigned_by_uid=assignment["assigned_by_uid"],
@@ -309,7 +337,7 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
                 state="closed" if closed else state, terminal_event=closed, history=ahistory))
         for event in {e.event_id: e for e in history + tuple(
                 e for a in assignments for e in a.history)}.values():
-            if not _known(event.emitter):
+            if not known_task_producer(event.emitter):
                 issue("unknown_task_producer", event.assignment_id, event.event_id, blocking=True)
             if event.fleet_uid != fleet:
                 issue("cross_fleet_task_event" if event.fleet_uid else "unscoped_task_event",
@@ -339,14 +367,14 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
             created_by_uid=row["created_by_uid"], state=state,
             current_assignment=current[0] if len(current) == 1 and not terminal and not any(i.blocking for i in issues) else None,
             assignments=tuple(assignments), history=history, terminal_event=terminal,
-            display_ids=tuple(sorted({_display_id(r["source_ref"]) for r in [row, *assigned[tid]]} - {None})),
+            display_ids=tuple(sorted({legacy_display_id(r["source_ref"]) for r in [row, *assigned[tid]]} - {None})),
             issues=tuple(dict.fromkeys(issues))))
 
     # Preserve A0's disagreement with the old display-ID closure grouping. A
     # closed sibling must not make another canonical row safe by coincidence.
     closed_groups = {(a.assignee_uid, a.source_ref) for task in tasks for a in task.assignments
                      if a.terminal_event and a.terminal_event.emitter != TASK_EMITTER
-                     and _display_id(a.source_ref)}
+                     and legacy_display_id(a.source_ref)}
     displays = defaultdict(set)
     for task in tasks:
         if task.terminal_event is None:
@@ -364,9 +392,9 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
             task = replace(task, issues=task.issues + tuple(extra), current_assignment=None,
                            state=task.state if task.terminal_event else None)
         resolved.append(task)
-    orphan_facts = tuple(map(_event, orphan_history + orphan_events))
-    orphan_terminal = {e.assignment_id for e in orphan_facts if _assignment_terminal(e)}
-    orphan_closed_work = {e.task_id for e in orphan_facts if _work_terminal(e)}
+    orphan_facts = tuple(map(task_event_from_row, orphan_history + orphan_events))
+    orphan_closures = task_closures(orphan_facts, orphan_assignments)
+    orphan_terminal, orphan_closed_work = orphan_closures.assignments, orphan_closures.tasks
     issues = [issue for task in resolved for issue in task.issues]
     issues += [TaskIssue("dangling_assignment", r["work_item_id"], r["assignment_id"],
                          blocking=r["assignment_id"] not in orphan_terminal) for r in orphan_assignments]
