@@ -62,8 +62,6 @@ if [ ! -f "$SRC_PLIST" ]; then
     exit 1
 fi
 
-mkdir -p "$HOME/Library/LaunchAgents"
-
 # Ownership gate (#1152) — BEFORE the copy, so a refusal changes nothing on
 # disk. Same predicate as the systemd sibling: a host job captured on macOS is
 # the same defect, and a guard on one platform only would leave the other

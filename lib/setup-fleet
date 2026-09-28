@@ -91,7 +91,7 @@ enroll_jobs() {
         FAILURES=$((FAILURES + 1))
         return
     fi
-    local enroller ext t base jobname found=0
+    local enroller ext t base jobname found=0 erc
     if [ "$_OS" = "Linux" ]; then
         enroller="$LIB_DIR/install_fleet_timer.sh"
         ext="timer"
@@ -112,7 +112,7 @@ enroll_jobs() {
         fi
         # TIMER_DIR + SERVICE_PREFIX per invocation: one call shape for
         # overlay and root mode (matches setup-system's host-jobs idiom).
-        local erc=0
+        erc=0
         TIMER_DIR="$TIMERS_DIR" SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname" || erc=$?
         case "$erc" in
             0) log "✓ job enrolled: $base" ;;

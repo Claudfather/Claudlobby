@@ -26,10 +26,13 @@ exactly as the fake does. The launchd canary in the PR body is for that.
 from __future__ import annotations
 
 import os
+import platform
 import signal
 import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 from tests.conftest import TG_STUB, _write_exec, constructed_env
 
@@ -167,6 +170,7 @@ class Host:
         _write_exec(str(bindir / "claudlobby"), FAKE_CLAUDLOBBY)
 
         self.fake_log = tmp_path / "supervisor-calls.log"
+        self.out_file = tmp_path / "run.out"
         self.job_pid_file = tmp_path / "job.pid"
         self.env = constructed_env(
             PATH=f"{bindir}:{os.environ['PATH']}",
@@ -179,6 +183,9 @@ class Host:
             TG_CAPTURE=tmp_path / "tg-capture",
             TMUX_TMPDIR=tmp_path / "no-tmux",
             PLANE_EMIT_DISABLED="1",
+            # A host without flock (macOS) locks with mkdir, which a killed run
+            # leaves behind; the next run would spin the default 30s on it.
+            WITH_LOCK_WAIT_S="2",
         )
 
     def install_self(self, revision):
@@ -192,21 +199,20 @@ class Host:
         an orphaned step still holds it, so waiting on one would time the
         step, not the run."""
         env = dict(self.env, **{k: str(v) for k, v in extra.items()})
-        self.out_file = self.tmp / "run.out"
-        out = open(self.out_file, "a")
-        return subprocess.Popen(
-            [
-                "bash",
-                "-c",
-                'printf "%s" "$$" > "$JOB_PID_FILE"; exec "$0" "$@"',
-                str(self.root / "lib" / "reload-fleet.sh"),
-                FLEET,
-            ],
-            env=env,
-            start_new_session=True,
-            stdout=out,
-            stderr=subprocess.STDOUT,
-        )
+        with open(self.out_file, "a") as out:    # the child keeps its own copy
+            return subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    'printf "%s" "$$" > "$JOB_PID_FILE"; exec "$0" "$@"',
+                    str(self.root / "lib" / "reload-fleet.sh"),
+                    FLEET,
+                ],
+                env=env,
+                start_new_session=True,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+            )
 
     def run(self, timeout=120, **extra):
         p = self.start(**extra)
@@ -253,6 +259,9 @@ def _kill_group(p):
 
 UID = os.getuid()
 OK_LINE = "download + generate OK"
+# The kill tests are about bash and signals, not the supervisor: they run on
+# the host's own OS, so on a Mac they exercise its /bin/bash 3.2.
+HOST_OS = platform.system()
 
 
 # --- point 1: a job never boots itself out mid-run ---------------------------
@@ -333,6 +342,7 @@ def test_removing_the_guard_reproduces_1924(tmp_path):
     assert host.records() == []
 
 
+@pytest.mark.skipif(HOST_OS != "Linux", reason="faking Linux needs Linux userland under lib-common")
 def test_systemd_reenrolls_every_job_its_own_included(tmp_path):
     """Linux is unaffected: enable --now of the reload-fleet timer does not stop
     the service running it, so the guard never applies and nothing is skipped."""
@@ -353,7 +363,7 @@ def test_systemd_reenrolls_every_job_its_own_included(tmp_path):
 def test_a_sigterm_mid_step_is_raised_at_once_naming_the_step(tmp_path):
     """Only the run's own process is signalled, while its step still has 30s
     to go: the alert must not wait for the step to finish."""
-    host = Host(tmp_path, "Linux")
+    host = Host(tmp_path, HOST_OS)
     p = host.start(GENERATE_SLEEP=30)
     try:
         host.wait_for_log("generate: composing")
@@ -378,7 +388,7 @@ def test_a_sigterm_mid_step_is_raised_at_once_naming_the_step(tmp_path):
 
 
 def test_a_sigkill_mid_step_is_raised_by_the_next_run(tmp_path):
-    host = Host(tmp_path, "Linux")
+    host = Host(tmp_path, HOST_OS)
     p = host.start(GENERATE_SLEEP=30)
     try:
         host.wait_for_log("generate: composing")
@@ -405,7 +415,7 @@ def test_a_sigkill_mid_step_is_raised_by_the_next_run(tmp_path):
 
 
 def test_the_next_run_leaves_live_runs_and_other_fleets_alone(tmp_path):
-    host = Host(tmp_path, "Linux")
+    host = Host(tmp_path, HOST_OS)
     records = host.root / "state" / "reload-fleet.inflight"
     records.mkdir(parents=True)
     # a run still going (its args name reload-fleet), and a dead record of a
@@ -436,7 +446,7 @@ def test_an_orphaned_lock_subshell_starts_no_further_step(tmp_path):
     (here during the npx preflight), it must start no further step -- and must
     not re-create the record the trap already raised, or the next run would
     raise the same kill a second time."""
-    host = Host(tmp_path, "Linux")
+    host = Host(tmp_path, HOST_OS)
     p = host.start(NPX_SLEEP=3)
     try:
         host.wait_for_log("npx: checking")
