@@ -1,4 +1,4 @@
-"""Publish frozen candidate unit files, never start or enable a native unit.
+"""Publish frozen candidate unit files and owned persistent enablement links.
 
 Generated configuration is applied first; installed definitions are published
 only at their explicit startup phase. Every enrolled declaration must carry the
@@ -6,7 +6,8 @@ shared admission owner's verified guard. This matters on Linux: publication in
 a user config directory can take precedence over a parked runtime mask.
 
 The coordinator owns zero-process proofs, native reload/unmask/start/readiness,
-and stopping candidates before rollback. ConfigInstall owns all file writes,
+and stopping candidates before rollback. Publication never starts a unit.
+ConfigInstall owns all file writes,
 interruption recovery and exact removal; original restoration is UnitPause's.
 """
 
@@ -36,7 +37,7 @@ def _digest(value):
 
 
 def journal_id(activation_id: str, phase: str) -> str:
-    if phase not in PHASES:
+    if phase not in (*PHASES, "directories"):
         raise ActivationError("unknown enrollment phase")
     return "enrollment-" + _digest([activation_id, phase])
 
@@ -98,6 +99,75 @@ def _target(manager, domain, source):
     return domain + "/" + name.removesuffix(".plist") if manager == "Darwin" else name
 
 
+def _wanted_by(content, source, paired_services):
+    """Only the compositor's shipped Install grammar has publication authority."""
+    if source.suffix == ".plist":
+        return None
+    wanted, section, seen = [], "", False
+    for raw in content.decode("utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            if section == "Install":
+                if seen:
+                    raise ActivationError("duplicate Install section is unsupported")
+                seen = True
+        elif section == "Install":
+            key, separator, value = line.partition("=")
+            if separator != "=" or key.strip() != "WantedBy":
+                raise ActivationError("unsupported unit Install semantics")
+            wanted.append(value.strip())
+    expected = ([] if source.name in paired_services else
+                ["timers.target" if source.suffix == ".timer" else "default.target"])
+    if wanted != expected or not expected and seen:
+        raise ActivationError("unit Install target differs from its persistent service/timer role")
+    return expected[0] if expected else None
+
+
+def _enablement(entry, wanted_by, prior):
+    if wanted_by is None:
+        return None
+    installed = Path(entry["installed"])
+    link = installed.parent / (wanted_by + ".wants") / installed.name
+    if link.parent.resolve() != link.parent:
+        raise ActivationError("enablement directory is redirected")
+    before = path_state(link)
+    node = before["node"]
+    if node["kind"] != "absent":
+        if (not entry["original"] or node["kind"] != "symlink"
+                or before["resolved"] != str(installed)):
+            raise ActivationError("unowned or misdirected native enablement link")
+    elif entry["original"] and dict(prior["properties"]).get("UnitFileState") == "enabled":
+        raise ActivationError("original persistent enablement link is missing")
+    return {"path": str(link), "target": str(installed), "before": before,
+            "create": not entry["original"], "wanted_by": wanted_by}
+
+
+def _check_enablement(entry, *, allow_candidate, require_applied=False):
+    link = entry["enablement"]
+    if link is None:
+        return
+    path = Path(link["path"])
+    installed = Path(entry["installed"])
+    if (link["wanted_by"] not in ("default.target", "timers.target")
+            or path != installed.parent / (link["wanted_by"] + ".wants") / installed.name
+            or link["target"] != str(installed)
+            or type(link["create"]) is not bool or link["create"] != (not entry["original"])):
+        raise ActivationError("frozen enablement target differs from its exact installed candidate")
+    if path.parent.resolve() != path.parent:
+        raise ActivationError("enablement directory is redirected")
+    actual = path_state(path)
+    applied = {"resolved": link["target"],
+               "node": {"kind": "symlink", "target": link["target"]}}
+    allowed = [link["before"]] if not require_applied or not link["create"] else []
+    if link["create"] and allow_candidate:
+        allowed.append(applied)
+    if actual not in allowed:
+        raise ActivationError("native enablement link changed outside this activation")
+
+
 def _native_quiet(adapter, manager, file, target, *, candidate=None):
     result = adapter.call("svc_activation_assert_external", file, target, str(os.getpid()))
     if result.returncode:
@@ -142,6 +212,7 @@ class EnrollmentPublication:
 def _check_targets(adapter, enrollment, entries, *, allow_candidate):
     manager, domain, directories, _, loaded = _catalog_now(adapter, enrollment)
     for entry in entries:
+        _check_enablement(entry, allow_candidate=allow_candidate)
         destination = Path(entry["installed"])
         if destination.parent not in directories or destination.parent.resolve() != destination.parent:
             raise ActivationError("candidate destination left verified search paths")
@@ -167,7 +238,8 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
 
     New identities use the explicitly selected, observed install directory.
     Matching identities retain the exact original installed path and owner.
-    No installed file is written, reloaded, enabled or started by preparation.
+    One directory-only ConfigInstall journal ensures missing link parents before
+    phase journals reserve their own files/links. No unit is enabled or started.
     """
     record = _record(store, activation_id)
     published = [store.root / "state/activations" / journal_id(activation_id, phase) / "config"
@@ -197,6 +269,7 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
         if prior["installed"]:
             _native_quiet(adapter, manager, prior["installed"][0]["path"], prior["target"])
     entries = []
+    paired_services = {declaration.service for declaration, item in units if item["enroll"] and declaration.service}
     for declaration, item in units:
         if not item["enroll"]:
             continue
@@ -217,21 +290,43 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
                         "environment": dict(declaration.environment),
                         "service": declaration.service,
                         "after": {"kind": "file", "sha256": item["sha256"], "mode": item["mode"]}})
+        wanted = _wanted_by(candidate.blob(item["sha256"]), declaration.source, paired_services)
+        entries[-1]["enablement"] = _enablement(entries[-1], wanted, prior)
     if not entries:
         raise ActivationError("empty enrolled candidate manifest is not removal authority")
     _check_targets(adapter, enrollment, entries, allow_candidate=False)
+    common = {"owner": _OWNER, "activation_id": activation_id,
+              "configuration_journal": configuration_journal, "candidate_plan": candidate.plan_id,
+              "install_directory": str(install_directory),
+              "enrollment_digest": record.body["intent"]["enrollment_digest"], "entries": entries}
+    directory_id = journal_id(activation_id, "directories")
+    directory_path = store.root / "state/activations" / directory_id / "config"
+    if directory_path.exists():
+        directory_plan = read_plan(store.root, read_config_install(store.root, directory_id).plan_id)
+        if directory_plan.effects != {**common, "phase": "directories"}:
+            raise ActivationError("prepared publication directories differ")
+    else:
+        builder = ConfigPlanBuilder(store.root, candidate.release_id, candidate.release_seal,
+                                    candidate.fleets, effects={**common, "phase": "directories"})
+        for entry in entries:
+            link = entry["enablement"]
+            if link and link["create"]:
+                builder.directory(Path(link["path"]).parent)
+        directory_plan = builder.seal()
+        prepare_config(directory_plan, directory_id)
+    _check_publication_changes(directory_plan, entries, "directories")
+    apply_config(store.root, directory_id)
     plans = []
     for phase in PHASES:
-        effects = {"owner": _OWNER, "activation_id": activation_id, "phase": phase,
-                   "configuration_journal": configuration_journal, "candidate_plan": candidate.plan_id,
-                   "install_directory": str(install_directory),
-                   "enrollment_digest": record.body["intent"]["enrollment_digest"], "entries": entries}
         builder = ConfigPlanBuilder(store.root, candidate.release_id, candidate.release_seal,
-                                    candidate.fleets, effects=effects)
+                                    candidate.fleets, effects={**common, "phase": phase})
         for entry in entries:
             builder.input(Path(entry["source"]))
             if entry["phase"] == phase:
                 builder.file(Path(entry["installed"]), candidate.blob(entry["after"]["sha256"]), mode=entry["after"]["mode"])
+                link = entry["enablement"]
+                if link and link["create"]:
+                    builder.symlink(Path(link["path"]), Path(link["target"]))
         plans.append(builder.seal())
     _check_targets(adapter, enrollment, entries, allow_candidate=False)
     for phase, plan in zip(PHASES, plans):
@@ -239,11 +334,30 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
     return tuple(plans)
 
 
+def _check_publication_changes(plan, entries, phase):
+    actual = {change.target: change.after for change in plan.changes}
+    if phase == "directories":
+        expected = {str(Path(entry["enablement"]["path"]).parent): {"kind": "directory", "mode": 0o755}
+                    for entry in entries if entry["enablement"] and entry["enablement"]["create"]}
+        valid = all(target in expected and node == expected[target] for target, node in actual.items())
+    else:
+        expected = {entry["installed"]: entry["after"] for entry in entries if entry["phase"] == phase}
+        expected.update({entry["enablement"]["path"]: {"kind": "symlink", "target": entry["enablement"]["target"]}
+                         for entry in entries if entry["phase"] == phase
+                         and entry["enablement"] and entry["enablement"]["create"]})
+        valid = actual == expected
+    if not valid or any(change.before["node"] != {"kind": "absent"} for change in plan.changes):
+        raise ActivationError("candidate publication contains unowned replacements")
+
+
 def _load(store, activation_id, record):
     pause = load_unit_pause(store, activation_id)
-    candidate, _ = _candidate(store, record, pause.enrollment["manager"])
+    candidate, units = _candidate(store, record, pause.enrollment["manager"])
+    paired_services = {declaration.service for declaration, item in units if item["enroll"] and declaration.service}
+    wanted = {str(declaration.source): _wanted_by(candidate.blob(item["sha256"]), declaration.source, paired_services)
+              for declaration, item in units if item["enroll"]}
     plans, shared = [], None
-    for phase in PHASES:
+    for phase in ("directories", *PHASES):
         journal = read_config_install(store.root, journal_id(activation_id, phase))
         plan = read_plan(store.root, journal.plan_id)
         effects = plan.effects
@@ -256,15 +370,45 @@ def _load(store, activation_id, record):
         if shared is not None and common != shared:
             raise ActivationError("candidate phase placements disagree")
         shared = common
-        expected = {entry["installed"]: entry["after"] for entry in effects["entries"] if entry["phase"] == phase}
-        if ({change.target: change.after for change in plan.changes} != expected
-                or any(change.before["node"] != {"kind": "absent"} for change in plan.changes)):
-            raise ActivationError("candidate publication contains unowned replacements")
-        plans.append(plan)
+        for entry in effects["entries"]:
+            link = entry["enablement"]
+            if entry["source"] not in wanted or (link["wanted_by"] if link else None) != wanted[entry["source"]]:
+                raise ActivationError("frozen enablement differs from candidate Install semantics")
+        _check_publication_changes(plan, effects["entries"], phase)
+        if phase != "directories":
+            plans.append(plan)
     configuration = read_config_install(store.root, plans[0].effects["configuration_journal"])
     if configuration.plan_id != candidate.plan_id or configuration.status != "applied":
         raise ActivationError("candidate generated configuration is no longer applied")
     return pause.enrollment, tuple(plans)
+
+
+def candidate_entries(store: ActivationStore, activation_id: str, phase: str) -> tuple[dict, ...]:
+    """Read verified frozen native placements; never derive installed paths again."""
+    if phase not in PHASES:
+        raise ActivationError("unknown enrollment phase")
+    _, plans = _load(store, activation_id, _record(store, activation_id))
+    entries = plans[PHASES.index(phase)].effects["entries"]
+    return tuple(json.loads(json.dumps(entry)) for entry in entries if entry["phase"] == phase)
+
+
+def verify_candidate_enablement(store: ActivationStore, activation_id: str, phase: str, *, adapter=None) -> str:
+    """Verify owned links and effective persistent state after the native reload.
+
+    This proves user-manager enablement, not OS user-manager startup or linger.
+    Original links are preserved; paired oneshot services have no enablement.
+    """
+    adapter = adapter or Adapter()
+    observations = []
+    for entry in candidate_entries(store, activation_id, phase):
+        _check_enablement(entry, allow_candidate=True, require_applied=True)
+        link = entry["enablement"]
+        if link and link["create"]:
+            snapshot = adapter.read("svc_activation_snapshot", entry["installed"], entry["target"]).strip().split()
+            if len(snapshot) != 3 or snapshot[:2] != ["enabled", "loaded"]:
+                raise ActivationError("new native unit is not persistently enabled")
+            observations.append([link["path"], link["target"], snapshot])
+    return _digest(observations)
 
 
 def install_candidate_units(store: ActivationStore, activation_id: str, phase: str, *, adapter=None) -> EnrollmentPublication:
@@ -279,7 +423,7 @@ def install_candidate_units(store: ActivationStore, activation_id: str, phase: s
     _check_targets(adapter, enrollment, entries, allow_candidate=True)
     apply_config(store.root, journal_id(activation_id, phase))
     # No daemon-reload here. Native state reconciliation/start is a separate
-    # coordinator effect; this evidence claims exact installed files only.
+    # coordinator effect; this evidence claims exact installed files/links only.
     return EnrollmentPublication(phase, journal_id(activation_id, phase), plan.plan_id,
                                  tuple(entry["target"] for entry in entries), "published")
 
@@ -300,4 +444,5 @@ def remove_candidate_units(store: ActivationStore, activation_id: str, *, adapte
         entries = [entry for entry in plan.effects["entries"] if entry["phase"] == phase]
         results.append(EnrollmentPublication(phase, journal_id(activation_id, phase), plan.plan_id,
                                              tuple(entry["target"] for entry in entries), "removed"))
+    rollback_config(store.root, journal_id(activation_id, "directories"))
     return tuple(results)

@@ -30,7 +30,8 @@ class Manager(RecordedAdapter):
     def call(self, function, *args):
         if function == "svc_inventory_catalog":
             text = f"manager\tLinux\ndirectory\t{self.directory}\n"
-            text += ''.join(f"installed\t{p.name}\n" for p in sorted(self.directory.glob('*.service')))
+            text += ''.join(f"installed\t{p.name}\n" for p in sorted(self.directory.iterdir())
+                            if p.suffix in (".service", ".timer"))
             text += ''.join(f"loaded\t{name}\n" for name in sorted(set(self.states) | self.loaded_foreign))
         elif function == "svc_inventory_state":
             file, target = Path(args[0]), args[1]
@@ -53,7 +54,7 @@ class Manager(RecordedAdapter):
         return subprocess.CompletedProcess([function, *args], 0, text, "")
 
 
-def _candidate_plan(installed):
+def _candidate_plan(installed, *, install_extra=""):
     root, inputs, paths, _, original_dir = installed
     old = r.read_release(root, inputs.release_id)
     candidate_inputs = replace(inputs, source_revision="c" * 40)
@@ -82,9 +83,10 @@ def _candidate_plan(installed):
                     mode="oneshot" if timed else "exec", argv=[str(candidate.cli_path), "fixture"])
         files = {stem + ".plist": (plistlib.dumps({"Label": stem, "WorkingDirectory": str(root),
                     "EnvironmentVariables": env, "ProgramArguments": list(argv)}), 0o640),
-                 stem + ".service": (f"[Service]\nWorkingDirectory={root}\nExecStart={runtime_admission.unit_systemd_command(argv)}\n".encode(), 0o640)}
+                 stem + ".service": ((f"[Service]\nWorkingDirectory={root}\nExecStart={runtime_admission.unit_systemd_command(argv)}\n" +
+                     ("" if timed else "[Install]\nWantedBy=default.target\n" + install_extra)).encode(), 0o640)}
         if timed:
-            files[stem + ".timer"] = (f"[Timer]\nUnit={stem}.service\n".encode(), 0o640)
+            files[stem + ".timer"] = (f"[Timer]\nUnit={stem}.service\n[Install]\nWantedBy=timers.target\n".encode(), 0o640)
         destination = root / "runtime/generated"
         items = unit_family(files, destination=destination, scope=scope, phase=phase,
                             release_id=candidate.release_id, fleet="alpha" if scope != "host" else None,
@@ -97,9 +99,9 @@ def _candidate_plan(installed):
 
 
 @pytest.fixture
-def case(enrollment, installed, monkeypatch):
+def case(enrollment, installed, monkeypatch, request):
     inventory, phases, _, _, foreign, wants = enrollment
-    plan, old, candidate = _candidate_plan(installed)
+    plan, old, candidate = _candidate_plan(installed, install_extra=getattr(request, "param", ""))
     adapter = Manager(inventory, plan)
     guard_checks = []
 
@@ -157,20 +159,43 @@ def test_bootstrap_candidate_publishes_new_units_then_removes_only_its_files(emp
         store.begin("cutover", "configuration_applied")
         config_install.apply_config(store.root, "generated-config")
         _complete_pending(store, "configuration_applied")
+        original_replace = config_install._replace
+        interrupted_target = adapter.directory / "default.target.wants"
+        def interrupted(source, destination):
+            original_replace(source, destination)
+            if destination == interrupted_target:
+                raise InterruptedError("after owned publication rename")
+        with monkeypatch.context() as patch:
+            patch.setattr(config_install, "_replace", interrupted)
+            with pytest.raises(InterruptedError):
+                publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                     install_directory=adapter.directory, adapter=adapter)
         plans = publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
                                                      install_directory=adapter.directory, adapter=adapter)
         assert all(not entry["original"] for entry in plans[0].effects["entries"])
         assert set(checks) == {d.source.name for d, item in planned_units(plan, "Linux") if item["enroll"]}
         store.begin("cutover", "ingest_started")
+        interrupted_target = adapter.directory / "default.target.wants/collector.service"
+        with monkeypatch.context() as patch:
+            patch.setattr(config_install, "_replace", interrupted)
+            with pytest.raises(InterruptedError):
+                publish.install_candidate_units(store, "cutover", "ingest", adapter=adapter)
+        assert interrupted_target.is_symlink()
         result = publish.install_candidate_units(store, "cutover", "ingest", adapter=adapter)
         assert result.targets == ("collector.service",)
         assert (adapter.directory / "collector.service").is_file()
+        link = adapter.directory / "default.target.wants/collector.service"
+        assert link.readlink() == adapter.directory / "collector.service"
+        foreign_link = link.parent / "foreign.service"
+        foreign_link.symlink_to("../foreign.service")
         store.begin_rollback("cutover")
         for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("candidate_units_removed")]:
             _complete(store, step)
         store.begin("cutover", "candidate_units_removed")
         publish.remove_candidate_units(store, "cutover", adapter=adapter)
         assert not (adapter.directory / "collector.service").exists()
+        assert not link.is_symlink()
+        assert foreign_link.readlink() == Path("../foreign.service")
         assert foreign.read_bytes() == original
         assert not any(call[0] in ("svc_activation_resume", "svc_enroll") for call in adapter.calls)
 
@@ -213,6 +238,12 @@ def test_phase_publication_retry_and_owned_cleanup_preserve_foreign(case, monkey
                 assert not (adapter.directory / "added.service").exists()
                 _complete_pending(store, step)
         assert not (adapter.directory / "dormant.service").exists()
+        added_link = adapter.directory / "default.target.wants/added.service"
+        timer_link = adapter.directory / "timers.target.wants/scheduled.timer"
+        assert added_link.readlink() == adapter.directory / "added.service"
+        assert timer_link.readlink() == adapter.directory / "scheduled.timer"
+        assert not (wants / "member.service").is_symlink()  # preserve its original disabled state
+        assert not (wants / "scheduled.service").is_symlink()  # paired oneshot remains static
         assert (adapter.directory / "member.service").stat().st_mode & 0o777 == 0o640
         store.begin_rollback("cutover")
         for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("candidate_units_removed")]:
@@ -225,6 +256,13 @@ def test_phase_publication_retry_and_owned_cleanup_preserve_foreign(case, monkey
             publish.remove_candidate_units(store, "cutover", adapter=adapter)
         assert (adapter.directory / "member.service").exists()
         changed.write_bytes(original)
+        added_link.unlink()
+        added_link.symlink_to(foreign)
+        with pytest.raises(state.ActivationError, match="enablement link changed"):
+            publish.remove_candidate_units(store, "cutover", adapter=adapter)
+        assert added_link.resolve() == foreign
+        added_link.unlink()
+        added_link.symlink_to(changed)
         removed = publish.remove_candidate_units(store, "cutover", adapter=adapter)
         assert len(removed) == 3
         assert publish.remove_candidate_units(store, "cutover", adapter=adapter) == removed
@@ -232,11 +270,13 @@ def test_phase_publication_retry_and_owned_cleanup_preserve_foreign(case, monkey
             assert not (adapter.directory / declaration.source.name).exists()
         assert foreign.read_bytes() == foreign_bytes
         assert (wants / "collector.service").readlink() == wanted_link
+        assert not added_link.is_symlink() and not timer_link.is_symlink()
+        assert not timer_link.parent.exists()  # ConfigInstall removes only its now-empty directory
         assert not any(call[0] in ("svc_activation_resume", "svc_enroll") for call in adapter.calls)
 
 
 def test_guard_and_foreign_loaded_collision_refuse_before_publication(case, monkeypatch):
-    inventory, _, _, adapter, _, _, _, _ = case
+    inventory, _, _, adapter, foreign, wants, _, _ = case
     with state.locked_activation(inventory.data_root) as store:
         prepared(case, store)
         def unguarded(*args):
@@ -246,8 +286,30 @@ def test_guard_and_foreign_loaded_collision_refuse_before_publication(case, monk
             with pytest.raises(state.ActivationError, match="unguarded"):
                 publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
                                                      install_directory=adapter.directory, adapter=adapter)
+        link = wants / "collector.service"
+        old_target = link.readlink()
+        link.unlink()
+        link.symlink_to(foreign)
+        with pytest.raises(state.ActivationError, match="misdirected native enablement"):
+            publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                 install_directory=adapter.directory, adapter=adapter)
+        assert link.resolve() == foreign
+        link.unlink()
+        link.symlink_to(old_target)
         adapter.loaded_foreign.add("added.service")
         with pytest.raises(state.ActivationError, match="foreign loaded candidate"):
+            publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                 install_directory=adapter.directory, adapter=adapter)
+        assert not (adapter.directory / "collector.service").exists()
+        assert not list((store.root / "state/activations").glob("enrollment-*/config"))
+
+
+@pytest.mark.parametrize("case", ["Also=foreign.service\n"], indirect=True)
+def test_unsupported_install_semantics_refuse_before_publication(case):
+    inventory, _, _, adapter, _, _, _, _ = case
+    with state.locked_activation(inventory.data_root) as store:
+        prepared(case, store)
+        with pytest.raises(state.ActivationError, match="unsupported unit Install"):
             publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
                                                  install_directory=adapter.directory, adapter=adapter)
         assert not (adapter.directory / "collector.service").exists()
