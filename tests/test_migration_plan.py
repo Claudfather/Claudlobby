@@ -187,7 +187,8 @@ def test_absent_and_empty_databases_are_distinct_and_never_initialized(releases)
     assert {Path(item["path"]).name for item in staged["files"]} == {
         ".young.tmp", ".partial.tmp", ".task.tmp"}
     assert any(item["issues"] for item in staged["files"] if item["path"].endswith(".partial.tmp"))
-    assert any("unresolved legacy task records" in reason for reason in pending.blockers)
+    assert any("non-telemetry pending records need a drain/quarantine decision" in reason
+               for reason in pending.blockers)
     with pytest.raises(ValueError, match="pending queues remain blocked"):
         verify_pending_queues(root, pending)
     _pending(staged_dir(root) / "arrived.batch", [_event_request()], raw=True)

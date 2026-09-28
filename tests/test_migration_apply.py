@@ -186,7 +186,7 @@ def test_conditional_queue_and_queue_changes_never_admit_sql(candidate):
     with activation.locked_activation(root) as store:
         _quiesce(store, plan, manifest)
         before = db_file(root).read_bytes()
-        with pytest.raises(apply.MigrationApplyError, match="unresolved legacy task"):
+        with pytest.raises(apply.MigrationApplyError, match="non-telemetry pending records need a drain/quarantine decision"):
             apply.apply_migration(store, "upgrade", manifest)
         assert db_file(root).read_bytes() == before
         assert apply.read_migration(root, "upgrade") is None
