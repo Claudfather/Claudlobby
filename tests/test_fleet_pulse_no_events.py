@@ -42,8 +42,8 @@ SOCKET = "pulse610"
 
 
 def _tmux_env(root: Path) -> dict:
-    """Pin the tmux rendezvous under the fixture root (per-test private)."""
-    return {**os.environ, "TMUX_TMPDIR": str(root / "tmux")}
+    """Use conftest's short private per-test directory (macOS sun_path limit)."""
+    return {**os.environ, "TMUX_TMPDIR": os.environ["TMPDIR"]}
 
 
 @pytest.fixture()
@@ -98,7 +98,7 @@ def _run_pulse(root: Path, fleet: str, extra_env: dict) -> subprocess.CompletedP
     env = _scrubbed_env(
         HOME=str(root / "home"),
         CLAUDLOBBY_ROOT=str(root),
-        TMUX_TMPDIR=str(root / "tmux"),
+        TMUX_TMPDIR=_tmux_env(root)["TMUX_TMPDIR"],
         **extra_env,
     )
     return subprocess.run(
