@@ -6,9 +6,12 @@ import argparse
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 import json
+import shlex
 import sys
 from typing import Callable
 from uuid import uuid4
+
+from .reference_hints import ReferenceHint
 
 
 _EXITS = {"internal_error": 1, "invalid_argument": 2, "not_found": 3,
@@ -22,7 +25,9 @@ _PUBLIC = {("host", "releases"): "host.releases", ("host", "status"): "host.stat
            ("migration", "status"): "migration.status"}
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("context", ("show",)), ("bot", ("list", "show", "capabilities")),
-    ("fleet", ("show",)), ("project", ("list", "show"))) for verb in verbs})
+    ("fleet", ("show",)), ("project", ("list", "show")),
+    ("task", ("list", "show")),
+    ("assignment", ("show",))) for verb in verbs})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
 
 
@@ -31,7 +36,7 @@ class CommandError:
     code: str
     message: str
     retryable: bool = False
-    hint: str | None = None
+    hint: str | ReferenceHint | None = None
 
 
 @dataclass(frozen=True)
@@ -57,7 +62,7 @@ class CommandOutput:
 
 
 class CommandFailure(Exception):
-    def __init__(self, code: str, message: str, *, hint: str | None = None,
+    def __init__(self, code: str, message: str, *, hint: str | ReferenceHint | None = None,
                  retryable: bool = False, data: dict | None = None,
                  release_id: str | None = None):
         if code not in _EXITS:
@@ -74,7 +79,20 @@ def emit(result: CommandResult, *, json_output: bool, lines: tuple[str, ...] = (
     elif result.error:
         print(result.error.message, file=sys.stderr)
         if result.error.hint:
-            print(result.error.hint, file=sys.stderr)
+            hint = result.error.hint
+            if isinstance(hint, ReferenceHint):
+                if hint.next_command:
+                    print(f"inspect claudlobby {shlex.join(hint.next_command)}", file=sys.stderr)
+                elif hint.candidates:
+                    for candidate in hint.candidates:
+                        print(f"candidate {candidate.task_id}"
+                              f"{f' / {candidate.assignment_id}' if candidate.assignment_id else ''}: "
+                              f"claudlobby {shlex.join(candidate.command)}", file=sys.stderr)
+                    if hint.total_matches > len(hint.candidates):
+                        print(f"{hint.total_matches - len(hint.candidates)} more candidates; "
+                              "select a canonical ID", file=sys.stderr)
+            else:
+                print(hint, file=sys.stderr)
     else:
         print("\n".join(lines) if lines else f"{result.command}: complete")
     return result.exit_code

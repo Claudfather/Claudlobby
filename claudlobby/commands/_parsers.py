@@ -282,6 +282,9 @@ def register_subparsers(sub) -> None:
                      "send nothing")
     ptr.set_defaults(func=_command("task", "cmd_task_recheck"))
 
+    from ._task_read_parsers import register_task_read_subparsers
+    register_task_read_subparsers(sub, t_sub)
+
     pu = sub.add_parser(
         "uptime",
         help="Per-bot uptime, MTBR, and restart-rate from keepalive logs",

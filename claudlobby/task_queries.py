@@ -16,26 +16,12 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Literal, NoReturn
 
+from .reference_hints import ReferenceCandidate, ReferenceHint
 from .task_state import Assignment, Task, TaskIssue, TaskSnapshot, legacy_display_id, read_tasks
 
 ListState = Literal["open", "queued", "assigned", "active", "blocked", "completed", "failed", "cancelled", "all"]
 _STATES = {"open", "queued", "assigned", "active", "blocked", "completed", "failed", "cancelled", "all"}
 _HINT_LIMIT = 20
-
-
-@dataclass(frozen=True)
-class ReferenceCandidate:
-    task_id: str
-    assignment_id: str | None
-    # Supported argv relative to the caller's SAME resolved root/fleet context.
-    command: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class ReferenceHint:
-    candidates: tuple[ReferenceCandidate, ...]
-    total_matches: int
-    next_command: tuple[str, ...] | None
 
 
 class TaskQueryError(ValueError):
