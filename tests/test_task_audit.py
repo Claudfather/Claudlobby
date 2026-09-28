@@ -199,7 +199,8 @@ def test_audit_is_repeatable_read_only_and_preserves_caller_transaction(conn):
     assert first == audit_tasks(conn)
     assert conn.in_transaction and conn.total_changes == changes
     assert tuple(conn.iterdump()) == before
-    conn.set_authorizer(None)
+    # Passing None to disable the authorizer is supported only since 3.11.
+    conn.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
     conn.rollback()
     assert audit_tasks(conn).counts["assignments"] == 0
 
