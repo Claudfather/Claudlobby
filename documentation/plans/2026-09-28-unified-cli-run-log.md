@@ -1,23 +1,27 @@
 # Unified CLI implementation record
 
-### 2026-09-28 12:34 UTC — operations CI fixture repair
+### 2026-09-28 13:03 UTC — remaining bootstrap assertion repaired
 
-**M:** PR #1935 at `910c5ec6` completed all three platform jobs with the same
-eight failed tests and seven setup errors. Linux 3.10/3.11 each passed 6,375
-tests with 15 skipped; macOS passed 6,353 with 37 skipped. Each had four
-warnings. [Complete run](https://github.com/Claudfather/Claudlobby/actions/runs/36419384613).
-Both conformance checks passed. These are failed candidate results, not acceptance.
+**M:** PR #1935 at `84539521` completed all platform jobs with one stale
+syntax-error assertion failing. Linux 3.10/3.11 each passed 6,389 tests with
+15 skipped; macOS passed 6,367 with 37 skipped. Each had four warnings.
+All 14 other previously failed/blocked nodes now pass, including the seven
+new runtime cases. Native macOS evidence and both conformance checks passed.
+[Complete run](https://github.com/Claudfather/Claudlobby/actions/runs/36422763759).
+These are failed candidate results, not acceptance.
 
-**R:** repair `28535478` changes five test files: the exact bootstrap allowlist
-now includes the three new stdlib-only modules; reused activation fixtures
-import their existing short socket-root fixture; schema tampering uses the
-current version plus one. Assertions and production behavior are unchanged.
-**M:** isolated exact import-boundary probes changed help from exit 1 to 0 and
-invalid syntax from 1 to 2, while selected command imports remained blocked.
-The schema-tamper case changed from one failure to one pass. Hosted runtime
-verification of the repair is pending; held feature work remains unpublished.
-The next feature push must use this same import-boundary check, not only a
-standalone help smoke. Sol implements bounded slices; parent reviews and publishes.
+**R:** `7b1e5796` changes only the existing bootstrap assertion to the stable
+public syntax error and requires empty stdout; exit 2, import isolation and
+traceback checks remain. **M:** the entire existing bootstrap test file ran in
+private source exports: parent 1 failed/5 passed, candidate 6 passed. This
+narrow run used stdlib environment setup, not the full suite's conftest.
+Hosted verification of the amended revision remains pending; no exclusions.
+
+The operator reaffirmed a working-system/canary-first approach: the next slice
+is usable messaging plus the default fleet-ops skill and narrow composed grants,
+then actual isolated delegation/recomposition. Further migration machinery is
+deferred until that slice needs it. Reuse existing tests; no new general harness.
+Sol implements bounded slices; parent reviews and publishes. Production is unchanged.
 
 Status: IN PROGRESS. Started 2026-09-28 UTC. Tracks #1747 and the design in
 [PR #1925](https://github.com/Claudfather/Claudlobby/pull/1925), revision
