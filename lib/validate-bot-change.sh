@@ -3380,7 +3380,7 @@ else
     PL_SOCK="$PL_SOCKDIR/s"
     PL_LIB="$PL_ROOT/lib"
     mkdir -p "$PL_LIB"
-    for _f in plane-emit.sh plane-socket-client.py; do
+    for _f in plane-emit.sh plane-socket-client.py lib-common.sh supervisor.sh cli-context.sh; do
         ln -s "$PL_REPO/lib/$_f" "$PL_LIB/$_f"
     done
 
@@ -3399,10 +3399,15 @@ else
                 bash "$PL_LIB/plane-emit.sh" 2> "$PL_ROOT/err"
     }
     _pl_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM events WHERE event='daemon_started'"; }
+    # Binding the socket precedes the daemon's own start receipt. Wait for that
+    # positive control, then count each shim emission relative to it.
+    PL_BASE=$(val_poll 100 0.1 _pl_count)
+    [ "${PL_BASE:-0}" -ge 1 ] && r=yes || r=no
+    harness_check "the daemon's own start row landed before shim emissions" "$r"
 
     _pl_emit "" "socket" >/dev/null && r=yes || r=no
     harness_check "Plane shim records with daemon up and no flag" "$r"
-    [ "$(_pl_count)" = "1" ] && r=yes || r=no
+    [ "$(_pl_count)" = "$((PL_BASE + 1))" ] && r=yes || r=no
     harness_check "the event row LANDED (real db, real shim)" "$r"
     grep -Eq 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=no || r=yes
     harness_check "  ...via rung 1 (no fallback disclosure on stderr)" "$r"
@@ -3415,7 +3420,7 @@ else
     rm -f "$PL_ROOT/state/plane/.socket-wedged"
     _pl_emit "PLANE_EMIT_ENABLED=0" "cold" >/dev/null && r=yes || r=no
     harness_check "Plane shim records with daemon down (legacy flag ignored)" "$r"
-    [ "$(_pl_count)" = "2" ] && r=yes || r=no
+    [ "$(_pl_count)" = "$((PL_BASE + 2))" ] && r=yes || r=no
     harness_check "the event row LANDED through the cold rung" "$r"
     grep -Eq 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...and the fallback was DISCLOSED, not silent" "$r"
@@ -3427,7 +3432,7 @@ else
 
     _pl_emit "PLANE_EMIT_DISABLED=1" "disabled" >/dev/null && r=yes || r=no
     harness_check "PLANE_EMIT_DISABLED shim returns successfully" "$r"
-    [ "$(_pl_count)" = "2" ] && r=yes || r=no
+    [ "$(_pl_count)" = "$((PL_BASE + 2))" ] && r=yes || r=no
     harness_check "  ...and writes NOTHING" "$r"
 
     # A stale daemon refusal must reach the current cold-CLI rung.
