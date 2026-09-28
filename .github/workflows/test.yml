@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Each test runs in exactly one lane, chosen by its markers (pinned by
+# tests/test_ci_lanes.py):
+#   pytest      the suite, less the harness and anything quarantined
+#   harness     the end-to-end validation harness, in parallel with pytest
+#   quarantine  known-flaky tests (quarantine.yml), which nothing should require
+# pytest and harness here, with conformance's vault-tests, are the lanes a
+# required-checks ruleset should name.
 jobs:
   pytest:
     runs-on: ubuntu-latest
@@ -20,9 +27,27 @@ jobs:
       - name: Install package
         run: pip install -e '.[dev]'
       - name: Run tests
-        # One pre-existing failure is deselected pending separate triage
-        # (tracked in the issue thread for #229). The rest of the suite must
-        # stay green.
-        run: |
-          pytest -v \
-            --deselect tests/test_validator.py::TestHookCommandValidation::test_existing_absolute_command_no_warn
+        # A test leaves this lane by a marker and no other way: `harness` runs
+        # in the job below, `quarantine(issue=N)` in quarantine.yml. Never
+        # --deselect a node id here: one that stops matching deselects nothing
+        # and says so nowhere.
+        run: pytest -v -m "not quarantine and not harness"
+
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install system deps
+        # The harness stands its throwaway bots up on real tmux. Without it the
+        # test skips, and this job would pass having run nothing.
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install package
+        run: pip install -e '.[dev]'
+      - name: Run the validation harness
+        # The suite's longest test (lib/validate-bot-change.sh): in its own job
+        # it runs beside the suite rather than inside it, and a rerun of it
+        # alone costs minutes, not the whole suite.
+        run: pytest -v -m "harness and not quarantine"

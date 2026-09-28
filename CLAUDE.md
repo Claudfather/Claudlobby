@@ -331,6 +331,19 @@ the other two cannot** (#1035). Drop any one and a live hole reopens.
 Redirect, read `$?`, then grep the file. Same `${PIPESTATUS[0]}` trap this file documents
 for `gh api ... | head`.
 
+**CI's lanes: quarantine a flaky test, never deselect it.** Each test runs in exactly one CI
+lane, chosen by its markers (pinned by `tests/test_ci_lanes.py`). `test.yml`'s `pytest` job
+runs `-m "not quarantine and not harness"`; its `harness` job runs the validation harness
+(`@pytest.mark.harness`) in parallel; and `quarantine.yml` runs every test marked
+`@pytest.mark.quarantine(issue=<N>)`. Fix a flaky test when its cause is clear and small.
+Otherwise quarantine it: it leaves the required lanes (`pytest`, `harness`, conformance's
+`vault-tests`) but still runs on every PR and push to main, in a check nothing should require.
+Collection refuses a quarantine that names no tracking issue. Never `--deselect` or `-k` a test
+out of a workflow: a node id that stops matching deselects nothing and says so nowhere. The
+suite still runs everything locally, and `pytest -m "not quarantine and not harness"` mirrors
+the required `pytest` lane. A quarantined test that shows up in your before/after name diff is
+a known flake, so rerun it on both arms before attributing it.
+
 ### Adding or modifying lib/ scripts
 
 1. Source `lib-common.sh` for shared helpers (OS detection, bot.conf loading, safe mktemp)
