@@ -537,6 +537,103 @@ svc_activation_resume() {
     [ "$_OS" = Darwin ] || [ "$SVC_ACT_ACTIVE" = "$SVC_ACT_OLD_ACTIVE" ]
 }
 
+# Exact candidate start after the publication owner verified bytes and quiet
+# ownership. The coordinator holds EX and arms the release-bound unit grant.
+# No enable/install/discovery: timers are started by their exact .timer target.
+svc_activation_start() {
+    local file="$1" target="$2"
+    [ -f "$file" ] || { _svc_activation_unknown "missing candidate: $file"; return 3; }
+    case "$_OS" in
+        Linux)
+            case "$target" in *[!a-zA-Z0-9_.@-]*|'') return 3 ;; esac
+            case "$target" in *.service|*.timer) ;; *) return 3 ;; esac
+            [ "${file##*/}" = "$target" ] || return 3
+            systemctl --user daemon-reload || return $?
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_ACTIVE" = inactive ] || return 3
+            if [ "$SVC_ACT_LOAD" = masked ]; then
+                [ "$SVC_ACT_FILE_STATE" = masked-runtime ] || return 3
+                systemctl --user unmask --runtime "$target" || return $?
+                systemctl --user daemon-reload || return $?
+            fi
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_LOAD $SVC_ACT_ACTIVE" = 'loaded inactive' ] || return 3
+            systemctl --user start "$target" || return $?
+            ;;
+        Darwin)
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_ACTIVE" = inactive ] || return 3
+            if [ "$SVC_ACT_LOAD" = unloaded ]; then
+                # RunAtLoad is allowed only inside the already-armed scope.
+                launchctl bootstrap "${target%/*}" "$file" || return $?
+            else
+                launchctl kickstart "$target" || return $?
+            fi
+            ;;
+        *) return 3 ;;
+    esac
+    printf 'start-requested\n' # native acknowledgement, not application readiness
+}
+
+# Native inactive plus exact Linux v2 cgroup emptiness, when a group is known.
+# Darwin needs the caller's pre-stop PID/socket witnesses as well. This does
+# not infer that arbitrary detached processes on the host are absent.
+svc_activation_quiet() {
+    local file="$1" target="$2" group="${3:-}" tree paths path members
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_ACTIVE" = inactive ] || { _svc_activation_unknown "$target remains active"; return 3; }
+    if [ "$_OS" = Linux ]; then
+        group="${group:-$SVC_ACT_GROUP}"
+        if [ -n "$group" ]; then
+            case "$group" in /*) ;; *) return 3 ;; esac
+            case "$group" in /|*..*|*$'\n'*) return 3 ;; esac
+            [ -r /sys/fs/cgroup/cgroup.controllers ] || { _svc_activation_unknown 'cgroup v2 unavailable'; return 3; }
+            tree="/sys/fs/cgroup$group"
+            if [ -e "$tree" ]; then
+                [ -d "$tree" ] && [ -r "$tree/cgroup.procs" ] || return 3
+                paths=$(find "$tree" -type f -name cgroup.procs -print) || return 3
+                [ -n "$paths" ] || return 3
+                while IFS= read -r path; do
+                    members=$(cat "$path") || return 3
+                    [ -z "$members" ] || { _svc_activation_unknown "$target has remaining cgroup members"; return 3; }
+                done <<EOF
+$paths
+EOF
+            fi
+            printf 'inactive\tcgroup-empty\n'; return 0
+        fi
+    fi
+    printf 'inactive\tno-cgroup-witness\n'
+}
+
+# Reuse the restart owner's readiness policy without invoking its fleet walk.
+# Source only inside these cold activation calls, never the per-tool hot path.
+svc_activation_bot_fence() (
+    export CLAUDLOBBY_ROOT="$1"
+    local bot_dir="$2" ceiling token
+    [ -d "$bot_dir" ] && [ -r "$bot_dir/bot.conf" ] || return 3
+    . "$_SUPERVISOR_LIB_DIR/rolling-restart.sh" || return 3
+    ceiling=$(rr_bot_ceiling "$bot_dir") || return 3
+    case "$ceiling" in ''|*[!0-9]*) return 3 ;; esac
+    token=$(bridge_fence_write "$bot_dir") || return 3
+    [ -n "$token" ] && grep -Fq -- "$token" "$bot_dir/logs/startup.log" || return 3
+    printf '%s\t%s\n' "$ceiling" "$token"
+)
+
+svc_activation_bot_ready() (
+    export CLAUDLOBBY_ROOT="$1"
+    local bot_dir="$2" ceiling="$3" token="$4" socket session
+    case "$ceiling" in ''|*[!0-9]*) return 3 ;; esac
+    [ -n "$token" ] || return 3
+    . "$_SUPERVISOR_LIB_DIR/rolling-restart.sh" || return 3
+    wait_bridge_ready "$bot_dir" "$ceiling" "$token" || return $?
+    socket=$(tmux_socket_for_bot "$bot_dir") || return 3
+    [ -n "$socket" ] || return 3
+    session=$(tmux_session_name "$bot_dir") || return 3
+    check_tmux_session "$session" "$socket" || return 3
+    printf 'bridge-ready\n'
+)
+
 # Read-only enrollment observations. Catalog rows are tab-separated; native
 # property output remains native output, parsed strictly by the inventory owner.
 # List both search paths and loaded names: either list alone misses consumers.
