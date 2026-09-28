@@ -1,0 +1,106 @@
+"""CLI parsing must survive unavailable command dependencies (#1747 P1)."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+from textwrap import dedent
+
+import pytest
+
+from tests.conftest import constructed_env
+
+
+REPO = Path(__file__).resolve().parents[1]
+
+# Fresh -S interpreters avoid pytest's already-imported dependencies. Record
+# attempts too, so optional-import exception handlers cannot hide a violation.
+BOOTSTRAP = """
+import sys
+sys.path.insert(0, sys.argv.pop(1))
+allowed = {
+    'claudlobby', 'claudlobby.__main__', 'claudlobby.commands',
+    'claudlobby.commands._parsers', 'claudlobby.task_defaults',
+}
+blocked = []
+class ImportBoundary:
+    def find_spec(self, fullname, path=None, target=None):
+        root = fullname.split('.')[0]
+        if ((root == 'claudlobby' and fullname not in allowed)
+                or (root != 'claudlobby' and root not in sys.stdlib_module_names)):
+            blocked.append(fullname)
+            raise ModuleNotFoundError('blocked CLI dependency: ' + fullname)
+sys.meta_path.insert(0, ImportBoundary())
+"""
+PARSE = """
+from claudlobby.__main__ import main
+try:
+    main(sys.argv[1:])
+finally:
+    assert not blocked, blocked
+"""
+
+
+def _run(code, *argv, tmp_path):
+    return subprocess.run(
+        [sys.executable, "-I", "-S", "-c", BOOTSTRAP + dedent(code), str(REPO), *argv],
+        cwd=tmp_path, env=constructed_env(), capture_output=True, text=True, timeout=15,
+    )
+
+
+@pytest.mark.parametrize(("argv", "expected"), [
+    (("--help",), "Compositor for Claude Code agent fleets"),
+    (("plane", "view", "--help"), "--host"),
+    (("data-migrate", "--help"), "--source"),
+])
+def test_help_needs_only_stdlib(argv, expected, tmp_path):
+    result = _run(PARSE, *argv, tmp_path=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert expected in result.stdout
+
+
+def test_invalid_arguments_refuse_before_loading_commands(tmp_path):
+    result = _run(PARSE, "task", "recheck", "--max-age-h", "bad", tmp_path=tmp_path)
+    assert result.returncode == 2, result.stderr
+    assert "invalid float value" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_main_passes_namespace_to_only_selected_handler_and_returns_its_result(tmp_path):
+    result = _run("""
+        import argparse
+        from types import ModuleType
+        from claudlobby.__main__ import main
+
+        captured = []
+        parse_args = argparse.ArgumentParser.parse_args
+        def capture(self, *args, **kwargs):
+            parsed = parse_args(self, *args, **kwargs)
+            captured.append((parsed, vars(parsed).copy()))
+            return parsed
+        argparse.ArgumentParser.parse_args = capture
+
+        fake = ModuleType('claudlobby.commands.events')
+        def handler(args):
+            assert len(captured) == 1 and args is captured[0][0]
+            assert vars(args) == captured[0][1]
+            assert args.cmd == 'events' and args.tail == 7
+            assert args.root == 'example' and args.fleet == 'test-fleet'
+            return 23
+        fake.cmd_events = handler
+        sys.modules[fake.__name__] = fake
+        rc = main(['--root', 'example', '--fleet', 'test-fleet', 'events', '--tail', '7'])
+        assert not blocked, blocked
+        sys.exit(rc)
+    """, tmp_path=tmp_path)
+    assert result.returncode == 23, result.stderr
+
+
+def test_selected_import_failure_is_not_masked(tmp_path):
+    result = _run("""
+        from claudlobby.__main__ import main
+        main(['events'])
+    """, tmp_path=tmp_path)
+    assert result.returncode == 1, result.stderr
+    assert "ModuleNotFoundError: blocked CLI dependency: claudlobby.commands.events" in result.stderr

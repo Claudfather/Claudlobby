@@ -52,6 +52,7 @@ from ..plane.db import open_ro
 from ..plane.ids import mint_msg_id
 from ..plane.inventory import short_alias as _short
 from ..plane.queries import OPEN_BY_TASK_REF_SQL
+from ..task_defaults import DEFAULT_MAX_AGE_H, DEFAULT_REPEAT_H
 from ._helpers import _resolve_paths
 
 # Every OPEN assignment carrying the legacy task id, newest first, with the
@@ -477,8 +478,6 @@ def cmd_task_nudge(args) -> int:
 # crash — it silently disables the debounce and re-asks a manager every run.
 RECHECK_REF_PREFIX = "task-recheck:"
 RECHECK_SENDER = "system:task-recheck"
-DEFAULT_MAX_AGE_H = 48.0
-DEFAULT_REPEAT_H = 24.0
 # How many rows ONE message names. A manager holding 22 stale rows would
 # otherwise get a 3000-character pane send, which is a wall nobody reads and a
 # payload the send path has never been measured on. The rest are NOT stamped —

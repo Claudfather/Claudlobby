@@ -146,26 +146,6 @@ def _migration_preamble(
     return paths, fleet, source_dir, rename_map
 
 
-def _add_migration_args(parser) -> None:
-    """Add the common --source, --map, --apply args shared by all migration commands."""
-    parser.add_argument(
-        "--source",
-        required=True,
-        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
-    )
-    parser.add_argument(
-        "--map",
-        action="append",
-        default=[],
-        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
-    )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write changes (default: dry-run preview only)",
-    )
-
-
 def refuse_unreachable(command: str, note: str) -> int:
     """The one refusal every plane-only reader prints (F18 closure, R2b-1):
     the plane cannot answer, so NOTHING is served rather than a wrong answer —

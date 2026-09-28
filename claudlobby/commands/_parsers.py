@@ -1,52 +1,39 @@
-"""Argparse subparser registration for the claudlobby CLI."""
+"""Argparse registration: command implementations load only on dispatch."""
 
 from __future__ import annotations
 
-from ._helpers import _add_migration_args
-from .core import (
-    cmd_brief,
-    cmd_creds_reconcile,
-    cmd_env_register,
-    cmd_diff,
-    cmd_doctor,
-    cmd_freshbox,
-    cmd_generate,
-    cmd_host_job,
-    cmd_host_timers,
-    cmd_list_library,
-    cmd_promote,
-    cmd_report_back,
-    cmd_workstreams,
-    cmd_status,
-    cmd_uptime,
-    cmd_validate,
-    cmd_warm_cache,
-)
-from .checkins import cmd_checkins
-from .cron_migrate import cmd_cron_migrate
-from .data_migrate import cmd_data_migrate
-from .env_migrate import cmd_env_migrate
-from .lessons_migrate import cmd_lessons_migrate
-from .memory_migrate import cmd_memory_migrate
-from .move_bot import cmd_move_bot
-from .plane import (
-    cmd_emit,
-    cmd_emit_batch,
-    cmd_plane_doctor,
-    cmd_plane_expire,
-    cmd_plane_import_workstreams,
-    cmd_plane_prune,
-    cmd_plane_registry,
-    cmd_plane_schema,
-    cmd_plane_open,
-    cmd_plane_serve,
-    cmd_plane_view,
-    cmd_plane_spool,
-    cmd_plane_status,
-)
-from .scaffolding import cmd_new_bot, cmd_new_guardrail, cmd_new_skill
-from .task import (DEFAULT_MAX_AGE_H, DEFAULT_REPEAT_H, cmd_task_nudge,
-                   cmd_task_recheck)
+from importlib import import_module
+
+from ..task_defaults import DEFAULT_MAX_AGE_H, DEFAULT_REPEAT_H
+
+
+def _command(module: str, name: str):
+    """Defer implementation imports until argparse has accepted the call."""
+    def dispatch(args):
+        handler = getattr(import_module(f".{module}", __package__), name)
+        return handler(args)
+
+    return dispatch
+
+
+def _add_migration_args(parser) -> None:
+    """Add the common --source, --map, --apply args shared by all migration commands."""
+    parser.add_argument(
+        "--source",
+        required=True,
+        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
+    )
+    parser.add_argument(
+        "--map",
+        action="append",
+        default=[],
+        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write changes (default: dry-run preview only)",
+    )
 
 
 def register_subparsers(sub) -> None:
@@ -66,7 +53,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="With --warn-baseline: record this run's warning categories to FILE",
     )
-    pv.set_defaults(func=cmd_validate)
+    pv.set_defaults(func=_command("core", "cmd_validate"))
 
     pdr = sub.add_parser(
         "doctor",
@@ -94,14 +81,14 @@ def register_subparsers(sub) -> None:
              "small one. Skipping says so in the report: undelivered work is "
              "then UNCHECKED, never reported clean.",
     )
-    pdr.set_defaults(func=cmd_doctor)
+    pdr.set_defaults(func=_command("core", "cmd_doctor"))
 
     pcr = sub.add_parser(
         "creds-reconcile",
         help="Reconcile declared credentials vs stored values vs equipped bots "
         "(#1104 shapes 1+2; shape 3 reports UNKNOWN by design)",
     )
-    pcr.set_defaults(func=cmd_creds_reconcile)
+    pcr.set_defaults(func=_command("core", "cmd_creds_reconcile"))
 
     per = sub.add_parser(
         "env-register",
@@ -112,7 +99,7 @@ def register_subparsers(sub) -> None:
         "--bot", help="Include this bot's .env tier (the most specific one)"
     )
     per.add_argument("--json", action="store_true", help="Machine-readable output")
-    per.set_defaults(func=cmd_env_register)
+    per.set_defaults(func=_command("core", "cmd_env_register"))
 
     pfb = sub.add_parser(
         "freshbox",
@@ -128,7 +115,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="Remove stale orphan supervision units (short-form <bot>.plist)",
     )
-    pfb.set_defaults(func=cmd_freshbox)
+    pfb.set_defaults(func=_command("core", "cmd_freshbox"))
 
     pg = sub.add_parser(
         "generate", help="Compose runtime/bots/ from fleet.yaml + library/"
@@ -137,44 +124,44 @@ def register_subparsers(sub) -> None:
     pg.add_argument(
         "--strict", action="store_true", help="Refuse to generate on warnings"
     )
-    pg.set_defaults(func=cmd_generate)
+    pg.set_defaults(func=_command("core", "cmd_generate"))
 
     pht = sub.add_parser(
         "host-timers",
         help="Compose host-global timer units from system.yaml host.jobs",
     )
-    pht.set_defaults(func=cmd_host_timers)
+    pht.set_defaults(func=_command("core", "cmd_host_timers"))
 
     phj = sub.add_parser(
         "host-job",
         help="Print one host job as this host runs it (packaged + host override), as JSON",
     )
     phj.add_argument("name", help="the host job, e.g. pull-root")
-    phj.set_defaults(func=cmd_host_job)
+    phj.set_defaults(func=_command("core", "cmd_host_job"))
 
     pl = sub.add_parser(
         "list-library",
         help="List available personas, skills, mcp, guardrails, protocols, voices",
     )
-    pl.set_defaults(func=cmd_list_library)
+    pl.set_defaults(func=_command("core", "cmd_list_library"))
 
     pd = sub.add_parser(
         "diff",
         help="Show drift between runtime/bots/<bot>/ and what generate would produce",
     )
     pd.add_argument("--bot", help="Diff only one bot (default: all)")
-    pd.set_defaults(func=cmd_diff)
+    pd.set_defaults(func=_command("core", "cmd_diff"))
 
     pp = sub.add_parser("promote", help="Promote runtime drift back to library/")
     pp.add_argument("bot", help="Bot name")
-    pp.set_defaults(func=cmd_promote)
+    pp.set_defaults(func=_command("core", "cmd_promote"))
 
     ps = sub.add_parser("status", help="Fleet health dashboard")
     ps.add_argument("--bot", help="Show detailed status for one bot")
     ps.add_argument(
         "--json", action="store_true", dest="json", help="JSON output for scripting"
     )
-    ps.set_defaults(func=cmd_status)
+    ps.set_defaults(func=_command("core", "cmd_status"))
 
     prb = sub.add_parser(
         "report-back",
@@ -191,7 +178,7 @@ def register_subparsers(sub) -> None:
     prb.add_argument(
         "--json", action="store_true", help="Output raw JSONL instead of table"
     )
-    prb.set_defaults(func=cmd_report_back)
+    prb.set_defaults(func=_command("core", "cmd_report_back"))
 
     pb = sub.add_parser(
         "brief",
@@ -213,13 +200,13 @@ def register_subparsers(sub) -> None:
         "lines + empty-state provenance + door line, token-capped — the "
         "composed hook's mode, never the full brief",
     )
-    pb.set_defaults(func=cmd_brief)
+    pb.set_defaults(func=_command("core", "cmd_brief"))
 
     pws = sub.add_parser(
         "workstreams",
         help="Read-only view of the fleet workstream registry",
     )
-    pws.set_defaults(func=cmd_workstreams, ws_command="list")
+    pws.set_defaults(func=_command("core", "cmd_workstreams"), ws_command="list")
     ws_sub = pws.add_subparsers(dest="ws_command")
     ws_sub.add_parser("list", help="List all workstreams (default)")
     pws_show = ws_sub.add_parser("show", help="Show one workstream by id")
@@ -238,7 +225,7 @@ def register_subparsers(sub) -> None:
                           " considered lengths, unavailable inputs, dispatch outcomes — by project")
     pck.add_argument("--limit", type=int, default=None,
                      help="at most N rows (applied after every filter; not with --summary)")
-    pck.set_defaults(func=cmd_checkins)
+    pck.set_defaults(func=_command("checkins", "cmd_checkins"))
 
     # The task loop's operator door (chunk M-A, #1481). A subcommand group from
     # the start, because M's other verbs land beside `nudge` rather than as
@@ -258,7 +245,7 @@ def register_subparsers(sub) -> None:
     ptn.add_argument("--assignment", default=None,
                      help="Act on THIS assignment (asg_...) when the task id matches"
                      " more than one open row — the remedy the refusal names")
-    ptn.set_defaults(func=cmd_task_nudge)
+    ptn.set_defaults(func=_command("task", "cmd_task_nudge"))
 
     # M4 (chunk M-B): the re-check the dormant `task-recheck` fleet timer runs,
     # and the same door by hand. `--fleet` here names the PLANE's fleet (an
@@ -288,7 +275,7 @@ def register_subparsers(sub) -> None:
     ptr.add_argument("--dry-run", dest="dry_run", action="store_true",
                      help="Print what each manager would be sent; record and "
                      "send nothing")
-    ptr.set_defaults(func=cmd_task_recheck)
+    ptr.set_defaults(func=_command("task", "cmd_task_recheck"))
 
     pu = sub.add_parser(
         "uptime",
@@ -301,14 +288,14 @@ def register_subparsers(sub) -> None:
         help="Time window (default: show all three in JSON, 24h for table)",
     )
     pu.add_argument("--json", action="store_true", dest="json", help="JSON output")
-    pu.set_defaults(func=cmd_uptime)
+    pu.set_defaults(func=_command("core", "cmd_uptime"))
 
     pe = sub.add_parser(
         "env-migrate",
         help="Extract secrets from an existing bot setup into tiered .env files (dry-run by default)",
     )
     _add_migration_args(pe)
-    pe.set_defaults(func=cmd_env_migrate)
+    pe.set_defaults(func=_command("env_migrate", "cmd_env_migrate"))
 
     pdm = sub.add_parser(
         "data-migrate",
@@ -323,14 +310,14 @@ def register_subparsers(sub) -> None:
         "--exclude",
         help="Comma-separated subdir names to skip (e.g. 'personal-projects,work-projects' to keep big git checkouts in place)",
     )
-    pdm.set_defaults(func=cmd_data_migrate)
+    pdm.set_defaults(func=_command("data_migrate", "cmd_data_migrate"))
 
     pcm = sub.add_parser(
         "cron-migrate",
         help="Rewrite cron entries from a legacy bot-fleet path layout to claudlobby's (dry-run by default)",
     )
     _add_migration_args(pcm)
-    pcm.set_defaults(func=cmd_cron_migrate)
+    pcm.set_defaults(func=_command("cron_migrate", "cmd_cron_migrate"))
 
     pm = sub.add_parser(
         "memory-migrate",
@@ -344,7 +331,7 @@ def register_subparsers(sub) -> None:
     pm.add_argument(
         "--force", action="store_true", help="Overwrite existing memory files"
     )
-    pm.set_defaults(func=cmd_memory_migrate)
+    pm.set_defaults(func=_command("memory_migrate", "cmd_memory_migrate"))
 
     plm = sub.add_parser(
         "lessons-migrate",
@@ -370,7 +357,7 @@ def register_subparsers(sub) -> None:
         dest="claudron_bin",
         help="Path to the claudron executable (default: `claudron` on PATH)",
     )
-    plm.set_defaults(func=cmd_lessons_migrate)
+    plm.set_defaults(func=_command("lessons_migrate", "cmd_lessons_migrate"))
 
     pn = sub.add_parser(
         "new-bot",
@@ -442,7 +429,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="Run `claudlobby generate --bot <name>` after writing",
     )
-    pn.set_defaults(func=cmd_new_bot)
+    pn.set_defaults(func=_command("scaffolding", "cmd_new_bot"))
 
     pns = sub.add_parser(
         "new-skill",
@@ -462,7 +449,7 @@ def register_subparsers(sub) -> None:
     pns.add_argument(
         "--dry-run", action="store_true", help="Show output but don't write"
     )
-    pns.set_defaults(func=cmd_new_skill)
+    pns.set_defaults(func=_command("scaffolding", "cmd_new_skill"))
 
     png = sub.add_parser(
         "new-guardrail",
@@ -479,7 +466,7 @@ def register_subparsers(sub) -> None:
     png.add_argument(
         "--dry-run", action="store_true", help="Show output but don't write"
     )
-    png.set_defaults(func=cmd_new_guardrail)
+    png.set_defaults(func=_command("scaffolding", "cmd_new_guardrail"))
 
     pw = sub.add_parser(
         "warm-cache",
@@ -490,7 +477,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="Show packages that would be warmed without downloading",
     )
-    pw.set_defaults(func=cmd_warm_cache)
+    pw.set_defaults(func=_command("core", "cmd_warm_cache"))
 
     pmb = sub.add_parser(
         "move-bot",
@@ -519,7 +506,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="Override pre-flight checks (e.g. active tmux session)",
     )
-    pmb.set_defaults(func=cmd_move_bot)
+    pmb.set_defaults(func=_command("move_bot", "cmd_move_bot"))
 
     pev = sub.add_parser(
         "events",
@@ -549,42 +536,40 @@ def register_subparsers(sub) -> None:
     )
     pev.add_argument("--json", action="store_true", help="Output raw JSONL")
 
-    from .events import cmd_events  # local import to avoid circular at module top-level
-
-    pev.set_defaults(func=cmd_events)
+    pev.set_defaults(func=_command("events", "cmd_events"))
 
     # --- observable plane (Phase 1 kernel) ---
     pe = sub.add_parser("emit", help="Validated event ingest into the plane db")
     pe.add_argument("event_type", help="communication | transmission | work_item | assignment | task")
     pe.add_argument("--json", required=True, help="Request JSON path, or '-' for stdin")
-    pe.set_defaults(func=cmd_emit)
+    pe.set_defaults(func=_command("plane", "cmd_emit"))
 
     peb = sub.add_parser("emit-batch", help="Atomic multi-event unit of work (F4)")
     peb.add_argument("--json", required=True, help='{"events": [...]} path, or "-"')
-    peb.set_defaults(func=cmd_emit_batch)
+    peb.set_defaults(func=_command("plane", "cmd_emit_batch"))
 
     pp = sub.add_parser("plane", help="Observable-plane operations")
     psub = pp.add_subparsers(dest="plane_action", required=True)
     ps = psub.add_parser("status", help="Kernel health: db, counts, spool")
-    ps.set_defaults(func=cmd_plane_status)
+    ps.set_defaults(func=_command("plane", "cmd_plane_status"))
     pd = psub.add_parser("doctor", help="Kernel health rungs (exit 1 on attention)")
-    pd.set_defaults(func=cmd_plane_doctor)
+    pd.set_defaults(func=_command("plane", "cmd_plane_doctor"))
     pv = psub.add_parser("serve", help="Run the ingest daemon (foreground)")
     pv.add_argument("--socket", help="Socket path override (default: state/plane/ingest.sock)")
     pv.add_argument("--drain-interval", default="600",
                     help="Seconds between spool drains (default 600)")
-    pv.set_defaults(func=cmd_plane_serve)
+    pv.set_defaults(func=_command("plane", "cmd_plane_serve"))
     pvw = psub.add_parser("view", help="Run the operator-plane view daemon (read-only UI)")
     pvw.add_argument("--host", default="127.0.0.1",
                      help="Bind address (default 127.0.0.1 — Tailscale Serve fronts it; a raw address is the dev fallback)")
     pvw.add_argument("--port", type=int, default=8899, help="Bind port (default 8899)")
-    pvw.set_defaults(func=cmd_plane_view)
+    pvw.set_defaults(func=_command("plane", "cmd_plane_view"))
     po = psub.add_parser("open", help="Print/launch the operator plane URL")
     po.add_argument("--port", type=int, default=8899, help="View daemon port (default 8899)")
     po.add_argument("--no-browser", action="store_true", help="Print the URL only")
-    po.set_defaults(func=cmd_plane_open)
+    po.set_defaults(func=_command("plane", "cmd_plane_open"))
     psc = psub.add_parser("schema", help="Export JSON Schemas (envelope + families)")
-    psc.set_defaults(func=cmd_plane_schema)
+    psc.set_defaults(func=_command("plane", "cmd_plane_schema"))
     ppr = psub.add_parser(
         "prune",
         help="Age out raw metric_samples past the retention window (30d;"
@@ -593,7 +578,7 @@ def register_subparsers(sub) -> None:
                      help="Retention window in days (default 30)")
     ppr.add_argument("--dry-run", action="store_true",
                      help="Report the count without deleting")
-    ppr.set_defaults(func=cmd_plane_prune)
+    ppr.set_defaults(func=_command("plane", "cmd_plane_prune"))
     pex = psub.add_parser(
         "expire",
         help="Attention expiry sweep: emit `expired` for assignments overdue"
@@ -604,7 +589,7 @@ def register_subparsers(sub) -> None:
                      " and silent right now — sharp)")
     pex.add_argument("--dry-run", action="store_true",
                      help="Report the count without emitting")
-    pex.set_defaults(func=cmd_plane_expire)
+    pex.set_defaults(func=_command("plane", "cmd_plane_expire"))
     piw = psub.add_parser(
         "import-workstreams",
         help="#1635: one-shot import of a pre-cutover workstreams.json into"
@@ -622,7 +607,7 @@ def register_subparsers(sub) -> None:
         "--archive", action="store_true",
         help="Rename the source file to <name>.imported-<batch> on success",
     )
-    piw.set_defaults(func=cmd_plane_import_workstreams)
+    piw.set_defaults(func=_command("plane", "cmd_plane_import_workstreams"))
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")
@@ -648,8 +633,8 @@ def register_subparsers(sub) -> None:
                       help="Hash-verify the projection against the"
                       " re-derived estate (root-mode fleet.yaml, or the"
                       " global --fleet <name> for an overlay)")
-    prg.set_defaults(func=cmd_plane_registry)
+    prg.set_defaults(func=_command("plane", "cmd_plane_registry"))
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
     psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])
     psp.add_argument("name", nargs="?", help="Spool file name (inspect/quarantine)")
-    psp.set_defaults(func=cmd_plane_spool)
+    psp.set_defaults(func=_command("plane", "cmd_plane_spool"))
