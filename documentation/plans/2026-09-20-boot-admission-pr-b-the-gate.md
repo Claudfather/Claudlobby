@@ -12,6 +12,9 @@ issue: "#1573"
 
 # PR B — the admission gate extends the boot lock, and one boot-progress marker
 
+
+> **Disposition 2026-09-28:** decided by the control reboot; if needed, built inside #1747 (see the epic's Disposition section). This plan's Task 5 deploy model (`git pull` as the carrier) and F17's opt-out are superseded by #1747's release activation. Branch `boot/pr-b-the-gate` is the reference implementation.
+
 ## Summary
 
 `lib/start-bot.sh` already carries a host-wide bring-up serializer — the #304 boot-mass mitigation at `:14-47`, a fleet-wide `mkdir` lock with a fixed 8 s hold and no ordering. PR B **replaces that lock in place** with the same idea done properly: N slots instead of one, managers first instead of arrival order, a real wait cap instead of 120 s, and a reaper instead of an age-based force-claim. A `data/.boot-queued` marker carrying the launcher's pid becomes the boot-progress signal `service_is_starting` reads first on both OSes, wired into **every** consumer of that door, so neither keepalive nor fleet-pulse can mistake a queued bot for a dead one. The proof is two planned reboots: one on PR A alone (the control), one on A+B, compared on the gate's own grant distribution rather than on an aggregate that queueing would satisfy for the wrong reason.

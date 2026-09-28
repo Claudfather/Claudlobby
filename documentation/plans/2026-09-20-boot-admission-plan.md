@@ -173,3 +173,27 @@ The control reboot is on the critical path deliberately: it is the only measurem
 area: supervision / boot path · effort: L (done) + M + L · risk: high (the boot path of every bot on the primary host) · priority: P1 (bites at every reboot; the last one took the estate's inbound down for half an hour)
 
 Linear: neither.
+
+## Disposition — 2026-09-28, after the unified CLI program (#1747) appeared
+
+Ratified by the operator on 2026-09-28. The unified CLI program (#1747, plan `2026-09-26-unified-cli-plan.md`) rewrites the
+lifecycle ground this epic stands on: package resources vs a mutable data root (P2a), sealed host releases with activation and
+rollback (P2b/P3), and the boot-path scripts moved onto the adapter (P3). It names #1573 as a dependency it builds on and does
+not replace the adapter. It does NOT bound how many bots run their MCP phase at once, and it does not give the watchdogs a
+platform-neutral mid-boot signal — PR B's substance is untouched by it; PR B's packaging is superseded.
+
+- **PR A stands** (merged #1684 + #1697, live on the primary host): #1747 depends on it. One item is owed to #1747: `load_host_boot`
+  reads the package `system.yaml` beside `config.py` and survives P1's package-data move by construction; if `system.yaml` ever
+  leaves the package directory, `_load_system_defaults` must move with it.
+- **PR B is decided by the control reboot, and if needed it is built INSIDE #1747, not before it.** A planned reboot of the primary
+  host on PR A alone is the pivot: every bridge up with no bounce → PR B closes as unnecessary. Otherwise PR B is retargeted as a
+  phase of #1747: the reviewed library semantics carry over (host-derived slots, one marker lifetime re-touched every poll, the
+  reaper with paired liveness, the state tree keyed on a boot id pinned once, a marker rung bounded by attempts so a crash loop
+  can never read as "boot in flight" — the #1774 class), renamed out of "admission" (P3 owns `runtime-admission.sh`,
+  `native_admission`), placed AFTER the release gate in `start-bot.sh`, on P2a's data-root layout, rolled out through P3's
+  activation/cutover instead of `git pull`. Branch `boot/pr-b-the-gate` (tip d1ec0ad) is the reference implementation and is
+  never merged as-is. Its deploy section, F17's opt-out carrier and its harness placement are superseded.
+- **PR C is closed as superseded.** F12's adapter migration is #1747 P3's (keepalive, spin-up and the installers on `svc_kick`, the
+  ratchet allowlist maintained there); the systemd stagger retirement and `boot_rung_for`'s consumer table (D2–D5) go to #1747's
+  unit-ownership phase as a note, not a plan.
+- **F13/F14/F15/F17 stay locked as amended, provisional; F17's carrier is replaced by release rollback under #1747.**
