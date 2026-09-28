@@ -1142,6 +1142,29 @@ harness_check "reload-fleet alerts the manager on failure (shared emit_failure_a
 [ ! -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
 harness_check "reload-fleet does not half-reload (no marker when download fails)" "$r"
 
+# #1924: a run KILLED mid-step never returns to loud_fail, so the check above
+# cannot see it. Its own EXIT trap must raise it, naming the step, while that
+# step is still going. setsid gives the run its own group, so the step it
+# orphans is reaped as one afterwards.
+printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"
+printf '#!/bin/bash\ncase " $* " in *" generate "*) echo "generate: composing"; exec sleep 30 ;; esac\nexit 0\n' > "$STUB_BIN/claudlobby"
+chmod +x "$STUB_BIN/claude" "$STUB_BIN/claudlobby"
+CLAUDLOBBY_ROOT="$ROOT" PATH="$STUB_BIN:$PATH" setsid "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 &
+RF_PID=$!
+for _i in $(seq 1 150); do
+    grep -q 'generate: composing' "$ROOT/state/reload-fleet.log" 2>/dev/null && break
+    sleep 0.2
+done
+kill -TERM "$RF_PID" 2>/dev/null || true
+wait "$RF_PID" 2>/dev/null || true
+kill -KILL -- "-$RF_PID" 2>/dev/null || true
+val_events "$ROOT" "$FLEET" fleet reload_failed | grep -q 'killed during step: claudlobby generate' && r=yes || r=no
+harness_check "#1924 reload-fleet killed mid-step raises reload_failed naming the step" "$r"
+mgr_pane=$(tmux capture-pane -J -t "$MGR" -p 2>/dev/null || true)
+printf '%s' "$mgr_pane" | grep -q 'killed during step' && r=yes || r=no
+harness_check "#1924 reload-fleet killed mid-step alerts the manager" "$r"
+printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claudlobby"
+
 # ===========================================================================
 # F2(b) consolidated activation — keepalive performs the live reload at idle.
 # ===========================================================================

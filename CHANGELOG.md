@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the nightly reload no longer stops itself on macOS, and a killed run is no longer silent (#1924)
+
+On launchd, `reload-fleet.sh` runs `setup-fleet --jobs-only`, which re-enrolls
+every fleet job, reload-fleet's own included, and the launchd enroller booted
+each job out before loading it again. Booting out the job that is running you
+stops you: launchd killed the run partway through, the bootstrap that should
+have followed never ran, and the job stayed unloaded. On the Mac both fleets'
+nightly reloads had been dead since 2026-09-22 (no plugin updates, no nightly
+generate, and every job sorting after `reload-fleet` never re-enrolled), and
+nothing alerted, because a killed run never gets back to the code that raises
+`reload_failed`. Linux was never affected: a systemd re-enroll does not stop
+the service that is running it.
+
+- A job never boots itself out. The copy, bootout and bootstrap moved from
+  `install_fleet_timer_launchd.sh` into the supervisor adapter
+  (`svc_enroll_agent`), which first asks launchd which pid is running the job
+  and whether that pid is one of the caller's ancestors
+  (`svc_job_hosts_caller`). If it is, the job stays loaded. When its plist is
+  unchanged, the nightly case, there is nothing to apply. When it changed,
+  nothing is touched: the enroller exits 4, and `setup-fleet` reports the job
+  as DEFERRED with the command that applies it from a shell, in the log and as
+  a `job_reenroll_deferred` FLEET NOTICE, on every run until it is applied.
+  The notice is the only signal a deferral gets: reload-fleet runs that step
+  non-fatally, and no doctor rung compares a loaded job with its composed
+  plist (#839). The check fails closed: a running job whose pid it cannot
+  read is held, never stopped.
+- The guard sits at the bootout itself rather than in `reload-fleet`, so it
+  covers every caller and every job, and it keys on launchd's own answer, not
+  on a job's name.
+- A mid-step kill now leaves a trace and an alert. Each step is logged before
+  it runs, and its output streams into `state/reload-fleet.log` as it runs
+  instead of after it returns. A run that is killed or aborts raises
+  `reload_failed` naming the step: from its EXIT trap on SIGTERM, SIGINT or
+  SIGHUP, without waiting for the step in the foreground, and from the next
+  run for a SIGKILL, through a per-run record in `state/reload-fleet.inflight/`.
+- A critical section that stops without recording why (its step subshell
+  killed) now names the step instead of raising `reload_failed` with a blank
+  reason.
+
+To recover a host that already lost the job, once this is installed there:
+confirm no reload is running, remove the stale `state/reload-fleet.lock.d`,
+and run `lib/setup-fleet <fleet> --jobs-only` from a shell for each fleet.
+
 ### Fixed — the plane's WAL is reported, a reader holding it is named, and no reader keeps one snapshot across a loop (#1905)
 
 A reader that holds a plane snapshot keeps the daemon's checkpoint from
