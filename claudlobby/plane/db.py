@@ -56,7 +56,10 @@ def connect_ro(path: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
         # A broken parent or denied stat is unavailable storage, not a missing
         # schema. Keep the same operational classification SQLite open uses.
         error = sqlite3.OperationalError("unable to open database file")
-        error.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+        # Python 3.10 lacks the named error constants/attributes. Preserve its
+        # existing message-based infrastructure classification in that runtime.
+        if hasattr(sqlite3, "SQLITE_CANTOPEN"):
+            error.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
         error.sqlite_errorname = "SQLITE_CANTOPEN"
         raise error from exc
     if not stat.S_ISREG(mode):
