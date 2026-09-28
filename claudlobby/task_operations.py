@@ -1,0 +1,309 @@
+"""First task mutations: durable admission, routing and acceptance, no delivery.
+
+The public boundary supplies resolved Context and existing frozen identities,
+and owns runtime/release admission. Request lock precedes the per-task lock;
+only emit_batch(require_commit=True) writes Plane facts. Receipts are proof
+coordinates, never a second work-state store or a conditional replay queue.
+"""
+
+from __future__ import annotations
+
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
+import fcntl
+import os
+from pathlib import Path
+import re
+import sqlite3
+import stat
+from types import MappingProxyType
+from typing import Literal, Mapping, TYPE_CHECKING
+
+from .plane.db import connect_ro, db_file
+from .plane.ids import ID_PATTERNS, mint_assignment_id, mint_event_id, mint_work_item_id
+from .plane.schema_state import PendingMigrationError, require_current_schema
+from .request_facts import expected_fact, reconcile_facts
+from .request_receipts import ReceiptConflict, RequestIntent, StagePlan, locked_request, semantic_digest
+from .task_queries import TaskQueryError, show_assignment, show_task
+from .task_state import TASK_EMITTER, Task
+
+if TYPE_CHECKING:
+    from .context import Context
+
+
+@dataclass(frozen=True)
+class TaskActor:
+    uid: str
+    alias: str
+
+
+@dataclass(frozen=True)
+class TaskOperationContext:
+    context: Context
+    host_uid: str
+    fleet_uid: str
+    caller: TaskActor
+    bots: Mapping[str, TaskActor]
+
+    def __post_init__(self):
+        object.__setattr__(self, "bots", MappingProxyType(dict(self.bots)))
+        for value, kind in ((self.host_uid, "host"), (self.fleet_uid, "fleet"),
+                            (self.caller.uid, "actor"), *((a.uid, "actor") for a in self.bots.values())):
+            if not isinstance(value, str) or not re.fullmatch(ID_PATTERNS[kind], value):
+                raise TaskQueryError("operation context requires canonical frozen identities")
+        if any(not isinstance(actor.alias, str) or not actor.alias for actor in (self.caller, *self.bots.values())):
+            raise TaskQueryError("operation context requires existing actor aliases")
+
+    @property
+    def root(self) -> Path:
+        return self.context.paths.root
+
+
+class TaskConflictError(TaskQueryError):
+    code = "conflict"
+
+
+class TaskRecordingError(TaskQueryError):
+    code = "unavailable"
+    recording = "unknown"
+
+    def __init__(self, request_id, reason):
+        self.request_id = request_id
+        super().__init__(f"recording not proved: {reason}; inspect request {request_id} before retrying")
+
+
+@dataclass(frozen=True)
+class TaskOperationResult:
+    request_id: str
+    task_id: str
+    assignment_id: str | None
+    task: Task  # current read, not a receipt-cached lifecycle state
+    replayed: bool
+    recording: Literal["committed"] = "committed"
+    delivery: Literal["not_requested"] = "not_requested"
+    notification: Literal["not_requested"] = "not_requested"
+
+
+@contextmanager
+def _locked_task(store, task_id):
+    store.assert_locked()
+    if not re.fullmatch(ID_PATTERNS["work_item"], task_id):
+        raise TaskQueryError("task lock requires a canonical task ID")
+    directory = store.path.parent.parent.parent  # existing request owner proved state/
+    for part in ("task-locks", store.fleet_uid):
+        directory = directory / part
+        if directory.is_symlink():
+            raise TaskConflictError("task lock directory is redirected")
+        directory.mkdir(mode=0o700, exist_ok=True)
+    path = directory / (task_id + ".lock")
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise TaskConflictError("task lock must be an owned private regular file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise TaskConflictError("task is already being changed") from exc
+        def check():
+            store.assert_locked()
+            current = path.lstat()
+            if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                raise TaskConflictError("task lock was replaced")
+        check()
+        yield check
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _reader(ctx):
+    try:
+        conn = connect_ro(db_file(ctx.root))
+    except FileNotFoundError as exc:
+        raise PendingMigrationError("task operations require an explicitly initialized Plane") from exc
+    with closing(conn):
+        require_current_schema(conn)
+        yield conn
+
+
+def _identities(ctx, conn, actors):
+    # Supported registry writers never delete/rebind aliases. Require their
+    # existing exact bindings, so ingest's lazy resolver cannot create one.
+    if (ctx.root / "state/host-uid").read_text().strip() != ctx.host_uid:
+        raise TaskConflictError("host identity differs from the operation context")
+    expected = [("fleet", ctx.context.fleet.name, ctx.fleet_uid)]
+    expected += [("actor", actor.alias, actor.uid) for actor in actors]
+    for kind, alias, uid in expected:
+        row = conn.execute("SELECT uid, parent_uid FROM identity_registry WHERE kind=? AND alias=?",
+                           (kind, alias)).fetchone()
+        if row is None or row[0] != uid or kind == "actor" and row[1] not in (None, ctx.fleet_uid):
+            raise TaskConflictError("frozen identity is absent, foreign or changed")
+
+
+def _worker(ctx, bot_id):
+    if bot_id not in ctx.context.fleet.bots or bot_id not in ctx.bots:
+        raise TaskQueryError("worker is not a declared member of the selected fleet")
+    return ctx.bots[bot_id]
+
+
+def _scope_links(ctx, conn, project_key, workstream_id, repo):
+    projects = ctx.context.fleet.projects
+    if project_key is not None:
+        if project_key not in projects:
+            raise TaskQueryError("project is not declared in the selected fleet")
+        if repo is not None and projects[project_key].repos and repo not in projects[project_key].repos:
+            raise TaskQueryError("repository does not belong to the declared project")
+    if workstream_id is not None:
+        row = conn.execute("SELECT fleet_uid, project_key FROM workstreams WHERE workstream_id=?",
+                           (workstream_id,)).fetchone()
+        if row is None or row[0] != ctx.fleet_uid:
+            raise TaskQueryError("workstream does not belong to the selected fleet")
+        if row[1] is not None and (row[1] not in projects or project_key is not None and row[1] != project_key):
+            raise TaskQueryError("workstream project differs from the selected task project")
+
+
+def _existing(store, ctx, operation, semantic, recipient=None):
+    receipt = store.load()
+    if receipt is not None:
+        intent = receipt.intent
+        if ((intent.operation, intent.operation_version, intent.host_uid, intent.fleet_uid,
+             intent.caller_uid, intent.recipient_uid, intent.semantic_sha256)
+                != (operation, 1, ctx.host_uid, ctx.fleet_uid, ctx.caller.uid, recipient, semantic)
+                or len(intent.stages) != 1 or intent.stages[0].kind != "recording"
+                or len(intent.stages[0].facts) != 1):
+            raise ReceiptConflict("request UUID already has different semantics or identities")
+    return receipt
+
+
+def _replayed(store, receipt, conn):
+    if receipt is None:
+        return False
+    proof = reconcile_facts(conn, receipt.intent.stages[0].facts)
+    status = receipt.stages[0].status
+    if proof.status == "committed":
+        if status == "unknown":
+            store.outcome(0, "committed")
+        elif status != "committed":
+            raise ReceiptConflict("facts exist without a compatible recorded attempt")
+        return True
+    if proof.status == "unknown":
+        raise TaskRecordingError(receipt.request_id, proof.reason)
+    if proof.status == "conflict" or status == "committed":
+        raise ReceiptConflict("request fact proof conflicts with its durable receipt")
+    if status == "unknown":
+        store.outcome(0, "unrecorded")
+    return False
+
+
+def _raw(ctx, request_id, family, payload, receipt):
+    from .plane import PLANE_SCHEMA_VERSION
+    return {"event_type": family, "payload": payload, "emitter": TASK_EMITTER,
+            "fleet": ctx.context.fleet.name, "source_ref": f"request:{request_id}",
+            "schema_version": PLANE_SCHEMA_VERSION,
+            "event_id": receipt.intent.stages[0].facts[0].event_id if receipt else mint_event_id()}
+
+
+def _prepare(store, ctx, operation, semantic, raw, task_id, assignment_id=None, recipient=None, actors=()):
+    from .plane.emit_api import CONTENT_FIELDS, load_capture_config, validate_item
+    modes = load_capture_config(ctx.root) if CONTENT_FIELDS.get(raw["event_type"]) else {}
+    validated, _ = validate_item(raw, modes)
+    fact = expected_fact(validated, host_uid=ctx.host_uid, fleet_uid=ctx.fleet_uid,
+                         parties={actor.alias: actor.uid for actor in (ctx.caller, *actors)})
+    return store.prepare(RequestIntent(operation, 1, ctx.host_uid, ctx.fleet_uid, ctx.caller.uid,
+                         recipient, semantic, (StagePlan("recording", (fact,)),),
+                         task_id=task_id, assignment_id=assignment_id))
+
+
+def _result(ctx, conn, receipt, replayed):
+    return TaskOperationResult(receipt.request_id, receipt.intent.task_id, receipt.intent.assignment_id,
+                               show_task(conn, receipt.intent.task_id, fleet_uid=ctx.fleet_uid), replayed)
+
+
+def _commit(store, ctx, conn, receipt, raw, check_lock):
+    from .plane.emit_api import emit_batch
+    check_lock()
+    store.begin_attempt()
+    store.stage(0)  # durable unknown before SQLite; crashes never authorize blind replay
+    try:
+        emit_batch(ctx.root, [raw], require_commit=True)
+    except (sqlite3.Error, OSError) as exc:
+        # Do not turn an exception into an unchanged result, even if it looks
+        # like a connection failure. The next invocation reconciles exact IDs.
+        raise TaskRecordingError(receipt.request_id, str(exc)) from exc
+    proof = reconcile_facts(conn, receipt.intent.stages[0].facts)
+    if proof.status == "conflict":
+        raise ReceiptConflict("committed result differs from the frozen request facts")
+    if proof.status != "committed":
+        raise TaskRecordingError(receipt.request_id, proof.reason)
+    receipt = store.outcome(0, "committed")
+    return _result(ctx, conn, receipt, False)
+
+
+def admit(ctx: TaskOperationContext, request_id: str, *, title: str, body: str | None = None,
+          repo: str | None = None, project_key: str | None = None,
+          workstream_id: str | None = None) -> TaskOperationResult:
+    """Admit fleet-owned intake, deliberately creating no assignment or message."""
+    semantic = semantic_digest(dict(title=title, body=body, repo=repo, project_key=project_key,
+                                    workstream_id=workstream_id))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.admit", semantic)
+        tid = previous.intent.task_id if previous else mint_work_item_id()
+        with _locked_task(store, tid) as check, _reader(ctx) as conn:
+            if _replayed(store, previous, conn):
+                return _result(ctx, conn, previous, True)
+            _identities(ctx, conn, (ctx.caller,))
+            _scope_links(ctx, conn, project_key, workstream_id, repo)
+            raw = _raw(ctx, request_id, "work_item", dict(work_item_id=tid, title=title, body=body,
+                       created_by=ctx.caller.alias, repo=repo, project_key=project_key,
+                       workstream_id=workstream_id), previous)
+            receipt = _prepare(store, ctx, "task.admit", semantic, raw, tid)
+            return _commit(store, ctx, conn, receipt, raw, check)
+
+
+def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,
+           expected_by: str | None = None) -> TaskOperationResult:
+    """Route one queued task, serialized with every other supported task mutation."""
+    worker = _worker(ctx, bot_id)
+    semantic = semantic_digest(dict(task_id=task_id, bot_id=bot_id, expected_by=expected_by))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.assign", semantic, worker.uid)
+        with _reader(ctx) as conn:
+            task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)  # canonical recovery errors
+            with _locked_task(store, task.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                if task.state != "queued" or task.current_assignment is not None:
+                    raise TaskConflictError("task is not queued and unassigned")
+                _identities(ctx, conn, (ctx.caller, worker))
+                _scope_links(ctx, conn, task.project_key, task.workstream_id, task.repo)
+                aid = previous.intent.assignment_id if previous else mint_assignment_id()
+                raw = _raw(ctx, request_id, "assignment", dict(assignment_id=aid, work_item_id=task_id,
+                           assignee=worker.alias, assigned_by=ctx.caller.alias, expected_by=expected_by), previous)
+                receipt = _prepare(store, ctx, "task.assign", semantic, raw, task_id, aid, worker.uid, (worker,))
+                return _commit(store, ctx, conn, receipt, raw, check)
+
+
+def accept(ctx: TaskOperationContext, request_id: str, assignment_id: str) -> TaskOperationResult:
+    """Accept the caller's exact current assignment; receipts/delivery are not acceptance."""
+    semantic = semantic_digest(dict(assignment_id=assignment_id))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "assignment.accept", semantic)
+        with _reader(ctx) as conn:
+            first = show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                view = show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid)
+                task = view.task.require_resolved()
+                if (view.assignment.assignee_uid != ctx.caller.uid
+                        or not any(_worker(ctx, bot) == ctx.caller for bot in ctx.bots if bot in ctx.context.fleet.bots)):
+                    raise TaskConflictError("only the declared current assignee can accept")
+                if task.state != "assigned" or task.current_assignment != view.assignment:
+                    raise TaskConflictError("assignment is stale, closed or already accepted")
+                _identities(ctx, conn, (ctx.caller,))
+                raw = _raw(ctx, request_id, "task", dict(work_item_id=task.task_id,
+                           assignment_id=assignment_id, event="accepted", actor=ctx.caller.alias), previous)
+                receipt = _prepare(store, ctx, "assignment.accept", semantic, raw, task.task_id, assignment_id)
+                return _commit(store, ctx, conn, receipt, raw, check)
