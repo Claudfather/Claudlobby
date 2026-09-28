@@ -91,6 +91,14 @@ def _spawns(bindir: Path):
     return log.read_text().splitlines() if log.exists() else []
 
 
+def _pids(bindir: Path):
+    """The child pids the npx stub logged. Its `>>` creates the file before it
+    writes the pid, so a file that exists can still be empty: wait on this,
+    never on the file (the int('') race _mints had)."""
+    log = bindir / "pids.log"
+    return [int(x) for x in log.read_text().split()] if log.exists() else []
+
+
 def _mints(bindir: Path) -> int:
     f = bindir / "mint-count"
     return int(f.read_text()) if f.exists() else 0
@@ -324,8 +332,8 @@ class TestRefreshLoop:
         env = _env(tmp_path, mint, GITHUB_MCP_REFRESH_SECONDS="600")
         proc = _start(env)
         try:
-            assert _wait_for(lambda: (tmp_path / "pids.log").exists(), timeout=15)
-            child_pid = int((tmp_path / "pids.log").read_text().splitlines()[0])
+            assert _wait_for(lambda: _pids(tmp_path), timeout=15)
+            child_pid = _pids(tmp_path)[0]
             _stop(proc)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:

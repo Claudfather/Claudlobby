@@ -19,6 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "lib" / "validate-bot-change.sh"
 
 
+# Its own CI job (test.yml `harness`), beside the rest of the suite: it is the
+# suite's longest test, and a rerun of it alone costs minutes, not the suite.
+@pytest.mark.harness
 @pytest.mark.skipif(
     shutil.which("tmux") is None, reason="tmux required for the observe step"
 )

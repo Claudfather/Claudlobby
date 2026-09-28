@@ -543,8 +543,13 @@ class PlaneDaemon:
                 listener.bind(str(tmp))
                 os.chmod(tmp, 0o600)
                 listener.listen(64)
+                # The identity is read from the hidden name, before the rename
+                # publishes it. Read back from the public path, it would be
+                # whatever sits there at that instant: a replacement landing
+                # between the rename and the read was recorded as ours and
+                # deleted at shutdown. The rename keeps the inode.
+                st = os.stat(tmp)
                 os.replace(tmp, self.sock_path)
-                st = os.stat(self.sock_path)
                 self._sock_stat = (st.st_dev, st.st_ino)
             except BaseException:
                 listener.close()

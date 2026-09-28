@@ -539,6 +539,49 @@ def test_shutdown_never_unlinks_a_replaced_socket(running):
         "shutdown deleted a file it does not own")
 
 
+def test_a_socket_replaced_as_it_is_published_is_never_taken_for_ours(
+    tmp_path: Path, monkeypatch
+):
+    """The daemon must learn which inode is its socket BEFORE it publishes it.
+    Read back from the public path after the rename, the identity is whatever
+    sits there at that instant: a replacement landing between the rename and
+    the read was recorded as the daemon's own and deleted at shutdown. That is
+    how test_shutdown_never_unlinks_a_replaced_socket flaked in CI, since its
+    fixture yields as soon as the path exists. Here the replacement lands
+    inside the publish itself, so the window is hit every time."""
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    real_replace = os.replace
+
+    def replace_then_swap(src, dst, *args, **kwargs):
+        real_replace(src, dst, *args, **kwargs)
+        if Path(dst) == sock:          # the publish: someone else takes the path
+            os.unlink(sock)
+            sock.write_text("imposter")
+
+    monkeypatch.setattr(os, "replace", replace_then_swap)
+    daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
+    t = threading.Thread(
+        target=lambda: daemon.serve(install_signals=False), daemon=True
+    )
+    t.start()
+    try:
+        for _ in range(200):
+            if daemon._sock_stat is not None:
+                break
+            time.sleep(0.02)
+        assert daemon._sock_stat is not None, "daemon never published its socket"
+        daemon.stop()
+        t.join(timeout=10)
+        assert daemon._lock_fd is None, "daemon never finished shutting down"
+        assert sock.exists() and sock.read_text() == "imposter", (
+            "shutdown deleted a file it does not own")
+    finally:
+        daemon.stop()
+        t.join(timeout=10)
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
 def test_override_parent_is_never_chmodded(tmp_path: Path):
     """PR-#1345 review F7: --socket must not mutate an operator directory."""
     sdir = _short_sock_dir()

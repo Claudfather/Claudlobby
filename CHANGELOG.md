@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a flaky test is quarantined, never deselected, and the last live flake #1945 named is fixed (#1947)
+
+CI's lanes are chosen by marker, and each test runs in exactly one of them
+(`tests/test_ci_lanes.py`):
+
+- `@pytest.mark.quarantine(issue=<N>)` takes a known-flaky test out of every
+  required lane: test.yml's `pytest` and `harness`, and conformance's
+  `vault-tests`. A new `quarantine` workflow, which no ruleset should require,
+  runs it on every PR and push to main, so it still fails where people see it.
+  Collection refuses a quarantine that names no tracking issue, in every lane,
+  before `-m` has deselected it. pytest's exit 5 (nothing selected) is a green
+  quarantine lane: an empty quarantine is the goal.
+- The validation harness has its own job, `harness` (`@pytest.mark.harness`),
+  beside `pytest`. It is the suite's longest test, about 3.6 minutes of CI
+  time, so a PR's wall time drops by about that much, and rerunning a harness
+  failure costs its own job rather than the whole suite. A required-checks
+  ruleset should name `harness` beside `pytest` and `vault-tests`.
+- The `--deselect` test.yml carried matched nothing: the test it named was
+  renamed two months ago, so it deselected nothing and said so nowhere. It is
+  gone, and no required lane may remove a test by node id or by `-k`.
+
+Two flaky tests are fixed:
+
+- `test_shutdown_never_unlinks_a_replaced_socket` failed twice in CI because
+  of a race in the daemon, not the test. `_bind` renamed its socket onto the
+  public path and only then read the inode it would own, from that path. A
+  replacement landing in between was taken for the daemon's own and deleted
+  at shutdown. The inode is now read from the hidden name, before the rename.
+- `test_sigterm_reaps_the_child` waited for `pids.log` to exist and then read
+  its first line, but the stub creates the file before it writes the pid: the
+  exists-but-empty race #1911 fixed for the mint counter.
+
+The other flaky tests #1945 named were already fixed on main (#1421, #1511,
+#1694, #1716, #1740, #1793, #1911). In every failed CI run from 09-01 to
+09-28, none failed in a `pytest` job on code that contained its fix, except
+in two PR runs that failed 164 and 458 tests at once. The harness
+keeps one known flake, the first request to a fresh daemon missing #1693's
+1 s deadline (one CI failure since 09-01). It stays required, in its own job,
+where a rerun is cheap.
+
 ### Fixed — the nightly reload no longer stops itself on macOS, and a killed run is no longer silent (#1924)
 
 On launchd, `reload-fleet.sh` runs `setup-fleet --jobs-only`, which re-enrolls

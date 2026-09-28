@@ -39,7 +39,9 @@ jobs:
         # the composer's rendered copy ever drifts from it.
         run: pip install -e '.[dev,vault]'
       - name: Run the vault-mode gate (snippet parity + contention)
-        run: pytest -q -m vault
+        # A quarantined vault test runs in quarantine.yml instead (where the
+        # [vault] extra is absent, so it skips there too until it is fixed).
+        run: pytest -q -m "vault and not quarantine"
 
   # ── F8 rename-map drift gate (stale-live-values only) ─────────────────────
   # Local-first: clauDNA is checked out and the gate is pointed at it. The
