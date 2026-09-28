@@ -12,7 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 the verdict to its author and anchors it to a commit. The four places a reviewer or a
 manager actually learns the verdict format still taught the older, identity-less,
 anchor-less `**Verdict: x**` shape — and one of them, `pr-comment-hygiene.md`'s `/ironclad`
-verdict format, used no bold at all, so `pr-review-state.py` never parsed it. vera had
+verdict format, used no bold at all, so `pr-review-state.py` never parsed it. Four more
+docs taught or looked for a bare `**Approve**` / `**Request Changes**`, which carries no
+identity or anchor either: the same-identity fallback in `github.md` and
+`same-identity-fallback.md`, and the peer-review rung of both merge guardrails. vera had
 already been writing the bracket-tag header by hand on #1912 and #1914; the docs had not
 caught up.
 
@@ -21,17 +24,53 @@ caught up.
   `**[<bot>] [VERDICT] <verdict>** — reviewed at <sha>` for all four taught verdicts (ship
   it / mechanical fixes / request changes / architectural concerns). The older
   `**Verdict: x**` form still parses — it carries neither identity nor anchor — and stays
-  documented as such rather than being presented as broken.
+  documented as such rather than being presented as broken. `verify-before-merge.md` also
+  tells a manager to read each reviewer's own latest verdict, never just the newest comment
+  on the PR, which is how `pr-review-state.py` resolves them.
 - `library/protocols/pr-comment-hygiene.md`'s `[<bot-name>] [VERDICT] <approve|request-changes|comment>`
   gains the same bold wrapping and an anchor, so a plan-PR verdict from `/ironclad` is
-  readable by the same tool as a code-PR verdict.
+  readable by the same tool as a code-PR verdict. It also records a known limitation: the
+  tool reads a bracket-tagged `comment` as vocabulary drift (`UNPARSED-HEADER`, exit 3)
+  until #1923 teaches it a neutral verdict.
+- `library/integrations/github.md` and `library/protocols/same-identity-fallback.md` now
+  teach `**[<bot>] [VERDICT] approve**` or `**[<bot>] [VERDICT] request changes**`, with
+  `— reviewed at <sha>`, for a same-identity verdict comment. `same-identity-fallback.md`
+  keeps a plain `**Comment**` (no verdict) bare: bracket-tagged, the tool would read it as
+  vocabulary drift.
+- `library/guardrails/merge-policy-auto-admin.md` and
+  `library/guardrails/merge-policy-auto-after-review.md` now tell a manager to look for a
+  `**[<bot>] [VERDICT] approve**` verdict line under same-identity fallback, the header
+  `pr-review-state.py` reads, in place of `**Approve**`.
 - No change to `lib/pr-review-state.py` itself — it already read both the old and new
   header shapes; only the taught vocabulary moved.
-- `tests/test_pr_review_state.py::TestDocsTeachTheParseableHeader` reads all four docs
-  straight off disk (never a hand-kept copy of their text) and asserts every concrete
-  header example parses as attributed AND anchored through the module's own regexes, that
-  every taught verdict word is still recognized, and that one doc-sourced header resolves
-  cleanly through the real `--payload-json` CLI seam.
+- `tests/test_pr_review_state.py::TestDocsTeachTheParseableHeader` reads the four docs in
+  the first two bullets straight off disk (never a hand-kept copy of their text), pins each
+  file's example count, and asserts every concrete header example parses as attributed AND
+  anchored through the module's own regexes, that every taught verdict word is still
+  recognized, and that one doc-sourced header resolves cleanly through the real
+  `--payload-json` CLI seam.
+
+### Fixed — `plane-lookup.py --received` says why at rc 4, and finds a receipt by the receiver's plane alias (#1922)
+
+`--received <msg_id> --destination <bot>` exits 4 when the destination has
+never recorded a receipt, which proves nothing either way. It printed nothing,
+and the match was exact, so a lookup that could never match (the receiver's
+`bot:<fleet>/<name>` alias, where the receipt hook records the bare `BOT_ID`,
+or a plane under another root) read exactly like a receipt hook that is not
+armed. Another fleet's manager lost time to it.
+
+- rc 4 now prints one line to stderr naming the destination, the root and both
+  causes: the receipt hook is not armed, or this lookup cannot reach what it
+  records. A lookup with no `--destination` says that instead. Stdout stays
+  empty and the exit code is still 4.
+- A `bot:<fleet>/<name>` destination is matched on its name, the way the
+  delivery join already keys receipts. The fleet part is dropped, not checked.
+- The new `--quiet` withholds that line and nothing else: an unreachable plane
+  still says so. The dispatch door's receipt gate passes it, so a clean
+  dispatch stays silent but for the plane shim
+  (`test_a_clean_dispatch_writes_only_the_shims_disclosure_to_stderr`).
+- The verify-then-trust check every bot carries (#1876) already passes the bare
+  `$BOT_ID` and treats any non-zero exit as unverified, so it is unchanged.
 
 ### Fixed — the `~/.env` lint no longer lets a negation elsewhere on a line hide an instruction (#1919)
 
@@ -651,6 +690,131 @@ Rung 4 of both merge guardrails keeps the branch while any open PR is based on
 it, when that listing fails, or when the branch name is empty; it edits no PR.
 The merge block refuses unless `REPO`, `N` and `PH` are set, since `gh pr merge`
 run alone accepted empty ones and went straight to the API.
+
+### Fixed — a fleet job removed from system.yaml was re-enrolled forever (#1764)
+
+`compose_fleet_timers` only ever WROTE. A job deleted from `system.yaml` left its
+composed `.service`/`.timer`/`.plist` in `runtime/fleet/timers/`, and the setup
+backbone enrolls what it finds there — `lib/setup-fleet`'s job leg is an additive
+glob-enroll that never disables, by design.
+
+Measured on this host: `plane-shadow` went from `system.yaml` at the F18 R2a
+closure (a299272) **together with the `lib/plane-shadow.sh` it execs**, and
+eighteen days later the nightly `reload-fleet` was still re-creating
+`~/Library/LaunchAgents/com.artemis.engineering.plane-shadow.plist` — a unit whose
+script does not exist, exiting 78 (`EX_CONFIG`) every night, sitting beside the
+`.retired-20260922` copy of itself an operator had already walked back by hand.
+The second fleet on the same host held the same stale composed units, one reload
+away from the same resurrection.
+
+- **The prune is DECLARATION-DERIVED, not a hardcoded name list.** The precedent
+  beside it, `_prune_leaf_manager_gated_units`, is exact-path bounded by a
+  frozenset of job names, and copying that shape would have fixed `plane-shadow`
+  and nothing else: the next job deleted from `system.yaml` resurrects the same
+  way, and the issue is about the class. So `_reconcile_fleet_job_units` keeps
+  what this generate composed and prunes every other `<prefix>.*` unit in the
+  directory.
+- **The briefing family is carved out explicitly, and that is the whole care in
+  this change.** A naive "delete every `<prefix>.*` not written this run" eats the
+  per-(bot,slot) briefing units, whose basenames the composer cannot enumerate in
+  advance and whose prune is guarded by its own independent count
+  (`BRIEFING_EXPECTED`). Sweeping them here would route those files past that
+  guard on a count that knows nothing about them — the exact wholesale-delete the
+  briefing guard exists to refuse. They stay owned by `_reconcile_briefing_units`
+  and are skipped by name.
+- **Guard and limit case are the briefing reconciler's, byte for byte**, so the
+  two halves of one directory answer "teardown or torn generate?" the same way:
+  fewer composed than the config declares means an interrupted or buggy run, so
+  the prune is SKIPPED entirely and warned about; `n_expected == 0` is a
+  legitimate full removal and prunes everything.
+- **It also runs on the early-return path** (`system_defaults.timers: false`, no
+  sweep, no briefing). That fleet never reaches the write path again, so without
+  this its job units would sit on disk forever for the setup backbone to keep
+  enrolling — the same bug by a different route.
+
+**Rollout gate: this is a composer change, so it takes effect at the next
+`generate` and reaches nothing before then.** It stops FUTURE enrollment only —
+an ALREADY-INSTALLED unit is walked back by nothing on the fleet side, the way
+`walk_back_uncomposed_host_units` does for host units, so the live agent had to
+be booted out by hand. That gap is real and is not closed here.
+
+#### Review round 2 — the prune had to learn that a torn DECLARATION is not a teardown
+
+Review found the shape above could delete, not refuse, on a torn input, and it
+was right. **A missing or empty package-owned `system.yaml` made
+`_load_system_defaults()` return `{}` silently** — no exception, no log — so
+`merged_defaults["jobs"]` went empty for any fleet without fleet-level
+`defaults.jobs` of its own (the common case) while that fleet's own
+`system_defaults.timers` was still `true`. `compose_fleet_timers` read the empty
+set as "this fleet composes no job timers" and the new prune deleted every
+already-composed job unit for it. Reproduced end to end through the real
+`load_fleet` → `compose_fleet_timers` with no exception raised anywhere, on
+**both** call sites — the review found the early-return one; the write path
+reaches it too whenever briefing or sweep keeps the function past that branch.
+
+**The route is live rather than theoretical: a built wheel shipped no
+`system.yaml` at all.** It was never listed in `package-data`, so every
+non-editable install would have hit exactly this state on its first generate.
+That is fixed here too, and pinned.
+
+**The existing guard could not have caught it, which is the instructive part.**
+`len(composed) < n_expected` compares two numbers that both derive from the
+merged job set; empty that set and `n_expected` is `0`, which is the documented
+signature of a legitimate full removal. A guard cannot discriminate a torn input
+using only values derived from that input.
+
+- **Source** — `_load_system_defaults` now REFUSES rather than returning `{}`.
+  This file is package-owned, not operator config: there is no install in which
+  "no system defaults" is a legitimate answer, and everything downstream (jobs,
+  hooks, host jobs, boot policy) was degrading silently, not just timers.
+  Loudness mirrors `_resolve_system_yaml`'s existing `RuntimeError` for the
+  adjacent stale-rename case — the rarer failure was already loud while the
+  likelier one was silent. The LOCATOR keeps returning `None` (one caller
+  legitimately asks "is there one?"); it is the LOADER that must not hand back
+  a void dressed as data. Nothing is cached on refusal, so a repaired install
+  works on the next call.
+- **Door** — the prune takes `declaration_torn`, computed from the one fact that
+  does *not* come from the merged set: the fleet's own manifest still asking for
+  these timers. It is not redundant with the source fix — it holds however the
+  data got torn, including routes not yet known — and a real teardown says so at
+  the source (`system_defaults: false`, or `timers: false`), where the flag is
+  already False and this is False with it. Both spellings are driven as positive
+  controls, because they switch off different fields and a guard reading either
+  one alone would pass one case while deleting nothing in the other.
+  The refusal lives inside `_prune_stale_units` rather than one frame up: a
+  refusal is a guard, a warning and a `return []`, and a second hand-typed copy
+  of that shape is the drift that function was extracted to retire.
+  It also reads the merged job set rather than the local `timers`, which has
+  already had the leaf-manager-gated jobs stripped — swapping the two passes
+  every other test today (only `manager-checkin` is gated, so the filtered set
+  cannot reach empty), and is pinned by a test that builds the roster where it
+  can, because an inert mutant leaves nothing recording why the line is written
+  that way.
+- **Blast radius** — `_load_system_defaults` is now called only when the fleet
+  actually consumes it. Refusing in the loader is right; calling it
+  unconditionally was not: `load_fleet` also backs `status`, `validate` and
+  `diff`, so a fleet that declared `system_defaults: false` — wanting nothing
+  from the file — was failing on it, taking the diagnostic commands down on
+  exactly the broken-install host an operator runs them to diagnose. Verified
+  both ways through the real CLI. The host-scoped readers (`load_host_jobs`,
+  `load_host_boot`) keep asking unconditionally, and that is pinned too: no
+  fleet flag opts a HOST out of its own platform equipment.
+- **A present but unreadable file** gets the same named refusal. The first cut
+  left a bare `path.open()`, so a permissions or YAML-syntax failure was the one
+  torn read that escaped as an unwrapped `OSError` with none of the guidance the
+  other branches give.
+
+#### Review round 3 — what a fleet owns in its timers dir, and how many units it declares
+
+- **Ownership** — the prune claims only `<prefix>.<job>` with the job ONE dotless
+  segment. A bare `<prefix>.` match read `com.review.child.*` (a fleet whose
+  prefix extends this one, its briefing family included) as `com.review`'s
+  retired jobs. No shipped layout shares a timers dir between fleets
+  (`Paths.runtime` is per overlay fleet, and root mode holds one fleet), so this
+  closes a deletion whose safety rested on that layout alone.
+- **Declared count** — counted as unit basenames, not declarations. A defaults
+  job named `code-audit-sweep` plus an enabled `fleet.sweep` write one file, so
+  every complete compose read as PARTIAL (9 of 10) and the prune never ran.
 
 ### Fixed — a unit that fails every start read as "boot in flight" forever, so a 23 h outage paged no one (#1769)
 
