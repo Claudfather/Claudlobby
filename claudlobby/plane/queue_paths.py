@@ -19,6 +19,11 @@ def staged_dir(root: Path) -> Path:
     return db_file(root).parent / "staged"
 
 
+def staged_payload(path: Path) -> bool:
+    """Pending stage names, including temp writes that may age into replay."""
+    return path.name.endswith((".batch", ".tmp"))
+
+
 @dataclass
 class SpoolScan:
     """One state-bearing enumeration of the spool tree — THE definition the

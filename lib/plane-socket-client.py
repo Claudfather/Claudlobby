@@ -23,6 +23,10 @@ exit:   0 ok (committed/duplicate) — RECORDED, in the plane, queryable now
         5 transport unavailable/unclassified (the shim's fallback trigger —
           safe to replay by pre-minted-id idempotency) — AND the daemon's
           `downgrade` refusal, see VERDICT_EXITS
+
+With --arm-log, every exit 5 from a socket attempt appends who it was and why
+(#1693, see _arm_record): the shim arms the host-wide wedge marker on exactly
+those exits, and the marker holds only a time.
 """
 
 from __future__ import annotations
@@ -58,9 +62,24 @@ TRANSPORT_UNAVAILABLE = 5
 VERDICT_EXITS = {"contract_violation": 2, "bad_request": 2,
                  "total_failure": 3}
 
+# The arm log (#1693). The shim arms the wedge marker on every exit 5 from a
+# socket attempt, and the marker holds only a time, so arms could be counted
+# per host and never per caller: a canary of the deadline on one bot was
+# invisible in the host's count. Each such exit appends one tab-separated row,
+#   <epoch> <class> <deadline s> <elapsed ms> <caller> <cause>
+# where cause is `timeout` (the deadline fired), `unreachable` (nothing is
+# listening), `downgrade`, `code:<x>` (any other refusal the cold rung can
+# answer) or the exception's class name. Kept 7 days, because a canary
+# compares a day before a knob with a day after; rewritten only once its
+# oldest row is a day past that, not on every arm, on the card that is the
+# bottleneck. Best-effort: it never changes the exit, and a row appended
+# while another client rotates can be lost.
+ARM_LOG_WINDOW_S = 7 * 86400
+ARM_LOG_SLACK_S = 86400
+
 
 def _parse_argv(argv: list):
-    """--socket S --finalize-to F [--timeout T] [--finalize-only [--stage-to D]] — hand-rolled
+    """--socket S --finalize-to F [--timeout T] [--arm-log L] [--finalize-only [--stage-to D]] — hand-rolled
     (see header). Owns EVERY refusal message and returns None after printing
     one: the old split (parser printed some refusals, main re-diagnosed with a
     generic line) stacked two errors and misattributed unknown-arg failures."""
@@ -70,6 +89,7 @@ def _parse_argv(argv: list):
                     # fallback rung (+ the shim's cooldown marker) is the fix
     finalize_only = False
     stage_to = ""   # empty: this caller did not opt in to staging (#1657)
+    arm_log = ""    # empty: record no arm (#1693)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -81,6 +101,8 @@ def _parse_argv(argv: list):
             finalize_only = True; i += 1
         elif a == "--stage-to" and i + 1 < len(argv):
             stage_to = argv[i + 1]; i += 2
+        elif a == "--arm-log" and i + 1 < len(argv):
+            arm_log = argv[i + 1]; i += 2
         elif a == "--timeout" and i + 1 < len(argv):
             try:
                 timeout = float(argv[i + 1])
@@ -100,7 +122,57 @@ def _parse_argv(argv: list):
         print("plane-socket-client: --socket and --finalize-to are required",
               file=sys.stderr)
         return None
-    return sock, fin, timeout, finalize_only, stage_to
+    return sock, fin, timeout, finalize_only, stage_to, arm_log
+
+
+def _cause(exc: BaseException) -> str:
+    # socket.timeout is TimeoutError only from 3.10; a 3.9 host has both.
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, (FileNotFoundError, ConnectionRefusedError)):
+        return "unreachable"
+    return type(exc).__name__
+
+
+def _arm_record(path: str, timeout: float, started: float, cause: str) -> None:
+    """One row per arm, with WHO: a bot, else its fleet, else the host."""
+    if not path:
+        return
+    env = os.environ
+    bot = env.get("BOT_ID", "")
+    fleet = env.get("FLEET_NAME") or env.get("CLAUDLOBBY_FLEET", "")
+    who = f"bot:{fleet or '?'}/{bot}" if bot else (f"fleet:{fleet}" if fleet else "host")
+    now = int(time.time())
+    row = [str(now), env.get("PLANE_EMIT_CLASS", ""), str(timeout),
+           str(int((time.monotonic() - started) * 1000)), who, cause]
+    try:
+        with open(path, "a") as f:
+            f.write("\t".join(" ".join(v.split()) or "-" for v in row) + "\n")
+        _arm_rotate(path, now)
+    except Exception:  # noqa: BLE001 -- best-effort: it never changes the exit
+        pass
+
+
+def _arm_rotate(path: str, now: int) -> None:
+    def epoch(line: str) -> int:
+        try:
+            return int(line.split("\t", 1)[0])
+        except ValueError:
+            return 0    # an unreadable row goes with the old ones
+    with open(path, errors="replace") as f:     # a torn row only ages out
+        if epoch(f.readline()) >= now - ARM_LOG_WINDOW_S - ARM_LOG_SLACK_S:
+            return
+        keep = [line for line in f if epoch(line) >= now - ARM_LOG_WINDOW_S]
+    tmp = f"{path}.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            f.writelines(keep)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _stage(stage_dir: str, sock_path: str, payload: str, lead: str) -> bool:
@@ -157,7 +229,7 @@ def main() -> int:
     parsed = _parse_argv(sys.argv[1:])
     if parsed is None:  # the parser already printed the one refusal
         return 2
-    sock_path, finalize_to, timeout, finalize_only, stage_to = parsed
+    sock_path, finalize_to, timeout, finalize_only, stage_to, arm_log = parsed
 
     try:
         parsed = json.loads(sys.stdin.read())
@@ -194,12 +266,14 @@ def main() -> int:
     # shim's cold-CLI rung does the real work.
     import time as _time
 
-    deadline = _time.monotonic() + timeout
+    started = _time.monotonic()
+    deadline = started + timeout
 
     def _remaining():
         left = deadline - _time.monotonic()
         if left <= 0:
-            raise OSError("shim deadline exceeded (wedged daemon?)")
+            # A TimeoutError (still an OSError) so the arm log calls it one.
+            raise TimeoutError("shim deadline exceeded (wedged daemon?)")
         return left
 
     try:
@@ -233,6 +307,7 @@ def main() -> int:
             raise ValueError(f"non-object reply: {type(resp).__name__}")
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"plane-socket-client: transport failed: {exc}", file=sys.stderr)
+        _arm_record(arm_log, timeout, started, _cause(exc))
         return 5
 
     if resp.get("ok"):
@@ -265,10 +340,14 @@ def main() -> int:
         print("plane-socket-client: the daemon is running older code than the"
               " db it opened — replaying through the cold rung, which runs"
               " the install's current code", file=sys.stderr)
+        _arm_record(arm_log, timeout, started, "downgrade")
         return TRANSPORT_UNAVAILABLE
     # Verdicts pass through; anything else (forbidden/internal/unknown) is
     # transport-ish — replaying through the CLI is safe by idempotency.
-    return VERDICT_EXITS.get(code, TRANSPORT_UNAVAILABLE)
+    rc = VERDICT_EXITS.get(code, TRANSPORT_UNAVAILABLE)
+    if rc == TRANSPORT_UNAVAILABLE:
+        _arm_record(arm_log, timeout, started, f"code:{code or '-'}")
+    return rc
 
 
 if __name__ == "__main__":

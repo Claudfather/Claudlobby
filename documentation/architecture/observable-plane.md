@@ -128,7 +128,23 @@ would skip the capture policy for a raw batch. The client stages only when that
 directory exists (the daemon creates it at startup, so an older daemon never
 gets one) and a connect probe finds a listener; otherwise it takes the cold
 rung as before. Doors that read a non-zero rc as "not recorded" never opt in.
-Staged depth is not yet a `plane doctor` rung.
+Staged depth is not yet a `plane doctor` rung. A stage killed before its rename
+leaves `.<event id>.tmp` (plane_emit_bounded's 10 s reaper, inside the stage's
+fsync), and the daemon replays one once it is an hour old: it is a finished
+batch with pre-minted ids (#1657).
+
+**The deadline follows who waits (#1693).** The client's total deadline is
+1.0 s unless the caller's class says otherwise. `PLANE_EMIT_CLASS` is `hook`
+(a live turn waits), `background` (nothing reads the result;
+`plane_emit_bounded`'s default) or `door` (the outcome turns on the result),
+and `PLANE_SOCKET_DEADLINE_HOOK_S`, `_BACKGROUND_S` and `_DOOR_S` set that
+class's deadline; all three are unset by default. On one SD card both rungs'
+commits wait for the same device, so a caller that misses during a stall gains
+nothing from the cold rung but a process spawn, and costs every other door on
+the host 60 s of cooldown. A caller that can afford to wait should. Every
+exit 5 from a socket attempt is recorded in `state/plane/.socket-arms` with
+its class, deadline, elapsed time, caller and cause: the marker itself holds
+only a time.
 
 There is no separate startup check: the daemon's first writes after bind —
 the lifecycle receipt and the startup spool drain — go through `migrate()`,

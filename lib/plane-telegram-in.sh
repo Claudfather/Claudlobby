@@ -73,6 +73,7 @@ case "$PAYLOAD" in
 esac
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on its plane record: its socket deadline (#1693, lib/plane-emit.sh)
 
 # read -d NUL is a builtin (no fork) and returns 1 at EOF-without-NUL,
 # which is the expected way this heredoc ends.
@@ -179,6 +180,6 @@ if [ $? -ne 0 ]; then
   exit 0
 fi
 [ -n "$BATCH" ] || exit 0
-printf '%s' "$BATCH" | "$LIB_DIR/plane-emit.sh" >/dev/null || \
+printf '%s' "$BATCH" | PLANE_EMIT_CLASS="$PLANE_EMIT_CLASS" "$LIB_DIR/plane-emit.sh" >/dev/null || \
   echo "plane-telegram-in: plane record failed rc=$? — message not recorded" >&2
 exit 0

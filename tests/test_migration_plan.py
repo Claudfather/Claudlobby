@@ -176,6 +176,20 @@ def test_absent_and_empty_databases_are_distinct_and_never_initialized(releases)
     assert _snapshot(root) == before
     assert not spool_path(root).exists() and not staged_dir(root).exists()
     verify_pending_queues(root, empty)
+    _pending(staged_dir(root) / ".young.tmp", [_event_request()], raw=True)
+    (staged_dir(root) / ".partial.tmp").write_text('{"events":')
+    _pending(staged_dir(root) / ".task.tmp",
+             [_event_request("task", event_id="pending-task",
+                             payload={"work_item_id": "wi_old", "event": "completed"})], raw=True)
+    pending = build_migration_manifest(root, source, target)
+    staged = pending.queues["staged"]
+    assert staged["file_count"] == 3
+    assert {Path(item["path"]).name for item in staged["files"]} == {
+        ".young.tmp", ".partial.tmp", ".task.tmp"}
+    assert any(item["issues"] for item in staged["files"] if item["path"].endswith(".partial.tmp"))
+    assert any("unresolved legacy task records" in reason for reason in pending.blockers)
+    with pytest.raises(ValueError, match="pending queues remain blocked"):
+        verify_pending_queues(root, pending)
     _pending(staged_dir(root) / "arrived.batch", [_event_request()], raw=True)
     with pytest.raises(ValueError, match="queue inventory changed"):
         verify_pending_queues(root, empty)

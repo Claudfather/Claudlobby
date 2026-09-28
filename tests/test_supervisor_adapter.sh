@@ -72,12 +72,16 @@ fi
 exit "${FAKE_EXIT:-0}"
 EOF
 
+# FAKE_PIDS: the pid lines a running job's `print` carries, one per entry
+# (svc_job_hosts_caller compares every one) -- unset, a running job prints none.
 cat > "$T/bin/launchctl" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
 if [ "$1" = "print" ]; then
     case "${FAKE_STATE:-active}" in
-        active)   printf 'state = running\n'; exit 0 ;;
+        active)   printf 'state = running\n'
+                  for _p in ${FAKE_PIDS:-}; do printf '\tpid = %s\n' "$_p"; done
+                  exit 0 ;;
         inactive) printf 'state = not running\n'; exit 0 ;;
         *)        exit 1 ;;
     esac
@@ -135,7 +139,7 @@ write_bot_conf() {  # write_bot_conf <bot_dir> <bot_service> <bot_name>
 reset_fakes() {
     : > "$FAKE_LOG"
     : > "$TMUX_LOG"
-    unset FAKE_STATE FAKE_EXIT || true
+    unset FAKE_STATE FAKE_EXIT FAKE_PIDS || true
     rm -f "$HOME/.config/systemd/user"/*.service "$HOME/Library/LaunchAgents"/*.plist 2>/dev/null || true
 }
 
@@ -436,6 +440,108 @@ as_os SunOS
 svc_disenroll "$BOT5" reaper_log "" "$T/bin/launchctl"
 assert_contains "empty label wins before unsupported OS" "callback:BOT_SERVICE unset — no supervised unit to remove" "$(cat "$FAKE_LOG")"
 assert_eq "unsupported empty label invokes no supervision action" "2" "$(wc -l < "$FAKE_LOG" | tr -d ' ')"
+echo "=== supervisor.sh contract -- svc_job_hosts_caller (#1924) ==="
+# The caller is this very shell: its own pid ($$) and its parent ($PPID) are
+# ancestors of every call below, while a background sleep is a live process
+# that is NOT one -- the shapes launchd can report for a running job.
+sleep 300 & SIBLING=$!
+hosts() { if svc_job_hosts_caller "$1"; then echo yes; else echo no; fi; }
+logged() { grep -c -- "$1" "$FAKE_LOG" || true; }
+
+reset_fakes
+as_os Darwin
+export FAKE_STATE=gone
+assert_eq "not loaded: does not host the caller" "no" "$(hosts job.alpha)"
+export FAKE_STATE=inactive
+assert_eq "loaded, not running: does not host the caller" "no" "$(hosts job.alpha)"
+export FAKE_STATE=active FAKE_PIDS="$$"
+assert_eq "running as this shell: hosts the caller" "yes" "$(hosts job.alpha)"
+assert_contains "the answer is launchd's own, for that label" "print gui/$(id -u)/job.alpha" "$(cat "$FAKE_LOG")"
+export FAKE_PIDS="$PPID"
+assert_eq "running as an ancestor further up: hosts the caller" "yes" "$(hosts job.alpha)"
+export FAKE_PIDS="$SIBLING"
+assert_eq "running as a live process that is not an ancestor: does not host" "no" "$(hosts job.alpha)"
+export FAKE_PIDS="$SIBLING $$"
+assert_eq "every pid line is compared, not only the first" "yes" "$(hosts job.alpha)"
+unset FAKE_PIDS
+assert_eq "running with no pid line: fails closed (hosts)" "yes" "$(hosts job.alpha)"
+export FAKE_PIDS="abc"
+assert_eq "running with an unparseable pid: fails closed (hosts)" "yes" "$(hosts job.alpha)"
+export FAKE_PIDS="$SIBLING"
+printf '#!/bin/bash\nexit 1\n' > "$T/bin/ps"; chmod +x "$T/bin/ps"
+assert_eq "ancestry walk that breaks off: fails closed (hosts)" "yes" "$(hosts job.alpha)"
+rm -f "$T/bin/ps"
+assert_eq "positive control: the same pid with a working walk does not host" "no" "$(hosts job.alpha)"
+
+reset_fakes
+as_os Linux
+export FAKE_STATE=active FAKE_PIDS="$$"
+assert_eq "Linux: never hosts -- a systemd re-enroll stops no service" "no" "$(hosts job.alpha)"
+assert_eq "Linux: nothing invoked" "" "$(cat "$FAKE_LOG")"
+
+echo "=== supervisor.sh contract -- svc_enroll_agent (#1924) ==="
+SRC="$T/composed/job.alpha.plist"
+DEST="$HOME/Library/LaunchAgents/job.alpha.plist"
+mkdir -p "$T/composed"
+printf 'new\n' > "$SRC"
+UID_NOW="$(id -u)"
+
+reset_fakes
+as_os Darwin
+export FAKE_STATE=gone
+set +e; out="$(svc_enroll_agent job.alpha "$SRC")"; rc=$?; set -e
+assert_eq "not loaded: rc 0" "0" "$rc"
+assert_eq "not loaded: the composed plist is installed" "new" "$(cat "$DEST")"
+assert_contains "not loaded: bootout of the label" "bootout gui/$UID_NOW/job.alpha" "$(cat "$FAKE_LOG")"
+assert_contains "not loaded: bootstrap of the installed plist" "bootstrap gui/$UID_NOW $DEST" "$(cat "$FAKE_LOG")"
+assert_contains "not loaded: says what it did" "installed + loaded: job.alpha" "$out"
+
+reset_fakes
+export FAKE_STATE=active FAKE_PIDS="$SIBLING"
+set +e; svc_enroll_agent job.alpha "$SRC" >/dev/null; rc=$?; set -e
+assert_eq "running, not the caller: rc 0" "0" "$rc"
+assert_eq "running, not the caller: still re-enrolled (bootout)" "1" "$(logged bootout)"
+assert_eq "running, not the caller: still re-enrolled (bootstrap)" "1" "$(logged bootstrap)"
+
+reset_fakes
+export FAKE_STATE=active FAKE_PIDS="$$"
+printf 'new\n' > "$DEST"
+set +e; out="$(svc_enroll_agent job.alpha "$SRC")"; rc=$?; set -e
+assert_eq "running the caller, plist unchanged: rc 0" "0" "$rc"
+assert_contains "running the caller, plist unchanged: says it left it loaded" "current: job.alpha" "$out"
+assert_eq "running the caller: never booted out" "0" "$(logged bootout)"
+assert_eq "running the caller: never re-bootstrapped" "0" "$(logged bootstrap)"
+
+reset_fakes
+export FAKE_STATE=active FAKE_PIDS="$$"
+printf 'old\n' > "$DEST"
+set +e; err="$(svc_enroll_agent job.alpha "$SRC" 2>&1 >/dev/null)"; rc=$?; set -e
+assert_eq "running the caller, plist changed: rc 4 (deferred)" "4" "$rc"
+assert_contains "running the caller, plist changed: says DEFERRED" "DEFERRED: job.alpha" "$err"
+assert_eq "deferred: the installed plist is untouched" "old" "$(cat "$DEST")"
+assert_eq "deferred: never booted out" "0" "$(logged bootout)"
+assert_eq "deferred: never re-bootstrapped" "0" "$(logged bootstrap)"
+
+reset_fakes
+export FAKE_STATE=active FAKE_PIDS="$$"
+set +e; svc_enroll_agent job.alpha "$SRC" >/dev/null 2>&1; rc=$?; set -e
+assert_eq "running the caller, nothing installed: rc 4 (deferred)" "4" "$rc"
+assert_eq "deferred: still nothing installed" "false" "$([ -f "$DEST" ] && echo true || echo false)"
+
+reset_fakes
+export FAKE_STATE=gone FAKE_EXIT=5
+set +e; err="$(svc_enroll_agent job.alpha "$SRC" 2>&1 >/dev/null)"; rc=$?; set -e
+assert_eq "bootstrap refused: rc 1, never the launchctl status" "1" "$rc"
+assert_contains "bootstrap refused: names launchctl's own status" "rc 5" "$err"
+
+reset_fakes
+as_os Linux
+set +e; svc_enroll_agent job.alpha "$SRC" >/dev/null 2>&1; rc=$?; set -e
+assert_eq "Linux: rc 2" "2" "$rc"
+assert_eq "Linux: nothing invoked" "" "$(cat "$FAKE_LOG")"
+
+kill "$SIBLING" 2>/dev/null || true
+wait "$SIBLING" 2>/dev/null || true
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

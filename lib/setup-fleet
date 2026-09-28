@@ -91,7 +91,7 @@ enroll_jobs() {
         FAILURES=$((FAILURES + 1))
         return
     fi
-    local enroller ext t base jobname found=0
+    local enroller ext t base jobname found=0 erc
     if [ "$_OS" = "Linux" ]; then
         enroller="$LIB_DIR/install_fleet_timer.sh"
         ext="timer"
@@ -112,12 +112,29 @@ enroll_jobs() {
         fi
         # TIMER_DIR + SERVICE_PREFIX per invocation: one call shape for
         # overlay and root mode (matches setup-system's host-jobs idiom).
-        if TIMER_DIR="$TIMERS_DIR" SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname"; then
-            log "✓ job enrolled: $base"
-        else
-            log "○ job enrollment FAILED: $base (re-run converges)"
-            FAILURES=$((FAILURES + 1))
-        fi
+        erc=0
+        TIMER_DIR="$TIMERS_DIR" SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname" || erc=$?
+        case "$erc" in
+            0) log "✓ job enrolled: $base" ;;
+            4)
+                # The launchd enroller refused to stop the job running this
+                # very pass (#1924) -- reload-fleet, which calls --jobs-only
+                # nightly -- and that job's composed plist changed. A re-run
+                # from inside it defers again; a run from a shell applies it.
+                # So it is raised as a notice on every run until applied:
+                # nothing else would raise it. reload-fleet runs this step
+                # non-fatally, and no doctor rung compares a LOADED job with
+                # its composed plist, so a log line alone is never read.
+                log "○ job re-enroll DEFERRED: $base is running this enrollment and its plist changed — apply it with lib/setup-fleet${FLEET:+ $FLEET} --jobs-only from a shell"
+                emit_fleet_notice "$BOTS_DIR" "job_reenroll_deferred" \
+                    "$base changed, but it is the job running this enrollment, so launchd keeps running the old one until you apply it from a shell: $LIB_DIR/setup-fleet${FLEET:+ $FLEET} --jobs-only"
+                FAILURES=$((FAILURES + 1))
+                ;;
+            *)
+                log "○ job enrollment FAILED: $base (re-run converges)"
+                FAILURES=$((FAILURES + 1))
+                ;;
+        esac
     done
     [ "$found" = 1 ] || log "no $SERVICE_PREFIX.*.$ext units in $TIMERS_DIR"
 }

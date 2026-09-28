@@ -12,11 +12,13 @@ import pytest
 
 from claudlobby.plane.db import db_path
 from claudlobby.plane.emit_api import emit
+from tests.plane_setup import initialize_plane
 
 PARITY = Path(__file__).resolve().parent.parent / "lib" / "plane-parity.py"
 
 
 def _emit_with_ref(root: Path, legacy_id: str, suffix: str) -> None:
+    initialize_plane(root)
     emit(root, {
         "event_type": "communication",
         "emitter": "parity-test",
@@ -166,6 +168,7 @@ def test_plane_only_id_with_no_ledger_twin_still_fails_under_since(tmp_path):
 def test_like_metacharacters_in_ledger_name_do_not_leak(tmp_path):
     """PR-#1345 review F8 (+ own pre-probe): '%'/'_' in a ledger name are
     text, not wildcards — 'dispatch_log' must not match 'dispatchXlog'."""
+    initialize_plane(tmp_path)
     emit(tmp_path, {
         "event_type": "communication", "emitter": "parity-test",
         "fleet": "example-fleet", "source_ref": "dispatchXlog:tsk_other",
@@ -197,6 +200,7 @@ def test_per_table_duplicate_rows_are_flagged(tmp_path):
 
 def test_field_mismatch_is_flagged_and_match_is_clean(tmp_path):
     """PR-#1345 review F4 (fields): same id, different content must fail."""
+    initialize_plane(tmp_path)
     emit(tmp_path, {
         "event_type": "work_item", "emitter": "parity-test",
         "fleet": "example-fleet", "source_ref": "dispatch-log:tsk_f1",

@@ -21,7 +21,7 @@ from uuid import UUID
 from .plane.db import connect_ro, db_file
 from .plane.ids import ID_PATTERNS
 from .plane.migrations import _MIGRATION_RE
-from .plane.queue_paths import scan_spool, spool_path, staged_dir
+from .plane.queue_paths import scan_spool, spool_path, staged_dir, staged_payload
 from .releases import ReleaseManifest, read_release
 from .request_receipts import decode_receipt
 from .runtime_versions import SUPPORTED_PLANE_SCHEMA_VERSIONS
@@ -323,7 +323,7 @@ def _queues(root: Path, source, target) -> tuple[dict, list[str]]:
     selections = {"spool": (spool.spool_state, spool.pending),
                   "inflight": (spool.spool_state, spool.inflight),
                   "quarantine": (spool.quarantine_state, spool.quarantined),
-                  "staged": (probe.state, sorted(p for p in entries if p.name.endswith(".batch")))}
+                  "staged": (probe.state, sorted(p for p in entries if staged_payload(p)))}
     result, blockers = {}, []
     for queue, (state, paths) in selections.items():
         location = staged_dir(root) if queue == "staged" else spool_path(root)

@@ -554,6 +554,50 @@ def test_shutdown_never_unlinks_a_replaced_socket(running):
         "shutdown deleted a file it does not own")
 
 
+def test_a_socket_replaced_as_it_is_published_is_never_taken_for_ours(
+    tmp_path: Path, monkeypatch
+):
+    """The daemon must learn which inode is its socket BEFORE it publishes it.
+    Read back from the public path after the rename, the identity is whatever
+    sits there at that instant: a replacement landing between the rename and
+    the read was recorded as the daemon's own and deleted at shutdown. That is
+    how test_shutdown_never_unlinks_a_replaced_socket flaked in CI, since its
+    fixture yields as soon as the path exists. Here the replacement lands
+    inside the publish itself, so the window is hit every time."""
+    initialize_plane(tmp_path)
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    real_replace = os.replace
+
+    def replace_then_swap(src, dst, *args, **kwargs):
+        real_replace(src, dst, *args, **kwargs)
+        if Path(dst) == sock:          # the publish: someone else takes the path
+            os.unlink(sock)
+            sock.write_text("imposter")
+
+    monkeypatch.setattr(os, "replace", replace_then_swap)
+    daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
+    t = threading.Thread(
+        target=lambda: daemon.serve(install_signals=False), daemon=True
+    )
+    t.start()
+    try:
+        for _ in range(200):
+            if daemon._sock_stat is not None:
+                break
+            time.sleep(0.02)
+        assert daemon._sock_stat is not None, "daemon never published its socket"
+        daemon.stop()
+        t.join(timeout=10)
+        assert daemon._lock_fd is None, "daemon never finished shutting down"
+        assert sock.exists() and sock.read_text() == "imposter", (
+            "shutdown deleted a file it does not own")
+    finally:
+        daemon.stop()
+        t.join(timeout=10)
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
 def test_override_parent_is_never_chmodded(tmp_path: Path):
     """PR-#1345 review F7: --socket must not mutate an operator directory."""
     initialize_plane(tmp_path)
@@ -1199,3 +1243,72 @@ def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_
         assert replies[-1]["code"] == "downgrade"
     finally:
         daemon.writer.close()
+def _orphan(staged: Path, name: str, text: str, age_s: float) -> Path:
+    """What a stage killed between its write and its rename leaves behind."""
+    staged.mkdir(parents=True, exist_ok=True)
+    f = staged / name
+    f.write_text(text)
+    t = time.time() - age_s
+    os.utime(f, (t, t))
+    return f
+
+
+def test_an_orphaned_stage_is_replayed_not_lost(running):
+    """#1657 follow-up 2, measured on the Pi: a stage killed between its write
+    and its rename leaves `.<event id>.tmp`, and the daemon replayed only
+    `*.batch`, so the event was lost -- 21 in two days, none of them on the
+    plane, each written a few seconds before a counted 10 s reap. An old one
+    is a finished batch with pre-minted ids: replay it, never delete it."""
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+
+    root, _sock, _ = running
+    staged = root / "state" / "plane" / "staged"
+    ev = {**_comm("7"), "event_id": mint_event_id()}
+    orphan = _orphan(staged, f".{ev['event_id']}.tmp",
+                     json.dumps({"events": [ev]}) + "\n", STAGED_ORPHAN_AGE_S + 60)
+    _until(lambda: not orphan.exists(), timeout=10)
+    conn = connect(db_path(root))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM communications WHERE event_id = ?",
+                         (ev["event_id"],)).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1
+
+
+def test_a_young_tmp_is_left_to_its_stager(running):
+    """A `.tmp` may be a stage still inside its fsync, with the rename to
+    come: read now, it would race its own writer. A sentinel batch landing
+    proves a replay tick ran while the young file was there."""
+    root, _sock, _ = running
+    staged = root / "state" / "plane" / "staged"
+    ev = {**_comm("8"), "event_id": mint_event_id()}
+    young = _orphan(staged, f".{ev['event_id']}.tmp",
+                    json.dumps({"events": [ev]}) + "\n", 0)
+    sentinel = {**_comm("9"), "event_id": mint_event_id()}
+    _stage(staged, f"1-{sentinel['event_id']}.batch", [sentinel])
+    _until(lambda: not list(staged.glob("*.batch")))
+    assert young.exists()
+    conn = connect(db_path(root))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM communications WHERE event_id = ?",
+                         (ev["event_id"],)).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
+
+
+def test_an_orphan_that_is_not_a_batch_is_quarantined(running):
+    """A stage killed before its flush leaves an empty file. It goes to the
+    quarantine with its reason, under a name a listing shows (not a dotfile),
+    and the daemon keeps serving."""
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+
+    root, sock, _ = running
+    staged = root / "state" / "plane" / "staged"
+    orphan = _orphan(staged, ".ev_" + "0" * 32 + ".tmp", "", STAGED_ORPHAN_AGE_S + 60)
+    _until(lambda: not orphan.exists(), timeout=10)
+    names = {f.name for f in (root / "state" / "plane" / "spool" / "quarantine").iterdir()}
+    assert "ev_" + "0" * 32 + ".json" in names, names
+    assert "ev_" + "0" * 32 + ".json.reason" in names, names
+    assert send_batch(sock, [_comm("a")])["ok"] is True

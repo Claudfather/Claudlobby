@@ -123,6 +123,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.
     "crash_loop": "critical",
+    # #1924: a launchd job whose changed plist setup-fleet could not apply,
+    # because the job itself was running the enrollment. A notice: nothing is
+    # broken yet, the job runs its old definition until someone applies it.
+    "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",
     "dispatch_orphaned": "notice",
     "worker_unassigned": "notice",
