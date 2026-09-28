@@ -168,3 +168,11 @@ descriptions must carry final results before a slice is presented as ready.
   without restoring checkout/PATH fallbacks. Other failures expose old implicit
   manager, synthetic package, native-helper and CLI fixture assumptions. Existing
   assertions are migrated to explicit owned resources, not weakened.
+- The history-free naked-bot probe now builds its exported source into an owned
+  wheel/environment and checks code, resources, defaults and CLI origin before
+  invoking real generate. Its private dependency closure comes from installed
+  distribution inventories without network access. Existing composition cases
+  remove source assets and poison ambient CLI/module paths. Setup/provenance
+  passed locally; 52 pure cases passed, three composition cases were excluded.
+  Direct CLI execution then hit the same bounded macOS stall; full composition
+  and the complete repaired suite still require hosted confirmation.
