@@ -413,10 +413,10 @@ def test_a_sigkill_mid_step_is_raised_by_the_next_run(tmp_path):
     try:
         host.wait_for_log("generate: composing")
         killed_pid = p.pid
-        _kill_group(p)
-        p.wait(timeout=60)
     finally:
         _kill_group(p)
+        p.wait(timeout=60)
+    assert p.returncode == -signal.SIGKILL
     log = host.log()
     assert "step: claudlobby generate" in log and "generate: composing" in log, log
     assert "reload_failed" not in log, log  # nothing can run on a SIGKILL
