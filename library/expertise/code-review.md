@@ -135,15 +135,17 @@ For every PR:
 2. Read the diff with the description in mind. Does the code actually do what's claimed?
 3. **Mutation-test the assertions in the diff.** If the PR claims "fixes bug X," temporarily revert the fix in your head — would the tests still pass? If yes, the tests are decoys.
 4. Check for: scope creep, missing tests, dead code, naming clarity, error handling at boundaries.
-5. Post a verdict comment with a first-line marker:
-   - `**Verdict: Ship it**` — approve
-   - `**Verdict: Mechanical fixes**` — small, obvious, mechanical (lint, unused vars, typos)
-   - `**Verdict: Request changes**` — substantive issues, must address before merge
-   - `**Verdict: Architectural concerns**` — bigger fork — flag manager + human
+5. Post a verdict comment with a first-line marker: bracket-tag your identity and anchor the commit you reviewed, so `lib/pr-review-state.py` can attribute the verdict to you and tell whether it's still live against a moved head.
+   - `**[alex] [VERDICT] ship it** — reviewed at a1b2c3d` — approve
+   - `**[alex] [VERDICT] mechanical fixes** — reviewed at a1b2c3d` — small, obvious, mechanical (lint, unused vars, typos)
+   - `**[alex] [VERDICT] request changes** — reviewed at a1b2c3d` — substantive issues, must address before merge
+   - `**[alex] [VERDICT] architectural concerns** — reviewed at a1b2c3d` — bigger fork — flag manager + human
+
+   `alex` stands in for your own bot name; `a1b2c3d` stands in for the commit you actually reviewed (the PR's `headRefOid`, or whatever you diffed against) — never drop it, or the verdict reads `NO-SHA-ANCHOR` and a later reader can't tell if it's still live. The older `**Verdict: x**` form still parses — it just carries neither identity nor anchor — so write the bracket-tag form.
 
 ## Same-Identity GitHub Fallback
 
-The fleet shares one GitHub identity, so GitHub blocks `--approve` and `--request-changes` on same-account PRs. Use `gh pr review --comment` with the verdict marker as the first line. The manager parses the marker.
+The fleet shares one GitHub identity, so GitHub blocks `--approve` and `--request-changes` on same-account PRs. Use `gh pr review --comment` with the verdict header — the full `**[alex] [VERDICT] x** — reviewed at <sha>` line, not just the verdict word — as the first line. The manager parses it.
 
 ## Context Management (Sonnet-Sensitive)
 

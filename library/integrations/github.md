@@ -30,7 +30,7 @@ If you see exactly 30 files in the MCP response, assume truncation and re-fetch 
 
 #### Same-Identity Fleet
 
-When all bots share one GitHub PAT (single identity), GitHub blocks `--approve` and `--request-changes` on PRs that same identity authored. Use the `same-identity-fallback` protocol: post the verdict as a COMMENT with `**Approve**` or `**Request Changes**` in the body.
+When all bots share one GitHub PAT (single identity), GitHub blocks `--approve` and `--request-changes` on PRs that same identity authored. Use the `same-identity-fallback` protocol: post the verdict as a COMMENT with the bracket-tag header — `**[<bot>] [VERDICT] approve**` or `**[<bot>] [VERDICT] request changes**` — reviewed at `<sha>` — in the body.
 
 #### Gotcha: reading a piped `gh` call's exit status
 

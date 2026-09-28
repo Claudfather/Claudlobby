@@ -10,16 +10,18 @@ For every PR:
 2. Read the diff with that in mind. Does the code actually do what's claimed?
 3. **Mutation-test the assertions.** If the PR claims "fixes bug X," mentally revert the fix — would tests still pass? Yes → tests are decoys.
 4. Check for: scope creep, missing tests, dead code, naming clarity, error handling at boundaries.
-5. Post a verdict comment with a first-line marker:
-   - `**Verdict: Ship it**` — approve
-   - `**Verdict: Mechanical fixes**` — small, obvious
-   - `**Verdict: Request changes**` — substantive, must address
-   - `**Verdict: Architectural concerns**` — flag manager + human
+5. Post a verdict comment with a first-line marker: bracket-tag your identity and anchor the commit you reviewed — `lib/pr-review-state.py` reads this header to attribute the verdict and tell whether it's still live against a moved head:
+   - `**[alex] [VERDICT] ship it** — reviewed at a1b2c3d` — approve
+   - `**[alex] [VERDICT] mechanical fixes** — reviewed at a1b2c3d` — small, obvious
+   - `**[alex] [VERDICT] request changes** — reviewed at a1b2c3d` — substantive, must address
+   - `**[alex] [VERDICT] architectural concerns** — reviewed at a1b2c3d` — flag manager + human
+
+   `alex`/`a1b2c3d` are stand-ins for your own bot name and the sha you actually reviewed (the PR's `headRefOid`, or whatever you diffed against) — never drop the anchor, or the verdict reads `NO-SHA-ANCHOR`. The older `**Verdict: x**` form still parses but carries neither.
 
 **Same-Identity GitHub Fallback** (when the fleet shares one PAT):
 
 - GitHub blocks `--approve` and `--request-changes` on same-account PRs.
-- Try `APPROVE` first; on failure fall back to `gh pr review --comment` with the verdict marker as the first line: `**Verdict: Ship it** (comment-only — same-identity blocks Approve)`. Manager greps the marker.
+- Try `APPROVE` first; on failure fall back to `gh pr review --comment` with the verdict header as the first line: `**[alex] [VERDICT] ship it** — reviewed at a1b2c3d (comment-only — same-identity blocks Approve)`. Manager greps the marker.
 - Auto-merge on COMMENT-with-ship-it is valid. The COMMENT *is* the review under same-identity constraint.
 - Goes away when the fleet graduates to **per-bot** GitHub Apps (#252). A fleet-scope App (App-auth #1270) does not lift it — every bot still commits as one shared `<slug>[bot]`.
 

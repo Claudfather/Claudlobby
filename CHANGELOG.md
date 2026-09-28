@@ -45,6 +45,50 @@ To recover a host that already lost the job, once this is installed there:
 confirm no reload is running, remove the stale `state/reload-fleet.lock.d`,
 and run `lib/setup-fleet <fleet> --jobs-only` from a shell for each fleet.
 
+### Changed — the bracket-tag, anchored verdict header is taught wherever a reviewer or a manager learns the format (#1913)
+
+`lib/pr-review-state.py` reads `**[name] [VERDICT] x** — reviewed at <sha>` and attributes
+the verdict to its author and anchors it to a commit. The four places a reviewer or a
+manager actually learns the verdict format still taught the older, identity-less,
+anchor-less `**Verdict: x**` shape — and one of them, `pr-comment-hygiene.md`'s `/ironclad`
+verdict format, used no bold at all, so `pr-review-state.py` never parsed it. Four more
+docs taught or looked for a bare `**Approve**` / `**Request Changes**`, which carries no
+identity or anchor either: the same-identity fallback in `github.md` and
+`same-identity-fallback.md`, and the peer-review rung of both merge guardrails. vera had
+already been writing the bracket-tag header by hand on #1912 and #1914; the docs had not
+caught up.
+
+- `library/expertise/code-review.md`, `library/protocols/review-flow.md` and
+  `library/protocols/verify-before-merge.md` now teach
+  `**[<bot>] [VERDICT] <verdict>** — reviewed at <sha>` for all four taught verdicts (ship
+  it / mechanical fixes / request changes / architectural concerns). The older
+  `**Verdict: x**` form still parses — it carries neither identity nor anchor — and stays
+  documented as such rather than being presented as broken. `verify-before-merge.md` also
+  tells a manager to read each reviewer's own latest verdict, never just the newest comment
+  on the PR, which is how `pr-review-state.py` resolves them.
+- `library/protocols/pr-comment-hygiene.md`'s `[<bot-name>] [VERDICT] <approve|request-changes|comment>`
+  gains the same bold wrapping and an anchor, so a plan-PR verdict from `/ironclad` is
+  readable by the same tool as a code-PR verdict. It also records a known limitation: the
+  tool reads a bracket-tagged `comment` as vocabulary drift (`UNPARSED-HEADER`, exit 3)
+  until #1923 teaches it a neutral verdict.
+- `library/integrations/github.md` and `library/protocols/same-identity-fallback.md` now
+  teach `**[<bot>] [VERDICT] approve**` or `**[<bot>] [VERDICT] request changes**`, with
+  `— reviewed at <sha>`, for a same-identity verdict comment. `same-identity-fallback.md`
+  keeps a plain `**Comment**` (no verdict) bare: bracket-tagged, the tool would read it as
+  vocabulary drift.
+- `library/guardrails/merge-policy-auto-admin.md` and
+  `library/guardrails/merge-policy-auto-after-review.md` now tell a manager to look for a
+  `**[<bot>] [VERDICT] approve**` verdict line under same-identity fallback, the header
+  `pr-review-state.py` reads, in place of `**Approve**`.
+- No change to `lib/pr-review-state.py` itself — it already read both the old and new
+  header shapes; only the taught vocabulary moved.
+- `tests/test_pr_review_state.py::TestDocsTeachTheParseableHeader` reads the four docs in
+  the first two bullets straight off disk (never a hand-kept copy of their text), pins each
+  file's example count, and asserts every concrete header example parses as attributed AND
+  anchored through the module's own regexes, that every taught verdict word is still
+  recognized, and that one doc-sourced header resolves cleanly through the real
+  `--payload-json` CLI seam.
+
 ### Fixed — `plane-lookup.py --received` says why at rc 4, and finds a receipt by the receiver's plane alias (#1922)
 
 `--received <msg_id> --destination <bot>` exits 4 when the destination has
